@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { Client } from '@modelcontextprotocol/client';
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, mkdir, realpath, writeFile, rm, access } from 'node:fs/promises';
+import { mkdtemp, mkdir, realpath, readFile, writeFile, rm, access } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -81,6 +83,34 @@ try {
   );
   assert.equal(resolve(context.workspace), resolve(workspace));
   assert.equal(context.approvalMode, 'agent');
+  const catalog = JSON.parse((await cli('capabilities')).stdout);
+  const skill = (await cli('skill-path')).stdout.trim();
+  assert.deepEqual(
+    JSON.parse(await readFile(join(skill, 'references/agent-api.json'), 'utf8')),
+    catalog,
+  );
+  await access(join(skill, 'SKILL.md'));
+  const client = new Client({ name: 'package-smoke', version: '1.0.0' });
+  try {
+    await client.connect(
+      new StdioClientTransport({
+        command: bin,
+        args: ['mcp', '--workspace', workspace],
+        cwd: outside,
+        stderr: 'pipe',
+      }),
+    );
+    assert.equal((await client.listTools()).tools.length, catalog.tools.length);
+    const reply = await client.callTool({ name: 'project_context', arguments: {} });
+    assert.equal(reply.structuredContent.workspace, context.workspace);
+    const board = await client.callTool({
+      name: 'board_create',
+      arguments: { title: 'Packaged MCP board', repositoryId: 'main' },
+    });
+    assert.ok(board.structuredContent.boardId);
+  } finally {
+    await client.close();
+  }
 
   child = spawn(bin, ['demo', '--data', join(root, 'demo'), '--port', '0'], {
     cwd: outside,
