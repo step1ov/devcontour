@@ -1,4 +1,5 @@
 import { DeliveryRunner } from '../runner/forge.ts';
+import { AgentContext, contextOperations } from '../application/context.ts';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { readFile, realpath } from 'node:fs/promises';
@@ -66,7 +67,13 @@ export async function serve(
           throw new DomainError('Отсутствует заголовок локального клиента', 403);
         const parts = path.split('/').filter(Boolean);
         let result: unknown;
-        if (req.method === 'GET' && path === '/api/state') {
+        if (req.method === 'POST' && path === '/api/agent') {
+          const request = z
+            .object({ operation: z.enum(contextOperations), input: z.unknown().optional() })
+            .strict()
+            .parse(await body(req));
+          result = new AgentContext(h).execute(request.operation, request.input ?? {});
+        } else if (req.method === 'GET' && path === '/api/state') {
           const state = h.store.read();
           result = {
             ...state,

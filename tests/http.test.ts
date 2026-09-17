@@ -36,6 +36,27 @@ test('Loopback API rejects cross-origin writes, validates input and survives mis
     assert.equal((await fetch(app.url + '/assets/does-not-exist.js')).status, 404);
     const response = await fetch(app.url + '/api/state');
     assert.equal(response.status, 200);
+    const agent = await request(
+      '/api/agent',
+      { operation: 'project_context', input: {} },
+      { 'X-Harness-Request': '1' },
+    );
+    assert.equal(agent.status, 200);
+    assert.equal((await agent.json()).protocolVersion, 1);
+    assert.equal(
+      (
+        await request(
+          '/api/agent',
+          { operation: 'mark_done', input: { passed: true } },
+          { 'X-Harness-Request': '1' },
+        )
+      ).status,
+      400,
+    );
+    assert.equal(
+      (await request('/api/agent', { operation: 'project_context', input: {} })).status,
+      403,
+    );
     assert.equal(((await response.json()) as { dataRoot: string }).dataRoot, f.root);
     assert.equal(
       (await request('/api/boards', { title: 'Valid board' }, { 'X-Harness-Request': '1' })).status,
