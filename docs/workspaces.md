@@ -16,7 +16,7 @@ PhpstormProjects/
   product-workspace/          # общий контур управления; вне Git компонентов
     workspace.json           # реестр, подготовленный агентом
     docs/
-      requirements.md        # требования продукта → задачи и ChangeSet
+      requirements.md        # общие сценарии и ссылки на требования компонентов
       harness-progress.md    # контекст ведущего агента для возобновления
       journal/CHG-12.md       # автоматически сформированный дневник
     .harness/local/
@@ -34,7 +34,9 @@ PhpstormProjects/
 2. Создать соседний каталог workspace и `workspace.json`. Пути репозиториев разрешаются относительно этого файла. Все репозитории должны быть корнями Git и иметь commit.
 3. Выполнить `workspace-init`, затем использовать только возвращённый `data` для импорта, ревью, очереди, сервера, приёмки и экспорта.
 4. Подготовить контракты продукта и библиотек. Разбить ТЗ на этапы и задачи с `repositoryId`; зависимости могут вести в другой репозиторий и другую доску.
-5. Настроить совместные проверки по закреплённым компонентам. Создать ChangeSet из досок одного результата, провести план через независимое ревью и запустить очередь.
+5. Настроить совместные проверки по закреплённым компонентам. Создать ChangeSet из досок одного результата. В agent mode зарегистрировать workflow каждой подготовленной доски и отдельный workflow ChangeSet: сервер выполнит review, очередь и приёмку. В operator mode использовать отдельные команды с подтверждениями.
+
+REQ-раздел библиотеки находится в её committed Git-файле: `requirements.source` читается из repositoryId задачи. В общий workspace выносятся связи с продуктовым сценарием и общими контрактами. Не связывайте библиотечную задачу с путём к внешнему ТЗ и не копируйте весь внутренний backlog в общую карту.
 
 Готовые заготовки: `packs/example-workspace.json` и `packs/example-changeset.json` в каталоге инструмента.
 
@@ -138,12 +140,28 @@ npm run devcontour -- serve --data /absolute/product-workspace/.harness/local
 
 ```sh
 npm run devcontour -- changeset-create --file changeset.json --data /absolute/product-workspace/.harness/local
+```
+
+Для обычного agent mode передайте полученный ID в MCP `workflow_start` или JSON envelope команды `agent`:
+
+```json
+{
+  "operation": "workflow_start",
+  "input": { "kind": "changeset", "id": "CHANGESET_ID", "authorRuntime": "codex" }
+}
+```
+
+Workflow ChangeSet ждёт принятых досок, но не регистрирует их jobs сам. Для каждой подготовленной доски зарегистрируйте отдельный `kind: board`. Статус ChangeSet и общей доски читайте без `repositoryId`; для локальной доски укажите компонент. Сервер должен оставаться запущенным. В remote mode ведущий агент отдельно готовит handoff и выполняет `remote-check` после публикации человеком.
+
+Ручная альтернатива (не выполнять одновременно с workflow того же результата):
+
+```sh
 npm run devcontour -- workspace-verify --changeset CHG-12 --data /absolute/product-workspace/.harness/local
 npm run devcontour -- changeset-accept --changeset CHG-12 --author-runtime codex --data /absolute/product-workspace/.harness/local
 npm run devcontour -- journal --data /absolute/product-workspace/.harness/local
 ```
 
-Команды `review-contract`, `review-plan`, `queue`, `run`, `accept`, `correct` продолжают работать с той же БД. Приёмка доски сохраняет SHA по репозиториям. `changeset-accept` требует успешной совместной проверки; `approvalMode: "operator"` возвращает `awaiting-operator`, после чего оператор подтверждает в UI. В режиме `agent` ведущий агент принимает результат сам. Он отдельно закрывает доски, когда их объём завершён.
+Команды `review-contract`, `review-plan`, `queue`, `run`, `accept`, `correct` продолжают работать с тем же общим контуром. Приёмка доски сохраняет SHA по репозиториям. `changeset-accept` требует успешной совместной проверки; `approvalMode: "operator"` возвращает `awaiting-operator`, после чего оператор подтверждает в UI. В agent mode приёмку выполняет workflow либо ведущий агент в выбранном ручном маршруте.
 
 ## Как проверяется комбинация версий
 
@@ -179,6 +197,8 @@ PASS требует успешного exit code, свежего непусто�
 3. Повторить контракт/план/реализацию и совместные проверки.
 
 У ещё не принятого ChangeSet состав берётся из последних ревизий его досок; добавленные исправления попадут в новую проверку. При необходимости поменять набор досок создайте новый ChangeSet. Старые неуспешные попытки не удаляются.
+
+После изменения ревизий/постановок зарегистрируйте новый workflow: прежний незавершённый job привязан к старому входу и станет stale. Jobs локальной доски живут в её компонентной SQLite, общего ChangeSet — в coordinator. Они не входят в Git sync или Markdown-дневник; статус читается отдельным `workflow_status`. Остановка чата не прекращает работу сервера, а `queue --pause` не блокирует все стадии. Перед синхронизацией/изменением конфигурации остановите сервер и другие записывающие клиенты.
 
 ## Владение общими библиотеками
 

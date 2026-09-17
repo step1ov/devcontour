@@ -7,12 +7,15 @@ DevContour — локальное приложение на TypeScript/Node.js �
 ```mermaid
 flowchart TD
   Lead[Ведущий агент / оператор] --> CLI[CLI]
+  Lead --> MCP[stdio MCP]
+  MCP --> AgentAPI[AgentService: схемы и операции]
+  AgentAPI --> Core
   Lead --> UI[React Console]
   UI --> HTTP[Локальный HTTP API]
   CLI --> Core[Harness / Workspace / DeliveryService]
   HTTP --> Core
   Core --> Store[Store / ComponentStorage / SQLite]
-  CLI --> Runner[Scheduler и runners]
+  CLI --> Runner[Scheduler, LeadRunner и runners]
   HTTP --> Runner
   Runner --> Core
   Runner --> Git[Git / worktree / refs]
@@ -51,6 +54,8 @@ Core не запускает subprocess. Исключение по зависи�
 Готовые задачи выбираются в порядке состояния; отдельного оптимизатора критического пути, поля бизнес-приоритета и распределённого планировщика бюджета пока нет. `concurrency` ограничивает число одновременно исполняемых попыток, а не число всех subprocess на машине.
 
 После подготовки ведущий агент может передать продолжение серверу через `workflow_start`. Домен `LeadWorkflow` сохраняет ограниченный автомат состояний, а `LeadRunner` вызывает существующие review, очередь и acceptance. У него нет альтернативного способа отметить задачу `done`. Такое разделение позволяет завершать уже подготовленный граф после закрытия чата, сохраняя условия проверки. Подробнее — [сохраняемый workflow](lead-workflow.md).
+
+CLI `agent`, HTTP `/api/agent` и stdio MCP вызывают один каталог `AgentService`; CLI/HTTP также сохраняют отдельные команды домена и runner. `serve` запускает scheduler и LeadRunner, а stdio MCP только предоставляет операции над явно выбранным workspace. Это разные процессы: доступность MCP не означает наличие активного исполнителя. `queue --pause` меняет выдачу Task, но не приостанавливает автомат этапов.
 
 Необязательные `requirements` в Task связывают версию Markdown-раздела с test gate и сценарием. Runner проверяет раздел на исходном, candidate и integration SHA, а домен требует evidence `requirement-source`. Digest раздела позволяет не перепроверять несвязанные требования при изменении соседнего текста. Gate подтверждает выполнение тестов; достаточность сценария остаётся предметом независимого review. См. [прослеживаемость](requirements.md).
 
