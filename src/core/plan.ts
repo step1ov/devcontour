@@ -6,6 +6,7 @@ export const planResult = z.object({
   tasks: z
     .array(
       z.object({
+        requirements: taskInput.shape.requirements,
         assignee: taskInput.shape.assignee,
         scope: taskInput.shape.scope,
         relatedRepositories: taskInput.shape.relatedRepositories,

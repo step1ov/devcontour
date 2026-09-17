@@ -7,6 +7,7 @@ import {
   type Verification,
   type ComponentImpact,
 } from './model.ts';
+import { createHash } from 'node:crypto';
 import { repositories, repository, roleBinding, reviewerBinding } from './repositories.ts';
 
 export function orderedGates<T extends Gate>(gates: T[]): T[] {
@@ -107,6 +108,8 @@ export function validateWorkflow(config: Config) {
       throw new DomainError('Ресурс port должен содержать порт 1024–65535');
   for (const gates of [...repos.map((r) => r.gates), config.workspaceGates]) {
     orderedGates(gates);
+    if (gates.some((g) => g.id === 'requirement-source'))
+      throw new DomainError('requirement-source — зарезервированный gate');
     for (const gate of gates) validateResources(config, gate.resources ?? []);
   }
 }
@@ -117,6 +120,20 @@ export function validateResources(config: Config, ids: string[]) {
 }
 export function validateTaskContext(config: Config, task: TaskInput) {
   validateResources(config, task.resources ?? []);
+  const keys = new Set<string>();
+  for (const link of task.requirements ?? []) {
+    const key = `${link.source}#${link.id}`;
+    if (keys.has(key)) throw new DomainError('Повтор требования: ' + key);
+    keys.add(key);
+    if (createHash('sha256').update(link.text).digest('hex') !== link.digest)
+      throw new DomainError('Текст требования не соответствует digest');
+    if (
+      !repository(config, task.repositoryId).gates.some(
+        (g) => g.id === link.gate && g.kind === 'test',
+      )
+    )
+      throw new DomainError('Требование должно ссылаться на test gate: ' + link.gate);
+  }
   if (task.scope === 'workspace' && new Set(task.relatedRepositories ?? []).size < 2)
     throw new DomainError('Общая задача должна затрагивать минимум два компонента');
   for (const id of task.relatedRepositories ?? []) repository(config, id);

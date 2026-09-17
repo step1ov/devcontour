@@ -1,3 +1,4 @@
+import { assertRequirements, recordRequirements } from './requirements.ts';
 import { snapshotDependencies, assertDependencies, runEnvironment } from './dependencies.ts';
 import { runSteps, withEnvironment } from './environment.ts';
 import { toolProfileFor, agentEnvironment } from './tools.ts';
@@ -133,6 +134,10 @@ export class Scheduler {
             r.integrationSha,
             this.targetFor(r.repositoryId ?? 'main'),
           );
+          assertRequirements(
+            this.h,
+            this.h.store.read().tasks.find((t) => t.id === r.taskId)!,
+          );
           const adopted = this.h.adopt(r.id, this.owner);
           this.h.finish(r.id, adopted.token, r.integrationSha);
           continue;
@@ -161,6 +166,7 @@ export class Scheduler {
           title: task.title,
           description: task.description,
           acceptance: task.acceptance,
+          requirements: task.requirements,
           dependsOn: task.dependsOn,
         },
         null,
@@ -277,6 +283,7 @@ export class Scheduler {
     const task = this.h.store.read().tasks.find((t) => t.id === run.taskId)!;
     const repo = repository(this.h.config, task.repositoryId);
     try {
+      assertRequirements(this.h, task);
       await withResources(
         this.h.config,
         [...(task.resources ?? []), ...repo.gates.flatMap((g) => g.resources ?? [])],
@@ -424,6 +431,7 @@ export class Scheduler {
                   join(this.runRoot(task.repositoryId), 'artifacts', run.id, 'candidate'),
                   signal,
                 );
+              recordRequirements(this.h, run, task, cwd, sha, 'candidate');
               this.h.phase(run.id, run.token, 'reviewing');
               await this.review(
                 this.runtimes[run.reviewer],
@@ -515,6 +523,7 @@ export class Scheduler {
             join(this.runRoot(task.repositoryId), 'artifacts', run.id, 'integration'),
             signal,
           );
+        recordRequirements(this.h, run, task, cwd, sha, 'integration');
         await this.review(this.runtimes[run.reviewer], run, task, cwd, sha, 'integration', signal);
       },
     );
@@ -528,6 +537,7 @@ export class Scheduler {
     await this.assertTargetDetached(repo.id);
     // Fencing validation, compare-and-swap publication and task acceptance share the DB write lock.
     // If the process dies after update-ref, recovery verifies persisted evidence before acceptance.
+    assertRequirements(this.h, task);
     this.h.finish(run.id, run.token, sha, () => {
       execFileSync('git', ['update-ref', target, sha, base], {
         cwd: repo.path,

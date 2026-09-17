@@ -1,4 +1,10 @@
 #!/usr/bin/env node
+import {
+  requirementSnapshot,
+  requirementReport,
+  correctRequirements,
+} from './runner/requirements.ts';
+import { repository as selectedRepository } from './core/repositories.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { AgentService, capabilities } from './application/agent.ts';
@@ -55,7 +61,7 @@ async function main() {
   if (operation === 'help' || args.includes('--help')) {
     console.log(
       'DevContour · AI-native разработка\nЗапуск: npm run devcontour -- <команда> [параметры]\n\n' +
-        'devcontour capabilities\ndevcontour mcp --workspace /absolute/workspace\ndevcontour agent --file request.json --workspace /absolute/workspace\n' +
+        'devcontour requirements-snapshot --repository-id main --file docs/spec.md --workspace ...\ndevcontour requirements-report --repository-id main --workspace ...\ndevcontour requirements-correct --board ID --reason ... --workspace ...\ndevcontour capabilities\ndevcontour mcp --workspace /absolute/workspace\ndevcontour agent --file request.json --workspace /absolute/workspace\n' +
         'devcontour sync [--member alice] [--allow-branch-change] [--resolutions file.json] --workspace ...\ndevcontour sync-status --workspace ...\ndevcontour assign-task --task <id> --member alice --workspace ...\n' +
         'devcontour storage-migrate --workspace ...\ndevcontour doctor [--probe] --workspace ...\ndevcontour handoff | remote-check --changeset CHG-1 --workspace ...\ndevcontour knowledge-import --source /donor --files README.md,docs/api.md [--ref HEAD] --workspace ...\ndevcontour environment-cleanup --receipt /absolute/receipt/environment.json --workspace ...\nДля нового проекта агент спрашивает абсолютный путь workspace. Все команды принимают --workspace /absolute/path вместо --data.\ndevcontour workspace-init --file /workspace/workspace.json [--data ...]\ndevcontour changeset-create --file changeset.json --data ...\ndevcontour workspace-verify | changeset-accept --changeset CHG-1 --data ...\ndevcontour journal --data ...\ndevcontour context-lock [--ref HEAD] | context-show --task T1 --workspace ...\ndevcontour resources | resource-release --key <key> --token <token> --cleanup-confirmed --workspace ...\ndevcontour setup --repository /absolute/product --profile <id> --workspace /absolute/workspace [--brief docs/spec.md] [--approval-mode agent|operator]\ndevcontour demo [--port 4317] | serve --workspace /absolute/workspace [--port 4317] [--dev]\ndevcontour init --repository /absolute/repo --data .harness/local\ndevcontour run | export | import-plan --file plan.json | doctor --data ...\ndevcontour plan --brief brief.md --runtime codex --data .harness/local\ndevcontour review-contract --file contract.json --author-runtime codex|claude --data ...\ndevcontour review-plan | accept --board B1 --author-runtime codex|claude --data ...\ndevcontour queue --start | --pause --data ...\ndevcontour retry --task T1 | edit-task --task T1 --file task.json | correct --board B1 --roots T1,T2 --reason ... --data ...',
     );
@@ -233,6 +239,30 @@ async function main() {
         throw new Error('Укажите --file request.json с operation и input');
       const request = JSON.parse(await readFile(resolve(option('--file', '')), 'utf8'));
       console.log(JSON.stringify(new AgentService(h).execute(request), null, 2));
+    } finally {
+      store.close();
+    }
+    return;
+  }
+  if (
+    ['requirements-snapshot', 'requirements-report', 'requirements-correct'].includes(operation)
+  ) {
+    try {
+      const repositoryId = option('--repository-id', 'main');
+      const result =
+        operation === 'requirements-snapshot'
+          ? requirementSnapshot(
+              selectedRepository(config, repositoryId).path,
+              option('--file', 'docs/spec.md'),
+            )
+          : operation === 'requirements-report'
+            ? requirementReport(h, repositoryId)
+            : correctRequirements(
+                h,
+                option('--board', ''),
+                option('--reason', 'Актуализация изменившихся требований'),
+              );
+      console.log(JSON.stringify(result, null, 2));
     } finally {
       store.close();
     }

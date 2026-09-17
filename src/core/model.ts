@@ -73,7 +73,17 @@ export const resourceSchema = z.object({
 });
 export type Resource = z.infer<typeof resourceSchema>;
 
+export const requirementLink = z.strictObject({
+  id: z.string().regex(/^REQ-[A-Za-z0-9_-]{1,64}$/),
+  source: relativePath,
+  digest: z.string().regex(/^[a-f0-9]{64}$/),
+  text: z.string().min(3).max(12000),
+  gate: id,
+  scenario: z.string().min(3).max(1500),
+});
+export type RequirementLink = z.infer<typeof requirementLink>;
 export const taskInput = z.object({
+  requirements: z.array(requirementLink).max(30).optional(),
   assignee: z
     .string()
     .regex(/^[A-Za-z0-9_.@-]{1,80}$/)
