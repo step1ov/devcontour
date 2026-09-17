@@ -6,6 +6,106 @@
   "maxResultBytes": 65536,
   "tools": [
     {
+      "name": "signal_ingest",
+      "description": "Record a normalized external observation in its component, deduplicate it and propose draft work or a correction. A resolved signal never supplies test evidence or accepts work.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "eventId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "incidentId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "repositoryId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "observedAt": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z))$"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "open",
+              "resolved"
+            ]
+          },
+          "title": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 180
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 8000
+          },
+          "evidenceUrl": {
+            "type": "string",
+            "format": "uri"
+          },
+          "boardId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "roots": {
+            "maxItems": 100,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          }
+        },
+        "required": [
+          "source",
+          "eventId",
+          "incidentId",
+          "repositoryId",
+          "observedAt",
+          "state",
+          "title",
+          "summary",
+          "evidenceUrl"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "signal_status",
+      "description": "Read external signal receipts in one component. No remote requests or model calls.",
+      "readOnly": true,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "repositoryId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          }
+        },
+        "required": [
+          "repositoryId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "workflow_start",
       "description": "Enqueue idempotent board review, execution and acceptance or ChangeSet verification. A running server may invoke models. Operator policy remains enforced.",
       "readOnly": false,
