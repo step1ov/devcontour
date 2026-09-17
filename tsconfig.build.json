@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rewriteRelativeImportExtensions": true,
+    "rootDir": "src",
+    "outDir": "lib",
+    "types": ["node"]
+  },
+  "include": ["src/cli.ts"],
+  "exclude": ["src/web", "tests", "e2e"]
+}

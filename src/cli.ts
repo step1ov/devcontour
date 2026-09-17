@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { DatabaseSync } from 'node:sqlite';
 import { AgentContext, contextOperations, type ContextOperation } from './application/context.ts';
 import { repositories } from './core/repositories.ts';
@@ -441,7 +442,8 @@ async function main() {
   }
   if (!['serve', 'demo'].includes(operation)) throw new Error('Неизвестная команда: ' + operation);
   const port = Number(option('--port', process.env.PORT ?? '4317'));
-  if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Некорректный port');
+  if (!Number.isInteger(port) || (port !== 0 && port < 1024) || port > 65535)
+    throw new Error('Некорректный port');
   const app = await serve(h, scheduler, { port, dev: args.includes('--dev') });
   console.log(
     `DevContour: ${app.url}\n${config.mode === 'demo' ? 'Учебный режим: модели не вызываются.' : 'Локальный режим: запуск использует настроенные CLI и их авторизацию.'}`,

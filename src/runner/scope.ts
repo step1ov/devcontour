@@ -1,4 +1,5 @@
-import { isAbsolute, join, resolve, sep } from 'node:path';
+import { isAbsolute, join, resolve, sep, dirname, basename } from 'node:path';
+import { existsSync, realpathSync } from 'node:fs';
 
 import { fileURLToPath } from 'node:url';
 
@@ -16,10 +17,13 @@ export function commandScope(args: string[], operation: string) {
     data = value('--data');
   if (workspace && data) throw new Error('Используйте --workspace или --data, не оба одновременно');
   if (workspace && !isAbsolute(workspace)) throw new Error('--workspace требует абсолютный путь');
-  const toolRoot = resolve(fileURLToPath(new URL('../../', import.meta.url)));
+  const toolRoot = realpathSync(fileURLToPath(new URL('../../', import.meta.url)));
+  const canonical = (path: string): string =>
+    existsSync(path) ? realpathSync(path) : join(canonical(dirname(path)), basename(path));
   if (
     workspace &&
-    (resolve(workspace) === toolRoot || resolve(workspace).startsWith(toolRoot + sep))
+    (canonical(resolve(workspace)) === toolRoot ||
+      canonical(resolve(workspace)).startsWith(toolRoot + sep))
   )
     throw new Error('Workspace должен находиться вне каталога devcontour');
   if (operation === 'demo' && workspace)

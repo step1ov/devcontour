@@ -3,6 +3,7 @@ import { AgentContext, contextOperations } from '../application/context.ts';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { readFile, realpath } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { resolve, join, extname, sep } from 'node:path';
 import { ZodError, z } from 'zod';
 import { Harness, specDigest } from '../core/service.ts';
@@ -49,14 +50,18 @@ export async function serve(
     : undefined;
   const server = createServer(async (req, res) => {
     try {
-      if (![new URL(origin).host, `localhost:${options.port}`].includes(req.headers.host ?? ''))
+      if (
+        ![new URL(origin).host, `localhost:${new URL(origin).port}`].includes(
+          req.headers.host ?? '',
+        )
+      )
         throw new DomainError('Host не разрешён', 403);
       const url = new URL(req.url ?? '/', origin);
       const path = url.pathname;
       if (path.startsWith('/api/')) {
         if (
           req.headers.origin &&
-          ![origin, `http://localhost:${options.port}`].includes(req.headers.origin)
+          ![origin, `http://localhost:${new URL(origin).port}`].includes(req.headers.origin)
         )
           throw new DomainError('Origin не разрешён', 403);
         if (
@@ -217,7 +222,8 @@ export async function serve(
         res.end('Not found');
         return;
       }
-      const file = path === '/' ? resolve('dist/index.html') : resolve('dist', '.' + path);
+      const staticRoot = fileURLToPath(new URL('../../dist/', import.meta.url));
+      const file = path === '/' ? join(staticRoot, 'index.html') : join(staticRoot, '.' + path);
       const mime: Record<string, string> = {
         '.html': 'text/html; charset=utf-8',
         '.js': 'text/javascript; charset=utf-8',
