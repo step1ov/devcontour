@@ -1,6 +1,6 @@
 # CLI и локальное API
 
-Команды вызываются из каталога DevContour. Отдельный глобальный executable в MVP не устанавливается:
+Из исходников команды вызываются через npm; [установленный пакет](distribution.md) предоставляет executable `devcontour`. Глобальная установка для работы не нужна:
 
 ```sh
 npm run devcontour -- help
@@ -61,6 +61,20 @@ Setup не вызывает модель, не устанавливает зав
 `run` не утверждает черновики и не выполняет весь продукт автоматически. Его успешный exit сам по себе не доказывает, что не осталось draft/blocked задач или непринятых досок. Проверяйте итоговое состояние и порученный объём.
 
 `accept`/`changeset-accept` не создают ещё один LLM-review готового отчёта. Они применяют доменные условия к уже полученным доказательствам. При `approvalMode: operator` агентский вызов возвращает `awaiting-operator`; оператор подтверждает в UI. Статус такого ответа нужно обработать, а не читать любой exit 0 как приёмку.
+
+## Требования, продолжение этапов и измерения
+
+| Команда                 | Параметры                                                  | Результат                                                 |
+| ----------------------- | ---------------------------------------------------------- | --------------------------------------------------------- |
+| `requirements-snapshot` | `--repository-id main --file docs/spec.md`                 | Разделы REQ из committed HEAD с digest                    |
+| `requirements-report`   | `--repository-id main`                                     | Связи требований и актуальность проверенного покрытия     |
+| `requirements-correct`  | `--board ID --reason TEXT`                                 | Draft-ревизия для изменившихся связанных требований       |
+| `metrics`               | опционально `--repository-id main`                         | Время стадий, ожидание и все попытки выбранного владельца |
+| `evals`                 | опционально `--repetitions N --max-calls N --timeout-ms N` | Изолированный eval протокола без workspace и моделей      |
+
+Первые четыре команды требуют `--workspace` или `--data`. Live-eval отдельно включается флагами `--live --runtime codex|claude --model MODEL`; его ограничения и интерпретация — в [evals](agent-evals.md).
+
+`workflow_start`, `workflow_status`, `workflow_retry`, `signal_ingest` и `signal_status` вызываются через MCP, HTTP `/api/agent` или CLI `agent --file request.json --workspace ...`. Файл содержит `{ "operation": "workflow_status", "input": { "repositoryId": "main" } }`. Форматы входа берутся из `capabilities`; процедура описана в [workflow](lead-workflow.md) и [сигналах](external-signals.md). Регистрация workflow не запускает отдельный daemon: его продвигает работающий `serve`.
 
 ## Публикация и обслуживание
 

@@ -1,0 +1,35 @@
+{
+  "date": "2026-09-17",
+  "mode": "demo fixture, no model calls",
+  "start": {
+    "content": [
+      {
+        "type": "text",
+        "text": "Script ran on page and returned:\n```json\n{\"http\":200,\"workflow\":{\"kind\":\"board\",\"id\":\"B-a4a093c7-bdfe-40d8-bf47-9cbd3e12e228\",\"authorRuntime\":\"codex\",\"maxAttempts\":3,\"key\":\"3ace277f9240a2a8ea0da52dc03a43271478c82a0ac637c745e56b6f454930e9\",\"owner\":\"main\",\"inputDigest\":\"b290ee3b882eafec0f0049d3a74b7ec7e2dd3a9f37a933d3fe7d8a0c73078a1b\",\"stage\":0,\"attempts\":0,\"status\":\"queued\",\"startedAt\":\"2026-09-17T18:56:01.860Z\",\"history\":[]}}\n```"
+      }
+    ]
+  },
+  "desktop": {
+    "heading": "Каталог продуктов",
+    "boardStatus": "accepted",
+    "taskCount": 5,
+    "allTasksDone": true,
+    "width": 1440,
+    "scrollWidth": 1440,
+    "correctionVisible": true
+  },
+  "mobile": {
+    "content": [
+      {
+        "type": "text",
+        "text": "Script ran on page and returned:\n```json\n{\"heading\":\"Каталог продуктов\",\"boardStatus\":\"accepted\",\"allTasksDone\":true,\"workflowStatus\":\"completed\",\"noPrivateToken\":true,\"selectedTab\":\"Список\",\"width\":390,\"scrollWidth\":390}\n```"
+      }
+    ]
+  },
+  "consoleErrors": 0,
+  "consoleWarnings": 0,
+  "limitations": [
+    "Supplemental Chrome DevTools smoke; not the full Playwright suite",
+    "Axe audit not run in supplemental smoke"
+  ]
+}

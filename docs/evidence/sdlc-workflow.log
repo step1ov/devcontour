@@ -1,0 +1,16 @@
+(node:88486) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Workflow enqueue is idempotent, expired owners are fenced and changed inputs become stale (13.097542ms)
+✔ Atomic local event and domain changes roll back together (2.881542ms)
+✔ Removed workflow inputs become stale without starving unrelated jobs (6.934584ms)
+✔ A real Git board resumes after process replacement without duplicating review or acceptance (7340.554209ms)
+✔ Operator policy never starts automatic review or resumes a queue (3.924458ms)
+✔ Waiting cycles resume shutdown pauses but preserve explicit user pauses (7.413958ms)
+ℹ tests 6
+ℹ suites 0
+ℹ pass 6
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 7659.387792

@@ -156,6 +156,77 @@ try {
   });
   assert.equal(response.status, 200);
   assert.equal((await response.json()).protocolVersion, 1);
+  const agent = async (operation, input) => {
+    const reply = await fetch(url + '/api/agent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Harness-Request': '1' },
+      body: JSON.stringify({ operation, input }),
+    });
+    const value = await reply.json();
+    assert.equal(reply.status, 200, JSON.stringify(value));
+    return value;
+  };
+  const board = await agent('board_create', {
+    title: 'Installed durable workflow',
+    repositoryId: 'main',
+  });
+  const task = await agent('task_create', {
+    boardId: board.boardId,
+    task: {
+      title: 'Verify installed workflow',
+      description: 'Produce and verify a real isolated Git deliverable.',
+      role: 'qa',
+      acceptance: ['The deliverable passes the configured test.'],
+    },
+  });
+  const job = await agent('workflow_start', {
+    kind: 'board',
+    id: board.boardId,
+    authorRuntime: 'codex',
+  });
+  assert.equal(
+    (await agent('workflow_start', { kind: 'board', id: board.boardId, authorRuntime: 'codex' }))
+      .key,
+    job.key,
+  );
+  let completed = false;
+  for (let count = 0; count < 450; count++) {
+    const report = await agent('workflow_status', { repositoryId: 'main' });
+    assert.ok(report.jobs.every((j) => !('token' in j)));
+    const current = report.jobs.find((j) => j.key === job.key);
+    if (current.status === 'failed' || current.status === 'stale')
+      assert.fail(JSON.stringify(current));
+    if (current.status === 'completed') {
+      completed = true;
+      break;
+    }
+    await delay(100);
+  }
+  assert.ok(completed, 'Installed server must advance a durable workflow without an active chat');
+  const metrics = await agent('workflow_metrics', { repositoryId: 'main' });
+  assert.ok(
+    metrics.attempts.some(
+      (r) => r.taskId === task.taskId && r.status === 'succeeded' && r.stages.length,
+    ),
+  );
+  const signal = {
+    source: 'ci-fixture',
+    eventId: 'failed-1',
+    incidentId: 'regression-1',
+    repositoryId: 'main',
+    observedAt: new Date().toISOString(),
+    state: 'open',
+    title: 'Inspect CI regression',
+    summary: 'A normalized external CI observation needs reproduction.',
+    evidenceUrl: 'https://ci.example.invalid/job/1',
+  };
+  const first = await agent('signal_ingest', signal),
+    duplicate = await agent('signal_ingest', signal);
+  assert.equal(first.taskIds[0], duplicate.taskIds[0]);
+  assert.equal(duplicate.duplicate, true);
+  assert.equal((await agent('task_briefing', { taskId: first.taskIds[0] })).task.status, 'draft');
+  assert.equal(JSON.parse((await cli('evals')).stdout).passed, true);
+
   console.log(
     JSON.stringify(
       {
@@ -172,6 +243,10 @@ try {
           'packaged static assets',
           'real Git fixture pipeline',
           'HTTP agent API',
+          'durable workflow through real Git acceptance',
+          'workflow metrics and private lease tokens',
+          'deduplicated external signal stays draft',
+          'installed protocol evals',
         ],
       },
       null,

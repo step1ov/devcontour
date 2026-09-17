@@ -14,7 +14,7 @@ npm pack
 `prepack` проверяет типы, компилирует Node-код в `lib/` и собирает UI в `dist/`. Полученный `devcontour-<version>.tgz` можно передать коллеге или установить из доверенного внутреннего хранилища:
 
 ```bash
-npm install --global /absolute/devcontour-0.2.0.tgz
+npm install --global /absolute/devcontour-0.3.0.tgz
 devcontour help
 devcontour serve --workspace /absolute/product-workspace --port 0
 ```

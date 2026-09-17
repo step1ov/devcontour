@@ -1,0 +1,148 @@
+
+> devcontour@0.3.0 test
+> node --import tsx --test tests/*.test.ts
+
+(node:90642) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Agent contracts require another runtime, retain review proof and deduplicate repeated content (78.412666ms)
+✔ Operator mode reviews but does not register contracts or approve draft tasks (15.806792ms)
+✔ Blocking findings reject even approved=true and do not enable execution (12.461458ms)
+✔ Agent plan approval is bound to reviewed specifications and preserves contract requirements (43.874792ms)
+✔ Agent cannot accept a board containing unverified work (6.363791ms)
+(node:90643) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Every pinned profile has an executable test gate and mobile limits concurrency (22.160459ms)
+✔ Local config rejects same-runtime self-review, demo adapters and escaping reports (18.043708ms)
+(node:90644) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Bounded briefing pages preserve multilingual contracts, reject stale and foreign cursors, omit runtime secrets (128.220041ms)
+✔ Progress explains dependency, pause, assignment and attempt constraints without claiming work (11.149625ms)
+✔ Checkpoints stay with their component and cannot bypass completion or write through symlinks (49.362208ms)
+✔ Checkpoint survives a real Git clone; unrelated identity and forged IDs are rejected (3381.401167ms)
+✔ Independent first checkpoints reuse Git identity and merge across clones without conflict (8466.210458ms)
+(node:90645) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ DAG rejects cycles and missing dependencies atomically (19.297ms)
+✔ Approval binds contracts and spec; dependent jobs wait for accepted predecessor (35.1185ms)
+✔ Concurrent store clients cannot claim one task twice (6.255792ms)
+✔ Expired attempts are fenced, retries get fresh run IDs and tokens (6.513041ms)
+✔ Done requires exact SHA test evidence and independent review for BOTH phases (8.071ms)
+✔ Correction makes a new transitive chain and preserves immutable accepted snapshot (23.280041ms)
+✔ Cross-board impact is included in correction, unrelated tasks keep their results (24.765875ms)
+✔ Board acceptance rejects empty, incomplete and unapproved tasks (8.597208ms)
+✔ Cancelled runs cannot publish and cancelled drafts can return to draft (14.855458ms)
+✔ Optimistic draft editing rejects stale client and atomic publish failure cannot mark done (10.068375ms)
+✔ Plan import accepts forward references, rejects cycles without partial writes (5.381167ms)
+✔ Contract approval is a real gate: architecture can start while implementation stays draft (10.329ms)
+✔ Repeated partial correction follows current replacements, never clones superseded history again (23.742167ms)
+✔ Mixed runtimes route every role to its independent reviewer and retain configured model (4.059625ms)
+(node:90646) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Gate DAG sorts prerequisites and rejects unknown/cyclic dependencies; component graph fails closed (6.262167ms)
+✔ Discovered debt becomes a deduplicated draft with provenance; scope and context are approved specification (18.786458ms)
+✔ Pinned role/library documents are selected reproducibly, delivered to writer and reviewer and persisted with each run (85293.461292ms)
+✔ Unknown context/resources and unpinned instructions cannot silently run (19582.43825ms)
+✔ Role and task write scopes reject an otherwise passing implementation before integration (20105.02975ms)
+✔ Generated files are protected and implementation discoveries enter the existing board automatically (56624.993ms)
+✔ Ordered codegen runs from its cwd before a real test in candidate and integration (38137.267917ms)
+✔ A host resource is exclusive across processes and aliases; TTL alone cannot steal ownership (219.441417ms)
+✔ Resource acquisition is all-or-nothing; cancellation and failure release only owned leases (107.112417ms)
+✔ CLI context-lock pins committed instructions, context-show resolves task selection and a running queue blocks policy updates (2406.194875ms)
+(node:90647) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Execution environment is explicit, missing secrets fail and logs redact inherited credentials (251.323916ms)
+✔ Runtime profiles carry only explicit MCP definitions and reviewer has no editing/Bash tools (1.52ms)
+✔ Environment cleanup runs after setup failure and cancellation; cleanup failure retains resource ownership (1489.949667ms)
+✔ Component databases contain local specifications, snapshots and events; coordinator holds only links (44890.377542ms)
+✔ A failure in one attached database rolls back updates across coordinator and all components (6012.864792ms)
+✔ Dependency artifacts are pinned and mutations are rejected independently of consumer gates (9602.032083ms)
+✔ Doctor detects absent prerequisites; donor import records source SHA and does not execute donor rules (10801.471958ms)
+✔ Manual handoff supports GitLab and GitHub; read-only observations require exact merged trees and CI SHA (49134.825167ms)
+✔ Explicit storage migration relocates historical local task bodies and preserves event identities (3985.854208ms)
+✔ Killed writer is recovered through SQLite rollback journals without losing graph consistency (4366.432417ms)
+✔ Doctor uses component tool profiles and executes isolated preflight with teardown (10761.75075ms)
+✔ Cleanup recovery preserves component environment and rejects live owners and foreign directories (4702.758667ms)
+(node:90648) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Protocol evaluation accepts safe actions and detects a deliberately weakened driver (12684.772ms)
+✔ Evaluation budget and runtime errors never become PASS; reports omit raw failures (1012.40975ms)
+(node:90649) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Requirement bindings sync between independent clones and remain in the component (24361.854125ms)
+✔ Git state restores a new component DB; baselines and task bodies stay in their owner repository (26232.512666ms)
+✔ Two clones add tasks to the same board and merge different fields without losing either change (39977.888875ms)
+✔ Conflicting edits require an explicit choice, and conflict detection leaves DB and files unchanged (30444.669417ms)
+✔ Peer completion needs a committed receipt and present Git result; it never restores a live run (27692.814292ms)
+✔ Broken receipts, absent commits, graph cycles, deleted history and forged done all roll back (24060.974041ms)
+✔ Team member filters claims; sync rejects active work, branch switches and symlinks (14996.797208ms)
+✔ Real runner checks and integration survive Git transfer without reusing local workers (25597.700333ms)
+✔ Shared graph references component tasks without exporting their bodies into workspace Git or baseline (6246.2225ms)
+✔ An initially empty shared board keeps its Git owner after tasks are added (4709.52575ms)
+✔ An unresolved real Git merge conflict blocks synchronization before touching local state (8722.838542ms)
+✔ CLI exposes sync, status and assignment against an explicit workspace (6356.313458ms)
+(node:90650) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Loopback API rejects cross-origin writes, validates input and survives missing assets (62.112667ms)
+✔ Two workspace servers use distinct ports and report their own state paths (17.334875ms)
+(node:90674) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Workflow enqueue is idempotent, expired owners are fenced and changed inputs become stale (15.68075ms)
+✔ Atomic local event and domain changes roll back together (4.130667ms)
+✔ Removed workflow inputs become stale without starving unrelated jobs (9.55875ms)
+✔ A real Git board resumes after process replacement without duplicating review or acceptance (44750.449625ms)
+✔ Operator policy never starts automatic review or resumes a queue (5.135708ms)
+✔ Waiting cycles resume shutdown pauses but preserve explicit user pauses (6.319416ms)
+(node:90730) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Read-only agent queries do not rebuild journals; mutations still update projections (10.367791ms)
+✔ Real MCP clients negotiate tools, keep independent workspaces and enforce draft/stale-edit rules (1391.108916ms)
+✔ Agent surface cannot provide evidence/approval; cyclic plans fail atomically and inputs are bounded (5.70775ms)
+(node:90780) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Metrics preserve failed and interrupted attempts, expose timing provenance and unknown cost (28.456333ms)
+(node:90789) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Requirement parser ignores examples, rejects duplicate IDs and bounds sections (1.165083ms)
+✔ Requirements survive real Git execution; changed spec loses current coverage and creates immutable correction (61053.815333ms)
+(node:91082) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Real git pipeline integrates concurrent siblings and verifies every candidate and merged SHA (119841.200875ms)
+✔ A missing required tool fails closed and never advances integration ref (21077.885125ms)
+✔ A reviewer refusal blocks publication (17614.932459ms)
+✔ Changes to gate policy files are rejected before commit (13411.938834ms)
+✔ Crash after Git publication is reconciled from persisted evidence without running models again (34944.716542ms)
+✔ JUnit rejects empty/malformed reports and distinguishes skipped tests from pass (1.01325ms)
+✔ CLI adapters use structured outputs, stdin prompts and restricted review permissions (0.147083ms)
+✔ Process timeout interrupts actual child processes (83.258583ms)
+(node:91435) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Product commands require scope; invalid or conflicting scope never silently selects demo (1.332209ms)
+✔ Bare CLI fails before creating demo files; two CLI sessions address separate workspace databases (3790.640208ms)
+✔ Workspace setup preserves an existing scope and rejects a workspace inside the product (1155.771625ms)
+✔ Setup starts from only a Markdown spec, copies hidden roles and pins an agent-mode config (451.683583ms)
+✔ Setup preserves existing files and explicit operator mode across repeated preparation (1531.161333ms)
+✔ Setup rejects escaping symlinks and invalid specs before copying any rules (313.579167ms)
+✔ Setup refuses an accidental child of another real Git repository (631.730083ms)
+✔ CLI setup supports explicit legacy data without bootstrapping a demo (1081.494208ms)
+(node:93845) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Signals deduplicate transactionally, reject changed event payloads and never accept resolved work (13.240209ms)
+✔ An incident on an accepted board creates a correction and retains its snapshot (7.909459ms)
+✔ Component incident bodies and event receipts stay out of coordinator SQLite (11.132542ms)
+(node:93912) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Real multi-repo DAG, isolated ownership, failing then passing pinned integration and immutable diary (61351.515917ms)
+✔ Verification fences expired runs, stops task claims, checks gate coverage and rejects changed policy (9.9755ms)
+✔ Workspace gates cannot change manifest or another component source (13684.541375ms)
+✔ Workspace setup preserves policy on repeat and detects a competing controller (8124.86575ms)
+✔ Projection failure never rolls back an already committed task event (3.881083ms)
+✔ Legacy single-repository state retains its approved spec digest after migration (5.713084ms)
+✔ Consumer impact executes prerequisites and affected product tests on real repository SHAs (53798.180625ms)
+ℹ tests 102
+ℹ suites 0
+ℹ pass 102
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 240016.730875

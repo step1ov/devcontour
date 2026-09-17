@@ -1,6 +1,6 @@
 {
   "name": "devcontour",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "protocolVersion": 1,
   "maxInputBytes": 100000,
   "maxResultBytes": 65536,
