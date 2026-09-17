@@ -23,8 +23,10 @@ export function createMcpServer(service: AgentService) {
         annotations: {
           readOnlyHint: readOnly(name),
           destructiveHint: !readOnly(name) && name !== 'checkpoint_save',
-          idempotentHint: readOnly(name) || name === 'queue_set',
-          openWorldHint: name === 'queue_set',
+          idempotentHint:
+            readOnly(name) || ['queue_set', 'workflow_start', 'signal_ingest'].includes(name),
+          openWorldHint:
+            name === 'queue_set' || name === 'workflow_start' || name === 'workflow_retry',
         },
       },
       async (input: unknown) => {

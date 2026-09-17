@@ -186,7 +186,9 @@ export async function setupProject(options: {
       .replaceAll('(docs/workspaces.md)', '(harness-workspaces.md)')
       .replaceAll('(docs/engineering-context.md)', '(harness-engineering.md)')
       .replaceAll('(docs/project-integration.md)', '(harness-integration.md)')
-      .replaceAll('(docs/team-sync.md)', '(harness-team-sync.md)'),
+      .replaceAll('(docs/team-sync.md)', '(harness-team-sync.md)')
+      .replaceAll('(docs/requirements.md)', '(harness-requirements.md)')
+      .replaceAll('(docs/lead-workflow.md)', '(harness-lead-workflow.md)'),
   );
   files.set(
     join(repository, 'docs', 'harness-workspaces.md'),
@@ -207,6 +209,11 @@ export async function setupProject(options: {
     join(repository, 'docs', 'harness-team-sync.md'),
     await readFile(join(harnessRoot, 'docs', 'team-sync.md'), 'utf8'),
   );
+  for (const name of ['requirements', 'lead-workflow'])
+    files.set(
+      join(repository, 'docs', `harness-${name}.md`),
+      await readFile(join(harnessRoot, 'docs', `${name}.md`), 'utf8'),
+    );
   files.set(join(data, 'packs.lock.json'), JSON.stringify(profileLock(selected), null, 2) + '\n');
   const profilePath = join(data, 'profiles', selected.id + '.json');
   const profileContent = await readFile(

@@ -1,3 +1,4 @@
+import { LeadRunner } from '../runner/lead-workflow.ts';
 import { DeliveryRunner } from '../runner/forge.ts';
 import { AgentService, capabilities } from '../application/agent.ts';
 import { taskProgress } from '../application/context.ts';
@@ -264,13 +265,16 @@ export async function serve(
     server.listen(options.port, '127.0.0.1', r);
   });
   origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const lead = new LeadRunner(h, scheduler.root);
   scheduler.start();
+  lead.start();
   return {
     server,
     url: origin,
     close: async () => {
       await deliveryRunner.stop();
       await workspaceRunner.stop();
+      await lead.stop();
       await scheduler.stop();
       await vite?.close();
       await new Promise<void>((r) => server.close(() => r()));

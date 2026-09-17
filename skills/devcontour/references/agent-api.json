@@ -6,6 +6,86 @@
   "maxResultBytes": 65536,
   "tools": [
     {
+      "name": "workflow_start",
+      "description": "Enqueue idempotent board review, execution and acceptance or ChangeSet verification. A running server may invoke models. Operator policy remains enforced.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "board",
+              "changeset"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "authorRuntime": {
+            "type": "string",
+            "enum": [
+              "codex",
+              "claude"
+            ]
+          },
+          "maxAttempts": {
+            "default": 3,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 5
+          }
+        },
+        "required": [
+          "kind",
+          "id",
+          "authorRuntime"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "workflow_status",
+      "description": "Read owner-local durable stage jobs. No model calls or execution leases are granted.",
+      "readOnly": true,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "repositoryId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "workflow_retry",
+      "description": "Retry a diagnosed failed stage within its original attempt budget. Never retries failed task implementations automatically.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "repositoryId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "key": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "workflow_metrics",
       "description": "Read per-owner execution measurements, incomplete attempts and unknown cost. No model calls.",
       "readOnly": true,
