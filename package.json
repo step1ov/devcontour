@@ -1,6 +1,6 @@
 {
   "name": "devcontour",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "bin": {
@@ -26,7 +26,8 @@
     "start": "node --import tsx src/cli.ts serve",
     "demo": "node --import tsx src/cli.ts demo",
     "typecheck": "tsc --noEmit",
-    "build": "npm run typecheck && tsc -p tsconfig.build.json && vite build",
+    "build": "npm run typecheck && tsc -p tsconfig.build.json && node scripts/build-skill.mjs && vite build",
+    "check:skill": "node scripts/build-skill.mjs --check",
     "prepack": "npm run build",
     "test:package": "npm run build && node scripts/smoke-package.mjs",
     "test": "node --import tsx --test tests/*.test.ts",
@@ -39,6 +40,7 @@
     "harness": "node --import tsx src/cli.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/server": "2.0.0",
     "@xyflow/react": "12.11.6",
     "fast-xml-parser": "5.11.1",
     "lucide-react": "1.46.0",
@@ -48,6 +50,7 @@
   },
   "devDependencies": {
     "@axe-core/playwright": "4.13.0",
+    "@modelcontextprotocol/client": "2.0.0",
     "@playwright/test": "1.63.0",
     "@types/node": "22.20.3",
     "@types/react": "19.3.0",

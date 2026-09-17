@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 import { DatabaseSync } from 'node:sqlite';
-import { AgentContext, contextOperations, type ContextOperation } from './application/context.ts';
+import { fileURLToPath } from 'node:url';
+import { AgentService, capabilities } from './application/agent.ts';
+import { serveMcp } from './server/mcp.ts';
 import { repositories } from './core/repositories.ts';
 import { doctor } from './runner/doctor.ts';
 import { cleanupEnvironment } from './runner/environment.ts';
@@ -42,10 +44,18 @@ const authorRuntime = () => {
   return value;
 };
 async function main() {
+  if (operation === 'skill-path') {
+    console.log(fileURLToPath(new URL('../skills/devcontour', import.meta.url)));
+    return;
+  }
+  if (operation === 'capabilities') {
+    console.log(JSON.stringify(capabilities(), null, 2));
+    return;
+  }
   if (operation === 'help' || args.includes('--help')) {
     console.log(
       'DevContour · AI-native разработка\nЗапуск: npm run devcontour -- <команда> [параметры]\n\n' +
-        'devcontour agent --file request.json --workspace /absolute/workspace (project_context, project_overview, task_briefing, checkpoint_save, checkpoint_changes)\n' +
+        'devcontour capabilities\ndevcontour mcp --workspace /absolute/workspace\ndevcontour agent --file request.json --workspace /absolute/workspace\n' +
         'devcontour sync [--member alice] [--allow-branch-change] [--resolutions file.json] --workspace ...\ndevcontour sync-status --workspace ...\ndevcontour assign-task --task <id> --member alice --workspace ...\n' +
         'devcontour storage-migrate --workspace ...\ndevcontour doctor [--probe] --workspace ...\ndevcontour handoff | remote-check --changeset CHG-1 --workspace ...\ndevcontour knowledge-import --source /donor --files README.md,docs/api.md [--ref HEAD] --workspace ...\ndevcontour environment-cleanup --receipt /absolute/receipt/environment.json --workspace ...\nДля нового проекта агент спрашивает абсолютный путь workspace. Все команды принимают --workspace /absolute/path вместо --data.\ndevcontour workspace-init --file /workspace/workspace.json [--data ...]\ndevcontour changeset-create --file changeset.json --data ...\ndevcontour workspace-verify | changeset-accept --changeset CHG-1 --data ...\ndevcontour journal --data ...\ndevcontour context-lock [--ref HEAD] | context-show --task T1 --workspace ...\ndevcontour resources | resource-release --key <key> --token <token> --cleanup-confirmed --workspace ...\ndevcontour setup --repository /absolute/product --profile <id> --workspace /absolute/workspace [--brief docs/spec.md] [--approval-mode agent|operator]\ndevcontour demo [--port 4317] | serve --workspace /absolute/workspace [--port 4317] [--dev]\ndevcontour init --repository /absolute/repo --data .harness/local\ndevcontour run | export | import-plan --file plan.json | doctor --data ...\ndevcontour plan --brief brief.md --runtime codex --data .harness/local\ndevcontour review-contract --file contract.json --author-runtime codex|claude --data ...\ndevcontour review-plan | accept --board B1 --author-runtime codex|claude --data ...\ndevcontour queue --start | --pause --data ...\ndevcontour retry --task T1 | edit-task --task T1 --file task.json | correct --board B1 --roots T1,T2 --reason ... --data ...',
     );
@@ -201,20 +211,28 @@ async function main() {
     config.storage === 'component' ? repositories(config) : undefined,
   );
   const h = new Harness(store, config);
+  if (operation === 'mcp') {
+    const server = await serveMcp(new AgentService(h));
+    let closed = false;
+    const close = () => {
+      if (!closed) {
+        closed = true;
+        store.close();
+      }
+    };
+    server.server.onclose = close;
+    for (const event of ['SIGTERM', 'SIGINT'] as const)
+      process.once(event, () => {
+        void server.close().finally(close);
+      });
+    return;
+  }
   if (operation === 'agent') {
     try {
       if (!args.includes('--file'))
         throw new Error('Укажите --file request.json с operation и input');
       const request = JSON.parse(await readFile(resolve(option('--file', '')), 'utf8'));
-      if (!contextOperations.includes(request.operation))
-        throw new Error('Неизвестная agent operation');
-      console.log(
-        JSON.stringify(
-          new AgentContext(h).execute(request.operation as ContextOperation, request.input ?? {}),
-          null,
-          2,
-        ),
-      );
+      console.log(JSON.stringify(new AgentService(h).execute(request), null, 2));
     } finally {
       store.close();
     }
