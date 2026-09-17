@@ -292,6 +292,7 @@ export class Harness {
             return [id, c.digest];
           }),
         );
+        t.approvedAt = now();
         t.approvedDigest = specDigest(t);
         t.approval = approval;
         t.status = 'ready';
@@ -363,6 +364,7 @@ export class Harness {
           status: 'draft',
           createdAt: now(),
           attempt: 0,
+          approvedAt: undefined,
           approvedDigest: undefined,
           approval: undefined,
           activeRunId: undefined,
@@ -449,7 +451,19 @@ export class Harness {
       validateTaskContext(this.config, t);
       if (t.approvedDigest !== specDigest(t))
         throw new DomainError('Спецификация изменилась после утверждения');
+      const dependencyDates = t.dependsOn.map((id) => {
+        const dependency = s.tasks.find((x) => x.id === id)!;
+        return (
+          s.runs.findLast((r) => r.taskId === id && r.status === 'succeeded')?.finishedAt ??
+          dependency.sharedCompletion?.receipt.finishedAt
+        );
+      });
+      const readyAt =
+        t.approvedAt && dependencyDates.every(Boolean)
+          ? [t.approvedAt, ...(dependencyDates as string[])].sort().at(-1)
+          : undefined;
       const run: Run = {
+        wait: { approvedAt: t.approvedAt, readyAt },
         requiredGates: [
           ...repository(this.config, t.repositoryId).gates.map((g) => g.id),
           ...(t.requirements?.length ? ['requirement-source'] : []),

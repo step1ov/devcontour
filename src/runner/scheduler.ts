@@ -1,3 +1,4 @@
+import { timed } from './timing.ts';
 import { assertRequirements, recordRequirements } from './requirements.ts';
 import { snapshotDependencies, assertDependencies, runEnvironment } from './dependencies.ts';
 import { runSteps, withEnvironment } from './environment.ts';
@@ -230,19 +231,21 @@ export class Scheduler {
       env: agent.env,
       redact: (text: string) => baseExecution.redact(agent.redact(text)),
     };
-    const result = await adapter.execute({
-      toolProfile,
-      execution,
-      cwd,
-      artifactDir: dir,
-      prompt: this.prompt(task, run, true, sha) + '\n\nExact diff to review:\n' + diff,
-      review: true,
-      task,
-      model: run.reviewerModel,
-      signal,
-      timeoutMs: this.h.config.runTimeoutMs,
-      resourcesJson: JSON.stringify(run.resources ?? []),
-    });
+    const result = await timed(this.h, run, phase + '-review', () =>
+      adapter.execute({
+        toolProfile,
+        execution,
+        cwd,
+        artifactDir: dir,
+        prompt: this.prompt(task, run, true, sha) + '\n\nExact diff to review:\n' + diff,
+        review: true,
+        task,
+        model: run.reviewerModel,
+        signal,
+        timeoutMs: this.h.config.runTimeoutMs,
+        resourcesJson: JSON.stringify(run.resources ?? []),
+      }),
+    );
     await assertDependencies(run.dependencies ?? []);
     const parsed = reviewResult.parse(result.data);
     this.h.discoveries(run.id, run.token, sha, parsed.discoveries);
@@ -354,22 +357,24 @@ export class Scheduler {
                 task.repositoryId,
               );
               const agent = agentEnvironment(this.h.config, toolProfile, execution.env);
-              const result = await writer.execute({
-                toolProfile,
-                execution: {
-                  env: agent.env,
-                  redact: (text) => execution.redact(agent.redact(text)),
-                },
-                cwd,
-                artifactDir: dir,
-                prompt: this.prompt(task, run),
-                review: false,
-                task,
-                model: run.model,
-                signal,
-                timeoutMs: this.h.config.runTimeoutMs,
-                resourcesJson: JSON.stringify(resources),
-              });
+              const result = await timed(this.h, run, 'implementation', () =>
+                writer.execute({
+                  toolProfile,
+                  execution: {
+                    env: agent.env,
+                    redact: (text) => execution.redact(agent.redact(text)),
+                  },
+                  cwd,
+                  artifactDir: dir,
+                  prompt: this.prompt(task, run),
+                  review: false,
+                  task,
+                  model: run.model,
+                  signal,
+                  timeoutMs: this.h.config.runTimeoutMs,
+                  resourcesJson: JSON.stringify(resources),
+                }),
+              );
               await writeFile(join(dir, 'result.json'), JSON.stringify(result.data, null, 2));
               const implementation = implementationResult.parse(result.data);
               if (!implementation.completed)
@@ -443,6 +448,7 @@ export class Scheduler {
                 signal,
               );
             },
+            (stage, action) => timed(this.h, run, 'candidate-environment:' + stage, action),
           );
           await assertDependencies(run.dependencies ?? []);
           // Serialize integration. Branch CAS still protects against other processes.
@@ -454,7 +460,7 @@ export class Scheduler {
               unlock = r;
             }),
           );
-          await previous;
+          await timed(this.h, run, 'integration-wait', () => previous);
           try {
             await this.integrate(run, task, signal);
           } finally {
@@ -526,6 +532,7 @@ export class Scheduler {
         recordRequirements(this.h, run, task, cwd, sha, 'integration');
         await this.review(this.runtimes[run.reviewer], run, task, cwd, sha, 'integration', signal);
       },
+      (stage, action) => timed(this.h, run, 'integration-environment:' + stage, action),
     );
     await assertDependencies(run.dependencies ?? []);
     if (

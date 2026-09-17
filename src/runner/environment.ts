@@ -75,6 +75,8 @@ export async function withEnvironment<T>(
   execution: ReturnType<typeof executionEnvironment>,
   signal: AbortSignal,
   action: () => Promise<T>,
+  measure: <R>(stage: string, action: () => Promise<R>) => Promise<R> = (_stage, action) =>
+    action(),
 ): Promise<T> {
   if (!lifecycle) return action();
   await mkdir(dir, { recursive: true });
@@ -95,14 +97,18 @@ export async function withEnvironment<T>(
   await writeFile(receiptPath, JSON.stringify(receipt, null, 2));
   let result: T | undefined, failure: unknown;
   try {
-    await runSteps(lifecycle.setup, cwd, join(dir, 'setup'), execution, signal);
-    await runSteps(lifecycle.ready, cwd, join(dir, 'ready'), execution, signal);
+    await measure('setup', () =>
+      runSteps(lifecycle.setup, cwd, join(dir, 'setup'), execution, signal),
+    );
+    await measure('ready', () =>
+      runSteps(lifecycle.ready, cwd, join(dir, 'ready'), execution, signal),
+    );
     result = await action();
   } catch (error) {
     failure = error;
   }
   try {
-    await teardown(lifecycle, cwd, dir, execution);
+    await measure('cleanup', () => teardown(lifecycle, cwd, dir, execution));
     receipt.status = 'cleaned';
   } catch (error) {
     receipt.status = 'cleanup-failed';

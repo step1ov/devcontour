@@ -6,6 +6,22 @@
   "maxResultBytes": 65536,
   "tools": [
     {
+      "name": "workflow_metrics",
+      "description": "Read per-owner execution measurements, incomplete attempts and unknown cost. No model calls.",
+      "readOnly": true,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "repositoryId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "requirements_snapshot",
       "description": "Read REQ sections from committed repository HEAD. Bind returned digest/text to a task and a configured test gate.",
       "readOnly": true,

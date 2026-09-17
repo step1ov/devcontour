@@ -1,3 +1,4 @@
+import { timed } from './timing.ts';
 import { runEnvironment, assertDependencies } from './dependencies.ts';
 import { readFile, writeFile, mkdir, rm, realpath } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
@@ -29,7 +30,10 @@ export function junitSummary(xml: string): { tests: number; failures: number; sk
   if (!summary.tests) throw new Error('JUnit не содержит выполненных testcases');
   return summary;
 }
-export async function runGate(
+export async function runGate(...args: Parameters<typeof executeGate>) {
+  return timed(args[0], args[1], `${args[4]}-test:${args[5].id}`, () => executeGate(...args));
+}
+async function executeGate(
   h: Harness,
   run: Run,
   cwd: string,
