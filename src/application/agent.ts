@@ -1,3 +1,4 @@
+import { LeadWorkflow, workflowInput } from '../core/lead-workflow.ts';
 import { workflowMetrics } from './metrics.ts';
 import {
   requirementSnapshot,
@@ -16,6 +17,12 @@ import { attachJournal } from '../runner/journal.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 export const agentInputs = {
+  workflow_start: workflowInput,
+  workflow_status: z.strictObject({ repositoryId: id.optional() }),
+  workflow_retry: z.strictObject({
+    repositoryId: id.optional(),
+    key: z.string().regex(/^[a-f0-9]{64}$/),
+  }),
   workflow_metrics: z.strictObject({ repositoryId: id.optional() }),
   requirements_snapshot: z.strictObject({ repositoryId: id, source: z.string().min(1).max(500) }),
   requirements_report: z.strictObject({ repositoryId: id }),
@@ -53,6 +60,12 @@ export const agentRequest = z
   .object({ operation: z.enum(agentOperations), input: z.unknown().optional() })
   .strict();
 export const descriptions: Record<AgentOperation, string> = {
+  workflow_start:
+    'Enqueue idempotent board review, execution and acceptance or ChangeSet verification. A running server may invoke models. Operator policy remains enforced.',
+  workflow_status:
+    'Read owner-local durable stage jobs. No model calls or execution leases are granted.',
+  workflow_retry:
+    'Retry a diagnosed failed stage within its original attempt budget. Never retries failed task implementations automatically.',
   workflow_metrics:
     'Read per-owner execution measurements, incomplete attempts and unknown cost. No model calls.',
   requirements_snapshot:
@@ -96,6 +109,7 @@ export const readOnly = (name: AgentOperation) =>
     'requirements_snapshot',
     'requirements_report',
     'workflow_metrics',
+    'workflow_status',
   ].includes(name);
 export function capabilities() {
   const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
@@ -123,6 +137,10 @@ export class AgentService {
       throw new DomainError('Ответ превышает 64 KiB; сузьте запрос или используйте CLI-отчёт', 413);
     return result;
   }
+  private workflowView(job: ReturnType<LeadWorkflow['start']>) {
+    const { token: _token, ...publicJob } = job;
+    return publicJob;
+  }
   private dispatch(raw: unknown): Record<string, unknown> {
     if (Buffer.byteLength(JSON.stringify(raw)) > 100000)
       throw new DomainError('Запрос превышает 100000 байт', 413);
@@ -139,6 +157,19 @@ export class AgentService {
     const h = this.h;
     if (!readOnly(operation) && !h.store.onCommit) attachJournal(h);
     switch (operation) {
+      case 'workflow_start':
+        return this.workflowView(new LeadWorkflow(h).start(input));
+      case 'workflow_status':
+        return {
+          jobs: new LeadWorkflow(h)
+            .list(agentInputs.workflow_status.parse(input).repositoryId)
+            .map((j) => this.workflowView(j)),
+          operatorBlocked: h.config.approvalMode === 'operator',
+        };
+      case 'workflow_retry': {
+        const v = agentInputs.workflow_retry.parse(input);
+        return this.workflowView(new LeadWorkflow(h).retry(v.key, v.repositoryId));
+      }
       case 'workflow_metrics':
         return workflowMetrics(h, agentInputs.workflow_metrics.parse(input).repositoryId);
       case 'requirements_snapshot': {

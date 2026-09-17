@@ -82,7 +82,7 @@ export class Scheduler {
   async stop() {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
-    this.h.pause(true);
+    this.h.pause(true, 'shutdown');
     for (const j of this.jobs.values()) j.controller.abort();
     await Promise.all([...this.jobs.values()].map((j) => j.promise));
     this.h.store.change('scheduler.released', (s) => {

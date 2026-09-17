@@ -416,10 +416,13 @@ export class Harness {
       return { boardId, revision: r.number, snapshot: r.snapshot.digest, approval };
     });
   }
-  pause(value: boolean) {
+  pause(value: boolean, reason: 'operator' | 'shutdown' = 'operator') {
     return this.store.change(value ? 'scheduler.paused' : 'scheduler.started', (s) => {
+      if (s.paused && value && reason === 'shutdown')
+        return { paused: true, reason: s.pauseReason };
       s.paused = value;
-      return { paused: value };
+      s.pauseReason = value ? reason : undefined;
+      return { paused: value, reason: s.pauseReason };
     });
   }
   assign(id: string, member: string) {

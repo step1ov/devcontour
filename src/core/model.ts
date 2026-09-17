@@ -227,6 +227,7 @@ export interface HarnessState {
   changeSets: ChangeSet[];
   leader?: { owner: string; leaseUntil: number };
   paused: boolean;
+  pauseReason?: 'operator' | 'shutdown';
   sequence: number;
 }
 export interface AuditEvent {

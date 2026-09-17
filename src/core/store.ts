@@ -7,6 +7,8 @@ export class Store {
   private db: DatabaseSync;
   private components?: ComponentStorage;
   private transaction = false;
+  private savepoint = 0;
+  private projectionPending = false;
   onCommit?: () => void;
   projectionError?: string;
   constructor(path: string, locations?: ComponentLocation[], migrate = false) {
@@ -102,20 +104,38 @@ export class Store {
     for (const task of state.tasks) task.repositoryId ??= 'main';
     return state;
   }
-  change<T>(type: string, action: (state: HarnessState) => T): T {
-    this.db.exec('BEGIN IMMEDIATE');
+  // Synchronous composition: local idempotency records and domain mutations commit together.
+  atomic<T>(action: () => T): T {
+    const outer = this.transaction;
+    const point = 'nested_' + ++this.savepoint;
+    const pending = this.projectionPending;
+    this.db.exec(outer ? `SAVEPOINT ${point}` : 'BEGIN IMMEDIATE');
     this.transaction = true;
-    let result: T;
-    let changed = false;
+    let value: T;
     try {
+      value = action();
+      if (value && typeof (value as any).then === 'function')
+        throw new Error('Store.atomic cannot await external work');
+      this.db.exec(outer ? `RELEASE ${point}` : 'COMMIT');
+    } catch (error) {
+      this.db.exec(outer ? `ROLLBACK TO ${point}; RELEASE ${point}` : 'ROLLBACK');
+      this.projectionPending = pending;
+      this.transaction = outer;
+      throw error;
+    }
+    this.transaction = outer;
+    if (!outer && this.projectionPending) {
+      this.projectionPending = false;
+      this.refreshProjection();
+    }
+    return value;
+  }
+  change<T>(type: string, action: (state: HarnessState) => T): T {
+    return this.atomic(() => {
       const state = this.read();
       const before = JSON.stringify(state);
-      result = action(state);
-      if (before === JSON.stringify(state)) {
-        this.db.exec('COMMIT');
-        this.transaction = false;
-        return result;
-      }
+      const result = action(state);
+      if (before === JSON.stringify(state)) return result;
       if (this.components) this.components.write(state);
       else this.db.prepare('UPDATE main.state SET data=? WHERE id=1').run(JSON.stringify(state));
       if (type !== 'heartbeat') {
@@ -124,17 +144,35 @@ export class Store {
           .prepare('INSERT INTO main.events(at,type,data) VALUES(?,?,?)')
           .run(at, type, this.components ? 'null' : JSON.stringify(result ?? null));
         this.components?.event(Number(inserted.lastInsertRowid), at, type, result ?? null, state);
+        this.projectionPending = true;
       }
-      this.db.exec('COMMIT');
-      changed = true;
-      this.transaction = false;
-    } catch (error) {
-      this.db.exec('ROLLBACK');
-      this.transaction = false;
-      throw error;
-    }
-    if (changed && type !== 'heartbeat') this.refreshProjection();
-    return result!;
+      return result;
+    });
+  }
+  localRecords<T>(namespace: string, owner?: string): Record<string, T> {
+    const schema = this.syncSchema(owner);
+    if (
+      !this.db
+        .prepare(
+          `SELECT name FROM ${schema}.sqlite_master WHERE type='table' AND name='local_workflow'`,
+        )
+        .get()
+    )
+      return {};
+    const rows = this.db
+      .prepare(`SELECT key,data FROM ${schema}.local_workflow WHERE namespace=? AND owner=?`)
+      .all(namespace, owner ?? '@workspace') as { key: string; data: string }[];
+    return Object.fromEntries(rows.map((r) => [r.key, JSON.parse(r.data)]));
+  }
+  saveLocal(namespace: string, owner: string | undefined, key: string, value: unknown) {
+    if (!this.transaction) throw new Error('Local workflow writes require an atomic transaction');
+    const schema = this.syncSchema(owner);
+    this.db.exec(
+      `CREATE TABLE IF NOT EXISTS ${schema}.local_workflow (namespace TEXT NOT NULL, owner TEXT NOT NULL, key TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(namespace,owner,key))`,
+    );
+    this.db
+      .prepare(`INSERT OR REPLACE INTO ${schema}.local_workflow VALUES(?,?,?,?)`)
+      .run(namespace, owner ?? '@workspace', key, JSON.stringify(value));
   }
   refreshProjection() {
     try {

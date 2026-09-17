@@ -114,6 +114,7 @@ export async function reviewPlan(
   boardId: string,
   author: Author,
   runtimes: Runtimes = adapters,
+  beforeCommit: () => void = () => {},
 ) {
   const state = h.store.read();
   const board = state.boards.find((b) => b.id === boardId);
@@ -138,20 +139,30 @@ export async function reviewPlan(
     tasks: Object.fromEntries(drafts.map((t) => [t.id, specDigest(t)])),
   };
   const approval = await review(h, root, author, 'task plan', proposal, runtimes);
+  beforeCommit();
   if (h.config.approvalMode === 'operator')
     return { status: 'awaiting-operator', boardId, approval };
   return {
     status: 'approved',
-    ...h.approve(
-      boardId,
-      drafts.map((t) => t.id),
-      approval,
-      expected,
-    ),
+    ...h.store.atomic(() => {
+      beforeCommit();
+      return h.approve(
+        boardId,
+        drafts.map((t) => t.id),
+        approval,
+        expected,
+      );
+    }),
   };
 }
 
-export async function acceptBoard(h: Harness, boardId: string, author: Author, manual = false) {
+export async function acceptBoard(
+  h: Harness,
+  boardId: string,
+  author: Author,
+  manual = false,
+  beforeCommit: () => void = () => {},
+) {
   const state = h.store.read();
   const board = state.boards.find((b) => b.id === boardId);
   if (!board) throw new DomainError('Доска не найдена');
@@ -166,17 +177,21 @@ export async function acceptBoard(h: Harness, boardId: string, author: Author, m
     heads[repo.id] ??= await git(repo.path, 'rev-parse', `refs/heads/${repo.targetBranch}`);
     await git(repo.path, 'merge-base', '--is-ancestor', task.resultSha!, heads[repo.id]);
   }
+  beforeCommit();
   const head = Object.values(heads)[0];
   if (h.config.approvalMode === 'operator' && !manual)
     return { status: 'awaiting-operator', boardId, head };
   return {
     status: 'accepted',
-    ...h.accept(
-      boardId,
-      head,
-      manual ? { actor: 'operator' } : { actor: 'agent', authorRuntime: author },
-      digest(revision),
-      heads,
-    ),
+    ...h.store.atomic(() => {
+      beforeCommit();
+      return h.accept(
+        boardId,
+        head,
+        manual ? { actor: 'operator' } : { actor: 'agent', authorRuntime: author },
+        digest(revision),
+        heads,
+      );
+    }),
   };
 }
