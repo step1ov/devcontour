@@ -1,3 +1,4 @@
+import { workflowMetrics } from './metrics.ts';
 import {
   requirementSnapshot,
   requirementReport,
@@ -15,6 +16,7 @@ import { attachJournal } from '../runner/journal.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 export const agentInputs = {
+  workflow_metrics: z.strictObject({ repositoryId: id.optional() }),
   requirements_snapshot: z.strictObject({ repositoryId: id, source: z.string().min(1).max(500) }),
   requirements_report: z.strictObject({ repositoryId: id }),
   requirements_correct: z.strictObject({ boardId: id, reason: z.string().min(10).max(5000) }),
@@ -51,6 +53,8 @@ export const agentRequest = z
   .object({ operation: z.enum(agentOperations), input: z.unknown().optional() })
   .strict();
 export const descriptions: Record<AgentOperation, string> = {
+  workflow_metrics:
+    'Read per-owner execution measurements, incomplete attempts and unknown cost. No model calls.',
   requirements_snapshot:
     'Read REQ sections from committed repository HEAD. Bind returned digest/text to a task and a configured test gate.',
   requirements_report:
@@ -91,6 +95,7 @@ export const readOnly = (name: AgentOperation) =>
     'checkpoint_changes',
     'requirements_snapshot',
     'requirements_report',
+    'workflow_metrics',
   ].includes(name);
 export function capabilities() {
   const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
@@ -134,6 +139,8 @@ export class AgentService {
     const h = this.h;
     if (!readOnly(operation) && !h.store.onCommit) attachJournal(h);
     switch (operation) {
+      case 'workflow_metrics':
+        return workflowMetrics(h, agentInputs.workflow_metrics.parse(input).repositoryId);
       case 'requirements_snapshot': {
         const v = agentInputs.requirements_snapshot.parse(input);
         return requirementSnapshot(repository(h.config, v.repositoryId).path, v.source);

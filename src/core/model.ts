@@ -117,6 +117,7 @@ export interface Task extends TaskInput {
   status: TaskStatus;
   supersedes?: string;
   createdAt: string;
+  approvedAt?: string;
   approvedDigest?: string;
   contractDigests: Record<string, string>;
   activeRunId?: string;
@@ -175,6 +176,14 @@ export interface Evidence {
   summary: string;
 }
 export interface Run {
+  wait?: { approvedAt?: string; readyAt?: string };
+  timings?: {
+    id: string;
+    stage: string;
+    startedAt: string;
+    finishedAt?: string;
+    outcome?: 'passed' | 'failed';
+  }[];
   requiredGates?: string[];
   id: string;
   taskId: string;

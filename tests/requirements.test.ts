@@ -78,6 +78,16 @@ test('Requirements survive real Git execution; changed spec loses current covera
     await scheduler.drain();
     const done = store.read().tasks.find((t) => t.id === task.id)!;
     assert.equal(done.status, 'done', done.failure);
+    assert.ok(
+      store
+        .read()
+        .runs[0].timings?.some((t) => t.stage === 'implementation' && t.outcome === 'passed'),
+    );
+    assert.ok(
+      store
+        .read()
+        .runs[0].timings?.some((t) => t.stage.startsWith('integration-test:') && t.finishedAt),
+    );
     assert.equal(requirementReport(h, 'main').tasks[0].requirements[0].verified, true);
     assert.equal(
       store.read().runs[0].evidence.filter((e) => e.gate === 'requirement-source').length,

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { workflowMetrics } from './application/metrics.ts';
 import { evaluateAgents } from './runner/evaluations.ts';
 import {
   requirementSnapshot,
@@ -284,6 +285,23 @@ async function main() {
                 option('--reason', 'Актуализация изменившихся требований'),
               );
       console.log(JSON.stringify(result, null, 2));
+    } finally {
+      store.close();
+    }
+    return;
+  }
+  if (operation === 'metrics') {
+    try {
+      console.log(
+        JSON.stringify(
+          workflowMetrics(
+            h,
+            args.includes('--repository-id') ? option('--repository-id', '') : undefined,
+          ),
+          null,
+          2,
+        ),
+      );
     } finally {
       store.close();
     }
