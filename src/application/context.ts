@@ -318,6 +318,7 @@ export class AgentContext {
           sections.push({ kind, id, part: i / 1800, text: chars.slice(i, i + 1800).join('') });
       };
       section('description', t.id, t.description);
+      for (const r of t.requirements ?? []) section('requirement', r.id, JSON.stringify(r));
       t.acceptance.forEach((text, i) => section('acceptance', String(i + 1), text));
       for (const id of t.contracts) {
         const c = requireValue(

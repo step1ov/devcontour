@@ -24,6 +24,7 @@ export const digest = (value: unknown) =>
 export const specDigest = (t: Task) =>
   digest({
     ...(t.repositoryId && t.repositoryId !== 'main' ? { repositoryId: t.repositoryId } : {}),
+    ...(t.requirements?.length ? { requirements: t.requirements } : {}),
     title: t.title,
     description: t.description,
     role: t.role,
@@ -316,12 +317,19 @@ export class Harness {
         .map((b) => ({ id: b.id, title: b.title })),
     };
   }
-  correct(boardId: string, roots: string[], reason: string) {
+  correct(
+    boardId: string,
+    roots: string[],
+    reason: string,
+    refresh?: { expected: string; requirements: Record<string, Task['requirements']> },
+  ) {
     if (reason.trim().length < 10 || reason.length > 5000)
       throw new DomainError('Опишите корректировку: от 10 до 5000 символов', 400);
     // Recompute the entire impact inside the write transaction; preview is never authoritative.
     return this.store.change('board.corrected', (s) => {
       const b = board(s, boardId);
+      if (refresh && digest(b) !== refresh.expected)
+        throw new DomainError('Доска изменилась во время чтения требований');
       const previous = b.revisions.at(-1)!;
       if (previous.status !== 'accepted') throw new DomainError('Сначала примите текущую ревизию');
       if (!roots.length || roots.some((id) => !previous.taskIds.includes(id)))
@@ -338,8 +346,11 @@ export class Harness {
       const map = new Map(impacted.map((id) => [id, entityId(s, 'T')]));
       for (const id of impacted) {
         const original = task(s, id);
+        const requirements = refresh?.requirements[id] ?? original.requirements;
+        validateTaskContext(this.config, { ...original, requirements });
         s.tasks.push({
           ...original,
+          requirements,
           sharedCompletion: undefined,
           id: map.get(id)!,
           description:
@@ -439,7 +450,10 @@ export class Harness {
       if (t.approvedDigest !== specDigest(t))
         throw new DomainError('Спецификация изменилась после утверждения');
       const run: Run = {
-        requiredGates: repository(this.config, t.repositoryId).gates.map((g) => g.id),
+        requiredGates: [
+          ...repository(this.config, t.repositoryId).gates.map((g) => g.id),
+          ...(t.requirements?.length ? ['requirement-source'] : []),
+        ],
         id: randomUUID(),
         taskId: t.id,
         repositoryId: t.repositoryId,
@@ -523,7 +537,10 @@ export class Harness {
         r.evidence.findLast(
           (e) => e.kind === kind && e.phase === phase && e.sha === sha && e.gate === gate,
         )?.passed === true;
-      for (const gate of repository(this.config, t.repositoryId).gates)
+      for (const gate of [
+        ...repository(this.config, t.repositoryId).gates,
+        ...(t.requirements?.length ? [{ id: 'requirement-source' }] : []),
+      ])
         for (const phase of ['candidate', 'integration'] as const)
           if (!last('test', phase, phase === 'candidate' ? r.candidateSha : sha, gate.id))
             throw new DomainError(`Нет PASS: ${phase}/${gate.id}`);

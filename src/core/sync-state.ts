@@ -178,6 +178,8 @@ export function validateReceipt(receipt: CompletionReceipt, t: Task, demo: boole
       receipt.runtime === receipt.reviewer)
   )
     throw new Error(`Нет независимого runtime review: ${t.id}`);
+  if (t.requirements?.length && !receipt.requiredGates.includes('requirement-source'))
+    throw new Error('Receipt не проверяет требования: ' + t.id);
   for (const phase of ['candidate', 'integration'] as const) {
     const sha = phase === 'candidate' ? receipt.candidateSha : receipt.resultSha;
     for (const [kind, gates] of [

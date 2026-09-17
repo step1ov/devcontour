@@ -109,6 +109,52 @@ function rewrite(path: string, change: (value: any) => void) {
   change(value);
   writeFileSync(path, canonical(value));
 }
+
+test('Requirement bindings sync between independent clones and remain in the component', () => {
+  const f = fixture();
+  try {
+    const a = f.create('requirements-a');
+    syncGit(a.h, { member: 'alice' });
+    const board = a.h.createBoard('Requirement links', '', 'main');
+    const text = '## REQ-search: Search\nSearch existing messages.';
+    const requirements = [
+      {
+        id: 'REQ-search',
+        source: 'docs/spec.md',
+        text,
+        digest: digest(text),
+        gate: 'test',
+        scenario: 'Search messages',
+      },
+    ];
+    const task = a.h.addTask(board.id, { ...input(), requirements });
+    syncGit(a.h);
+    a.commit();
+    const db = new DatabaseSync(join(a.workspace, '.harness/local/state.sqlite'));
+    try {
+      assert.ok(
+        !JSON.stringify(db.prepare('SELECT data FROM state').all()).includes(
+          'Search existing messages',
+        ),
+      );
+    } finally {
+      db.close();
+    }
+    const b = f.create('requirements-b', a);
+    syncGit(b.h, { member: 'bob' });
+    assert.deepEqual(
+      b.store.read().tasks.find((t) => t.id === task.id)!.requirements,
+      requirements,
+    );
+    assert.ok(
+      readFileSync(join(b.repo, '.devcontour/tasks', task.id + '.json'), 'utf8').includes(
+        'REQ-search',
+      ),
+    );
+  } finally {
+    f.cleanup();
+  }
+});
 function complete(p: ReturnType<typeof peer>, id: string) {
   p.h.approve(p.store.read().boards[0].id);
   p.h.pause(false);

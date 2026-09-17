@@ -6,6 +6,75 @@
   "maxResultBytes": 65536,
   "tools": [
     {
+      "name": "requirements_snapshot",
+      "description": "Read REQ sections from committed repository HEAD. Bind returned digest/text to a task and a configured test gate.",
+      "readOnly": true,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "repositoryId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "source": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "repositoryId",
+          "source"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "requirements_report",
+      "description": "Compare current requirement sections with task evidence. Historical done is unchanged; stale requirements are not current coverage.",
+      "readOnly": true,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "repositoryId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          }
+        },
+        "required": [
+          "repositoryId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "requirements_correct",
+      "description": "Create draft replacements for changed requirements on an accepted board. Preserve history and require new plan review.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "boardId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 5000
+          }
+        },
+        "required": [
+          "boardId",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "project_context",
       "description": "Read workspace identity, components, modes and supported operations. Does not start work.",
       "readOnly": true,
@@ -167,6 +236,51 @@
                 "items": {
                   "type": "object",
                   "properties": {
+                    "requirements": {
+                      "maxItems": 30,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "pattern": "^REQ-[A-Za-z0-9_-]{1,64}$"
+                          },
+                          "source": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 500
+                          },
+                          "digest": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          },
+                          "text": {
+                            "type": "string",
+                            "minLength": 3,
+                            "maxLength": 12000
+                          },
+                          "gate": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                          },
+                          "scenario": {
+                            "type": "string",
+                            "minLength": 3,
+                            "maxLength": 1500
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "source",
+                          "digest",
+                          "text",
+                          "gate",
+                          "scenario"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
                     "assignee": {
                       "type": "string",
                       "pattern": "^[A-Za-z0-9_.@-]{1,80}$"
@@ -329,6 +443,51 @@
           "task": {
             "type": "object",
             "properties": {
+              "requirements": {
+                "maxItems": 30,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^REQ-[A-Za-z0-9_-]{1,64}$"
+                    },
+                    "source": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "digest": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "text": {
+                      "type": "string",
+                      "minLength": 3,
+                      "maxLength": 12000
+                    },
+                    "gate": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                    },
+                    "scenario": {
+                      "type": "string",
+                      "minLength": 3,
+                      "maxLength": 1500
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "source",
+                    "digest",
+                    "text",
+                    "gate",
+                    "scenario"
+                  ],
+                  "additionalProperties": false
+                }
+              },
               "assignee": {
                 "type": "string",
                 "pattern": "^[A-Za-z0-9_.@-]{1,80}$"
@@ -534,6 +693,51 @@
           "task": {
             "type": "object",
             "properties": {
+              "requirements": {
+                "maxItems": 30,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "pattern": "^REQ-[A-Za-z0-9_-]{1,64}$"
+                    },
+                    "source": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    },
+                    "digest": {
+                      "type": "string",
+                      "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "text": {
+                      "type": "string",
+                      "minLength": 3,
+                      "maxLength": 12000
+                    },
+                    "gate": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                    },
+                    "scenario": {
+                      "type": "string",
+                      "minLength": 3,
+                      "maxLength": 1500
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "source",
+                    "digest",
+                    "text",
+                    "gate",
+                    "scenario"
+                  ],
+                  "additionalProperties": false
+                }
+              },
               "assignee": {
                 "type": "string",
                 "pattern": "^[A-Za-z0-9_.@-]{1,80}$"

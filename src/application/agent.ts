@@ -1,3 +1,9 @@
+import {
+  requirementSnapshot,
+  requirementReport,
+  correctRequirements,
+} from '../runner/requirements.ts';
+import { repository } from '../core/repositories.ts';
 import { z } from 'zod';
 import { readFileSync } from 'node:fs';
 import { AgentContext, contextInputs, type ContextOperation } from './context.ts';
@@ -9,6 +15,9 @@ import { attachJournal } from '../runner/journal.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 export const agentInputs = {
+  requirements_snapshot: z.strictObject({ repositoryId: id, source: z.string().min(1).max(500) }),
+  requirements_report: z.strictObject({ repositoryId: id }),
+  requirements_correct: z.strictObject({ boardId: id, reason: z.string().min(10).max(5000) }),
   ...contextInputs,
   plan_import: z.object({ plan: planResult }).strict(),
   board_create: z
@@ -42,6 +51,12 @@ export const agentRequest = z
   .object({ operation: z.enum(agentOperations), input: z.unknown().optional() })
   .strict();
 export const descriptions: Record<AgentOperation, string> = {
+  requirements_snapshot:
+    'Read REQ sections from committed repository HEAD. Bind returned digest/text to a task and a configured test gate.',
+  requirements_report:
+    'Compare current requirement sections with task evidence. Historical done is unchanged; stale requirements are not current coverage.',
+  requirements_correct:
+    'Create draft replacements for changed requirements on an accepted board. Preserve history and require new plan review.',
   project_context:
     'Read workspace identity, components, modes and supported operations. Does not start work.',
   project_overview:
@@ -69,7 +84,14 @@ export const descriptions: Record<AgentOperation, string> = {
     'Pause or resume issuance of tasks. Resuming may invoke configured models in a running server; this does not launch a server or cancel active runs.',
 };
 export const readOnly = (name: AgentOperation) =>
-  ['project_context', 'project_overview', 'task_briefing', 'checkpoint_changes'].includes(name);
+  [
+    'project_context',
+    'project_overview',
+    'task_briefing',
+    'checkpoint_changes',
+    'requirements_snapshot',
+    'requirements_report',
+  ].includes(name);
 export function capabilities() {
   const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
   return {
@@ -91,6 +113,12 @@ export function capabilities() {
 export class AgentService {
   constructor(readonly h: Harness) {}
   execute(raw: unknown): Record<string, unknown> {
+    const result = this.dispatch(raw);
+    if (Buffer.byteLength(JSON.stringify(result)) > 65536)
+      throw new DomainError('Ответ превышает 64 KiB; сузьте запрос или используйте CLI-отчёт', 413);
+    return result;
+  }
+  private dispatch(raw: unknown): Record<string, unknown> {
     if (Buffer.byteLength(JSON.stringify(raw)) > 100000)
       throw new DomainError('Запрос превышает 100000 байт', 413);
     const request = agentRequest.parse(raw),
@@ -104,8 +132,18 @@ export class AgentService {
       return operation === 'project_context' ? { ...result, operations: agentOperations } : result;
     }
     const h = this.h;
-    if (!h.store.onCommit) attachJournal(h);
+    if (!readOnly(operation) && !h.store.onCommit) attachJournal(h);
     switch (operation) {
+      case 'requirements_snapshot': {
+        const v = agentInputs.requirements_snapshot.parse(input);
+        return requirementSnapshot(repository(h.config, v.repositoryId).path, v.source);
+      }
+      case 'requirements_report':
+        return requirementReport(h, agentInputs.requirements_report.parse(input).repositoryId);
+      case 'requirements_correct': {
+        const v = agentInputs.requirements_correct.parse(input);
+        return correctRequirements(h, v.boardId, v.reason);
+      }
       case 'plan_import':
         return h.importPlan(agentInputs.plan_import.parse(input).plan);
       case 'board_create': {
