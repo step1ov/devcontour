@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { evaluateAgents } from './runner/evaluations.ts';
 import {
   requirementSnapshot,
   requirementReport,
@@ -50,6 +51,26 @@ const authorRuntime = () => {
   return value;
 };
 async function main() {
+  if (operation === 'evals') {
+    const runtime = option('--runtime', '');
+    if (args.includes('--live') && runtime !== 'codex' && runtime !== 'claude')
+      throw new Error('Live evals требуют --runtime codex|claude');
+    if (!args.includes('--live') && (runtime || args.includes('--model')))
+      throw new Error('Для вызовов модели явно укажите --live');
+    const result = await evaluateAgents({
+      runtime: args.includes('--live') ? (runtime as 'codex' | 'claude') : undefined,
+      model: args.includes('--model') ? option('--model', '') : undefined,
+      repetitions: Number(option('--repetitions', '1')),
+      maxCalls: Number(option('--max-calls', '6')),
+      timeoutMs: Number(option('--timeout-ms', '120000')),
+      instructions: args.includes('--instructions')
+        ? await readFile(resolve(option('--instructions', '')), 'utf8')
+        : undefined,
+    });
+    console.log(JSON.stringify(result, null, 2));
+    if (!result.passed) process.exitCode = 1;
+    return;
+  }
   if (operation === 'skill-path') {
     console.log(fileURLToPath(new URL('../skills/devcontour', import.meta.url)));
     return;
