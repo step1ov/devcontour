@@ -1,0 +1,79 @@
+{
+  "version": 1,
+  "name": "Product workspace",
+  "approvalMode": "agent",
+  "repositories": [
+    {
+      "id": "product",
+      "name": "Product",
+      "kind": "product",
+      "path": "../product",
+      "profile": "react-vite-admin",
+      "gates": [
+        {
+          "id": "install",
+          "kind": "check",
+          "command": ["npm", "ci"]
+        },
+        {
+          "id": "tests",
+          "kind": "test",
+          "command": ["npm", "run", "test:harness"],
+          "report": {
+            "type": "junit",
+            "path": ".reports/junit.xml"
+          },
+          "dependsOn": ["install"]
+        }
+      ],
+      "protectedPaths": [
+        "package.json",
+        "package-lock.json",
+        "scripts/test-workspace.mjs",
+        ".github/"
+      ],
+      "dependsOn": ["library"],
+      "generatedPaths": ["dist/"]
+    },
+    {
+      "id": "library",
+      "name": "Shared library",
+      "kind": "library",
+      "path": "../shared-library",
+      "profile": "react-vite-admin",
+      "gates": [
+        {
+          "id": "install",
+          "kind": "check",
+          "command": ["npm", "ci"]
+        },
+        {
+          "id": "tests",
+          "kind": "test",
+          "command": ["npm", "run", "test:harness"],
+          "report": {
+            "type": "junit",
+            "path": ".reports/junit.xml"
+          },
+          "dependsOn": ["install"]
+        }
+      ],
+      "dependsOn": [],
+      "generatedPaths": ["dist/"]
+    }
+  ],
+  "workspaceGates": [
+    {
+      "id": "product-with-library",
+      "repositoryId": "product",
+      "kind": "test",
+      "command": ["node", "scripts/test-workspace.mjs"],
+      "report": {
+        "type": "junit",
+        "path": ".reports/workspace.xml"
+      },
+      "artifacts": [".reports/consumed-library.tgz"]
+    }
+  ],
+  "verificationMode": "all"
+}
