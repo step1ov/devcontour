@@ -9,6 +9,9 @@ test('Plan → parallel execution → acceptance → correction → acceptance p
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Каталог продуктов', exact: true })).toBeVisible();
   await expect(page.getByText('Учебный режим · без вызовов моделей')).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Что нужно для продолжения' })).toContainText(
+    'Очередь на паузе',
+  );
   await page.getByRole('button', { name: 'Запустить очередь' }).click();
   await expect(page.getByRole('button', { name: 'Принять доску' })).toBeVisible({ timeout: 45000 });
   await page.getByRole('button', { name: 'Принять доску' }).click();

@@ -2,7 +2,7 @@ name: Verify DevContour
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, master]
   merge_group:
 permissions:
   contents: read

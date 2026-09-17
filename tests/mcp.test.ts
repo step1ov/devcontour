@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFileSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
@@ -8,6 +8,23 @@ import { AgentService, capabilities } from '../src/application/agent.ts';
 import { fixture, input } from './helpers.ts';
 const data = (result: { structuredContent?: unknown }) =>
   result.structuredContent as Record<string, unknown>;
+
+test('Read-only agent queries do not rebuild journals; mutations still update projections', () => {
+  const f = fixture();
+  try {
+    f.h.config.workspaceRoot = f.root;
+    const service = new AgentService(f.h);
+    service.execute({ operation: 'project_context', input: {} });
+    service.execute({ operation: 'project_overview', input: {} });
+    assert.equal(existsSync(join(f.root, 'docs/journal')), false);
+    assert.equal(f.store.events().length, 0);
+    service.execute({ operation: 'board_create', input: { title: 'Journal mutation' } });
+    assert.equal(existsSync(join(f.root, 'docs/journal')), true);
+    assert.equal(f.store.read().boards.length, 1);
+  } finally {
+    f.cleanup();
+  }
+});
 
 async function connect(f: ReturnType<typeof fixture>) {
   writeFileSync(join(f.root, 'config.json'), JSON.stringify(f.h.config));

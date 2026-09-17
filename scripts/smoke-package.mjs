@@ -167,6 +167,8 @@ try {
           'explicit workspace',
           'installed profiles and templates',
           'CLI context',
+          'MCP negotiation and draft mutation',
+          'portable skill schema parity',
           'packaged static assets',
           'real Git fixture pipeline',
           'HTTP agent API',

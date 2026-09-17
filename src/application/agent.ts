@@ -89,9 +89,7 @@ export function capabilities() {
 
 // CLI, HTTP and MCP use this layer. Review/evidence remain owned by existing runners.
 export class AgentService {
-  constructor(readonly h: Harness) {
-    attachJournal(h);
-  }
+  constructor(readonly h: Harness) {}
   execute(raw: unknown): Record<string, unknown> {
     if (Buffer.byteLength(JSON.stringify(raw)) > 100000)
       throw new DomainError('Запрос превышает 100000 байт', 413);
@@ -106,6 +104,7 @@ export class AgentService {
       return operation === 'project_context' ? { ...result, operations: agentOperations } : result;
     }
     const h = this.h;
+    if (!h.store.onCommit) attachJournal(h);
     switch (operation) {
       case 'plan_import':
         return h.importPlan(agentInputs.plan_import.parse(input).plan);

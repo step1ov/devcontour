@@ -33,10 +33,12 @@ npm run format:check
 | `npm run dev`           | Demo + Vite для локальной разработки UI                                 |
 | `npm run typecheck`     | Проверка TypeScript без сборки                                          |
 | `npm run lint`          | Проверка использования цветовых токенов; это не общий ESLint            |
-| `npm run build`         | Typecheck и Vite-сборка UI                                              |
+| `npm run build`         | Typecheck, Node CLI в lib, справочник skill и UI в dist                 |
+| `npm run test:package`  | Установка настоящего архива без dev dependencies и проверка CLI/MCP/UI  |
+| `npm run check:skill`   | Совпадение переносимого справочника с каталогом agent API               |
 | `npm test`              | Node unit/integration tests, включая реальные временные Git-репозитории |
 | `npm run test:e2e`      | Playwright и accessibility-сценарии                                     |
-| `npm run check`         | lint → build → test → test:e2e                                          |
+| `npm run check`         | lint → build → test → skill → установленный пакет → test:e2e            |
 | `npm run format:check`  | Prettier; выполняется отдельно от check                                 |
 | `npm run hooks:install` | Установка hooks в Git-копии                                             |
 
@@ -53,7 +55,8 @@ Pre-commit запускает token lint и typecheck; pre-push и текущи�
 5. `src/runner/scheduler.ts` — исполнение одной попытки и интеграция.
 6. `src/runner/adapters.ts`, `gates.ts`, `process.ts` — границы с CLI, отчётами и subprocess.
 7. `src/core/workspace.ts` / `src/runner/workspace.ts` — общий результат.
-8. `src/cli.ts`, `src/server/http.ts`, `src/web/App.tsx` — пользовательские входы и отображение.
+8. `src/application/agent.ts` — общий каталог схем и операций CLI/HTTP/MCP; `context.ts` рядом — ограниченный контекст, причины ожидания и checkpoints.
+9. `src/cli.ts`, `src/server/http.ts`, `src/server/mcp.ts`, `src/web/App.tsx` — транспорт и отображение. Не добавляйте обход доменных правил в отдельный транспорт.
 
 Отследите один demo Run: ID задачи → claim → артефакты → candidate SHA → integration SHA → resultSha. Затем разберите failed Run и убедитесь, почему его нельзя принять. Такой маршрут быстрее объясняет систему, чем чтение UI от начала до конца.
 

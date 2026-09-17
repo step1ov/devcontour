@@ -1,5 +1,6 @@
 import { DeliveryRunner } from '../runner/forge.ts';
 import { AgentService, capabilities } from '../application/agent.ts';
+import { taskProgress } from '../application/context.ts';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { readFile, realpath } from 'node:fs/promises';
@@ -84,6 +85,7 @@ export async function serve(
               ...t,
               specDigest: specDigest(t),
               blockers: blockers(t, state),
+              progress: taskProgress(h, state, t),
             })),
             events: h.store.events(),
             journalError: h.store.projectionError,
