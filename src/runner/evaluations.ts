@@ -6,7 +6,7 @@ import { configSchema } from '../core/model.ts';
 import { Harness, digest, specDigest } from '../core/service.ts';
 import { Store } from '../core/store.ts';
 import { evaluationResult, type EvaluationResult } from '../core/evaluation.ts';
-import { git } from './process.ts';
+import { git, command } from './process.ts';
 import { adapters } from './adapters.ts';
 import { agentEnvironment } from './tools.ts';
 import type { Task } from '../core/model.ts';
@@ -76,6 +76,15 @@ export async function evaluateAgents(
     'utf8',
   );
   const instructions = options.instructions ?? skill;
+  let runtimeVersion: string | null = null;
+  if (options.runtime) {
+    try {
+      const version = await command([options.runtime, '--version'], tmpdir(), { timeoutMs: 5000 });
+      if (!version.code) runtimeVersion = version.stdout.trim().split('\n')[0].slice(0, 200);
+    } catch {
+      /* Individual cases report runtime unavailability. */
+    }
+  }
   const results: Record<string, unknown>[] = [];
   let calls = 0;
   for (let repetition = 1; repetition <= repetitions; repetition++)
@@ -278,6 +287,7 @@ export async function evaluateAgents(
     version: 1,
     mode: options.runtime ? 'live' : options.driver ? 'injected-driver' : 'protocol-fixture',
     runtime: options.runtime ?? null,
+    runtimeVersion,
     model: options.model ?? null,
     instructionsDigest: digest(instructions),
     skillDigest: digest(skill),

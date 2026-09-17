@@ -73,6 +73,16 @@ export class LeadWorkflow {
     if (!job) throw new DomainError('Workflow не найден');
     return job;
   }
+  private currentInput(job: WorkflowJob) {
+    try {
+      const current = this.input(job.kind, job.id);
+      return current.digest === job.inputDigest && current.owner === job.owner;
+    } catch (error) {
+      // A removed subject is stale work, not a reason to block every later job.
+      if (error instanceof DomainError) return false;
+      throw error;
+    }
+  }
   start(raw: unknown) {
     const input = workflowInput.parse(raw);
     return this.h.store.atomic(() => {
@@ -107,9 +117,9 @@ export class LeadWorkflow {
         (job.status === 'running' && job.leaseUntil! > Date.now())
       )
         return;
-      if (this.input(job.kind, job.id).digest !== job.inputDigest) {
+      if (!this.currentInput(job)) {
         job.status = 'stale';
-        job.error = 'Input changed';
+        job.error = 'Input changed or removed';
       } else if (job.attempts >= job.maxAttempts) {
         job.status = 'failed';
         job.error = 'Stage attempt budget exhausted';
@@ -132,8 +142,7 @@ export class LeadWorkflow {
       current.leaseUntil! <= Date.now()
     )
       throw new DomainError('Workflow lease утрачен');
-    if (this.input(job.kind, job.id).digest !== job.inputDigest)
-      throw new DomainError('Workflow input изменился');
+    if (!this.currentInput(job)) throw new DomainError('Workflow input изменился');
     return current;
   }
   heartbeat(job: WorkflowJob) {
@@ -171,12 +180,7 @@ export class LeadWorkflow {
     this.h.store.atomic(() => {
       const current = this.get(job.key, job.owner);
       if (current.token !== job.token || current.status !== 'running') return;
-      current.status =
-        this.input(job.kind, job.id).digest !== job.inputDigest
-          ? 'stale'
-          : interrupted
-            ? 'queued'
-            : 'failed';
+      current.status = !this.currentInput(job) ? 'stale' : interrupted ? 'queued' : 'failed';
       current.error = message.slice(0, 1000);
       current.token = undefined;
       current.leaseUntil = undefined;
@@ -188,7 +192,7 @@ export class LeadWorkflow {
       const job = this.get(key, owner);
       if (job.status !== 'failed' || job.attempts >= job.maxAttempts)
         throw new DomainError('Retry недоступен; проверьте статус и бюджет');
-      if (this.input(job.kind, job.id).digest !== job.inputDigest)
+      if (!this.currentInput(job))
         throw new DomainError('Нужен новый workflow для изменившегося входа');
       job.status = 'queued';
       job.error = undefined;

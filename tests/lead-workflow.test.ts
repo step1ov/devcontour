@@ -63,6 +63,33 @@ test('Atomic local event and domain changes roll back together', () => {
   }
 });
 
+test('Removed workflow inputs become stale without starving unrelated jobs', async () => {
+  const f = fixture();
+  try {
+    const flow = new LeadWorkflow(f.h);
+    const jobs = ['Queued removal', 'Running removal', 'Unrelated board'].map((title) => {
+      const board = f.h.createBoard(title, '', 'main');
+      f.h.addTask(board.id, input());
+      return flow.start({ kind: 'board', id: board.id, authorRuntime: 'codex' });
+    });
+    const running = flow.claim(jobs[1].key, 'main')!;
+    f.store.change('fixture.remove', (s) => {
+      s.boards = s.boards.filter((b) => b.id === jobs[2].id);
+      const retained = new Set(s.boards[0].revisions.at(-1)!.taskIds);
+      s.tasks = s.tasks.filter((t) => retained.has(t.id));
+    });
+    flow.fail(running, 'Subject removed during review');
+    assert.equal(flow.get(running.key, 'main').status, 'stale');
+    const runner = new LeadRunner(f.h, f.root);
+    await runner.tick();
+    await runner.stop();
+    assert.equal(flow.get(jobs[0].key, 'main').status, 'stale');
+    assert.equal(flow.get(jobs[2].key, 'main').stage, 1);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('A real Git board resumes after process replacement without duplicating review or acceptance', async () => {
   const root = await mkdtemp(join(tmpdir(), 'devcontour-lead-'));
   await setupDemo(root);

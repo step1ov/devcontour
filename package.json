@@ -1,6 +1,6 @@
 {
   "name": "devcontour",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "bin": {
@@ -37,7 +37,8 @@
     "hooks:install": "node scripts/install-hooks.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "harness": "node --import tsx src/cli.ts"
+    "harness": "node --import tsx src/cli.ts",
+    "test:evals": "node --import tsx src/cli.ts evals"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.0.0",
