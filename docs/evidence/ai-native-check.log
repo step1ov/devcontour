@@ -1,0 +1,229 @@
+
+> harness-template@0.1.0 check
+> npm run lint && npm run build && npm test && npm run test:e2e
+
+
+> harness-template@0.1.0 lint
+> node scripts/check-tokens.mjs
+
+Semantic color tokens: OK
+
+> harness-template@0.1.0 build
+> npm run typecheck && vite build
+
+
+> harness-template@0.1.0 typecheck
+> tsc --noEmit
+
+vite v8.3.0 building client environment for production...
+transforming...
+✓ 2121 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   0.45 kB │ gzip:   0.31 kB
+dist/assets/index-Cf1FfvAx.css   35.37 kB │ gzip:   6.42 kB
+dist/assets/index-Bcxza_kF.js   522.33 kB │ gzip: 161.16 kB
+
+[plugin builtin:vite-reporter] 
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rolldownOptions.output.codeSplitting to improve chunking: https://rolldown.rs/reference/OutputOptions.codeSplitting
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 251ms
+
+> harness-template@0.1.0 test
+> node --import tsx --test tests/*.test.ts
+
+(node:32284) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Agent contracts require another runtime, retain review proof and deduplicate repeated content (26.031209ms)
+✔ Operator mode reviews but does not register contracts or approve draft tasks (22.435042ms)
+✔ Blocking findings reject even approved=true and do not enable execution (11.698667ms)
+✔ Agent plan approval is bound to reviewed specifications and preserves contract requirements (12.479041ms)
+✔ Agent cannot accept a board containing unverified work (3.316042ms)
+(node:32285) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Every pinned profile has an executable test gate and mobile limits concurrency (10.681625ms)
+✔ Local config rejects same-runtime self-review, demo adapters and escaping reports (4.20575ms)
+(node:32286) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ DAG rejects cycles and missing dependencies atomically (14.672333ms)
+✔ Approval binds contracts and spec; dependent jobs wait for accepted predecessor (13.665541ms)
+✔ Concurrent store clients cannot claim one task twice (7.488208ms)
+✔ Expired attempts are fenced, retries get fresh run IDs and tokens (9.699916ms)
+✔ Done requires exact SHA test evidence and independent review for BOTH phases (6.22825ms)
+✔ Correction makes a new transitive chain and preserves immutable accepted snapshot (17.2025ms)
+✔ Cross-board impact is included in correction, unrelated tasks keep their results (14.256ms)
+✔ Board acceptance rejects empty, incomplete and unapproved tasks (3.567333ms)
+✔ Cancelled runs cannot publish and cancelled drafts can return to draft (5.879167ms)
+✔ Optimistic draft editing rejects stale client and atomic publish failure cannot mark done (5.284625ms)
+✔ Plan import accepts forward references, rejects cycles without partial writes (5.558042ms)
+✔ Contract approval is a real gate: architecture can start while implementation stays draft (5.722792ms)
+✔ Repeated partial correction follows current replacements, never clones superseded history again (12.086333ms)
+✔ Mixed runtimes route every role to its independent reviewer and retain configured model (4.431083ms)
+(node:32287) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Loopback API rejects cross-origin writes, validates input and survives missing assets (35.191917ms)
+(node:32288) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Real git pipeline integrates concurrent siblings and verifies every candidate and merged SHA (55805.586625ms)
+✔ A missing required tool fails closed and never advances integration ref (11725.068959ms)
+✔ A reviewer refusal blocks publication (12394.127125ms)
+✔ Changes to gate policy files are rejected before commit (10845.834833ms)
+✔ Crash after Git publication is reconciled from persisted evidence without running models again (30418.030084ms)
+✔ JUnit rejects empty/malformed reports and distinguishes skipped tests from pass (0.872833ms)
+✔ CLI adapters use structured outputs, stdin prompts and restricted review permissions (0.10925ms)
+✔ Process timeout interrupts actual child processes (83.210292ms)
+✔ Setup starts from only a Markdown spec, copies hidden roles and pins an agent-mode config (345.192667ms)
+✔ Setup preserves existing files and explicit operator mode across repeated preparation (978.232042ms)
+✔ Setup rejects escaping symlinks and invalid specs before copying any rules (262.90325ms)
+✔ Setup refuses an accidental child of another real Git repository (552.527291ms)
+✔ CLI setup defaults to the product state and does not bootstrap a demo (662.80375ms)
+ℹ tests 35
+ℹ suites 0
+ℹ pass 35
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 121660.81175
+
+> harness-template@0.1.0 test:e2e
+> playwright test
+
+[WebServer] (node:53010) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[WebServer] (node:53010) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+[WebServer] (Use `node --trace-warnings ...` to show where the warning was created)
+[WebServer] (node:53010) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+
+Running 4 tests using 1 worker
+
+(node:55576) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  1 e2e/harness.spec.ts:3:1 › Plan → parallel execution → acceptance → correction → acceptance preserves prior revision (0ms)
+(node:55578) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  2 e2e/harness.spec.ts:40:1 › Operator can create a board, tasks and dependency; invalid cycle is explained (1ms)
+(node:55580) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✘  3 e2e/harness.spec.ts:79:1 › Desktop and mobile views are accessible and do not overflow (0ms)
+(node:55584) Warning: The 'NO_COLOR' env is ignored due to the 'FORCE_COLOR' env being set.
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ✓  4 e2e/harness.spec.ts:98:1 › Local API rejects foreign origins and malformed changes (28ms)
+
+
+  1) e2e/harness.spec.ts:3:1 › Plan → parallel execution → acceptance → correction → acceptance preserves prior revision 
+
+    Error: browserType.launch: Target page, context or browser has been closed
+    Browser logs:
+
+    <launching> /Users/antonstepanov/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-edgeupdater --disable-extensions --disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,BlockOriginHeaderModificationOnRedirect,Translate,AutoDeElevate,OptimizationHints,msForceBrowserSignIn,msEdgeUpdateLaunchServicesPreferredVersion --enable-features=CDPScreenshotNewSurface --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --disable-updater-scheduler --force-color-profile=srgb --metrics-recording-only --no-first-run --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --edge-skip-compat-layer-relaunch --disable-infobars --disable-search-engine-choice-screen --disable-sync --enable-unsafe-swiftshader --headless --hide-scrollbars --mute-audio --blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4 --no-sandbox --user-data-dir=/var/folders/z1/_4dp8kz54v3bhyt_gkhxcnyr0000gn/T/playwright_chromiumdev_profile-zkreeF --remote-debugging-pipe --no-startup-window
+    <launched> pid=55577
+    [pid=55577][err] [0916/205128.514304:ERROR:base/power_monitor/thermal_state_observer_mac.mm:140] ThermalStateObserverMac unable to register to power notifications. Result: 9
+    [pid=55577][err] [0916/205128.533894:ERROR:net/dns/dns_config_service_posix.cc:138] DNS config watch failed to start.
+    [pid=55577][err] [0916/205128.544918:FATAL:base/apple/mach_port_rendezvous_mac.cc:159] Check failed: kr == KERN_SUCCESS. bootstrap_check_in org.chromium.Chromium.MachPortRendezvousServer.55577: Permission denied (1100)
+    Call log:
+      - <launching> /Users/antonstepanov/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-edgeupdater --disable-extensions --disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,BlockOriginHeaderModificationOnRedirect,Translate,AutoDeElevate,OptimizationHints,msForceBrowserSignIn,msEdgeUpdateLaunchServicesPreferredVersion --enable-features=CDPScreenshotNewSurface --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --disable-updater-scheduler --force-color-profile=srgb --metrics-recording-only --no-first-run --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --edge-skip-compat-layer-relaunch --disable-infobars --disable-search-engine-choice-screen --disable-sync --enable-unsafe-swiftshader --headless --hide-scrollbars --mute-audio --blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4 --no-sandbox --user-data-dir=/var/folders/z1/_4dp8kz54v3bhyt_gkhxcnyr0000gn/T/playwright_chromiumdev_profile-zkreeF --remote-debugging-pipe --no-startup-window
+      - <launched> pid=55577
+      - [pid=55577][err] [0916/205128.514304:ERROR:base/power_monitor/thermal_state_observer_mac.mm:140] ThermalStateObserverMac unable to register to power notifications. Result: 9
+      - [pid=55577][err] [0916/205128.533894:ERROR:net/dns/dns_config_service_posix.cc:138] DNS config watch failed to start.
+      - [pid=55577][err] [0916/205128.544918:FATAL:base/apple/mach_port_rendezvous_mac.cc:159] Check failed: kr == KERN_SUCCESS. bootstrap_check_in org.chromium.Chromium.MachPortRendezvousServer.55577: Permission denied (1100)
+      - [pid=55577] <gracefully close start>
+      - [pid=55577] <kill>
+      - [pid=55577] <will force kill>
+      - [pid=55577] exception while trying to kill process: Error: kill EPERM
+      - [pid=55577] <process did exit: exitCode=null, signal=SIGTRAP>
+      - [pid=55577] starting temporary directories cleanup
+      - [pid=55577] finished temporary directories cleanup
+      - [pid=55577] <gracefully close end>
+
+
+    Error Context: test-results/harness-Plan-→-parallel-ex-2a0cb-ce-preserves-prior-revision/error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/harness-Plan-→-parallel-ex-2a0cb-ce-preserves-prior-revision/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/harness-Plan-→-parallel-ex-2a0cb-ce-preserves-prior-revision/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  2) e2e/harness.spec.ts:40:1 › Operator can create a board, tasks and dependency; invalid cycle is explained 
+
+    Error: browserType.launch: Target page, context or browser has been closed
+    Browser logs:
+
+    <launching> /Users/antonstepanov/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-edgeupdater --disable-extensions --disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,BlockOriginHeaderModificationOnRedirect,Translate,AutoDeElevate,OptimizationHints,msForceBrowserSignIn,msEdgeUpdateLaunchServicesPreferredVersion --enable-features=CDPScreenshotNewSurface --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --disable-updater-scheduler --force-color-profile=srgb --metrics-recording-only --no-first-run --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --edge-skip-compat-layer-relaunch --disable-infobars --disable-search-engine-choice-screen --disable-sync --enable-unsafe-swiftshader --headless --hide-scrollbars --mute-audio --blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4 --no-sandbox --user-data-dir=/var/folders/z1/_4dp8kz54v3bhyt_gkhxcnyr0000gn/T/playwright_chromiumdev_profile-9a4HLF --remote-debugging-pipe --no-startup-window
+    <launched> pid=55579
+    [pid=55579][err] [0916/205129.247011:ERROR:base/power_monitor/thermal_state_observer_mac.mm:140] ThermalStateObserverMac unable to register to power notifications. Result: 9
+    [pid=55579][err] [0916/205129.249072:ERROR:net/dns/dns_config_service_posix.cc:138] DNS config watch failed to start.
+    [pid=55579][err] [0916/205129.249612:FATAL:base/apple/mach_port_rendezvous_mac.cc:159] Check failed: kr == KERN_SUCCESS. bootstrap_check_in org.chromium.Chromium.MachPortRendezvousServer.55579: Permission denied (1100)
+    Call log:
+      - <launching> /Users/antonstepanov/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-edgeupdater --disable-extensions --disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,BlockOriginHeaderModificationOnRedirect,Translate,AutoDeElevate,OptimizationHints,msForceBrowserSignIn,msEdgeUpdateLaunchServicesPreferredVersion --enable-features=CDPScreenshotNewSurface --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --disable-updater-scheduler --force-color-profile=srgb --metrics-recording-only --no-first-run --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --edge-skip-compat-layer-relaunch --disable-infobars --disable-search-engine-choice-screen --disable-sync --enable-unsafe-swiftshader --headless --hide-scrollbars --mute-audio --blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4 --no-sandbox --user-data-dir=/var/folders/z1/_4dp8kz54v3bhyt_gkhxcnyr0000gn/T/playwright_chromiumdev_profile-9a4HLF --remote-debugging-pipe --no-startup-window
+      - <launched> pid=55579
+      - [pid=55579][err] [0916/205129.247011:ERROR:base/power_monitor/thermal_state_observer_mac.mm:140] ThermalStateObserverMac unable to register to power notifications. Result: 9
+      - [pid=55579][err] [0916/205129.249072:ERROR:net/dns/dns_config_service_posix.cc:138] DNS config watch failed to start.
+      - [pid=55579][err] [0916/205129.249612:FATAL:base/apple/mach_port_rendezvous_mac.cc:159] Check failed: kr == KERN_SUCCESS. bootstrap_check_in org.chromium.Chromium.MachPortRendezvousServer.55579: Permission denied (1100)
+      - [pid=55579] <gracefully close start>
+      - [pid=55579] <kill>
+      - [pid=55579] <will force kill>
+      - [pid=55579] exception while trying to kill process: Error: kill EPERM
+      - [pid=55579] <process did exit: exitCode=null, signal=SIGTRAP>
+      - [pid=55579] starting temporary directories cleanup
+      - [pid=55579] finished temporary directories cleanup
+      - [pid=55579] <gracefully close end>
+
+
+    Error Context: test-results/harness-Operator-can-creat-2bc62--invalid-cycle-is-explained/error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/harness-Operator-can-creat-2bc62--invalid-cycle-is-explained/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/harness-Operator-can-creat-2bc62--invalid-cycle-is-explained/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  3) e2e/harness.spec.ts:79:1 › Desktop and mobile views are accessible and do not overflow ────────
+
+    Error: browserType.launch: Target page, context or browser has been closed
+    Browser logs:
+
+    <launching> /Users/antonstepanov/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-edgeupdater --disable-extensions --disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,BlockOriginHeaderModificationOnRedirect,Translate,AutoDeElevate,OptimizationHints,msForceBrowserSignIn,msEdgeUpdateLaunchServicesPreferredVersion --enable-features=CDPScreenshotNewSurface --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --disable-updater-scheduler --force-color-profile=srgb --metrics-recording-only --no-first-run --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --edge-skip-compat-layer-relaunch --disable-infobars --disable-search-engine-choice-screen --disable-sync --enable-unsafe-swiftshader --headless --hide-scrollbars --mute-audio --blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4 --no-sandbox --user-data-dir=/var/folders/z1/_4dp8kz54v3bhyt_gkhxcnyr0000gn/T/playwright_chromiumdev_profile-hnvRsu --remote-debugging-pipe --no-startup-window
+    <launched> pid=55583
+    [pid=55583][err] [0916/205129.950177:ERROR:base/power_monitor/thermal_state_observer_mac.mm:140] ThermalStateObserverMac unable to register to power notifications. Result: 9
+    [pid=55583][err] [0916/205129.952607:ERROR:net/dns/dns_config_service_posix.cc:138] DNS config watch failed to start.
+    [pid=55583][err] [0916/205129.953274:FATAL:base/apple/mach_port_rendezvous_mac.cc:159] Check failed: kr == KERN_SUCCESS. bootstrap_check_in org.chromium.Chromium.MachPortRendezvousServer.55583: Permission denied (1100)
+    [pid=55583] <process did exit: exitCode=null, signal=SIGTRAP>
+    [pid=55583] starting temporary directories cleanup
+    Call log:
+      - <launching> /Users/antonstepanov/Library/Caches/ms-playwright/chromium_headless_shell-1243/chrome-headless-shell-mac-arm64/chrome-headless-shell --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-edgeupdater --disable-extensions --disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,BlockOriginHeaderModificationOnRedirect,Translate,AutoDeElevate,OptimizationHints,msForceBrowserSignIn,msEdgeUpdateLaunchServicesPreferredVersion --enable-features=CDPScreenshotNewSurface --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --disable-updater-scheduler --force-color-profile=srgb --metrics-recording-only --no-first-run --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --edge-skip-compat-layer-relaunch --disable-infobars --disable-search-engine-choice-screen --disable-sync --enable-unsafe-swiftshader --headless --hide-scrollbars --mute-audio --blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4 --no-sandbox --user-data-dir=/var/folders/z1/_4dp8kz54v3bhyt_gkhxcnyr0000gn/T/playwright_chromiumdev_profile-hnvRsu --remote-debugging-pipe --no-startup-window
+      - <launched> pid=55583
+      - [pid=55583][err] [0916/205129.950177:ERROR:base/power_monitor/thermal_state_observer_mac.mm:140] ThermalStateObserverMac unable to register to power notifications. Result: 9
+      - [pid=55583][err] [0916/205129.952607:ERROR:net/dns/dns_config_service_posix.cc:138] DNS config watch failed to start.
+      - [pid=55583][err] [0916/205129.953274:FATAL:base/apple/mach_port_rendezvous_mac.cc:159] Check failed: kr == KERN_SUCCESS. bootstrap_check_in org.chromium.Chromium.MachPortRendezvousServer.55583: Permission denied (1100)
+      - [pid=55583] <process did exit: exitCode=null, signal=SIGTRAP>
+      - [pid=55583] starting temporary directories cleanup
+      - [pid=55583] <gracefully close start>
+      - [pid=55583] <kill>
+      - [pid=55583] <skipped force kill spawnedProcess.killed=false processClosed=true>
+      - [pid=55583] finished temporary directories cleanup
+      - [pid=55583] <gracefully close end>
+
+
+    Error Context: test-results/harness-Desktop-and-mobile-718a5-essible-and-do-not-overflow/error-context.md
+
+    attachment #2: trace (application/zip) ─────────────────────────────────────────────────────────
+    test-results/harness-Desktop-and-mobile-718a5-essible-and-do-not-overflow/trace.zip
+    Usage:
+
+        npx playwright show-trace test-results/harness-Desktop-and-mobile-718a5-essible-and-do-not-overflow/trace.zip
+
+    ────────────────────────────────────────────────────────────────────────────────────────────────
+
+  3 failed
+    e2e/harness.spec.ts:3:1 › Plan → parallel execution → acceptance → correction → acceptance preserves prior revision 
+    e2e/harness.spec.ts:40:1 › Operator can create a board, tasks and dependency; invalid cycle is explained 
+    e2e/harness.spec.ts:79:1 › Desktop and mobile views are accessible and do not overflow ─────────
+  1 passed (17.6s)

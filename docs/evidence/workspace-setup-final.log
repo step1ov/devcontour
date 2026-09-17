@@ -1,0 +1,21 @@
+✔ Setup starts from only a Markdown spec, copies hidden roles and pins an agent-mode config (92.172875ms)
+✔ Setup preserves existing files and explicit operator mode across repeated preparation (336.826416ms)
+✔ Setup rejects escaping symlinks and invalid specs before copying any rules (66.928541ms)
+✔ Setup refuses an accidental child of another real Git repository (132.416834ms)
+✔ CLI setup defaults to the product state and does not bootstrap a demo (391.933875ms)
+(node:17903) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Real multi-repo DAG, isolated ownership, failing then passing pinned integration and immutable diary (9825.114542ms)
+✔ Verification fences expired runs, stops task claims, checks gate coverage and rejects changed policy (9.23625ms)
+✔ Workspace gates cannot change manifest or another component source (3277.954416ms)
+✔ Workspace setup preserves policy on repeat and detects a competing controller (1762.701667ms)
+✔ Projection failure never rolls back an already committed task event (3.91375ms)
+✔ Legacy single-repository state retains its approved spec digest after migration (4.305667ms)
+ℹ tests 11
+ℹ suites 0
+ℹ pass 11
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 15168.489042

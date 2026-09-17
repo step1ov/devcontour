@@ -1,0 +1,27 @@
+{
+  "id": "next-product",
+  "version": "0.1.0",
+  "capabilities": ["react-ssr", "seo", "design-tokens", "playwright"],
+  "gates": [
+    { "id": "install", "kind": "check", "command": ["npm", "ci"], "timeoutMs": 240000 },
+    {
+      "id": "typecheck",
+      "kind": "check",
+      "command": ["npm", "run", "typecheck"],
+      "timeoutMs": 120000
+    },
+    {
+      "id": "production-build",
+      "kind": "check",
+      "command": ["npm", "run", "build"],
+      "timeoutMs": 240000
+    },
+    {
+      "id": "acceptance",
+      "kind": "test",
+      "command": ["npm", "run", "test:harness"],
+      "timeoutMs": 240000,
+      "report": { "type": "junit", "path": ".reports/junit.xml" }
+    }
+  ]
+}

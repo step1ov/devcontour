@@ -1,0 +1,32 @@
+{
+  "tool": "Chrome DevTools MCP",
+  "url": "http://127.0.0.1:4321",
+  "fixture": "demo; no model calls",
+  "observations": [
+    {
+      "mode": "agent",
+      "viewport": 1440,
+      "label": "Согласования: агент",
+      "visible": true,
+      "overflow": false
+    },
+    {
+      "mode": "operator",
+      "viewport": 1440,
+      "label": "Согласования: оператор",
+      "visible": true,
+      "overflow": false
+    },
+    {
+      "mode": "agent",
+      "viewport": 500,
+      "overflow": false
+    },
+    {
+      "mode": "operator",
+      "viewport": 500,
+      "overflow": false
+    }
+  ],
+  "scope": "Approval-mode label and responsive smoke check only; resize to 390 was clamped by browser to 500. Full Playwright browser suite blocked by environment."
+}

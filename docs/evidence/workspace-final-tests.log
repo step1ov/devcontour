@@ -1,0 +1,19 @@
+(node:13339) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Loopback API rejects cross-origin writes, validates input and survives missing assets (42.1555ms)
+(node:13340) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Real multi-repo DAG, isolated ownership, failing then passing pinned integration and immutable diary (9733.691542ms)
+✔ Verification fences expired runs, stops task claims, checks gate coverage and rejects changed policy (10.015375ms)
+✔ Workspace gates cannot change manifest or another component source (3303.97725ms)
+✔ Workspace setup preserves policy on repeat and detects a competing controller (1782.558458ms)
+✔ Projection failure never rolls back an already committed task event (3.032041ms)
+✔ Legacy single-repository state retains its approved spec digest after migration (4.525458ms)
+ℹ tests 7
+ℹ suites 0
+ℹ pass 7
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 15126.333

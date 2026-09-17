@@ -1,0 +1,22 @@
+{
+  "id": "react-vite-admin",
+  "version": "0.1.0",
+  "capabilities": ["react-spa", "design-tokens", "playwright"],
+  "gates": [
+    { "id": "install", "kind": "check", "command": ["npm", "ci"], "timeoutMs": 240000 },
+    {
+      "id": "typecheck",
+      "kind": "check",
+      "command": ["npm", "run", "typecheck"],
+      "timeoutMs": 120000
+    },
+    { "id": "build", "kind": "check", "command": ["npm", "run", "build"], "timeoutMs": 120000 },
+    {
+      "id": "acceptance",
+      "kind": "test",
+      "command": ["npm", "run", "test:harness"],
+      "timeoutMs": 240000,
+      "report": { "type": "junit", "path": ".reports/junit.xml" }
+    }
+  ]
+}

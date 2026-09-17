@@ -1,0 +1,22 @@
+(node:49128) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Loopback API rejects cross-origin writes, validates input and survives missing assets (45.784541ms)
+✔ Two workspace servers use distinct ports and report their own state paths (15.692666ms)
+(node:49129) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Product commands require scope; invalid or conflicting scope never silently selects demo (0.9745ms)
+✔ Bare CLI fails before creating demo files; two CLI sessions address separate workspace databases (1714.051584ms)
+✔ Workspace setup preserves an existing scope and rejects a workspace inside the product (261.815375ms)
+✔ Setup starts from only a Markdown spec, copies hidden roles and pins an agent-mode config (128.91975ms)
+✔ Setup preserves existing files and explicit operator mode across repeated preparation (416.7255ms)
+✔ Setup rejects escaping symlinks and invalid specs before copying any rules (135.123959ms)
+✔ Setup refuses an accidental child of another real Git repository (143.866292ms)
+✔ CLI setup supports explicit legacy data without bootstrapping a demo (471.306334ms)
+ℹ tests 10
+ℹ suites 0
+ℹ pass 10
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2259.699167

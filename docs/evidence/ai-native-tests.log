@@ -1,0 +1,57 @@
+
+> harness-template@0.1.0 test
+> node --import tsx --test tests/*.test.ts
+
+(node:56402) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Agent contracts require another runtime, retain review proof and deduplicate repeated content (43.436792ms)
+✔ Operator mode reviews but does not register contracts or approve draft tasks (30.51475ms)
+✔ Blocking findings reject even approved=true and do not enable execution (14.453709ms)
+✔ Agent plan approval is bound to reviewed specifications and preserves contract requirements (21.2295ms)
+✔ Agent cannot accept a board containing unverified work (4.521084ms)
+(node:56403) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Every pinned profile has an executable test gate and mobile limits concurrency (11.33925ms)
+✔ Local config rejects same-runtime self-review, demo adapters and escaping reports (4.435ms)
+(node:56404) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ DAG rejects cycles and missing dependencies atomically (13.811959ms)
+✔ Approval binds contracts and spec; dependent jobs wait for accepted predecessor (10.502291ms)
+✔ Concurrent store clients cannot claim one task twice (6.758333ms)
+✔ Expired attempts are fenced, retries get fresh run IDs and tokens (6.538458ms)
+✔ Done requires exact SHA test evidence and independent review for BOTH phases (6.278375ms)
+✔ Correction makes a new transitive chain and preserves immutable accepted snapshot (17.256042ms)
+✔ Cross-board impact is included in correction, unrelated tasks keep their results (11.982958ms)
+✔ Board acceptance rejects empty, incomplete and unapproved tasks (3.166833ms)
+✔ Cancelled runs cannot publish and cancelled drafts can return to draft (4.698375ms)
+✔ Optimistic draft editing rejects stale client and atomic publish failure cannot mark done (4.749334ms)
+✔ Plan import accepts forward references, rejects cycles without partial writes (4.577875ms)
+✔ Contract approval is a real gate: architecture can start while implementation stays draft (3.875083ms)
+✔ Repeated partial correction follows current replacements, never clones superseded history again (10.535792ms)
+✔ Mixed runtimes route every role to its independent reviewer and retain configured model (3.857333ms)
+(node:56405) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Loopback API rejects cross-origin writes, validates input and survives missing assets (36.920541ms)
+(node:56406) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Real git pipeline integrates concurrent siblings and verifies every candidate and merged SHA (40922.880709ms)
+✔ A missing required tool fails closed and never advances integration ref (7807.552791ms)
+✔ A reviewer refusal blocks publication (8260.636958ms)
+✔ Changes to gate policy files are rejected before commit (7140.659333ms)
+✔ Crash after Git publication is reconciled from persisted evidence without running models again (19793.630375ms)
+✔ JUnit rejects empty/malformed reports and distinguishes skipped tests from pass (0.980958ms)
+✔ CLI adapters use structured outputs, stdin prompts and restricted review permissions (0.101417ms)
+✔ Process timeout interrupts actual child processes (84.208333ms)
+✔ Setup starts from only a Markdown spec, copies hidden roles and pins an agent-mode config (256.904208ms)
+✔ Setup preserves existing files and explicit operator mode across repeated preparation (805.141791ms)
+✔ Setup rejects escaping symlinks and invalid specs before copying any rules (222.364584ms)
+✔ Setup refuses an accidental child of another real Git repository (466.324041ms)
+✔ CLI setup defaults to the product state and does not bootstrap a demo (524.402375ms)
+ℹ tests 35
+ℹ suites 0
+ℹ pass 35
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 84498.891375

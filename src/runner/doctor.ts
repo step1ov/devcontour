@@ -1,0 +1,244 @@
+import { access, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { delimiter, isAbsolute, join, resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import type { Config, Role } from '../core/model.ts';
+import { repositories, roleBinding, reviewerBinding } from '../core/repositories.ts';
+import { validateWorkflow } from '../core/workflow.ts';
+import { command, git } from './process.ts';
+import { executionEnvironment, runSteps, withEnvironment } from './environment.ts';
+import { withResources } from './resources.ts';
+import { agentEnvironment, toolProfileFor } from './tools.ts';
+import { taskContext } from './context.ts';
+import { forgeAdapter } from './forge.ts';
+import { Harness } from '../core/service.ts';
+import { Store } from '../core/store.ts';
+import { z } from 'zod';
+
+type Check = { id: string; status: 'passed' | 'blocked' | 'not-checked'; detail: string };
+export async function executable(file: string) {
+  const candidates = file.includes('/')
+    ? [file]
+    : (process.env.PATH ?? '').split(delimiter).map((p) => join(p, file));
+  for (const path of candidates) {
+    try {
+      await access(path, constants.X_OK);
+      return path;
+    } catch {
+      /* next PATH entry */
+    }
+  }
+  throw new Error('Команда не найдена: ' + file);
+}
+export async function doctor(config: Config, root: string, probe = false) {
+  const checks: Check[] = [];
+  const check = async (id: string, action: () => Promise<string>) => {
+    try {
+      checks.push({ id, status: 'passed', detail: await action() });
+    } catch (e) {
+      checks.push({ id, status: 'blocked', detail: e instanceof Error ? e.message : String(e) });
+    }
+  };
+  await check('config', async () => {
+    validateWorkflow(config);
+    return 'Графы и профили согласованы';
+  });
+  const bindings = repositories(config).flatMap((repo) =>
+    (Object.keys(config.roles) as Role[]).flatMap((role) =>
+      [false, true].map((review) => ({
+        repo,
+        role,
+        review,
+        binding: review
+          ? reviewerBinding(config, role, repo.id)
+          : roleBinding(config, role, repo.id),
+      })),
+    ),
+  );
+  const runtimes = new Set(bindings.map((b) => b.binding.runtime));
+  for (const runtime of ['git', ...runtimes].filter((s) => s !== 'demo'))
+    await check('cli:' + runtime, async () => {
+      await executable(runtime);
+      const r = await command([runtime, '--version'], config.repository, { timeoutMs: 10000 });
+      if (r.code) throw new Error('CLI --version завершился с ошибкой');
+      return r.stdout.trim().slice(0, 200);
+    });
+  await check('environment', async () => {
+    executionEnvironment([config.environment]);
+    return 'Обязательные переменные заданы; значения скрыты';
+  });
+  for (const { repo, role, review, binding } of bindings)
+    await check(`tools:${repo.id}:${role}:${review ? 'review' : 'write'}`, async () => {
+      const profile = toolProfileFor(config, binding.runtime, role, review, repo.id);
+      agentEnvironment(config, profile);
+      for (const server of Object.values(profile?.mcp ?? {}))
+        if (server.command) await executable(server.command);
+      return profile
+        ? 'Профиль и переменные MCP доступны; соединение проверяет project preflight'
+        : 'Штатный CLI без явно заданного профиля MCP';
+    });
+  for (const repo of repositories(config)) {
+    await check('repository:' + repo.id, async () => {
+      if (
+        (await realpath(repo.path)) !==
+        (await realpath(await git(repo.path, 'rev-parse', '--show-toplevel')))
+      )
+        throw new Error('Ожидается корень Git');
+      await git(repo.path, 'rev-parse', '--verify', 'HEAD');
+      await git(repo.path, 'check-ref-format', '--branch', repo.targetBranch);
+      const common = resolve(repo.path, await git(repo.path, 'rev-parse', '--git-common-dir'));
+      try {
+        const owner = JSON.parse(await readFile(join(common, 'harness-owner.json'), 'utf8'));
+        if (
+          owner.owner !== (await realpath(root)) ||
+          owner.repositoryId !== repo.id ||
+          owner.targetBranch !== repo.targetBranch
+        )
+          throw new Error('Репозиторий принадлежит другому workspace');
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+      }
+      if (
+        (await git(repo.path, 'worktree', 'list', '--porcelain'))
+          .split('\n')
+          .includes(`branch refs/heads/${repo.targetBranch}`)
+      )
+        throw new Error('Ветка интеграции открыта в worktree');
+      executionEnvironment([config.environment, repo.environment]);
+      for (const step of [
+        ...repo.gates,
+        ...(repo.prepare ?? []),
+        ...(repo.dependencyBuild ?? []),
+        ...(repo.preflight ?? []),
+        ...(repo.lifecycle?.setup ?? []),
+        ...(repo.lifecycle?.ready ?? []),
+        ...(repo.lifecycle?.teardown ?? []),
+      ])
+        if (!step.command[0].includes('/') || isAbsolute(step.command[0]))
+          await executable(step.command[0]);
+      return 'Git, окружение и исполняемые команды доступны';
+    });
+    if (repo.forge)
+      await check('forge:' + repo.id, async () => {
+        await git(repo.path, 'check-ref-format', '--branch', repo.forge!.targetBranch);
+        await git(repo.path, 'remote', 'get-url', repo.forge!.remote);
+        const connection = config.forgeConnections[repo.forge!.connection];
+        if (!connection) throw new Error('Не настроен forge connection');
+        if (connection.tokenEnv && !process.env[connection.tokenEnv])
+          throw new Error('Не задан read-only token: ' + connection.tokenEnv);
+        if (probe) {
+          const store = new Store(':memory:');
+          try {
+            await forgeAdapter(connection, new Harness(store, config)).observe(
+              repo,
+              'harness-doctor-nonexistent',
+              AbortSignal.timeout(30000),
+            );
+          } finally {
+            store.close();
+          }
+        }
+        return probe
+          ? 'Read-only forge доступен; запись не выполнялась'
+          : 'Конфигурация доступна; сеть не проверена';
+      });
+    if (probe && repo.preflight?.length)
+      await check('probe:' + repo.id, async () => {
+        const runId = randomUUID(),
+          dir = join(root, 'doctor', runId),
+          cwd = join(dir, repo.id);
+        await mkdir(dir, { recursive: true });
+        const sha = await git(repo.path, 'rev-parse', 'HEAD');
+        await git(repo.path, 'worktree', 'add', '--detach', cwd, sha);
+        try {
+          await withResources(
+            config,
+            repo.gates.flatMap((g) => g.resources ?? []),
+            `doctor:${runId}`,
+            AbortSignal.timeout(config.runTimeoutMs),
+            async (signal, resources) => {
+              const execution = executionEnvironment([config.environment, repo.environment], {
+                HARNESS_REPOSITORY_ID: repo.id,
+                HARNESS_RUN_ID: runId,
+                HARNESS_RESOURCES_JSON: JSON.stringify(resources),
+              });
+              await withEnvironment(
+                repo.lifecycle,
+                cwd,
+                join(dir, 'environment'),
+                execution,
+                signal,
+                () => runSteps(repo.preflight!, cwd, join(dir, 'preflight'), execution, signal),
+              );
+            },
+          );
+          return 'Project preflight прошёл в отдельном worktree';
+        } finally {
+          // Keep failed environments for explicit cleanup instead of deleting their scripts.
+          let clean = true;
+          try {
+            clean =
+              JSON.parse(await readFile(join(dir, 'environment', 'environment.json'), 'utf8'))
+                .status === 'cleaned';
+          } catch {
+            /* no lifecycle */
+          }
+          if (clean) await git(repo.path, 'worktree', 'remove', '--force', cwd);
+        }
+      });
+  }
+  if (config.contextPacks.length)
+    await check('context', async () => {
+      for (const role of Object.keys(config.roles))
+        await taskContext(config, {
+          role: role as Role,
+          contextPacks: config.contextPacks.map((p) => p.id),
+        } as Parameters<typeof taskContext>[1]);
+      return 'Закреплённые инструкции доступны и совпадают с digest';
+    });
+  for (const dir of [
+    join(root, 'artifacts'),
+    join(root, 'workspace-checks'),
+    join(root, 'doctor'),
+    ...(config.storage === 'component'
+      ? repositories(config).map((r) => join(r.path, '.harness/local/artifacts'))
+      : []),
+  ]) {
+    let files: string[] = [];
+    try {
+      files = await readdir(dir, { recursive: true });
+    } catch {
+      /* no receipts */
+    }
+    for (const file of files.filter((p) => p.endsWith('environment.json')))
+      await check(`cleanup:${dir}/${file}`, async () => {
+        const receipt = JSON.parse(await readFile(join(dir, file), 'utf8'));
+        if (receipt.status !== 'cleaned')
+          throw new Error(
+            'Есть незавершённое окружение; проверьте владельца и выполните environment-cleanup',
+          );
+        return 'Окружение очищено';
+      });
+  }
+  checks.push({
+    id: 'live-models',
+    status: 'not-checked',
+    detail:
+      'Модели не вызываются. Авторизация и реальная работа инструментов подтверждаются отдельным пилотом.',
+  });
+  if (!probe || !repositories(config).every((r) => r.preflight?.length))
+    checks.push({
+      id: 'project-probes',
+      status: 'not-checked',
+      detail:
+        'Настройте preflight команд установки/доступов/MCP и выполните doctor --probe. Отсутствующие проверки не считаются PASS.',
+    });
+  const result = {
+    scope: probe ? 'configured-probes' : 'static',
+    ready: !checks.some((c) => c.status === 'blocked'),
+    checks,
+  };
+  await mkdir(root, { recursive: true });
+  await writeFile(join(root, 'doctor.json'), JSON.stringify(result, null, 2));
+  return result;
+}

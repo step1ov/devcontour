@@ -1,0 +1,60 @@
+
+> harness-template@0.1.0 test
+> tsx --test tests/*.test.ts
+
+(node:92171) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Every pinned profile has an executable test gate and mobile limits concurrency (35.728ms)
+✔ Local config rejects same-runtime self-review, demo adapters and escaping reports (8.092584ms)
+(node:92172) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ DAG rejects cycles and missing dependencies atomically (22.6055ms)
+✔ Approval binds contracts and spec; dependent jobs wait for accepted predecessor (12.750417ms)
+✔ Concurrent store clients cannot claim one task twice (7.651666ms)
+✔ Expired attempts are fenced, retries get fresh run IDs and tokens (8.238375ms)
+✔ Done requires exact SHA test evidence and independent review for BOTH phases (9.712208ms)
+✔ Correction makes a new transitive chain and preserves immutable accepted snapshot (27.913292ms)
+✔ Cross-board impact is included in correction, unrelated tasks keep their results (35.8055ms)
+✔ Board acceptance rejects empty, incomplete and unapproved tasks (5.738625ms)
+✔ Cancelled runs cannot publish and cancelled drafts can return to draft (8.113125ms)
+✔ Optimistic draft editing rejects stale client and atomic publish failure cannot mark done (10.346459ms)
+✔ Plan import accepts forward references, rejects cycles without partial writes (9.379208ms)
+✔ Contract approval is a real gate: architecture can start while implementation stays draft (12.558584ms)
+✔ Repeated partial correction follows current replacements, never clones superseded history again (26.034541ms)
+✔ Mixed runtimes route every role to its independent reviewer and retain configured model (7.324042ms)
+(node:92173) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Loopback API rejects cross-origin writes, validates input and survives missing assets (81.841375ms)
+(node:92174) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✖ Real git pipeline integrates concurrent siblings and verifies every candidate and merged SHA (100854.50725ms)
+✔ A missing required tool fails closed and never advances integration ref (11162.795041ms)
+✔ A reviewer refusal blocks publication (9151.955458ms)
+✔ Changes to gate policy files are rejected before commit (8065.261917ms)
+✔ Crash after Git publication is reconciled from persisted evidence without running models again (22436.595875ms)
+✔ JUnit rejects empty/malformed reports and distinguishes skipped tests from pass (1.06725ms)
+✔ CLI adapters use structured outputs, stdin prompts and restricted review permissions (0.111458ms)
+✔ Process timeout interrupts actual child processes (83.039792ms)
+ℹ tests 25
+ℹ suites 0
+ℹ pass 24
+ℹ fail 1
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 152203.122
+
+✖ failing tests:
+
+test at tests/runner.test.ts:36:1
+✖ Real git pipeline integrates concurrent siblings and verifies every candidate and merged SHA (100854.50725ms)
+  AssertionError [ERR_ASSERTION]: [{"title":"Подготовить структуру проекта","description":"Создать учебный артефакт структуры проекта для проверки полного цикла.","role":"architect","dependsOn":[],"acceptance":["Артефакт структуры существует и проходит проверку."],"contracts":[],"id":"T2","status":"done","attempt":1,"createdAt":"2026-09-16T16:08:08.619Z","contractDigests":{},"approvedDigest":"e59b101065bbf4ed6baf9697f708ba83d84a26b74e5341fc9dff6f507fbcfcbb","resultSha":"754c01455c5b442552e99ee27cc604620a355e22"},{"title":"Проверить базовый сценарий","description":"Подтвердить связь с артефактом структуры и сохранить результат учебной проверки.","role":"qa","dependsOn":["T2"],"acceptance":["Зависимость присутствует в интегрированном результате."],"contracts":[],"id":"T3","status":"done","attempt":1,"createdAt":"2026-09-16T16:08:08.619Z","contractDigests":{},"approvedDigest":"2f335c5edde3d0f0a7c395b20488d44d2798939ddcf5daa3047e67d2c01f1da5","resultSha":"d64cde2d0335c1b51222f0eaf8bbbe768b9921d5"},{"title":"Зафиксировать API и состояния","description":"Подготовить учебный результат утверждённого контракта API и состояний интерфейса.","role":"architect","dependsOn":[],"acceptance":["Контракт API и четыре состояния интерфейса описаны."],"contracts":["C5"],"id":"T6","status":"done","attempt":1,"createdAt":"2026-09-16T16:08:15.772Z","contractDigests":{"C5":"43c56eb9276c187c47dd8c321329d1c0c648c163ad79d937a63b1bc6d40d797a"},"approvedDigest":"5a032e92628593c46fe46c330ae401cde377629ecc2c00e9e0b0a8dfd311efde","resultSha":"94ce494c144b1ca86e449aa8c08e3a71d6654573"},{"title":"Поиск по каталогу","description":"Учебный backend-срез: подготовить артефакт поиска, связанный с утверждённым API.","role":"backend","dependsOn":["T6"],"acceptance":["Поиск следует согласованному контракту.","Пустой запрос обрабатывается явно."],"contracts":["C5"],"id":"T7","status":"done","attempt":1,"createdAt":"2026-09-16T16:08:15.772Z","contractDigests":{"C5":"43c56eb9276c187c47dd8c321329d1c0c648c163ad79d937a63b1bc6d40d797a"},"approvedDigest":"f5ec4e73530fe14a4a3e6c82eaa0d4bc514406eeb481177c2ee915b4b9e499d0","resultSha":"2f576e655ce8a9698a294d80e16ec434e7d90473"},{"title":"Экран каталога","description":"Учебный frontend-срез: подготовить артефакт интерфейса поиска и его состояний.","role":"frontend","dependsOn":["T6"],"acceptance":["Есть состояния загрузки, ошибки, пустого и полного результата."],"contracts":["C5"],"id":"T8","status":"done","attempt":1,"createdAt":"2026-09-16T16:08:15.773Z","contractDigests":{"C5":"43c56eb9276c187c47dd8c321329d1c0c648c163ad79d937a63b1bc6d40d797a"},"approvedDigest":"dc6272e3a4aa2a48c16eb075d765b9846d2a85661b0d06f159d0e66ba38045d9","resultSha":"8b8e1e8bd90561c6eead044a4e9f99277504b75b"},{"title":"Сценарии приёмки","description":"Учебный QA-срез: подготовить набор сценариев для поиска и пограничных состояний.","role":"qa","dependsOn":["T6"],"acceptance":["Сценарии покрывают положительный и отрицательный путь."],"contracts":[],"id":"T9","status":"done","attempt":1,"createdAt":"2026-09-16T16:08:15.773Z","contractDigests":{},"approvedDigest":"40e7dbe520024ed6cc38f91dafcf27540a76c12cd766d077454d78b5034e3f02","resultSha":"8fbdef88a89fbb7ac233dbafa98ede61035ffad3"},{"title":"Проверить сквозной результат","description":"Проверить наличие всех трёх артефактов после объединения параллельной работы.","role":"qa","dependsOn":["T7","T8","T9"],"acceptance":["Backend, frontend и QA-артефакты присутствуют вместе."],"contracts":[],"id":"T10","status":"failed","attempt":1,"createdAt":"2026-09-16T16:08:15.773Z","contractDigests":{},"approvedDigest":"83ca7d19bbedc843d6f86213a58cae7ce53bf34a5d65d4a59dfc6d4a226108f9","failure":"Истёк срок владения. Проверьте worktree и повторите явно."}]
+      at TestContext.<anonymous> (/Users/antonstepanov/Documents/Codex/2026-09-16/harness-chat-gpt-claude-code-vite/outputs/harness-template/tests/runner.test.ts:42:12)
+      at async Test.run (node:internal/test_runner/test:1069:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:332:3) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: false,
+    expected: true,
+    operator: '=='
+  }

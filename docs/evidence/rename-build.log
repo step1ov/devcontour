@@ -1,0 +1,23 @@
+
+> devcontour@0.1.0 build
+> npm run typecheck && vite build
+
+
+> devcontour@0.1.0 typecheck
+> tsc --noEmit
+
+vite v8.3.0 building client environment for production...
+transforming...
+✓ 2122 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   0.46 kB │ gzip:   0.32 kB
+dist/assets/index-CfCkA7BN.css   35.81 kB │ gzip:   6.49 kB
+dist/assets/index-DxSRo4Vs.js   536.02 kB │ gzip: 164.46 kB
+
+[plugin builtin:vite-reporter] 
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rolldownOptions.output.codeSplitting to improve chunking: https://rolldown.rs/reference/OutputOptions.codeSplitting
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 276ms

@@ -1,0 +1,27 @@
+{
+  "date": "2026-09-16",
+  "method": "Chrome DevTools MCP; UI forms/buttons and read-only state verification",
+  "workflows": {
+    "runAcceptCorrectAccept": "passed",
+    "revisionOneSnapshotUnchanged": true,
+    "replacementTaskCount": 5,
+    "oldTasksRemainDone": true,
+    "createBoardAndDependency": "passed",
+    "cycleRejectedInDialog": "passed",
+    "newBoardRemainsSelectedAfterCreation": "passed"
+  },
+  "accessibility": [
+    { "viewport": [1540, 875], "violations": 0, "passes": 45 },
+    { "viewport": [390, 844], "violations": 0, "passes": 45 }
+  ],
+  "productionSmoke": {
+    "viewport": [1540, 980],
+    "nodes": 5,
+    "horizontalOverflow": false,
+    "consoleErrors": 0,
+    "consoleWarnings": 0
+  },
+  "playwrightRunner": "blocked by macOS shell Chromium bootstrap permission",
+  "liveModelCalls": false,
+  "mobileDeviceTests": false
+}
