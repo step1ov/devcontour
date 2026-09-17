@@ -59,6 +59,14 @@ test('Bounded briefing pages preserve multilingual contracts, reject stale and f
     assert.ok(!briefing.includes(run.token));
     assert.ok(!briefing.includes('secret-owner'));
     assert.throws(() => api.execute('project_overview', { repositoryId: 'absent' }), /репозиторий/);
+    assert.throws(
+      () =>
+        api.execute('project_overview', {
+          repositoryId: 'main',
+          cursor: Buffer.from('null').toString('base64url'),
+        }),
+      /Некорректный cursor/,
+    );
   } finally {
     f.cleanup();
   }
@@ -217,6 +225,59 @@ test('Checkpoint survives a real Git clone; unrelated identity and forged IDs ar
       api.execute('checkpoint_changes', { repositoryId: 'main', checkpointId: '../../state' }),
     );
     rmSync(join(clone, '.devcontour/checkpoints'), { recursive: true });
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Independent first checkpoints reuse Git identity and merge across clones without conflict', async () => {
+  const f = fixture();
+  try {
+    const original = join(f.root, 'shared');
+    mkdirSync(join(original, '.devcontour'), { recursive: true });
+    writeFileSync(
+      join(original, '.devcontour/identity.json'),
+      JSON.stringify({
+        version: 1,
+        id: '11111111-1111-4111-8111-111111111111',
+        repositoryId: 'main',
+      }),
+    );
+    await git(original, 'init', '-b', 'main');
+    const identity = async (path: string) => {
+      await git(path, 'config', 'user.email', 'fixture@example.invalid');
+      await git(path, 'config', 'user.name', 'Fixture');
+    };
+    await identity(original);
+    await git(original, 'add', '.');
+    await git(original, 'commit', '-m', 'Shared identity');
+    const clone = join(f.root, 'peer');
+    await git(f.root, 'clone', original, clone);
+    await identity(clone);
+    const api = new AgentContext(f.h),
+      ids: string[] = [];
+    for (const repo of [original, clone]) {
+      f.h.config.repository = repo;
+      const overview = api.execute('project_overview', { repositoryId: 'main' }) as any;
+      const cp = api.execute('checkpoint_save', {
+        repositoryId: 'main',
+        expectedRevision: overview.revision,
+        summary: 'Independent session',
+        nextStep: 'Read the current state',
+      }) as any;
+      ids.push(cp.checkpointId);
+      await git(repo, 'add', '.');
+      await git(repo, 'commit', '-m', 'Session checkpoint');
+    }
+    assert.notEqual(ids[0], ids[1]);
+    await git(clone, 'fetch', 'origin');
+    await git(clone, 'merge', '--no-edit', 'origin/main');
+    for (const checkpointId of ids)
+      assert.equal(
+        (api.execute('checkpoint_changes', { repositoryId: 'main', checkpointId }) as any).total,
+        0,
+      );
+    assert.equal(readdirSync(join(clone, '.devcontour/checkpoints')).length, 2);
   } finally {
     f.cleanup();
   }
