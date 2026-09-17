@@ -1,0 +1,24 @@
+(node:72793) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Bounded briefing pages preserve multilingual contracts, reject stale and foreign cursors, omit runtime secrets (52.600625ms)
+✔ Progress explains dependency, pause, assignment and attempt constraints without claiming work (7.532625ms)
+✔ Checkpoints stay with their component and cannot bypass completion or write through symlinks (44.466083ms)
+✔ Checkpoint survives a real Git clone; unrelated identity and forged IDs are rejected (901.730625ms)
+✔ Independent first checkpoints reuse Git identity and merge across clones without conflict (1253.689375ms)
+(node:72794) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Loopback API rejects cross-origin writes, validates input and survives missing assets (73.795875ms)
+✔ Two workspace servers use distinct ports and report their own state paths (15.205083ms)
+(node:72795) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Read-only agent queries do not rebuild journals; mutations still update projections (10.95475ms)
+✔ Real MCP clients negotiate tools, keep independent workspaces and enforce draft/stale-edit rules (594.761875ms)
+✔ Agent surface cannot provide evidence/approval; cyclic plans fail atomically and inputs are bounded (5.391292ms)
+ℹ tests 10
+ℹ suites 0
+ℹ pass 10
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2522.248375

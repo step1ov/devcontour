@@ -29,7 +29,12 @@ import {
 } from 'lucide-react';
 import type { HarnessState, Task, Config, AuditEvent, Board, Role } from '../core/model.ts';
 import { levels } from '../core/graph.ts';
-type UITask = Task & { specDigest: string; blockers: string[] };
+import type { taskProgress } from '../application/context.ts';
+type UITask = Task & {
+  specDigest: string;
+  blockers: string[];
+  progress?: ReturnType<typeof taskProgress>;
+};
 type Snapshot = Omit<HarnessState, 'tasks'> & {
   tasks: UITask[];
   events: AuditEvent[];
@@ -57,6 +62,17 @@ const roleNames: Record<Role, string> = {
   backend: 'Backend',
   frontend: 'Frontend',
   qa: 'Тестирование',
+};
+const waitingReasons: Record<string, string> = {
+  plan_review_required: 'План ещё не утверждён. Требуется ревью.',
+  dependencies_incomplete: 'Сначала должны завершиться связанные задачи.',
+  queue_paused: 'Очередь на паузе. Выдача задач возобновится после запуска.',
+  assigned_to_another_member: 'Задача назначена другому участнику команды.',
+  workers_busy: 'Все исполнители заняты. Задача ждёт свободного места.',
+  workspace_operation_active: 'Идёт общая проверка или проверка публикации.',
+  inactive_revision: 'Задача относится к неактивной ревизии.',
+  failure_requires_diagnosis: 'Разберите причину сбоя перед повторной попыткой.',
+  attempts_exhausted: 'Лимит попыток исчерпан. Нужна диагностика и пересмотр решения.',
 };
 const statusNames: Record<string, string> = {
   draft: 'Черновик',
@@ -339,6 +355,16 @@ export function App() {
   const blocked = tasks.filter((t) => status(t) === 'blocked').length;
   const ready = tasks.filter((t) => data.ready.includes(t.id)).length;
   const latestRun = task ? data.runs.filter((r) => r.taskId === task.id).at(-1) : undefined;
+  const taskRepository = data.config.repositories.find((r) => r.id === task?.repositoryId);
+  const taskBinding = task
+    ? (taskRepository?.roles?.[task.role] ?? data.config.roles[task.role])
+    : undefined;
+  const plannedReviewer = taskBinding?.reviewer ?? taskRepository?.reviewer ?? data.config.reviewer;
+  const displayedRun = task && !['draft', 'ready'].includes(task.status) ? latestRun : undefined;
+  const displayedWriter = displayedRun ?? taskBinding;
+  const displayedReviewer = displayedRun
+    ? { runtime: displayedRun.reviewer, model: displayedRun.reviewerModel }
+    : plannedReviewer;
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -1017,6 +1043,19 @@ export function App() {
                       </div>
                     )}
                     <p className="task-description">{task.description}</p>
+                    {!!task.progress?.reasons.length && (
+                      <section className="task-next-step" aria-label="Что нужно для продолжения">
+                        <h3>Что нужно для продолжения</h3>
+                        <ul>
+                          {task.progress.reasons.map((reason) => (
+                            <li key={reason}>{waitingReasons[reason] ?? reason}</li>
+                          ))}
+                        </ul>
+                      </section>
+                    )}
+                    {task.progress?.eligible && (
+                      <p className="task-next-step">Задача доступна для выдачи исполнителю.</p>
+                    )}
                     <dl>
                       <div>
                         <dt>Роль</dt>
@@ -1025,17 +1064,15 @@ export function App() {
                       <div>
                         <dt>Исполнитель</dt>
                         <dd>
-                          {data.config.roles[task.role].runtime}
-                          {data.config.roles[task.role].model &&
-                            ` / ${data.config.roles[task.role].model}`}
+                          {displayedWriter?.runtime}
+                          {displayedWriter?.model && ` / ${displayedWriter.model}`}
                         </dd>
                       </div>
                       <div>
                         <dt>Ревью</dt>
                         <dd>
-                          {latestRun?.reviewer ??
-                            data.config.roles[task.role].reviewer?.runtime ??
-                            data.config.reviewer.runtime}
+                          {displayedReviewer.runtime}
+                          {displayedReviewer.model && ` / ${displayedReviewer.model}`}
                         </dd>
                       </div>
                       <div>

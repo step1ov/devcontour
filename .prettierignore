@@ -1,5 +1,7 @@
 node_modules
 dist
+lib
+skills/devcontour/references/agent-api.json
 .harness
 playwright-report
 test-results

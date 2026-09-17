@@ -77,7 +77,7 @@ npx playwright install chromium
 npm run check
 ```
 
-`check` включает проверку цветовых токенов, TypeScript/Vite build, unit/Git integration tests и Playwright E2E. Форматирование проверяется отдельно: `npm run format:check`. Доступность тестовых инструментов обязательна: отсутствие браузера не считается PASS.
+`check` включает проверку цветовых токенов, TypeScript/Node/Vite build, unit/Git integration tests, соответствие skill схемам, установку и проверку npm-пакета, Playwright E2E. Форматирование проверяется отдельно: `npm run format:check`. Доступность тестовых инструментов обязательна: отсутствие браузера не считается PASS.
 
 [Руководство разработчика](docs/development.md) объясняет структуру кода, выбор тестов и добавление возможностей. [Архитектура](docs/architecture.md) описывает инварианты и восстановление после сбоев. Исторические [отчёты проверок](docs/index.md#отчёты-проверок) отделяют выполненные fixture-проверки от непроверенных live-интеграций.
 

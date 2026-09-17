@@ -486,6 +486,24 @@ textarea::placeholder {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.task-next-step {
+  padding: var(--space-3);
+  margin: var(--space-4) 0;
+  background: var(--surface-subtle);
+  border-radius: var(--radius-md);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+.task-next-step h3 {
+  margin-top: 0;
+}
+.task-next-step ul {
+  padding-left: var(--space-4);
+  margin-bottom: 0;
+}
+.task-next-step li + li {
+  margin-top: var(--space-2);
+}
 dl {
   margin: var(--space-5) 0;
 }

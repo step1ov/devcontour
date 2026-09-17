@@ -13,6 +13,12 @@ export default defineConfig({
     ...devices['Desktop Chrome'],
   },
   webServer: {
+    env: {
+      GIT_AUTHOR_NAME: 'DevContour fixture',
+      GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
+      GIT_COMMITTER_NAME: 'DevContour fixture',
+      GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
+    },
     command: `npm run devcontour -- demo --data .harness/e2e-${Date.now()} --port 4399`,
     url: 'http://127.0.0.1:4399/api/state',
     reuseExistingServer: false,
