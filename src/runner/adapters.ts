@@ -1,3 +1,4 @@
+import { evaluationResult } from '../core/evaluation.ts';
 import type { ToolProfile } from '../core/integrations.ts';
 import { codexTools, claudeMcp, claudeRules } from './tools.ts';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
@@ -73,7 +74,7 @@ const reviewSchema = {
   required: ['approved', 'summary', 'findings', 'discoveries'],
 };
 export interface AgentRequest {
-  purpose?: 'plan';
+  purpose?: 'plan' | 'evaluation';
   toolProfile?: ToolProfile;
   execution?: { env: NodeJS.ProcessEnv; redact: (text: string) => string };
   mcpConfigPath?: string;
@@ -102,7 +103,14 @@ export function cliArguments(
   schemaPath: string,
   resultPath: string,
 ): string[] {
-  const schema = r.purpose === 'plan' ? planSchema : r.review ? reviewSchema : implementationSchema;
+  const schema =
+    r.purpose === 'evaluation'
+      ? z.toJSONSchema(evaluationResult, { target: 'draft-7' })
+      : r.purpose === 'plan'
+        ? planSchema
+        : r.review
+          ? reviewSchema
+          : implementationSchema;
   if (runtime === 'codex')
     return [
       'codex',
@@ -160,7 +168,13 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
       await writeFile(
         schemaPath,
         JSON.stringify(
-          r.purpose === 'plan' ? planSchema : r.review ? reviewSchema : implementationSchema,
+          r.purpose === 'evaluation'
+            ? z.toJSONSchema(evaluationResult, { target: 'draft-7' })
+            : r.purpose === 'plan'
+              ? planSchema
+              : r.review
+                ? reviewSchema
+                : implementationSchema,
         ),
       );
       if (name === 'claude' && r.toolProfile) {
@@ -202,9 +216,14 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
         if (output.is_error) throw new Error(`Claude: ${output.result ?? 'ошибка runtime'}`);
         data = output.structured_output;
       }
-      (r.purpose === 'plan' ? planResult : r.review ? reviewResult : implementationResult).parse(
-        data,
-      );
+      (r.purpose === 'evaluation'
+        ? evaluationResult
+        : r.purpose === 'plan'
+          ? planResult
+          : r.review
+            ? reviewResult
+            : implementationResult
+      ).parse(data);
       return { data, log, command: argv };
     },
   };
