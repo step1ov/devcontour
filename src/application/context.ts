@@ -19,6 +19,7 @@ import {
 } from '../core/model.ts';
 import { repositories, repository, roleBinding, reviewerBinding } from '../core/repositories.ts';
 import { blockers } from '../core/graph.ts';
+import { identitySchema } from '../core/sync-model.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 const scope = { repositoryId: id.optional() };
@@ -178,7 +179,14 @@ function page<T>(
   if (input.cursor) {
     let cursor;
     try {
-      cursor = JSON.parse(Buffer.from(input.cursor, 'base64url').toString());
+      cursor = z
+        .object({
+          revision: z.string(),
+          binding: z.string(),
+          offset: z.number().int().nonnegative(),
+        })
+        .strict()
+        .parse(JSON.parse(Buffer.from(input.cursor, 'base64url').toString()));
     } catch {
       throw new DomainError('Некорректный cursor', 400);
     }
@@ -369,10 +377,21 @@ export class AgentContext {
       if (input.expectedRevision !== snap.revision)
         throw new DomainError('Контекст изменился; обновите обзор перед checkpoint');
       mkdirSync(directory, { recursive: true });
-      if (!existsSync(identityPath))
-        writeFileSync(identityPath, JSON.stringify({ version: 1, id: randomUUID() }) + '\n', {
+      if (!existsSync(identityPath)) {
+        const gitIdentityPath = safePath(root, '.devcontour/identity.json');
+        let identity: string = randomUUID();
+        if (existsSync(gitIdentityPath)) {
+          if (lstatSync(gitIdentityPath).size > 1000)
+            throw new DomainError('Некорректная Git identity', 400);
+          const shared = identitySchema.parse(JSON.parse(readFileSync(gitIdentityPath, 'utf8')));
+          if (shared.repositoryId !== input.repositoryId)
+            throw new DomainError('Git identity принадлежит другому компоненту');
+          identity = shared.id;
+        }
+        writeFileSync(identityPath, JSON.stringify({ version: 1, id: identity }) + '\n', {
           flag: 'wx',
         });
+      }
       const identity = this.identity(identityPath);
       const checkpoint = checkpointSchema.parse({
         version: 1,
