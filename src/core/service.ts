@@ -1,4 +1,5 @@
 import { validateTaskContext, validateWorkflow } from './workflow.ts';
+import { entityId } from './ids.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { repository, repositories, roleBinding, reviewerBinding } from './repositories.ts';
 import { Store } from './store.ts';
@@ -113,7 +114,7 @@ export class Harness {
       const ids = new Map<string, string>();
       for (const t of plan.tasks) {
         if (ids.has(t.key)) throw new DomainError('Ключи задач должны быть уникальны', 400);
-        ids.set(t.key, `T${++s.sequence}`);
+        ids.set(t.key, entityId(s, 'T'));
       }
       const tasks = plan.tasks.map((item) => {
         const parsed = taskInput.parse({
@@ -129,6 +130,7 @@ export class Harness {
         validateTaskContext(this.config, parsed);
         return {
           ...parsed,
+          assignee: parsed.assignee ?? s.team?.member,
           id: ids.get(item.key)!,
           status: 'draft' as const,
           attempt: 0,
@@ -139,7 +141,7 @@ export class Harness {
       s.tasks.push(...tasks);
       assertDag(s.tasks);
       const b = {
-        id: `B${++s.sequence}`,
+        id: entityId(s, 'B'),
         title: plan.title,
         description: plan.description,
         revisions: [
@@ -162,7 +164,7 @@ export class Harness {
       throw new DomainError('Название: от 3 до 180 символов', 400);
     return this.store.change('board.created', (s) => {
       const b = {
-        id: `B${++s.sequence}`,
+        id: entityId(s, 'B'),
         repositoryId,
         title: title.trim(),
         description,
@@ -191,7 +193,8 @@ export class Harness {
         throw new DomainError('Локальная доска принимает только задачи своего компонента');
       const t: Task = {
         ...parsed,
-        id: `T${++s.sequence}`,
+        assignee: parsed.assignee ?? s.team?.member,
+        id: entityId(s, 'T'),
         status: 'draft',
         attempt: 0,
         createdAt: now(),
@@ -237,7 +240,7 @@ export class Harness {
       throw new DomainError('Укажите название и содержимое контракта (до 60 000 символов)', 400);
     return this.store.change('contract.approved', (s) => {
       const c = {
-        id: `C${++s.sequence}`,
+        id: entityId(s, 'C'),
         repositoryId,
         title,
         content,
@@ -332,11 +335,12 @@ export class Harness {
         );
       const currentIds = new Map(s.tasks.map((t) => [t.id, latestTaskId(s.tasks, t.id)]));
       const currentRoots = roots.map((id) => currentIds.get(id)!);
-      const map = new Map(impacted.map((id) => [id, `T${++s.sequence}`]));
+      const map = new Map(impacted.map((id) => [id, entityId(s, 'T')]));
       for (const id of impacted) {
         const original = task(s, id);
         s.tasks.push({
           ...original,
+          sharedCompletion: undefined,
           id: map.get(id)!,
           description:
             original.description +
@@ -405,6 +409,15 @@ export class Harness {
       return { paused: value };
     });
   }
+  assign(id: string, member: string) {
+    const assignee = taskInput.shape.assignee.unwrap().parse(member);
+    return this.store.change('task.assigned', (s) => {
+      const t = task(s, id);
+      if (t.activeRunId) throw new DomainError('Дождитесь завершения активной попытки');
+      t.assignee = assignee;
+      return { taskId: id, assignee };
+    });
+  }
   claim(owner: string): Run | undefined {
     return this.store.change('run.claimed', (s) => {
       if (
@@ -418,12 +431,15 @@ export class Harness {
       )
         return;
       if (s.runs.filter((r) => r.status === 'active').length >= this.config.concurrency) return;
-      const t = readyTasks(s).find((t) => t.attempt < this.config.maxAttempts);
+      const t = readyTasks(s).find(
+        (t) => t.attempt < this.config.maxAttempts && (!s.team || t.assignee === s.team.member),
+      );
       if (!t) return;
       validateTaskContext(this.config, t);
       if (t.approvedDigest !== specDigest(t))
         throw new DomainError('Спецификация изменилась после утверждения');
       const run: Run = {
+        requiredGates: repository(this.config, t.repositoryId).gates.map((g) => g.id),
         id: randomUUID(),
         taskId: t.id,
         repositoryId: t.repositoryId,
@@ -561,7 +577,7 @@ export class Harness {
         );
         if (!inbox) {
           inbox = {
-            id: `B${++s.sequence}`,
+            id: entityId(s, 'B'),
             title: 'Находки агентов',
             description:
               'Непроверенные дефекты и техдолг. Ведущий агент проверяет воспроизведение и приоритет до утверждения.',
@@ -596,7 +612,8 @@ export class Harness {
               verification: 'proposed',
             },
           }),
-          id: `T${++s.sequence}`,
+          id: entityId(s, 'T'),
+          assignee: s.team?.member,
           status: 'draft',
           attempt: 0,
           createdAt: now(),

@@ -3,6 +3,7 @@ import { runSteps, withEnvironment } from './environment.ts';
 import { toolProfileFor, agentEnvironment } from './tools.ts';
 import { orderedGates, withinPaths, validateWorkflow } from '../core/workflow.ts';
 import { taskContext } from './context.ts';
+import { assertTeamCheckout } from './git-sync.ts';
 import { withResources } from './resources.ts';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -101,6 +102,7 @@ export class Scheduler {
         if (r?.status !== 'active') job.controller.abort();
       }
       while (this.jobs.size < this.h.config.concurrency) {
+        if (!this.h.store.read().paused) assertTeamCheckout(this.h);
         const run = this.h.claim(this.owner);
         if (!run) break;
         const controller = new AbortController();
@@ -380,6 +382,7 @@ export class Scheduler {
                   ...repo.protectedPaths,
                   repo.configFile ?? 'harness.component.json',
                   '.harness/',
+                  '.devcontour/',
                   ...(repo.generatedPaths ?? []),
                   ...this.h.config.contextPacks
                     .filter((pack) => pack.repositoryId === repo.id)

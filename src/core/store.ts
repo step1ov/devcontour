@@ -179,4 +179,25 @@ export class Store {
   close() {
     this.db.close();
   }
+  private syncSchema(owner?: string) {
+    return owner && this.components ? this.components.schema(owner) : 'main';
+  }
+  syncBaseline(owner?: string): unknown {
+    const schema = this.syncSchema(owner);
+    this.db.exec(
+      `CREATE TABLE IF NOT EXISTS ${schema}.git_sync (owner TEXT PRIMARY KEY, data TEXT NOT NULL)`,
+    );
+    const row = this.db
+      .prepare(`SELECT data FROM ${schema}.git_sync WHERE owner=?`)
+      .get(owner ?? '@workspace') as { data: string } | undefined;
+    return row ? JSON.parse(row.data) : undefined;
+  }
+  saveSyncBaseline(owner: string | undefined, value: unknown) {
+    if (!this.transaction) throw new Error('Sync baseline requires a Store transaction');
+    const schema = this.syncSchema(owner);
+    this.syncBaseline(owner);
+    this.db
+      .prepare(`INSERT OR REPLACE INTO ${schema}.git_sync(owner,data) VALUES(?,?)`)
+      .run(owner ?? '@workspace', JSON.stringify(value));
+  }
 }

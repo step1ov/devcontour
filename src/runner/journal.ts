@@ -161,7 +161,7 @@ export function attachJournal(h: Harness) {
           renameSync(temp, destination);
         }
       for (const c of state.changeSets) {
-        if (!/^CHG-\d+$/.test(c.id)) throw new Error('Некорректный ID журнала');
+        if (!/^CHG-[A-Za-z0-9_-]{1,76}$/.test(c.id)) throw new Error('Некорректный ID журнала');
         const destination = join(dir, c.id + '.md');
         const temporary = destination + '.' + randomUUID() + '.tmp';
         writeFileSync(temporary, renderJournal(state, c.id, events), { flag: 'wx' });
