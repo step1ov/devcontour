@@ -1,3 +1,4 @@
+import { SignalInbox, signalInput } from '../core/signals.ts';
 import { LeadWorkflow, workflowInput } from '../core/lead-workflow.ts';
 import { workflowMetrics } from './metrics.ts';
 import {
@@ -17,6 +18,8 @@ import { attachJournal } from '../runner/journal.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 export const agentInputs = {
+  signal_ingest: signalInput,
+  signal_status: z.strictObject({ repositoryId: id }),
   workflow_start: workflowInput,
   workflow_status: z.strictObject({ repositoryId: id.optional() }),
   workflow_retry: z.strictObject({
@@ -60,6 +63,10 @@ export const agentRequest = z
   .object({ operation: z.enum(agentOperations), input: z.unknown().optional() })
   .strict();
 export const descriptions: Record<AgentOperation, string> = {
+  signal_ingest:
+    'Record a normalized external observation in its component, deduplicate it and propose draft work or a correction. A resolved signal never supplies test evidence or accepts work.',
+  signal_status:
+    'Read external signal receipts in one component. No remote requests or model calls.',
   workflow_start:
     'Enqueue idempotent board review, execution and acceptance or ChangeSet verification. A running server may invoke models. Operator policy remains enforced.',
   workflow_status:
@@ -110,6 +117,7 @@ export const readOnly = (name: AgentOperation) =>
     'requirements_report',
     'workflow_metrics',
     'workflow_status',
+    'signal_status',
   ].includes(name);
 export function capabilities() {
   const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
@@ -157,6 +165,12 @@ export class AgentService {
     const h = this.h;
     if (!readOnly(operation) && !h.store.onCommit) attachJournal(h);
     switch (operation) {
+      case 'signal_ingest':
+        return new SignalInbox(h).ingest(input);
+      case 'signal_status':
+        return {
+          events: new SignalInbox(h).list(agentInputs.signal_status.parse(input).repositoryId),
+        };
       case 'workflow_start':
         return this.workflowView(new LeadWorkflow(h).start(input));
       case 'workflow_status':

@@ -354,6 +354,9 @@ export interface ChangeSet {
 }
 
 export const configSchema = z.object({
+  signalPolicy: z
+    .object({ maxActionsPerHour: z.number().int().min(1).max(100).default(10) })
+    .default({ maxActionsPerHour: 10 }),
   version: z.literal(1),
   name: z.string().min(1),
   environment: environmentSchema.optional(),
