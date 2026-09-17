@@ -1,5 +1,7 @@
 node_modules/
 dist/
+lib/
+*.tgz
 .harness/
 playwright-report/
 test-results/

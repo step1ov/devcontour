@@ -3,6 +3,20 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "devcontour": "lib/cli.js"
+  },
+  "files": [
+    "lib",
+    "dist",
+    "packs",
+    "templates",
+    "skills",
+    "docs",
+    "design",
+    "START.md",
+    "AGENTS.md"
+  ],
   "engines": {
     "node": ">=24.3.0"
   },
@@ -12,7 +26,9 @@
     "start": "node --import tsx src/cli.ts serve",
     "demo": "node --import tsx src/cli.ts demo",
     "typecheck": "tsc --noEmit",
-    "build": "npm run typecheck && vite build",
+    "build": "npm run typecheck && tsc -p tsconfig.build.json && vite build",
+    "prepack": "npm run build",
+    "test:package": "npm run build && node scripts/smoke-package.mjs",
     "test": "node --import tsx --test tests/*.test.ts",
     "test:e2e": "playwright test",
     "lint": "node scripts/check-tokens.mjs",
