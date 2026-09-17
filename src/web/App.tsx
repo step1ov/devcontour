@@ -82,6 +82,10 @@ const stamp = (value?: string) =>
 function status(t: UITask) {
   return t.status === 'ready' && t.blockers.length ? 'blocked' : t.status;
 }
+const taskStatusName = (t: UITask) =>
+  t.status === 'done' && t.sharedCompletion ? 'Принята из Git' : statusNames[status(t)];
+const shortId = (id: string) =>
+  /^[A-Z]+-[a-f0-9-]{36}$/.test(id) ? id.slice(0, id.indexOf('-') + 9) : id;
 function Badge({ value, children }: { value: string; children?: ReactNode }) {
   return <span className={`badge badge-${value}`}>{children ?? statusNames[value] ?? value}</span>;
 }
@@ -91,13 +95,13 @@ function TaskNode({ data }: NodeProps) {
     <div className={`task-node node-${status(t)}`}>
       <Handle type="target" position={Position.Left} />
       <div className="node-meta">
-        <span>{t.id}</span>
+        <span title={t.id}>{shortId(t.id)}</span>
         <span>
           {t.repositoryId} · {roleNames[t.role]}
         </span>
       </div>
       <strong>{t.title}</strong>
-      <Badge value={status(t)} />
+      <Badge value={status(t)}>{taskStatusName(t)}</Badge>
       <Handle type="source" position={Position.Right} />
     </div>
   );
@@ -306,7 +310,7 @@ export function App() {
           position: { x: level * dx, y: row * dy },
           data: { task: t },
           selected: t.id === selected,
-          ariaLabel: `${t.id}: ${t.title}, ${statusNames[status(t)]}`,
+          ariaLabel: `${t.id}: ${t.title}, ${taskStatusName(t)}`,
         };
       }),
       edges: filtered.flatMap((t) =>
@@ -523,7 +527,7 @@ export function App() {
                 {done}
                 <span> / {tasks.length}</span>
               </strong>
-              <span>проверено локально</span>
+              <span>результатов принято</span>
             </div>
             <div>
               <Play />
@@ -654,7 +658,9 @@ export function App() {
                         key={t.id}
                         onClick={() => setSelected(t.id)}
                       >
-                        <span className="task-id">{t.id}</span>
+                        <span className="task-id" title={t.id}>
+                          {shortId(t.id)}
+                        </span>
                         <div>
                           <strong>{t.title}</strong>
                           <small>
@@ -662,7 +668,7 @@ export function App() {
                             {t.dependsOn.length ? ` · после ${t.dependsOn.join(', ')}` : ''}
                           </small>
                         </div>
-                        <Badge value={status(t)} />
+                        <Badge value={status(t)}>{taskStatusName(t)}</Badge>
                         <ChevronRight />
                       </button>
                     ))
@@ -975,12 +981,41 @@ export function App() {
                   <>
                     <div className="inspector-top">
                       <span>{task.id}</span>
-                      <Badge value={status(task)} />
+                      <Badge value={status(task)}>{taskStatusName(task)}</Badge>
                     </div>
                     <h2>{task.title}</h2>
                     <p>
                       Репозиторий: <code>{task.repositoryId}</code>
                     </p>
+                    {task.assignee && (
+                      <p>
+                        Ответственный: <strong>{task.assignee}</strong>
+                      </p>
+                    )}
+                    {task.sharedCompletion && (
+                      <div>
+                        <p>
+                          Результат принят из Git: <code>{task.resultSha?.slice(0, 12)}</code>.
+                          Проверки выполнены участником команды; локальная попытка не запускалась.
+                        </p>
+                        <details>
+                          <summary>Свидетельство участника</summary>
+                          <p>
+                            {task.sharedCompletion.receipt.runtime} →{' '}
+                            {task.sharedCompletion.receipt.reviewer}; Git{' '}
+                            <code>{task.sharedCompletion.sourceCommit.slice(0, 12)}</code>
+                          </p>
+                          <ul>
+                            {task.sharedCompletion.receipt.checks.map((check, index) => (
+                              <li key={index}>
+                                {check.phase} / {check.gate}: {check.passed ? 'PASS' : 'FAIL'} ·{' '}
+                                <code>{check.sha.slice(0, 12)}</code>
+                              </li>
+                            ))}
+                          </ul>
+                        </details>
+                      </div>
+                    )}
                     <p className="task-description">{task.description}</p>
                     <dl>
                       <div>
@@ -1106,7 +1141,9 @@ export function App() {
                       </div>
                     ) : (
                       <p className="muted">
-                        Появятся после запуска. Отсутствие отчёта не считается успехом.
+                        {task.sharedCompletion
+                          ? 'Свидетельство участника доступно выше. Логи хранятся в исходном контуре выполнения.'
+                          : 'Появятся после запуска. Отсутствие отчёта не считается успехом.'}
                       </p>
                     )}
                     {task.resultSha && (

@@ -65,7 +65,7 @@ export class ComponentStorage {
       return { id: repo.id, path, schema };
     });
   }
-  private schema(id: string) {
+  schema(id: string) {
     const location = this.locations.find((c) => c.id === id);
     if (!location) throw new Error('Неизвестный компонент хранилища: ' + id);
     return location.schema;
@@ -85,6 +85,7 @@ export class ComponentStorage {
     if (value.repositoryId && 'content' in value && 'approvedAt' in value)
       return value.repositoryId;
     if (value.revisions && value.id) {
+      if (value.scope === 'workspace') return;
       if (value.repositoryId) return value.repositoryId;
       const tasks = value.revisions
         .flatMap((r: any) => r.taskIds)

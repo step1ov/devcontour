@@ -71,6 +71,7 @@ export function projectConfig(
       'harness.config.json',
       'harness.component.json',
       '.harness/',
+      '.devcontour/',
       'package.json',
       'package-lock.json',
     ],
@@ -177,12 +178,15 @@ export async function setupProject(options: {
     join(repository, '.gitignore'),
     '.harness/\n.reports/\nnode_modules/\ndist/\n.env*\n!.env.example\n',
   );
+  if (workspaceRoot)
+    files.set(join(workspaceRoot, '.gitignore'), '.harness/\n.env*\n!.env.example\n');
   files.set(
     join(repository, 'docs', 'harness-start.md'),
     (await readFile(join(harnessRoot, 'START.md'), 'utf8'))
       .replaceAll('(docs/workspaces.md)', '(harness-workspaces.md)')
       .replaceAll('(docs/engineering-context.md)', '(harness-engineering.md)')
-      .replaceAll('(docs/project-integration.md)', '(harness-integration.md)'),
+      .replaceAll('(docs/project-integration.md)', '(harness-integration.md)')
+      .replaceAll('(docs/team-sync.md)', '(harness-team-sync.md)'),
   );
   files.set(
     join(repository, 'docs', 'harness-workspaces.md'),
@@ -198,6 +202,10 @@ export async function setupProject(options: {
   files.set(
     join(repository, 'docs', 'harness-integration.md'),
     await readFile(join(harnessRoot, 'docs', 'project-integration.md'), 'utf8'),
+  );
+  files.set(
+    join(repository, 'docs', 'harness-team-sync.md'),
+    await readFile(join(harnessRoot, 'docs', 'team-sync.md'), 'utf8'),
   );
   files.set(join(data, 'packs.lock.json'), JSON.stringify(profileLock(selected), null, 2) + '\n');
   const profilePath = join(data, 'profiles', selected.id + '.json');

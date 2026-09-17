@@ -1,6 +1,7 @@
 import { delivered } from './delivery.ts';
 import { componentImpact } from './workflow.ts';
 import { randomUUID } from 'node:crypto';
+import { entityId } from './ids.ts';
 import { z } from 'zod';
 import { Harness, digest, specDigest } from './service.ts';
 import { repositories } from './repositories.ts';
@@ -77,7 +78,7 @@ export class Workspace {
         throw new DomainError('supersedes должен ссылаться на принятый ChangeSet');
       const c: ChangeSet = {
         ...parsed,
-        id: `CHG-${++s.sequence}`,
+        id: entityId(s, 'CHG'),
         createdAt: new Date().toISOString(),
         verifications: [],
       };

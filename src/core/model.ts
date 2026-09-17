@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { CompletionReceipt } from './sync-model.ts';
 import {
   environmentSchema,
   lifecycleSchema,
@@ -73,6 +74,10 @@ export const resourceSchema = z.object({
 export type Resource = z.infer<typeof resourceSchema>;
 
 export const taskInput = z.object({
+  assignee: z
+    .string()
+    .regex(/^[A-Za-z0-9_.@-]{1,80}$/)
+    .optional(),
   repositoryId: id.default('main'),
   scope: z.enum(['component', 'workspace']).default('component'),
   relatedRepositories: z.array(id).optional(),
@@ -97,6 +102,7 @@ export const taskInput = z.object({
 });
 export type TaskInput = z.infer<typeof taskInput>;
 export interface Task extends TaskInput {
+  sharedCompletion?: { receipt: CompletionReceipt; sourceCommit: string };
   id: string;
   status: TaskStatus;
   supersedes?: string;
@@ -127,6 +133,7 @@ export interface Revision {
   snapshot?: { tasks: Task[]; sha: string; digest: string; repositories?: Record<string, string> };
 }
 export interface Board {
+  scope?: 'component' | 'workspace';
   repositoryId?: string;
   id: string;
   title: string;
@@ -158,6 +165,7 @@ export interface Evidence {
   summary: string;
 }
 export interface Run {
+  requiredGates?: string[];
   id: string;
   taskId: string;
   repositoryId?: string;
@@ -191,6 +199,7 @@ export interface Run {
   dependencies?: DependencySnapshot[];
 }
 export interface HarnessState {
+  team?: { member: string };
   version: 1;
   boards: Board[];
   tasks: Task[];
