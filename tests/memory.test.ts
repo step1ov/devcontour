@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { git } from '../src/runner/process.ts';
 import { ProjectMemory } from '../src/application/memory.ts';
-import { Harness } from '../src/core/service.ts';
+import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { config } from './helpers.ts';
 import { AgentContext } from '../src/application/context.ts';
@@ -21,7 +21,7 @@ async function fixture() {
   await git(repo, 'add', '.');
   await git(repo, 'commit', '-m', 'Initial source');
   const store = new Store(join(root, 'state.sqlite')),
-    h = new Harness(store, config({ repository: repo }));
+    h = new DevContour(store, config({ repository: repo }));
   return {
     root,
     repo,
@@ -147,7 +147,7 @@ test('Memory survives independent Git clones and merges; source edits and owner 
       const store = new Store(join(f.root, name + '.sqlite'));
       stores.push(store);
       paths.push(path);
-      memories.push(new ProjectMemory(new Harness(store, config({ repository: path }))));
+      memories.push(new ProjectMemory(new DevContour(store, config({ repository: path }))));
     }
     const alice = memories[0].retain({
       repositoryId: 'main',

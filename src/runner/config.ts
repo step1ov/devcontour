@@ -116,7 +116,7 @@ export function scopedConfig(config: Config) {
   if (config.storage !== 'component') return config;
   const refs = repositories(config).map((repo) => {
     const { id, path, dependsOn, configFile, ...settings } = repo;
-    const file = configFile ?? 'harness.component.json';
+    const file = configFile ?? 'devcontour.component.json';
     const destination = resolve(path, file);
     if (
       !destination.startsWith(realpathSync(path) + sep) ||

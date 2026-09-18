@@ -11,7 +11,7 @@ import { withResources } from './resources.ts';
 import { agentEnvironment, toolProfileFor } from './tools.ts';
 import { taskContext } from './context.ts';
 import { forgeAdapter } from './forge.ts';
-import { Harness } from '../core/service.ts';
+import { DevContour } from '../core/service.ts';
 import { Store } from '../core/store.ts';
 import { z } from 'zod';
 
@@ -88,7 +88,7 @@ export async function doctor(config: Config, root: string, probe = false) {
       await git(repo.path, 'check-ref-format', '--branch', repo.targetBranch);
       const common = resolve(repo.path, await git(repo.path, 'rev-parse', '--git-common-dir'));
       try {
-        const owner = JSON.parse(await readFile(join(common, 'harness-owner.json'), 'utf8'));
+        const owner = JSON.parse(await readFile(join(common, 'devcontour-owner.json'), 'utf8'));
         if (
           owner.owner !== (await realpath(root)) ||
           owner.repositoryId !== repo.id ||
@@ -129,9 +129,9 @@ export async function doctor(config: Config, root: string, probe = false) {
         if (probe) {
           const store = new Store(':memory:');
           try {
-            await forgeAdapter(connection, new Harness(store, config)).observe(
+            await forgeAdapter(connection, new DevContour(store, config)).observe(
               repo,
-              'harness-doctor-nonexistent',
+              'devcontour-doctor-nonexistent',
               AbortSignal.timeout(30000),
             );
           } finally {
@@ -158,9 +158,9 @@ export async function doctor(config: Config, root: string, probe = false) {
             AbortSignal.timeout(config.runTimeoutMs),
             async (signal, resources) => {
               const execution = executionEnvironment([config.environment, repo.environment], {
-                HARNESS_REPOSITORY_ID: repo.id,
-                HARNESS_RUN_ID: runId,
-                HARNESS_RESOURCES_JSON: JSON.stringify(resources),
+                DEVCONTOUR_REPOSITORY_ID: repo.id,
+                DEVCONTOUR_RUN_ID: runId,
+                DEVCONTOUR_RESOURCES_JSON: JSON.stringify(resources),
               });
               await withEnvironment(
                 repo.lifecycle,
@@ -201,7 +201,7 @@ export async function doctor(config: Config, root: string, probe = false) {
     join(root, 'workspace-checks'),
     join(root, 'doctor'),
     ...(config.storage === 'component'
-      ? repositories(config).map((r) => join(r.path, '.harness/local/artifacts'))
+      ? repositories(config).map((r) => join(r.path, '.devcontour-local/artifacts'))
       : []),
   ]) {
     let files: string[] = [];

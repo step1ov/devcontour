@@ -10,7 +10,7 @@ import { config, input } from './helpers.ts';
 import { configSchema, repositorySchema, type Config, type Run } from '../src/core/model.ts';
 import { environmentSchema, lifecycleSchema, toolProfileSchema } from '../src/core/integrations.ts';
 import { Store } from '../src/core/store.ts';
-import { Harness, specDigest } from '../src/core/service.ts';
+import { DevContour, specDigest } from '../src/core/service.ts';
 import { Workspace } from '../src/core/workspace.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { WorkspaceRunner } from '../src/runner/workspace.ts';
@@ -29,24 +29,24 @@ import { attachJournal } from '../src/runner/journal.ts';
 import { doctor } from '../src/runner/doctor.ts';
 import { importKnowledge } from '../src/runner/knowledge.ts';
 
-const makeRoot = () => mkdtemp(join(tmpdir(), 'harness-enterprise-'));
+const makeRoot = () => mkdtemp(join(tmpdir(), 'devcontour-enterprise-'));
 const step = (id: string, code: string) => ({
   id,
   command: [process.execPath, '-e', code],
   timeoutMs: 3000,
 });
-const testScript = `import{readFileSync,writeFileSync}from'node:fs'; const value=JSON.parse(readFileSync('value.json','utf8')); if(value<1)process.exit(1); writeFileSync(process.env.HARNESS_REPORT_PATH,'<testsuite><testcase name="value"/></testsuite>');`;
+const testScript = `import{readFileSync,writeFileSync}from'node:fs'; const value=JSON.parse(readFileSync('value.json','utf8')); if(value<1)process.exit(1); writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase name="value"/></testsuite>');`;
 async function fixture(components = true) {
   const root = await makeRoot(),
     workspace = join(root, 'workspace'),
-    data = join(workspace, '.harness/local');
+    data = join(workspace, '.devcontour-local');
   await mkdir(workspace);
   const repos = [];
   for (const id of ['library', 'product']) {
     const path = join(root, id);
     await mkdir(path);
     await git(path, 'init', '-b', 'main');
-    await writeFile(join(path, '.gitignore'), '.harness/\n.reports/\n.deps/\n');
+    await writeFile(join(path, '.gitignore'), '.devcontour-local/\n.reports/\n.deps/\n');
     await writeFile(join(path, 'value.json'), '1');
     await writeFile(join(path, 'verify.mjs'), testScript);
     await writeFile(join(path, 'README.md'), 'Verified donor conventions.');
@@ -92,7 +92,7 @@ async function fixture(components = true) {
     ],
   });
   const store = new Store(join(data, 'state.sqlite'), components ? repos : undefined),
-    h = new Harness(store, c);
+    h = new DevContour(store, c);
   attachJournal(h);
   const runtime = {
     ...adapters,
@@ -106,7 +106,7 @@ async function fixture(components = true) {
             command: ['fixture'],
           };
         if (r.task.repositoryId === 'product') {
-          const paths = JSON.parse(r.execution!.env.HARNESS_COMPONENTS_JSON!);
+          const paths = JSON.parse(r.execution!.env.DEVCONTOUR_COMPONENTS_JSON!);
           assert.equal(await readFile(join(paths.library, 'value.json'), 'utf8'), '2');
         }
         await writeFile(join(r.cwd, 'value.json'), '2');
@@ -144,7 +144,7 @@ test('Execution environment is explicit, missing secrets fail and logs redact in
   });
   const e = executionEnvironment(
     [profile],
-    { HARNESS_RUN_ID: 'r' },
+    { DEVCONTOUR_RUN_ID: 'r' },
     {
       PATH: process.env.PATH,
       REGISTRY: 'registry-private-token',
@@ -161,7 +161,7 @@ test('Execution environment is explicit, missing secrets fail and logs redact in
   );
   assert.equal(r.stdout.trim(), '[REDACTED] [REDACTED]');
   assert.throws(() => executionEnvironment([profile], {}, {}), /Не задана/);
-  assert.throws(() => environmentSchema.parse({ values: { HARNESS_RUN_ID: 'spoof' } }));
+  assert.throws(() => environmentSchema.parse({ values: { DEVCONTOUR_RUN_ID: 'spoof' } }));
 });
 
 test('Runtime profiles carry only explicit MCP definitions and reviewer has no editing/Bash tools', () => {
@@ -325,7 +325,7 @@ test('Component databases contain local specifications, snapshots and events; co
     } finally {
       db.close();
     }
-    const lib = new DatabaseSync(join(f.c.repositories[0].path, '.harness/local/state.sqlite'), {
+    const lib = new DatabaseSync(join(f.c.repositories[0].path, '.devcontour-local/state.sqlite'), {
       readOnly: true,
     });
     try {
@@ -343,7 +343,7 @@ test('Component databases contain local specifications, snapshots and events; co
       );
     }
     const journal = await readFile(
-      join(f.c.repositories[0].path, '.harness/journal/activity.md'),
+      join(f.c.repositories[0].path, '.devcontour-local/journal/activity.md'),
       'utf8',
     );
     assert.match(journal, /PRIVATE_LIBRARY_SPECIFICATION/);
@@ -368,7 +368,7 @@ test('A failure in one attached database rolls back updates across coordinator a
   try {
     const b = f.h.createBoard('Tasks');
     const t = f.h.addTask(b.id, { ...input(), repositoryId: 'library' });
-    const product = new DatabaseSync(join(f.c.repositories[1].path, '.harness/local/state.sqlite'));
+    const product = new DatabaseSync(join(f.c.repositories[1].path, '.devcontour-local/state.sqlite'));
     product.exec(
       "CREATE TRIGGER reject_update BEFORE UPDATE ON state BEGIN SELECT RAISE(ABORT,'fixture failure'); END",
     );
@@ -430,12 +430,12 @@ test('Doctor detects absent prerequisites; donor import records source SHA and d
   const f = await fixture(false);
   try {
     f.c.repositories[0].preflight = [
-      { id: 'missing', command: ['absent-harness-tool'], timeoutMs: 1000 },
+      { id: 'missing', command: ['absent-devcontour-tool'], timeoutMs: 1000 },
     ];
     const result = await doctor(f.c, f.data);
     assert.equal(result.ready, false);
     assert.ok(
-      result.checks.some((c) => c.status === 'blocked' && c.detail.includes('absent-harness-tool')),
+      result.checks.some((c) => c.status === 'blocked' && c.detail.includes('absent-devcontour-tool')),
     );
     const imported = await importKnowledge(f.workspace, f.c.repositories[0].path, ['README.md']);
     assert.equal(imported.status, 'unreviewed');
@@ -661,7 +661,7 @@ test('Killed writer is recovered through SQLite rollback journals without losing
     f.store.close();
     closed = true;
     const dbPath = join(f.data, 'state.sqlite'),
-      libPath = join(f.c.repositories[0].path, '.harness/local/state.sqlite');
+      libPath = join(f.c.repositories[0].path, '.devcontour-local/state.sqlite');
     const code = `const{DatabaseSync}=require('node:sqlite');const db=new DatabaseSync(process.argv[1]);db.prepare('ATTACH DATABASE ? AS lib').run(process.argv[2]);db.exec(\"PRAGMA journal_mode=DELETE; PRAGMA lib.journal_mode=DELETE; BEGIN IMMEDIATE; UPDATE main.state SET data=json_set(data,'$.sequence',999999); UPDATE lib.state SET data=json_set(data,'$.tasks[0].description','Uncommitted corruption');\");process.kill(process.pid,'SIGKILL');`;
     const result = await command([process.execPath, '-e', code, dbPath, libPath], f.root);
     assert.notEqual(result.code, 0);
@@ -694,7 +694,7 @@ test('Doctor uses component tool profiles and executes isolated preflight with t
     };
     f.c.toolProfiles['private-read'] = toolProfileSchema.parse({
       runtime: 'codex',
-      environment: { secrets: { TOKEN: 'HARNESS_TEST_NONEXISTENT_SECRET_732' } },
+      environment: { secrets: { TOKEN: 'DEVCONTOUR_TEST_NONEXISTENT_SECRET_732' } },
     });
     let result = await doctor(f.c, f.data);
     assert.ok(
@@ -725,7 +725,7 @@ test('Cleanup recovery preserves component environment and rejects live owners a
   try {
     const { realpath } = await import('node:fs/promises');
     const repo = f.c.repositories[0],
-      cwd = join(repo.path, '.harness/local/recovery');
+      cwd = join(repo.path, '.devcontour-local/recovery');
     await mkdir(cwd, { recursive: true });
     repo.environment = environmentSchema.parse({ values: { CLEANUP_SCOPE: 'library' } });
     repo.lifecycle = lifecycleSchema.parse({
@@ -736,7 +736,7 @@ test('Cleanup recovery preserves component environment and rejects live owners a
         ),
       ],
     });
-    const env = executionEnvironment([repo.environment], { HARNESS_REPOSITORY_ID: repo.id });
+    const env = executionEnvironment([repo.environment], { DEVCONTOUR_REPOSITORY_ID: repo.id });
     const path = join(cwd, 'receipt/environment.json');
     await withEnvironment(
       repo.lifecycle,
@@ -750,7 +750,7 @@ test('Cleanup recovery preserves component environment and rejects live owners a
     await writeFile(join(cwd, '.running'), 'pending');
     receipt.status = 'active';
     await writeFile(path, JSON.stringify(receipt));
-    const roots = [await realpath(join(repo.path, '.harness/local'))];
+    const roots = [await realpath(join(repo.path, '.devcontour-local'))];
     await assert.rejects(cleanupEnvironment(path, f.c, roots), /ещё существует/);
     receipt.ownerPid = 2147483647;
     receipt.cwd = f.root;

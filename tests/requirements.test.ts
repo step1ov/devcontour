@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { setupDemo } from '../src/demo.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Store } from '../src/core/store.ts';
-import { Harness, specDigest } from '../src/core/service.ts';
+import { DevContour, specDigest } from '../src/core/service.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { git } from '../src/runner/process.ts';
 import { acceptBoard } from '../src/runner/agent-control.ts';
@@ -34,7 +34,7 @@ test('Requirements survive real Git execution; changed spec loses current covera
   await setupDemo(root);
   const config = loadConfig(join(root, 'config.json'));
   const store = new Store(join(root, 'state.sqlite'));
-  const h = new Harness(store, config),
+  const h = new DevContour(store, config),
     scheduler = new Scheduler(h, root);
   try {
     store.change('fixture.reset', (s) => {

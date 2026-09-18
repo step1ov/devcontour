@@ -9,7 +9,7 @@ import { command } from './process.ts';
 
 export function executionEnvironment(
   profiles: (Environment | undefined)[],
-  harness: NodeJS.ProcessEnv = {},
+  devcontour: NodeJS.ProcessEnv = {},
   source = process.env,
 ) {
   const env: NodeJS.ProcessEnv = {
@@ -34,7 +34,7 @@ export function executionEnvironment(
       secretValues.push(source[from]!);
     }
   }
-  Object.assign(env, harness);
+  Object.assign(env, devcontour);
   return { env, redact: redactor(secretValues) };
 }
 export function redactor(values: string[]) {
@@ -84,15 +84,15 @@ export async function withEnvironment<T>(
   const receipt = {
     version: 1,
     ownerPid: process.pid,
-    harnessEnv: Object.fromEntries(
-      Object.entries(execution.env).filter(([key]) => key.startsWith('HARNESS_')),
+    devcontourEnv: Object.fromEntries(
+      Object.entries(execution.env).filter(([key]) => key.startsWith('DEVCONTOUR_')),
     ),
     cwd,
     lifecycle,
     policyDigest: digest(lifecycle),
     status: 'active',
     startedAt: new Date().toISOString(),
-    runId: execution.env.HARNESS_RUN_ID,
+    runId: execution.env.DEVCONTOUR_RUN_ID,
   };
   await writeFile(receiptPath, JSON.stringify(receipt, null, 2));
   let result: T | undefined, failure: unknown;
@@ -151,7 +151,7 @@ export async function cleanupEnvironment(
   const cwd = await realpath(receipt.cwd);
   if (!allowedRoots.some((root) => cwd.startsWith(root + sep)))
     throw new Error('Окружение находится вне рабочих каталогов выбранного workspace');
-  const repositoryId = receipt.harnessEnv?.HARNESS_REPOSITORY_ID;
+  const repositoryId = receipt.devcontourEnv?.DEVCONTOUR_REPOSITORY_ID;
   const repo = repositoryId ? config.repositories.find((r) => r.id === repositoryId) : undefined;
   if (repositoryId && !repo && repositoryId !== 'main')
     throw new Error('Неизвестный компонент сохранённого окружения');
@@ -167,8 +167,8 @@ export async function cleanupEnvironment(
   if (receipt.ownerPid && processAlive(receipt.ownerPid))
     throw new Error('Процесс владельца окружения ещё существует; сначала остановите его');
   const execution = executionEnvironment([config.environment, repo?.environment], {
-    ...receipt.harnessEnv,
-    HARNESS_RUN_ID: receipt.runId,
+    ...receipt.devcontourEnv,
+    DEVCONTOUR_RUN_ID: receipt.runId,
   });
   await teardown(lifecycle, cwd, join(receiptPath, '..'), execution);
   await writeFile(receiptPath, JSON.stringify({ ...receipt, status: 'cleaned' }, null, 2));

@@ -7,7 +7,7 @@
     {
       "id": "build-and-install",
       "kind": "check",
-      "command": ["npm", "run", "mobile:harness:prepare"],
+      "command": ["npm", "run", "mobile:devcontour:prepare"],
       "timeoutMs": 600000
     },
     {

@@ -2,7 +2,7 @@ node_modules
 dist
 lib
 skills/devcontour/references/agent-api.json
-.harness
+.devcontour-local
 playwright-report
 test-results
 package-lock.json

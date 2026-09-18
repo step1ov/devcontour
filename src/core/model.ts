@@ -227,7 +227,7 @@ export interface Run {
   resources?: Resource[];
   dependencies?: DependencySnapshot[];
 }
-export interface HarnessState {
+export interface DevContourState {
   team?: { member: string };
   version: 1;
   boards: Board[];
@@ -298,8 +298,8 @@ export const repositorySchema = z.object({
   path: z.string().min(1),
   targetBranch: z
     .string()
-    .regex(/^harness\/[a-zA-Z0-9/_-]+$/)
-    .default('harness/accepted'),
+    .regex(/^devcontour\/[a-zA-Z0-9/_-]+$/)
+    .default('devcontour/accepted'),
   gates: gateList,
   protectedPaths: z
     .array(z.string().min(1))
@@ -401,8 +401,8 @@ export const configSchema = z.object({
   repository: z.string().min(1),
   targetBranch: z
     .string()
-    .regex(/^harness\/[a-zA-Z0-9/_-]+$/)
-    .default('harness/accepted'),
+    .regex(/^devcontour\/[a-zA-Z0-9/_-]+$/)
+    .default('devcontour/accepted'),
   mode: z.enum(['local', 'demo']).default('local'),
   approvalMode: z.enum(['agent', 'operator']).default('agent'),
   concurrency: z.number().int().min(1).max(4).default(2),
@@ -433,7 +433,7 @@ export const configSchema = z.object({
   gates: gateList,
   protectedPaths: z
     .array(z.string().min(1))
-    .default(['.github/', '.githooks/', 'harness.config.json']),
+    .default(['.github/', '.githooks/', 'devcontour.config.json']),
   packs: z
     .array(
       z.object({
@@ -446,7 +446,7 @@ export const configSchema = z.object({
     .default([]),
 });
 export type Config = z.infer<typeof configSchema>;
-export const emptyState = (): HarnessState => ({
+export const emptyState = (): DevContourState => ({
   version: 1,
   boards: [],
   tasks: [],

@@ -5,7 +5,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { Harness, digest, specDigest } from '../core/service.ts';
+import { DevContour, digest, specDigest } from '../core/service.ts';
 import { type Approval, type Task, DomainError } from '../core/model.ts';
 import { adapters, reviewResult, type AgentAdapter } from './adapters.ts';
 import { repositories, repository } from '../core/repositories.ts';
@@ -20,7 +20,7 @@ type Author = 'codex' | 'claude';
 type Runtimes = Record<Author, AgentAdapter>;
 
 async function review(
-  h: Harness,
+  h: DevContour,
   root: string,
   author: Author,
   subject: string,
@@ -85,7 +85,7 @@ async function review(
 }
 
 export async function reviewContract(
-  h: Harness,
+  h: DevContour,
   root: string,
   input: unknown,
   author: Author,
@@ -119,7 +119,7 @@ export async function reviewContract(
 }
 
 export async function reviewPlan(
-  h: Harness,
+  h: DevContour,
   root: string,
   boardId: string,
   author: Author,
@@ -176,7 +176,7 @@ export async function reviewPlan(
 }
 
 export async function acceptBoard(
-  h: Harness,
+  h: DevContour,
   boardId: string,
   author: Author,
   manual = false,

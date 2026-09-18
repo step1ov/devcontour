@@ -2,7 +2,7 @@ import { mkdir, writeFile, access } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { configSchema, type Config } from './core/model.ts';
 import { Store } from './core/store.ts';
-import { Harness } from './core/service.ts';
+import { DevContour } from './core/service.ts';
 import { Scheduler } from './runner/scheduler.ts';
 import { git } from './runner/process.ts';
 export async function exists(path: string) {
@@ -34,8 +34,8 @@ export async function setupDemo(root: string) {
 import assert from 'node:assert/strict';
 const ids=new Set((await readdir('deliverables')).map(x=>x.replace('.json','')));
 for(const id of ids){const t=JSON.parse(await readFile('deliverables/'+id+'.json','utf8'));assert.equal(t.id,id);assert.ok(t.title.length>=3);assert.ok(t.acceptance.length>0);for(const dep of t.dependsOn)assert.ok(ids.has(dep),'Missing dependency '+dep);}
-assert.ok(ids.has(process.env.HARNESS_TASK_ID),'No result for current task');
-await mkdir('.reports',{recursive:true});await writeFile(process.env.HARNESS_REPORT_PATH, '<testsuite name="demo" tests="2"><testcase name="dependency-artifacts"/><testcase name="current-task-result"/></testsuite>');
+assert.ok(ids.has(process.env.DEVCONTOUR_TASK_ID),'No result for current task');
+await mkdir('.reports',{recursive:true});await writeFile(process.env.DEVCONTOUR_REPORT_PATH, '<testsuite name="demo" tests="2"><testcase name="dependency-artifacts"/><testcase name="current-task-result"/></testsuite>');
 console.log('2 fixture assertions passed. No AI model was called.');\n`,
   );
   await git(repo, 'init', '-b', 'main');
@@ -76,7 +76,7 @@ console.log('2 fixture assertions passed. No AI model was called.');\n`,
     ],
   });
   const store = new Store(join(root, 'state.sqlite'));
-  const h = new Harness(store, config);
+  const h = new DevContour(store, config);
   const scheduler = new Scheduler(h, root);
   await scheduler.init();
   const history = h.createBoard(

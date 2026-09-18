@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { Harness, digest } from '../core/service.ts';
+import { DevContour, digest } from '../core/service.ts';
 import {
   unknownUsage,
   priceUsage,
@@ -73,7 +73,7 @@ export function runtimeVersion(runtime: string, env?: NodeJS.ProcessEnv) {
   return versions.get(key)!;
 }
 export async function measuredExecute(
-  h: Harness,
+  h: DevContour,
   adapter: AgentAdapter,
   request: AgentRequest,
   meta: { repositoryId?: string; runId?: string; subjectId?: string; stage: string },

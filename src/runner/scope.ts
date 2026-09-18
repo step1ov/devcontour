@@ -35,7 +35,7 @@ export function commandScope(args: string[], operation: string) {
   return {
     workspace: workspace ? resolve(workspace) : undefined,
     data: workspace
-      ? join(resolve(workspace), '.harness', 'local')
-      : resolve(data ?? '.harness/demo'),
+      ? join(resolve(workspace), '.devcontour-local')
+      : resolve(data ?? '.devcontour-local/demo'),
   };
 }

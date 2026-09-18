@@ -12,7 +12,7 @@ flowchart TD
   AgentAPI --> Core
   Lead --> UI[React Console]
   UI --> HTTP[Локальный HTTP API]
-  CLI --> Core[Harness / Workspace / DeliveryService]
+  CLI --> Core[DevContour / Workspace / DeliveryService]
   HTTP --> Core
   Core --> Store[Store / ComponentStorage / SQLite]
   CLI --> Runner[Scheduler, LeadRunner и runners]
@@ -135,7 +135,7 @@ Remote-check связывает observation с конкретной Verification
 
 После commit `journal.ts` строит Markdown-дневники. Они сериализованы через БД и заменяются атомарно, но не входят в транзакцию исходного события. Ошибка проекции видима; повторный запуск/команда `journal` может её исправить. SQLite остаётся первичным состоянием.
 
-UI читает общее состояние, показывает доски, графы, попытки, ChangeSet и доказательства. HTTP слушает `127.0.0.1`, проверяет Host/Origin, JSON Content-Type и `X-Harness-Request: 1` для изменений. Артефакты читаются по сохранённым ссылкам с проверкой допустимого корня. Нет endpoint «установить done» или «загрузить произвольный PASS».
+UI читает общее состояние, показывает доски, графы, попытки, ChangeSet и доказательства. HTTP слушает `127.0.0.1`, проверяет Host/Origin, JSON Content-Type и `X-DevContour-Request: 1` для изменений. Артефакты читаются по сохранённым ссылкам с проверкой допустимого корня. Нет endpoint «установить done» или «загрузить произвольный PASS».
 
 Это single-user локальная граница. Заголовок и Origin-проверка не заменяют аутентификацию/роли для публичного сервиса. Worktree и tool allowlists не являются полноценной изоляцией от процесса того же OS-пользователя; credentials и внешние MCP должны иметь подходящие права сами.
 

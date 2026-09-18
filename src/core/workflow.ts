@@ -3,7 +3,7 @@ import {
   type Config,
   type Gate,
   type TaskInput,
-  type HarnessState,
+  type DevContourState,
   type Verification,
   type ComponentImpact,
 } from './model.ts';
@@ -149,7 +149,7 @@ export const withinPaths = (path: string, prefixes: string[]) =>
 // Compare complete repository SHAs: manifests, lockfiles and configuration changes are included.
 export function componentImpact(
   config: Config,
-  state: HarnessState,
+  state: DevContourState,
   run: Verification,
 ): ComponentImpact {
   const repos = repositories(config),

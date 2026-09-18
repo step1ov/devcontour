@@ -8,7 +8,7 @@ import { readFile, realpath } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { resolve, join, extname, sep } from 'node:path';
 import { ZodError, z } from 'zod';
-import { Harness, specDigest } from '../core/service.ts';
+import { DevContour, specDigest } from '../core/service.ts';
 import { DomainError } from '../core/model.ts';
 import { blockers, readyTasks } from '../core/graph.ts';
 import { Scheduler } from '../runner/scheduler.ts';
@@ -37,7 +37,7 @@ async function body(req: IncomingMessage) {
   }
 }
 export async function serve(
-  h: Harness,
+  h: DevContour,
   scheduler: Scheduler,
   options: { port: number; dev?: boolean },
 ) {
@@ -68,7 +68,7 @@ export async function serve(
           throw new DomainError('Origin не разрешён', 403);
         if (
           !['GET', 'HEAD'].includes(req.method ?? 'GET') &&
-          (req.headers['x-harness-request'] !== '1' ||
+          (req.headers['x-devcontour-request'] !== '1' ||
             !req.headers['content-type']?.startsWith('application/json'))
         )
           throw new DomainError('Отсутствует заголовок локального клиента', 403);
@@ -138,7 +138,7 @@ export async function serve(
           const roots = [
             join(scheduler.root, 'artifacts'),
             ...(h.config.storage === 'component'
-              ? repositories(h.config).map((r) => join(r.path, '.harness/local/artifacts'))
+              ? repositories(h.config).map((r) => join(r.path, '.devcontour-local/artifacts'))
               : []),
           ];
           if (

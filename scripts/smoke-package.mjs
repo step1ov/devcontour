@@ -38,7 +38,7 @@ try {
   assert.ok(archive.files.some((f) => f.path === 'dist/index.html'));
   assert.ok(archive.files.some((f) => f.path === 'templates/project/.agents/roles/backend.md'));
   assert.ok(!archive.files.some((f) => /^(evidence|docs\/evidence|\.idea)\//.test(f.path)));
-  assert.ok(!archive.files.some((f) => /^(src|tests|node_modules|\.harness)\//.test(f.path)));
+  assert.ok(!archive.files.some((f) => /^(src|tests|node_modules|\.devcontour-local)\//.test(f.path)));
   await writeFile(join(installation, 'package.json'), '{"private":true}');
   await exec(
     'npm',
@@ -107,11 +107,11 @@ try {
   );
   assert.equal(setup.status, 'needs-agent-bootstrap');
   await access(join(product, '.agents/roles/backend.md'));
-  await access(join(product, 'docs/harness-project-memory.md'));
-  await access(join(product, 'docs/harness-experiments.md'));
-  await access(join(product, 'docs/harness-intent.md'));
-  await access(join(product, 'docs/harness-mcp-and-profiles.md'));
-  await access(join(product, 'docs/harness-start.md'));
+  await access(join(product, 'docs/devcontour-project-memory.md'));
+  await access(join(product, 'docs/devcontour-experiments.md'));
+  await access(join(product, 'docs/devcontour-intent.md'));
+  await access(join(product, 'docs/devcontour-mcp-and-profiles.md'));
+  await access(join(product, 'docs/devcontour-start.md'));
   const request = join(root, 'request.json');
   await writeFile(request, JSON.stringify({ operation: 'project_context', input: {} }));
   const context = JSON.parse(
@@ -193,7 +193,7 @@ try {
   );
   const response = await fetch(url + '/api/agent', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Harness-Request': '1' },
+    headers: { 'Content-Type': 'application/json', 'X-DevContour-Request': '1' },
     body: JSON.stringify({ operation: 'project_context', input: {} }),
   });
   assert.equal(response.status, 200);
@@ -201,7 +201,7 @@ try {
   const agent = async (operation, input) => {
     const reply = await fetch(url + '/api/agent', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Harness-Request': '1' },
+      headers: { 'Content-Type': 'application/json', 'X-DevContour-Request': '1' },
       body: JSON.stringify({ operation, input }),
     });
     const value = await reply.json();

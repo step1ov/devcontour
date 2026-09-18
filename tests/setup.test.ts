@@ -17,7 +17,7 @@ import { loadConfig } from '../src/runner/config.ts';
 import { command, git } from '../src/runner/process.ts';
 
 async function product() {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'harness-setup-')));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'devcontour-setup-')));
   await mkdir(join(root, 'docs'));
   await writeFile(join(root, 'docs/spec.md'), '# Каталог\nПоиск товаров в настоящей базе.');
   return root;
@@ -29,31 +29,31 @@ test('Setup starts from only a Markdown spec, copies hidden roles and pins an ag
     const result = await setupProject({ repository: root, profile: 'react-vite-admin' });
     assert.equal(result.status, 'needs-agent-bootstrap');
     assert.equal(result.approvalMode, 'agent');
-    assert.equal(result.data, join(root, '.harness/local'));
+    assert.equal(result.data, join(root, '.devcontour-local'));
     assert.match(
       await readFile(join(root, '.agents/roles/backend.md'), 'utf8'),
       /backend|API|бэкенд/i,
     );
-    await access(join(root, 'docs/harness-start.md'));
-    await access(join(root, 'docs/harness-project-memory.md'));
-    await access(join(root, 'docs/harness-intent.md'));
-    await access(join(root, 'docs/harness-mcp-and-profiles.md'));
-    await access(join(root, 'docs/harness-experiments.md'));
+    await access(join(root, 'docs/devcontour-start.md'));
+    await access(join(root, 'docs/devcontour-project-memory.md'));
+    await access(join(root, 'docs/devcontour-intent.md'));
+    await access(join(root, 'docs/devcontour-mcp-and-profiles.md'));
+    await access(join(root, 'docs/devcontour-experiments.md'));
     assert.match(
-      await readFile(join(root, 'docs/harness-start.md'), 'utf8'),
-      /\(harness-project-memory.md\)/,
+      await readFile(join(root, 'docs/devcontour-start.md'), 'utf8'),
+      /\(devcontour-project-memory.md\)/,
     );
-    await access(join(root, 'docs/harness-workspaces.md'));
-    await access(join(root, 'docs/harness-engineering.md'));
+    await access(join(root, 'docs/devcontour-workspaces.md'));
+    await access(join(root, 'docs/devcontour-engineering.md'));
     await access(join(root, '.agents/context/mobile-maestro.md'));
     await access(join(root, 'CLAUDE.md'));
     assert.match(
-      await readFile(join(root, 'docs/harness-start.md'), 'utf8'),
-      /\(harness-engineering.md\)/,
+      await readFile(join(root, 'docs/devcontour-start.md'), 'utf8'),
+      /\(devcontour-engineering.md\)/,
     );
     assert.match(
-      await readFile(join(root, 'docs/harness-start.md'), 'utf8'),
-      /\(harness-workspaces.md\)/,
+      await readFile(join(root, 'docs/devcontour-start.md'), 'utf8'),
+      /\(devcontour-workspaces.md\)/,
     );
     await access(join(result.data, 'profiles/react-vite-admin.json'));
     const config = loadConfig(join(result.data, 'config.json'));
@@ -115,7 +115,7 @@ test('Setup rejects escaping symlinks and invalid specs before copying any rules
     );
     await writeFile(join(root, 'docs/spec.md'), '  \n');
     await assert.rejects(setupProject({ repository: root, profile: 'go-api' }), /пустое/);
-    await assert.rejects(access(join(root, '.harness')));
+    await assert.rejects(access(join(root, '.devcontour-local')));
   } finally {
     await rm(root, { recursive: true, force: true });
     await rm(outside, { recursive: true, force: true });
@@ -151,7 +151,7 @@ test('CLI setup supports explicit legacy data without bootstrapping a demo', asy
         '--profile',
         'mobile-maestro',
         '--data',
-        join(root, '.harness/local'),
+        join(root, '.devcontour-local'),
         '--approval-mode',
         'operator',
       ],
@@ -159,10 +159,10 @@ test('CLI setup supports explicit legacy data without bootstrapping a demo', asy
     );
     assert.equal(result.code, 0, result.stderr);
     const output = JSON.parse(result.stdout);
-    assert.equal(output.data, join(root, '.harness/local'));
+    assert.equal(output.data, join(root, '.devcontour-local'));
     assert.equal(output.approvalMode, 'operator');
     assert.equal(loadConfig(join(output.data, 'config.json')).concurrency, 1);
-    await assert.rejects(access(join(root, '.harness/demo')));
+    await assert.rejects(access(join(root, '.devcontour-local/demo')));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

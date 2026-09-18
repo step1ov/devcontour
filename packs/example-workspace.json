@@ -18,7 +18,7 @@
         {
           "id": "tests",
           "kind": "test",
-          "command": ["npm", "run", "test:harness"],
+          "command": ["npm", "run", "test:devcontour"],
           "report": {
             "type": "junit",
             "path": ".reports/junit.xml"
@@ -50,7 +50,7 @@
         {
           "id": "tests",
           "kind": "test",
-          "command": ["npm", "run", "test:harness"],
+          "command": ["npm", "run", "test:devcontour"],
           "report": {
             "type": "junit",
             "path": ".reports/junit.xml"

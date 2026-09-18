@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { fixture, input, complete } from './helpers.ts';
 import { specDigest } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
-import { Harness } from '../src/core/service.ts';
+import { DevContour } from '../src/core/service.ts';
 import { join } from 'node:path';
 import { readyTasks } from '../src/core/graph.ts';
 
@@ -53,7 +53,7 @@ test('Concurrent store clients cannot claim one task twice', () => {
     f.h.approve(b.id);
     f.h.pause(false);
     const r = f.h.claim('one');
-    const other = new Harness(second, f.h.config).claim('two');
+    const other = new DevContour(second, f.h.config).claim('two');
     assert.ok(r);
     assert.equal(other, undefined);
     assert.equal(second.read().runs.length, 1);

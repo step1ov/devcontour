@@ -100,19 +100,19 @@ test('Desktop and mobile views are accessible and do not overflow', async ({ pag
 });
 test('Local API rejects foreign origins and malformed changes', async ({ request }) => {
   const foreign = await request.post('/api/boards', {
-    headers: { Origin: 'https://attacker.example', 'X-Harness-Request': '1' },
+    headers: { Origin: 'https://attacker.example', 'X-DevContour-Request': '1' },
     data: { title: 'Injected board' },
   });
   expect(foreign.status()).toBe(403);
   const noHeader = await request.post('/api/boards', { data: { title: 'Injected board' } });
   expect(noHeader.status()).toBe(403);
   const malformed = await request.post('/api/boards', {
-    headers: { 'X-Harness-Request': '1' },
+    headers: { 'X-DevContour-Request': '1' },
     data: { title: 'x' },
   });
   expect(malformed.status()).toBe(400);
   const arbitrary = await request.post('/api/evidence', {
-    headers: { 'X-Harness-Request': '1' },
+    headers: { 'X-DevContour-Request': '1' },
     data: { passed: true },
   });
   expect(arbitrary.status()).toBe(404);

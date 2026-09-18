@@ -27,7 +27,7 @@ test('Every pinned profile has an executable test gate and mobile limits concurr
   await assert.rejects(profile('../secret'));
 });
 test('Local config rejects same-runtime self-review, demo adapters and escaping reports', () => {
-  const root = mkdtempSync(join(tmpdir(), 'harness-config-'));
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-config-'));
   try {
     const file = join(root, 'config.json');
     let c = config({ repository: root, mode: 'local' });

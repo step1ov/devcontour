@@ -27,7 +27,7 @@ import {
   Workflow,
   ChevronRight,
 } from 'lucide-react';
-import type { HarnessState, Task, Config, AuditEvent, Board, Role } from '../core/model.ts';
+import type { DevContourState, Task, Config, AuditEvent, Board, Role } from '../core/model.ts';
 import { levels } from '../core/graph.ts';
 import type { taskProgress } from '../application/context.ts';
 type UITask = Task & {
@@ -35,7 +35,7 @@ type UITask = Task & {
   blockers: string[];
   progress?: ReturnType<typeof taskProgress>;
 };
-type Snapshot = Omit<HarnessState, 'tasks'> & {
+type Snapshot = Omit<DevContourState, 'tasks'> & {
   tasks: UITask[];
   events: AuditEvent[];
   ready: string[];
@@ -130,7 +130,7 @@ async function api(path: string, input?: unknown, method = 'POST') {
       ? undefined
       : {
           method,
-          headers: { 'Content-Type': 'application/json', 'X-Harness-Request': '1' },
+          headers: { 'Content-Type': 'application/json', 'X-DevContour-Request': '1' },
           body: JSON.stringify(input),
         },
   );
@@ -862,7 +862,7 @@ export function App() {
                               onClick={() =>
                                 void act(
                                   () => api(`changesets/${c.id}/handoff`, {}),
-                                  'Инструкция ручной публикации сохранена в .harness/local/handoffs выбранного workspace',
+                                  'Инструкция ручной публикации сохранена в .devcontour-local/handoffs выбранного workspace',
                                   false,
                                 )
                               }

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { AgentService, capabilities } from '../application/agent.ts';
 import { configSchema } from '../core/model.ts';
-import { Harness, digest, specDigest } from '../core/service.ts';
+import { DevContour, digest, specDigest } from '../core/service.ts';
 import { Store } from '../core/store.ts';
 import { evaluationResult, type EvaluationResult } from '../core/evaluation.ts';
 import { git, command } from './process.ts';
@@ -135,7 +135,7 @@ export async function evaluateAgents(
           ],
         });
         store = new Store(join(workspace, 'state.sqlite'), [{ id: 'main', path: repo }]);
-        const h = new Harness(store, config),
+        const h = new DevContour(store, config),
           service = new AgentService(h);
         const board = h.createBoard('Evaluation board', '', 'main');
         const input = {

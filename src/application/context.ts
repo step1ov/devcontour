@@ -10,12 +10,12 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { Harness, digest, specDigest } from '../core/service.ts';
+import { DevContour, digest, specDigest } from '../core/service.ts';
 import {
   DomainError,
   requireValue,
   type Board,
-  type HarnessState,
+  type DevContourState,
   type Task,
 } from '../core/model.ts';
 import { repositories, repository, roleBinding, reviewerBinding } from '../core/repositories.ts';
@@ -46,7 +46,7 @@ export type ContextOperation = keyof typeof contextInputs;
 export const contextOperations = Object.keys(contextInputs) as ContextOperation[];
 
 // Keep runtime ownership tokens, commands, credentials and full component bodies out of summaries.
-export function taskProgress(h: Harness, s: HarnessState, t: Task) {
+export function taskProgress(h: DevContour, s: DevContourState, t: Task) {
   const dependencies = blockers(t, s);
   const active = s.boards.some(
     (b) => b.revisions.at(-1)?.status === 'active' && b.revisions.at(-1)!.taskIds.includes(t.id),
@@ -84,7 +84,7 @@ export function taskProgress(h: Harness, s: HarnessState, t: Task) {
     eligible: t.status === 'ready' && !reasons.length,
   };
 }
-function boardOwner(b: Board, s: HarnessState) {
+function boardOwner(b: Board, s: DevContourState) {
   if (b.scope === 'workspace') return undefined;
   if (b.repositoryId) return b.repositoryId;
   const tasks = s.tasks.filter((t) => b.revisions.some((r) => r.taskIds.includes(t.id)));
@@ -100,7 +100,7 @@ type RecordSummary = {
   status?: string;
   repositoryId?: string;
 };
-function snapshot(h: Harness, s: HarnessState, repositoryId?: string) {
+function snapshot(h: DevContour, s: DevContourState, repositoryId?: string) {
   if (repositoryId) repository(h.config, repositoryId);
   const records: RecordSummary[] = [];
   const add = (
@@ -260,7 +260,7 @@ function safePath(root: string, relative: string) {
 }
 
 export class AgentContext {
-  constructor(readonly h: Harness) {}
+  constructor(readonly h: DevContour) {}
   execute(operation: ContextOperation, raw: unknown): unknown {
     const result = this.evaluate(operation, raw);
     if (Buffer.byteLength(JSON.stringify(result)) > MAX_RESPONSE)

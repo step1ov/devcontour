@@ -1,18 +1,18 @@
 import { randomUUID } from 'node:crypto';
-import { Harness, digest } from './service.ts';
+import { DevContour, digest } from './service.ts';
 import { Workspace, changeSnapshot, snapshotDigest } from './workspace.ts';
-import { DomainError, type ChangeSet, type HarnessState } from './model.ts';
+import { DomainError, type ChangeSet, type DevContourState } from './model.ts';
 import type { Delivery, DeliveryComponent } from './integrations.ts';
 import { repositories } from './repositories.ts';
 
-export const deliveryPolicy = (h: Harness) =>
+export const deliveryPolicy = (h: DevContour) =>
   digest({
     mode: h.config.completionMode,
     connections: h.config.forgeConnections,
     repositories: repositories(h.config),
     environment: h.config.environment,
   });
-export function currentVerification(h: Harness, s: HarnessState, c: ChangeSet) {
+export function currentVerification(h: DevContour, s: DevContourState, c: ChangeSet) {
   const v = c.verifications.at(-1);
   if (
     !v ||
@@ -25,7 +25,7 @@ export function currentVerification(h: Harness, s: HarnessState, c: ChangeSet) {
     throw new DomainError('Доставка требует актуальной успешной проверки ChangeSet');
   return v;
 }
-export function delivered(h: Harness, c: ChangeSet) {
+export function delivered(h: DevContour, c: ChangeSet) {
   const v = c.verifications.at(-1);
   return c.deliveries?.findLast(
     (d) =>
@@ -36,7 +36,7 @@ export function delivered(h: Harness, c: ChangeSet) {
   );
 }
 export class Deliveries {
-  constructor(readonly h: Harness) {}
+  constructor(readonly h: DevContour) {}
   start(id: string, namespace: string) {
     if (this.h.config.completionMode !== 'remote')
       throw new DomainError('Включите completionMode: remote');
@@ -78,7 +78,7 @@ export class Deliveries {
           d.components[repo.id] = {
             sha: v.manifest![repo.id].sha,
             tree: v.manifest![repo.id].tree,
-            sourceBranch: `harness/delivery/${namespace}-${c.id}-${repo.id}-${v.manifest![repo.id].sha.slice(0, 12)}`,
+            sourceBranch: `devcontour/delivery/${namespace}-${c.id}-${repo.id}-${v.manifest![repo.id].sha.slice(0, 12)}`,
             state: 'pending',
           };
         c.deliveries.push(d);

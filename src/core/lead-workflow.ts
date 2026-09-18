@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { Harness, digest } from './service.ts';
+import { DevContour, digest } from './service.ts';
 import { taskInput, DomainError } from './model.ts';
 import { boardOwner } from './sync-state.ts';
 import { Workspace } from './workspace.ts';
@@ -27,7 +27,7 @@ export type WorkflowJob = z.infer<typeof workflowInput> & {
   history: { at: string; stage: number; event: string }[];
 };
 export class LeadWorkflow {
-  constructor(readonly h: Harness) {}
+  constructor(readonly h: DevContour) {}
   input(kind: WorkflowJob['kind'], id: string) {
     const s = this.h.store.read();
     const changeSet = kind === 'changeset' ? s.changeSets.find((c) => c.id === id) : undefined;

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { Harness, digest } from '../core/service.ts';
+import { DevContour, digest } from '../core/service.ts';
 import { DomainError } from '../core/model.ts';
 import { repository } from '../core/repositories.ts';
 import { taskOwner } from '../core/sync-state.ts';
@@ -48,7 +48,7 @@ function page<T>(records: T[], input: { cursor?: string; limit: number }) {
   };
 }
 export class Observability {
-  constructor(readonly h: Harness) {}
+  constructor(readonly h: DevContour) {}
   private runs(repositoryId?: string) {
     if (repositoryId) repository(this.h.config, repositoryId);
     const s = this.h.store.read(),

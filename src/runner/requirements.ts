@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { Harness, digest } from '../core/service.ts';
+import { DevContour, digest } from '../core/service.ts';
 import { DomainError, relativePath, type Task, type Run } from '../core/model.ts';
 import { repository } from '../core/repositories.ts';
 
@@ -46,7 +46,7 @@ export function requirementSnapshot(cwd: string, source: string, ref = 'HEAD') {
   return { source, sha, requirements: parseRequirements(git('show', `${sha}:${source}`)) };
 }
 export function currentRequirements(
-  h: Harness,
+  h: DevContour,
   task: Task,
   cwd = repository(h.config, task.repositoryId).path,
   ref = 'HEAD',
@@ -64,7 +64,7 @@ export function currentRequirements(
     };
   });
 }
-export function assertRequirements(h: Harness, task: Task, cwd?: string, ref?: string) {
+export function assertRequirements(h: DevContour, task: Task, cwd?: string, ref?: string) {
   const stale = currentRequirements(h, task, cwd, ref).filter((r) => !r.fresh);
   if (stale.length)
     throw new DomainError(
@@ -72,7 +72,7 @@ export function assertRequirements(h: Harness, task: Task, cwd?: string, ref?: s
     );
 }
 export function recordRequirements(
-  h: Harness,
+  h: DevContour,
   run: Run,
   task: Task,
   cwd: string,
@@ -95,7 +95,7 @@ export function recordRequirements(
     summary: 'Pinned requirement sections match source HEAD and tested SHA',
   });
 }
-export function requirementReport(h: Harness, repositoryId: string) {
+export function requirementReport(h: DevContour, repositoryId: string) {
   repository(h.config, repositoryId);
   const s = h.store.read();
   const replaced = new Set(s.tasks.map((t) => t.supersedes));
@@ -130,7 +130,7 @@ export function requirementReport(h: Harness, repositoryId: string) {
       }),
   };
 }
-export function correctRequirements(h: Harness, boardId: string, reason: string) {
+export function correctRequirements(h: DevContour, boardId: string, reason: string) {
   const s = h.store.read(),
     board = s.boards.find((b) => b.id === boardId);
   if (!board) throw new DomainError('Доска не найдена');

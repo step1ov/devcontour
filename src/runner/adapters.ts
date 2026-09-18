@@ -192,13 +192,13 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
         timeoutMs: r.timeoutMs,
         input: r.prompt,
         ...(r.resourcesJson
-          ? { env: { ...process.env, HARNESS_RESOURCES_JSON: r.resourcesJson } }
+          ? { env: { ...process.env, DEVCONTOUR_RESOURCES_JSON: r.resourcesJson } }
           : {}),
         ...(r.execution
           ? {
               env: {
                 ...r.execution.env,
-                ...(r.resourcesJson ? { HARNESS_RESOURCES_JSON: r.resourcesJson } : {}),
+                ...(r.resourcesJson ? { DEVCONTOUR_RESOURCES_JSON: r.resourcesJson } : {}),
               },
               redact: r.execution.redact,
             }

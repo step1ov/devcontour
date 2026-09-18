@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { Harness, digest } from './service.ts';
+import { DevContour, digest } from './service.ts';
 import { DomainError } from './model.ts';
 import { repository } from './repositories.ts';
 import { boardOwner } from './sync-state.ts';
@@ -38,7 +38,7 @@ type Incident = {
 };
 
 export class SignalInbox {
-  constructor(readonly h: Harness) {}
+  constructor(readonly h: DevContour) {}
   ingest(raw: unknown) {
     const signal = signalInput.parse(raw),
       owner = signal.repositoryId;

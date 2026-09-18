@@ -1,11 +1,11 @@
 import { usageTotals, type UsageRecord } from '../core/usage.ts';
-import type { Harness } from '../core/service.ts';
+import type { DevContour } from '../core/service.ts';
 import { repository } from '../core/repositories.ts';
 import { taskOwner, boardOwner } from '../core/sync-state.ts';
 
 const elapsed = (start?: string, end?: string) =>
   start && end ? Math.max(0, Date.parse(end) - Date.parse(start)) : null;
-export function workflowMetrics(h: Harness, repositoryId?: string, at = new Date().toISOString()) {
+export function workflowMetrics(h: DevContour, repositoryId?: string, at = new Date().toISOString()) {
   if (repositoryId) repository(h.config, repositoryId);
   const s = h.store.read(),
     tasks = s.tasks.filter((t) => taskOwner(t) === repositoryId),

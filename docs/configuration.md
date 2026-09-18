@@ -7,8 +7,8 @@
 | Файл                                        | Назначение                                                                               |
 | ------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | `<workspace>/workspace.json`                | Входной реестр для первичного `workspace-init`; относительные пути разрешаются от него   |
-| `<workspace>/.harness/local/config.json`    | Рабочая общая конфигурация, которую CLI/server загружают при старте                      |
-| `<repo>/harness.component.json`             | Настройки конкретного компонента, подключаемые через `configFile`; следует хранить в Git |
+| `<workspace>/.devcontour-local/config.json`    | Рабочая общая конфигурация, которую CLI/server загружают при старте                      |
+| `<repo>/devcontour.component.json`             | Настройки конкретного компонента, подключаемые через `configFile`; следует хранить в Git |
 | `<data>/packs.lock.json`                    | Версии и digests установленных stack profiles                                            |
 | `<repo>/.agents/`, `AGENTS.md`, `CLAUDE.md` | Читаемые человеком и агентом правила; выбранные файлы закрепляются context packs         |
 
@@ -29,13 +29,13 @@
 | `approvalMode`                   | `agent`                                      | Кто подтверждает этапы: агент или оператор                            |
 | `completionMode`                 | `local`                                      | Нужна ли подтверждённая remote Delivery для ChangeSet acceptance      |
 | `storage`                        | `central`                                    | Физическое размещение состояния; новые workspace выбирают `component` |
-| `targetBranch`                   | `harness/accepted`                           | Локальная интеграционная ветка; имя должно начинаться `harness/`      |
+| `targetBranch`                   | `devcontour/accepted`                           | Локальная интеграционная ветка; имя должно начинаться `devcontour/`      |
 | `concurrency`                    | `2`, диапазон 1–4                            | Число одновременно выданных попыток; mobile profile задаёт 1          |
 | `leaseMs`                        | `30000`, минимум 5000                        | Время владения, продлеваемое heartbeat                                |
 | `runTimeoutMs`                   | `900000`, минимум 1000                       | Общий deadline попытки/операции runner; включает ожидание ресурсов    |
 | `maxAttempts`                    | `3`, диапазон 1–10                           | Ограничение повторов Task и числа Verification конкретного ChangeSet  |
 | `verificationMode`               | `all`                                        | Полный набор совместных gates либо явная оптимизация `affected`       |
-| `resourceDatabase`               | `~/.harness/resources.sqlite` при исполнении | Общий pool хоста; переопределение требует абсолютный путь             |
+| `resourceDatabase`               | `~/.devcontour-local/resources.sqlite` при исполнении | Общий pool хоста; переопределение требует абсолютный путь             |
 | `signalPolicy.maxActionsPerHour` | `10`, диапазон 1–100                         | Лимит новых предложений из сигналов за час для source и компонента    |
 
 Schema defaults и выбранный профиль — разные уровни. Например, `protectedPaths` в generated setup шире default схемы; чтение одного model.ts не показывает готовую политику продукта. `doctor` проверяет загруженную конфигурацию.
@@ -74,7 +74,7 @@ Schema defaults и выбранный профиль — разные уровн
       "id": "tests",
       "kind": "test",
       "dependsOn": ["types"],
-      "command": ["npm", "run", "test:harness"],
+      "command": ["npm", "run", "test:devcontour"],
       "timeoutMs": 240000,
       "report": { "type": "junit", "path": ".reports/junit.xml" }
     }
@@ -116,7 +116,7 @@ Schema defaults и выбранный профиль — разные уровн
 }
 ```
 
-Базовые PATH/HOME/TMPDIR/CI дополняются явно перечисленными переменными. `secrets` хранит отображение целевого имени в имя переменной процесса; значений секретов в JSON нет. Отсутствие заявленного inherit/secret — ошибка. HARNESS_* зарезервированы. Tool profile может дополнить среду вызова runtime; настройки агента в открытом диалоге не копируются в worker автоматически.
+Базовые PATH/HOME/TMPDIR/CI дополняются явно перечисленными переменными. `secrets` хранит отображение целевого имени в имя переменной процесса; значений секретов в JSON нет. Отсутствие заявленного inherit/secret — ошибка. DEVCONTOUR_* зарезервированы. Tool profile может дополнить среду вызова runtime; настройки агента в открытом диалоге не копируются в worker автоматически.
 
 Lifecycle требует хотя бы один teardown step; setup/ready могут быть пустыми. Команды start должны завершаться после запуска управляемого сервиса, а не оставаться бесконечным foreground-процессом. Teardown должен быть повторяемым и безопасным после частичного setup. Для общей проверки используется `workspaceLifecycle`.
 
@@ -126,16 +126,16 @@ Lifecycle требует хотя бы один teardown step; setup/ready мо�
 
 | Переменная                  | Где используется                                                |
 | --------------------------- | --------------------------------------------------------------- |
-| `HARNESS_RUN_ID`            | Идентификатор попытки/совместной проверки для изоляции ресурсов |
-| `HARNESS_REPOSITORY_ID`     | ID компонента task run                                          |
-| `HARNESS_TASK_ID`           | В task run; в workspace-проверке отдельной Task нет             |
-| `HARNESS_PHASE`             | Фаза окружения/проверки                                         |
-| `HARNESS_REPORT_PATH`       | Абсолютный путь отчёта текущего test gate                       |
-| `HARNESS_COMPONENTS_JSON`   | JSON-map компонентов в закреплённые рабочие каталоги            |
-| `HARNESS_DEPENDENCIES_JSON` | Snapshots входных библиотек Task: версии и артефакты            |
-| `HARNESS_CHANGESET_ID`      | Общая проверка ChangeSet                                        |
-| `HARNESS_MANIFEST_PATH`     | Manifest совместной комбинации                                  |
-| `HARNESS_RESOURCES_JSON`    | Выделенные ресурсы, их адреса/идентификаторы                    |
+| `DEVCONTOUR_RUN_ID`            | Идентификатор попытки/совместной проверки для изоляции ресурсов |
+| `DEVCONTOUR_REPOSITORY_ID`     | ID компонента task run                                          |
+| `DEVCONTOUR_TASK_ID`           | В task run; в workspace-проверке отдельной Task нет             |
+| `DEVCONTOUR_PHASE`             | Фаза окружения/проверки                                         |
+| `DEVCONTOUR_REPORT_PATH`       | Абсолютный путь отчёта текущего test gate                       |
+| `DEVCONTOUR_COMPONENTS_JSON`   | JSON-map компонентов в закреплённые рабочие каталоги            |
+| `DEVCONTOUR_DEPENDENCIES_JSON` | Snapshots входных библиотек Task: версии и артефакты            |
+| `DEVCONTOUR_CHANGESET_ID`      | Общая проверка ChangeSet                                        |
+| `DEVCONTOUR_MANIFEST_PATH`     | Manifest совместной комбинации                                  |
+| `DEVCONTOUR_RESOURCES_JSON`    | Выделенные ресурсы, их адреса/идентификаторы                    |
 
 Не предполагается, что каждая переменная присутствует у любой команды. Скрипт должен явно требовать нужный контекст и завершаться понятной ошибкой при его отсутствии. Парсите JSON, не извлекайте пути поиском подстрок.
 
@@ -145,7 +145,7 @@ Lifecycle требует хотя бы один teardown step; setup/ready мо�
 
 `toolProfiles` описывает runtime, environment, MCP servers и capability settings. Claude: `claudeTools`/`claudeAllowedTools`; Codex: `codexShell`/`codexNetwork`. MCP transport — stdio с command/args/env либо http с url/bearerTokenEnv; `tools` — явный allowlist. Имена инструментов сверяются с конкретным сервером. Встроенный reviewer остаётся read-only; права серверов MCP тоже должны быть ограничены.
 
-`forgeConnections` — общие подключения `gitlab | github | command`. `repository.forge` — connection, project, remote, удалённая targetBranch и requiredChecks. Не путайте её с локальной `repository.targetBranch: harness/accepted`. Настройка `completionMode: remote` требует полного рабочего пути проверки Delivery; одного URL GitLab недостаточно.
+`forgeConnections` — общие подключения `gitlab | github | command`. `repository.forge` — connection, project, remote, удалённая targetBranch и requiredChecks. Не путайте её с локальной `repository.targetBranch: devcontour/accepted`. Настройка `completionMode: remote` требует полного рабочего пути проверки Delivery; одного URL GitLab недостаточно.
 
 ## Безопасное изменение политики
 

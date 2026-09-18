@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { Harness, digest } from '../core/service.ts';
+import { DevContour, digest } from '../core/service.ts';
 import { Deliveries } from '../core/delivery.ts';
 import { repositories } from '../core/repositories.ts';
 import type { Repository } from '../core/model.ts';
@@ -169,13 +169,13 @@ export class GitHubAdapter implements ForgeAdapter {
     });
   }
 }
-export function forgeAdapter(config: ForgeConnection, h: Harness): ForgeAdapter {
+export function forgeAdapter(config: ForgeConnection, h: DevContour): ForgeAdapter {
   if (config.provider === 'gitlab') return new GitLabAdapter(config);
   if (config.provider === 'github') return new GitHubAdapter(config);
   return {
     async observe(repo, sourceBranch, signal) {
       const execution = executionEnvironment([h.config.environment, repo.environment], {
-        HARNESS_FORGE_REQUEST: JSON.stringify({
+        DEVCONTOUR_FORGE_REQUEST: JSON.stringify({
           project: repo.forge!.project,
           sourceBranch,
           targetBranch: repo.forge!.targetBranch,
@@ -197,7 +197,7 @@ export class DeliveryRunner {
   readonly state: Deliveries;
   private controllers = new Set<AbortController>();
   constructor(
-    readonly h: Harness,
+    readonly h: DevContour,
     readonly root: string,
   ) {
     this.state = new Deliveries(h);
@@ -317,7 +317,7 @@ export class DeliveryRunner {
         } else {
           if (!observation.mergedSha || !/^[a-f0-9]{40,64}$/.test(observation.mergedSha))
             throw new Error('Forge не вернул итоговый merge SHA');
-          const ref = `refs/harness/remote-check/${d.id}/${repo.id}`;
+          const ref = `refs/devcontour/remote-check/${d.id}/${repo.id}`;
           // Fetch reads the remote and only updates a private local ref; it never pushes.
           const fetched = await command(
             [

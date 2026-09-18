@@ -39,7 +39,7 @@ export async function setupWorkspace(file: string, data?: string) {
     readComponentConfig({ ...r, path: resolve(workspaceRoot, r.path) }),
   );
   const input = registrySchema.parse(raw);
-  const root = resolve(data ?? join(workspaceRoot, '.harness', 'local'));
+  const root = resolve(data ?? join(workspaceRoot, '.devcontour-local'));
   const selected = await Promise.all(
     input.repositories.map((r) => profile(r.profile, r.path, r.id)),
   );

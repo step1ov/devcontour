@@ -65,8 +65,8 @@ export async function snapshotDependencies(
   for (const snapshot of snapshots) {
     const repo = repository(config, snapshot.repositoryId);
     const execution = executionEnvironment([config.environment, repo.environment], {
-      HARNESS_RUN_ID: run.id,
-      HARNESS_COMPONENTS_JSON: JSON.stringify(paths),
+      DEVCONTOUR_RUN_ID: run.id,
+      DEVCONTOUR_COMPONENTS_JSON: JSON.stringify(paths),
     });
     await runSteps(
       repo.dependencyBuild ?? [],
@@ -104,13 +104,13 @@ export async function assertDependencies(snapshots: DependencySnapshot[], config
 export function runEnvironment(config: Config, run: Run, phase: string, cwd: string) {
   const repo = repository(config, run.repositoryId ?? 'main');
   return executionEnvironment([config.environment, repo.environment], {
-    HARNESS_REPOSITORY_ID: repo.id,
-    HARNESS_RUN_ID: run.id,
-    HARNESS_TASK_ID: run.taskId,
-    HARNESS_PHASE: phase,
-    HARNESS_RESOURCES_JSON: JSON.stringify(run.resources ?? []),
-    HARNESS_DEPENDENCIES_JSON: JSON.stringify(run.dependencies ?? []),
-    HARNESS_COMPONENTS_JSON: JSON.stringify({
+    DEVCONTOUR_REPOSITORY_ID: repo.id,
+    DEVCONTOUR_RUN_ID: run.id,
+    DEVCONTOUR_TASK_ID: run.taskId,
+    DEVCONTOUR_PHASE: phase,
+    DEVCONTOUR_RESOURCES_JSON: JSON.stringify(run.resources ?? []),
+    DEVCONTOUR_DEPENDENCIES_JSON: JSON.stringify(run.dependencies ?? []),
+    DEVCONTOUR_COMPONENTS_JSON: JSON.stringify({
       ...Object.fromEntries((run.dependencies ?? []).map((s) => [s.repositoryId, s.path])),
       [repo.id]: cwd,
     }),

@@ -2,13 +2,13 @@ import type { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, realpathSync, existsSync, lstatSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { createHash } from 'node:crypto';
-import { emptyState, type HarnessState, type AuditEvent } from './model.ts';
+import { emptyState, type DevContourState, type AuditEvent } from './model.ts';
 
 export interface ComponentLocation {
   id: string;
   path: string;
 }
-const marker = '$harnessComponentObject';
+const marker = '$devcontourComponentObject';
 export class ComponentStorage {
   readonly locations: { id: string; path: string; schema: string }[];
   constructor(
@@ -24,8 +24,8 @@ export class ComponentStorage {
       throw new Error('Повтор component ID');
     this.locations = components.map((repo, index) => {
       const root = realpathSync(repo.path),
-        path = join(root, '.harness', 'local', 'state.sqlite');
-      for (const p of [join(root, '.harness'), dirname(path), path])
+        path = join(root, '.devcontour-local', 'state.sqlite');
+      for (const p of [join(root, '.devcontour-local'), dirname(path), path])
         if (existsSync(p) && lstatSync(p).isSymbolicLink())
           throw new Error('Component storage не пишет через symlink');
       if (resolve(path) === realpathSync(coordinator))
@@ -70,7 +70,7 @@ export class ComponentStorage {
     if (!location) throw new Error('Неизвестный компонент хранилища: ' + id);
     return location.schema;
   }
-  private owner(value: any, state: HarnessState): string | undefined {
+  private owner(value: any, state: DevContourState): string | undefined {
     if (!value || typeof value !== 'object') return;
     if (
       value.repositoryId &&
@@ -104,7 +104,7 @@ export class ComponentStorage {
     if (entity && entity !== value) return this.owner(entity, state);
     return;
   }
-  private encode(value: unknown, state: HarnessState): string {
+  private encode(value: unknown, state: DevContourState): string {
     return JSON.stringify(value, (_key, item) => {
       if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
       // Only complete local entities are externalized; ID-only links stay common metadata.
@@ -133,7 +133,7 @@ export class ComponentStorage {
       return JSON.parse(row.data);
     });
   }
-  read(main: any): HarnessState {
+  read(main: any): DevContourState {
     if (!main.componentLayout) {
       if (
         main.tasks.length ||
@@ -184,7 +184,7 @@ export class ComponentStorage {
     delete merged.componentLayout;
     return merged;
   }
-  write(state: HarnessState) {
+  write(state: DevContourState) {
     const main: any = structuredClone(state),
       local = new Map(this.locations.map((l) => [l.id, emptyState()]));
     const layout: any = { locations: this.locations.map(({ id, path }) => ({ id, path })) };
@@ -214,7 +214,7 @@ export class ComponentStorage {
       if (!data?.componentEvent && !data?.[marker]) this.event(e.id, e.at, e.type, data, state);
     }
   }
-  event(id: number, at: string, type: string, data: any, state: HarnessState) {
+  event(id: number, at: string, type: string, data: any, state: DevContourState) {
     const owner = this.owner(data, state);
     if (owner) {
       this.db

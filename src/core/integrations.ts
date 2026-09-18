@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 const name = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
-const envKey = name.refine((s) => !s.startsWith('HARNESS_'), 'HARNESS_* задаёт runner');
+const envKey = name.refine((s) => !s.startsWith('DEVCONTOUR_'), 'DEVCONTOUR_* задаёт runner');
 export const environmentSchema = z.object({
   inherit: z.array(envKey).default([]),
   values: z.record(envKey, z.string()).default({}),

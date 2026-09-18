@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { z } from 'zod';
-import { Harness, digest, specDigest } from '../core/service.ts';
+import { DevContour, digest, specDigest } from '../core/service.ts';
 import { DomainError, requireValue, type Task } from '../core/model.ts';
 import { repository } from '../core/repositories.ts';
 import { taskOwner } from '../core/sync-state.ts';
@@ -36,7 +36,7 @@ function git(root: string, ...args: string[]) {
   }).trimEnd();
 }
 export class IntentService {
-  constructor(readonly h: Harness) {}
+  constructor(readonly h: DevContour) {}
   private root(repositoryId?: string) {
     return repositoryId
       ? repository(this.h.config, repositoryId).path
