@@ -37,7 +37,7 @@ export function validateWorkflow(config: Config) {
     ...repos.flatMap((r) => [
       ...Object.values(r.roles ?? {})
         .filter(Boolean)
-        .flatMap((role) => [role!, ...(role?.reviewer ? [role.reviewer] : [])]),
+        .flatMap((role) => [role, ...(role?.reviewer ? [role.reviewer] : [])]),
       ...(r.reviewer ? [r.reviewer] : []),
     ]),
     ...Object.values(config.roles),

@@ -346,10 +346,10 @@ export class DeliveryRunner {
           c.mergedSha = observation.mergedSha;
           c.state = 'merged';
           for (const name of repo.forge!.requiredChecks)
-            if (!c.checks!.some((check) => check.name === name)) waiting = true;
+            if (!c.checks.some((check) => check.name === name)) waiting = true;
           if (
-            !c.checks!.length ||
-            c.checks!.some((check) => check.sha !== c.mergedSha || check.status !== 'success')
+            !c.checks.length ||
+            c.checks.some((check) => check.sha !== c.mergedSha || check.status !== 'success')
           )
             waiting = true;
         }

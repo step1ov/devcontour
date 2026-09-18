@@ -205,7 +205,7 @@ export class ProjectMemory {
       if (statuses.has(r.id)) return statuses.get(r.id)!;
       if (trail.has(r.id)) return 'stale';
       const next = new Set([...trail, r.id]);
-      let status: MemoryStatus = replaced.has(r.id)
+      const status: MemoryStatus = replaced.has(r.id)
         ? 'superseded'
         : !r.sources.length && !r.supports.length
           ? 'ungrounded'
