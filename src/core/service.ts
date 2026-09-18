@@ -11,7 +11,7 @@ import {
   taskInput,
   discoveryInput,
   type Task,
-  type HarnessState,
+  type DevContourState,
   type Config,
   type Evidence,
   type Run,
@@ -41,23 +41,23 @@ export const specDigest = (t: Task) =>
     ...(t.finding ? { finding: t.finding } : {}),
   });
 const now = () => new Date().toISOString();
-const task = (s: HarnessState, id: string) =>
+const task = (s: DevContourState, id: string) =>
   requireValue(
     s.tasks.find((t) => t.id === id),
     `Задача ${id} не найдена`,
   );
-const board = (s: HarnessState, id: string) =>
+const board = (s: DevContourState, id: string) =>
   requireValue(
     s.boards.find((b) => b.id === id),
     `Доска ${id} не найдена`,
   );
-function activeRevision(s: HarnessState, id: string) {
+function activeRevision(s: DevContourState, id: string) {
   const b = board(s, id);
   const r = b.revisions.at(-1)!;
   if (r.status !== 'active') throw new DomainError('Доска принята. Создайте корректировку.');
   return r;
 }
-export class Harness {
+export class DevContour {
   constructor(
     readonly store: Store,
     readonly config: Config,
@@ -514,7 +514,7 @@ export class Harness {
     id: string,
     token: string,
     type: string,
-    fn: (run: Run, t: Task, s: HarnessState) => T,
+    fn: (run: Run, t: Task, s: DevContourState) => T,
   ): T {
     return this.store.change(type, (s) => {
       const r = requireValue(

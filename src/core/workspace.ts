@@ -3,12 +3,12 @@ import { componentImpact } from './workflow.ts';
 import { randomUUID } from 'node:crypto';
 import { entityId } from './ids.ts';
 import { z } from 'zod';
-import { Harness, digest, specDigest } from './service.ts';
+import { DevContour, digest, specDigest } from './service.ts';
 import { repositories } from './repositories.ts';
 import {
   DomainError,
   requireValue,
-  type HarnessState,
+  type DevContourState,
   type ChangeSet,
   type Verification,
   type WorkspaceEvidence,
@@ -21,12 +21,12 @@ export const changeSetInput = z.object({
   boardIds: z.array(z.string()).min(1).max(100),
   supersedes: z.string().optional(),
 });
-const find = (s: HarnessState, id: string) =>
+const find = (s: DevContourState, id: string) =>
   requireValue(
     s.changeSets.find((c) => c.id === id),
     'ChangeSet не найден',
   );
-export function changeSnapshot(s: HarnessState, c: ChangeSet) {
+export function changeSnapshot(s: DevContourState, c: ChangeSet) {
   const boards = c.boardIds.map((id) =>
     requireValue(
       s.boards.find((b) => b.id === id),
@@ -52,7 +52,7 @@ export const snapshotDigest = (snapshot: ReturnType<typeof changeSnapshot>) =>
   });
 
 export class Workspace {
-  constructor(readonly h: Harness) {}
+  constructor(readonly h: DevContour) {}
   policyDigest() {
     return digest({
       repositories: repositories(this.h.config),

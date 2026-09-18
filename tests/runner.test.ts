@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { setupDemo } from '../src/demo.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
-import { Harness } from '../src/core/service.ts';
+import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { adapters, cliArguments, type AgentRequest } from '../src/runner/adapters.ts';
 import { git, command } from '../src/runner/process.ts';
@@ -15,11 +15,11 @@ import { input } from './helpers.ts';
 import { acceptBoard } from '../src/runner/agent-control.ts';
 import { ProjectMemory } from '../src/application/memory.ts';
 async function runtimeFixture() {
-  const root = await mkdtemp(join(tmpdir(), 'harness-runner-'));
+  const root = await mkdtemp(join(tmpdir(), 'devcontour-runner-'));
   await setupDemo(root);
   const config = loadConfig(join(root, 'config.json'));
   const store = new Store(join(root, 'state.sqlite'));
-  const h = new Harness(store, config);
+  const h = new DevContour(store, config);
   const scheduler = new Scheduler(h, root);
   await scheduler.init();
   return {
@@ -146,7 +146,7 @@ test('A missing required tool fails closed and never advances integration ref', 
   const f = await runtimeFixture();
   try {
     const before = await git(f.config.repository, 'rev-parse', f.scheduler.target);
-    f.config.gates[0].command = ['harness-tool-that-does-not-exist'];
+    f.config.gates[0].command = ['devcontour-tool-that-does-not-exist'];
     f.h.pause(false);
     await f.scheduler.drain();
     const failed = f.store.read().tasks.filter((t) => t.status === 'failed');

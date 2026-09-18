@@ -20,7 +20,7 @@ export async function reserveRepositories(config: Config, dataRoot: string) {
     );
     if (commonDirs.has(common)) throw new Error('Один Git-репозиторий зарегистрирован дважды');
     commonDirs.add(common);
-    const path = join(common, 'harness-owner.json');
+    const path = join(common, 'devcontour-owner.json');
     const content = JSON.stringify({
       owner,
       repositoryId: repo.id,

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { config, input, fixture, complete } from './helpers.ts';
 import { repositorySchema } from '../src/core/model.ts';
-import { Harness, specDigest } from '../src/core/service.ts';
+import { DevContour, specDigest } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { Workspace } from '../src/core/workspace.ts';
 import { WorkspaceRunner } from '../src/runner/workspace.ts';
@@ -21,26 +21,26 @@ import { acceptBoard } from '../src/runner/agent-control.ts';
 const localTest = `import {readFileSync,writeFileSync} from 'node:fs';
 const n=JSON.parse(readFileSync('value.json','utf8'));
 const ok=typeof n==='number';
-writeFileSync(process.env.HARNESS_REPORT_PATH, '<testsuite><testcase name="numeric value">'+(ok?'':'<failure/>')+'</testcase></testsuite>');
+writeFileSync(process.env.DEVCONTOUR_REPORT_PATH, '<testsuite><testcase name="numeric value">'+(ok?'':'<failure/>')+'</testcase></testsuite>');
 process.exitCode=ok?0:1;`;
 const combinedTest = `import {readFileSync,writeFileSync} from 'node:fs';
-const paths=JSON.parse(process.env.HARNESS_COMPONENTS_JSON);
-const manifest=JSON.parse(readFileSync(process.env.HARNESS_MANIFEST_PATH,'utf8'));
+const paths=JSON.parse(process.env.DEVCONTOUR_COMPONENTS_JSON);
+const manifest=JSON.parse(readFileSync(process.env.DEVCONTOUR_MANIFEST_PATH,'utf8'));
 const actual=JSON.parse(readFileSync(paths.library+'/value.json','utf8'));
 const expected=JSON.parse(readFileSync(paths.product+'/value.json','utf8'));
 const ok=actual===expected && manifest.components.library.path===paths.library;
-writeFileSync(process.env.HARNESS_REPORT_PATH,'<testsuite><testcase name="product consumes library">'+(ok?'':'<failure message="incompatible library"/>')+'</testcase></testsuite>');
+writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase name="product consumes library">'+(ok?'':'<failure message="incompatible library"/>')+'</testcase></testsuite>');
 if(!ok) console.error('incompatible library',actual,expected);
 process.exitCode=ok?0:1;`;
 async function multiRepo() {
-  const root = await mkdtemp(join(tmpdir(), 'harness-workspace-'));
+  const root = await mkdtemp(join(tmpdir(), 'devcontour-workspace-'));
   const repos = [];
   for (const id of ['product', 'library']) {
     const path = join(root, id);
     await mkdir(path);
     await git(path, 'init', '-b', 'main');
     await git(path, 'config', 'user.email', 'fixture@example.invalid');
-    await git(path, 'config', 'user.name', 'Harness fixture');
+    await git(path, 'config', 'user.name', 'DevContour fixture');
     await writeFile(join(path, '.gitignore'), '.reports/\n');
     await writeFile(join(path, 'value.json'), '1');
     await writeFile(join(path, 'local.mjs'), localTest);
@@ -84,9 +84,9 @@ async function multiRepo() {
       },
     ],
   });
-  const data = join(workspaceRoot, '.harness');
+  const data = join(workspaceRoot, '.devcontour-local');
   const store = new Store(join(data, 'state.sqlite')),
-    h = new Harness(store, c);
+    h = new DevContour(store, c);
   attachJournal(h);
   const runtimes = {
     ...adapters,
@@ -287,13 +287,13 @@ test('Workspace gates cannot change manifest or another component source', async
     gate.command = [
       process.execPath,
       '-e',
-      `require('node:fs').writeFileSync(process.env.HARNESS_MANIFEST_PATH,'{}');require('node:fs').writeFileSync(process.env.HARNESS_REPORT_PATH,'<testsuite><testcase name="x"/></testsuite>')`,
+      `require('node:fs').writeFileSync(process.env.DEVCONTOUR_MANIFEST_PATH,'{}');require('node:fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase name="x"/></testsuite>')`,
     ];
     await assert.rejects(f.runner.verify(c.id), /manifest/);
     gate.command = [
       process.execPath,
       '-e',
-      `require('node:fs').writeFileSync(JSON.parse(process.env.HARNESS_COMPONENTS_JSON).library+'/value.json','99');require('node:fs').writeFileSync(process.env.HARNESS_REPORT_PATH,'<testsuite><testcase name="x"/></testsuite>')`,
+      `require('node:fs').writeFileSync(JSON.parse(process.env.DEVCONTOUR_COMPONENTS_JSON).library+'/value.json','99');require('node:fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase name="x"/></testsuite>')`,
     ];
     await assert.rejects(f.runner.verify(c.id), /исходники/);
     assert.throws(() => f.runner.workspace.accept(c.id), /успешной/);
@@ -381,7 +381,7 @@ test('Consumer impact executes prerequisites and affected product tests on real 
     await writeFile(join(unrelated, 'local.mjs'), localTest);
     await git(unrelated, 'add', '.');
     await git(unrelated, 'commit', '-m', 'independent product');
-    await git(unrelated, 'branch', 'harness/accepted');
+    await git(unrelated, 'branch', 'devcontour/accepted');
     f.c.repositories.push(
       repositorySchema.parse({
         id: 'unrelated',

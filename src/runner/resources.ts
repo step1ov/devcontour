@@ -20,7 +20,7 @@ export const resourceKey = (r: Resource) =>
           : r.value,
   });
 export const resourceDatabase = (config: Config) =>
-  config.resourceDatabase ?? join(homedir(), '.harness', 'resources.sqlite');
+  config.resourceDatabase ?? join(homedir(), '.devcontour-local', 'resources.sqlite');
 type LeaseRow = {
   key: string;
   resource: string;

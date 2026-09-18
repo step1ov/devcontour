@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { SignalInbox } from '../src/core/signals.ts';
 import { Store } from '../src/core/store.ts';
-import { Harness } from '../src/core/service.ts';
+import { DevContour } from '../src/core/service.ts';
 import { fixture, config, input, complete } from './helpers.ts';
 
 const observation = (changes = {}) => ({
@@ -86,7 +86,7 @@ test('Component incident bodies and event receipts stay out of coordinator SQLit
   const path = join(f.root, 'coordinator.sqlite');
   const local = new Store(path, [{ id: 'main', path: repo }]);
   try {
-    const h = new Harness(local, config({ repository: repo, storage: 'component' }));
+    const h = new DevContour(local, config({ repository: repo, storage: 'component' }));
     const inbox = new SignalInbox(h);
     inbox.ingest(
       observation({ summary: 'PRIVATE_LIBRARY_DIAGNOSIS is stored only in the library.' }),

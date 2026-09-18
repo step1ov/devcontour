@@ -7,7 +7,7 @@ import { commandScope } from '../src/runner/scope.ts';
 import { setupProject } from '../src/runner/setup.ts';
 import { command } from '../src/runner/process.ts';
 import { Store } from '../src/core/store.ts';
-import { Harness } from '../src/core/service.ts';
+import { DevContour } from '../src/core/service.ts';
 import { loadConfig } from '../src/runner/config.ts';
 
 const cli = resolve('src/cli.ts');
@@ -37,7 +37,7 @@ test('Product commands require scope; invalid or conflicting scope never silentl
   );
   assert.equal(
     commandScope(['serve', '--workspace', '/tmp/project'], 'serve').data,
-    join('/tmp/project', '.harness', 'local'),
+    join('/tmp/project', '.devcontour-local'),
   );
   assert.throws(() => commandScope(['serve', '--workspace', 'relative'], 'serve'), /абсолютный/);
   assert.throws(
@@ -57,7 +57,7 @@ test('Product commands require scope; invalid or conflicting scope never silentl
 });
 
 test('Bare CLI fails before creating demo files; two CLI sessions address separate workspace databases', async () => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'harness-scope-')));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'devcontour-scope-')));
   try {
     const missing = await run(root, 'serve');
     assert.notEqual(missing.code, 0);
@@ -81,14 +81,14 @@ test('Bare CLI fails before creating demo files; two CLI sessions address separa
       );
       assert.equal(result.code, 0, result.stderr);
       const setup = JSON.parse(result.stdout);
-      assert.equal(setup.data, join(workspace, '.harness', 'local'));
+      assert.equal(setup.data, join(workspace, '.devcontour-local'));
       assert.equal(loadConfig(join(setup.data, 'config.json')).workspaceRoot, workspace);
       assert.match(
-        await readFile(join(product, 'docs/harness-start.md'), 'utf8'),
-        /harness-integration.md/,
+        await readFile(join(product, 'docs/devcontour-start.md'), 'utf8'),
+        /devcontour-integration.md/,
       );
-      assert.match(await readFile(join(product, 'docs/harness-integration.md'), 'utf8'), /Forge/);
-      assert.ok(JSON.parse(await readFile(join(product, 'harness.component.json'), 'utf8')).roles);
+      assert.match(await readFile(join(product, 'docs/devcontour-integration.md'), 'utf8'), /Forge/);
+      assert.ok(JSON.parse(await readFile(join(product, 'devcontour.component.json'), 'utf8')).roles);
       const planFile = join(workspace, 'plan.json');
       await writeFile(
         planFile,
@@ -121,16 +121,16 @@ test('Bare CLI fails before creating demo files; two CLI sessions address separa
     );
     assert.equal(JSON.parse(states[0].stdout).state.boards[0].title, 'shop work');
     assert.equal(JSON.parse(states[1].stdout).state.boards[0].title, 'crm work');
-    await assert.rejects(readFile(join(root, 'shop', '.harness', 'local', 'config.json')));
-    await assert.rejects(readFile(join(root, '.harness', 'demo', 'config.json')));
+    await assert.rejects(readFile(join(root, 'shop', '.devcontour-local', 'config.json')));
+    await assert.rejects(readFile(join(root, '.devcontour-local', 'demo', 'config.json')));
     const first = contexts[0];
-    const config = loadConfig(join(first.workspace, '.harness', 'local', 'config.json'));
+    const config = loadConfig(join(first.workspace, '.devcontour-local', 'config.json'));
     assert.equal(config.storage, 'component');
     const store = new Store(
-      join(first.workspace, '.harness', 'local', 'state.sqlite'),
+      join(first.workspace, '.devcontour-local', 'state.sqlite'),
       config.repositories,
     );
-    const h = new Harness(store, config);
+    const h = new DevContour(store, config);
     assert.equal(h.store.read().boards.length, 1);
     store.close();
   } finally {
@@ -139,7 +139,7 @@ test('Bare CLI fails before creating demo files; two CLI sessions address separa
 });
 
 test('Workspace setup preserves an existing scope and rejects a workspace inside the product', async () => {
-  const root = await realpath(await mkdtemp(join(tmpdir(), 'harness-workspace-start-')));
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'devcontour-workspace-start-')));
   try {
     const product = join(root, 'product'),
       workspace = join(root, 'workspace');

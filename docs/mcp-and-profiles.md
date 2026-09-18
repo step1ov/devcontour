@@ -22,11 +22,11 @@ DevContour разделяет четыре выбора: стек продукт
 | Профиль        | Что включает                                             | Что готовит агент                                                                                                                                         |
 | -------------- | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `python-api`   | `uv sync --locked`, Ruff и pytest с JUnit                | Закреплённые зависимости в pyproject.toml/uv.lock, Python, реальные API/DB-тесты. Для другого менеджера или проверок — локальный профиль.                 |
-| `nest-api`     | `node-checks`, сборка, отдельные integration-тесты       | Scripts typecheck, build, test:harness и test:harness:integration; JUnit в `.reports/junit.xml` и `.reports/integration.xml`, тестовое окружение сервиса. |
+| `nest-api`     | `node-checks`, сборка, отдельные integration-тесты       | Scripts typecheck, build, test:devcontour и test:devcontour:integration; JUnit в `.reports/junit.xml` и `.reports/integration.xml`, тестовое окружение сервиса. |
 | `react-native` | `node-checks` и `mobile-maestro`                         | Unit-тесты, сборка и установка текущего SHA, устройство, mobile flows и cleanup.                                                                          |
 | `expo-mobile`  | `react-native` с метаданными Expo и защитой конфигурации | Совместимые с SDK зависимости, фактический способ сборки/установки и проверки приложения.                                                                 |
 
-`node-checks` содержит npm ci, typecheck и test:harness; это переиспользуемая часть, а не полноценная приёмка любого продукта. Для прежних Node-профилей дополнительно нужен build. Scripts должны выдавать реальные отчёты, а не заглушки. Для Go требуется согласованная версия runner, формирующего JUnit. Maestro задаёт способ E2E-проверки и сочетается с React Native/Expo. `mobile:harness:prepare` обязан установить проверяемую сборку; наличие Expo Go или старой сборки не подтверждает текущий SHA. Автоматического EAS build, публикации и управления устройствами профиль не добавляет.
+`node-checks` содержит npm ci, typecheck и test:devcontour; это переиспользуемая часть, а не полноценная приёмка любого продукта. Для прежних Node-профилей дополнительно нужен build. Scripts должны выдавать реальные отчёты, а не заглушки. Для Go требуется согласованная версия runner, формирующего JUnit. Maestro задаёт способ E2E-проверки и сочетается с React Native/Expo. `mobile:devcontour:prepare` обязан установить проверяемую сборку; наличие Expo Go или старой сборки не подтверждает текущий SHA. Автоматического EAS build, публикации и управления устройствами профиль не добавляет.
 
 ## Собственный профиль и составные части
 
@@ -161,10 +161,10 @@ Claude получает строгий MCP config и allowlist. Codex при я�
 MCP помогает изучить UI/устройство и подготовить сценарий. Затем зафиксируйте его как повторяемую команду проверки с наблюдаемыми assertions и отчётом. Например, в целевом Playwright config reporter может использовать:
 
 ```ts
-reporter: [['junit', { outputFile: process.env.HARNESS_REPORT_PATH ?? '.reports/junit.xml' }]],
+reporter: [['junit', { outputFile: process.env.DEVCONTOUR_REPORT_PATH ?? '.reports/junit.xml' }]],
 ```
 
-Это фрагмент настройки reporter, не полный TypeScript-модуль. `test:harness` должен выполнять настоящие тесты, писать отчёт и завершаться ненулевым кодом при сбое. `.reports/` исключается из Git. Runner удаляет прежний отчёт, требует хотя бы один testcase и отклоняет skipped/failure/error.
+Это фрагмент настройки reporter, не полный TypeScript-модуль. `test:devcontour` должен выполнять настоящие тесты, писать отчёт и завершаться ненулевым кодом при сбое. `.reports/` исключается из Git. Runner удаляет прежний отчёт, требует хотя бы один testcase и отклоняет skipped/failure/error.
 
 Для Maestro действуют те же условия: нужная сборка, фактическое устройство, повторяемый flow, отчёт, изоляция ресурсов и cleanup. Интерактивное исследование помогает найти сценарий, но произвольный текст «я проверил» не заменяет evidence.
 

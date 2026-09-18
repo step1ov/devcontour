@@ -2,12 +2,12 @@ import { repositories } from '../core/repositories.ts';
 import { mkdirSync, writeFileSync, renameSync, lstatSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { Harness } from '../core/service.ts';
-import type { HarnessState, AuditEvent } from '../core/model.ts';
+import type { DevContour } from '../core/service.ts';
+import type { DevContourState, AuditEvent } from '../core/model.ts';
 import { changeSnapshot } from '../core/workspace.ts';
 
 const line = (text: string) => text.replace(/[\r\n|]/g, ' ');
-export function renderJournal(state: HarnessState, id: string, events: AuditEvent[]) {
+export function renderJournal(state: DevContourState, id: string, events: AuditEvent[]) {
   const c = state.changeSets.find((c) => c.id === id);
   if (!c) throw new Error('ChangeSet не найден');
   const accepted = c.verifications.find((v) => v.id === c.acceptance?.verificationId);
@@ -108,7 +108,7 @@ export function renderJournal(state: HarnessState, id: string, events: AuditEven
   );
   return rows.join('\n');
 }
-export function attachJournal(h: Harness) {
+export function attachJournal(h: DevContour) {
   if (!h.config.workspaceRoot) return;
   const root = realpathSync(h.config.workspaceRoot);
   h.store.onCommit = () =>
@@ -122,7 +122,7 @@ export function attachJournal(h: Harness) {
       }
       if (h.config.storage === 'component')
         for (const repo of repositories(h.config)) {
-          const localDir = join(realpathSync(repo.path), '.harness', 'journal');
+          const localDir = join(realpathSync(repo.path), '.devcontour-local', 'journal');
           mkdirSync(localDir, { recursive: true });
           if (realpathSync(localDir) !== resolve(localDir))
             throw new Error('Локальный журнал не пишет через symlink');

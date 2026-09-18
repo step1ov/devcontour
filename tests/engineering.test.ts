@@ -9,7 +9,7 @@ import { once } from 'node:events';
 import { config, fixture, input } from './helpers.ts';
 import { orderedGates, validateWorkflow } from '../src/core/workflow.ts';
 import { taskInput, type Task } from '../src/core/model.ts';
-import { specDigest, Harness } from '../src/core/service.ts';
+import { specDigest, DevContour } from '../src/core/service.ts';
 import { ResourcePool, resourceKey, withResources } from '../src/runner/resources.ts';
 import { pinContext, taskContext } from '../src/runner/context.ts';
 import { git, command } from '../src/runner/process.ts';
@@ -47,7 +47,7 @@ test('Gate DAG sorts prerequisites and rejects unknown/cyclic dependencies; comp
       name: 'A',
       kind: 'library',
       path: '/a',
-      targetBranch: 'harness/accepted',
+      targetBranch: 'devcontour/accepted',
       gates: c.gates,
       protectedPaths: [],
       dependsOn: ['b'],
@@ -57,7 +57,7 @@ test('Gate DAG sorts prerequisites and rejects unknown/cyclic dependencies; comp
       name: 'B',
       kind: 'product',
       path: '/b',
-      targetBranch: 'harness/accepted',
+      targetBranch: 'devcontour/accepted',
       gates: c.gates,
       protectedPaths: [],
       dependsOn: ['a'],
@@ -100,11 +100,11 @@ test('Discovered debt becomes a deduplicated draft with provenance; scope and co
 });
 
 async function runnerFixture() {
-  const root = await mkdtemp(join(tmpdir(), 'harness-context-'));
+  const root = await mkdtemp(join(tmpdir(), 'devcontour-context-'));
   await setupDemo(root);
   const c = loadConfig(join(root, 'config.json')),
     store = new Store(join(root, 'state.sqlite'));
-  const h = new Harness(store, c);
+  const h = new DevContour(store, c);
   const scheduler = new Scheduler(h, root);
   await scheduler.init();
   return {
@@ -299,7 +299,7 @@ test('Ordered codegen runs from its cwd before a real test in candidate and inte
     );
     await writeFile(
       join(f.c.repository, 'check-marker.mjs'),
-      "import {readFileSync,writeFileSync} from 'node:fs'; if(JSON.parse(process.env.HARNESS_RESOURCES_JSON)[0].value!=='SIMULATOR-A') process.exit(2); if(readFileSync('generated-marker','utf8')!=='ready') process.exit(1); writeFileSync(process.env.HARNESS_REPORT_PATH,'<testsuite><testcase name=\"generated\"/></testsuite>');",
+      "import {readFileSync,writeFileSync} from 'node:fs'; if(JSON.parse(process.env.DEVCONTOUR_RESOURCES_JSON)[0].value!=='SIMULATOR-A') process.exit(2); if(readFileSync('generated-marker','utf8')!=='ready') process.exit(1); writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase name=\"generated\"/></testsuite>');",
     );
     await git(f.c.repository, 'add', 'tools', 'check-marker.mjs');
     await git(f.c.repository, 'commit', '-m', 'codegen fixture');
@@ -344,7 +344,7 @@ test('Ordered codegen runs from its cwd before a real test in candidate and inte
 
 const device = { id: 'phone', kind: 'device' as const, value: 'SIMULATOR-A' };
 test('A host resource is exclusive across processes and aliases; TTL alone cannot steal ownership', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'harness-resource-')),
+  const root = await mkdtemp(join(tmpdir(), 'devcontour-resource-')),
     path = join(root, 'resources.sqlite');
   const pool = new ResourcePool(path);
   try {
@@ -376,7 +376,7 @@ test('A host resource is exclusive across processes and aliases; TTL alone canno
 });
 
 test('Resource acquisition is all-or-nothing; cancellation and failure release only owned leases', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'harness-resource-')),
+  const root = await mkdtemp(join(tmpdir(), 'devcontour-resource-')),
     path = join(root, 'resources.sqlite');
   const c = config({
     resources: [device, { id: 'port', kind: 'port', value: '4327' }],
@@ -417,7 +417,7 @@ test('Resource acquisition is all-or-nothing; cancellation and failure release o
 });
 
 test('CLI context-lock pins committed instructions, context-show resolves task selection and a running queue blocks policy updates', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'harness-context-cli-'));
+  const root = await mkdtemp(join(tmpdir(), 'devcontour-context-cli-'));
   const repo = join(root, 'repo'),
     data = join(root, 'data');
   await mkdir(repo);
@@ -435,7 +435,7 @@ test('CLI context-lock pins committed instructions, context-show resolves task s
     });
     await writeFile(join(data, 'config.json'), JSON.stringify(c));
     const store = new Store(join(data, 'state.sqlite')),
-      h = new Harness(store, c);
+      h = new DevContour(store, c);
     const b = h.createBoard('SDK consumer');
     const t = h.addTask(b.id, input());
     store.close();

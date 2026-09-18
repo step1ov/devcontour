@@ -96,7 +96,7 @@ Pre-commit запускает token lint и typecheck; pre-push и текущи�
 | Хранилища/интеграции    | `tests/enterprise.test.ts`                               | Локальность записей, миграция, cleanup, dependencies, forge observations                    |
 | Начало работы           | `tests/setup.test.ts`, `scope.test.ts`, `config.test.ts` | Существующие файлы, явный workspace, profile locks, совместимость                           |
 | AI-согласования         | `tests/agent-control.test.ts`                            | Независимость, blocking review, изменённая после review постановка, operator mode           |
-| HTTP/UI                 | `tests/http.test.ts`, `e2e/harness.spec.ts`              | Origin/Host, заголовки, публичный сценарий, доступность и состояния интерфейса              |
+| HTTP/UI                 | `tests/http.test.ts`, `e2e/devcontour.spec.ts`              | Origin/Host, заголовки, публичный сценарий, доступность и состояния интерфейса              |
 
 Fixtures используют временные репозитории, bare remotes, локальные HTTP-ответы и управляемые процессы. Они проверяют поведение без платного API и credentials. Не заменяйте реальную Git-проверку mock-ответом там, где риск заключается именно в Git ancestry/ref/worktree.
 
@@ -124,7 +124,7 @@ Fixtures используют временные репозитории, bare re
 
 Встроенные профили находятся в `packs/profiles/`; ID совпадает с именем JSON-файла, отдельного allowlist нет. Собственный профиль подключается из репозитория компонента и не требует правки дистрибутива. Resolver в runner/packs.ts объединяет extends, проверяет границы владельца, конфликты и JUnit, фиксирует digest всего состава. Проверяйте tests/profiles.test.ts: transitive drift, clone, одинаковые ID разных владельцев, реальное выполнение Python и защиту manifest. Старые builtin leaf digests сохраняются. Изменение существующего профиля требует осознанного обновления lock у потребителя.
 
-Новый gate обычно является конфигурацией и проектным скриптом, а не изменением ядра. `command` — массив argv без неявного shell. Test gate пишет свежий JUnit в `HARNESS_REPORT_PATH`, возвращает корректный код выхода, не меняет tracked-код и очищает внешние ресурсы. Новый формат доказательств потребует изменения схем и правил acceptance.
+Новый gate обычно является конфигурацией и проектным скриптом, а не изменением ядра. `command` — массив argv без неявного shell. Test gate пишет свежий JUnit в `DEVCONTOUR_REPORT_PATH`, возвращает корректный код выхода, не меняет tracked-код и очищает внешние ресурсы. Новый формат доказательств потребует изменения схем и правил acceptance.
 
 ## Добавить forge
 

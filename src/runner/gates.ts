@@ -4,7 +4,7 @@ import { readFile, writeFile, mkdir, rm, realpath } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import { command, git } from './process.ts';
-import { digest, Harness } from '../core/service.ts';
+import { digest, DevContour } from '../core/service.ts';
 import type { Run, Gate, Evidence } from '../core/model.ts';
 export function junitSummary(xml: string): { tests: number; failures: number; skipped: number } {
   if (xml.includes('<!DOCTYPE') || XMLValidator.validate(xml) !== true)
@@ -34,7 +34,7 @@ export async function runGate(...args: Parameters<typeof executeGate>) {
   return timed(args[0], args[1], `${args[4]}-test:${args[5].id}`, () => executeGate(...args));
 }
 async function executeGate(
-  h: Harness,
+  h: DevContour,
   run: Run,
   cwd: string,
   sha: string,
@@ -62,7 +62,7 @@ async function executeGate(
     const result = await command(gate.command, gateCwd, {
       signal,
       timeoutMs: gate.timeoutMs,
-      env: { ...runEnvironment(h.config, run, phase, cwd).env, HARNESS_REPORT_PATH: reportPath },
+      env: { ...runEnvironment(h.config, run, phase, cwd).env, DEVCONTOUR_REPORT_PATH: reportPath },
       redact: runEnvironment(h.config, run, phase, cwd).redact,
     });
     exitCode = result.code;

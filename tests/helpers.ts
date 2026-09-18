@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { configSchema, type Config, type Task } from '../src/core/model.ts';
-import { Harness } from '../src/core/service.ts';
+import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 export const config = (overrides: Partial<Config> = {}): Config =>
   configSchema.parse({
@@ -36,9 +36,9 @@ export const input = (title = 'Example task', dependsOn: string[] = []) => ({
   acceptance: ['The expected result is checked.'],
 });
 export function fixture() {
-  const root = mkdtempSync(join(tmpdir(), 'harness-test-'));
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-test-'));
   const store = new Store(join(root, 'state.sqlite'));
-  const h = new Harness(store, config());
+  const h = new DevContour(store, config());
   return {
     root,
     store,
@@ -49,7 +49,7 @@ export function fixture() {
     },
   };
 }
-export function complete(h: Harness, id: string) {
+export function complete(h: DevContour, id: string) {
   h.pause(false);
   const run = h.claim('test')!;
   if (run.taskId !== id) throw new Error('Wrong claim');

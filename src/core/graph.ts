@@ -1,4 +1,4 @@
-import { DomainError, type Task, type HarnessState } from './model.ts';
+import { DomainError, type Task, type DevContourState } from './model.ts';
 export function assertDag(tasks: Pick<Task, 'id' | 'dependsOn'>[]) {
   const map = new Map(tasks.map((t) => [t.id, t]));
   const visiting = new Set<string>();
@@ -29,10 +29,10 @@ export function descendants(tasks: Task[], roots: string[]): string[] {
   }
   return [...seen];
 }
-export function blockers(task: Task, state: HarnessState): string[] {
+export function blockers(task: Task, state: DevContourState): string[] {
   return task.dependsOn.filter((id) => state.tasks.find((t) => t.id === id)?.status !== 'done');
 }
-export function readyTasks(state: HarnessState) {
+export function readyTasks(state: DevContourState) {
   const visible = new Set(
     state.boards.flatMap((b) =>
       b.revisions.filter((r) => r.status === 'active').flatMap((r) => r.taskIds),

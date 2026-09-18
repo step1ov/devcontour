@@ -3,13 +3,13 @@ import { toolProfileFor, agentEnvironment } from './tools.ts';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { Harness } from '../core/service.ts';
+import { DevContour } from '../core/service.ts';
 import { adapters } from './adapters.ts';
 import { repositories } from '../core/repositories.ts';
 import { planResult } from '../core/plan.ts';
 import type { Task } from '../core/model.ts';
 export async function plan(
-  h: Harness,
+  h: DevContour,
   root: string,
   brief: string,
   runtime: 'codex' | 'claude',

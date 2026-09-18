@@ -4,7 +4,7 @@ import { withResources } from './resources.ts';
 import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { createHash } from 'node:crypto';
-import { Harness, digest } from '../core/service.ts';
+import { DevContour, digest } from '../core/service.ts';
 import { Workspace } from '../core/workspace.ts';
 import { repositories } from '../core/repositories.ts';
 import type { Verification, WorkspaceEvidence } from '../core/model.ts';
@@ -16,7 +16,7 @@ export class WorkspaceRunner {
   readonly workspace: Workspace;
   private jobs = new Map<string, { controller: AbortController; promise: Promise<unknown> }>();
   constructor(
-    readonly h: Harness,
+    readonly h: DevContour,
     readonly root: string,
   ) {
     this.workspace = new Workspace(h);
@@ -107,11 +107,11 @@ export class WorkspaceRunner {
             }
           };
           const commonEnv = {
-            HARNESS_RUN_ID: run.id,
-            HARNESS_CHANGESET_ID: id,
-            HARNESS_RESOURCES_JSON: JSON.stringify(resources),
-            HARNESS_MANIFEST_PATH: manifestPath,
-            HARNESS_COMPONENTS_JSON: JSON.stringify(paths),
+            DEVCONTOUR_RUN_ID: run.id,
+            DEVCONTOUR_CHANGESET_ID: id,
+            DEVCONTOUR_RESOURCES_JSON: JSON.stringify(resources),
+            DEVCONTOUR_MANIFEST_PATH: manifestPath,
+            DEVCONTOUR_COMPONENTS_JSON: JSON.stringify(paths),
           };
           const firstPath = paths[repositories(this.h.config)[0].id];
           await withEnvironment(
@@ -156,7 +156,7 @@ export class WorkspaceRunner {
                         repositories(this.h.config).find((r) => r.id === gate.repositoryId)
                           ?.environment,
                       ],
-                      { ...commonEnv, HARNESS_REPORT_PATH: reportPath },
+                      { ...commonEnv, DEVCONTOUR_REPORT_PATH: reportPath },
                     ).env,
                     redact: executionEnvironment([
                       this.h.config.environment,

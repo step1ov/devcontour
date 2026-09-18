@@ -12,8 +12,8 @@ import {
 } from 'node:fs';
 import { dirname, join, sep } from 'node:path';
 import { z } from 'zod';
-import type { Harness } from '../core/service.ts';
-import type { HarnessState } from '../core/model.ts';
+import type { DevContour } from '../core/service.ts';
+import type { DevContourState } from '../core/model.ts';
 import { taskInput } from '../core/model.ts';
 import { repository, repositories } from '../core/repositories.ts';
 import {
@@ -88,7 +88,7 @@ function readRecords(root: string): Records {
   }
   return records;
 }
-function scopes(h: Harness): Scope[] {
+function scopes(h: DevContour): Scope[] {
   if (!h.config.workspaceRoot)
     throw new Error('Git sync требует workspaceRoot вне компонентов; настройте workspace');
   const locations = [
@@ -105,9 +105,9 @@ function scopes(h: Harness): Scope[] {
     if (git(path, 'rev-parse', '--show-toplevel') !== path)
       throw new Error('Нужен отдельный Git repository: ' + path);
     try {
-      git(path, 'check-ignore', '--no-index', '.harness/local/state.sqlite');
+      git(path, 'check-ignore', '--no-index', '.devcontour-local/state.sqlite');
     } catch {
-      throw new Error('Добавьте .harness/ в .gitignore перед sync: ' + path);
+      throw new Error('Добавьте .devcontour-local/ в .gitignore перед sync: ' + path);
     }
     let ignored = false;
     try {
@@ -148,7 +148,7 @@ function scopes(h: Harness): Scope[] {
     return { ...location, path, branch, commit, identity, remote, baseline };
   });
 }
-function assertIdle(s: HarnessState) {
+function assertIdle(s: DevContourState) {
   if (
     !s.paused ||
     s.runs.some((r) => r.status === 'active') ||
@@ -177,9 +177,9 @@ function assertCommitContains(path: string, sha: string, targetBranch: string) {
   }
 }
 function validateGitResults(
-  h: Harness,
-  old: HarnessState,
-  next: HarnessState,
+  h: DevContour,
+  old: DevContourState,
+  next: DevContourState,
   scopeList: Scope[],
   records: Map<string | undefined, Records>,
 ) {
@@ -225,13 +225,13 @@ function atomicWrite(root: string, relative: string, value: unknown) {
   mkdirSync(dirname(path), { recursive: true });
   safePath(root, relative);
   // Temp files are outside the tracked state directory and on the same filesystem.
-  const local = safePath(root, '.harness/local');
+  const local = safePath(root, '.devcontour-local');
   mkdirSync(local, { recursive: true });
   const temp = join(local, `git-sync-${randomUUID()}.tmp`);
   writeFileSync(temp, content, { flag: 'wx' });
   renameSync(temp, path);
 }
-export function syncGit(h: Harness, options: SyncOptions = {}) {
+export function syncGit(h: DevContour, options: SyncOptions = {}) {
   if (options.resolutions)
     z.record(z.string(), z.enum(['local', 'git'])).parse(options.resolutions);
   let output: {
@@ -241,7 +241,7 @@ export function syncGit(h: Harness, options: SyncOptions = {}) {
     conflicts: { key: string; reason: string }[];
     scopes: { repositoryId?: string; path: string; branch: string }[];
   };
-  const action = (state: HarnessState) => {
+  const action = (state: DevContourState) => {
     if (!options.dryRun) assertIdle(state);
     const member = options.member ?? state.team?.member;
     if (!options.dryRun && !member)
@@ -342,7 +342,7 @@ export function syncGit(h: Harness, options: SyncOptions = {}) {
   return output!;
 }
 
-export function assertTeamCheckout(h: Harness) {
+export function assertTeamCheckout(h: DevContour) {
   if (!h.store.read().team) return;
   for (const scope of scopes(h)) {
     if (

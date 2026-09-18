@@ -13,7 +13,7 @@ import { repository } from '../core/repositories.ts';
 import { z } from 'zod';
 import { readFileSync } from 'node:fs';
 import { AgentContext, contextInputs, type ContextOperation } from './context.ts';
-import { Harness, specDigest } from '../core/service.ts';
+import { DevContour, specDigest } from '../core/service.ts';
 import { taskInput, DomainError } from '../core/model.ts';
 import { planResult } from '../core/plan.ts';
 import { Workspace, changeSetInput } from '../core/workspace.ts';
@@ -167,7 +167,7 @@ export function capabilities() {
 
 // CLI, HTTP and MCP use this layer. Review/evidence remain owned by existing runners.
 export class AgentService {
-  constructor(readonly h: Harness) {}
+  constructor(readonly h: DevContour) {}
   execute(raw: unknown): Record<string, unknown> {
     const result = this.dispatch(raw);
     if (Buffer.byteLength(JSON.stringify(result)) > 65536)

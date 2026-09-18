@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { Harness, digest } from '../core/service.ts';
+import { DevContour, digest } from '../core/service.ts';
 import { DomainError, relativePath, requireValue } from '../core/model.ts';
 import { repository } from '../core/repositories.ts';
 import { identitySchema } from '../core/sync-model.ts';
@@ -92,7 +92,7 @@ function source(root: string, path: string, ref: string) {
 }
 const words = (text: string) => new Set(text.toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? []);
 export class ProjectMemory {
-  constructor(readonly h: Harness) {}
+  constructor(readonly h: DevContour) {}
   private root(repositoryId?: string) {
     return repositoryId
       ? repository(this.h.config, repositoryId).path

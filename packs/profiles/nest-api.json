@@ -14,7 +14,7 @@
     {
       "id": "api-acceptance",
       "kind": "test",
-      "command": ["npm", "run", "test:harness:integration"],
+      "command": ["npm", "run", "test:devcontour:integration"],
       "timeoutMs": 240000,
       "dependsOn": ["build"],
       "report": {

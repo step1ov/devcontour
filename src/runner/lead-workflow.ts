@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { LeadWorkflow, type WorkflowJob } from '../core/lead-workflow.ts';
-import type { Harness } from '../core/service.ts';
+import type { DevContour } from '../core/service.ts';
 import { repositories, repository } from '../core/repositories.ts';
 import { Workspace, changeSnapshot, snapshotDigest } from '../core/workspace.ts';
 import { reviewPlan, acceptBoard } from './agent-control.ts';
@@ -15,7 +15,7 @@ export class LeadRunner {
   private pending?: Promise<void>;
   private controller?: AbortController;
   constructor(
-    readonly h: Harness,
+    readonly h: DevContour,
     readonly root: string,
   ) {
     this.workflow = new LeadWorkflow(h);
@@ -117,7 +117,7 @@ export class LeadRunner {
             }),
           ) as Pick<typeof adapters, 'codex' | 'claude'>;
           const root = job.owner
-            ? join(repository(this.h.config, job.owner).path, '.harness/local')
+            ? join(repository(this.h.config, job.owner).path, '.devcontour-local')
             : this.root;
           await reviewPlan(this.h, root, b.id, job.authorRuntime, runtimes, guard);
         }

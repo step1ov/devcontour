@@ -8,7 +8,7 @@ import { profile, profileMetadata, profilePin, packKey } from './packs.ts';
 import { git } from './process.ts';
 
 const templateRoot = fileURLToPath(new URL('../../templates/project/', import.meta.url));
-const harnessRoot = fileURLToPath(new URL('../../', import.meta.url));
+const devcontourRoot = fileURLToPath(new URL('../../', import.meta.url));
 export function defaultContextPacks(repositoryId = 'main') {
   const prefix = repositoryId === 'main' ? '' : repositoryId + '-';
   return [
@@ -74,9 +74,9 @@ export function projectConfig(
       '.agents/',
       '.github/',
       '.githooks/',
-      'harness.config.json',
-      'harness.component.json',
-      '.harness/',
+      'devcontour.config.json',
+      'devcontour.component.json',
+      '.devcontour-local/',
       '.devcontour/',
       'package.json',
       'package-lock.json',
@@ -149,7 +149,7 @@ export async function setupProject(options: {
   approvalMode?: ApprovalMode;
 }) {
   const repository = await realpath(resolve(options.repository));
-  if (repository === (await realpath(harnessRoot)))
+  if (repository === (await realpath(devcontourRoot)))
     throw new Error('Укажите отдельный каталог продукта, а не исходники DevContour');
   const docs = await realpath(join(repository, 'docs'));
   if (docs !== join(repository, 'docs')) throw new Error('docs должен быть внутри продукта');
@@ -181,7 +181,7 @@ export async function setupProject(options: {
     workspaceRoot = (await inspect(options.workspace))
       ? await realpath(options.workspace)
       : resolve(options.workspace);
-    const toolRoot = await realpath(harnessRoot);
+    const toolRoot = await realpath(devcontourRoot);
     if (
       [repository, toolRoot].some(
         (root) => workspaceRoot === root || workspaceRoot!.startsWith(root + sep),
@@ -190,24 +190,24 @@ export async function setupProject(options: {
       throw new Error('Workspace должен находиться вне репозитория продукта и каталога DevContour');
   }
   const data = workspaceRoot
-    ? join(workspaceRoot, '.harness', 'local')
+    ? join(workspaceRoot, '.devcontour-local')
     : options.data
       ? resolve(options.data)
-      : join(repository, '.harness', 'local');
+      : join(repository, '.devcontour-local');
   const files = new Map<string, string>();
   for (const name of await templateFiles())
     files.set(join(repository, name), await readFile(join(templateRoot, name), 'utf8'));
   files.set(
     join(repository, '.gitignore'),
-    '.harness/\n.reports/\nnode_modules/\ndist/\n.venv/\n__pycache__/\n.pytest_cache/\n.ruff_cache/\n.expo/\n.env*\n!.env.example\n',
+    '.devcontour-local/\n.reports/\nnode_modules/\ndist/\n.venv/\n__pycache__/\n.pytest_cache/\n.ruff_cache/\n.expo/\n.env*\n!.env.example\n',
   );
   if (workspaceRoot)
-    files.set(join(workspaceRoot, '.gitignore'), '.harness/\n.env*\n!.env.example\n');
+    files.set(join(workspaceRoot, '.gitignore'), '.devcontour-local/\n.env*\n!.env.example\n');
   const guides = new Map([
-    ['START.md', 'harness-start.md'],
-    ['docs/workspaces.md', 'harness-workspaces.md'],
-    ['docs/engineering-context.md', 'harness-engineering.md'],
-    ['docs/project-integration.md', 'harness-integration.md'],
+    ['START.md', 'devcontour-start.md'],
+    ['docs/workspaces.md', 'devcontour-workspaces.md'],
+    ['docs/engineering-context.md', 'devcontour-engineering.md'],
+    ['docs/project-integration.md', 'devcontour-integration.md'],
     ...[
       'team-sync',
       'requirements',
@@ -218,16 +218,16 @@ export async function setupProject(options: {
       'agent-evals',
       'intent',
       'mcp-and-profiles',
-    ].map((name) => ['docs/' + name + '.md', 'harness-' + name + '.md'] as [string, string]),
+    ].map((name) => ['docs/' + name + '.md', 'devcontour-' + name + '.md'] as [string, string]),
   ]);
   for (const [source, destination] of guides) {
-    const text = await readFile(join(harnessRoot, source), 'utf8');
+    const text = await readFile(join(devcontourRoot, source), 'utf8');
     const rewritten = text.replace(
       /\[([^\]]+)\]\(([^)]+\.md(?:#[^)]*)?)\)/g,
       (match, label, target: string) => {
         if (/^(https?:|#)/.test(target)) return match;
         const [file, anchor] = target.split('#');
-        const sourceRelative = relative(harnessRoot, resolve(harnessRoot, dirname(source), file));
+        const sourceRelative = relative(devcontourRoot, resolve(devcontourRoot, dirname(source), file));
         const installed = guides.get(sourceRelative);
         return installed
           ? '[' + label + '](' + installed + (anchor ? '#' + anchor : '') + ')'

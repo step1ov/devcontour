@@ -2,7 +2,7 @@ import { ComponentStorage, type ComponentLocation } from './component-storage.ts
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { emptyState, type HarnessState, type AuditEvent } from './model.ts';
+import { emptyState, type DevContourState, type AuditEvent } from './model.ts';
 export class Store {
   private db: DatabaseSync;
   private components?: ComponentStorage;
@@ -81,7 +81,7 @@ export class Store {
       }
     }
   }
-  read(): HarnessState {
+  read(): DevContourState {
     if (this.transaction || !this.components) return this.readUnlocked();
     this.db.exec('BEGIN');
     try {
@@ -93,7 +93,7 @@ export class Store {
       throw e;
     }
   }
-  private readUnlocked(): HarnessState {
+  private readUnlocked(): DevContourState {
     const row = this.db.prepare('SELECT data FROM main.state WHERE id=1').get() as { data: string };
     const raw = JSON.parse(row.data);
     const state = this.components ? this.components.read(raw) : raw;
@@ -130,7 +130,7 @@ export class Store {
     }
     return value;
   }
-  change<T>(type: string, action: (state: HarnessState) => T): T {
+  change<T>(type: string, action: (state: DevContourState) => T): T {
     return this.atomic(() => {
       const state = this.read();
       const before = JSON.stringify(state);
@@ -182,7 +182,7 @@ export class Store {
       this.projectionError = String(error);
     }
   }
-  project(write: (state: HarnessState, events: AuditEvent[]) => void) {
+  project(write: (state: DevContourState, events: AuditEvent[]) => void) {
     this.db.exec('BEGIN IMMEDIATE');
     this.transaction = true;
     try {

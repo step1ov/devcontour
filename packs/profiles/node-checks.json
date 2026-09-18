@@ -20,7 +20,7 @@
     {
       "id": "unit-tests",
       "kind": "test",
-      "command": ["npm", "run", "test:harness"],
+      "command": ["npm", "run", "test:devcontour"],
       "timeoutMs": 240000,
       "dependsOn": ["typecheck"],
       "report": {

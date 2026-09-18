@@ -1,8 +1,8 @@
-import { digest, specDigest, type Harness } from './service.ts';
+import { digest, specDigest, type DevContour } from './service.ts';
 import { repository } from './repositories.ts';
 import { assertDag } from './graph.ts';
 import { validateTaskContext } from './workflow.ts';
-import { taskInput, type HarnessState, type Task, type Approval, type Board } from './model.ts';
+import { taskInput, type DevContourState, type Task, type Approval, type Board } from './model.ts';
 import {
   canonical,
   recordKey,
@@ -18,7 +18,7 @@ export function taskOwner(t: Pick<Task, 'scope' | 'repositoryId'>) {
 }
 export function boardOwner(
   b: Pick<Board, 'repositoryId' | 'revisions' | 'scope'>,
-  state: HarnessState,
+  state: DevContourState,
 ) {
   if (b.scope === 'workspace') return;
   if (b.repositoryId) return b.repositoryId;
@@ -38,7 +38,7 @@ function approval(a?: Approval) {
       }
     : undefined;
 }
-export function completion(h: Harness, s: HarnessState, t: Task): CompletionReceipt {
+export function completion(h: DevContour, s: DevContourState, t: Task): CompletionReceipt {
   if (t.sharedCompletion) return t.sharedCompletion.receipt;
   const run = s.runs.findLast(
     (r) => r.taskId === t.id && r.status === 'succeeded' && r.integrationSha === t.resultSha,
@@ -76,7 +76,7 @@ export function completion(h: Harness, s: HarnessState, t: Task): CompletionRece
     })),
   });
 }
-export function recordsFromState(h: Harness, s: HarnessState) {
+export function recordsFromState(h: DevContour, s: DevContourState) {
   const records = new Map<string | undefined, Records>();
   const add = (owner: string | undefined, record: SyncRecord) => {
     if (!records.has(owner)) records.set(owner, {});
@@ -199,8 +199,8 @@ export function validateReceipt(receipt: CompletionReceipt, t: Task, demo: boole
 // Shared records are peer attestations from a reviewed Git repository. They never
 // recreate worker credentials, leases, processes, local reports or workspace acceptance.
 export function stateFromRecords(
-  h: Harness,
-  old: HarnessState,
+  h: DevContour,
+  old: DevContourState,
   groups: Map<string | undefined, Records>,
   commits: Map<string | undefined, string>,
 ) {

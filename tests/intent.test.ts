@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setupDemo } from '../src/demo.ts';
 import { loadConfig } from '../src/runner/config.ts';
-import { Harness } from '../src/core/service.ts';
+import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { repositories } from '../src/core/repositories.ts';
 import { IntentService } from '../src/runner/intent.ts';
@@ -75,7 +75,7 @@ async function fixture() {
   await setupDemo(root);
   const config = loadConfig(join(root, 'config.json'));
   const store = new Store(join(root, 'state.sqlite')),
-    h = new Harness(store, config),
+    h = new DevContour(store, config),
     intent = new IntentService(h);
   store.change('fixture.reset', (s) => {
     s.tasks = [];
@@ -83,7 +83,7 @@ async function fixture() {
     s.runs = [];
   });
   await mkdir(join(config.repository, 'docs'), { recursive: true });
-  await writeFile(join(config.repository, '.gitignore'), '.reports/\n.harness/\n');
+  await writeFile(join(config.repository, '.gitignore'), '.reports/\n.devcontour-local/\n');
   await writeFile(join(config.repository, 'docs/spec.md'), spec);
   await git(config.repository, 'add', 'docs/spec.md', '.gitignore');
   await git(config.repository, 'commit', '-m', 'Source requirements');
@@ -353,7 +353,7 @@ test('Intent and task bindings survive an independent Git clone without centrali
     await git(workspace, 'init', '-b', 'main');
     await git(workspace, 'config', 'user.name', 'Fixture');
     await git(workspace, 'config', 'user.email', 'fixture@example.invalid');
-    await writeFile(join(workspace, '.gitignore'), '.harness/\n');
+    await writeFile(join(workspace, '.gitignore'), '.devcontour-local/\n');
     await git(workspace, 'add', '.gitignore');
     await git(workspace, 'commit', '-m', 'Workspace');
     f.config.workspaceRoot = workspace;
@@ -370,7 +370,7 @@ test('Intent and task bindings survive an independent Git clone without centrali
     await git(f.root, 'clone', '--no-local', f.config.repository, clone);
     await git(f.root, 'clone', '--no-local', workspace, clonedWorkspace);
     cloneStore = new Store(join(f.root, 'clone.sqlite'));
-    const h = new Harness(cloneStore, {
+    const h = new DevContour(cloneStore, {
       ...f.config,
       repository: clone,
       workspaceRoot: clonedWorkspace,

@@ -37,7 +37,6 @@
     "hooks:install": "node scripts/install-hooks.mjs",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "harness": "node --import tsx src/cli.ts",
     "test:evals": "node --import tsx src/cli.ts evals"
   },
   "dependencies": {

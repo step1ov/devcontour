@@ -12,7 +12,7 @@
 npm run devcontour -- setup --repository /absolute/product --profile react-vite-admin --workspace /absolute/product-workspace
 ```
 
-Ответ `needs-agent-bootstrap` означает продолжение работы. Изучите `created` и `preserved`. Агент создаёт или адаптирует приложение, реальные `typecheck/build/test:harness`, JUnit reporter, gitignore, инструкции ролей и тестовые сервисы. Существующий стек сохраняется, если требования не дают причины его менять.
+Ответ `needs-agent-bootstrap` означает продолжение работы. Изучите `created` и `preserved`. Агент создаёт или адаптирует приложение, реальные `typecheck/build/test:devcontour`, JUnit reporter, gitignore, инструкции ролей и тестовые сервисы. Существующий стек сохраняется, если требования не дают причины его менять.
 
 Для нового продукта подготовьте Git и начальный commit осознанно, проверив diff и отсутствие секретов. Runner работает с коммитами; незакоммиченное ТЗ или тест не появится автоматически в новом worktree. Не запускайте после setup повторный init.
 
@@ -90,7 +90,7 @@ npm run devcontour -- review-plan --board B4 --author-runtime codex --workspace 
 npm run devcontour -- serve --workspace /absolute/product-workspace --port 4317
 ```
 
-Агент проверяет `/api/state`: `config.workspaceRoot` и `dataRoot` должны соответствовать выбранному workspace. URL и способ продолжения процесса записываются в `<workspace>/docs/harness-progress.md`.
+Агент проверяет `/api/state`: `config.workspaceRoot` и `dataRoot` должны соответствовать выбранному workspace. URL и способ продолжения процесса записываются в `<workspace>/docs/devcontour-progress.md`.
 
 Во втором терминале:
 
@@ -115,10 +115,10 @@ npm run devcontour -- accept --board B4 --author-runtime codex --workspace /abso
 Основной checkout не переключается. Для просмотра приложения можно создать отдельный detached checkout:
 
 ```sh
-git -C /absolute/product worktree add --detach /absolute/product-review harness/accepted
+git -C /absolute/product worktree add --detach /absolute/product-review devcontour/accepted
 ```
 
-Он фиксирует текущую версию. Новое движение принятой ветки не обновляет этот checkout автоматически. Не держите саму `harness/accepted` текущей веткой рабочего каталога.
+Он фиксирует текущую версию. Новое движение принятой ветки не обновляет этот checkout автоматически. Не держите саму `devcontour/accepted` текущей веткой рабочего каталога.
 
 ## 7. Принять общий результат и передать публикацию
 

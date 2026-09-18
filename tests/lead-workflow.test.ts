@@ -7,7 +7,7 @@ import { fixture, input } from './helpers.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
 import { Store } from '../src/core/store.ts';
-import { Harness, specDigest } from '../src/core/service.ts';
+import { DevContour, specDigest } from '../src/core/service.ts';
 import { setupDemo } from '../src/demo.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Workspace } from '../src/core/workspace.ts';
@@ -95,7 +95,7 @@ test('A real Git board resumes after process replacement without duplicating rev
   await setupDemo(root);
   const config = loadConfig(join(root, 'config.json'));
   let store = new Store(join(root, 'state.sqlite'));
-  let h = new Harness(store, config),
+  let h = new DevContour(store, config),
     lead = new LeadRunner(h, root);
   let scheduler: Scheduler | undefined;
   try {
@@ -114,7 +114,7 @@ test('A real Git board resumes after process replacement without duplicating rev
     store.atomic(() => store.saveLocal('lead', 'main', job.key, { ...claimed, leaseUntil: 0 }));
     store.close();
     store = new Store(join(root, 'state.sqlite'));
-    h = new Harness(store, config);
+    h = new DevContour(store, config);
     lead = new LeadRunner(h, root);
     await lead.tick();
     await lead.tick();

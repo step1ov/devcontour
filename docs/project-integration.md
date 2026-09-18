@@ -10,26 +10,26 @@ chat-workspace/
   docs/spec.md
   docs/decisions/                 # общие решения
   docs/journal/CHG-*.md           # межпроектный результат, версии и проверки
-  .harness/local/
+  .devcontour-local/
     config.json                  # общая политика и ссылки на component config
     state.sqlite                 # координация; без тел локальных задач
     workspace-checks/            # совместные проверки
     handoffs/                    # инструкции ручной публикации
 chat-backend/
-  harness.component.json         # gates, окружение, роли и модели компонента
+  devcontour.component.json         # gates, окружение, роли и модели компонента
   AGENTS.md
   .agents/roles/
   memory/
-  .harness/local/
+  .devcontour-local/
     state.sqlite                 # задачи, попытки, события, исторические снимки
     worktrees/
     artifacts/
     dependencies/                # закреплённые входные зависимости этой попытки
-  .harness/journal/activity.md    # автоматически собранный местный журнал
+  .devcontour-local/journal/activity.md    # автоматически собранный местный журнал
 chat-admin/                      # та же структура
 ```
 
-`harness.component.json` и инструкции следует коммитить. `.harness/` исключается из Git. Дневник — проекция базы; библиотечный CHANGELOG и устойчивые решения обновляются отдельно в самой библиотеке. Старый оркестратор используется только как донор, его scheduler не запускается.
+`devcontour.component.json` и инструкции следует коммитить. `.devcontour-local/` исключается из Git. Дневник — проекция базы; библиотечный CHANGELOG и устойчивые решения обновляются отдельно в самой библиотеке. Старый оркестратор используется только как донор, его scheduler не запускается.
 
 Новые `setup --workspace` и `workspace-init` используют `storage: "component"`. Локальные роли переопределяют общие: например, библиотека может использовать Claude для backend и Codex для ревью, другая библиотека — обратную пару. Профили доступа к общим инструментам описываются в `toolProfiles`; роли компонента выбирают их по `toolProfile`.
 
@@ -60,7 +60,7 @@ npm run devcontour -- doctor --workspace /absolute/workspace
 npm run devcontour -- doctor --probe --workspace /absolute/workspace
 ```
 
-Первый режим проверяет конфигурацию, графы, CLI, Git, переменные, закреплённый контекст и незавершённую очистку. `--probe` дополнительно выполняет настроенные `preflight` компонента в отдельном worktree и read-only запрос к forge. Очередь должна быть остановлена. Пример части `harness.component.json`:
+Первый режим проверяет конфигурацию, графы, CLI, Git, переменные, закреплённый контекст и незавершённую очистку. `--probe` дополнительно выполняет настроенные `preflight` компонента в отдельном worktree и read-only запрос к forge. Очередь должна быть остановлена. Пример части `devcontour.component.json`:
 
 ```json
 {
@@ -87,7 +87,7 @@ npm run devcontour -- doctor --probe --workspace /absolute/workspace
 }
 ```
 
-`inherit` и `secrets` обязательны, если перечислены: отсутствие значения блокирует запуск. В конфигурации хранятся имена источников, значения берутся из окружения процесса. Известные секреты и унаследованные значения маскируются в выводах runner. Маскирование не заменяет правило не печатать секреты. Авторизация CLI через штатные файлы в HOME сохраняется; env-авторизацию нужно перечислить явно. HARNESS_* зарезервированы runner.
+`inherit` и `secrets` обязательны, если перечислены: отсутствие значения блокирует запуск. В конфигурации хранятся имена источников, значения берутся из окружения процесса. Известные секреты и унаследованные значения маскируются в выводах runner. Маскирование не заменяет правило не печатать секреты. Авторизация CLI через штатные файлы в HOME сохраняется; env-авторизацию нужно перечислить явно. DEVCONTOUR_* зарезервированы runner.
 
 Пример Claude-профиля для чтения GitLab через уже настроенный HTTP MCP:
 
@@ -125,17 +125,17 @@ URL и имена MCP tools — примеры, их нужно сверить �
 
 ```json
 {
-  "dependencyBuild": [{ "id": "pack", "command": ["node", "scripts/pack-for-harness.mjs"] }],
+  "dependencyBuild": [{ "id": "pack", "command": ["node", "scripts/pack-for-devcontour.mjs"] }],
   "dependencyArtifacts": [".reports/library.tgz"]
 }
 ```
 
-Потребитель получает HARNESS_COMPONENTS_JSON (пути компонентов) и HARNESS_DEPENDENCIES_JSON (SHA/tree/хеши артефактов). Его `prepare` запускается до реализации/проверок кандидата и отдельно перед проверками интеграционного коммита:
+Потребитель получает DEVCONTOUR_COMPONENTS_JSON (пути компонентов) и DEVCONTOUR_DEPENDENCIES_JSON (SHA/tree/хеши артефактов). Его `prepare` запускается до реализации/проверок кандидата и отдельно перед проверками интеграционного коммита:
 
 ```json
 {
   "prepare": [
-    { "id": "install-pinned-libraries", "command": ["node", "scripts/prepare-harness.mjs"] }
+    { "id": "install-pinned-libraries", "command": ["node", "scripts/prepare-devcontour.mjs"] }
   ]
 }
 ```
@@ -156,7 +156,7 @@ URL и имена MCP tools — примеры, их нужно сверить �
 }
 ```
 
-Скрипт создаёт изолированную БД/контейнер по HARNESS_RUN_ID и HARNESS_PHASE, применяет миграции, seed и проверяет готовность. Он должен завершаться, оставляя управляемый сервис (например, detached container), и иметь повторяемую очистку. Для workspace доступны HARNESS_COMPONENTS_JSON и HARNESS_MANIFEST_PATH; cwd — первый компонент реестра.
+Скрипт создаёт изолированную БД/контейнер по DEVCONTOUR_RUN_ID и DEVCONTOUR_PHASE, применяет миграции, seed и проверяет готовность. Он должен завершаться, оставляя управляемый сервис (например, detached container), и иметь повторяемую очистку. Для workspace доступны DEVCONTOUR_COMPONENTS_JSON и DEVCONTOUR_MANIFEST_PATH; cwd — первый компонент реестра.
 
 Teardown запускается после успеха, ошибки setup/ready, ошибки проверки и отмены. У него собственный deadline. Ошибка очистки блокирует приёмку и сохраняет ресурсные аренды; повторно выдавать такой ресурс нельзя. После аварии сохраняется environment.json с владельцем и параметрами.
 
@@ -186,7 +186,7 @@ Forge отвечает за чтение удалённых фактов. Дос
 }
 ```
 
-Пример в `harness.component.json`:
+Пример в `devcontour.component.json`:
 
 ```json
 {
@@ -210,7 +210,7 @@ npm run devcontour -- remote-check --changeset CHG-12 --workspace /absolute/work
 npm run devcontour -- changeset-accept --changeset CHG-12 --author-runtime codex --workspace /absolute/workspace
 ```
 
-Handoff сохраняет JSON/Markdown с точными SHA, ветками и командами push в `<workspace>/.harness/local/handoffs/`. Команды не исполняются. Повтор использует тот же идентификатор. Remote-check — один ограниченный запрос состояния; это не фоновая подписка.
+Handoff сохраняет JSON/Markdown с точными SHA, ветками и командами push в `<workspace>/.devcontour-local/handoffs/`. Команды не исполняются. Повтор использует тот же идентификатор. Remote-check — один ограниченный запрос состояния; это не фоновая подписка.
 
 Проверяется source SHA, факт merge, наличие merge-коммита в целевой ветке через read-only fetch, совпадение дерева с локально проверенным результатом и CI на итоговом SHA. Merge/squash могут изменить SHA при сохранении дерева; если дерево изменилось, требуется новая проверка результата. Приёмка фиксирует историческую комбинацию, не обещает атомарный merge нескольких репозиториев. Пакеты автоматически не публикуются; версия потребителя должна проходить отдельную проверку установки из реестра, если это критерий выпуска.
 
@@ -218,7 +218,7 @@ Handoff сохраняет JSON/Markdown с точными SHA, ветками �
 
 `completionMode: "local"` сохраняет прежний локальный цикл. `remote` не позволяет принять ChangeSet, пока факты публикации не подтверждены. Локальный статус задачи в UI подписан «Проверена локально». Согласования этапов по умолчанию выполняет агент; ручная публикация — отдельная явно выбранная ответственность человека.
 
-Для другого forge/MCP задайте connection `{ "provider": "command", "probe": { "id": "read-remote", "command": ["node", "scripts/forge-readonly.mjs"] } }`. Скрипт получает HARNESS_FORGE_REQUEST, обращается к разрешённым read-only инструментам и возвращает JSON по `observationSchema` из `src/runner/forge.ts`. Он является доверенным адаптером, как проектный test runner: его исходники и разрешения должны быть проверены. Непроверенный текст от модели не подменяет такой адаптер.
+Для другого forge/MCP задайте connection `{ "provider": "command", "probe": { "id": "read-remote", "command": ["node", "scripts/forge-readonly.mjs"] } }`. Скрипт получает DEVCONTOUR_FORGE_REQUEST, обращается к разрешённым read-only инструментам и возвращает JSON по `observationSchema` из `src/runner/forge.ts`. Он является доверенным адаптером, как проектный test runner: его исходники и разрешения должны быть проверены. Непроверенный текст от модели не подменяет такой адаптер.
 
 ## Донор знаний
 

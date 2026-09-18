@@ -18,7 +18,7 @@ import { setupProject } from '../src/runner/setup.ts';
 import { setupWorkspace } from '../src/runner/workspace-setup.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { git, command } from '../src/runner/process.ts';
-import { Harness } from '../src/core/service.ts';
+import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { adapters, type AgentRequest } from '../src/runner/adapters.ts';
@@ -101,7 +101,7 @@ test('Local profiles compose stack/checks/environment read-only and keep legacy 
     );
     assert.equal(shown.code, 0, shown.stderr);
     assert.deepEqual(JSON.parse(shown.stdout).pin, profilePin(selected));
-    await assert.rejects(access(join(f.repo, '.harness')));
+    await assert.rejects(access(join(f.repo, '.devcontour-local')));
     const expo = await profile('expo-mobile');
     assert.ok(expo.gates.some((g) => g.id === 'unit-tests'));
     assert.ok(expo.gates.some((g) => g.id === 'build-and-install'));
@@ -174,7 +174,7 @@ test('Setup pins transitive local sources, preserves policy and never silently i
     assert.equal(c.environment, undefined);
     assert.equal(c.repositories[0].environment!.values.PROJECT_MARKER, 'product');
     assert.ok(c.repositories[0].protectedPaths.includes('profiles/tests.json'));
-    const localFile = join(f.repo, 'harness.component.json');
+    const localFile = join(f.repo, 'devcontour.component.json');
     const local = JSON.parse(await readFile(localFile, 'utf8'));
     local.gates[0].timeoutMs = 3210;
     await json(localFile, local);
@@ -267,7 +267,7 @@ ok = pathlib.Path('value.txt').read_text() == '2' and os.environ.get('PROJECT_MA
 suite = ET.Element('testsuite')
 case = ET.SubElement(suite, 'testcase', name='value and environment')
 if not ok: ET.SubElement(case, 'failure', message='expected 2 and owner environment')
-ET.ElementTree(suite).write(os.environ['HARNESS_REPORT_PATH'])
+ET.ElementTree(suite).write(os.environ['DEVCONTOUR_REPORT_PATH'])
 sys.exit(0 if ok else 1)
 `,
     );
@@ -280,7 +280,7 @@ sys.exit(0 if ok else 1)
     c.contextPacks = []; // The fixture isolates profile execution, not context-lock behaviour.
     c.maxAttempts = 3;
     store = new Store(join(result.data, 'state.sqlite'));
-    const h = new Harness(store, c);
+    const h = new DevContour(store, c);
     let mode = 'noop';
     const execute = async (r: AgentRequest) => {
       if (r.review)

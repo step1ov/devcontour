@@ -14,7 +14,7 @@
     {
       "id": "acceptance",
       "kind": "test",
-      "command": ["npm", "run", "test:harness"],
+      "command": ["npm", "run", "test:devcontour"],
       "timeoutMs": 240000,
       "report": { "type": "junit", "path": ".reports/junit.xml" }
     }

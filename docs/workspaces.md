@@ -10,16 +10,16 @@
 PhpstormProjects/
   product/                    # Git продукта, docs/spec.md, локальные тесты и память
   shared-library/             # отдельный Git, API библиотеки, тесты, CHANGELOG
-    harness.component.json    # локальные роли, gates, среда и правила
-    .harness/local/           # SQLite задач, worktrees, artifacts
-    .harness/journal/         # подробный журнал библиотеки
+    devcontour.component.json    # локальные роли, gates, среда и правила
+    .devcontour-local/           # SQLite задач, worktrees, artifacts
+    .devcontour-local/journal/         # подробный журнал библиотеки
   product-workspace/          # общий контур управления; вне Git компонентов
     workspace.json           # реестр, подготовленный агентом
     docs/
       requirements.md        # общие сценарии и ссылки на требования компонентов
-      harness-progress.md    # контекст ведущего агента для возобновления
+      devcontour-progress.md    # контекст ведущего агента для возобновления
       journal/CHG-12.md       # автоматически сформированный дневник
-    .harness/local/
+    .devcontour-local/
       config.json            # ссылки на компоненты, общие роли и проверки
       packs.lock.json
       state.sqlite           # координация и ссылки; задачи/evidence — в компонентах
@@ -30,7 +30,7 @@ PhpstormProjects/
 
 ## Подготовка агентом
 
-1. Получить путь workspace от пользователя и проверить его содержимое. Изучить продукт, библиотеки, их AGENTS.md, незакоммиченные изменения и существующие процессы. Для каждого компонента выбрать профиль и реальные gates. Подготовить исходный commit и тесты. Новые приложения подготавливаются через `setup`; для существующих библиотек правила переносятся выборочно. Вспомогательные config, созданные `setup --data <workspace>/.harness/bootstrap/<repositoryId>`, не запускать как независимые контроллеры. Не использовать setup для каждого компонента с одной папкой состояния: рабочий общий config создаёт workspace-init.
+1. Получить путь workspace от пользователя и проверить его содержимое. Изучить продукт, библиотеки, их AGENTS.md, незакоммиченные изменения и существующие процессы. Для каждого компонента выбрать профиль и реальные gates. Подготовить исходный commit и тесты. Новые приложения подготавливаются через `setup`; для существующих библиотек правила переносятся выборочно. Вспомогательные config, созданные `setup --data <workspace>/.devcontour-local/bootstrap/<repositoryId>`, не запускать как независимые контроллеры. Не использовать setup для каждого компонента с одной папкой состояния: рабочий общий config создаёт workspace-init.
 2. Создать соседний каталог workspace и `workspace.json`. Пути репозиториев разрешаются относительно этого файла. Все репозитории должны быть корнями Git и иметь commit.
 3. Выполнить `workspace-init`, затем использовать только возвращённый `data` для импорта, ревью, очереди, сервера, приёмки и экспорта.
 4. Подготовить контракты продукта и библиотек. Разбить ТЗ на этапы и задачи с `repositoryId`; зависимости могут вести в другой репозиторий и другую доску.
@@ -60,7 +60,7 @@ REQ-раздел библиотеки находится в её committed Git-�
         {
           "id": "tests",
           "kind": "test",
-          "command": ["npm", "run", "test:harness"],
+          "command": ["npm", "run", "test:devcontour"],
           "report": { "type": "junit", "path": ".reports/junit.xml" }
         }
       ],
@@ -83,7 +83,7 @@ REQ-раздел библиотеки находится в её committed Git-�
         {
           "id": "tests",
           "kind": "test",
-          "command": ["npm", "run", "test:harness"],
+          "command": ["npm", "run", "test:devcontour"],
           "report": { "type": "junit", "path": ".reports/junit.xml" }
         }
       ]
@@ -102,14 +102,14 @@ REQ-раздел библиотеки находится в её committed Git-�
 }
 ```
 
-Общие роли и модели задаются в workspace; roles/reviewer в harness.component.json переопределяют их для компонента. Gates и protectedPaths также находятся в компоненте. `profile` выбирает встроенный ID либо `./profiles/service.json` внутри соответствующего компонента; готового генератора произвольной библиотеки в нём нет. Локальные profiles могут иметь одинаковые IDs: lock различает владельца и путь. Правила [композиции](mcp-and-profiles.md) одинаковы для setup и workspace-init. Для Go-библиотеки можно выбрать `go-api` и переопределить команды. `concurrency`, timeout и роли агент уточняет в рабочем `config.json`; для мобильного устройства настройте общий host resource и привяжите его к задачам/gates.
+Общие роли и модели задаются в workspace; roles/reviewer в devcontour.component.json переопределяют их для компонента. Gates и protectedPaths также находятся в компоненте. `profile` выбирает встроенный ID либо `./profiles/service.json` внутри соответствующего компонента; готового генератора произвольной библиотеки в нём нет. Локальные profiles могут иметь одинаковые IDs: lock различает владельца и путь. Правила [композиции](mcp-and-profiles.md) одинаковы для setup и workspace-init. Для Go-библиотеки можно выбрать `go-api` и переопределить команды. `concurrency`, timeout и роли агент уточняет в рабочем `config.json`; для мобильного устройства настройте общий host resource и привяжите его к задачам/gates.
 
 ```sh
 npm run devcontour -- workspace-init --file /absolute/product-workspace/workspace.json
-npm run devcontour -- serve --data /absolute/product-workspace/.harness/local
+npm run devcontour -- serve --data /absolute/product-workspace/.devcontour-local
 ```
 
-Все команды принимают `--workspace /absolute/workspace` вместо `--data /absolute/workspace/.harness/local`. Для одного нового репозитория `setup --workspace ...` сразу сохраняет его конфигурацию в выбранном workspace. Для реестра нескольких репозиториев используйте workspace-init. Пустой запуск serve/run/setup не создаёт demo.
+Все команды принимают `--workspace /absolute/workspace` вместо `--data /absolute/workspace/.devcontour-local`. Для одного нового репозитория `setup --workspace ...` сразу сохраняет его конфигурацию в выбранном workspace. Для реестра нескольких репозиториев используйте workspace-init. Пустой запуск serve/run/setup не создаёт demo.
 
 Сервер запускает ведущий агент и проверяет `/api/state`. Один UI показывает все доски, «Общий граф» и фильтр репозиториев. Во вкладке «Изменения» видны ChangeSet, SHA, результаты совместных тестов, логи и дневник. В обычном режиме агент управляет ими через CLI; оператору нажимать кнопки не требуется.
 
@@ -139,7 +139,7 @@ npm run devcontour -- serve --data /absolute/product-workspace/.harness/local
 ```
 
 ```sh
-npm run devcontour -- changeset-create --file changeset.json --data /absolute/product-workspace/.harness/local
+npm run devcontour -- changeset-create --file changeset.json --data /absolute/product-workspace/.devcontour-local
 ```
 
 Для обычного agent mode передайте полученный ID в MCP `workflow_start` или JSON envelope команды `agent`:
@@ -156,9 +156,9 @@ Workflow ChangeSet ждёт принятых досок, но не регист�
 Ручная альтернатива (не выполнять одновременно с workflow того же результата):
 
 ```sh
-npm run devcontour -- workspace-verify --changeset CHG-12 --data /absolute/product-workspace/.harness/local
-npm run devcontour -- changeset-accept --changeset CHG-12 --author-runtime codex --data /absolute/product-workspace/.harness/local
-npm run devcontour -- journal --data /absolute/product-workspace/.harness/local
+npm run devcontour -- workspace-verify --changeset CHG-12 --data /absolute/product-workspace/.devcontour-local
+npm run devcontour -- changeset-accept --changeset CHG-12 --author-runtime codex --data /absolute/product-workspace/.devcontour-local
+npm run devcontour -- journal --data /absolute/product-workspace/.devcontour-local
 ```
 
 Команды `review-contract`, `review-plan`, `queue`, `run`, `accept`, `correct` продолжают работать с тем же общим контуром. Приёмка доски сохраняет SHA по репозиториям. `changeset-accept` требует успешной совместной проверки; `approvalMode: "operator"` возвращает `awaiting-operator`, после чего оператор подтверждает в UI. В agent mode приёмку выполняет workflow либо ведущий агент в выбранном ручном маршруте.
@@ -169,16 +169,16 @@ npm run devcontour -- journal --data /absolute/product-workspace/.harness/local
 
 На время проверки прекращается выдача новых задач. Lease и fencing запрещают запоздалой попытке объявить успех. В workspace есть только одна активная совместная проверка; после аварии её можно повторить, когда истечёт lease. Число попыток ограничено `maxAttempts`; исчерпание бюджета требует решения ведущего агента, а не бесконечного перезапуска.
 
-Runner создаёт detached worktree для каждого `harness/accepted`, проверяет присутствие result SHA задач и сохраняет manifest `{repositoryId: {sha, tree}}`. Каждая команда получает:
+Runner создаёт detached worktree для каждого `devcontour/accepted`, проверяет присутствие result SHA задач и сохраняет manifest `{repositoryId: {sha, tree}}`. Каждая команда получает:
 
-- `HARNESS_COMPONENTS_JSON` — JSON-map `repositoryId → абсолютный путь проверяемого worktree`;
-- `HARNESS_MANIFEST_PATH` — файл с SHA, tree, путями и digest комбинации;
-- `HARNESS_REPORT_PATH` — обязательный путь свежего JUnit для test gate;
-- `HARNESS_CHANGESET_ID`, `HARNESS_RUN_ID` — IDs для изоляции ресурсов.
+- `DEVCONTOUR_COMPONENTS_JSON` — JSON-map `repositoryId → абсолютный путь проверяемого worktree`;
+- `DEVCONTOUR_MANIFEST_PATH` — файл с SHA, tree, путями и digest комбинации;
+- `DEVCONTOUR_REPORT_PATH` — обязательный путь свежего JUnit для test gate;
+- `DEVCONTOUR_CHANGESET_ID`, `DEVCONTOUR_RUN_ID` — IDs для изоляции ресурсов.
 
-`cwd` команды — worktree репозитория из `repositoryId`. Команды выполняются без shell; необходимые переменные и сервисы ведущий агент настраивает явно. Прямой запуск принимает PATH/HOME/TMPDIR/CI и перечисленные HARNESS-переменные; секреты всего окружения автоматически не копируются. Это не изоляция от файлов пользователя.
+`cwd` команды — worktree репозитория из `repositoryId`. Команды выполняются без shell; необходимые переменные и сервисы ведущий агент настраивает явно. Прямой запуск принимает PATH/HOME/TMPDIR/CI и перечисленные DEVCONTOUR-переменные; секреты всего окружения автоматически не копируются. Это не изоляция от файлов пользователя.
 
-Скрипт интеграции должен взять библиотеку именно из `HARNESS_COMPONENTS_JSON`, собрать её, подключить к продукту и выполнить настоящие сценарии. Для npm это может быть tarball из `npm pack`; для Go — временный `GOWORK` в игнорируемой папке. Не используйте случайно установленный глобальный пакет, соседнюю рабочую ветку или floating `latest`. Для зависимости из registry закрепите версию и checksum в проверяемом исходнике. Генерируемые lock-файлы и build outputs сохраняйте в игнорируемых временных каталогах, если инструмент меняет их.
+Скрипт интеграции должен взять библиотеку именно из `DEVCONTOUR_COMPONENTS_JSON`, собрать её, подключить к продукту и выполнить настоящие сценарии. Для npm это может быть tarball из `npm pack`; для Go — временный `GOWORK` в игнорируемой папке. Не используйте случайно установленный глобальный пакет, соседнюю рабочую ветку или floating `latest`. Для зависимости из registry закрепите версию и checksum в проверяемом исходнике. Генерируемые lock-файлы и build outputs сохраняйте в игнорируемых временных каталогах, если инструмент меняет их.
 
 Сам runner не знает семантику вашего package manager и не способен доказать, что произвольная тестовая команда действительно использовала библиотеку. Это контракт интеграционного скрипта и предмет ревью. `artifacts` позволяет сохранить SHA-256 реально собранного/использованного пакета; пути разрешаются относительно корня worktree компонента, независимо от gate.cwd. Последующая проверка не может незаметно изменить уже зафиксированный артефакт.
 
@@ -202,7 +202,7 @@ PASS требует успешного exit code, свежего непусто�
 
 ## Владение общими библиотеками
 
-В common Git dir каждого репозитория создаётся `harness-owner.json` с путём общей папки данных, ID репозитория и целевой веткой. Повторные процессы с той же конфигурацией работают через общий SQLite leader/leases. Другая БД, другой repository ID или другой integration branch отклоняются. Резервация сохраняется после остановки сервера.
+В common Git dir каждого репозитория создаётся `devcontour-owner.json` с путём общей папки данных, ID репозитория и целевой веткой. Повторные процессы с той же конфигурацией работают через общий SQLite leader/leases. Другая БД, другой repository ID или другой integration branch отклоняются. Резервация сохраняется после остановки сервера.
 
 Если два продукта используют одну библиотеку, включите оба продукта и библиотеку в один workspace. Запускайте несколько workers под одним scheduler. Несколько независимых оркестраторов для одной библиотеки увеличивают вероятность конфликтов, а не дают неограниченный параллелизм.
 

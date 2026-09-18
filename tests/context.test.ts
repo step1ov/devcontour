@@ -12,7 +12,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { AgentContext } from '../src/application/context.ts';
-import { specDigest, Harness } from '../src/core/service.ts';
+import { specDigest, DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { config, fixture, input } from './helpers.ts';
 import { repositorySchema } from '../src/core/model.ts';
@@ -109,7 +109,7 @@ test('Checkpoints stay with their component and cannot bypass completion or writ
       return repositorySchema.parse({ id, name: id, path, gates: f.h.config.gates });
     });
     store = new Store(join(workspace, 'state.sqlite'), repos);
-    const h = new Harness(
+    const h = new DevContour(
         store,
         config({ storage: 'component', workspaceRoot: workspace, repositories: repos }),
       ),

@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { z } from 'zod';
 import { configSchema } from '../core/model.ts';
-import { Harness, digest } from '../core/service.ts';
+import { DevContour, digest } from '../core/service.ts';
 import { Store } from '../core/store.ts';
 import { priceSchema, usageTotals, type UsageRecord } from '../core/usage.ts';
 import { adapters, type AgentAdapter } from './adapters.ts';
@@ -103,7 +103,7 @@ export async function engineeringEvals(raw: unknown = {}, fixtureAdapter?: Agent
         await git(repo, 'config', 'user.email', 'fixture@example.invalid');
         for (const [path, contents] of Object.entries(scenario.before))
           await writeFile(join(repo, 'src', path), contents);
-        await writeFile(join(repo, '.gitignore'), '.reports/\n.harness/\n.devcontour/\n');
+        await writeFile(join(repo, '.gitignore'), '.reports/\n.devcontour-local/\n.devcontour/\n');
         await writeFile(
           join(repo, 'verify.mjs'),
           `import assert from 'node:assert/strict';import {mkdirSync,writeFileSync} from 'node:fs';let failed=false;try {${scenario.check}}catch {failed=true;}mkdirSync('.reports',{recursive:true});writeFileSync('.reports/tests.xml', '<testsuite tests="1" failures="'+(failed?1:0)+'"><testcase name="${scenario.id}">'+(failed?'<failure message="behavior mismatch"/>':'')+'</testcase></testsuite>');if(failed)process.exitCode=1;`,
@@ -139,7 +139,7 @@ export async function engineeringEvals(raw: unknown = {}, fixtureAdapter?: Agent
           protectedPaths: ['verify.mjs', '.gitignore'],
         });
         store = new Store(join(root, 'state.sqlite'));
-        const h = new Harness(store, config);
+        const h = new DevContour(store, config);
         const board = h.createBoard('Engineering ' + scenario.id, '', 'main');
         const contract = h.contract(
           'Evaluation contract',

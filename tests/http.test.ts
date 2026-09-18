@@ -19,18 +19,18 @@ test('Loopback API rejects cross-origin writes, validates input and survives mis
         await request(
           '/api/boards',
           { title: 'Injected board' },
-          { Origin: 'https://untrusted.example', 'X-Harness-Request': '1' },
+          { Origin: 'https://untrusted.example', 'X-DevContour-Request': '1' },
         )
       ).status,
       403,
     );
     assert.equal((await request('/api/boards', { title: 'Injected board' })).status, 403);
     assert.equal(
-      (await request('/api/boards', { title: 'x' }, { 'X-Harness-Request': '1' })).status,
+      (await request('/api/boards', { title: 'x' }, { 'X-DevContour-Request': '1' })).status,
       400,
     );
     assert.equal(
-      (await request('/api/evidence', { passed: true }, { 'X-Harness-Request': '1' })).status,
+      (await request('/api/evidence', { passed: true }, { 'X-DevContour-Request': '1' })).status,
       404,
     );
     assert.equal((await fetch(app.url + '/assets/does-not-exist.js')).status, 404);
@@ -39,7 +39,7 @@ test('Loopback API rejects cross-origin writes, validates input and survives mis
     const agent = await request(
       '/api/agent',
       { operation: 'project_context', input: {} },
-      { 'X-Harness-Request': '1' },
+      { 'X-DevContour-Request': '1' },
     );
     assert.equal(agent.status, 200);
     assert.equal((await agent.json()).protocolVersion, 1);
@@ -48,7 +48,7 @@ test('Loopback API rejects cross-origin writes, validates input and survives mis
         await request(
           '/api/agent',
           { operation: 'mark_done', input: { passed: true } },
-          { 'X-Harness-Request': '1' },
+          { 'X-DevContour-Request': '1' },
         )
       ).status,
       400,
@@ -59,11 +59,11 @@ test('Loopback API rejects cross-origin writes, validates input and survives mis
     );
     assert.equal(((await response.json()) as { dataRoot: string }).dataRoot, f.root);
     assert.equal(
-      (await request('/api/boards', { title: 'Valid board' }, { 'X-Harness-Request': '1' })).status,
+      (await request('/api/boards', { title: 'Valid board' }, { 'X-DevContour-Request': '1' })).status,
       200,
     );
     assert.equal(f.store.read().boards.length, 1);
-    const headers = { 'X-Harness-Request': '1' };
+    const headers = { 'X-DevContour-Request': '1' };
     const created = await request(
       '/api/changesets',
       {

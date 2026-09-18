@@ -14,7 +14,7 @@ import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile, readFile, realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { Harness, digest } from '../core/service.ts';
+import { DevContour, digest } from '../core/service.ts';
 import { type Run, type Task, type Evidence } from '../core/model.ts';
 import { adapters, implementationResult, reviewResult, type AgentAdapter } from './adapters.ts';
 import { git } from './process.ts';
@@ -29,13 +29,13 @@ export class Scheduler {
   private contexts = new Map<string, string>();
   private mergeTails = new Map<string, Promise<void>>();
   constructor(
-    readonly h: Harness,
+    readonly h: DevContour,
     readonly root: string,
     readonly runtimes: typeof adapters = adapters,
   ) {}
   runRoot(repositoryId = 'main') {
     return this.h.config.storage === 'component'
-      ? join(repository(this.h.config, repositoryId).path, '.harness', 'local')
+      ? join(repository(this.h.config, repositoryId).path, '.devcontour-local')
       : this.root;
   }
   get active() {
@@ -162,7 +162,7 @@ export class Scheduler {
     return [
       review
         ? 'You independently review the exact candidate. Do not edit files. Reject missing acceptance criteria, weakened tests, policy changes, and unsafe changes. Report concrete findings.'
-        : 'Implement the approved task in this isolated worktree. Do not commit, push, merge, change harness policy, or start other agents. DevContour owns testing and integration. Return completed=false if you cannot finish.',
+        : 'Implement the approved task in this isolated worktree. Do not commit, push, merge, change devcontour policy, or start other agents. DevContour owns testing and integration. Return completed=false if you cannot finish.',
       `Role: ${task.role}. Task: ${task.id}. Approved specification: ${task.approvedDigest}.`,
       JSON.stringify(
         {
@@ -325,7 +325,7 @@ export class Scheduler {
           const base = await git(repo.path, 'rev-parse', this.targetFor(repo.id));
           const cwd = join(this.runRoot(task.repositoryId), 'worktrees', run.id);
           await mkdir(join(this.runRoot(task.repositoryId), 'worktrees'), { recursive: true });
-          await git(repo.path, 'worktree', 'add', '-b', `harness/run-${run.id}`, cwd, base);
+          await git(repo.path, 'worktree', 'add', '-b', `devcontour/run-${run.id}`, cwd, base);
           run.baseSha = base;
           const memory = new ProjectMemory(this.h).recall(
             {
@@ -425,7 +425,7 @@ export class Scheduler {
               this.h.heartbeat(run.id, run.token);
               if (signal.aborted) throw new Error('Попытка отменена');
               if ((await git(cwd, 'rev-parse', 'HEAD')) !== base)
-                throw new Error('Агент изменил HEAD; интеграцией владеет harness');
+                throw new Error('Агент изменил HEAD; интеграцией владеет devcontour');
               await git(cwd, 'add', '-A');
               const changed = (
                 await git(cwd, 'diff', '--cached', '--no-renames', '--name-only', '-z')
@@ -435,8 +435,8 @@ export class Scheduler {
               const forbidden = changed.filter((p) =>
                 withinPaths(p, [
                   ...repo.protectedPaths,
-                  repo.configFile ?? 'harness.component.json',
-                  '.harness/',
+                  repo.configFile ?? 'devcontour.component.json',
+                  '.devcontour-local/',
                   '.devcontour/',
                   ...(repo.generatedPaths ?? []),
                   ...this.h.config.contextPacks

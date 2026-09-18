@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Store } from '../src/core/store.ts';
-import { Harness, digest, specDigest } from '../src/core/service.ts';
+import { DevContour, digest, specDigest } from '../src/core/service.ts';
 import { recordsFromState } from '../src/core/sync-state.ts';
 import { canonical } from '../src/core/sync-model.ts';
 import { syncGit, assertTeamCheckout } from '../src/runner/git-sync.ts';
@@ -39,7 +39,7 @@ interface Peer {
   repo: string;
   workspace: string;
   store: Store;
-  h: Harness;
+  h: DevContour;
   commit(): void;
   pull(): void;
 }
@@ -56,7 +56,7 @@ function peer(root: string, name: string, source?: Peer): Peer {
     else {
       mkdirSync(path!);
       git(path!, 'init', '-b', 'main');
-      writeFileSync(join(path!, '.gitignore'), '.harness/\n');
+      writeFileSync(join(path!, '.gitignore'), '.devcontour-local/\n');
       writeFileSync(join(path!, 'README.md'), 'A test repository.\n');
       git(path!, 'add', '.');
       git(path!, 'commit', '-m', 'baseline');
@@ -65,8 +65,8 @@ function peer(root: string, name: string, source?: Peer): Peer {
     git(path!, 'config', 'user.email', 'sync@example.test');
   }
   const c = config({ repository: repo, workspaceRoot: workspace, storage: 'component' });
-  const store = new Store(join(workspace, '.harness/local/state.sqlite'), repositories(c));
-  const h = new Harness(store, c);
+  const store = new Store(join(workspace, '.devcontour-local/state.sqlite'), repositories(c));
+  const h = new DevContour(store, c);
   return {
     repo,
     workspace,
@@ -130,7 +130,7 @@ test('Requirement bindings sync between independent clones and remain in the com
     const task = a.h.addTask(board.id, { ...input(), requirements });
     syncGit(a.h);
     a.commit();
-    const db = new DatabaseSync(join(a.workspace, '.harness/local/state.sqlite'));
+    const db = new DatabaseSync(join(a.workspace, '.devcontour-local/state.sqlite'));
     try {
       assert.ok(
         !JSON.stringify(db.prepare('SELECT data FROM state').all()).includes(
@@ -195,7 +195,7 @@ test('Git state restores a new component DB; baselines and task bodies stay in t
     assert.ok(
       !readFileSync(join(a.workspace, '.devcontour/identity.json'), 'utf8').includes(t.title),
     );
-    const main = new DatabaseSync(join(a.workspace, '.harness/local/state.sqlite'));
+    const main = new DatabaseSync(join(a.workspace, '.devcontour-local/state.sqlite'));
     assert.ok(!JSON.stringify(main.prepare('SELECT * FROM git_sync').all()).includes(t.title));
     main.close();
     const before = readFileSync(join(a.repo, '.devcontour/tasks', t.id + '.json'), 'utf8');
@@ -413,10 +413,10 @@ test('Real runner checks and integration survive Git transfer without reusing lo
   let scheduler: Scheduler | undefined;
   try {
     const a = f.create('alice');
-    writeFileSync(join(a.repo, '.gitignore'), '.harness/\n.reports/\n');
+    writeFileSync(join(a.repo, '.gitignore'), '.devcontour-local/\n.reports/\n');
     writeFileSync(
       join(a.repo, 'verify.mjs'),
-      `import {writeFileSync,readdirSync} from 'node:fs'; if (!readdirSync('deliverables').length) process.exit(1); writeFileSync(process.env.HARNESS_REPORT_PATH, '<testsuite><testcase name="deliverable"/></testsuite>');`,
+      `import {writeFileSync,readdirSync} from 'node:fs'; if (!readdirSync('deliverables').length) process.exit(1); writeFileSync(process.env.DEVCONTOUR_REPORT_PATH, '<testsuite><testcase name="deliverable"/></testsuite>');`,
     );
     git(a.repo, 'add', '.gitignore', 'verify.mjs');
     git(a.repo, 'commit', '-m', 'Real test gate');
@@ -426,14 +426,14 @@ test('Real runner checks and integration survive Git transfer without reusing lo
     a.h.approve(board.id);
     syncGit(a.h);
     a.commit();
-    scheduler = new Scheduler(a.h, join(a.workspace, '.harness/local'));
+    scheduler = new Scheduler(a.h, join(a.workspace, '.devcontour-local'));
     await scheduler.init();
     a.h.pause(false);
     await scheduler.drain();
     await scheduler.stop();
     const result = a.store.read().tasks[0];
     assert.equal(result.status, 'done', result.failure);
-    git(a.repo, 'merge', '--ff-only', 'harness/accepted');
+    git(a.repo, 'merge', '--ff-only', 'devcontour/accepted');
     syncGit(a.h);
     a.commit();
     const b = f.create('bob', a);
@@ -458,7 +458,7 @@ test('Shared graph references component tasks without exporting their bodies int
     for (const path of paths) {
       mkdirSync(path);
       git(path, 'init', '-b', 'main');
-      writeFileSync(join(path, '.gitignore'), '.harness/\n');
+      writeFileSync(join(path, '.gitignore'), '.devcontour-local/\n');
       git(path, 'add', '.gitignore');
       git(path, 'commit', '-m', 'baseline');
     }
@@ -477,8 +477,8 @@ test('Shared graph references component tasks without exporting their bodies int
       repositories: repos,
       storage: 'component',
     });
-    store = new Store(join(workspace, '.harness/local/state.sqlite'), repos);
-    const h = new Harness(store, c),
+    store = new Store(join(workspace, '.devcontour-local/state.sqlite'), repos);
+    const h = new DevContour(store, c),
       board = h.createBoard('Joint change');
     const library = h.addTask(board.id, {
       ...input('Private library requirement'),
@@ -561,7 +561,7 @@ test('CLI exposes sync, status and assignment against an explicit workspace', ()
     const a = f.create('alice'),
       board = a.h.createBoard('CLI board', '', 'main');
     const t = a.h.addTask(board.id, input());
-    writeFileSync(join(a.workspace, '.harness/local/config.json'), JSON.stringify(a.h.config));
+    writeFileSync(join(a.workspace, '.devcontour-local/config.json'), JSON.stringify(a.h.config));
     const cli = (...args: string[]) =>
       JSON.parse(
         execFileSync(

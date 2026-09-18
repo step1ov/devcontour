@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import type { Harness } from '../core/service.ts';
+import type { DevContour } from '../core/service.ts';
 import type { Run } from '../core/model.ts';
 export async function timed<T>(
-  h: Harness,
+  h: DevContour,
   run: Run,
   stage: string,
   action: () => Promise<T>,
