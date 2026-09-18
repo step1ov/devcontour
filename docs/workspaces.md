@@ -102,7 +102,7 @@ REQ-раздел библиотеки находится в её committed Git-�
 }
 ```
 
-Общие роли и модели задаются в workspace; roles/reviewer в harness.component.json переопределяют их для компонента. Gates и protectedPaths также находятся в компоненте. `profile` выбирает подходящий набор стартовых команд; готового генератора произвольной библиотеки в нём нет. Для Go-библиотеки можно выбрать `go-api` и переопределить команды. `concurrency`, timeout и роли агент уточняет в рабочем `config.json`; для мобильного устройства настройте общий host resource и привяжите его к задачам/gates.
+Общие роли и модели задаются в workspace; roles/reviewer в harness.component.json переопределяют их для компонента. Gates и protectedPaths также находятся в компоненте. `profile` выбирает встроенный ID либо `./profiles/service.json` внутри соответствующего компонента; готового генератора произвольной библиотеки в нём нет. Локальные profiles могут иметь одинаковые IDs: lock различает владельца и путь. Правила [композиции](mcp-and-profiles.md) одинаковы для setup и workspace-init. Для Go-библиотеки можно выбрать `go-api` и переопределить команды. `concurrency`, timeout и роли агент уточняет в рабочем `config.json`; для мобильного устройства настройте общий host resource и привяжите его к задачам/gates.
 
 ```sh
 npm run devcontour -- workspace-init --file /absolute/product-workspace/workspace.json

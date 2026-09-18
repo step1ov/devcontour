@@ -1,8 +1,8 @@
 import { validateWorkflow } from '../core/workflow.ts';
 import { readFileSync, realpathSync, writeFileSync, existsSync, lstatSync } from 'node:fs';
 import { isAbsolute, resolve, dirname, join, sep } from 'node:path';
-import { createHash } from 'node:crypto';
 import { repositories } from '../core/repositories.ts';
+import { packKey, resolveProfile } from './packs.ts';
 import { configSchema, type Config } from '../core/model.ts';
 export function loadConfig(path: string): Config {
   const raw = JSON.parse(readFileSync(path, 'utf8'));
@@ -63,16 +63,29 @@ export function loadConfig(path: string): Config {
   }
   if (c.mode === 'local' && c.packs.length) {
     const lock = JSON.parse(readFileSync(join(dirname(path), 'packs.lock.json'), 'utf8'));
+    if (new Set(c.packs.map(packKey)).size !== c.packs.length)
+      throw new Error('Повтор установленного профиля');
     for (const pack of c.packs) {
-      if (!['react-vite-admin', 'next-product', 'go-api', 'mobile-maestro'].includes(pack.id))
-        throw new Error('Неизвестный установленный профиль: ' + pack.id);
-      const pinned = lock.packs?.find((p: { id: string }) => p.id === pack.id);
-      const raw = readFileSync(
-        new URL(`../../packs/profiles/${pack.id}.json`, import.meta.url),
-        'utf8',
+      const owner = pack.source
+        ? repositories(c).find((r) => r.id === pack.source!.repositoryId)
+        : undefined;
+      if (pack.source && !owner) throw new Error('Неизвестный владелец профиля');
+      const actual = resolveProfile(
+        pack.source ? './' + pack.source.path : pack.id,
+        owner?.path,
+        owner?.id,
       );
-      const expected = createHash('sha256').update(raw).digest('hex');
-      if (!pinned || pinned.version !== pack.version || pinned.digest !== expected)
+      const matches =
+        lock.packs?.filter((p: Config['packs'][number]) => packKey(p) === packKey(pack)) ?? [];
+      const pinned = matches[0];
+      if (
+        matches.length !== 1 ||
+        actual.id !== pack.id ||
+        actual.version !== pack.version ||
+        JSON.stringify(actual.capabilities) !== JSON.stringify(pack.capabilities) ||
+        pinned.version !== pack.version ||
+        pinned.digest !== actual.digest
+      )
         throw new Error(
           'Профиль изменился после установки: ' + pack.id + '; проверьте обновление и lock-файл',
         );

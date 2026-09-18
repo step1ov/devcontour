@@ -1,0 +1,32 @@
+{
+  "id": "node-checks",
+  "version": "0.1.0",
+  "capabilities": ["node", "typescript", "unit-tests"],
+  "protectedPaths": ["package.json", "package-lock.json"],
+  "gates": [
+    {
+      "id": "install",
+      "kind": "check",
+      "command": ["npm", "ci"],
+      "timeoutMs": 240000
+    },
+    {
+      "id": "typecheck",
+      "kind": "check",
+      "command": ["npm", "run", "typecheck"],
+      "timeoutMs": 240000,
+      "dependsOn": ["install"]
+    },
+    {
+      "id": "unit-tests",
+      "kind": "test",
+      "command": ["npm", "run", "test:harness"],
+      "timeoutMs": 240000,
+      "dependsOn": ["typecheck"],
+      "report": {
+        "type": "junit",
+        "path": ".reports/junit.xml"
+      }
+    }
+  ]
+}

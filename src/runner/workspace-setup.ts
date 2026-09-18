@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile, realpath, mkdtemp, rm } from 'node:fs/promi
 import { dirname, join, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { configSchema, repositorySchema } from '../core/model.ts';
-import { profile } from './packs.ts';
+import { profile, packKey, profileMetadata } from './packs.ts';
 import { projectConfig, profileLock } from './setup.ts';
 import { loadConfig, readComponentConfig, scopedConfig } from './config.ts';
 import { reserveRepositories } from './ownership.ts';
@@ -40,7 +40,9 @@ export async function setupWorkspace(file: string, data?: string) {
   );
   const input = registrySchema.parse(raw);
   const root = resolve(data ?? join(workspaceRoot, '.harness', 'local'));
-  const selected = await Promise.all(input.repositories.map((r) => profile(r.profile)));
+  const selected = await Promise.all(
+    input.repositories.map((r) => profile(r.profile, r.path, r.id)),
+  );
   const repos = await Promise.all(
     input.repositories.map(async (r, i) => ({
       id: r.id,
@@ -50,10 +52,10 @@ export async function setupWorkspace(file: string, data?: string) {
       name: r.name,
       kind: r.kind,
       dependsOn: r.dependsOn,
-      generatedPaths: r.generatedPaths,
-      environment: r.environment,
-      lifecycle: r.lifecycle,
-      prepare: r.prepare,
+      generatedPaths: [...new Set([...selected[i].generatedPaths, ...(r.generatedPaths ?? [])])],
+      environment: r.environment ?? selected[i].environment,
+      lifecycle: r.lifecycle ?? selected[i].lifecycle,
+      prepare: r.prepare ?? selected[i].prepare,
       dependencyBuild: r.dependencyBuild,
       dependencyArtifacts: r.dependencyArtifacts,
       preflight: r.preflight,
@@ -61,7 +63,12 @@ export async function setupWorkspace(file: string, data?: string) {
       path: await realpath(resolve(workspaceRoot, r.path)),
       targetBranch: r.targetBranch,
       gates: r.gates ?? selected[i].gates,
-      protectedPaths: r.protectedPaths ?? projectConfig('.', selected[i]).protectedPaths,
+      protectedPaths: [
+        ...new Set([
+          ...(r.protectedPaths ?? projectConfig('.', selected[i]).protectedPaths),
+          ...selected[i].protectedPaths,
+        ]),
+      ],
     })),
   );
   if (repos.some((r) => workspaceRoot === r.path || workspaceRoot.startsWith(r.path + sep)))
@@ -71,7 +78,7 @@ export async function setupWorkspace(file: string, data?: string) {
     new Set(repos.map((r) => r.path)).size !== repos.length
   )
     throw new Error('IDs и пути репозиториев должны быть уникальны');
-  const packs = [...new Map(selected.map((p) => [p.id, p])).values()];
+  const packs = [...new Map(selected.map((p) => [packKey(p), p])).values()];
   const config = configSchema.parse({
     ...projectConfig(repos[0].path, selected[0], input.approvalMode),
     name: input.name,
@@ -85,13 +92,16 @@ export async function setupWorkspace(file: string, data?: string) {
     resourceDatabase: input.resourceDatabase,
     verificationMode: input.verificationMode,
     environment: input.environment,
+    lifecycle: undefined,
+    prepare: undefined,
+    generatedPaths: [],
     workspaceLifecycle: input.workspaceLifecycle,
     toolProfiles: input.toolProfiles,
     completionMode: input.completionMode,
     forgeConnections: input.forgeConnections,
     storage: 'component',
     gates: repos[0].gates,
-    packs: packs.map((p) => ({ id: p.id, version: p.version, capabilities: p.capabilities })),
+    packs: packs.map(profileMetadata),
   });
   const configPath = join(root, 'config.json');
   try {
@@ -99,10 +109,11 @@ export async function setupWorkspace(file: string, data?: string) {
     const existing = loadConfig(configPath);
     if (
       existing.workspaceRoot !== workspaceRoot ||
+      JSON.stringify(existing.packs) !== JSON.stringify(config.packs) ||
       JSON.stringify(existing.repositories.map(({ id, path }) => ({ id, path }))) !==
         JSON.stringify(repos.map(({ id, path }) => ({ id, path })))
     )
-      throw new Error('Существующая конфигурация относится к другому workspace');
+      throw new Error('Существующая конфигурация относится к другому workspace или профилю');
     await reserveRepositories(existing, root);
     return { status: 'preserved', data: root, config: configPath };
   } catch (error) {

@@ -37,6 +37,7 @@ test('Setup starts from only a Markdown spec, copies hidden roles and pins an ag
     await access(join(root, 'docs/harness-start.md'));
     await access(join(root, 'docs/harness-project-memory.md'));
     await access(join(root, 'docs/harness-intent.md'));
+    await access(join(root, 'docs/harness-mcp-and-profiles.md'));
     await access(join(root, 'docs/harness-experiments.md'));
     assert.match(
       await readFile(join(root, 'docs/harness-start.md'), 'utf8'),

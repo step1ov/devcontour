@@ -16,6 +16,8 @@ DevContour — локальная система разработки с AI-аг
 
 DevContour можно [установить из npm-архива](docs/distribution.md): CLI, сервер, UI и профили входят в одну поставку. Для краткого контекста и возобновления сессии предусмотрен [интерфейс агента](docs/agent-interface.md).
 
+Стек продукта задаётся [подключаемым профилем](docs/mcp-and-profiles.md) в его репозитории. Агент объединяет настройки стека, проверок и окружения; готовые примеры включают Python, NestJS и React Native/Expo наряду с React/Vite, Next.js и Go. Добавление стека не требует изменения DevContour.
+
 Для AI-клиентов есть собственные [MCP и skill](docs/mcp-server.md): типизированные инструменты, явная привязка к workspace и общий с CLI каталог возможностей.
 
 В версии 0.3 добавлены [связи требований и проверок](docs/requirements.md), [evals агента](docs/agent-evals.md), [метрики процесса](docs/metrics.md), [продолжение этапов сервером](docs/lead-workflow.md) и [внешние сигналы](docs/external-signals.md). Выполненные проверки и ограничения — в [отчёте версии](docs/verification-sdlc.md).

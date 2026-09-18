@@ -1,0 +1,23 @@
+{
+  "package": "devcontour-0.3.0.tgz",
+  "size": 3102060,
+  "checks": [
+    "isolated production install",
+    "no source or tsx",
+    "explicit workspace",
+    "installed profiles and templates",
+    "custom composed profile, transitive lock and Python/Nest/React Native/Expo presets",
+    "CLI context",
+    "MCP negotiation and draft mutation",
+    "portable skill schema parity",
+    "packaged static assets",
+    "real Git fixture pipeline",
+    "HTTP agent API",
+    "durable workflow through real Git acceptance",
+    "workflow metrics and private lease tokens",
+    "deduplicated external signal stays draft",
+    "installed protocol evals",
+    "installed intent render, snapshot and missing-work report",
+    "CLI coverage gate rejects an undecomposed release"
+  ]
+}
