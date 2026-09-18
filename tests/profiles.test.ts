@@ -169,7 +169,7 @@ test('Setup pins transitive local sources, preserves policy and never silently i
     };
     const first = await setupProject(options);
     const configPath = join(first.data, 'config.json');
-    let c = loadConfig(configPath);
+    const c = loadConfig(configPath);
     assert.equal(c.packs[0].source!.repositoryId, 'main');
     assert.equal(c.environment, undefined);
     assert.equal(c.repositories[0].environment!.values.PROJECT_MARKER, 'product');

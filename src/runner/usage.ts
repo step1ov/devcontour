@@ -43,7 +43,7 @@ export function parseUsage(runtime: 'codex' | 'claude', stdout: string, complete
     if (!turns.length) return unknownUsage();
     const sum = (key: string) => {
       const values = turns.map((e) => tokens(e.usage?.[key]));
-      return values.every((v) => v !== null) ? values.reduce<number>((s, v) => s + v!, 0) : null;
+      return values.every((v) => v !== null) ? values.reduce<number>((s, v) => s + v, 0) : null;
     };
     return usageSchema.parse({
       inputTokens: sum('input_tokens'),

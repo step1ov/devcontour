@@ -47,9 +47,7 @@ test('Agent contracts require another runtime, retain review proof and deduplica
     const contract = f.store.read().contracts[0];
     assert.equal(contract.approval?.authorRuntime, 'codex');
     assert.equal(contract.approval?.reviewerRuntime, 'claude');
-    const saved = JSON.parse(
-      await readFile(contract.approval!.artifact + '/proposal.json', 'utf8'),
-    );
+    const saved = JSON.parse(await readFile(contract.approval.artifact + '/proposal.json', 'utf8'));
     assert.deepEqual(saved, proposal);
     await reviewContract(
       f.h,
