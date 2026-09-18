@@ -34,4 +34,4 @@ Playwright: **1 HTTP E2E прошёл; 3 браузерных сценария �
 
 Live Claude/Codex review, реальные библиотеки пользователя, публикация пакетов, deployment, мобильный Maestro, несколько OS-хостов и полноценный sandbox. Интеграционный скрипт каждого продукта требуется подготовить так, чтобы он действительно подключал закреплённую библиотеку; runner сам не определяет семантику package manager. Федерация независимых workspace и атомарный merge нескольких Git-репозиториев не реализованы.
 
-Логи: [основной check](evidence/workspace-check.log), [HTTP/workspace после уточнений](evidence/workspace-final-tests.log), [setup/workspace финально](evidence/workspace-setup-final.log).
+Логи: [основной check](../evidence/workspace-check.log), [HTTP/workspace после уточнений](../evidence/workspace-final-tests.log), [setup/workspace финально](../evidence/workspace-setup-final.log).

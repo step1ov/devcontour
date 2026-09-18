@@ -26,7 +26,7 @@
 
 Первый полный `npm run check` прошёл build, 110 тогда существовавших Node tests, проверку skill и npm-пакета. Затем Playwright завершился ошибкой `bootstrap_check_in … MachPortRendezvousServer … Permission denied (1100)`. После двух дополнительных тестов выполнен итоговый полный Node suite на 112 тестов и повторно проверен пакет. Общий `npm run check` **не объявляется зелёным**. Chrome smoke проверяет перечисленные действия, но не заменяет весь Playwright suite и axe-аудит.
 
-Журналы: [полный check](evidence/learning-check.log), [итоговые Node tests](evidence/learning-tests.log), [целевые проверки](evidence/learning-targeted.log), [установка пакета](evidence/learning-package.log), [Chrome smoke](evidence/learning-browser.json).
+Журналы: [полный check](../evidence/learning-check.log), [итоговые Node tests](../evidence/learning-tests.log), [целевые проверки](../evidence/learning-targeted.log), [установка пакета](../evidence/learning-package.log), [Chrome smoke](../evidence/learning-browser.json).
 
 ## Что именно подтверждено
 

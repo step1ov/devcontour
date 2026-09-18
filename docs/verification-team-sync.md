@@ -17,7 +17,7 @@
 | Axe в доступном Chrome     | 0 нарушений на 1600 px и 390 px                                                                          |
 | Переполнение               | Document width равна viewport; на 390 px inspector clientWidth и scrollWidth равны 356 px                |
 
-Полный `npm run check` **не зелёный** из-за запуска Chromium: `bootstrap_check_in ... MachPortRendezvousServer ... Permission denied (1100)`. Браузерные сценарии Playwright не помечались skip и не подменялись пустыми тестами. Проверка доступным Chrome дополняет отчёт, но не объявляется успешным запуском всех Playwright-сценариев. [Лог общего прогона](evidence/team-sync-check.log).
+Полный `npm run check` **не зелёный** из-за запуска Chromium: `bootstrap_check_in ... MachPortRendezvousServer ... Permission denied (1100)`. Браузерные сценарии Playwright не помечались skip и не подменялись пустыми тестами. Проверка доступным Chrome дополняет отчёт, но не объявляется успешным запуском всех Playwright-сценариев. [Лог общего прогона](../evidence/team-sync-check.log).
 
 ## Что проверяют новые сценарии
 

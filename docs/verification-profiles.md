@@ -23,7 +23,7 @@
 
 Chromium не стартует из-за `bootstrap_check_in … MachPortRendezvousServer … Permission denied (1100)` в sandbox macOS. Браузерная часть обязательных проверок остаётся неподтверждённой; полный набор проверок не объявляется зелёным. UI-функции в этом изменении не добавлялись.
 
-Журналы: [сборка](evidence/profiles-build.log), [полный Node suite](evidence/profiles-tests.log), [установленный пакет](evidence/profiles-package.log), [Playwright](evidence/profiles-e2e.log).
+Журналы: [сборка](../evidence/profiles-build.log), [полный Node suite](../evidence/profiles-tests.log), [установленный пакет](../evidence/profiles-package.log), [Playwright](../evidence/profiles-e2e.log).
 
 ## Что подтверждают тесты
 

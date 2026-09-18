@@ -6,3 +6,6 @@ skills/devcontour/references/agent-api.json
 playwright-report
 test-results
 package-lock.json
+
+.idea
+evidence

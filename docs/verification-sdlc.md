@@ -27,7 +27,7 @@
 
 Playwright завершился ошибкой `bootstrap_check_in … MachPortRendezvousServer … Permission denied (1100)` при запуске Chromium. Это ограничение запуска браузера, а не результат прохождения UI-сценариев. Дополнительный Chrome smoke не заменяет все три E2E, включая axe-аудит и полный цикл корректировки; полный `npm run check` не объявляется зелёным.
 
-Основные журналы: [полный check](evidence/sdlc-check.log), [итоговые Node tests](evidence/sdlc-tests.log), [пакет](evidence/sdlc-package.log), [workflow regression](evidence/sdlc-workflow.log), [браузерный smoke](evidence/sdlc-browser.json).
+Основные журналы: [полный check](../evidence/sdlc-check.log), [итоговые Node tests](../evidence/sdlc-tests.log), [пакет](../evidence/sdlc-package.log), [workflow regression](../evidence/sdlc-workflow.log), [браузерный smoke](../evidence/sdlc-browser.json).
 
 ## Что доказывают проверки
 

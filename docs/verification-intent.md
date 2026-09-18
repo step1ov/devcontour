@@ -27,7 +27,7 @@
 
 Первый `npm run check` прошёл lint, build, 117 Node tests и проверку skill, затем остановился на npm install. После последней правки повторно выполнены полный Node suite и `npm run test:package`. Отдельный `npm run test:e2e` завершился с ошибкой `bootstrap_check_in … MachPortRendezvousServer … Permission denied (1100)`. Полный `npm run check` **не объявляется зелёным**. UI-код в этом изменении не менялся; автоматические браузерные сценарии требуют повторного запуска в среде, разрешающей запуск Chromium.
 
-Журналы: [первый check](evidence/intent-check.log), [итоговые Node tests](evidence/intent-tests.log), [установленный пакет](evidence/intent-package.log), [Playwright](evidence/intent-e2e.log).
+Журналы: [первый check](../evidence/intent-check.log), [итоговые Node tests](../evidence/intent-tests.log), [установленный пакет](../evidence/intent-package.log), [Playwright](../evidence/intent-e2e.log).
 
 ## Что именно подтверждено
 

@@ -27,4 +27,4 @@
 
 Живые Codex/Claude CLI, Maestro на реальном устройстве, мобильная сборка и авторизация приложения не запускались: для этого нужен конкретный продукт и настроенные инструменты. MCP инструкции не выдаются за такую проверку. Resource pool координирует Harness-процессы на одном хосте и не создаёт ресурсы/контейнеры. Порядок работы и границы описаны в [инженерных расширениях](engineering-context.md).
 
-Логи: [общий check](evidence/engineering-check.log), [последний CLI-тест](evidence/engineering-context-cli.log).
+Логи: [общий check](../evidence/engineering-check.log), [последний CLI-тест](../evidence/engineering-context-cli.log).

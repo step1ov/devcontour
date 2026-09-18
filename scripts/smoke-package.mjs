@@ -37,6 +37,7 @@ try {
   assert.ok(archive.files.some((f) => f.path === 'lib/cli.js'));
   assert.ok(archive.files.some((f) => f.path === 'dist/index.html'));
   assert.ok(archive.files.some((f) => f.path === 'templates/project/.agents/roles/backend.md'));
+  assert.ok(!archive.files.some((f) => /^(evidence|docs\/evidence|\.idea)\//.test(f.path)));
   assert.ok(!archive.files.some((f) => /^(src|tests|node_modules|\.harness)\//.test(f.path)));
   await writeFile(join(installation, 'package.json'), '{"private":true}');
   await exec(

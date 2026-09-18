@@ -34,4 +34,4 @@ Vite сообщает advisory о JS chunk больше 500 kB; сборку э�
 - Реальные корпоративный MCP, private Registry, PostgreSQL, удалённые GitLab/GitHub API и Codex/Claude-сессии не проверялись. Lifecycle проверен процессами fixture, а не PostgreSQL-контейнером. Для конкретного продукта агент должен настроить scripts и провести пилот по его ТЗ.
 - Тесты доказывают инварианты Harness на fixtures, а не полноту тестов будущего продукта. Проектные gates и критерии приёмки остаются обязательными.
 
-Логи: [общий check](evidence/integration-check.log), [заключительный HTTP/setup прогон](evidence/integration-api-setup.log), [заключительная сборка](evidence/integration-build.log).
+Логи: [общий check](../evidence/integration-check.log), [заключительный HTTP/setup прогон](../evidence/integration-api-setup.log), [заключительная сборка](../evidence/integration-build.log).

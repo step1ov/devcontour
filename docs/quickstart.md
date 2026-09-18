@@ -7,7 +7,7 @@
 Нужны Node.js 24.3+ с `node:sqlite`, npm и Git. Установка зависимостей требует доступа к используемому npm registry. Проверка браузером дополнительно требует Chromium для Playwright; для запуска самой консоли это не нужно.
 
 ```sh
-cd /Users/antonstepanov/PhpstormProjects/devcontour
+cd devcontour
 node --version
 git --version
 npm ci
