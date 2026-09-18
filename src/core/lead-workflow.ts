@@ -49,6 +49,7 @@ export class LeadWorkflow {
         id,
         approvalMode: this.h.config.approvalMode,
         completionMode: this.h.config.completionMode,
+        releaseId: changeSet?.releaseId,
         boards: boards.map((b) => ({
           id: b.id,
           title: b.title,

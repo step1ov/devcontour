@@ -1,0 +1,116 @@
+{
+  "kind": "workspace",
+  "title": "Система общения",
+  "purpose": "Помочь модераторам управлять общением и ограничивать нарушения.",
+  "product": {
+    "applications": [
+      {
+        "id": "admin",
+        "title": "Админка",
+        "purpose": "Управление участниками и модерация.",
+        "audience": ["Модераторы"],
+        "componentIds": ["admin-ui"]
+      },
+      {
+        "id": "mobile",
+        "title": "Мобильное приложение",
+        "purpose": "Общение сотрудников в чатах.",
+        "audience": ["Сотрудники"],
+        "componentIds": ["mobile-ui"]
+      }
+    ],
+    "components": [
+      {
+        "id": "admin-ui",
+        "title": "Интерфейс модератора",
+        "kind": "frontend",
+        "repositoryId": "product",
+        "path": "apps/admin",
+        "dependsOn": ["chat-api"]
+      },
+      {
+        "id": "mobile-ui",
+        "title": "Мобильный клиент",
+        "kind": "mobile",
+        "repositoryId": "product",
+        "path": "apps/mobile",
+        "dependsOn": ["chat-api"]
+      },
+      {
+        "id": "chat-api",
+        "title": "Библиотека чата",
+        "kind": "library",
+        "repositoryId": "library",
+        "path": ".",
+        "dependsOn": []
+      }
+    ],
+    "features": [
+      {
+        "id": "block-member",
+        "title": "Блокировка участника",
+        "outcome": "Модератор ограничивает нарушителя, и ограничение действует в клиенте."
+      },
+      {
+        "id": "export-audit",
+        "title": "Экспорт журнала",
+        "outcome": "Модератор получает историю действий для разбора обращения."
+      }
+    ]
+  },
+  "releases": [
+    {
+      "id": "mvp",
+      "title": "Первая версия модерации",
+      "components": [
+        { "repositoryId": "product", "releaseId": "mvp" },
+        { "repositoryId": "library", "releaseId": "moderation-api" }
+      ],
+      "features": [
+        {
+          "featureId": "block-member",
+          "applications": [
+            {
+              "applicationId": "admin",
+              "scope": "included",
+              "stories": [
+                { "repositoryId": "product", "storyId": "moderate-member" },
+                { "repositoryId": "library", "storyId": "enforce-block" }
+              ]
+            },
+            {
+              "applicationId": "mobile",
+              "scope": "included",
+              "stories": [
+                { "repositoryId": "product", "storyId": "show-block" },
+                { "repositoryId": "library", "storyId": "enforce-block" }
+              ]
+            }
+          ],
+          "checks": [
+            {
+              "gate": "product-with-library",
+              "scenario": "После блокировки в админке API запрещает отправку, мобильный клиент показывает ограничение."
+            }
+          ]
+        },
+        {
+          "featureId": "export-audit",
+          "applications": [
+            {
+              "applicationId": "admin",
+              "scope": "deferred",
+              "reason": "Следующий этап после проверки основного сценария модерации."
+            },
+            {
+              "applicationId": "mobile",
+              "scope": "not-applicable",
+              "reason": "Выгрузка журнала доступна только в админке."
+            }
+          ],
+          "checks": []
+        }
+      ]
+    }
+  ]
+}

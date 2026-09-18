@@ -15,6 +15,7 @@ import { Scheduler } from '../runner/scheduler.ts';
 import { acceptBoard } from '../runner/agent-control.ts';
 import { repositories } from '../core/repositories.ts';
 import { WorkspaceRunner } from '../runner/workspace.ts';
+import { IntentService } from '../runner/intent.ts';
 import { attachJournal, renderJournal } from '../runner/journal.ts';
 const json = (res: ServerResponse, status: number, value: unknown) => {
   res.writeHead(status, {
@@ -109,7 +110,11 @@ export async function serve(
               packs: h.config.packs,
             },
           };
-        } else if (req.method === 'GET' && parts[1] === 'changesets' && parts[3] === 'journal')
+        } else if (req.method === 'GET' && path === '/api/product')
+          result = new IntentService(h).productView({
+            releaseId: url.searchParams.get('release') ?? undefined,
+          });
+        else if (req.method === 'GET' && parts[1] === 'changesets' && parts[3] === 'journal')
           result = { content: renderJournal(h.store.read(), parts[2], h.store.allEvents()) };
         else if (req.method === 'GET' && parts[1] === 'changesets' && parts[3] === 'evidence') {
           const e = h.store

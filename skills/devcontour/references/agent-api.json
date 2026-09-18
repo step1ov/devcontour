@@ -7,7 +7,7 @@
   "tools": [
     {
       "name": "intent_render",
-      "description": "Render a component intent map from committed local REQ sources, or workspace release references. Returns Markdown only; does not write, approve or commit it.",
+      "description": "Render component intent from committed REQ sources, or a workspace product/application/feature map with pinned local story references. Returns Markdown only; does not write, approve or commit it.",
       "readOnly": true,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -252,6 +252,159 @@
                     "minLength": 3,
                     "maxLength": 2000
                   },
+                  "product": {
+                    "type": "object",
+                    "properties": {
+                      "applications": {
+                        "minItems": 1,
+                        "maxItems": 30,
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9_-]{1,50}$"
+                            },
+                            "title": {
+                              "type": "string",
+                              "minLength": 3,
+                              "maxLength": 180,
+                              "pattern": "^[^\\r\\n]+$"
+                            },
+                            "purpose": {
+                              "type": "string",
+                              "minLength": 3,
+                              "maxLength": 2000
+                            },
+                            "audience": {
+                              "minItems": 1,
+                              "maxItems": 20,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 3,
+                                "maxLength": 2000
+                              }
+                            },
+                            "componentIds": {
+                              "minItems": 1,
+                              "maxItems": 100,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "pattern": "^[A-Za-z0-9_-]{1,50}$"
+                              }
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "title",
+                            "purpose",
+                            "audience",
+                            "componentIds"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "components": {
+                        "minItems": 1,
+                        "maxItems": 100,
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9_-]{1,50}$"
+                            },
+                            "title": {
+                              "type": "string",
+                              "minLength": 3,
+                              "maxLength": 180,
+                              "pattern": "^[^\\r\\n]+$"
+                            },
+                            "kind": {
+                              "type": "string",
+                              "minLength": 2,
+                              "maxLength": 50
+                            },
+                            "repositoryId": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                            },
+                            "path": {
+                              "anyOf": [
+                                {
+                                  "type": "string",
+                                  "const": "."
+                                },
+                                {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 500
+                                }
+                              ]
+                            },
+                            "dependsOn": {
+                              "maxItems": 100,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "pattern": "^[A-Za-z0-9_-]{1,50}$"
+                              }
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "title",
+                            "kind",
+                            "repositoryId",
+                            "path",
+                            "dependsOn"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "features": {
+                        "minItems": 1,
+                        "maxItems": 100,
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "id": {
+                              "type": "string",
+                              "pattern": "^[A-Za-z0-9_-]{1,50}$"
+                            },
+                            "title": {
+                              "type": "string",
+                              "minLength": 3,
+                              "maxLength": 180,
+                              "pattern": "^[^\\r\\n]+$"
+                            },
+                            "outcome": {
+                              "type": "string",
+                              "minLength": 3,
+                              "maxLength": 2000
+                            }
+                          },
+                          "required": [
+                            "id",
+                            "title",
+                            "outcome"
+                          ],
+                          "additionalProperties": false
+                        }
+                      }
+                    },
+                    "required": [
+                      "applications",
+                      "components",
+                      "features"
+                    ],
+                    "additionalProperties": false
+                  },
                   "releases": {
                     "minItems": 1,
                     "maxItems": 20,
@@ -288,6 +441,148 @@
                             "required": [
                               "repositoryId",
                               "releaseId"
+                            ],
+                            "additionalProperties": false
+                          }
+                        },
+                        "features": {
+                          "minItems": 1,
+                          "maxItems": 100,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "featureId": {
+                                "type": "string",
+                                "pattern": "^[A-Za-z0-9_-]{1,50}$"
+                              },
+                              "applications": {
+                                "minItems": 1,
+                                "maxItems": 30,
+                                "type": "array",
+                                "items": {
+                                  "oneOf": [
+                                    {
+                                      "type": "object",
+                                      "properties": {
+                                        "applicationId": {
+                                          "type": "string",
+                                          "pattern": "^[A-Za-z0-9_-]{1,50}$"
+                                        },
+                                        "scope": {
+                                          "type": "string",
+                                          "const": "included"
+                                        },
+                                        "stories": {
+                                          "minItems": 1,
+                                          "maxItems": 100,
+                                          "type": "array",
+                                          "items": {
+                                            "type": "object",
+                                            "properties": {
+                                              "repositoryId": {
+                                                "type": "string",
+                                                "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                                              },
+                                              "storyId": {
+                                                "type": "string",
+                                                "pattern": "^[A-Za-z0-9_-]{1,50}$"
+                                              }
+                                            },
+                                            "required": [
+                                              "repositoryId",
+                                              "storyId"
+                                            ],
+                                            "additionalProperties": false
+                                          }
+                                        }
+                                      },
+                                      "required": [
+                                        "applicationId",
+                                        "scope",
+                                        "stories"
+                                      ],
+                                      "additionalProperties": false
+                                    },
+                                    {
+                                      "type": "object",
+                                      "properties": {
+                                        "applicationId": {
+                                          "type": "string",
+                                          "pattern": "^[A-Za-z0-9_-]{1,50}$"
+                                        },
+                                        "scope": {
+                                          "type": "string",
+                                          "const": "deferred"
+                                        },
+                                        "reason": {
+                                          "type": "string",
+                                          "minLength": 3,
+                                          "maxLength": 2000
+                                        }
+                                      },
+                                      "required": [
+                                        "applicationId",
+                                        "scope",
+                                        "reason"
+                                      ],
+                                      "additionalProperties": false
+                                    },
+                                    {
+                                      "type": "object",
+                                      "properties": {
+                                        "applicationId": {
+                                          "type": "string",
+                                          "pattern": "^[A-Za-z0-9_-]{1,50}$"
+                                        },
+                                        "scope": {
+                                          "type": "string",
+                                          "const": "not-applicable"
+                                        },
+                                        "reason": {
+                                          "type": "string",
+                                          "minLength": 3,
+                                          "maxLength": 2000
+                                        }
+                                      },
+                                      "required": [
+                                        "applicationId",
+                                        "scope",
+                                        "reason"
+                                      ],
+                                      "additionalProperties": false
+                                    }
+                                  ]
+                                }
+                              },
+                              "checks": {
+                                "maxItems": 30,
+                                "type": "array",
+                                "items": {
+                                  "type": "object",
+                                  "properties": {
+                                    "gate": {
+                                      "type": "string",
+                                      "pattern": "^[A-Za-z0-9_-]{1,50}$"
+                                    },
+                                    "scenario": {
+                                      "type": "string",
+                                      "minLength": 3,
+                                      "maxLength": 2000
+                                    }
+                                  },
+                                  "required": [
+                                    "gate",
+                                    "scenario"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              }
+                            },
+                            "required": [
+                              "featureId",
+                              "applications",
+                              "checks"
                             ],
                             "additionalProperties": false
                           }
@@ -341,7 +636,7 @@
     },
     {
       "name": "intent_report",
-      "description": "Audit every story of a declared release and all declared REQ sources for missing or stale coverage. Workspace reports contain component references and counts only. This never accepts a release.",
+      "description": "Audit all release stories and REQ sources. Product maps add application/feature progress and current bound ChangeSet acceptance. Read-only; never accepts a release or copies local task text.",
       "readOnly": true,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -359,6 +654,22 @@
         "required": [
           "releaseId"
         ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "product_view",
+      "description": "Read the committed product/application/component map and computed feature progress for a release. Includes explicit deferred/not-applicable scope and joint verification. No writes or model calls.",
+      "readOnly": true,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "releaseId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,50}$"
+          }
+        },
         "additionalProperties": false
       }
     },
@@ -1772,7 +2083,7 @@
     },
     {
       "name": "changeset_create",
-      "description": "Declare a shared change across boards. Verification and acceptance are separate operations.",
+      "description": "Declare a shared change across boards. Set releaseId to bind product release acceptance to the workspace INTENT map and mandatory joint tests. Verification and acceptance remain separate operations.",
       "readOnly": false,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1781,6 +2092,10 @@
           "changeSet": {
             "type": "object",
             "properties": {
+              "releaseId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,50}$"
+              },
               "title": {
                 "type": "string",
                 "minLength": 3,

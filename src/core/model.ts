@@ -329,6 +329,7 @@ export interface ComponentImpact {
   baseline?: string;
 }
 export interface Verification {
+  productRelease?: import('./product-map.ts').ProductReleaseProof;
   id: string;
   token: string;
   leaseUntil: number;
@@ -346,6 +347,7 @@ export interface Verification {
   error?: string;
 }
 export interface ChangeSet {
+  releaseId?: string;
   id: string;
   title: string;
   description: string;

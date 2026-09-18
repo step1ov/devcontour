@@ -24,6 +24,7 @@ export function renderJournal(state: DevContourState, id: string, events: AuditE
     c.description,
     '',
     `Статус: ${c.acceptance ? 'принят' : 'в работе'}. Создан: ${c.createdAt}.`,
+    ...(c.releaseId ? [`Продуктовый релиз INTENT: ${c.releaseId}.`] : []),
     ...(c.supersedes ? [`Продолжает: ${c.supersedes}.`] : []),
     '',
     '## Состав',
@@ -46,6 +47,12 @@ export function renderJournal(state: DevContourState, id: string, events: AuditE
       '',
       `Policy: ${v.policyDigest}`,
       `Manifest: ${v.manifestDigest ?? 'не закреплён'}`,
+      ...(v.productRelease
+        ? [
+            `Карта продукта: ${v.productRelease.intentDigest}`,
+            `Сквозные gates фич: ${v.productRelease.gateIds.join(', ')}`,
+          ]
+        : []),
       ...(v.impact
         ? [
             `Impact: ${v.impact.mode} · ${line(v.impact.reason)}`,

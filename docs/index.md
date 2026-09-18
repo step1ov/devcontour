@@ -47,6 +47,8 @@
 
 ## Справочники
 
+- [Карта продукта и приёмка релиза](product-map.md): приложения, технические компоненты, фичи, явный scope и совместные проверки.
+
 - [Продуктовое намерение и полнота релиза](intent.md): цель, истории, инвентарь ТЗ, привязки к evidence и локальность компонентов.
 
 - [Требования и доказательства](requirements.md): привязка разделов ТЗ, актуальность покрытия и корректировки.
@@ -93,6 +95,7 @@
 
 ## Отчёты проверок
 
+- [Карта приложений и фич, совместная приёмка продуктового релиза](verification-product.md).
 - [Подключаемые профили, композиция и новые стеки](verification-profiles.md).
 - [Продуктовое намерение, полнота релиза и привязка к evidence](verification-intent.md).
 - [Память с источниками, runtime usage, инженерные evals и аудит решений](verification-learning.md).
@@ -117,8 +120,8 @@
 
 Изменение поведения сопровождается правкой соответствующего руководства, примера и, при изменении принципа, записи в [решениях](decisions.md). Не добавляйте очередную заметку «теперь поддерживается» поверх устаревшего раздела: перепишите его под текущее состояние. Общие правила держите в одном нормативном месте, из остальных документов ссылайтесь на него.
 
-`setup` переносит тринадцать руководств: `START.md` → `devcontour-start.md`, `workspaces.md` → `devcontour-workspaces.md`, `engineering-context.md` → `devcontour-engineering.md`, `project-integration.md` → `devcontour-integration.md`, `team-sync.md` → `devcontour-team-sync.md`, `requirements.md` → `devcontour-requirements.md`, `lead-workflow.md` → `devcontour-lead-workflow.md`, `project-memory.md` → `devcontour-project-memory.md`, `metrics.md` → `devcontour-metrics.md`, `experiments.md` → `devcontour-experiments.md`, `agent-evals.md` → `devcontour-agent-evals.md`, `intent.md` → `devcontour-intent.md`, `mcp-and-profiles.md` → `devcontour-mcp-and-profiles.md`. Ссылки между установленными руководствами преобразуются автоматически. Ссылки на остальной справочник показывают его имя внутри дистрибутива DevContour без неработающего относительного URL. Существующие копии не перезаписываются. При обновлении проверьте ссылки и осознанно перенесите полезные изменения в правила продукта.
+`setup` переносит четырнадцать руководств: `START.md` → `devcontour-start.md`, `workspaces.md` → `devcontour-workspaces.md`, `engineering-context.md` → `devcontour-engineering.md`, `project-integration.md` → `devcontour-integration.md`, `team-sync.md` → `devcontour-team-sync.md`, `requirements.md` → `devcontour-requirements.md`, `lead-workflow.md` → `devcontour-lead-workflow.md`, `project-memory.md` → `devcontour-project-memory.md`, `metrics.md` → `devcontour-metrics.md`, `experiments.md` → `devcontour-experiments.md`, `agent-evals.md` → `devcontour-agent-evals.md`, `intent.md` → `devcontour-intent.md`, `product-map.md` → `devcontour-product-map.md`, `mcp-and-profiles.md` → `devcontour-mcp-and-profiles.md`. Ссылки между установленными руководствами преобразуются автоматически. Ссылки на остальной справочник показывают его имя внутри дистрибутива DevContour без неработающего относительного URL. Существующие копии не перезаписываются. При обновлении проверьте ссылки и осознанно перенесите полезные изменения в правила продукта.
 
 ## Последняя проверка
 
-[Результаты внешнего ревью и живого пилота](verification-review.md): гигиена репозитория, единое имя, линтер, фактические результаты Claude/Codex и оставшиеся ограничения.
+[Карта продукта и приёмка релиза](verification-product.md): тесты ядра, Git-синхронизация, проверка UI и ограничения браузерных автотестов. Результаты Claude/Codex и гигиены репозитория сохранены отдельно в [отчёте внешнего ревью и живого пилота](verification-review.md).

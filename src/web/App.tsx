@@ -30,6 +30,7 @@ import {
 import type { DevContourState, Task, Config, AuditEvent, Board, Role } from '../core/model.ts';
 import { levels } from '../core/graph.ts';
 import type { taskProgress } from '../application/context.ts';
+import { ProductPanel } from './ProductPanel.tsx';
 type UITask = Task & {
   specDigest: string;
   blockers: string[];
@@ -244,7 +245,8 @@ export function App() {
   const revision =
     board?.revisions.find((r) => r.number === revisionNumber) ?? board?.revisions.at(-1);
   const current = revision?.number === board?.revisions.at(-1)?.number;
-  const editable = revision?.status === 'active' && current && tab !== 'workspace';
+  const editable =
+    revision?.status === 'active' && current && tab !== 'workspace' && tab !== 'product';
   const tasks = useMemo(
     () => data?.tasks.filter((t) => revision?.taskIds.includes(t.id)) ?? [],
     [data, revision],
@@ -446,7 +448,8 @@ export function App() {
       <main className="workspace">
         <div className="topbar">
           <span>
-            Проект <ChevronRight /> {board?.title ?? 'Новая доска'}
+            Проект <ChevronRight />{' '}
+            {tab === 'product' ? 'Продукт' : (board?.title ?? 'Новая доска')}
           </span>
           <span className="mode-label">
             {data.config.mode === 'demo'
@@ -458,13 +461,19 @@ export function App() {
           <header className="page-header">
             <div>
               <div className="title-row">
-                <h1>{board?.title ?? 'Создайте первую доску'}</h1>
-                {revision && <span className="revision-label">r{revision.number}</span>}
+                <h1>{tab === 'product' ? 'Продукт' : (board?.title ?? 'Создайте первую доску')}</h1>
+                {revision && tab !== 'product' && (
+                  <span className="revision-label">r{revision.number}</span>
+                )}
               </div>
-              <p>{board?.description ?? 'Опишите цель, добавьте задачи и их зависимости.'}</p>
+              <p>
+                {tab === 'product'
+                  ? 'Пользовательские возможности, приложения и проверенный результат.'
+                  : (board?.description ?? 'Опишите цель, добавьте задачи и их зависимости.')}
+              </p>
             </div>
             <div className="header-actions">
-              {board && current && revision?.status === 'accepted' && (
+              {tab !== 'product' && board && current && revision?.status === 'accepted' && (
                 <button
                   className="primary"
                   onClick={() => {
@@ -544,7 +553,7 @@ export function App() {
               </button>
             </div>
           )}
-          {revision?.status === 'accepted' && (
+          {tab !== 'product' && revision?.status === 'accepted' && (
             <div className="accepted-banner">
               <CircleCheck />
               <div>
@@ -556,47 +565,50 @@ export function App() {
               <code>{revision.snapshot?.sha.slice(0, 8)}</code>
             </div>
           )}
-          <section className="summary-bar" aria-label="Прогресс доски">
-            <div>
-              <CircleCheck />
-              <strong>
-                {done}
-                <span> / {tasks.length}</span>
-              </strong>
-              <span>результатов принято</span>
-            </div>
-            <div>
-              <Play />
-              <strong>{ready}</strong>
-              <span>готово к запуску</span>
-            </div>
-            <div>
-              <Clock />
-              <strong>{blocked}</strong>
-              <span>ждут зависимостей</span>
-            </div>
-            <div className="queue-control">
-              <button
-                className={data.paused ? 'primary' : ''}
-                disabled={busy || (data.paused && !data.ready.length)}
-                onClick={() =>
-                  void act(
-                    () => api('scheduler', { start: data.paused }),
-                    data.paused
-                      ? 'Очередь всех досок запущена'
-                      : 'Новые задачи приостановлены; текущие продолжаются',
-                    false,
-                  )
-                }
-              >
-                {data.paused ? <Play /> : <Pause />}
-                {data.paused ? 'Запустить очередь' : 'Пауза очереди'}
-              </button>
-            </div>
-          </section>
+          {tab !== 'product' && (
+            <section className="summary-bar" aria-label="Прогресс доски">
+              <div>
+                <CircleCheck />
+                <strong>
+                  {done}
+                  <span> / {tasks.length}</span>
+                </strong>
+                <span>результатов принято</span>
+              </div>
+              <div>
+                <Play />
+                <strong>{ready}</strong>
+                <span>готово к запуску</span>
+              </div>
+              <div>
+                <Clock />
+                <strong>{blocked}</strong>
+                <span>ждут зависимостей</span>
+              </div>
+              <div className="queue-control">
+                <button
+                  className={data.paused ? 'primary' : ''}
+                  disabled={busy || (data.paused && !data.ready.length)}
+                  onClick={() =>
+                    void act(
+                      () => api('scheduler', { start: data.paused }),
+                      data.paused
+                        ? 'Очередь всех досок запущена'
+                        : 'Новые задачи приостановлены; текущие продолжаются',
+                      false,
+                    )
+                  }
+                >
+                  {data.paused ? <Play /> : <Pause />}
+                  {data.paused ? 'Запустить очередь' : 'Пауза очереди'}
+                </button>
+              </div>
+            </section>
+          )}
           <div className="workspace-toolbar">
             <div className="tabs" role="tablist" aria-label="Представление доски">
               {[
+                { key: 'product', label: 'Продукт', icon: <LayoutGrid /> },
                 { key: 'graph', label: 'Граф', icon: <GitBranch /> },
                 { key: 'workspace', label: 'Общий граф', icon: <Workflow /> },
                 { key: 'changesets', label: 'Изменения', icon: <FileCheck /> },
@@ -615,32 +627,46 @@ export function App() {
                 </button>
               ))}
             </div>
-            <label className="repository-filter">
-              <span className="sr-only">Репозиторий</span>
-              <select
-                aria-label="Репозиторий"
-                value={repositoryFilter}
-                onChange={(e) => setRepositoryFilter(e.target.value)}
-              >
-                <option value="">Все репозитории</option>
-                {data.config.repositories.map((r) => (
-                  <option key={r.id} value={r.id}>
-                    {r.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="search">
-              <span className="sr-only">Поиск задач</span>
-              <input
-                placeholder="Найти задачу…"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-              />
-            </label>
+            {tab !== 'product' && (
+              <>
+                <label className="repository-filter">
+                  <span className="sr-only">Репозиторий</span>
+                  <select
+                    aria-label="Репозиторий"
+                    value={repositoryFilter}
+                    onChange={(e) => setRepositoryFilter(e.target.value)}
+                  >
+                    <option value="">Все репозитории</option>
+                    {data.config.repositories.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="search">
+                  <span className="sr-only">Поиск задач</span>
+                  <input
+                    placeholder="Найти задачу…"
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                  />
+                </label>
+              </>
+            )}
           </div>
-          <div className={`work-area ${tab === 'changesets' ? 'changeset-area' : ''}`}>
+          <div
+            className={`work-area ${tab === 'changesets' || tab === 'product' ? 'changeset-area' : ''}`}
+          >
             <section className="board-surface" aria-label="Рабочая область">
+              {tab === 'product' && (
+                <ProductPanel
+                  onRepository={(id) => {
+                    setRepositoryFilter(id);
+                    setTab('workspace');
+                  }}
+                />
+              )}
               {(tab === 'graph' || tab === 'workspace') &&
                 (filtered.length ? (
                   <>
@@ -768,6 +794,11 @@ export function App() {
                           </Badge>
                         </div>
                         <p>{c.description}</p>
+                        {c.releaseId && (
+                          <p>
+                            Продуктовый релиз: <strong>{c.releaseId}</strong>
+                          </p>
+                        )}
                         <p>
                           Доски:{' '}
                           {c.boardIds
@@ -1011,7 +1042,7 @@ export function App() {
                 </div>
               )}
             </section>
-            {tab !== 'changesets' && (
+            {tab !== 'changesets' && tab !== 'product' && (
               <aside className="inspector" aria-label="Детали задачи">
                 {task ? (
                   <>
@@ -1282,6 +1313,7 @@ export function App() {
                     description: f.get('description'),
                     boardIds: f.getAll('boardIds'),
                     supersedes: f.get('supersedes') || undefined,
+                    releaseId: f.get('releaseId') || undefined,
                   }),
                 'ChangeSet создан',
               );
@@ -1309,6 +1341,10 @@ export function App() {
                 </label>
               ))}
             </fieldset>
+            <label>
+              ID продуктового релиза (если принимаем релиз INTENT)
+              <input name="releaseId" pattern="[A-Za-z0-9_-]{1,50}" placeholder="Например, mvp" />
+            </label>
             <label>
               Продолжает принятый ChangeSet
               <select name="supersedes">
