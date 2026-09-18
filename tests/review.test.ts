@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { inspectReview } from '../src/runner/review.ts';
+import { inspectReview, observedCommand } from '../src/runner/review.ts';
 import { validateExecution } from '../src/core/review.ts';
 
 test('Review commands are observed from CLI events, never inferred from model claims', () => {
@@ -26,6 +26,30 @@ test('Review commands are observed from CLI events, never inferred from model cl
   assert.equal(result.mode, 'commands');
   assert.equal(result.commands[0].output, 'tests 2 pass 2');
   assert.equal(inspectReview('claude', event(0)).mode, 'diff-only');
+  const inspection = {
+    ...result,
+    commands: [
+      {
+        command: "echo 'node verify.mjs --read-only REVIEW_TEST_PASS'",
+        exitCode: 0,
+        output: 'REVIEW_TEST_PASS',
+      },
+    ],
+  };
+  assert.equal(
+    observedCommand(inspection, 'node verify.mjs --read-only', 'REVIEW_TEST_PASS'),
+    false,
+  );
+  inspection.commands[0].command = '/bin/zsh -lc "node verify.mjs --read-only"';
+  assert.equal(
+    observedCommand(inspection, 'node verify.mjs --read-only', 'REVIEW_TEST_PASS'),
+    true,
+  );
+  inspection.commands[0].command += '; echo done';
+  assert.equal(
+    observedCommand(inspection, 'node verify.mjs --read-only', 'REVIEW_TEST_PASS'),
+    false,
+  );
   assert.throws(() => validateExecution(undefined));
   assert.throws(() => validateExecution({ commands: [], noCommandsReason: null }));
   assert.deepEqual(
