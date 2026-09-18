@@ -268,6 +268,7 @@ test('CLI adapters use structured outputs, stdin prompts and restricted review p
   const claude = cliArguments('claude', r, 'schema.json', 'result.json');
   assert.ok(claude.includes('dontAsk'));
   assert.ok(claude.includes('Read,Glob,Grep'));
+  assert.ok(claude.includes('Bash,Edit,Write,NotebookEdit'));
   assert.ok(!claude.includes('--dangerously-skip-permissions'));
 });
 test('Process timeout interrupts actual child processes', async () => {
