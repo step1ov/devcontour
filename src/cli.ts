@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { IntentService } from './runner/intent.ts';
 import { engineeringEvals } from './runner/engineering-evals.ts';
 import { compareEvaluations } from './application/eval-comparison.ts';
 import { workflowMetrics } from './application/metrics.ts';
@@ -124,6 +125,9 @@ async function main() {
     return;
   }
   if (operation === 'help' || args.includes('--help')) {
+    console.log(
+      'devcontour intent-render --file definition.json [--repository-id ID] --workspace ...\ndevcontour intent-snapshot [--repository-id ID] [--story ID] --workspace ...\ndevcontour intent-report --release ID [--repository-id ID] [--require-complete] --workspace ...',
+    );
     console.log(
       'devcontour engineering-evals [--live --runtime codex|claude --model ID --reviewer-model ID]\ndevcontour eval-compare --baseline report.json --candidate report.json',
     );
@@ -285,6 +289,37 @@ async function main() {
     config.storage === 'component' ? repositories(config) : undefined,
   );
   const h = new Harness(store, config);
+  if (['intent-render', 'intent-snapshot', 'intent-report'].includes(operation)) {
+    try {
+      const service = new IntentService(h);
+      const repositoryId = args.includes('--repository-id')
+        ? option('--repository-id', '')
+        : undefined;
+      if (operation === 'intent-render') {
+        if (!args.includes('--file')) throw new Error('Укажите --file definition.json');
+        const definition = JSON.parse(await readFile(resolve(option('--file', '')), 'utf8'));
+        process.stdout.write(service.render({ repositoryId, definition }).markdown);
+      } else {
+        const result =
+          operation === 'intent-snapshot'
+            ? service.snapshot({
+                repositoryId,
+                storyId: args.includes('--story') ? option('--story', '') : undefined,
+              })
+            : service.report({ repositoryId, releaseId: option('--release', '') });
+        console.log(JSON.stringify(result, null, 2));
+        if (
+          operation === 'intent-report' &&
+          args.includes('--require-complete') &&
+          !('coverageComplete' in result && result.coverageComplete)
+        )
+          process.exitCode = 1;
+      }
+    } finally {
+      store.close();
+    }
+    return;
+  }
   if (operation === 'mcp') {
     const server = await serveMcp(new AgentService(h));
     let closed = false;

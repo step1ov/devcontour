@@ -1,0 +1,49 @@
+
+> devcontour@0.3.0 test:package
+> npm run build && node scripts/smoke-package.mjs
+
+
+> devcontour@0.3.0 build
+> npm run typecheck && tsc -p tsconfig.build.json && node scripts/build-skill.mjs && vite build
+
+
+> devcontour@0.3.0 typecheck
+> tsc --noEmit
+
+vite v8.3.0 building client environment for production...
+transforming...
+✓ 2123 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   0.46 kB │ gzip:   0.32 kB
+dist/assets/index-BI8T98BB.css   36.20 kB │ gzip:   6.55 kB
+dist/assets/index-B2XegF1v.js   540.22 kB │ gzip: 165.70 kB
+
+[plugin builtin:vite-reporter]
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rolldownOptions.output.codeSplitting to improve chunking: https://rolldown.rs/reference/OutputOptions.codeSplitting
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 246ms
+{
+  "package": "devcontour-0.3.0.tgz",
+  "size": 3077355,
+  "checks": [
+    "isolated production install",
+    "no source or tsx",
+    "explicit workspace",
+    "installed profiles and templates",
+    "CLI context",
+    "MCP negotiation and draft mutation",
+    "portable skill schema parity",
+    "packaged static assets",
+    "real Git fixture pipeline",
+    "HTTP agent API",
+    "durable workflow through real Git acceptance",
+    "workflow metrics and private lease tokens",
+    "deduplicated external signal stays draft",
+    "installed protocol evals",
+    "installed intent render, snapshot and missing-work report",
+    "CLI coverage gate rejects an undecomposed release"
+  ]
+}

@@ -6,6 +6,363 @@
   "maxResultBytes": 65536,
   "tools": [
     {
+      "name": "intent_render",
+      "description": "Render a component intent map from committed local REQ sources, or workspace release references. Returns Markdown only; does not write, approve or commit it.",
+      "readOnly": true,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "repositoryId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "definition": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "component"
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 180,
+                    "pattern": "^[^\\r\\n]+$"
+                  },
+                  "purpose": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 2000
+                  },
+                  "audience": {
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 3,
+                      "maxLength": 2000
+                    }
+                  },
+                  "constraints": {
+                    "default": [],
+                    "maxItems": 20,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 3,
+                      "maxLength": 2000
+                    }
+                  },
+                  "nonGoals": {
+                    "default": [],
+                    "maxItems": 20,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 3,
+                      "maxLength": 2000
+                    }
+                  },
+                  "assumptions": {
+                    "default": [],
+                    "maxItems": 20,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 3,
+                      "maxLength": 2000
+                    }
+                  },
+                  "sources": {
+                    "minItems": 1,
+                    "maxItems": 30,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 500
+                    }
+                  },
+                  "releases": {
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9_-]{1,50}$"
+                        },
+                        "title": {
+                          "type": "string",
+                          "minLength": 3,
+                          "maxLength": 180,
+                          "pattern": "^[^\\r\\n]+$"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "title"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "stories": {
+                    "minItems": 1,
+                    "maxItems": 100,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9_-]{1,50}$"
+                        },
+                        "title": {
+                          "type": "string",
+                          "minLength": 3,
+                          "maxLength": 180,
+                          "pattern": "^[^\\r\\n]+$"
+                        },
+                        "releaseId": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9_-]{1,50}$"
+                        },
+                        "criteria": {
+                          "minItems": 1,
+                          "maxItems": 20,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "id": {
+                                "type": "string",
+                                "pattern": "^[A-Za-z0-9_-]{1,50}$"
+                              },
+                              "text": {
+                                "type": "string",
+                                "minLength": 3,
+                                "maxLength": 2000
+                              },
+                              "requirements": {
+                                "minItems": 1,
+                                "maxItems": 20,
+                                "type": "array",
+                                "items": {
+                                  "type": "object",
+                                  "properties": {
+                                    "source": {
+                                      "type": "string",
+                                      "minLength": 1,
+                                      "maxLength": 500
+                                    },
+                                    "id": {
+                                      "type": "string",
+                                      "pattern": "^REQ-[A-Za-z0-9_-]{1,64}$"
+                                    }
+                                  },
+                                  "required": [
+                                    "source",
+                                    "id"
+                                  ],
+                                  "additionalProperties": false
+                                }
+                              }
+                            },
+                            "required": [
+                              "id",
+                              "text",
+                              "requirements"
+                            ],
+                            "additionalProperties": false
+                          }
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "title",
+                        "releaseId",
+                        "criteria"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "exclusions": {
+                    "default": [],
+                    "maxItems": 200,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "source": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 500
+                        },
+                        "id": {
+                          "type": "string",
+                          "pattern": "^REQ-[A-Za-z0-9_-]{1,64}$"
+                        },
+                        "reason": {
+                          "type": "string",
+                          "minLength": 3,
+                          "maxLength": 2000
+                        }
+                      },
+                      "required": [
+                        "source",
+                        "id",
+                        "reason"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "title",
+                  "purpose",
+                  "audience",
+                  "sources",
+                  "releases",
+                  "stories"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "workspace"
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 180,
+                    "pattern": "^[^\\r\\n]+$"
+                  },
+                  "purpose": {
+                    "type": "string",
+                    "minLength": 3,
+                    "maxLength": 2000
+                  },
+                  "releases": {
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9_-]{1,50}$"
+                        },
+                        "title": {
+                          "type": "string",
+                          "minLength": 3,
+                          "maxLength": 180,
+                          "pattern": "^[^\\r\\n]+$"
+                        },
+                        "components": {
+                          "minItems": 1,
+                          "maxItems": 10,
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "repositoryId": {
+                                "type": "string",
+                                "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                              },
+                              "releaseId": {
+                                "type": "string",
+                                "pattern": "^[A-Za-z0-9_-]{1,50}$"
+                              }
+                            },
+                            "required": [
+                              "repositoryId",
+                              "releaseId"
+                            ],
+                            "additionalProperties": false
+                          }
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "title",
+                        "components"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "title",
+                  "purpose",
+                  "releases"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "required": [
+          "definition"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "intent_snapshot",
+      "description": "Read committed INTENT.md and exact story REQ bindings. Add a configured test gate/scenario, and bind the detailed requirements too.",
+      "readOnly": true,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "repositoryId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "storyId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,50}$"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "intent_report",
+      "description": "Audit every story of a declared release and all declared REQ sources for missing or stale coverage. Workspace reports contain component references and counts only. This never accepts a release.",
+      "readOnly": true,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "repositoryId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "releaseId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,50}$"
+          }
+        },
+        "required": [
+          "releaseId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "memory_retain",
       "description": "Save an immutable, source-pinned statement in its Git owner. References are local. This is context, never approval or evidence.",
       "readOnly": false,

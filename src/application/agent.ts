@@ -1,3 +1,4 @@
+import { IntentService, intentInputs } from '../runner/intent.ts';
 import { Observability, observabilityInputs } from './observability.ts';
 import { ProjectMemory, memoryInputs } from './memory.ts';
 import { SignalInbox, signalInput } from '../core/signals.ts';
@@ -20,6 +21,7 @@ import { attachJournal } from '../runner/journal.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 export const agentInputs = {
+  ...intentInputs,
   ...memoryInputs,
   ...observabilityInputs,
   signal_ingest: signalInput,
@@ -67,6 +69,12 @@ export const agentRequest = z
   .object({ operation: z.enum(agentOperations), input: z.unknown().optional() })
   .strict();
 export const descriptions: Record<AgentOperation, string> = {
+  intent_render:
+    'Render a component intent map from committed local REQ sources, or workspace release references. Returns Markdown only; does not write, approve or commit it.',
+  intent_snapshot:
+    'Read committed INTENT.md and exact story REQ bindings. Add a configured test gate/scenario, and bind the detailed requirements too.',
+  intent_report:
+    'Audit every story of a declared release and all declared REQ sources for missing or stale coverage. Workspace reports contain component references and counts only. This never accepts a release.',
   usage_report:
     'Read paginated owner-local invocation costs, versions and telemetry coverage; never evidence.',
   decision_report:
@@ -123,6 +131,9 @@ export const descriptions: Record<AgentOperation, string> = {
 };
 export const readOnly = (name: AgentOperation) =>
   [
+    'intent_render',
+    'intent_snapshot',
+    'intent_report',
     'usage_report',
     'decision_report',
     'strategy_replay',
@@ -183,6 +194,12 @@ export class AgentService {
     const h = this.h;
     if (!readOnly(operation) && !h.store.onCommit) attachJournal(h);
     switch (operation) {
+      case 'intent_render':
+        return new IntentService(h).render(input);
+      case 'intent_snapshot':
+        return new IntentService(h).snapshot(input);
+      case 'intent_report':
+        return new IntentService(h).report(input);
       case 'usage_report':
         return new Observability(h).usage(input);
       case 'decision_report':

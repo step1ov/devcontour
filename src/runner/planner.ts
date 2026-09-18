@@ -40,6 +40,7 @@ export async function plan(
         '. Every task must set repositoryId to a registered ID. Dependencies may cross repositories. Inspect the required repositories read-only.',
       'Assign narrow writePaths from actual repository structure. Use contextPacks IDs for relevant custom libraries and mobile testing; never invent IDs. Declare resources needed by task-level MCP work. Other-layer changes become dependent tasks, not scope expansion.',
       'When the specification has REQ-* sections, use requirements_snapshot through the lead agent and preserve exact id/source/text/digest bindings. Link each requirement to a configured test gate and an observable scenario; never invent a digest.',
+      'Read the component INTENT.md when present. The lead prepares it from the specification, then uses intent_snapshot for exact story REQ bindings. Bind both the selected story and its detailed REQ sections to tasks. Cover only the requested release; preserve IDs, product purpose, constraints and non-goals. The release inventory must account for every declared source requirement, including work not yet decomposed. Do not weaken intent to fit implementation or mark a release complete from task counts.',
       'Available context packs: ' + JSON.stringify(h.config.contextPacks),
       'Available resource IDs: ' +
         JSON.stringify(h.config.resources.map(({ id, kind }) => ({ id, kind }))),
