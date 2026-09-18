@@ -180,40 +180,41 @@ export async function setupProject(options: {
   );
   if (workspaceRoot)
     files.set(join(workspaceRoot, '.gitignore'), '.harness/\n.env*\n!.env.example\n');
-  files.set(
-    join(repository, 'docs', 'harness-start.md'),
-    (await readFile(join(harnessRoot, 'START.md'), 'utf8'))
-      .replaceAll('(docs/workspaces.md)', '(harness-workspaces.md)')
-      .replaceAll('(docs/engineering-context.md)', '(harness-engineering.md)')
-      .replaceAll('(docs/project-integration.md)', '(harness-integration.md)')
-      .replaceAll('(docs/team-sync.md)', '(harness-team-sync.md)')
-      .replaceAll('(docs/requirements.md)', '(harness-requirements.md)')
-      .replaceAll('(docs/lead-workflow.md)', '(harness-lead-workflow.md)'),
-  );
-  files.set(
-    join(repository, 'docs', 'harness-workspaces.md'),
-    (await readFile(join(harnessRoot, 'docs', 'workspaces.md'), 'utf8'))
-      .replaceAll('(../START.md)', '(harness-start.md)')
-      .replaceAll('(engineering-context.md)', '(harness-engineering.md)')
-      .replaceAll('(project-integration.md)', '(harness-integration.md)'),
-  );
-  files.set(
-    join(repository, 'docs', 'harness-engineering.md'),
-    await readFile(join(harnessRoot, 'docs', 'engineering-context.md'), 'utf8'),
-  );
-  files.set(
-    join(repository, 'docs', 'harness-integration.md'),
-    await readFile(join(harnessRoot, 'docs', 'project-integration.md'), 'utf8'),
-  );
-  files.set(
-    join(repository, 'docs', 'harness-team-sync.md'),
-    await readFile(join(harnessRoot, 'docs', 'team-sync.md'), 'utf8'),
-  );
-  for (const name of ['requirements', 'lead-workflow'])
-    files.set(
-      join(repository, 'docs', `harness-${name}.md`),
-      await readFile(join(harnessRoot, 'docs', `${name}.md`), 'utf8'),
+  const guides = new Map([
+    ['START.md', 'harness-start.md'],
+    ['docs/workspaces.md', 'harness-workspaces.md'],
+    ['docs/engineering-context.md', 'harness-engineering.md'],
+    ['docs/project-integration.md', 'harness-integration.md'],
+    ...[
+      'team-sync',
+      'requirements',
+      'lead-workflow',
+      'project-memory',
+      'metrics',
+      'experiments',
+      'agent-evals',
+    ].map((name) => ['docs/' + name + '.md', 'harness-' + name + '.md'] as [string, string]),
+  ]);
+  for (const [source, destination] of guides) {
+    const text = await readFile(join(harnessRoot, source), 'utf8');
+    const rewritten = text.replace(
+      /\[([^\]]+)\]\(([^)]+\.md(?:#[^)]*)?)\)/g,
+      (match, label, target: string) => {
+        if (/^(https?:|#)/.test(target)) return match;
+        const [file, anchor] = target.split('#');
+        const sourceRelative = relative(harnessRoot, resolve(harnessRoot, dirname(source), file));
+        const installed = guides.get(sourceRelative);
+        return installed
+          ? '[' + label + '](' + installed + (anchor ? '#' + anchor : '') + ')'
+          : label +
+              ' (справочник DevContour: ' +
+              sourceRelative +
+              (anchor ? '#' + anchor : '') +
+              ')';
+      },
     );
+    files.set(join(repository, 'docs', destination), rewritten);
+  }
   files.set(join(data, 'packs.lock.json'), JSON.stringify(profileLock(selected), null, 2) + '\n');
   const profilePath = join(data, 'profiles', selected.id + '.json');
   const profileContent = await readFile(

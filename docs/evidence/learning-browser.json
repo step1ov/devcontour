@@ -1,0 +1,56 @@
+{
+  "date": "2026-09-18",
+  "method": "Chrome DevTools MCP against isolated demo; no models",
+  "board": {
+    "title": "Каталог продуктов",
+    "revisions": [
+      {
+        "number": 1,
+        "status": "accepted",
+        "digest": "a9c38b099ff932346afbb6e22b00d2d82be02bff7a9be9dd88610aa2db0ea417"
+      },
+      {
+        "number": 2,
+        "status": "accepted",
+        "digest": "4a87711663633eaa84b55d197657594bdcf1b66d5e8d483e77a218d786896796"
+      }
+    ],
+    "revision1Unchanged": true
+  },
+  "mobile": {
+    "width": 390,
+    "height": 844,
+    "scrollWidth": 390,
+    "selectedTab": "Список"
+  },
+  "desktop": {
+    "width": 1440,
+    "height": 1000,
+    "scrollWidth": 1440,
+    "overflow": false
+  },
+  "reports": {
+    "usage_report": {
+      "status": 200,
+      "records": 36
+    },
+    "decision_report": {
+      "status": 200,
+      "records": 12
+    },
+    "strategy_replay": {
+      "status": 200,
+      "matched": 12,
+      "unsupported": 0,
+      "promotable": false
+    }
+  },
+  "console": {
+    "errors": 0,
+    "warnings": 0
+  },
+  "limitations": [
+    "Supplemental smoke, not the complete Playwright suite or an axe audit.",
+    "Playwright Chromium launch failed with MachPortRendezvousServer Permission denied (1100)."
+  ]
+}

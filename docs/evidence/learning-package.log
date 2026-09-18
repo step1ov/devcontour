@@ -1,0 +1,20 @@
+{
+  "package": "devcontour-0.3.0.tgz",
+  "size": 3050026,
+  "checks": [
+    "isolated production install",
+    "no source or tsx",
+    "explicit workspace",
+    "installed profiles and templates",
+    "CLI context",
+    "MCP negotiation and draft mutation",
+    "portable skill schema parity",
+    "packaged static assets",
+    "real Git fixture pipeline",
+    "HTTP agent API",
+    "durable workflow through real Git acceptance",
+    "workflow metrics and private lease tokens",
+    "deduplicated external signal stays draft",
+    "installed protocol evals"
+  ]
+}

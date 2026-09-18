@@ -1,3 +1,5 @@
+import { Observability, observabilityInputs } from './observability.ts';
+import { ProjectMemory, memoryInputs } from './memory.ts';
 import { SignalInbox, signalInput } from '../core/signals.ts';
 import { LeadWorkflow, workflowInput } from '../core/lead-workflow.ts';
 import { workflowMetrics } from './metrics.ts';
@@ -18,6 +20,8 @@ import { attachJournal } from '../runner/journal.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 export const agentInputs = {
+  ...memoryInputs,
+  ...observabilityInputs,
   signal_ingest: signalInput,
   signal_status: z.strictObject({ repositoryId: id }),
   workflow_start: workflowInput,
@@ -63,6 +67,16 @@ export const agentRequest = z
   .object({ operation: z.enum(agentOperations), input: z.unknown().optional() })
   .strict();
 export const descriptions: Record<AgentOperation, string> = {
+  usage_report:
+    'Read paginated owner-local invocation costs, versions and telemetry coverage; never evidence.',
+  decision_report:
+    'Read recorded dispatch inputs and observed outcomes. Other component tasks appear only as dependency IDs.',
+  strategy_replay:
+    'Audit a fixed strategy against prefix-only dispatch inputs. Unobserved alternatives stay unsupported; no policy is installed.',
+  memory_retain:
+    'Save an immutable, source-pinned statement in its Git owner. References are local. This is context, never approval or evidence.',
+  memory_recall:
+    'Retrieve owner-local knowledge within a byte budget, excluding stale/conflicting statements and hypotheses by default. No model calls.',
   signal_ingest:
     'Record a normalized external observation in its component, deduplicate it and propose draft work or a correction. A resolved signal never supplies test evidence or accepts work.',
   signal_status:
@@ -109,6 +123,10 @@ export const descriptions: Record<AgentOperation, string> = {
 };
 export const readOnly = (name: AgentOperation) =>
   [
+    'usage_report',
+    'decision_report',
+    'strategy_replay',
+    'memory_recall',
     'project_context',
     'project_overview',
     'task_briefing',
@@ -165,6 +183,16 @@ export class AgentService {
     const h = this.h;
     if (!readOnly(operation) && !h.store.onCommit) attachJournal(h);
     switch (operation) {
+      case 'usage_report':
+        return new Observability(h).usage(input);
+      case 'decision_report':
+        return new Observability(h).decisions(input);
+      case 'strategy_replay':
+        return new Observability(h).replay(input);
+      case 'memory_retain':
+        return new ProjectMemory(h).retain(input);
+      case 'memory_recall':
+        return new ProjectMemory(h).recall(input);
       case 'signal_ingest':
         return new SignalInbox(h).ingest(input);
       case 'signal_status':

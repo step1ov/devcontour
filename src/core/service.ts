@@ -97,6 +97,7 @@ export class Harness {
           environment,
         }),
       ),
+      memoryPolicy: this.config.memoryPolicy,
       protectedPaths: repo.protectedPaths,
       roles: { ...this.config.roles, ...repo.roles },
       repositoryReviewer: repo.reviewer,
@@ -447,9 +448,10 @@ export class Harness {
       )
         return;
       if (s.runs.filter((r) => r.status === 'active').length >= this.config.concurrency) return;
-      const t = readyTasks(s).find(
+      const eligible = readyTasks(s).filter(
         (t) => t.attempt < this.config.maxAttempts && (!s.team || t.assignee === s.team.member),
       );
+      const t = eligible[0];
       if (!t) return;
       validateTaskContext(this.config, t);
       if (t.approvedDigest !== specDigest(t))
@@ -465,7 +467,20 @@ export class Harness {
         t.approvedAt && dependencyDates.every(Boolean)
           ? [t.approvedAt, ...(dependencyDates as string[])].sort().at(-1)
           : undefined;
+      const candidates = eligible.map((t) => ({
+        taskId: t.id,
+        repositoryId: t.repositoryId,
+        attempt: t.attempt,
+      }));
       const run: Run = {
+        dispatch: {
+          policy: 'fifo-ready-v1',
+          at: now(),
+          eligible: candidates,
+          activeCount: s.runs.filter((r) => r.status === 'active').length,
+          concurrency: this.config.concurrency,
+          inputDigest: digest(candidates),
+        },
         wait: { approvedAt: t.approvedAt, readyAt },
         requiredGates: [
           ...repository(this.config, t.repositoryId).gates.map((g) => g.id),

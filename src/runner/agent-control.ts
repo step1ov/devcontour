@@ -1,3 +1,5 @@
+import { measuredExecute } from './usage.ts';
+import { boardOwner } from '../core/sync-state.ts';
 import { toolProfileFor, agentEnvironment } from './tools.ts';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -24,6 +26,8 @@ async function review(
   subject: string,
   proposal: unknown,
   runtimes: Runtimes,
+  repositoryId?: string,
+  subjectId?: string,
 ): Promise<Approval> {
   if (h.config.mode !== 'local')
     throw new DomainError('AI-согласование доступно только для local mode');
@@ -49,18 +53,23 @@ async function review(
   await writeFile(join(artifact, 'proposal.json'), JSON.stringify(proposal, null, 2) + '\n');
   await writeFile(join(artifact, 'prompt.txt'), prompt);
   const toolProfile = toolProfileFor(h.config, reviewer, 'architect', true);
-  const result = await runtimes[reviewer].execute({
-    toolProfile,
-    execution: agentEnvironment(h.config, toolProfile),
-    cwd: h.config.repository,
-    artifactDir: artifact,
-    prompt,
-    review: true,
-    task: {} as Task,
-    model: h.config.reviewer.runtime === reviewer ? h.config.reviewer.model : undefined,
-    signal: AbortSignal.timeout(h.config.runTimeoutMs),
-    timeoutMs: h.config.runTimeoutMs,
-  });
+  const result = await measuredExecute(
+    h,
+    runtimes[reviewer],
+    {
+      toolProfile,
+      execution: agentEnvironment(h.config, toolProfile),
+      cwd: h.config.repository,
+      artifactDir: artifact,
+      prompt,
+      review: true,
+      task: {} as Task,
+      model: h.config.reviewer.runtime === reviewer ? h.config.reviewer.model : undefined,
+      signal: AbortSignal.timeout(h.config.runTimeoutMs),
+      timeoutMs: h.config.runTimeoutMs,
+    },
+    { repositoryId, subjectId, stage: subject === 'task plan' ? 'plan-review' : 'contract-review' },
+  );
   const parsed = reviewResult.parse(result.data);
   await writeFile(join(artifact, 'review.json'), JSON.stringify(parsed, null, 2) + '\n');
   await writeFile(join(artifact, 'runtime.log'), result.log);
@@ -99,6 +108,7 @@ export async function reviewContract(
     'contract / architecture decision',
     proposal,
     runtimes,
+    proposal.repositoryId,
   );
   if (h.config.approvalMode === 'operator')
     return { status: 'awaiting-operator', proposal, approval };
@@ -138,7 +148,16 @@ export async function reviewPlan(
     taskIds: revision.taskIds,
     tasks: Object.fromEntries(drafts.map((t) => [t.id, specDigest(t)])),
   };
-  const approval = await review(h, root, author, 'task plan', proposal, runtimes);
+  const approval = await review(
+    h,
+    root,
+    author,
+    'task plan',
+    proposal,
+    runtimes,
+    boardOwner(board, state),
+    boardId,
+  );
   beforeCommit();
   if (h.config.approvalMode === 'operator')
     return { status: 'awaiting-operator', boardId, approval };

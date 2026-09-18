@@ -1,0 +1,27 @@
+(node:90721) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Engineering corpus exercises real candidate/integration gates and detects a no-op writer (11330.234ms)
+✔ Engineering limits and live opt-in remain explicit (5.605791ms)
+(node:90722) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Typed memory pins sources, rejects cross-owner links and excludes stale/conflicting derived summaries (4024.620542ms)
+✔ Memory survives independent Git clones and merges; source edits and owner changes stay visible (2560.517458ms)
+✔ Setup starts from only a Markdown spec, copies hidden roles and pins an agent-mode config (132.455ms)
+✔ Setup preserves existing files and explicit operator mode across repeated preparation (320.726334ms)
+✔ Setup rejects escaping symlinks and invalid specs before copying any rules (112.315541ms)
+✔ Setup refuses an accidental child of another real Git repository (161.700542ms)
+✔ CLI setup supports explicit legacy data without bootstrapping a demo (550.288042ms)
+(node:90724) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+✔ Runtime telemetry normalizes cache tokens; malformed/missing/partial data is never zero (2.05675ms)
+✔ Costs retain failed calls, count retry overhead, preserve unknown totals and page diagnostics (26.804083ms)
+✔ CLI telemetry is captured on actual process failure and uses the invoked binary version (3129.586166ms)
+✔ Effective tariffs are snapshotted and cannot retroactively change call estimates (5.897417ms)
+ℹ tests 13
+ℹ suites 0
+ℹ pass 13
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 11647.922667
