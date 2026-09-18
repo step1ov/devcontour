@@ -152,9 +152,10 @@ function Modal({
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     const prior = document.activeElement as HTMLElement;
-    ref.current?.showModal();
+    const dialog = ref.current;
+    dialog?.showModal();
     return () => {
-      ref.current?.close();
+      dialog?.close();
       prior?.focus();
     };
   }, []);
@@ -222,7 +223,9 @@ export function App() {
         if (alive) setError(String(e.message));
       });
     void load();
-    const id = setInterval(load, 1800);
+    const id = setInterval(() => {
+      void load();
+    }, 1800);
     return () => {
       alive = false;
       clearInterval(id);
@@ -242,13 +245,19 @@ export function App() {
     board?.revisions.find((r) => r.number === revisionNumber) ?? board?.revisions.at(-1);
   const current = revision?.number === board?.revisions.at(-1)?.number;
   const editable = revision?.status === 'active' && current && tab !== 'workspace';
-  const tasks = data?.tasks.filter((t) => revision?.taskIds.includes(t.id)) ?? [];
-  const graphTasks =
-    tab === 'workspace'
-      ? (data?.tasks.filter((t) =>
-          data.boards.some((b) => b.revisions.at(-1)?.taskIds.includes(t.id)),
-        ) ?? [])
-      : tasks;
+  const tasks = useMemo(
+    () => data?.tasks.filter((t) => revision?.taskIds.includes(t.id)) ?? [],
+    [data, revision],
+  );
+  const graphTasks = useMemo(
+    () =>
+      tab === 'workspace'
+        ? (data?.tasks.filter((t) =>
+            data.boards.some((b) => b.revisions.at(-1)?.taskIds.includes(t.id)),
+          ) ?? [])
+        : tasks,
+    [tab, data, tasks],
+  );
   const filtered = graphTasks.filter(
     (t) =>
       (!repositoryFilter || t.repositoryId === repositoryFilter) &&
@@ -278,6 +287,7 @@ export function App() {
       valid = false;
     };
   }, [modal, boardId, roots]);
+  const hasData = !!data;
   useEffect(() => {
     if (!canvasRef.current) return;
     const observer = new ResizeObserver(() => {
@@ -285,7 +295,7 @@ export function App() {
     });
     observer.observe(canvasRef.current);
     return () => observer.disconnect();
-  }, [tab, boardId, !!data]);
+  }, [tab, boardId, hasData]);
   async function act(fn: () => Promise<unknown>, message: string, close = true) {
     setBusy(true);
     setError('');

@@ -219,6 +219,27 @@ test('Environment cleanup runs after setup failure and cancellation; cleanup fai
     await assert.rejects(readFile(marker));
     const abort = new AbortController();
     l.setup = [];
+    // JavaScript permits throwing falsy values. Cleanup must not turn that into success.
+    for (const thrown of [undefined, false, 0, '']) {
+      await writeFile(marker, 'running');
+      await assert.rejects(
+        withEnvironment(
+          l,
+          root,
+          join(root, 'falsy-error'),
+          executionEnvironment([]),
+          new AbortController().signal,
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- deliberately exercise invalid third-party failures
+          () => Promise.reject(thrown),
+        ),
+        (error: unknown) => error instanceof Error && Object.is(error.cause, thrown),
+      );
+      await assert.rejects(readFile(marker));
+      assert.equal(
+        JSON.parse(await readFile(join(root, 'falsy-error/environment.json'), 'utf8')).status,
+        'cleaned',
+      );
+    }
     await assert.rejects(
       withEnvironment(
         l,
@@ -368,7 +389,9 @@ test('A failure in one attached database rolls back updates across coordinator a
   try {
     const b = f.h.createBoard('Tasks');
     const t = f.h.addTask(b.id, { ...input(), repositoryId: 'library' });
-    const product = new DatabaseSync(join(f.c.repositories[1].path, '.devcontour-local/state.sqlite'));
+    const product = new DatabaseSync(
+      join(f.c.repositories[1].path, '.devcontour-local/state.sqlite'),
+    );
     product.exec(
       "CREATE TRIGGER reject_update BEFORE UPDATE ON state BEGIN SELECT RAISE(ABORT,'fixture failure'); END",
     );
@@ -435,7 +458,9 @@ test('Doctor detects absent prerequisites; donor import records source SHA and d
     const result = await doctor(f.c, f.data);
     assert.equal(result.ready, false);
     assert.ok(
-      result.checks.some((c) => c.status === 'blocked' && c.detail.includes('absent-devcontour-tool')),
+      result.checks.some(
+        (c) => c.status === 'blocked' && c.detail.includes('absent-devcontour-tool'),
+      ),
     );
     const imported = await importKnowledge(f.workspace, f.c.repositories[0].path, ['README.md']);
     assert.equal(imported.status, 'unreviewed');
