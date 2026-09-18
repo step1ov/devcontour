@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -7,7 +9,6 @@ import {
   type ReactNode,
   type FormEvent,
 } from 'react';
-import { ReactFlow, Background, Controls, Handle, Position, type NodeProps } from '@xyflow/react';
 import {
   GitBranch,
   Plus,
@@ -30,7 +31,10 @@ import {
 import type { DevContourState, Task, Config, AuditEvent, Board, Role } from '../core/model.ts';
 import { levels } from '../core/graph.ts';
 import type { taskProgress } from '../application/context.ts';
-import { ProductPanel } from './ProductPanel.tsx';
+const GraphPanel = lazy(() => import('./GraphPanel.tsx'));
+const ProductPanel = lazy(() =>
+  import('./ProductPanel.tsx').then((module) => ({ default: module.ProductPanel })),
+);
 type UITask = Task & {
   specDigest: string;
   blockers: string[];
@@ -106,24 +110,6 @@ const shortId = (id: string) =>
 function Badge({ value, children }: { value: string; children?: ReactNode }) {
   return <span className={`badge badge-${value}`}>{children ?? statusNames[value] ?? value}</span>;
 }
-function TaskNode({ data }: NodeProps) {
-  const t = data.task as UITask;
-  return (
-    <div className={`task-node node-${status(t)}`}>
-      <Handle type="target" position={Position.Left} />
-      <div className="node-meta">
-        <span title={t.id}>{shortId(t.id)}</span>
-        <span>
-          {t.repositoryId} · {roleNames[t.role]}
-        </span>
-      </div>
-      <strong>{t.title}</strong>
-      <Badge value={status(t)}>{taskStatusName(t)}</Badge>
-      <Handle type="source" position={Position.Right} />
-    </div>
-  );
-}
-const nodeTypes = { task: TaskNode };
 async function api(path: string, input?: unknown, method = 'POST') {
   const response = await fetch(
     '/api/' + path,
@@ -336,7 +322,15 @@ export function App() {
           id: t.id,
           type: 'task',
           position: { x: level * dx, y: row * dy },
-          data: { task: t },
+          data: {
+            id: t.id,
+            shortId: shortId(t.id),
+            title: t.title,
+            repositoryId: t.repositoryId,
+            role: roleNames[t.role],
+            status: status(t),
+            statusLabel: taskStatusName(t),
+          },
           selected: t.id === selected,
           ariaLabel: `${t.id}: ${t.title}, ${taskStatusName(t)}`,
         };
@@ -659,388 +653,389 @@ export function App() {
             className={`work-area ${tab === 'changesets' || tab === 'product' ? 'changeset-area' : ''}`}
           >
             <section className="board-surface" aria-label="Рабочая область">
-              {tab === 'product' && (
-                <ProductPanel
-                  onRepository={(id) => {
-                    setRepositoryFilter(id);
-                    setTab('workspace');
-                  }}
-                />
-              )}
-              {(tab === 'graph' || tab === 'workspace') &&
-                (filtered.length ? (
-                  <>
-                    <div className="graph-caption">
-                      <span>Зависимость ведёт от условия к результату</span>
-                      <span>{graph.edges.length} связей</span>
+              <Suspense fallback={<p role="status">Загружаем представление…</p>}>
+                {tab === 'product' && (
+                  <ProductPanel
+                    onRepository={(id) => {
+                      setRepositoryFilter(id);
+                      setTab('workspace');
+                    }}
+                  />
+                )}
+                {(tab === 'graph' || tab === 'workspace') &&
+                  (filtered.length ? (
+                    <>
+                      <div className="graph-caption">
+                        <span>Зависимость ведёт от условия к результату</span>
+                        <span>{graph.edges.length} связей</span>
+                      </div>
+                      <div className="graph-canvas" ref={canvasRef}>
+                        <GraphPanel
+                          onInit={(instance) => {
+                            flowRef.current = (options) => instance.fitView(options);
+                          }}
+                          key={`${boardId}-${revision?.number}-${filtered.map((t) => t.id).join()}`}
+                          nodes={graph.nodes}
+                          edges={graph.edges}
+                          nodesDraggable={false}
+                          nodesConnectable={false}
+                          edgesFocusable={false}
+                          deleteKeyCode={null}
+                          onNodeClick={(_, n) => setSelected(n.id)}
+                          fitView
+                          fitViewOptions={{ padding: 0.12, minZoom: 0.65, maxZoom: 1 }}
+                          minZoom={0.3}
+                        />
+                      </div>
+                    </>
+                  ) : (
+                    <div className="empty">
+                      <GitBranch />
+                      <h2>{query ? 'Нет совпадений' : 'Граф начинается с задачи'}</h2>
+                      <p>
+                        {query
+                          ? 'Измените поисковый запрос.'
+                          : 'Добавьте первый результат и критерии его приёмки.'}
+                      </p>
+                      {editable && !query && (
+                        <button onClick={() => setModal('task')}>Добавить задачу</button>
+                      )}
                     </div>
-                    <div className="graph-canvas" ref={canvasRef}>
-                      <ReactFlow
-                        onInit={(instance) => {
-                          flowRef.current = (options) => instance.fitView(options);
-                        }}
-                        key={`${boardId}-${revision?.number}-${filtered.map((t) => t.id).join()}`}
-                        nodes={graph.nodes}
-                        edges={graph.edges}
-                        nodeTypes={nodeTypes}
-                        nodesDraggable={false}
-                        nodesConnectable={false}
-                        edgesFocusable={false}
-                        deleteKeyCode={null}
-                        onNodeClick={(_, n) => setSelected(n.id)}
-                        fitView
-                        fitViewOptions={{ padding: 0.12, minZoom: 0.65, maxZoom: 1 }}
-                        minZoom={0.3}
-                      >
-                        <Background />
-                        <Controls showInteractive={false} />
-                      </ReactFlow>
-                    </div>
-                  </>
-                ) : (
-                  <div className="empty">
-                    <GitBranch />
-                    <h2>{query ? 'Нет совпадений' : 'Граф начинается с задачи'}</h2>
-                    <p>
-                      {query
-                        ? 'Измените поисковый запрос.'
-                        : 'Добавьте первый результат и критерии его приёмки.'}
-                    </p>
-                    {editable && !query && (
-                      <button onClick={() => setModal('task')}>Добавить задачу</button>
+                  ))}
+                {tab === 'list' && (
+                  <div className="task-list">
+                    {filtered.length ? (
+                      filtered.map((t) => (
+                        <button
+                          className={`task-row ${selected === t.id ? 'selected' : ''}`}
+                          key={t.id}
+                          onClick={() => setSelected(t.id)}
+                        >
+                          <span className="task-id" title={t.id}>
+                            {shortId(t.id)}
+                          </span>
+                          <div>
+                            <strong>{t.title}</strong>
+                            <small>
+                              {t.repositoryId} · {roleNames[t.role]}
+                              {t.dependsOn.length ? ` · после ${t.dependsOn.join(', ')}` : ''}
+                            </small>
+                          </div>
+                          <Badge value={status(t)}>{taskStatusName(t)}</Badge>
+                          <ChevronRight />
+                        </button>
+                      ))
+                    ) : (
+                      <p className="empty">Нет задач для отображения.</p>
                     )}
                   </div>
-                ))}
-              {tab === 'list' && (
-                <div className="task-list">
-                  {filtered.length ? (
-                    filtered.map((t) => (
-                      <button
-                        className={`task-row ${selected === t.id ? 'selected' : ''}`}
-                        key={t.id}
-                        onClick={() => setSelected(t.id)}
-                      >
-                        <span className="task-id" title={t.id}>
-                          {shortId(t.id)}
-                        </span>
-                        <div>
-                          <strong>{t.title}</strong>
-                          <small>
-                            {t.repositoryId} · {roleNames[t.role]}
-                            {t.dependsOn.length ? ` · после ${t.dependsOn.join(', ')}` : ''}
-                          </small>
-                        </div>
-                        <Badge value={status(t)}>{taskStatusName(t)}</Badge>
-                        <ChevronRight />
+                )}
+                {tab === 'changesets' && (
+                  <div className="history-list changesets">
+                    <div className="section-title">
+                      <h2>Изменения workspace</h2>
+                      <button onClick={() => setModal('changeset')}>
+                        <Plus />
+                        Новый ChangeSet
                       </button>
-                    ))
-                  ) : (
-                    <p className="empty">Нет задач для отображения.</p>
-                  )}
-                </div>
-              )}
-              {tab === 'changesets' && (
-                <div className="history-list changesets">
-                  <div className="section-title">
-                    <h2>Изменения workspace</h2>
-                    <button onClick={() => setModal('changeset')}>
-                      <Plus />
-                      Новый ChangeSet
-                    </button>
-                  </div>
-                  <p>
-                    Одна возможность продукта, несколько репозиториев. Приёмка фиксирует проверенную
-                    комбинацию SHA.
-                  </p>
-                  {data.config.storage === 'component' && (
+                    </div>
                     <p>
-                      Задачи и журналы хранятся в компонентах. Здесь показан общий граф и
-                      межпроектная приёмка.
+                      Одна возможность продукта, несколько репозиториев. Приёмка фиксирует
+                      проверенную комбинацию SHA.
                     </p>
-                  )}
-                  {!data.changeSets.length && (
-                    <p>
-                      Ведущий агент объединяет доски в ChangeSet и настраивает совместные проверки
-                      продукта и библиотек.
-                    </p>
-                  )}
-                  {[...data.changeSets].reverse().map((c) => {
-                    const v = c.verifications.at(-1);
-                    const delivery = c.deliveries?.filter((d) => d.verificationId === v?.id).at(-1);
-                    const needsDelivery = data.config.completionMode === 'remote';
-                    const state = c.acceptance
-                      ? 'done'
-                      : v?.status === 'failed'
-                        ? 'failed'
-                        : v?.status === 'active'
-                          ? 'running'
-                          : 'ready';
-                    return (
-                      <article key={c.id}>
-                        <div>
-                          <strong>
-                            {c.id} · {c.title}
-                          </strong>
-                          <Badge value={state}>
-                            {c.acceptance
-                              ? 'Принят'
-                              : v?.status === 'passed'
-                                ? 'Проверен локально'
-                                : v?.status === 'failed'
-                                  ? 'Сбой проверки'
-                                  : v?.status === 'active'
-                                    ? 'Проверяется'
-                                    : 'Ожидает проверки'}
-                          </Badge>
-                        </div>
-                        <p>{c.description}</p>
-                        {c.releaseId && (
-                          <p>
-                            Продуктовый релиз: <strong>{c.releaseId}</strong>
-                          </p>
-                        )}
-                        <p>
-                          Доски:{' '}
-                          {c.boardIds
-                            .map((id) => data.boards.find((b) => b.id === id)?.title ?? id)
-                            .join(', ')}
-                          {c.supersedes && ` · продолжает ${c.supersedes}`}
-                        </p>
-                        {v?.error && <p className="alert error">{v.error}</p>}
-                        {needsDelivery && (
-                          <p>Публикация человеком; DevContour проверяет merge и CI.</p>
-                        )}
-                        {delivery && (
+                    {data.config.storage === 'component' && (
+                      <p>
+                        Задачи и журналы хранятся в компонентах. Здесь показан общий граф и
+                        межпроектная приёмка.
+                      </p>
+                    )}
+                    {!data.changeSets.length && (
+                      <p>
+                        Ведущий агент объединяет доски в ChangeSet и настраивает совместные проверки
+                        продукта и библиотек.
+                      </p>
+                    )}
+                    {[...data.changeSets].reverse().map((c) => {
+                      const v = c.verifications.at(-1);
+                      const delivery = c.deliveries
+                        ?.filter((d) => d.verificationId === v?.id)
+                        .at(-1);
+                      const needsDelivery = data.config.completionMode === 'remote';
+                      const state = c.acceptance
+                        ? 'done'
+                        : v?.status === 'failed'
+                          ? 'failed'
+                          : v?.status === 'active'
+                            ? 'running'
+                            : 'ready';
+                      return (
+                        <article key={c.id}>
                           <div>
+                            <strong>
+                              {c.id} · {c.title}
+                            </strong>
+                            <Badge value={state}>
+                              {c.acceptance
+                                ? 'Принят'
+                                : v?.status === 'passed'
+                                  ? 'Проверен локально'
+                                  : v?.status === 'failed'
+                                    ? 'Сбой проверки'
+                                    : v?.status === 'active'
+                                      ? 'Проверяется'
+                                      : 'Ожидает проверки'}
+                            </Badge>
+                          </div>
+                          <p>{c.description}</p>
+                          {c.releaseId && (
                             <p>
-                              Публикация:{' '}
-                              {delivery.status === 'delivered'
-                                ? 'Merge и CI подтверждены'
-                                : delivery.status === 'active'
-                                  ? 'Проверяется'
-                                  : 'Ожидает публикации или CI'}
+                              Продуктовый релиз: <strong>{c.releaseId}</strong>
                             </p>
-                            {delivery.error && <p className="alert error">{delivery.error}</p>}
-                            {Object.entries(delivery.components).map(([id, component]) => (
-                              <p key={id}>
-                                <strong>{id}</strong> · {component.state} ·{' '}
-                                <code>{component.sha.slice(0, 12)}</code>{' '}
-                                {component.url && /^https?:\/\//.test(component.url) && (
-                                  <a href={component.url} target="_blank" rel="noreferrer">
-                                    PR/MR #{component.mr}
-                                  </a>
-                                )}
-                                {component.checks?.map((check) => (
-                                  <span key={check.name}>
-                                    {' '}
-                                    · {check.name}: {check.status}
-                                  </span>
-                                ))}
+                          )}
+                          <p>
+                            Доски:{' '}
+                            {c.boardIds
+                              .map((id) => data.boards.find((b) => b.id === id)?.title ?? id)
+                              .join(', ')}
+                            {c.supersedes && ` · продолжает ${c.supersedes}`}
+                          </p>
+                          {v?.error && <p className="alert error">{v.error}</p>}
+                          {needsDelivery && (
+                            <p>Публикация человеком; DevContour проверяет merge и CI.</p>
+                          )}
+                          {delivery && (
+                            <div>
+                              <p>
+                                Публикация:{' '}
+                                {delivery.status === 'delivered'
+                                  ? 'Merge и CI подтверждены'
+                                  : delivery.status === 'active'
+                                    ? 'Проверяется'
+                                    : 'Ожидает публикации или CI'}
                               </p>
-                            ))}
-                          </div>
-                        )}
-                        {v?.manifest && (
-                          <div className="manifest-list">
-                            {Object.entries(v.manifest).map(([id, m]) => (
-                              <p key={id}>
-                                <strong>{id}</strong> <code>{m.sha}</code>
-                              </p>
-                            ))}
-                          </div>
-                        )}
-                        {v?.evidence.map((e) => (
-                          <p key={e.gate}>
-                            <Badge value={e.passed ? 'done' : 'failed'}>
-                              {e.passed ? 'PASS' : 'FAIL'}
-                            </Badge>{' '}
-                            {e.gate} · {e.summary}{' '}
+                              {delivery.error && <p className="alert error">{delivery.error}</p>}
+                              {Object.entries(delivery.components).map(([id, component]) => (
+                                <p key={id}>
+                                  <strong>{id}</strong> · {component.state} ·{' '}
+                                  <code>{component.sha.slice(0, 12)}</code>{' '}
+                                  {component.url && /^https?:\/\//.test(component.url) && (
+                                    <a href={component.url} target="_blank" rel="noreferrer">
+                                      PR/MR #{component.mr}
+                                    </a>
+                                  )}
+                                  {component.checks?.map((check) => (
+                                    <span key={check.name}>
+                                      {' '}
+                                      · {check.name}: {check.status}
+                                    </span>
+                                  ))}
+                                </p>
+                              ))}
+                            </div>
+                          )}
+                          {v?.manifest && (
+                            <div className="manifest-list">
+                              {Object.entries(v.manifest).map(([id, m]) => (
+                                <p key={id}>
+                                  <strong>{id}</strong> <code>{m.sha}</code>
+                                </p>
+                              ))}
+                            </div>
+                          )}
+                          {v?.evidence.map((e) => (
+                            <p key={e.gate}>
+                              <Badge value={e.passed ? 'done' : 'failed'}>
+                                {e.passed ? 'PASS' : 'FAIL'}
+                              </Badge>{' '}
+                              {e.gate} · {e.summary}{' '}
+                              <button
+                                onClick={() =>
+                                  void act(
+                                    async () => {
+                                      const value = await api(
+                                        `changesets/${c.id}/evidence?verification=${v.id}&gate=${encodeURIComponent(e.gate)}`,
+                                      );
+                                      setLog({ title: e.gate, content: value.content });
+                                    },
+                                    '',
+                                    false,
+                                  )
+                                }
+                              >
+                                Лог проверки
+                              </button>
+                            </p>
+                          ))}
+                          {c.acceptance && (
+                            <p>
+                              Принят {stamp(c.acceptance.at)} · {c.acceptance.approval.actor} ·
+                              receipt <code>{c.acceptance.digest.slice(0, 16)}</code>
+                            </p>
+                          )}
+                          <div className="changeset-actions">
+                            {!c.acceptance && (
+                              <button
+                                disabled={
+                                  busy || v?.status === 'active' || delivery?.status === 'active'
+                                }
+                                onClick={() =>
+                                  void act(
+                                    () => api(`changesets/${c.id}/verify`, {}),
+                                    'Совместная проверка запущена',
+                                    false,
+                                  )
+                                }
+                              >
+                                <Play />
+                                Проверить совместно
+                              </button>
+                            )}
+                            {!c.acceptance && needsDelivery && v?.status === 'passed' && (
+                              <button
+                                disabled={busy || delivery?.status === 'active'}
+                                onClick={() =>
+                                  void act(
+                                    () => api(`changesets/${c.id}/handoff`, {}),
+                                    'Инструкция ручной публикации сохранена в .devcontour-local/handoffs выбранного workspace',
+                                    false,
+                                  )
+                                }
+                              >
+                                Подготовить передачу
+                              </button>
+                            )}
+                            {!c.acceptance &&
+                              needsDelivery &&
+                              v?.status === 'passed' &&
+                              delivery?.status !== 'delivered' && (
+                                <button
+                                  disabled={busy || delivery?.status === 'active'}
+                                  onClick={() =>
+                                    void act(
+                                      () => api(`changesets/${c.id}/remote-check`, {}),
+                                      'Состояние публикации обновлено',
+                                      false,
+                                    )
+                                  }
+                                >
+                                  Проверить публикацию
+                                </button>
+                              )}
+                            {!c.acceptance &&
+                              v?.status === 'passed' &&
+                              (!needsDelivery || delivery?.status === 'delivered') && (
+                                <button
+                                  disabled={busy}
+                                  onClick={() =>
+                                    void act(
+                                      () => api(`changesets/${c.id}/accept`, {}),
+                                      'ChangeSet принят',
+                                      false,
+                                    )
+                                  }
+                                >
+                                  <Check />
+                                  Принять ChangeSet
+                                </button>
+                              )}
                             <button
                               onClick={() =>
                                 void act(
                                   async () => {
-                                    const value = await api(
-                                      `changesets/${c.id}/evidence?verification=${v.id}&gate=${encodeURIComponent(e.gate)}`,
-                                    );
-                                    setLog({ title: e.gate, content: value.content });
+                                    const value = await api(`changesets/${c.id}/journal`);
+                                    setLog({ title: `Дневник ${c.id}`, content: value.content });
                                   },
                                   '',
                                   false,
                                 )
                               }
                             >
-                              Лог проверки
+                              Дневник
                             </button>
-                          </p>
-                        ))}
-                        {c.acceptance && (
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                )}
+                {tab === 'history' && (
+                  <div className="history-list">
+                    <h2>История результата</h2>
+                    <p>
+                      Принятые снимки неизменяемы. Каждая корректировка имеет свой план и
+                      доказательства.
+                    </p>
+                    {[...(board?.revisions ?? [])].reverse().map((r) => (
+                      <article key={r.number}>
+                        <div>
+                          <span className="history-number">r{r.number}</span>
+                          <div>
+                            <strong>{r.reason}</strong>
+                            <small>
+                              {stamp(r.createdAt)} · {r.taskIds.length} задач
+                            </small>
+                          </div>
+                          <Badge value={r.status === 'accepted' ? 'done' : 'ready'}>
+                            {r.status === 'accepted' ? 'Принята' : 'В работе'}
+                          </Badge>
+                        </div>
+                        {r.snapshot && (
                           <p>
-                            Принят {stamp(c.acceptance.at)} · {c.acceptance.approval.actor} ·
-                            receipt <code>{c.acceptance.digest.slice(0, 16)}</code>
+                            Снимок <code>{r.snapshot.digest.slice(0, 12)}</code> · Git{' '}
+                            <code>
+                              {Object.entries(r.snapshot.repositories ?? { main: r.snapshot.sha })
+                                .map(([id, sha]) => `${id}:${sha.slice(0, 8)}`)
+                                .join(' · ')}
+                            </code>
                           </p>
                         )}
-                        <div className="changeset-actions">
-                          {!c.acceptance && (
-                            <button
-                              disabled={
-                                busy || v?.status === 'active' || delivery?.status === 'active'
-                              }
-                              onClick={() =>
-                                void act(
-                                  () => api(`changesets/${c.id}/verify`, {}),
-                                  'Совместная проверка запущена',
-                                  false,
-                                )
-                              }
-                            >
-                              <Play />
-                              Проверить совместно
-                            </button>
-                          )}
-                          {!c.acceptance && needsDelivery && v?.status === 'passed' && (
-                            <button
-                              disabled={busy || delivery?.status === 'active'}
-                              onClick={() =>
-                                void act(
-                                  () => api(`changesets/${c.id}/handoff`, {}),
-                                  'Инструкция ручной публикации сохранена в .devcontour-local/handoffs выбранного workspace',
-                                  false,
-                                )
-                              }
-                            >
-                              Подготовить передачу
-                            </button>
-                          )}
-                          {!c.acceptance &&
-                            needsDelivery &&
-                            v?.status === 'passed' &&
-                            delivery?.status !== 'delivered' && (
-                              <button
-                                disabled={busy || delivery?.status === 'active'}
-                                onClick={() =>
-                                  void act(
-                                    () => api(`changesets/${c.id}/remote-check`, {}),
-                                    'Состояние публикации обновлено',
-                                    false,
-                                  )
-                                }
-                              >
-                                Проверить публикацию
-                              </button>
-                            )}
-                          {!c.acceptance &&
-                            v?.status === 'passed' &&
-                            (!needsDelivery || delivery?.status === 'delivered') && (
-                              <button
-                                disabled={busy}
-                                onClick={() =>
-                                  void act(
-                                    () => api(`changesets/${c.id}/accept`, {}),
-                                    'ChangeSet принят',
-                                    false,
-                                  )
-                                }
-                              >
-                                <Check />
-                                Принять ChangeSet
-                              </button>
-                            )}
-                          <button
-                            onClick={() =>
-                              void act(
-                                async () => {
-                                  const value = await api(`changesets/${c.id}/journal`);
-                                  setLog({ title: `Дневник ${c.id}`, content: value.content });
-                                },
-                                '',
-                                false,
-                              )
-                            }
-                          >
-                            Дневник
-                          </button>
-                        </div>
+                        <button
+                          onClick={() => {
+                            setRevisionNumber(r.number);
+                            setTab('graph');
+                          }}
+                        >
+                          Открыть ревизию {r.number}
+                          <ArrowUpRight />
+                        </button>
                       </article>
-                    );
-                  })}
-                </div>
-              )}
-              {tab === 'history' && (
-                <div className="history-list">
-                  <h2>История результата</h2>
-                  <p>
-                    Принятые снимки неизменяемы. Каждая корректировка имеет свой план и
-                    доказательства.
-                  </p>
-                  {[...(board?.revisions ?? [])].reverse().map((r) => (
-                    <article key={r.number}>
-                      <div>
-                        <span className="history-number">r{r.number}</span>
-                        <div>
-                          <strong>{r.reason}</strong>
-                          <small>
-                            {stamp(r.createdAt)} · {r.taskIds.length} задач
-                          </small>
-                        </div>
-                        <Badge value={r.status === 'accepted' ? 'done' : 'ready'}>
-                          {r.status === 'accepted' ? 'Принята' : 'В работе'}
-                        </Badge>
-                      </div>
-                      {r.snapshot && (
-                        <p>
-                          Снимок <code>{r.snapshot.digest.slice(0, 12)}</code> · Git{' '}
-                          <code>
-                            {Object.entries(r.snapshot.repositories ?? { main: r.snapshot.sha })
-                              .map(([id, sha]) => `${id}:${sha.slice(0, 8)}`)
-                              .join(' · ')}
-                          </code>
-                        </p>
-                      )}
-                      <button
-                        onClick={() => {
-                          setRevisionNumber(r.number);
-                          setTab('graph');
-                        }}
-                      >
-                        Открыть ревизию {r.number}
-                        <ArrowUpRight />
-                      </button>
-                    </article>
-                  ))}
-                </div>
-              )}
-              {tab === 'contracts' && (
-                <div className="history-list">
-                  <div className="section-title">
-                    <h2>Утверждённые контракты</h2>
-                    <button onClick={() => setModal('contract')}>
-                      <Plus />
-                      Контракт
-                    </button>
+                    ))}
                   </div>
-                  <p>
-                    Новая версия создаётся отдельным контрактом. Задачи закрепляют его содержимое
-                    при утверждении.
-                  </p>
-                  {data.contracts.map((c) => (
-                    <article key={c.id}>
-                      <div>
-                        <strong>{c.title}</strong>
-                        <Badge value="done">{c.id}</Badge>
-                      </div>
-                      <pre>{c.content}</pre>
-                      <small>
-                        SHA-256 {c.digest.slice(0, 16)} · {stamp(c.approvedAt)}
-                      </small>
-                    </article>
-                  ))}
-                  {!data.contracts.length && (
+                )}
+                {tab === 'contracts' && (
+                  <div className="history-list">
+                    <div className="section-title">
+                      <h2>Утверждённые контракты</h2>
+                      <button onClick={() => setModal('contract')}>
+                        <Plus />
+                        Контракт
+                      </button>
+                    </div>
                     <p>
-                      Добавьте API, события или дизайн-контракт перед утверждением связанных задач.
+                      Новая версия создаётся отдельным контрактом. Задачи закрепляют его содержимое
+                      при утверждении.
                     </p>
-                  )}
-                </div>
-              )}
+                    {data.contracts.map((c) => (
+                      <article key={c.id}>
+                        <div>
+                          <strong>{c.title}</strong>
+                          <Badge value="done">{c.id}</Badge>
+                        </div>
+                        <pre>{c.content}</pre>
+                        <small>
+                          SHA-256 {c.digest.slice(0, 16)} · {stamp(c.approvedAt)}
+                        </small>
+                      </article>
+                    ))}
+                    {!data.contracts.length && (
+                      <p>
+                        Добавьте API, события или дизайн-контракт перед утверждением связанных
+                        задач.
+                      </p>
+                    )}
+                  </div>
+                )}
+              </Suspense>
             </section>
             {tab !== 'changesets' && tab !== 'product' && (
               <aside className="inspector" aria-label="Детали задачи">
@@ -1212,6 +1207,8 @@ export function App() {
                               <small>
                                 {e.phase === 'integration' ? 'После интеграции' : 'Кандидат'} ·{' '}
                                 {e.sha.slice(0, 7)}
+                                {e.kind === 'review' &&
+                                  ` · ${e.inspection?.mode ?? 'команды не зафиксированы'}`}
                               </small>
                             </span>
                           </button>
