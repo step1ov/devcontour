@@ -7,7 +7,7 @@
 Нужны Node.js 24.3+, npm, Git. Сверьте `package.json` и lockfile; не обновляйте зависимости просто для первого запуска. Реальные модели для стандартных тестов не требуются.
 
 ```sh
-cd /absolute/devcontour
+cd devcontour
 npm ci
 npm run dev
 ```
