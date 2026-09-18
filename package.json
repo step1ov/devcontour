@@ -38,7 +38,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test:evals": "node --import tsx src/cli.ts evals",
-    "lint:report": "eslint ."
+    "lint:report": "eslint .",
+    "test:live": "npm run build && node scripts/live-pilot.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.0.0",
