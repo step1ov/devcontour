@@ -167,7 +167,7 @@ try {
         passed: report.passed,
         calls,
         durationMs: report.durationMs,
-        error: state.runs[0]?.error ?? null,
+        error: setupError ?? state.runs[0]?.error ?? null,
         totals: report.totals,
         report: join(root, 'report.json'),
       },

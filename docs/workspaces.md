@@ -7,7 +7,7 @@
 ## Где что находится
 
 ```text
-PhpstormProjects/
+projects/
   product/                    # Git продукта, docs/spec.md, локальные тесты и память
   shared-library/             # отдельный Git, API библиотеки, тесты, CHANGELOG
     devcontour.component.json    # локальные роли, gates, среда и правила
