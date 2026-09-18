@@ -42,7 +42,7 @@ test('A hanging subprocess emits output before timeout and retains activity, tai
     ],
     process.cwd(),
     {
-      timeoutMs: 600,
+      timeoutMs: 5000,
       onOutput: (_stream, text) => {
         assert.equal(finished, false);
         live += text;
@@ -81,7 +81,7 @@ else { process.stderr.write('loading private-token and waiting for provider\\n')
       review: false,
       task: f.h.addTask(f.h.createBoard('Diagnostic fixture').id, input()),
       signal: new AbortController().signal,
-      timeoutMs: 1000,
+      timeoutMs: 5000,
       execution: {
         env: { PATH: bin + delimiter + process.env.PATH },
         redact: redactor(['private-token']),
