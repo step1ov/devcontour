@@ -2,6 +2,7 @@ import { taskOwner } from '../core/sync-state.ts';
 import { ProjectMemory } from '../application/memory.ts';
 import { measuredExecute } from './usage.ts';
 import { unobservedReview } from '../core/review.ts';
+import { composeRedactors } from './redaction.ts';
 import { timed } from './timing.ts';
 import { assertRequirements, recordRequirements } from './requirements.ts';
 import { snapshotDependencies, assertDependencies, runEnvironment } from './dependencies.ts';
@@ -233,7 +234,7 @@ export class Scheduler {
     const agent = agentEnvironment(this.h.config, toolProfile, baseExecution.env);
     const execution = {
       env: agent.env,
-      redact: (text: string) => baseExecution.redact(agent.redact(text)),
+      redact: composeRedactors(agent.redact, baseExecution.redact),
     };
     const result = await timed(this.h, run, phase + '-review', () =>
       measuredExecute(
@@ -407,7 +408,7 @@ export class Scheduler {
                     toolProfile,
                     execution: {
                       env: agent.env,
-                      redact: (text) => execution.redact(agent.redact(text)),
+                      redact: composeRedactors(agent.redact, execution.redact),
                     },
                     cwd,
                     artifactDir: dir,

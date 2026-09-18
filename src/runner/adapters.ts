@@ -8,6 +8,10 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { reviewExecution, validateExecution, type ReviewInspection } from '../core/review.ts';
 import { inspectReview } from './review.ts';
+import { runtimeEvents, claudeResult } from './runtime-events.ts';
+import { appendFileSync } from 'node:fs';
+import type { Redactor } from './redaction.ts';
+import type { RuntimeDiagnostics } from '../core/runtime-diagnostics.ts';
 import { planResult, planSchema } from '../core/plan.ts';
 import { command } from './process.ts';
 import { discoveryInput, type RuntimeName, type Task } from '../core/model.ts';
@@ -80,10 +84,11 @@ const reviewSchema = {
   required: ['approved', 'summary', 'findings', 'discoveries', 'execution'],
 };
 export interface AgentRequest {
+  onDiagnostics?: (diagnostics: RuntimeDiagnostics) => void;
   onUsage?: (usage: Usage, runtimeVersion?: string | null) => void;
   purpose?: 'plan' | 'evaluation';
   toolProfile?: ToolProfile;
-  execution?: { env: NodeJS.ProcessEnv; redact: (text: string) => string };
+  execution?: { env: NodeJS.ProcessEnv; redact: Redactor };
   mcpConfigPath?: string;
   cwd: string;
   artifactDir: string;
@@ -141,7 +146,8 @@ export function cliArguments(
     'claude',
     '--print',
     '--output-format',
-    'json',
+    'stream-json',
+    '--verbose',
     '--json-schema',
     JSON.stringify(schema),
     '--permission-mode',
@@ -193,7 +199,17 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
       }
       const argv = cliArguments(name, r, schemaPath, resultPath);
       const version = await runtimeVersion(name, r.execution?.env);
+      const logPath = join(r.artifactDir, 'runtime.log');
+      await writeFile(logPath, `Runtime ${name}; started ${new Date().toISOString()}\n`);
+      let loggedBytes = 0;
       const result = await command(argv, r.cwd, {
+        onOutput: (stream, text) => {
+          // Keep live logs bounded; final diagnostics retain both stream tails.
+          if (loggedBytes >= 10_000_000) return;
+          const entry = `[${new Date().toISOString()} ${stream}] ${text}`;
+          appendFileSync(logPath, entry);
+          loggedBytes += Buffer.byteLength(entry);
+        },
         signal: r.signal,
         timeoutMs: r.timeoutMs,
         input:
@@ -214,6 +230,11 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
             }
           : {}),
       });
+      await writeFile(
+        join(r.artifactDir, 'runtime.json'),
+        JSON.stringify(result.diagnostics, null, 2),
+      );
+      r.onDiagnostics?.(result.diagnostics);
       r.onUsage?.(
         parseUsage(
           name,
@@ -226,7 +247,6 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
         version,
       );
       const log = result.stdout + '\n' + result.stderr;
-      await writeFile(join(r.artifactDir, 'runtime.log'), log);
       if (result.code !== 0 || result.timedOut || r.signal.aborted)
         throw new Error(
           `${name}: runtime завершился с кодом ${result.code}${result.timedOut ? ' (timeout)' : ''}. Лог: ${r.artifactDir}`,
@@ -238,7 +258,9 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
         await writeFile(resultPath, cleaned);
         data = JSON.parse(cleaned);
       } else {
-        const output = JSON.parse(result.stdout);
+        const output = claudeResult.parse(
+          runtimeEvents(result.stdout).events.findLast((e) => e.type === 'result'),
+        );
         if (output.is_error) throw new Error(`Claude: ${output.result ?? 'ошибка runtime'}`);
         data = output.structured_output;
       }

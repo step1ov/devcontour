@@ -10,6 +10,8 @@ import {
 } from '../core/usage.ts';
 import type { AgentAdapter, AgentRequest } from './adapters.ts';
 import { command } from './process.ts';
+import { runtimeEvents } from './runtime-events.ts';
+import { z } from 'zod';
 
 const number = (v: unknown): number | null =>
   typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null;
@@ -18,8 +20,10 @@ const tokens = (v: unknown) => (Number.isSafeInteger(v) ? number(v) : null);
 export function parseUsage(runtime: 'codex' | 'claude', stdout: string, completed: boolean): Usage {
   try {
     if (runtime === 'claude') {
-      const result = JSON.parse(stdout),
-        u = result.usage;
+      const stream = runtimeEvents(stdout);
+      const result = stream.events.findLast((e) => e.type === 'result');
+      if (!result) return unknownUsage();
+      const u = z.record(z.string(), z.unknown()).parse(result.usage);
       if (result.type !== 'result' || !u) return unknownUsage();
       const input = tokens(u.input_tokens),
         read = tokens(u.cache_read_input_tokens),
@@ -31,18 +35,17 @@ export function parseUsage(runtime: 'codex' | 'claude', stdout: string, complete
         cacheReadTokens: read,
         cacheWriteTokens: write,
         reportedUsd: number(result.total_cost_usd),
-        complete: completed,
+        complete: completed && !stream.malformed,
         source: 'claude-result',
       });
     }
-    const events = stdout
-      .split('\n')
-      .filter(Boolean)
-      .map((line) => JSON.parse(line));
+    const { events, malformed } = runtimeEvents(stdout);
     const turns = events.filter((e) => e.type === 'turn.completed');
     if (!turns.length) return unknownUsage();
     const sum = (key: string) => {
-      const values = turns.map((e) => tokens(e.usage?.[key]));
+      const values = turns.map((e) =>
+        tokens(z.record(z.string(), z.unknown()).parse(e.usage)[key]),
+      );
       return values.every((v) => v !== null) ? values.reduce<number>((s, v) => s + v, 0) : null;
     };
     return usageSchema.parse({
@@ -51,7 +54,7 @@ export function parseUsage(runtime: 'codex' | 'claude', stdout: string, complete
       cacheReadTokens: sum('cached_input_tokens'),
       cacheWriteTokens: 0,
       reportedUsd: null,
-      complete: completed,
+      complete: completed && !malformed,
       source: 'codex-turn-events',
     });
   } catch {
@@ -109,6 +112,11 @@ export async function measuredExecute(
   try {
     const result = await adapter.execute({
       ...request,
+      onDiagnostics: (diagnostics) => {
+        record.diagnostics = diagnostics;
+        save();
+        request.onDiagnostics?.(diagnostics);
+      },
       onUsage: (usage, version) => {
         record.usage = usageSchema.parse(usage);
         record.runtimeVersion = version ?? record.runtimeVersion;
