@@ -1,5 +1,13 @@
 # CLI и локальное API
 
+## Просмотр профиля до настройки workspace
+
+```sh
+devcontour profile-show --repository /absolute/product --profile ./profiles/service.json
+```
+
+Без выполнения команд возвращает resolved (проверки и источники состава), metadata (запись config.packs), pin (запись packs.lock.json). Для компонента с другим ID задайте --repository-id. Допускается встроенный ID вместо пути. Workspace не требуется: владелец файлов задан через --repository. Тот же профиль принимает setup/init --profile или поле profile в workspace-init registry. [Правила состава и обновления](mcp-and-profiles.md).
+
 Из исходников команды вызываются через npm; [установленный пакет](distribution.md) предоставляет executable `devcontour`. Глобальная установка для работы не нужна:
 
 ```sh

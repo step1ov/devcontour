@@ -435,7 +435,14 @@ export const configSchema = z.object({
     .array(z.string().min(1))
     .default(['.github/', '.githooks/', 'harness.config.json']),
   packs: z
-    .array(z.object({ id, version: z.string(), capabilities: z.array(z.string()) }))
+    .array(
+      z.object({
+        id,
+        version: z.string(),
+        capabilities: z.array(z.string()),
+        source: z.strictObject({ repositoryId: id, path: relativePath }).optional(),
+      }),
+    )
     .default([]),
 });
 export type Config = z.infer<typeof configSchema>;

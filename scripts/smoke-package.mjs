@@ -69,15 +69,47 @@ try {
     join(product, 'docs/spec.md'),
     '# API\nCreate a product with tested requirements.',
   );
+  await mkdir(join(product, 'profiles'));
+  const profileEnvironment = JSON.stringify({
+    id: 'environment',
+    version: '1.0.0',
+    environment: { values: { PROFILE_SMOKE: 'yes' } },
+  });
+  await writeFile(join(product, 'profiles/environment.json'), profileEnvironment);
+  await writeFile(
+    join(product, 'profiles/api.json'),
+    JSON.stringify({
+      id: 'installed-custom',
+      version: '1.0.0',
+      extends: ['go-api', './environment.json'],
+    }),
+  );
+  for (const id of ['python-api', 'nest-api', 'react-native', 'expo-mobile']) {
+    const shown = JSON.parse(
+      (await cli('profile-show', '--repository', product, '--profile', id)).stdout,
+    );
+    assert.equal(shown.resolved.id, id);
+    assert.ok(shown.resolved.gates.some((g) => g.kind === 'test'));
+  }
   const setup = JSON.parse(
-    (await cli('setup', '--repository', product, '--workspace', workspace, '--profile', 'go-api'))
-      .stdout,
+    (
+      await cli(
+        'setup',
+        '--repository',
+        product,
+        '--workspace',
+        workspace,
+        '--profile',
+        './profiles/api.json',
+      )
+    ).stdout,
   );
   assert.equal(setup.status, 'needs-agent-bootstrap');
   await access(join(product, '.agents/roles/backend.md'));
   await access(join(product, 'docs/harness-project-memory.md'));
   await access(join(product, 'docs/harness-experiments.md'));
   await access(join(product, 'docs/harness-intent.md'));
+  await access(join(product, 'docs/harness-mcp-and-profiles.md'));
   await access(join(product, 'docs/harness-start.md'));
   const request = join(root, 'request.json');
   await writeFile(request, JSON.stringify({ operation: 'project_context', input: {} }));
@@ -86,6 +118,12 @@ try {
   );
   assert.equal(resolve(context.workspace), resolve(workspace));
   assert.equal(context.approvalMode, 'agent');
+  await writeFile(join(product, 'profiles/environment.json'), profileEnvironment + '\n');
+  await assert.rejects(
+    cli('agent', '--workspace', workspace, '--file', request),
+    /Профиль изменился/,
+  );
+  await writeFile(join(product, 'profiles/environment.json'), profileEnvironment);
   const catalog = JSON.parse((await cli('capabilities')).stdout);
   const skill = (await cli('skill-path')).stdout.trim();
   assert.deepEqual(
@@ -325,6 +363,7 @@ try {
           'no source or tsx',
           'explicit workspace',
           'installed profiles and templates',
+          'custom composed profile, transitive lock and Python/Nest/React Native/Expo presets',
           'CLI context',
           'MCP negotiation and draft mutation',
           'portable skill schema parity',

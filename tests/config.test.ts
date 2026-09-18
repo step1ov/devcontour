@@ -7,12 +7,22 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 test('Every pinned profile has an executable test gate and mobile limits concurrency', async () => {
-  for (const id of ['react-vite-admin', 'next-product', 'go-api', 'mobile-maestro']) {
+  for (const id of [
+    'react-vite-admin',
+    'next-product',
+    'go-api',
+    'mobile-maestro',
+    'python-api',
+    'nest-api',
+    'react-native',
+    'expo-mobile',
+  ]) {
     const pack = await profile(id);
     assert.equal(pack.id, id);
     assert.equal(pack.digest.length, 64);
     assert.ok(pack.gates.some((g) => g.kind === 'test' && g.report?.type === 'junit'));
-    if (id === 'mobile-maestro') assert.equal(pack.concurrency, 1);
+    if (['mobile-maestro', 'react-native', 'expo-mobile'].includes(id))
+      assert.equal(pack.concurrency, 1);
   }
   await assert.rejects(profile('../secret'));
 });

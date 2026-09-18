@@ -2,8 +2,9 @@ import { lstat, mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/pr
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { configSchema, roles } from '../core/model.ts';
+import { repositories } from '../core/repositories.ts';
 import { loadConfig, scopedConfig } from './config.ts';
-import { profile } from './packs.ts';
+import { profile, profileMetadata, profilePin, packKey } from './packs.ts';
 import { git } from './process.ts';
 
 const templateRoot = fileURLToPath(new URL('../../templates/project/', import.meta.url));
@@ -62,7 +63,12 @@ export function projectConfig(
     reviewer: { runtime: 'codex' },
     concurrency: selected.concurrency ?? 2,
     gates: selected.gates,
+    prepare: selected.prepare,
+    environment: selected.environment,
+    lifecycle: selected.lifecycle,
+    generatedPaths: selected.generatedPaths,
     protectedPaths: [
+      ...selected.protectedPaths,
       'AGENTS.md',
       'CLAUDE.md',
       '.agents/',
@@ -75,14 +81,31 @@ export function projectConfig(
       'package.json',
       'package-lock.json',
     ],
-    packs: [{ id: selected.id, version: selected.version, capabilities: selected.capabilities }],
+    packs: [profileMetadata(selected)],
   });
 }
 
 export const profileLock = (selected: Profile) => ({
   version: 1,
-  packs: [{ id: selected.id, version: selected.version, digest: selected.digest }],
+  packs: [profilePin(selected)],
 });
+
+// Bootstrap a single component without turning its environment into workspace-wide defaults.
+export function componentProfileConfig(
+  config: ReturnType<typeof projectConfig>,
+  workspaceRoot: string,
+) {
+  return {
+    ...config,
+    workspaceRoot,
+    storage: 'component' as const,
+    repositories: [{ ...repositories(config)[0], environment: config.environment }],
+    environment: undefined,
+    lifecycle: undefined,
+    prepare: undefined,
+    generatedPaths: [],
+  };
+}
 
 async function inspect(path: string) {
   try {
@@ -149,7 +172,7 @@ export async function setupProject(options: {
   if (gitRoot && (await realpath(gitRoot)) !== repository)
     throw new Error('Продукт находится внутри другого Git-репозитория; выберите его корень');
 
-  const selected = await profile(options.profile);
+  const selected = await profile(options.profile, repository);
   if (options.workspace && options.data) throw new Error('Используйте workspace или data, не оба');
   let workspaceRoot: string | undefined;
   if (options.workspace) {
@@ -176,7 +199,7 @@ export async function setupProject(options: {
     files.set(join(repository, name), await readFile(join(templateRoot, name), 'utf8'));
   files.set(
     join(repository, '.gitignore'),
-    '.harness/\n.reports/\nnode_modules/\ndist/\n.env*\n!.env.example\n',
+    '.harness/\n.reports/\nnode_modules/\ndist/\n.venv/\n__pycache__/\n.pytest_cache/\n.ruff_cache/\n.expo/\n.env*\n!.env.example\n',
   );
   if (workspaceRoot)
     files.set(join(workspaceRoot, '.gitignore'), '.harness/\n.env*\n!.env.example\n');
@@ -194,6 +217,7 @@ export async function setupProject(options: {
       'experiments',
       'agent-evals',
       'intent',
+      'mcp-and-profiles',
     ].map((name) => ['docs/' + name + '.md', 'harness-' + name + '.md'] as [string, string]),
   ]);
   for (const [source, destination] of guides) {
@@ -218,19 +242,20 @@ export async function setupProject(options: {
   }
   files.set(join(data, 'packs.lock.json'), JSON.stringify(profileLock(selected), null, 2) + '\n');
   const profilePath = join(data, 'profiles', selected.id + '.json');
-  const profileContent = await readFile(
-    new URL(`../../packs/profiles/${selected.id}.json`, import.meta.url),
-    'utf8',
-  );
+  const profileContent = selected.raw;
   files.set(profilePath, profileContent);
   // Publish config last so an interrupted copy can resume without an incomplete policy.
   files.set(
     join(data, 'config.json'),
     JSON.stringify(
       {
-        ...projectConfig(repository, selected, options.approvalMode),
+        ...(workspaceRoot
+          ? componentProfileConfig(
+              projectConfig(repository, selected, options.approvalMode),
+              workspaceRoot,
+            )
+          : projectConfig(repository, selected, options.approvalMode)),
         contextPacks: defaultContextPacks(),
-        ...(workspaceRoot ? { workspaceRoot, storage: 'component' } : {}),
       },
       null,
       2,
@@ -250,7 +275,7 @@ export async function setupProject(options: {
       (workspaceRoot && existing.workspaceRoot !== workspaceRoot) ||
       existing.repository !== repository ||
       existing.mode !== 'local' ||
-      !existing.packs.some((p) => p.id === selected.id)
+      !existing.packs.some((p) => packKey(p) === packKey(selected))
     )
       throw new Error('Существующая конфигурация относится к другому продукту или профилю');
     if (options.approvalMode && existing.approvalMode !== options.approvalMode)

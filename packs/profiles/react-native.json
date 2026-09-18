@@ -1,0 +1,7 @@
+{
+  "id": "react-native",
+  "version": "0.1.0",
+  "extends": ["node-checks", "mobile-maestro"],
+  "capabilities": ["react-native"],
+  "protectedPaths": ["app.json", "babel.config.js", "metro.config.js"]
+}
