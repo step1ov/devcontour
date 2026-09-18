@@ -30,6 +30,8 @@ Setup не вызывает модель, не устанавливает зав
 
 ## План и контракты
 
+Карта продукта: `intent-render --file definition.json [--repository-id ID]` выводит Markdown без записи; `intent-snapshot [--repository-id ID] [--story ID]` читает committed-карту; `intent-report --release ID [--repository-id ID] [--require-complete]` возвращает JSON покрытия. Всем нужен явный --workspace/--data. Без repositoryId выбирается общий workspace. require-complete задаёт exit 1 при неполном покрытии. Точная структура и безопасная замена документа — [INTENT](intent.md).
+
 | Команда           | Параметры                                                          | Результат / эффект                                                                                    |
 | ----------------- | ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
 | `plan`            | `--brief FILE --runtime codex\|claude`, опционально `--model NAME` | Вызывает модель, сохраняет и импортирует новый черновой план                                          |

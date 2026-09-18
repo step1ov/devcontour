@@ -77,6 +77,7 @@ try {
   await access(join(product, '.agents/roles/backend.md'));
   await access(join(product, 'docs/harness-project-memory.md'));
   await access(join(product, 'docs/harness-experiments.md'));
+  await access(join(product, 'docs/harness-intent.md'));
   await access(join(product, 'docs/harness-start.md'));
   const request = join(root, 'request.json');
   await writeFile(request, JSON.stringify({ operation: 'project_context', input: {} }));
@@ -221,6 +222,65 @@ try {
   });
   const recall = await agent('memory_recall', { repositoryId: 'main', query: 'smoke' });
   assert.ok(recall.records.some((r) => r.record.id === knowledge.id));
+  const intentRepo = join(root, 'demo', 'repository');
+  await writeFile(
+    join(intentRepo, 'intent-spec.md'),
+    '## REQ-smoke: Package intent\nVerify complete release coverage.\n',
+  );
+  await exec('git', ['add', 'intent-spec.md'], { cwd: intentRepo });
+  await exec('git', ['commit', '-m', 'Package intent fixture'], { cwd: intentRepo });
+  const intent = await agent('intent_render', {
+    repositoryId: 'main',
+    definition: {
+      kind: 'component',
+      title: 'Installed product intent',
+      purpose: 'Verify installed intent API behaviour.',
+      audience: ['Product operators'],
+      sources: ['intent-spec.md'],
+      releases: [{ id: 'mvp', title: 'First release' }],
+      stories: [
+        {
+          id: 'smoke',
+          title: 'Operator sees completion',
+          releaseId: 'mvp',
+          criteria: [
+            {
+              id: 'ac-smoke',
+              text: 'Missing work remains visible.',
+              requirements: [{ source: 'intent-spec.md', id: 'REQ-smoke' }],
+            },
+          ],
+        },
+      ],
+    },
+  });
+  await writeFile(join(intentRepo, 'INTENT.md'), intent.markdown);
+  await exec('git', ['add', 'INTENT.md'], { cwd: intentRepo });
+  await exec('git', ['commit', '-m', 'Pin package intent'], { cwd: intentRepo });
+  assert.equal(
+    (await agent('intent_snapshot', { repositoryId: 'main', storyId: 'smoke' })).stories[0]
+      .requirement.id,
+    'REQ-intent-smoke',
+  );
+  const coverage = await agent('intent_report', { repositoryId: 'main', releaseId: 'mvp' });
+  assert.equal(coverage.coverageComplete, false);
+  assert.deepEqual(coverage.stories[0].taskIds, []);
+  await assert.rejects(
+    cli(
+      'intent-report',
+      '--repository-id',
+      'main',
+      '--release',
+      'mvp',
+      '--require-complete',
+      '--data',
+      join(root, 'demo'),
+    ),
+    (error) => {
+      assert.equal(JSON.parse(error.stdout).coverageComplete, false);
+      return error.code === 1;
+    },
+  );
   assert.ok(
     metrics.attempts.some(
       (r) => r.taskId === task.taskId && r.status === 'succeeded' && r.stages.length,
@@ -275,6 +335,8 @@ try {
           'workflow metrics and private lease tokens',
           'deduplicated external signal stays draft',
           'installed protocol evals',
+          'installed intent render, snapshot and missing-work report',
+          'CLI coverage gate rejects an undecomposed release',
         ],
       },
       null,

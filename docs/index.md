@@ -45,6 +45,8 @@
 
 ## Справочники
 
+- [Продуктовое намерение и полнота релиза](intent.md): цель, истории, инвентарь ТЗ, привязки к evidence и локальность компонентов.
+
 - [Требования и доказательства](requirements.md): привязка разделов ТЗ, актуальность покрытия и корректировки.
 - [Evals агентов](agent-evals.md): детерминированная проверка протокола и явно запускаемые проверки моделей.
 - [Метрики процесса](metrics.md): время этапов, ожидание, неудачные попытки и границы измерений.
@@ -87,4 +89,4 @@
 
 Изменение поведения сопровождается правкой соответствующего руководства, примера и, при изменении принципа, записи в [решениях](decisions.md). Не добавляйте очередную заметку «теперь поддерживается» поверх устаревшего раздела: перепишите его под текущее состояние. Общие правила держите в одном нормативном месте, из остальных документов ссылайтесь на него.
 
-`setup` переносит одиннадцать руководств: `START.md` → `harness-start.md`, `workspaces.md` → `harness-workspaces.md`, `engineering-context.md` → `harness-engineering.md`, `project-integration.md` → `harness-integration.md`, `team-sync.md` → `harness-team-sync.md`, `requirements.md` → `harness-requirements.md`, `lead-workflow.md` → `harness-lead-workflow.md`, `project-memory.md` → `harness-project-memory.md`, `metrics.md` → `harness-metrics.md`, `experiments.md` → `harness-experiments.md`, `agent-evals.md` → `harness-agent-evals.md`. Ссылки между установленными руководствами преобразуются автоматически. Ссылки на остальной справочник показывают его имя внутри дистрибутива DevContour без неработающего относительного URL. Существующие копии не перезаписываются. При обновлении проверьте ссылки и осознанно перенесите полезные изменения в правила продукта.
+`setup` переносит двенадцать руководств: `START.md` → `harness-start.md`, `workspaces.md` → `harness-workspaces.md`, `engineering-context.md` → `harness-engineering.md`, `project-integration.md` → `harness-integration.md`, `team-sync.md` → `harness-team-sync.md`, `requirements.md` → `harness-requirements.md`, `lead-workflow.md` → `harness-lead-workflow.md`, `project-memory.md` → `harness-project-memory.md`, `metrics.md` → `harness-metrics.md`, `experiments.md` → `harness-experiments.md`, `agent-evals.md` → `harness-agent-evals.md`, `intent.md` → `harness-intent.md`. Ссылки между установленными руководствами преобразуются автоматически. Ссылки на остальной справочник показывают его имя внутри дистрибутива DevContour без неработающего относительного URL. Существующие копии не перезаписываются. При обновлении проверьте ссылки и осознанно перенесите полезные изменения в правила продукта.

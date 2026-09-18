@@ -193,6 +193,7 @@ export async function setupProject(options: {
       'metrics',
       'experiments',
       'agent-evals',
+      'intent',
     ].map((name) => ['docs/' + name + '.md', 'harness-' + name + '.md'] as [string, string]),
   ]);
   for (const [source, destination] of guides) {
