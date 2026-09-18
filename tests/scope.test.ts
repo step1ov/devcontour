@@ -87,8 +87,13 @@ test('Bare CLI fails before creating demo files; two CLI sessions address separa
         await readFile(join(product, 'docs/devcontour-start.md'), 'utf8'),
         /devcontour-integration.md/,
       );
-      assert.match(await readFile(join(product, 'docs/devcontour-integration.md'), 'utf8'), /Forge/);
-      assert.ok(JSON.parse(await readFile(join(product, 'devcontour.component.json'), 'utf8')).roles);
+      assert.match(
+        await readFile(join(product, 'docs/devcontour-integration.md'), 'utf8'),
+        /Forge/,
+      );
+      assert.ok(
+        JSON.parse(await readFile(join(product, 'devcontour.component.json'), 'utf8')).roles,
+      );
       const planFile = join(workspace, 'plan.json');
       await writeFile(
         planFile,

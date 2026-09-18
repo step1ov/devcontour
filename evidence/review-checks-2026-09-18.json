@@ -1,0 +1,34 @@
+{
+  "date": "2026-09-18",
+  "unitIntegration": {
+    "passed": 122,
+    "failed": 0,
+    "skipped": 0
+  },
+  "lint": "passed with documented warning debt",
+  "build": "passed",
+  "skill": "passed",
+  "format": "passed",
+  "installedPackage": "passed after engineering-evals timeout fix",
+  "playwright": {
+    "httpPassed": 1,
+    "browserNotExecuted": 3,
+    "commandExitCode": 1,
+    "reason": "Chromium MachPortRendezvousServer permission denied"
+  },
+  "uiSmoke": {
+    "graph": "passed",
+    "dialogEscapeFocusReturn": "passed",
+    "queueStart": "passed",
+    "consoleErrors": 0
+  },
+  "liveEvidence": "live-pilot-2026-09-18.json",
+  "ci": {
+    "observedCommit": "71a0b7d15d53dcb7ad15f350971ffb4b0a4035e0",
+    "url": "https://github.com/step1ov/devcontour/actions/runs/35328073444",
+    "status": "failure",
+    "step": "npm run check",
+    "substep": "unknown",
+    "newCommitsPushed": false
+  }
+}

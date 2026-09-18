@@ -227,7 +227,10 @@ export async function setupProject(options: {
       (match, label, target: string) => {
         if (/^(https?:|#)/.test(target)) return match;
         const [file, anchor] = target.split('#');
-        const sourceRelative = relative(devcontourRoot, resolve(devcontourRoot, dirname(source), file));
+        const sourceRelative = relative(
+          devcontourRoot,
+          resolve(devcontourRoot, dirname(source), file),
+        );
         const installed = guides.get(sourceRelative);
         return installed
           ? '[' + label + '](' + installed + (anchor ? '#' + anchor : '') + ')'

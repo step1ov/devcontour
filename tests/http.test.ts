@@ -59,7 +59,8 @@ test('Loopback API rejects cross-origin writes, validates input and survives mis
     );
     assert.equal(((await response.json()) as { dataRoot: string }).dataRoot, f.root);
     assert.equal(
-      (await request('/api/boards', { title: 'Valid board' }, { 'X-DevContour-Request': '1' })).status,
+      (await request('/api/boards', { title: 'Valid board' }, { 'X-DevContour-Request': '1' }))
+        .status,
       200,
     );
     assert.equal(f.store.read().boards.length, 1);

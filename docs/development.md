@@ -32,7 +32,7 @@ npm run format:check
 | ----------------------- | ----------------------------------------------------------------------- |
 | `npm run dev`           | Demo + Vite для локальной разработки UI                                 |
 | `npm run typecheck`     | Проверка TypeScript без сборки                                          |
-| `npm run lint`          | Проверка использования цветовых токенов; это не общий ESLint            |
+| `npm run lint`          | Цветовые токены и ESLint с проверкой типов; ошибки блокируют            |
 | `npm run build`         | Typecheck, Node CLI в lib, справочник skill и UI в dist                 |
 | `npm run test:package`  | Установка настоящего архива без dev dependencies и проверка CLI/MCP/UI  |
 | `npm run check:skill`   | Совпадение переносимого справочника с каталогом agent API               |
@@ -42,7 +42,7 @@ npm run format:check
 | `npm run format:check`  | Prettier; выполняется отдельно от check                                 |
 | `npm run hooks:install` | Установка hooks в Git-копии                                             |
 
-Pre-commit запускает token lint и typecheck; pre-push и текущий GitHub Actions workflow — `check`. Наличие CI-конфига для GitHub не ограничивает forge продуктов: это разные интеграции. Для другого CI воспроизведите те же проверки и сохранение отчётов.
+Pre-commit запускает token lint, ESLint и typecheck; pre-push и текущий GitHub Actions workflow — `check`. Наличие CI-конфига для GitHub не ограничивает forge продуктов: это разные интеграции. Для другого CI воспроизведите те же проверки и сохранение отчётов.
 
 ## Первое знакомство с кодом
 
@@ -96,7 +96,7 @@ Pre-commit запускает token lint и typecheck; pre-push и текущи�
 | Хранилища/интеграции    | `tests/enterprise.test.ts`                               | Локальность записей, миграция, cleanup, dependencies, forge observations                    |
 | Начало работы           | `tests/setup.test.ts`, `scope.test.ts`, `config.test.ts` | Существующие файлы, явный workspace, profile locks, совместимость                           |
 | AI-согласования         | `tests/agent-control.test.ts`                            | Независимость, blocking review, изменённая после review постановка, operator mode           |
-| HTTP/UI                 | `tests/http.test.ts`, `e2e/devcontour.spec.ts`              | Origin/Host, заголовки, публичный сценарий, доступность и состояния интерфейса              |
+| HTTP/UI                 | `tests/http.test.ts`, `e2e/devcontour.spec.ts`           | Origin/Host, заголовки, публичный сценарий, доступность и состояния интерфейса              |
 
 Fixtures используют временные репозитории, bare remotes, локальные HTTP-ответы и управляемые процессы. Они проверяют поведение без платного API и credentials. Не заменяйте реальную Git-проверку mock-ответом там, где риск заключается именно в Git ancestry/ref/worktree.
 
@@ -163,3 +163,11 @@ UI отображает серверное состояние и объясня�
 ## Развивать продуктовую карту
 
 core/intent.ts отвечает за формат и детерминированный Markdown, runner/intent.ts — за Git-источники и производный отчёт. Секции REQ-intent используют обычный путь requirements; отдельные статусы историй не сохраняются. Изменения проверяйте tests/intent.test.ts: пустой DAG, забытый REQ, будущий релиз, исключения, недоступный источник, реальные candidate/integration checks, критерий после приёмки, разные владельцы и независимый clone. Проверяйте отсутствие подробностей компонента в общей карте и сохранность task bindings в sync.
+
+## Статический анализ
+
+`npm run lint` блокирует ошибки ESLint, включая `no-floating-promises`, `no-misused-promises` и правила React Hooks. `npm run lint:report` дополнительно показывает предупреждения первого аудита: постепенно типизируем входной JSON и убираем `any`. Предупреждения не означают, что работа завершена; список правил и исходные количества — в [отчёте ревью](verification-review.md).
+
+Регистрация тестов через `node:test` — единственное точечное исключение для неожидаемого промиса: его завершением владеет Node test runner. Все остальные промисы в тестах проверяются. TypeScript 6.0.3 выбран как версия, поддерживаемая установленным typescript-eslint; `@types/node` соответствует Node 24. `strict` включён. Включение `noUncheckedIndexedAccess` требует отдельной работы с границами массивов, а не сотен механических `!`.
+
+Живые вызовы не входят в `check`. Явный запуск `npm run test:live -- --live --author-model ID --reviewer-model ID` выполняет одну заранее утверждённую задачу с Claude и двумя ревью Codex, максимум три вызова и одну попытку. Он расходует доступные лимиты CLI и сохраняет локальный отчёт; общий денежный hard cap не реализован. Сначала проверьте CLI и их авторизацию. [Границы пилота и результаты](verification-review.md).
