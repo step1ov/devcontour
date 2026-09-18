@@ -12,12 +12,14 @@ import { Scheduler } from '../lib/runner/scheduler.js';
 import { git } from '../lib/runner/process.js';
 import { usageTotals } from '../lib/core/usage.js';
 import { doctor } from '../lib/runner/doctor.js';
+import { observedCommand } from '../lib/runner/review.js';
 
 const { values } = parseArgs({
   options: {
     live: { type: 'boolean' },
     'author-model': { type: 'string' },
     'reviewer-model': { type: 'string' },
+    'require-review-commands': { type: 'boolean', default: false },
   },
 });
 assert.ok(
@@ -47,8 +49,10 @@ let failed=false;
 try { const {list}=await import('./src/api.mjs'); const {names}=await import('./src/consumer.mjs');
 assert.deepEqual(list(),{items:[{name:'Ada'},{name:'Lin'}],total:2}); assert.equal(names(),'Ada,Lin'); }
 catch(e) {failed=true;console.error(e.message);}
-mkdirSync('.reports',{recursive:true});
-writeFileSync('.reports/tests.xml','<testsuite tests="1" failures="'+(failed?1:0)+'"><testcase name="API and consumer contract">'+(failed?'<failure message="behavior mismatch"/>':'')+'</testcase></testsuite>');
+if (!process.argv.includes('--read-only')) {
+ mkdirSync('.reports',{recursive:true});
+ writeFileSync('.reports/tests.xml','<testsuite tests="1" failures="'+(failed?1:0)+'"><testcase name="API and consumer contract">'+(failed?'<failure message="behavior mismatch"/>':'')+'</testcase></testsuite>');
+} else if (!failed) console.log('REVIEW_TEST_PASS');
 if(failed)process.exitCode=1;
 `,
 );
@@ -121,7 +125,21 @@ const bounded = (adapter) => ({
     console.log(
       `Call ${calls}/3: ${adapter.name}, ${request.review ? 'review' : 'implementation'}`,
     );
-    return adapter.execute(request);
+    const strictReview = request.review && values['require-review-commands'];
+    const result = await adapter.execute({
+      ...request,
+      prompt:
+        request.prompt +
+        (strictReview
+          ? '\nExecute node verify.mjs --read-only in the provided cwd. Report its exact exit code and output in execution. Do not edit any files.'
+          : ''),
+    });
+    if (strictReview)
+      assert.ok(
+        observedCommand(result.inspection, 'node verify.mjs --read-only', 'REVIEW_TEST_PASS'),
+        'Reviewer did not execute the required read-only test; pilot fails',
+      );
+    return result;
   },
 });
 const scheduler = new Scheduler(h, root, {
@@ -147,6 +165,7 @@ try {
   const usages = Object.values(store.localRecords('usage', 'main'));
   const report = {
     mode: 'live',
+    requireReviewCommands: values['require-review-commands'],
     setupError,
     authorModel: values['author-model'],
     reviewerModel: values['reviewer-model'],

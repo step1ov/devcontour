@@ -37,3 +37,23 @@ export function inspectReview(runtime: string, output: string): ReviewInspection
     reason: observed ? null : 'Нет подтверждённой успешной команды в событиях Codex.',
   };
 }
+
+// Match an exact command, allowing only the runtime's simple shell wrapper.
+export function observedCommand(
+  inspection: ReviewInspection | undefined,
+  expectedCommand: string,
+  expectedOutputLine: string,
+) {
+  return Boolean(
+    inspection?.source === 'codex-events' &&
+    inspection.commands.some((c) => {
+      const wrapped = /^(?:\/bin\/)?(?:sh|bash|zsh) -l?c (['"])(.*)\1$/.exec(c.command);
+      const command = wrapped?.[2] ?? c.command;
+      return (
+        c.exitCode === 0 &&
+        command === expectedCommand &&
+        c.output.split(/\r?\n/).includes(expectedOutputLine)
+      );
+    }),
+  );
+}
