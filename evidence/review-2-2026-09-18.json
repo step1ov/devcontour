@@ -1,0 +1,24 @@
+{
+  "date": "2026-09-18",
+  "node": "24.3.0",
+  "platform": "macOS",
+  "baselineCommit": "7565825952e95f52088580d09d52d43c4d9bec20",
+  "implementationCommits": ["d46390a", "d124145", "f8d3416", "04300ff", "08e8c63", "0a71c64"],
+  "checks": {
+    "lint": "PASS",
+    "build": "PASS",
+    "unitIntegration": { "status": "PASS", "tests": 133, "passed": 133, "failed": 0, "skipped": 0, "concurrency": 4 },
+    "reviewDelta": "PASS",
+    "skillSchemaParity": "PASS",
+    "packageProductionInstall": "PASS",
+    "format": "PASS",
+    "playwright": { "apiPassed": 1, "browserFailedAtLaunch": 5, "browserScenariosExecuted": 0, "limitation": "MachPortRendezvousServer: Permission denied (1100)" },
+    "check": { "status": "FAIL", "exitCode": 1, "reason": "Chromium launch blocked by host sandbox" },
+    "reviewerSandboxProbe": { "status": "ENVIRONMENT_BLOCKED", "exitCode": 71, "reason": "sandbox-exec: sandbox_apply: Operation not permitted", "writeProtectionProven": false },
+    "browserManual": { "status": "PASS", "scenarios": ["lazy graph loading", "select graph node and inspect task", "lazy product view without a map", "return to task list"], "consoleErrors": 0, "axeExecuted": false }
+  },
+  "github": { "runUrl": "https://github.com/step1ov/devcontour/actions/runs/35346025863", "status": "failure", "fullLogsHttpStatus": 403, "failureCause": "unknown", "greenCiClaimed": false },
+  "pilot2": { "status": "NOT_RUN", "preparation": "PASS", "modelCalls": 0, "budgetApproved": false },
+  "bundleKb": { "main": 364.41, "graph": 178.21, "product": 6.95 },
+  "notes": ["Summarized local observations; not a gate receipt or a live-model result", "No raw prompts, credentials, personal paths or provider transcripts included"]
+}
