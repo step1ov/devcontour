@@ -6,6 +6,8 @@ import { codexTools, claudeMcp, claudeRules } from './tools.ts';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { reviewExecution, validateExecution, type ReviewInspection } from '../core/review.ts';
+import { inspectReview } from './review.ts';
 import { planResult, planSchema } from '../core/plan.ts';
 import { command } from './process.ts';
 import { discoveryInput, type RuntimeName, type Task } from '../core/model.ts';
@@ -15,6 +17,7 @@ export const implementationResult = z.object({
   discoveries: z.array(discoveryInput).max(20).default([]),
 });
 export const reviewResult = z.object({
+  execution: reviewExecution.optional(),
   approved: z.boolean(),
   summary: z.string(),
   discoveries: z.array(discoveryInput).max(20).default([]),
@@ -48,6 +51,7 @@ const reviewSchema = {
   type: 'object',
   additionalProperties: false,
   properties: {
+    execution: z.toJSONSchema(reviewExecution, { target: 'draft-7' }),
     approved: { type: 'boolean' },
     summary: { type: 'string' },
     discoveries: {
@@ -73,7 +77,7 @@ const reviewSchema = {
       },
     },
   },
-  required: ['approved', 'summary', 'findings', 'discoveries'],
+  required: ['approved', 'summary', 'findings', 'discoveries', 'execution'],
 };
 export interface AgentRequest {
   onUsage?: (usage: Usage, runtimeVersion?: string | null) => void;
@@ -92,6 +96,7 @@ export interface AgentRequest {
   timeoutMs: number;
 }
 export interface AgentResult {
+  inspection?: ReviewInspection;
   data: unknown;
   log: string;
   command: string[];
@@ -146,6 +151,7 @@ export function cliArguments(
       ? ['Read', 'Glob', 'Grep']
       : (r.toolProfile?.claudeTools ?? ['Read', 'Glob', 'Grep', 'Edit', 'Write'])
     ).join(','),
+    ...(r.review ? ['--disallowedTools', 'Bash,Edit,Write,NotebookEdit'] : []),
     ...(r.toolProfile
       ? [
           '--allowedTools',
@@ -190,7 +196,11 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
       const result = await command(argv, r.cwd, {
         signal: r.signal,
         timeoutMs: r.timeoutMs,
-        input: r.prompt,
+        input:
+          r.prompt +
+          (r.review && !r.purpose
+            ? '\nReport execution.commands with command, exitCode and summary, or an empty list and a concrete execution.noCommandsReason. Never claim a command was run based only on the supplied diff.'
+            : ''),
         ...(r.resourcesJson
           ? { env: { ...process.env, DEVCONTOUR_RESOURCES_JSON: r.resourcesJson } }
           : {}),
@@ -240,7 +250,13 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
             ? reviewResult
             : implementationResult
       ).parse(data);
-      return { data, log, command: argv };
+      if (r.review && !r.purpose) validateExecution(reviewResult.parse(data).execution);
+      return {
+        data,
+        log,
+        command: argv,
+        ...(r.review ? { inspection: inspectReview(name, result.stdout) } : {}),
+      };
     },
   };
 }

@@ -1,4 +1,5 @@
 import { priceSchema } from './usage.ts';
+import type { ReviewInspection } from './review.ts';
 import { z } from 'zod';
 import type { CompletionReceipt } from './sync-model.ts';
 import {
@@ -162,6 +163,7 @@ export interface Contract {
   approval?: Approval;
 }
 export interface Evidence {
+  inspection?: ReviewInspection;
   id: string;
   runId: string;
   kind: 'test' | 'review';

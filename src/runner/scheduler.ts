@@ -1,6 +1,7 @@
 import { taskOwner } from '../core/sync-state.ts';
 import { ProjectMemory } from '../application/memory.ts';
 import { measuredExecute } from './usage.ts';
+import { unobservedReview } from '../core/review.ts';
 import { timed } from './timing.ts';
 import { assertRequirements, recordRequirements } from './requirements.ts';
 import { snapshotDependencies, assertDependencies, runEnvironment } from './dependencies.ts';
@@ -263,9 +264,12 @@ export class Scheduler {
     const passed =
       clean && parsed.approved && !parsed.findings.some((f) => f.severity === 'blocking');
     const log = join(dir, 'review.json');
-    await writeFile(log, JSON.stringify(parsed, null, 2));
+    const inspection = result.inspection ?? unobservedReview();
+    const review = { ...parsed, inspection };
+    await writeFile(log, JSON.stringify(review, null, 2));
     this.h.evidence(run.id, run.token, {
       kind: 'review',
+      inspection,
       phase,
       sha,
       gate: 'independent-review',
@@ -273,8 +277,8 @@ export class Scheduler {
       command: result.command,
       exitCode: passed ? 0 : 1,
       log,
-      digest: digest(parsed),
-      summary: parsed.summary,
+      digest: digest(review),
+      summary: `[${inspection.mode}] ${parsed.summary}`,
     });
     if (!passed) throw new Error('Независимое ревью отклонило результат: ' + parsed.summary);
   }
