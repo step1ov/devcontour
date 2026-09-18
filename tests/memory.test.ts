@@ -108,7 +108,7 @@ test('Typed memory pins sources, rejects cross-owner links and excludes stale/co
     assert.equal(f.memory.recall({ repositoryId: 'main' }).records.length, 0);
     const historical = f.memory.recall({ repositoryId: 'main', includeUncertain: true });
     assert.ok(historical.records.find((r) => r.record.id === summary.id)?.status === 'stale');
-    await f.memory.retain({
+    f.memory.retain({
       repositoryId: 'main',
       kind: 'hypothesis',
       subject: 'performance',

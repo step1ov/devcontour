@@ -50,7 +50,7 @@ export async function serve(
         await import('vite')
       ).createServer({ server: { middlewareMode: true }, appType: 'spa' })
     : undefined;
-  const server = createServer(async (req, res) => {
+  const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     try {
       if (
         ![new URL(origin).host, `localhost:${new URL(origin).port}`].includes(
@@ -259,6 +259,13 @@ export async function serve(
               : String(error),
       });
     }
+  };
+  const server = createServer((req, res) => {
+    // Node's HTTP server does not await listener promises. Also catch failures
+    // while writing an error response, e.g. after the connection has closed.
+    void handleRequest(req, res).catch((error: unknown) => {
+      res.destroy(error instanceof Error ? error : new Error(String(error)));
+    });
   });
   await new Promise<void>((r, reject) => {
     server.once('error', reject);

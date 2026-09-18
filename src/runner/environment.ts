@@ -25,13 +25,13 @@ export function executionEnvironment(
       if (source[key] === undefined) throw new Error(`Не задана переменная окружения: ${key}`);
       env[key] = source[key];
       // Inherited values are also redacted: callers need not classify every provider token.
-      if (source[key]) secretValues.push(source[key]!);
+      if (source[key]) secretValues.push(source[key]);
     }
     Object.assign(env, profile.values);
     for (const [key, from] of Object.entries(profile.secrets)) {
       if (!source[from]) throw new Error(`Не задан секрет окружения: ${from} (для ${key})`);
       env[key] = source[from];
-      secretValues.push(source[from]!);
+      secretValues.push(source[from]);
     }
   }
   Object.assign(env, devcontour);
@@ -95,7 +95,7 @@ export async function withEnvironment<T>(
     runId: execution.env.DEVCONTOUR_RUN_ID,
   };
   await writeFile(receiptPath, JSON.stringify(receipt, null, 2));
-  let result: T | undefined, failure: unknown;
+  let result: T | undefined, failure: Error | undefined;
   try {
     await measure('setup', () =>
       runSteps(lifecycle.setup, cwd, join(dir, 'setup'), execution, signal),
@@ -105,7 +105,11 @@ export async function withEnvironment<T>(
     );
     result = await action();
   } catch (error) {
-    failure = error;
+    // A thrown undefined/false must still fail the attempt after cleanup.
+    failure =
+      error instanceof Error
+        ? error
+        : new Error('Операция окружения завершилась ошибкой', { cause: error });
   }
   try {
     await measure('cleanup', () => teardown(lifecycle, cwd, dir, execution));
