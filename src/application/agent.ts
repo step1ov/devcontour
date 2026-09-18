@@ -70,11 +70,13 @@ export const agentRequest = z
   .strict();
 export const descriptions: Record<AgentOperation, string> = {
   intent_render:
-    'Render a component intent map from committed local REQ sources, or workspace release references. Returns Markdown only; does not write, approve or commit it.',
+    'Render component intent from committed REQ sources, or a workspace product/application/feature map with pinned local story references. Returns Markdown only; does not write, approve or commit it.',
   intent_snapshot:
     'Read committed INTENT.md and exact story REQ bindings. Add a configured test gate/scenario, and bind the detailed requirements too.',
   intent_report:
-    'Audit every story of a declared release and all declared REQ sources for missing or stale coverage. Workspace reports contain component references and counts only. This never accepts a release.',
+    'Audit all release stories and REQ sources. Product maps add application/feature progress and current bound ChangeSet acceptance. Read-only; never accepts a release or copies local task text.',
+  product_view:
+    'Read the committed product/application/component map and computed feature progress for a release. Includes explicit deferred/not-applicable scope and joint verification. No writes or model calls.',
   usage_report:
     'Read paginated owner-local invocation costs, versions and telemetry coverage; never evidence.',
   decision_report:
@@ -125,7 +127,7 @@ export const descriptions: Record<AgentOperation, string> = {
   board_correct:
     'Create a correction after board acceptance, preserving history and recalculating transitive impact.',
   changeset_create:
-    'Declare a shared change across boards. Verification and acceptance are separate operations.',
+    'Declare a shared change across boards. Set releaseId to bind product release acceptance to the workspace INTENT map and mandatory joint tests. Verification and acceptance remain separate operations.',
   queue_set:
     'Pause or resume issuance of tasks. Resuming may invoke configured models in a running server; this does not launch a server or cancel active runs.',
 };
@@ -134,6 +136,7 @@ export const readOnly = (name: AgentOperation) =>
     'intent_render',
     'intent_snapshot',
     'intent_report',
+    'product_view',
     'usage_report',
     'decision_report',
     'strategy_replay',
@@ -200,6 +203,8 @@ export class AgentService {
         return new IntentService(h).snapshot(input);
       case 'intent_report':
         return new IntentService(h).report(input);
+      case 'product_view':
+        return new IntentService(h).productView(input);
       case 'usage_report':
         return new Observability(h).usage(input);
       case 'decision_report':

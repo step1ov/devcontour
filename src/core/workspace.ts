@@ -5,6 +5,7 @@ import { entityId } from './ids.ts';
 import { z } from 'zod';
 import { DevContour, digest, specDigest } from './service.ts';
 import { repositories } from './repositories.ts';
+import type { ProductReleaseProof } from './product-map.ts';
 import {
   DomainError,
   requireValue,
@@ -16,6 +17,10 @@ import {
 } from './model.ts';
 
 export const changeSetInput = z.object({
+  releaseId: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{1,50}$/)
+    .optional(),
   title: z.string().trim().min(3).max(180),
   description: z.string().trim().min(10).max(12000),
   boardIds: z.array(z.string()).min(1).max(100),
@@ -51,8 +56,26 @@ export const snapshotDigest = (snapshot: ReturnType<typeof changeSnapshot>) =>
     })),
   });
 
+export interface ProductReleaseGuard {
+  capture(releaseId: string, snapshot: ReturnType<typeof changeSnapshot>): ProductReleaseProof;
+  validate(
+    proof: ProductReleaseProof,
+    snapshot: ReturnType<typeof changeSnapshot>,
+    manifest?: Verification['manifest'],
+  ): void;
+}
+
 export class Workspace {
-  constructor(readonly h: DevContour) {}
+  constructor(
+    readonly h: DevContour,
+    readonly productGuard?: ProductReleaseGuard,
+  ) {}
+  private guard() {
+    return requireValue(
+      this.productGuard,
+      'Продуктовый релиз требует проверки INTENT через runner',
+    );
+  }
   policyDigest() {
     return digest({
       repositories: repositories(this.h.config),
@@ -118,7 +141,9 @@ export class Workspace {
       const snapshot = changeSnapshot(s, c);
       if (!snapshot.tasks.length || snapshot.tasks.some((t) => t.status !== 'done' || !t.resultSha))
         throw new DomainError('Сначала завершите все задачи ChangeSet');
+      const productRelease = c.releaseId ? this.guard().capture(c.releaseId, snapshot) : undefined;
       const v: Verification = {
+        ...(productRelease ? { productRelease } : {}),
         id: randomUUID(),
         token: randomUUID(),
         startedAt: new Date().toISOString(),
@@ -146,10 +171,19 @@ export class Workspace {
       )
         throw new DomainError('Устаревшая попытка проверки workspace');
       if (
+        c.releaseId !== v.productRelease?.releaseId ||
         v.policyDigest !== this.policyDigest() ||
         v.specDigest !== snapshotDigest(changeSnapshot(s, c))
       )
         throw new DomainError('Состав ChangeSet или политика изменились; нужна новая проверка');
+      if (c.releaseId) {
+        if (v.productRelease?.releaseId !== c.releaseId)
+          throw new DomainError('Нет закреплённой проверки продуктового релиза');
+        // Full coverage is captured before the lease starts. Compare its pinned inputs at
+        // manifest/finish/accept; per-gate recording and heartbeats need no Git I/O.
+        if (event === 'workspace.verified')
+          this.guard().validate(v.productRelease, changeSnapshot(s, c), v.manifest);
+      }
       return action(v);
     });
   }
@@ -173,7 +207,12 @@ export class Workspace {
         throw new DomainError('Manifest должен фиксировать SHA и tree каждого репозитория');
       v.manifest = manifest;
       v.manifestDigest = digest(manifest);
-      v.impact = componentImpact(this.h.config, this.h.store.read(), v);
+      if (v.productRelease) this.guard().validate(v.productRelease, v, manifest);
+      v.impact = componentImpact(
+        v.productRelease ? { ...this.h.config, verificationMode: 'all' } : this.h.config,
+        this.h.store.read(),
+        v,
+      );
       return { changeSetId: id, verificationId: v.id, manifest, digest: v.manifestDigest };
     });
   }
@@ -217,11 +256,17 @@ export class Workspace {
         !v ||
         v.status !== 'passed' ||
         !v.manifest ||
+        c.releaseId !== v.productRelease?.releaseId ||
         digest(v.manifest) !== v.manifestDigest ||
         v.policyDigest !== this.policyDigest() ||
         v.specDigest !== snapshotDigest(changeSnapshot(s, c))
       )
         throw new DomainError('Нет актуальной успешной проверки всего ChangeSet');
+      if (c.releaseId) {
+        if (v.productRelease?.releaseId !== c.releaseId)
+          throw new DomainError('Нет закреплённой проверки продуктового релиза');
+        this.guard().validate(v.productRelease, changeSnapshot(s, c), v.manifest);
+      }
       for (const gate of this.h.config.workspaceGates.filter(
         (g) => !v.impact || v.impact.gateIds.includes(g.id),
       ))

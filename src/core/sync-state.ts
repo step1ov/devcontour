@@ -158,6 +158,7 @@ export function recordsFromState(h: DevContour, s: DevContourState) {
         title: c.title,
         description: c.description,
         boardIds: c.boardIds,
+        releaseId: c.releaseId,
         createdAt: c.createdAt,
         supersedes: c.supersedes,
       },
@@ -396,9 +397,18 @@ export function stateFromRecords(
         previous = old.changeSets.find((p) => p.id === c.id);
       if (c.boardIds.some((id) => !s.boards.some((b) => b.id === id)))
         throw new Error('ChangeSet с неизвестной доской');
-      if (previous?.acceptance && canonical(c.boardIds) !== canonical(previous.boardIds))
+      if (
+        previous?.acceptance &&
+        (canonical(c.boardIds) !== canonical(previous.boardIds) ||
+          c.releaseId !== previous.releaseId)
+      )
         throw new Error('Нельзя менять принятый ChangeSet');
-      return { ...previous, ...c, verifications: previous?.verifications ?? [] };
+      return {
+        ...previous,
+        ...c,
+        releaseId: c.releaseId,
+        verifications: previous?.verifications ?? [],
+      };
     });
   assertDag(s.changeSets.map((c) => ({ id: c.id, dependsOn: c.supersedes ? [c.supersedes] : [] })));
   return s;

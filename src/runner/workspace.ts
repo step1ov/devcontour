@@ -6,6 +6,7 @@ import { join, resolve, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import { DevContour, digest } from '../core/service.ts';
 import { Workspace } from '../core/workspace.ts';
+import { IntentService } from './intent.ts';
 import { repositories } from '../core/repositories.ts';
 import type { Verification, WorkspaceEvidence } from '../core/model.ts';
 import { reserveRepositories } from './ownership.ts';
@@ -19,7 +20,7 @@ export class WorkspaceRunner {
     readonly h: DevContour,
     readonly root: string,
   ) {
-    this.workspace = new Workspace(h);
+    this.workspace = new Workspace(h, new IntentService(h));
   }
   verify(id: string) {
     const run = this.workspace.start(id);
@@ -67,6 +68,7 @@ export class WorkspaceRunner {
             manifest[repo.id] = { sha, tree: await git(cwd, 'rev-parse', 'HEAD^{tree}') };
             paths[repo.id] = await realpath(cwd);
           }
+          w.heartbeat(id, run.token);
           w.manifest(id, run.token, manifest);
           const impact = this.h.store
             .read()
@@ -211,6 +213,7 @@ export class WorkspaceRunner {
             },
           );
           await clean();
+          w.heartbeat(id, run.token);
           return w.finish(id, run.token);
         },
       );

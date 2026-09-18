@@ -1,9 +1,28 @@
 import { execFileSync } from 'node:child_process';
 import { z } from 'zod';
 import { DevContour, digest, specDigest } from '../core/service.ts';
-import { DomainError, requireValue, type Task } from '../core/model.ts';
-import { repository } from '../core/repositories.ts';
+import {
+  DomainError,
+  relativePath,
+  requireValue,
+  type Task,
+  type Verification,
+} from '../core/model.ts';
+import {
+  Workspace,
+  changeSnapshot,
+  snapshotDigest,
+  type ProductReleaseGuard,
+} from '../core/workspace.ts';
+import {
+  storyKey,
+  type FeatureProgress,
+  type ProductReleaseProof,
+  type ProductView,
+} from '../core/product-map.ts';
+import { repository, repositories } from '../core/repositories.ts';
 import { taskOwner } from '../core/sync-state.ts';
+import { delivered } from '../core/delivery.ts';
 import {
   intentDefinition,
   intentRequirementId,
@@ -12,6 +31,7 @@ import {
   renderIntent,
   validateIntent,
   type ComponentIntent,
+  type WorkspaceIntent,
 } from '../core/intent.ts';
 import { parseRequirements, requirementSnapshot } from './requirements.ts';
 
@@ -26,6 +46,7 @@ export const intentInputs = {
   intent_render: z.strictObject({ ...scope, definition: intentDefinition }),
   intent_snapshot: z.strictObject({ ...scope, storyId: id.optional() }),
   intent_report: z.strictObject({ ...scope, releaseId: id }),
+  product_view: z.strictObject({ releaseId: id.optional() }),
 };
 function git(root: string, ...args: string[]) {
   return execFileSync('git', args, {
@@ -35,25 +56,75 @@ function git(root: string, ...args: string[]) {
     stdio: ['ignore', 'pipe', 'pipe'],
   }).trimEnd();
 }
-export class IntentService {
+export class IntentService implements ProductReleaseGuard {
   constructor(readonly h: DevContour) {}
+  private readCache?: Map<string, string>;
+  private reading<T>(read: () => T): T {
+    if (this.readCache) return read();
+    this.readCache = new Map();
+    try {
+      return read();
+    } finally {
+      this.readCache = undefined;
+    }
+  }
+  private git(root: string, ...args: string[]) {
+    const key = JSON.stringify([root, args]);
+    if (this.readCache?.has(key)) return this.readCache.get(key)!;
+    const value = git(root, ...args);
+    this.readCache?.set(key, value);
+    return value;
+  }
+  private requirements(root: string, source: string, sha: string) {
+    relativePath.parse(source);
+    if (!/^[a-f0-9]{40,64}$/.test(sha)) throw new DomainError('Нужен точный SHA источников');
+    if (
+      !/^100(644|755) blob /.test(
+        this.git(root, '--literal-pathspecs', 'ls-tree', sha, '--', source),
+      )
+    )
+      throw new DomainError('ТЗ должно быть обычным Git-файлом: ' + source);
+    return { requirements: parseRequirements(this.git(root, 'show', sha + ':' + source)) };
+  }
+  render(raw: unknown) {
+    return this.reading(() => this.renderCurrent(raw));
+  }
+  snapshot(raw: unknown) {
+    return this.reading(() => this.snapshotCurrent(raw));
+  }
+  report(raw: unknown): Record<string, unknown> {
+    return this.reading(() => this.reportCurrent(raw));
+  }
+  productView(raw: unknown = {}): ProductView {
+    return this.reading(() => this.productViewCurrent(raw));
+  }
+  capture(releaseId: string, selected: ReturnType<typeof changeSnapshot>): ProductReleaseProof {
+    return this.reading(() => this.captureCurrent(releaseId, selected));
+  }
+  validate(
+    proof: ProductReleaseProof,
+    selected: ReturnType<typeof changeSnapshot>,
+    manifest?: Verification['manifest'],
+  ) {
+    return this.reading(() => this.validateCurrent(proof, selected, manifest));
+  }
   private root(repositoryId?: string) {
     return repositoryId
       ? repository(this.h.config, repositoryId).path
       : requireValue(this.h.config.workspaceRoot, 'Нужен Git workspaceRoot');
   }
-  private read(repositoryId?: string) {
+  private read(repositoryId?: string, ref = 'HEAD') {
     const root = this.root(repositoryId),
-      sha = git(root, 'rev-parse', '--verify', 'HEAD^{commit}');
-    if (!/^100(644|755) blob /.test(git(root, 'ls-tree', sha, '--', 'INTENT.md')))
+      sha = this.git(root, 'rev-parse', '--verify', ref + '^{commit}');
+    if (!/^100(644|755) blob /.test(this.git(root, 'ls-tree', sha, '--', 'INTENT.md')))
       throw new DomainError('Нужен обычный committed INTENT.md выбранного владельца');
-    const markdown = git(root, 'show', sha + ':INTENT.md'),
+    const markdown = this.git(root, 'show', sha + ':INTENT.md'),
       document = parseIntent(markdown);
     if ((repositoryId ? 'component' : 'workspace') !== document.kind)
       throw new DomainError('INTENT kind не соответствует владельцу');
     return { sha, markdown, document, digest: digest(document) };
   }
-  render(raw: unknown) {
+  private renderCurrent(raw: unknown) {
     const input = intentInputs.intent_render.parse(raw),
       definition = input.definition;
     validateIntent(definition);
@@ -62,9 +133,9 @@ export class IntentService {
     let document;
     if (definition.kind === 'component') {
       const root = this.root(input.repositoryId),
-        sha = git(root, 'rev-parse', '--verify', 'HEAD^{commit}');
+        sha = this.git(root, 'rev-parse', '--verify', 'HEAD^{commit}');
       const sections = definition.sources.flatMap((source) =>
-        requirementSnapshot(root, source, sha).requirements.map((r) => ({ ...r, source })),
+        this.requirements(root, source, sha).requirements.map((r) => ({ ...r, source })),
       );
       const pin = (ref: { source: string; id: string }) => {
         const r = sections.find((s) => referenceKey(s) === referenceKey(ref));
@@ -82,6 +153,8 @@ export class IntentService {
         exclusions: definition.exclusions.map((e) => ({ ...pin(e), reason: e.reason })),
       };
     } else {
+      const issues = this.mapIssues(definition);
+      if (issues.length) throw new DomainError(issues.join('; '));
       document = {
         ...definition,
         version: 1,
@@ -107,7 +180,7 @@ export class IntentService {
       next: 'Write in the selected owner, review scope, commit, then intent_snapshot. No file or status was changed.',
     };
   }
-  snapshot(raw: unknown) {
+  private snapshotCurrent(raw: unknown) {
     const input = intentInputs.intent_snapshot.parse(raw),
       snapshot = this.read(input.repositoryId);
     if (snapshot.document.kind === 'workspace') {
@@ -141,7 +214,7 @@ export class IntentService {
       })),
     };
   }
-  report(raw: unknown): Record<string, unknown> {
+  private reportCurrent(raw: unknown): Record<string, unknown> {
     const input = intentInputs.intent_report.parse(raw),
       snapshot = this.read(input.repositoryId);
     if (snapshot.document.kind === 'component')
@@ -150,16 +223,41 @@ export class IntentService {
         input.releaseId,
         snapshot as typeof snapshot & { document: ComponentIntent },
       );
-    const release = snapshot.document.releases.find((r) => r.id === input.releaseId);
+    const coverage = this.workspaceCoverage(snapshot.document, input.releaseId);
+    const product = snapshot.document.product
+      ? this.productProgress(snapshot.document, snapshot.digest, input.releaseId, coverage)
+      : undefined;
+    return {
+      repositoryId: null,
+      releaseId: input.releaseId,
+      intentDigest: snapshot.digest,
+      coverageComplete: coverage.complete,
+      components: coverage.components,
+      ...(product ? { product, issues: coverage.issues } : {}),
+      releaseAccepted: product?.releaseAccepted ?? false,
+      note: 'Coverage is not release acceptance. Product releases require a bound ChangeSet and fresh joint verification. Component task text stays local.',
+    };
+  }
+  private workspaceCoverage(
+    doc: WorkspaceIntent,
+    releaseId: string,
+    manifest?: Verification['manifest'],
+    resultRefs?: Record<string, string>,
+  ) {
+    const release = doc.releases.find((r) => r.id === releaseId);
     if (!release) throw new DomainError('Неизвестный релиз');
+    const locals = new Map<string, ReturnType<IntentService['componentReport']>>();
     const components = release.components.map((c) => {
       try {
-        const actual = this.read(c.repositoryId);
+        const actual = this.read(c.repositoryId, manifest?.[c.repositoryId]?.sha ?? 'HEAD');
+        if (actual.document.kind !== 'component') throw new DomainError('Нужна карта компонента');
         const report = this.componentReport(
           c.repositoryId,
           c.releaseId,
           actual as typeof actual & { document: ComponentIntent },
+          manifest?.[c.repositoryId]?.sha ?? resultRefs?.[c.repositoryId],
         );
+        locals.set(c.repositoryId, report);
         return {
           ...c,
           currentDigest: actual.digest,
@@ -172,20 +270,343 @@ export class IntentService {
         return { ...c, fresh: false, coverageComplete: false, unavailable: true };
       }
     });
+    const issues = this.mapIssues(doc, releaseId);
     return {
-      repositoryId: null,
-      releaseId: release.id,
-      intentDigest: snapshot.digest,
-      coverageComplete: components.every((c) => c.coverageComplete),
+      release,
+      locals,
       components,
-      releaseAccepted: false,
-      note: 'Coverage only. Joint ChangeSet verification and the configured publication policy remain mandatory. Component task text stays local.',
+      issues,
+      complete: !issues.length && components.every((c) => c.coverageComplete),
     };
   }
+  private mapIssues(
+    doc: Extract<z.infer<typeof intentDefinition>, { kind: 'workspace' }>,
+    releaseId?: string,
+  ) {
+    if (!doc.product) return [];
+    const issues: string[] = [],
+      locals = new Map<string, ComponentIntent>();
+    for (const component of doc.product.components) {
+      try {
+        repository(this.h.config, component.repositoryId);
+      } catch {
+        issues.push('Неизвестный репозиторий карты: ' + component.repositoryId);
+      }
+    }
+    for (const release of doc.releases.filter((r) => !releaseId || r.id === releaseId)) {
+      const linked = new Set<string>();
+      for (const feature of release.features ?? []) {
+        for (const check of feature.checks) {
+          const gate = this.h.config.workspaceGates.find((g) => g.id === check.gate);
+          if (!gate || gate.kind !== 'test' || !gate.report)
+            issues.push('Фиче нужен настроенный сквозной test gate с JUnit: ' + check.gate);
+        }
+        for (const app of feature.applications) {
+          if (app.scope !== 'included') continue;
+          app.stories.forEach((s) => linked.add(storyKey(s)));
+        }
+      }
+      for (const target of release.components) {
+        try {
+          if (!locals.has(target.repositoryId)) {
+            const current = this.read(target.repositoryId).document;
+            if (current.kind !== 'component') throw new DomainError('Нужна карта компонента');
+            locals.set(target.repositoryId, current);
+          }
+          const local = locals.get(target.repositoryId)!;
+          for (const key of linked) {
+            const [repositoryId, storyId] = JSON.parse(key) as string[];
+            if (
+              repositoryId === target.repositoryId &&
+              !local.stories.some((s) => s.id === storyId && s.releaseId === target.releaseId)
+            )
+              issues.push(
+                'Неизвестная история в релизе компонента: ' + repositoryId + '/' + storyId,
+              );
+          }
+          for (const story of local.stories.filter((s) => s.releaseId === target.releaseId))
+            if (!linked.has(storyKey({ repositoryId: target.repositoryId, storyId: story.id })))
+              issues.push(
+                'История релиза не связана с фичей: ' + target.repositoryId + '/' + story.id,
+              );
+        } catch {
+          issues.push('Недоступна карта компонента: ' + target.repositoryId);
+        }
+      }
+    }
+    return [...new Set(issues)];
+  }
+
+  private captureCurrent(
+    releaseId: string,
+    selected: ReturnType<typeof changeSnapshot>,
+  ): ProductReleaseProof {
+    const snapshot = this.read(),
+      doc = snapshot.document;
+    if (doc.kind !== 'workspace' || !doc.product)
+      throw new DomainError('Для приёмки релиза нужна продуктовая карта workspace');
+    const acceptedHeads = Object.fromEntries(
+      repositories(this.h.config).map((repo) => [
+        repo.id,
+        this.git(repo.path, 'rev-parse', 'refs/heads/' + repo.targetBranch),
+      ]),
+    );
+    const coverage = this.workspaceCoverage(doc, releaseId, undefined, acceptedHeads);
+    if (!coverage.complete)
+      throw new DomainError(
+        'Продуктовый релиз не покрыт актуальными требованиями и задачами' +
+          (coverage.issues.length ? ': ' + coverage.issues.join('; ') : ''),
+      );
+    const state = this.h.store.read();
+    for (const board of selected.boards) {
+      const revision = state.boards.find((b) => b.id === board.id)?.revisions.at(-1);
+      if (revision?.status !== 'accepted' || revision.number !== board.revision)
+        throw new DomainError('Для релиза сначала примите текущие ревизии всех досок');
+    }
+    const selectedIds = new Set(selected.tasks.map((t) => t.id));
+    for (const local of coverage.locals.values())
+      for (const taskId of local.stories.flatMap((s) => s.taskIds))
+        if (!selectedIds.has(taskId))
+          throw new DomainError('ChangeSet не включает задачу релиза: ' + taskId);
+    return {
+      releaseId,
+      intentDigest: snapshot.digest,
+      gateIds: [
+        ...new Set(coverage.release.features!.flatMap((f) => f.checks.map((c) => c.gate))),
+      ].sort(),
+      acceptedHeads,
+      sources: coverage.release.components.map((c) => {
+        const local = this.read(c.repositoryId).document as ComponentIntent;
+        const files = [...new Set(['INTENT.md', ...local.sources])].sort();
+        return {
+          repositoryId: c.repositoryId,
+          files,
+          digest: this.sourceDigest(c.repositoryId, files, 'HEAD'),
+        };
+      }),
+      stateDigest: this.coverageStateDigest(
+        coverage.release.components.map((c) => c.repositoryId),
+        selected,
+      ),
+    };
+  }
+
+  private sourceDigest(repositoryId: string, files: string[], ref: string) {
+    return digest(
+      this.git(
+        repository(this.h.config, repositoryId).path,
+        '--literal-pathspecs',
+        'ls-tree',
+        ref,
+        '--',
+        ...files,
+      ),
+    );
+  }
+
+  private coverageStateDigest(
+    repositoryIds: string[],
+    selected: ReturnType<typeof changeSnapshot>,
+  ) {
+    const state = this.h.store.read();
+    const tasks = state.tasks.filter((t) => repositoryIds.includes(taskOwner(t) ?? ''));
+    const ids = new Set(tasks.map((t) => t.id));
+    return digest({
+      tasks: tasks.toSorted((a, b) => a.id.localeCompare(b.id)),
+      checks: state.runs
+        .filter((r) => ids.has(r.taskId) && r.status === 'succeeded')
+        .map((r) => ({ id: r.id, taskId: r.taskId, evidence: r.evidence }))
+        .toSorted((a, b) => a.id.localeCompare(b.id)),
+      boards: selected.boards
+        .map((b) => {
+          const revision = state.boards.find((x) => x.id === b.id)?.revisions.at(-1);
+          return { id: b.id, revision: revision?.number, status: revision?.status };
+        })
+        .toSorted((a, b) => a.id.localeCompare(b.id)),
+    });
+  }
+
+  private validateCurrent(
+    proof: ProductReleaseProof,
+    selected: ReturnType<typeof changeSnapshot>,
+    manifest?: Verification['manifest'],
+  ) {
+    const snapshot = this.read();
+    if (snapshot.digest !== proof.intentDigest)
+      throw new DomainError('Продуктовая карта изменилась; нужна новая проверка релиза');
+    const doc = snapshot.document as WorkspaceIntent;
+    const release = doc.releases.find((r) => r.id === proof.releaseId);
+    if (
+      !release ||
+      this.mapGateIds(release) !== JSON.stringify(proof.gateIds) ||
+      proof.stateDigest !==
+        this.coverageStateDigest(
+          release.components.map((c) => c.repositoryId),
+          selected,
+        )
+    )
+      throw new DomainError('Покрытие или проверки релиза изменились; нужна новая проверка');
+    for (const [id, sha] of Object.entries(proof.acceptedHeads)) {
+      const repo = repository(this.h.config, id);
+      if (
+        this.git(repo.path, 'rev-parse', 'refs/heads/' + repo.targetBranch) !== sha ||
+        (manifest && manifest[id]?.sha !== sha)
+      )
+        throw new DomainError('Принятая версия компонента изменилась; повторите проверку релиза');
+    }
+    for (const source of proof.sources) {
+      if (source.digest !== this.sourceDigest(source.repositoryId, source.files, 'HEAD'))
+        throw new DomainError('Источники требований изменились; повторите проверку релиза');
+      if (
+        manifest &&
+        (!manifest[source.repositoryId] ||
+          source.digest !==
+            this.sourceDigest(source.repositoryId, source.files, manifest[source.repositoryId].sha))
+      )
+        throw new DomainError(
+          'Проверяемые SHA не содержат актуальные источники продуктового релиза',
+        );
+    }
+  }
+
+  private mapGateIds(release: WorkspaceIntent['releases'][number]) {
+    return JSON.stringify(
+      [...new Set(release.features?.flatMap((f) => f.checks.map((c) => c.gate)))].sort(),
+    );
+  }
+
+  private productProgress(
+    doc: WorkspaceIntent,
+    intentDigest: string,
+    releaseId: string,
+    coverage: ReturnType<IntentService['workspaceCoverage']>,
+  ) {
+    const state = this.h.store.read(),
+      workspace = new Workspace(this.h);
+    let verification: { changeSetId: string; verificationId: string } | undefined;
+    let releaseAccepted = false;
+    for (const changeSet of [...state.changeSets].reverse()) {
+      if (changeSet.releaseId !== releaseId) continue;
+      const run = changeSet.verifications.at(-1);
+      if (
+        !run ||
+        run.status !== 'passed' ||
+        !run.manifest ||
+        !run.productRelease ||
+        run.productRelease.releaseId !== releaseId ||
+        run.productRelease.intentDigest !== intentDigest ||
+        run.manifestDigest !== digest(run.manifest) ||
+        run.policyDigest !== workspace.policyDigest()
+      )
+        continue;
+      try {
+        const selected = changeSnapshot(state, changeSet);
+        if (run.specDigest !== snapshotDigest(selected)) continue;
+        this.validate(run.productRelease, selected, run.manifest);
+        if (
+          this.h.config.workspaceGates.some(
+            (g) => !run.evidence.findLast((e) => e.gate === g.id)?.passed,
+          )
+        )
+          continue;
+        verification = { changeSetId: changeSet.id, verificationId: run.id };
+        releaseAccepted =
+          changeSet.acceptance?.verificationId === run.id &&
+          changeSet.acceptance.digest === digest(run) &&
+          (this.h.config.completionMode !== 'remote' || Boolean(delivered(this.h, changeSet)));
+        if (releaseAccepted) break;
+      } catch {
+        /* An old acceptance remains history, not current product readiness. */
+      }
+    }
+    const features: FeatureProgress[] = coverage.release.features!.map((scope) => {
+      const feature = doc.product!.features.find((f) => f.id === scope.featureId)!;
+      const applications = scope.applications.map((app) => {
+        if (app.scope !== 'included') return app;
+        const stories = app.stories.map((ref) => ({
+          story: coverage.locals.get(ref.repositoryId)?.stories.find((s) => s.id === ref.storyId),
+          fresh: coverage.components.find((c) => c.repositoryId === ref.repositoryId)?.fresh,
+        }));
+        return {
+          ...app,
+          covered: stories.every((s) => s.fresh && s.story?.verified),
+          planned: stories.every((s) => Boolean(s.story?.taskIds.length)),
+        };
+      });
+      const included = applications.filter((a) => a.scope === 'included');
+      const covered = included.length > 0 && included.every((a) => a.covered);
+      const status: FeatureProgress['status'] = !included.length
+        ? applications.some((a) => a.scope === 'deferred')
+          ? 'deferred'
+          : 'not-applicable'
+        : !included.every((a) => a.planned)
+          ? 'unplanned'
+          : !covered
+            ? 'in-progress'
+            : releaseAccepted
+              ? 'accepted'
+              : verification
+                ? 'verified'
+                : 'awaiting-verification';
+      return {
+        ...feature,
+        status,
+        applications,
+        checks: scope.checks.map((c) => ({ ...c, passed: covered && Boolean(verification) })),
+      };
+    });
+    return { features, verification, releaseAccepted };
+  }
+
+  private productViewCurrent(raw: unknown = {}): ProductView {
+    const input = intentInputs.product_view.parse(raw);
+    if (!this.h.config.workspaceRoot)
+      return {
+        available: false,
+        reason: 'Укажите Git workspace и подготовьте его INTENT.md с картой продукта.',
+      };
+    const root = this.root();
+    if (!this.git(root, 'ls-tree', 'HEAD', '--', 'INTENT.md'))
+      return {
+        available: false,
+        reason: 'Ведущий агент ещё не закрепил INTENT.md в Git workspace.',
+      };
+    const snapshot = this.read(),
+      doc = snapshot.document as WorkspaceIntent;
+    if (!doc.product)
+      return {
+        available: false,
+        reason:
+          'В INTENT.md есть релизы компонентов; добавьте приложения и карту фич через intent_render.',
+      };
+    const releaseId = input.releaseId ?? doc.releases[0].id;
+    const coverage = this.workspaceCoverage(doc, releaseId);
+    const issues = [
+      ...coverage.issues,
+      ...coverage.components
+        .filter((c) => !c.coverageComplete)
+        .map((c) => 'Нет актуального полного покрытия компонента: ' + c.repositoryId),
+    ];
+    return {
+      available: true,
+      title: doc.title,
+      purpose: doc.purpose,
+      applications: doc.product.applications,
+      components: doc.product.components,
+      releases: doc.releases.map((r) => ({ id: r.id, title: r.title })),
+      releaseId,
+      intentDigest: snapshot.digest,
+      coverageComplete: coverage.complete,
+      issues,
+      ...this.productProgress(doc, snapshot.digest, releaseId, coverage),
+    };
+  }
+
   private componentReport(
     repositoryId: string,
     releaseId: string,
     snapshot: { sha: string; markdown: string; document: ComponentIntent; digest: string },
+    resultRef?: string,
   ) {
     const doc = snapshot.document,
       root = this.root(repositoryId);
@@ -201,7 +622,7 @@ export class IntentService {
     const sectionsAt = (source: string) => {
       if (!sources.has(source)) {
         try {
-          sources.set(source, requirementSnapshot(root, source, snapshot.sha).requirements);
+          sources.set(source, this.requirements(root, source, snapshot.sha).requirements);
         } catch {
           sources.set(source, null);
         }
@@ -238,19 +659,51 @@ export class IntentService {
       );
     };
     const completionCache = new Map<string, boolean>();
+    let resultTip: string | undefined,
+      allResultsIntegrated = false;
+    const results = [...new Set(tasks.filter((t) => t.status === 'done').map((t) => t.resultSha))];
+    if (results.length && results.every((sha) => sha && /^[a-f0-9]{40,64}$/.test(sha))) {
+      try {
+        resultTip = this.git(
+          root,
+          'rev-parse',
+          resultRef ?? repository(this.h.config, repositoryId).targetBranch,
+        );
+        allResultsIntegrated = true;
+        // A bounded batch has only the accepted tip as an independent head iff all
+        // result commits are its ancestors. Fall back per task for partial reports.
+        for (let offset = 0; offset < results.length; offset += 100) {
+          if (
+            this.git(
+              root,
+              'merge-base',
+              '--independent',
+              resultTip,
+              ...(results.slice(offset, offset + 100) as string[]),
+            ) !== resultTip
+          ) {
+            allResultsIntegrated = false;
+            break;
+          }
+        }
+      } catch {
+        allResultsIntegrated = false;
+      }
+    }
     const completed = (task: Task) => {
       if (completionCache.has(task.id)) return completionCache.get(task.id)!;
       completionCache.set(task.id, false);
       if (task.status !== 'done' || task.approvedDigest !== specDigest(task) || !fresh(task))
         return false;
       try {
-        git(
-          root,
-          'merge-base',
-          '--is-ancestor',
-          task.resultSha!,
-          repository(this.h.config, repositoryId).targetBranch,
-        );
+        if (!allResultsIntegrated)
+          this.git(
+            root,
+            'merge-base',
+            '--is-ancestor',
+            task.resultSha!,
+            resultTip ?? resultRef ?? repository(this.h.config, repositoryId).targetBranch,
+          );
       } catch {
         return false;
       }

@@ -217,13 +217,14 @@ export async function setupProject(options: {
       'experiments',
       'agent-evals',
       'intent',
+      'product-map',
       'mcp-and-profiles',
     ].map((name) => ['docs/' + name + '.md', 'devcontour-' + name + '.md'] as [string, string]),
   ]);
   for (const [source, destination] of guides) {
     const text = await readFile(join(devcontourRoot, source), 'utf8');
     const rewritten = text.replace(
-      /\[([^\]]+)\]\(([^)]+\.md(?:#[^)]*)?)\)/g,
+      /\[([^\]]+)\]\(([^)]+\.(?:md|json)(?:#[^)]*)?)\)/g,
       (match, label, target: string) => {
         if (/^(https?:|#)/.test(target)) return match;
         const [file, anchor] = target.split('#');

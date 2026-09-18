@@ -72,6 +72,8 @@
   --icon-size: 1.125rem;
   --logo-size: 2rem;
   --dialog-width: 40rem;
+  --product-table-width: 48rem;
+  --product-column-width: 12rem;
   --duration-quick: 120ms;
   --z-overlay: 20;
   --graph-dot: var(--color-line);

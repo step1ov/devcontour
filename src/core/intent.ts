@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { DomainError, relativePath } from './model.ts';
+import { productMap, featureScope, validateProductMap } from './product-map.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,50}$/);
 const title = z
@@ -44,11 +45,20 @@ const target = z.strictObject({
   repositoryId: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/),
   releaseId: id,
 });
+const releaseFeatures = z.array(featureScope).min(1).max(100).optional();
 const workspace = z.strictObject({
   kind: z.literal('workspace'),
   ...common,
+  product: productMap.optional(),
   releases: z
-    .array(z.strictObject({ id, title, components: z.array(target).min(1).max(10) }))
+    .array(
+      z.strictObject({
+        id,
+        title,
+        components: z.array(target).min(1).max(10),
+        features: releaseFeatures,
+      }),
+    )
     .min(1)
     .max(20),
 });
@@ -77,6 +87,7 @@ export const intentDocument = z.discriminatedUnion('kind', [
         z.strictObject({
           id,
           title,
+          features: releaseFeatures,
           components: z
             .array(target.extend({ intentDigest: hash }))
             .min(1)
@@ -89,6 +100,7 @@ export const intentDocument = z.discriminatedUnion('kind', [
 ]);
 export type IntentDocument = z.infer<typeof intentDocument>;
 export type ComponentIntent = Extract<IntentDocument, { kind: 'component' }>;
+export type WorkspaceIntent = Extract<IntentDocument, { kind: 'workspace' }>;
 export const intentRequirementId = (storyId: string) => 'REQ-intent-' + storyId;
 export const referenceKey = (ref: { source: string; id: string }) =>
   JSON.stringify([ref.source, ref.id]);
@@ -102,6 +114,7 @@ export function validateIntent(value: z.infer<typeof intentDefinition>) {
     'release ID',
   );
   if (value.kind === 'workspace') {
+    validateProductMap(value.product, value.releases);
     for (const release of value.releases)
       unique(
         release.components.map((c) => c.repositoryId),
@@ -191,14 +204,40 @@ export function renderIntent(raw: unknown): string {
       }
     }
   } else {
+    if (value.product) {
+      lines.push('## Приложения и технические компоненты', '');
+      for (const app of value.product.applications)
+        lines.push(
+          '### ' + app.id + ': ' + app.title,
+          '',
+          prose(app.purpose),
+          '',
+          prose('Пользователи: ' + app.audience.join(', ')),
+          prose('Компоненты: ' + app.componentIds.join(', ')),
+          '',
+        );
+      for (const c of value.product.components) lines.push(prose(JSON.stringify(c)), '');
+      lines.push('## Возможности продукта', '');
+      for (const f of value.product.features)
+        lines.push('### ' + f.id + ': ' + f.title, '', prose(f.outcome), '');
+    }
     lines.push('## Component releases', '');
-    for (const release of value.releases)
+    for (const release of value.releases) {
       lines.push(
         '### ' + release.id + ': ' + release.title,
         '',
         ...release.components.map((c) => prose(JSON.stringify(c))),
         '',
       );
+      for (const f of release.features ?? [])
+        lines.push(
+          '#### ' + f.featureId,
+          '',
+          ...f.applications.map((a) => prose(JSON.stringify(a))),
+          ...f.checks.map((c) => prose(JSON.stringify(c))),
+          '',
+        );
+    }
   }
   return lines.join('\n');
 }

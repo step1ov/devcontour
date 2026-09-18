@@ -134,7 +134,7 @@ async function main() {
       'devcontour profile-show --profile <ID|./file.json> --repository /absolute/repo [--repository-id ID]',
     );
     console.log(
-      'devcontour intent-render --file definition.json [--repository-id ID] --workspace ...\ndevcontour intent-snapshot [--repository-id ID] [--story ID] --workspace ...\ndevcontour intent-report --release ID [--repository-id ID] [--require-complete] --workspace ...',
+      'devcontour intent-render --file definition.json [--repository-id ID] --workspace ...\ndevcontour intent-snapshot [--repository-id ID] [--story ID] --workspace ...\ndevcontour intent-report --release ID [--repository-id ID] [--require-complete] [--require-accepted] --workspace ...\ndevcontour product-view [--release ID] [--require-accepted] --workspace ...',
     );
     console.log(
       'devcontour engineering-evals [--live --runtime codex|claude --model ID --reviewer-model ID]\ndevcontour eval-compare --baseline report.json --candidate report.json',
@@ -314,7 +314,7 @@ async function main() {
     config.storage === 'component' ? repositories(config) : undefined,
   );
   const h = new DevContour(store, config);
-  if (['intent-render', 'intent-snapshot', 'intent-report'].includes(operation)) {
+  if (['intent-render', 'intent-snapshot', 'intent-report', 'product-view'].includes(operation)) {
     try {
       const service = new IntentService(h);
       const repositoryId = args.includes('--repository-id')
@@ -326,17 +326,26 @@ async function main() {
         process.stdout.write(service.render({ repositoryId, definition }).markdown);
       } else {
         const result =
-          operation === 'intent-snapshot'
-            ? service.snapshot({
-                repositoryId,
-                storyId: args.includes('--story') ? option('--story', '') : undefined,
+          operation === 'product-view'
+            ? service.productView({
+                releaseId: args.includes('--release') ? option('--release', '') : undefined,
               })
-            : service.report({ repositoryId, releaseId: option('--release', '') });
+            : operation === 'intent-snapshot'
+              ? service.snapshot({
+                  repositoryId,
+                  storyId: args.includes('--story') ? option('--story', '') : undefined,
+                })
+              : service.report({ repositoryId, releaseId: option('--release', '') });
         console.log(JSON.stringify(result, null, 2));
         if (
           operation === 'intent-report' &&
           args.includes('--require-complete') &&
           !('coverageComplete' in result && result.coverageComplete)
+        )
+          process.exitCode = 1;
+        if (
+          args.includes('--require-accepted') &&
+          !('releaseAccepted' in result && result.releaseAccepted)
         )
           process.exitCode = 1;
       }
@@ -415,7 +424,7 @@ async function main() {
   }
   attachJournal(h);
   const scheduler = new Scheduler(h, root);
-  const workspace = new Workspace(h);
+  const workspace = new Workspace(h, new IntentService(h));
   const workspaceRunner = new WorkspaceRunner(h, root);
   if (agentOperations.includes(operation)) {
     try {

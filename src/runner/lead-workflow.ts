@@ -7,6 +7,7 @@ import { reviewPlan, acceptBoard } from './agent-control.ts';
 import { WorkspaceRunner } from './workspace.ts';
 import { adapters } from './adapters.ts';
 import { assertRequirements } from './requirements.ts';
+import { IntentService } from './intent.ts';
 
 export class LeadRunner {
   readonly workflow: LeadWorkflow;
@@ -152,11 +153,24 @@ export class LeadRunner {
         (id) => s.boards.find((b) => b.id === id)?.revisions.at(-1)?.status !== 'accepted',
       );
     for (const task of changeSnapshot(s, c).tasks) assertRequirements(this.h, task);
-    const workspace = new Workspace(this.h);
+    const workspace = new Workspace(this.h, new IntentService(this.h));
     if (job.stage === 1) {
       const last = c.verifications.at(-1);
+      let productFresh = c.releaseId === last?.productRelease?.releaseId;
+      if (c.releaseId && last?.productRelease) {
+        try {
+          new IntentService(this.h).validate(
+            last.productRelease,
+            changeSnapshot(s, c),
+            last.manifest,
+          );
+        } catch {
+          productFresh = false;
+        }
+      }
       if (
         last?.status === 'passed' &&
+        productFresh &&
         last.specDigest === snapshotDigest(changeSnapshot(s, c)) &&
         last.policyDigest === workspace.policyDigest()
       )

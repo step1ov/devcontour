@@ -92,6 +92,10 @@ export const recordSchema = z.discriminatedUnion('kind', [
     version: z.literal(1),
     kind: z.literal('changeset'),
     data: z.strictObject({
+      releaseId: z
+        .string()
+        .regex(/^[A-Za-z0-9_-]{1,50}$/)
+        .optional(),
       id: syncId,
       title: z.string().min(3).max(180),
       description: z.string().min(10).max(12000),

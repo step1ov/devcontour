@@ -1071,6 +1071,73 @@ legend {
 .changeset-area {
   grid-template-columns: minmax(0, 1fr);
 }
+.product-panel {
+  padding: var(--space-6);
+  overflow-wrap: anywhere;
+}
+.product-heading,
+.product-switch {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  align-items: start;
+  justify-content: space-between;
+}
+.product-switch {
+  justify-content: start;
+  margin-block: var(--space-5);
+}
+.product-switch button[aria-pressed='true'] {
+  background: var(--status-ready-bg);
+  border-color: var(--action-primary);
+  color: var(--action-primary);
+}
+.product-table-scroll {
+  overflow-x: auto;
+  margin-block: var(--space-4);
+}
+.product-table {
+  width: 100%;
+  min-width: var(--product-table-width);
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+.product-table caption {
+  text-align: left;
+  font-weight: var(--weight-bold);
+  padding-block: var(--space-3);
+}
+.product-table th,
+.product-table td {
+  min-width: var(--product-column-width);
+  text-align: left;
+  vertical-align: top;
+  padding: var(--space-3);
+  border-bottom: var(--border-width) solid var(--border);
+}
+.product-table thead {
+  background: var(--surface-subtle);
+}
+.product-table p {
+  font-weight: var(--weight-normal);
+}
+.product-panel .link-button {
+  white-space: normal;
+  text-align: left;
+  padding: var(--space-1);
+  background: transparent;
+  color: var(--action-primary);
+  border-color: transparent;
+}
+.product-applications {
+  display: grid;
+  gap: var(--space-4);
+}
+.product-applications article {
+  padding: var(--space-4);
+  border: var(--border-width) solid var(--border);
+  border-radius: var(--radius-md);
+}
 .manifest-list {
   display: block !important;
   overflow-wrap: anywhere;
