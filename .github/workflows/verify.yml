@@ -18,12 +18,18 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      - run: npm run check
+      - name: Verify and retain the complete log
+        shell: bash
+        run: |
+          set -o pipefail
+          npm run check 2>&1 | tee verification.log
+      - run: npm run format:check
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: browser-evidence
+          name: verification-evidence
           path: |
+            verification.log
             playwright-report/
             test-results/
           if-no-files-found: ignore

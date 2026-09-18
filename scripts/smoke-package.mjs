@@ -38,7 +38,9 @@ try {
   assert.ok(archive.files.some((f) => f.path === 'dist/index.html'));
   assert.ok(archive.files.some((f) => f.path === 'templates/project/.agents/roles/backend.md'));
   assert.ok(!archive.files.some((f) => /^(evidence|docs\/evidence|\.idea)\//.test(f.path)));
-  assert.ok(!archive.files.some((f) => /^(src|tests|node_modules|\.devcontour-local)\//.test(f.path)));
+  assert.ok(
+    !archive.files.some((f) => /^(src|tests|node_modules|\.devcontour-local)\//.test(f.path)),
+  );
   await writeFile(join(installation, 'package.json'), '{"private":true}');
   await exec(
     'npm',
@@ -58,7 +60,10 @@ try {
   const bin = join(installation, 'node_modules/.bin/devcontour');
   await assert.rejects(access(join(installed, 'src')));
   await assert.rejects(access(join(installation, 'node_modules/tsx')));
-  const cli = (...args) => exec(bin, args, { cwd: outside, timeout: 30000 });
+  // The engineering corpus runs three real Git pipelines, not a single CLI query.
+  // Keep it bounded without applying the 30s command-response budget to all nine stages.
+  const cli = (...args) =>
+    exec(bin, args, { cwd: outside, timeout: args[0] === 'engineering-evals' ? 120000 : 30000 });
   assert.match((await cli('help')).stdout, /DevContour/);
   await assert.rejects(cli('serve'), /workspace/);
   await assert.rejects(cli('serve', '--workspace', installed), /вне каталога/);
