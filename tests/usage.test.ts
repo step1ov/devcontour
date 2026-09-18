@@ -7,9 +7,20 @@ import { Observability } from '../src/application/observability.ts';
 import { fixture, input, complete } from './helpers.ts';
 import type { AgentRequest } from '../src/runner/adapters.ts';
 import { cliAdapter } from '../src/runner/adapters.ts';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { join, delimiter } from 'node:path';
 import { configSchema, type Task } from '../src/core/model.ts';
+
+test('Documented Codex JSONL telemetry survives unrelated events and exposes incomplete streams', async () => {
+  const output = await readFile(new URL('./fixtures/codex-events.jsonl', import.meta.url), 'utf8');
+  const usage = parseUsage('codex', output, true);
+  assert.equal(usage.inputTokens, 24763);
+  assert.equal(usage.cacheReadTokens, 24448);
+  assert.equal(usage.outputTokens, 122);
+  assert.equal(usage.reportedUsd, null);
+  assert.equal(parseUsage('codex', output + '{truncated', true).complete, false);
+  assert.equal(parseUsage('codex', output + '{truncated', true).inputTokens, 24763);
+});
 
 test('Runtime telemetry normalizes cache tokens; malformed/missing/partial data is never zero', () => {
   const claude = parseUsage(

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { RuntimeDiagnostics } from './runtime-diagnostics.ts';
 
 const count = z.number().int().nonnegative().nullable();
 export const usageSchema = z
@@ -35,6 +36,7 @@ export const priceSchema = z
   .strict();
 export type Price = z.infer<typeof priceSchema>;
 export interface UsageRecord {
+  diagnostics?: RuntimeDiagnostics;
   id: string;
   repositoryId?: string;
   runId?: string;

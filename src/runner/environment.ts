@@ -6,6 +6,8 @@ import { CleanupFailure } from '../core/integrations.ts';
 import { processAlive } from './resources.ts';
 import { digest } from '../core/service.ts';
 import { command } from './process.ts';
+import { redactor } from './redaction.ts';
+export { redactor } from './redaction.ts';
 
 export function executionEnvironment(
   profiles: (Environment | undefined)[],
@@ -36,13 +38,6 @@ export function executionEnvironment(
   }
   Object.assign(env, devcontour);
   return { env, redact: redactor(secretValues) };
-}
-export function redactor(values: string[]) {
-  const secrets = [
-    ...new Set(values.filter(Boolean).flatMap((s) => [s, encodeURIComponent(s)])),
-  ].sort((a, b) => b.length - a.length);
-  return (text: string) =>
-    secrets.reduce((result, secret) => result.split(secret).join('[REDACTED]'), text);
 }
 export async function runSteps(
   steps: Step[],

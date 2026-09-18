@@ -1,9 +1,13 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
+import { outputRedactor, type Redactor } from './redaction.ts';
+import type { RuntimeDiagnostics } from '../core/runtime-diagnostics.ts';
 export interface CommandResult {
   code: number;
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  diagnostics: RuntimeDiagnostics;
 }
 export async function command(
   argv: string[],
@@ -13,11 +17,15 @@ export async function command(
     timeoutMs?: number;
     input?: string;
     env?: NodeJS.ProcessEnv;
-    redact?: (text: string) => string;
+    redact?: Redactor;
+    onOutput?: (stream: 'stdout' | 'stderr', text: string) => void;
   } = {},
 ): Promise<CommandResult> {
   if (!argv.length) throw new Error('Пустая команда');
   return new Promise((resolve, reject) => {
+    const startedAt = new Date().toISOString();
+    let lastOutputAt: string | null = null;
+    let processTree: RuntimeDiagnostics['processTree'];
     const child = spawn(argv[0], argv.slice(1), {
       cwd,
       env: options.env ?? process.env,
@@ -29,12 +37,29 @@ export async function command(
       stderr = '',
       timedOut = false,
       killTimer: NodeJS.Timeout | undefined;
-    const append = (current: string, data: Buffer) => (current + data.toString()).slice(-2_000_000);
-    child.stdout.on('data', (d) => {
-      stdout = append(stdout, d);
+    const stdoutDecoder = new StringDecoder('utf8'),
+      stderrDecoder = new StringDecoder('utf8');
+    const maskOut = outputRedactor(options.redact),
+      maskErr = outputRedactor(options.redact);
+    let outputError: Error | undefined;
+    const append = (stream: 'stdout' | 'stderr', text: string) => {
+      if (!text) return;
+      if (stream === 'stdout') stdout = (stdout + text).slice(-2_000_000);
+      else stderr = (stderr + text).slice(-2_000_000);
+      try {
+        options.onOutput?.(stream, text);
+      } catch (error) {
+        outputError = error instanceof Error ? error : new Error(String(error));
+        stop();
+      }
+    };
+    child.stdout.on('data', (d: Buffer) => {
+      lastOutputAt = new Date().toISOString();
+      append('stdout', maskOut(stdoutDecoder.write(d)));
     });
-    child.stderr.on('data', (d) => {
-      stderr = append(stderr, d);
+    child.stderr.on('data', (d: Buffer) => {
+      lastOutputAt = new Date().toISOString();
+      append('stderr', maskErr(stderrDecoder.write(d)));
     });
     const signalGroup = (signal: NodeJS.Signals) => {
       try {
@@ -45,7 +70,9 @@ export async function command(
       }
     };
     const stop = () => {
+      processTree ??= captureProcessTree(child.pid);
       signalGroup('SIGTERM');
+      if (killTimer) return;
       killTimer = setTimeout(() => signalGroup('SIGKILL'), 1000);
       killTimer.unref();
     };
@@ -64,20 +91,72 @@ export async function command(
       cleanup();
       reject(e);
     });
-    child.once('close', (code) => {
+    child.once('close', (code, signal) => {
       if (code !== 0 || options.signal?.aborted || timedOut) signalGroup('SIGKILL');
       cleanup();
+      append('stdout', maskOut(stdoutDecoder.end(), true));
+      append('stderr', maskErr(stderrDecoder.end(), true));
+      if (outputError) {
+        reject(outputError);
+        return;
+      }
       resolve({
         code: code ?? -1,
-        stdout: options.redact ? options.redact(stdout) : stdout,
-        stderr: options.redact ? options.redact(stderr) : stderr,
+        stdout,
+        stderr,
         timedOut,
+        diagnostics: {
+          startedAt,
+          finishedAt: new Date().toISOString(),
+          lastOutputAt,
+          exitCode: code,
+          signal,
+          timedOut,
+          aborted: Boolean(options.signal?.aborted),
+          stdoutTail: stdout.slice(-4000),
+          stderrTail: stderr.slice(-4000),
+          processTree,
+        },
       });
     });
     child.stdin.on('error', () => {});
     child.stdin.end(options.input ?? '');
     if (options.signal?.aborted) stop();
   });
+}
+function captureProcessTree(pid?: number): RuntimeDiagnostics['processTree'] {
+  if (!pid || process.platform === 'win32')
+    return {
+      available: false,
+      reason: 'Process inventory unavailable on this platform',
+      processes: [],
+    };
+  const result = spawnSync('ps', ['-axo', 'pid=,ppid=,pgid=,comm='], {
+    encoding: 'utf8',
+    timeout: 250,
+    maxBuffer: 1_000_000,
+  });
+  if (result.status !== 0)
+    return { available: false, reason: 'OS denied or timed out process inventory', processes: [] };
+  const rows = result.stdout.split('\n').flatMap((line) => {
+    const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(line);
+    return m
+      ? [
+          {
+            pid: Number(m[1]),
+            parentPid: Number(m[2]),
+            groupPid: Number(m[3]),
+            name: m[4].split('/').at(-1)!,
+          },
+        ]
+      : [];
+  });
+  const ids = new Set([pid]);
+  for (let size = -1; size !== ids.size;) {
+    size = ids.size;
+    for (const row of rows) if (ids.has(row.parentPid) || row.groupPid === pid) ids.add(row.pid);
+  }
+  return { available: true, processes: rows.filter((r) => ids.has(r.pid)).slice(0, 100) };
 }
 export async function git(cwd: string, ...args: string[]) {
   const result = await command(['git', ...args], cwd, {
