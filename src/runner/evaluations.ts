@@ -1,3 +1,5 @@
+import { measuredExecute } from './usage.ts';
+import { priceSchema, usageTotals, type UsageRecord, type Price } from '../core/usage.ts';
 import { mkdir, mkdtemp, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -48,6 +50,7 @@ export type EvalDriver = (input: EvalInput) => Promise<unknown>;
 
 export async function evaluateAgents(
   options: {
+    prices?: Price[];
     runtime?: 'codex' | 'claude';
     model?: string;
     repetitions?: number;
@@ -57,6 +60,7 @@ export async function evaluateAgents(
     instructions?: string;
   } = {},
 ) {
+  const prices = options.prices?.map((price) => priceSchema.parse(price)) ?? [];
   const repetitions = options.repetitions ?? 1,
     maxCalls = options.maxCalls ?? 6;
   const timeoutMs = options.timeoutMs ?? 120000;
@@ -86,6 +90,7 @@ export async function evaluateAgents(
     }
   }
   const results: Record<string, unknown>[] = [];
+  const usage: UsageRecord[] = [];
   let calls = 0;
   for (let repetition = 1; repetition <= repetitions; repetition++)
     for (const scenario of scenarios) {
@@ -110,6 +115,7 @@ export async function evaluateAgents(
         await git(repo, 'commit', '--allow-empty', '-m', 'Evaluation baseline');
         const config = configSchema.parse({
           version: 1,
+          prices,
           name: 'Agent evaluation',
           repository: repo,
           workspaceRoot: workspace,
@@ -201,18 +207,23 @@ export async function evaluateAgents(
           response = await options.driver({ caseId: scenario.id, prompt, baseline });
         else if (options.runtime)
           response = (
-            await adapters[options.runtime].execute({
-              purpose: 'evaluation',
-              cwd: repo,
-              artifactDir: join(root, 'artifacts'),
-              prompt,
-              review: true,
-              task: {} as Task,
-              execution: agentEnvironment(config, undefined),
-              model: options.model,
-              signal: AbortSignal.timeout(timeoutMs),
-              timeoutMs,
-            })
+            await measuredExecute(
+              h,
+              adapters[options.runtime],
+              {
+                purpose: 'evaluation',
+                cwd: repo,
+                artifactDir: join(root, 'artifacts'),
+                prompt,
+                review: true,
+                task: {} as Task,
+                execution: agentEnvironment(config, undefined),
+                model: options.model,
+                signal: AbortSignal.timeout(timeoutMs),
+                timeoutMs,
+              },
+              { stage: 'evaluation', subjectId: scenario.id },
+            )
           ).data;
         else response = baseline;
         const parsed = evaluationResult.parse(response),
@@ -266,7 +277,7 @@ export async function evaluateAgents(
           contextRead: observed,
           rejectedActions: errors.length,
           durationMs: Date.now() - started,
-          costUsd: null,
+          costUsd: usageTotals(Object.values(store.localRecords<UsageRecord>('usage'))).costUsd,
         });
       } catch (e) {
         // Never persist raw provider output or credentials in the report.
@@ -279,18 +290,27 @@ export async function evaluateAgents(
           costUsd: null,
         });
       } finally {
+        if (store) {
+          const records = Object.values(store.localRecords<UsageRecord>('usage'));
+          usage.push(...records);
+          const last = results.at(-1);
+          if (last) last.costUsd = usageTotals(records).costUsd;
+        }
         store?.close();
         await rm(root, { recursive: true, force: true });
       }
     }
   return {
     version: 1,
+    caseIds: scenarios.map((s) => s.id),
+    environment: { node: process.version, platform: process.platform, arch: process.arch },
     mode: options.runtime ? 'live' : options.driver ? 'injected-driver' : 'protocol-fixture',
     runtime: options.runtime ?? null,
     runtimeVersion,
     model: options.model ?? null,
     instructionsDigest: digest(instructions),
     skillDigest: digest(skill),
+    priceTableDigest: digest(prices),
     corpusDigest: digest(scenarios),
     catalogDigest: digest(capabilities()),
     budget: {
@@ -298,7 +318,11 @@ export async function evaluateAgents(
       calls,
       timeoutMs,
       repetitions,
-      costUsd: null,
+      costUsd: usageTotals(
+        usage,
+        results.some((r) => r.status === 'unverified'),
+      ).costUsd,
+      knownCostUsd: usageTotals(usage).knownCostUsd,
       note: 'Call/time limits are enforced; monetary limits belong to the provider account.',
     },
     passed: results.every((r) => r.status === 'passed'),

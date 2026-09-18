@@ -63,3 +63,9 @@ Checkpoint — подсказка для продолжения. Он не ра�
 `progress.reasons` разделяет причины: `plan_review_required`, `dependencies_incomplete`, `queue_paused`, `assigned_to_another_member`, `workers_busy`, `workspace_operation_active`, `inactive_revision`, `failure_requires_diagnosis`, `attempts_exhausted`. `eligible` — наблюдение о возможности выдачи задачи сейчас. Получить право записи можно только через scheduler и его lease; обзор не бронирует задачу.
 
 Heartbeat сам по себе не меняет ревизию контекста. Новая попытка, фаза, результат, правка задания, член команды, настройки и состояние общей проверки меняют соответствующие отпечатки. Это уменьшает шум при чтении и сохраняет видимость содержательных изменений.
+
+## Знания и наблюдения выполнения
+
+`memory_retain`/`memory_recall` сохраняют и выбирают [типизированные знания](project-memory.md) в выбранном владельце. Overview/checkpoint отражают смену каталога и актуальности источников отдельной записью knowledge. Дополнительная память не заменяет все страницы task_briefing или закреплённые context packs.
+
+`usage_report` и `decision_report` имеют limit/cursor, меняющийся отчёт требует начать чтение заново. `strategy_replay` — read-only аудит двух фиксированных правил, без выдачи задач. [Метрики](metrics.md) и [эксперименты](experiments.md) определяют знаменатели, unknown и ограничения сравнения.

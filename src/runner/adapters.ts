@@ -1,3 +1,5 @@
+import { parseUsage, runtimeVersion } from './usage.ts';
+import type { Usage } from '../core/usage.ts';
 import { evaluationResult } from '../core/evaluation.ts';
 import type { ToolProfile } from '../core/integrations.ts';
 import { codexTools, claudeMcp, claudeRules } from './tools.ts';
@@ -74,6 +76,7 @@ const reviewSchema = {
   required: ['approved', 'summary', 'findings', 'discoveries'],
 };
 export interface AgentRequest {
+  onUsage?: (usage: Usage, runtimeVersion?: string | null) => void;
   purpose?: 'plan' | 'evaluation';
   toolProfile?: ToolProfile;
   execution?: { env: NodeJS.ProcessEnv; redact: (text: string) => string };
@@ -94,6 +97,7 @@ export interface AgentResult {
   command: string[];
 }
 export interface AgentAdapter {
+  version?: string;
   name: RuntimeName;
   execute(request: AgentRequest): Promise<AgentResult>;
 }
@@ -182,6 +186,7 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
         await writeFile(r.mcpConfigPath, JSON.stringify(claudeMcp(r.toolProfile), null, 2));
       }
       const argv = cliArguments(name, r, schemaPath, resultPath);
+      const version = await runtimeVersion(name, r.execution?.env);
       const result = await command(argv, r.cwd, {
         signal: r.signal,
         timeoutMs: r.timeoutMs,
@@ -199,6 +204,17 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
             }
           : {}),
       });
+      r.onUsage?.(
+        parseUsage(
+          name,
+          result.stdout,
+          result.code === 0 &&
+            !result.timedOut &&
+            !r.signal.aborted &&
+            result.stdout.length < 2_000_000,
+        ),
+        version,
+      );
       const log = result.stdout + '\n' + result.stderr;
       await writeFile(join(r.artifactDir, 'runtime.log'), log);
       if (result.code !== 0 || result.timedOut || r.signal.aborted)

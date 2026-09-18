@@ -1,3 +1,4 @@
+import { ProjectMemory } from './memory.ts';
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import {
@@ -150,6 +151,15 @@ function snapshot(h: Harness, s: HarnessState, repositoryId?: string) {
         verifications: c.verifications.map(({ token: _token, leaseUntil: _lease, ...v }) => v),
         deliveries: c.deliveries?.map(({ token: _token, leaseUntil: _lease, ...d }) => d),
       });
+  if (repositoryId || h.config.workspaceRoot) {
+    const memory = new ProjectMemory(h).recall({ repositoryId, maxBytes: 0 });
+    if (memory.recordCount)
+      add(
+        'knowledge',
+        { id: repositoryId ?? 'workspace', repositoryId },
+        { revision: memory.revision },
+      );
+  }
   records.sort((a, b) => a.key.localeCompare(b.key));
   const control = {
     paused: s.paused,

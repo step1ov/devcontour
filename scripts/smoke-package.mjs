@@ -75,6 +75,8 @@ try {
   );
   assert.equal(setup.status, 'needs-agent-bootstrap');
   await access(join(product, '.agents/roles/backend.md'));
+  await access(join(product, 'docs/harness-project-memory.md'));
+  await access(join(product, 'docs/harness-experiments.md'));
   await access(join(product, 'docs/harness-start.md'));
   const request = join(root, 'request.json');
   await writeFile(request, JSON.stringify({ operation: 'project_context', input: {} }));
@@ -204,6 +206,21 @@ try {
   }
   assert.ok(completed, 'Installed server must advance a durable workflow without an active chat');
   const metrics = await agent('workflow_metrics', { repositoryId: 'main' });
+  assert.ok((await agent('usage_report', { repositoryId: 'main' })).records.length);
+  assert.ok((await agent('decision_report', { repositoryId: 'main' })).records.length);
+  assert.equal(
+    (await agent('strategy_replay', { repositoryId: 'main', policy: 'fifo-ready-v1' })).unsupported,
+    0,
+  );
+  const knowledge = await agent('memory_retain', {
+    repositoryId: 'main',
+    kind: 'fact',
+    subject: 'smoke',
+    text: 'Package memory smoke',
+    sources: ['README.md'],
+  });
+  const recall = await agent('memory_recall', { repositoryId: 'main', query: 'smoke' });
+  assert.ok(recall.records.some((r) => r.record.id === knowledge.id));
   assert.ok(
     metrics.attempts.some(
       (r) => r.taskId === task.taskId && r.status === 'succeeded' && r.stages.length,
@@ -226,6 +243,17 @@ try {
   assert.equal(duplicate.duplicate, true);
   assert.equal((await agent('task_briefing', { taskId: first.taskIds[0] })).task.status, 'draft');
   assert.equal(JSON.parse((await cli('evals')).stdout).passed, true);
+  const engineering = JSON.parse((await cli('engineering-evals')).stdout);
+  assert.equal(engineering.passed, true);
+  const evaluationPath = join(root, 'engineering.json');
+  await writeFile(evaluationPath, JSON.stringify(engineering));
+  assert.equal(
+    JSON.parse(
+      (await cli('eval-compare', '--baseline', evaluationPath, '--candidate', evaluationPath))
+        .stdout,
+    ).passRateDelta,
+    0,
+  );
 
   console.log(
     JSON.stringify(

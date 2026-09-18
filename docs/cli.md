@@ -137,3 +137,9 @@ Setup не вызывает модель, не устанавливает зав
 | `assign-task --task <ID> --member alice`        | Меняет ответственного при отсутствии активной попытки; командная очередь берёт только свои задачи                  |
 
 Все команды принимают `--workspace /absolute/workspace` или прежний `--data`. Sync требует `workspaceRoot` и отдельные Git-репозитории; он не делает commit/pull/push. Операционный `export` остаётся диагностикой, его JSON не является переносимым sync-форматом. Новые IDs содержат UUID; используйте возвращённые IDs, не вычисляйте следующий номер. Подробные сценарии, примеры файлов решений и границы доверия — [team-sync.md](team-sync.md).
+
+## Эксперименты без продуктового workspace
+
+`engineering-evals` использует собственные временные Git-репозитории. По умолчанию это fixture без модели; live требует `--live --runtime codex|claude --model ID --reviewer-model ID`. `eval-compare --baseline ABS.json --candidate ABS.json` сравнивает совместимые отчёты без вызова модели. Полные параметры и ограничения — [эксперименты](experiments.md).
+
+Для memory_retain/recall, usage_report, decision_report и strategy_replay используйте общий `agent --file request.json --workspace ...`; точные схемы показывает capabilities.

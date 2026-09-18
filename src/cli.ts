@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { engineeringEvals } from './runner/engineering-evals.ts';
+import { compareEvaluations } from './application/eval-comparison.ts';
 import { workflowMetrics } from './application/metrics.ts';
 import { evaluateAgents } from './runner/evaluations.ts';
 import {
@@ -52,6 +54,44 @@ const authorRuntime = () => {
   return value;
 };
 async function main() {
+  if (operation === 'eval-compare') {
+    if (!args.includes('--baseline') || !args.includes('--candidate'))
+      throw new Error('Укажите --baseline и --candidate JSON reports');
+    console.log(
+      JSON.stringify(
+        compareEvaluations(
+          JSON.parse(await readFile(resolve(option('--baseline', '')), 'utf8')),
+          JSON.parse(await readFile(resolve(option('--candidate', '')), 'utf8')),
+        ),
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+  if (operation === 'engineering-evals') {
+    if (
+      !args.includes('--live') &&
+      (args.includes('--runtime') || args.includes('--model') || args.includes('--reviewer-model'))
+    )
+      throw new Error('Для моделей требуется --live');
+    if (args.includes('--live') && !args.includes('--runtime'))
+      throw new Error('Укажите --runtime codex|claude');
+    const result = await engineeringEvals({
+      runtime: args.includes('--live') ? option('--runtime', '') : undefined,
+      model: args.includes('--model') ? option('--model', '') : undefined,
+      reviewerModel: args.includes('--reviewer-model') ? option('--reviewer-model', '') : undefined,
+      prices: args.includes('--prices')
+        ? JSON.parse(await readFile(resolve(option('--prices', '')), 'utf8'))
+        : undefined,
+      repetitions: Number(option('--repetitions', '1')),
+      maxCalls: Number(option('--max-calls', '9')),
+      timeoutMs: Number(option('--timeout-ms', '120000')),
+    });
+    console.log(JSON.stringify(result, null, 2));
+    if (!result.passed) process.exitCode = 1;
+    return;
+  }
   if (operation === 'evals') {
     const runtime = option('--runtime', '');
     if (args.includes('--live') && runtime !== 'codex' && runtime !== 'claude')
@@ -61,6 +101,9 @@ async function main() {
     const result = await evaluateAgents({
       runtime: args.includes('--live') ? (runtime as 'codex' | 'claude') : undefined,
       model: args.includes('--model') ? option('--model', '') : undefined,
+      prices: args.includes('--prices')
+        ? JSON.parse(await readFile(resolve(option('--prices', '')), 'utf8'))
+        : undefined,
       repetitions: Number(option('--repetitions', '1')),
       maxCalls: Number(option('--max-calls', '6')),
       timeoutMs: Number(option('--timeout-ms', '120000')),
@@ -81,6 +124,9 @@ async function main() {
     return;
   }
   if (operation === 'help' || args.includes('--help')) {
+    console.log(
+      'devcontour engineering-evals [--live --runtime codex|claude --model ID --reviewer-model ID]\ndevcontour eval-compare --baseline report.json --candidate report.json',
+    );
     console.log(
       'DevContour · AI-native разработка\nЗапуск: npm run devcontour -- <команда> [параметры]\n\n' +
         'devcontour evals [--live --runtime codex|claude --model MODEL --repetitions 3 --max-calls 18]\ndevcontour metrics [--repository-id main] --workspace ...\ndevcontour requirements-snapshot --repository-id main --file docs/spec.md --workspace ...\ndevcontour requirements-report --repository-id main --workspace ...\ndevcontour requirements-correct --board ID --reason ... --workspace ...\ndevcontour capabilities\ndevcontour mcp --workspace /absolute/workspace\ndevcontour agent --file request.json --workspace /absolute/workspace\n' +

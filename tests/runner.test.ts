@@ -13,6 +13,7 @@ import { git, command } from '../src/runner/process.ts';
 import { junitSummary } from '../src/runner/gates.ts';
 import { input } from './helpers.ts';
 import { acceptBoard } from '../src/runner/agent-control.ts';
+import { ProjectMemory } from '../src/application/memory.ts';
 async function runtimeFixture() {
   const root = await mkdtemp(join(tmpdir(), 'harness-runner-'));
   await setupDemo(root);
@@ -34,6 +35,58 @@ async function runtimeFixture() {
     },
   };
 }
+test('Writer and both reviewers use the same memory snapshot despite a later knowledge correction', async () => {
+  const f = await runtimeFixture();
+  let scheduler: Scheduler | undefined;
+  try {
+    const task = f.store.read().tasks.find((t) => t.status === 'ready')!;
+    const memory = new ProjectMemory(f.h);
+    const record = memory.retain({
+      repositoryId: 'main',
+      kind: 'fact',
+      subject: task.id,
+      text: task.title + ' OriginalMemoryMarker',
+      sources: ['README.md'],
+    });
+    const prompts: string[] = [];
+    scheduler = new Scheduler(f.h, f.root, {
+      ...adapters,
+      demo: {
+        ...adapters.demo,
+        execute: async (request) => {
+          if (request.task.id === task.id) {
+            prompts.push(request.prompt);
+            if (!request.review)
+              memory.retain({
+                repositoryId: 'main',
+                kind: 'fact',
+                subject: task.id,
+                text: task.title + ' CorrectedMemoryMarker',
+                sources: ['README.md'],
+                supersedes: [record.id],
+              });
+          }
+          return adapters.demo.execute(request);
+        },
+      },
+    });
+    await scheduler.init();
+    f.h.pause(false);
+    await scheduler.drain();
+    const run = f.store.read().runs.find((r) => r.taskId === task.id)!;
+    assert.equal(run.status, 'succeeded');
+    assert.deepEqual(run.memory!.ids, [record.id]);
+    assert.equal(prompts.length, 3);
+    assert.ok(
+      prompts.every(
+        (p) => p.includes('OriginalMemoryMarker') && !p.includes('CorrectedMemoryMarker'),
+      ),
+    );
+  } finally {
+    await scheduler?.stop();
+    await f.cleanup();
+  }
+});
 test('Real git pipeline integrates concurrent siblings and verifies every candidate and merged SHA', async () => {
   const f = await runtimeFixture();
   try {

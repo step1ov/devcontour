@@ -1,3 +1,4 @@
+import { priceSchema } from './usage.ts';
 import { z } from 'zod';
 import type { CompletionReceipt } from './sync-model.ts';
 import {
@@ -176,6 +177,15 @@ export interface Evidence {
   summary: string;
 }
 export interface Run {
+  memory?: { revision: string; ids: string[]; digest: string; bytes: number };
+  dispatch?: {
+    policy: 'fifo-ready-v1';
+    at: string;
+    eligible: { taskId: string; repositoryId?: string; attempt: number }[];
+    activeCount: number;
+    concurrency: number;
+    inputDigest: string;
+  };
   wait?: { approvedAt?: string; readyAt?: string };
   timings?: {
     id: string;
@@ -354,6 +364,19 @@ export interface ChangeSet {
 }
 
 export const configSchema = z.object({
+  prices: z
+    .array(priceSchema)
+    .max(100)
+    .refine(
+      (prices) =>
+        new Set(prices.map((p) => JSON.stringify([p.runtime, p.model, Date.parse(p.effectiveAt)])))
+          .size === prices.length,
+      'Duplicate tariff effectiveAt',
+    )
+    .default([]),
+  memoryPolicy: z
+    .object({ maxBytes: z.number().int().min(0).max(24000).default(8000) })
+    .default({ maxBytes: 8000 }),
   signalPolicy: z
     .object({ maxActionsPerHour: z.number().int().min(1).max(100).default(10) })
     .default({ maxActionsPerHour: 10 }),
