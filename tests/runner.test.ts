@@ -201,6 +201,37 @@ test('A reviewer refusal blocks publication', async () => {
     await f.cleanup();
   }
 });
+test('A reviewer that creates an untracked file cannot approve an unchanged candidate', async () => {
+  const f = await runtimeFixture();
+  try {
+    const priorRuns = new Set(f.store.read().runs.map((r) => r.id));
+    const scheduler = new Scheduler(f.h, f.root, {
+      ...adapters,
+      demo: {
+        ...adapters.demo,
+        async execute(r: AgentRequest) {
+          const result = await adapters.demo.execute(r);
+          if (r.review) await writeFile(join(r.cwd, 'reviewer-created.txt'), 'unexpected write');
+          return result;
+        },
+      },
+    });
+    const before = await git(f.config.repository, 'rev-parse', scheduler.target);
+    f.h.pause(false);
+    await scheduler.drain();
+    assert.equal(await git(f.config.repository, 'rev-parse', scheduler.target), before);
+    const reviews = f.store
+      .read()
+      .runs.filter((r) => !priorRuns.has(r.id))
+      .flatMap((r) => r.evidence)
+      .filter((e) => e.kind === 'review');
+    assert.ok(reviews.length);
+    assert.ok(reviews.every((e) => !e.passed));
+    assert.ok(reviews.every((e) => e.inspection?.mode === 'diff-only'));
+  } finally {
+    await f.cleanup();
+  }
+});
 test('Changes to gate policy files are rejected before commit', async () => {
   const f = await runtimeFixture();
   try {

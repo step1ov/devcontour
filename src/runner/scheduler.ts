@@ -221,6 +221,7 @@ export class Scheduler {
     const dir = join(this.runRoot(task.repositoryId), 'artifacts', run.id, phase, 'review');
     await mkdir(dir, { recursive: true });
     const diff = await git(cwd, 'diff', '--no-ext-diff', '--no-textconv', run.baseSha!, sha);
+    const initialStatus = await git(cwd, 'status', '--porcelain', '--untracked-files=all');
     if (diff.length > 1000000)
       throw new Error('Diff превышает лимит независимого ревью; разбейте задачу');
     const toolProfile = toolProfileFor(
@@ -260,6 +261,7 @@ export class Scheduler {
     const parsed = reviewResult.parse(result.data);
     this.h.discoveries(run.id, run.token, sha, parsed.discoveries);
     const clean =
+      (await git(cwd, 'status', '--porcelain', '--untracked-files=all')) === initialStatus &&
       !(await git(cwd, 'status', '--porcelain', '--untracked-files=no')) &&
       (await git(cwd, 'rev-parse', 'HEAD')) === sha;
     const passed =

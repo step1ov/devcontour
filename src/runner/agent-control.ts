@@ -1,4 +1,5 @@
 import { measuredExecute } from './usage.ts';
+import { unobservedReview } from '../core/review.ts';
 import { boardOwner } from '../core/sync-state.ts';
 import { toolProfileFor, agentEnvironment } from './tools.ts';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -71,7 +72,11 @@ async function review(
     { repositoryId, subjectId, stage: subject === 'task plan' ? 'plan-review' : 'contract-review' },
   );
   const parsed = reviewResult.parse(result.data);
-  await writeFile(join(artifact, 'review.json'), JSON.stringify(parsed, null, 2) + '\n');
+  await writeFile(
+    join(artifact, 'review.json'),
+    JSON.stringify({ ...parsed, inspection: result.inspection ?? unobservedReview() }, null, 2) +
+      '\n',
+  );
   await writeFile(join(artifact, 'runtime.log'), result.log);
   if (!parsed.approved || parsed.findings.some((f) => f.severity === 'blocking'))
     throw new DomainError(`Независимое ревью отклонено: ${parsed.summary}. Артефакты: ${artifact}`);
