@@ -1,10 +1,21 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
-import { Boxes, CircleDot, History, Loader2, MessageCircleQuestion, Scale } from 'lucide-react';
+import {
+  Boxes,
+  CircleDot,
+  History,
+  Loader2,
+  MessageCircleQuestion,
+  Milestone,
+  Scale,
+  User,
+} from 'lucide-react';
 import type { Preparation } from '../core/preparation.ts';
-import { featuresOf } from '../core/preparation.ts';
+import { featuresOf, personasOf, releasesOf } from '../core/preparation.ts';
 import type {
   StoredProductBrief,
   ProductFeature,
+  ProductPersona,
+  ProductRelease,
   ArchitectureBrief,
   PreparationQuestion,
   PreparationRecord,
@@ -35,6 +46,7 @@ type Readiness = {
   readiness: 'unplanned' | 'in-progress' | 'failed' | 'done';
 };
 type FeatureView = ProductFeature & Readiness;
+type ReleaseReadiness = Readiness & { features: number; criteria: number };
 const names = {
   draft: 'Агент прорабатывает',
   'in-review': 'Ожидает вашего решения',
@@ -301,9 +313,19 @@ const readinessTone = {
   done: 'success',
 } as const;
 
-// The operator reads the product feature by feature; scenarios and criteria
-// belong to the feature they describe, and readiness is derived from tasks.
-function Feature({ feature }: { feature: FeatureView }) {
+// The operator reads the product feature by feature. Each scenario names the
+// persona living it, and each criterion names the release it belongs to.
+function Feature({
+  feature,
+  personas,
+  releases,
+}: {
+  feature: FeatureView;
+  personas: ProductPersona[];
+  releases: ProductRelease[];
+}) {
+  const who = (id: string) => personas.find((x) => x.id === id)?.name ?? id;
+  const when = (id: string) => releases.find((x) => x.id === id)?.title ?? id;
   return (
     <Card>
       <CardHeader className="gap-2 pb-3">
@@ -322,20 +344,27 @@ function Feature({ feature }: { feature: FeatureView }) {
       <CardContent className="grid gap-4 pt-0">
         <div>
           <h4 className="mb-2 text-sm font-semibold">Сценарии</h4>
-          <ul className="grid list-disc gap-2 pl-5">
+          <ul className="grid gap-2">
             {feature.scenarios.map((s, i) => (
               <li key={i} className="max-w-[74ch] break-words whitespace-pre-wrap">
-                {s}
+                <Badge variant="outline" className="mr-2">
+                  <User aria-hidden="true" className="size-3" />
+                  {who(s.personaId)}
+                </Badge>
+                {s.text}
               </li>
             ))}
           </ul>
         </div>
         <div>
           <h4 className="mb-2 text-sm font-semibold">Как примем</h4>
-          <ul className="grid list-disc gap-2 pl-5">
-            {feature.acceptance.map((s, i) => (
+          <ul className="grid gap-2">
+            {feature.acceptance.map((a, i) => (
               <li key={i} className="max-w-[74ch] break-words whitespace-pre-wrap">
-                {s}
+                <Badge variant="ready" className="mr-2">
+                  {when(a.releaseId)}
+                </Badge>
+                {a.text}
               </li>
             ))}
           </ul>
@@ -347,12 +376,108 @@ function Feature({ feature }: { feature: FeatureView }) {
     </Card>
   );
 }
+function Personas({ personas }: { personas: ProductPersona[] }) {
+  return (
+    <Section title={'Персоны (' + personas.length + ')'}>
+      <p className="text-muted-foreground mb-4 max-w-[78ch]">
+        Цели и боли персоны — основание, на котором агент разрешает неоднозначности так же, как
+        решил бы этот человек.
+      </p>
+      <ul className="grid gap-4 md:grid-cols-2">
+        {personas.map((persona) => (
+          <li key={persona.id}>
+            <Card className="h-full">
+              <CardHeader className="gap-1 pb-3">
+                <CardTitle className="flex items-center gap-2">
+                  <User className="text-primary size-4 shrink-0" aria-hidden="true" />
+                  {persona.name}
+                </CardTitle>
+                <p className="text-muted-foreground text-sm">{persona.role}</p>
+              </CardHeader>
+              <CardContent className="grid gap-3 pt-0 text-sm">
+                <div>
+                  <h4 className="mb-1 font-semibold">Цели</h4>
+                  <ul className="grid list-disc gap-1 pl-5">
+                    {persona.goals.map((g, i) => (
+                      <li key={i}>{g}</li>
+                    ))}
+                  </ul>
+                </div>
+                <div>
+                  <h4 className="mb-1 font-semibold">Боли</h4>
+                  <ul className="grid list-disc gap-1 pl-5">
+                    {persona.pains.map((g, i) => (
+                      <li key={i}>{g}</li>
+                    ))}
+                  </ul>
+                </div>
+              </CardContent>
+            </Card>
+          </li>
+        ))}
+      </ul>
+    </Section>
+  );
+}
+function Releases({
+  releases,
+  readiness,
+}: {
+  releases: ProductRelease[];
+  readiness: ReleaseReadiness[];
+}) {
+  return (
+    <Section title={'Релизы (' + releases.length + ')'}>
+      <p className="text-muted-foreground mb-4 max-w-[78ch]">
+        Граница объёма: что должно существовать первым и что может подождать. Порядок сверху вниз.
+      </p>
+      <ol className="grid gap-3">
+        {releases.map((r, i) => {
+          const state = readiness.find((x) => x.id === r.id);
+          return (
+            <li key={r.id}>
+              <Card>
+                <CardHeader className="gap-1 pb-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <CardTitle className="flex items-start gap-2">
+                      <Milestone
+                        className="text-primary mt-0.5 size-4 shrink-0"
+                        aria-hidden="true"
+                      />
+                      <span className="max-w-[70ch] break-words">
+                        {i + 1}. {r.title}
+                      </span>
+                    </CardTitle>
+                    {state && (
+                      <Badge variant={readinessTone[state.readiness]}>
+                        {readinessNames[state.readiness]}
+                        {state.tasks > 0 && ' · ' + state.done + '/' + state.tasks}
+                      </Badge>
+                    )}
+                  </div>
+                  <p className="max-w-[78ch] break-words whitespace-pre-wrap">{r.goal}</p>
+                  {state && (
+                    <p className="text-muted-foreground text-sm">
+                      Фич: {state.features} · критериев: {state.criteria}
+                    </p>
+                  )}
+                </CardHeader>
+              </Card>
+            </li>
+          );
+        })}
+      </ol>
+    </Section>
+  );
+}
 function Product({
   content: p,
   readiness,
+  releaseReadiness,
 }: {
   content: StoredProductBrief;
   readiness: Readiness[];
+  releaseReadiness: ReleaseReadiness[];
 }) {
   const blank: Readiness = { id: '', tasks: 0, done: 0, failed: 0, readiness: 'unplanned' };
   const features: FeatureView[] = featuresOf(p).map((f) => ({
@@ -360,8 +485,18 @@ function Product({
     ...(readiness.find((r) => r.id === f.id) ?? blank),
     id: f.id,
   }));
+  const personas = personasOf(p);
+  const releases = releasesOf(p);
   const done = features.filter((f) => f.readiness === 'done').length;
   const planned = features.filter((f) => f.tasks > 0).length;
+  // Features surface in the order their earliest release does.
+  const first = (f: FeatureView) =>
+    Math.min(
+      ...f.acceptance.map((a) => {
+        const index = releases.findIndex((r) => r.id === a.releaseId);
+        return index < 0 ? releases.length : index;
+      }),
+    );
   return (
     <>
       <Section title="Проблема и ожидаемый результат">
@@ -370,7 +505,8 @@ function Product({
         </p>
         <p className="mt-2 max-w-[78ch] break-words whitespace-pre-wrap">{p.outcome}</p>
       </Section>
-      <TextList title="Для кого" items={p.audience} />
+      <Personas personas={personas} />
+      <Releases releases={releases} readiness={releaseReadiness} />
       <Section title={'Фичи продукта (' + features.length + ')'}>
         {planned > 0 && (
           <p className="text-muted-foreground mb-4">
@@ -379,11 +515,13 @@ function Product({
           </p>
         )}
         <ul className="grid gap-4">
-          {features.map((f) => (
-            <li key={f.id}>
-              <Feature feature={f} />
-            </li>
-          ))}
+          {[...features]
+            .sort((a, b) => first(a) - first(b))
+            .map((f) => (
+              <li key={f.id}>
+                <Feature feature={f} personas={personas} releases={releases} />
+              </li>
+            ))}
         </ul>
       </Section>
       <TextList title="За пределами изменения" items={p.exclusions} />
@@ -757,7 +895,11 @@ export function PreparationPanel() {
                   <Decisions stage={tab} decisions={c.decisions} questions={c.questions} />
                   {tab === 'product' ? (
                     p ? (
-                      <Product content={p.content} readiness={c.features} />
+                      <Product
+                        content={p.content}
+                        readiness={c.features}
+                        releaseReadiness={c.releases}
+                      />
                     ) : (
                       <Alert className="max-w-[78ch] border-dashed">
                         <AlertDescription>

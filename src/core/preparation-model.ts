@@ -3,28 +3,78 @@ const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const text = z.string().trim().max(6000);
 const items = z.array(z.string().trim().min(3).max(1500)).max(30);
-export const featureId = z.string().regex(/^[a-z0-9][a-z0-9-]{1,48}$/);
-// A feature is the unit the operator reads, approves and later tracks. Scenarios
-// and acceptance live inside it so readiness has something to attach to.
+const slug = z.string().regex(/^[a-z0-9][a-z0-9-]{1,48}$/);
+export const featureId = slug;
+export const releaseId = slug;
+// A release is the scope boundary: what has to exist first and what may wait.
+export const productRelease = z.strictObject({
+  id: releaseId,
+  title: z.string().trim().min(3).max(160),
+  goal: z.string().trim().min(10).max(1500),
+});
+// Acceptance is stated per release, so one feature can start in an early
+// release and be completed in a later one without splitting it in two.
+export const acceptanceCriterion = z.strictObject({
+  releaseId,
+  text: z.string().trim().min(3).max(1500),
+});
+export const personaId = slug;
+// A persona carries the goals and pains behind a decision, so ambiguity is
+// resolved the way the person it describes would resolve it.
+export const productPersona = z.strictObject({
+  id: personaId,
+  name: z.string().trim().min(2).max(80),
+  role: z.string().trim().min(3).max(200),
+  goals: z.array(z.string().trim().min(3).max(600)).min(1).max(10),
+  pains: z.array(z.string().trim().min(3).max(600)).min(1).max(10),
+});
+// A scenario names the persona living it; a feature's audience is derived from
+// its scenarios rather than declared twice.
+export const productScenario = z.strictObject({
+  personaId,
+  text: z.string().trim().min(3).max(1500),
+});
+// A feature is the unit the operator reads, approves and later tracks.
 export const productFeature = z.strictObject({
   id: featureId,
   title: z.string().trim().min(3).max(160),
   outcome: z.string().trim().min(10).max(1500),
-  scenarios: z.array(z.string().trim().min(3).max(1500)).min(1).max(20),
-  acceptance: z.array(z.string().trim().min(3).max(1500)).min(1).max(20),
+  scenarios: z.array(productScenario).min(1).max(20),
+  acceptance: z.array(acceptanceCriterion).min(1).max(30),
 });
 export const productBrief = z.strictObject({
   problem: text,
-  audience: items,
   outcome: text,
+  personas: z.array(productPersona).min(1).max(20),
+  releases: z.array(productRelease).min(1).max(10),
   features: z.array(productFeature).min(1).max(40),
   exclusions: items,
   references: items,
   questions: items,
 });
-// Briefs saved before features existed stay readable: approval history is
-// immutable, so old revisions must keep parsing and rendering.
-export const legacyProductBrief = z.strictObject({
+// Approval history is immutable, so every shape ever saved must keep parsing
+// and rendering. Both earlier shapes normalise into a single implicit release.
+export const featureBriefWithoutReleases = z.strictObject({
+  problem: text,
+  audience: items,
+  outcome: text,
+  features: z
+    .array(
+      z.strictObject({
+        id: featureId,
+        title: z.string().trim().min(3).max(160),
+        outcome: z.string().trim().min(10).max(1500),
+        scenarios: z.array(z.string().trim().min(3).max(1500)).min(1).max(20),
+        acceptance: z.array(z.string().trim().min(3).max(1500)).min(1).max(20),
+      }),
+    )
+    .min(1)
+    .max(40),
+  exclusions: items,
+  references: items,
+  questions: items,
+});
+export const flatBrief = z.strictObject({
   problem: text,
   audience: items,
   outcome: text,
@@ -35,7 +85,7 @@ export const legacyProductBrief = z.strictObject({
   references: items,
   questions: items,
 });
-export const storedProductBrief = z.union([productBrief, legacyProductBrief]);
+export const storedProductBrief = z.union([productBrief, featureBriefWithoutReleases, flatBrief]);
 export const c4Diagram = z.strictObject({
   systemId: id,
   nodes: z
@@ -210,9 +260,12 @@ export const preparationDecision = z.strictObject({
 export type PreparationQuestion = z.infer<typeof preparationQuestion>;
 export type PreparationRecord = z.infer<typeof preparationRecord>;
 export type PreparationActivity = z.infer<typeof preparationActivity>;
+export type ProductPersona = z.infer<typeof productPersona>;
+export type ProductScenario = z.infer<typeof productScenario>;
+export type ProductRelease = z.infer<typeof productRelease>;
+export type AcceptanceCriterion = z.infer<typeof acceptanceCriterion>;
 export type ProductFeature = z.infer<typeof productFeature>;
 export type ProductBrief = z.infer<typeof productBrief>;
-export type LegacyProductBrief = z.infer<typeof legacyProductBrief>;
 export type StoredProductBrief = z.infer<typeof storedProductBrief>;
 export type ArchitectureBrief = z.infer<typeof architectureBrief>;
 export type C4Diagram = z.infer<typeof c4Diagram>;

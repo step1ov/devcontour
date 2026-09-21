@@ -13,6 +13,8 @@ import {
   type ProductBrief,
   type StoredProductBrief,
   type ProductFeature,
+  type ProductRelease,
+  type ProductPersona,
   type C4Diagram,
 } from './preparation-model.ts';
 const hash = (value: unknown) =>
@@ -39,17 +41,45 @@ function change(s: DevContourState, id?: string) {
   if (!c) throw new DomainError('Выберите изменение продукта', 409);
   return journal(c);
 }
-// A brief saved before features existed still has to render and stay approvable,
-// so it reads as one feature carrying its former scenarios and criteria.
+// Briefs saved before releases, or before features, still have to render and
+// stay approvable. Both earlier shapes read as a single implicit release.
+const implicitRelease = {
+  id: 'release',
+  title: 'Единственный релиз',
+  goal: 'Постановка сохранена до того, как релизы стали отдельной сущностью.',
+};
+export function releasesOf(content: StoredProductBrief): ProductRelease[] {
+  return 'releases' in content ? content.releases : [implicitRelease];
+}
+export function personasOf(content: StoredProductBrief): ProductPersona[] {
+  if ('personas' in content) return content.personas;
+  return content.audience.map((role, index) => ({
+    id: 'audience-' + (index + 1),
+    name: 'Без имени',
+    role,
+    goals: ['Цели не описаны: постановка сохранена до появления персон'],
+    pains: ['Боли не описаны: постановка сохранена до появления персон'],
+  }));
+}
 export function featuresOf(content: StoredProductBrief): ProductFeature[] {
-  if ('features' in content) return content.features;
+  if ('personas' in content) return content.features;
+  const persona = personasOf(content)[0]?.id ?? 'audience-1';
+  const steps = (texts: string[]) => texts.map((text) => ({ personaId: persona, text }));
+  const criteria = (texts: string[]) =>
+    texts.map((text) => ({ releaseId: implicitRelease.id, text }));
+  if ('features' in content)
+    return content.features.map((f) => ({
+      ...f,
+      scenarios: steps(f.scenarios),
+      acceptance: criteria(f.acceptance),
+    }));
   return [
     {
       id: 'brief',
       title: 'Постановка прежнего формата',
       outcome: content.outcome,
-      scenarios: content.scenarios,
-      acceptance: content.acceptance,
+      scenarios: steps(content.scenarios),
+      acceptance: criteria(content.acceptance),
     },
   ];
 }
@@ -153,20 +183,41 @@ function validateJournal(c: ProductChange) {
     throw new DomainError('Решение ссылается на несуществующий вопрос');
 }
 function validateProduct(p: StoredProductBrief) {
-  const features = featuresOf(p);
+  const features = featuresOf(p),
+    personas = personasOf(p);
   if (
     p.problem.length < 10 ||
     p.outcome.length < 10 ||
-    !p.audience.length ||
+    !personas.length ||
+    personas.some((persona) => !persona.goals.length || !persona.pains.length) ||
     !features.length ||
     features.some((f) => !f.scenarios.length || !f.acceptance.length) ||
     p.questions.length
   )
     throw new DomainError(
-      'Для согласования нужны проблема, пользователи, результат и хотя бы одна фича со сценариями и критериями; открытые вопросы нужно решить',
+      'Для согласования нужны проблема, результат, персоны с целями и болями и хотя бы одна фича со сценариями и критериями; открытые вопросы нужно решить',
     );
   const ids = features.map((f) => f.id);
   if (new Set(ids).size !== ids.length) throw new DomainError('Повтор ID фичи в постановке');
+  const releases = releasesOf(p),
+    releaseIds = releases.map((r) => r.id);
+  if (new Set(releaseIds).size !== releaseIds.length)
+    throw new DomainError('Повтор ID релиза в постановке');
+  const used = new Set(features.flatMap((f) => f.acceptance.map((a) => a.releaseId)));
+  for (const criterion of features.flatMap((f) => f.acceptance))
+    if (!releaseIds.includes(criterion.releaseId))
+      throw new DomainError('Критерий ссылается на несуществующий релиз: ' + criterion.releaseId);
+  const empty = releases.find((r) => !used.has(r.id));
+  if (empty) throw new DomainError('У релиза нет ни одного критерия приёмки: ' + empty.id);
+  const personaIds = personas.map((persona) => persona.id);
+  if (new Set(personaIds).size !== personaIds.length)
+    throw new DomainError('Повтор ID персоны в постановке');
+  const acting = new Set(features.flatMap((f) => f.scenarios.map((s) => s.personaId)));
+  for (const scenario of features.flatMap((f) => f.scenarios))
+    if (!personaIds.includes(scenario.personaId))
+      throw new DomainError('Сценарий ссылается на несуществующую персону: ' + scenario.personaId);
+  const unused = personas.find((persona) => !acting.has(persona.id));
+  if (unused) throw new DomainError('У персоны нет ни одного сценария: ' + unused.id);
 }
 function validateArchitecture(a: ArchitectureBrief) {
   if (
@@ -318,6 +369,36 @@ export class Preparation {
             activity: [...(c.activity ?? [])].reverse().slice(0, 40),
             questions: c.questions ?? [],
             decisions: [...(c.decisions ?? [])].reverse(),
+            // A release aggregates the features that carry at least one of its
+            // criteria; a feature spanning two releases counts in both.
+            releases: product
+              ? releasesOf(product.content).map((r) => {
+                  const own = featuresOf(product.content).filter((f) =>
+                    f.acceptance.some((a) => a.releaseId === r.id),
+                  );
+                  const ids = own.map((f) => f.id);
+                  const bound = tasks.filter((t) => t.featureId && ids.includes(t.featureId));
+                  const done = bound.filter((t) => t.status === 'done').length;
+                  return {
+                    id: r.id,
+                    features: own.length,
+                    criteria: own.reduce(
+                      (sum, f) => sum + f.acceptance.filter((a) => a.releaseId === r.id).length,
+                      0,
+                    ),
+                    tasks: bound.length,
+                    done,
+                    failed: bound.filter((t) => t.status === 'failed').length,
+                    readiness: !bound.length
+                      ? ('unplanned' as const)
+                      : done === bound.length
+                        ? ('done' as const)
+                        : bound.some((t) => t.status === 'failed')
+                          ? ('failed' as const)
+                          : ('in-progress' as const),
+                  };
+                })
+              : [],
             // Readiness only: the feature text already travels in product.content,
             // and duplicating it pushed the agent response past its size budget.
             features: product

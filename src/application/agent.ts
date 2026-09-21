@@ -79,7 +79,7 @@ export const descriptions: Record<AgentOperation, string> = {
   preparation_activate:
     'Select the change for subsequent development tasks. Does not approve any stage.',
   preparation_product:
-    'Save a new immutable product draft with optimistic concurrency. Never approves it; a revision invalidates the prior architecture for new work.',
+    'Save a new immutable product draft with optimistic concurrency: personas with goals and pains, releases as the scope boundary, and features whose scenarios name a persona and whose acceptance criteria name a release. Resolve ambiguity the way the relevant persona would. Never approves it; a revision invalidates the prior architecture for new work.',
   preparation_architecture:
     'Save architecture, justified stack and structured C1/C2 only after operator product approval. Does not approve development.',
   preparation_submit:

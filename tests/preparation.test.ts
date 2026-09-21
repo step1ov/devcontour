@@ -144,7 +144,10 @@ test('Revisions invalidate architecture and stale decisions, plans and task atte
       content: {
         ...product,
         features: [
-          { ...product.features[0], acceptance: ['Блокировка имеет срок действия.'] },
+          {
+            ...product.features[0],
+            acceptance: [{ releaseId: 'r1', text: 'Блокировка имеет срок действия.' }],
+          },
           ...product.features.slice(1),
         ],
       },
