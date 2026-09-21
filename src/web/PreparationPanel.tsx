@@ -305,7 +305,8 @@ function Architecture({ content: a }: { content: ArchitectureBrief }) {
         <p className="max-w-[78ch] break-words whitespace-pre-wrap">{a.summary}</p>
       </Section>
       <Section title="Стек и обоснование">
-        <div className="overflow-x-auto">
+        {/* A horizontally scrolling region needs its own tab stop (WCAG 2.1.1). */}
+        <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Стек и обоснование">
           <table className="w-full min-w-(--product-table-width) border-collapse">
             <thead>
               <tr>
