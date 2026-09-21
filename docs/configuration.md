@@ -26,23 +26,23 @@
 
 ## Общая политика
 
-| Поле                             | Default схемы                                         | Смысл                                                                 |
-| -------------------------------- | ----------------------------------------------------- | --------------------------------------------------------------------- |
-| `version`                        | Обязательно `1`                                       | Версия поддерживаемого формата                                        |
-| `name`, `repository`             | Обязательны                                           | Имя и основной Git root; без repositories образует компонент `main`   |
-| `workspaceRoot`                  | Не задан                                              | Канонический путь общей координации                                   |
-| `mode`                           | `local`                                               | `demo` допускает детерминированные runtime                            |
-| `approvalMode`                   | `agent`                                               | Кто подтверждает технические этапы после двух продуктовых решений     |
-| `completionMode`                 | `local`                                               | Нужна ли подтверждённая remote Delivery для ChangeSet acceptance      |
-| `storage`                        | `central`                                             | Физическое размещение состояния; новые workspace выбирают `component` |
-| `targetBranch`                   | `devcontour/accepted`                                 | Локальная интеграционная ветка; имя должно начинаться `devcontour/`   |
-| `concurrency`                    | `2`, диапазон 1–4                                     | Число одновременно выданных попыток; mobile profile задаёт 1          |
-| `leaseMs`                        | `30000`, минимум 5000                                 | Время владения, продлеваемое heartbeat                                |
-| `runTimeoutMs`                   | `900000`, минимум 1000                                | Общий deadline попытки/операции runner; включает ожидание ресурсов    |
-| `maxAttempts`                    | `3`, диапазон 1–10                                    | Ограничение повторов Task и числа Verification конкретного ChangeSet  |
-| `verificationMode`               | `all`                                                 | Полный набор совместных gates либо явная оптимизация `affected`       |
-| `resourceDatabase`               | `~/.devcontour-local/resources.sqlite` при исполнении | Общий pool хоста; переопределение требует абсолютный путь             |
-| `signalPolicy.maxActionsPerHour` | `10`, диапазон 1–100                                  | Лимит новых предложений из сигналов за час для source и компонента    |
+| Поле                             | Default схемы                                         | Смысл                                                                |
+| -------------------------------- | ----------------------------------------------------- | -------------------------------------------------------------------- |
+| `version`                        | Обязательно `1`                                       | Версия поддерживаемого формата                                       |
+| `name`, `repository`             | Обязательны                                           | Имя и основной Git root; без repositories образует компонент `main`  |
+| `workspaceRoot`                  | Не задан                                              | Канонический путь общей координации                                  |
+| `mode`                           | `local`                                               | `demo` допускает детерминированные runtime                           |
+| `approvalMode`                   | `agent`                                               | Кто подтверждает технические этапы после двух продуктовых решений    |
+| `completionMode`                 | `local`                                               | Нужна ли подтверждённая remote Delivery для ChangeSet acceptance     |
+| `storage`                        | `central`                                             | Setup выбирает `central` для embedded и `component` для separate     |
+| `targetBranch`                   | `devcontour/accepted`                                 | Локальная интеграционная ветка; имя должно начинаться `devcontour/`  |
+| `concurrency`                    | `2`, диапазон 1–4                                     | Число одновременно выданных попыток; mobile profile задаёт 1         |
+| `leaseMs`                        | `30000`, минимум 5000                                 | Время владения, продлеваемое heartbeat                               |
+| `runTimeoutMs`                   | `900000`, минимум 1000                                | Общий deadline попытки/операции runner; включает ожидание ресурсов   |
+| `maxAttempts`                    | `3`, диапазон 1–10                                    | Ограничение повторов Task и числа Verification конкретного ChangeSet |
+| `verificationMode`               | `all`                                                 | Полный набор совместных gates либо явная оптимизация `affected`      |
+| `resourceDatabase`               | `~/.devcontour-local/resources.sqlite` при исполнении | Общий pool хоста; переопределение требует абсолютный путь            |
+| `signalPolicy.maxActionsPerHour` | `10`, диапазон 1–100                                  | Лимит новых предложений из сигналов за час для source и компонента   |
 
 Schema defaults и выбранный профиль — разные уровни. Например, `protectedPaths` в generated setup шире default схемы; чтение одного model.ts не показывает готовую политику продукта. `doctor` проверяет загруженную конфигурацию.
 
