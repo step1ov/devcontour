@@ -397,7 +397,8 @@ test('Agent progress, operator answers and recorded decisions are durable and ga
       },
     });
     view = p.status(id);
-    const question = (view.enabled && view.current!.questions[0])!;
+    assert.ok(view.enabled);
+    const question = view.current!.questions[0];
     assert.equal(question.status, 'open');
     assert.equal(view.enabled && view.changes[0].open, 1);
 

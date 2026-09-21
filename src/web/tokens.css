@@ -77,4 +77,30 @@
   --duration-quick: 120ms;
   --z-overlay: 20;
   --graph-dot: var(--color-line);
+
+  /* shadcn/ui reads these names; they alias the semantic tokens above so the
+     palette keeps a single source of truth in this file. */
+  --background: var(--surface-page);
+  --foreground: var(--text-primary);
+  --card: var(--surface-panel);
+  --card-foreground: var(--text-primary);
+  --popover: var(--surface-panel);
+  --popover-foreground: var(--text-primary);
+  --primary: var(--action-primary);
+  --primary-foreground: var(--color-white);
+  --secondary: var(--surface-subtle);
+  --secondary-foreground: var(--text-primary);
+  --muted: var(--surface-subtle);
+  --muted-foreground: var(--text-secondary);
+  --accent: var(--status-ready-bg);
+  --accent-foreground: var(--action-primary);
+  --destructive: var(--status-failed);
+  --destructive-foreground: var(--color-white);
+  --success: var(--status-done);
+  --success-foreground: var(--status-done-bg);
+  --warning: var(--status-blocked);
+  --warning-foreground: var(--status-blocked-bg);
+  --input: var(--border);
+  --ring: var(--focus);
+  --overlay: var(--color-scrim);
 }
