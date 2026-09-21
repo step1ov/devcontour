@@ -1,5 +1,14 @@
 import { useEffect, useState } from 'react';
 import type { FeatureStatus, ProductView } from '../core/product-map.ts';
+import { Button } from '@/ui/button.tsx';
+import { cn } from '@/lib/utils.ts';
+
+const panel = 'p-6 break-words';
+const scroll = 'my-4 overflow-x-auto';
+const table =
+  'w-full min-w-(--product-table-width) border-collapse text-sm [&_caption]:py-3 [&_caption]:text-left [&_caption]:font-semibold [&_thead]:bg-secondary [&_td]:min-w-(--product-column-width) [&_th]:min-w-(--product-column-width) [&_td]:border-b [&_th]:border-b [&_td]:p-3 [&_th]:p-3 [&_td]:text-left [&_th]:text-left [&_td]:align-top [&_th]:align-top [&_p]:font-normal';
+const link =
+  'h-auto whitespace-normal p-1 text-left text-primary underline-offset-4 hover:underline';
 
 const labels: Record<FeatureStatus, string> = {
   unplanned: 'Нужны задачи',
@@ -52,20 +61,20 @@ export function ProductPanel({ onRepository }: { onRepository: (id: string) => v
   }, [release]);
   if (error)
     return (
-      <div className="product-panel" role="alert">
+      <div className={panel} role="alert">
         {error}
       </div>
     );
   if (!view || (view.available && release && view.releaseId !== release))
     return (
-      <div className="product-panel" role="status">
+      <div className={panel} role="status">
         Читаем карту продукта…
       </div>
     );
   if (!view.available)
     return (
-      <div className="product-panel">
-        <h2>Карта продукта ещё не подготовлена</h2>
+      <div className={panel}>
+        <h2 className="text-lg font-semibold">Карта продукта ещё не подготовлена</h2>
         <p>{view.reason}</p>
         <p>
           Агент описывает приложения, общие фичи и ссылки на истории компонентов. Статусы появятся
@@ -74,15 +83,16 @@ export function ProductPanel({ onRepository }: { onRepository: (id: string) => v
       </div>
     );
   return (
-    <div className="product-panel">
-      <div className="product-heading">
+    <div className={panel}>
+      <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h2>{view.title}</h2>
-          <p>{view.purpose}</p>
+          <h2 className="text-lg font-semibold">{view.title}</h2>
+          <p className="text-muted-foreground">{view.purpose}</p>
         </div>
-        <label>
+        <label className="grid gap-1 text-sm font-medium">
           Релиз
           <select
+            className="border-input bg-card h-10 rounded-md border px-3 text-sm"
             aria-label="Продуктовый релиз"
             value={release || view.releaseId}
             onChange={(event) => setRelease(event.target.value)}
@@ -105,22 +115,29 @@ export function ProductPanel({ onRepository }: { onRepository: (id: string) => v
               : 'Продуктовый релиз ещё не готов: проверьте покрытие требований.'}
       </p>
       {view.verification && (
-        <p className="muted">
+        <p className="text-muted-foreground">
           Проверка: {view.verification.changeSetId} · {view.verification.verificationId}
         </p>
       )}
-      <div className="product-switch" aria-label="Представление продукта">
-        <button aria-pressed={mode === 'features'} onClick={() => setMode('features')}>
-          Возможности для пользователя
-        </button>
-        <button aria-pressed={mode === 'applications'} onClick={() => setMode('applications')}>
-          Приложения и компоненты
-        </button>
+      <div className="my-5 flex flex-wrap gap-4" aria-label="Представление продукта">
+        {(['features', 'applications'] as const).map((value) => (
+          <Button
+            key={value}
+            variant="outline"
+            aria-pressed={mode === value}
+            className={cn(mode === value && 'border-primary bg-accent text-accent-foreground')}
+            onClick={() => setMode(value)}
+          >
+            {value === 'features' ? 'Возможности для пользователя' : 'Приложения и компоненты'}
+          </Button>
+        ))}
       </div>
       {view.issues.length > 0 && (
         <details>
-          <summary>Что мешает завершению ({view.issues.length})</summary>
-          <ul>
+          <summary className="cursor-pointer font-medium">
+            Что мешает завершению ({view.issues.length})
+          </summary>
+          <ul className="mt-2 grid gap-1">
             {view.issues.map((issue) => (
               <li key={issue}>{issue}</li>
             ))}
@@ -128,13 +145,8 @@ export function ProductPanel({ onRepository }: { onRepository: (id: string) => v
         </details>
       )}
       {mode === 'features' ? (
-        <div
-          className="product-table-scroll"
-          tabIndex={0}
-          role="region"
-          aria-label="Карта фич по приложениям"
-        >
-          <table className="product-table">
+        <div className={scroll} tabIndex={0} role="region" aria-label="Карта фич по приложениям">
+          <table className={table}>
             <caption>Фичи и их участие в выбранном релизе</caption>
             <thead>
               <tr>
@@ -167,15 +179,17 @@ export function ProductPanel({ onRepository }: { onRepository: (id: string) => v
                                   ? 'Есть задачи'
                                   : 'Нужны задачи'}
                             </strong>
-                            <ul>
+                            <ul className="mt-1 grid gap-1">
                               {scope.stories.map((s) => (
                                 <li key={s.repositoryId + '/' + s.storyId}>
-                                  <button
-                                    className="link-button"
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className={link}
                                     onClick={() => onRepository(s.repositoryId)}
                                   >
                                     {s.repositoryId} / {s.storyId}
-                                  </button>
+                                  </Button>
                                 </li>
                               ))}
                             </ul>
@@ -197,7 +211,7 @@ export function ProductPanel({ onRepository }: { onRepository: (id: string) => v
                       <p key={check.gate}>
                         {check.passed ? '✓' : '○'} {check.scenario}
                         <br />
-                        <span className="muted">{check.gate}</span>
+                        <span className="text-muted-foreground">{check.gate}</span>
                       </p>
                     ))}
                   </td>
@@ -208,10 +222,10 @@ export function ProductPanel({ onRepository }: { onRepository: (id: string) => v
         </div>
       ) : (
         <>
-          <div className="product-applications">
+          <div className="grid gap-4">
             {view.applications.map((app) => (
-              <article key={app.id}>
-                <h3>{app.title}</h3>
+              <article key={app.id} className="rounded-md border p-4">
+                <h3 className="text-md font-semibold">{app.title}</h3>
                 <p>{app.purpose}</p>
                 <p>Пользователи: {app.audience.join(', ')}</p>
                 <p>
@@ -224,12 +238,12 @@ export function ProductPanel({ onRepository }: { onRepository: (id: string) => v
             ))}
           </div>
           <div
-            className="product-table-scroll"
+            className={scroll}
             tabIndex={0}
             role="region"
             aria-label="Размещение технических компонентов"
           >
-            <table className="product-table">
+            <table className={table}>
               <caption>Технические компоненты и размещение кода</caption>
               <thead>
                 <tr>
@@ -245,9 +259,14 @@ export function ProductPanel({ onRepository }: { onRepository: (id: string) => v
                     <th scope="row">{c.title}</th>
                     <td>{c.kind}</td>
                     <td>
-                      <button className="link-button" onClick={() => onRepository(c.repositoryId)}>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className={link}
+                        onClick={() => onRepository(c.repositoryId)}
+                      >
                         {c.repositoryId}
-                      </button>{' '}
+                      </Button>{' '}
                       / {c.path}
                     </td>
                     <td>
@@ -260,7 +279,7 @@ export function ProductPanel({ onRepository }: { onRepository: (id: string) => v
               </tbody>
             </table>
           </div>
-          <p className="muted">
+          <p className="text-muted-foreground">
             Несколько компонентов могут жить в одном репозитории. Задачи и интеграция сохраняют
             границы Git.
           </p>

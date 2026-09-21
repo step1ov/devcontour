@@ -14,6 +14,16 @@ import {
   type NodeProps,
 } from '@xyflow/react';
 import type { C4Diagram } from '../core/preparation-model.ts';
+import { cn } from '@/lib/utils.ts';
+
+// The class names stay: React Flow styles the node wrapper and the panel's
+// tests address elements by them.
+const elementTone = {
+  person: 'border-(--text-secondary) bg-secondary',
+  system: 'border-primary bg-accent',
+  'external-system': 'border-(--text-secondary) bg-secondary',
+  container: 'border-primary bg-card',
+};
 const kinds = {
   person: 'Пользователь',
   system: 'Система',
@@ -23,12 +33,19 @@ const kinds = {
 type ElementData = C4Diagram['nodes'][number] & Record<string, unknown>;
 function Element({ data }: NodeProps<Node<ElementData>>) {
   return (
-    <div className={`c4-element c4-${data.kind}`}>
+    <div
+      className={cn(
+        'c4-element min-h-[150px] w-[280px] rounded-md border p-4',
+        elementTone[data.kind],
+      )}
+    >
       <Handle type="target" position={Position.Left} />
-      <small>{kinds[data.kind]}</small>
-      <strong>{data.name}</strong>
-      {data.technology && <span>{data.technology}</span>}
-      <p>{data.description}</p>
+      <small className="text-muted-foreground text-xs">{kinds[data.kind]}</small>
+      <strong className="block">{data.name}</strong>
+      {data.technology && (
+        <span className="text-muted-foreground block text-sm">{data.technology}</span>
+      )}
+      <p className="mt-2 text-sm">{data.description}</p>
       <Handle type="source" position={Position.Right} />
     </div>
   );
@@ -40,7 +57,7 @@ function Relationship(props: EdgeProps) {
       <BaseEdge path={path} markerEnd={props.markerEnd} style={props.style} />
       <EdgeLabelRenderer>
         <div
-          className="c4-edge-label"
+          className="c4-edge-label bg-card absolute z-[2] max-w-[150px] rounded-sm px-2 py-1 text-center text-xs leading-tight break-words"
           style={{ transform: `translate(-50%, -50%) translate(${x}px, ${y}px)` }}
         >
           {props.label}
@@ -111,17 +128,17 @@ export default function C4Panel({
     labelBgStyle: { fill: 'var(--surface-panel)' },
   }));
   return (
-    <figure className="c4-figure">
-      <figcaption>
+    <figure className="c4-figure my-8">
+      <figcaption className="text-md mb-3 font-semibold">
         C{level} · {level === 1 ? 'Контекст системы' : 'Приложения, сервисы и хранилища'}
         {level === 2 && (
-          <small>
+          <small className="text-muted-foreground block text-sm font-normal">
             Граница системы: {systemName}. Container в C4 — приложение или хранилище, не обязательно
             Docker.
           </small>
         )}
       </figcaption>
-      <div className="c4-canvas">
+      <div className="c4-canvas bg-card h-(--canvas-height) rounded-md border">
         <ReactFlow
           key={JSON.stringify(diagram)}
           nodes={nodes}
@@ -141,9 +158,9 @@ export default function C4Panel({
           <Controls showInteractive={false} />
         </ReactFlow>
       </div>
-      <details>
-        <summary>Элементы и связи текстом</summary>
-        <ul>
+      <details className="mt-3">
+        <summary className="cursor-pointer font-medium">Элементы и связи текстом</summary>
+        <ul className="mt-2 grid gap-1">
           {diagram.nodes.map((n) => (
             <li key={n.id}>
               <strong>{n.name}</strong> — {kinds[n.kind]}. {n.description}
@@ -151,7 +168,7 @@ export default function C4Panel({
             </li>
           ))}
         </ul>
-        <ul>
+        <ul className="mt-2 grid gap-1">
           {diagram.relationships.map((r, i) => (
             <li key={i}>
               {diagram.nodes.find((n) => n.id === r.from)?.name} →{' '}
