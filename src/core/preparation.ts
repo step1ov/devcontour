@@ -318,13 +318,14 @@ export class Preparation {
             activity: [...(c.activity ?? [])].reverse().slice(0, 40),
             questions: c.questions ?? [],
             decisions: [...(c.decisions ?? [])].reverse(),
-            // Readiness is derived from the tracker, never set by hand.
+            // Readiness only: the feature text already travels in product.content,
+            // and duplicating it pushed the agent response past its size budget.
             features: product
               ? featuresOf(product.content).map((f) => {
                   const own = tasks.filter((t) => t.featureId === f.id);
                   const done = own.filter((t) => t.status === 'done').length;
                   return {
-                    ...f,
+                    id: f.id,
                     tasks: own.length,
                     done,
                     failed: own.filter((t) => t.status === 'failed').length,

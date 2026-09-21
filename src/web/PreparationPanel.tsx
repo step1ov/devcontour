@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import { Boxes, CircleDot, History, Loader2, MessageCircleQuestion, Scale } from 'lucide-react';
 import type { Preparation } from '../core/preparation.ts';
+import { featuresOf } from '../core/preparation.ts';
 import type {
   StoredProductBrief,
   ProductFeature,
@@ -26,12 +27,14 @@ type View = ReturnType<Preparation['status']> & {
   workspace?: { mode: 'embedded' | 'separate'; path: string };
 };
 type Stage = 'product' | 'architecture' | 'development';
-type FeatureView = ProductFeature & {
+type Readiness = {
+  id: string;
   tasks: number;
   done: number;
   failed: number;
   readiness: 'unplanned' | 'in-progress' | 'failed' | 'done';
 };
+type FeatureView = ProductFeature & Readiness;
 const names = {
   draft: 'Агент прорабатывает',
   'in-review': 'Ожидает вашего решения',
@@ -346,11 +349,17 @@ function Feature({ feature }: { feature: FeatureView }) {
 }
 function Product({
   content: p,
-  features,
+  readiness,
 }: {
   content: StoredProductBrief;
-  features: FeatureView[];
+  readiness: Readiness[];
 }) {
+  const blank: Readiness = { id: '', tasks: 0, done: 0, failed: 0, readiness: 'unplanned' };
+  const features: FeatureView[] = featuresOf(p).map((f) => ({
+    ...f,
+    ...(readiness.find((r) => r.id === f.id) ?? blank),
+    id: f.id,
+  }));
   const done = features.filter((f) => f.readiness === 'done').length;
   const planned = features.filter((f) => f.tasks > 0).length;
   return (
@@ -748,7 +757,7 @@ export function PreparationPanel() {
                   <Decisions stage={tab} decisions={c.decisions} questions={c.questions} />
                   {tab === 'product' ? (
                     p ? (
-                      <Product content={p.content} features={c.features} />
+                      <Product content={p.content} readiness={c.features} />
                     ) : (
                       <Alert className="max-w-[78ch] border-dashed">
                         <AlertDescription>
