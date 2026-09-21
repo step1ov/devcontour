@@ -1,3 +1,4 @@
+import { selectedWorkspaceMode, assertControllerCheckout } from './workspace-mode.ts';
 import { validateWorkflow } from '../core/workflow.ts';
 import { readFileSync, realpathSync, writeFileSync, existsSync, lstatSync } from 'node:fs';
 import { isAbsolute, resolve, dirname, join, sep } from 'node:path';
@@ -20,6 +21,12 @@ export function loadConfig(path: string): Config {
     new Set(c.repositories.map((r) => r.path)).size !== c.repositories.length
   )
     throw new Error('IDs и пути репозиториев должны быть уникальны');
+  if (c.workspaceRoot) {
+    const selected = selectedWorkspaceMode(c.workspaceRoot);
+    if (selected && selected !== (c.workspaceMode ?? 'separate'))
+      throw new Error('Режим конфигурации не соответствует выбранному workspace');
+    if (selected) assertControllerCheckout(c.workspaceRoot);
+  }
   const gateSets = [
     ...repositories(c).map((r) => r.gates),
     ...(c.workspaceGates.length ? [c.workspaceGates] : []),
@@ -113,7 +120,7 @@ export function readComponentConfig(entry: any) {
   };
 }
 export function scopedConfig(config: Config) {
-  if (config.storage !== 'component') return config;
+  if (config.storage !== 'component' && config.workspaceMode !== 'embedded') return config;
   const refs = repositories(config).map((repo) => {
     const { id, path, dependsOn, configFile, ...settings } = repo;
     const file = configFile ?? 'devcontour.component.json';

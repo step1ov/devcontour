@@ -1,4 +1,9 @@
 #!/usr/bin/env node
+import {
+  workspaceMode,
+  selectedWorkspaceMode,
+  assertControllerCheckout,
+} from './runner/workspace-mode.ts';
 import { startWorkspace, requirePreparation, preparationStore } from './runner/start.ts';
 import { PreparationAgent, WorkspaceAgent } from './application/preparation-agent.ts';
 import { preparationInputs } from './core/preparation-model.ts';
@@ -134,7 +139,7 @@ async function main() {
   }
   if (operation === 'help' || args.includes('--help')) {
     console.log(
-      'devcontour start --workspace /absolute/workspace [--port 4317] — панель до выбора стека и создания репозиториев',
+      'devcontour start --workspace /absolute/workspace [--workspace-mode embedded|separate] [--port 4317] — при первом запуске явно выберите размещение; панель до выбора стека и создания репозиториев',
     );
     console.log(
       'devcontour profile-show --profile <ID|./file.json> --repository /absolute/repo [--repository-id ID]',
@@ -179,9 +184,16 @@ async function main() {
     if (!workspacePath) throw new Error('Для раннего запуска укажите --workspace /absolute/path');
     const port = Number(option('--port', '4317'));
     if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Некорректный port');
-    const app = await startWorkspace(workspacePath, { port, dev: args.includes('--dev') });
+    const mode = args.includes('--workspace-mode')
+      ? workspaceMode.parse(option('--workspace-mode', ''))
+      : undefined;
+    const app = await startWorkspace(workspacePath, {
+      port,
+      dev: args.includes('--dev'),
+      workspaceMode: mode,
+    });
     console.log(
-      `DevContour: ${app.url}\nПродукт → согласование → архитектура и стек → согласование → разработка.`,
+      `DevContour: ${app.url}\nWorkspace: ${workspacePath} · ${selectedWorkspaceMode(workspacePath)}\nПродукт → согласование → архитектура и стек → согласование → разработка.`,
     );
     let closing = false;
     const close = async () => {
@@ -197,6 +209,12 @@ async function main() {
     });
     return;
   }
+  if (workspacePath && selectedWorkspaceMode(workspacePath))
+    assertControllerCheckout(workspacePath);
+  if (args.includes('--workspace-mode'))
+    throw new Error(
+      '--workspace-mode задаётся командой start; остальные команды используют сохранённый выбор',
+    );
   if (operation === 'agent' && args.includes('--file')) {
     const request: unknown = JSON.parse(await readFile(resolve(option('--file', '')), 'utf8'));
     if (
@@ -283,9 +301,15 @@ async function main() {
     );
     if (
       workspacePath &&
-      (workspacePath === repository || workspacePath.startsWith(repository + sep))
+      (selectedWorkspaceMode(workspacePath) === 'embedded'
+        ? workspacePath !== repository
+        : workspacePath === repository || workspacePath.startsWith(repository + sep))
     )
-      throw new Error('Workspace должен находиться вне репозитория продукта');
+      throw new Error(
+        selectedWorkspaceMode(workspacePath) === 'embedded'
+          ? 'Embedded workspace должен совпадать с корнем репозитория'
+          : 'Separate workspace должен находиться вне репозитория продукта',
+      );
     await mkdir(root, { recursive: true });
     const selected = await profile(option('--profile', 'react-vite-admin'), repository);
     let c = projectConfig(
@@ -337,6 +361,10 @@ async function main() {
       'Конфигурация не принадлежит выбранному workspace; для прежней конфигурации используйте --data',
     );
   if (operation === 'storage-migrate') {
+    if (config.workspaceMode === 'embedded')
+      throw new Error(
+        'Embedded workspace уже использует единую БД; storage-migrate предназначен для отдельного workspace',
+      );
     const inspectDB = new DatabaseSync(join(root, 'state.sqlite'));
     const partitioned = Boolean(
       JSON.parse(

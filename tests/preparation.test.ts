@@ -229,7 +229,7 @@ test('C1/C2 validation blocks incomplete and contradictory architecture', () => 
 test('Empty workspace serves immediately, survives restart and attaches real Git configuration at the same URL', async () => {
   const root = mkdtempSync(join(tmpdir(), 'devcontour-start-')),
     workspace = join(root, 'workspace');
-  let app = await startWorkspace(workspace, { port: 0 });
+  let app = await startWorkspace(workspace, { port: 0, workspaceMode: 'separate' });
   const headers = { 'Content-Type': 'application/json', 'X-DevContour-Request': '1' };
   const post = (path: string, body: unknown, origin?: string) =>
     fetch(app.url + path, {
@@ -257,7 +257,7 @@ test('Empty workspace serves immediately, survives restart and attaches real Git
     approvePreparation(new Preparation(store));
     store.close();
     await app.close();
-    app = await startWorkspace(workspace, { port: 0 });
+    app = await startWorkspace(workspace, { port: 0, workspaceMode: 'separate' });
     const early = await (await fetch(app.url + '/api/preparation')).json();
     assert.equal(early.developmentReady, true);
     assert.equal(early.engineConnected, false);

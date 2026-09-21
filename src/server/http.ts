@@ -1,3 +1,4 @@
+import { workspaceDescription } from '../runner/workspace-mode.ts';
 import { Preparation } from '../core/preparation.ts';
 import { PreparationAgent } from '../application/preparation-agent.ts';
 import type { Store } from '../core/store.ts';
@@ -48,6 +49,7 @@ export async function serve(
     dev?: boolean;
     bootstrap?: {
       store: Store;
+      workspace?: string;
       connect: () => Promise<{ h: DevContour; scheduler: Scheduler } | undefined>;
     };
   },
@@ -120,7 +122,13 @@ export async function serve(
           const view = new Preparation(preparationStore).status(
             url.searchParams.get('change') ?? undefined,
           );
-          json(res, 200, { ...view, engineConnected: Boolean(h), startupError });
+          const root = h?.config.workspaceRoot ?? options.bootstrap?.workspace;
+          json(res, 200, {
+            ...view,
+            engineConnected: Boolean(h),
+            startupError,
+            workspace: root ? workspaceDescription(root) : undefined,
+          });
           return;
         }
         if (req.method === 'POST' && path === '/api/preparation/decision' && preparationStore) {
@@ -163,6 +171,7 @@ export async function serve(
             config: {
               name: h.config.name,
               workspaceRoot: h.config.workspaceRoot,
+              workspaceMode: h.config.workspaceMode,
               repositories: repositories(h.config),
               workspaceGates: h.config.workspaceGates,
               mode: h.config.mode,

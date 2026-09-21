@@ -1,3 +1,4 @@
+import { chooseWorkspaceMode, type WorkspaceMode } from './workspace-mode.ts';
 import { preparationStore } from './preparation-store.ts';
 import { existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -12,13 +13,17 @@ import { serve } from '../server/http.ts';
 
 export { preparationStore, requirePreparation } from './preparation-store.ts';
 
-export async function startWorkspace(workspace: string, options: { port: number; dev?: boolean }) {
+export async function startWorkspace(
+  workspace: string,
+  options: { port: number; dev?: boolean; workspaceMode?: WorkspaceMode },
+) {
   mkdirSync(workspace, { recursive: true });
   const canonical = canonicalPath(workspace),
     root = join(canonical, '.devcontour-local');
   const configPath = join(root, 'config.json');
   if (existsSync(configPath) && loadConfig(configPath).workspaceRoot !== canonical)
     throw new Error('Конфигурация относится к другому workspace');
+  chooseWorkspaceMode(canonical, options.workspaceMode);
   const store = preparationStore(root);
   try {
     new Preparation(store).enable();
@@ -26,6 +31,7 @@ export async function startWorkspace(workspace: string, options: { port: number;
       ...options,
       bootstrap: {
         store,
+        workspace: canonical,
         connect: async () => {
           const status = new Preparation(store).status();
           if (!status.enabled || !status.developmentReady || !existsSync(join(root, 'config.json')))

@@ -398,6 +398,7 @@ export const configSchema = z.object({
   forgeConnections: z.record(z.string(), forgeConnectionSchema).default({}),
   storage: z.enum(['central', 'component']).default('central'),
   workspaceRoot: z.string().optional(),
+  workspaceMode: z.enum(['embedded', 'separate']).optional(),
   contextPacks: z.array(contextPackSchema).default([]),
   resources: z.array(resourceSchema).default([]),
   resourceDatabase: z.string().optional(),

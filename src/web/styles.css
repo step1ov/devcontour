@@ -1440,3 +1440,14 @@ legend {
   white-space: normal;
   overflow-wrap: anywhere;
 }
+
+.preparation-location {
+  display: grid;
+  gap: var(--space-2);
+  max-width: 32rem;
+  overflow-wrap: anywhere;
+}
+.preparation-location code {
+  white-space: normal;
+  font-size: var(--text-xs);
+}

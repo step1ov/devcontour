@@ -121,7 +121,9 @@ export function attachJournal(h: DevContour) {
   h.store.onCommit = () =>
     h.store.project((state, events) => {
       let dir = root;
-      for (const name of ['docs', 'journal']) {
+      for (const name of h.config.workspaceMode === 'embedded'
+        ? ['.devcontour-local', 'journal']
+        : ['docs', 'journal']) {
         dir = join(dir, name);
         mkdirSync(dir, { recursive: true });
         if (lstatSync(dir).isSymbolicLink() || realpathSync(dir) !== resolve(dir))

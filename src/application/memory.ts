@@ -1,3 +1,4 @@
+import { memoryDirectory } from '../core/placement.ts';
 import { z } from 'zod';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -99,10 +100,11 @@ export class ProjectMemory {
       : requireValue(this.h.config.workspaceRoot, 'Для общей памяти нужен workspaceRoot');
   }
   private identity(root: string, create = false, repositoryId?: string): string | undefined {
-    const path = safe(root, '.devcontour/context-identity.json');
+    const prefix = memoryDirectory(this.h.config, repositoryId);
+    const path = safe(root, prefix + '/context-identity.json');
     if (!existsSync(path) && create) {
-      mkdirSync(safe(root, '.devcontour'), { recursive: true });
-      const sync = safe(root, '.devcontour/identity.json');
+      mkdirSync(safe(root, prefix), { recursive: true });
+      const sync = safe(root, prefix + '/identity.json');
       const shared = existsSync(sync)
         ? identitySchema.parse(JSON.parse(readFileSync(sync, 'utf8')))
         : undefined;
@@ -122,18 +124,19 @@ export class ProjectMemory {
       .parse(JSON.parse(readFileSync(path, 'utf8'))).id;
   }
   private records(root: string, repositoryId?: string): MemoryRecord[] {
-    const directory = safe(root, '.devcontour/knowledge');
+    const prefix = memoryDirectory(this.h.config, repositoryId);
+    const directory = safe(root, prefix + '/knowledge');
     if (!existsSync(directory)) return [];
     const files = readdirSync(directory)
       .filter((f) => f.endsWith('.json'))
       .sort();
     if (files.length > 2000)
       throw new DomainError('Memory scan limit: 2000 records; archive or partition knowledge');
-    const identity = this.identity(root);
+    const identity = this.identity(root, false, repositoryId);
     return files.map((file) => {
       if (!/^[a-f0-9-]{36}\.json$/.test(file))
         throw new DomainError('Некорректное имя memory record');
-      const path = safe(root, '.devcontour/knowledge/' + file);
+      const path = safe(root, prefix + '/knowledge/' + file);
       if (lstatSync(path).size > 32000) throw new DomainError('Memory record exceeds 32 KiB');
       const record = recordSchema.parse(JSON.parse(readFileSync(path, 'utf8')));
       if (
@@ -172,8 +175,9 @@ export class ProjectMemory {
       identity: this.identity(root, true, input.repositoryId),
       createdAt: new Date().toISOString(),
     });
-    mkdirSync(safe(root, '.devcontour/knowledge'), { recursive: true });
-    const path = safe(root, '.devcontour/knowledge/' + record.id + '.json');
+    const prefix = memoryDirectory(this.h.config, input.repositoryId);
+    mkdirSync(safe(root, prefix + '/knowledge'), { recursive: true });
+    const path = safe(root, prefix + '/knowledge/' + record.id + '.json');
     writeFileSync(path, JSON.stringify(record, null, 2) + '\n', { flag: 'wx' });
     return { id: record.id, path, digest: digest(record), contextOnly: true };
   }

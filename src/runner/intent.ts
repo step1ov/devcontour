@@ -113,16 +113,22 @@ export class IntentService implements ProductReleaseGuard {
       ? repository(this.h.config, repositoryId).path
       : requireValue(this.h.config.workspaceRoot, 'Нужен Git workspaceRoot');
   }
+  private source(repositoryId?: string) {
+    return repositoryId && this.h.config.workspaceMode === 'embedded'
+      ? 'docs/implementation-intent.md'
+      : 'INTENT.md';
+  }
   private read(repositoryId?: string, ref = 'HEAD') {
     const root = this.root(repositoryId),
+      source = this.source(repositoryId),
       sha = this.git(root, 'rev-parse', '--verify', ref + '^{commit}');
-    if (!/^100(644|755) blob /.test(this.git(root, 'ls-tree', sha, '--', 'INTENT.md')))
-      throw new DomainError('Нужен обычный committed INTENT.md выбранного владельца');
-    const markdown = this.git(root, 'show', sha + ':INTENT.md'),
+    if (!/^100(644|755) blob /.test(this.git(root, 'ls-tree', sha, '--', source)))
+      throw new DomainError(`Нужен обычный committed ${source} выбранного владельца`);
+    const markdown = this.git(root, 'show', sha + ':' + source),
       document = parseIntent(markdown);
     if ((repositoryId ? 'component' : 'workspace') !== document.kind)
       throw new DomainError('INTENT kind не соответствует владельцу');
-    return { sha, markdown, document, digest: digest(document) };
+    return { sha, source, markdown, document, digest: digest(document) };
   }
   private renderCurrent(raw: unknown) {
     const input = intentInputs.intent_render.parse(raw),
@@ -174,7 +180,7 @@ export class IntentService implements ProductReleaseGuard {
     parseRequirements(markdown);
     if (Buffer.byteLength(markdown) > 1_000_000) throw new DomainError('INTENT превышает 1 MB');
     return {
-      source: 'INTENT.md',
+      source: this.source(input.repositoryId),
       markdown,
       committed: false,
       next: 'Write in the selected owner, review scope, commit, then intent_snapshot. No file or status was changed.',
@@ -188,7 +194,7 @@ export class IntentService implements ProductReleaseGuard {
         throw new DomainError('Workspace содержит ссылки на релизы, а не локальные истории');
       return {
         repositoryId: null,
-        source: 'INTENT.md',
+        source: this.source(input.repositoryId),
         sha: snapshot.sha,
         digest: snapshot.digest,
         document: snapshot.document,
@@ -201,7 +207,7 @@ export class IntentService implements ProductReleaseGuard {
     if (!stories.length) throw new DomainError('Неизвестная история');
     return {
       repositoryId: input.repositoryId,
-      source: 'INTENT.md',
+      source: this.source(input.repositoryId),
       sha: snapshot.sha,
       digest: snapshot.digest,
       releases: snapshot.document.releases,
@@ -209,7 +215,7 @@ export class IntentService implements ProductReleaseGuard {
         ...s,
         requirement: {
           ...bindings.find((b) => b.id === intentRequirementId(s.id))!,
-          source: 'INTENT.md',
+          source: this.source(input.repositoryId),
         },
       })),
     };
@@ -377,7 +383,7 @@ export class IntentService implements ProductReleaseGuard {
       acceptedHeads,
       sources: coverage.release.components.map((c) => {
         const local = this.read(c.repositoryId).document as ComponentIntent;
-        const files = [...new Set(['INTENT.md', ...local.sources])].sort();
+        const files = [...new Set([this.source(c.repositoryId), ...local.sources])].sort();
         return {
           repositoryId: c.repositoryId,
           files,
@@ -731,11 +737,12 @@ export class IntentService implements ProductReleaseGuard {
         );
         const related = tasks.filter((t) => {
           const links = t.requirements ?? [];
-          if (links.some((r) => r.source === 'INTENT.md' && r.id === binding.id)) return true;
+          if (links.some((r) => r.source === this.source(repositoryId) && r.id === binding.id))
+            return true;
           // An unassigned contributor cannot disappear behind another completed task.
           // Explicitly assigned stories of other releases retain their own scope.
           return (
-            !links.some((r) => r.source === 'INTENT.md' && knownStories.has(r.id)) &&
+            !links.some((r) => r.source === this.source(repositoryId) && knownStories.has(r.id)) &&
             links.some((r) => requirementKeys.has(referenceKey(r)))
           );
         });
@@ -744,7 +751,7 @@ export class IntentService implements ProductReleaseGuard {
             completed(t) &&
             t.requirements?.some(
               (r) =>
-                r.source === 'INTENT.md' &&
+                r.source === this.source(repositoryId) &&
                 r.id === binding.id &&
                 r.digest === binding.digest &&
                 checked(t, r.gate),

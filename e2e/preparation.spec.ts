@@ -11,7 +11,7 @@ test('An empty workspace shows live product review, C1/C2 and separate operator 
   request,
 }) => {
   const root = mkdtempSync(join(tmpdir(), 'devcontour-ui-stages-'));
-  const app = await startWorkspace(join(root, 'workspace'), { port: 0 });
+  const app = await startWorkspace(join(root, 'workspace'), { port: 0, workspaceMode: 'embedded' });
   const send = async (operation: string, input: unknown) => {
     const response = await request.post(app.url + '/api/agent', {
       headers: { 'X-DevContour-Request': '1' },
@@ -23,6 +23,7 @@ test('An empty workspace shows live product review, C1/C2 and separate operator 
   try {
     await page.goto(app.url);
     await expect(page.getByRole('heading', { name: 'От запроса к разработке' })).toBeVisible();
+    await expect(page.getByText('Внутри репозитория', { exact: true })).toBeVisible();
     await page.getByLabel('Новое изменение').fill('Модерация чата');
     await page.getByRole('button', { name: 'Создать изменение', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'Модерация чата' })).toBeVisible();

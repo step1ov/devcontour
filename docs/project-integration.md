@@ -6,6 +6,8 @@ DevContour остаётся единственным scheduler. Правила, 
 
 ## Размещение данных
 
+Ниже описан separate для самостоятельных репозиториев. Для одного Git, включая монорепозиторий, embedded объединяет код и workspace: [выбор размещения](workspace-modes.md).
+
 ```text
 chat-workspace/
   workspace.json

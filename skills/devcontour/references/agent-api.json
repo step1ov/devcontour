@@ -1140,7 +1140,7 @@
     },
     {
       "name": "intent_snapshot",
-      "description": "Read committed INTENT.md and exact story REQ bindings. Add a configured test gate/scenario, and bind the detailed requirements too.",
+      "description": "Read the committed intent source returned for the selected owner (docs/implementation-intent.md in embedded mode, otherwise INTENT.md) and exact story REQ bindings. Add a configured test gate/scenario, and bind the detailed requirements too.",
       "readOnly": true,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

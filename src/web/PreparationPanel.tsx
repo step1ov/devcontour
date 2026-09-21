@@ -6,6 +6,7 @@ const C4 = lazy(() => import('./C4Panel.tsx'));
 type View = ReturnType<Preparation['status']> & {
   engineConnected?: boolean;
   startupError?: string;
+  workspace?: { mode: 'embedded' | 'separate'; path: string };
 };
 const names = {
   draft: 'Агент прорабатывает',
@@ -209,7 +210,17 @@ export function PreparationPanel() {
             Сначала определяем продукт, затем согласуем устройство системы и запускаем исполнение.
           </p>
         </div>
-        <span className="preparation-live">Панель подключена</span>
+        <div className="preparation-location">
+          <span className="preparation-live">Панель подключена</span>
+          {view.workspace && (
+            <>
+              <strong>
+                {view.workspace.mode === 'embedded' ? 'Внутри репозитория' : 'Отдельный workspace'}
+              </strong>
+              <code>{view.workspace.path}</code>
+            </>
+          )}
+        </div>
       </header>
       <div className="preparation-layout">
         <aside className="preparation-sidebar">

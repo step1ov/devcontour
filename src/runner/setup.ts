@@ -1,3 +1,4 @@
+import { selectedWorkspaceMode, assertControllerCheckout } from './workspace-mode.ts';
 import { lstat, mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -76,6 +77,8 @@ export function projectConfig(
       '.githooks/',
       'devcontour.config.json',
       'devcontour.component.json',
+      'devcontour.workspace.json',
+      'docs/journal/',
       '.devcontour-local/',
       '.devcontour/',
       'package.json',
@@ -95,10 +98,14 @@ export function componentProfileConfig(
   config: ReturnType<typeof projectConfig>,
   workspaceRoot: string,
 ) {
+  const mode = selectedWorkspaceMode(workspaceRoot) ?? 'separate';
+  if (mode === 'embedded' && config.repository !== workspaceRoot)
+    throw new Error('Embedded workspace должен совпадать с корнем единственного репозитория');
   return {
     ...config,
     workspaceRoot,
-    storage: 'component' as const,
+    workspaceMode: mode,
+    storage: mode === 'embedded' ? ('central' as const) : ('component' as const),
     repositories: [{ ...repositories(config)[0], environment: config.environment }],
     environment: undefined,
     lifecycle: undefined,
@@ -182,12 +189,20 @@ export async function setupProject(options: {
       ? await realpath(options.workspace)
       : resolve(options.workspace);
     const toolRoot = await realpath(devcontourRoot);
+    const mode = selectedWorkspaceMode(workspaceRoot) ?? 'separate';
+    if (workspaceRoot === toolRoot || workspaceRoot.startsWith(toolRoot + sep))
+      throw new Error('Workspace должен находиться вне каталога DevContour');
     if (
-      [repository, toolRoot].some(
-        (root) => workspaceRoot === root || workspaceRoot!.startsWith(root + sep),
-      )
+      mode === 'embedded'
+        ? workspaceRoot !== repository
+        : workspaceRoot === repository || workspaceRoot.startsWith(repository + sep)
     )
-      throw new Error('Workspace должен находиться вне репозитория продукта и каталога DevContour');
+      throw new Error(
+        mode === 'embedded'
+          ? 'Embedded workspace должен совпадать с корнем репозитория'
+          : 'Separate workspace должен находиться вне репозитория продукта',
+      );
+    if (await inspect(workspaceRoot)) assertControllerCheckout(workspaceRoot);
   }
   const data = workspaceRoot
     ? join(workspaceRoot, '.devcontour-local')
@@ -201,7 +216,7 @@ export async function setupProject(options: {
     join(repository, '.gitignore'),
     '.devcontour-local/\n.reports/\nnode_modules/\ndist/\n.venv/\n__pycache__/\n.pytest_cache/\n.ruff_cache/\n.expo/\n.env*\n!.env.example\n',
   );
-  if (workspaceRoot)
+  if (workspaceRoot && workspaceRoot !== repository)
     files.set(join(workspaceRoot, '.gitignore'), '.devcontour-local/\n.env*\n!.env.example\n');
   const guides = new Map([
     ['START.md', 'devcontour-start.md'],
@@ -213,6 +228,7 @@ export async function setupProject(options: {
       'requirements',
       'lead-workflow',
       'staged-workflow',
+      'workspace-modes',
       'project-memory',
       'metrics',
       'experiments',
@@ -309,7 +325,7 @@ export async function setupProject(options: {
   if (workspaceRoot) {
     const configPath = join(data, 'config.json');
     const config = loadConfig(configPath);
-    if (config.storage === 'component')
+    if (config.storage === 'component' || config.workspaceMode === 'embedded')
       await writeFile(configPath, JSON.stringify(scopedConfig(config), null, 2) + '\n');
   }
   return {

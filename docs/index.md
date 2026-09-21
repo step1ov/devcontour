@@ -91,11 +91,13 @@
 
 ## Продуктовая проработка
 
+- [Выбор размещения: внутри репозитория или отдельно](workspace-modes.md).
+
 - [Три этапа: продукт, архитектура и разработка](staged-workflow.md).
 
 ## Как поддерживать документы
 
 Изменение поведения сопровождается правкой соответствующего руководства, примера и, при изменении принципа, записи в [решениях](decisions.md). Не добавляйте очередную заметку «теперь поддерживается» поверх устаревшего раздела: перепишите его под текущее состояние. Общие правила держите в одном нормативном месте, из остальных документов ссылайтесь на него.
 
-`setup` переносит пятнадцать руководств: `START.md` → `devcontour-start.md`, `staged-workflow.md` → `devcontour-staged-workflow.md`, `workspaces.md` → `devcontour-workspaces.md`, `engineering-context.md` → `devcontour-engineering.md`, `project-integration.md` → `devcontour-integration.md`, `team-sync.md` → `devcontour-team-sync.md`, `requirements.md` → `devcontour-requirements.md`, `lead-workflow.md` → `devcontour-lead-workflow.md`, `project-memory.md` → `devcontour-project-memory.md`, `metrics.md` → `devcontour-metrics.md`, `experiments.md` → `devcontour-experiments.md`, `agent-evals.md` → `devcontour-agent-evals.md`, `intent.md` → `devcontour-intent.md`, `product-map.md` → `devcontour-product-map.md`, `mcp-and-profiles.md` → `devcontour-mcp-and-profiles.md`. Ссылки между установленными руководствами преобразуются автоматически. Ссылки на остальной справочник показывают его имя внутри дистрибутива DevContour без неработающего относительного URL. Существующие копии не перезаписываются. При обновлении проверьте ссылки и осознанно перенесите полезные изменения в правила продукта.
+`setup` переносит шестнадцать руководств: `START.md` → `devcontour-start.md`, `staged-workflow.md` → `devcontour-staged-workflow.md`, `workspace-modes.md` → `devcontour-workspace-modes.md`, `workspaces.md` → `devcontour-workspaces.md`, `engineering-context.md` → `devcontour-engineering.md`, `project-integration.md` → `devcontour-integration.md`, `team-sync.md` → `devcontour-team-sync.md`, `requirements.md` → `devcontour-requirements.md`, `lead-workflow.md` → `devcontour-lead-workflow.md`, `project-memory.md` → `devcontour-project-memory.md`, `metrics.md` → `devcontour-metrics.md`, `experiments.md` → `devcontour-experiments.md`, `agent-evals.md` → `devcontour-agent-evals.md`, `intent.md` → `devcontour-intent.md`, `product-map.md` → `devcontour-product-map.md`, `mcp-and-profiles.md` → `devcontour-mcp-and-profiles.md`. Ссылки между установленными руководствами преобразуются автоматически. Ссылки на остальной справочник показывают его имя внутри дистрибутива DevContour без неработающего относительного URL. Существующие копии не перезаписываются. При обновлении проверьте ссылки и осознанно перенесите полезные изменения в правила продукта.
 

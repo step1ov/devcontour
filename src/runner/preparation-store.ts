@@ -1,11 +1,14 @@
+import { selectedWorkspaceMode, assertControllerCheckout } from './workspace-mode.ts';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { Store } from '../core/store.ts';
 import { developmentBinding } from '../core/preparation.ts';
 import { repositories } from '../core/repositories.ts';
 import { loadConfig } from './config.ts';
 
 export function preparationStore(root: string) {
+  const workspace = dirname(root);
+  if (selectedWorkspaceMode(workspace)) assertControllerCheckout(workspace);
   const path = join(root, 'config.json');
   const config = existsSync(path) ? loadConfig(path) : undefined;
   return new Store(

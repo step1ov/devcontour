@@ -1,5 +1,9 @@
 # CLI и локальное API
 
+## Первый запуск и размещение
+
+`start --workspace-mode embedded --workspace /absolute/product --port 0` открывает панель внутри одного репозитория. `start --workspace-mode separate --workspace /absolute/workspace --port 0` использует отдельную папку. Первый выбор обязателен; последующие команды читают сохранённый `devcontour.workspace.json`. Без режима/пути CLI объясняет, что уточнить у пользователя. [Границы режимов](workspace-modes.md). Смена размещения существующей памяти не выполняется флагом.
+
 ## Просмотр профиля до настройки workspace
 
 ```sh

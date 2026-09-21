@@ -1,3 +1,4 @@
+import { selectedWorkspaceMode, assertControllerCheckout } from './workspace-mode.ts';
 import { mkdir, readFile, writeFile, realpath, mkdtemp, rm } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
 import { z } from 'zod';
@@ -34,6 +35,8 @@ const registrySchema = z.object({
 export async function setupWorkspace(file: string, data?: string) {
   const source = await realpath(resolve(file));
   const workspaceRoot = dirname(source);
+  assertControllerCheckout(workspaceRoot);
+  const workspaceMode = selectedWorkspaceMode(workspaceRoot) ?? 'separate';
   const raw = JSON.parse(await readFile(source, 'utf8'));
   raw.repositories = raw.repositories.map((r: any) =>
     readComponentConfig({ ...r, path: resolve(workspaceRoot, r.path) }),
@@ -71,8 +74,14 @@ export async function setupWorkspace(file: string, data?: string) {
       ],
     })),
   );
-  if (repos.some((r) => workspaceRoot === r.path || workspaceRoot.startsWith(r.path + sep)))
-    throw new Error('Workspace с дневником должен находиться вне репозиториев компонентов');
+  if (
+    workspaceMode === 'embedded'
+      ? repos.length !== 1 || repos[0].path !== workspaceRoot
+      : repos.some((r) => workspaceRoot === r.path || workspaceRoot.startsWith(r.path + sep))
+  )
+    throw new Error(
+      'Embedded требует один репозиторий в корне workspace; separate — workspace вне компонентов',
+    );
   if (
     new Set(repos.map((r) => r.id)).size !== repos.length ||
     new Set(repos.map((r) => r.path)).size !== repos.length
@@ -83,6 +92,7 @@ export async function setupWorkspace(file: string, data?: string) {
     ...projectConfig(repos[0].path, selected[0], input.approvalMode),
     name: input.name,
     workspaceRoot,
+    workspaceMode,
     targetBranch: repos[0].targetBranch,
     concurrency: Math.min(...selected.map((p) => p.concurrency ?? 2)),
     repositories: repos,
@@ -99,7 +109,7 @@ export async function setupWorkspace(file: string, data?: string) {
     toolProfiles: input.toolProfiles,
     completionMode: input.completionMode,
     forgeConnections: input.forgeConnections,
-    storage: 'component',
+    storage: workspaceMode === 'embedded' ? 'central' : 'component',
     gates: repos[0].gates,
     packs: packs.map(profileMetadata),
   });

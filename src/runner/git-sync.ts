@@ -1,3 +1,5 @@
+import { memoryDirectory } from '../core/placement.ts';
+import { selectedWorkspaceMode } from './workspace-mode.ts';
 import { validatePreparation } from '../core/preparation.ts';
 import type { Store } from '../core/store.ts';
 import { execFileSync } from 'node:child_process';
@@ -41,6 +43,7 @@ type Baseline = z.infer<typeof baselineSchema>;
 type Scope = {
   owner?: string;
   path: string;
+  directory: string;
   branch: string;
   commit: string;
   identity: SyncIdentity;
@@ -70,7 +73,7 @@ function safePath(root: string, relative: string) {
   }
   return path;
 }
-function readRecords(root: string): Records {
+function readRecords(root: string, directory = '.devcontour'): Records {
   const records: Records = {};
   safePath(root, directory);
   for (const category of categories) {
@@ -91,24 +94,37 @@ function readRecords(root: string): Records {
   return records;
 }
 function scopes(h: DevContour): Scope[] {
-  if (!h.config.workspaceRoot)
-    throw new Error('Git sync требует workspaceRoot вне компонентов; настройте workspace');
+  if (!h.config.workspaceRoot) throw new Error('Git sync требует явно выбранный workspaceRoot');
+  const selected = selectedWorkspaceMode(h.config.workspaceRoot);
+  if (selected && selected !== (h.config.workspaceMode ?? 'separate'))
+    throw new Error('Режим конфигурации не соответствует выбранному workspace');
   const locations = [
     { owner: undefined as string | undefined, path: h.config.workspaceRoot },
-    ...repositories(h.config).map((r) => ({ owner: r.id, path: r.path })),
+    ...repositories(h.config).map((r) => ({
+      owner: r.id,
+      path: r.path,
+      directory: memoryDirectory(h.config, r.id),
+    })),
   ];
-  return readScopes(h.store, locations);
+  return readScopes(h.store, locations, h.config.workspaceMode === 'embedded');
 }
 function readScopes(
   store: Store,
-  locations: { owner: string | undefined; path: string }[],
+  locations: { owner: string | undefined; path: string; directory?: string }[],
+  embedded = false,
 ): Scope[] {
   const roots = locations.map((l) => realpathSync(l.path));
-  if (roots.some((p, i) => roots.some((q, j) => i !== j && (p === q || p.startsWith(q + sep)))))
+  if (embedded && (roots.length !== 2 || roots[0] !== roots[1]))
+    throw new Error('Embedded sync требует workspace и единственный репозиторий в одном корне');
+  if (
+    !embedded &&
+    roots.some((p, i) => roots.some((q, j) => i !== j && (p === q || p.startsWith(q + sep))))
+  )
     throw new Error(
       'Git sync требует отдельные, невложенные Git-репозитории workspace и компонентов',
     );
   return locations.map((location) => {
+    const directory = location.directory ?? '.devcontour';
     const path = realpathSync(location.path);
     if (git(path, 'rev-parse', '--show-toplevel') !== path)
       throw new Error('Нужен отдельный Git repository: ' + path);
@@ -150,10 +166,10 @@ function readScopes(
       throw new Error('Это другой проект/clone identity: ' + path);
     if (baseline && !existsSync(file))
       throw new Error('Git identity удалена; проверьте ветку: ' + path);
-    const remote = readRecords(path);
+    const remote = readRecords(path, directory);
     if (!existsSync(file) && Object.keys(remote).length)
       throw new Error('Нет identity у существующих Git-записей: ' + path);
-    return { ...location, path, branch, commit, identity, remote, baseline };
+    return { ...location, path, directory, branch, commit, identity, remote, baseline };
   });
 }
 function assertIdle(s: DevContourState) {
@@ -203,7 +219,7 @@ function validateGitResults(
     for (const key of [`tasks/${t.id}`, `receipts/${t.sharedCompletion!.receipt.id}`]) {
       let committed: unknown;
       try {
-        committed = JSON.parse(git(scope.path, 'show', `HEAD:${directory}/${key}.json`));
+        committed = JSON.parse(git(scope.path, 'show', `HEAD:${scope.directory}/${key}.json`));
       } catch {
         throw new Error('Приёмка из Git требует committed task + receipt: ' + key);
       }
@@ -324,13 +340,13 @@ export function syncGit(h: DevContour, options: SyncOptions = {}) {
     for (const scope of locations)
       if (
         git(scope.path, 'symbolic-ref', '--short', 'HEAD') !== scope.branch ||
-        canonical(readRecords(scope.path)) !== canonical(scope.remote)
+        canonical(readRecords(scope.path, scope.directory)) !== canonical(scope.remote)
       )
         throw new Error('Git tree изменилось во время sync; повторите команду');
     for (const scope of locations) {
-      atomicWrite(scope.path, directory + '/identity.json', scope.identity);
+      atomicWrite(scope.path, scope.directory + '/identity.json', scope.identity);
       for (const [key, record] of Object.entries(merged.get(scope.owner)!))
-        atomicWrite(scope.path, `${directory}/${key}.json`, record);
+        atomicWrite(scope.path, `${scope.directory}/${key}.json`, record);
       h.store.saveSyncBaseline(scope.owner, {
         version: 1,
         identity: scope.identity,
@@ -390,12 +406,12 @@ export function syncPreparation(store: Store, workspace: string, member: string)
     const next = { ...state, preparation: record.data };
     validatePreparation(next, state);
     if (
-      canonical(readRecords(scope.path)) !== canonical(scope.remote) ||
+      canonical(readRecords(scope.path, scope.directory)) !== canonical(scope.remote) ||
       git(scope.path, 'symbolic-ref', '--short', 'HEAD') !== scope.branch
     )
       throw new Error('Git tree изменилось во время sync');
-    atomicWrite(scope.path, directory + '/identity.json', scope.identity);
-    atomicWrite(scope.path, directory + '/' + key + '.json', record);
+    atomicWrite(scope.path, scope.directory + '/identity.json', scope.identity);
+    atomicWrite(scope.path, scope.directory + '/' + key + '.json', record);
     store.saveSyncBaseline(undefined, {
       version: 1,
       identity: scope.identity,

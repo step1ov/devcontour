@@ -1,3 +1,4 @@
+import { memoryDirectory } from '../core/placement.ts';
 import { assertTaskPreparation } from '../core/preparation.ts';
 import { ProjectMemory } from './memory.ts';
 import { z } from 'zod';
@@ -284,6 +285,7 @@ export class AgentContext {
         protocolVersion: 1,
         name: h.config.name,
         workspace: h.config.workspaceRoot ?? null,
+        workspaceMode: h.config.workspaceMode ?? (h.config.workspaceRoot ? 'separate' : null),
         approvalMode: h.config.approvalMode,
         completionMode: h.config.completionMode,
         storage: h.config.storage,
@@ -390,14 +392,15 @@ export class AgentContext {
       ? repository(h.config, input.repositoryId).path
       : requireValue(h.config.workspaceRoot, 'Для общего checkpoint требуется workspaceRoot');
     const snap = snapshot(h, s, input.repositoryId);
-    const identityPath = safePath(root, '.devcontour/context-identity.json');
-    const directory = safePath(root, '.devcontour/checkpoints');
+    const prefix = memoryDirectory(h.config, input.repositoryId);
+    const identityPath = safePath(root, prefix + '/context-identity.json');
+    const directory = safePath(root, prefix + '/checkpoints');
     if (operation === 'checkpoint_save' && 'expectedRevision' in input) {
       if (input.expectedRevision !== snap.revision)
         throw new DomainError('Контекст изменился; обновите обзор перед checkpoint');
       mkdirSync(directory, { recursive: true });
       if (!existsSync(identityPath)) {
-        const gitIdentityPath = safePath(root, '.devcontour/identity.json');
+        const gitIdentityPath = safePath(root, prefix + '/identity.json');
         let identity: string = randomUUID();
         if (existsSync(gitIdentityPath)) {
           if (lstatSync(gitIdentityPath).size > 1000)
@@ -434,7 +437,7 @@ export class AgentContext {
       };
     }
     if (!('checkpointId' in input)) throw new DomainError('Укажите checkpointId', 400);
-    const file = safePath(root, '.devcontour/checkpoints/' + input.checkpointId + '.json');
+    const file = safePath(root, prefix + '/checkpoints/' + input.checkpointId + '.json');
     if (lstatSync(file).size > 4 * 1024 * 1024)
       throw new DomainError('Checkpoint слишком большой', 413);
     const saved = checkpointSchema.parse(JSON.parse(readFileSync(file, 'utf8')));

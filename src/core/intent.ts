@@ -11,7 +11,10 @@ const title = z
   .regex(/^[^\r\n]+$/);
 const text = z.string().trim().min(3).max(2000);
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
-const source = relativePath.refine((p) => p !== 'INTENT.md', 'INTENT не может ссылаться на себя');
+const source = relativePath.refine(
+  (p) => !['INTENT.md', 'docs/implementation-intent.md'].includes(p),
+  'INTENT не может ссылаться на себя',
+);
 const reference = z.strictObject({ source, id: z.string().regex(/^REQ-[A-Za-z0-9_-]{1,64}$/) });
 const pinned = reference.extend({ digest: hash });
 const criterion = z.strictObject({

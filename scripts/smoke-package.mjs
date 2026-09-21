@@ -104,6 +104,29 @@ try {
   const { Preparation } = await import(
     new URL('file://' + join(installed, 'lib/core/preparation.js'))
   );
+  const { startWorkspace } = await import(
+    new URL('file://' + join(installed, 'lib/runner/start.js'))
+  );
+  const embeddedWorkspace = join(root, 'embedded-product');
+  await assert.rejects(
+    cli('start', '--workspace', embeddedWorkspace, '--port', '0'),
+    /workspace-mode/,
+  );
+  const embeddedPanel = await startWorkspace(embeddedWorkspace, {
+    port: 0,
+    workspaceMode: 'embedded',
+  });
+  try {
+    const early = await (await fetch(embeddedPanel.url + '/api/preparation')).json();
+    assert.equal(early.workspace.mode, 'embedded');
+    assert.equal(early.engineConnected, false);
+  } finally {
+    await embeddedPanel.close();
+  }
+  assert.equal(
+    JSON.parse(await readFile(join(embeddedWorkspace, 'devcontour.workspace.json'), 'utf8')).mode,
+    'embedded',
+  );
   const examplePreparation = JSON.parse(
     await readFile(join(installed, 'packs/example-preparation.json'), 'utf8'),
   );
@@ -404,6 +427,7 @@ try {
           'isolated production install',
           'no source or tsx',
           'explicit workspace',
+          'embedded placement selection and early panel without a project configuration',
           'installed profiles and templates',
           'custom composed profile, transitive lock and Python/Nest/React Native/Expo presets',
           'CLI context',

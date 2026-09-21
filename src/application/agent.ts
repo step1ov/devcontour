@@ -88,7 +88,7 @@ export const descriptions: Record<AgentOperation, string> = {
   intent_render:
     'Render component intent from committed REQ sources, or a workspace product/application/feature map with pinned local story references. Returns Markdown only; does not write, approve or commit it.',
   intent_snapshot:
-    'Read committed INTENT.md and exact story REQ bindings. Add a configured test gate/scenario, and bind the detailed requirements too.',
+    'Read the committed intent source returned for the selected owner (docs/implementation-intent.md in embedded mode, otherwise INTENT.md) and exact story REQ bindings. Add a configured test gate/scenario, and bind the detailed requirements too.',
   intent_report:
     'Audit all release stories and REQ sources. Product maps add application/feature progress and current bound ChangeSet acceptance. Read-only; never accepts a release or copies local task text.',
   product_view:

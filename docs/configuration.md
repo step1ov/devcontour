@@ -4,6 +4,10 @@
 
 Форматы заданы в `src/core/model.ts`, `integrations.ts`, `runner/config.ts` и `workspace-setup.ts`. JSON-блоки ниже — фрагменты, если не сказано иначе. Не заменяйте ими весь созданный config. Перед изменением политики приостановите очередь, завершите активные операции и остановите сервер/другие записывающие клиенты; после правки проверьте настройки и запустите его заново. Пауза workers не блокирует все стадии workflow.
 
+## Выбор размещения
+
+`devcontour.workspace.json` содержит `{ "version": 1, "mode": "embedded" }` либо `separate`; он сохраняется в Git и выбирается пользователем до первого запуска. Рабочий config содержит соответствующий `workspaceMode`. Embedded требует один репозиторий в корне workspace и `storage: central`; separate сохраняет отдельный workspace и component storage. Локальный selection pin и загрузчик отклоняют расхождение режимов. Изменение поля не является миграцией. [Подробности](workspace-modes.md).
+
 ## Уровни и файлы
 
 | Файл                                        | Назначение                                                                               |
@@ -18,7 +22,7 @@
 
 В component mode coordinator хранит ссылки `{id, path, dependsOn, configFile}`. При загрузке содержимое component config переопределяет локальные настройки, но `id`, `path`, `dependsOn` и `configFile` берутся из общей записи. Так глобальная топология остаётся согласованной, а команды/роли живут рядом с кодом.
 
-`setup --workspace`/`workspace-init` выбирают component storage. Default самой схемы — central для совместимости старых конфигураций. Не переключайте действующее хранилище одним полем: для central → component используется `storage-migrate`.
+`setup --workspace`/`workspace-init` выбирают central storage для embedded и component для separate. Default самой схемы — central для совместимости старых конфигураций. Не переключайте действующее хранилище одним полем: для central → component используется `storage-migrate`.
 
 ## Общая политика
 

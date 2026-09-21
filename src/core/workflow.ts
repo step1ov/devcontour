@@ -33,6 +33,17 @@ export function orderedGates<T extends Gate>(gates: T[]): T[] {
 
 export function validateWorkflow(config: Config) {
   const repos = repositories(config);
+  if (
+    config.workspaceMode === 'embedded' &&
+    (!config.workspaceRoot ||
+      repos.length !== 1 ||
+      repos[0].path !== config.workspaceRoot ||
+      config.repository !== config.workspaceRoot ||
+      config.storage !== 'central')
+  )
+    throw new DomainError(
+      'Embedded workspace: один репозиторий в корне workspace и одна central SQLite',
+    );
   const bindings = [
     ...repos.flatMap((r) => [
       ...Object.values(r.roles ?? {})
