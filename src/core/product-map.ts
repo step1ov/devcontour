@@ -13,22 +13,22 @@ export const storyReference = z.strictObject({
   repositoryId: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/),
   storyId: id,
 });
-const applicationScope = z.discriminatedUnion('scope', [
+const channelScope = z.discriminatedUnion('scope', [
   z.strictObject({
-    applicationId: id,
+    channelId: id,
     scope: z.literal('included'),
     stories: z.array(storyReference).min(1).max(100),
   }),
-  z.strictObject({ applicationId: id, scope: z.literal('deferred'), reason: text }),
-  z.strictObject({ applicationId: id, scope: z.literal('not-applicable'), reason: text }),
+  z.strictObject({ channelId: id, scope: z.literal('deferred'), reason: text }),
+  z.strictObject({ channelId: id, scope: z.literal('not-applicable'), reason: text }),
 ]);
 export const featureScope = z.strictObject({
   featureId: id,
-  applications: z.array(applicationScope).min(1).max(30),
+  channels: z.array(channelScope).min(1).max(30),
   checks: z.array(z.strictObject({ gate: id, scenario: text })).max(30),
 });
 export const productMap = z.strictObject({
-  applications: z
+  channels: z
     .array(
       z.strictObject({
         id,
@@ -63,7 +63,7 @@ export type FeatureScope = z.infer<typeof featureScope>;
 export const storyKey = (ref: z.infer<typeof storyReference>) =>
   JSON.stringify([ref.repositoryId, ref.storyId]);
 
-export function applicationRepositories(product: ProductMap, applicationId: string) {
+export function channelRepositories(product: ProductMap, channelId: string) {
   const visited = new Set<string>(),
     repositories = new Set<string>();
   const visit = (id: string) => {
@@ -74,7 +74,7 @@ export function applicationRepositories(product: ProductMap, applicationId: stri
     repositories.add(component.repositoryId);
     component.dependsOn.forEach(visit);
   };
-  product.applications.find((a) => a.id === applicationId)?.componentIds.forEach(visit);
+  product.channels.find((a) => a.id === channelId)?.componentIds.forEach(visit);
   return repositories;
 }
 
@@ -95,8 +95,8 @@ export function validateProductMap(
     return;
   }
   unique(
-    product.applications.map((a) => a.id),
-    'application ID',
+    product.channels.map((a) => a.id),
+    'channel ID',
   );
   unique(
     product.components.map((c) => c.id),
@@ -120,8 +120,8 @@ export function validateProductMap(
     visited.add(id);
   };
   product.components.forEach((c) => visit(c.id));
-  for (const app of product.applications) {
-    unique(app.componentIds, 'application component');
+  for (const app of product.channels) {
+    unique(app.componentIds, 'channel component');
     app.componentIds.forEach(visit);
   }
   for (const release of releases) {
@@ -136,24 +136,24 @@ export function validateProductMap(
       if (!product.features.some((f) => f.id === scope.featureId))
         throw new DomainError('Неизвестная фича');
       unique(
-        scope.applications.map((a) => a.applicationId),
-        'feature application',
+        scope.channels.map((a) => a.channelId),
+        'feature channel',
       );
-      if (scope.applications.length !== product.applications.length)
+      if (scope.channels.length !== product.channels.length)
         throw new DomainError('Фича должна явно определить scope каждого приложения');
-      const included = scope.applications.filter((a) => a.scope === 'included');
+      const included = scope.channels.filter((a) => a.scope === 'included');
       if (Boolean(included.length) !== Boolean(scope.checks.length))
         throw new DomainError('Сквозные проверки обязательны только для включённой фичи');
       unique(
         scope.checks.map((c) => c.gate),
         'feature gate',
       );
-      for (const app of scope.applications) {
-        if (!product.applications.some((a) => a.id === app.applicationId))
+      for (const app of scope.channels) {
+        if (!product.channels.some((a) => a.id === app.channelId))
           throw new DomainError('Неизвестное приложение');
         if (app.scope !== 'included') continue;
         unique(app.stories.map(storyKey), 'feature story');
-        const repos = applicationRepositories(product, app.applicationId);
+        const repos = channelRepositories(product, app.channelId);
         for (const ref of app.stories)
           if (
             !repos.has(ref.repositoryId) ||
@@ -162,7 +162,7 @@ export function validateProductMap(
             throw new DomainError('История должна принадлежать компоненту приложения и релизу');
       }
     }
-    if (!scopes.some((f) => f.applications.some((a) => a.scope === 'included')))
+    if (!scopes.some((f) => f.channels.some((a) => a.scope === 'included')))
       throw new DomainError('Продуктовый релиз должен включать хотя бы одну фичу');
   }
 }
@@ -190,7 +190,7 @@ export interface FeatureProgress {
   title: string;
   outcome: string;
   status: FeatureStatus;
-  applications: (FeatureScope['applications'][number] & { covered?: boolean; planned?: boolean })[];
+  channels: (FeatureScope['channels'][number] & { covered?: boolean; planned?: boolean })[];
   checks: (FeatureScope['checks'][number] & { passed: boolean })[];
 }
 export type ProductView =
@@ -199,7 +199,7 @@ export type ProductView =
       available: true;
       title: string;
       purpose: string;
-      applications: ProductMap['applications'];
+      channels: ProductMap['channels'];
       components: ProductMap['components'];
       releases: { id: string; title: string }[];
       releaseId: string;

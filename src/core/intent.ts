@@ -209,7 +209,7 @@ export function renderIntent(raw: unknown): string {
   } else {
     if (value.product) {
       lines.push('## Приложения и технические компоненты', '');
-      for (const app of value.product.applications)
+      for (const app of value.product.channels)
         lines.push(
           '### ' + app.id + ': ' + app.title,
           '',
@@ -236,7 +236,7 @@ export function renderIntent(raw: unknown): string {
         lines.push(
           '#### ' + f.featureId,
           '',
-          ...f.applications.map((a) => prose(JSON.stringify(a))),
+          ...f.channels.map((a) => prose(JSON.stringify(a))),
           ...f.checks.map((c) => prose(JSON.stringify(c))),
           '',
         );

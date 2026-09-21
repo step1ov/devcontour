@@ -307,7 +307,7 @@ export class IntentService implements ProductReleaseGuard {
           if (!gate || gate.kind !== 'test' || !gate.report)
             issues.push('Фиче нужен настроенный сквозной test gate с JUnit: ' + check.gate);
         }
-        for (const app of feature.applications) {
+        for (const app of feature.channels) {
           if (app.scope !== 'included') continue;
           app.stories.forEach((s) => linked.add(storyKey(s)));
         }
@@ -527,7 +527,7 @@ export class IntentService implements ProductReleaseGuard {
     }
     const features: FeatureProgress[] = coverage.release.features!.map((scope) => {
       const feature = doc.product!.features.find((f) => f.id === scope.featureId)!;
-      const applications = scope.applications.map((app) => {
+      const channels = scope.channels.map((app) => {
         if (app.scope !== 'included') return app;
         const stories = app.stories.map((ref) => ({
           story: coverage.locals.get(ref.repositoryId)?.stories.find((s) => s.id === ref.storyId),
@@ -539,10 +539,10 @@ export class IntentService implements ProductReleaseGuard {
           planned: stories.every((s) => Boolean(s.story?.taskIds.length)),
         };
       });
-      const included = applications.filter((a) => a.scope === 'included');
+      const included = channels.filter((a) => a.scope === 'included');
       const covered = included.length > 0 && included.every((a) => a.covered);
       const status: FeatureProgress['status'] = !included.length
-        ? applications.some((a) => a.scope === 'deferred')
+        ? channels.some((a) => a.scope === 'deferred')
           ? 'deferred'
           : 'not-applicable'
         : !included.every((a) => a.planned)
@@ -557,7 +557,7 @@ export class IntentService implements ProductReleaseGuard {
       return {
         ...feature,
         status,
-        applications,
+        channels,
         checks: scope.checks.map((c) => ({ ...c, passed: covered && Boolean(verification) })),
       };
     });
@@ -597,7 +597,7 @@ export class IntentService implements ProductReleaseGuard {
       available: true,
       title: doc.title,
       purpose: doc.purpose,
-      applications: doc.product.applications,
+      channels: doc.product.channels,
       components: doc.product.components,
       releases: doc.releases.map((r) => ({ id: r.id, title: r.title })),
       releaseId,

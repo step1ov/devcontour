@@ -193,6 +193,16 @@ function validateProduct(p: ProductBrief) {
   for (const scenario of p.features.flatMap((f) => f.scenarios))
     if (scenario.personaId && !personaIds.includes(scenario.personaId))
       throw new DomainError('Сценарий ссылается на несуществующую персону: ' + scenario.personaId);
+  const channelIds = p.channels.map((c) => c.id);
+  if (new Set(channelIds).size !== channelIds.length)
+    throw new DomainError('Повтор ID канала в постановке');
+  for (const feature of p.features)
+    for (const channel of feature.channels)
+      if (!channelIds.includes(channel))
+        throw new DomainError('Фича ссылается на несуществующий канал: ' + channel);
+  const reached = new Set(p.features.flatMap((f) => f.channels));
+  const idle = p.channels.find((c) => !reached.has(c.id));
+  if (idle) throw new DomainError('Канал не реализует ни одной фичи: ' + idle.id);
 }
 function validateArchitecture(a: ArchitectureBrief) {
   if (

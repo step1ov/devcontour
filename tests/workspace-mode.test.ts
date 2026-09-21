@@ -337,7 +337,7 @@ test('Embedded product map and local intent drive real worktrees, joint verifica
         title: 'Chat product',
         purpose: 'Moderators control access to chat.',
         product: {
-          applications: [
+          channels: [
             {
               id: 'admin',
               title: 'Admin',
@@ -366,9 +366,9 @@ test('Embedded product map and local intent drive real worktrees, joint verifica
             features: [
               {
                 featureId: 'block',
-                applications: [
+                channels: [
                   {
-                    applicationId: 'admin',
+                    channelId: 'admin',
                     scope: 'included',
                     stories: [{ repositoryId: 'main', storyId: 'block' }],
                   },

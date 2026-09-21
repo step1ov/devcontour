@@ -51,7 +51,7 @@ const map = () => {
     title: 'Корпоративный чат',
     purpose: 'Помочь модератору ограничить нарушителя во всех клиентах.',
     product: {
-      applications: [
+      channels: [
         {
           id: 'admin',
           title: 'Админка',
@@ -113,9 +113,9 @@ const map = () => {
         features: [
           {
             featureId: 'block',
-            applications: [
+            channels: [
               {
-                applicationId: 'admin',
+                channelId: 'admin',
                 scope: 'included',
                 stories: [
                   { repositoryId: 'app', storyId: 'block' },
@@ -123,7 +123,7 @@ const map = () => {
                 ],
               },
               {
-                applicationId: 'mobile',
+                channelId: 'mobile',
                 scope: 'included',
                 stories: [
                   { repositoryId: 'app', storyId: 'block' },
@@ -140,14 +140,14 @@ const map = () => {
           },
           {
             featureId: 'export',
-            applications: [
+            channels: [
               {
-                applicationId: 'admin',
+                channelId: 'admin',
                 scope: 'deferred',
                 reason: 'После проверки сценария блокировки.',
               },
               {
-                applicationId: 'mobile',
+                channelId: 'mobile',
                 scope: 'not-applicable',
                 reason: 'Журнал доступен только модератору в админке.',
               },
@@ -324,11 +324,11 @@ process.exitCode=ok?0:1;`,
   };
 }
 
-test('Product map separates monorepo applications and cross-repository features; rejects incomplete or unsafe declarations', async () => {
+test('Product map separates monorepo channels and cross-repository features; rejects incomplete or unsafe declarations', async () => {
   const f = await fixture();
   try {
     const view = f.view();
-    assert.equal(view.applications.length, 2);
+    assert.equal(view.channels.length, 2);
     assert.equal(view.components.filter((c) => c.repositoryId === 'app').length, 2);
     assert.equal(view.features[0].status, 'unplanned');
     assert.equal(view.features[1].status, 'deferred');
@@ -343,14 +343,14 @@ test('Product map separates monorepo applications and cross-repository features;
     );
     for (const mutate of [
       (d: any) => d.releases[0].features.pop(),
-      (d: any) => d.releases[0].features[0].applications.pop(),
-      (d: any) => (d.releases[0].features[0].applications[0].stories[0].storyId = 'absent'),
+      (d: any) => d.releases[0].features[0].channels.pop(),
+      (d: any) => (d.releases[0].features[0].channels[0].stories[0].storyId = 'absent'),
       (d: any) => (d.releases[0].features[0].checks[0].gate = 'absent'),
       (d: any) => (d.releases[0].features[0].checks = []),
       (d: any) => d.product.components[2].dependsOn.push('web'),
       (d: any) => (d.product.components[0].path = '../other'),
       (d: any) => (d.product.components[0].repositoryId = 'unknown'),
-      (d: any) => d.releases[0].features[0].applications.forEach((a: any) => a.stories.pop()),
+      (d: any) => d.releases[0].features[0].channels.forEach((a: any) => a.stories.pop()),
     ]) {
       const changed = map();
       mutate(changed);

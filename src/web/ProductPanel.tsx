@@ -23,7 +23,7 @@ export function ProductPanel({ onRepository }: { onRepository: (id: string) => v
   const [view, setView] = useState<ProductView>();
   const [release, setRelease] = useState('');
   const [error, setError] = useState('');
-  const [mode, setMode] = useState<'features' | 'applications'>('features');
+  const [mode, setMode] = useState<'features' | 'channels'>('features');
   useEffect(() => {
     const controller = new AbortController();
     let pending = false;
@@ -120,7 +120,7 @@ export function ProductPanel({ onRepository }: { onRepository: (id: string) => v
         </p>
       )}
       <div className="my-5 flex flex-wrap gap-4" aria-label="Представление продукта">
-        {(['features', 'applications'] as const).map((value) => (
+        {(['features', 'channels'] as const).map((value) => (
           <Button
             key={value}
             variant="outline"
@@ -151,7 +151,7 @@ export function ProductPanel({ onRepository }: { onRepository: (id: string) => v
             <thead>
               <tr>
                 <th scope="col">Возможность</th>
-                {view.applications.map((a) => (
+                {view.channels.map((a) => (
                   <th scope="col" key={a.id}>
                     {a.title}
                   </th>
@@ -166,8 +166,8 @@ export function ProductPanel({ onRepository }: { onRepository: (id: string) => v
                     {feature.title}
                     <p>{feature.outcome}</p>
                   </th>
-                  {view.applications.map((app) => {
-                    const scope = feature.applications.find((a) => a.applicationId === app.id)!;
+                  {view.channels.map((app) => {
+                    const scope = feature.channels.find((a) => a.channelId === app.id)!;
                     return (
                       <td key={app.id}>
                         {scope.scope === 'included' ? (
@@ -223,7 +223,7 @@ export function ProductPanel({ onRepository }: { onRepository: (id: string) => v
       ) : (
         <>
           <div className="grid gap-4">
-            {view.applications.map((app) => (
+            {view.channels.map((app) => (
               <article key={app.id} className="rounded-md border p-4">
                 <h3 className="text-md font-semibold">{app.title}</h3>
                 <p>{app.purpose}</p>

@@ -3,7 +3,7 @@
   "title": "Система общения",
   "purpose": "Помочь модераторам управлять общением и ограничивать нарушения.",
   "product": {
-    "applications": [
+    "channels": [
       {
         "id": "admin",
         "title": "Админка",
@@ -69,9 +69,9 @@
       "features": [
         {
           "featureId": "block-member",
-          "applications": [
+          "channels": [
             {
-              "applicationId": "admin",
+              "channelId": "admin",
               "scope": "included",
               "stories": [
                 { "repositoryId": "product", "storyId": "moderate-member" },
@@ -79,7 +79,7 @@
               ]
             },
             {
-              "applicationId": "mobile",
+              "channelId": "mobile",
               "scope": "included",
               "stories": [
                 { "repositoryId": "product", "storyId": "show-block" },
@@ -96,14 +96,14 @@
         },
         {
           "featureId": "export-audit",
-          "applications": [
+          "channels": [
             {
-              "applicationId": "admin",
+              "channelId": "admin",
               "scope": "deferred",
               "reason": "Следующий этап после проверки основного сценария модерации."
             },
             {
-              "applicationId": "mobile",
+              "channelId": "mobile",
               "scope": "not-applicable",
               "reason": "Выгрузка журнала доступна только в админке."
             }

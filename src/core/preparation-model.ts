@@ -7,6 +7,7 @@ const slug = z.string().regex(/^[a-z0-9][a-z0-9-]{1,48}$/);
 export const featureId = slug;
 export const releaseId = slug;
 export const personaId = slug;
+export const channelId = slug;
 export const semver = z
   .string()
   .regex(
@@ -39,11 +40,20 @@ export const productScenario = z.strictObject({
   personaId: personaId.optional(),
   text: z.string().trim().min(3).max(1500),
 });
+// A channel is where the product reaches someone: a mobile app, an admin
+// panel, a web client. Features name the channels that realise them, so the
+// delivery map is not reinvented after setup.
+export const productChannel = z.strictObject({
+  id: channelId,
+  title: z.string().trim().min(3).max(160),
+  purpose: z.string().trim().min(10).max(1500),
+});
 // A feature is the unit the operator reads, approves and later tracks.
 export const productFeature = z.strictObject({
   id: featureId,
   title: z.string().trim().min(3).max(160),
   outcome: z.string().trim().min(10).max(1500),
+  channels: z.array(channelId).min(1).max(10),
   scenarios: z.array(productScenario).min(1).max(20),
   acceptance: z.array(acceptanceCriterion).min(1).max(30),
 });
@@ -51,6 +61,7 @@ export const productBrief = z.strictObject({
   problem: text,
   outcome: text,
   personas: z.array(productPersona).max(20).default([]),
+  channels: z.array(productChannel).min(1).max(10),
   releases: z.array(productRelease).min(1).max(10),
   features: z.array(productFeature).min(1).max(40),
   exclusions: items,
@@ -231,6 +242,7 @@ export const preparationDecision = z.strictObject({
 export type PreparationQuestion = z.infer<typeof preparationQuestion>;
 export type PreparationRecord = z.infer<typeof preparationRecord>;
 export type PreparationActivity = z.infer<typeof preparationActivity>;
+export type ProductChannel = z.infer<typeof productChannel>;
 export type ProductPersona = z.infer<typeof productPersona>;
 export type ProductScenario = z.infer<typeof productScenario>;
 export type ProductRelease = z.infer<typeof productRelease>;

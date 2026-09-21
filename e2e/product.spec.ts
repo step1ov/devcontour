@@ -29,7 +29,7 @@ test('Product UI presents application scope, release selection, repository navig
       available: true,
       title: definition.title,
       purpose: definition.purpose,
-      applications: product.applications,
+      channels: product.channels,
       components: product.components,
       releases: [
         { id: 'mvp', title: 'Первая модерация' },
@@ -43,7 +43,7 @@ test('Product UI presents application scope, release selection, repository navig
       features: definition.releases[0].features!.map((scope) => ({
         ...product.features.find((f) => f.id === scope.featureId)!,
         status: scope.featureId === 'block-member' ? 'awaiting-verification' : 'deferred',
-        applications: scope.applications.map((a) => ({ ...a, covered: true, planned: true })),
+        channels: scope.channels.map((a) => ({ ...a, covered: true, planned: true })),
         checks: scope.checks.map((c) => ({ ...c, passed: false })),
       })),
     };

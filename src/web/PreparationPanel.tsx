@@ -6,6 +6,7 @@ import {
   Loader2,
   MessageCircleQuestion,
   Milestone,
+  MonitorSmartphone,
   Scale,
   User,
 } from 'lucide-react';
@@ -14,6 +15,7 @@ import type {
   ProductBrief,
   ProductFeature,
   ProductPersona,
+  ProductChannel,
   ProductRelease,
   ArchitectureBrief,
   PreparationQuestion,
@@ -318,10 +320,12 @@ function Feature({
   feature,
   personas,
   releases,
+  channels,
 }: {
   feature: FeatureView;
   personas: ProductPersona[];
   releases: ProductRelease[];
+  channels: ProductChannel[];
 }) {
   const who = (id?: string) => (id ? (personas.find((x) => x.id === id)?.name ?? id) : '');
   const when = (id: string) => releases.find((x) => x.id === id)?.title ?? id;
@@ -339,6 +343,15 @@ function Feature({
           </Badge>
         </div>
         <p className="max-w-[78ch] break-words whitespace-pre-wrap">{feature.outcome}</p>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-muted-foreground text-sm">Каналы:</span>
+          {feature.channels.map((id) => (
+            <Badge key={id} variant="secondary">
+              <MonitorSmartphone aria-hidden="true" className="size-3" />
+              {channels.find((c) => c.id === id)?.title ?? id}
+            </Badge>
+          ))}
+        </div>
       </CardHeader>
       <CardContent className="grid gap-4 pt-0">
         <div>
@@ -417,6 +430,43 @@ function Personas({ personas }: { personas: ProductPersona[] }) {
             </Card>
           </li>
         ))}
+      </ul>
+    </Section>
+  );
+}
+function Channels({
+  channels,
+  features,
+}: {
+  channels: ProductChannel[];
+  features: ProductFeature[];
+}) {
+  return (
+    <Section title={'Каналы (' + channels.length + ')'}>
+      <p className="text-muted-foreground mb-4 max-w-[78ch]">
+        Где продукт встречается с человеком. Каждая фича называет каналы, которые её реализуют.
+      </p>
+      <ul className="grid gap-3 md:grid-cols-2">
+        {channels.map((c) => {
+          const count = features.filter((f) => f.channels.includes(c.id)).length;
+          return (
+            <li key={c.id}>
+              <Card className="h-full">
+                <CardHeader className="gap-1 pb-4">
+                  <CardTitle className="flex items-start gap-2">
+                    <MonitorSmartphone
+                      className="text-primary mt-0.5 size-4 shrink-0"
+                      aria-hidden="true"
+                    />
+                    <span className="max-w-[60ch] break-words">{c.title}</span>
+                  </CardTitle>
+                  <p className="max-w-[70ch] break-words whitespace-pre-wrap">{c.purpose}</p>
+                  <p className="text-muted-foreground text-sm">Фич в канале: {count}</p>
+                </CardHeader>
+              </Card>
+            </li>
+          );
+        })}
       </ul>
     </Section>
   );
@@ -508,6 +558,7 @@ function Product({
         <p className="mt-2 max-w-[78ch] break-words whitespace-pre-wrap">{p.outcome}</p>
       </Section>
       <Personas personas={personas} />
+      <Channels channels={p.channels} features={p.features} />
       <Releases releases={releases} readiness={releaseReadiness} />
       <Section title={'Фичи продукта (' + features.length + ')'}>
         {planned > 0 && (
@@ -521,7 +572,12 @@ function Product({
             .sort((a, b) => first(a) - first(b))
             .map((f) => (
               <li key={f.id}>
-                <Feature feature={f} personas={personas} releases={releases} />
+                <Feature
+                  feature={f}
+                  personas={personas}
+                  releases={releases}
+                  channels={p.channels}
+                />
               </li>
             ))}
         </ul>

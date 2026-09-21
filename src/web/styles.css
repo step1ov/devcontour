@@ -1129,11 +1129,11 @@ legend {
   color: var(--action-primary);
   border-color: transparent;
 }
-.product-applications {
+.product-channels {
   display: grid;
   gap: var(--space-4);
 }
-.product-applications article {
+.product-channels article {
   padding: var(--space-4);
   border: var(--border-width) solid var(--border);
   border-radius: var(--radius-md);
