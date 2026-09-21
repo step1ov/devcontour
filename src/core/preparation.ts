@@ -11,6 +11,8 @@ import {
   type ProductChange,
   type ArchitectureBrief,
   type ProductBrief,
+  type StoredProductBrief,
+  type ProductFeature,
   type C4Diagram,
 } from './preparation-model.ts';
 const hash = (value: unknown) =>
@@ -37,6 +39,20 @@ function change(s: DevContourState, id?: string) {
   if (!c) throw new DomainError('Выберите изменение продукта', 409);
   return journal(c);
 }
+// A brief saved before features existed still has to render and stay approvable,
+// so it reads as one feature carrying its former scenarios and criteria.
+export function featuresOf(content: StoredProductBrief): ProductFeature[] {
+  if ('features' in content) return content.features;
+  return [
+    {
+      id: 'brief',
+      title: 'Постановка прежнего формата',
+      outcome: content.outcome,
+      scenarios: content.scenarios,
+      acceptance: content.acceptance,
+    },
+  ];
+}
 function productReady(c: ProductChange) {
   if (c.product.at(-1)?.status !== 'approved')
     throw new DomainError('Сначала пользователь должен утвердить продуктовую постановку', 409);
@@ -61,7 +77,10 @@ export function developmentBinding(
     );
   return { changeId: c.id, productDigest: product.digest, architectureDigest: architecture.digest };
 }
-export function assertTaskPreparation(s: DevContourState, task: Pick<Task, 'preparation'>) {
+export function assertTaskPreparation(
+  s: DevContourState,
+  task: Pick<Task, 'preparation' | 'featureId'>,
+) {
   if (!s.preparation) return;
   if (
     !task.preparation ||
@@ -69,6 +88,16 @@ export function assertTaskPreparation(s: DevContourState, task: Pick<Task, 'prep
   )
     throw new DomainError(
       'Задача не связана с текущими утверждёнными продуктом и архитектурой',
+      409,
+    );
+  if (
+    task.featureId &&
+    !featuresOf(productReady(change(s, task.preparation.changeId)).content).some(
+      (f) => f.id === task.featureId,
+    )
+  )
+    throw new DomainError(
+      'Задача ссылается на фичу вне утверждённой постановки: ' + task.featureId,
       409,
     );
 }
@@ -123,19 +152,21 @@ function validateJournal(c: ProductChange) {
   if (decisions.some((d) => d.questionId && !ids.includes(d.questionId)))
     throw new DomainError('Решение ссылается на несуществующий вопрос');
 }
-function validateProduct(p: ProductBrief) {
+function validateProduct(p: StoredProductBrief) {
+  const features = featuresOf(p);
   if (
     p.problem.length < 10 ||
     p.outcome.length < 10 ||
     !p.audience.length ||
-    !p.scenarios.length ||
-    !p.scope.length ||
-    !p.acceptance.length ||
+    !features.length ||
+    features.some((f) => !f.scenarios.length || !f.acceptance.length) ||
     p.questions.length
   )
     throw new DomainError(
-      'Для согласования нужны проблема, пользователи, результат, сценарии, границы и критерии; открытые вопросы нужно решить',
+      'Для согласования нужны проблема, пользователи, результат и хотя бы одна фича со сценариями и критериями; открытые вопросы нужно решить',
     );
+  const ids = features.map((f) => f.id);
+  if (new Set(ids).size !== ids.length) throw new DomainError('Повтор ID фичи в постановке');
 }
 function validateArchitecture(a: ArchitectureBrief) {
   if (
@@ -190,7 +221,7 @@ export function validatePreparation(s: DevContourState, previous?: DevContourSta
         )
           throw new DomainError('Некорректная версия или решение: ' + c.id);
         if (r.status === 'approved' || r.status === 'in-review') {
-          if (stage === 'product') validateProduct(r.content as ProductBrief);
+          if (stage === 'product') validateProduct(r.content as StoredProductBrief);
           else validateArchitecture(r.content as ArchitectureBrief);
         }
         if (
@@ -287,6 +318,26 @@ export class Preparation {
             activity: [...(c.activity ?? [])].reverse().slice(0, 40),
             questions: c.questions ?? [],
             decisions: [...(c.decisions ?? [])].reverse(),
+            // Readiness is derived from the tracker, never set by hand.
+            features: product
+              ? featuresOf(product.content).map((f) => {
+                  const own = tasks.filter((t) => t.featureId === f.id);
+                  const done = own.filter((t) => t.status === 'done').length;
+                  return {
+                    ...f,
+                    tasks: own.length,
+                    done,
+                    failed: own.filter((t) => t.status === 'failed').length,
+                    readiness: !own.length
+                      ? ('unplanned' as const)
+                      : done === own.length
+                        ? ('done' as const)
+                        : own.some((t) => t.status === 'failed')
+                          ? ('failed' as const)
+                          : ('in-progress' as const),
+                  };
+                })
+              : [],
             history: (['product', 'architecture'] as const).flatMap((stage) =>
               c[stage].map(({ number, status, createdAt, reason, decision, digest }) => ({
                 stage,

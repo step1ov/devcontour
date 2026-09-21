@@ -3,7 +3,28 @@ const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const text = z.string().trim().max(6000);
 const items = z.array(z.string().trim().min(3).max(1500)).max(30);
+export const featureId = z.string().regex(/^[a-z0-9][a-z0-9-]{1,48}$/);
+// A feature is the unit the operator reads, approves and later tracks. Scenarios
+// and acceptance live inside it so readiness has something to attach to.
+export const productFeature = z.strictObject({
+  id: featureId,
+  title: z.string().trim().min(3).max(160),
+  outcome: z.string().trim().min(10).max(1500),
+  scenarios: z.array(z.string().trim().min(3).max(1500)).min(1).max(20),
+  acceptance: z.array(z.string().trim().min(3).max(1500)).min(1).max(20),
+});
 export const productBrief = z.strictObject({
+  problem: text,
+  audience: items,
+  outcome: text,
+  features: z.array(productFeature).min(1).max(40),
+  exclusions: items,
+  references: items,
+  questions: items,
+});
+// Briefs saved before features existed stay readable: approval history is
+// immutable, so old revisions must keep parsing and rendering.
+export const legacyProductBrief = z.strictObject({
   problem: text,
   audience: items,
   outcome: text,
@@ -14,6 +35,7 @@ export const productBrief = z.strictObject({
   references: items,
   questions: items,
 });
+export const storedProductBrief = z.union([productBrief, legacyProductBrief]);
 export const c4Diagram = z.strictObject({
   systemId: id,
   nodes: z
@@ -106,7 +128,7 @@ export const productChange = z.strictObject({
   id,
   title: z.string().trim().min(3).max(180),
   createdAt: z.iso.datetime(),
-  product: z.array(z.strictObject({ ...revision, content: productBrief })).max(100),
+  product: z.array(z.strictObject({ ...revision, content: storedProductBrief })).max(100),
   architecture: z
     .array(z.strictObject({ ...revision, productDigest: hash, content: architectureBrief }))
     .max(100),
@@ -188,7 +210,10 @@ export const preparationDecision = z.strictObject({
 export type PreparationQuestion = z.infer<typeof preparationQuestion>;
 export type PreparationRecord = z.infer<typeof preparationRecord>;
 export type PreparationActivity = z.infer<typeof preparationActivity>;
+export type ProductFeature = z.infer<typeof productFeature>;
 export type ProductBrief = z.infer<typeof productBrief>;
+export type LegacyProductBrief = z.infer<typeof legacyProductBrief>;
+export type StoredProductBrief = z.infer<typeof storedProductBrief>;
 export type ArchitectureBrief = z.infer<typeof architectureBrief>;
 export type C4Diagram = z.infer<typeof c4Diagram>;
 export type ProductChange = z.infer<typeof productChange>;

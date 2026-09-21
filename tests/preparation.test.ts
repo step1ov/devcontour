@@ -141,7 +141,13 @@ test('Revisions invalidate architecture and stale decisions, plans and task atte
       changeId: id,
       expectedDigest: before.product.at(-1)!.digest,
       reason: 'Изменились критерии',
-      content: { ...product, acceptance: ['Блокировка имеет срок действия.'] },
+      content: {
+        ...product,
+        features: [
+          { ...product.features[0], acceptance: ['Блокировка имеет срок действия.'] },
+          ...product.features.slice(1),
+        ],
+      },
     });
     assert.throws(
       () =>

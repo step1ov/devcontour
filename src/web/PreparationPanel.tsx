@@ -1,8 +1,9 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
-import { CircleDot, History, Loader2, MessageCircleQuestion, Scale } from 'lucide-react';
+import { Boxes, CircleDot, History, Loader2, MessageCircleQuestion, Scale } from 'lucide-react';
 import type { Preparation } from '../core/preparation.ts';
 import type {
-  ProductBrief,
+  StoredProductBrief,
+  ProductFeature,
   ArchitectureBrief,
   PreparationQuestion,
   PreparationRecord,
@@ -25,6 +26,12 @@ type View = ReturnType<Preparation['status']> & {
   workspace?: { mode: 'embedded' | 'separate'; path: string };
 };
 type Stage = 'product' | 'architecture' | 'development';
+type FeatureView = ProductFeature & {
+  tasks: number;
+  done: number;
+  failed: number;
+  readiness: 'unplanned' | 'in-progress' | 'failed' | 'done';
+};
 const names = {
   draft: 'Агент прорабатывает',
   'in-review': 'Ожидает вашего решения',
@@ -278,7 +285,74 @@ function Decisions({
     </Section>
   );
 }
-function Product({ content: p }: { content: ProductBrief }) {
+const readinessNames = {
+  unplanned: 'Нет задач',
+  'in-progress': 'В работе',
+  failed: 'Есть сбой',
+  done: 'Задачи выполнены',
+} as const;
+const readinessTone = {
+  unplanned: 'secondary',
+  'in-progress': 'ready',
+  failed: 'destructive',
+  done: 'success',
+} as const;
+
+// The operator reads the product feature by feature; scenarios and criteria
+// belong to the feature they describe, and readiness is derived from tasks.
+function Feature({ feature }: { feature: FeatureView }) {
+  return (
+    <Card>
+      <CardHeader className="gap-2 pb-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <CardTitle className="flex items-start gap-2">
+            <Boxes className="text-primary mt-0.5 size-4 shrink-0" aria-hidden="true" />
+            <span className="max-w-[70ch] break-words">{feature.title}</span>
+          </CardTitle>
+          <Badge variant={readinessTone[feature.readiness]}>
+            {readinessNames[feature.readiness]}
+            {feature.tasks > 0 && ' · ' + feature.done + '/' + feature.tasks}
+          </Badge>
+        </div>
+        <p className="max-w-[78ch] break-words whitespace-pre-wrap">{feature.outcome}</p>
+      </CardHeader>
+      <CardContent className="grid gap-4 pt-0">
+        <div>
+          <h4 className="mb-2 text-sm font-semibold">Сценарии</h4>
+          <ul className="grid list-disc gap-2 pl-5">
+            {feature.scenarios.map((s, i) => (
+              <li key={i} className="max-w-[74ch] break-words whitespace-pre-wrap">
+                {s}
+              </li>
+            ))}
+          </ul>
+        </div>
+        <div>
+          <h4 className="mb-2 text-sm font-semibold">Как примем</h4>
+          <ul className="grid list-disc gap-2 pl-5">
+            {feature.acceptance.map((s, i) => (
+              <li key={i} className="max-w-[74ch] break-words whitespace-pre-wrap">
+                {s}
+              </li>
+            ))}
+          </ul>
+        </div>
+        <p className="text-muted-foreground text-xs">
+          ID фичи: <code className="font-mono">{feature.id}</code>
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+function Product({
+  content: p,
+  features,
+}: {
+  content: StoredProductBrief;
+  features: FeatureView[];
+}) {
+  const done = features.filter((f) => f.readiness === 'done').length;
+  const planned = features.filter((f) => f.tasks > 0).length;
   return (
     <>
       <Section title="Проблема и ожидаемый результат">
@@ -288,10 +362,22 @@ function Product({ content: p }: { content: ProductBrief }) {
         <p className="mt-2 max-w-[78ch] break-words whitespace-pre-wrap">{p.outcome}</p>
       </Section>
       <TextList title="Для кого" items={p.audience} />
-      <TextList title="Пользовательские сценарии" items={p.scenarios} />
-      <TextList title="Входит в изменение" items={p.scope} />
+      <Section title={'Фичи продукта (' + features.length + ')'}>
+        {planned > 0 && (
+          <p className="text-muted-foreground mb-4">
+            Задачи заведены для {planned} из {features.length}; полностью выполнены {done}.
+            Готовность считается по задачам и не заменяет приёмку релиза.
+          </p>
+        )}
+        <ul className="grid gap-4">
+          {features.map((f) => (
+            <li key={f.id}>
+              <Feature feature={f} />
+            </li>
+          ))}
+        </ul>
+      </Section>
       <TextList title="За пределами изменения" items={p.exclusions} />
-      <TextList title="Как примем результат" items={p.acceptance} />
       <TextList title="Материалы и референсы" items={p.references} />
       {p.questions.length > 0 && <TextList title="Вопросы этой версии" items={p.questions} />}
     </>
@@ -662,7 +748,7 @@ export function PreparationPanel() {
                   <Decisions stage={tab} decisions={c.decisions} questions={c.questions} />
                   {tab === 'product' ? (
                     p ? (
-                      <Product content={p.content} />
+                      <Product content={p.content} features={c.features} />
                     ) : (
                       <Alert className="max-w-[78ch] border-dashed">
                         <AlertDescription>

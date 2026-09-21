@@ -1,4 +1,4 @@
-import { preparationBinding, type PreparationState } from './preparation-model.ts';
+import { preparationBinding, featureId, type PreparationState } from './preparation-model.ts';
 import { priceSchema } from './usage.ts';
 import type { ReviewInspection } from './review.ts';
 import { z } from 'zod';
@@ -87,6 +87,9 @@ export const requirementLink = z.strictObject({
 export type RequirementLink = z.infer<typeof requirementLink>;
 export const taskInput = z.object({
   preparation: preparationBinding.optional(),
+  // Which approved product feature this task delivers, so the panel can show
+  // feature readiness instead of a flat task count.
+  featureId: featureId.optional(),
   requirements: z.array(requirementLink).max(30).optional(),
   assignee: z
     .string()
