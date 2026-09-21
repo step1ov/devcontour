@@ -17,7 +17,7 @@ npm pack
 npm install --global /absolute/devcontour-0.3.0.tgz
 devcontour help
 # Для уже подготовленного workspace:
-devcontour serve --workspace /absolute/product-workspace --port 0
+devcontour start --workspace /absolute/product-workspace --port 0
 ```
 
 Глобальная установка необязательна. Можно установить архив в отдельный каталог инструментов и вызывать его `node_modules/.bin/devcontour`. Сборщик, TypeScript, `tsx`, тестовые библиотеки и исходники не нужны для запуска. Профили и статические файлы читаются относительно установленного пакета. Текущий каталог процесса не выбирает ни UI, ни продуктовый workspace.

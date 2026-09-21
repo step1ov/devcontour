@@ -1,3 +1,4 @@
+import { preparationState } from './preparation-model.ts';
 import { z } from 'zod';
 import { taskInput } from './model.ts';
 
@@ -62,6 +63,7 @@ const revision = z.strictObject({
     .optional(),
 });
 export const recordSchema = z.discriminatedUnion('kind', [
+  z.strictObject({ version: z.literal(1), kind: z.literal('preparation'), data: preparationState }),
   z.strictObject({ version: z.literal(1), kind: z.literal('task'), data: task, progress }),
   z.strictObject({
     version: z.literal(1),

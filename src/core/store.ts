@@ -11,7 +11,12 @@ export class Store {
   private projectionPending = false;
   onCommit?: () => void;
   projectionError?: string;
-  constructor(path: string, locations?: ComponentLocation[], migrate = false) {
+  constructor(
+    path: string,
+    locations?: ComponentLocation[],
+    migrate = false,
+    journalMode?: 'DELETE',
+  ) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
     if (
@@ -39,7 +44,7 @@ export class Store {
       }
     }
     this.db.exec(
-      `PRAGMA journal_mode=${locations?.length ? 'DELETE' : 'WAL'}; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;`,
+      `PRAGMA journal_mode=${journalMode ?? (locations?.length ? 'DELETE' : 'WAL')}; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;`,
     );
     this.db.exec(
       'CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, type TEXT NOT NULL, data TEXT NOT NULL);',

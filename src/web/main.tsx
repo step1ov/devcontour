@@ -3,9 +3,9 @@ import { createRoot } from 'react-dom/client';
 import '@xyflow/react/dist/style.css';
 import './tokens.css';
 import './styles.css';
-import { App } from './App.tsx';
+import { PreparationPanel } from './PreparationPanel.tsx';
 createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <App />
+    <PreparationPanel />
   </React.StrictMode>,
 );

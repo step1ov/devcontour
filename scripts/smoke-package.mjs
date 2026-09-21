@@ -97,6 +97,42 @@ try {
     assert.equal(shown.resolved.id, id);
     assert.ok(shown.resolved.gates.some((g) => g.kind === 'test'));
   }
+  // The installed package must support preparation before setup, without dev dependencies.
+  const { Store: PreparationStore } = await import(
+    new URL('file://' + join(installed, 'lib/core/store.js'))
+  );
+  const { Preparation } = await import(
+    new URL('file://' + join(installed, 'lib/core/preparation.js'))
+  );
+  const examplePreparation = JSON.parse(
+    await readFile(join(installed, 'packs/example-preparation.json'), 'utf8'),
+  );
+  const stageStore = new PreparationStore(join(workspace, '.devcontour-local/state.sqlite'));
+  try {
+    const stages = new Preparation(stageStore);
+    const created = stages.execute('preparation_create', { title: 'Packaged product fixture' });
+    const changeId = created.activeChangeId;
+    for (const stage of ['product', 'architecture']) {
+      const draft = stages.execute('preparation_' + stage, {
+        changeId,
+        expectedDigest: null,
+        reason: 'Package verification fixture',
+        content: examplePreparation[stage],
+      });
+      const expectedDigest = draft.current[stage].digest;
+      stages.execute('preparation_submit', { changeId, stage, expectedDigest });
+      stages.decide({
+        changeId,
+        stage,
+        expectedDigest,
+        decision: 'approve',
+        comment: 'Explicit test fixture, not a user decision',
+      });
+    }
+    assert.equal(stages.status().developmentReady, true);
+  } finally {
+    stageStore.close();
+  }
   const setup = JSON.parse(
     (
       await cli(

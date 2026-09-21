@@ -1,0 +1,373 @@
+import { syncPreparation } from '../src/runner/git-sync.ts';
+import { WorkspaceAgent } from '../src/application/preparation-agent.ts';
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, realpathSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { execFileSync } from 'node:child_process';
+import { Preparation, developmentBinding } from '../src/core/preparation.ts';
+import { PreparationAgent } from '../src/application/preparation-agent.ts';
+import { startWorkspace, preparationStore, requirePreparation } from '../src/runner/start.ts';
+import { fixture, input, config } from './helpers.ts';
+import { architecture, product, approvePreparation, approveStage } from './preparation-fixture.ts';
+import { LeadWorkflow } from '../src/core/lead-workflow.ts';
+import { specDigest } from '../src/core/service.ts';
+
+test('Product and architecture require distinct operator decisions; no agent or queue bypass', () => {
+  const f = fixture(),
+    p = new Preparation(f.store),
+    agent = new PreparationAgent(f.store);
+  try {
+    assert.throws(() =>
+      p.execute('preparation_architecture', {
+        changeId: 'missing',
+        expectedDigest: null,
+        reason: 'Invalid early change',
+        content: architecture,
+      }),
+    );
+    assert.equal(f.store.read().preparation, undefined);
+    p.enable();
+    const b = f.h.createBoard('Разработка чата');
+    assert.throws(() => f.h.addTask(b.id, input()), /изменение продукта/);
+    p.execute('preparation_create', { title: 'Модерация чата' });
+    const id = f.store.read().preparation!.activeChangeId!;
+    assert.throws(
+      () =>
+        p.execute('preparation_architecture', {
+          changeId: id,
+          expectedDigest: null,
+          reason: 'Architecture',
+          content: architecture,
+        }),
+      /продуктовую/,
+    );
+    p.execute('preparation_product', {
+      changeId: id,
+      expectedDigest: null,
+      reason: 'Initial brief',
+      content: { ...product, questions: ['Нужно ли удалять сообщения?'] },
+    });
+    let digest = f.store.read().preparation!.changes[0].product.at(-1)!.digest;
+    assert.throws(
+      () =>
+        p.execute('preparation_submit', { changeId: id, stage: 'product', expectedDigest: digest }),
+      /вопросы/,
+    );
+    p.execute('preparation_product', {
+      changeId: id,
+      expectedDigest: digest,
+      reason: 'Questions resolved',
+      content: product,
+    });
+    digest = f.store.read().preparation!.changes[0].product.at(-1)!.digest;
+    assert.throws(
+      () =>
+        p.decide({
+          changeId: id,
+          stage: 'product',
+          expectedDigest: digest,
+          decision: 'approve',
+          comment: '',
+        }),
+      /не ожидает/,
+    );
+    approveStage(p, id, 'product');
+    assert.throws(() => f.h.pause(false), /архитектуру/);
+    assert.throws(() => f.h.addTask(b.id, input()), /архитектуру/);
+    assert.throws(() =>
+      agent.execute({ operation: 'preparation_decide', input: { approved: true } }),
+    );
+    p.execute('preparation_architecture', {
+      changeId: id,
+      expectedDigest: null,
+      reason: 'Architecture chosen',
+      content: architecture,
+    });
+    const archDigest = f.store.read().preparation!.changes[0].architecture.at(-1)!.digest;
+    p.execute('preparation_submit', {
+      changeId: id,
+      stage: 'architecture',
+      expectedDigest: archDigest,
+    });
+    p.decide({
+      changeId: id,
+      stage: 'architecture',
+      expectedDigest: archDigest,
+      decision: 'request-changes',
+      comment: 'Добавить сравнение альтернатив',
+    });
+    assert.throws(() => f.h.pause(false), /архитектуру/);
+    p.execute('preparation_architecture', {
+      changeId: id,
+      expectedDigest: archDigest,
+      reason: 'Alternatives clarified',
+      content: architecture,
+    });
+    approveStage(p, id, 'architecture');
+    const t = f.h.addTask(b.id, input());
+    assert.equal(t.preparation?.changeId, id);
+    f.h.approve(b.id);
+    f.h.pause(false);
+    const r = f.h.claim('worker')!;
+    assert.equal(r.taskId, t.id);
+    assert.throws(
+      () =>
+        p.execute('preparation_product', {
+          changeId: id,
+          expectedDigest: digest,
+          reason: 'Late scope change',
+          content: product,
+        }),
+      /дождитесь/,
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Revisions invalidate architecture and stale decisions, plans and task attempts', () => {
+  const f = fixture(),
+    p = new Preparation(f.store);
+  try {
+    const id = approvePreparation(p),
+      before = f.store.read().preparation!.changes[0];
+    const b = f.h.createBoard('План первой версии');
+    const t = f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    const original = specDigest(t);
+    p.execute('preparation_product', {
+      changeId: id,
+      expectedDigest: before.product.at(-1)!.digest,
+      reason: 'Изменились критерии',
+      content: { ...product, acceptance: ['Блокировка имеет срок действия.'] },
+    });
+    assert.throws(
+      () =>
+        p.decide({
+          changeId: id,
+          stage: 'product',
+          expectedDigest: before.product.at(-1)!.digest,
+          decision: 'approve',
+          comment: '',
+        }),
+      /Версия изменилась/,
+    );
+    assert.throws(
+      () => new LeadWorkflow(f.h).start({ kind: 'board', id: b.id, authorRuntime: 'codex' }),
+      /продуктовую/,
+    );
+    approveStage(p, id, 'product');
+    assert.throws(() => developmentBinding(f.store.read()), /архитектуру/);
+    p.execute('preparation_architecture', {
+      changeId: id,
+      expectedDigest: before.architecture.at(-1)!.digest,
+      reason: 'Новая постановка',
+      content: architecture,
+    });
+    approveStage(p, id, 'architecture');
+    f.h.pause(false);
+    assert.throws(() => f.h.claim('worker'), /не связана/);
+    assert.equal(specDigest(f.store.read().tasks[0]), original);
+    assert.equal(f.store.read().preparation!.changes[0].product[0].status, 'approved');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('C1/C2 validation blocks incomplete and contradictory architecture', () => {
+  const f = fixture(),
+    p = new Preparation(f.store);
+  try {
+    const id = approvePreparation(p);
+    const invalids = [
+      { ...architecture, c2: undefined },
+      { ...architecture, c2: { ...architecture.c2!, systemId: 'other' } },
+      {
+        ...architecture,
+        c1: {
+          ...architecture.c1!,
+          relationships: [
+            { from: 'missing', to: 'chat', description: 'Missing endpoint', technology: '' },
+          ],
+        },
+      },
+      {
+        ...architecture,
+        c2: {
+          ...architecture.c2!,
+          nodes: architecture.c2!.nodes.map((n) =>
+            n.kind === 'container' ? { ...n, technology: '' } : n,
+          ),
+        },
+      },
+    ];
+    for (const content of invalids) {
+      const expectedDigest = f.store.read().preparation!.changes[0].architecture.at(-1)!.digest;
+      p.execute('preparation_architecture', {
+        changeId: id,
+        expectedDigest,
+        reason: 'Invalid diagram fixture',
+        content,
+      });
+      const digest = f.store.read().preparation!.changes[0].architecture.at(-1)!.digest;
+      assert.throws(() =>
+        p.execute('preparation_submit', {
+          changeId: id,
+          stage: 'architecture',
+          expectedDigest: digest,
+        }),
+      );
+      assert.equal(f.store.read().preparation!.changes[0].architecture.at(-1)!.status, 'draft');
+    }
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Empty workspace serves immediately, survives restart and attaches real Git configuration at the same URL', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-start-')),
+    workspace = join(root, 'workspace');
+  let app = await startWorkspace(workspace, { port: 0 });
+  const headers = { 'Content-Type': 'application/json', 'X-DevContour-Request': '1' };
+  const post = (path: string, body: unknown, origin?: string) =>
+    fetch(app.url + path, {
+      method: 'POST',
+      headers: { ...headers, ...(origin ? { Origin: origin } : {}) },
+      body: JSON.stringify(body),
+    });
+  try {
+    assert.equal((await fetch(app.url + '/')).status, 200);
+    assert.equal((await fetch(app.url + '/api/state')).status, 409);
+    assert.equal(existsSync(join(workspace, '.devcontour-local/config.json')), false);
+    assert.throws(
+      () => requirePreparation(join(workspace, '.devcontour-local')),
+      /изменение продукта/,
+    );
+    assert.equal(
+      (await post('/api/preparation/decision', {}, 'https://other.example')).status,
+      403,
+    );
+    assert.equal(
+      (await post('/api/agent', { operation: 'queue_set', input: { paused: false } })).status,
+      409,
+    );
+    const store = preparationStore(join(workspace, '.devcontour-local'));
+    approvePreparation(new Preparation(store));
+    store.close();
+    await app.close();
+    app = await startWorkspace(workspace, { port: 0 });
+    const early = await (await fetch(app.url + '/api/preparation')).json();
+    assert.equal(early.developmentReady, true);
+    assert.equal(early.engineConnected, false);
+    const repo = join(root, 'product');
+    mkdirSync(repo);
+    const git = (...args: string[]) =>
+      execFileSync('git', ['-C', repo, ...args], {
+        stdio: 'pipe',
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: 'Fixture',
+          GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
+          GIT_COMMITTER_NAME: 'Fixture',
+          GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
+        },
+      });
+    git('init', '-b', 'main');
+    writeFileSync(join(repo, 'README.md'), 'Product fixture');
+    git('add', '.');
+    git('commit', '-m', 'initial');
+    const cfg = config({
+      repository: repo,
+      workspaceRoot: realpathSync(workspace),
+      targetBranch: 'devcontour/integration',
+      storage: 'component',
+    });
+    writeFileSync(join(workspace, '.devcontour-local/config.json'), JSON.stringify(cfg));
+    const deadline = Date.now() + 20000;
+    let connected = false;
+    while (Date.now() < deadline) {
+      const state = await (await fetch(app.url + '/api/preparation')).json();
+      if (state.startupError) throw new Error(state.startupError);
+      if (state.engineConnected) {
+        connected = true;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.equal(connected, true);
+    assert.equal((await fetch(app.url + '/api/state')).status, 200);
+    assert.equal(
+      new WorkspaceAgent(join(workspace, '.devcontour-local')).execute({
+        operation: 'preparation_status',
+      }).enabled,
+      true,
+    );
+    assert.equal(
+      (
+        await post('/api/agent', {
+          operation: 'board_create',
+          input: { title: 'Реальная разработка' },
+        })
+      ).status,
+      200,
+    );
+    assert.equal(
+      (await (await fetch(app.url + '/api/preparation')).json()).current.product.status,
+      'approved',
+    );
+  } finally {
+    await app.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Before stack selection, preparation sync uses real Git clones and rejects concurrent edits without partial import', () => {
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-preparation-sync-'));
+  const aPath = join(root, 'a'),
+    bPath = join(root, 'b');
+  mkdirSync(aPath);
+  const git = (path: string, ...args: string[]) =>
+    execFileSync('git', ['-C', path, ...args], {
+      stdio: 'pipe',
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: 'Fixture',
+        GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
+        GIT_COMMITTER_NAME: 'Fixture',
+        GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
+      },
+    });
+  git(aPath, 'init', '-b', 'main');
+  writeFileSync(join(aPath, '.gitignore'), '.devcontour-local/\n');
+  git(aPath, 'add', '.');
+  git(aPath, 'commit', '-m', 'initial');
+  const a = preparationStore(join(aPath, '.devcontour-local'));
+  let b: ReturnType<typeof preparationStore> | undefined;
+  try {
+    const p = new Preparation(a);
+    approvePreparation(p);
+    syncPreparation(a, aPath, 'alice');
+    git(aPath, 'add', '.devcontour');
+    git(aPath, 'commit', '-m', 'product approved');
+    git(root, 'clone', '--no-local', aPath, bPath);
+    b = preparationStore(join(bPath, '.devcontour-local'));
+    new Preparation(b).enable();
+    syncPreparation(b, bPath, 'bob');
+    assert.equal(developmentBinding(b.read())?.changeId, developmentBinding(a.read())?.changeId);
+    new Preparation(b).execute('preparation_create', { title: 'Local new change' });
+    p.execute('preparation_create', { title: 'Peer new change' });
+    syncPreparation(a, aPath, 'alice');
+    git(aPath, 'add', '.devcontour');
+    git(aPath, 'commit', '-m', 'new change');
+    git(bPath, 'pull', '--ff-only');
+    const before = JSON.stringify(b.read());
+    assert.throws(() => syncPreparation(b!, bPath, 'bob'), /Конфликт/i);
+    assert.equal(JSON.stringify(b.read()), before);
+  } finally {
+    a.close();
+    b?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

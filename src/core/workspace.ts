@@ -1,3 +1,4 @@
+import { assertTaskPreparation } from './preparation.ts';
 import { delivered } from './delivery.ts';
 import { componentImpact } from './workflow.ts';
 import { randomUUID } from 'node:crypto';
@@ -139,6 +140,7 @@ export class Workspace {
       if (c.verifications.length >= this.h.config.maxAttempts)
         throw new DomainError('Исчерпан лимит попыток ChangeSet');
       const snapshot = changeSnapshot(s, c);
+      snapshot.tasks.forEach((t) => assertTaskPreparation(s, t));
       if (!snapshot.tasks.length || snapshot.tasks.some((t) => t.status !== 'done' || !t.resultSha))
         throw new DomainError('Сначала завершите все задачи ChangeSet');
       const productRelease = c.releaseId ? this.guard().capture(c.releaseId, snapshot) : undefined;
@@ -251,6 +253,7 @@ export class Workspace {
     return this.h.store.change('changeset.accepted', (s) => {
       const c = find(s, id);
       if (c.acceptance) return { status: 'already-accepted', changeSetId: id };
+      changeSnapshot(s, c).tasks.forEach((t) => assertTaskPreparation(s, t));
       const v = c.verifications.at(-1);
       if (
         !v ||

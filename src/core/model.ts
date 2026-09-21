@@ -1,3 +1,4 @@
+import { preparationBinding, type PreparationState } from './preparation-model.ts';
 import { priceSchema } from './usage.ts';
 import type { ReviewInspection } from './review.ts';
 import { z } from 'zod';
@@ -85,6 +86,7 @@ export const requirementLink = z.strictObject({
 });
 export type RequirementLink = z.infer<typeof requirementLink>;
 export const taskInput = z.object({
+  preparation: preparationBinding.optional(),
   requirements: z.array(requirementLink).max(30).optional(),
   assignee: z
     .string()
@@ -230,6 +232,7 @@ export interface Run {
   dependencies?: DependencySnapshot[];
 }
 export interface DevContourState {
+  preparation?: PreparationState;
   team?: { member: string };
   version: 1;
   boards: Board[];

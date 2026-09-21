@@ -1,3 +1,4 @@
+import { assertTaskPreparation } from '../core/preparation.ts';
 import { ProjectMemory } from './memory.ts';
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
@@ -52,6 +53,13 @@ export function taskProgress(h: DevContour, s: DevContourState, t: Task) {
     (b) => b.revisions.at(-1)?.status === 'active' && b.revisions.at(-1)!.taskIds.includes(t.id),
   );
   const reasons: string[] = [];
+  if (s.preparation && t.status !== 'done') {
+    try {
+      assertTaskPreparation(s, t);
+    } catch {
+      reasons.push('product_approval_required');
+    }
+  }
   if (t.status === 'draft') reasons.push('plan_review_required');
   if (t.status === 'failed')
     reasons.push(

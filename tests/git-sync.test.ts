@@ -1,3 +1,5 @@
+import { Preparation } from '../src/core/preparation.ts';
+import { approvePreparation } from './preparation-fixture.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -581,6 +583,38 @@ test('CLI exposes sync, status and assignment against an explicit workspace', ()
     assert.equal(cli('sync-status').changes.length, 1);
     cli('sync');
     assert.equal(cli('sync-status').changes.length, 0);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Product decisions and task bindings round-trip between independent component clones without moving local task bodies', () => {
+  const f = fixture();
+  try {
+    const a = f.create('product-a');
+    const changeId = approvePreparation(new Preparation(a.store));
+    const board = a.h.createBoard('Approved product work', '', 'main');
+    const task = a.h.addTask(board.id, input());
+    a.h.approve(board.id);
+    syncGit(a.h, { member: 'alice' });
+    a.commit();
+    const b = f.create('product-b', a);
+    syncGit(b.h, { member: 'bob' });
+    assert.equal(b.store.read().preparation?.changes[0].id, changeId);
+    assert.deepEqual(b.store.read().tasks[0].preparation, task.preparation);
+    assert.equal(b.store.read().preparation?.changes[0].architecture[0].status, 'approved');
+    const shared = readFileSync(
+      join(a.workspace, '.devcontour/preparations/workspace-preparation.json'),
+      'utf8',
+    );
+    assert.ok(!shared.includes(task.description));
+    const prior = JSON.stringify(b.store.read());
+    const path = join(b.workspace, '.devcontour/preparations/workspace-preparation.json');
+    const altered = JSON.parse(readFileSync(path, 'utf8'));
+    altered.data.changes[0].product[0].decision.comment = 'Rewritten history';
+    writeFileSync(path, JSON.stringify(altered));
+    assert.throws(() => syncGit(b.h, { member: 'bob' }), /неизменяема/);
+    assert.equal(JSON.stringify(b.store.read()), prior);
   } finally {
     f.cleanup();
   }

@@ -11,7 +11,7 @@ import {
 } from '../application/agent.ts';
 import { DomainError } from '../core/model.ts';
 
-export function createMcpServer(service: AgentService) {
+export function createMcpServer(service: Pick<AgentService, 'execute'>) {
   const { version } = capabilities();
   const server = new McpServer({ name: 'devcontour', version });
   for (const name of agentOperations) {
@@ -58,7 +58,7 @@ export function createMcpServer(service: AgentService) {
   return server;
 }
 
-export async function serveMcp(service: AgentService) {
+export async function serveMcp(service: Pick<AgentService, 'execute'>) {
   const server = createMcpServer(service);
   await server.connect(
     new StdioServerTransport(process.stdin, process.stdout, { maxBufferSize: 128 * 1024 }),

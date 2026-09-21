@@ -1162,3 +1162,281 @@ legend {
 .changesets article > div {
   flex-wrap: wrap;
 }
+
+/* The product decision stays visible before any technical configuration exists. */
+.preparation {
+  max-width: 100rem;
+  margin: auto;
+  padding: var(--space-8);
+}
+.preparation-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: var(--space-6);
+  margin-bottom: var(--space-8);
+}
+.preparation-brand {
+  display: block;
+  color: var(--action-primary);
+  font-weight: var(--weight-bold);
+  margin-bottom: var(--space-3);
+}
+.preparation-header p {
+  max-width: 70ch;
+  margin-top: var(--space-3);
+  color: var(--text-secondary);
+}
+.preparation-live {
+  color: var(--status-done);
+  white-space: nowrap;
+}
+.preparation-layout {
+  display: grid;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  gap: var(--space-8);
+}
+.preparation-sidebar h2 {
+  font-size: var(--text-md);
+}
+.preparation-sidebar nav,
+.preparation-sidebar form {
+  display: grid;
+  gap: var(--space-3);
+}
+.preparation-sidebar nav button {
+  text-align: left;
+  justify-content: start;
+}
+.preparation-sidebar [aria-current],
+.preparation-steps [aria-current] {
+  border-color: var(--action-primary);
+  background: var(--status-ready-bg);
+}
+.preparation-sidebar form {
+  margin-top: var(--space-8);
+}
+.preparation-sidebar input {
+  width: 100%;
+}
+.preparation-content {
+  min-width: 0;
+}
+.preparation-steps {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 var(--space-8);
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+.preparation-steps button {
+  height: 100%;
+  width: 100%;
+  display: grid;
+  text-align: left;
+  justify-content: start;
+  padding: var(--space-4);
+}
+.preparation-steps button > span {
+  font-size: var(--text-lg);
+  color: var(--action-primary);
+}
+.preparation-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: var(--space-4);
+}
+.preparation-version {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  color: var(--text-secondary);
+  padding-bottom: var(--space-4);
+  border-bottom: var(--border-width) solid var(--border);
+}
+.preparation-section {
+  padding: var(--space-4) 0;
+  border-bottom: var(--border-width) solid var(--border);
+}
+.preparation-section h3 {
+  font-size: var(--text-md);
+  margin: 0 0 var(--space-3);
+}
+.preparation-section p,
+.preparation-section li {
+  max-width: 78ch;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.preparation-section li + li {
+  margin-top: var(--space-2);
+}
+.preparation-table {
+  overflow-x: auto;
+}
+.preparation-table table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: var(--product-table-width);
+}
+.preparation-table th,
+.preparation-table td {
+  padding: var(--space-3);
+  text-align: left;
+  vertical-align: top;
+  border-bottom: var(--border-width) solid var(--border);
+}
+.preparation-empty {
+  padding: var(--space-8);
+  background: var(--surface-panel);
+  border: var(--border-width) dashed var(--border);
+  border-radius: var(--radius-md);
+  max-width: 78ch;
+}
+.preparation-approval {
+  padding: var(--space-6);
+  background: var(--status-ready-bg);
+  border: var(--border-width) solid var(--action-primary);
+  border-radius: var(--radius-md);
+  margin-top: var(--space-8);
+}
+.preparation-approval h3 {
+  margin-top: 0;
+  font-size: var(--text-md);
+}
+.preparation-approval textarea {
+  display: block;
+  width: 100%;
+  margin: var(--space-3) 0;
+}
+.preparation-approval form,
+.preparation-approval > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+.preparation-decision {
+  margin-top: var(--space-6);
+  padding: var(--space-4);
+  background: var(--surface-subtle);
+  border-left: var(--focus-width) solid var(--action-primary);
+}
+.preparation-decision p {
+  margin: var(--space-2) 0 0;
+  white-space: pre-wrap;
+}
+.preparation-warning {
+  background: var(--status-blocked-bg);
+  color: var(--status-blocked);
+  padding: var(--space-4);
+}
+.preparation-error {
+  color: var(--status-failed);
+  background: var(--status-failed-bg);
+  padding: var(--space-4);
+}
+.preparation-history {
+  margin: var(--space-8) 0;
+}
+.preparation-history summary {
+  cursor: pointer;
+  font-weight: var(--weight-medium);
+}
+.preparation-history li {
+  padding: var(--space-3) 0;
+}
+.preparation-return {
+  display: flex;
+  gap: var(--space-4);
+  padding: var(--space-3);
+  align-items: center;
+}
+.c4-figure {
+  margin: var(--space-8) 0;
+}
+.c4-figure figcaption {
+  font-size: var(--text-md);
+  font-weight: var(--weight-bold);
+  margin-bottom: var(--space-3);
+}
+.c4-canvas {
+  height: var(--canvas-height);
+  border: var(--border-width) solid var(--border);
+  background: var(--surface-panel);
+  border-radius: var(--radius-md);
+}
+.c4-element {
+  width: 280px;
+  min-height: 150px;
+  padding: var(--space-4);
+  border: var(--border-width) solid var(--action-primary);
+  border-radius: var(--radius-md);
+  background: var(--surface-panel);
+}
+.c4-element strong,
+.c4-element span {
+  display: block;
+}
+.c4-element p {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-sm);
+}
+.c4-system {
+  background: var(--status-ready-bg);
+}
+.c4-person,
+.c4-external-system {
+  border-color: var(--text-secondary);
+  background: var(--surface-subtle);
+}
+.c4-boundary {
+  border: var(--border-width) dashed var(--action-primary) !important;
+  background: var(--status-ready-bg) !important;
+}
+.c4-figure details {
+  margin-top: var(--space-3);
+}
+@media (max-width: 850px) {
+  .preparation {
+    padding: var(--space-4);
+  }
+  .preparation-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .preparation-header {
+    display: block;
+  }
+  .preparation-sidebar nav {
+    display: flex;
+    flex-wrap: wrap;
+  }
+  .preparation-sidebar form {
+    margin-top: var(--space-4);
+  }
+  .preparation-steps {
+    gap: var(--space-2);
+  }
+  .preparation-steps button {
+    padding: var(--space-2);
+  }
+  .preparation-title {
+    flex-wrap: wrap;
+  }
+}
+
+.c4-edge-label {
+  position: absolute;
+  z-index: 2;
+  max-width: 150px;
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--text-xs);
+  line-height: var(--line-tight);
+  color: var(--text-primary);
+  background: var(--surface-panel);
+  border-radius: var(--radius-sm);
+  text-align: center;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}

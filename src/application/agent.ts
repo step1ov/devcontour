@@ -1,3 +1,5 @@
+import { Preparation } from '../core/preparation.ts';
+import { preparationInputs, type PreparationOperation } from '../core/preparation-model.ts';
 import { IntentService, intentInputs } from '../runner/intent.ts';
 import { Observability, observabilityInputs } from './observability.ts';
 import { ProjectMemory, memoryInputs } from './memory.ts';
@@ -21,6 +23,7 @@ import { attachJournal } from '../runner/journal.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 export const agentInputs = {
+  ...preparationInputs,
   ...intentInputs,
   ...memoryInputs,
   ...observabilityInputs,
@@ -69,6 +72,19 @@ export const agentRequest = z
   .object({ operation: z.enum(agentOperations), input: z.unknown().optional() })
   .strict();
 export const descriptions: Record<AgentOperation, string> = {
+  preparation_status:
+    'Read product and architecture stages, exact revisions, operator feedback and linked development. Available before project setup.',
+  preparation_create:
+    'Create a product change. Product and architecture require explicit operator decisions in the web panel before development.',
+  preparation_activate:
+    'Select the change for subsequent development tasks. Does not approve any stage.',
+  preparation_product:
+    'Save a new immutable product draft with optimistic concurrency. Never approves it; a revision invalidates the prior architecture for new work.',
+  preparation_architecture:
+    'Save architecture, justified stack and structured C1/C2 only after operator product approval. Does not approve development.',
+  preparation_submit:
+    'Validate the current draft and send it to the operator for approval. Unresolved questions or incomplete C1/C2 block submission.',
+
   intent_render:
     'Render component intent from committed REQ sources, or a workspace product/application/feature map with pinned local story references. Returns Markdown only; does not write, approve or commit it.',
   intent_snapshot:
@@ -133,6 +149,7 @@ export const descriptions: Record<AgentOperation, string> = {
 };
 export const readOnly = (name: AgentOperation) =>
   [
+    'preparation_status',
     'intent_render',
     'intent_snapshot',
     'intent_report',
@@ -195,6 +212,8 @@ export class AgentService {
       return operation === 'project_context' ? { ...result, operations: agentOperations } : result;
     }
     const h = this.h;
+    if (operation in preparationInputs)
+      return new Preparation(h.store).execute(operation as PreparationOperation, input);
     if (!readOnly(operation) && !h.store.onCommit) attachJournal(h);
     switch (operation) {
       case 'intent_render':

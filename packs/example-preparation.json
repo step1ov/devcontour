@@ -1,0 +1,120 @@
+{
+  "product": {
+    "problem": "Модератору нужно ограничивать доступ нарушителей к чату.",
+    "audience": ["Модераторы корпоративного чата"],
+    "outcome": "Модератор блокирует участника с указанием причины.",
+    "scenarios": ["Открыть участника, указать причину, подтвердить блокировку."],
+    "scope": ["Админка и API модерации"],
+    "exclusions": ["Мобильный интерфейс — следующий этап"],
+    "acceptance": ["Заблокированный участник не может отправить сообщение."],
+    "references": ["docs/spec.md — исходное техническое задание"],
+    "questions": []
+  },
+  "architecture": {
+    "summary": "Админка обращается к существующему API. Сервис сохраняет блокировки в PostgreSQL.",
+    "stack": [
+      {
+        "area": "Интерфейс",
+        "choice": "React + Vite",
+        "rationale": "Внутренней админке не требуется серверный рендеринг.",
+        "alternatives": "Next.js добавит ненужный для этой задачи сервер."
+      },
+      {
+        "area": "API",
+        "choice": "Go",
+        "rationale": "Существующий сервис чата уже использует Go; расширяем его контракт без второго сервиса.",
+        "alternatives": "Новый сервис на другом языке добавит границу интеграции без продуктовой необходимости."
+      },
+      {
+        "area": "Данные",
+        "choice": "PostgreSQL",
+        "rationale": "Участники и ограничения уже находятся в PostgreSQL; обновляем их одной транзакцией.",
+        "alternatives": "Отдельное хранилище потребует синхронизации и усложнит атомарность блокировки."
+      }
+    ],
+    "decisions": ["Блокировка проверяется API при отправке сообщения."],
+    "risks": ["Совместимость текущих клиентов проверяем контрактными тестами."],
+    "testStrategy": "Контрактные тесты API и сквозной сценарий блокировки в браузере.",
+    "questions": [],
+    "c1": {
+      "systemId": "chat",
+      "nodes": [
+        {
+          "id": "moderator",
+          "name": "Модератор",
+          "kind": "person",
+          "description": "Управляет участниками чата",
+          "technology": ""
+        },
+        {
+          "id": "chat",
+          "name": "Корпоративный чат",
+          "kind": "system",
+          "description": "Общение и модерация сообщений",
+          "technology": ""
+        }
+      ],
+      "relationships": [
+        {
+          "from": "moderator",
+          "to": "chat",
+          "description": "Блокирует участника",
+          "technology": ""
+        }
+      ]
+    },
+    "c2": {
+      "systemId": "chat",
+      "nodes": [
+        {
+          "id": "moderator",
+          "name": "Модератор",
+          "kind": "person",
+          "description": "Управляет участниками чата",
+          "technology": ""
+        },
+        {
+          "id": "admin",
+          "name": "Админка",
+          "kind": "container",
+          "description": "Показывает участников и форму блокировки",
+          "technology": "React / Vite"
+        },
+        {
+          "id": "api",
+          "name": "API чата",
+          "kind": "container",
+          "description": "Проверяет права и применяет блокировку",
+          "technology": "Go"
+        },
+        {
+          "id": "db",
+          "name": "База чата",
+          "kind": "container",
+          "description": "Хранит участников и ограничения",
+          "technology": "PostgreSQL"
+        }
+      ],
+      "relationships": [
+        {
+          "from": "moderator",
+          "to": "admin",
+          "description": "Управляет участниками",
+          "technology": "HTTPS"
+        },
+        {
+          "from": "admin",
+          "to": "api",
+          "description": "Изменяет блокировку",
+          "technology": "JSON / HTTPS"
+        },
+        {
+          "from": "api",
+          "to": "db",
+          "description": "Сохраняет ограничения",
+          "technology": "SQL"
+        }
+      ]
+    }
+  }
+}

@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { startWorkspace, requirePreparation, preparationStore } from './runner/start.ts';
+import { PreparationAgent, WorkspaceAgent } from './application/preparation-agent.ts';
+import { preparationInputs } from './core/preparation-model.ts';
 import { IntentService } from './runner/intent.ts';
 import { engineeringEvals } from './runner/engineering-evals.ts';
 import { compareEvaluations } from './application/eval-comparison.ts';
@@ -45,7 +48,7 @@ import { setupWorkspace } from './runner/workspace-setup.ts';
 import { Workspace } from './core/workspace.ts';
 import { attachJournal } from './runner/journal.ts';
 import { commandScope } from './runner/scope.ts';
-import { syncGit } from './runner/git-sync.ts';
+import { syncGit, syncPreparation } from './runner/git-sync.ts';
 import { setupDemo, exists } from './demo.ts';
 const args = process.argv.slice(2),
   operation = args[0] ?? 'serve';
@@ -131,6 +134,9 @@ async function main() {
   }
   if (operation === 'help' || args.includes('--help')) {
     console.log(
+      'devcontour start --workspace /absolute/workspace [--port 4317] — панель до выбора стека и создания репозиториев',
+    );
+    console.log(
       'devcontour profile-show --profile <ID|./file.json> --repository /absolute/repo [--repository-id ID]',
     );
     console.log(
@@ -166,6 +172,70 @@ async function main() {
     return;
   }
   ({ data: root, workspace: workspacePath } = commandScope(args, operation));
+  if (
+    operation === 'start' ||
+    (operation === 'serve' && workspacePath && !(await exists(join(root, 'config.json'))))
+  ) {
+    if (!workspacePath) throw new Error('Для раннего запуска укажите --workspace /absolute/path');
+    const port = Number(option('--port', '4317'));
+    if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Некорректный port');
+    const app = await startWorkspace(workspacePath, { port, dev: args.includes('--dev') });
+    console.log(
+      `DevContour: ${app.url}\nПродукт → согласование → архитектура и стек → согласование → разработка.`,
+    );
+    let closing = false;
+    const close = async () => {
+      if (closing) return;
+      closing = true;
+      await app.close();
+    };
+    process.on('SIGINT', () => {
+      void close();
+    });
+    process.on('SIGTERM', () => {
+      void close();
+    });
+    return;
+  }
+  if (operation === 'agent' && args.includes('--file')) {
+    const request: unknown = JSON.parse(await readFile(resolve(option('--file', '')), 'utf8'));
+    if (
+      request &&
+      typeof request === 'object' &&
+      'operation' in request &&
+      typeof request.operation === 'string' &&
+      request.operation in preparationInputs
+    ) {
+      const store = preparationStore(root);
+      try {
+        console.log(JSON.stringify(new PreparationAgent(store).execute(request), null, 2));
+      } finally {
+        store.close();
+      }
+      return;
+    }
+  }
+  if (operation === 'sync' && workspacePath && !(await exists(join(root, 'config.json')))) {
+    const store = preparationStore(root);
+    try {
+      console.log(
+        JSON.stringify(syncPreparation(store, workspacePath, option('--member', '')), null, 2),
+      );
+    } finally {
+      store.close();
+    }
+    return;
+  }
+  if (operation === 'mcp' && !(await exists(join(root, 'config.json')))) {
+    const server = await serveMcp(new WorkspaceAgent(root));
+    for (const event of ['SIGINT', 'SIGTERM'] as const)
+      process.once(event, () => {
+        void server.close();
+      });
+    return;
+  }
+  if (workspacePath && ['setup', 'init', 'workspace-init'].includes(operation))
+    requirePreparation(root);
   if (operation === 'workspace-init') {
     if (!args.includes('--file')) throw new Error('Укажите --file workspace.json');
     if (

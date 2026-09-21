@@ -1,3 +1,4 @@
+import { validatePreparation } from './preparation.ts';
 import { digest, specDigest, type DevContour } from './service.ts';
 import { repository } from './repositories.ts';
 import { assertDag } from './graph.ts';
@@ -163,6 +164,7 @@ export function recordsFromState(h: DevContour, s: DevContourState) {
         supersedes: c.supersedes,
       },
     });
+  if (s.preparation) add(undefined, { version: 1, kind: 'preparation', data: s.preparation });
   return records;
 }
 export function validateReceipt(receipt: CompletionReceipt, t: Task, demo: boolean) {
@@ -214,6 +216,12 @@ export function stateFromRecords(
     if (ids.has(record.data.id)) throw new Error('Повтор ID: ' + record.data.id);
     ids.add(record.data.id);
   }
+  const preparations = all.filter((x) => x.record.kind === 'preparation');
+  if (preparations.length > 1 || preparations.some((x) => x.owner))
+    throw new Error('Продуктовый процесс хранится только в workspace');
+  const preparation = preparations[0]?.record;
+  s.preparation = preparation?.kind === 'preparation' ? preparation.data : undefined;
+  validatePreparation(s, old);
   const contracts = all.filter((x) => x.record.kind === 'contract');
   s.contracts = contracts.map(({ owner, record }) => {
     if (record.kind !== 'contract') throw new Error('Contract expected');

@@ -1,3 +1,4 @@
+import { developmentBinding, assertTaskPreparation } from './preparation.ts';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { DevContour, digest } from './service.ts';
@@ -30,6 +31,7 @@ export class LeadWorkflow {
   constructor(readonly h: DevContour) {}
   input(kind: WorkflowJob['kind'], id: string) {
     const s = this.h.store.read();
+    developmentBinding(s);
     const changeSet = kind === 'changeset' ? s.changeSets.find((c) => c.id === id) : undefined;
     if (kind === 'changeset' && !changeSet) throw new DomainError('ChangeSet не найден');
     const boardIds = changeSet?.boardIds ?? [id];
@@ -41,6 +43,7 @@ export class LeadWorkflow {
     const taskIds = new Set(boards.flatMap((b) => b.revisions.at(-1)!.taskIds));
     const tasks = s.tasks.filter((t) => taskIds.has(t.id));
     if (!tasks.length) throw new DomainError('В workflow нет задач');
+    tasks.forEach((task) => assertTaskPreparation(s, task));
     const owner = kind === 'board' ? boardOwner(boards[0], s) : undefined;
     return {
       owner,

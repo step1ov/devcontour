@@ -6,6 +6,530 @@
   "maxResultBytes": 65536,
   "tools": [
     {
+      "name": "preparation_status",
+      "description": "Read product and architecture stages, exact revisions, operator feedback and linked development. Available before project setup.",
+      "readOnly": true,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "changeId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "preparation_create",
+      "description": "Create a product change. Product and architecture require explicit operator decisions in the web panel before development.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 180
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "preparation_activate",
+      "description": "Select the change for subsequent development tasks. Does not approve any stage.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "changeId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          }
+        },
+        "required": [
+          "changeId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "preparation_product",
+      "description": "Save a new immutable product draft with optimistic concurrency. Never approves it; a revision invalidates the prior architecture for new work.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "changeId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "expectedDigest": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 2000
+          },
+          "content": {
+            "type": "object",
+            "properties": {
+              "problem": {
+                "type": "string",
+                "maxLength": 6000
+              },
+              "audience": {
+                "maxItems": 30,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 3,
+                  "maxLength": 1500
+                }
+              },
+              "outcome": {
+                "type": "string",
+                "maxLength": 6000
+              },
+              "scenarios": {
+                "maxItems": 30,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 3,
+                  "maxLength": 1500
+                }
+              },
+              "scope": {
+                "maxItems": 30,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 3,
+                  "maxLength": 1500
+                }
+              },
+              "exclusions": {
+                "maxItems": 30,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 3,
+                  "maxLength": 1500
+                }
+              },
+              "acceptance": {
+                "maxItems": 30,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 3,
+                  "maxLength": 1500
+                }
+              },
+              "references": {
+                "maxItems": 30,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 3,
+                  "maxLength": 1500
+                }
+              },
+              "questions": {
+                "maxItems": 30,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 3,
+                  "maxLength": 1500
+                }
+              }
+            },
+            "required": [
+              "problem",
+              "audience",
+              "outcome",
+              "scenarios",
+              "scope",
+              "exclusions",
+              "acceptance",
+              "references",
+              "questions"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "changeId",
+          "expectedDigest",
+          "reason",
+          "content"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "preparation_architecture",
+      "description": "Save architecture, justified stack and structured C1/C2 only after operator product approval. Does not approve development.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "changeId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "expectedDigest": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 2000
+          },
+          "content": {
+            "type": "object",
+            "properties": {
+              "summary": {
+                "type": "string",
+                "maxLength": 6000
+              },
+              "stack": {
+                "maxItems": 30,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "area": {
+                      "type": "string",
+                      "minLength": 2,
+                      "maxLength": 100
+                    },
+                    "choice": {
+                      "type": "string",
+                      "minLength": 2,
+                      "maxLength": 200
+                    },
+                    "rationale": {
+                      "type": "string",
+                      "minLength": 10,
+                      "maxLength": 1500
+                    },
+                    "alternatives": {
+                      "type": "string",
+                      "minLength": 3,
+                      "maxLength": 1500
+                    }
+                  },
+                  "required": [
+                    "area",
+                    "choice",
+                    "rationale",
+                    "alternatives"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "decisions": {
+                "maxItems": 30,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 3,
+                  "maxLength": 1500
+                }
+              },
+              "risks": {
+                "maxItems": 30,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 3,
+                  "maxLength": 1500
+                }
+              },
+              "testStrategy": {
+                "type": "string",
+                "maxLength": 6000
+              },
+              "questions": {
+                "maxItems": 30,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 3,
+                  "maxLength": 1500
+                }
+              },
+              "c1": {
+                "type": "object",
+                "properties": {
+                  "systemId": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                  },
+                  "nodes": {
+                    "minItems": 1,
+                    "maxItems": 30,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                        },
+                        "name": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 100
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "person",
+                            "system",
+                            "external-system",
+                            "container"
+                          ]
+                        },
+                        "description": {
+                          "type": "string",
+                          "minLength": 3,
+                          "maxLength": 600
+                        },
+                        "technology": {
+                          "default": "",
+                          "type": "string",
+                          "maxLength": 150
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "name",
+                        "kind",
+                        "description"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "relationships": {
+                    "minItems": 1,
+                    "maxItems": 60,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "from": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                        },
+                        "to": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                        },
+                        "description": {
+                          "type": "string",
+                          "minLength": 3,
+                          "maxLength": 200
+                        },
+                        "technology": {
+                          "default": "",
+                          "type": "string",
+                          "maxLength": 100
+                        }
+                      },
+                      "required": [
+                        "from",
+                        "to",
+                        "description"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "systemId",
+                  "nodes",
+                  "relationships"
+                ],
+                "additionalProperties": false
+              },
+              "c2": {
+                "type": "object",
+                "properties": {
+                  "systemId": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                  },
+                  "nodes": {
+                    "minItems": 1,
+                    "maxItems": 30,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                        },
+                        "name": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 100
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "person",
+                            "system",
+                            "external-system",
+                            "container"
+                          ]
+                        },
+                        "description": {
+                          "type": "string",
+                          "minLength": 3,
+                          "maxLength": 600
+                        },
+                        "technology": {
+                          "default": "",
+                          "type": "string",
+                          "maxLength": 150
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "name",
+                        "kind",
+                        "description"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "relationships": {
+                    "minItems": 1,
+                    "maxItems": 60,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "from": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                        },
+                        "to": {
+                          "type": "string",
+                          "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                        },
+                        "description": {
+                          "type": "string",
+                          "minLength": 3,
+                          "maxLength": 200
+                        },
+                        "technology": {
+                          "default": "",
+                          "type": "string",
+                          "maxLength": 100
+                        }
+                      },
+                      "required": [
+                        "from",
+                        "to",
+                        "description"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "systemId",
+                  "nodes",
+                  "relationships"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "summary",
+              "stack",
+              "decisions",
+              "risks",
+              "testStrategy",
+              "questions"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "changeId",
+          "expectedDigest",
+          "reason",
+          "content"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "preparation_submit",
+      "description": "Validate the current draft and send it to the operator for approval. Unresolved questions or incomplete C1/C2 block submission.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "changeId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "stage": {
+            "type": "string",
+            "enum": [
+              "product",
+              "architecture"
+            ]
+          },
+          "expectedDigest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "required": [
+          "changeId",
+          "stage",
+          "expectedDigest"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "intent_render",
       "description": "Render component intent from committed REQ sources, or a workspace product/application/feature map with pinned local story references. Returns Markdown only; does not write, approve or commit it.",
       "readOnly": true,
@@ -1521,6 +2045,29 @@
           "task": {
             "type": "object",
             "properties": {
+              "preparation": {
+                "type": "object",
+                "properties": {
+                  "changeId": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                  },
+                  "productDigest": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "architectureDigest": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "changeId",
+                  "productDigest",
+                  "architectureDigest"
+                ],
+                "additionalProperties": false
+              },
               "requirements": {
                 "maxItems": 30,
                 "type": "array",
@@ -1771,6 +2318,29 @@
           "task": {
             "type": "object",
             "properties": {
+              "preparation": {
+                "type": "object",
+                "properties": {
+                  "changeId": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                  },
+                  "productDigest": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "architectureDigest": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "changeId",
+                  "productDigest",
+                  "architectureDigest"
+                ],
+                "additionalProperties": false
+              },
               "requirements": {
                 "maxItems": 30,
                 "type": "array",

@@ -69,6 +69,8 @@ const roleNames: Record<Role, string> = {
   qa: 'Тестирование',
 };
 const waitingReasons: Record<string, string> = {
+  product_approval_required:
+    'Нужно согласовать продукт и архитектуру или обновить привязку черновика задачи.',
   plan_review_required: 'План ещё не утверждён. Требуется ревью.',
   dependencies_incomplete: 'Сначала должны завершиться связанные задачи.',
   queue_paused: 'Очередь на паузе. Выдача задач возобновится после запуска.',

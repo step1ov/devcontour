@@ -1,3 +1,4 @@
+import { developmentBinding, assertTaskPreparation } from './preparation.ts';
 import { validateTaskContext, validateWorkflow } from './workflow.ts';
 import { entityId } from './ids.ts';
 import { createHash, randomUUID } from 'node:crypto';
@@ -23,6 +24,7 @@ export const digest = (value: unknown) =>
     .digest('hex');
 export const specDigest = (t: Task) =>
   digest({
+    ...(t.preparation ? { preparation: t.preparation } : {}),
     ...(t.repositoryId && t.repositoryId !== 'main' ? { repositoryId: t.repositoryId } : {}),
     ...(t.requirements?.length ? { requirements: t.requirements } : {}),
     title: t.title,
@@ -132,6 +134,7 @@ export class DevContour {
         validateTaskContext(this.config, parsed);
         return {
           ...parsed,
+          preparation: developmentBinding(s),
           assignee: parsed.assignee ?? s.team?.member,
           id: ids.get(item.key)!,
           status: 'draft' as const,
@@ -195,6 +198,7 @@ export class DevContour {
         throw new DomainError('Локальная доска принимает только задачи своего компонента');
       const t: Task = {
         ...parsed,
+        preparation: developmentBinding(s),
         assignee: parsed.assignee ?? s.team?.member,
         id: entityId(s, 'T'),
         status: 'draft',
@@ -226,7 +230,7 @@ export class DevContour {
         (parsed.repositoryId !== ownerBoard.repositoryId || parsed.scope === 'workspace')
       )
         throw new DomainError('Локальная доска принимает только задачи своего компонента');
-      Object.assign(t, parsed);
+      Object.assign(t, parsed, { preparation: developmentBinding(s) });
       assertDag(s.tasks);
       return t;
     });
@@ -261,6 +265,7 @@ export class DevContour {
     expected?: { revision: number; taskIds: string[]; tasks: Record<string, string> },
   ) {
     return this.store.change('board.approved', (s) => {
+      developmentBinding(s);
       const r = activeRevision(s, boardId);
       if (!r.taskIds.length) throw new DomainError('Добавьте задачи перед утверждением');
       const selected = taskIds ?? r.taskIds;
@@ -279,6 +284,7 @@ export class DevContour {
       for (const id of selected) {
         const t = task(s, id);
         if (t.status !== 'draft') continue;
+        assertTaskPreparation(s, t);
         validateTaskContext(this.config, t);
         if (['backend', 'frontend'].includes(t.role) && !t.contracts.length)
           throw new DomainError(`${t.id}: для ${t.role} сначала привяжите утверждённый контракт`);
@@ -352,6 +358,7 @@ export class DevContour {
         validateTaskContext(this.config, { ...original, requirements });
         s.tasks.push({
           ...original,
+          preparation: developmentBinding(s),
           requirements,
           sharedCompletion: undefined,
           id: map.get(id)!,
@@ -405,6 +412,7 @@ export class DevContour {
       if (!r.taskIds.length || r.taskIds.some((id) => task(s, id).status !== 'done'))
         throw new DomainError('Приёмка доступна, когда все задачи прошли интеграцию и проверки');
       const tasks = r.taskIds.map((id) => structuredClone(task(s, id)));
+      tasks.forEach((t) => assertTaskPreparation(s, t));
       r.status = 'accepted';
       r.acceptedAt = now();
       r.acceptance = approval;
@@ -419,6 +427,7 @@ export class DevContour {
   }
   pause(value: boolean, reason: 'operator' | 'shutdown' = 'operator') {
     return this.store.change(value ? 'scheduler.paused' : 'scheduler.started', (s) => {
+      if (!value) developmentBinding(s);
       if (s.paused && value && reason === 'shutdown')
         return { paused: true, reason: s.pauseReason };
       s.paused = value;
@@ -453,6 +462,7 @@ export class DevContour {
       );
       const t = eligible[0];
       if (!t) return;
+      assertTaskPreparation(s, t);
       validateTaskContext(this.config, t);
       if (t.approvedDigest !== specDigest(t))
         throw new DomainError('Спецификация изменилась после утверждения');
@@ -522,6 +532,7 @@ export class DevContour {
         'Попытка не найдена',
       );
       const t = task(s, r.taskId);
+      assertTaskPreparation(s, t);
       if (r.policyDigest !== this.policyDigest(t.repositoryId))
         throw new DomainError('Политика проверок изменилась; нужна новая попытка');
       if (

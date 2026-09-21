@@ -1,3 +1,6 @@
+import { Preparation } from '../core/preparation.ts';
+import { PreparationAgent } from '../application/preparation-agent.ts';
+import type { Store } from '../core/store.ts';
 import { LeadRunner } from '../runner/lead-workflow.ts';
 import { DeliveryRunner } from '../runner/forge.ts';
 import { AgentService, capabilities } from '../application/agent.ts';
@@ -38,13 +41,52 @@ async function body(req: IncomingMessage) {
   }
 }
 export async function serve(
-  h: DevContour,
-  scheduler: Scheduler,
-  options: { port: number; dev?: boolean },
+  h: DevContour | undefined,
+  scheduler: Scheduler | undefined,
+  options: {
+    port: number;
+    dev?: boolean;
+    bootstrap?: {
+      store: Store;
+      connect: () => Promise<{ h: DevContour; scheduler: Scheduler } | undefined>;
+    };
+  },
 ) {
-  attachJournal(h);
-  const workspaceRunner = new WorkspaceRunner(h, scheduler.root);
-  const deliveryRunner = new DeliveryRunner(h, scheduler.root);
+  let workspaceRunner: WorkspaceRunner | undefined;
+  let deliveryRunner: DeliveryRunner | undefined;
+  let lead: LeadRunner | undefined;
+  let connecting: Promise<void> | undefined;
+  let startupError: string | undefined;
+  let stopping = false;
+  const startEngine = () => {
+    if (!h || !scheduler) return;
+    attachJournal(h);
+    workspaceRunner = new WorkspaceRunner(h, scheduler.root);
+    deliveryRunner = new DeliveryRunner(h, scheduler.root);
+    lead = new LeadRunner(h, scheduler.root);
+    scheduler.start();
+    lead.start();
+  };
+  const connect = () => {
+    if (h || !options.bootstrap || stopping) return Promise.resolve();
+    if (connecting) return connecting;
+    connecting = options.bootstrap
+      .connect()
+      .then((engine) => {
+        if (!engine) return;
+        h = engine.h;
+        scheduler = engine.scheduler;
+        startupError = undefined;
+        if (!stopping) startEngine();
+      })
+      .catch((error: unknown) => {
+        startupError = error instanceof Error ? error.message : String(error);
+      })
+      .finally(() => {
+        connecting = undefined;
+      });
+    return connecting;
+  };
   let origin = `http://127.0.0.1:${options.port}`;
   const vite = options.dev
     ? await (
@@ -73,6 +115,31 @@ export async function serve(
             !req.headers['content-type']?.startsWith('application/json'))
         )
           throw new DomainError('Отсутствует заголовок локального клиента', 403);
+        const preparationStore = h?.store ?? options.bootstrap?.store;
+        if (req.method === 'GET' && path === '/api/preparation' && preparationStore) {
+          const view = new Preparation(preparationStore).status(
+            url.searchParams.get('change') ?? undefined,
+          );
+          json(res, 200, { ...view, engineConnected: Boolean(h), startupError });
+          return;
+        }
+        if (req.method === 'POST' && path === '/api/preparation/decision' && preparationStore) {
+          json(res, 200, new Preparation(preparationStore).decide(await body(req)));
+          return;
+        }
+        if (req.method === 'GET' && path === '/api/capabilities') {
+          json(res, 200, capabilities());
+          return;
+        }
+        if (req.method === 'POST' && path === '/api/agent' && !h && preparationStore) {
+          json(res, 200, new PreparationAgent(preparationStore).execute(await body(req)));
+          return;
+        }
+        if (!h || !scheduler || !workspaceRunner || !deliveryRunner)
+          throw new DomainError(
+            'Панель подготовки запущена. Разработка ждёт согласований и настройки проекта',
+            409,
+          );
         const parts = path.split('/').filter(Boolean);
         let result: unknown;
         if (req.method === 'GET' && path === '/api/capabilities') {
@@ -87,7 +154,7 @@ export async function serve(
               ...t,
               specDigest: specDigest(t),
               blockers: blockers(t, state),
-              progress: taskProgress(h, state, t),
+              progress: taskProgress(h!, state, t),
             })),
             events: h.store.events(),
             journalError: h.store.projectionError,
@@ -277,17 +344,25 @@ export async function serve(
     server.listen(options.port, '127.0.0.1', r);
   });
   origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  const lead = new LeadRunner(h, scheduler.root);
-  scheduler.start();
-  lead.start();
+  startEngine();
+  const connectionTimer = options.bootstrap
+    ? setInterval(() => {
+        void connect();
+      }, 1000)
+    : undefined;
+  connectionTimer?.unref();
   return {
     server,
     url: origin,
     close: async () => {
-      await deliveryRunner.stop();
-      await workspaceRunner.stop();
-      await lead.stop();
-      await scheduler.stop();
+      stopping = true;
+      clearInterval(connectionTimer);
+      await connecting;
+      await deliveryRunner?.stop();
+      await workspaceRunner?.stop();
+      await lead?.stop();
+      await scheduler?.stop();
+      if (options.bootstrap && h) h.store.close();
       await vite?.close();
       await new Promise<void>((r) => server.close(() => r()));
     },

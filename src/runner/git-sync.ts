@@ -1,3 +1,5 @@
+import { validatePreparation } from '../core/preparation.ts';
+import type { Store } from '../core/store.ts';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
@@ -28,7 +30,7 @@ import {
 import { completion, recordsFromState, stateFromRecords, taskOwner } from '../core/sync-state.ts';
 
 const directory = '.devcontour';
-const categories = ['tasks', 'boards', 'contracts', 'receipts', 'changesets'];
+const categories = ['tasks', 'boards', 'contracts', 'receipts', 'changesets', 'preparations'];
 const baselineSchema = z.object({
   version: z.literal(1),
   identity: identitySchema,
@@ -95,6 +97,12 @@ function scopes(h: DevContour): Scope[] {
     { owner: undefined as string | undefined, path: h.config.workspaceRoot },
     ...repositories(h.config).map((r) => ({ owner: r.id, path: r.path })),
   ];
+  return readScopes(h.store, locations);
+}
+function readScopes(
+  store: Store,
+  locations: { owner: string | undefined; path: string }[],
+): Scope[] {
   const roots = locations.map((l) => realpathSync(l.path));
   if (roots.some((p, i) => roots.some((q, j) => i !== j && (p === q || p.startsWith(q + sep)))))
     throw new Error(
@@ -126,7 +134,7 @@ function scopes(h: DevContour): Scope[] {
       throw new Error('Git sync требует именованную ветку: ' + path);
     }
     const commit = git(path, 'rev-parse', '--verify', 'HEAD');
-    const raw = h.store.syncBaseline(location.owner);
+    const raw = store.syncBaseline(location.owner);
     const baseline = raw ? baselineSchema.parse(raw) : undefined;
     const file = safePath(path, directory + '/identity.json');
     const identity = existsSync(file)
@@ -354,4 +362,47 @@ export function assertTeamCheckout(h: DevContour) {
         'Git context изменился. Приостановите очередь и выполните sync перед запуском задач',
       );
   }
+}
+
+// Product preparation can be shared before there are repositories or execution gates.
+export function syncPreparation(store: Store, workspace: string, member: string) {
+  taskInput.shape.assignee.unwrap().parse(member);
+  return store.change('preparation.synchronized', (state) => {
+    assertIdle(state);
+    const scope = readScopes(store, [{ owner: undefined, path: workspace }])[0];
+    if (
+      Object.values(scope.remote).some((r) => r.kind !== 'preparation') ||
+      Object.values(scope.baseline?.records ?? {}).some((r) => r.kind !== 'preparation')
+    )
+      throw new Error(
+        'Здесь уже есть техническая память; восстановите конфигурацию и используйте полный sync',
+      );
+    if (scope.baseline && scope.branch !== scope.baseline.branch)
+      throw new Error('Для другой ветки подготовки используйте отдельный workspace');
+    const key = 'preparations/workspace-preparation';
+    const base = scope.baseline?.records[key];
+    const current =
+      state.preparation && (state.preparation.changes.length || base || !scope.remote[key])
+        ? { version: 1, kind: 'preparation', data: state.preparation }
+        : undefined;
+    const record = recordSchema.parse(mergeValue(base, current, scope.remote[key]));
+    if (record.kind !== 'preparation') throw new Error('Нет продуктового процесса для sync');
+    const next = { ...state, preparation: record.data };
+    validatePreparation(next, state);
+    if (
+      canonical(readRecords(scope.path)) !== canonical(scope.remote) ||
+      git(scope.path, 'symbolic-ref', '--short', 'HEAD') !== scope.branch
+    )
+      throw new Error('Git tree изменилось во время sync');
+    atomicWrite(scope.path, directory + '/identity.json', scope.identity);
+    atomicWrite(scope.path, directory + '/' + key + '.json', record);
+    store.saveSyncBaseline(undefined, {
+      version: 1,
+      identity: scope.identity,
+      branch: scope.branch,
+      records: { [key]: record },
+    });
+    state.preparation = record.data;
+    return { status: 'synchronized', changes: record.data.changes.length, member };
+  });
 }

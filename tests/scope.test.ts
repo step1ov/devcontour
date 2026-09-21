@@ -1,3 +1,6 @@
+import { preparationStore } from '../src/runner/start.ts';
+import { Preparation } from '../src/core/preparation.ts';
+import { approvePreparation } from './preparation-fixture.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, realpath, readFile, writeFile, rm, readdir } from 'node:fs/promises';
@@ -69,6 +72,9 @@ test('Bare CLI fails before creating demo files; two CLI sessions address separa
         workspace = join(root, name + '-workspace');
       await mkdir(join(product, 'docs'), { recursive: true });
       await writeFile(join(product, 'docs', 'spec.md'), '# Product\nObservable scenario');
+      const stageStore = preparationStore(join(workspace, '.devcontour-local'));
+      approvePreparation(new Preparation(stageStore));
+      stageStore.close();
       const result = await run(
         root,
         'setup',

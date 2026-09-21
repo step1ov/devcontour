@@ -212,6 +212,7 @@ export async function setupProject(options: {
       'team-sync',
       'requirements',
       'lead-workflow',
+      'staged-workflow',
       'project-memory',
       'metrics',
       'experiments',
