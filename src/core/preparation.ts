@@ -11,10 +11,6 @@ import {
   type ProductChange,
   type ArchitectureBrief,
   type ProductBrief,
-  type StoredProductBrief,
-  type ProductFeature,
-  type ProductRelease,
-  type ProductPersona,
   type C4Diagram,
 } from './preparation-model.ts';
 const hash = (value: unknown) =>
@@ -40,48 +36,6 @@ function change(s: DevContourState, id?: string) {
   const c = s.preparation?.changes.find((c) => c.id === (id ?? s.preparation?.activeChangeId));
   if (!c) throw new DomainError('Выберите изменение продукта', 409);
   return journal(c);
-}
-// Briefs saved before releases, or before features, still have to render and
-// stay approvable. Both earlier shapes read as a single implicit release.
-const implicitRelease = {
-  id: 'release',
-  title: 'Единственный релиз',
-  goal: 'Постановка сохранена до того, как релизы стали отдельной сущностью.',
-};
-export function releasesOf(content: StoredProductBrief): ProductRelease[] {
-  return 'releases' in content ? content.releases : [implicitRelease];
-}
-export function personasOf(content: StoredProductBrief): ProductPersona[] {
-  if ('personas' in content) return content.personas;
-  return content.audience.map((role, index) => ({
-    id: 'audience-' + (index + 1),
-    name: 'Без имени',
-    role,
-    goals: ['Цели не описаны: постановка сохранена до появления персон'],
-    pains: ['Боли не описаны: постановка сохранена до появления персон'],
-  }));
-}
-export function featuresOf(content: StoredProductBrief): ProductFeature[] {
-  if ('personas' in content) return content.features;
-  const persona = personasOf(content)[0]?.id ?? 'audience-1';
-  const steps = (texts: string[]) => texts.map((text) => ({ personaId: persona, text }));
-  const criteria = (texts: string[]) =>
-    texts.map((text) => ({ releaseId: implicitRelease.id, text }));
-  if ('features' in content)
-    return content.features.map((f) => ({
-      ...f,
-      scenarios: steps(f.scenarios),
-      acceptance: criteria(f.acceptance),
-    }));
-  return [
-    {
-      id: 'brief',
-      title: 'Постановка прежнего формата',
-      outcome: content.outcome,
-      scenarios: steps(content.scenarios),
-      acceptance: criteria(content.acceptance),
-    },
-  ];
 }
 function productReady(c: ProductChange) {
   if (c.product.at(-1)?.status !== 'approved')
@@ -122,7 +76,7 @@ export function assertTaskPreparation(
     );
   if (
     task.featureId &&
-    !featuresOf(productReady(change(s, task.preparation.changeId)).content).some(
+    !productReady(change(s, task.preparation.changeId)).content.features.some(
       (f) => f.id === task.featureId,
     )
   )
@@ -182,47 +136,63 @@ function validateJournal(c: ProductChange) {
   if (decisions.some((d) => d.questionId && !ids.includes(d.questionId)))
     throw new DomainError('Решение ссылается на несуществующий вопрос');
 }
-// Rules apply to the shape that was actually saved: an older revision was valid
-// when the operator approved it, and history may not be retroactively broken.
-function validateProduct(p: StoredProductBrief) {
-  const features = featuresOf(p);
+// SemVer ordering: releases are delivered in the order they are listed, so a
+// later entry must carry a higher version. A prerelease sorts below its release.
+function rank(version: string) {
+  const [core, pre] = version.split('-');
+  const [major, minor, patch] = core.split('.').map(Number);
+  return { major, minor, patch, pre: pre ?? '' };
+}
+function ordered(previous: string, next: string) {
+  const a = rank(previous),
+    b = rank(next);
+  for (const key of ['major', 'minor', 'patch'] as const) {
+    if (b[key] > a[key]) return true;
+    if (b[key] < a[key]) return false;
+  }
+  return Boolean(a.pre) && !b.pre;
+}
+function validateProduct(p: ProductBrief) {
   if (
     p.problem.length < 10 ||
     p.outcome.length < 10 ||
-    !features.length ||
-    features.some((f) => !f.scenarios.length || !f.acceptance.length) ||
+    !p.features.length ||
+    p.features.some((f) => !f.scenarios.length || !f.acceptance.length) ||
     p.questions.length
   )
     throw new DomainError(
       'Для согласования нужны проблема, результат и хотя бы одна фича со сценариями и критериями; открытые вопросы нужно решить',
     );
-  const ids = features.map((f) => f.id);
+  const ids = p.features.map((f) => f.id);
   if (new Set(ids).size !== ids.length) throw new DomainError('Повтор ID фичи в постановке');
-  if (!('personas' in p)) {
-    if (!('features' in p) ? !p.audience.length : false)
-      throw new DomainError('Для согласования нужны пользователи');
-    return;
-  }
-  if (!p.personas.length || p.personas.some((x) => !x.goals.length || !x.pains.length))
-    throw new DomainError('У каждой персоны должны быть цели и боли');
-  const personaIds = p.personas.map((x) => x.id);
-  if (new Set(personaIds).size !== personaIds.length)
-    throw new DomainError('Повтор ID персоны в постановке');
   const releaseIds = p.releases.map((r) => r.id);
   if (new Set(releaseIds).size !== releaseIds.length)
     throw new DomainError('Повтор ID релиза в постановке');
-  for (const criterion of features.flatMap((f) => f.acceptance))
+  const versions = p.releases.map((r) => r.version);
+  if (new Set(versions).size !== versions.length)
+    throw new DomainError('Повтор версии релиза в постановке');
+  for (const [index, release] of p.releases.entries())
+    if (index && !ordered(p.releases[index - 1].version, release.version))
+      throw new DomainError(
+        'Версии релизов должны возрастать по SemVer: ' +
+          p.releases[index - 1].version +
+          ' затем ' +
+          release.version,
+      );
+  for (const criterion of p.features.flatMap((f) => f.acceptance))
     if (!releaseIds.includes(criterion.releaseId))
       throw new DomainError('Критерий ссылается на несуществующий релиз: ' + criterion.releaseId);
-  for (const scenario of features.flatMap((f) => f.scenarios))
-    if (!personaIds.includes(scenario.personaId))
-      throw new DomainError('Сценарий ссылается на несуществующую персону: ' + scenario.personaId);
-  const used = new Set(features.flatMap((f) => f.acceptance.map((a) => a.releaseId)));
+  const used = new Set(p.features.flatMap((f) => f.acceptance.map((a) => a.releaseId)));
   const empty = p.releases.find((r) => !used.has(r.id));
   if (empty) throw new DomainError('У релиза нет ни одного критерия приёмки: ' + empty.id);
-  const acting = new Set(features.flatMap((f) => f.scenarios.map((s) => s.personaId)));
-  const unused = p.personas.find((x) => !acting.has(x.id));
-  if (unused) throw new DomainError('У персоны нет ни одного сценария: ' + unused.id);
+  const personaIds = p.personas.map((x) => x.id);
+  if (new Set(personaIds).size !== personaIds.length)
+    throw new DomainError('Повтор ID персоны в постановке');
+  if (p.personas.some((x) => !x.goals.length || !x.pains.length))
+    throw new DomainError('У описанной персоны должны быть цели и боли');
+  for (const scenario of p.features.flatMap((f) => f.scenarios))
+    if (scenario.personaId && !personaIds.includes(scenario.personaId))
+      throw new DomainError('Сценарий ссылается на несуществующую персону: ' + scenario.personaId);
 }
 function validateArchitecture(a: ArchitectureBrief) {
   if (
@@ -277,7 +247,7 @@ export function validatePreparation(s: DevContourState, previous?: DevContourSta
         )
           throw new DomainError('Некорректная версия или решение: ' + c.id);
         if (r.status === 'approved' || r.status === 'in-review') {
-          if (stage === 'product') validateProduct(r.content as StoredProductBrief);
+          if (stage === 'product') validateProduct(r.content as ProductBrief);
           else validateArchitecture(r.content as ArchitectureBrief);
         }
         if (
@@ -377,8 +347,8 @@ export class Preparation {
             // A release aggregates the features that carry at least one of its
             // criteria; a feature spanning two releases counts in both.
             releases: product
-              ? releasesOf(product.content).map((r) => {
-                  const own = featuresOf(product.content).filter((f) =>
+              ? product.content.releases.map((r) => {
+                  const own = product.content.features.filter((f) =>
                     f.acceptance.some((a) => a.releaseId === r.id),
                   );
                   const ids = own.map((f) => f.id);
@@ -407,7 +377,7 @@ export class Preparation {
             // Readiness only: the feature text already travels in product.content,
             // and duplicating it pushed the agent response past its size budget.
             features: product
-              ? featuresOf(product.content).map((f) => {
+              ? product.content.features.map((f) => {
                   const own = tasks.filter((t) => t.featureId === f.id);
                   const done = own.filter((t) => t.status === 'done').length;
                   return {

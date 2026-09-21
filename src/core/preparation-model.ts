@@ -6,9 +6,17 @@ const items = z.array(z.string().trim().min(3).max(1500)).max(30);
 const slug = z.string().regex(/^[a-z0-9][a-z0-9-]{1,48}$/);
 export const featureId = slug;
 export const releaseId = slug;
+export const personaId = slug;
+export const semver = z
+  .string()
+  .regex(
+    /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/,
+    'Версия релиза должна следовать SemVer, например 0.1.0',
+  );
 // A release is the scope boundary: what has to exist first and what may wait.
 export const productRelease = z.strictObject({
   id: releaseId,
+  version: semver,
   title: z.string().trim().min(3).max(160),
   goal: z.string().trim().min(10).max(1500),
 });
@@ -18,9 +26,8 @@ export const acceptanceCriterion = z.strictObject({
   releaseId,
   text: z.string().trim().min(3).max(1500),
 });
-export const personaId = slug;
-// A persona carries the goals and pains behind a decision, so ambiguity is
-// resolved the way the person it describes would resolve it.
+// Personas are optional context. When one is named, it carries the goals and
+// pains behind a decision, so ambiguity is resolved the way that person would.
 export const productPersona = z.strictObject({
   id: personaId,
   name: z.string().trim().min(2).max(80),
@@ -28,10 +35,8 @@ export const productPersona = z.strictObject({
   goals: z.array(z.string().trim().min(3).max(600)).min(1).max(10),
   pains: z.array(z.string().trim().min(3).max(600)).min(1).max(10),
 });
-// A scenario names the persona living it; a feature's audience is derived from
-// its scenarios rather than declared twice.
 export const productScenario = z.strictObject({
-  personaId,
+  personaId: personaId.optional(),
   text: z.string().trim().min(3).max(1500),
 });
 // A feature is the unit the operator reads, approves and later tracks.
@@ -45,47 +50,13 @@ export const productFeature = z.strictObject({
 export const productBrief = z.strictObject({
   problem: text,
   outcome: text,
-  personas: z.array(productPersona).min(1).max(20),
+  personas: z.array(productPersona).max(20).default([]),
   releases: z.array(productRelease).min(1).max(10),
   features: z.array(productFeature).min(1).max(40),
   exclusions: items,
   references: items,
   questions: items,
 });
-// Approval history is immutable, so every shape ever saved must keep parsing
-// and rendering. Both earlier shapes normalise into a single implicit release.
-export const featureBriefWithoutReleases = z.strictObject({
-  problem: text,
-  audience: items,
-  outcome: text,
-  features: z
-    .array(
-      z.strictObject({
-        id: featureId,
-        title: z.string().trim().min(3).max(160),
-        outcome: z.string().trim().min(10).max(1500),
-        scenarios: z.array(z.string().trim().min(3).max(1500)).min(1).max(20),
-        acceptance: z.array(z.string().trim().min(3).max(1500)).min(1).max(20),
-      }),
-    )
-    .min(1)
-    .max(40),
-  exclusions: items,
-  references: items,
-  questions: items,
-});
-export const flatBrief = z.strictObject({
-  problem: text,
-  audience: items,
-  outcome: text,
-  scenarios: items,
-  scope: items,
-  exclusions: items,
-  acceptance: items,
-  references: items,
-  questions: items,
-});
-export const storedProductBrief = z.union([productBrief, featureBriefWithoutReleases, flatBrief]);
 export const c4Diagram = z.strictObject({
   systemId: id,
   nodes: z
@@ -178,7 +149,7 @@ export const productChange = z.strictObject({
   id,
   title: z.string().trim().min(3).max(180),
   createdAt: z.iso.datetime(),
-  product: z.array(z.strictObject({ ...revision, content: storedProductBrief })).max(100),
+  product: z.array(z.strictObject({ ...revision, content: productBrief })).max(100),
   architecture: z
     .array(z.strictObject({ ...revision, productDigest: hash, content: architectureBrief }))
     .max(100),
@@ -266,7 +237,6 @@ export type ProductRelease = z.infer<typeof productRelease>;
 export type AcceptanceCriterion = z.infer<typeof acceptanceCriterion>;
 export type ProductFeature = z.infer<typeof productFeature>;
 export type ProductBrief = z.infer<typeof productBrief>;
-export type StoredProductBrief = z.infer<typeof storedProductBrief>;
 export type ArchitectureBrief = z.infer<typeof architectureBrief>;
 export type C4Diagram = z.infer<typeof c4Diagram>;
 export type ProductChange = z.infer<typeof productChange>;

@@ -10,9 +10,8 @@ import {
   User,
 } from 'lucide-react';
 import type { Preparation } from '../core/preparation.ts';
-import { featuresOf, personasOf, releasesOf } from '../core/preparation.ts';
 import type {
-  StoredProductBrief,
+  ProductBrief,
   ProductFeature,
   ProductPersona,
   ProductRelease,
@@ -324,7 +323,7 @@ function Feature({
   personas: ProductPersona[];
   releases: ProductRelease[];
 }) {
-  const who = (id: string) => personas.find((x) => x.id === id)?.name ?? id;
+  const who = (id?: string) => (id ? (personas.find((x) => x.id === id)?.name ?? id) : '');
   const when = (id: string) => releases.find((x) => x.id === id)?.title ?? id;
   return (
     <Card>
@@ -347,10 +346,12 @@ function Feature({
           <ul className="grid gap-2">
             {feature.scenarios.map((s, i) => (
               <li key={i} className="max-w-[74ch] break-words whitespace-pre-wrap">
-                <Badge variant="outline" className="mr-2">
-                  <User aria-hidden="true" className="size-3" />
-                  {who(s.personaId)}
-                </Badge>
+                {s.personaId && (
+                  <Badge variant="outline" className="mr-2">
+                    <User aria-hidden="true" className="size-3" />
+                    {who(s.personaId)}
+                  </Badge>
+                )}
                 {s.text}
               </li>
             ))}
@@ -377,6 +378,7 @@ function Feature({
   );
 }
 function Personas({ personas }: { personas: ProductPersona[] }) {
+  if (!personas.length) return null;
   return (
     <Section title={'Персоны (' + personas.length + ')'}>
       <p className="text-muted-foreground mb-4 max-w-[78ch]">
@@ -445,7 +447,7 @@ function Releases({
                         aria-hidden="true"
                       />
                       <span className="max-w-[70ch] break-words">
-                        {i + 1}. {r.title}
+                        {r.version} · {r.title}
                       </span>
                     </CardTitle>
                     {state && (
@@ -475,18 +477,18 @@ function Product({
   readiness,
   releaseReadiness,
 }: {
-  content: StoredProductBrief;
+  content: ProductBrief;
   readiness: Readiness[];
   releaseReadiness: ReleaseReadiness[];
 }) {
   const blank: Readiness = { id: '', tasks: 0, done: 0, failed: 0, readiness: 'unplanned' };
-  const features: FeatureView[] = featuresOf(p).map((f) => ({
+  const features: FeatureView[] = p.features.map((f) => ({
     ...f,
     ...(readiness.find((r) => r.id === f.id) ?? blank),
     id: f.id,
   }));
-  const personas = personasOf(p);
-  const releases = releasesOf(p);
+  const personas = p.personas;
+  const releases = p.releases;
   const done = features.filter((f) => f.readiness === 'done').length;
   const planned = features.filter((f) => f.tasks > 0).length;
   // Features surface in the order their earliest release does.

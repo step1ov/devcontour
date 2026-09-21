@@ -485,3 +485,79 @@ test('Agent progress, operator answers and recorded decisions are durable and ga
     f.cleanup();
   }
 });
+
+test('Releases carry ordered SemVer versions; personas are optional but must resolve', () => {
+  const f = fixture(),
+    p = new Preparation(f.store);
+  try {
+    p.execute('preparation_create', { title: 'Модерация чата' });
+    const id = f.store.read().preparation!.activeChangeId!;
+    const save = (content: unknown, expected: string | null = null) =>
+      p.execute('preparation_product', {
+        changeId: id,
+        expectedDigest: expected,
+        reason: 'Проверка правил релизов и персон',
+        content,
+      });
+    const submit = () => {
+      const digest = f.store.read().preparation!.changes[0].product.at(-1)!.digest;
+      p.execute('preparation_submit', { changeId: id, stage: 'product', expectedDigest: digest });
+      return digest;
+    };
+
+    // A release list that does not ascend is rejected on submission.
+    save({
+      ...product,
+      releases: [
+        { ...product.releases[0], version: '0.2.0' },
+        { ...product.releases[1], version: '0.1.0' },
+      ],
+    });
+    assert.throws(submit, /возрастать по SemVer/);
+    let digest = f.store.read().preparation!.changes[0].product.at(-1)!.digest;
+
+    // A prerelease sorts below the release that follows it.
+    save(
+      {
+        ...product,
+        releases: [
+          { ...product.releases[0], version: '1.0.0-beta.1' },
+          { ...product.releases[1], version: '1.0.0' },
+        ],
+      },
+      digest,
+    );
+    digest = submit();
+
+    // Personas may be omitted entirely.
+    save(
+      {
+        ...product,
+        personas: [],
+        features: product.features.map((feature) => ({
+          ...feature,
+          scenarios: feature.scenarios.map(({ text }) => ({ text })),
+        })),
+      },
+      digest,
+    );
+    digest = submit();
+    assert.equal(f.store.read().preparation!.changes[0].product.at(-1)!.content.personas.length, 0);
+
+    // A scenario may not point at a persona that is not described.
+    save(
+      {
+        ...product,
+        personas: [],
+        features: product.features.map((feature) => ({
+          ...feature,
+          scenarios: feature.scenarios.map(({ text }) => ({ personaId: 'ghost', text })),
+        })),
+      },
+      digest,
+    );
+    assert.throws(submit, /несуществующую персону/);
+  } finally {
+    f.cleanup();
+  }
+});
