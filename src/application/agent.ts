@@ -84,6 +84,12 @@ export const descriptions: Record<AgentOperation, string> = {
     'Save architecture, justified stack and structured C1/C2 only after operator product approval. Does not approve development.',
   preparation_submit:
     'Validate the current draft and send it to the operator for approval. Unresolved questions or incomplete C1/C2 block submission.',
+  preparation_progress:
+    'Append a short note about the work in progress so the panel shows the session is active before any revision exists. Context only; never approves or reports evidence.',
+  preparation_question:
+    'Record open product or architecture questions for the operator, or withdraw ones that no longer apply. The operator answers them in the panel; an answered question cannot be withdrawn.',
+  preparation_resolve:
+    'Record a decision with its rationale in the durable journal, optionally closing an answered question. Does not approve a stage.',
 
   intent_render:
     'Render component intent from committed REQ sources, or a workspace product/application/feature map with pinned local story references. Returns Markdown only; does not write, approve or commit it.',

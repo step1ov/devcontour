@@ -59,6 +59,35 @@ export const architectureBrief = z.strictObject({
   c1: c4Diagram.optional(),
   c2: c4Diagram.optional(),
 });
+const stage = z.enum(['product', 'architecture']);
+const note = z.string().trim().min(3).max(300);
+// The lead agent spends long stretches reading a brief without saving a revision.
+// An append-only journal makes that work visible in the panel from the first launch.
+export const preparationActivity = z.strictObject({
+  at: z.iso.datetime(),
+  stage: z.enum(['product', 'architecture', 'development']),
+  note,
+});
+export const preparationQuestion = z.strictObject({
+  id,
+  stage,
+  createdAt: z.iso.datetime(),
+  text: z.string().trim().min(3).max(1500),
+  why: z.string().trim().max(600).default(''),
+  options: z.array(z.string().trim().min(1).max(300)).max(6).default([]),
+  status: z.enum(['open', 'answered', 'withdrawn']),
+  answer: z
+    .strictObject({ at: z.iso.datetime(), text: z.string().trim().min(1).max(3000) })
+    .optional(),
+});
+export const preparationRecord = z.strictObject({
+  id,
+  stage,
+  createdAt: z.iso.datetime(),
+  statement: z.string().trim().min(3).max(600),
+  rationale: z.string().trim().min(3).max(1500),
+  questionId: id.optional(),
+});
 const revision = {
   number: z.number().int().positive(),
   digest: hash,
@@ -81,6 +110,9 @@ export const productChange = z.strictObject({
   architecture: z
     .array(z.strictObject({ ...revision, productDigest: hash, content: architectureBrief }))
     .max(100),
+  activity: z.array(preparationActivity).max(200).default([]),
+  questions: z.array(preparationQuestion).max(60).default([]),
+  decisions: z.array(preparationRecord).max(100).default([]),
 });
 export const preparationState = z.strictObject({
   id: z.literal('workspace-preparation'),
@@ -113,7 +145,39 @@ export const preparationInputs = {
     stage: z.enum(['product', 'architecture']),
     expectedDigest: hash,
   }),
+  preparation_progress: z.strictObject({
+    changeId: id.optional(),
+    stage: z.enum(['product', 'architecture', 'development']).default('product'),
+    note,
+  }),
+  preparation_question: z.strictObject({
+    changeId: id.optional(),
+    stage: stage.default('product'),
+    add: z
+      .array(
+        z.strictObject({
+          text: z.string().trim().min(3).max(1500),
+          why: z.string().trim().max(600).default(''),
+          options: z.array(z.string().trim().min(1).max(300)).max(6).default([]),
+        }),
+      )
+      .max(10)
+      .default([]),
+    withdraw: z.array(id).max(10).default([]),
+  }),
+  preparation_resolve: z.strictObject({
+    changeId: id.optional(),
+    stage: stage.default('product'),
+    statement: z.string().trim().min(3).max(600),
+    rationale: z.string().trim().min(3).max(1500),
+    questionId: id.optional(),
+  }),
 };
+export const preparationAnswer = z.strictObject({
+  changeId: id,
+  questionId: id,
+  text: z.string().trim().min(1).max(3000),
+});
 export const preparationDecision = z.strictObject({
   changeId: id,
   stage: z.enum(['product', 'architecture']),
@@ -121,6 +185,9 @@ export const preparationDecision = z.strictObject({
   decision: z.enum(['approve', 'request-changes']),
   comment: z.string().trim().max(3000),
 });
+export type PreparationQuestion = z.infer<typeof preparationQuestion>;
+export type PreparationRecord = z.infer<typeof preparationRecord>;
+export type PreparationActivity = z.infer<typeof preparationActivity>;
 export type ProductBrief = z.infer<typeof productBrief>;
 export type ArchitectureBrief = z.infer<typeof architectureBrief>;
 export type C4Diagram = z.infer<typeof c4Diagram>;

@@ -135,6 +135,10 @@ export async function serve(
           json(res, 200, new Preparation(preparationStore).decide(await body(req)));
           return;
         }
+        if (req.method === 'POST' && path === '/api/preparation/answer' && preparationStore) {
+          json(res, 200, new Preparation(preparationStore).answer(await body(req)));
+          return;
+        }
         if (req.method === 'GET' && path === '/api/capabilities') {
           json(res, 200, capabilities());
           return;

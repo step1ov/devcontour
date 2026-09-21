@@ -4,6 +4,7 @@ import type { Store } from './store.ts';
 import {
   preparationInputs,
   preparationDecision,
+  preparationAnswer,
   preparationState,
   type PreparationBinding,
   type PreparationOperation,
@@ -23,10 +24,18 @@ const hash = (value: unknown) =>
     )
     .digest('hex');
 const now = () => new Date().toISOString();
+// States saved before the journal existed carry no arrays; normalise on access so
+// every caller can append without re-checking.
+function journal(c: ProductChange) {
+  c.activity ??= [];
+  c.questions ??= [];
+  c.decisions ??= [];
+  return c;
+}
 function change(s: DevContourState, id?: string) {
   const c = s.preparation?.changes.find((c) => c.id === (id ?? s.preparation?.activeChangeId));
   if (!c) throw new DomainError('Выберите изменение продукта', 409);
-  return c;
+  return journal(c);
 }
 function productReady(c: ProductChange) {
   if (c.product.at(-1)?.status !== 'approved')
@@ -101,6 +110,19 @@ function validateDiagram(d: C4Diagram, level: 1 | 2) {
   )
     throw new DomainError('C2: приложения и хранилища внутри системы, с указанными технологиями');
 }
+function validateJournal(c: ProductChange) {
+  const questions = c.questions ?? [],
+    decisions = c.decisions ?? [],
+    ids = questions.map((q) => q.id);
+  if (new Set(ids).size !== ids.length) throw new DomainError('Повтор ID вопроса: ' + c.id);
+  if (questions.some((q) => Boolean(q.answer) !== (q.status === 'answered')))
+    throw new DomainError('Ответ должен соответствовать статусу вопроса');
+  const recorded = decisions.map((d) => d.id);
+  if (new Set(recorded).size !== recorded.length)
+    throw new DomainError('Повтор ID решения: ' + c.id);
+  if (decisions.some((d) => d.questionId && !ids.includes(d.questionId)))
+    throw new DomainError('Решение ссылается на несуществующий вопрос');
+}
 function validateProduct(p: ProductBrief) {
   if (
     p.problem.length < 10 ||
@@ -150,7 +172,8 @@ export function validatePreparation(s: DevContourState, previous?: DevContourSta
     (p.activeChangeId && !p.changes.some((c) => c.id === p.activeChangeId))
   )
     throw new DomainError('Некорректный реестр продуктовых изменений');
-  for (const c of p.changes)
+  for (const c of p.changes) {
+    validateJournal(c);
     for (const stage of ['product', 'architecture'] as const)
       for (const [index, r] of c[stage].entries()) {
         const expected = hash({
@@ -176,10 +199,26 @@ export function validatePreparation(s: DevContourState, previous?: DevContourSta
         )
           throw new DomainError('Архитектура должна ссылаться на утверждённую постановку');
       }
+  }
   for (const old of previous?.preparation?.changes ?? []) {
     const next = p.changes.find((c) => c.id === old.id);
     if (!next || next.title !== old.title || next.createdAt !== old.createdAt)
       throw new DomainError('Нельзя удалить историю продуктового изменения');
+    for (const before of old.decisions ?? []) {
+      const after = (next.decisions ?? []).find((d) => d.id === before.id);
+      if (!after || hash(after) !== hash(before))
+        throw new DomainError('Журнал принятых решений неизменяем');
+    }
+    for (const before of old.questions ?? []) {
+      const after = (next.questions ?? []).find((q) => q.id === before.id);
+      if (
+        !after ||
+        after.text !== before.text ||
+        after.createdAt !== before.createdAt ||
+        (before.answer && hash(before.answer) !== hash(after.answer))
+      )
+        throw new DomainError('История вопросов и ответов неизменяема');
+    }
     for (const stage of ['product', 'architecture'] as const)
       for (const before of old[stage]) {
         const after = next[stage].find((r) => r.number === before.number);
@@ -223,16 +262,31 @@ export class Preparation {
         blocker = (error as Error).message;
       }
     const tasks = s.tasks.filter((t) => Boolean(c) && t.preparation?.changeId === c?.id);
+    // The newest note of any change tells the operator the session is alive even
+    // before the first revision exists.
+    const latest = p.changes
+      .flatMap((item) => (item.activity ?? []).map((a) => ({ ...a, changeId: item.id })))
+      .sort((a, b) => a.at.localeCompare(b.at))
+      .at(-1);
     return {
       enabled: true as const,
       activeChangeId: p.activeChangeId,
-      changes: p.changes.map(({ id, title, createdAt }) => ({ id, title, createdAt })),
+      changes: p.changes.map((item) => ({
+        id: item.id,
+        title: item.title,
+        createdAt: item.createdAt,
+        open: (item.questions ?? []).filter((q) => q.status === 'open').length,
+      })),
+      agentActivity: latest,
       current: c
         ? {
             id: c.id,
             title: c.title,
             product,
             architecture,
+            activity: [...(c.activity ?? [])].reverse().slice(0, 40),
+            questions: c.questions ?? [],
+            decisions: [...(c.decisions ?? [])].reverse(),
             history: (['product', 'architecture'] as const).flatMap((stage) =>
               c[stage].map(({ number, status, createdAt, reason, decision, digest }) => ({
                 stage,
@@ -280,13 +334,23 @@ export class Preparation {
             createdAt: now(),
             product: [],
             architecture: [],
+            activity: [],
+            questions: [],
+            decisions: [],
           });
           p.activeChangeId = selected;
         } else {
           const v = preparationInputs[operation].parse(input),
             c = change(s, v.changeId);
           selected = c.id;
-          editable(s, c.id);
+          // The journal only appends context; it never rewrites an approved revision,
+          // so it stays available while the queue is running.
+          if (
+            !(
+              ['preparation_progress', 'preparation_question', 'preparation_resolve'] as string[]
+            ).includes(operation)
+          )
+            editable(s, c.id);
           if (operation === 'preparation_activate') p.activeChangeId = c.id;
           else if (operation === 'preparation_product') {
             const v = preparationInputs[operation].parse(input);
@@ -322,11 +386,58 @@ export class Preparation {
                 productDigest: product.digest,
               }),
             });
+          } else if (operation === 'preparation_progress') {
+            const v = preparationInputs[operation].parse(input);
+            c.activity.push({ at: now(), stage: v.stage, note: v.note });
+            if (c.activity.length > 200) c.activity.splice(0, c.activity.length - 200);
+          } else if (operation === 'preparation_question') {
+            const v = preparationInputs[operation].parse(input);
+            if (!v.add.length && !v.withdraw.length)
+              throw new DomainError('Укажите вопросы для добавления или снятия');
+            for (const q of v.withdraw) {
+              const existing = c.questions.find((item) => item.id === q);
+              if (!existing) throw new DomainError('Вопрос не найден: ' + q, 404);
+              if (existing.status === 'answered')
+                throw new DomainError('Отвеченный вопрос нельзя снять: ' + q, 409);
+              existing.status = 'withdrawn';
+            }
+            for (const q of v.add)
+              c.questions.push({
+                id: 'Q-' + randomUUID(),
+                stage: v.stage,
+                createdAt: now(),
+                status: 'open',
+                text: q.text,
+                why: q.why,
+                options: q.options,
+              });
+          } else if (operation === 'preparation_resolve') {
+            const v = preparationInputs[operation].parse(input);
+            if (v.questionId) {
+              const q = c.questions.find((item) => item.id === v.questionId);
+              if (!q) throw new DomainError('Вопрос не найден: ' + v.questionId, 404);
+              if (q.status === 'open')
+                throw new DomainError('Сначала дождитесь ответа пользователя на вопрос', 409);
+            }
+            c.decisions.push({
+              id: 'D-' + randomUUID(),
+              stage: v.stage,
+              createdAt: now(),
+              statement: v.statement,
+              rationale: v.rationale,
+              ...(v.questionId ? { questionId: v.questionId } : {}),
+            });
           } else if (operation === 'preparation_submit') {
             const v = preparationInputs[operation].parse(input),
               r = c[v.stage].at(-1);
             if (!r || r.digest !== v.expectedDigest || r.status !== 'draft')
               throw new DomainError('На согласование можно отправить только текущий черновик', 409);
+            const open = c.questions.filter((q) => q.status === 'open' && q.stage === v.stage);
+            if (open.length)
+              throw new DomainError(
+                'Сначала получите ответы на открытые вопросы этапа: ' + open.length,
+                409,
+              );
             if (
               v.stage === 'architecture' &&
               c.architecture.at(-1)!.productDigest !== productReady(c).digest
@@ -340,6 +451,23 @@ export class Preparation {
       });
       return this.status(selected);
     });
+  }
+  // The answer comes from the panel form, like a stage decision: the agent asks,
+  // the operator replies, and the agent turns the reply into a recorded decision.
+  answer(raw: unknown) {
+    const v = preparationAnswer.parse(raw);
+    this.store.change('preparation.operator-answer', (s) => {
+      const before = structuredClone(s),
+        c = change(s, v.changeId),
+        q = c.questions.find((item) => item.id === v.questionId);
+      if (!q) throw new DomainError('Вопрос не найден', 404);
+      if (q.status !== 'open') throw new DomainError('Вопрос уже закрыт', 409);
+      q.status = 'answered';
+      q.answer = { at: now(), text: v.text };
+      validatePreparation(s, before);
+      return { changeId: c.id, questionId: q.id };
+    });
+    return this.status(v.changeId);
   }
   decide(raw: unknown) {
     const v = preparationDecision.parse(raw);

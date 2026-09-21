@@ -371,3 +371,107 @@ test('Before stack selection, preparation sync uses real Git clones and rejects 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('Agent progress, operator answers and recorded decisions are durable and gate submission', () => {
+  const f = fixture(),
+    p = new Preparation(f.store),
+    agent = new PreparationAgent(f.store);
+  try {
+    p.execute('preparation_create', { title: 'Модерация чата' });
+    const id = f.store.read().preparation!.activeChangeId!;
+
+    // Progress is visible before any revision exists.
+    agent.execute({
+      operation: 'preparation_progress',
+      input: { changeId: id, note: 'Читаю ТЗ: разделы 1–7' },
+    });
+    let view = p.status(id);
+    assert.equal(view.enabled && view.agentActivity?.note, 'Читаю ТЗ: разделы 1–7');
+    assert.equal(view.enabled && view.current!.activity.length, 1);
+
+    agent.execute({
+      operation: 'preparation_question',
+      input: {
+        changeId: id,
+        add: [{ text: 'Какой первичный рынок?', why: 'Влияет на GDPR', options: ['ЕС', 'РФ'] }],
+      },
+    });
+    view = p.status(id);
+    const question = (view.enabled && view.current!.questions[0])!;
+    assert.equal(question.status, 'open');
+    assert.equal(view.enabled && view.changes[0].open, 1);
+
+    // A recorded decision cannot close a question the operator has not answered.
+    assert.throws(
+      () =>
+        agent.execute({
+          operation: 'preparation_resolve',
+          input: {
+            changeId: id,
+            questionId: question.id,
+            statement: 'Берём ЕС',
+            rationale: 'Так решил агент',
+          },
+        }),
+      /дождитесь ответа/,
+    );
+    // The agent cannot answer on the operator's behalf.
+    assert.throws(() =>
+      agent.execute({
+        operation: 'preparation_answer',
+        input: { changeId: id, questionId: question.id, text: 'ЕС' },
+      }),
+    );
+
+    p.execute('preparation_product', {
+      changeId: id,
+      expectedDigest: null,
+      reason: 'Initial brief',
+      content: product,
+    });
+    const digest = f.store.read().preparation!.changes[0].product.at(-1)!.digest;
+    assert.throws(
+      () =>
+        p.execute('preparation_submit', { changeId: id, stage: 'product', expectedDigest: digest }),
+      /открытые вопросы/,
+    );
+
+    p.answer({ changeId: id, questionId: question.id, text: 'ЕС, хостинг во Франкфурте' });
+    view = p.status(id);
+    assert.equal(
+      view.enabled && view.current!.questions[0].answer?.text,
+      'ЕС, хостинг во Франкфурте',
+    );
+    assert.throws(
+      () => p.answer({ changeId: id, questionId: question.id, text: 'Передумал' }),
+      /уже закрыт/,
+    );
+    assert.throws(() =>
+      agent.execute({
+        operation: 'preparation_question',
+        input: { changeId: id, withdraw: [question.id] },
+      }),
+    );
+
+    agent.execute({
+      operation: 'preparation_resolve',
+      input: {
+        changeId: id,
+        questionId: question.id,
+        statement: 'Первичный рынок — ЕС',
+        rationale: 'Ответ пользователя: хостинг во Франкфурте',
+      },
+    });
+    view = p.status(id);
+    assert.equal(view.enabled && view.current!.decisions[0].questionId, question.id);
+    p.execute('preparation_submit', { changeId: id, stage: 'product', expectedDigest: digest });
+    assert.equal(p.status(id).enabled && p.status(id).current!.product!.status, 'in-review');
+
+    // The journal survives a reopened store and stays immutable.
+    const saved = f.store.read().preparation!.changes[0];
+    assert.equal(saved.decisions.length, 1);
+    assert.equal(saved.questions[0].answer!.text, 'ЕС, хостинг во Франкфурте');
+  } finally {
+    f.cleanup();
+  }
+});
