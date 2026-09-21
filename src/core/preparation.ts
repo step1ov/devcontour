@@ -182,41 +182,46 @@ function validateJournal(c: ProductChange) {
   if (decisions.some((d) => d.questionId && !ids.includes(d.questionId)))
     throw new DomainError('Решение ссылается на несуществующий вопрос');
 }
+// Rules apply to the shape that was actually saved: an older revision was valid
+// when the operator approved it, and history may not be retroactively broken.
 function validateProduct(p: StoredProductBrief) {
-  const features = featuresOf(p),
-    personas = personasOf(p);
+  const features = featuresOf(p);
   if (
     p.problem.length < 10 ||
     p.outcome.length < 10 ||
-    !personas.length ||
-    personas.some((persona) => !persona.goals.length || !persona.pains.length) ||
     !features.length ||
     features.some((f) => !f.scenarios.length || !f.acceptance.length) ||
     p.questions.length
   )
     throw new DomainError(
-      'Для согласования нужны проблема, результат, персоны с целями и болями и хотя бы одна фича со сценариями и критериями; открытые вопросы нужно решить',
+      'Для согласования нужны проблема, результат и хотя бы одна фича со сценариями и критериями; открытые вопросы нужно решить',
     );
   const ids = features.map((f) => f.id);
   if (new Set(ids).size !== ids.length) throw new DomainError('Повтор ID фичи в постановке');
-  const releases = releasesOf(p),
-    releaseIds = releases.map((r) => r.id);
+  if (!('personas' in p)) {
+    if (!('features' in p) ? !p.audience.length : false)
+      throw new DomainError('Для согласования нужны пользователи');
+    return;
+  }
+  if (!p.personas.length || p.personas.some((x) => !x.goals.length || !x.pains.length))
+    throw new DomainError('У каждой персоны должны быть цели и боли');
+  const personaIds = p.personas.map((x) => x.id);
+  if (new Set(personaIds).size !== personaIds.length)
+    throw new DomainError('Повтор ID персоны в постановке');
+  const releaseIds = p.releases.map((r) => r.id);
   if (new Set(releaseIds).size !== releaseIds.length)
     throw new DomainError('Повтор ID релиза в постановке');
-  const used = new Set(features.flatMap((f) => f.acceptance.map((a) => a.releaseId)));
   for (const criterion of features.flatMap((f) => f.acceptance))
     if (!releaseIds.includes(criterion.releaseId))
       throw new DomainError('Критерий ссылается на несуществующий релиз: ' + criterion.releaseId);
-  const empty = releases.find((r) => !used.has(r.id));
-  if (empty) throw new DomainError('У релиза нет ни одного критерия приёмки: ' + empty.id);
-  const personaIds = personas.map((persona) => persona.id);
-  if (new Set(personaIds).size !== personaIds.length)
-    throw new DomainError('Повтор ID персоны в постановке');
-  const acting = new Set(features.flatMap((f) => f.scenarios.map((s) => s.personaId)));
   for (const scenario of features.flatMap((f) => f.scenarios))
     if (!personaIds.includes(scenario.personaId))
       throw new DomainError('Сценарий ссылается на несуществующую персону: ' + scenario.personaId);
-  const unused = personas.find((persona) => !acting.has(persona.id));
+  const used = new Set(features.flatMap((f) => f.acceptance.map((a) => a.releaseId)));
+  const empty = p.releases.find((r) => !used.has(r.id));
+  if (empty) throw new DomainError('У релиза нет ни одного критерия приёмки: ' + empty.id);
+  const acting = new Set(features.flatMap((f) => f.scenarios.map((s) => s.personaId)));
+  const unused = p.personas.find((x) => !acting.has(x.id));
   if (unused) throw new DomainError('У персоны нет ни одного сценария: ' + unused.id);
 }
 function validateArchitecture(a: ArchitectureBrief) {
