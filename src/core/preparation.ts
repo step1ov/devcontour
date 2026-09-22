@@ -24,6 +24,55 @@ const hash = (value: unknown) =>
     )
     .digest('hex');
 const now = () => new Date().toISOString();
+// Titles are usually Russian; a readable key needs transliteration rather than
+// dropping every non-latin character.
+const latin: Record<string, string> = {
+  а: 'a',
+  б: 'b',
+  в: 'v',
+  г: 'g',
+  д: 'd',
+  е: 'e',
+  ё: 'e',
+  ж: 'zh',
+  з: 'z',
+  и: 'i',
+  й: 'y',
+  к: 'k',
+  л: 'l',
+  м: 'm',
+  н: 'n',
+  о: 'o',
+  п: 'p',
+  р: 'r',
+  с: 's',
+  т: 't',
+  у: 'u',
+  ф: 'f',
+  х: 'h',
+  ц: 'ts',
+  ч: 'ch',
+  ш: 'sh',
+  щ: 'sch',
+  ъ: '',
+  ы: 'y',
+  ь: '',
+  э: 'e',
+  ю: 'yu',
+  я: 'ya',
+};
+export function slugify(title: string) {
+  const text = [...title.toLowerCase()]
+    .map((c) => latin[c] ?? c)
+    .join('')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 49)
+    .replace(/-+$/g, '');
+  return /^[a-z0-9]/.test(text) ? text : 'change';
+}
+const changeKeyOf = (number: number, slug: string) =>
+  'r-' + String(number).padStart(3, '0') + '.' + slug;
 // States saved before the journal existed carry no arrays; normalise on access so
 // every caller can append without re-checking.
 function journal(c: ProductChange) {
@@ -234,8 +283,10 @@ export function validatePreparation(s: DevContourState, previous?: DevContourSta
     return;
   }
   const p = preparationState.parse(s.preparation);
+  const keys = p.changes.map((c) => c.key);
   if (
     new Set(p.changes.map((c) => c.id)).size !== p.changes.length ||
+    new Set(keys).size !== keys.length ||
     (p.activeChangeId && !p.changes.some((c) => c.id === p.activeChangeId))
   )
     throw new DomainError('Некорректный реестр продуктовых изменений');
@@ -269,7 +320,12 @@ export function validatePreparation(s: DevContourState, previous?: DevContourSta
   }
   for (const old of previous?.preparation?.changes ?? []) {
     const next = p.changes.find((c) => c.id === old.id);
-    if (!next || next.title !== old.title || next.createdAt !== old.createdAt)
+    if (
+      !next ||
+      next.title !== old.title ||
+      next.createdAt !== old.createdAt ||
+      next.key !== old.key
+    )
       throw new DomainError('Нельзя удалить историю продуктового изменения');
     for (const before of old.decisions ?? []) {
       const after = (next.decisions ?? []).find((d) => d.id === before.id);
@@ -340,6 +396,7 @@ export class Preparation {
       activeChangeId: p.activeChangeId,
       changes: p.changes.map((item) => ({
         id: item.id,
+        key: item.key,
         title: item.title,
         createdAt: item.createdAt,
         open: (item.questions ?? []).filter((q) => q.status === 'open').length,
@@ -348,6 +405,7 @@ export class Preparation {
       current: c
         ? {
             id: c.id,
+            key: c.key,
             title: c.title,
             product,
             architecture,
@@ -448,6 +506,7 @@ export class Preparation {
           selected = 'PC-' + randomUUID();
           p.changes.push({
             id: selected,
+            key: changeKeyOf(p.changes.length + 1, v.slug ?? slugify(v.title)),
             title: v.title,
             createdAt: now(),
             product: [],

@@ -156,8 +156,12 @@ const revision = {
     })
     .optional(),
 };
+// A readable, sortable key: the sequence gives order, the slug gives meaning.
+// The UUID stays internal; this is what names folders and files.
+export const changeKey = z.string().regex(/^r-\d{3}\.[a-z0-9][a-z0-9-]{0,48}$/);
 export const productChange = z.strictObject({
   id,
+  key: changeKey,
   title: z.string().trim().min(3).max(180),
   createdAt: z.iso.datetime(),
   product: z.array(z.strictObject({ ...revision, content: productBrief })).max(100),
@@ -180,7 +184,14 @@ export const preparationBinding = z.strictObject({
 });
 export const preparationInputs = {
   preparation_status: z.strictObject({ changeId: id.optional() }),
-  preparation_create: z.strictObject({ title: z.string().trim().min(3).max(180) }),
+  preparation_create: z.strictObject({
+    title: z.string().trim().min(3).max(180),
+    // Optional: derived from the title when omitted.
+    slug: z
+      .string()
+      .regex(/^[a-z0-9][a-z0-9-]{0,48}$/)
+      .optional(),
+  }),
   preparation_activate: z.strictObject({ changeId: id }),
   preparation_product: z.strictObject({
     changeId: id,

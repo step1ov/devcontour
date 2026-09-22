@@ -571,14 +571,18 @@ test('Releases carry ordered SemVer versions; personas are optional but must res
   }
 });
 
-test('The brief is projected to docs/product on every revision, without a running server', () => {
+test('Each change owns a folder in docs/changes, keyed and indexed', () => {
   const root = mkdtempSync(join(tmpdir(), 'devcontour-projection-'));
   const store = preparationStore(join(root, '.devcontour-local'));
   try {
     const p = new Preparation(store);
     p.execute('preparation_create', { title: 'Модерация чата' });
-    const id = store.read().preparation!.activeChangeId!;
-    const directory = join(root, 'docs', 'product');
+    const change = store.read().preparation!.changes[0];
+    const id = change.id;
+
+    // The key is readable and ordered; the UUID stays internal.
+    assert.equal(change.key, 'r-001.moderatsiya-chata');
+    const directory = join(root, 'docs', 'changes', change.key);
 
     p.execute('preparation_product', {
       changeId: id,
@@ -587,29 +591,38 @@ test('The brief is projected to docs/product on every revision, without a runnin
       content: product,
     });
     assert.equal(store.projectionError, undefined);
-    const markdown = readFileSync(join(directory, id + '.md'), 'utf8');
-    assert.match(markdown, /## Продукт · версия 1 · черновик агента/);
+
+    const brief = readFileSync(join(directory, 'brief.md'), 'utf8');
+    assert.match(brief, /поручение/);
+    const markdown = readFileSync(join(directory, 'product.md'), 'utf8');
+    assert.match(markdown, /Версия 1 · черновик агента/);
     assert.match(markdown, new RegExp(product.features[0].title));
     assert.match(markdown, new RegExp(product.releases[0].version));
-    assert.match(markdown, /Каналы:/);
+    assert.match(readFileSync(join(directory, 'architecture.md'), 'utf8'), /после утверждения/);
+    assert.match(readFileSync(join(directory, 'journal.md'), 'utf8'), /Принятые решения/);
+    assert.match(
+      readFileSync(join(root, 'docs', 'changes', 'README.md'), 'utf8'),
+      /r-001\.moderatsiya-chata/,
+    );
 
     // The JSON projection carries the durable record, not runtime telemetry.
-    const saved = JSON.parse(readFileSync(join(directory, id + '.json'), 'utf8'));
+    const saved = JSON.parse(readFileSync(join(directory, 'change.json'), 'utf8'));
     assert.equal(saved.product[0].content.features.length, product.features.length);
     assert.equal('activity' in saved, false);
 
+    // brief.md belongs to the operator and is never overwritten.
+    writeFileSync(join(directory, 'brief.md'), 'Моё поручение своими словами.\n');
     // A progress note must not touch the projected files at all.
-    const stamp = statSync(join(directory, id + '.json')).mtimeMs;
+    const stamp = statSync(join(directory, 'change.json')).mtimeMs;
     p.execute('preparation_progress', { changeId: id, note: 'Изучаю ограничения' });
-    assert.equal(statSync(join(directory, id + '.json')).mtimeMs, stamp);
+    assert.equal(statSync(join(directory, 'change.json')).mtimeMs, stamp);
 
-    // Before the operator decides, the projection already shows the exact
-    // version awaiting them, so it can be read and reviewed outside the panel.
+    // Before the operator decides, the projection shows the version awaiting them.
     const digest = store.read().preparation!.changes[0].product.at(-1)!.digest;
     p.execute('preparation_submit', { changeId: id, stage: 'product', expectedDigest: digest });
     assert.match(
-      readFileSync(join(directory, id + '.md'), 'utf8'),
-      /## Продукт · версия 1 · ожидает решения пользователя/,
+      readFileSync(join(directory, 'product.md'), 'utf8'),
+      /Версия 1 · ожидает решения пользователя/,
     );
 
     // And after they decide, the decision and its comment are in the file.
@@ -620,9 +633,19 @@ test('The brief is projected to docs/product on every revision, without a runnin
       decision: 'approve',
       comment: 'Границы релизов понятны',
     });
-    const decided = readFileSync(join(directory, id + '.md'), 'utf8');
-    assert.match(decided, /## Продукт · версия 1 · утверждено/);
+    const decided = readFileSync(join(directory, 'product.md'), 'utf8');
+    assert.match(decided, /Версия 1 · утверждено/);
     assert.match(decided, /Решение пользователя .*Границы релизов понятны/);
+    assert.equal(
+      readFileSync(join(directory, 'brief.md'), 'utf8'),
+      'Моё поручение своими словами.\n',
+    );
+
+    // A second change gets the next number and its own folder.
+    p.execute('preparation_create', { title: 'Экспорт отчётов', slug: 'reports-export' });
+    const second = store.read().preparation!.changes[1];
+    assert.equal(second.key, 'r-002.reports-export');
+    assert.ok(existsSync(join(root, 'docs', 'changes', second.key, 'product.md')));
   } finally {
     store.close();
     rmSync(root, { recursive: true, force: true });
