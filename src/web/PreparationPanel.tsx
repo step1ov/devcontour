@@ -15,6 +15,7 @@ import { ArchitectureBriefView } from './ArchitectureBrief.tsx';
 import { DesignBriefView } from './DesignBrief.tsx';
 import { ReferencesBriefView } from './ReferencesBrief.tsx';
 import { ConceptBriefView } from './ConceptBrief.tsx';
+import { StageBoundary } from './StageBoundary.tsx';
 import { Alert, AlertDescription, AlertTitle } from '@/ui/alert.tsx';
 import { Badge } from '@/ui/badge.tsx';
 import { Button } from '@/ui/button.tsx';
@@ -740,20 +741,133 @@ export function PreparationPanel() {
                       </AlertDescription>
                     </Alert>
                   )}
-                  {tab === 'product' ? (
-                    p ? (
-                      <ProductBriefView
-                        content={p.content}
-                        readiness={c.features}
-                        releaseReadiness={c.releases}
+                  <StageBoundary stage={tab}>
+                    {tab === 'product' ? (
+                      p ? (
+                        <ProductBriefView
+                          content={p.content}
+                          readiness={c.features}
+                          releaseReadiness={c.releases}
+                          busy={busy}
+                          onSave={(next, reason) =>
+                            void run(() =>
+                              request('agent', {
+                                operation: 'preparation_product',
+                                input: {
+                                  changeId: c.id,
+                                  expectedDigest: p.digest,
+                                  reason,
+                                  content: next,
+                                },
+                              }),
+                            )
+                          }
+                        />
+                      ) : (
+                        <Alert className="max-w-[78ch] border-dashed">
+                          <AlertDescription>
+                            Поручите ведущему агенту изучить ТЗ и заполнить постановку. Здесь
+                            появятся сценарии, границы и критерии приёмки. Проект и стек пока не
+                            нужны.
+                          </AlertDescription>
+                        </Alert>
+                      )
+                    ) : tab === 'architecture' ? (
+                      a ? (
+                        <ArchitectureBriefView
+                          content={a.content}
+                          busy={busy}
+                          onSave={(next, reason) =>
+                            void run(() =>
+                              request('agent', {
+                                operation: 'preparation_architecture',
+                                input: {
+                                  changeId: c.id,
+                                  expectedDigest: a.digest,
+                                  reason,
+                                  content: next,
+                                },
+                              }),
+                            )
+                          }
+                        />
+                      ) : (
+                        <Alert className="max-w-[78ch] border-dashed">
+                          <AlertDescription>
+                            {p?.status === 'approved'
+                              ? 'Агент готовит архитектуру, сравнение стеков и диаграммы C1/C2.'
+                              : 'Архитектура будет прорабатываться после вашего утверждения продуктовой части.'}
+                          </AlertDescription>
+                        </Alert>
+                      )
+                    ) : tab === 'references' ? (
+                      refs ? (
+                        <ReferencesBriefView
+                          content={refs.content}
+                          busy={busy}
+                          onSave={(next, reason) =>
+                            void run(() =>
+                              request('agent', {
+                                operation: 'preparation_references',
+                                input: {
+                                  changeId: c.id,
+                                  expectedDigest: refs.digest,
+                                  reason,
+                                  content: next,
+                                },
+                              }),
+                            )
+                          }
+                        />
+                      ) : (
+                        <Alert className="max-w-[78ch] border-dashed">
+                          <AlertDescription>
+                            {a?.status === 'approved'
+                              ? 'Агент ищет референсы и описывает, что берёт из каждого. Вы принимаете или отклоняете каждый.'
+                              : 'Референсы собираются после вашего утверждения архитектуры.'}
+                          </AlertDescription>
+                        </Alert>
+                      )
+                    ) : tab === 'concept' ? (
+                      con ? (
+                        <ConceptBriefView
+                          content={con.content}
+                          busy={busy}
+                          onSave={(next, reason) =>
+                            void run(() =>
+                              request('agent', {
+                                operation: 'preparation_concept',
+                                input: {
+                                  changeId: c.id,
+                                  expectedDigest: con.digest,
+                                  reason,
+                                  content: next,
+                                },
+                              }),
+                            )
+                          }
+                        />
+                      ) : (
+                        <Alert className="max-w-[78ch] border-dashed">
+                          <AlertDescription>
+                            {refs?.status === 'approved'
+                              ? 'Агент формулирует концепцию и готовит эскизы, между которыми вы выберете.'
+                              : 'Концепт прорабатывается после вашего утверждения референсов.'}
+                          </AlertDescription>
+                        </Alert>
+                      )
+                    ) : d ? (
+                      <DesignBriefView
+                        content={d.content}
+                        channels={p?.content.channels ?? []}
                         busy={busy}
                         onSave={(next, reason) =>
                           void run(() =>
                             request('agent', {
-                              operation: 'preparation_product',
+                              operation: 'preparation_design',
                               input: {
                                 changeId: c.id,
-                                expectedDigest: p.digest,
+                                expectedDigest: d.digest,
                                 reason,
                                 content: next,
                               },
@@ -764,123 +878,13 @@ export function PreparationPanel() {
                     ) : (
                       <Alert className="max-w-[78ch] border-dashed">
                         <AlertDescription>
-                          Поручите ведущему агенту изучить ТЗ и заполнить постановку. Здесь появятся
-                          сценарии, границы и критерии приёмки. Проект и стек пока не нужны.
+                          {con?.status === 'approved'
+                            ? 'Агент собирает палитру, токены, guidelines и разбор по каналам.'
+                            : 'Дизайн-система готовится после вашего утверждения концепта.'}
                         </AlertDescription>
                       </Alert>
-                    )
-                  ) : tab === 'architecture' ? (
-                    a ? (
-                      <ArchitectureBriefView
-                        content={a.content}
-                        busy={busy}
-                        onSave={(next, reason) =>
-                          void run(() =>
-                            request('agent', {
-                              operation: 'preparation_architecture',
-                              input: {
-                                changeId: c.id,
-                                expectedDigest: a.digest,
-                                reason,
-                                content: next,
-                              },
-                            }),
-                          )
-                        }
-                      />
-                    ) : (
-                      <Alert className="max-w-[78ch] border-dashed">
-                        <AlertDescription>
-                          {p?.status === 'approved'
-                            ? 'Агент готовит архитектуру, сравнение стеков и диаграммы C1/C2.'
-                            : 'Архитектура будет прорабатываться после вашего утверждения продуктовой части.'}
-                        </AlertDescription>
-                      </Alert>
-                    )
-                  ) : tab === 'references' ? (
-                    refs ? (
-                      <ReferencesBriefView
-                        content={refs.content}
-                        busy={busy}
-                        onSave={(next, reason) =>
-                          void run(() =>
-                            request('agent', {
-                              operation: 'preparation_references',
-                              input: {
-                                changeId: c.id,
-                                expectedDigest: refs.digest,
-                                reason,
-                                content: next,
-                              },
-                            }),
-                          )
-                        }
-                      />
-                    ) : (
-                      <Alert className="max-w-[78ch] border-dashed">
-                        <AlertDescription>
-                          {a?.status === 'approved'
-                            ? 'Агент ищет референсы и описывает, что берёт из каждого. Вы принимаете или отклоняете каждый.'
-                            : 'Референсы собираются после вашего утверждения архитектуры.'}
-                        </AlertDescription>
-                      </Alert>
-                    )
-                  ) : tab === 'concept' ? (
-                    con ? (
-                      <ConceptBriefView
-                        content={con.content}
-                        busy={busy}
-                        onSave={(next, reason) =>
-                          void run(() =>
-                            request('agent', {
-                              operation: 'preparation_concept',
-                              input: {
-                                changeId: c.id,
-                                expectedDigest: con.digest,
-                                reason,
-                                content: next,
-                              },
-                            }),
-                          )
-                        }
-                      />
-                    ) : (
-                      <Alert className="max-w-[78ch] border-dashed">
-                        <AlertDescription>
-                          {refs?.status === 'approved'
-                            ? 'Агент формулирует концепцию и готовит эскизы, между которыми вы выберете.'
-                            : 'Концепт прорабатывается после вашего утверждения референсов.'}
-                        </AlertDescription>
-                      </Alert>
-                    )
-                  ) : d ? (
-                    <DesignBriefView
-                      content={d.content}
-                      channels={p?.content.channels ?? []}
-                      busy={busy}
-                      onSave={(next, reason) =>
-                        void run(() =>
-                          request('agent', {
-                            operation: 'preparation_design',
-                            input: {
-                              changeId: c.id,
-                              expectedDigest: d.digest,
-                              reason,
-                              content: next,
-                            },
-                          }),
-                        )
-                      }
-                    />
-                  ) : (
-                    <Alert className="max-w-[78ch] border-dashed">
-                      <AlertDescription>
-                        {con?.status === 'approved'
-                          ? 'Агент собирает палитру, токены, guidelines и разбор по каналам.'
-                          : 'Дизайн-система готовится после вашего утверждения концепта.'}
-                      </AlertDescription>
-                    </Alert>
-                  )}
+                    )}
+                  </StageBoundary>
                   {current?.decision && (
                     <div className="bg-secondary border-primary mt-6 border-l-[3px] p-4">
                       <strong>
