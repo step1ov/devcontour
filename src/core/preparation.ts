@@ -394,12 +394,17 @@ export class Preparation {
       s.preparation = { id: 'workspace-preparation', changes: [] };
     });
   }
-  status(id?: string) {
+  // The agent writes the content and can re-read it from docs/changes; sending
+  // it back on every call pushed realistic briefs past the response budget.
+  status(id?: string, options: { content?: boolean } = {}) {
+    const withContent = options.content ?? true;
     const s = this.store.read(),
       p = s.preparation;
     if (!p) return { enabled: false as const };
     const c = p.changes.find((c) => c.id === (id ?? p.activeChangeId));
     if (id && !c) throw new DomainError('Изменение не найдено', 404);
+    const strip = <T extends { content: unknown }>(r: T | undefined) =>
+      r && (withContent ? r : { ...r, content: undefined });
     const product = c?.product.at(-1),
       architecture = c?.architecture.at(-1);
     let ready = false,
@@ -435,8 +440,9 @@ export class Preparation {
             id: c.id,
             key: c.key,
             title: c.title,
-            product,
-            architecture,
+            product: strip(product),
+            architecture: strip(architecture),
+            source: 'docs/changes/' + c.key,
             activity: [...(c.activity ?? [])].reverse().slice(0, 40),
             questions: c.questions ?? [],
             decisions: [...(c.decisions ?? [])].reverse(),
@@ -521,7 +527,7 @@ export class Preparation {
   }
   execute(operation: PreparationOperation, input: unknown) {
     if (operation === 'preparation_status')
-      return this.status(preparationInputs[operation].parse(input).changeId);
+      return this.status(preparationInputs[operation].parse(input).changeId, { content: false });
     preparationInputs[operation].parse(input);
     return this.store.atomic(() => {
       this.enable();
@@ -654,7 +660,7 @@ export class Preparation {
         validatePreparation(s, before);
         return { changeId: selected };
       });
-      return this.status(selected);
+      return this.status(selected, { content: false });
     });
   }
   // The answer comes from the panel form, like a stage decision: the agent asks,
