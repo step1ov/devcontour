@@ -4,6 +4,9 @@ test('Plan → parallel execution → acceptance → correction → acceptance p
   page,
   request,
 }) => {
+  // Two full queue cycles run here: the default 60s budget leaves no margin and
+  // any load on the machine turns a real pass into a timeout.
+  test.slow();
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto('/');
