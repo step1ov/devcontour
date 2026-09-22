@@ -1,26 +1,13 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
-import {
-  Boxes,
-  CircleDot,
-  History,
-  Loader2,
-  MessageCircleQuestion,
-  Milestone,
-  MonitorSmartphone,
-  Scale,
-  User,
-} from 'lucide-react';
+import { CircleDot, History, Loader2, MessageCircleQuestion, Scale, Send } from 'lucide-react';
 import type { Preparation } from '../core/preparation.ts';
 import type {
   ProductBrief,
-  ProductFeature,
-  ProductPersona,
-  ProductChannel,
-  ProductRelease,
   ArchitectureBrief,
   PreparationQuestion,
   PreparationRecord,
 } from '../core/preparation-model.ts';
+import { ProductBriefView, type Readiness } from './ProductBrief.tsx';
 import { Alert, AlertDescription, AlertTitle } from '@/ui/alert.tsx';
 import { Badge } from '@/ui/badge.tsx';
 import { Button } from '@/ui/button.tsx';
@@ -39,14 +26,6 @@ type View = ReturnType<Preparation['status']> & {
   workspace?: { mode: 'embedded' | 'separate'; path: string };
 };
 type Stage = 'product' | 'architecture' | 'development';
-type Readiness = {
-  id: string;
-  tasks: number;
-  done: number;
-  failed: number;
-  readiness: 'unplanned' | 'in-progress' | 'failed' | 'done';
-};
-type FeatureView = ProductFeature & Readiness;
 type ReleaseReadiness = Readiness & { features: number; criteria: number };
 const names = {
   draft: 'Агент прорабатывает',
@@ -299,293 +278,6 @@ function Decisions({
         ))}
       </ul>
     </Section>
-  );
-}
-const readinessNames = {
-  unplanned: 'Нет задач',
-  'in-progress': 'В работе',
-  failed: 'Есть сбой',
-  done: 'Задачи выполнены',
-} as const;
-const readinessTone = {
-  unplanned: 'secondary',
-  'in-progress': 'ready',
-  failed: 'destructive',
-  done: 'success',
-} as const;
-
-// The operator reads the product feature by feature. Each scenario names the
-// persona living it, and each criterion names the release it belongs to.
-function Feature({
-  feature,
-  personas,
-  releases,
-  channels,
-}: {
-  feature: FeatureView;
-  personas: ProductPersona[];
-  releases: ProductRelease[];
-  channels: ProductChannel[];
-}) {
-  const who = (id?: string) => (id ? (personas.find((x) => x.id === id)?.name ?? id) : '');
-  const when = (id: string) => releases.find((x) => x.id === id)?.title ?? id;
-  return (
-    <Card>
-      <CardHeader className="gap-2 pb-3">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <CardTitle className="flex items-start gap-2">
-            <Boxes className="text-primary mt-0.5 size-4 shrink-0" aria-hidden="true" />
-            <span className="max-w-[70ch] break-words">{feature.title}</span>
-          </CardTitle>
-          <Badge variant={readinessTone[feature.readiness]}>
-            {readinessNames[feature.readiness]}
-            {feature.tasks > 0 && ' · ' + feature.done + '/' + feature.tasks}
-          </Badge>
-        </div>
-        <p className="max-w-[78ch] break-words whitespace-pre-wrap">{feature.outcome}</p>
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-muted-foreground text-sm">Каналы:</span>
-          {feature.channels.map((id) => (
-            <Badge key={id} variant="secondary">
-              <MonitorSmartphone aria-hidden="true" className="size-3" />
-              {channels.find((c) => c.id === id)?.title ?? id}
-            </Badge>
-          ))}
-        </div>
-      </CardHeader>
-      <CardContent className="grid gap-4 pt-0">
-        <div>
-          <h4 className="mb-2 text-sm font-semibold">Сценарии</h4>
-          <ul className="grid gap-2">
-            {feature.scenarios.map((s, i) => (
-              <li key={i} className="max-w-[74ch] break-words whitespace-pre-wrap">
-                {s.personaId && (
-                  <Badge variant="outline" className="mr-2">
-                    <User aria-hidden="true" className="size-3" />
-                    {who(s.personaId)}
-                  </Badge>
-                )}
-                {s.text}
-              </li>
-            ))}
-          </ul>
-        </div>
-        <div>
-          <h4 className="mb-2 text-sm font-semibold">Как примем</h4>
-          <ul className="grid gap-2">
-            {feature.acceptance.map((a, i) => (
-              <li key={i} className="max-w-[74ch] break-words whitespace-pre-wrap">
-                <Badge variant="ready" className="mr-2">
-                  {when(a.releaseId)}
-                </Badge>
-                {a.text}
-              </li>
-            ))}
-          </ul>
-        </div>
-        <p className="text-muted-foreground text-xs">
-          ID фичи: <code className="font-mono">{feature.id}</code>
-        </p>
-      </CardContent>
-    </Card>
-  );
-}
-function Personas({ personas }: { personas: ProductPersona[] }) {
-  if (!personas.length) return null;
-  return (
-    <Section title={'Персоны (' + personas.length + ')'}>
-      <p className="text-muted-foreground mb-4 max-w-[78ch]">
-        Цели и боли персоны — основание, на котором агент разрешает неоднозначности так же, как
-        решил бы этот человек.
-      </p>
-      <ul className="grid gap-4 md:grid-cols-2">
-        {personas.map((persona) => (
-          <li key={persona.id}>
-            <Card className="h-full">
-              <CardHeader className="gap-1 pb-3">
-                <CardTitle className="flex items-center gap-2">
-                  <User className="text-primary size-4 shrink-0" aria-hidden="true" />
-                  {persona.name}
-                </CardTitle>
-                <p className="text-muted-foreground text-sm">{persona.role}</p>
-              </CardHeader>
-              <CardContent className="grid gap-3 pt-0 text-sm">
-                <div>
-                  <h4 className="mb-1 font-semibold">Цели</h4>
-                  <ul className="grid list-disc gap-1 pl-5">
-                    {persona.goals.map((g, i) => (
-                      <li key={i}>{g}</li>
-                    ))}
-                  </ul>
-                </div>
-                <div>
-                  <h4 className="mb-1 font-semibold">Боли</h4>
-                  <ul className="grid list-disc gap-1 pl-5">
-                    {persona.pains.map((g, i) => (
-                      <li key={i}>{g}</li>
-                    ))}
-                  </ul>
-                </div>
-              </CardContent>
-            </Card>
-          </li>
-        ))}
-      </ul>
-    </Section>
-  );
-}
-function Channels({
-  channels,
-  features,
-}: {
-  channels: ProductChannel[];
-  features: ProductFeature[];
-}) {
-  return (
-    <Section title={'Каналы (' + channels.length + ')'}>
-      <p className="text-muted-foreground mb-4 max-w-[78ch]">
-        Где продукт встречается с человеком. Каждая фича называет каналы, которые её реализуют.
-      </p>
-      <ul className="grid gap-3 md:grid-cols-2">
-        {channels.map((c) => {
-          const count = features.filter((f) => f.channels.includes(c.id)).length;
-          return (
-            <li key={c.id}>
-              <Card className="h-full">
-                <CardHeader className="gap-1 pb-4">
-                  <CardTitle className="flex items-start gap-2">
-                    <MonitorSmartphone
-                      className="text-primary mt-0.5 size-4 shrink-0"
-                      aria-hidden="true"
-                    />
-                    <span className="max-w-[60ch] break-words">{c.title}</span>
-                  </CardTitle>
-                  <p className="max-w-[70ch] break-words whitespace-pre-wrap">{c.purpose}</p>
-                  <p className="text-muted-foreground text-sm">Фич в канале: {count}</p>
-                </CardHeader>
-              </Card>
-            </li>
-          );
-        })}
-      </ul>
-    </Section>
-  );
-}
-function Releases({
-  releases,
-  readiness,
-}: {
-  releases: ProductRelease[];
-  readiness: ReleaseReadiness[];
-}) {
-  return (
-    <Section title={'Релизы (' + releases.length + ')'}>
-      <p className="text-muted-foreground mb-4 max-w-[78ch]">
-        Граница объёма: что должно существовать первым и что может подождать. Порядок сверху вниз.
-      </p>
-      <ol className="grid gap-3">
-        {releases.map((r, i) => {
-          const state = readiness.find((x) => x.id === r.id);
-          return (
-            <li key={r.id}>
-              <Card>
-                <CardHeader className="gap-1 pb-4">
-                  <div className="flex flex-wrap items-start justify-between gap-3">
-                    <CardTitle className="flex items-start gap-2">
-                      <Milestone
-                        className="text-primary mt-0.5 size-4 shrink-0"
-                        aria-hidden="true"
-                      />
-                      <span className="max-w-[70ch] break-words">
-                        {r.version} · {r.title}
-                      </span>
-                    </CardTitle>
-                    {state && (
-                      <Badge variant={readinessTone[state.readiness]}>
-                        {readinessNames[state.readiness]}
-                        {state.tasks > 0 && ' · ' + state.done + '/' + state.tasks}
-                      </Badge>
-                    )}
-                  </div>
-                  <p className="max-w-[78ch] break-words whitespace-pre-wrap">{r.goal}</p>
-                  {state && (
-                    <p className="text-muted-foreground text-sm">
-                      Фич: {state.features} · критериев: {state.criteria}
-                    </p>
-                  )}
-                </CardHeader>
-              </Card>
-            </li>
-          );
-        })}
-      </ol>
-    </Section>
-  );
-}
-function Product({
-  content: p,
-  readiness,
-  releaseReadiness,
-}: {
-  content: ProductBrief;
-  readiness: Readiness[];
-  releaseReadiness: ReleaseReadiness[];
-}) {
-  const blank: Readiness = { id: '', tasks: 0, done: 0, failed: 0, readiness: 'unplanned' };
-  const features: FeatureView[] = p.features.map((f) => ({
-    ...f,
-    ...(readiness.find((r) => r.id === f.id) ?? blank),
-    id: f.id,
-  }));
-  const personas = p.personas;
-  const releases = p.releases;
-  const done = features.filter((f) => f.readiness === 'done').length;
-  const planned = features.filter((f) => f.tasks > 0).length;
-  // Features surface in the order their earliest release does.
-  const first = (f: FeatureView) =>
-    Math.min(
-      ...f.acceptance.map((a) => {
-        const index = releases.findIndex((r) => r.id === a.releaseId);
-        return index < 0 ? releases.length : index;
-      }),
-    );
-  return (
-    <>
-      <Section title="Проблема и ожидаемый результат">
-        <p className="max-w-[78ch] break-words whitespace-pre-wrap">
-          {p.problem || 'Агент ещё уточняет проблему'}
-        </p>
-        <p className="mt-2 max-w-[78ch] break-words whitespace-pre-wrap">{p.outcome}</p>
-      </Section>
-      <Personas personas={personas} />
-      <Channels channels={p.channels} features={p.features} />
-      <Releases releases={releases} readiness={releaseReadiness} />
-      <Section title={'Фичи продукта (' + features.length + ')'}>
-        {planned > 0 && (
-          <p className="text-muted-foreground mb-4">
-            Задачи заведены для {planned} из {features.length}; полностью выполнены {done}.
-            Готовность считается по задачам и не заменяет приёмку релиза.
-          </p>
-        )}
-        <ul className="grid gap-4">
-          {[...features]
-            .sort((a, b) => first(a) - first(b))
-            .map((f) => (
-              <li key={f.id}>
-                <Feature
-                  feature={f}
-                  personas={personas}
-                  releases={releases}
-                  channels={p.channels}
-                />
-              </li>
-            ))}
-        </ul>
-      </Section>
-      <TextList title="За пределами изменения" items={p.exclusions} />
-      <TextList title="Материалы и референсы" items={p.references} />
-      {p.questions.length > 0 && <TextList title="Вопросы этой версии" items={p.questions} />}
-    </>
   );
 }
 function Architecture({ content: a }: { content: ArchitectureBrief }) {
@@ -930,7 +622,37 @@ export function PreparationPanel() {
                       <strong>Версия {current.number}</strong>
                       <Badge variant={tone[current.status]}>{names[current.status]}</Badge>
                       <span className="text-muted-foreground">{current.reason}</span>
+                      {current.status === 'draft' && (
+                        <Button
+                          size="sm"
+                          className="ml-auto"
+                          disabled={busy}
+                          onClick={() => {
+                            void run(() =>
+                              request('agent', {
+                                operation: 'preparation_submit',
+                                input: {
+                                  changeId: c.id,
+                                  stage: tab,
+                                  expectedDigest: current.digest,
+                                },
+                              }),
+                            );
+                          }}
+                        >
+                          <Send aria-hidden="true" />
+                          Отправить на утверждение
+                        </Button>
+                      )}
                     </div>
+                  )}
+                  {current?.status === 'draft' && c.history.length > 1 && (
+                    <Alert variant="info" className="mt-4">
+                      <AlertDescription>
+                        Правка создала новую версию. Она снова черновик: отправьте её на
+                        утверждение, когда закончите.
+                      </AlertDescription>
+                    </Alert>
                   )}
                   {tab === 'architecture' && !architectureCurrent && a && (
                     <Alert variant="warning" className="mt-4">
@@ -953,10 +675,24 @@ export function PreparationPanel() {
                   <Decisions stage={tab} decisions={c.decisions} questions={c.questions} />
                   {tab === 'product' ? (
                     p ? (
-                      <Product
+                      <ProductBriefView
                         content={p.content}
                         readiness={c.features}
                         releaseReadiness={c.releases}
+                        busy={busy}
+                        onSave={(next, reason) =>
+                          void run(() =>
+                            request('agent', {
+                              operation: 'preparation_product',
+                              input: {
+                                changeId: c.id,
+                                expectedDigest: p.digest,
+                                reason,
+                                content: next,
+                              },
+                            }),
+                          )
+                        }
                       />
                     ) : (
                       <Alert className="max-w-[78ch] border-dashed">

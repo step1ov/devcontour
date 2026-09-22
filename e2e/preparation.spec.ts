@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startWorkspace } from '../src/runner/start.ts';
@@ -97,6 +97,62 @@ test('An empty workspace shows live product review, C1/C2 and separate operator 
     expect((await (await request.get(app.url + '/api/preparation')).json()).developmentReady).toBe(
       true,
     );
+  } finally {
+    await app.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('The operator edits a section in the panel and the change reaches state and files', async ({
+  page,
+  request,
+}) => {
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-ui-edit-'));
+  const app = await startWorkspace(join(root, 'workspace'), { port: 0, workspaceMode: 'embedded' });
+  try {
+    await page.goto(app.url);
+    await page.getByLabel('Новое изменение').fill('Модерация чата');
+    await page.getByRole('button', { name: 'Создать изменение', exact: true }).click();
+    const current = await (await request.get(app.url + '/api/preparation')).json();
+    await request.post(app.url + '/api/agent', {
+      headers: { 'X-DevContour-Request': '1' },
+      data: {
+        operation: 'preparation_product',
+        input: {
+          changeId: current.current.id,
+          expectedDigest: null,
+          reason: 'Сценарии подготовлены',
+          content: product,
+        },
+      },
+    });
+    await expect(page.getByRole('heading', { name: 'Карта продукта' })).toBeVisible();
+
+    // The section menu jumps instead of scrolling the whole page.
+    await page.getByRole('navigation', { name: 'Разделы постановки' }).getByText('Каналы').click();
+    await expect(page.getByRole('heading', { name: /Каналы \(/ })).toBeInViewport();
+
+    // Editing a block saves a new revision through the same guarded operation.
+    const problem = page.locator('#section-problem');
+    await problem.getByRole('button', { name: 'Изменить' }).click();
+    await problem.getByLabel('Проблема').fill('Переписанная в панели проблема.');
+    await problem.getByRole('button', { name: 'Сохранить как новую версию' }).click();
+    await expect(page.getByText('Версия 2')).toBeVisible();
+    await expect(page.getByText('Переписанная в панели проблема.')).toBeVisible();
+
+    const saved = await (await request.get(app.url + '/api/preparation')).json();
+    expect(saved.current.product.number).toBe(2);
+    expect(saved.current.product.content.problem).toBe('Переписанная в панели проблема.');
+
+    // The projection follows the edit without a separate step.
+    const file = join(root, 'workspace', 'docs', 'changes', saved.current.key, 'product.md');
+    expect(readFileSync(file, 'utf8')).toContain('Переписанная в панели проблема.');
+
+    // The operator can send their own draft for approval.
+    await page.getByRole('button', { name: 'Отправить на утверждение' }).click();
+    await expect(
+      page.getByRole('heading', { name: 'Утвердить продуктовую постановку' }),
+    ).toBeVisible();
   } finally {
     await app.close();
     rmSync(root, { recursive: true, force: true });
