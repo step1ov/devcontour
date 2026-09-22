@@ -21,6 +21,7 @@ import { startWorkspace, preparationStore, requirePreparation } from '../src/run
 import { fixture, input, config } from './helpers.ts';
 import {
   architecture,
+  design,
   product,
   approvePreparation,
   approveStage,
@@ -121,6 +122,16 @@ test('Product and architecture require distinct operator decisions; no agent or 
       content: architecture,
     });
     approveStage(p, id, 'architecture');
+    // Development also waits for the design direction.
+    assert.throws(() => f.h.pause(false), /направление дизайна/);
+    assert.throws(() => f.h.addTask(b.id, input()), /направление дизайна/);
+    p.execute('preparation_design', {
+      changeId: id,
+      expectedDigest: f.store.read().preparation!.changes[0].design.at(-1)?.digest ?? null,
+      reason: 'Направление дизайна для текущей архитектуры',
+      content: design,
+    });
+    approveStage(p, id, 'design');
     const t = f.h.addTask(b.id, input());
     assert.equal(t.preparation?.changeId, id);
     f.h.approve(b.id);
@@ -191,6 +202,16 @@ test('Revisions invalidate architecture and stale decisions, plans and task atte
       content: architecture,
     });
     approveStage(p, id, 'architecture');
+    // Development also waits for the design direction.
+    assert.throws(() => f.h.pause(false), /направление дизайна/);
+    assert.throws(() => f.h.addTask(b.id, input()), /направление дизайна/);
+    p.execute('preparation_design', {
+      changeId: id,
+      expectedDigest: f.store.read().preparation!.changes[0].design.at(-1)?.digest ?? null,
+      reason: 'Направление дизайна для текущей архитектуры',
+      content: design,
+    });
+    approveStage(p, id, 'design');
     f.h.pause(false);
     assert.throws(() => f.h.claim('worker'), /не связана/);
     assert.equal(specDigest(f.store.read().tasks[0]), original);

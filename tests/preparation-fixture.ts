@@ -1,11 +1,12 @@
-import { architectureBrief, productBrief } from '../src/core/preparation-model.ts';
+import { architectureBrief, designBrief, productBrief } from '../src/core/preparation-model.ts';
 import { readFileSync } from 'node:fs';
 import { Preparation } from '../src/core/preparation.ts';
 const example = JSON.parse(
   readFileSync(new URL('../packs/example-preparation.json', import.meta.url), 'utf8'),
-) as { product: unknown; architecture: unknown };
+) as { product: unknown; architecture: unknown; design: unknown };
 export const product = productBrief.parse(example.product);
 export const architecture = architectureBrief.parse(example.architecture);
+export const design = designBrief.parse(example.design);
 export function approvePreparation(p: Preparation) {
   p.execute('preparation_create', { title: 'Модерация чата' });
   const status = p.status();
@@ -25,6 +26,13 @@ export function approvePreparation(p: Preparation) {
     content: architecture,
   });
   approveStage(p, changeId, 'architecture');
+  p.execute('preparation_design', {
+    changeId,
+    expectedDigest: null,
+    reason: 'Первое направление дизайна',
+    content: design,
+  });
+  approveStage(p, changeId, 'design');
   return changeId;
 }
 // Some tests need the architecture stage open without approving architecture.
@@ -42,7 +50,23 @@ export function approveProductOnly(p: Preparation) {
   approveStage(p, changeId, 'product');
   return changeId;
 }
-export function approveStage(p: Preparation, changeId: string, stage: 'product' | 'architecture') {
+// Architecture approved, design still open: for tests about the design stage.
+export function approveArchitectureOnly(p: Preparation) {
+  const changeId = approveProductOnly(p);
+  p.execute('preparation_architecture', {
+    changeId,
+    expectedDigest: null,
+    reason: 'Первая архитектура',
+    content: architecture,
+  });
+  approveStage(p, changeId, 'architecture');
+  return changeId;
+}
+export function approveStage(
+  p: Preparation,
+  changeId: string,
+  stage: 'product' | 'architecture' | 'design',
+) {
   const view = p.status(changeId);
   if (!view.enabled) throw new Error('Missing preparation');
   const expectedDigest = view.current![stage]!.digest;

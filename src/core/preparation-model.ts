@@ -121,7 +121,46 @@ export const architectureBrief = z.strictObject({
   c2: c4Diagram.optional(),
   c3: z.array(c4Components).max(5).default([]),
 });
-const stage = z.enum(['product', 'architecture']);
+// A design reference is a link plus the one property we intend to take from it.
+// Storing the property, not the picture, is what makes the choice reviewable.
+export const designReference = z.strictObject({
+  url: z.string().trim().min(3).max(600),
+  takeaway: z.string().trim().min(3).max(600),
+  status: z.enum(['candidate', 'accepted', 'rejected']).default('candidate'),
+});
+export const designToken = z.strictObject({
+  group: z.string().trim().min(2).max(60),
+  name: z.string().trim().min(2).max(60),
+  value: z.string().trim().min(1).max(120),
+  purpose: z.string().trim().max(300).default(''),
+});
+export const channelDesign = z.strictObject({
+  channelId,
+  notes: z.array(z.string().trim().min(3).max(600)).min(1).max(20),
+});
+// Direction is decided once and blocks everything downstream, so it is a stage.
+// Screen layouts stay per-feature contracts inside development.
+export const designBrief = z.strictObject({
+  applicable: z.boolean().default(true),
+  reason: z.string().trim().max(1500).default(''),
+  concept: text,
+  references: z.array(designReference).max(40).default([]),
+  shared: items,
+  channels: z.array(channelDesign).max(10).default([]),
+  tokens: z.array(designToken).max(80).default([]),
+  guidelines: items,
+  prototypes: z
+    .array(
+      z.strictObject({
+        title: z.string().trim().min(3).max(160),
+        url: z.string().trim().min(3).max(600),
+      }),
+    )
+    .max(20)
+    .default([]),
+  questions: items,
+});
+const stage = z.enum(['product', 'architecture', 'design']);
 const note = z.string().trim().min(3).max(300);
 // The lead agent spends long stretches reading a brief without saving a revision.
 // An append-only journal makes that work visible in the panel from the first launch.
@@ -176,6 +215,9 @@ export const productChange = z.strictObject({
   architecture: z
     .array(z.strictObject({ ...revision, productDigest: hash, content: architectureBrief }))
     .max(100),
+  design: z
+    .array(z.strictObject({ ...revision, architectureDigest: hash, content: designBrief }))
+    .max(100),
   activity: z.array(preparationActivity).max(200).default([]),
   questions: z.array(preparationQuestion).max(60).default([]),
   decisions: z.array(preparationRecord).max(100).default([]),
@@ -189,6 +231,7 @@ export const preparationBinding = z.strictObject({
   changeId: id,
   productDigest: hash,
   architectureDigest: hash,
+  designDigest: hash,
 });
 export const preparationInputs = {
   preparation_status: z.strictObject({ changeId: id.optional() }),
@@ -213,9 +256,15 @@ export const preparationInputs = {
     reason: z.string().min(3).max(2000),
     content: architectureBrief,
   }),
+  preparation_design: z.strictObject({
+    changeId: id,
+    expectedDigest: hash.nullable(),
+    reason: z.string().min(3).max(2000),
+    content: designBrief,
+  }),
   preparation_submit: z.strictObject({
     changeId: id,
-    stage: z.enum(['product', 'architecture']),
+    stage,
     expectedDigest: hash,
   }),
   preparation_progress: z.strictObject({
@@ -253,7 +302,7 @@ export const preparationAnswer = z.strictObject({
 });
 export const preparationDecision = z.strictObject({
   changeId: id,
-  stage: z.enum(['product', 'architecture']),
+  stage,
   expectedDigest: hash,
   decision: z.enum(['approve', 'request-changes']),
   comment: z.string().trim().max(3000),
@@ -269,6 +318,8 @@ export type AcceptanceCriterion = z.infer<typeof acceptanceCriterion>;
 export type ProductFeature = z.infer<typeof productFeature>;
 export type ProductBrief = z.infer<typeof productBrief>;
 export type ArchitectureBrief = z.infer<typeof architectureBrief>;
+export type DesignBrief = z.infer<typeof designBrief>;
+export type DesignReference = z.infer<typeof designReference>;
 export type C4Diagram = z.infer<typeof c4Diagram>;
 export type C4Components = z.infer<typeof c4Components>;
 export type ProductChange = z.infer<typeof productChange>;

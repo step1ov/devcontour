@@ -10,6 +10,7 @@ import {
   type PreparationOperation,
   type ProductChange,
   type ArchitectureBrief,
+  type DesignBrief,
   type ProductBrief,
   type C4Diagram,
 } from './preparation-model.ts';
@@ -91,13 +92,8 @@ function productReady(c: ProductChange) {
     throw new DomainError('Сначала пользователь должен утвердить продуктовую постановку', 409);
   return c.product.at(-1)!;
 }
-export function developmentBinding(
-  s: DevContourState,
-  id?: string,
-): PreparationBinding | undefined {
-  if (!s.preparation) return;
-  const c = change(s, id),
-    product = productReady(c),
+function architectureReady(c: ProductChange) {
+  const product = productReady(c),
     architecture = c.architecture.at(-1);
   if (
     !architecture ||
@@ -108,7 +104,28 @@ export function developmentBinding(
       'Сначала пользователь должен утвердить актуальные архитектуру и стек',
       409,
     );
-  return { changeId: c.id, productDigest: product.digest, architectureDigest: architecture.digest };
+  return architecture;
+}
+export function developmentBinding(
+  s: DevContourState,
+  id?: string,
+): PreparationBinding | undefined {
+  if (!s.preparation) return;
+  const c = change(s, id),
+    product = productReady(c),
+    architecture = architectureReady(c),
+    design = c.design.at(-1);
+  if (!design || design.status !== 'approved' || design.architectureDigest !== architecture.digest)
+    throw new DomainError(
+      'Сначала пользователь должен утвердить актуальное направление дизайна',
+      409,
+    );
+  return {
+    changeId: c.id,
+    productDigest: product.digest,
+    architectureDigest: architecture.digest,
+    designDigest: design.digest,
+  };
 }
 export function assertTaskPreparation(
   s: DevContourState,
@@ -304,6 +321,31 @@ function validateArchitecture(a: ArchitectureBrief) {
     }
   }
 }
+// Direction is what blocks development, so it is validated like the other two
+// stages. A change that touches no interface may declare itself inapplicable —
+// with a reason the operator approves, not a silent skip.
+function validateDesign(d: DesignBrief, channels: string[]) {
+  if (!d.applicable) {
+    if (d.reason.length < 10)
+      throw new DomainError('Объясните, почему изменению не нужно направление дизайна');
+    return;
+  }
+  if (d.concept.length < 10 || !d.guidelines.length || !d.tokens.length || !d.channels.length)
+    throw new DomainError(
+      'Для согласования нужны концепция, семантические токены, guidelines и разбор по каналам; либо отметьте, что дизайн не требуется',
+    );
+  if (d.questions.length) throw new DomainError('Открытые вопросы дизайна нужно решить');
+  for (const item of d.channels)
+    if (!channels.includes(item.channelId))
+      throw new DomainError('Дизайн ссылается на несуществующий канал: ' + item.channelId);
+  const covered = d.channels.map((item) => item.channelId);
+  if (new Set(covered).size !== covered.length)
+    throw new DomainError('Повтор канала в разборе дизайна');
+  const names = d.tokens.map((token) => token.group + '/' + token.name);
+  if (new Set(names).size !== names.length) throw new DomainError('Повтор имени токена');
+  if (d.references.some((r) => !/^https?:\/\//.test(r.url)))
+    throw new DomainError('Референс должен быть ссылкой http(s)');
+}
 export function validatePreparation(s: DevContourState, previous?: DevContourState) {
   if (!s.preparation) {
     if (previous?.preparation)
@@ -320,7 +362,7 @@ export function validatePreparation(s: DevContourState, previous?: DevContourSta
     throw new DomainError('Некорректный реестр продуктовых изменений');
   for (const c of p.changes) {
     validateJournal(c);
-    for (const stage of ['product', 'architecture'] as const)
+    for (const stage of ['product', 'architecture', 'design'] as const)
       for (const [index, r] of c[stage].entries()) {
         const expected = hash({
           changeId: c.id,
@@ -328,6 +370,7 @@ export function validatePreparation(s: DevContourState, previous?: DevContourSta
           number: r.number,
           content: r.content,
           ...('productDigest' in r ? { productDigest: r.productDigest } : {}),
+          ...('architectureDigest' in r ? { architectureDigest: r.architectureDigest } : {}),
         });
         if (
           r.number !== index + 1 ||
@@ -337,13 +380,25 @@ export function validatePreparation(s: DevContourState, previous?: DevContourSta
           throw new DomainError('Некорректная версия или решение: ' + c.id);
         if (r.status === 'approved' || r.status === 'in-review') {
           if (stage === 'product') validateProduct(r.content as ProductBrief);
-          else validateArchitecture(r.content as ArchitectureBrief);
+          else if (stage === 'architecture') validateArchitecture(r.content as ArchitectureBrief);
+          else {
+            const source = c.product.find((v) => v.status === 'approved');
+            validateDesign(
+              r.content as DesignBrief,
+              source ? (source.content as ProductBrief).channels.map((x) => x.id) : [],
+            );
+          }
         }
         if (
           'productDigest' in r &&
           !c.product.some((v) => v.digest === r.productDigest && v.status === 'approved')
         )
           throw new DomainError('Архитектура должна ссылаться на утверждённую постановку');
+        if (
+          'architectureDigest' in r &&
+          !c.architecture.some((v) => v.digest === r.architectureDigest && v.status === 'approved')
+        )
+          throw new DomainError('Дизайн должен ссылаться на утверждённую архитектуру');
       }
   }
   for (const old of previous?.preparation?.changes ?? []) {
@@ -370,7 +425,7 @@ export function validatePreparation(s: DevContourState, previous?: DevContourSta
       )
         throw new DomainError('История вопросов и ответов неизменяема');
     }
-    for (const stage of ['product', 'architecture'] as const)
+    for (const stage of ['product', 'architecture', 'design'] as const)
       for (const before of old[stage]) {
         const after = next[stage].find((r) => r.number === before.number);
         if (
@@ -406,7 +461,8 @@ export class Preparation {
     const strip = <T extends { content: unknown }>(r: T | undefined) =>
       r && (withContent ? r : { ...r, content: undefined });
     const product = c?.product.at(-1),
-      architecture = c?.architecture.at(-1);
+      architecture = c?.architecture.at(-1),
+      design = c?.design.at(-1);
     let ready = false,
       blocker = 'Создайте изменение и поручите агенту проработать продуктовую часть';
     if (c)
@@ -442,6 +498,7 @@ export class Preparation {
             title: c.title,
             product: strip(product),
             architecture: strip(architecture),
+            design: strip(design),
             source: 'docs/changes/' + c.key,
             activity: [...(c.activity ?? [])].reverse().slice(0, 40),
             questions: c.questions ?? [],
@@ -497,7 +554,7 @@ export class Preparation {
                   };
                 })
               : [],
-            history: (['product', 'architecture'] as const).flatMap((stage) =>
+            history: (['product', 'architecture', 'design'] as const).flatMap((stage) =>
               c[stage].map(({ number, status, createdAt, reason, decision, digest }) => ({
                 stage,
                 number,
@@ -510,7 +567,13 @@ export class Preparation {
             ),
           }
         : undefined,
-      phase: ready ? 'development' : product?.status === 'approved' ? 'architecture' : 'product',
+      phase: ready
+        ? 'development'
+        : product?.status !== 'approved'
+          ? 'product'
+          : architecture?.status !== 'approved' || architecture.productDigest !== product.digest
+            ? 'architecture'
+            : 'design',
       developmentReady: ready,
       blocker,
       delivery: {
@@ -545,6 +608,7 @@ export class Preparation {
             createdAt: now(),
             product: [],
             architecture: [],
+            design: [],
             activity: [],
             questions: [],
             decisions: [],
@@ -595,6 +659,27 @@ export class Preparation {
                 number,
                 content: v.content,
                 productDigest: product.digest,
+              }),
+            });
+          } else if (operation === 'preparation_design') {
+            const v = preparationInputs[operation].parse(input),
+              architecture = architectureReady(c);
+            if ((c.design.at(-1)?.digest ?? null) !== v.expectedDigest)
+              throw new DomainError('Направление дизайна изменилось; перечитайте его', 409);
+            const number = c.design.length + 1;
+            c.design.push({
+              number,
+              status: 'draft',
+              createdAt: now(),
+              reason: v.reason,
+              architectureDigest: architecture.digest,
+              content: v.content,
+              digest: hash({
+                changeId: c.id,
+                stage: 'design',
+                number,
+                content: v.content,
+                architectureDigest: architecture.digest,
               }),
             });
           } else if (operation === 'preparation_progress') {
@@ -654,6 +739,11 @@ export class Preparation {
               c.architecture.at(-1)!.productDigest !== productReady(c).digest
             )
               throw new DomainError('Архитектура относится к прежней постановке');
+            if (
+              v.stage === 'design' &&
+              c.design.at(-1)!.architectureDigest !== architectureReady(c).digest
+            )
+              throw new DomainError('Дизайн относится к прежней архитектуре');
             r.status = 'in-review';
           }
         }
@@ -694,6 +784,11 @@ export class Preparation {
         c.architecture.at(-1)!.productDigest !== productReady(c).digest
       )
         throw new DomainError('Архитектура относится к прежней постановке');
+      if (
+        v.stage === 'design' &&
+        c.design.at(-1)!.architectureDigest !== architectureReady(c).digest
+      )
+        throw new DomainError('Дизайн относится к прежней архитектуре');
       if (v.decision === 'request-changes' && v.comment.length < 3)
         throw new DomainError('Опишите необходимые изменения');
       r.status = v.decision === 'approve' ? 'approved' : 'changes-requested';

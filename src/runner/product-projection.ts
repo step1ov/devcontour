@@ -197,6 +197,81 @@ export function renderArchitecture(change: ProductChange) {
   }
   return rows.join('\n');
 }
+export function renderDesign(change: ProductChange) {
+  const design = change.design.at(-1);
+  const rows = header(change, 'направление дизайна');
+  if (!design) {
+    rows.push('Направление дизайна прорабатывается после утверждения архитектуры.', '');
+    return rows.join('\n');
+  }
+  const content = design.content;
+  rows.push(
+    `Версия ${design.number} · ${names[design.status]} · ${design.createdAt}`,
+    '',
+    `Причина версии: ${line(design.reason)}`,
+    ...(design.decision
+      ? [
+          '',
+          `Решение пользователя ${design.decision.at}: ${line(design.decision.comment) || 'без замечаний'}`,
+        ]
+      : []),
+    '',
+  );
+  if (!content.applicable) {
+    rows.push('## Дизайн не требуется', '', content.reason, '');
+    return rows.join('\n');
+  }
+  rows.push(
+    '## Концепция',
+    '',
+    content.concept,
+    '',
+    '## Референсы',
+    '',
+    ...(content.references.length
+      ? content.references.map(
+          (r) =>
+            `- [${r.status === 'accepted' ? 'принят' : r.status === 'rejected' ? 'отклонён' : 'кандидат'}] ${r.url} — ${line(r.takeaway)}`,
+        )
+      : ['Референсы не собраны.']),
+    '',
+    '## Общее для всех каналов',
+    '',
+    ...content.shared.map((x) => `- ${line(x)}`),
+    '',
+    '## Различия по каналам',
+    '',
+  );
+  for (const item of content.channels)
+    rows.push(
+      `### ${line(change.product.at(-1)?.content.channels.find((x) => x.id === item.channelId)?.title ?? item.channelId)}`,
+      '',
+      ...item.notes.map((n) => `- ${line(n)}`),
+      '',
+    );
+  rows.push(
+    '## Семантические токены',
+    '',
+    '| Группа | Имя | Значение | Назначение |',
+    '| --- | --- | --- | --- |',
+    ...content.tokens.map(
+      (x) => `| ${line(x.group)} | ${line(x.name)} | ${line(x.value)} | ${line(x.purpose)} |`,
+    ),
+    '',
+    '## Guidelines',
+    '',
+    ...content.guidelines.map((x) => `- ${line(x)}`),
+    '',
+  );
+  if (content.prototypes.length)
+    rows.push(
+      '## Макеты',
+      '',
+      ...content.prototypes.map((x) => `- [${line(x.title)}](${x.url})`),
+      '',
+    );
+  return rows.join('\n');
+}
 export function renderChangeJournal(change: ProductChange) {
   const rows = header(change, 'вопросы и решения');
   const questions = change.questions ?? [];
@@ -233,10 +308,10 @@ export function renderChangeJournal(change: ProductChange) {
       : ['Решения ещё не зафиксированы.', '']),
     '## История версий',
     '',
-    ...(['product', 'architecture'] as const).flatMap((stage) =>
+    ...(['product', 'architecture', 'design'] as const).flatMap((stage) =>
       change[stage].map(
         (r) =>
-          `- ${stage === 'product' ? 'Продукт' : 'Архитектура'} v${r.number} · ${names[r.status]} · ${r.createdAt} · ${line(r.reason)}`,
+          `- ${stage === 'product' ? 'Продукт' : stage === 'architecture' ? 'Архитектура' : 'Дизайн'} v${r.number} · ${names[r.status]} · ${r.createdAt} · ${line(r.reason)}`,
       ),
     ),
     '',
@@ -291,6 +366,7 @@ export function writeProduct(state: DevContourState, root: string) {
     const dir = directory(root, change.key);
     atomicWrite(join(dir, 'product.md'), renderProduct(change));
     atomicWrite(join(dir, 'architecture.md'), renderArchitecture(change));
+    atomicWrite(join(dir, 'design.md'), renderDesign(change));
     atomicWrite(join(dir, 'journal.md'), renderChangeJournal(change));
     const { activity: _activity, ...durable } = change;
     atomicWrite(join(dir, 'change.json'), JSON.stringify(durable, null, 2) + '\n');
