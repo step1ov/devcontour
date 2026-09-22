@@ -1,5 +1,13 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
-import { CircleDot, History, Loader2, MessageCircleQuestion, Scale, Send } from 'lucide-react';
+import {
+  ChevronRight,
+  CircleDot,
+  History,
+  Loader2,
+  MessageCircleQuestion,
+  Scale,
+  Send,
+} from 'lucide-react';
 import type { Preparation } from '../core/preparation.ts';
 import type {
   ProductBrief,
@@ -74,6 +82,47 @@ function Section({
     <section className={cn('border-b py-4', className)}>
       <h3 className="text-md mb-3 font-semibold">{title}</h3>
       {children}
+    </section>
+  );
+}
+// A section the reader opens when it matters. An empty one starts folded, and
+// one that fills up unfolds itself until the reader decides otherwise.
+function Foldable({
+  id,
+  title,
+  count,
+  children,
+}: {
+  id: string;
+  title: string;
+  count: number;
+  children: React.ReactNode;
+}) {
+  const [choice, setChoice] = useState<boolean | null>(null);
+  const open = choice ?? count > 0;
+  return (
+    <section className="border-b py-4">
+      <h3>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="-ml-2 gap-2"
+          aria-expanded={open}
+          aria-controls={id}
+          onClick={() => setChoice(!open)}
+        >
+          <ChevronRight
+            aria-hidden="true"
+            className={cn('transition-transform', open && 'rotate-90')}
+          />
+          <span className="text-md font-semibold">
+            {title} ({count})
+          </span>
+        </Button>
+      </h3>
+      <div id={id} hidden={!open} className="mt-3">
+        {children}
+      </div>
     </section>
   );
 }
@@ -166,14 +215,14 @@ function Questions({
 }) {
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const mine = questions.filter((q) => q.stage === stage && q.status !== 'withdrawn');
-  if (!mine.length) return null;
   const open = mine.filter((q) => q.status === 'open');
   return (
-    <Section title={'Открытые вопросы (' + open.length + ')'}>
+    <Foldable id={'questions-' + stage} title="Открытые вопросы" count={open.length}>
       <p className="text-muted-foreground mb-4 max-w-[78ch]">
         Агент не отвечает на них сам. Пока есть неотвеченные вопросы этапа, версию нельзя отправить
         на утверждение.
       </p>
+      {!mine.length && <p className="text-muted-foreground">Вопросов по этому этапу не было.</p>}
       <ul className="grid gap-4">
         {mine.map((q) => (
           <li key={q.id}>
@@ -242,7 +291,7 @@ function Questions({
           </li>
         ))}
       </ul>
-    </Section>
+    </Foldable>
   );
 }
 function Decisions({
@@ -255,9 +304,13 @@ function Decisions({
   questions: PreparationQuestion[];
 }) {
   const mine = decisions.filter((d) => d.stage === stage);
-  if (!mine.length) return null;
   return (
-    <Section title={'Принятые решения (' + mine.length + ')'}>
+    <Foldable id={'decisions-' + stage} title="Принятые решения" count={mine.length}>
+      {!mine.length && (
+        <p className="text-muted-foreground">
+          Решения появятся здесь, когда агент зафиксирует их с обоснованием.
+        </p>
+      )}
       <ul className="grid gap-3">
         {mine.map((d) => (
           <li key={d.id} className="bg-secondary border-primary border-l-[3px] p-3">
@@ -277,7 +330,7 @@ function Decisions({
           </li>
         ))}
       </ul>
-    </Section>
+    </Foldable>
   );
 }
 function Architecture({ content: a }: { content: ArchitectureBrief }) {
@@ -662,17 +715,6 @@ export function PreparationPanel() {
                       </AlertDescription>
                     </Alert>
                   )}
-                  <Questions
-                    stage={tab}
-                    questions={c.questions}
-                    busy={busy}
-                    onAnswer={(questionId, text) =>
-                      void run(() =>
-                        request('preparation/answer', { changeId: c.id, questionId, text }),
-                      )
-                    }
-                  />
-                  <Decisions stage={tab} decisions={c.decisions} questions={c.questions} />
                   {tab === 'product' ? (
                     p ? (
                       <ProductBriefView
@@ -771,6 +813,17 @@ export function PreparationPanel() {
                         </div>
                       </form>
                     )}
+                  <Questions
+                    stage={tab}
+                    questions={c.questions}
+                    busy={busy}
+                    onAnswer={(questionId, text) =>
+                      void run(() =>
+                        request('preparation/answer', { changeId: c.id, questionId, text }),
+                      )
+                    }
+                  />
+                  <Decisions stage={tab} decisions={c.decisions} questions={c.questions} />
                 </>
               )}
               <div className="my-8">

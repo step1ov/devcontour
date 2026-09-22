@@ -153,6 +153,12 @@ test('The operator edits a section in the panel and the change reaches state and
     await expect(
       page.getByRole('heading', { name: 'Утвердить продуктовую постановку' }),
     ).toBeVisible();
+
+    // Questions and decisions sit at the bottom and start folded when empty.
+    const questions = page.getByRole('button', { name: /Открытые вопросы \(0\)/ });
+    await expect(questions).toHaveAttribute('aria-expanded', 'false');
+    await questions.click();
+    await expect(page.getByText('Вопросов по этому этапу не было.')).toBeVisible();
   } finally {
     await app.close();
     rmSync(root, { recursive: true, force: true });
