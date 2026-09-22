@@ -232,30 +232,6 @@ function DiagramEditor({
     </div>
   );
 }
-function DiagramText({ diagram }: { diagram: C4Diagram }) {
-  const name = (id: string) => diagram.nodes.find((n) => n.id === id)?.name ?? id;
-  return (
-    <details className="mt-3">
-      <summary className="cursor-pointer font-medium">Элементы и связи текстом</summary>
-      <ul className="mt-2 grid gap-1">
-        {diagram.nodes.map((n) => (
-          <li key={n.id}>
-            <strong>{n.name}</strong> — {n.description}
-            {n.technology && ' Технология: ' + n.technology + '.'}
-          </li>
-        ))}
-      </ul>
-      <ul className="mt-2 grid gap-1">
-        {diagram.relationships.map((r, i) => (
-          <li key={i}>
-            {name(r.from)} → {name(r.to)}: {r.description}
-            {r.technology && ' (' + r.technology + ')'}
-          </li>
-        ))}
-      </ul>
-    </details>
-  );
-}
 export function ArchitectureBriefView({
   content,
   busy,
@@ -534,7 +510,6 @@ export function ArchitectureBriefView({
             ) : diagram ? (
               <Suspense fallback={<p role="status">Загрузка диаграммы…</p>}>
                 <C4 diagram={diagram} level={level} systemName={system} />
-                <DiagramText diagram={diagram} />
               </Suspense>
             ) : (
               <p className="text-muted-foreground">Диаграмма ещё не создана.</p>
@@ -637,13 +612,6 @@ export function ArchitectureBriefView({
                   systemName={
                     containers.find((n) => n.id === c3.containerId)?.name ?? c3.containerId
                   }
-                />
-                <DiagramText
-                  diagram={{
-                    systemId: c3.containerId,
-                    nodes: c3.nodes,
-                    relationships: c3.relationships,
-                  }}
                 />
               </div>
             ))}
