@@ -5,6 +5,8 @@ import { randomUUID } from 'node:crypto';
 import type { DevContour } from '../core/service.ts';
 import type { DevContourState, AuditEvent } from '../core/model.ts';
 import { changeSnapshot } from '../core/workspace.ts';
+import { writeProduct } from './product-projection.ts';
+import type { Store } from '../core/store.ts';
 
 const line = (text: string) => text.replace(/[\r\n|]/g, ' ');
 export function renderJournal(state: DevContourState, id: string, events: AuditEvent[]) {
@@ -115,12 +117,24 @@ export function renderJournal(state: DevContourState, id: string, events: AuditE
   );
   return rows.join('\n');
 }
+// Before a stack exists there is no configuration and no delivery journal, but
+// the brief already needs to be readable outside the panel.
+export function attachProductProjection(store: Store, workspaceRoot: string) {
+  const root = realpathSync(workspaceRoot);
+  store.onCommit = () => store.project((state) => writeProduct(state, root));
+  store.projectionKind = 'product';
+  store.refreshProjection();
+}
 export function attachJournal(h: DevContour) {
   if (!h.config.workspaceRoot) return;
   const root = realpathSync(h.config.workspaceRoot);
   h.store.onCommit = () =>
     h.store.project((state, events) => {
+      writeProduct(state, root);
       let dir = root;
+      // The delivery journal changes on every task event. In embedded mode the
+      // workspace is the product repository, so it stays in the runtime
+      // directory rather than dirtying the working tree during a run.
       for (const name of h.config.workspaceMode === 'embedded'
         ? ['.devcontour-local', 'journal']
         : ['docs', 'journal']) {
@@ -177,5 +191,6 @@ export function attachJournal(h: DevContour) {
         renameSync(temporary, destination);
       }
     });
+  h.store.projectionKind = 'full';
   h.store.refreshProjection();
 }

@@ -2,7 +2,15 @@ import { syncPreparation } from '../src/runner/git-sync.ts';
 import { WorkspaceAgent } from '../src/application/preparation-agent.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, realpathSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+  existsSync,
+  realpathSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
@@ -559,5 +567,46 @@ test('Releases carry ordered SemVer versions; personas are optional but must res
     assert.throws(submit, /несуществующую персону/);
   } finally {
     f.cleanup();
+  }
+});
+
+test('The brief is projected to docs/product on every revision, without a running server', () => {
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-projection-'));
+  const store = preparationStore(join(root, '.devcontour-local'));
+  try {
+    const p = new Preparation(store);
+    p.execute('preparation_create', { title: 'Модерация чата' });
+    const id = store.read().preparation!.activeChangeId!;
+    const directory = join(root, 'docs', 'product');
+
+    p.execute('preparation_product', {
+      changeId: id,
+      expectedDigest: null,
+      reason: 'Первичная постановка',
+      content: product,
+    });
+    assert.equal(store.projectionError, undefined);
+    const markdown = readFileSync(join(directory, id + '.md'), 'utf8');
+    assert.match(markdown, /## Продукт · версия 1 · черновик агента/);
+    assert.match(markdown, new RegExp(product.features[0].title));
+    assert.match(markdown, new RegExp(product.releases[0].version));
+    assert.match(markdown, /Каналы:/);
+
+    // The JSON projection carries the durable record, not runtime telemetry.
+    const saved = JSON.parse(readFileSync(join(directory, id + '.json'), 'utf8'));
+    assert.equal(saved.product[0].content.features.length, product.features.length);
+    assert.equal('activity' in saved, false);
+
+    // A progress note must not rewrite the projected files.
+    const before = readFileSync(join(directory, id + '.json'), 'utf8');
+    p.execute('preparation_progress', { changeId: id, note: 'Изучаю ограничения' });
+    assert.equal(readFileSync(join(directory, id + '.json'), 'utf8'), before);
+
+    // An operator decision is durable and reaches the projection.
+    approveStage(p, id, 'product');
+    assert.match(readFileSync(join(directory, id + '.md'), 'utf8'), /утверждено/);
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
   }
 });

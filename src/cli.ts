@@ -628,7 +628,15 @@ async function main() {
         store.refreshProjection();
         if (store.projectionError) throw new Error(store.projectionError);
         result = {
-          directory: config.workspaceRoot ? join(config.workspaceRoot, 'docs', 'journal') : null,
+          journal: config.workspaceRoot
+            ? join(
+                config.workspaceRoot,
+                ...(config.workspaceMode === 'embedded'
+                  ? ['.devcontour-local', 'journal']
+                  : ['docs', 'journal']),
+              )
+            : null,
+          product: config.workspaceRoot ? join(config.workspaceRoot, 'docs', 'product') : null,
         };
       } else if (operation === 'review-contract')
         result = await reviewContract(

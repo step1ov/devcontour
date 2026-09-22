@@ -10,6 +10,9 @@ export class Store {
   private savepoint = 0;
   private projectionPending = false;
   onCommit?: () => void;
+  // Which projections onCommit writes: 'product' before a stack exists,
+  // 'full' once the technical configuration adds the delivery journal.
+  projectionKind?: 'product' | 'full';
   projectionError?: string;
   constructor(
     path: string,

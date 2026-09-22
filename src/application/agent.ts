@@ -220,7 +220,7 @@ export class AgentService {
     const h = this.h;
     if (operation in preparationInputs)
       return new Preparation(h.store).execute(operation as PreparationOperation, input);
-    if (!readOnly(operation) && !h.store.onCommit) attachJournal(h);
+    if (!readOnly(operation) && h.store.projectionKind !== 'full') attachJournal(h);
     switch (operation) {
       case 'intent_render':
         return new IntentService(h).render(input);
