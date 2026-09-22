@@ -99,12 +99,12 @@ test('An empty workspace shows live product review, C1/C2 and separate operator 
     // Design is three decisions of its own before development opens.
     for (const [index, step] of (
       [
-        ['references', referencesFixture, /3 Референсы/],
-        ['concept', conceptFixture, /4 Концепт и эскизы/],
-        ['design', designFixture, /5 Макет и дизайн-система/],
+        ['references', referencesFixture, /1 Референсы/],
+        ['concept', conceptFixture, /2 Концепт и эскизы/],
+        ['design', designFixture, /3 Макет и дизайн-система/],
       ] as const
     ).entries()) {
-      const [stage, content, tab] = step;
+      const [stage, content, label] = step;
       const saved = await send('preparation_' + stage, {
         changeId,
         expectedDigest: null,
@@ -116,10 +116,15 @@ test('An empty workspace shows live product review, C1/C2 and separate operator 
         stage,
         expectedDigest: saved.current[stage].digest,
       });
-      await page.getByRole('button', { name: tab }).click();
+      // Design is one stage with three steps inside it.
+      if (index === 0) await page.getByRole('button', { name: /3 Дизайн/ }).click();
+      await page
+        .getByRole('navigation', { name: 'Шаги дизайна' })
+        .getByRole('button', { name: label })
+        .click();
       await page.getByRole('button', { name: 'Утвердить версию 1', exact: true }).click();
     }
-    await page.getByRole('button', { name: /6 Разработка/ }).click();
+    await page.getByRole('button', { name: /4 Разработка/ }).click();
     await expect(
       page.getByRole('heading', { name: 'Постановка и архитектура утверждены' }),
     ).toBeVisible();

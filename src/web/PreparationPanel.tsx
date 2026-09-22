@@ -48,14 +48,19 @@ const approvalTitles: Record<Exclude<Stage, 'development'>, string> = {
   concept: 'Утвердить концепт и эскизы',
   design: 'Утвердить макет и дизайн-систему',
 };
-const stageNames = [
-  'Продукт',
-  'Архитектура и стек',
-  'Референсы',
-  'Концепт и эскизы',
-  'Макет и дизайн-система',
-  'Разработка',
-];
+// Design is one stage of the project with three decisions inside it. The
+// stepper shows the stage; the sub-navigation shows where inside it we are.
+const designSteps = ['references', 'concept', 'design'] as const;
+type DesignStep = (typeof designSteps)[number];
+const designStepNames: Record<DesignStep, string> = {
+  references: 'Референсы',
+  concept: 'Концепт и эскизы',
+  design: 'Макет и дизайн-система',
+};
+const topStages = ['product', 'architecture', 'design', 'development'] as const;
+const topStageNames = ['Продукт', 'Архитектура и стек', 'Дизайн', 'Разработка'];
+const isDesignStep = (stage: Stage): stage is DesignStep =>
+  (designSteps as readonly string[]).includes(stage);
 // The stage, the selected change and the development view live in the URL, so a
 // reload keeps the reader where they were and a link points at what they meant.
 function readLocation() {
@@ -448,6 +453,12 @@ export function PreparationPanel() {
   const referencesCurrent = a?.status === 'approved' && refs?.architectureDigest === a.digest;
   const conceptCurrent = refs?.status === 'approved' && con?.referencesDigest === refs.digest;
   const designCurrent = con?.status === 'approved' && d?.conceptDigest === con.digest;
+  // How far the design stage has got: used by the stepper and the sub-nav.
+  const designApproved = [
+    referencesCurrent && refs?.status === 'approved',
+    conceptCurrent && con?.status === 'approved',
+    designCurrent && d?.status === 'approved',
+  ].filter(Boolean).length;
   const stageCurrent = {
     product: true,
     architecture: architectureCurrent,
@@ -579,61 +590,61 @@ export function PreparationPanel() {
             </Alert>
           )}
           <ol
-            className="mb-8 grid list-none grid-cols-1 gap-3 p-0 sm:grid-cols-2 lg:grid-cols-3"
+            className="mb-8 grid list-none grid-cols-1 gap-3 p-0 sm:grid-cols-2 lg:grid-cols-4"
             aria-label="Этапы изменения"
           >
-            {stages.map((step, i) => (
-              <li key={step}>
-                <Button
-                  variant="outline"
-                  aria-current={tab === step ? 'step' : undefined}
-                  className={cn(
-                    'grid h-full w-full justify-items-start gap-1 p-4 text-left whitespace-normal',
-                    tab === step && 'border-primary bg-accent',
-                  )}
-                  onClick={() => {
-                    setTab(step);
-                    setComment('');
-                  }}
-                >
-                  <span className="text-primary text-lg">{i + 1}</span>
-                  <strong>{stageNames[i]}</strong>
-                  <small className="text-muted-foreground">
-                    {step === 'product'
-                      ? p
-                        ? names[p.status]
-                        : 'Нужна постановка'
-                      : step === 'architecture'
-                        ? p?.status !== 'approved'
-                          ? 'После согласования продукта'
-                          : architectureCurrent && a
-                            ? names[a.status]
-                            : 'Нужна актуальная архитектура'
-                        : step === 'references'
-                          ? a?.status !== 'approved'
-                            ? 'После согласования архитектуры'
-                            : referencesCurrent && refs
-                              ? names[refs.status]
-                              : 'Нужны актуальные референсы'
-                          : step === 'concept'
-                            ? refs?.status !== 'approved'
-                              ? 'После согласования референсов'
-                              : conceptCurrent && con
-                                ? names[con.status]
-                                : 'Нужен актуальный концепт'
-                            : step === 'design'
-                              ? con?.status !== 'approved'
-                                ? 'После согласования концепта'
-                                : designCurrent && d
-                                  ? names[d.status]
-                                  : 'Нужна актуальная дизайн-система'
-                              : view.developmentReady
-                                ? 'Разрешена'
-                                : 'Ожидает согласований'}
-                  </small>
-                </Button>
-              </li>
-            ))}
+            {topStages.map((step, i) => {
+              const active = step === 'design' ? isDesignStep(tab) : tab === step;
+              return (
+                <li key={step}>
+                  <Button
+                    variant="outline"
+                    aria-current={active ? 'step' : undefined}
+                    className={cn(
+                      'grid h-full w-full justify-items-start gap-1 p-4 text-left whitespace-normal',
+                      active && 'border-primary bg-accent',
+                    )}
+                    onClick={() => {
+                      // Entering design lands on the first step still open.
+                      setTab(
+                        step === 'design'
+                          ? !referencesCurrent || refs?.status !== 'approved'
+                            ? 'references'
+                            : !conceptCurrent || con?.status !== 'approved'
+                              ? 'concept'
+                              : 'design'
+                          : step,
+                      );
+                      setComment('');
+                    }}
+                  >
+                    <span className="text-primary text-lg">{i + 1}</span>
+                    <strong>{topStageNames[i]}</strong>
+                    <small className="text-muted-foreground">
+                      {step === 'product'
+                        ? p
+                          ? names[p.status]
+                          : 'Нужна постановка'
+                        : step === 'architecture'
+                          ? p?.status !== 'approved'
+                            ? 'После согласования продукта'
+                            : architectureCurrent && a
+                              ? names[a.status]
+                              : 'Нужна актуальная архитектура'
+                          : step === 'design'
+                            ? a?.status !== 'approved'
+                              ? 'После согласования архитектуры'
+                              : designApproved === 3
+                                ? 'Утверждено'
+                                : 'Шаг ' + (designApproved + 1) + ' из 3'
+                            : view.developmentReady
+                              ? 'Разрешена'
+                              : 'Ожидает согласований'}
+                    </small>
+                  </Button>
+                </li>
+              );
+            })}
           </ol>
           {c ? (
             <>
@@ -696,6 +707,40 @@ export function PreparationPanel() {
                 </Section>
               ) : (
                 <>
+                  {isDesignStep(tab) && (
+                    <nav
+                      aria-label="Шаги дизайна"
+                      className="mb-4 flex flex-wrap gap-2 border-b pb-4"
+                    >
+                      {designSteps.map((step, i) => {
+                        const revision = { references: refs, concept: con, design: d }[step];
+                        const reached = designApproved >= i;
+                        return (
+                          <Button
+                            key={step}
+                            variant="outline"
+                            size="sm"
+                            aria-current={tab === step ? 'step' : undefined}
+                            className={cn(
+                              'h-auto gap-2 py-2',
+                              tab === step && 'border-primary bg-accent',
+                              !reached && 'opacity-60',
+                            )}
+                            onClick={() => {
+                              setTab(step);
+                              setComment('');
+                            }}
+                          >
+                            <span className="text-primary">{i + 1}</span>
+                            <span>{designStepNames[step]}</span>
+                            <Badge variant={revision ? tone[revision.status] : 'secondary'}>
+                              {revision ? names[revision.status] : 'Не начат'}
+                            </Badge>
+                          </Button>
+                        );
+                      })}
+                    </nav>
+                  )}
                   {current && (
                     <div className="flex flex-wrap items-center gap-3 border-b pb-4">
                       <strong>Версия {current.number}</strong>
