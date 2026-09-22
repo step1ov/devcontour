@@ -154,6 +154,23 @@ test('The operator edits a section in the panel and the change reaches state and
       page.getByRole('heading', { name: 'Утвердить продуктовую постановку' }),
     ).toBeVisible();
 
+    // A new feature is created from the panel and lands in the saved revision.
+    await page.getByRole('button', { name: 'Добавить фичу' }).click();
+    const form = page.locator('#section-features form');
+    await form.getByLabel('Название').fill('Уведомления');
+    await form.getByLabel('Результат для пользователя').fill('Пользователь получает напоминание.');
+    await form.getByRole('checkbox').first().check();
+    await form.getByLabel('Текст сценария 1').fill('Пользователь включает напоминания.');
+    await form.getByLabel('Текст критерия 1').fill('Напоминание приходит в заданное время.');
+    await form.getByRole('button', { name: 'Сохранить как новую версию' }).click();
+    await expect(page.getByRole('heading', { name: 'Уведомления' })).toBeVisible();
+    const withFeature = await (await request.get(app.url + '/api/preparation')).json();
+    expect(
+      withFeature.current.product.content.features.some(
+        (f: { id: string }) => f.id === 'uvedomleniya',
+      ),
+    ).toBe(true);
+
     // Questions and decisions sit at the bottom and start folded when empty.
     const questions = page.getByRole('button', { name: /Открытые вопросы \(0\)/ });
     await expect(questions).toHaveAttribute('aria-expanded', 'false');

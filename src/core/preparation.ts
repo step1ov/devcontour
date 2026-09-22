@@ -61,7 +61,7 @@ const latin: Record<string, string> = {
   ю: 'yu',
   я: 'ya',
 };
-export function slugify(title: string) {
+export function slugify(title: string, fallback = 'change') {
   const text = [...title.toLowerCase()]
     .map((c) => latin[c] ?? c)
     .join('')
@@ -69,7 +69,7 @@ export function slugify(title: string) {
     .replace(/^-+|-+$/g, '')
     .slice(0, 49)
     .replace(/-+$/g, '');
-  return /^[a-z0-9]/.test(text) ? text : 'change';
+  return /^[a-z0-9]/.test(text) ? text : fallback;
 }
 const changeKeyOf = (number: number, slug: string) =>
   'r-' + String(number).padStart(3, '0') + '.' + slug;

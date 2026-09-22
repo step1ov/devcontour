@@ -10,6 +10,7 @@ import {
   User,
 } from 'lucide-react';
 import type { ProductBrief, ProductFeature } from '../core/preparation-model.ts';
+import { slugify } from '../core/preparation.ts';
 import { Badge } from '@/ui/badge.tsx';
 import { Button } from '@/ui/button.tsx';
 import { Card, CardContent, CardHeader, CardTitle } from '@/ui/card.tsx';
@@ -51,14 +52,6 @@ const sections = [
 function jump(id: string) {
   document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
-const slug = (value: string, fallback: string) => {
-  const text = value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 48);
-  return /^[a-z0-9]/.test(text) ? text : fallback;
-};
 
 function Section({
   id,
@@ -258,10 +251,70 @@ export function ProductBriefView({
     setEditing(key);
   };
   const close = () => setEditing(null);
-  const submit = (reason: string) => (e: React.FormEvent) => {
+  // Identifiers are derived when the version is saved. Deriving them while the
+  // operator types would rename the item the open form is bound to.
+  const normalise = (next: ProductBrief, addedId?: string) => {
+    const unique = (id: string, taken: string[], fallback: string) => {
+      let value = id || fallback;
+      for (let n = 2; taken.includes(value); n++) value = (id || fallback) + '-' + n;
+      return value;
+    };
+    const personas: string[] = [];
+    next.personas = next.personas.map((persona, i) => {
+      const id = unique(persona.id || slugify(persona.name, ''), personas, 'persona-' + (i + 1));
+      personas.push(id);
+      return { ...persona, id };
+    });
+    const channels: string[] = [];
+    next.channels = next.channels.map((channel, i) => {
+      const id = unique(channel.id || slugify(channel.title, ''), channels, 'channel-' + (i + 1));
+      channels.push(id);
+      return { ...channel, id };
+    });
+    const releases: string[] = [];
+    next.releases = next.releases.map((release, i) => {
+      const id = unique(release.id || slugify(release.title, ''), releases, 'release-' + (i + 1));
+      releases.push(id);
+      return { ...release, id };
+    });
+    if (addedId) {
+      const at = next.features.findIndex((f) => f.id === addedId);
+      if (at >= 0) {
+        const taken = next.features.filter((_, i) => i !== at).map((f) => f.id);
+        next.features[at] = {
+          ...next.features[at],
+          id: unique(slugify(next.features[at].title, ''), taken, addedId),
+        };
+      }
+    }
+    return next;
+  };
+  const submit = (reason: string, addedId?: string) => (e: React.FormEvent) => {
     e.preventDefault();
-    onSave(draft, reason);
+    onSave(normalise(structuredClone(draft), addedId), reason);
     setEditing(null);
+  };
+  // A feature being added exists only in the draft until it is saved.
+  const editingFeature = editing?.startsWith('feature:') ? editing.slice('feature:'.length) : null;
+  const added =
+    editingFeature && !content.features.some((f) => f.id === editingFeature)
+      ? draft.features.find((f) => f.id === editingFeature)
+      : undefined;
+  const addFeature = () => {
+    const next = structuredClone(content);
+    let id = 'feature-' + (next.features.length + 1);
+    for (let n = next.features.length + 1; next.features.some((f) => f.id === id); n++)
+      id = 'feature-' + n;
+    next.features.push({
+      id,
+      title: '',
+      outcome: '',
+      channels: [],
+      scenarios: [{ text: '' }],
+      acceptance: [{ releaseId: next.releases[0]?.id ?? '', text: '' }],
+    });
+    setDraft(next);
+    setEditing('feature:' + id);
   };
   const who = (id?: string) => (id ? (content.personas.find((x) => x.id === id)?.name ?? id) : '');
   const when = (id: string) => content.releases.find((x) => x.id === id)?.version ?? id;
@@ -336,7 +389,6 @@ export function ProductBriefView({
                           next[i] = {
                             ...persona,
                             name: e.target.value,
-                            id: persona.id || slug(e.target.value, 'persona-' + (i + 1)),
                           };
                           setDraft({ ...draft, personas: next });
                         }}
@@ -407,7 +459,7 @@ export function ProductBriefView({
                     personas: [
                       ...draft.personas,
                       {
-                        id: 'persona-' + (draft.personas.length + 1),
+                        id: '',
                         name: '',
                         role: '',
                         goals: [],
@@ -483,7 +535,6 @@ export function ProductBriefView({
                         next[i] = {
                           ...channel,
                           title: e.target.value,
-                          id: channel.id || slug(e.target.value, 'channel-' + (i + 1)),
                         };
                         setDraft({ ...draft, channels: next });
                       }}
@@ -503,7 +554,7 @@ export function ProductBriefView({
                     />
                   </div>
                   <p className="text-muted-foreground text-xs">
-                    ID: <code className="font-mono">{channel.id}</code>
+                    ID: <code className="font-mono">{channel.id || 'назначим при сохранении'}</code>
                   </p>
                 </CardContent>
               </Card>
@@ -516,10 +567,7 @@ export function ProductBriefView({
                 onClick={() =>
                   setDraft({
                     ...draft,
-                    channels: [
-                      ...draft.channels,
-                      { id: 'channel-' + (draft.channels.length + 1), title: '', purpose: '' },
-                    ],
+                    channels: [...draft.channels, { id: '', title: '', purpose: '' }],
                   })
                 }
               >
@@ -593,7 +641,6 @@ export function ProductBriefView({
                           next[i] = {
                             ...release,
                             title: e.target.value,
-                            id: release.id || slug(e.target.value, 'release-' + (i + 1)),
                           };
                           setDraft({ ...draft, releases: next });
                         }}
@@ -614,7 +661,7 @@ export function ProductBriefView({
                     />
                   </div>
                   <p className="text-muted-foreground text-xs">
-                    ID: <code className="font-mono">{release.id}</code>
+                    ID: <code className="font-mono">{release.id || 'назначим при сохранении'}</code>
                   </p>
                 </CardContent>
               </Card>
@@ -630,7 +677,7 @@ export function ProductBriefView({
                     releases: [
                       ...draft.releases,
                       {
-                        id: 'release-' + (draft.releases.length + 1),
+                        id: '',
                         version: '',
                         title: '',
                         goal: '',
@@ -706,10 +753,42 @@ export function ProductBriefView({
                 draft={draft}
                 setDraft={setDraft}
                 onSubmit={submit('Изменена фича «' + feature.title + '»')}
+                onDelete={() => {
+                  const next = structuredClone(content);
+                  next.features = next.features.filter((f) => f.id !== feature.id);
+                  onSave(next, 'Удалена фича «' + feature.title + '»');
+                  setEditing(null);
+                }}
               />
             </li>
           ))}
+          {added && (
+            <li>
+              <FeatureCard
+                feature={added}
+                content={content}
+                editing
+                adding
+                busy={busy}
+                who={who}
+                when={when}
+                onEdit={() => undefined}
+                onCancel={close}
+                draft={draft}
+                setDraft={setDraft}
+                onSubmit={submit('Добавлена фича «' + added.title + '»', added.id)}
+              />
+            </li>
+          )}
         </ul>
+        {!added && (
+          <div className="mt-4">
+            <Button variant="outline" size="sm" onClick={addFeature}>
+              <Plus aria-hidden="true" />
+              Добавить фичу
+            </Button>
+          </div>
+        )}
       </Section>
 
       {(['exclusions', 'references'] as const).map((key) => (
@@ -756,6 +835,8 @@ function FeatureCard({
   content,
   state,
   editing,
+  adding,
+  onDelete,
   busy,
   who,
   when,
@@ -769,6 +850,8 @@ function FeatureCard({
   content: ProductBrief;
   state?: Readiness;
   editing: boolean;
+  adding?: boolean;
+  onDelete?: () => void;
   busy: boolean;
   who: (id?: string) => string;
   when: (id: string) => string;
@@ -942,7 +1025,22 @@ function FeatureCard({
                 </Button>
               </div>
             </div>
-            <EditActions onCancel={onCancel} busy={busy} />
+            <div className="flex flex-wrap items-center gap-3">
+              <EditActions onCancel={onCancel} busy={busy} />
+              {onDelete && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="mt-4"
+                  disabled={busy}
+                  onClick={onDelete}
+                >
+                  <Trash2 aria-hidden="true" />
+                  Удалить фичу
+                </Button>
+              )}
+            </div>
           </form>
         </CardContent>
       </Card>
