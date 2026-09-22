@@ -198,7 +198,7 @@ export function renderArchitecture(change: ProductChange) {
   return rows.join('\n');
 }
 export function renderDesign(change: ProductChange) {
-  const design = change.design.at(-1);
+  const design = (change.design ?? []).at(-1);
   const rows = header(change, 'направление дизайна');
   if (!design) {
     rows.push('Направление дизайна прорабатывается после утверждения архитектуры.', '');
@@ -309,7 +309,7 @@ export function renderChangeJournal(change: ProductChange) {
     '## История версий',
     '',
     ...(['product', 'architecture', 'design'] as const).flatMap((stage) =>
-      change[stage].map(
+      (change[stage] ?? []).map(
         (r) =>
           `- ${stage === 'product' ? 'Продукт' : stage === 'architecture' ? 'Архитектура' : 'Дизайн'} v${r.number} · ${names[r.status]} · ${r.createdAt} · ${line(r.reason)}`,
       ),
@@ -328,12 +328,12 @@ export function renderIndex(changes: ProductChange[]) {
     '',
     'Каждая папка — одно изменение. `brief.md` пишет человек, остальное проецируется.',
     '',
-    '| Ключ | Изменение | Продукт | Архитектура | Создано |',
-    '| --- | --- | --- | --- | --- |',
+    '| Ключ | Изменение | Продукт | Архитектура | Дизайн | Создано |',
+    '| --- | --- | --- | --- | --- | --- |',
     ...changes.map((c) => {
-      const product = c.product.at(-1),
-        architecture = c.architecture.at(-1);
-      return `| [\`${c.key}\`](./${c.key}/) | ${line(c.title)} | ${product ? 'v' + product.number + ' · ' + names[product.status] : '—'} | ${architecture ? 'v' + architecture.number + ' · ' + names[architecture.status] : '—'} | ${c.createdAt.slice(0, 10)} |`;
+      const state = (r?: { number: number; status: keyof typeof names }) =>
+        r ? 'v' + r.number + ' · ' + names[r.status] : '—';
+      return `| [\`${c.key}\`](./${c.key}/) | ${line(c.title)} | ${state(c.product.at(-1))} | ${state(c.architecture.at(-1))} | ${state((c.design ?? []).at(-1))} | ${c.createdAt.slice(0, 10)} |`;
     }),
     '',
   ].join('\n');

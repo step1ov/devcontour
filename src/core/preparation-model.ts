@@ -217,7 +217,8 @@ export const productChange = z.strictObject({
     .max(100),
   design: z
     .array(z.strictObject({ ...revision, architectureDigest: hash, content: designBrief }))
-    .max(100),
+    .max(100)
+    .default([]),
   activity: z.array(preparationActivity).max(200).default([]),
   questions: z.array(preparationQuestion).max(60).default([]),
   decisions: z.array(preparationRecord).max(100).default([]),

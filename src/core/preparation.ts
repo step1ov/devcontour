@@ -80,6 +80,7 @@ function journal(c: ProductChange) {
   c.activity ??= [];
   c.questions ??= [];
   c.decisions ??= [];
+  c.design ??= [];
   return c;
 }
 function change(s: DevContourState, id?: string) {
@@ -362,6 +363,7 @@ export function validatePreparation(s: DevContourState, previous?: DevContourSta
     throw new DomainError('Некорректный реестр продуктовых изменений');
   for (const c of p.changes) {
     validateJournal(c);
+    c.design ??= [];
     for (const stage of ['product', 'architecture', 'design'] as const)
       for (const [index, r] of c[stage].entries()) {
         const expected = hash({
@@ -385,7 +387,7 @@ export function validatePreparation(s: DevContourState, previous?: DevContourSta
             const source = c.product.find((v) => v.status === 'approved');
             validateDesign(
               r.content as DesignBrief,
-              source ? (source.content as ProductBrief).channels.map((x) => x.id) : [],
+              source ? source.content.channels.map((x) => x.id) : [],
             );
           }
         }
@@ -426,8 +428,8 @@ export function validatePreparation(s: DevContourState, previous?: DevContourSta
         throw new DomainError('История вопросов и ответов неизменяема');
     }
     for (const stage of ['product', 'architecture', 'design'] as const)
-      for (const before of old[stage]) {
-        const after = next[stage].find((r) => r.number === before.number);
+      for (const before of old[stage] ?? []) {
+        const after = (next[stage] ?? []).find((r) => r.number === before.number);
         if (
           !after ||
           before.digest !== after.digest ||
@@ -462,7 +464,7 @@ export class Preparation {
       r && (withContent ? r : { ...r, content: undefined });
     const product = c?.product.at(-1),
       architecture = c?.architecture.at(-1),
-      design = c?.design.at(-1);
+      design = c?.design?.at(-1);
     let ready = false,
       blocker = 'Создайте изменение и поручите агенту проработать продуктовую часть';
     if (c)
@@ -555,7 +557,7 @@ export class Preparation {
                 })
               : [],
             history: (['product', 'architecture', 'design'] as const).flatMap((stage) =>
-              c[stage].map(({ number, status, createdAt, reason, decision, digest }) => ({
+              (c[stage] ?? []).map(({ number, status, createdAt, reason, decision, digest }) => ({
                 stage,
                 number,
                 status,
