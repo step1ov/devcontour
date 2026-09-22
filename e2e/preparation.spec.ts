@@ -171,6 +171,17 @@ test('The operator edits a section in the panel and the change reaches state and
       ),
     ).toBe(true);
 
+    // The stage lives in the URL, so a reload keeps the reader in place.
+    await page.getByRole('button', { name: /2 Архитектура и стек/ }).click();
+    await expect(page).toHaveURL(/stage=architecture/);
+    await page.reload();
+    await expect(
+      page.getByText('Архитектура будет прорабатываться после вашего утверждения'),
+    ).toBeVisible();
+    await page.goBack();
+    await expect(page).not.toHaveURL(/stage=/);
+    await page.getByRole('button', { name: /1 Продукт/ }).click();
+
     // Questions and decisions sit at the bottom and start folded when empty.
     const questions = page.getByRole('button', { name: /Открытые вопросы \(0\)/ });
     await expect(questions).toHaveAttribute('aria-expanded', 'false');

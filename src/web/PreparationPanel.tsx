@@ -34,6 +34,28 @@ type View = ReturnType<Preparation['status']> & {
   workspace?: { mode: 'embedded' | 'separate'; path: string };
 };
 type Stage = 'product' | 'architecture' | 'development';
+const stages: Stage[] = ['product', 'architecture', 'development'];
+// The stage, the selected change and the development view live in the URL, so a
+// reload keeps the reader where they were and a link points at what they meant.
+function readLocation() {
+  const params = new URLSearchParams(window.location.search);
+  const stage = params.get('stage');
+  return {
+    change: params.get('change') ?? '',
+    tab: (stages.includes(stage as Stage) ? stage : 'product') as Stage,
+    boards: params.get('view') === 'boards',
+  };
+}
+function writeLocation(state: { change: string; tab: Stage; boards: boolean }) {
+  const params = new URLSearchParams();
+  if (state.change) params.set('change', state.change);
+  if (state.tab !== 'product') params.set('stage', state.tab);
+  if (state.boards) params.set('view', 'boards');
+  const search = params.toString();
+  const next = window.location.pathname + (search ? '?' + search : '');
+  if (next !== window.location.pathname + window.location.search)
+    window.history.pushState(null, '', next);
+}
 type ReleaseReadiness = Readiness & { features: number; criteria: number };
 const names = {
   draft: 'Агент прорабатывает',
@@ -389,14 +411,27 @@ function Architecture({ content: a }: { content: ArchitectureBrief }) {
 }
 export function PreparationPanel() {
   const [view, setView] = useState<View>();
-  const [selected, setSelected] = useState('');
-  const [tab, setTab] = useState<Stage>('product');
+  const [selected, setSelected] = useState(() => readLocation().change);
+  const [tab, setTab] = useState<Stage>(() => readLocation().tab);
   const [error, setError] = useState('');
   const [comment, setComment] = useState('');
   const [title, setTitle] = useState('');
   const [busy, setBusy] = useState(false);
-  const [tasks, showTasks] = useState(false);
+  const [tasks, showTasks] = useState(() => readLocation().boards);
   const [historyOpen, setHistoryOpen] = useState(false);
+  useEffect(() => {
+    writeLocation({ change: selected, tab, boards: tasks });
+  }, [selected, tab, tasks]);
+  useEffect(() => {
+    const restore = () => {
+      const state = readLocation();
+      setSelected(state.change);
+      setTab(state.tab);
+      showTasks(state.boards);
+    };
+    window.addEventListener('popstate', restore);
+    return () => window.removeEventListener('popstate', restore);
+  }, []);
   const reload = useCallback(async () => {
     setView(
       await request<View>(
