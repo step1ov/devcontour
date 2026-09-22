@@ -27,6 +27,21 @@ export function approvePreparation(p: Preparation) {
   approveStage(p, changeId, 'architecture');
   return changeId;
 }
+// Some tests need the architecture stage open without approving architecture.
+export function approveProductOnly(p: Preparation) {
+  p.execute('preparation_create', { title: 'Модерация чата' });
+  const status = p.status();
+  if (!status.enabled) throw new Error('Missing preparation');
+  const changeId = status.activeChangeId!;
+  p.execute('preparation_product', {
+    changeId,
+    expectedDigest: null,
+    reason: 'Первичная постановка',
+    content: product,
+  });
+  approveStage(p, changeId, 'product');
+  return changeId;
+}
 export function approveStage(p: Preparation, changeId: string, stage: 'product' | 'architecture') {
   const view = p.status(changeId);
   if (!view.enabled) throw new Error('Missing preparation');

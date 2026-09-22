@@ -23,12 +23,14 @@ const elementTone = {
   system: 'border-primary bg-accent',
   'external-system': 'border-(--text-secondary) bg-secondary',
   container: 'border-primary bg-card',
+  component: 'border-primary bg-card',
 };
 const kinds = {
   person: 'Пользователь',
   system: 'Система',
   'external-system': 'Внешняя система',
   container: 'Приложение / хранилище',
+  component: 'Компонент',
 };
 type ElementData = C4Diagram['nodes'][number] & Record<string, unknown>;
 function Element({ data }: NodeProps<Node<ElementData>>) {
@@ -74,15 +76,17 @@ export default function C4Panel({
   systemName,
 }: {
   diagram: C4Diagram;
-  level: 1 | 2;
+  level: 1 | 2 | 3;
   systemName: string;
 }) {
   const nodes = useMemo(() => {
     const result: Node[] = [];
     const people = diagram.nodes.filter((n) => n.kind === 'person');
-    const internal = diagram.nodes.filter((n) => n.kind === (level === 1 ? 'system' : 'container'));
+    const internal = diagram.nodes.filter(
+      (n) => n.kind === (level === 1 ? 'system' : level === 2 ? 'container' : 'component'),
+    );
     const external = diagram.nodes.filter((n) => n.kind === 'external-system');
-    if (level === 2)
+    if (level !== 1)
       result.push({
         id: 'boundary-' + diagram.systemId,
         type: 'group',
@@ -100,14 +104,14 @@ export default function C4Panel({
           data: { ...n },
           position: {
             x:
-              level === 2 && column === 1
+              level !== 1 && column === 1
                 ? 30 + (index % 2) * 440
-                : level === 2 && column === 2
+                : level !== 1 && column === 2
                   ? 1420
                   : column * 490,
-            y: (level === 2 && column === 1 ? Math.floor(index / 2) : index) * 240 + 65,
+            y: (level !== 1 && column === 1 ? Math.floor(index / 2) : index) * 240 + 65,
           },
-          ...(level === 2 && column === 1
+          ...(level !== 1 && column === 1
             ? { parentId: 'boundary-' + diagram.systemId, extent: 'parent' as const }
             : {}),
           draggable: false,
@@ -130,11 +134,22 @@ export default function C4Panel({
   return (
     <figure className="c4-figure my-8">
       <figcaption className="text-md mb-3 font-semibold">
-        C{level} · {level === 1 ? 'Контекст системы' : 'Приложения, сервисы и хранилища'}
+        C{level} ·{' '}
+        {level === 1
+          ? 'Контекст системы'
+          : level === 2
+            ? 'Приложения, сервисы и хранилища'
+            : 'Компоненты внутри контейнера'}
         {level === 2 && (
           <small className="text-muted-foreground block text-sm font-normal">
             Граница системы: {systemName}. Container в C4 — приложение или хранилище, не обязательно
             Docker.
+          </small>
+        )}
+        {level === 3 && (
+          <small className="text-muted-foreground block text-sm font-normal">
+            Граница контейнера: {systemName}. Уровень показан только там, где внутреннее устройство
+            несёт риск.
           </small>
         )}
       </figcaption>

@@ -275,6 +275,34 @@ function validateArchitecture(a: ArchitectureBrief) {
     if (!other || other.kind !== n.kind || other.name !== n.name)
       throw new DomainError('Пользователи и внешние системы C2 должны соответствовать C1');
   }
+  const containers = new Set(a.c2.nodes.filter((n) => n.kind === 'container').map((n) => n.id));
+  const drawn = new Set<string>();
+  for (const c3 of a.c3) {
+    if (!containers.has(c3.containerId))
+      throw new DomainError('C3 описывает контейнер вне C2: ' + c3.containerId);
+    if (drawn.has(c3.containerId))
+      throw new DomainError('Для контейнера уже есть C3: ' + c3.containerId);
+    drawn.add(c3.containerId);
+    const ids = c3.nodes.map((n) => n.id);
+    if (new Set(ids).size !== ids.length) throw new DomainError('Повтор ID на C3');
+    if (
+      c3.relationships.some((r) => !ids.includes(r.from) || !ids.includes(r.to) || r.from === r.to)
+    )
+      throw new DomainError('Некорректная связь на C3');
+    if (c3.nodes.some((n) => !c3.relationships.some((r) => r.from === n.id || r.to === n.id)))
+      throw new DomainError('У каждого элемента C3 должна быть связь');
+    if (!c3.nodes.some((n) => n.kind === 'component'))
+      throw new DomainError('C3 должен содержать компоненты контейнера: ' + c3.containerId);
+    if (c3.nodes.some((n) => n.kind === 'component' && !n.technology))
+      throw new DomainError('У компонента C3 должна быть указана технология');
+    // Everything that is not a component of this container must already exist
+    // on C2, so the levels cannot drift apart.
+    for (const n of c3.nodes.filter((n) => n.kind !== 'component')) {
+      const other = a.c2.nodes.find((other) => other.id === n.id);
+      if (!other || other.kind !== n.kind || other.name !== n.name)
+        throw new DomainError('Соседи на C3 должны совпадать с C2: ' + n.id);
+    }
+  }
 }
 export function validatePreparation(s: DevContourState, previous?: DevContourState) {
   if (!s.preparation) {

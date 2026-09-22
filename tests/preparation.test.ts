@@ -19,7 +19,13 @@ import { Preparation, developmentBinding } from '../src/core/preparation.ts';
 import { PreparationAgent } from '../src/application/preparation-agent.ts';
 import { startWorkspace, preparationStore, requirePreparation } from '../src/runner/start.ts';
 import { fixture, input, config } from './helpers.ts';
-import { architecture, product, approvePreparation, approveStage } from './preparation-fixture.ts';
+import {
+  architecture,
+  product,
+  approvePreparation,
+  approveStage,
+  approveProductOnly,
+} from './preparation-fixture.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { specDigest } from '../src/core/service.ts';
 
@@ -649,5 +655,87 @@ test('Each change owns a folder in docs/changes, keyed and indexed', () => {
   } finally {
     store.close();
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('C3 is optional, scoped to a real container and consistent with C2', () => {
+  const f = fixture(),
+    p = new Preparation(f.store);
+  try {
+    const id = approveProductOnly(p);
+    const container = architecture.c2!.nodes.find((n) => n.kind === 'container')!;
+    const component = {
+      id: 'load-engine',
+      name: 'Модуль расчёта',
+      kind: 'component' as const,
+      description: 'Считает достижимые веса без зависимостей от UI и хранилища.',
+      technology: 'TypeScript',
+    };
+    const save = (c3: unknown, expected: string | null) =>
+      p.execute('preparation_architecture', {
+        changeId: id,
+        expectedDigest: expected,
+        reason: 'Проверка правил C3',
+        content: { ...architecture, c3 },
+      });
+    const submit = () => {
+      const digest = f.store.read().preparation!.changes[0].architecture.at(-1)!.digest;
+      p.execute('preparation_submit', {
+        changeId: id,
+        stage: 'architecture',
+        expectedDigest: digest,
+      });
+      return digest;
+    };
+
+    // Omitting C3 entirely stays valid: the level is optional.
+    save([], null);
+    let digest = submit();
+
+    // A diagram must name a container that exists on C2.
+    save(
+      [
+        {
+          containerId: 'ghost-container',
+          nodes: [component, { ...container }],
+          relationships: [{ from: component.id, to: container.id, description: 'Использует' }],
+        },
+      ],
+      digest,
+    );
+    assert.throws(submit, /контейнер вне C2/);
+    digest = f.store.read().preparation!.changes[0].architecture.at(-1)!.digest;
+
+    // A neighbour drawn on C3 must be the same element as on C2.
+    save(
+      [
+        {
+          containerId: container.id,
+          nodes: [component, { ...container, name: 'Переименованный' }],
+          relationships: [{ from: component.id, to: container.id, description: 'Использует' }],
+        },
+      ],
+      digest,
+    );
+    assert.throws(submit, /должны совпадать с C2/);
+    digest = f.store.read().preparation!.changes[0].architecture.at(-1)!.digest;
+
+    // A consistent diagram passes and reaches the operator.
+    save(
+      [
+        {
+          containerId: container.id,
+          nodes: [component, { ...container }],
+          relationships: [{ from: component.id, to: container.id, description: 'Использует' }],
+        },
+      ],
+      digest,
+    );
+    submit();
+    const saved = f.store.read().preparation!.changes[0].architecture.at(-1)!;
+    assert.equal(saved.status, 'in-review');
+    assert.equal(saved.content.c3.length, 1);
+  } finally {
+    f.cleanup();
   }
 });

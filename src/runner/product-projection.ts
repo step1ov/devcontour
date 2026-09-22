@@ -165,13 +165,23 @@ export function renderArchitecture(change: ProductChange) {
     content.testStrategy,
     '',
   );
-  for (const [level, diagram] of [
-    [1, content.c1],
-    [2, content.c2],
-  ] as const) {
+  const levels: [string, { nodes: unknown; relationships: unknown } | undefined][] = [
+    ['C1 · контекст системы', content.c1],
+    ['C2 · приложения, сервисы и хранилища', content.c2],
+    ...(content.c3 ?? []).map(
+      (c3) =>
+        [
+          'C3 · компоненты контейнера ' +
+            (content.c2?.nodes.find((n) => n.id === c3.containerId)?.name ?? c3.containerId),
+          c3,
+        ] as [string, typeof c3],
+    ),
+  ];
+  for (const [title, value] of levels) {
+    const diagram = value as typeof content.c1;
     if (!diagram) continue;
     rows.push(
-      `## C${level}`,
+      `## ${title}`,
       '',
       ...diagram.nodes.map(
         (n) =>

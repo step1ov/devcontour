@@ -75,7 +75,7 @@ export const c4Diagram = z.strictObject({
       z.strictObject({
         id,
         name: z.string().trim().min(1).max(100),
-        kind: z.enum(['person', 'system', 'external-system', 'container']),
+        kind: z.enum(['person', 'system', 'external-system', 'container', 'component']),
         description: z.string().trim().min(3).max(600),
         technology: z.string().trim().max(150).default(''),
       }),
@@ -93,6 +93,13 @@ export const c4Diagram = z.strictObject({
     )
     .min(1)
     .max(60),
+});
+// C3 is optional and scoped: one diagram per container whose internals carry
+// real risk. Drawing every container at this level produces decoration.
+export const c4Components = z.strictObject({
+  containerId: id,
+  nodes: c4Diagram.shape.nodes,
+  relationships: c4Diagram.shape.relationships,
 });
 export const architectureBrief = z.strictObject({
   summary: text,
@@ -112,6 +119,7 @@ export const architectureBrief = z.strictObject({
   questions: items,
   c1: c4Diagram.optional(),
   c2: c4Diagram.optional(),
+  c3: z.array(c4Components).max(5).default([]),
 });
 const stage = z.enum(['product', 'architecture']);
 const note = z.string().trim().min(3).max(300);
@@ -262,6 +270,7 @@ export type ProductFeature = z.infer<typeof productFeature>;
 export type ProductBrief = z.infer<typeof productBrief>;
 export type ArchitectureBrief = z.infer<typeof architectureBrief>;
 export type C4Diagram = z.infer<typeof c4Diagram>;
+export type C4Components = z.infer<typeof c4Components>;
 export type ProductChange = z.infer<typeof productChange>;
 export type PreparationState = z.infer<typeof preparationState>;
 export type PreparationBinding = z.infer<typeof preparationBinding>;

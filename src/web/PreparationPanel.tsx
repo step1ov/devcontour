@@ -369,6 +369,14 @@ function Architecture({ content: a }: { content: ArchitectureBrief }) {
       <Suspense fallback={<p role="status">Загрузка диаграмм…</p>}>
         {a.c1 && <C4 diagram={a.c1} level={1} systemName={systemName} />}
         {a.c2 && <C4 diagram={a.c2} level={2} systemName={systemName} />}
+        {(a.c3 ?? []).map((c3) => (
+          <C4
+            key={c3.containerId}
+            diagram={{ systemId: c3.containerId, nodes: c3.nodes, relationships: c3.relationships }}
+            level={3}
+            systemName={a.c2?.nodes.find((n) => n.id === c3.containerId)?.name ?? c3.containerId}
+          />
+        ))}
       </Suspense>
       <TextList title="Решения и границы ответственности" items={a.decisions} />
       <TextList title="Риски и компромиссы" items={a.risks} />
