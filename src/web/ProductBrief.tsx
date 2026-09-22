@@ -41,6 +41,7 @@ const readinessTone = {
 const sections = [
   ['problem', 'Проблема'],
   ['outcome', 'Результат'],
+  ['map', 'Карта'],
   ['personas', 'Персоны'],
   ['channels', 'Каналы'],
   ['releases', 'Релизы'],
@@ -325,17 +326,12 @@ export function ProductBriefView({
         aria-label="Разделы постановки"
         className="bg-background sticky top-0 z-10 -mx-1 mb-2 flex gap-1 overflow-x-auto border-b px-1 py-2"
       >
-        <Button variant="ghost" size="sm" onClick={() => jump('section-map')}>
-          Карта
-        </Button>
         {sections.map(([key, label]) => (
           <Button key={key} variant="ghost" size="sm" onClick={() => jump('section-' + key)}>
             {label}
           </Button>
         ))}
       </nav>
-
-      <Matrix content={content} readiness={byFeature} />
 
       {(['problem', 'outcome'] as const).map((key) => (
         <Section
@@ -366,6 +362,8 @@ export function ProductBriefView({
           )}
         </Section>
       ))}
+
+      <Matrix content={content} readiness={byFeature} />
 
       <Section
         id="section-personas"
@@ -768,7 +766,6 @@ export function ProductBriefView({
                 feature={added}
                 content={content}
                 editing
-                adding
                 busy={busy}
                 who={who}
                 when={when}
@@ -835,7 +832,6 @@ function FeatureCard({
   content,
   state,
   editing,
-  adding,
   onDelete,
   busy,
   who,
@@ -850,7 +846,6 @@ function FeatureCard({
   content: ProductBrief;
   state?: Readiness;
   editing: boolean;
-  adding?: boolean;
   onDelete?: () => void;
   busy: boolean;
   who: (id?: string) => string;

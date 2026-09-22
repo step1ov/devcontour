@@ -64,6 +64,7 @@ test('An empty workspace shows live product review, C1/C2 and separate operator 
       page.getByRole('heading', { name: 'Утвердить архитектуру и стек', exact: true }),
     ).toBeVisible();
     await expect(page.locator('.c4-figure')).toHaveCount(2);
+
     await expect(page.locator('.c4-element').filter({ hasText: 'База чата' })).toBeVisible();
     expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
     await page.screenshot({ path: 'test-results/preparation-architecture.png', fullPage: true });
@@ -97,6 +98,30 @@ test('An empty workspace shows live product review, C1/C2 and separate operator 
     expect((await (await request.get(app.url + '/api/preparation')).json()).developmentReady).toBe(
       true,
     );
+
+    // Architecture blocks edit in place, and sub-items are added and removed.
+    await page.getByRole('button', { name: /2 Архитектура и стек/ }).click();
+    const before = (await (await request.get(app.url + '/api/preparation')).json()).current
+      .architecture.number;
+    const stack = page.locator('#section-stack');
+    await stack.getByRole('button', { name: 'Изменить' }).click();
+    await stack.getByRole('button', { name: 'Добавить строку стека' }).click();
+    await stack.getByLabel('Область').last().fill('Очередь задач');
+    await stack.getByLabel('Выбор').last().fill('pg-boss поверх Postgres');
+    await stack
+      .getByLabel('Почему')
+      .last()
+      .fill('Не заводим второе хранилище ради редких публикаций.');
+    await stack.getByLabel('Альтернативы').last().fill('Redis — лишняя зависимость на этом этапе.');
+    await stack.getByRole('button', { name: 'Сохранить как новую версию' }).click();
+    await expect(page.getByText('pg-boss поверх Postgres')).toBeVisible();
+    const withStack = await (await request.get(app.url + '/api/preparation')).json();
+    expect(withStack.current.architecture.number).toBe(before + 1);
+    expect(
+      withStack.current.architecture.content.stack.some(
+        (s: { area: string }) => s.area === 'Очередь задач',
+      ),
+    ).toBe(true);
   } finally {
     await app.close();
     rmSync(root, { recursive: true, force: true });

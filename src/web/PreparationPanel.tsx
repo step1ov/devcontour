@@ -9,13 +9,9 @@ import {
   Send,
 } from 'lucide-react';
 import type { Preparation } from '../core/preparation.ts';
-import type {
-  ProductBrief,
-  ArchitectureBrief,
-  PreparationQuestion,
-  PreparationRecord,
-} from '../core/preparation-model.ts';
-import { ProductBriefView, type Readiness } from './ProductBrief.tsx';
+import type { PreparationQuestion, PreparationRecord } from '../core/preparation-model.ts';
+import { ProductBriefView } from './ProductBrief.tsx';
+import { ArchitectureBriefView } from './ArchitectureBrief.tsx';
 import { Alert, AlertDescription, AlertTitle } from '@/ui/alert.tsx';
 import { Badge } from '@/ui/badge.tsx';
 import { Button } from '@/ui/button.tsx';
@@ -27,7 +23,6 @@ import { Textarea } from '@/ui/textarea.tsx';
 import { cn } from '@/lib/utils.ts';
 
 const Development = lazy(() => import('./App.tsx').then((m) => ({ default: m.App })));
-const C4 = lazy(() => import('./C4Panel.tsx'));
 type View = ReturnType<Preparation['status']> & {
   engineConnected?: boolean;
   startupError?: string;
@@ -56,7 +51,6 @@ function writeLocation(state: { change: string; tab: Stage; boards: boolean }) {
   if (next !== window.location.pathname + window.location.search)
     window.history.pushState(null, '', next);
 }
-type ReleaseReadiness = Readiness & { features: number; criteria: number };
 const names = {
   draft: 'Агент прорабатывает',
   'in-review': 'Ожидает вашего решения',
@@ -146,23 +140,6 @@ function Foldable({
         {children}
       </div>
     </section>
-  );
-}
-function TextList({ title, items }: { title: string; items: string[] }) {
-  return (
-    <Section title={title}>
-      {items.length ? (
-        <ul className="grid gap-2">
-          {items.map((item, i) => (
-            <li key={i} className="max-w-[78ch] break-words whitespace-pre-wrap">
-              {item}
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <p className="text-muted-foreground">Не указано</p>
-      )}
-    </Section>
   );
 }
 
@@ -353,60 +330,6 @@ function Decisions({
         ))}
       </ul>
     </Foldable>
-  );
-}
-function Architecture({ content: a }: { content: ArchitectureBrief }) {
-  const systemName = a.c1?.nodes.find((n) => n.id === a.c1?.systemId)?.name ?? 'Система';
-  return (
-    <>
-      <Section title="Архитектурное решение">
-        <p className="max-w-[78ch] break-words whitespace-pre-wrap">{a.summary}</p>
-      </Section>
-      <Section title="Стек и обоснование">
-        {/* A horizontally scrolling region needs its own tab stop (WCAG 2.1.1). */}
-        <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="Стек и обоснование">
-          <table className="w-full min-w-(--product-table-width) border-collapse">
-            <thead>
-              <tr>
-                {['Область', 'Выбор', 'Почему', 'Альтернативы'].map((h) => (
-                  <th key={h} className="border-b p-3 text-left align-top font-medium">
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {a.stack.map((s, i) => (
-                <tr key={i}>
-                  <td className="border-b p-3 align-top">{s.area}</td>
-                  <td className="border-b p-3 align-top">{s.choice}</td>
-                  <td className="border-b p-3 align-top">{s.rationale}</td>
-                  <td className="border-b p-3 align-top">{s.alternatives}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </Section>
-      <Suspense fallback={<p role="status">Загрузка диаграмм…</p>}>
-        {a.c1 && <C4 diagram={a.c1} level={1} systemName={systemName} />}
-        {a.c2 && <C4 diagram={a.c2} level={2} systemName={systemName} />}
-        {(a.c3 ?? []).map((c3) => (
-          <C4
-            key={c3.containerId}
-            diagram={{ systemId: c3.containerId, nodes: c3.nodes, relationships: c3.relationships }}
-            level={3}
-            systemName={a.c2?.nodes.find((n) => n.id === c3.containerId)?.name ?? c3.containerId}
-          />
-        ))}
-      </Suspense>
-      <TextList title="Решения и границы ответственности" items={a.decisions} />
-      <TextList title="Риски и компромиссы" items={a.risks} />
-      <Section title="Стратегия тестирования">
-        <p className="max-w-[78ch] break-words whitespace-pre-wrap">{a.testStrategy}</p>
-      </Section>
-      {a.questions.length > 0 && <TextList title="Вопросы этой версии" items={a.questions} />}
-    </>
   );
 }
 export function PreparationPanel() {
@@ -788,7 +711,23 @@ export function PreparationPanel() {
                       </Alert>
                     )
                   ) : a ? (
-                    <Architecture content={a.content} />
+                    <ArchitectureBriefView
+                      content={a.content}
+                      busy={busy}
+                      onSave={(next, reason) =>
+                        void run(() =>
+                          request('agent', {
+                            operation: 'preparation_architecture',
+                            input: {
+                              changeId: c.id,
+                              expectedDigest: a.digest,
+                              reason,
+                              content: next,
+                            },
+                          }),
+                        )
+                      }
+                    />
                   ) : (
                     <Alert className="max-w-[78ch] border-dashed">
                       <AlertDescription>
