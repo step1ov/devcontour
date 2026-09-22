@@ -10,19 +10,13 @@ import { Textarea } from '@/ui/textarea.tsx';
 import { EditActions, Lines, Section, SectionNav, useSectionDraft } from './BriefEditing.tsx';
 
 const sections = [
-  ['concept', 'Концепция'],
-  ['references', 'Референсы'],
+  ['palette', 'Палитра'],
+  ['tokens', 'Токены'],
   ['shared', 'Общее'],
   ['channels', 'По каналам'],
-  ['tokens', 'Токены'],
   ['guidelines', 'Guidelines'],
-  ['prototypes', 'Макеты'],
+  ['handoff', 'Пакет передачи'],
 ] as const;
-const statuses = {
-  candidate: { label: 'Кандидат', tone: 'secondary' },
-  accepted: { label: 'Принят', tone: 'success' },
-  rejected: { label: 'Отклонён', tone: 'destructive' },
-} as const;
 
 export function DesignBriefView({
   content,
@@ -42,160 +36,72 @@ export function DesignBriefView({
     close();
   };
   const title = (id: string) => channels.find((c) => c.id === id)?.title ?? id;
-  if (!content.applicable)
-    return (
-      <>
-        <Alert variant="info" className="mb-4">
-          <AlertDescription>
-            Изменению не нужно направление дизайна. Причина: {content.reason}
-          </AlertDescription>
-        </Alert>
-        {editing === 'applicable' ? (
-          <form onSubmit={submit('Направление дизайна снова требуется')}>
-            <Button
-              type="submit"
-              disabled={busy}
-              onClick={() => setDraft({ ...draft, applicable: true })}
-            >
-              Вернуть стадию дизайна
-            </Button>
-          </form>
-        ) : (
-          <Button variant="outline" size="sm" onClick={() => open('applicable')}>
-            Дизайн всё-таки нужен
-          </Button>
-        )}
-      </>
-    );
   return (
     <>
-      <SectionNav label="Разделы дизайна" sections={sections} />
+      <SectionNav label="Разделы дизайн-системы" sections={sections} />
 
       <Section
-        id="section-concept"
-        title="Концепция"
-        editing={editing === 'concept'}
-        onEdit={() => open('concept')}
-      >
-        {editing === 'concept' ? (
-          <form onSubmit={submit('Изменена концепция дизайна')}>
-            <Textarea
-              aria-label="Концепция"
-              rows={8}
-              value={draft.concept}
-              onChange={(e) => setDraft({ ...draft, concept: e.target.value })}
-            />
-            <div className="mt-4 grid gap-2">
-              <Label htmlFor="design-not-needed">Если дизайн не требуется — объясните почему</Label>
-              <Textarea
-                id="design-not-needed"
-                rows={2}
-                value={draft.reason}
-                onChange={(e) => setDraft({ ...draft, reason: e.target.value })}
-              />
-              <div>
-                <Button
-                  type="submit"
-                  variant="outline"
-                  size="sm"
-                  disabled={busy || draft.reason.trim().length < 10}
-                  onClick={() => setDraft({ ...draft, applicable: false })}
-                >
-                  Отметить, что дизайн не нужен
-                </Button>
-              </div>
-            </div>
-            <EditActions onCancel={close} busy={busy} />
-          </form>
-        ) : (
-          <p className="max-w-[78ch] break-words whitespace-pre-wrap">
-            {content.concept || 'Пока не заполнено'}
-          </p>
-        )}
-      </Section>
-
-      <Section
-        id="section-references"
-        title={
-          'Референсы (' +
-          content.references.filter((r) => r.status === 'accepted').length +
-          ' принято из ' +
-          content.references.length +
-          ')'
-        }
-        editing={editing === 'references'}
-        onEdit={() => open('references')}
+        id="section-palette"
+        title={'Палитра (' + content.palette.length + ')'}
+        editing={editing === 'palette'}
+        onEdit={() => open('palette')}
       >
         <p className="text-muted-foreground mb-4 max-w-[78ch]">
-          Храним ссылку и то, что именно отсюда берём. Свойство, а не картинка, делает выбор
-          проверяемым.
+          Примитивы палитры. Компоненты их не используют напрямую — только через семантические
+          токены ниже.
         </p>
-        {editing === 'references' ? (
-          <form onSubmit={submit('Изменены референсы')} className="grid gap-4">
-            {draft.references.map((r, i) => (
-              <Card key={i}>
-                <CardContent className="grid gap-3 p-4">
-                  <div className="grid gap-2">
-                    <Label htmlFor={'ref-url-' + i}>Ссылка</Label>
-                    <Input
-                      id={'ref-url-' + i}
-                      value={r.url}
-                      placeholder="https://"
-                      onChange={(e) => {
-                        const references = [...draft.references];
-                        references[i] = { ...r, url: e.target.value };
-                        setDraft({ ...draft, references });
-                      }}
-                    />
-                  </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor={'ref-take-' + i}>Что берём</Label>
-                    <Textarea
-                      id={'ref-take-' + i}
-                      rows={2}
-                      value={r.takeaway}
-                      onChange={(e) => {
-                        const references = [...draft.references];
-                        references[i] = { ...r, takeaway: e.target.value };
-                        setDraft({ ...draft, references });
-                      }}
-                    />
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    {(['accepted', 'candidate', 'rejected'] as const).map((status) => (
-                      <Button
-                        key={status}
-                        type="button"
-                        variant={r.status === status ? 'default' : 'outline'}
-                        size="sm"
-                        onClick={() => {
-                          const references = [...draft.references];
-                          references[i] = { ...r, status };
-                          setDraft({ ...draft, references });
-                        }}
-                      >
-                        {status === 'accepted' ? <Check aria-hidden="true" /> : null}
-                        {status === 'rejected' ? <X aria-hidden="true" /> : null}
-                        {statuses[status].label}
-                      </Button>
-                    ))}
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      onClick={() =>
-                        setDraft({
-                          ...draft,
-                          references: draft.references.filter((_, at) => at !== i),
-                        })
-                      }
-                    >
-                      <Trash2 aria-hidden="true" />
-                      Удалить
-                    </Button>
-                  </div>
-                </CardContent>
-              </Card>
+        {editing === 'palette' ? (
+          <form onSubmit={submit('Изменена палитра')} className="grid gap-3">
+            {draft.palette.map((color, i) => (
+              <div key={i} className="grid gap-2 sm:grid-cols-[3rem_12rem_9rem_minmax(0,1fr)_auto]">
+                <span
+                  aria-hidden="true"
+                  className="h-10 rounded-sm border"
+                  style={{
+                    background: /^#[0-9a-fA-F]{6}$/.test(color.value) ? color.value : undefined,
+                  }}
+                />
+                <Input
+                  aria-label={'Имя цвета ' + (i + 1)}
+                  value={color.name}
+                  onChange={(e) => {
+                    const palette = [...draft.palette];
+                    palette[i] = { ...color, name: e.target.value };
+                    setDraft({ ...draft, palette });
+                  }}
+                />
+                <Input
+                  aria-label={'Значение цвета ' + (i + 1)}
+                  placeholder="#rrggbb"
+                  value={color.value}
+                  onChange={(e) => {
+                    const palette = [...draft.palette];
+                    palette[i] = { ...color, value: e.target.value };
+                    setDraft({ ...draft, palette });
+                  }}
+                />
+                <Input
+                  aria-label={'Роль цвета ' + (i + 1)}
+                  placeholder="Где используется"
+                  value={color.role}
+                  onChange={(e) => {
+                    const palette = [...draft.palette];
+                    palette[i] = { ...color, role: e.target.value };
+                    setDraft({ ...draft, palette });
+                  }}
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  aria-label={'Удалить цвет ' + (i + 1)}
+                  onClick={() =>
+                    setDraft({ ...draft, palette: draft.palette.filter((_, at) => at !== i) })
+                  }
+                >
+                  <Trash2 aria-hidden="true" />
+                </Button>
+              </div>
             ))}
             <div>
               <Button
@@ -205,41 +111,38 @@ export function DesignBriefView({
                 onClick={() =>
                   setDraft({
                     ...draft,
-                    references: [
-                      ...draft.references,
-                      { url: '', takeaway: '', status: 'candidate' },
-                    ],
+                    // Left blank on purpose: the value is data the operator
+                    // supplies, and a hardcoded default would be a colour
+                    // literal outside tokens.css.
+                    palette: [...draft.palette, { name: '', value: '', role: '' }],
                   })
                 }
               >
                 <Plus aria-hidden="true" />
-                Добавить референс
+                Добавить цвет
               </Button>
             </div>
             <EditActions onCancel={close} busy={busy} />
           </form>
-        ) : content.references.length ? (
-          <ul className="grid gap-3">
-            {content.references.map((r, i) => (
-              <li key={i} className="flex flex-wrap items-start gap-3">
-                <Badge variant={statuses[r.status].tone}>{statuses[r.status].label}</Badge>
-                <span className="max-w-[70ch] break-words">
-                  <a
-                    href={r.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-primary underline-offset-4 hover:underline"
-                  >
-                    {r.url}
-                    <ExternalLink aria-hidden="true" className="ml-1 inline size-3" />
-                  </a>
-                  <span className="block">{r.takeaway}</span>
+        ) : content.palette.length ? (
+          <ul className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {content.palette.map((color) => (
+              <li key={color.name} className="flex items-center gap-3">
+                <span
+                  aria-hidden="true"
+                  className="size-12 shrink-0 rounded-md border"
+                  style={{ background: color.value }}
+                />
+                <span className="min-w-0">
+                  <code className="font-mono text-sm">{color.name}</code>
+                  <span className="text-muted-foreground block text-xs">{color.value}</span>
+                  {color.role && <span className="block text-sm">{color.role}</span>}
                 </span>
               </li>
             ))}
           </ul>
         ) : (
-          <p className="text-muted-foreground">Референсы ещё не собраны.</p>
+          <p className="text-muted-foreground">Палитра не задана.</p>
         )}
       </Section>
 
@@ -504,45 +407,45 @@ export function DesignBriefView({
       </Section>
 
       <Section
-        id="section-prototypes"
-        title={'Макеты (' + content.prototypes.length + ')'}
-        editing={editing === 'prototypes'}
-        onEdit={() => open('prototypes')}
+        id="section-handoff"
+        title={'Пакет передачи (' + content.handoff.length + ')'}
+        editing={editing === 'handoff'}
+        onEdit={() => open('handoff')}
       >
         <p className="text-muted-foreground mb-4 max-w-[78ch]">
-          Ссылки на макеты экранов. Сами экраны остаются контрактами внутри разработки — здесь
-          только направление и то, где макет лежит.
+          Где лежит пакет передачи: экспорт макетов, файл токенов, спецификация. Экраны остаются
+          контрактами внутри разработки — здесь только путь к артефактам.
         </p>
-        {editing === 'prototypes' ? (
+        {editing === 'handoff' ? (
           <form onSubmit={submit('Изменены ссылки на макеты')} className="grid gap-3">
-            {draft.prototypes.map((item, i) => (
+            {draft.handoff.map((item, i) => (
               <div key={i} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto]">
                 <Input
-                  aria-label={'Название макета ' + (i + 1)}
+                  aria-label={'Название артефакта ' + (i + 1)}
                   value={item.title}
                   onChange={(e) => {
-                    const prototypes = [...draft.prototypes];
-                    prototypes[i] = { ...item, title: e.target.value };
-                    setDraft({ ...draft, prototypes });
+                    const handoff = [...draft.handoff];
+                    handoff[i] = { ...item, title: e.target.value };
+                    setDraft({ ...draft, handoff });
                   }}
                 />
                 <Input
-                  aria-label={'Ссылка на макет ' + (i + 1)}
-                  placeholder="https://"
-                  value={item.url}
+                  aria-label={'Путь к артефакту ' + (i + 1)}
+                  placeholder="docs/design/ui/handoff"
+                  value={item.path}
                   onChange={(e) => {
-                    const prototypes = [...draft.prototypes];
-                    prototypes[i] = { ...item, url: e.target.value };
-                    setDraft({ ...draft, prototypes });
+                    const handoff = [...draft.handoff];
+                    handoff[i] = { ...item, path: e.target.value };
+                    setDraft({ ...draft, handoff });
                   }}
                 />
                 <Button
                   type="button"
                   variant="ghost"
                   size="icon"
-                  aria-label={'Удалить макет ' + (i + 1)}
+                  aria-label={'Удалить артефакт ' + (i + 1)}
                   onClick={() =>
-                    setDraft({ ...draft, prototypes: draft.prototypes.filter((_, at) => at !== i) })
+                    setDraft({ ...draft, handoff: draft.handoff.filter((_, at) => at !== i) })
                   }
                 >
                   <Trash2 aria-hidden="true" />
@@ -555,34 +458,29 @@ export function DesignBriefView({
                 variant="outline"
                 size="sm"
                 onClick={() =>
-                  setDraft({ ...draft, prototypes: [...draft.prototypes, { title: '', url: '' }] })
+                  setDraft({ ...draft, handoff: [...draft.handoff, { title: '', path: '' }] })
                 }
               >
                 <Plus aria-hidden="true" />
-                Добавить макет
+                Добавить артефакт
               </Button>
             </div>
             <EditActions onCancel={close} busy={busy} />
           </form>
-        ) : content.prototypes.length ? (
+        ) : content.handoff.length ? (
           <ul className="grid gap-2">
-            {content.prototypes.map((item, i) => (
+            {content.handoff.map((item, i) => (
               <li key={i} className="flex items-center gap-2">
                 <Palette className="text-primary size-4 shrink-0" aria-hidden="true" />
-                <a
-                  href={item.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-primary underline-offset-4 hover:underline"
-                >
-                  {item.title}
-                  <ExternalLink aria-hidden="true" className="ml-1 inline size-3" />
-                </a>
+                <span>{item.title}</span>
+                <code className="text-muted-foreground font-mono text-sm break-all">
+                  {item.path}
+                </code>
               </li>
             ))}
           </ul>
         ) : (
-          <p className="text-muted-foreground">Макетов пока нет.</p>
+          <p className="text-muted-foreground">Пакет передачи ещё не собран.</p>
         )}
       </Section>
     </>

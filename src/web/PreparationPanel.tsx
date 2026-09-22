@@ -13,6 +13,8 @@ import type { PreparationQuestion, PreparationRecord } from '../core/preparation
 import { ProductBriefView } from './ProductBrief.tsx';
 import { ArchitectureBriefView } from './ArchitectureBrief.tsx';
 import { DesignBriefView } from './DesignBrief.tsx';
+import { ReferencesBriefView } from './ReferencesBrief.tsx';
+import { ConceptBriefView } from './ConceptBrief.tsx';
 import { Alert, AlertDescription, AlertTitle } from '@/ui/alert.tsx';
 import { Badge } from '@/ui/badge.tsx';
 import { Button } from '@/ui/button.tsx';
@@ -29,8 +31,30 @@ type View = ReturnType<Preparation['status']> & {
   startupError?: string;
   workspace?: { mode: 'embedded' | 'separate'; path: string };
 };
-type Stage = 'product' | 'architecture' | 'design' | 'development';
-const stages: Stage[] = ['product', 'architecture', 'design', 'development'];
+type Stage = 'product' | 'architecture' | 'references' | 'concept' | 'design' | 'development';
+const stages: Stage[] = [
+  'product',
+  'architecture',
+  'references',
+  'concept',
+  'design',
+  'development',
+];
+const approvalTitles: Record<Exclude<Stage, 'development'>, string> = {
+  product: 'Утвердить продуктовую постановку',
+  architecture: 'Утвердить архитектуру и стек',
+  references: 'Утвердить референсы',
+  concept: 'Утвердить концепт и эскизы',
+  design: 'Утвердить макет и дизайн-систему',
+};
+const stageNames = [
+  'Продукт',
+  'Архитектура и стек',
+  'Референсы',
+  'Концепт и эскизы',
+  'Макет и дизайн-система',
+  'Разработка',
+];
 // The stage, the selected change and the development view live in the URL, so a
 // reload keeps the reader where they were and a link points at what they meant.
 function readLocation() {
@@ -52,18 +76,19 @@ function writeLocation(state: { change: string; tab: Stage; boards: boolean }) {
   if (next !== window.location.pathname + window.location.search)
     window.history.pushState(null, '', next);
 }
-const names = {
+type RevisionStatus = 'draft' | 'in-review' | 'approved' | 'changes-requested';
+const names: Record<RevisionStatus, string> = {
   draft: 'Агент прорабатывает',
   'in-review': 'Ожидает вашего решения',
   approved: 'Утверждено',
   'changes-requested': 'Нужна доработка',
 };
-const tone = {
+const tone: Record<RevisionStatus, 'secondary' | 'warning' | 'success' | 'destructive'> = {
   draft: 'secondary',
   'in-review': 'warning',
   approved: 'success',
   'changes-requested': 'destructive',
-} as const;
+};
 async function request<T>(path: string, value?: unknown): Promise<T> {
   const response = await fetch(
     '/api/' + path,
@@ -208,7 +233,7 @@ function Questions({
   busy,
   onAnswer,
 }: {
-  stage: 'product' | 'architecture' | 'design';
+  stage: Exclude<Stage, 'development'>;
   questions: PreparationQuestion[];
   busy: boolean;
   onAnswer: (questionId: string, text: string) => void;
@@ -299,7 +324,7 @@ function Decisions({
   decisions,
   questions,
 }: {
-  stage: 'product' | 'architecture' | 'design';
+  stage: Exclude<Stage, 'development'>;
   decisions: PreparationRecord[];
   questions: PreparationQuestion[];
 }) {
@@ -413,13 +438,23 @@ export function PreparationPanel() {
   const c = view.current,
     p = c?.product,
     a = c?.architecture,
+    refs = c?.references,
+    con = c?.concept,
     d = c?.design;
-  const current =
-    tab === 'product' ? p : tab === 'architecture' ? a : tab === 'design' ? d : undefined;
+  const revisions = { product: p, architecture: a, references: refs, concept: con, design: d };
+  const current = tab === 'development' ? undefined : revisions[tab];
   const architectureCurrent = p?.status === 'approved' && a?.productDigest === p.digest;
-  const designCurrent = a?.status === 'approved' && d?.architectureDigest === a.digest;
-  const stageCurrent =
-    tab === 'product' ? true : tab === 'architecture' ? architectureCurrent : designCurrent;
+  const referencesCurrent = a?.status === 'approved' && refs?.architectureDigest === a.digest;
+  const conceptCurrent = refs?.status === 'approved' && con?.referencesDigest === refs.digest;
+  const designCurrent = con?.status === 'approved' && d?.conceptDigest === con.digest;
+  const stageCurrent = {
+    product: true,
+    architecture: architectureCurrent,
+    references: referencesCurrent,
+    concept: conceptCurrent,
+    design: designCurrent,
+    development: false,
+  }[tab];
   const decide = (decision: 'approve' | 'request-changes') =>
     run(async () => {
       if (!c || !current || tab === 'development') return;
@@ -543,10 +578,10 @@ export function PreparationPanel() {
             </Alert>
           )}
           <ol
-            className="mb-8 grid list-none grid-cols-1 gap-3 p-0 sm:grid-cols-2 lg:grid-cols-4"
+            className="mb-8 grid list-none grid-cols-1 gap-3 p-0 sm:grid-cols-2 lg:grid-cols-3"
             aria-label="Этапы изменения"
           >
-            {(['product', 'architecture', 'design', 'development'] as const).map((step, i) => (
+            {stages.map((step, i) => (
               <li key={step}>
                 <Button
                   variant="outline"
@@ -561,7 +596,7 @@ export function PreparationPanel() {
                   }}
                 >
                   <span className="text-primary text-lg">{i + 1}</span>
-                  <strong>{['Продукт', 'Архитектура и стек', 'Дизайн', 'Разработка'][i]}</strong>
+                  <strong>{stageNames[i]}</strong>
                   <small className="text-muted-foreground">
                     {step === 'product'
                       ? p
@@ -573,15 +608,27 @@ export function PreparationPanel() {
                           : architectureCurrent && a
                             ? names[a.status]
                             : 'Нужна актуальная архитектура'
-                        : step === 'design'
+                        : step === 'references'
                           ? a?.status !== 'approved'
                             ? 'После согласования архитектуры'
-                            : designCurrent && d
-                              ? names[d.status]
-                              : 'Нужно актуальное направление'
-                          : view.developmentReady
-                            ? 'Разрешена'
-                            : 'Ожидает согласований'}
+                            : referencesCurrent && refs
+                              ? names[refs.status]
+                              : 'Нужны актуальные референсы'
+                          : step === 'concept'
+                            ? refs?.status !== 'approved'
+                              ? 'После согласования референсов'
+                              : conceptCurrent && con
+                                ? names[con.status]
+                                : 'Нужен актуальный концепт'
+                            : step === 'design'
+                              ? con?.status !== 'approved'
+                                ? 'После согласования концепта'
+                                : designCurrent && d
+                                  ? names[d.status]
+                                  : 'Нужна актуальная дизайн-система'
+                              : view.developmentReady
+                                ? 'Разрешена'
+                                : 'Ожидает согласований'}
                   </small>
                 </Button>
               </li>
@@ -685,19 +732,11 @@ export function PreparationPanel() {
                       </AlertDescription>
                     </Alert>
                   )}
-                  {tab === 'architecture' && !architectureCurrent && a && (
+                  {!stageCurrent && current && tab !== 'product' && (
                     <Alert variant="warning" className="mt-4">
                       <AlertDescription>
-                        Эта архитектура относится к прежней постановке. Агент должен подготовить
-                        новую версию.
-                      </AlertDescription>
-                    </Alert>
-                  )}
-                  {tab === 'design' && !designCurrent && d && (
-                    <Alert variant="warning" className="mt-4">
-                      <AlertDescription>
-                        Это направление дизайна относится к прежней архитектуре. Агент должен
-                        подготовить новую версию.
+                        Эта версия относится к прежнему предыдущему этапу. Агент должен подготовить
+                        новую.
                       </AlertDescription>
                     </Alert>
                   )}
@@ -758,6 +797,62 @@ export function PreparationPanel() {
                         </AlertDescription>
                       </Alert>
                     )
+                  ) : tab === 'references' ? (
+                    refs ? (
+                      <ReferencesBriefView
+                        content={refs.content}
+                        busy={busy}
+                        onSave={(next, reason) =>
+                          void run(() =>
+                            request('agent', {
+                              operation: 'preparation_references',
+                              input: {
+                                changeId: c.id,
+                                expectedDigest: refs.digest,
+                                reason,
+                                content: next,
+                              },
+                            }),
+                          )
+                        }
+                      />
+                    ) : (
+                      <Alert className="max-w-[78ch] border-dashed">
+                        <AlertDescription>
+                          {a?.status === 'approved'
+                            ? 'Агент ищет референсы и описывает, что берёт из каждого. Вы принимаете или отклоняете каждый.'
+                            : 'Референсы собираются после вашего утверждения архитектуры.'}
+                        </AlertDescription>
+                      </Alert>
+                    )
+                  ) : tab === 'concept' ? (
+                    con ? (
+                      <ConceptBriefView
+                        content={con.content}
+                        busy={busy}
+                        onSave={(next, reason) =>
+                          void run(() =>
+                            request('agent', {
+                              operation: 'preparation_concept',
+                              input: {
+                                changeId: c.id,
+                                expectedDigest: con.digest,
+                                reason,
+                                content: next,
+                              },
+                            }),
+                          )
+                        }
+                      />
+                    ) : (
+                      <Alert className="max-w-[78ch] border-dashed">
+                        <AlertDescription>
+                          {refs?.status === 'approved'
+                            ? 'Агент формулирует концепцию и готовит эскизы, между которыми вы выберете.'
+                            : 'Концепт прорабатывается после вашего утверждения референсов.'}
+                        </AlertDescription>
+                      </Alert>
+                    )
                   ) : d ? (
                     <DesignBriefView
                       content={d.content}
@@ -780,9 +875,9 @@ export function PreparationPanel() {
                   ) : (
                     <Alert className="max-w-[78ch] border-dashed">
                       <AlertDescription>
-                        {a?.status === 'approved'
-                          ? 'Агент собирает референсы, концепцию, токены и guidelines. Макеты экранов останутся контрактами внутри разработки.'
-                          : 'Направление дизайна прорабатывается после вашего утверждения архитектуры.'}
+                        {con?.status === 'approved'
+                          ? 'Агент собирает палитру, токены, guidelines и разбор по каналам.'
+                          : 'Дизайн-система готовится после вашего утверждения концепта.'}
                       </AlertDescription>
                     </Alert>
                   )}
@@ -806,19 +901,11 @@ export function PreparationPanel() {
                           void decide('approve');
                         }}
                       >
-                        <h3 className="text-md mb-2 font-semibold">
-                          {tab === 'product'
-                            ? 'Утвердить продуктовую постановку'
-                            : tab === 'architecture'
-                              ? 'Утвердить архитектуру и стек'
-                              : 'Утвердить направление дизайна'}
-                        </h3>
+                        <h3 className="text-md mb-2 font-semibold">{approvalTitles[tab]}</h3>
                         <p className="max-w-[78ch]">
-                          {tab === 'product'
-                            ? 'После утверждения агент сможет приступить к архитектуре. Разработка останется заблокированной.'
-                            : tab === 'architecture'
-                              ? 'После утверждения агент сможет проработать направление дизайна. Разработка останется заблокированной.'
-                              : 'После утверждения агент сможет настроить проект и начать разработку по этой версии.'}
+                          {tab === 'design'
+                            ? 'После утверждения агент сможет настроить проект и начать разработку по этой версии.'
+                            : 'После утверждения откроется следующий этап. Разработка останется заблокированной.'}
                         </p>
                         <Label htmlFor="decision-comment" className="mt-4 block">
                           Комментарий к решению

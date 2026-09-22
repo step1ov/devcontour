@@ -4,7 +4,13 @@ import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startWorkspace } from '../src/runner/start.ts';
-import { product, architecture, design as designFixture } from '../tests/preparation-fixture.ts';
+import {
+  product,
+  architecture,
+  references as referencesFixture,
+  concept as conceptFixture,
+  design as designFixture,
+} from '../tests/preparation-fixture.ts';
 
 test('An empty workspace shows live product review, C1/C2 and separate operator approvals', async ({
   page,
@@ -90,24 +96,30 @@ test('An empty workspace shows live product review, C1/C2 and separate operator 
       expectedDigest: updated.current.architecture.digest,
     });
     await page.getByRole('button', { name: 'Утвердить версию 2', exact: true }).click();
-    // The design direction is the third decision before development opens.
-    const design = await send('preparation_design', {
-      changeId,
-      expectedDigest: null,
-      reason: 'Направление дизайна',
-      content: designFixture,
-    });
-    await send('preparation_submit', {
-      changeId,
-      stage: 'design',
-      expectedDigest: design.current.design.digest,
-    });
-    await page.getByRole('button', { name: /3 Дизайн/ }).click();
-    await expect(
-      page.getByRole('heading', { name: 'Утвердить направление дизайна' }),
-    ).toBeVisible();
-    await page.getByRole('button', { name: 'Утвердить версию 1', exact: true }).click();
-    await page.getByRole('button', { name: /4 Разработка/ }).click();
+    // Design is three decisions of its own before development opens.
+    for (const [index, step] of (
+      [
+        ['references', referencesFixture, /3 Референсы/],
+        ['concept', conceptFixture, /4 Концепт и эскизы/],
+        ['design', designFixture, /5 Макет и дизайн-система/],
+      ] as const
+    ).entries()) {
+      const [stage, content, tab] = step;
+      const saved = await send('preparation_' + stage, {
+        changeId,
+        expectedDigest: null,
+        reason: 'Этап дизайна ' + (index + 1),
+        content,
+      });
+      await send('preparation_submit', {
+        changeId,
+        stage,
+        expectedDigest: saved.current[stage].digest,
+      });
+      await page.getByRole('button', { name: tab }).click();
+      await page.getByRole('button', { name: 'Утвердить версию 1', exact: true }).click();
+    }
+    await page.getByRole('button', { name: /6 Разработка/ }).click();
     await expect(
       page.getByRole('heading', { name: 'Постановка и архитектура утверждены' }),
     ).toBeVisible();

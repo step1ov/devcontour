@@ -10,6 +10,8 @@ import {
   type PreparationOperation,
   type ProductChange,
   type ArchitectureBrief,
+  type ReferencesBrief,
+  type ConceptBrief,
   type DesignBrief,
   type ProductBrief,
   type C4Diagram,
@@ -80,6 +82,8 @@ function journal(c: ProductChange) {
   c.activity ??= [];
   c.questions ??= [];
   c.decisions ??= [];
+  c.references ??= [];
+  c.concept ??= [];
   c.design ??= [];
   return c;
 }
@@ -107,6 +111,24 @@ function architectureReady(c: ProductChange) {
     );
   return architecture;
 }
+function referencesReady(c: ProductChange) {
+  const architecture = architectureReady(c),
+    references = c.references.at(-1);
+  if (
+    !references ||
+    references.status !== 'approved' ||
+    references.architectureDigest !== architecture.digest
+  )
+    throw new DomainError('Сначала пользователь должен утвердить референсы', 409);
+  return references;
+}
+function conceptReady(c: ProductChange) {
+  const references = referencesReady(c),
+    concept = c.concept.at(-1);
+  if (!concept || concept.status !== 'approved' || concept.referencesDigest !== references.digest)
+    throw new DomainError('Сначала пользователь должен утвердить концепт и эскизы', 409);
+  return concept;
+}
 export function developmentBinding(
   s: DevContourState,
   id?: string,
@@ -115,16 +137,26 @@ export function developmentBinding(
   const c = change(s, id),
     product = productReady(c),
     architecture = architectureReady(c),
+    references = referencesReady(c);
+  // A change that touches no interface stops the design track at references:
+  // the operator approved that it does not apply, and nothing follows.
+  if (!references.content.applicable)
+    return {
+      changeId: c.id,
+      productDigest: product.digest,
+      architectureDigest: architecture.digest,
+      referencesDigest: references.digest,
+    };
+  const concept = conceptReady(c),
     design = c.design.at(-1);
-  if (!design || design.status !== 'approved' || design.architectureDigest !== architecture.digest)
-    throw new DomainError(
-      'Сначала пользователь должен утвердить актуальное направление дизайна',
-      409,
-    );
+  if (!design || design.status !== 'approved' || design.conceptDigest !== concept.digest)
+    throw new DomainError('Сначала пользователь должен утвердить макет и дизайн-систему', 409);
   return {
     changeId: c.id,
     productDigest: product.digest,
     architectureDigest: architecture.digest,
+    referencesDigest: references.digest,
+    conceptDigest: concept.digest,
     designDigest: design.digest,
   };
 }
@@ -325,15 +357,32 @@ function validateArchitecture(a: ArchitectureBrief) {
 // Direction is what blocks development, so it is validated like the other two
 // stages. A change that touches no interface may declare itself inapplicable —
 // with a reason the operator approves, not a silent skip.
-function validateDesign(d: DesignBrief, channels: string[]) {
-  if (!d.applicable) {
-    if (d.reason.length < 10)
+function validateReferences(r: ReferencesBrief) {
+  if (!r.applicable) {
+    if (r.reason.length < 10)
       throw new DomainError('Объясните, почему изменению не нужно направление дизайна');
     return;
   }
-  if (d.concept.length < 10 || !d.guidelines.length || !d.tokens.length || !d.channels.length)
+  if (r.summary.length < 10 || !r.items.length)
+    throw new DomainError('Для согласования нужны обзор поиска и хотя бы один референс');
+  if (r.questions.length) throw new DomainError('Открытые вопросы по референсам нужно решить');
+  if (!r.items.some((item) => item.status === 'accepted'))
+    throw new DomainError('Отметьте хотя бы один принятый референс');
+  if (r.items.some((item) => !/^https?:\/\//.test(item.url)))
+    throw new DomainError('Референс должен быть ссылкой http(s)');
+}
+function validateConcept(c: ConceptBrief) {
+  if (c.concept.length < 10) throw new DomainError('Для согласования нужна концепция дизайна');
+  if (c.questions.length) throw new DomainError('Открытые вопросы концепта нужно решить');
+  if (c.sketches.length && !c.sketches.some((s) => s.status === 'accepted'))
+    throw new DomainError('Отметьте выбранный эскиз или уберите отклонённые');
+  if (c.sketches.some((s) => !s.file && !s.url))
+    throw new DomainError('У эскиза должен быть файл или ссылка');
+}
+function validateDesign(d: DesignBrief, channels: string[]) {
+  if (!d.guidelines.length || !d.tokens.length || !d.channels.length || !d.palette.length)
     throw new DomainError(
-      'Для согласования нужны концепция, семантические токены, guidelines и разбор по каналам; либо отметьте, что дизайн не требуется',
+      'Для согласования нужны палитра, семантические токены, guidelines и разбор по каналам',
     );
   if (d.questions.length) throw new DomainError('Открытые вопросы дизайна нужно решить');
   for (const item of d.channels)
@@ -344,8 +393,8 @@ function validateDesign(d: DesignBrief, channels: string[]) {
     throw new DomainError('Повтор канала в разборе дизайна');
   const names = d.tokens.map((token) => token.group + '/' + token.name);
   if (new Set(names).size !== names.length) throw new DomainError('Повтор имени токена');
-  if (d.references.some((r) => !/^https?:\/\//.test(r.url)))
-    throw new DomainError('Референс должен быть ссылкой http(s)');
+  const colors = d.palette.map((c) => c.name);
+  if (new Set(colors).size !== colors.length) throw new DomainError('Повтор имени цвета палитры');
 }
 export function validatePreparation(s: DevContourState, previous?: DevContourState) {
   if (!s.preparation) {
@@ -364,8 +413,8 @@ export function validatePreparation(s: DevContourState, previous?: DevContourSta
   for (const c of p.changes) {
     validateJournal(c);
     c.design ??= [];
-    for (const stage of ['product', 'architecture', 'design'] as const)
-      for (const [index, r] of c[stage].entries()) {
+    for (const stage of ['product', 'architecture', 'references', 'concept', 'design'] as const)
+      for (const [index, r] of (c[stage] ?? []).entries()) {
         const expected = hash({
           changeId: c.id,
           stage,
@@ -373,6 +422,8 @@ export function validatePreparation(s: DevContourState, previous?: DevContourSta
           content: r.content,
           ...('productDigest' in r ? { productDigest: r.productDigest } : {}),
           ...('architectureDigest' in r ? { architectureDigest: r.architectureDigest } : {}),
+          ...('referencesDigest' in r ? { referencesDigest: r.referencesDigest } : {}),
+          ...('conceptDigest' in r ? { conceptDigest: r.conceptDigest } : {}),
         });
         if (
           r.number !== index + 1 ||
@@ -383,6 +434,8 @@ export function validatePreparation(s: DevContourState, previous?: DevContourSta
         if (r.status === 'approved' || r.status === 'in-review') {
           if (stage === 'product') validateProduct(r.content as ProductBrief);
           else if (stage === 'architecture') validateArchitecture(r.content as ArchitectureBrief);
+          else if (stage === 'references') validateReferences(r.content as ReferencesBrief);
+          else if (stage === 'concept') validateConcept(r.content as ConceptBrief);
           else {
             const source = c.product.find((v) => v.status === 'approved');
             validateDesign(
@@ -400,7 +453,19 @@ export function validatePreparation(s: DevContourState, previous?: DevContourSta
           'architectureDigest' in r &&
           !c.architecture.some((v) => v.digest === r.architectureDigest && v.status === 'approved')
         )
-          throw new DomainError('Дизайн должен ссылаться на утверждённую архитектуру');
+          throw new DomainError('Референсы должны ссылаться на утверждённую архитектуру');
+        if (
+          'referencesDigest' in r &&
+          !(c.references ?? []).some(
+            (v) => v.digest === r.referencesDigest && v.status === 'approved',
+          )
+        )
+          throw new DomainError('Концепт должен ссылаться на утверждённые референсы');
+        if (
+          'conceptDigest' in r &&
+          !(c.concept ?? []).some((v) => v.digest === r.conceptDigest && v.status === 'approved')
+        )
+          throw new DomainError('Дизайн должен ссылаться на утверждённый концепт');
       }
   }
   for (const old of previous?.preparation?.changes ?? []) {
@@ -427,7 +492,7 @@ export function validatePreparation(s: DevContourState, previous?: DevContourSta
       )
         throw new DomainError('История вопросов и ответов неизменяема');
     }
-    for (const stage of ['product', 'architecture', 'design'] as const)
+    for (const stage of ['product', 'architecture', 'references', 'concept', 'design'] as const)
       for (const before of old[stage] ?? []) {
         const after = (next[stage] ?? []).find((r) => r.number === before.number);
         if (
@@ -464,6 +529,8 @@ export class Preparation {
       r && (withContent ? r : { ...r, content: undefined });
     const product = c?.product.at(-1),
       architecture = c?.architecture.at(-1),
+      references = c?.references?.at(-1),
+      concept = c?.concept?.at(-1),
       design = c?.design?.at(-1);
     let ready = false,
       blocker = 'Создайте изменение и поручите агенту проработать продуктовую часть';
@@ -500,6 +567,8 @@ export class Preparation {
             title: c.title,
             product: strip(product),
             architecture: strip(architecture),
+            references: strip(references),
+            concept: strip(concept),
             design: strip(design),
             source: 'docs/changes/' + c.key,
             activity: [...(c.activity ?? [])].reverse().slice(0, 40),
@@ -556,7 +625,9 @@ export class Preparation {
                   };
                 })
               : [],
-            history: (['product', 'architecture', 'design'] as const).flatMap((stage) =>
+            history: (
+              ['product', 'architecture', 'references', 'concept', 'design'] as const
+            ).flatMap((stage) =>
               (c[stage] ?? []).map(({ number, status, createdAt, reason, decision, digest }) => ({
                 stage,
                 number,
@@ -575,7 +646,12 @@ export class Preparation {
           ? 'product'
           : architecture?.status !== 'approved' || architecture.productDigest !== product.digest
             ? 'architecture'
-            : 'design',
+            : references?.status !== 'approved' ||
+                references.architectureDigest !== architecture.digest
+              ? 'references'
+              : concept?.status !== 'approved' || concept.referencesDigest !== references.digest
+                ? 'concept'
+                : 'design',
       developmentReady: ready,
       blocker,
       delivery: {
@@ -610,6 +686,8 @@ export class Preparation {
             createdAt: now(),
             product: [],
             architecture: [],
+            references: [],
+            concept: [],
             design: [],
             activity: [],
             questions: [],
@@ -663,13 +741,13 @@ export class Preparation {
                 productDigest: product.digest,
               }),
             });
-          } else if (operation === 'preparation_design') {
+          } else if (operation === 'preparation_references') {
             const v = preparationInputs[operation].parse(input),
               architecture = architectureReady(c);
-            if ((c.design.at(-1)?.digest ?? null) !== v.expectedDigest)
-              throw new DomainError('Направление дизайна изменилось; перечитайте его', 409);
-            const number = c.design.length + 1;
-            c.design.push({
+            if ((c.references.at(-1)?.digest ?? null) !== v.expectedDigest)
+              throw new DomainError('Референсы изменились; перечитайте их', 409);
+            const number = c.references.length + 1;
+            c.references.push({
               number,
               status: 'draft',
               createdAt: now(),
@@ -678,10 +756,52 @@ export class Preparation {
               content: v.content,
               digest: hash({
                 changeId: c.id,
-                stage: 'design',
+                stage: 'references',
                 number,
                 content: v.content,
                 architectureDigest: architecture.digest,
+              }),
+            });
+          } else if (operation === 'preparation_concept') {
+            const v = preparationInputs[operation].parse(input),
+              references = referencesReady(c);
+            if ((c.concept.at(-1)?.digest ?? null) !== v.expectedDigest)
+              throw new DomainError('Концепт изменился; перечитайте его', 409);
+            const number = c.concept.length + 1;
+            c.concept.push({
+              number,
+              status: 'draft',
+              createdAt: now(),
+              reason: v.reason,
+              referencesDigest: references.digest,
+              content: v.content,
+              digest: hash({
+                changeId: c.id,
+                stage: 'concept',
+                number,
+                content: v.content,
+                referencesDigest: references.digest,
+              }),
+            });
+          } else if (operation === 'preparation_design') {
+            const v = preparationInputs[operation].parse(input),
+              concept = conceptReady(c);
+            if ((c.design.at(-1)?.digest ?? null) !== v.expectedDigest)
+              throw new DomainError('Дизайн изменился; перечитайте его', 409);
+            const number = c.design.length + 1;
+            c.design.push({
+              number,
+              status: 'draft',
+              createdAt: now(),
+              reason: v.reason,
+              conceptDigest: concept.digest,
+              content: v.content,
+              digest: hash({
+                changeId: c.id,
+                stage: 'design',
+                number,
+                content: v.content,
+                conceptDigest: concept.digest,
               }),
             });
           } else if (operation === 'preparation_progress') {
@@ -742,10 +862,17 @@ export class Preparation {
             )
               throw new DomainError('Архитектура относится к прежней постановке');
             if (
-              v.stage === 'design' &&
-              c.design.at(-1)!.architectureDigest !== architectureReady(c).digest
+              v.stage === 'references' &&
+              c.references.at(-1)!.architectureDigest !== architectureReady(c).digest
             )
-              throw new DomainError('Дизайн относится к прежней архитектуре');
+              throw new DomainError('Референсы относятся к прежней архитектуре');
+            if (
+              v.stage === 'concept' &&
+              c.concept.at(-1)!.referencesDigest !== referencesReady(c).digest
+            )
+              throw new DomainError('Концепт относится к прежним референсам');
+            if (v.stage === 'design' && c.design.at(-1)!.conceptDigest !== conceptReady(c).digest)
+              throw new DomainError('Дизайн относится к прежнему концепту');
             r.status = 'in-review';
           }
         }
@@ -787,10 +914,14 @@ export class Preparation {
       )
         throw new DomainError('Архитектура относится к прежней постановке');
       if (
-        v.stage === 'design' &&
-        c.design.at(-1)!.architectureDigest !== architectureReady(c).digest
+        v.stage === 'references' &&
+        c.references.at(-1)!.architectureDigest !== architectureReady(c).digest
       )
-        throw new DomainError('Дизайн относится к прежней архитектуре');
+        throw new DomainError('Референсы относятся к прежней архитектуре');
+      if (v.stage === 'concept' && c.concept.at(-1)!.referencesDigest !== referencesReady(c).digest)
+        throw new DomainError('Концепт относится к прежним референсам');
+      if (v.stage === 'design' && c.design.at(-1)!.conceptDigest !== conceptReady(c).digest)
+        throw new DomainError('Дизайн относится к прежнему концепту');
       if (v.decision === 'request-changes' && v.comment.length < 3)
         throw new DomainError('Опишите необходимые изменения');
       r.status = v.decision === 'approve' ? 'approved' : 'changes-requested';

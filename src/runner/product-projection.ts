@@ -198,78 +198,99 @@ export function renderArchitecture(change: ProductChange) {
   return rows.join('\n');
 }
 export function renderDesign(change: ProductChange) {
+  const rows = header(change, 'дизайн');
+  const references = (change.references ?? []).at(-1);
+  const concept = (change.concept ?? []).at(-1);
   const design = (change.design ?? []).at(-1);
-  const rows = header(change, 'направление дизайна');
-  if (!design) {
-    rows.push('Направление дизайна прорабатывается после утверждения архитектуры.', '');
-    return rows.join('\n');
-  }
-  const content = design.content;
-  rows.push(
-    `Версия ${design.number} · ${names[design.status]} · ${design.createdAt}`,
-    '',
-    `Причина версии: ${line(design.reason)}`,
-    ...(design.decision
-      ? [
-          '',
-          `Решение пользователя ${design.decision.at}: ${line(design.decision.comment) || 'без замечаний'}`,
-        ]
-      : []),
-    '',
-  );
-  if (!content.applicable) {
-    rows.push('## Дизайн не требуется', '', content.reason, '');
+  if (!references) {
+    rows.push('Дизайн прорабатывается после утверждения архитектуры.', '');
     return rows.join('\n');
   }
   rows.push(
-    '## Концепция',
+    `## 1. Референсы · версия ${references.number} · ${names[references.status]}`,
     '',
-    content.concept,
-    '',
-    '## Референсы',
-    '',
-    ...(content.references.length
-      ? content.references.map(
-          (r) =>
-            `- [${r.status === 'accepted' ? 'принят' : r.status === 'rejected' ? 'отклонён' : 'кандидат'}] ${r.url} — ${line(r.takeaway)}`,
-        )
-      : ['Референсы не собраны.']),
-    '',
-    '## Общее для всех каналов',
-    '',
-    ...content.shared.map((x) => `- ${line(x)}`),
-    '',
-    '## Различия по каналам',
+    `Причина версии: ${line(references.reason)}`,
     '',
   );
-  for (const item of content.channels)
-    rows.push(
-      `### ${line(change.product.at(-1)?.content.channels.find((x) => x.id === item.channelId)?.title ?? item.channelId)}`,
-      '',
-      ...item.notes.map((n) => `- ${line(n)}`),
-      '',
-    );
+  if (!references.content.applicable) {
+    rows.push('Изменению не нужно направление дизайна.', '', references.content.reason, '');
+    return rows.join('\n');
+  }
   rows.push(
-    '## Семантические токены',
+    references.content.summary,
     '',
-    '| Группа | Имя | Значение | Назначение |',
+    '| Статус | Ссылка | Что берём | Скриншот |',
     '| --- | --- | --- | --- |',
-    ...content.tokens.map(
-      (x) => `| ${line(x.group)} | ${line(x.name)} | ${line(x.value)} | ${line(x.purpose)} |`,
+    ...references.content.items.map(
+      (item) =>
+        `| ${item.status === 'accepted' ? 'принят' : item.status === 'rejected' ? 'отклонён' : 'кандидат'} | ${item.url} | ${line(item.takeaway)} | ${item.screenshot ? `![](../../design/refs/${item.screenshot})` : '—'} |`,
     ),
     '',
-    '## Guidelines',
-    '',
-    ...content.guidelines.map((x) => `- ${line(x)}`),
-    '',
   );
-  if (content.prototypes.length)
+  if (concept) {
     rows.push(
-      '## Макеты',
+      `## 2. Концепт и эскизы · версия ${concept.number} · ${names[concept.status]}`,
       '',
-      ...content.prototypes.map((x) => `- [${line(x.title)}](${x.url})`),
+      `Причина версии: ${line(concept.reason)}`,
+      '',
+      concept.content.concept,
       '',
     );
+    if (concept.content.sketches.length)
+      rows.push(
+        '### Эскизы',
+        '',
+        ...concept.content.sketches.map(
+          (s) =>
+            `- [${s.status === 'accepted' ? 'выбран' : s.status === 'rejected' ? 'отклонён' : 'кандидат'}] **${line(s.title)}** — ${s.file ? `![](../../design/sketches/${s.file})` : s.url}${s.note ? ' · ' + line(s.note) : ''}`,
+        ),
+        '',
+      );
+  }
+  if (design) {
+    const content = design.content;
+    rows.push(
+      `## 3. Макет и дизайн-система · версия ${design.number} · ${names[design.status]}`,
+      '',
+      `Причина версии: ${line(design.reason)}`,
+      '',
+      '### Палитра',
+      '',
+      '| Имя | Значение | Роль |',
+      '| --- | --- | --- |',
+      ...content.palette.map((c) => `| ${line(c.name)} | \`${c.value}\` | ${line(c.role)} |`),
+      '',
+      '### Семантические токены',
+      '',
+      '| Группа | Имя | Значение | Назначение |',
+      '| --- | --- | --- | --- |',
+      ...content.tokens.map(
+        (x) => `| ${line(x.group)} | ${line(x.name)} | ${line(x.value)} | ${line(x.purpose)} |`,
+      ),
+      '',
+      '### Общее для всех каналов',
+      '',
+      ...content.shared.map((x) => `- ${line(x)}`),
+      '',
+      '### Различия по каналам',
+      '',
+    );
+    for (const item of content.channels)
+      rows.push(
+        `#### ${line(change.product.at(-1)?.content.channels.find((x) => x.id === item.channelId)?.title ?? item.channelId)}`,
+        '',
+        ...item.notes.map((n) => `- ${line(n)}`),
+        '',
+      );
+    rows.push('### Guidelines', '', ...content.guidelines.map((x) => `- ${line(x)}`), '');
+    if (content.handoff.length)
+      rows.push(
+        '### Пакет передачи',
+        '',
+        ...content.handoff.map((x) => `- [${line(x.title)}](${x.path})`),
+        '',
+      );
+  }
   return rows.join('\n');
 }
 export function renderChangeJournal(change: ProductChange) {
@@ -308,10 +329,10 @@ export function renderChangeJournal(change: ProductChange) {
       : ['Решения ещё не зафиксированы.', '']),
     '## История версий',
     '',
-    ...(['product', 'architecture', 'design'] as const).flatMap((stage) =>
+    ...(['product', 'architecture', 'references', 'concept', 'design'] as const).flatMap((stage) =>
       (change[stage] ?? []).map(
         (r) =>
-          `- ${stage === 'product' ? 'Продукт' : stage === 'architecture' ? 'Архитектура' : 'Дизайн'} v${r.number} · ${names[r.status]} · ${r.createdAt} · ${line(r.reason)}`,
+          `- ${{ product: 'Продукт', architecture: 'Архитектура', references: 'Референсы', concept: 'Концепт', design: 'Дизайн' }[stage]} v${r.number} · ${names[r.status]} · ${r.createdAt} · ${line(r.reason)}`,
       ),
     ),
     '',

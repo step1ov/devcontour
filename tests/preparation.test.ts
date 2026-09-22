@@ -21,12 +21,57 @@ import { startWorkspace, preparationStore, requirePreparation } from '../src/run
 import { fixture, input, config } from './helpers.ts';
 import {
   architecture,
+  concept,
   design,
   product,
+  references,
   approvePreparation,
   approveStage,
   approveProductOnly,
 } from './preparation-fixture.ts';
+
+// Re-approves the whole design track against whatever architecture is current.
+function approveDesignTrack(
+  p: Preparation,
+  f: {
+    store: {
+      read: () => {
+        preparation?: {
+          changes: {
+            references: { digest: string }[];
+            concept: { digest: string }[];
+            design: { digest: string }[];
+          }[];
+        };
+      };
+    };
+  },
+  id: string,
+) {
+  const at = (stage: 'references' | 'concept' | 'design') =>
+    f.store.read().preparation!.changes[0][stage].at(-1)?.digest ?? null;
+  p.execute('preparation_references', {
+    changeId: id,
+    expectedDigest: at('references'),
+    reason: 'Референсы для текущей архитектуры',
+    content: references,
+  });
+  approveStage(p, id, 'references');
+  p.execute('preparation_concept', {
+    changeId: id,
+    expectedDigest: at('concept'),
+    reason: 'Концепт для текущих референсов',
+    content: concept,
+  });
+  approveStage(p, id, 'concept');
+  p.execute('preparation_design', {
+    changeId: id,
+    expectedDigest: at('design'),
+    reason: 'Дизайн-система для текущего концепта',
+    content: design,
+  });
+  approveStage(p, id, 'design');
+}
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { specDigest } from '../src/core/service.ts';
 
@@ -122,16 +167,10 @@ test('Product and architecture require distinct operator decisions; no agent or 
       content: architecture,
     });
     approveStage(p, id, 'architecture');
-    // Development also waits for the design direction.
-    assert.throws(() => f.h.pause(false), /направление дизайна/);
-    assert.throws(() => f.h.addTask(b.id, input()), /направление дизайна/);
-    p.execute('preparation_design', {
-      changeId: id,
-      expectedDigest: f.store.read().preparation!.changes[0].design.at(-1)?.digest ?? null,
-      reason: 'Направление дизайна для текущей архитектуры',
-      content: design,
-    });
-    approveStage(p, id, 'design');
+    // Development also waits for the three design approvals.
+    assert.throws(() => f.h.pause(false), /референсы/);
+    assert.throws(() => f.h.addTask(b.id, input()), /референсы/);
+    approveDesignTrack(p, f, id);
     const t = f.h.addTask(b.id, input());
     assert.equal(t.preparation?.changeId, id);
     f.h.approve(b.id);
@@ -202,16 +241,10 @@ test('Revisions invalidate architecture and stale decisions, plans and task atte
       content: architecture,
     });
     approveStage(p, id, 'architecture');
-    // Development also waits for the design direction.
-    assert.throws(() => f.h.pause(false), /направление дизайна/);
-    assert.throws(() => f.h.addTask(b.id, input()), /направление дизайна/);
-    p.execute('preparation_design', {
-      changeId: id,
-      expectedDigest: f.store.read().preparation!.changes[0].design.at(-1)?.digest ?? null,
-      reason: 'Направление дизайна для текущей архитектуры',
-      content: design,
-    });
-    approveStage(p, id, 'design');
+    // Development also waits for the three design approvals.
+    assert.throws(() => f.h.pause(false), /референсы/);
+    assert.throws(() => f.h.addTask(b.id, input()), /референсы/);
+    approveDesignTrack(p, f, id);
     f.h.pause(false);
     assert.throws(() => f.h.claim('worker'), /не связана/);
     assert.equal(specDigest(f.store.read().tasks[0]), original);

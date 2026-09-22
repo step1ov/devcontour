@@ -121,12 +121,54 @@ export const architectureBrief = z.strictObject({
   c2: c4Diagram.optional(),
   c3: z.array(c4Components).max(5).default([]),
 });
-// A design reference is a link plus the one property we intend to take from it.
-// Storing the property, not the picture, is what makes the choice reviewable.
+// Design is decided in three steps, each approved on its own: which references
+// we take from, what the concept and its sketches are, and only then the
+// system of tokens, palette and rules.
+
+// A reference is a link, the one property we intend to take, and a screenshot
+// kept beside it so the operator can compare candidates at a glance.
 export const designReference = z.strictObject({
   url: z.string().trim().min(3).max(600),
   takeaway: z.string().trim().min(3).max(600),
+  screenshot: z
+    .string()
+    .trim()
+    .regex(/^[a-z0-9][a-z0-9._-]{0,120}$/i)
+    .optional(),
   status: z.enum(['candidate', 'accepted', 'rejected']).default('candidate'),
+});
+export const referencesBrief = z.strictObject({
+  applicable: z.boolean().default(true),
+  reason: z.string().trim().max(1500).default(''),
+  summary: text,
+  items: z.array(designReference).max(60).default([]),
+  questions: items,
+});
+// A sketch is a rendered option the operator chooses between. It lives as a
+// file beside the references so the choice is made by looking, not reading.
+export const designSketch = z.strictObject({
+  title: z.string().trim().min(3).max(160),
+  file: z
+    .string()
+    .trim()
+    .regex(/^[a-z0-9][a-z0-9._-]{0,120}$/i)
+    .optional(),
+  url: z.string().trim().max(600).default(''),
+  note: z.string().trim().max(1000).default(''),
+  status: z.enum(['candidate', 'accepted', 'rejected']).default('candidate'),
+});
+export const conceptBrief = z.strictObject({
+  concept: text,
+  sketches: z.array(designSketch).max(30).default([]),
+  questions: items,
+});
+export const paletteColor = z.strictObject({
+  name: z.string().trim().min(2).max(60),
+  value: z
+    .string()
+    .trim()
+    .regex(/^#[0-9a-fA-F]{6}$/, 'Цвет палитры задаётся как #rrggbb'),
+  role: z.string().trim().max(300).default(''),
 });
 export const designToken = z.strictObject({
   group: z.string().trim().min(2).max(60),
@@ -138,29 +180,24 @@ export const channelDesign = z.strictObject({
   channelId,
   notes: z.array(z.string().trim().min(3).max(600)).min(1).max(20),
 });
-// Direction is decided once and blocks everything downstream, so it is a stage.
-// Screen layouts stay per-feature contracts inside development.
 export const designBrief = z.strictObject({
-  applicable: z.boolean().default(true),
-  reason: z.string().trim().max(1500).default(''),
-  concept: text,
-  references: z.array(designReference).max(40).default([]),
+  palette: z.array(paletteColor).max(80).default([]),
+  tokens: z.array(designToken).max(120).default([]),
   shared: items,
   channels: z.array(channelDesign).max(10).default([]),
-  tokens: z.array(designToken).max(80).default([]),
   guidelines: items,
-  prototypes: z
+  handoff: z
     .array(
       z.strictObject({
         title: z.string().trim().min(3).max(160),
-        url: z.string().trim().min(3).max(600),
+        path: z.string().trim().min(3).max(300),
       }),
     )
-    .max(20)
+    .max(30)
     .default([]),
   questions: items,
 });
-const stage = z.enum(['product', 'architecture', 'design']);
+const stage = z.enum(['product', 'architecture', 'references', 'concept', 'design']);
 const note = z.string().trim().min(3).max(300);
 // The lead agent spends long stretches reading a brief without saving a revision.
 // An append-only journal makes that work visible in the panel from the first launch.
@@ -215,8 +252,16 @@ export const productChange = z.strictObject({
   architecture: z
     .array(z.strictObject({ ...revision, productDigest: hash, content: architectureBrief }))
     .max(100),
+  references: z
+    .array(z.strictObject({ ...revision, architectureDigest: hash, content: referencesBrief }))
+    .max(100)
+    .default([]),
+  concept: z
+    .array(z.strictObject({ ...revision, referencesDigest: hash, content: conceptBrief }))
+    .max(100)
+    .default([]),
   design: z
-    .array(z.strictObject({ ...revision, architectureDigest: hash, content: designBrief }))
+    .array(z.strictObject({ ...revision, conceptDigest: hash, content: designBrief }))
     .max(100)
     .default([]),
   activity: z.array(preparationActivity).max(200).default([]),
@@ -232,7 +277,9 @@ export const preparationBinding = z.strictObject({
   changeId: id,
   productDigest: hash,
   architectureDigest: hash,
-  designDigest: hash,
+  referencesDigest: hash,
+  conceptDigest: hash.optional(),
+  designDigest: hash.optional(),
 });
 export const preparationInputs = {
   preparation_status: z.strictObject({ changeId: id.optional() }),
@@ -256,6 +303,18 @@ export const preparationInputs = {
     expectedDigest: hash.nullable(),
     reason: z.string().min(3).max(2000),
     content: architectureBrief,
+  }),
+  preparation_references: z.strictObject({
+    changeId: id,
+    expectedDigest: hash.nullable(),
+    reason: z.string().min(3).max(2000),
+    content: referencesBrief,
+  }),
+  preparation_concept: z.strictObject({
+    changeId: id,
+    expectedDigest: hash.nullable(),
+    reason: z.string().min(3).max(2000),
+    content: conceptBrief,
   }),
   preparation_design: z.strictObject({
     changeId: id,
@@ -319,8 +378,12 @@ export type AcceptanceCriterion = z.infer<typeof acceptanceCriterion>;
 export type ProductFeature = z.infer<typeof productFeature>;
 export type ProductBrief = z.infer<typeof productBrief>;
 export type ArchitectureBrief = z.infer<typeof architectureBrief>;
+export type ReferencesBrief = z.infer<typeof referencesBrief>;
+export type ConceptBrief = z.infer<typeof conceptBrief>;
 export type DesignBrief = z.infer<typeof designBrief>;
 export type DesignReference = z.infer<typeof designReference>;
+export type DesignSketch = z.infer<typeof designSketch>;
+export type PaletteColor = z.infer<typeof paletteColor>;
 export type C4Diagram = z.infer<typeof c4Diagram>;
 export type C4Components = z.infer<typeof c4Components>;
 export type ProductChange = z.infer<typeof productChange>;

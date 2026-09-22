@@ -82,8 +82,12 @@ export const descriptions: Record<AgentOperation, string> = {
     'Save a new immutable product draft with optimistic concurrency: personas with goals and pains, releases as the scope boundary, and features whose scenarios name a persona and whose acceptance criteria name a release. Resolve ambiguity the way the relevant persona would. Never approves it; a revision invalidates the prior architecture for new work.',
   preparation_architecture:
     'Save architecture, justified stack and structured C1/C2 only after operator product approval. Does not approve development.',
+  preparation_references:
+    'Save the first design step: candidate references with the property taken from each and an optional screenshot stored beside them. The operator accepts or rejects each one. A change that touches no interface sets applicable=false with a reason, which ends the design track.',
+  preparation_concept:
+    'Save the second design step after the operator approved the references: the concept and the rendered sketches they choose between. Sketches are files or links, one of them marked accepted.',
   preparation_design:
-    'Save the design direction after the operator approved the architecture: references with the property taken from each, the concept, semantic tokens, guidelines and what differs per channel. Screen layouts stay per-feature UI contracts inside development. A change that touches no interface may set applicable=false with a reason the operator still approves.',
+    'Save the third design step after the operator approved the concept: the palette, semantic tokens, guidelines, what is shared and what differs per channel, and the handoff package. Screen layouts stay per-feature UI contracts inside development.',
   preparation_submit:
     'Validate the current draft and send it to the operator for approval. Unresolved questions or incomplete C1/C2 block submission.',
   preparation_progress:

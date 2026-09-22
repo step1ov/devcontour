@@ -135,6 +135,36 @@ export async function serve(
           json(res, 200, new Preparation(preparationStore).decide(await body(req)));
           return;
         }
+        // Reference screenshots and sketches live beside the design documents.
+        // Serve them read-only from that one directory, with the same realpath
+        // containment the evidence route uses.
+        if (req.method === 'GET' && path === '/api/design/asset') {
+          const root = h?.config.workspaceRoot ?? options.bootstrap?.workspace;
+          const name = url.searchParams.get('file') ?? '';
+          const kind = url.searchParams.get('kind') === 'sketches' ? 'sketches' : 'refs';
+          if (!root || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$/.test(name))
+            throw new DomainError('Некорректное имя файла', 400);
+          const directory = await realpath(join(root, 'docs', 'design', kind));
+          const file = await realpath(join(directory, name));
+          if (!file.startsWith(directory + sep)) throw new DomainError('Путь не разрешён', 403);
+          const types: Record<string, string> = {
+            '.png': 'image/png',
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.webp': 'image/webp',
+            '.svg': 'image/svg+xml',
+          };
+          const type = types[extname(file).toLowerCase()];
+          if (!type) throw new DomainError('Неподдерживаемый тип файла', 415);
+          res.writeHead(200, {
+            'Content-Type': type,
+            'Cache-Control': 'no-cache',
+            'X-Content-Type-Options': 'nosniff',
+            'Content-Security-Policy': "default-src 'none'; sandbox",
+          });
+          res.end(await readFile(file));
+          return;
+        }
         if (req.method === 'POST' && path === '/api/preparation/answer' && preparationStore) {
           json(res, 200, new Preparation(preparationStore).answer(await body(req)));
           return;
