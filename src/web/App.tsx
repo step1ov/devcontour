@@ -29,6 +29,13 @@ import {
   ChevronRight,
 } from 'lucide-react';
 import type { DevContourState, Task, Config, AuditEvent, Board, Role } from '../core/model.ts';
+import { Alert, AlertDescription } from '@/ui/alert.tsx';
+import { Badge } from '@/ui/badge.tsx';
+import { Button } from '@/ui/button.tsx';
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/ui/dialog.tsx';
+import { Input } from '@/ui/input.tsx';
+import { Textarea } from '@/ui/textarea.tsx';
+import { cn } from '@/lib/utils.ts';
 import { levels } from '../core/graph.ts';
 import type { taskProgress } from '../application/context.ts';
 const GraphPanel = lazy(() => import('./GraphPanel.tsx'));
@@ -109,8 +116,22 @@ const taskStatusName = (t: UITask) =>
   t.status === 'done' && t.sharedCompletion ? 'Принята из Git' : statusNames[status(t)];
 const shortId = (id: string) =>
   /^[A-Z]+-[a-f0-9-]{36}$/.test(id) ? id.slice(0, id.indexOf('-') + 9) : id;
-function Badge({ value, children }: { value: string; children?: ReactNode }) {
-  return <span className={`badge badge-${value}`}>{children ?? statusNames[value] ?? value}</span>;
+const badgeTone: Record<string, 'secondary' | 'ready' | 'success' | 'warning' | 'destructive'> = {
+  ready: 'ready',
+  running: 'ready',
+  verifying: 'ready',
+  reviewing: 'ready',
+  integrating: 'ready',
+  done: 'success',
+  blocked: 'warning',
+  failed: 'destructive',
+};
+function StatusBadge({ value, children }: { value: string; children?: ReactNode }) {
+  return (
+    <Badge variant={badgeTone[value] ?? 'secondary'}>
+      {children ?? statusNames[value] ?? value}
+    </Badge>
+  );
 }
 async function api(path: string, input?: unknown, method = 'POST') {
   const response = await fetch(
@@ -138,41 +159,25 @@ function Modal({
   onClose: () => void;
   error?: string;
 }) {
-  const ref = useRef<HTMLDialogElement>(null);
-  useEffect(() => {
-    const prior = document.activeElement as HTMLElement;
-    const dialog = ref.current;
-    dialog?.showModal();
-    return () => {
-      dialog?.close();
-      prior?.focus();
-    };
-  }, []);
+  // Radix marks the rest of the page inert while this is open, so background
+  // graph nodes stop competing for the same accessible names.
   return (
-    <dialog
-      ref={ref}
-      onCancel={(e) => {
-        e.preventDefault();
-        onClose();
-      }}
-      onClick={(e) => {
-        if (e.target === ref.current) onClose();
-      }}
-      aria-labelledby="modal-title"
-    >
-      <div className="modal-head">
-        <h2 id="modal-title">{title}</h2>
-        <button className="icon-button" onClick={onClose} aria-label="Закрыть диалог">
-          <X />
-        </button>
-      </div>
-      {error && (
-        <p className="alert error" role="alert">
-          {error}
-        </p>
-      )}
-      {children}
-    </dialog>
+    <Dialog open onOpenChange={(next) => !next && onClose()}>
+      <DialogContent>
+        <div className="mb-5 flex items-center justify-between gap-4">
+          <DialogTitle className="text-lg font-semibold">{title}</DialogTitle>
+        </div>
+        <DialogDescription className="sr-only">
+          Диалог {title}. Закройте его, чтобы вернуться к доске.
+        </DialogDescription>
+        {error && (
+          <Alert variant="destructive" role="alert" className="mb-4">
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
+        {children}
+      </DialogContent>
+    </Dialog>
   );
 }
 export function App() {
@@ -352,11 +357,15 @@ export function App() {
   }, [filtered, selected]);
   if (!data)
     return (
-      <main className="loading">
+      <main className="grid min-h-dvh place-content-center justify-items-center gap-4">
         <Workflow />
         <h1>DevContour</h1>
         <p role="status">{error || 'Загружаем рабочий граф…'}</p>
-        {error && <button onClick={() => location.reload()}>Повторить</button>}
+        {error && (
+          <Button variant="outline" onClick={() => location.reload()}>
+            Повторить
+          </Button>
+        )}
       </main>
     );
   const done = tasks.filter((t) => t.status === 'done').length;
@@ -374,30 +383,40 @@ export function App() {
     ? { runtime: displayedRun.reviewer, model: displayedRun.reviewerModel }
     : plannedReviewer;
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <a className="brand" href="/" aria-label="DevContour, главная">
-          <span className="brand-icon">
+    <div className="grid min-h-dvh grid-cols-[var(--sidebar-width)_minmax(0,1fr)] max-[1180px]:grid-cols-[12rem_minmax(0,1fr)] max-[760px]:block">
+      <aside className="bg-card flex flex-col border-r px-3 py-6 max-[1180px]:px-2 max-[760px]:border-r-0 max-[760px]:border-b max-[760px]:p-3">
+        <a
+          className="text-md text-foreground flex items-center gap-2 px-3 pb-8 font-semibold no-underline max-[1180px]:px-2 max-[760px]:p-0 max-[760px]:pb-3"
+          href="/"
+          aria-label="DevContour, главная"
+        >
+          <span className="bg-primary text-primary-foreground flex size-(--logo-size) shrink-0 items-center justify-center rounded-md">
             <Workflow />
           </span>
-          DevContour<span className="version">mvp</span>
+          DevContour
+          <span className="text-muted-foreground ml-auto text-xs font-normal max-[760px]:ml-0">
+            mvp
+          </span>
         </a>
-        <div className="project-name">
-          <span className="project-avatar">D</span>
+        <div className="mb-6 flex gap-3 rounded-md border p-3 text-sm max-[760px]:hidden">
+          <span className="bg-accent text-primary grid size-(--logo-size) shrink-0 place-items-center rounded-sm max-[1180px]:hidden">
+            D
+          </span>
           <div>
             <strong>{data.config.name}</strong>
             <small>Локальное рабочее пространство</small>
           </div>
         </div>
-        <div className="sidebar-heading">
+        <div className="text-muted-foreground flex items-center justify-between pl-3 text-sm max-[760px]:pl-0">
           <span>Доски проекта</span>
-          <button
+          <Button
+            variant="outline"
             className="icon-button"
             aria-label="Создать доску"
             onClick={() => setModal('board')}
           >
             <Plus />
-          </button>
+          </Button>
         </div>
         <nav aria-label="Доски">
           {[...data.boards]
@@ -407,9 +426,13 @@ export function App() {
                 Number(a.revisions.at(-1)!.status === 'active'),
             )
             .map((b) => (
-              <button
+              <Button
+                variant="outline"
                 key={b.id}
-                className={`board-nav ${b.id === boardId ? 'is-active' : ''}`}
+                className={cn(
+                  'mt-1 h-auto w-full justify-start gap-3 border-0 p-3 text-left text-sm whitespace-normal max-[760px]:w-auto max-[760px]:min-w-48 max-[760px]:shrink-0 max-[760px]:p-2',
+                  b.id === boardId && 'text-primary bg-accent',
+                )}
                 onClick={() => switchBoard(b.id)}
                 aria-current={b.id === boardId ? 'page' : undefined}
               >
@@ -422,12 +445,17 @@ export function App() {
                   </small>
                 </span>
                 {b.revisions.at(-1)!.status === 'accepted' && <Check className="nav-check" />}
-              </button>
+              </Button>
             ))}
         </nav>
-        <div className="sidebar-bottom">
-          <div className="runner-status">
-            <span className={data.paused ? 'dot' : 'dot active'} />
+        <div className="text-muted-foreground mt-auto px-3 pt-8 text-xs [&_p]:my-2 max-[760px]:hidden">
+          <div className="text-foreground flex items-center gap-2">
+            <span
+              className={cn(
+                'inline-block size-2 rounded-full',
+                data.paused ? 'bg-(--text-secondary)' : 'bg-success',
+              )}
+            />
             <strong>{data.paused ? 'Очередь на паузе' : 'Оркестратор работает'}</strong>
           </div>
           <p>
@@ -441,25 +469,27 @@ export function App() {
           <p>Согласования: {data.config.approvalMode === 'operator' ? 'оператор' : 'агент'}</p>
         </div>
       </aside>
-      <main className="workspace">
-        <div className="topbar">
+      <main className="min-w-0">
+        <div className="bg-card text-muted-foreground flex flex-wrap items-center justify-between gap-4 border-b px-8 py-4 text-xs max-[1180px]:px-5 max-[760px]:p-3 [&_svg]:size-3.5 [&>span:first-child]:flex [&>span:first-child]:items-center [&>span:first-child]:gap-2">
           <span>
             Проект <ChevronRight />{' '}
             {tab === 'product' ? 'Продукт' : (board?.title ?? 'Новая доска')}
           </span>
-          <span className="mode-label">
+          <span className="text-primary bg-accent rounded-sm px-2 py-1">
             {data.config.mode === 'demo'
               ? 'Учебный режим · без вызовов моделей'
               : 'Локальный runtime'}
           </span>
         </div>
-        <div className="page-content">
-          <header className="page-header">
+        <div className="p-8 max-[1180px]:p-5 max-[760px]:p-4">
+          <header className="mb-6 flex flex-wrap items-start justify-between gap-6 max-[760px]:mb-4 max-[760px]:gap-4">
             <div>
-              <div className="title-row">
+              <div className="flex items-center gap-3">
                 <h1>{tab === 'product' ? 'Продукт' : (board?.title ?? 'Создайте первую доску')}</h1>
                 {revision && tab !== 'product' && (
-                  <span className="revision-label">r{revision.number}</span>
+                  <span className="text-muted-foreground rounded-sm border px-2 py-1 text-sm">
+                    r{revision.number}
+                  </span>
                 )}
               </div>
               <p>
@@ -468,9 +498,10 @@ export function App() {
                   : (board?.description ?? 'Опишите цель, добавьте задачи и их зависимости.')}
               </p>
             </div>
-            <div className="header-actions">
+            <div className="flex shrink-0 flex-wrap gap-2 max-[760px]:w-full">
               {tab !== 'product' && board && current && revision?.status === 'accepted' && (
-                <button
+                <Button
+                  variant="outline"
                   className="primary"
                   onClick={() => {
                     setRoots([]);
@@ -479,26 +510,28 @@ export function App() {
                 >
                   <RotateCcw />
                   Создать корректировку
-                </button>
+                </Button>
               )}
               {editable && (
                 <>
-                  <button onClick={() => setModal('task')}>
+                  <Button variant="outline" onClick={() => setModal('task')}>
                     <Plus />
                     Задача
-                  </button>
+                  </Button>
                   {tasks.some((t) => t.status === 'draft') && (
-                    <button
+                    <Button
+                      variant="outline"
                       onClick={() =>
                         void act(() => api(`boards/${boardId}/approve`, {}), 'Задачи утверждены')
                       }
                       disabled={busy}
                     >
                       Утвердить план
-                    </button>
+                    </Button>
                   )}
                   {tasks.length > 0 && done === tasks.length && (
-                    <button
+                    <Button
+                      variant="outline"
                       className="primary"
                       disabled={busy}
                       onClick={() =>
@@ -512,7 +545,7 @@ export function App() {
                       {data.config.completionMode === 'remote'
                         ? 'Принять доску локально'
                         : 'Принять доску'}
-                    </button>
+                    </Button>
                   )}
                 </>
               )}
@@ -522,13 +555,14 @@ export function App() {
             <div className="alert error" role="alert">
               <AlertCircle />
               <span>{error}</span>
-              <button
+              <Button
+                variant="outline"
                 className="icon-button"
                 onClick={() => setError('')}
                 aria-label="Скрыть ошибку"
               >
                 <X />
-              </button>
+              </Button>
             </div>
           )}
           {data.journalError && (
@@ -537,20 +571,24 @@ export function App() {
             </p>
           )}
           {notice && (
-            <div className="notice" role="status">
+            <div
+              className="text-success bg-success-foreground mb-4 flex items-center gap-3 rounded-md px-4 py-3 text-sm break-words [&>svg]:size-4.5 [&>svg]:shrink-0"
+              role="status"
+            >
               <Check />
               {notice}
-              <button
+              <Button
+                variant="outline"
                 className="icon-button"
                 onClick={() => setNotice('')}
                 aria-label="Скрыть уведомление"
               >
                 <X />
-              </button>
+              </Button>
             </div>
           )}
           {tab !== 'product' && revision?.status === 'accepted' && (
-            <div className="accepted-banner">
+            <div className="text-success bg-success-foreground mb-5 flex items-center gap-3 rounded-md p-4 text-sm [&>svg]:size-6 [&>svg]:shrink-0 [&_span]:block [&_code]:ml-auto">
               <CircleCheck />
               <div>
                 <strong>
@@ -562,7 +600,10 @@ export function App() {
             </div>
           )}
           {tab !== 'product' && (
-            <section className="summary-bar" aria-label="Прогресс доски">
+            <section
+              className="bg-card mb-6 flex flex-wrap items-center gap-8 rounded-md border px-5 py-4 max-[1180px]:gap-4 max-[760px]:mb-4 max-[760px]:p-3 [&>div]:flex [&>div]:items-center [&>div]:gap-2 [&>div]:max-[760px]:flex-auto [&>div>span]:text-muted-foreground [&>div>span]:text-sm [&>div>svg]:text-muted-foreground [&>div>svg]:size-4.5 [&_strong]:text-md [&_strong>span]:text-muted-foreground [&_strong>span]:font-normal"
+              aria-label="Прогресс доски"
+            >
               <div>
                 <CircleCheck />
                 <strong>
@@ -581,8 +622,9 @@ export function App() {
                 <strong>{blocked}</strong>
                 <span>ждут зависимостей</span>
               </div>
-              <div className="queue-control">
-                <button
+              <div className="ml-auto max-[760px]:ml-0 max-[760px]:w-full [&_button]:max-[760px]:w-full">
+                <Button
+                  variant="outline"
                   className={data.paused ? 'primary' : ''}
                   disabled={busy || (data.paused && !data.ready.length)}
                   onClick={() =>
@@ -597,12 +639,16 @@ export function App() {
                 >
                   {data.paused ? <Play /> : <Pause />}
                   {data.paused ? 'Запустить очередь' : 'Пауза очереди'}
-                </button>
+                </Button>
               </div>
             </section>
           )}
-          <div className="workspace-toolbar">
-            <div className="tabs" role="tablist" aria-label="Представление доски">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-4">
+            <div
+              className="flex flex-wrap gap-1 max-[760px]:w-full max-[760px]:justify-between max-[760px]:gap-0"
+              role="tablist"
+              aria-label="Представление доски"
+            >
               {[
                 { key: 'product', label: 'Продукт', icon: <LayoutGrid /> },
                 { key: 'graph', label: 'Граф', icon: <GitBranch /> },
@@ -612,7 +658,8 @@ export function App() {
                 { key: 'history', label: 'Ревизии', icon: <History /> },
                 { key: 'contracts', label: 'Контракты', icon: <FileCheck /> },
               ].map((t) => (
-                <button
+                <Button
+                  variant="outline"
                   key={t.key}
                   role="tab"
                   aria-selected={tab === t.key}
@@ -620,12 +667,12 @@ export function App() {
                 >
                   {t.icon}
                   {t.label}
-                </button>
+                </Button>
               ))}
             </div>
             {tab !== 'product' && (
               <>
-                <label className="repository-filter">
+                <label className="max-w-60 max-[760px]:w-full max-[760px]:max-w-none">
                   <span className="sr-only">Репозиторий</span>
                   <select
                     aria-label="Репозиторий"
@@ -640,9 +687,9 @@ export function App() {
                     ))}
                   </select>
                 </label>
-                <label className="search">
+                <label className="max-w-60 max-[760px]:w-full max-[760px]:max-w-none">
                   <span className="sr-only">Поиск задач</span>
-                  <input
+                  <Input
                     placeholder="Найти задачу…"
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
@@ -652,9 +699,17 @@ export function App() {
             )}
           </div>
           <div
-            className={`work-area ${tab === 'changesets' || tab === 'product' ? 'changeset-area' : ''}`}
+            className={cn(
+              'grid items-start gap-4',
+              tab === 'changesets' || tab === 'product'
+                ? 'grid-cols-[minmax(0,1fr)]'
+                : 'grid-cols-[minmax(0,1fr)_var(--inspector-width)] max-[1180px]:grid-cols-[minmax(0,1fr)]',
+            )}
           >
-            <section className="board-surface" aria-label="Рабочая область">
+            <section
+              className="bg-card min-w-0 overflow-hidden rounded-lg border shadow-sm"
+              aria-label="Рабочая область"
+            >
               <Suspense fallback={<p role="status">Загружаем представление…</p>}>
                 {tab === 'product' && (
                   <ProductPanel
@@ -667,11 +722,14 @@ export function App() {
                 {(tab === 'graph' || tab === 'workspace') &&
                   (filtered.length ? (
                     <>
-                      <div className="graph-caption">
+                      <div className="text-muted-foreground flex justify-between border-b px-4 py-3 text-xs [&>span:first-child]:max-[760px]:max-w-[27ch]">
                         <span>Зависимость ведёт от условия к результату</span>
                         <span>{graph.edges.length} связей</span>
                       </div>
-                      <div className="graph-canvas" ref={canvasRef}>
+                      <div
+                        className="bg-background h-(--canvas-height) max-[760px]:h-[26rem]"
+                        ref={canvasRef}
+                      >
                         <GraphPanel
                           onInit={(instance) => {
                             flowRef.current = (options) => instance.fitView(options);
@@ -691,7 +749,7 @@ export function App() {
                       </div>
                     </>
                   ) : (
-                    <div className="empty">
+                    <div className="text-muted-foreground flex min-h-64 flex-col items-center justify-center gap-3 p-8 text-center [&>svg]:size-8 [&_h2]:text-md [&_h2]:text-foreground [&_h2]:m-0 [&_p]:m-0">
                       <GitBranch />
                       <h2>{query ? 'Нет совпадений' : 'Граф начинается с задачи'}</h2>
                       <p>
@@ -700,20 +758,26 @@ export function App() {
                           : 'Добавьте первый результат и критерии его приёмки.'}
                       </p>
                       {editable && !query && (
-                        <button onClick={() => setModal('task')}>Добавить задачу</button>
+                        <Button variant="outline" onClick={() => setModal('task')}>
+                          Добавить задачу
+                        </Button>
                       )}
                     </div>
                   ))}
                 {tab === 'list' && (
-                  <div className="task-list">
+                  <div className="">
                     {filtered.length ? (
                       filtered.map((t) => (
-                        <button
-                          className={`task-row ${selected === t.id ? 'selected' : ''}`}
+                        <Button
+                          variant="outline"
+                          className={cn(
+                            'flex h-auto w-full items-center justify-start gap-3 rounded-none border-0 border-b p-4 text-left font-normal whitespace-normal last:border-b-0 max-[760px]:flex-wrap max-[760px]:gap-2',
+                            selected === t.id && 'bg-accent',
+                          )}
                           key={t.id}
                           onClick={() => setSelected(t.id)}
                         >
-                          <span className="task-id" title={t.id}>
+                          <span className="text-muted-foreground min-w-8 text-xs" title={t.id}>
                             {shortId(t.id)}
                           </span>
                           <div>
@@ -723,23 +787,25 @@ export function App() {
                               {t.dependsOn.length ? ` · после ${t.dependsOn.join(', ')}` : ''}
                             </small>
                           </div>
-                          <Badge value={status(t)}>{taskStatusName(t)}</Badge>
+                          <StatusBadge value={status(t)}>{taskStatusName(t)}</StatusBadge>
                           <ChevronRight />
-                        </button>
+                        </Button>
                       ))
                     ) : (
-                      <p className="empty">Нет задач для отображения.</p>
+                      <p className="text-muted-foreground flex min-h-64 flex-col items-center justify-center gap-3 p-8 text-center [&>svg]:size-8 [&_h2]:text-md [&_h2]:text-foreground [&_h2]:m-0 [&_p]:m-0">
+                        Нет задач для отображения.
+                      </p>
                     )}
                   </div>
                 )}
                 {tab === 'changesets' && (
-                  <div className="history-list changesets">
-                    <div className="section-title">
+                  <div className="min-h-(--canvas-height) p-6 [&>h2]:text-md [&>p]:text-muted-foreground [&>p]:max-w-[65ch] [&>p]:text-sm">
+                    <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                       <h2>Изменения workspace</h2>
-                      <button onClick={() => setModal('changeset')}>
+                      <Button variant="outline" onClick={() => setModal('changeset')}>
                         <Plus />
                         Новый ChangeSet
-                      </button>
+                      </Button>
                     </div>
                     <p>
                       Одна возможность продукта, несколько репозиториев. Приёмка фиксирует
@@ -776,7 +842,7 @@ export function App() {
                             <strong>
                               {c.id} · {c.title}
                             </strong>
-                            <Badge value={state}>
+                            <StatusBadge value={state}>
                               {c.acceptance
                                 ? 'Принят'
                                 : v?.status === 'passed'
@@ -786,7 +852,7 @@ export function App() {
                                     : v?.status === 'active'
                                       ? 'Проверяется'
                                       : 'Ожидает проверки'}
-                            </Badge>
+                            </StatusBadge>
                           </div>
                           <p>{c.description}</p>
                           {c.releaseId && (
@@ -836,7 +902,7 @@ export function App() {
                             </div>
                           )}
                           {v?.manifest && (
-                            <div className="manifest-list">
+                            <div className="block break-words [&_code]:text-xs">
                               {Object.entries(v.manifest).map(([id, m]) => (
                                 <p key={id}>
                                   <strong>{id}</strong> <code>{m.sha}</code>
@@ -846,11 +912,12 @@ export function App() {
                           )}
                           {v?.evidence.map((e) => (
                             <p key={e.gate}>
-                              <Badge value={e.passed ? 'done' : 'failed'}>
+                              <StatusBadge value={e.passed ? 'done' : 'failed'}>
                                 {e.passed ? 'PASS' : 'FAIL'}
-                              </Badge>{' '}
+                              </StatusBadge>{' '}
                               {e.gate} · {e.summary}{' '}
-                              <button
+                              <Button
+                                variant="outline"
                                 onClick={() =>
                                   void act(
                                     async () => {
@@ -865,7 +932,7 @@ export function App() {
                                 }
                               >
                                 Лог проверки
-                              </button>
+                              </Button>
                             </p>
                           ))}
                           {c.acceptance && (
@@ -874,9 +941,10 @@ export function App() {
                               receipt <code>{c.acceptance.digest.slice(0, 16)}</code>
                             </p>
                           )}
-                          <div className="changeset-actions">
+                          <div className="flex flex-wrap gap-2">
                             {!c.acceptance && (
-                              <button
+                              <Button
+                                variant="outline"
                                 disabled={
                                   busy || v?.status === 'active' || delivery?.status === 'active'
                                 }
@@ -890,10 +958,11 @@ export function App() {
                               >
                                 <Play />
                                 Проверить совместно
-                              </button>
+                              </Button>
                             )}
                             {!c.acceptance && needsDelivery && v?.status === 'passed' && (
-                              <button
+                              <Button
+                                variant="outline"
                                 disabled={busy || delivery?.status === 'active'}
                                 onClick={() =>
                                   void act(
@@ -904,13 +973,14 @@ export function App() {
                                 }
                               >
                                 Подготовить передачу
-                              </button>
+                              </Button>
                             )}
                             {!c.acceptance &&
                               needsDelivery &&
                               v?.status === 'passed' &&
                               delivery?.status !== 'delivered' && (
-                                <button
+                                <Button
+                                  variant="outline"
                                   disabled={busy || delivery?.status === 'active'}
                                   onClick={() =>
                                     void act(
@@ -921,12 +991,13 @@ export function App() {
                                   }
                                 >
                                   Проверить публикацию
-                                </button>
+                                </Button>
                               )}
                             {!c.acceptance &&
                               v?.status === 'passed' &&
                               (!needsDelivery || delivery?.status === 'delivered') && (
-                                <button
+                                <Button
+                                  variant="outline"
                                   disabled={busy}
                                   onClick={() =>
                                     void act(
@@ -938,9 +1009,10 @@ export function App() {
                                 >
                                   <Check />
                                   Принять ChangeSet
-                                </button>
+                                </Button>
                               )}
-                            <button
+                            <Button
+                              variant="outline"
                               onClick={() =>
                                 void act(
                                   async () => {
@@ -953,7 +1025,7 @@ export function App() {
                               }
                             >
                               Дневник
-                            </button>
+                            </Button>
                           </div>
                         </article>
                       );
@@ -961,7 +1033,7 @@ export function App() {
                   </div>
                 )}
                 {tab === 'history' && (
-                  <div className="history-list">
+                  <div className="min-h-(--canvas-height) p-6 [&>h2]:text-md [&>p]:text-muted-foreground [&>p]:max-w-[65ch] [&>p]:text-sm">
                     <h2>История результата</h2>
                     <p>
                       Принятые снимки неизменяемы. Каждая корректировка имеет свой план и
@@ -970,16 +1042,16 @@ export function App() {
                     {[...(board?.revisions ?? [])].reverse().map((r) => (
                       <article key={r.number}>
                         <div>
-                          <span className="history-number">r{r.number}</span>
+                          <span className="text-primary bg-accent rounded-sm p-2">r{r.number}</span>
                           <div>
                             <strong>{r.reason}</strong>
                             <small>
                               {stamp(r.createdAt)} · {r.taskIds.length} задач
                             </small>
                           </div>
-                          <Badge value={r.status === 'accepted' ? 'done' : 'ready'}>
+                          <StatusBadge value={r.status === 'accepted' ? 'done' : 'ready'}>
                             {r.status === 'accepted' ? 'Принята' : 'В работе'}
-                          </Badge>
+                          </StatusBadge>
                         </div>
                         {r.snapshot && (
                           <p>
@@ -991,7 +1063,8 @@ export function App() {
                             </code>
                           </p>
                         )}
-                        <button
+                        <Button
+                          variant="outline"
                           onClick={() => {
                             setRevisionNumber(r.number);
                             setTab('graph');
@@ -999,19 +1072,19 @@ export function App() {
                         >
                           Открыть ревизию {r.number}
                           <ArrowUpRight />
-                        </button>
+                        </Button>
                       </article>
                     ))}
                   </div>
                 )}
                 {tab === 'contracts' && (
-                  <div className="history-list">
-                    <div className="section-title">
+                  <div className="min-h-(--canvas-height) p-6 [&>h2]:text-md [&>p]:text-muted-foreground [&>p]:max-w-[65ch] [&>p]:text-sm">
+                    <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                       <h2>Утверждённые контракты</h2>
-                      <button onClick={() => setModal('contract')}>
+                      <Button variant="outline" onClick={() => setModal('contract')}>
                         <Plus />
                         Контракт
-                      </button>
+                      </Button>
                     </div>
                     <p>
                       Новая версия создаётся отдельным контрактом. Задачи закрепляют его содержимое
@@ -1021,7 +1094,7 @@ export function App() {
                       <article key={c.id}>
                         <div>
                           <strong>{c.title}</strong>
-                          <Badge value="done">{c.id}</Badge>
+                          <StatusBadge value="done">{c.id}</StatusBadge>
                         </div>
                         <pre>{c.content}</pre>
                         <small>
@@ -1040,12 +1113,15 @@ export function App() {
               </Suspense>
             </section>
             {tab !== 'changesets' && tab !== 'product' && (
-              <aside className="inspector" aria-label="Детали задачи">
+              <aside
+                className="bg-card max-h-[calc(var(--canvas-height)+var(--space-10))] overflow-auto rounded-lg border p-5 text-sm max-[1180px]:max-h-none"
+                aria-label="Детали задачи"
+              >
                 {task ? (
                   <>
-                    <div className="inspector-top">
+                    <div className="text-muted-foreground mb-4 flex items-center justify-between gap-2 text-xs [&>span:first-child]:min-w-0 [&>span:first-child]:break-words">
                       <span>{task.id}</span>
-                      <Badge value={status(task)}>{taskStatusName(task)}</Badge>
+                      <StatusBadge value={status(task)}>{taskStatusName(task)}</StatusBadge>
                     </div>
                     <h2>{task.title}</h2>
                     <p>
@@ -1080,9 +1156,14 @@ export function App() {
                         </details>
                       </div>
                     )}
-                    <p className="task-description">{task.description}</p>
+                    <p className="text-muted-foreground break-words whitespace-pre-wrap">
+                      {task.description}
+                    </p>
                     {!!task.progress?.reasons.length && (
-                      <section className="task-next-step" aria-label="Что нужно для продолжения">
+                      <section
+                        className="bg-secondary my-4 rounded-md p-3 text-sm break-words [&>h3]:mt-0 [&_ul]:mb-0 [&_ul]:pl-4 [&_li+li]:mt-2"
+                        aria-label="Что нужно для продолжения"
+                      >
                         <h3>Что нужно для продолжения</h3>
                         <ul>
                           {task.progress.reasons.map((reason) => (
@@ -1092,7 +1173,9 @@ export function App() {
                       </section>
                     )}
                     {task.progress?.eligible && (
-                      <p className="task-next-step">Задача доступна для выдачи исполнителю.</p>
+                      <p className="bg-secondary my-4 rounded-md p-3 text-sm break-words [&>h3]:mt-0 [&_ul]:mb-0 [&_ul]:pl-4 [&_li+li]:mt-2">
+                        Задача доступна для выдачи исполнителю.
+                      </p>
                     )}
                     <dl>
                       <div>
@@ -1119,15 +1202,22 @@ export function App() {
                       </div>
                     </dl>
                     {task.supersedes && (
-                      <p className="replacement">
+                      <p className="bg-accent text-primary rounded-sm p-2">
                         Корректирует <strong>{task.supersedes}</strong>
                       </p>
                     )}
                     <h3>Критерии приёмки</h3>
-                    <ul className="acceptance-list">
+                    <ul className="m-0 list-none p-0 [&_svg]:size-3.5">
                       {task.acceptance.map((a, i) => (
                         <li key={i}>
-                          <span className={task.status === 'done' ? 'checked' : ''}>
+                          <span
+                            className={cn(
+                              'flex size-5 shrink-0 items-center justify-center rounded-full border text-xs',
+                              task.status === 'done'
+                                ? 'text-success bg-success-foreground border-transparent'
+                                : 'text-muted-foreground',
+                            )}
+                          >
                             {task.status === 'done' ? <Check /> : i + 1}
                           </span>
                           {a}
@@ -1136,11 +1226,12 @@ export function App() {
                     </ul>
                     <h3>Зависимости</h3>
                     {task.dependsOn.length ? (
-                      <div className="dependency-list">
+                      <div className="grid gap-2">
                         {task.dependsOn.map((id) => {
                           const d = data.tasks.find((t) => t.id === id);
                           return (
-                            <button
+                            <Button
+                              variant="outline"
                               key={id}
                               onClick={() => {
                                 if (tasks.some((t) => t.id === id)) setSelected(id);
@@ -1155,7 +1246,9 @@ export function App() {
                                 }
                               }}
                             >
-                              <span className={d?.status === 'done' ? 'dep-done' : 'dep-pending'}>
+                              <span
+                                className={d?.status === 'done' ? 'text-success' : 'text-warning'}
+                              >
                                 {d?.status === 'done' ? <Check /> : <Clock />}
                               </span>
                               <span>
@@ -1163,17 +1256,17 @@ export function App() {
                                 <small>{d?.title}</small>
                               </span>
                               <ChevronRight />
-                            </button>
+                            </Button>
                           );
                         })}
                       </div>
                     ) : (
-                      <p className="muted">Можно начать независимо.</p>
+                      <p className="text-muted-foreground text-sm">Можно начать независимо.</p>
                     )}
                     {task.contracts.length > 0 && (
                       <>
                         <h3>Контракты</h3>
-                        <p className="muted">
+                        <p className="text-muted-foreground text-sm">
                           {task.contracts.join(', ')}
                           {task.approvedDigest
                             ? ' · версии закреплены'
@@ -1183,9 +1276,10 @@ export function App() {
                     )}
                     <h3>Проверки и доказательства</h3>
                     {latestRun?.evidence.length ? (
-                      <div className="evidence-list">
+                      <div className="grid gap-2">
                         {latestRun.evidence.map((e) => (
-                          <button
+                          <Button
+                            variant="outline"
                             key={e.id}
                             onClick={() =>
                               void act(
@@ -1201,7 +1295,7 @@ export function App() {
                               )
                             }
                           >
-                            <span className={e.passed ? 'dep-done' : 'dep-error'}>
+                            <span className={e.passed ? 'text-success' : 'text-destructive'}>
                               {e.passed ? <Check /> : <X />}
                             </span>
                             <span>
@@ -1213,27 +1307,34 @@ export function App() {
                                   ` · ${e.inspection?.mode ?? 'команды не зафиксированы'}`}
                               </small>
                             </span>
-                          </button>
+                          </Button>
                         ))}
                       </div>
                     ) : (
-                      <p className="muted">
+                      <p className="text-muted-foreground text-sm">
                         {task.sharedCompletion
                           ? 'Свидетельство участника доступно выше. Логи хранятся в исходном контуре выполнения.'
                           : 'Появятся после запуска. Отсутствие отчёта не считается успехом.'}
                       </p>
                     )}
                     {task.resultSha && (
-                      <p className="result-sha">
+                      <p className="text-success mt-4">
                         Принятый коммит <code>{task.resultSha.slice(0, 12)}</code>
                       </p>
                     )}
-                    {task.failure && <p className="failure-detail">{task.failure}</p>}
-                    <div className="task-actions">
+                    {task.failure && (
+                      <p className="bg-destructive-foreground text-destructive rounded-sm p-3 break-words">
+                        {task.failure}
+                      </p>
+                    )}
+                    <div className="mt-6 flex flex-wrap gap-2 border-t pt-4">
                       {task.status === 'draft' && editable && (
                         <>
-                          <button onClick={() => setModal('edit')}>Редактировать</button>
-                          <button
+                          <Button variant="outline" onClick={() => setModal('edit')}>
+                            Редактировать
+                          </Button>
+                          <Button
+                            variant="outline"
                             disabled={busy}
                             onClick={() =>
                               void act(
@@ -1244,11 +1345,12 @@ export function App() {
                             }
                           >
                             Утвердить задачу
-                          </button>
+                          </Button>
                         </>
                       )}
                       {['failed', 'cancelled'].includes(task.status) && (
-                        <button
+                        <Button
+                          variant="outline"
                           disabled={busy}
                           onClick={() =>
                             void act(
@@ -1260,10 +1362,11 @@ export function App() {
                         >
                           <RotateCcw />
                           Повторить
-                        </button>
+                        </Button>
                       )}
                       {!['done', 'cancelled'].includes(task.status) && (
-                        <button
+                        <Button
+                          variant="outline"
                           disabled={busy}
                           onClick={() =>
                             void act(
@@ -1274,12 +1377,12 @@ export function App() {
                           }
                         >
                           Отменить задачу
-                        </button>
+                        </Button>
                       )}
                     </div>
                   </>
                 ) : (
-                  <div className="empty">
+                  <div className="text-muted-foreground flex min-h-64 flex-col items-center justify-center gap-3 p-8 text-center [&>svg]:size-8 [&_h2]:text-md [&_h2]:text-foreground [&_h2]:m-0 [&_p]:m-0">
                     <FileCheck />
                     <p>Выберите задачу, чтобы увидеть зависимости и результаты проверок.</p>
                   </div>
@@ -1287,7 +1390,7 @@ export function App() {
               </aside>
             )}
           </div>
-          <footer className="workspace-footer">
+          <footer className="text-muted-foreground mt-4 flex justify-between gap-4 text-xs [&>span:first-child]:flex [&>span:first-child]:items-center [&>span:first-child]:gap-2">
             <span>
               <span className="dot active" /> SQLite · состояние сохранено локально
             </span>
@@ -1320,17 +1423,17 @@ export function App() {
           >
             <label>
               Название
-              <input name="title" required minLength={3} maxLength={180} />
+              <Input name="title" required minLength={3} maxLength={180} />
             </label>
             <label>
               Ожидаемый результат продукта
-              <textarea name="description" required minLength={10} maxLength={12000} />
+              <Textarea name="description" required minLength={10} maxLength={12000} />
             </label>
             <fieldset>
               <legend>Доски</legend>
               {data.boards.map((b) => (
-                <label className="check-option" key={b.id}>
-                  <input
+                <label className="flex cursor-pointer items-start gap-2 py-2 text-sm" key={b.id}>
+                  <Input
                     type="checkbox"
                     name="boardIds"
                     value={b.id}
@@ -1342,7 +1445,7 @@ export function App() {
             </fieldset>
             <label>
               ID продуктового релиза (если принимаем релиз INTENT)
-              <input name="releaseId" pattern="[A-Za-z0-9_-]{1,50}" placeholder="Например, mvp" />
+              <Input name="releaseId" pattern="[A-Za-z0-9_-]{1,50}" placeholder="Например, mvp" />
             </label>
             <label>
               Продолжает принятый ChangeSet
@@ -1357,10 +1460,8 @@ export function App() {
                   ))}
               </select>
             </label>
-            <div className="form-actions">
-              <button className="primary" disabled={busy}>
-                Создать ChangeSet
-              </button>
+            <div className="mt-6 flex justify-end gap-3">
+              <Button disabled={busy}>Создать ChangeSet</Button>
             </div>
           </form>
         </Modal>
@@ -1382,7 +1483,7 @@ export function App() {
           >
             <label>
               Название
-              <input
+              <Input
                 name="title"
                 required
                 minLength={3}
@@ -1392,15 +1493,13 @@ export function App() {
             </label>
             <label>
               Цель
-              <textarea name="description" rows={3} maxLength={5000} />
+              <Textarea name="description" rows={3} maxLength={5000} />
             </label>
-            <div className="form-actions">
-              <button type="button" onClick={() => setModal(null)}>
+            <div className="mt-6 flex justify-end gap-3">
+              <Button variant="outline" type="button" onClick={() => setModal(null)}>
                 Отмена
-              </button>
-              <button className="primary" disabled={busy}>
-                Создать доску
-              </button>
+              </Button>
+              <Button disabled={busy}>Создать доску</Button>
             </div>
           </form>
         </Modal>
@@ -1443,21 +1542,19 @@ export function App() {
               );
             }}
           >
-            <p className="muted">
+            <p className="text-muted-foreground text-sm">
               Подтверждая, вы фиксируете эту версию. Изменения оформляются новым контрактом.
             </p>
             <label>
               Название и версия
-              <input name="title" required maxLength={180} />
+              <Input name="title" required maxLength={180} />
             </label>
             <label>
               Содержимое
-              <textarea name="content" required rows={10} maxLength={60000} />
+              <Textarea name="content" required rows={10} maxLength={60000} />
             </label>
-            <div className="form-actions">
-              <button className="primary" disabled={busy}>
-                Утвердить контракт
-              </button>
+            <div className="mt-6 flex justify-end gap-3">
+              <Button disabled={busy}>Утвердить контракт</Button>
             </div>
           </form>
         </Modal>
@@ -1482,7 +1579,7 @@ export function App() {
             <fieldset>
               <legend>Что требует изменения</legend>
               {tasks.map((t) => (
-                <label className="check-option" key={t.id}>
+                <label className="flex cursor-pointer items-start gap-2 py-2 text-sm" key={t.id}>
                   <input
                     type="checkbox"
                     checked={roots.includes(t.id)}
@@ -1499,7 +1596,7 @@ export function App() {
               ))}
             </fieldset>
             {impact && (
-              <div className="impact">
+              <div className="bg-accent mt-4 rounded-sm p-4 text-sm [&_p]:my-2 [&_ul]:mb-0 [&_ul]:pl-5">
                 <strong>Затронуто задач: {impact.taskIds.length}</strong>
                 <p>Будут созданы черновики для выбранных задач и всех зависимых результатов.</p>
                 <ul>
@@ -1519,7 +1616,7 @@ export function App() {
             )}
             <label>
               Что и почему меняем
-              <textarea
+              <Textarea
                 name="reason"
                 required
                 minLength={10}
@@ -1528,20 +1625,20 @@ export function App() {
                 placeholder="Например, поиск должен учитывать архивные продукты…"
               />
             </label>
-            <div className="form-actions">
-              <button type="button" onClick={() => setModal(null)}>
+            <div className="mt-6 flex justify-end gap-3">
+              <Button variant="outline" type="button" onClick={() => setModal(null)}>
                 Отмена
-              </button>
-              <button className="primary" disabled={busy || !impact}>
+              </Button>
+              <Button disabled={busy || !impact}>
                 Создать ревизию {(revision?.number ?? 0) + 1}
-              </button>
+              </Button>
             </div>
           </form>
         </Modal>
       )}
       {log && (
         <Modal error={error} title={log.title} onClose={() => setLog(undefined)}>
-          <pre className="log-content">{log.content}</pre>
+          <pre className="max-h-[65dvh] overflow-auto">{log.content}</pre>
         </Modal>
       )}
     </div>
@@ -1579,11 +1676,11 @@ function TaskForm({
     >
       <label>
         Название
-        <input name="title" defaultValue={task?.title} required minLength={3} maxLength={180} />
+        <Input name="title" defaultValue={task?.title} required minLength={3} maxLength={180} />
       </label>
       <label>
         Описание результата
-        <textarea
+        <Textarea
           name="description"
           defaultValue={task?.description}
           required
@@ -1617,15 +1714,15 @@ function TaskForm({
       </label>
       <label>
         Критерии приёмки, по одному на строку
-        <textarea name="acceptance" defaultValue={task?.acceptance.join('\n')} required rows={3} />
+        <Textarea name="acceptance" defaultValue={task?.acceptance.join('\n')} required rows={3} />
       </label>
-      <fieldset className="scroll-options">
+      <fieldset className="max-h-48 overflow-auto">
         <legend>Зависит от задач</legend>
         {data.tasks
           .filter((t) => t.id !== task?.id && !data.tasks.some((x) => x.supersedes === t.id))
           .map((t) => (
-            <label className="check-option" key={t.id}>
-              <input
+            <label className="flex cursor-pointer items-start gap-2 py-2 text-sm" key={t.id}>
+              <Input
                 name="dependsOn"
                 type="checkbox"
                 value={t.id}
@@ -1639,11 +1736,11 @@ function TaskForm({
         {data.tasks.length === 0 && <p>Пока нет других задач.</p>}
       </fieldset>
       {data.contracts.length > 0 && (
-        <fieldset className="scroll-options">
+        <fieldset className="max-h-48 overflow-auto">
           <legend>Контракты</legend>
           {data.contracts.map((c) => (
-            <label className="check-option" key={c.id}>
-              <input
+            <label className="flex cursor-pointer items-start gap-2 py-2 text-sm" key={c.id}>
+              <Input
                 type="checkbox"
                 name="contracts"
                 value={c.id}
@@ -1656,10 +1753,8 @@ function TaskForm({
           ))}
         </fieldset>
       )}
-      <div className="form-actions">
-        <button className="primary" disabled={busy}>
-          Сохранить черновик
-        </button>
+      <div className="mt-6 flex justify-end gap-3">
+        <Button disabled={busy}>Сохранить черновик</Button>
       </div>
     </form>
   );

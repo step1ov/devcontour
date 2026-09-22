@@ -20,7 +20,12 @@ test('Plan → parallel execution → acceptance → correction → acceptance p
   const board = before.boards.find((b: any) => b.title === 'Каталог продуктов');
   const digest = board.revisions[0].snapshot.digest;
   await page.getByRole('button', { name: 'Создать корректировку' }).click();
-  await page.getByLabel(/Зафиксировать API и состояния/).check();
+  // Scope to the dialog: the graph node behind it carries the same task title
+  // in its accessible label, and getByLabel does not filter aria-hidden.
+  await page
+    .getByRole('dialog')
+    .getByLabel(/Зафиксировать API и состояния/)
+    .check();
   await expect(page.getByText('Затронуто задач: 5')).toBeVisible();
   await page
     .getByLabel('Что и почему меняем')
@@ -31,6 +36,9 @@ test('Plan → parallel execution → acceptance → correction → acceptance p
   await page.getByRole('button', { name: 'Утвердить план' }).click();
   await expect(page.getByRole('button', { name: 'Принять доску' })).toBeVisible({ timeout: 45000 });
   await page.getByRole('button', { name: 'Принять доску' }).click();
+  // Acceptance is confirmed by the correction action appearing; reading the API
+  // before that races the click.
+  await expect(page.getByRole('button', { name: 'Создать корректировку' })).toBeVisible();
   await page.getByRole('tab', { name: 'Ревизии', exact: true }).click();
   await expect(page.getByRole('button', { name: 'Открыть ревизию 1' })).toBeVisible();
   const after = await (await request.get('/api/state')).json();

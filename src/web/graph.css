@@ -1,0 +1,27 @@
+/* React Flow renders its own wrappers, so its variables and generated classes
+   cannot be expressed as utilities on elements we control. */
+.react-flow {
+  --xy-edge-stroke-default: var(--canvas-edge);
+  --xy-edge-stroke-width-default: var(--edge-width);
+  --xy-background-pattern-dots-color-default: var(--graph-dot);
+  --xy-controls-button-background-color-default: var(--surface-panel);
+  --xy-controls-button-background-color-hover-default: var(--surface-subtle);
+  --xy-controls-button-color-default: var(--text-primary);
+}
+.react-flow__node.selected .task-node {
+  outline: var(--focus-width) solid var(--action-primary);
+  outline-offset: var(--space-1);
+}
+.react-flow__handle {
+  background: var(--canvas-edge);
+  border-color: var(--surface-panel);
+  width: var(--space-2);
+  height: var(--space-2);
+}
+.edge-done .react-flow__edge-path {
+  stroke: var(--status-done);
+}
+.c4-boundary {
+  border: var(--border-width) dashed var(--action-primary) !important;
+  background: var(--status-ready-bg) !important;
+}
