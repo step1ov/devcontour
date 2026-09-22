@@ -1,4 +1,12 @@
-import { mkdirSync, writeFileSync, renameSync, lstatSync, realpathSync } from 'node:fs';
+import {
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  renameSync,
+  lstatSync,
+  realpathSync,
+  existsSync,
+} from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { DevContourState } from '../core/model.ts';
@@ -177,7 +185,10 @@ function directory(root: string) {
   }
   return dir;
 }
+// Skip an identical rewrite: a heartbeat or a progress note must not touch the
+// product repository at all, not even its timestamps.
 function atomicWrite(destination: string, content: string) {
+  if (existsSync(destination) && readFileSync(destination, 'utf8') === content) return;
   const temporary = destination + '.' + randomUUID() + '.tmp';
   writeFileSync(temporary, content, { flag: 'wx' });
   renameSync(temporary, destination);

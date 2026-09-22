@@ -7,6 +7,7 @@ import {
   mkdirSync,
   writeFileSync,
   readFileSync,
+  statSync,
   rmSync,
   existsSync,
   realpathSync,
@@ -597,14 +598,31 @@ test('The brief is projected to docs/product on every revision, without a runnin
     assert.equal(saved.product[0].content.features.length, product.features.length);
     assert.equal('activity' in saved, false);
 
-    // A progress note must not rewrite the projected files.
-    const before = readFileSync(join(directory, id + '.json'), 'utf8');
+    // A progress note must not touch the projected files at all.
+    const stamp = statSync(join(directory, id + '.json')).mtimeMs;
     p.execute('preparation_progress', { changeId: id, note: 'Изучаю ограничения' });
-    assert.equal(readFileSync(join(directory, id + '.json'), 'utf8'), before);
+    assert.equal(statSync(join(directory, id + '.json')).mtimeMs, stamp);
 
-    // An operator decision is durable and reaches the projection.
-    approveStage(p, id, 'product');
-    assert.match(readFileSync(join(directory, id + '.md'), 'utf8'), /утверждено/);
+    // Before the operator decides, the projection already shows the exact
+    // version awaiting them, so it can be read and reviewed outside the panel.
+    const digest = store.read().preparation!.changes[0].product.at(-1)!.digest;
+    p.execute('preparation_submit', { changeId: id, stage: 'product', expectedDigest: digest });
+    assert.match(
+      readFileSync(join(directory, id + '.md'), 'utf8'),
+      /## Продукт · версия 1 · ожидает решения пользователя/,
+    );
+
+    // And after they decide, the decision and its comment are in the file.
+    p.decide({
+      changeId: id,
+      stage: 'product',
+      expectedDigest: digest,
+      decision: 'approve',
+      comment: 'Границы релизов понятны',
+    });
+    const decided = readFileSync(join(directory, id + '.md'), 'utf8');
+    assert.match(decided, /## Продукт · версия 1 · утверждено/);
+    assert.match(decided, /Решение пользователя .*Границы релизов понятны/);
   } finally {
     store.close();
     rmSync(root, { recursive: true, force: true });
