@@ -1,4 +1,4 @@
-import { Check, ExternalLink, Plus, Trash2, X } from 'lucide-react';
+import { Check, Plus, Trash2, X } from 'lucide-react';
 import type { ConceptBrief } from '../core/preparation-model.ts';
 import { Badge } from '@/ui/badge.tsx';
 import { Button } from '@/ui/button.tsx';
@@ -6,7 +6,7 @@ import { Card, CardContent } from '@/ui/card.tsx';
 import { Input } from '@/ui/input.tsx';
 import { Label } from '@/ui/label.tsx';
 import { Textarea } from '@/ui/textarea.tsx';
-import { EditActions, Section, useSectionDraft } from './BriefEditing.tsx';
+import { EditActions, Section, Source, useSectionDraft } from './BriefEditing.tsx';
 import { Shot, statuses } from './ReferencesBrief.tsx';
 
 export function ConceptBriefView({
@@ -92,11 +92,13 @@ export function ConceptBriefView({
                     </div>
                   </div>
                   <div className="grid gap-2">
-                    <Label htmlFor={'sketch-url-' + i}>Либо ссылка</Label>
+                    <Label htmlFor={'sketch-url-' + i}>
+                      Исходник: ссылка или путь в репозитории
+                    </Label>
                     <Input
                       id={'sketch-url-' + i}
                       value={s.url}
-                      placeholder="https://"
+                      placeholder="https://… или docs/design/sketches/файл.html"
                       onChange={(e) => {
                         const sketches = [...draft.sketches];
                         sketches[i] = { ...s, url: e.target.value };
@@ -183,24 +185,17 @@ export function ConceptBriefView({
                         {s.status === 'accepted' ? 'Выбран' : statuses[s.status].label}
                       </Badge>
                     </div>
-                    {s.file ? (
+                    {s.file && (
                       <Shot
                         file={s.file}
                         alt={s.title}
                         kind="sketches"
                         className="w-full rounded-sm"
                       />
-                    ) : s.url ? (
-                      <a
-                        href={s.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-primary break-all underline-offset-4 hover:underline"
-                      >
-                        {s.url}
-                        <ExternalLink aria-hidden="true" className="ml-1 inline size-3" />
-                      </a>
-                    ) : null}
+                    )}
+                    {/* The source stays visible next to the image: a sketch is
+                        worth editing, and that needs the file it came from. */}
+                    <Source url={s.url} />
                     {s.note && <p className="text-muted-foreground text-sm">{s.note}</p>}
                   </CardContent>
                 </Card>

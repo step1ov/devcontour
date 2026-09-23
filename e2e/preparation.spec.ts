@@ -133,6 +133,30 @@ test('An empty workspace shows live product review, C1/C2 and separate operator 
       true,
     );
 
+    // The concept step is read, edited and saved like every other one: the
+    // operator picks between sketches there, so it cannot be display-only.
+    await page.getByRole('button', { name: /3 Дизайн/ }).click();
+    await page
+      .getByRole('navigation', { name: 'Шаги дизайна' })
+      .getByRole('button', { name: /2 Концепт и эскизы/ })
+      .click();
+    const sketches = page.locator('#section-sketches');
+    await expect(sketches.getByRole('heading', { name: /Эскизы \(/ })).toBeVisible();
+    await sketches.getByRole('button', { name: 'Изменить' }).click();
+    await sketches.getByRole('button', { name: 'Добавить эскиз' }).click();
+    await sketches.getByLabel('Название варианта').last().fill('Вариант с обратным отсчётом');
+    await sketches
+      .getByLabel('Исходник: ссылка или путь в репозитории')
+      .last()
+      .fill('docs/design/sketches/countdown.html');
+    await sketches.getByRole('button', { name: 'Сохранить как новую версию' }).click();
+    await expect(page.getByText('Вариант с обратным отсчётом')).toBeVisible();
+    // A repository path is shown as a path, not as a link that leads nowhere.
+    await expect(
+      page.getByRole('link', { name: /docs\/design\/sketches\/countdown\.html/ }),
+    ).toHaveCount(0);
+    await expect(page.getByText('docs/design/sketches/countdown.html')).toBeVisible();
+
     // Architecture blocks edit in place, and sub-items are added and removed.
     await page.getByRole('button', { name: /2 Архитектура и стек/ }).click();
     const before = (await (await request.get(app.url + '/api/preparation')).json()).current

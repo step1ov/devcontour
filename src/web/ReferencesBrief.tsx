@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Check, ExternalLink, FileCode2, ImageOff, Plus, Trash2, X, ZoomIn } from 'lucide-react';
+import { Check, ImageOff, Plus, Trash2, X, ZoomIn } from 'lucide-react';
 import type { ReferencesBrief } from '../core/preparation-model.ts';
 import { Alert, AlertDescription } from '@/ui/alert.tsx';
 import { Badge } from '@/ui/badge.tsx';
@@ -9,7 +9,7 @@ import { Dialog, DialogContent, DialogTitle } from '@/ui/dialog.tsx';
 import { Input } from '@/ui/input.tsx';
 import { Label } from '@/ui/label.tsx';
 import { Textarea } from '@/ui/textarea.tsx';
-import { EditActions, Section, useSectionDraft } from './BriefEditing.tsx';
+import { EditActions, Section, Source, useSectionDraft } from './BriefEditing.tsx';
 
 export const statuses = {
   candidate: { label: 'Кандидат', tone: 'secondary' },
@@ -288,24 +288,7 @@ export function ReferencesBriefView({
                       <Badge variant={statuses[r.status].tone}>{statuses[r.status].label}</Badge>
                     </td>
                     <td className="border-b p-2 align-top">
-                      {/^https?:\/\//i.test(r.url) ? (
-                        <a
-                          href={r.url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-primary break-all underline-offset-4 hover:underline"
-                        >
-                          {r.url}
-                          <ExternalLink aria-hidden="true" className="ml-1 inline size-3" />
-                        </a>
-                      ) : (
-                        // A reference can live in the repository. Rendering the path as
-                        // a link would only produce one that leads nowhere.
-                        <span className="text-muted-foreground flex items-start gap-1">
-                          <FileCode2 aria-hidden="true" className="mt-0.5 size-3 shrink-0" />
-                          <code className="font-mono break-all">{r.url}</code>
-                        </span>
-                      )}
+                      <Source url={r.url} />
                     </td>
                     <td className="border-b p-2 align-top">{r.takeaway}</td>
                   </tr>

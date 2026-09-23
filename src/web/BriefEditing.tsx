@@ -1,8 +1,33 @@
 import { useState } from 'react';
-import { Check, Pencil } from 'lucide-react';
+import { Check, ExternalLink, FileCode2, Pencil } from 'lucide-react';
 import { Button } from '@/ui/button.tsx';
 import { Label } from '@/ui/label.tsx';
 import { Textarea } from '@/ui/textarea.tsx';
+
+// A reference or a sketch points either outside or at a file in this
+// repository. Only the first is a link; rendering the second as one would
+// produce a link that leads nowhere.
+export function Source({ url, className }: { url: string; className?: string }) {
+  if (!url) return null;
+  if (/^https?:\/\//i.test(url))
+    return (
+      <a
+        href={url}
+        target="_blank"
+        rel="noreferrer"
+        className={'text-primary break-all underline-offset-4 hover:underline ' + (className ?? '')}
+      >
+        {url}
+        <ExternalLink aria-hidden="true" className="ml-1 inline size-3" />
+      </a>
+    );
+  return (
+    <span className={'text-muted-foreground flex items-start gap-1 ' + (className ?? '')}>
+      <FileCode2 aria-hidden="true" className="mt-0.5 size-3 shrink-0" />
+      <code className="font-mono text-xs break-all">{url}</code>
+    </span>
+  );
+}
 
 // Shared editing chrome for the two briefs: the product and the architecture
 // are read and changed the same way, so the affordances are identical.

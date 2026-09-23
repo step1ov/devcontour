@@ -325,6 +325,36 @@ function Questions({
     </Foldable>
   );
 }
+// A stage with nothing in it is either untouched or waiting on the operator.
+// Saying which, and pointing at the step that holds it, is the difference
+// between an empty tab and a tab that explains itself.
+function Waiting({
+  previous,
+  blocked,
+  working,
+  onGo,
+}: {
+  previous?: { status: string };
+  blocked: string;
+  working: string;
+  onGo: () => void;
+}) {
+  const pending = previous?.status === 'in-review';
+  return (
+    <Alert className="max-w-[78ch] border-dashed">
+      <AlertDescription className="grid gap-3">
+        <span>{previous?.status === 'approved' ? working : blocked}</span>
+        {pending && (
+          <span>
+            <Button variant="outline" size="sm" onClick={onGo}>
+              Перейти к решению
+            </Button>
+          </span>
+        )}
+      </AlertDescription>
+    </Alert>
+  );
+}
 function Decisions({
   stage,
   decisions,
@@ -893,13 +923,12 @@ export function PreparationPanel() {
                           }
                         />
                       ) : (
-                        <Alert className="max-w-[78ch] border-dashed">
-                          <AlertDescription>
-                            {a?.status === 'approved'
-                              ? 'Агент ищет референсы и описывает, что берёт из каждого. Вы принимаете или отклоняете каждый.'
-                              : 'Референсы собираются после вашего утверждения архитектуры.'}
-                          </AlertDescription>
-                        </Alert>
+                        <Waiting
+                          previous={a}
+                          working="Агент ищет референсы и описывает, что берёт из каждого. Вы принимаете или отклоняете каждый."
+                          blocked="Референсы собираются после вашего утверждения архитектуры — она ждёт вашего решения."
+                          onGo={() => setTab('architecture')}
+                        />
                       )
                     ) : tab === 'concept' ? (
                       con ? (
@@ -921,13 +950,12 @@ export function PreparationPanel() {
                           }
                         />
                       ) : (
-                        <Alert className="max-w-[78ch] border-dashed">
-                          <AlertDescription>
-                            {refs?.status === 'approved'
-                              ? 'Агент формулирует концепцию и готовит эскизы, между которыми вы выберете.'
-                              : 'Концепт прорабатывается после вашего утверждения референсов.'}
-                          </AlertDescription>
-                        </Alert>
+                        <Waiting
+                          previous={refs}
+                          working="Агент формулирует концепцию и готовит эскизы, между которыми вы выберете."
+                          blocked="Концепт нельзя сохранить, пока не утверждены референсы — они ждут вашего решения."
+                          onGo={() => setTab('references')}
+                        />
                       )
                     ) : d ? (
                       <DesignBriefView
@@ -949,13 +977,12 @@ export function PreparationPanel() {
                         }
                       />
                     ) : (
-                      <Alert className="max-w-[78ch] border-dashed">
-                        <AlertDescription>
-                          {con?.status === 'approved'
-                            ? 'Агент собирает палитру, токены, guidelines и разбор по каналам.'
-                            : 'Дизайн-система готовится после вашего утверждения концепта.'}
-                        </AlertDescription>
-                      </Alert>
+                      <Waiting
+                        previous={con}
+                        working="Агент собирает палитру, токены, guidelines и разбор по каналам."
+                        blocked="Дизайн-система готовится после вашего утверждения концепта — он ждёт вашего решения."
+                        onGo={() => setTab('concept')}
+                      />
                     )}
                   </StageBoundary>
                   {current?.decision && (
