@@ -33,6 +33,10 @@
             "type": "string",
             "minLength": 3,
             "maxLength": 180
+          },
+          "slug": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]{0,48}$"
           }
         },
         "required": [
@@ -486,7 +490,8 @@
                             "person",
                             "system",
                             "external-system",
-                            "container"
+                            "container",
+                            "component"
                           ]
                         },
                         "description": {
@@ -580,7 +585,8 @@
                             "person",
                             "system",
                             "external-system",
-                            "container"
+                            "container",
+                            "component"
                           ]
                         },
                         "description": {
@@ -644,6 +650,106 @@
                   "relationships"
                 ],
                 "additionalProperties": false
+              },
+              "c3": {
+                "default": [],
+                "maxItems": 5,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "containerId": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                    },
+                    "nodes": {
+                      "minItems": 1,
+                      "maxItems": 30,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "id": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                          },
+                          "name": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 100
+                          },
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "person",
+                              "system",
+                              "external-system",
+                              "container",
+                              "component"
+                            ]
+                          },
+                          "description": {
+                            "type": "string",
+                            "minLength": 3,
+                            "maxLength": 600
+                          },
+                          "technology": {
+                            "default": "",
+                            "type": "string",
+                            "maxLength": 150
+                          }
+                        },
+                        "required": [
+                          "id",
+                          "name",
+                          "kind",
+                          "description"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "relationships": {
+                      "minItems": 1,
+                      "maxItems": 60,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "from": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                          },
+                          "to": {
+                            "type": "string",
+                            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                          },
+                          "description": {
+                            "type": "string",
+                            "minLength": 3,
+                            "maxLength": 200
+                          },
+                          "technology": {
+                            "default": "",
+                            "type": "string",
+                            "maxLength": 100
+                          }
+                        },
+                        "required": [
+                          "from",
+                          "to",
+                          "description"
+                        ],
+                        "additionalProperties": false
+                      }
+                    }
+                  },
+                  "required": [
+                    "containerId",
+                    "nodes",
+                    "relationships"
+                  ],
+                  "additionalProperties": false
+                }
               }
             },
             "required": [
@@ -652,6 +758,412 @@
               "decisions",
               "risks",
               "testStrategy",
+              "questions"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "changeId",
+          "expectedDigest",
+          "reason",
+          "content"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "preparation_references",
+      "description": "Save the first design step: candidate references with the property taken from each and an optional screenshot stored beside them. The operator accepts or rejects each one. A change that touches no interface sets applicable=false with a reason, which ends the design track.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "changeId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "expectedDigest": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 2000
+          },
+          "content": {
+            "type": "object",
+            "properties": {
+              "applicable": {
+                "default": true,
+                "type": "boolean"
+              },
+              "reason": {
+                "default": "",
+                "type": "string",
+                "maxLength": 1500
+              },
+              "summary": {
+                "type": "string",
+                "maxLength": 6000
+              },
+              "items": {
+                "default": [],
+                "maxItems": 60,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "url": {
+                      "type": "string",
+                      "minLength": 3,
+                      "maxLength": 600
+                    },
+                    "takeaway": {
+                      "type": "string",
+                      "minLength": 3,
+                      "maxLength": 600
+                    },
+                    "screenshot": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9._-]{0,120}$"
+                    },
+                    "status": {
+                      "default": "candidate",
+                      "type": "string",
+                      "enum": [
+                        "candidate",
+                        "accepted",
+                        "rejected"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "url",
+                    "takeaway"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "questions": {
+                "maxItems": 30,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 3,
+                  "maxLength": 1500
+                }
+              }
+            },
+            "required": [
+              "summary",
+              "questions"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "changeId",
+          "expectedDigest",
+          "reason",
+          "content"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "preparation_concept",
+      "description": "Save the second design step after the operator approved the references: the concept and the rendered sketches they choose between. Sketches are files or links, one of them marked accepted.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "changeId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "expectedDigest": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 2000
+          },
+          "content": {
+            "type": "object",
+            "properties": {
+              "concept": {
+                "type": "string",
+                "maxLength": 6000
+              },
+              "sketches": {
+                "default": [],
+                "maxItems": 30,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "title": {
+                      "type": "string",
+                      "minLength": 3,
+                      "maxLength": 160
+                    },
+                    "file": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9._-]{0,120}$"
+                    },
+                    "url": {
+                      "default": "",
+                      "type": "string",
+                      "maxLength": 600
+                    },
+                    "note": {
+                      "default": "",
+                      "type": "string",
+                      "maxLength": 1000
+                    },
+                    "status": {
+                      "default": "candidate",
+                      "type": "string",
+                      "enum": [
+                        "candidate",
+                        "accepted",
+                        "rejected"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "title"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "questions": {
+                "maxItems": 30,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 3,
+                  "maxLength": 1500
+                }
+              }
+            },
+            "required": [
+              "concept",
+              "questions"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "changeId",
+          "expectedDigest",
+          "reason",
+          "content"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "preparation_design",
+      "description": "Save the third design step after the operator approved the concept: the palette, semantic tokens, guidelines, what is shared and what differs per channel, and the handoff package. Screen layouts stay per-feature UI contracts inside development.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "changeId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "expectedDigest": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 2000
+          },
+          "content": {
+            "type": "object",
+            "properties": {
+              "palette": {
+                "default": [],
+                "maxItems": 80,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 2,
+                      "maxLength": 60
+                    },
+                    "value": {
+                      "type": "string",
+                      "pattern": "^#[0-9a-fA-F]{6}$"
+                    },
+                    "role": {
+                      "default": "",
+                      "type": "string",
+                      "maxLength": 300
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "value"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "tokens": {
+                "default": [],
+                "maxItems": 120,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "group": {
+                      "type": "string",
+                      "minLength": 2,
+                      "maxLength": 60
+                    },
+                    "name": {
+                      "type": "string",
+                      "minLength": 2,
+                      "maxLength": 60
+                    },
+                    "value": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 120
+                    },
+                    "purpose": {
+                      "default": "",
+                      "type": "string",
+                      "maxLength": 300
+                    }
+                  },
+                  "required": [
+                    "group",
+                    "name",
+                    "value"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "shared": {
+                "maxItems": 30,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 3,
+                  "maxLength": 1500
+                }
+              },
+              "channels": {
+                "default": [],
+                "maxItems": 10,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "channelId": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9-]{1,48}$"
+                    },
+                    "notes": {
+                      "minItems": 1,
+                      "maxItems": 20,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 600
+                      }
+                    }
+                  },
+                  "required": [
+                    "channelId",
+                    "notes"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "guidelines": {
+                "maxItems": 30,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 3,
+                  "maxLength": 1500
+                }
+              },
+              "handoff": {
+                "default": [],
+                "maxItems": 30,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "title": {
+                      "type": "string",
+                      "minLength": 3,
+                      "maxLength": 160
+                    },
+                    "path": {
+                      "type": "string",
+                      "minLength": 3,
+                      "maxLength": 300
+                    }
+                  },
+                  "required": [
+                    "title",
+                    "path"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "questions": {
+                "maxItems": 30,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 3,
+                  "maxLength": 1500
+                }
+              }
+            },
+            "required": [
+              "shared",
+              "guidelines",
               "questions"
             ],
             "additionalProperties": false
@@ -682,7 +1194,10 @@
             "type": "string",
             "enum": [
               "product",
-              "architecture"
+              "architecture",
+              "references",
+              "concept",
+              "design"
             ]
           },
           "expectedDigest": {
@@ -716,6 +1231,9 @@
             "enum": [
               "product",
               "architecture",
+              "references",
+              "concept",
+              "design",
               "development"
             ]
           },
@@ -748,7 +1266,10 @@
             "type": "string",
             "enum": [
               "product",
-              "architecture"
+              "architecture",
+              "references",
+              "concept",
+              "design"
             ]
           },
           "add": {
@@ -800,7 +1321,7 @@
     },
     {
       "name": "preparation_resolve",
-      "description": "Record a decision with its rationale in the durable journal, optionally closing an answered question. Does not approve a stage.",
+      "description": "Record a decision with its rationale in the durable journal, optionally closing an answered question, or withdraw decisions that no longer hold. Does not approve a stage.",
       "readOnly": false,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -815,7 +1336,10 @@
             "type": "string",
             "enum": [
               "product",
-              "architecture"
+              "architecture",
+              "references",
+              "concept",
+              "design"
             ]
           },
           "statement": {
@@ -831,12 +1355,32 @@
           "questionId": {
             "type": "string",
             "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "withdraw": {
+            "default": [],
+            "maxItems": 10,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                },
+                "reason": {
+                  "type": "string",
+                  "minLength": 3,
+                  "maxLength": 600
+                }
+              },
+              "required": [
+                "id",
+                "reason"
+              ],
+              "additionalProperties": false
+            }
           }
         },
-        "required": [
-          "statement",
-          "rationale"
-        ],
         "additionalProperties": false
       }
     },
@@ -2370,12 +2914,25 @@
                   "architectureDigest": {
                     "type": "string",
                     "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "referencesDigest": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "conceptDigest": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "designDigest": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
                   }
                 },
                 "required": [
                   "changeId",
                   "productDigest",
-                  "architectureDigest"
+                  "architectureDigest",
+                  "referencesDigest"
                 ],
                 "additionalProperties": false
               },
@@ -2647,12 +3204,25 @@
                   "architectureDigest": {
                     "type": "string",
                     "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "referencesDigest": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "conceptDigest": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "designDigest": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
                   }
                 },
                 "required": [
                   "changeId",
                   "productDigest",
-                  "architectureDigest"
+                  "architectureDigest",
+                  "referencesDigest"
                 ],
                 "additionalProperties": false
               },

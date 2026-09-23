@@ -546,9 +546,43 @@ test('Agent progress, operator answers and recorded decisions are durable and ga
     p.execute('preparation_submit', { changeId: id, stage: 'product', expectedDigest: digest });
     assert.equal(p.status(id).enabled && p.status(id).current!.product!.status, 'in-review');
 
+    // A decision that no longer holds is struck out, not erased, and the
+    // strike-out itself cannot be taken back or rewritten afterwards.
+    const journal = () => {
+      const s = p.status(id);
+      assert.ok(s.enabled);
+      return s.current!.decisions;
+    };
+    const decision = journal()[0];
+    agent.execute({
+      operation: 'preparation_resolve',
+      input: {
+        changeId: id,
+        withdraw: [{ id: decision.id, reason: 'Рынок пересмотрен после ответа пользователя' }],
+      },
+    });
+    const struck = journal();
+    assert.equal(struck.length, 1);
+    assert.equal(struck[0].statement, 'Первичный рынок — ЕС');
+    assert.equal(struck[0].withdrawn!.reason, 'Рынок пересмотрен после ответа пользователя');
+    assert.throws(
+      () =>
+        agent.execute({
+          operation: 'preparation_resolve',
+          input: { changeId: id, withdraw: [{ id: decision.id, reason: 'Ещё раз' }] },
+        }),
+      /уже отозвано/,
+    );
+    // Withdrawing needs either a decision to record or decisions to strike.
+    assert.throws(
+      () => agent.execute({ operation: 'preparation_resolve', input: { changeId: id } }),
+      /решение и обоснование/,
+    );
+
     // The journal survives a reopened store and stays immutable.
     const saved = f.store.read().preparation!.changes[0];
     assert.equal(saved.decisions.length, 1);
+    assert.ok(saved.decisions[0].withdrawn);
     assert.equal(saved.questions[0].answer!.text, 'ЕС, хостинг во Франкфурте');
   } finally {
     f.cleanup();

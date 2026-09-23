@@ -315,8 +315,9 @@ export function renderChangeJournal(change: ProductChange) {
     '',
     ...(decisions.length
       ? decisions.flatMap((d) => [
-          `### ${line(d.statement)}`,
+          `### ${d.withdrawn ? '~~' + line(d.statement) + '~~' : line(d.statement)}`,
           '',
+          ...(d.withdrawn ? [`Отозвано ${d.withdrawn.at}: ${line(d.withdrawn.reason)}`, ''] : []),
           line(d.rationale),
           ...(d.questionId
             ? [

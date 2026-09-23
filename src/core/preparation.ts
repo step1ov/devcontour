@@ -368,8 +368,10 @@ function validateReferences(r: ReferencesBrief) {
   if (r.questions.length) throw new DomainError('Открытые вопросы по референсам нужно решить');
   if (!r.items.some((item) => item.status === 'accepted'))
     throw new DomainError('Отметьте хотя бы один принятый референс');
-  if (r.items.some((item) => !/^https?:\/\//.test(item.url)))
-    throw new DomainError('Референс должен быть ссылкой http(s)');
+  // A reference is either a link or a file kept in the repository — a mockup
+  // rendered for this change is as much a reference as someone else's app.
+  if (r.items.some((item) => !/^https?:\/\//.test(item.url) && !/^[\w.-]+\/\S+$/.test(item.url)))
+    throw new DomainError('Референс должен быть ссылкой http(s) или путём в репозитории');
 }
 function validateConcept(c: ConceptBrief) {
   if (c.concept.length < 10) throw new DomainError('Для согласования нужна концепция дизайна');
@@ -479,7 +481,13 @@ export function validatePreparation(s: DevContourState, previous?: DevContourSta
       throw new DomainError('Нельзя удалить историю продуктового изменения');
     for (const before of old.decisions ?? []) {
       const after = (next.decisions ?? []).find((d) => d.id === before.id);
-      if (!after || hash(after) !== hash(before))
+      // A decision may be struck out, which only adds the withdrawal note.
+      // Everything else about it, the withdrawal included, stays as recorded.
+      if (
+        !after ||
+        hash({ ...after, withdrawn: undefined }) !== hash({ ...before, withdrawn: undefined }) ||
+        (before.withdrawn && hash(before.withdrawn) !== hash(after.withdrawn))
+      )
         throw new DomainError('Журнал принятых решений неизменяем');
     }
     for (const before of old.questions ?? []) {
@@ -831,20 +839,31 @@ export class Preparation {
               });
           } else if (operation === 'preparation_resolve') {
             const v = preparationInputs[operation].parse(input);
-            if (v.questionId) {
-              const q = c.questions.find((item) => item.id === v.questionId);
-              if (!q) throw new DomainError('Вопрос не найден: ' + v.questionId, 404);
-              if (q.status === 'open')
-                throw new DomainError('Сначала дождитесь ответа пользователя на вопрос', 409);
+            for (const at of v.withdraw) {
+              const existing = c.decisions.find((item) => item.id === at.id);
+              if (!existing) throw new DomainError('Решение не найдено: ' + at.id, 404);
+              if (existing.withdrawn) throw new DomainError('Решение уже отозвано: ' + at.id, 409);
+              existing.withdrawn = { at: now(), reason: at.reason };
             }
-            c.decisions.push({
-              id: 'D-' + randomUUID(),
-              stage: v.stage,
-              createdAt: now(),
-              statement: v.statement,
-              rationale: v.rationale,
-              ...(v.questionId ? { questionId: v.questionId } : {}),
-            });
+            if (!v.statement || !v.rationale) {
+              if (!v.withdraw.length)
+                throw new DomainError('Укажите решение и обоснование либо решения к отзыву');
+            } else {
+              if (v.questionId) {
+                const q = c.questions.find((item) => item.id === v.questionId);
+                if (!q) throw new DomainError('Вопрос не найден: ' + v.questionId, 404);
+                if (q.status === 'open')
+                  throw new DomainError('Сначала дождитесь ответа пользователя на вопрос', 409);
+              }
+              c.decisions.push({
+                id: 'D-' + randomUUID(),
+                stage: v.stage,
+                createdAt: now(),
+                statement: v.statement,
+                rationale: v.rationale,
+                ...(v.questionId ? { questionId: v.questionId } : {}),
+              });
+            }
           } else if (operation === 'preparation_submit') {
             const v = preparationInputs[operation].parse(input),
               r = c[v.stage].at(-1);

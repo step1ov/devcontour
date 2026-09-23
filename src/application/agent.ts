@@ -95,7 +95,7 @@ export const descriptions: Record<AgentOperation, string> = {
   preparation_question:
     'Record open product or architecture questions for the operator, or withdraw ones that no longer apply. The operator answers them in the panel; an answered question cannot be withdrawn.',
   preparation_resolve:
-    'Record a decision with its rationale in the durable journal, optionally closing an answered question. Does not approve a stage.',
+    'Record a decision with its rationale in the durable journal, optionally closing an answered question, or withdraw decisions that no longer hold. Does not approve a stage.',
 
   intent_render:
     'Render component intent from committed REQ sources, or a workspace product/application/feature map with pinned local story references. Returns Markdown only; does not write, approve or commit it.',

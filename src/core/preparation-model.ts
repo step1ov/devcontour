@@ -201,9 +201,12 @@ const stage = z.enum(['product', 'architecture', 'references', 'concept', 'desig
 const note = z.string().trim().min(3).max(300);
 // The lead agent spends long stretches reading a brief without saving a revision.
 // An append-only journal makes that work visible in the panel from the first launch.
+// Progress is reported from every stage the agent actually works in, design
+// sub-stages included; otherwise the panel keeps showing stale product work.
+const activityStage = z.enum([...stage.options, 'development']);
 export const preparationActivity = z.strictObject({
   at: z.iso.datetime(),
-  stage: z.enum(['product', 'architecture', 'development']),
+  stage: activityStage,
   note,
 });
 export const preparationQuestion = z.strictObject({
@@ -225,6 +228,11 @@ export const preparationRecord = z.strictObject({
   statement: z.string().trim().min(3).max(600),
   rationale: z.string().trim().min(3).max(1500),
   questionId: id.optional(),
+  // A decision that no longer holds is struck out, never erased: the journal
+  // has to show that it was once made and why it was taken back.
+  withdrawn: z
+    .strictObject({ at: z.iso.datetime(), reason: z.string().trim().min(3).max(600) })
+    .optional(),
 });
 const revision = {
   number: z.number().int().positive(),
@@ -329,7 +337,7 @@ export const preparationInputs = {
   }),
   preparation_progress: z.strictObject({
     changeId: id.optional(),
-    stage: z.enum(['product', 'architecture', 'development']).default('product'),
+    stage: activityStage.default('product'),
     note,
   }),
   preparation_question: z.strictObject({
@@ -347,12 +355,18 @@ export const preparationInputs = {
       .default([]),
     withdraw: z.array(id).max(10).default([]),
   }),
+  // A decision can also be withdrawn: a retry or a rethink leaves a record
+  // that no longer holds, and leaving it standing misleads whoever reads it.
   preparation_resolve: z.strictObject({
     changeId: id.optional(),
     stage: stage.default('product'),
-    statement: z.string().trim().min(3).max(600),
-    rationale: z.string().trim().min(3).max(1500),
+    statement: z.string().trim().min(3).max(600).optional(),
+    rationale: z.string().trim().min(3).max(1500).optional(),
     questionId: id.optional(),
+    withdraw: z
+      .array(z.strictObject({ id, reason: z.string().trim().min(3).max(600) }))
+      .max(10)
+      .default([]),
   }),
 };
 export const preparationAnswer = z.strictObject({

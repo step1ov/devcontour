@@ -335,8 +335,11 @@ function Decisions({
   questions: PreparationQuestion[];
 }) {
   const mine = decisions.filter((d) => d.stage === stage);
+  // Withdrawn decisions stay visible but are not counted as standing ones,
+  // so the count answers "what holds now", not "what was ever written down".
+  const standing = mine.filter((d) => !d.withdrawn).length;
   return (
-    <Foldable id={'decisions-' + stage} title="Принятые решения" count={mine.length}>
+    <Foldable id={'decisions-' + stage} title="Принятые решения" count={standing}>
       {!mine.length && (
         <p className="text-muted-foreground">
           Решения появятся здесь, когда агент зафиксирует их с обоснованием.
@@ -344,10 +347,30 @@ function Decisions({
       )}
       <ul className="grid gap-3">
         {mine.map((d) => (
-          <li key={d.id} className="bg-secondary border-primary border-l-[3px] p-3">
+          <li
+            key={d.id}
+            className={
+              d.withdrawn
+                ? 'bg-secondary border-muted-foreground/40 border-l-[3px] p-3 opacity-70'
+                : 'bg-secondary border-primary border-l-[3px] p-3'
+            }
+          >
             <strong className="flex items-start gap-2">
-              <Scale className="text-primary mt-0.5 size-4 shrink-0" aria-hidden="true" />
-              <span className="max-w-[70ch] break-words whitespace-pre-wrap">{d.statement}</span>
+              <Scale
+                className={
+                  d.withdrawn ? 'mt-0.5 size-4 shrink-0' : 'text-primary mt-0.5 size-4 shrink-0'
+                }
+                aria-hidden="true"
+              />
+              <span
+                className={
+                  d.withdrawn
+                    ? 'max-w-[70ch] break-words whitespace-pre-wrap line-through'
+                    : 'max-w-[70ch] break-words whitespace-pre-wrap'
+                }
+              >
+                {d.statement}
+              </span>
             </strong>
             <p className="text-muted-foreground mt-1 max-w-[70ch] text-sm break-words whitespace-pre-wrap">
               {d.rationale}
@@ -355,6 +378,11 @@ function Decisions({
             {d.questionId && (
               <p className="text-muted-foreground mt-1 text-sm">
                 По вопросу: {questions.find((q) => q.id === d.questionId)?.text ?? d.questionId}
+              </p>
+            )}
+            {d.withdrawn && (
+              <p className="text-muted-foreground mt-1 max-w-[70ch] text-sm break-words whitespace-pre-wrap">
+                Отозвано {ago(d.withdrawn.at)}: {d.withdrawn.reason}
               </p>
             )}
             <p className="text-muted-foreground mt-1 text-xs">{ago(d.createdAt)}</p>
