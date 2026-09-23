@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Check, ExternalLink, ImageOff, Plus, Trash2, X, ZoomIn } from 'lucide-react';
+import { Check, ExternalLink, FileCode2, ImageOff, Plus, Trash2, X, ZoomIn } from 'lucide-react';
 import type { ReferencesBrief } from '../core/preparation-model.ts';
 import { Alert, AlertDescription } from '@/ui/alert.tsx';
 import { Badge } from '@/ui/badge.tsx';
@@ -172,11 +172,11 @@ export function ReferencesBriefView({
                 <CardContent className="grid gap-3 p-4">
                   <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_10rem]">
                     <div className="grid gap-2">
-                      <Label htmlFor={'ref-url-' + i}>Ссылка</Label>
+                      <Label htmlFor={'ref-url-' + i}>Ссылка или путь в репозитории</Label>
                       <Input
                         id={'ref-url-' + i}
                         value={r.url}
-                        placeholder="https://"
+                        placeholder="https://… или docs/design/refs/файл.html"
                         onChange={(e) => {
                           const items = [...draft.items];
                           items[i] = { ...r, url: e.target.value };
@@ -288,15 +288,24 @@ export function ReferencesBriefView({
                       <Badge variant={statuses[r.status].tone}>{statuses[r.status].label}</Badge>
                     </td>
                     <td className="border-b p-2 align-top">
-                      <a
-                        href={r.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-primary break-all underline-offset-4 hover:underline"
-                      >
-                        {r.url}
-                        <ExternalLink aria-hidden="true" className="ml-1 inline size-3" />
-                      </a>
+                      {/^https?:\/\//i.test(r.url) ? (
+                        <a
+                          href={r.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-primary break-all underline-offset-4 hover:underline"
+                        >
+                          {r.url}
+                          <ExternalLink aria-hidden="true" className="ml-1 inline size-3" />
+                        </a>
+                      ) : (
+                        // A reference can live in the repository. Rendering the path as
+                        // a link would only produce one that leads nowhere.
+                        <span className="text-muted-foreground flex items-start gap-1">
+                          <FileCode2 aria-hidden="true" className="mt-0.5 size-3 shrink-0" />
+                          <code className="font-mono break-all">{r.url}</code>
+                        </span>
+                      )}
                     </td>
                     <td className="border-b p-2 align-top">{r.takeaway}</td>
                   </tr>
