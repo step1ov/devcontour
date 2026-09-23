@@ -32,6 +32,21 @@ const registrySchema = z.object({
   completionMode: configSchema.shape.completionMode,
   forgeConnections: configSchema.shape.forgeConnections,
 });
+
+// Роль, которой в конфигурации ещё нет, добавляется: именно этого не хватало,
+// когда продукт обзаводился мобильным приложением. Уже существующая роль не
+// трогается — её runtime и ревьюера выбирал оператор, и перенос объявления не
+// повод отменять этот выбор.
+
+/** Имена ролей, объявленных конфигурацией: workspace плюс каждый компонент. */
+const declaredNames = (
+  scope: { roles: Record<string, unknown> },
+  components: { roles?: Record<string, unknown> }[],
+) => [...new Set([...Object.keys(scope.roles), ...components.flatMap((r) => Object.keys(r.roles ?? {}))])];
+const withDeclaredRoles = (
+  existing: Record<string, unknown>,
+  declared: Record<string, unknown>,
+) => ({ ...declared, ...existing });
 export async function setupWorkspace(file: string, data?: string) {
   const source = await realpath(resolve(file));
   const workspaceRoot = dirname(source);
@@ -144,6 +159,10 @@ export async function setupWorkspace(file: string, data?: string) {
             repositories: repos,
             workspaceGates: config.workspaceGates,
             contextPacks: config.contextPacks,
+            roles: withDeclaredRoles(
+              (raw as { roles?: Record<string, unknown> }).roles ?? {},
+              config.roles,
+            ),
           },
           null,
           2,
@@ -160,6 +179,7 @@ export async function setupWorkspace(file: string, data?: string) {
     )
       throw new Error('Существующая конфигурация относится к другому workspace или профилю');
     await reserveRepositories(existing, root);
+    const known = declaredNames(existing, existing.repositories);
     // The workspace, its repositories and the pinned profile are the same, so
     // what the registry declares about them may still change afterwards: a joint
     // release gate did not exist at setup, a component splits one suite into a
@@ -173,6 +193,10 @@ export async function setupWorkspace(file: string, data?: string) {
       JSON.stringify(existing.repositories.map((r) => r.gates)) !==
         JSON.stringify(repos.map((r) => r.gates)) ||
       JSON.stringify(existing.environment) !== JSON.stringify(config.environment) ||
+      // Новая роль ищется по множеству имён, а не сравнением привязок: конфигурация
+      // хранит их уже нормализованными, и побайтовое сравнение объявляло бы
+      // изменение на каждом запуске.
+      declaredNames(config, repos).some((role) => !known.includes(role)) ||
       JSON.stringify(
         existing.contextPacks.map(({ id, version, files }) => ({ id, version, files })),
       ) !==
@@ -203,6 +227,7 @@ export async function setupWorkspace(file: string, data?: string) {
             repositories: repos,
             contextPacks,
             environment: config.environment,
+            roles: withDeclaredRoles(existing.roles, config.roles),
           },
           null,
           2,

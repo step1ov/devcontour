@@ -15,6 +15,7 @@ import { adapters, type AgentRequest } from '../src/runner/adapters.ts';
 import { reserveRepositories } from '../src/runner/ownership.ts';
 import { attachJournal } from '../src/runner/journal.ts';
 import { setupWorkspace } from '../src/runner/workspace-setup.ts';
+import { declaredRoles } from '../src/core/repositories.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { git } from '../src/runner/process.ts';
 import { acceptBoard } from '../src/runner/agent-control.ts';
@@ -347,6 +348,30 @@ test('Workspace setup preserves policy on repeat and detects a competing control
     // Everything else the operator changed by hand survives the update.
     assert.equal(loadConfig(configPath).approvalMode, 'operator');
     assert.equal((await setupWorkspace(path, f.data)).status, 'preserved');
+
+    // Роль, которой в конфигурации нет, добавляется переносом объявления:
+    // продукт обзаводится мобильным приложением уже после установки контура.
+    // Выбор оператора для существующей роли при этом не отменяется.
+    const chosen = JSON.parse(await readFile(configPath, 'utf8')) as {
+      roles: Record<string, { runtime: string; model?: string; title?: string }>;
+    };
+    chosen.roles.backend.model = 'chosen-by-operator';
+    await writeFile(configPath, JSON.stringify(chosen));
+    registry.repositories[0].roles = {
+      mobile: {
+        runtime: 'claude',
+        title: 'Мобильный разработчик',
+        requiresContract: true,
+        reviewer: { runtime: 'codex' },
+      },
+    };
+    await writeFile(path, JSON.stringify(registry));
+    assert.equal((await setupWorkspace(path, f.data)).status, 'declaration-updated');
+    const withRole = loadConfig(configPath);
+    assert.equal(withRole.repositories[0].roles!.mobile.title, 'Мобильный разработчик');
+    assert.equal(withRole.repositories[0].roles!.mobile.requiresContract, true);
+    assert.ok(declaredRoles(withRole, withRole.repositories[0].id).includes('mobile'));
+    assert.equal(withRole.roles.backend.model, 'chosen-by-operator', 'выбор оператора сохранён');
 
     // Закрепление context pack переживает соседнее изменение объявления.
     // Реестр закрепления не содержит: перенеся объявление целиком, setup
