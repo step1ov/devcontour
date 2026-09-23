@@ -355,6 +355,62 @@ function Journal({ events }: { events: AuditEvent[] }) {
   );
 }
 
+// Вкладка отвечала графиками, но не отвечала одним предложением: на каком
+// этапе разработка и чего она ждёт. Полосы показывают объём, карточки — кто
+// занят; между ними не было ответа на вопрос, с которого читатель начинает.
+function Stage({
+  tasks,
+  running,
+  paused,
+  pauseReason,
+  events,
+}: {
+  tasks: Task[];
+  running: number;
+  paused?: boolean;
+  pauseReason?: string;
+  events: AuditEvent[];
+}) {
+  const done = tasks.filter((t) => t.status === 'done').length;
+  const failed = tasks.filter((t) => t.status === 'failed').length;
+  const drafts = tasks.filter((t) => t.status === 'draft').length;
+  const stopped =
+    paused && !pauseReason
+      ? (
+          [...events].reverse().find((e) => e.type === 'scheduler.error')?.data as
+            | { error?: string }
+            | undefined
+        )?.error?.replace(/^Error:\s*/, '')
+      : undefined;
+  const line = !tasks.length
+    ? 'Объём ещё не собран: доска пуста.'
+    : drafts === tasks.length
+      ? 'План собран и ждёт независимого ревью — черновики очередь не выдаёт.'
+      : done === tasks.length
+        ? 'Весь объём принят исполнителями; доска ждёт приёмки.'
+        : running
+          ? `Идёт выдача: занято исполнителей — ${running}, принято ${done} из ${tasks.length}.`
+          : paused
+            ? `Выдача остановлена, принято ${done} из ${tasks.length}.`
+            : `Ожидание выдачи: принято ${done} из ${tasks.length}.`;
+  return (
+    <Card>
+      <CardContent className="grid gap-2 p-4">
+        <p className="text-md m-0">{line}</p>
+        {failed > 0 && (
+          <p className="text-destructive m-0 text-sm">
+            Задач со сбоем: {failed}. Повтор возможен, пока не исчерпан бюджет попыток.
+          </p>
+        )}
+        {stopped && (
+          <p className="text-destructive m-0 text-sm break-words">
+            Очередь остановилась сама: {stopped}
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 export function ProgressPanel({
   state,
   onSelect,
@@ -363,6 +419,8 @@ export function ProgressPanel({
     events?: AuditEvent[];
     contractAttempts?: ContractAttempt[];
     concurrency?: number;
+    paused?: boolean;
+    pauseReason?: 'operator' | 'shutdown';
     config: {
       repositories?: { id: string; name?: string; kind?: string }[];
       gates?: Gate[];
@@ -432,6 +490,13 @@ export function ProgressPanel({
 
   return (
     <div className="grid gap-6">
+      <Stage
+        tasks={tasks}
+        running={runs.length}
+        paused={state.paused}
+        pauseReason={state.pauseReason}
+        events={state.events ?? []}
+      />
       <Setup
         repositories={state.config.repositories}
         gates={state.config.gates}
