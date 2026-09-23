@@ -619,3 +619,29 @@ test('Product decisions and task bindings round-trip between independent compone
     f.cleanup();
   }
 });
+
+test("A contract's document path survives export into Git", () => {
+  const f = fixture();
+  try {
+    const a = f.create('alice');
+    a.h.contract(
+      'Каталог',
+      '# Каталог\n\nGET /products возвращает список.\n',
+      { actor: 'operator' },
+      'main',
+      'docs/contracts/catalog.md',
+    );
+    // Путь к документу — часть происхождения контракта. Без него клон
+    // восстанавливает текст, не зная, какому файлу в дереве он отвечает.
+    const record = Object.values(recordsFromState(a.h, a.store.read()).get('main')!).find(
+      (r) => r.kind === 'contract',
+    )!;
+    assert.equal(
+      (record.data as { source?: string }).source,
+      'docs/contracts/catalog.md',
+      'путь контракта должен уходить в Git вместе с текстом',
+    );
+  } finally {
+    f.cleanup();
+  }
+});
