@@ -359,8 +359,11 @@ export function syncGit(h: DevContour, options: SyncOptions = {}) {
     return output;
   };
   if (options.dryRun)
-    h.store.project((s) => {
-      action(s);
+    // Вхолостую сверка считает результат и пишет baseline, но журнал не
+    // проецирует: project теперь пропускает снимок не новее записанного, и
+    // холостой прогон не выполнялся бы вовсе.
+    h.store.atomic(() => {
+      action(h.store.read());
     });
   else h.store.change('git.synchronized', action);
   return output!;

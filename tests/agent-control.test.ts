@@ -366,7 +366,7 @@ test('A runtime that emitted work spends the attempt; one that never started doe
       { mode: 0o755 },
     );
     await assert.rejects(
-      cliAdapter('claude').execute(request('noisy') as never),
+      cliAdapter('claude').execute(request('noisy')),
       (error: Error) => !(error instanceof BlockedError) && /кодом 1/.test(error.message),
     );
 
@@ -379,14 +379,14 @@ test('A runtime that emitted work spends the attempt; one that never started doe
       { mode: 0o755 },
     );
     await assert.rejects(
-      cliAdapter('claude').execute(request('silent') as never),
+      cliAdapter('claude').execute(request('silent')),
       (error: Error) => error instanceof BlockedError,
     );
 
     // Нечего запускать — тоже отказ окружения, хотя приходит ошибкой запуска.
     await rm(join(dir, 'claude'));
     await assert.rejects(
-      cliAdapter('claude').execute(request('missing') as never),
+      cliAdapter('claude').execute(request('missing')),
       (error: Error) => error instanceof BlockedError,
     );
   } finally {

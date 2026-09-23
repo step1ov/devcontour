@@ -122,7 +122,7 @@ test('A component keeps the roles its own profile brought, across a config reloa
         mobile: { runtime: 'claude', title: 'Мобильный разработчик' },
         backend: { runtime: 'claude' },
       },
-    } as never) as { roles: Record<string, { runtime: string; title?: string }> };
+    }) as { roles: Record<string, { runtime: string; title?: string }> };
     assert.equal(entry.roles.mobile.title, 'Мобильный разработчик', 'роль профиля сохранена');
     assert.equal(entry.roles.backend.runtime, 'codex', 'компонент уточняет свою роль');
   } finally {

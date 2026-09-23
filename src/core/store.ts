@@ -211,7 +211,7 @@ export class Store {
       // уже есть. Заодно это делает повторную проекцию бесплатной — лок
       // отпускается сразу, не дожидаясь файловой записи.
       const version = events.at(-1)?.id ?? 0;
-      const projected = (this.localRecords<number>('projection')['version'] ?? 0) as number;
+      const projected = this.localRecords<number>('projection')['version'] ?? 0;
       if (version > projected || !events.length) {
         this.saveLocal('projection', undefined, 'version', version);
         write(state, events);
