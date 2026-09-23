@@ -448,3 +448,45 @@ test('An exhausted attempt budget can be reset, but only deliberately and with a
     f.cleanup();
   }
 });
+
+test('A task that produced nothing can return to draft, one that delivered cannot', () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const t = f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    assert.equal(f.store.read().tasks[0].status, 'ready');
+
+    // Контракт исправлен до приёмки доски: переписывать под старый нечего, а
+    // штатного пути не было — correct требует принятой ревизии, edit-task
+    // черновика. Оставался тупик и правка базы руками.
+    assert.throws(() => f.h.reopen(t.id, 'коротко'), /от 10 до 5000/);
+    const result = f.h.reopen(t.id, 'Контракт исправлен: привязка ссылается на прежнюю редакцию');
+    assert.deepEqual(result, {
+      taskId: t.id,
+      reason: 'Контракт исправлен: привязка ссылается на прежнюю редакцию',
+      wasApproved: true,
+    });
+    const draft = f.store.read().tasks[0];
+    assert.equal(draft.status, 'draft');
+    // Утверждение снято: доска обязана пройти ревью плана заново, иначе это
+    // был бы обход независимого согласования.
+    assert.equal(draft.approvedDigest, undefined);
+    assert.equal(draft.approval, undefined);
+
+    // Задача с принятым результатом возвращается только корректировкой доски:
+    // под неё уже велась работа, и история этого не должна терять.
+    f.h.approve(b.id);
+    f.h.pause(false);
+    const run = f.h.claim('one')!;
+    f.h.phase(run.id, run.token, 'integrating', { candidateSha: 'a'.repeat(40) });
+    f.store.change('test.finish', (s) => {
+      s.tasks[0].resultSha = 'b'.repeat(40);
+      s.tasks[0].status = 'done';
+      s.tasks[0].activeRunId = undefined;
+    });
+    assert.throws(() => f.h.reopen(t.id, 'Контракт снова изменился, хочу переписать'), /корректировка/);
+  } finally {
+    f.cleanup();
+  }
+});

@@ -728,6 +728,37 @@ export class DevContour {
    * оставалась правка базы руками. Сброс возможен, он явный и с причиной —
    * она попадает в журнал рядом с попытками, которые сбрасываются.
    */
+  /**
+   * Вернуть в черновик задачу, которая ничего не произвела.
+   *
+   * Утверждённая постановка неизменна — и правильно: под неё уже велась работа.
+   * Но пока задача не дала принятого результата, менять её бывает необходимо:
+   * контракт исправлен до того, как доска принята, и переписывать под старый
+   * контракт нечего. Штатного пути не было: `correct` требует принятой ревизии
+   * и завершённых задач, `edit-task` — черновика. Оставался тупик, из которого
+   * выходили правкой базы руками.
+   *
+   * Возврат разрешён только задаче без принятого результата. Прогоны остаются
+   * в истории; утверждение снимается, и доску нужно провести через ревью плана
+   * заново — иначе это был бы обход независимого согласования.
+   */
+  reopen(id: string, reason: string) {
+    if (reason.trim().length < 10 || reason.length > 5000)
+      throw new DomainError('Опишите причину возврата: от 10 до 5000 символов', 400);
+    return this.store.change('task.reopened', (s) => {
+      const t = task(s, id);
+      if (t.resultSha)
+        throw new DomainError('Задача дала принятый результат; нужна корректировка доски');
+      if (t.activeRunId) throw new DomainError('Дождитесь завершения текущей попытки');
+      if (t.status === 'draft') return { taskId: id, alreadyDraft: true };
+      const approved = t.approvedDigest;
+      t.status = 'draft';
+      t.approvedDigest = undefined;
+      t.approval = undefined;
+      t.failure = undefined;
+      return { taskId: id, reason: reason.trim(), wasApproved: Boolean(approved) };
+    });
+  }
   retry(id: string, reset?: { reason: string }) {
     return this.store.change('task.retry', (s) => {
       const t = task(s, id);
