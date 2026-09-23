@@ -1,6 +1,23 @@
 import { useMemo } from 'react';
-import { Bot, CheckCircle2, CircleDashed, FlaskConical, Loader2, XCircle } from 'lucide-react';
-import type { DevContourState, Run, Task, TaskStatus, Role } from '../core/model.ts';
+import {
+  Bot,
+  CheckCircle2,
+  CircleDashed,
+  FlaskConical,
+  Loader2,
+  Settings2,
+  ScrollText,
+  XCircle,
+} from 'lucide-react';
+import type {
+  AuditEvent,
+  DevContourState,
+  Gate,
+  Run,
+  Task,
+  TaskStatus,
+  Role,
+} from '../core/model.ts';
 import { Badge } from '@/ui/badge.tsx';
 import { Card, CardContent, CardHeader, CardTitle } from '@/ui/card.tsx';
 
@@ -79,12 +96,187 @@ function Bar({ done, total, label }: { done: number; total: number; label: strin
   );
 }
 
+// Setting a project up produces configuration, not tasks, so the board stayed
+// empty while real work happened: a repository was attached, a profile of
+// checks was pinned, context packs were locked. The journal already recorded
+// all of it as audit events; only nobody rendered them.
+const eventNames: Record<string, string> = {
+  'preparation.enabled': 'Подготовка включена',
+  'preparation.operator-decision': 'Решение пользователя',
+  'preparation.operator-answer': 'Ответ пользователя на вопрос',
+  preparation_create: 'Создано изменение продукта',
+  preparation_product: 'Сохранена постановка',
+  preparation_architecture: 'Сохранена архитектура',
+  preparation_references: 'Сохранены референсы',
+  preparation_concept: 'Сохранён концепт',
+  preparation_design: 'Сохранена дизайн-система',
+  preparation_submit: 'Отправлено на согласование',
+  preparation_resolve: 'Зафиксировано решение',
+  preparation_question: 'Задан вопрос пользователю',
+  preparation_progress: 'Заметка о работе агента',
+  'config.saved': 'Сохранена конфигурация',
+  'context.locked': 'Закреплены context packs',
+  'task.created': 'Создана задача',
+  'task.status': 'Изменён статус задачи',
+  'board.created': 'Создана доска',
+  'board.accepted': 'Доска принята',
+  'contract.registered': 'Зарегистрирован контракт',
+  'run.started': 'Запущен прогон',
+  'run.finished': 'Прогон завершён',
+};
+
+function Setup({
+  repositories,
+  gates,
+  packs,
+}: {
+  repositories?: { id: string; name?: string; kind?: string; path?: string }[];
+  gates?: Gate[];
+  packs?: {
+    id: string;
+    version?: string;
+    capabilities?: string[];
+    source?: { path?: string };
+  }[];
+}) {
+  const configured = (repositories?.length ?? 0) > 0;
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center gap-2">
+          <Settings2 className="text-primary size-4" aria-hidden="true" />
+          Настройка контура
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="grid gap-5">
+        {configured ? (
+          <>
+            <div className="grid gap-2">
+              <span className="text-muted-foreground text-xs tracking-wider uppercase">
+                Компоненты ({repositories!.length})
+              </span>
+              <ul className="grid gap-1 text-sm">
+                {repositories!.map((r) => (
+                  <li key={r.id} className="flex flex-wrap items-center gap-2">
+                    <code className="font-mono text-xs">{r.id}</code>
+                    <span>{r.name ?? r.id}</span>
+                    {r.kind && <Badge variant="secondary">{r.kind}</Badge>}
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div className="grid gap-2">
+              <span className="text-muted-foreground text-xs tracking-wider uppercase">
+                Проверки профиля ({gates?.length ?? 0})
+              </span>
+              {gates?.length ? (
+                <ul className="grid gap-1">
+                  {gates.map((g) => (
+                    <li key={g.id} className="flex flex-wrap items-center gap-2 text-sm">
+                      <Badge variant={g.kind === 'test' ? 'success' : 'secondary'}>
+                        {g.kind === 'test' ? 'тест' : 'проверка'}
+                      </Badge>
+                      <code className="font-mono text-xs">{g.id}</code>
+                      <code className="text-muted-foreground font-mono text-xs break-all">
+                        {g.command.join(' ')}
+                      </code>
+                      {g.report && (
+                        <span className="text-muted-foreground text-xs">отчёт {g.report.type}</span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-muted-foreground text-sm">Профиль ещё не закреплён.</p>
+              )}
+            </div>
+            <div className="grid gap-2">
+              <span className="text-muted-foreground text-xs tracking-wider uppercase">
+                Профиль проверок
+              </span>
+              {packs?.length ? (
+                <ul className="grid gap-1 text-sm">
+                  {packs.map((p) => (
+                    <li key={p.id} className="flex flex-wrap items-center gap-2">
+                      <code className="font-mono text-xs">{p.id}</code>
+                      {p.version && (
+                        <span className="text-muted-foreground text-xs">{p.version}</span>
+                      )}
+                      {p.capabilities?.map((c) => (
+                        <Badge key={c} variant="secondary">
+                          {c}
+                        </Badge>
+                      ))}
+                      {p.source?.path && (
+                        <code className="text-muted-foreground font-mono text-xs break-all">
+                          {p.source.path}
+                        </code>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-muted-foreground text-sm">Профиль ещё не закреплён.</p>
+              )}
+            </div>
+          </>
+        ) : (
+          <p className="text-muted-foreground">
+            Контур ещё не настроен. Здесь появятся компоненты, проверки профиля и context packs.
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function Journal({ events }: { events: AuditEvent[] }) {
+  const recent = [...events].sort((a, b) => b.id - a.id).slice(0, 40);
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center gap-2">
+          <ScrollText className="text-primary size-4" aria-hidden="true" />
+          Журнал ({events.length})
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        {recent.length ? (
+          <ul className="grid gap-2">
+            {recent.map((e) => (
+              <li key={e.id} className="flex flex-wrap items-baseline gap-3 border-b pb-2 text-sm">
+                <span className="text-muted-foreground font-mono text-xs">
+                  {new Date(e.at).toLocaleString('ru-RU')}
+                </span>
+                <span className="min-w-0 flex-1">{eventNames[e.type] ?? e.type}</span>
+                <code className="text-muted-foreground font-mono text-xs">{e.type}</code>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-muted-foreground">Событий пока нет.</p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 export function ProgressPanel({
   state,
   onSelect,
 }: {
   state: Pick<DevContourState, 'tasks' | 'runs' | 'contracts'> & {
-    config: { repositories?: { id: string }[] };
+    events?: AuditEvent[];
+    config: {
+      repositories?: { id: string; name?: string; kind?: string }[];
+      gates?: Gate[];
+      packs?: {
+        id: string;
+        version?: string;
+        capabilities?: string[];
+        source?: { path?: string };
+      }[];
+    };
   };
   onSelect?: (taskId: string) => void;
 }) {
@@ -141,6 +333,12 @@ export function ProgressPanel({
 
   return (
     <div className="grid gap-6">
+      <Setup
+        repositories={state.config.repositories}
+        gates={state.config.gates}
+        packs={state.config.packs}
+      />
+
       <Card>
         <CardHeader className="pb-3">
           <CardTitle>Готовность</CardTitle>
@@ -331,6 +529,8 @@ export function ProgressPanel({
           )}
         </CardContent>
       </Card>
+
+      <Journal events={state.events ?? []} />
     </div>
   );
 }
