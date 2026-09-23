@@ -339,7 +339,7 @@ test('Workspace setup preserves policy on repeat and detects a competing control
       },
     ];
     await writeFile(path, JSON.stringify(registry));
-    assert.equal((await setupWorkspace(path, f.data)).status, 'gates-updated');
+    assert.equal((await setupWorkspace(path, f.data)).status, 'declaration-updated');
     assert.deepEqual(
       loadConfig(configPath).workspaceGates.map((g) => g.id),
       ['release-acceptance'],

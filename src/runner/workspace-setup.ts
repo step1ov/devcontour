@@ -161,22 +161,25 @@ export async function setupWorkspace(file: string, data?: string) {
       throw new Error('Существующая конфигурация относится к другому workspace или профилю');
     await reserveRepositories(existing, root);
     // The workspace, its repositories and the pinned profile are the same, so
-    // the checks each component declares may still change afterwards: a joint
-    // release gate did not exist at setup, and a component splits one suite
-    // into a gate per task as work is decomposed. Without this there is no
-    // route to either, and the declared checks stay frozen at first install.
-    const gatesChanged =
+    // what the registry declares about them may still change afterwards: a joint
+    // release gate did not exist at setup, a component splits one suite into a
+    // gate per task as work is decomposed, and a runtime turns out to need a
+    // credential from the environment. Identity stays pinned; the declaration
+    // follows the registry, otherwise it stays frozen at first install and there
+    // is no route to any of these but a fresh workspace.
+    const declarationChanged =
       JSON.stringify(existing.workspaceGates) !== JSON.stringify(config.workspaceGates) ||
       JSON.stringify(existing.gates) !== JSON.stringify(config.gates) ||
       JSON.stringify(existing.repositories.map((r) => r.gates)) !==
         JSON.stringify(repos.map((r) => r.gates)) ||
+      JSON.stringify(existing.environment) !== JSON.stringify(config.environment) ||
       JSON.stringify(
         existing.contextPacks.map(({ id, version, files }) => ({ id, version, files })),
       ) !==
         JSON.stringify(
           config.contextPacks.map(({ id, version, files }) => ({ id, version, files })),
         );
-    if (gatesChanged) {
+    if (declarationChanged) {
       await writeFile(
         configPath,
         JSON.stringify(
@@ -186,12 +189,13 @@ export async function setupWorkspace(file: string, data?: string) {
             gates: config.gates,
             repositories: repos,
             contextPacks: config.contextPacks,
+            environment: config.environment,
           },
           null,
           2,
         ),
       );
-      return { status: 'gates-updated', data: root, config: configPath };
+      return { status: 'declaration-updated', data: root, config: configPath };
     }
     return { status: 'preserved', data: root, config: configPath };
   } catch (error) {

@@ -20,6 +20,32 @@ export const implementationResult = z.object({
   summary: z.string(),
   discoveries: z.array(discoveryInput).max(20).default([]),
 });
+// Отказ runtime объясняет сам runtime: «Not logged in», исчерпанный лимит,
+// недоступная модель. Код выхода про это не говорит ничего, поэтому короткую
+// причину достаём из его собственного вывода и кладём рядом с кодом.
+function runtimeReason(
+  name: string,
+  stdout: string,
+  stderr: string,
+  redact?: (value: string) => string,
+): string | undefined {
+  let reason: string | undefined;
+  if (name === 'claude') {
+    const last = runtimeEvents(stdout).events.findLast((e) => e.type === 'result') as
+      | { result?: unknown }
+      | undefined;
+    if (typeof last?.result === 'string') reason = last.result;
+  }
+  reason ??= stderr
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .at(-1);
+  if (!reason) return undefined;
+  const cleaned = (redact ? redact(reason) : reason).slice(0, 300);
+  return `: ${cleaned}`;
+}
+
 export const reviewResult = z.object({
   execution: reviewExecution.optional(),
   approved: z.boolean(),
@@ -249,7 +275,11 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
       const log = result.stdout + '\n' + result.stderr;
       if (result.code !== 0 || result.timedOut || r.signal.aborted)
         throw new Error(
-          `${name}: runtime завершился с кодом ${result.code}${result.timedOut ? ' (timeout)' : ''}. Лог: ${r.artifactDir}`,
+          `${name}: runtime завершился с кодом ${result.code}${result.timedOut ? ' (timeout)' : ''}` +
+            // Причина отказа приходит от самого runtime — «Not logged in», исчерпанный
+            // лимит, недоступная модель. Без неё сообщение говорит только «код 1», и
+            // отказ окружения выглядит как провал задачи, пока кто-то не откроет лог.
+            `${runtimeReason(name, result.stdout, result.stderr, r.execution?.redact) ?? ''}. Лог: ${r.artifactDir}`,
         );
       let data: unknown;
       if (name === 'codex') {
