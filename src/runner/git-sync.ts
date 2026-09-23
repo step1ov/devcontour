@@ -359,9 +359,13 @@ export function syncGit(h: DevContour, options: SyncOptions = {}) {
     return output;
   };
   if (options.dryRun)
-    h.store.project((s) => {
-      action(s);
-    });
+    h.store.project(
+      (s) => {
+        action(s);
+      },
+      // Сверка пишет baseline даже вхолостую, поэтому здесь лок записи нужен.
+      { write: true },
+    );
   else h.store.change('git.synchronized', action);
   return output!;
 }

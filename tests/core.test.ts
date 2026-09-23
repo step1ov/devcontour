@@ -62,6 +62,26 @@ test('Concurrent store clients cannot claim one task twice', () => {
     f.cleanup();
   }
 });
+test('A projection in flight does not block a write from another process', () => {
+  const f = fixture();
+  const second = new Store(join(f.root, 'state.sqlite'));
+  try {
+    f.h.createBoard('Board');
+    let wrote = false;
+    // Проекция пишет журнал на диск и делает это долго. Пока она читает,
+    // соседний процесс обязан суметь записать: иначе панель, обновляющая
+    // журнал, роняет агента с «database is locked».
+    f.store.project(() => {
+      new DevContour(second, f.h.config).createBoard('Second board');
+      wrote = true;
+    });
+    assert.ok(wrote);
+    assert.equal(f.store.read().boards.length, 2);
+  } finally {
+    second.close();
+    f.cleanup();
+  }
+});
 test('Expired attempts are fenced, retries get fresh run IDs and tokens', () => {
   const f = fixture();
   try {

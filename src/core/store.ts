@@ -47,7 +47,7 @@ export class Store {
       }
     }
     this.db.exec(
-      `PRAGMA journal_mode=${journalMode ?? (locations?.length ? 'DELETE' : 'WAL')}; PRAGMA busy_timeout=5000; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;`,
+      `PRAGMA journal_mode=${journalMode ?? (locations?.length ? 'DELETE' : 'WAL')}; PRAGMA busy_timeout=20000; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;`,
     );
     this.db.exec(
       'CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, type TEXT NOT NULL, data TEXT NOT NULL);',
@@ -190,8 +190,16 @@ export class Store {
       this.projectionError = String(error);
     }
   }
-  project(write: (state: DevContourState, events: AuditEvent[]) => void) {
-    this.db.exec('BEGIN IMMEDIATE');
+  // Проекция почти всегда только читает: журнал доставки и продуктовые файлы
+  // пишутся на диск, и это долго. Лок записи на это время означал, что панель,
+  // обновляющая журнал, блокирует агента в соседнем процессе — «database is
+  // locked» приходило именно отсюда. В WAL читатель писателю не мешает, поэтому
+  // лок записи берётся только там, где проекция действительно пишет в БД.
+  project(
+    write: (state: DevContourState, events: AuditEvent[]) => void,
+    options?: { write?: boolean },
+  ) {
+    this.db.exec(options?.write ? 'BEGIN IMMEDIATE' : 'BEGIN');
     this.transaction = true;
     try {
       write(this.read(), this.allEvents());
