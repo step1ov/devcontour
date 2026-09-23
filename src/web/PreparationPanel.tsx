@@ -1,6 +1,8 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
 import {
+  Check,
   ChevronRight,
+  CircleDashed,
   CircleDot,
   History,
   Loader2,
@@ -27,7 +29,24 @@ import { Textarea } from '@/ui/textarea.tsx';
 import { cn } from '@/lib/utils.ts';
 
 const Development = lazy(() => import('./App.tsx').then((m) => ({ default: m.App })));
+type Worker = {
+  runId: string;
+  taskId: string;
+  title: string;
+  role?: string;
+  phase?: string;
+  runtime?: string;
+  model?: string;
+  startedAt: string;
+};
 type View = ReturnType<Preparation['status']> & {
+  setup?: {
+    repositories: string[];
+    profile: string | null;
+    gates: string[];
+    workspaceGates: string[];
+  };
+  workers?: Worker[];
   engineConnected?: boolean;
   startupError?: string;
   workspace?: { mode: 'embedded' | 'separate'; path: string };
@@ -353,6 +372,96 @@ function Waiting({
         )}
       </AlertDescription>
     </Alert>
+  );
+}
+const roleNames: Record<string, string> = {
+  architect: 'Архитектор',
+  backend: 'Разработчик бэкенда',
+  frontend: 'Разработчик интерфейса',
+  qa: 'Тестировщик',
+};
+const phaseNames: Record<string, string> = {
+  running: 'пишет код',
+  verifying: 'гоняет проверки',
+  reviewing: 'на ревью',
+  integrating: 'интегрирует',
+};
+// Setting a contour up is a sequence with a result, so it gets a progress bar
+// of its own: before the first task exists it is the only work happening.
+function SetupProgress({ setup, tasks }: { setup: View['setup']; tasks: number }) {
+  const steps = [
+    { id: 'repo', label: 'Репозиторий подключён', done: (setup?.repositories.length ?? 0) > 0 },
+    { id: 'profile', label: 'Профиль проверок закреплён', done: Boolean(setup?.profile) },
+    { id: 'gates', label: 'Проверки компонента настроены', done: (setup?.gates.length ?? 0) > 0 },
+    {
+      id: 'joint',
+      label: 'Сквозная проверка релиза настроена',
+      done: (setup?.workspaceGates.length ?? 0) > 0,
+    },
+    { id: 'tasks', label: 'Задачи собраны в доску', done: tasks > 0 },
+  ];
+  const done = steps.filter((s) => s.done).length;
+  const percent = Math.round((done / steps.length) * 100);
+  return (
+    <div className="mt-4 grid gap-3">
+      <div className="flex items-baseline justify-between gap-3">
+        <strong className="text-sm">Настройка контура</strong>
+        <span className="text-muted-foreground font-mono text-sm">
+          {done} / {steps.length} · {percent}%
+        </span>
+      </div>
+      <div
+        className="bg-secondary h-2 overflow-hidden rounded-full"
+        role="progressbar"
+        aria-valuenow={percent}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-label="Настройка контура"
+      >
+        <div className="bg-primary h-full rounded-full" style={{ width: percent + '%' }} />
+      </div>
+      <ul className="grid gap-1 text-sm">
+        {steps.map((step) => (
+          <li key={step.id} className="flex items-center gap-2">
+            {step.done ? (
+              <Check className="text-primary size-4 shrink-0" aria-hidden="true" />
+            ) : (
+              <CircleDashed className="text-muted-foreground size-4 shrink-0" aria-hidden="true" />
+            )}
+            <span className={step.done ? '' : 'text-muted-foreground'}>{step.label}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+function Workers({ workers }: { workers: Worker[] }) {
+  return (
+    <div className="mt-6 grid gap-3">
+      <strong className="text-sm">Заняты сейчас ({workers.length})</strong>
+      {workers.length ? (
+        <ul className="grid gap-2">
+          {workers.map((w) => (
+            <li key={w.runId} className="flex flex-wrap items-center gap-3 border-b pb-2 text-sm">
+              <Loader2 className="text-primary size-4 shrink-0 animate-spin" aria-hidden="true" />
+              <strong>{w.role ? (roleNames[w.role] ?? w.role) : 'Исполнитель'}</strong>
+              <span className="text-muted-foreground">
+                {w.phase ? (phaseNames[w.phase] ?? w.phase) : 'работает'}
+              </span>
+              <span className="min-w-0 flex-1">{w.title}</span>
+              <code className="text-muted-foreground font-mono text-xs">
+                {w.model ?? w.runtime}
+              </code>
+              <span className="text-muted-foreground text-xs">{ago(w.startedAt)}</span>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="text-muted-foreground text-sm">
+          Никто не занят задачей. Здесь появятся исполнитель, этап, модель и время работы.
+        </p>
+      )}
+    </div>
   );
 }
 function Decisions({
@@ -743,10 +852,12 @@ export function PreparationPanel() {
                         : 'Агент готовит репозитории, профили и настоящие проверки. Панель подключит технический workflow автоматически.'
                       : view.blocker}
                   </p>
-                  <p className="mt-2">
+                  <SetupProgress setup={view.setup} tasks={view.delivery.total} />
+                  <p className="mt-4">
                     Принято задач: {view.delivery.done} из {view.delivery.total}. Сбоев:{' '}
                     {view.delivery.failed}.
                   </p>
+                  <Workers workers={view.workers ?? []} />
                   {view.delivery.boards.length > 0 && (
                     <ul className="mt-2 grid gap-2">
                       {view.delivery.boards.map((b) => (

@@ -123,9 +123,36 @@ export async function serve(
             url.searchParams.get('change') ?? undefined,
           );
           const root = h?.config.workspaceRoot ?? options.bootstrap?.workspace;
+          // Setting a contour up is work with a result, so the stage that
+          // waits on it reports how far it got and who is busy right now,
+          // instead of a task count that stays at zero for the whole of setup.
+          const engine = h?.store.read();
           json(res, 200, {
             ...view,
             engineConnected: Boolean(h),
+            setup: h
+              ? {
+                  repositories: h.config.repositories.map((r) => r.id),
+                  profile: h.config.packs?.[0]?.id ?? null,
+                  gates: h.config.gates.map((g) => g.id),
+                  workspaceGates: h.config.workspaceGates.map((g) => g.id),
+                }
+              : undefined,
+            workers: (engine?.runs ?? [])
+              .filter((r) => r.status === 'active')
+              .map((r) => {
+                const task = engine?.tasks.find((t) => t.id === r.taskId);
+                return {
+                  runId: r.id,
+                  taskId: r.taskId,
+                  title: task?.title ?? r.taskId,
+                  role: task?.role,
+                  phase: r.phase,
+                  runtime: r.runtime,
+                  model: r.model,
+                  startedAt: r.startedAt,
+                };
+              }),
             startupError,
             workspace: root ? workspaceDescription(root) : undefined,
           });
