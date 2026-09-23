@@ -50,7 +50,7 @@ test('Product UI presents application scope, release selection, repository navig
     await route.fulfill({ json: view });
   });
   await page.goto('/');
-  await page.getByRole('tab', { name: 'Продукт', exact: true }).click();
+  await page.getByRole('tab', { name: 'Карта продукта', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Система общения', exact: true })).toBeVisible();
   await expect(page.getByText('Ждёт сквозной проверки', { exact: true })).toBeVisible();
   await expect(page.getByText('Не применяется', { exact: true })).toBeVisible();
@@ -72,14 +72,14 @@ test('Product UI presents application scope, release selection, repository navig
     'true',
   );
   unavailable = true;
-  await page.getByRole('tab', { name: 'Продукт', exact: true }).click();
+  await page.getByRole('tab', { name: 'Карта продукта', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('INTENT изменён');
   await expect(page.getByRole('table')).toHaveCount(0);
 });
 
 test('Product UI explains a missing map without claiming product readiness', async ({ page }) => {
   await page.goto('/');
-  await page.getByRole('tab', { name: 'Продукт', exact: true }).click();
+  await page.getByRole('tab', { name: 'Карта продукта', exact: true }).click();
   await expect(
     page.getByRole('heading', { name: 'Карта продукта ещё не подготовлена' }),
   ).toBeVisible();

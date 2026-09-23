@@ -197,7 +197,10 @@ export function App() {
   const [boardId, setBoardId] = useState('');
   const [revisionNumber, setRevisionNumber] = useState<number | null>(null);
   const [selected, setSelected] = useState('');
-  const [tab, setTab] = useState('graph');
+  // An empty graph is the least informative thing to land on: before the first
+  // board exists, what the operator needs to see is how the contour is set up.
+  const [tab, setTab] = useState('progress');
+  const landed = useRef(false);
   const [query, setQuery] = useState('');
   const [repositoryFilter, setRepositoryFilter] = useState('');
   const [modal, setModal] = useState<
@@ -229,6 +232,13 @@ export function App() {
       clearInterval(id);
     };
   }, [refresh]);
+  // Once there is work to look at, the graph becomes the useful default. This
+  // fires once, so it never overrides a tab the operator chose.
+  useEffect(() => {
+    if (landed.current || !data) return;
+    landed.current = true;
+    if (data.tasks.length) setTab('graph');
+  }, [data]);
   useEffect(() => {
     if (!data) return;
     if (!boardId)
@@ -477,7 +487,7 @@ export function App() {
         <div className="bg-card text-muted-foreground flex flex-wrap items-center justify-between gap-4 border-b px-8 py-4 text-xs max-[1180px]:px-5 max-[760px]:p-3 [&_svg]:size-3.5 [&>span:first-child]:flex [&>span:first-child]:items-center [&>span:first-child]:gap-2">
           <span>
             Проект <ChevronRight />{' '}
-            {tab === 'product' ? 'Продукт' : (board?.title ?? 'Новая доска')}
+            {tab === 'product' ? 'Карта продукта' : (board?.title ?? 'Новая доска')}
           </span>
           <span className="text-primary bg-accent rounded-sm px-2 py-1">
             {data.config.mode === 'demo'
@@ -489,7 +499,9 @@ export function App() {
           <header className="mb-6 flex flex-wrap items-start justify-between gap-6 max-[760px]:mb-4 max-[760px]:gap-4">
             <div>
               <div className="flex items-center gap-3">
-                <h1>{tab === 'product' ? 'Продукт' : (board?.title ?? 'Создайте первую доску')}</h1>
+                <h1>
+                  {tab === 'product' ? 'Карта продукта' : (board?.title ?? 'Создайте первую доску')}
+                </h1>
                 {revision && tab !== 'product' && (
                   <span className="text-muted-foreground rounded-sm border px-2 py-1 text-sm">
                     r{revision.number}
@@ -654,7 +666,7 @@ export function App() {
               aria-label="Представление доски"
             >
               {[
-                { key: 'product', label: 'Продукт', icon: <LayoutGrid /> },
+                { key: 'product', label: 'Карта продукта', icon: <LayoutGrid /> },
                 { key: 'progress', label: 'Ход работ', icon: <Activity /> },
                 { key: 'graph', label: 'Граф', icon: <GitBranch /> },
                 { key: 'workspace', label: 'Общий граф', icon: <Workflow /> },
