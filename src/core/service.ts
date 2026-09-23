@@ -716,15 +716,31 @@ export class DevContour {
       return { taskId: id };
     });
   }
-  retry(id: string) {
+  /**
+   * Повтор после сбоя. Бюджет попыток защищает от задачи, которая крутится
+   * вхолостую, но у оператора, устранившего причину, не было никакого способа
+   * вернуть задачу в работу: лимит упирался в тупик, и единственным выходом
+   * оставалась правка базы руками. Сброс возможен, он явный и с причиной —
+   * она попадает в журнал рядом с попытками, которые сбрасываются.
+   */
+  retry(id: string, reset?: { reason: string }) {
     return this.store.change('task.retry', (s) => {
       const t = task(s, id);
       if (!['failed', 'cancelled'].includes(t.status))
         throw new DomainError('Повтор доступен после сбоя или отмены');
-      if (t.attempt >= this.config.maxAttempts) throw new DomainError('Исчерпан лимит попыток');
+      const spent = t.attempt;
+      if (t.attempt >= this.config.maxAttempts) {
+        if (!reset?.reason.trim())
+          throw new DomainError(
+            'Исчерпан лимит попыток. Устраните причину и повторите со сбросом, указав его причину',
+          );
+        t.attempt = 0;
+      }
       t.status = t.approvedDigest ? 'ready' : 'draft';
       t.failure = undefined;
-      return { taskId: id };
+      return reset?.reason.trim()
+        ? { taskId: id, reset: { spent, reason: reset.reason.trim() } }
+        : { taskId: id };
     });
   }
   expire(at = Date.now()) {
