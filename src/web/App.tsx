@@ -75,6 +75,7 @@ type Snapshot = Omit<DevContourState, 'tasks'> & {
     | 'completionMode'
     | 'storage'
     | 'concurrency'
+    | 'maxAttempts'
     | 'roles'
     | 'reviewer'
     | 'gates'
@@ -143,7 +144,15 @@ const badgeTone: Record<string, 'secondary' | 'ready' | 'success' | 'warning' | 
 // после выдачи, и на третьей попытке в ревью. Живая часть строки показывает
 // фазу, исполнителя, пройденные проверки и причину ожидания — то, ради чего
 // иначе приходится открывать карточку задачи и читать журнал.
-function TaskLive({ task, runs }: { task: UITask; runs: Run[] }) {
+function TaskLive({
+  task,
+  runs,
+  maxAttempts,
+}: {
+  task: UITask;
+  runs: Run[];
+  maxAttempts?: number;
+}) {
   const run = runs.filter((r) => r.taskId === task.id).at(-1);
   const active = run?.status === 'active';
   if (active)
@@ -174,6 +183,15 @@ function TaskLive({ task, runs }: { task: UITask; runs: Run[] }) {
       <small className="text-destructive mt-1 block break-words">
         {run?.blocked ? 'Отказ окружения, попытка не засчитана: ' : ''}
         {task.failure}
+        {/* Исчерпанный бюджет — тупик, пока о сбросе никто не знает: без этой
+            строки остаётся только править базу руками. */}
+        {maxAttempts !== undefined && task.attempt >= maxAttempts && (
+          <>
+            {' '}
+            Бюджет попыток исчерпан ({task.attempt} из {maxAttempts}). Устраните причину и
+            повторите со сбросом: <code>retry --task {task.id} --reset --reason …</code>
+          </>
+        )}
       </small>
     );
   if (task.status === 'done' && run)
@@ -925,7 +943,7 @@ export function App() {
                               {t.repositoryId} · {roleLabel(t.role)}
                               {t.dependsOn.length ? ` · после ${t.dependsOn.join(', ')}` : ''}
                             </small>
-                            <TaskLive task={t} runs={data.runs} />
+                            <TaskLive task={t} runs={data.runs} maxAttempts={data.config.maxAttempts} />
                           </div>
                           <StatusBadge value={status(t)}>{taskStatusName(t)}</StatusBadge>
                           <ChevronRight />

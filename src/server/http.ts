@@ -138,6 +138,7 @@ export async function serve(
                   gates: h.config.gates.map((g) => g.id),
                   workspaceGates: h.config.workspaceGates.map((g) => g.id),
                   concurrency: h.config.concurrency,
+              maxAttempts: h.config.maxAttempts,
                 }
               : undefined,
             workers: (engine?.runs ?? [])
