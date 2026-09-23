@@ -20,6 +20,7 @@ import type {
   TaskStatus,
   Role,
 } from '../core/model.ts';
+import { WorkerCards } from './Workers.tsx';
 import { Badge } from '@/ui/badge.tsx';
 import { Card, CardContent, CardHeader, CardTitle } from '@/ui/card.tsx';
 
@@ -366,6 +367,7 @@ export function ProgressPanel({
   state: Pick<DevContourState, 'tasks' | 'runs' | 'contracts'> & {
     events?: AuditEvent[];
     contractAttempts?: ContractAttempt[];
+    concurrency?: number;
     config: {
       repositories?: { id: string; name?: string; kind?: string }[];
       gates?: Gate[];
@@ -476,76 +478,22 @@ export function ProgressPanel({
           </CardTitle>
         </CardHeader>
         <CardContent>
-          {working.length ? (
-            <div
-              className="overflow-x-auto"
-              tabIndex={0}
-              role="region"
-              aria-label="Сейчас в работе"
-            >
-              <table className="w-full min-w-[52rem] border-collapse text-sm">
-                <thead>
-                  <tr>
-                    {['Задача', 'Блок', 'Кто работает', 'Модель', 'Этап', 'Попытка', 'Идёт'].map(
-                      (h) => (
-                        <th key={h} className="border-b p-2 text-left align-top font-medium">
-                          {h}
-                        </th>
-                      ),
-                    )}
-                  </tr>
-                </thead>
-                <tbody>
-                  {working.map(({ task, run }) => (
-                    <tr key={task.id}>
-                      <td className="border-b p-2 align-top">
-                        {onSelect ? (
-                          <button
-                            type="button"
-                            className="text-primary text-left underline-offset-4 hover:underline"
-                            onClick={() => onSelect(task.id)}
-                          >
-                            {task.title}
-                          </button>
-                        ) : (
-                          task.title
-                        )}
-                      </td>
-                      <td className="border-b p-2 align-top font-mono text-xs">
-                        {task.repositoryId}
-                      </td>
-                      <td className="border-b p-2 align-top">
-                        {run ? workerName(run, task, state.runs) : roleNames[task.role]}
-                      </td>
-                      <td className="border-b p-2 align-top font-mono text-xs">
-                        {run ? (run.model ?? run.runtime) : '—'}
-                        {run?.reviewerModel && (
-                          <span className="text-muted-foreground">
-                            {' '}
-                            · ревью {run.reviewerModel}
-                          </span>
-                        )}
-                      </td>
-                      <td className="border-b p-2 align-top">
-                        <Badge variant={statusTone[task.status]}>
-                          <Loader2 className="mr-1 size-3 animate-spin" aria-hidden="true" />
-                          {statusNames[task.status]}
-                        </Badge>
-                      </td>
-                      <td className="border-b p-2 align-top font-mono text-xs">{task.attempt}</td>
-                      <td className="border-b p-2 align-top font-mono text-xs">
-                        {run ? elapsed(run.startedAt) : '—'}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <p className="text-muted-foreground">
-              Сейчас никто не занят задачей. Здесь появятся исполнитель, модель и время работы.
-            </p>
-          )}
+          <WorkerCards
+            workers={working.map(({ task, run }) => ({
+              runId: run?.id ?? task.id,
+              taskId: task.id,
+              title: task.title,
+              role: task.role,
+              phase: run?.phase ?? task.status,
+              runtime: run?.runtime,
+              model: run?.model,
+              reviewer: run?.reviewer,
+              reviewerModel: run?.reviewerModel,
+              attempt: task.attempt,
+              startedAt: run?.startedAt ?? task.createdAt,
+            }))}
+            concurrency={state.concurrency}
+          />
         </CardContent>
       </Card>
 

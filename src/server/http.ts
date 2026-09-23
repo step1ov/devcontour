@@ -136,6 +136,7 @@ export async function serve(
                   profile: h.config.packs?.[0]?.id ?? null,
                   gates: h.config.gates.map((g) => g.id),
                   workspaceGates: h.config.workspaceGates.map((g) => g.id),
+                  concurrency: h.config.concurrency,
                 }
               : undefined,
             workers: (engine?.runs ?? [])
@@ -150,6 +151,9 @@ export async function serve(
                   phase: r.phase,
                   runtime: r.runtime,
                   model: r.model,
+                  reviewer: r.reviewer,
+                  reviewerModel: r.reviewerModel,
+                  attempt: r.attempt,
                   startedAt: r.startedAt,
                 };
               }),

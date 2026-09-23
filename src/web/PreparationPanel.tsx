@@ -18,6 +18,7 @@ import { DesignBriefView } from './DesignBrief.tsx';
 import { ReferencesBriefView } from './ReferencesBrief.tsx';
 import { ConceptBriefView } from './ConceptBrief.tsx';
 import { StageBoundary } from './StageBoundary.tsx';
+import { WorkerCards, type Worker } from './Workers.tsx';
 import { Alert, AlertDescription, AlertTitle } from '@/ui/alert.tsx';
 import { Badge } from '@/ui/badge.tsx';
 import { Button } from '@/ui/button.tsx';
@@ -29,22 +30,13 @@ import { Textarea } from '@/ui/textarea.tsx';
 import { cn } from '@/lib/utils.ts';
 
 const Development = lazy(() => import('./App.tsx').then((m) => ({ default: m.App })));
-type Worker = {
-  runId: string;
-  taskId: string;
-  title: string;
-  role?: string;
-  phase?: string;
-  runtime?: string;
-  model?: string;
-  startedAt: string;
-};
 type View = ReturnType<Preparation['status']> & {
   setup?: {
     repositories: string[];
     profile: string | null;
     gates: string[];
     workspaceGates: string[];
+    concurrency?: number;
   };
   workers?: Worker[];
   engineConnected?: boolean;
@@ -435,32 +427,11 @@ function SetupProgress({ setup, tasks }: { setup: View['setup']; tasks: number }
     </div>
   );
 }
-function Workers({ workers }: { workers: Worker[] }) {
+function Workers({ workers, concurrency }: { workers: Worker[]; concurrency?: number }) {
   return (
     <div className="mt-6 grid gap-3">
       <strong className="text-sm">Заняты сейчас ({workers.length})</strong>
-      {workers.length ? (
-        <ul className="grid gap-2">
-          {workers.map((w) => (
-            <li key={w.runId} className="flex flex-wrap items-center gap-3 border-b pb-2 text-sm">
-              <Loader2 className="text-primary size-4 shrink-0 animate-spin" aria-hidden="true" />
-              <strong>{w.role ? (roleNames[w.role] ?? w.role) : 'Исполнитель'}</strong>
-              <span className="text-muted-foreground">
-                {w.phase ? (phaseNames[w.phase] ?? w.phase) : 'работает'}
-              </span>
-              <span className="min-w-0 flex-1">{w.title}</span>
-              <code className="text-muted-foreground font-mono text-xs">
-                {w.model ?? w.runtime}
-              </code>
-              <span className="text-muted-foreground text-xs">{ago(w.startedAt)}</span>
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <p className="text-muted-foreground text-sm">
-          Никто не занят задачей. Здесь появятся исполнитель, этап, модель и время работы.
-        </p>
-      )}
+      <WorkerCards workers={workers} concurrency={concurrency} />
     </div>
   );
 }
@@ -857,7 +828,7 @@ export function PreparationPanel() {
                     Принято задач: {view.delivery.done} из {view.delivery.total}. Сбоев:{' '}
                     {view.delivery.failed}.
                   </p>
-                  <Workers workers={view.workers ?? []} />
+                  <Workers workers={view.workers ?? []} concurrency={view.setup?.concurrency} />
                   {view.delivery.boards.length > 0 && (
                     <ul className="mt-2 grid gap-2">
                       {view.delivery.boards.map((b) => (

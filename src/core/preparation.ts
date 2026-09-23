@@ -551,6 +551,7 @@ export class Preparation {
         blocker = (error as Error).message;
       }
     const tasks = s.tasks.filter((t) => Boolean(c) && t.preparation?.changeId === c?.id);
+    const live = tasks.filter((t) => t.status !== 'cancelled');
     // The newest note of any change tells the operator the session is alive even
     // before the first revision exists.
     const latest = p.changes
@@ -662,13 +663,16 @@ export class Preparation {
                 : 'design',
       developmentReady: ready,
       blocker,
+      // Отменённая работа не входит в объём: план, выпущенный заново, оставляет
+      // за собой прежние задачи, и считать их значит показывать «0 из 70» там,
+      // где живых задач одна. Доска без живых задач — тоже история.
       delivery: {
-        total: tasks.length,
-        done: tasks.filter((t) => t.status === 'done').length,
-        failed: tasks.filter((t) => t.status === 'failed').length,
+        total: live.length,
+        done: live.filter((t) => t.status === 'done').length,
+        failed: live.filter((t) => t.status === 'failed').length,
         boards: s.boards
           .filter((b) =>
-            b.revisions.some((r) => r.taskIds.some((id) => tasks.some((t) => t.id === id))),
+            b.revisions.some((r) => r.taskIds.some((id) => live.some((t) => t.id === id))),
           )
           .map(({ id, title }) => ({ id, title })),
       },
