@@ -304,6 +304,16 @@ test('CLI adapters use structured outputs, stdin prompts and restricted review p
   assert.ok(claude.includes('Read,Glob,Grep'));
   assert.ok(claude.includes('Bash,Edit,Write,NotebookEdit'));
   assert.ok(!claude.includes('--dangerously-skip-permissions'));
+  // Прогон не наследует конфигурацию оператора: чужой MCP-сервер, не сумевший
+  // авторизоваться, убивал ревью — работа была сделана и проверена, а
+  // результат терялся из-за сервера, к контуру отношения не имеющего.
+  assert.ok(codex.includes('--ignore-user-config'));
+  assert.ok(codex.includes('mcp_servers={}'));
+  assert.ok(claude.includes('--strict-mcp-config'));
+  assert.deepEqual(
+    claude.slice(claude.indexOf('--setting-sources'), claude.indexOf('--setting-sources') + 2),
+    ['--setting-sources', ''],
+  );
 });
 test('Process timeout interrupts actual child processes', async () => {
   const r = await command([process.execPath, '-e', 'setInterval(()=>{},1000)'], process.cwd(), {

@@ -165,7 +165,12 @@ export function cliArguments(
       '--output-last-message',
       resultPath,
       ...(r.model ? ['--model', r.model] : []),
-      ...(r.toolProfile ? codexTools(r.toolProfile) : []),
+      // Без объявленного профиля инструментов codex брал глобальную
+      // конфигурацию оператора вместе с её MCP-серверами. Чужой сервер,
+      // который не смог авторизоваться, убивал прогон на стадии ревью —
+      // работа была сделана и проверена, а результат терялся из-за сервера,
+      // к контуру отношения не имеющего. Прогон начинается с пустого набора.
+      ...(r.toolProfile ? codexTools(r.toolProfile) : ['--ignore-user-config', '-c', 'mcp_servers={}']),
       '-',
     ];
   return [
