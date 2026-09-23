@@ -27,6 +27,7 @@ import {
   RotateCcw,
   Workflow,
   ChevronRight,
+  Activity,
 } from 'lucide-react';
 import type { DevContourState, Task, Config, AuditEvent, Board, Role } from '../core/model.ts';
 import { Alert, AlertDescription } from '@/ui/alert.tsx';
@@ -39,6 +40,9 @@ import { cn } from '@/lib/utils.ts';
 import { levels } from '../core/graph.ts';
 import type { taskProgress } from '../application/context.ts';
 const GraphPanel = lazy(() => import('./GraphPanel.tsx'));
+const ProgressPanel = lazy(() =>
+  import('./ProgressPanel.tsx').then((module) => ({ default: module.ProgressPanel })),
+);
 const ProductPanel = lazy(() =>
   import('./ProductPanel.tsx').then((module) => ({ default: module.ProductPanel })),
 );
@@ -651,6 +655,7 @@ export function App() {
             >
               {[
                 { key: 'product', label: 'Продукт', icon: <LayoutGrid /> },
+                { key: 'progress', label: 'Ход работ', icon: <Activity /> },
                 { key: 'graph', label: 'Граф', icon: <GitBranch /> },
                 { key: 'workspace', label: 'Общий граф', icon: <Workflow /> },
                 { key: 'changesets', label: 'Изменения', icon: <FileCheck /> },
@@ -701,7 +706,7 @@ export function App() {
           <div
             className={cn(
               'grid items-start gap-4',
-              tab === 'changesets' || tab === 'product'
+              tab === 'changesets' || tab === 'product' || tab === 'progress'
                 ? 'grid-cols-[minmax(0,1fr)]'
                 : 'grid-cols-[minmax(0,1fr)_var(--inspector-width)] max-[1180px]:grid-cols-[minmax(0,1fr)]',
             )}
@@ -711,6 +716,17 @@ export function App() {
               aria-label="Рабочая область"
             >
               <Suspense fallback={<p role="status">Загружаем представление…</p>}>
+                {tab === 'progress' && data && (
+                  <div className="p-4">
+                    <ProgressPanel
+                      state={data}
+                      onSelect={(id) => {
+                        setSelected(id);
+                        setTab('list');
+                      }}
+                    />
+                  </div>
+                )}
                 {tab === 'product' && (
                   <ProductPanel
                     onRepository={(id) => {
