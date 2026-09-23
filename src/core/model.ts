@@ -106,6 +106,12 @@ export const taskInput = z.object({
   contracts: z.array(id).max(30).default([]),
   contextPacks: z.array(id).max(30).optional(),
   writePaths: z.array(relativePath).min(1).max(100).optional(),
+  // Область доказательства: подмножество проверок профиля, которым эта задача
+  // доказывает себя. У задачи уже есть область записи; без области
+  // доказательства параллельная декомпозиция упирается в общий набор, где
+  // зелёный gate не различает, чьи ожидания закрыты. Полный набор остаётся
+  // обязательным для приёмки доски и релиза.
+  gates: z.array(id).max(20).optional(),
   resources: z.array(id).max(20).optional(),
   finding: discoveryInput
     .extend({

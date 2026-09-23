@@ -145,6 +145,19 @@ export function validateTaskContext(config: Config, task: TaskInput) {
     )
       throw new DomainError('Требование должно ссылаться на test gate: ' + link.gate);
   }
+  if (task.gates) {
+    const own = repository(config, task.repositoryId).gates;
+    for (const id of task.gates)
+      if (!own.some((g) => g.id === id))
+        throw new DomainError('Проверка вне профиля компонента: ' + id);
+    // Проверками без теста задача доказать себя не может: typecheck и lint
+    // проходят и на нереализованном коде.
+    if (!task.gates.some((id) => own.some((g) => g.id === id && g.kind === 'test')))
+      throw new DomainError('Область доказательства задачи должна включать test gate');
+    for (const link of task.requirements ?? [])
+      if (!task.gates.includes(link.gate))
+        throw new DomainError('Требование ссылается на проверку вне области задачи: ' + link.gate);
+  }
   if (task.scope === 'workspace' && new Set(task.relatedRepositories ?? []).size < 2)
     throw new DomainError('Общая задача должна затрагивать минимум два компонента');
   for (const id of task.relatedRepositories ?? []) repository(config, id);

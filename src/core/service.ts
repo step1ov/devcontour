@@ -493,7 +493,9 @@ export class DevContour {
         },
         wait: { approvedAt: t.approvedAt, readyAt },
         requiredGates: [
-          ...repository(this.config, t.repositoryId).gates.map((g) => g.id),
+          // Задача доказывает себя своей областью, если она объявлена; иначе —
+          // всем профилем, как раньше.
+          ...(t.gates ?? repository(this.config, t.repositoryId).gates.map((g) => g.id)),
           ...(t.requirements?.length ? ['requirement-source'] : []),
         ],
         id: randomUUID(),

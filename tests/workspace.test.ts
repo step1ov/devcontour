@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
@@ -511,5 +512,80 @@ test('Consumer impact executes prerequisites and affected product tests on real 
     assert.equal(f.store.read().tasks.find((t) => t.id === lib.id)!.status, 'done');
   } finally {
     await f.cleanup();
+  }
+});
+
+test('A task proves itself with its own gates; the rest of the profile stays required elsewhere', () => {
+  const f = fixture();
+  try {
+    f.h.config.gates = [
+      { id: 'typecheck', kind: 'check', command: ['node', 'tc.mjs'], timeoutMs: 60_000 },
+      {
+        id: 'unit',
+        kind: 'test',
+        command: ['node', 'verify.mjs'],
+        timeoutMs: 60_000,
+        report: { type: 'junit', path: '.reports/junit.xml' },
+      },
+      {
+        id: 'engine',
+        kind: 'test',
+        command: ['node', 'engine.mjs'],
+        timeoutMs: 60_000,
+        report: { type: 'junit', path: '.reports/engine.xml' },
+      },
+    ];
+    const b = f.h.createBoard('Narrow proof');
+    // Без объявленной области задача доказывает себя всем профилем, как раньше.
+    const whole = f.h.addTask(b.id, input('Everything'));
+    const narrow = f.h.addTask(b.id, { ...input('Engine only'), gates: ['typecheck', 'engine'] });
+    f.h.approve(b.id);
+    f.h.pause(false);
+    const claimed: NonNullable<ReturnType<typeof f.h.claim>>[] = [];
+    for (let i = 0; i < 4; i++) {
+      const run = f.h.claim('worker-' + i);
+      if (!run) break;
+      claimed.push(run);
+    }
+    assert.equal(claimed.length, 2, 'обе задачи должны быть выданы');
+    const gatesOf = (taskId: string) =>
+      claimed
+        .find((r) => r.taskId === taskId)!
+        .requiredGates!.slice()
+        .sort();
+    assert.deepEqual(gatesOf(whole.id), ['engine', 'typecheck', 'unit']);
+    assert.deepEqual(gatesOf(narrow.id), ['engine', 'typecheck']);
+
+    // Проверками без теста доказать себя нельзя: typecheck проходит и на пустом коде.
+    assert.throws(
+      () => f.h.addTask(b.id, { ...input('No test'), gates: ['typecheck'] }),
+      /test gate/,
+    );
+    // Область — подмножество профиля компонента, а не произвольный список.
+    assert.throws(
+      () => f.h.addTask(b.id, { ...input('Foreign'), gates: ['unit', 'nightly'] }),
+      /вне профиля/,
+    );
+    // Требование не может ссылаться на проверку за пределами области задачи.
+    assert.throws(
+      () =>
+        f.h.addTask(b.id, {
+          ...input('Mismatched'),
+          gates: ['engine'],
+          requirements: [
+            {
+              id: 'REQ-load',
+              source: 'docs/spec.md',
+              digest: createHash('sha256').update('Текст требования').digest('hex'),
+              text: 'Текст требования',
+              gate: 'unit',
+              scenario: 'Ядро возвращает сборку',
+            },
+          ],
+        }),
+      /вне области задачи/,
+    );
+  } finally {
+    f.cleanup();
   }
 });
