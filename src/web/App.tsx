@@ -434,6 +434,14 @@ export function App() {
         </div>
         <nav aria-label="Доски">
           {[...data.boards]
+            // Доска, где вся работа отменена, — история, а не выбор. Оставлять
+            // её в списке значит показывать три одноимённых доски и заставлять
+            // читателя угадывать живую.
+            .filter((b) => {
+              const ids = new Set(b.revisions.flatMap((r) => r.taskIds));
+              const own = data.tasks.filter((t) => ids.has(t.id));
+              return own.length === 0 || own.some((t) => t.status !== 'cancelled');
+            })
             .sort(
               (a, b) =>
                 Number(b.revisions.at(-1)!.status === 'active') -
