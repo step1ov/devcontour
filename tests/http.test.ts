@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import { fixture } from './helpers.ts';
 import { serve } from '../src/server/http.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
+import { runActivity } from '../src/runner/activity.ts';
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 test('Loopback API rejects cross-origin writes, validates input and survives missing assets', async () => {
   const f = fixture();
   const scheduler = new Scheduler(f.h, f.root);
@@ -126,5 +130,37 @@ test('Two workspace servers use distinct ports and report their own state paths'
     await b?.close();
     left.cleanup();
     right.cleanup();
+  }
+});
+
+test('The panel can read what a run is doing right now', async () => {
+  // Фаза отвечает грубо: `running` одинаков и через минуту после выдачи, и на
+  // десятом инструменте. Действия читаются из потока событий самого runtime.
+  const root = await mkdtemp(join(tmpdir(), 'devcontour-activity-'));
+  try {
+    const dir = join(root, 'artifacts', 'run-1', 'implementation');
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, 'runtime.log'),
+      [
+        '[2026-09-24T10:00:00.000Z stdout] {"type":"system","subtype":"init"}',
+        '[2026-09-24T10:00:01.000Z stdout] {"type":"assistant","message":{"content":[' +
+          '{"type":"tool_use","name":"Read","input":{"file_path":"/w/packages/schema/src/load.ts"}}]}}',
+        '[2026-09-24T10:00:02.000Z stdout] {"type":"result","is_error":false}',
+        '',
+      ].join('\n'),
+    );
+    const activity = await runActivity({ runRoot: () => root }, {
+      id: 'run-1',
+      repositoryId: 'main',
+      worktree: '/w',
+    } as never);
+    assert.deepEqual(
+      activity.map((a) => a.text),
+      ['Read packages/schema/src/load.ts'],
+      'служебные события не считаются действием, а путь читается от корня worktree',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });

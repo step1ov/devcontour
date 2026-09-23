@@ -21,6 +21,7 @@ import { repositories } from '../core/repositories.ts';
 import { WorkspaceRunner } from '../runner/workspace.ts';
 import { IntentService } from '../runner/intent.ts';
 import { attachJournal, renderJournal } from '../runner/journal.ts';
+import { runActivity } from '../runner/activity.ts';
 const json = (res: ServerResponse, status: number, value: unknown) => {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
@@ -314,6 +315,14 @@ export async function serve(
           if (!file.startsWith(root + sep))
             throw new DomainError('Путь артефакта не разрешён', 403);
           result = { content: (await readFile(file, 'utf8')).slice(-100000) };
+        } else if (req.method === 'GET' && parts[1] === 'runs' && parts[3] === 'activity') {
+          // «Чем агент занят прямо сейчас» — самый частый вопрос оператора, и
+          // фаза на него отвечает грубо: `running` одинаков и через минуту
+          // после выдачи, и на десятом инструменте. Здесь — последние действия
+          // runtime, прочитанные из его же потока событий.
+          const run = h.store.read().runs.find((r) => r.id === parts[2]);
+          if (!run) throw new DomainError('Прогон не найден', 404);
+          result = { activity: await runActivity(scheduler, run) };
         } else if (req.method === 'GET' && parts[1] === 'boards' && parts[3] === 'impact')
           result = h.impact(
             parts[2],

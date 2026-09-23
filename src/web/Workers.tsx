@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { Bot, CircleDashed, Eye, Loader2 } from 'lucide-react';
 import { Badge } from '@/ui/badge.tsx';
 import { Card, CardContent } from '@/ui/card.tsx';
@@ -71,6 +72,42 @@ export function Phases({ current }: { current?: string }) {
   );
 }
 
+
+// Фаза отвечает грубо: `running` одинаков и через минуту после выдачи, и на
+// десятом инструменте. Последние действия runtime показывают, чем агент занят
+// на самом деле — читать журнал для этого больше не нужно.
+function Activity({ runId }: { runId: string }) {
+  const [lines, setLines] = useState<{ phase: string; text: string }[]>([]);
+  useEffect(() => {
+    let live = true;
+    const load = async () => {
+      try {
+        const response = await fetch(`api/runs/${runId}/activity`);
+        if (!response.ok) return;
+        const data = (await response.json()) as { activity?: { phase: string; text: string }[] };
+        if (live) setLines(data.activity?.slice(-3) ?? []);
+      } catch {
+        // Панель переживает недоступный сервер: строки просто не обновятся.
+      }
+    };
+    void load();
+    const timer = setInterval(() => void load(), 4000);
+    return () => {
+      live = false;
+      clearInterval(timer);
+    };
+  }, [runId]);
+  if (!lines.length) return null;
+  return (
+    <ol className="text-muted-foreground m-0 grid gap-0.5 font-mono text-xs">
+      {lines.map((line, i) => (
+        <li key={i} className="truncate" title={line.text}>
+          {line.text}
+        </li>
+      ))}
+    </ol>
+  );
+}
 export function WorkerCards({ workers, concurrency }: { workers: Worker[]; concurrency?: number }) {
   const free = Math.max(0, (concurrency ?? workers.length) - workers.length);
   return (
@@ -93,6 +130,7 @@ export function WorkerCards({ workers, concurrency }: { workers: Worker[]; concu
             </div>
             <p className="min-w-0 break-words">{w.title}</p>
             <Phases current={w.phase} />
+            <Activity runId={w.runId} />
             {(w.reviewer ?? w.reviewerModel) && (
               <p className="text-muted-foreground flex items-center gap-2 text-xs">
                 <Eye aria-hidden="true" className="size-3 shrink-0" />
