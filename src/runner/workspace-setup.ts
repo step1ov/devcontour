@@ -38,6 +38,21 @@ const registrySchema = z.object({
 // трогается — её runtime и ревьюера выбирал оператор, и перенос объявления не
 // повод отменять этот выбор.
 
+// Реестр объявляет пакеты, но не закрепляет их: revision и digest появляются
+// только при context-lock. Переносить объявление целиком значит сбрасывать
+// закрепление каждый раз, когда рядом меняется что-то другое, и останавливать
+// очередь на «пакет не закреплён». Неизменившийся пакет закрепление сохраняет.
+const withPins = (
+  existing: { id: string; version: string; files: string[] }[],
+  declared: { id: string; version: string; files: string[] }[],
+) => {
+  const pinned = new Map(existing.map((p) => [JSON.stringify([p.id, p.files]), p]));
+  return declared.map((p) => {
+    const was = pinned.get(JSON.stringify([p.id, p.files]));
+    return was && was.version === p.version ? { ...p, ...was } : p;
+  });
+};
+
 /** Имена ролей, объявленных конфигурацией: workspace плюс каждый компонент. */
 const declaredNames = (
   scope: { roles: Record<string, unknown> },
@@ -158,7 +173,11 @@ export async function setupWorkspace(file: string, data?: string) {
             gates: config.gates,
             repositories: repos,
             workspaceGates: config.workspaceGates,
-            contextPacks: config.contextPacks,
+            contextPacks: withPins(
+              (raw as { contextPacks?: { id: string; version: string; files: string[] }[] })
+                .contextPacks ?? [],
+              config.contextPacks,
+            ),
             roles: withDeclaredRoles(
               (raw as { roles?: Record<string, unknown> }).roles ?? {},
               config.roles,
@@ -204,19 +223,7 @@ export async function setupWorkspace(file: string, data?: string) {
           config.contextPacks.map(({ id, version, files }) => ({ id, version, files })),
         );
     if (declarationChanged) {
-      // Реестр объявляет пакеты, но не закрепляет их: revision и digest
-      // появляются только при context-lock. Переносить объявление целиком
-      // значило бы сбрасывать закрепление всякий раз, когда меняется что-то
-      // рядом, и останавливать очередь на «пакет не закреплён». Поэтому
-      // неизменившийся пакет сохраняет своё закрепление, а изменившийся —
-      // теряет его честно и требует нового lock.
-      const pinned = new Map(
-        existing.contextPacks.map((p) => [JSON.stringify({ id: p.id, files: p.files }), p]),
-      );
-      const contextPacks = config.contextPacks.map((p) => {
-        const was = pinned.get(JSON.stringify({ id: p.id, files: p.files }));
-        return was && was.version === p.version ? { ...p, ...was } : p;
-      });
+      const contextPacks = withPins(existing.contextPacks, config.contextPacks);
       await writeFile(
         configPath,
         JSON.stringify(
