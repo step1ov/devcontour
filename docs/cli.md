@@ -54,6 +54,8 @@ Setup не вызывает модель, не устанавливает зав
 | `review-contract` | `--file FILE --author-runtime codex\|claude`                       | Независимое review предложения; при agent mode регистрирует контракт, при operator ждёт подтверждения |
 | `review-plan`     | `--board ID --author-runtime codex\|claude`                        | Проверяет текущий план и утверждает черновики по политике                                             |
 
+Предложение контракта ссылается на файл в репозитории: `{"title": "...", "file": "docs/contracts/load-engine.md"}`. Содержимое читается из дерева в момент ревью, поэтому рецензент и реестр видят одну и ту же редакцию, а принятый digest относится к файлу, а не к чьей-то копии. Путь сохраняется в `Contract.source`. Inline-поле `content` остаётся для предложений, у которых файла ещё нет; указывать оба сразу нельзя.
+
 `--author-runtime` обозначает фактического автора предложения, не произвольный выбор reviewer. Review выбирает другой runtime. Команды review вызывают модель и расходуют её лимиты. Точное совпадение уже утверждённого контракта может вернуть `already-approved`.
 
 Файл contract proposal содержит `title`, `content`, опционально `repositoryId`. Отсутствие repositoryId означает общий контракт. Plan содержит `title`, `description`, `tasks` (1–30), у каждой задачи — локальный `key`, роль, description, acceptance, contracts, dependsOn и при необходимости repositoryId/scope/context/writePaths/resources. `dependsOn` принимает ключ из этого плана либо существующий Task ID. Пример: [example-plan.json](../packs/example-plan.json).

@@ -53,6 +53,12 @@ npm run devcontour -- doctor --probe --workspace /absolute/product-workspace
 npm run devcontour -- review-contract --file /absolute/product-workspace/docs/proposals/catalog-contract.json --author-runtime codex --workspace /absolute/product-workspace
 ```
 
+Предложение — короткий JSON с названием и путём к документу: содержимое берётся из дерева, а не из копии внутри предложения, поэтому отправить на ревью устаревшую редакцию нельзя.
+
+```json
+{ "title": "Catalog API v1", "file": "docs/contracts/catalog.md" }
+```
+
 Укажите фактический runtime автора. Другой runtime проверит предложение. При agent mode сохранится Contract с ID; при operator mode ответ будет `awaiting-operator`, после чего человек регистрирует согласованное содержимое в UI. Файл в Git сам по себе не является утверждённой записью Contract.
 
 Если интерфейс ещё нужно исследовать, сначала создайте небольшой план только подготовительных работ. Не утверждайте весь frontend/backend заранее в надежде дописать договор позже.

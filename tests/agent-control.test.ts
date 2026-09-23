@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, symlink } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { fixture, input } from './helpers.ts';
 import { reviewContract, reviewPlan, acceptBoard } from '../src/runner/agent-control.ts';
 import { specDigest } from '../src/core/service.ts';
@@ -60,6 +61,68 @@ test('Agent contracts require another runtime, retain review proof and deduplica
     );
     assert.equal(calls, 1);
     assert.equal(f.store.read().contracts.length, 1);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('A contract proposal reads the document from the repository, not a copy of it', async () => {
+  const f = fixture();
+  try {
+    f.h.config.mode = 'local';
+    const relative = 'docs/contracts/catalog.md';
+    const file = join(f.h.config.repository, relative);
+    await mkdir(dirname(file), { recursive: true });
+    await writeFile(file, '# Catalog\n\nGET /products returns a documented list.\n');
+    const proposal = { title: 'Catalog API v1', file: relative };
+
+    const r = await reviewContract(f.h, f.root, proposal, 'codex', runtimes());
+    assert.equal(r.status, 'approved');
+    const contract = f.store.read().contracts[0];
+    assert.match(contract.content, /GET \/products/);
+    // Путь сохраняется: принятый digest относится к файлу в дереве, а не к
+    // тексту, который когда-то скопировали в предложение.
+    assert.equal(contract.source, relative);
+
+    // Правка документа — другой контракт, а не повтор того же: дедупликация
+    // идёт по содержимому, и снимок прошлой редакции её не обманывает.
+    await writeFile(file, '# Catalog\n\nGET /products returns a list and errors.\n');
+    await reviewContract(f.h, f.root, proposal, 'codex', runtimes());
+    assert.equal(f.store.read().contracts.length, 2);
+    assert.match(f.store.read().contracts[1].content, /errors/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('A contract file outside the repository is refused', async () => {
+  const f = fixture();
+  try {
+    f.h.config.mode = 'local';
+    // Побег через символическую ссылку: путь относительный и без «..», но
+    // ведёт наружу. Проверяется разрешённый путь, а не написанный.
+    await mkdir(join(f.h.config.repository, 'docs'), { recursive: true });
+    await symlink('/etc/hosts', join(f.h.config.repository, 'docs/escape.md'));
+    await assert.rejects(
+      reviewContract(
+        f.h,
+        f.root,
+        { title: 'Escape', file: 'docs/escape.md' },
+        'codex',
+        runtimes(),
+      ),
+      /внутри репозитория/,
+    );
+    await assert.rejects(
+      reviewContract(f.h, f.root, { title: 'Ghost', file: 'docs/none.md' }, 'codex', runtimes()),
+      /не найден/,
+    );
+    // Ни текста, ни файла — и то и другое сразу тоже не предложение.
+    await assert.rejects(
+      reviewContract(f.h, f.root, { title: 'Neither' }, 'codex', runtimes()),
+      /file/,
+    );
+    assert.equal(f.store.read().contracts.length, 0);
   } finally {
     f.cleanup();
   }

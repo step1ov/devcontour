@@ -240,6 +240,7 @@ export class DevContour {
     content: string,
     approval: Approval = { actor: 'operator' },
     repositoryId?: string,
+    source?: string,
   ) {
     if (repositoryId) repository(this.config, repositoryId);
     if (!title.trim() || !content.trim() || content.length > 60000)
@@ -250,6 +251,7 @@ export class DevContour {
         repositoryId,
         title,
         content,
+        source,
         digest: digest(content),
         approvedAt: now(),
         approval,

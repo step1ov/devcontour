@@ -2,21 +2,36 @@ import { measuredExecute } from './usage.ts';
 import { unobservedReview } from '../core/review.ts';
 import { boardOwner } from '../core/sync-state.ts';
 import { toolProfileFor, agentEnvironment } from './tools.ts';
-import { mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, writeFile, readFile, realpath } from 'node:fs/promises';
+import { join, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { DevContour, digest, specDigest } from '../core/service.ts';
-import { type Approval, type ContractAttempt, type Task, DomainError } from '../core/model.ts';
+import {
+  type Approval,
+  type ContractAttempt,
+  type Task,
+  DomainError,
+  relativePath,
+} from '../core/model.ts';
 import { adapters, reviewResult, type AgentAdapter } from './adapters.ts';
 import { repositories, repository } from '../core/repositories.ts';
 import { git } from './process.ts';
 
-export const contractProposal = z.object({
-  repositoryId: z.string().optional(),
-  title: z.string().trim().min(1).max(180),
-  content: z.string().trim().min(1).max(60000),
-});
+// Контракт живёт в репозитории, и предложение должно на него ссылаться, а не
+// нести копию: копию легко отправить на ревью устаревшей, и тогда принятый
+// digest не относится ни к одному файлу в дереве. Inline-текст остаётся для
+// предложений, у которых файла ещё нет.
+export const contractProposal = z
+  .object({
+    repositoryId: z.string().optional(),
+    title: z.string().trim().min(1).max(180),
+    content: z.string().trim().min(1).max(60000).optional(),
+    file: relativePath.optional(),
+  })
+  .refine((p) => Boolean(p.content) !== Boolean(p.file), {
+    message: 'Укажите либо file — путь к контракту в репозитории, либо content',
+  });
 type Author = 'codex' | 'claude';
 type Runtimes = Record<Author, AgentAdapter>;
 
@@ -135,6 +150,28 @@ async function review(
   };
 }
 
+// Контракт читается из дерева в момент ревью: ревьюер и реестр видят то же
+// самое, что лежит в репозитории, а не то, что автор скопировал когда-то.
+async function contractContent(
+  h: DevContour,
+  proposal: { content?: string; file?: string; repositoryId?: string },
+) {
+  if (!proposal.file) return proposal.content!;
+  const base = await realpath(repository(h.config, proposal.repositoryId).path);
+  const file = resolve(base, proposal.file);
+  let resolved: string;
+  try {
+    resolved = await realpath(file);
+  } catch {
+    throw new DomainError('Контракт не найден: ' + proposal.file, 400);
+  }
+  if (resolved !== file || !resolved.startsWith(base + sep))
+    throw new DomainError('Контракт должен лежать внутри репозитория', 400);
+  const content = await readFile(resolved, 'utf8');
+  if (!content.trim()) throw new DomainError('Файл контракта пуст: ' + proposal.file, 400);
+  return content;
+}
+
 export async function reviewContract(
   h: DevContour,
   root: string,
@@ -142,7 +179,8 @@ export async function reviewContract(
   author: Author,
   runtimes: Runtimes = adapters,
 ) {
-  const proposal = contractProposal.parse(input);
+  const parsed = contractProposal.parse(input);
+  const proposal = { ...parsed, content: await contractContent(h, parsed) };
   const existing = h.store
     .read()
     .contracts.find(
@@ -165,7 +203,13 @@ export async function reviewContract(
     return { status: 'awaiting-operator', proposal, approval };
   return {
     status: 'approved',
-    contract: h.contract(proposal.title, proposal.content, approval, proposal.repositoryId),
+    contract: h.contract(
+      proposal.title,
+      proposal.content,
+      approval,
+      proposal.repositoryId,
+      proposal.file,
+    ),
   };
 }
 
