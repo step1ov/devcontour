@@ -110,9 +110,19 @@ export function readComponentConfig(entry: any) {
   const path = realpathSync(resolve(root, entry.configFile));
   if (!path.startsWith(root + sep))
     throw new Error('Component config должен находиться в репозитории');
+  const file = JSON.parse(readFileSync(path, 'utf8')) as {
+    roles?: Record<string, unknown>;
+  };
+  // Роли складываются по ключам, а не заменяются целиком: компонент уточняет
+  // привязку своей роли, но роли, пришедшие из его профиля, при перезагрузке
+  // конфигурации обязаны остаться — иначе mobile и qa-mobile исчезали у
+  // компонента, который их и объявил.
+  const roles =
+    entry.roles || file.roles ? { ...entry.roles, ...file.roles } : undefined;
   return {
     ...entry,
-    ...JSON.parse(readFileSync(path, 'utf8')),
+    ...file,
+    ...(roles ? { roles } : {}),
     id: entry.id,
     path: entry.path,
     dependsOn: entry.dependsOn,

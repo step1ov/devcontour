@@ -284,10 +284,21 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
         version,
       );
       const log = result.stdout + '\n' + result.stderr;
-      // Runtime не выдал результата: задача не была ни выполнена, ни провалена —
-      // ей просто не дали работать. Это отказ окружения, и попытку он не тратит.
+      // Отказ окружения — это когда runtime не начал работать: не запустился,
+      // не авторизовался, оборвался до первой попытки. Отсутствие кандидата
+      // этого не доказывает: агент мог править файлы и упасть по таймауту,
+      // истратив прогон, — такую попытку возвращать нельзя.
+      //
+      // Признак берётся из вывода самого runtime, но считаются не любые
+      // события: незалогиненный claude тоже печатает system и result. Работой
+      // считается ход агента — ответ, вызов инструмента, сообщение. Таймаут —
+      // всегда работа: он израсходовал весь отведённый бюджет.
+      const bookkeeping = ['system', 'result', 'error', 'session.created', 'thread.started'];
+      const started =
+        result.timedOut ||
+        runtimeEvents(result.stdout).events.some((e) => !bookkeeping.includes(String(e.type)));
       if (result.code !== 0 || result.timedOut || r.signal.aborted)
-        throw new BlockedError(
+        throw new (started ? Error : BlockedError)(
           `${name}: runtime завершился с кодом ${result.code}${result.timedOut ? ' (timeout)' : ''}` +
             // Причина отказа приходит от самого runtime — «Not logged in», исчерпанный
             // лимит, недоступная модель. Без неё сообщение говорит только «код 1», и

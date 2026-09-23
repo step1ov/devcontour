@@ -106,6 +106,50 @@ test('A contract proposal reads the document from the repository, not a copy of 
   }
 });
 
+test('A workspace whose repositories are not named main still reviews contracts', async () => {
+  const f = fixture();
+  const repo = await repositoryFixture(f);
+  try {
+    // Раньше ревью и разбор предложения молча брали «main». В workspace из
+    // product и library это имя не существует, и путь, который работал,
+    // начинал падать на несуществующем репозитории.
+    f.h.config.repositories = [
+      {
+        id: 'product',
+        name: 'Product',
+        kind: 'product',
+        path: repo.path,
+        targetBranch: 'devcontour/accepted',
+        gates: [],
+        protectedPaths: [],
+      },
+    ] as typeof f.h.config.repositories;
+    const relative = 'docs/contracts/catalog.md';
+    await mkdir(join(repo.path, dirname(relative)), { recursive: true });
+    await writeFile(join(repo.path, relative), '# Catalog\n\nGET /products.\n');
+
+    const byFile = await reviewContract(
+      f.h,
+      f.root,
+      { title: 'Catalog API v1', file: relative },
+      'codex',
+      runtimes(),
+    );
+    assert.equal(byFile.status, 'approved');
+    const inline = await reviewContract(
+      f.h,
+      f.root,
+      { title: 'Shared decision', content: 'Общая архитектурная запись.' },
+      'codex',
+      runtimes(),
+    );
+    assert.equal(inline.status, 'approved');
+  } finally {
+    await repo.remove();
+    f.cleanup();
+  }
+});
+
 test('A contract file outside the repository is refused', async () => {
   const f = fixture();
   const repo = await repositoryFixture(f);
@@ -288,5 +332,64 @@ test('Agent cannot accept a board containing unverified work', async () => {
     assert.equal(f.store.read().boards[0].revisions[0].status, 'active');
   } finally {
     f.cleanup();
+  }
+});
+
+test('A runtime that emitted work spends the attempt; one that never started does not', async () => {
+  // Классификация принадлежит адаптеру и читается из вывода самого runtime.
+  // Отсутствие кандидата отказа не доказывает: агент мог править файлы и
+  // упасть по таймауту, истратив прогон.
+  const { cliAdapter } = await import('../src/runner/adapters.ts');
+  const { BlockedError } = await import('../src/core/model.ts');
+  const dir = await mkdtemp(join(tmpdir(), 'devcontour-runtime-'));
+  const request = (script: string) => ({
+    cwd: dir,
+    artifactDir: dir,
+    prompt: 'ignored',
+    review: false,
+    task: {} as never,
+    signal: AbortSignal.timeout(20_000),
+    timeoutMs: 20_000,
+    execution: {
+      // Только временный каталог: иначе отсутствующий фейковый runtime
+      // находит настоящий claude в системе, и тест проверяет не то.
+      env: { PATH: dir },
+      redact: (v: string) => v,
+    },
+    script,
+  });
+  try {
+    // Ненастоящий claude: сделал ход агента и упал — работа шла.
+    await writeFile(
+      join(dir, 'claude'),
+      '#!/bin/sh\necho \'{"type":"assistant","message":{"content":[]}}\'\nexit 1\n',
+      { mode: 0o755 },
+    );
+    await assert.rejects(
+      cliAdapter('claude').execute(request('noisy') as never),
+      (error: Error) => !(error instanceof BlockedError) && /кодом 1/.test(error.message),
+    );
+
+    // Тот же код выхода, но ходов не было: только system и result, как у
+    // незалогиненного claude. Работа не начиналась.
+    await writeFile(
+      join(dir, 'claude'),
+      '#!/bin/sh\necho \'{"type":"system","subtype":"init"}\'\n' +
+        'echo \'{"type":"result","is_error":true,"result":"Not logged in"}\'\nexit 1\n',
+      { mode: 0o755 },
+    );
+    await assert.rejects(
+      cliAdapter('claude').execute(request('silent') as never),
+      (error: Error) => error instanceof BlockedError,
+    );
+
+    // Нечего запускать — тоже отказ окружения, хотя приходит ошибкой запуска.
+    await rm(join(dir, 'claude'));
+    await assert.rejects(
+      cliAdapter('claude').execute(request('missing') as never),
+      (error: Error) => error instanceof BlockedError,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });

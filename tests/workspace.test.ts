@@ -402,6 +402,16 @@ test('Workspace setup preserves policy on repeat and detects a competing control
     assert.equal(after.contextPacks[0].revision, 'a'.repeat(40));
     assert.equal(after.contextPacks[0].digest, 'b'.repeat(64));
     assert.equal(after.workspaceGates[0].timeoutMs, 700000);
+
+    // Сменились роли пакета — это другое объявление. По id, version и files
+    // оно выглядело прежним: перенос не запускался, и исполнитель продолжал
+    // получать устаревшие инструкции вместе с их закреплением.
+    registry.contextPacks[0].roles = ['backend', 'qa'];
+    await writeFile(path, JSON.stringify(registry));
+    assert.equal((await setupWorkspace(path, f.data)).status, 'declaration-updated');
+    const reselected = loadConfig(configPath);
+    assert.deepEqual(reselected.contextPacks[0].roles, ['backend', 'qa']);
+    assert.equal(reselected.contextPacks[0].revision, undefined, 'закрепление потеряно честно');
     await assert.rejects(
       setupWorkspace(path, join(f.root, 'another')),
       /workspace|владел|управля/i,

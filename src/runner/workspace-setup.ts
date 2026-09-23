@@ -230,12 +230,12 @@ export async function setupWorkspace(file: string, data?: string) {
         ),
       ) ||
       declaredNames(config, repos).some((role) => !known.includes(role)) ||
-      JSON.stringify(
-        existing.contextPacks.map(({ id, version, files }) => ({ id, version, files })),
-      ) !==
-        JSON.stringify(
-          config.contextPacks.map(({ id, version, files }) => ({ id, version, files })),
-        );
+      // Сравнивается всё объявление пакета. По id, version и files пакет,
+      // сменивший компонент или роли, выглядел неизменившимся: перенос не
+      // запускался, и устаревшее объявление вместе со своим закреплением
+      // оставалось действующим.
+      JSON.stringify(existing.contextPacks.map(declaration)) !==
+        JSON.stringify(config.contextPacks.map(declaration));
     if (declarationChanged) {
       const contextPacks = withPins(existing.contextPacks, config.contextPacks);
       await writeFile(

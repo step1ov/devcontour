@@ -590,13 +590,18 @@ export class DevContour {
         r.evidence.findLast(
           (e) => e.kind === kind && e.phase === phase && e.sha === sha && e.gate === gate,
         )?.passed === true;
-      for (const gate of [
-        ...repository(this.config, t.repositoryId).gates,
-        ...(t.requirements?.length ? [{ id: 'requirement-source' }] : []),
-      ])
+      // Доказательства требуются по области доказательства прогона — той же,
+      // по которой гейты и запускались. Требовать весь набор профиля значит
+      // требовать от задачи зелени по проверкам соседних, ещё не сделанных
+      // задач; полный набор остаётся обязательным при приёмке доски и релиза.
+      const required = r.requiredGates ?? [
+        ...repository(this.config, t.repositoryId).gates.map((g) => g.id),
+        ...(t.requirements?.length ? ['requirement-source'] : []),
+      ];
+      for (const gate of required)
         for (const phase of ['candidate', 'integration'] as const)
-          if (!last('test', phase, phase === 'candidate' ? r.candidateSha : sha, gate.id))
-            throw new DomainError(`Нет PASS: ${phase}/${gate.id}`);
+          if (!last('test', phase, phase === 'candidate' ? r.candidateSha : sha, gate))
+            throw new DomainError(`Нет PASS: ${phase}/${gate}`);
       for (const phase of ['candidate', 'integration'] as const)
         if (
           !last('review', phase, phase === 'candidate' ? r.candidateSha : sha, 'independent-review')

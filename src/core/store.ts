@@ -204,7 +204,18 @@ export class Store {
     this.db.exec('BEGIN IMMEDIATE');
     this.transaction = true;
     try {
-      write(this.read(), this.allEvents());
+      const state = this.read();
+      const events = this.allEvents();
+      // Снимок старше уже спроецированного писать нечего: его файлы легли бы
+      // поверх более новых и стёрли бы из видимой истории событие, которое там
+      // уже есть. Заодно это делает повторную проекцию бесплатной — лок
+      // отпускается сразу, не дожидаясь файловой записи.
+      const version = events.at(-1)?.id ?? 0;
+      const projected = (this.localRecords<number>('projection')['version'] ?? 0) as number;
+      if (version > projected || !events.length) {
+        this.saveLocal('projection', undefined, 'version', version);
+        write(state, events);
+      }
       this.db.exec('COMMIT');
       this.transaction = false;
     } catch (error) {

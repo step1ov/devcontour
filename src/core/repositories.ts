@@ -35,12 +35,13 @@ export function roleBinding(
  * Объявленные роли контура: workspace плюс то, что добавил компонент.
  * Инструмент не знает заранее, какие роли бывают у продукта.
  */
-export function declaredRoles(config: Config, repositoryId = 'main'): string[] {
+export function declaredRoles(config: Config, repositoryId?: string): string[] {
+  // Компонент по умолчанию — первый настроенный, а не обязательно «main»:
+  // в workspace из product и library вызов без repositoryId иначе падал бы на
+  // несуществующем репозитории, хотя раньше эти пути работали.
+  const owner = repositoryId ?? repositories(config)[0].id;
   return [
-    ...new Set([
-      ...Object.keys(config.roles),
-      ...Object.keys(repository(config, repositoryId).roles ?? {}),
-    ]),
+    ...new Set([...Object.keys(config.roles), ...Object.keys(repository(config, owner).roles ?? {})]),
   ];
 }
 /**

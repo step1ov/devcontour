@@ -451,3 +451,43 @@ test('The scheduler classifies a refusal itself: a runtime that never ran refund
     await f.cleanup();
   }
 });
+
+test('A task runs its own scope of proof, not every gate the profile declares', async () => {
+  const f = await runtimeFixture();
+  try {
+    const repo = repositories(f.config)[0];
+    await git(repo.path, 'update-ref', `refs/heads/${repo.targetBranch}`, await git(repo.path, 'rev-parse', 'HEAD'));
+    // Гейт соседней, ещё не сделанной задачи. Раньше он ложился на любую
+    // задачу компонента: параллельная декомпозиция не могла пройти, пока не
+    // сделаны все соседи, хотя область доказательства у каждой своя.
+    const failing = {
+      id: 'sibling-tests',
+      kind: 'test' as const,
+      command: ['sh', '-c', 'exit 1'],
+      timeoutMs: 60_000,
+      report: { type: 'junit' as const, path: '.reports/junit.xml' },
+      artifacts: [],
+    };
+    f.h.config.gates = [...f.h.config.gates, failing];
+    f.h.config.repositories = [];
+
+    const board = f.h.createBoard('Доска с областями');
+    const own = f.h.config.gates.filter((g) => g.id !== failing.id).map((g) => g.id);
+    const scoped = f.h.addTask(board.id, { ...input('Задача со своей областью'), gates: own });
+    f.h.approve(board.id);
+    f.h.pause(false);
+    const scheduler = new Scheduler(f.h, f.root);
+    await scheduler.drain();
+
+    const done = f.store.read().tasks.find((t) => t.id === scoped.id)!;
+    assert.equal(done.status, 'done', done.failure);
+    const run = f.store.read().runs.find((r) => r.taskId === scoped.id)!;
+    assert.ok(
+      !run.evidence.some((e) => e.gate === failing.id),
+      'чужой gate не должен выполняться в прогоне задачи',
+    );
+    await scheduler.stop();
+  } finally {
+    await f.cleanup();
+  }
+});

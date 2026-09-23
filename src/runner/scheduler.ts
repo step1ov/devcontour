@@ -17,12 +17,21 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile, readFile, realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { DevContour, digest } from '../core/service.ts';
-import { BlockedError, type Run, type Task, type Evidence } from '../core/model.ts';
+import { BlockedError, type Run, type Task, type Evidence, type Gate } from '../core/model.ts';
 import { adapters, implementationResult, reviewResult, type AgentAdapter } from './adapters.ts';
 import { git } from './process.ts';
 import { repositories, repository, roleBinding } from '../core/repositories.ts';
 import { reserveRepositories } from './ownership.ts';
 import { runGate } from './gates.ts';
+
+// Гейты прогона — область доказательства задачи, если она объявлена. Полный
+// набор профиля остаётся обязательным для приёмки доски и релиза, но требовать
+// его от каждой задачи значит, что задача не может пройти, пока не сделаны все
+// соседние: у параллельной декомпозиции красный gate соседа ложится на того,
+// кто к нему не притрагивался. Зависимости по dependsOn покрывают порядок;
+// доказывает задача своё.
+const runGates = (repo: { gates: Gate[] }, task: Task) =>
+  orderedGates(task.gates?.length ? repo.gates.filter((g) => task.gates!.includes(g.id)) : repo.gates);
 export class Scheduler {
   readonly owner = randomUUID();
   private jobs = new Map<string, { promise: Promise<void>; controller: AbortController }>();
@@ -514,7 +523,7 @@ export class Scheduler {
               this.h.discoveries(run.id, run.token, sha, implementation.discoveries);
               run.candidateSha = sha;
               this.h.phase(run.id, run.token, 'verifying', { candidateSha: sha });
-              for (const gate of orderedGates(repo.gates))
+              for (const gate of runGates(repo, task))
                 await runGate(
                   this.h,
                   run,
@@ -616,7 +625,7 @@ export class Scheduler {
           execution,
           signal,
         );
-        for (const gate of orderedGates(repo.gates))
+        for (const gate of runGates(repo, task))
           await runGate(
             this.h,
             run,

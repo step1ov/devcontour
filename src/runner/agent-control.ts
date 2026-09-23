@@ -101,7 +101,7 @@ async function review(
   await writeFile(join(artifact, 'prompt.txt'), prompt);
   // Ревью читает архитектуру, но роль architect не обязана существовать:
   // конфигурация вправе объявить только свои. Берётся объявленная.
-  const declared = declaredRoles(h.config, repositoryId);
+  const declared = declaredRoles(h.config, repositoryId ?? defaultOwner(h));
   const reviewRole = declared.includes('architect') ? 'architect' : declared[0];
   const toolProfile = toolProfileFor(h.config, reviewer, reviewRole, true);
   const result = await measuredExecute(
@@ -154,6 +154,12 @@ async function review(
   };
 }
 
+// Компонент по умолчанию — «main», если он есть, иначе первый настроенный:
+// workspace вправе называть репозитории product и library, и вызов без
+// repositoryId там не должен падать на несуществующем имени.
+const defaultOwner = (h: DevContour) =>
+  repositories(h.config).some((r) => r.id === 'main') ? 'main' : repositories(h.config)[0].id;
+
 // Контракт читается из дерева в момент ревью: ревьюер и реестр видят то же
 // самое, что лежит в репозитории, а не то, что автор скопировал когда-то.
 async function contractContent(
@@ -164,10 +170,7 @@ async function contractContent(
   // Компонент может называться не main: в workspace из product и library
   // предложение без repositoryId иначе искало бы несуществующий репозиторий,
   // хотя inline-вариант там работал.
-  const owner =
-    proposal.repositoryId ??
-    (repositories(h.config).some((r) => r.id === 'main') ? 'main' : repositories(h.config)[0].id);
-  const base = await realpath(repository(h.config, owner).path);
+  const base = await realpath(repository(h.config, proposal.repositoryId ?? defaultOwner(h)).path);
   const file = resolve(base, proposal.file);
   let resolved: string;
   try {

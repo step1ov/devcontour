@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { profile } from '../src/runner/packs.ts';
 import { config, fixture, input } from './helpers.ts';
 import { declaredRoles, requiresContract } from '../src/core/repositories.ts';
-import { loadConfig } from '../src/runner/config.ts';
+import { loadConfig, readComponentConfig } from '../src/runner/config.ts';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -99,5 +99,33 @@ test('A workspace declares its own roles, and a task cannot name one that is not
     assert.throws(() => f.h.approve(b.id), /контракт/);
   } finally {
     f.cleanup();
+  }
+});
+
+test('A component keeps the roles its own profile brought, across a config reload', () => {
+  // Роли профиля принадлежат компоненту, чей это профиль. Перезагрузка
+  // component config заменяла объект ролей целиком, и mobile с qa-mobile
+  // исчезали у того самого компонента, который их объявил.
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-component-'));
+  try {
+    writeFileSync(
+      join(root, 'devcontour.component.json'),
+      JSON.stringify({ roles: { backend: { runtime: 'codex', reviewer: { runtime: 'claude' } } } }),
+    );
+    const entry = readComponentConfig({
+      id: 'mobile-app',
+      name: 'Mobile',
+      kind: 'product',
+      path: root,
+      configFile: 'devcontour.component.json',
+      roles: {
+        mobile: { runtime: 'claude', title: 'Мобильный разработчик' },
+        backend: { runtime: 'claude' },
+      },
+    } as never) as { roles: Record<string, { runtime: string; title?: string }> };
+    assert.equal(entry.roles.mobile.title, 'Мобильный разработчик', 'роль профиля сохранена');
+    assert.equal(entry.roles.backend.runtime, 'codex', 'компонент уточняет свою роль');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

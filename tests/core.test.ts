@@ -62,31 +62,40 @@ test('Concurrent store clients cannot claim one task twice', () => {
     f.cleanup();
   }
 });
-test('A projection serialises, so a stale snapshot cannot overwrite a newer journal', () => {
+test('A stale snapshot does not overwrite a newer journal', () => {
   const f = fixture();
   const second = new Store(join(f.root, 'state.sqlite'));
   try {
-    f.h.createBoard('Board');
-    // Журнал пишут оба процесса в одни и те же файлы. Если проекции идут
-    // одновременно, младший снимок ложится поверх старшего и запись, уже
-    // попавшая в журнал, из него исчезает — а журнал обещан append-only.
-    let concurrent = true;
-    f.store.project(() => {
-      try {
-        second.project(() => undefined);
-      } catch {
-        concurrent = false;
-      }
-      // Соседний процесс не должен успеть спроецировать более новое состояние
-      // раньше, чем эта проекция закончит писать свои файлы.
-      assert.equal(concurrent, false, 'проекции обязаны идти по очереди');
-    });
-    assert.equal(f.store.read().boards.length, 1);
+    f.h.createBoard('Первая');
+    const written: string[][] = [];
+    const record = (store: Store) =>
+      store.project((state) => written.push(state.boards.map((b) => b.title)));
+
+    // Свежий снимок пишет журнал.
+    record(f.store);
+    new DevContour(second, f.h.config).createBoard('Вторая');
+    record(second);
+    assert.deepEqual(written, [['Первая'], ['Первая', 'Вторая']]);
+
+    // Процесс, читавший состояние раньше, не должен положить свой снимок
+    // поверх: запись «Вторая» уже в журнале, а журнал обещан append-only.
+    record(f.store);
+    assert.deepEqual(
+      written,
+      [['Первая'], ['Первая', 'Вторая']],
+      'устаревшая проекция не пишет ничего',
+    );
+
+    // Новое событие снова открывает запись.
+    f.h.createBoard('Третья');
+    record(f.store);
+    assert.deepEqual(written.at(-1), ['Первая', 'Вторая', 'Третья']);
   } finally {
     second.close();
     f.cleanup();
   }
 });
+
 test('Expired attempts are fenced, retries get fresh run IDs and tokens', () => {
   const f = fixture();
   try {
