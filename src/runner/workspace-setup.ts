@@ -143,6 +143,7 @@ export async function setupWorkspace(file: string, data?: string) {
             gates: config.gates,
             repositories: repos,
             workspaceGates: config.workspaceGates,
+            contextPacks: config.contextPacks,
           },
           null,
           2,
@@ -168,7 +169,13 @@ export async function setupWorkspace(file: string, data?: string) {
       JSON.stringify(existing.workspaceGates) !== JSON.stringify(config.workspaceGates) ||
       JSON.stringify(existing.gates) !== JSON.stringify(config.gates) ||
       JSON.stringify(existing.repositories.map((r) => r.gates)) !==
-        JSON.stringify(repos.map((r) => r.gates));
+        JSON.stringify(repos.map((r) => r.gates)) ||
+      JSON.stringify(
+        existing.contextPacks.map(({ id, version, files }) => ({ id, version, files })),
+      ) !==
+        JSON.stringify(
+          config.contextPacks.map(({ id, version, files }) => ({ id, version, files })),
+        );
     if (gatesChanged) {
       await writeFile(
         configPath,
@@ -178,6 +185,7 @@ export async function setupWorkspace(file: string, data?: string) {
             workspaceGates: config.workspaceGates,
             gates: config.gates,
             repositories: repos,
+            contextPacks: config.contextPacks,
           },
           null,
           2,
