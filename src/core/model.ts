@@ -236,6 +236,8 @@ export interface Run {
   candidateSha?: string;
   integrationSha?: string;
   error?: string;
+  /** Отказ окружения: исполнителю не дали работать, попытка не засчитана. */
+  blocked?: boolean;
   evidence: Evidence[];
   context?: {
     id: string;
@@ -508,6 +510,15 @@ export class DomainError extends Error {
     super(message);
   }
 }
+/**
+ * Отказ окружения, а не задачи: исполнителю не дали работать. Незалогиненный
+ * runtime, незакреплённый пакет контекста, недоступный ресурс — задача при этом
+ * ни разу не была попробована, и попытка ей не засчитывается. Иначе бюджет
+ * попыток сгорает на неполадках контура, и задача блокируется, ни разу не
+ * дойдя до исполнителя.
+ */
+export class BlockedError extends Error {}
+
 export function requireValue<T>(value: T | undefined, message: string): T {
   if (value === undefined) throw new DomainError(message, 404);
   return value;

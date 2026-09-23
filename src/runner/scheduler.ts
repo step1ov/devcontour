@@ -17,7 +17,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile, readFile, realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { DevContour, digest } from '../core/service.ts';
-import { type Run, type Task, type Evidence } from '../core/model.ts';
+import { BlockedError, type Run, type Task, type Evidence } from '../core/model.ts';
 import { adapters, implementationResult, reviewResult, type AgentAdapter } from './adapters.ts';
 import { git } from './process.ts';
 import { repositories, repository, roleBinding } from '../core/repositories.ts';
@@ -560,7 +560,7 @@ export class Scheduler {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       try {
-        this.h.fail(run.id, run.token, message);
+        this.h.fail(run.id, run.token, message, error instanceof BlockedError);
       } catch {
         /* A cancelled or fenced run cannot publish a late failure. */
       }

@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { type Config, type ContextPack, type Task, type Run } from '../core/model.ts';
+import { BlockedError, type Config, type ContextPack, type Task, type Run } from '../core/model.ts';
 import { digest } from '../core/service.ts';
 import { repository } from '../core/repositories.ts';
 import { git } from './process.ts';
@@ -58,7 +58,7 @@ export async function taskContext(config: Config, task: Task) {
     sections: string[] = [];
   for (const pack of selected) {
     if (!pack.revision || !pack.digest)
-      throw new Error(
+      throw new BlockedError(
         `Context pack ${pack.id} не закреплён; выполните context-lock после bootstrap-коммита`,
       );
     const documents = await contents(config, pack, pack.revision);

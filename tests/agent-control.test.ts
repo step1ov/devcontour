@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, writeFile, mkdir, symlink } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fixture, input } from './helpers.ts';
 import { reviewContract, reviewPlan, acceptBoard } from '../src/runner/agent-control.ts';
@@ -66,12 +67,21 @@ test('Agent contracts require another runtime, retain review proof and deduplica
   }
 });
 
+// Фикстура ставит репозиторий в /tmp; тесты, пишущие файлы, берут свой каталог,
+// иначе они пачкают общий и зависят друг от друга.
+async function repositoryFixture(f: { h: { config: { repository: string; mode: string } } }) {
+  const path = await mkdtemp(join(tmpdir(), 'devcontour-contract-'));
+  f.h.config.repository = path;
+  f.h.config.mode = 'local';
+  return { path, remove: () => rm(path, { recursive: true, force: true }) };
+}
+
 test('A contract proposal reads the document from the repository, not a copy of it', async () => {
   const f = fixture();
+  const repo = await repositoryFixture(f);
   try {
-    f.h.config.mode = 'local';
     const relative = 'docs/contracts/catalog.md';
-    const file = join(f.h.config.repository, relative);
+    const file = join(repo.path, relative);
     await mkdir(dirname(file), { recursive: true });
     await writeFile(file, '# Catalog\n\nGET /products returns a documented list.\n');
     const proposal = { title: 'Catalog API v1', file: relative };
@@ -91,18 +101,19 @@ test('A contract proposal reads the document from the repository, not a copy of 
     assert.equal(f.store.read().contracts.length, 2);
     assert.match(f.store.read().contracts[1].content, /errors/);
   } finally {
+    await repo.remove();
     f.cleanup();
   }
 });
 
 test('A contract file outside the repository is refused', async () => {
   const f = fixture();
+  const repo = await repositoryFixture(f);
   try {
-    f.h.config.mode = 'local';
     // Побег через символическую ссылку: путь относительный и без «..», но
     // ведёт наружу. Проверяется разрешённый путь, а не написанный.
-    await mkdir(join(f.h.config.repository, 'docs'), { recursive: true });
-    await symlink('/etc/hosts', join(f.h.config.repository, 'docs/escape.md'));
+    await mkdir(join(repo.path, 'docs'), { recursive: true });
+    await symlink('/etc/hosts', join(repo.path, 'docs/escape.md'));
     await assert.rejects(
       reviewContract(
         f.h,
@@ -124,6 +135,7 @@ test('A contract file outside the repository is refused', async () => {
     );
     assert.equal(f.store.read().contracts.length, 0);
   } finally {
+    await repo.remove();
     f.cleanup();
   }
 });

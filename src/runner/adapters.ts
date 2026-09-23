@@ -14,7 +14,7 @@ import type { Redactor } from './redaction.ts';
 import type { RuntimeDiagnostics } from '../core/runtime-diagnostics.ts';
 import { planResult, planSchema } from '../core/plan.ts';
 import { command } from './process.ts';
-import { discoveryInput, type RuntimeName, type Task } from '../core/model.ts';
+import { BlockedError, discoveryInput, type RuntimeName, type Task } from '../core/model.ts';
 export const implementationResult = z.object({
   completed: z.boolean(),
   summary: z.string(),
@@ -273,8 +273,10 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
         version,
       );
       const log = result.stdout + '\n' + result.stderr;
+      // Runtime не выдал результата: задача не была ни выполнена, ни провалена —
+      // ей просто не дали работать. Это отказ окружения, и попытку он не тратит.
       if (result.code !== 0 || result.timedOut || r.signal.aborted)
-        throw new Error(
+        throw new BlockedError(
           `${name}: runtime завершился с кодом ${result.code}${result.timedOut ? ' (timeout)' : ''}` +
             // Причина отказа приходит от самого runtime — «Not logged in», исчерпанный
             // лимит, недоступная модель. Без неё сообщение говорит только «код 1», и

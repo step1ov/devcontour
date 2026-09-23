@@ -366,3 +366,30 @@ test('Mixed runtimes route every role to its independent reviewer and retain con
     f.cleanup();
   }
 });
+
+test('An environment refusal does not spend the task attempt budget', () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const t = f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    f.h.pause(false);
+
+    // Отказ окружения: исполнителю не дали работать. Бюджет попыток задачи на
+    // неполадках контура сгорать не должен — иначе задача блокируется, ни разу
+    // не дойдя до исполнителя.
+    const blocked = f.h.claim('one')!;
+    f.h.fail(blocked.id, blocked.token, 'runtime: Not logged in', true);
+    assert.equal(f.store.read().tasks[0].attempt, 0);
+    assert.equal(f.store.read().runs[0].blocked, true);
+    f.h.retry(t.id);
+
+    // Настоящая попытка расходуется: исполнитель работал и не справился.
+    const real = f.h.claim('one')!;
+    f.h.fail(real.id, real.token, 'Исполнитель сообщил о незавершённой работе');
+    assert.equal(f.store.read().tasks[0].attempt, 1);
+    assert.equal(f.store.read().runs[1].blocked, undefined);
+  } finally {
+    f.cleanup();
+  }
+});

@@ -605,15 +605,20 @@ export class DevContour {
       return { taskId: t.id, runId: id, sha };
     });
   }
-  fail(id: string, token: string, error: string) {
+  fail(id: string, token: string, error: string, blocked = false) {
     return this.withRun(id, token, 'run.failed', (r, t) => {
       r.status = 'failed';
       r.error = error;
+      r.blocked = blocked || undefined;
       r.finishedAt = now();
       t.status = 'failed';
       t.failure = error;
       t.activeRunId = undefined;
-      return { taskId: t.id, runId: id, error };
+      // Отказ окружения задачу не пробовал: попытка возвращается, иначе бюджет
+      // сгорает на неполадках контура и задача блокируется, ни разу не дойдя
+      // до исполнителя.
+      if (blocked && t.attempt > 0) t.attempt--;
+      return { taskId: t.id, runId: id, error, blocked };
     });
   }
   discoveries(id: string, token: string, sha: string, input: unknown) {
