@@ -501,3 +501,49 @@ test('A task runs its own scope of proof, not every gate the profile declares', 
     await f.cleanup();
   }
 });
+
+test('A refusal that will repeat on every task stops the queue instead of burning budgets', async () => {
+  const f = await runtimeFixture();
+  const refusing = (message: string) => ({
+    ...adapters,
+    demo: {
+      ...adapters.demo,
+      name: 'demo' as const,
+      execute: () => Promise.reject(new Error(message)),
+    },
+  });
+  try {
+    const repo = repositories(f.config)[0];
+    await git(repo.path, 'update-ref', `refs/heads/${repo.targetBranch}`, await git(repo.path, 'rev-parse', 'HEAD'));
+    const board = f.h.createBoard('Доска');
+    const first = f.h.addTask(board.id, input('Первая задача'));
+    const second = f.h.addTask(board.id, input('Вторая задача'));
+    f.h.approve(board.id);
+    f.h.pause(false);
+
+    // Кончились кредиты: причина вне контура и одна для всех задач. Очередь,
+    // которая продолжит перебор, сожжёт бюджет попыток каждой из них.
+    const scheduler = new Scheduler(
+      f.h,
+      f.root,
+      refusing('demo: runtime завершился с кодом 1: Credit balance is too low'),
+    );
+    await scheduler.drain();
+    const state = f.store.read();
+    assert.equal(state.paused, true, 'выдача остановлена');
+    assert.equal(
+      state.runs.filter((r) => r.taskId === second.id).length,
+      0,
+      'вторая задача не выдавалась',
+    );
+    assert.equal(state.tasks.find((t) => t.id === first.id)!.attempt, 1);
+    assert.equal(state.tasks.find((t) => t.id === second.id)!.attempt, 0);
+    assert.match(
+      (f.store.events().find((e) => e.type === 'scheduler.error')?.data as { error: string }).error,
+      /Credit balance/,
+    );
+    await scheduler.stop();
+  } finally {
+    await f.cleanup();
+  }
+});

@@ -32,6 +32,14 @@ import { runGate } from './gates.ts';
 // доказывает задача своё.
 const runGates = (repo: { gates: Gate[] }, task: Task) =>
   orderedGates(task.gates?.length ? repo.gates.filter((g) => task.gates!.includes(g.id)) : repo.gates);
+
+// Отказ провайдера, а не задачи: он повторится на любой следующей выдаче.
+// Список узкий намеренно — временные ошибки сети и лимиты частоты сюда не
+// входят: остановить очередь из-за них значило бы звать человека без нужды.
+const providerRefusal = (message: string) =>
+  /credit balance|not logged in|please run \/login|invalid api key|authentication_error|insufficient_quota/i.test(
+    message,
+  );
 export class Scheduler {
   readonly owner = randomUUID();
   private jobs = new Map<string, { promise: Promise<void>; controller: AbortController }>();
@@ -579,6 +587,15 @@ export class Scheduler {
           message,
           error instanceof BlockedError && !run.candidateSha,
         );
+        // Отказ, который повторится на любой задаче — кончились кредиты,
+        // runtime не авторизован, — останавливает выдачу. Иначе очередь
+        // перебирает задачи одну за другой и сжигает бюджет попыток каждой,
+        // хотя причина у всех одна и находится вне контура.
+        if (error instanceof BlockedError || providerRefusal(message))
+          this.h.store.change('scheduler.error', (s) => {
+            s.paused = true;
+            return { error: `Выдача остановлена: ${message}` };
+          });
       } catch {
         /* A cancelled or fenced run cannot publish a late failure. */
       }
