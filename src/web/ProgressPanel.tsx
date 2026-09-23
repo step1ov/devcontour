@@ -3,6 +3,7 @@ import {
   Bot,
   CheckCircle2,
   CircleDashed,
+  FileSignature,
   FlaskConical,
   Loader2,
   Settings2,
@@ -11,6 +12,7 @@ import {
 } from 'lucide-react';
 import type {
   AuditEvent,
+  ContractAttempt,
   DevContourState,
   Gate,
   Run,
@@ -56,6 +58,13 @@ const statusTone: Record<TaskStatus, 'secondary' | 'warning' | 'success' | 'dest
 };
 const active: TaskStatus[] = ['running', 'verifying', 'reviewing', 'integrating'];
 
+function ago(at: string) {
+  const seconds = Math.max(0, Math.round((Date.now() - new Date(at).getTime()) / 1000));
+  if (seconds < 60) return seconds + ' с назад';
+  if (seconds < 3600) return Math.round(seconds / 60) + ' мин назад';
+  if (seconds < 86400) return Math.round(seconds / 3600) + ' ч назад';
+  return new Date(at).toLocaleDateString('ru-RU');
+}
 function elapsed(from: string) {
   const seconds = Math.max(0, Math.round((Date.now() - new Date(from).getTime()) / 1000));
   if (seconds < 60) return seconds + ' с';
@@ -230,6 +239,78 @@ function Setup({
   );
 }
 
+// Ревью контракта — работа с попытками, и каждая стоила вызова модели.
+// Показываем их целиком: отклонение с находками полезнее, чем тишина.
+function Contracts({
+  contracts,
+  attempts,
+}: {
+  contracts: { id: string; title: string; approvedAt: string }[];
+  attempts: ContractAttempt[];
+}) {
+  const recent = [...attempts].reverse();
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center gap-2">
+          <FileSignature className="text-primary size-4" aria-hidden="true" />
+          Контракты ({contracts.length} принято, попыток {attempts.length})
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="grid gap-4">
+        {contracts.length > 0 && (
+          <ul className="grid gap-1 text-sm">
+            {contracts.map((c) => (
+              <li key={c.id} className="flex flex-wrap items-center gap-2">
+                <CheckCircle2 className="text-primary size-4 shrink-0" aria-hidden="true" />
+                <span className="min-w-0 flex-1">{c.title}</span>
+                <span className="text-muted-foreground text-xs">{ago(c.approvedAt)}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+        {recent.length ? (
+          <ol className="grid gap-3">
+            {recent.map((a, i) => (
+              <li key={a.id} className="border-b pb-3 last:border-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant={a.approved ? 'success' : 'destructive'}>
+                    Попытка {attempts.length - i}
+                  </Badge>
+                  <strong className="min-w-0 flex-1">{a.title}</strong>
+                  <code className="text-muted-foreground font-mono text-xs">
+                    {a.authorRuntime} → {a.reviewerRuntime}
+                  </code>
+                  <span className="text-muted-foreground text-xs">{ago(a.at)}</span>
+                </div>
+                <p className="text-muted-foreground mt-1 max-w-[80ch] text-sm">{a.summary}</p>
+                {a.findings.length > 0 && (
+                  <ul className="mt-2 grid gap-1">
+                    {a.findings.map((f, at) => (
+                      <li key={at} className="flex gap-2 text-sm">
+                        <Badge
+                          variant={f.severity === 'blocking' ? 'destructive' : 'secondary'}
+                          className="shrink-0"
+                        >
+                          {f.severity === 'blocking' ? 'блокер' : f.severity}
+                        </Badge>
+                        <span className="max-w-[80ch]">{f.message}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <p className="text-muted-foreground">
+            Ревью контрактов ещё не запускалось. Здесь будет видно каждую попытку и её находки.
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 function Journal({ events }: { events: AuditEvent[] }) {
   const recent = [...events].sort((a, b) => b.id - a.id).slice(0, 40);
   return (
@@ -267,6 +348,7 @@ export function ProgressPanel({
 }: {
   state: Pick<DevContourState, 'tasks' | 'runs' | 'contracts'> & {
     events?: AuditEvent[];
+    contractAttempts?: ContractAttempt[];
     config: {
       repositories?: { id: string; name?: string; kind?: string }[];
       gates?: Gate[];
@@ -529,6 +611,8 @@ export function ProgressPanel({
           )}
         </CardContent>
       </Card>
+
+      <Contracts contracts={state.contracts} attempts={state.contractAttempts ?? []} />
 
       <Journal events={state.events ?? []} />
     </div>

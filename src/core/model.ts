@@ -234,6 +234,21 @@ export interface Run {
   resources?: Resource[];
   dependencies?: DependencySnapshot[];
 }
+// Ревью контракта — работа с попытками: отклонение оставляет находки, которые
+// стоили вызова модели. Без записи в состоянии они живут только файлами на
+// диске, и панель показывает пустоту там, где шёл процесс.
+export interface ContractAttempt {
+  id: string;
+  at: string;
+  title: string;
+  repositoryId?: string;
+  approved: boolean;
+  summary: string;
+  findings: { severity: string; message: string }[];
+  artifact: string;
+  authorRuntime: string;
+  reviewerRuntime: string;
+}
 export interface DevContourState {
   preparation?: PreparationState;
   team?: { member: string };
@@ -241,6 +256,7 @@ export interface DevContourState {
   boards: Board[];
   tasks: Task[];
   contracts: Contract[];
+  contractAttempts?: ContractAttempt[];
   runs: Run[];
   changeSets: ChangeSet[];
   leader?: { owner: string; leaseUntil: number };

@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { DevContour, digest, specDigest } from '../core/service.ts';
-import { type Approval, type Task, DomainError } from '../core/model.ts';
+import { type Approval, type ContractAttempt, type Task, DomainError } from '../core/model.ts';
 import { adapters, reviewResult, type AgentAdapter } from './adapters.ts';
 import { repositories, repository } from '../core/repositories.ts';
 import { git } from './process.ts';
@@ -19,6 +19,14 @@ export const contractProposal = z.object({
 });
 type Author = 'codex' | 'claude';
 type Runtimes = Record<Author, AgentAdapter>;
+
+// Попытки накапливаются: держим последние, чтобы состояние не росло без предела.
+const MAX_CONTRACT_ATTEMPTS = 60;
+function recordContractAttempt(h: DevContour, attempt: ContractAttempt) {
+  h.store.change('contract.review', (s) => {
+    s.contractAttempts = [...(s.contractAttempts ?? []), attempt].slice(-MAX_CONTRACT_ATTEMPTS);
+  });
+}
 
 async function review(
   h: DevContour,
@@ -78,7 +86,21 @@ async function review(
       '\n',
   );
   await writeFile(join(artifact, 'runtime.log'), result.log);
-  if (!parsed.approved || parsed.findings.some((f) => f.severity === 'blocking'))
+  const rejected = !parsed.approved || parsed.findings.some((f) => f.severity === 'blocking');
+  if (subject !== 'task plan')
+    recordContractAttempt(h, {
+      id: artifact.split('/').at(-1) ?? artifact,
+      at: new Date().toISOString(),
+      title: (proposal as { title?: string }).title ?? subject,
+      repositoryId,
+      approved: !rejected,
+      summary: parsed.summary,
+      findings: parsed.findings.map((f) => ({ severity: f.severity, message: f.message })),
+      artifact,
+      authorRuntime: author,
+      reviewerRuntime: reviewer,
+    });
+  if (rejected)
     throw new DomainError(`Независимое ревью отклонено: ${parsed.summary}. Артефакты: ${artifact}`);
   return {
     actor: 'agent',

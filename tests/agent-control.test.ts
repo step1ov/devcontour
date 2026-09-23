@@ -117,6 +117,14 @@ test('Blocking findings reject even approved=true and do not enable execution', 
       /отклонено/,
     );
     assert.equal(f.store.read().contracts.length, 0);
+    // Отклонённая попытка стоила вызова модели и остаётся в состоянии с
+    // находками: иначе процесс виден только файлами на диске.
+    const attempts = f.store.read().contractAttempts ?? [];
+    assert.equal(attempts.length, 1);
+    assert.equal(attempts[0].approved, false);
+    assert.equal(attempts[0].title, 'API');
+    assert.ok(attempts[0].findings.some((finding) => finding.severity === 'blocking'));
+    assert.ok(attempts[0].artifact.length > 0);
   } finally {
     f.cleanup();
   }
