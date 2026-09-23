@@ -245,6 +245,23 @@ test('Independent component profiles with the same ID retain owner-local policie
       environment: { values: { PROJECT_MARKER: 'new' } },
     });
     assert.throws(() => loadConfig(result.config), /Профиль изменился/);
+    // Правка без смены версии остаётся отказом: пин защищает от тихой подмены.
+    await assert.rejects(setupWorkspace(registry), /Профиль изменился/);
+    // Поднятая версия составного профиля — заявление «изменилось намеренно»,
+    // и только она разрешает переписать lock. Правка вложенного профиля версию
+    // составного не меняет, поэтому сама по себе установку не разрешает: автор
+    // обязан объявить изменение там, где профиль установлен.
+    await json(join(library, 'profiles/main.json'), {
+      id: 'custom-api',
+      version: '1.1.0',
+      extends: ['./stack.json', './tests.json', './env.json'],
+    });
+    assert.equal((await setupWorkspace(registry)).status, 'profile-updated');
+    assert.equal(
+      loadConfig(result.config).repositories.find((r) => r.id === 'library')!.environment!.values
+        .PROJECT_MARKER,
+      'new',
+    );
   } finally {
     await f.close();
   }

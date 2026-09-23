@@ -114,9 +114,43 @@ export async function setupWorkspace(file: string, data?: string) {
     packs: packs.map(profileMetadata),
   });
   const configPath = join(root, 'config.json');
+  const lock = { version: 1, packs: packs.flatMap((p) => profileLock(p).packs) };
   try {
     await readFile(configPath);
-    const existing = loadConfig(configPath);
+    let existing;
+    try {
+      existing = loadConfig(configPath);
+    } catch (error) {
+      // Профиль пинится digest, и изменить его после установки было нечем.
+      // Поднятая автором версия — явное заявление «изменилось намеренно»:
+      // только она разрешает переписать lock. Правка без смены версии
+      // по-прежнему отклоняется, иначе пин ничего не защищает.
+      const raw = JSON.parse(await readFile(configPath, 'utf8')) as {
+        packs?: { id: string; version: string }[];
+      };
+      const sameProfiles =
+        raw.packs?.length === config.packs.length &&
+        raw.packs.every((p, i) => p.id === config.packs[i].id);
+      const versionBumped = raw.packs?.some((p, i) => p.version !== config.packs[i].version);
+      if (!/Профиль изменился/.test(String(error)) || !sameProfiles || !versionBumped) throw error;
+      await writeFile(join(root, 'packs.lock.json'), JSON.stringify(lock, null, 2) + '\n');
+      await writeFile(
+        configPath,
+        JSON.stringify(
+          {
+            ...raw,
+            packs: config.packs,
+            gates: config.gates,
+            repositories: repos,
+            workspaceGates: config.workspaceGates,
+          },
+          null,
+          2,
+        ),
+      );
+      await reserveRepositories(loadConfig(configPath), root);
+      return { status: 'profile-updated', data: root, config: configPath };
+    }
     if (
       existing.workspaceRoot !== workspaceRoot ||
       JSON.stringify(existing.packs) !== JSON.stringify(config.packs) ||
@@ -125,14 +159,29 @@ export async function setupWorkspace(file: string, data?: string) {
     )
       throw new Error('Существующая конфигурация относится к другому workspace или профилю');
     await reserveRepositories(existing, root);
-    // The workspace and its repositories are the same, so joint gates may still
-    // be declared after the fact. A product configured by `setup` starts without
-    // them, and without this there is no route to add one: a release feature
-    // check requires a workspace test gate, which could then never exist.
-    if (JSON.stringify(existing.workspaceGates) !== JSON.stringify(config.workspaceGates)) {
+    // The workspace, its repositories and the pinned profile are the same, so
+    // the checks each component declares may still change afterwards: a joint
+    // release gate did not exist at setup, and a component splits one suite
+    // into a gate per task as work is decomposed. Without this there is no
+    // route to either, and the declared checks stay frozen at first install.
+    const gatesChanged =
+      JSON.stringify(existing.workspaceGates) !== JSON.stringify(config.workspaceGates) ||
+      JSON.stringify(existing.gates) !== JSON.stringify(config.gates) ||
+      JSON.stringify(existing.repositories.map((r) => r.gates)) !==
+        JSON.stringify(repos.map((r) => r.gates));
+    if (gatesChanged) {
       await writeFile(
         configPath,
-        JSON.stringify({ ...existing, workspaceGates: config.workspaceGates }, null, 2),
+        JSON.stringify(
+          {
+            ...existing,
+            workspaceGates: config.workspaceGates,
+            gates: config.gates,
+            repositories: repos,
+          },
+          null,
+          2,
+        ),
       );
       return { status: 'gates-updated', data: root, config: configPath };
     }
@@ -141,7 +190,6 @@ export async function setupWorkspace(file: string, data?: string) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
   await mkdir(root, { recursive: true });
-  const lock = { version: 1, packs: packs.flatMap((p) => profileLock(p).packs) };
   const previewRoot = await mkdtemp(join(root, '.setup-'));
   try {
     const preview = join(previewRoot, 'config.json');
