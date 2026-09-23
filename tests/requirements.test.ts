@@ -7,6 +7,7 @@ import { setupDemo } from '../src/demo.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour, specDigest } from '../src/core/service.ts';
+import { updateBase } from '../src/runner/base-update.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { git } from '../src/runner/process.ts';
 import { acceptBoard } from '../src/runner/agent-control.ts';
@@ -74,6 +75,9 @@ test('Requirements survive real Git execution; changed spec loses current covera
     );
     h.approve(board.id);
     await scheduler.init();
+    // Требование только что закоммичено в рабочую ветку: база прогонов должна
+    // его содержать, иначе исполнитель ищет источник в дереве без него.
+    await updateBase(config, root);
     h.pause(false);
     await scheduler.drain();
     const done = store.read().tasks.find((t) => t.id === task.id)!;
@@ -109,10 +113,19 @@ test('Requirements survive real Git execution; changed spec loses current covera
     assert.equal(replacement.status, 'draft');
     assert.notEqual(replacement.requirements![0].digest, requirement.digest);
     assert.notEqual(specDigest(replacement), done.approvedDigest);
-    // A writer that fails to implement the new specification cannot get source evidence.
+    // Задача цитирует новую редакцию спецификации, а база прогонов её ещё не
+    // содержит: выдать работу на таком дереве значит искать источник там, где
+    // его нет. Раньше это давало непонятный провал задачи — теперь отказ назван.
     h.approve(board.id);
+    await assert.rejects(scheduler.drain(), /base-update/);
+    assert.equal(store.read().tasks.find((t) => t.id === replacement.id)!.status, 'ready');
+
+    // С перенесённой базой источник на месте, и доказательство снова собирается.
+    await updateBase(config, root);
     await scheduler.drain();
-    assert.equal(store.read().tasks.find((t) => t.id === replacement.id)!.status, 'failed');
+    const redone = store.read().tasks.find((t) => t.id === replacement.id)!;
+    assert.equal(redone.status, 'done', redone.failure);
+    assert.equal(requirementReport(h, 'main').tasks[0].requirements[0].verified, true);
   } finally {
     await scheduler.stop();
     store.close();

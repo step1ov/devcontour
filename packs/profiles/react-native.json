@@ -1,7 +1,34 @@
 {
   "id": "react-native",
-  "version": "0.1.0",
-  "extends": ["node-checks", "mobile-maestro"],
-  "capabilities": ["react-native"],
-  "protectedPaths": ["app.json", "babel.config.js", "metro.config.js"]
+  "version": "0.2.0",
+  "extends": [
+    "node-checks",
+    "mobile-maestro"
+  ],
+  "capabilities": [
+    "react-native"
+  ],
+  "protectedPaths": [
+    "app.json",
+    "babel.config.js",
+    "metro.config.js"
+  ],
+  "roles": {
+    "mobile": {
+      "runtime": "claude",
+      "title": "Мобильный разработчик",
+      "requiresContract": true,
+      "reviewer": {
+        "runtime": "codex"
+      }
+    },
+    "qa-mobile": {
+      "runtime": "codex",
+      "title": "Тестировщик приложения",
+      "toolProfile": "mobile",
+      "reviewer": {
+        "runtime": "claude"
+      }
+    }
+  }
 }

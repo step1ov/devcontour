@@ -2,7 +2,13 @@ import { developmentBinding, assertTaskPreparation } from './preparation.ts';
 import { validateTaskContext, validateWorkflow } from './workflow.ts';
 import { entityId } from './ids.ts';
 import { createHash, randomUUID } from 'node:crypto';
-import { repository, repositories, roleBinding, reviewerBinding } from './repositories.ts';
+import {
+  repository,
+  repositories,
+  roleBinding,
+  reviewerBinding,
+  requiresContract,
+} from './repositories.ts';
 import { Store } from './store.ts';
 import { planResult } from './plan.ts';
 import { assertDag, descendants, readyTasks, latestTaskId, impactGraph } from './graph.ts';
@@ -288,7 +294,7 @@ export class DevContour {
         if (t.status !== 'draft') continue;
         assertTaskPreparation(s, t);
         validateTaskContext(this.config, t);
-        if (['backend', 'frontend'].includes(t.role) && !t.contracts.length)
+        if (requiresContract(this.config, t.role, t.repositoryId) && !t.contracts.length)
           throw new DomainError(`${t.id}: для ${t.role} сначала привяжите утверждённый контракт`);
         t.contractDigests = Object.fromEntries(
           t.contracts.map((id) => {

@@ -3,6 +3,12 @@ import { lstat, mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/pr
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { configSchema, roles } from '../core/model.ts';
+const builtinTitles: Record<string, string> = {
+  architect: 'Архитектор',
+  backend: 'Разработчик бэкенда',
+  frontend: 'Разработчик интерфейса',
+  qa: 'Тестировщик',
+};
 import { repositories } from '../core/repositories.ts';
 import { loadConfig, scopedConfig } from './config.ts';
 import { profile, profileMetadata, profilePin, packKey } from './packs.ts';
@@ -10,25 +16,28 @@ import { git } from './process.ts';
 
 const templateRoot = fileURLToPath(new URL('../../templates/project/', import.meta.url));
 const devcontourRoot = fileURLToPath(new URL('../../', import.meta.url));
-export function defaultContextPacks(repositoryId = 'main') {
+// Чему учить роль, кроме её собственной инструкции: тестировщика — проверкам,
+// тех, кто делает интерфейс, — дизайну, остальных — контрактам. Правило по виду
+// роли, а не по списку имён: `qa-mobile` и `qa-web` — тоже тестировщики.
+const companionContext = (role: string) =>
+  role.startsWith('qa') ? 'testing' : ['frontend', 'mobile'].includes(role) ? 'design' : 'contracts';
+
+export function defaultContextPacks(repositoryId = 'main', declared: string[] = [...roles]) {
   const prefix = repositoryId === 'main' ? '' : repositoryId + '-';
   return [
     {
       id: prefix + 'workflow',
       version: '1.0.0',
       repositoryId,
-      roles: [...roles],
+      roles: declared,
       files: ['.agents/context/workflow.md', '.agents/context/review.md'],
     },
-    ...roles.map((role) => ({
+    ...declared.map((role) => ({
       id: prefix + role,
       version: '1.0.0',
       repositoryId,
       roles: [role],
-      files: [
-        `.agents/roles/${role}.md`,
-        `.agents/context/${role === 'frontend' ? 'design' : role === 'qa' ? 'testing' : 'contracts'}.md`,
-      ],
+      files: [`.agents/roles/${role}.md`, `.agents/context/${companionContext(role)}.md`],
     })),
     {
       id: prefix + 'library-contracts',
@@ -60,7 +69,21 @@ export function projectConfig(
     repository,
     mode: 'local',
     approvalMode,
-    roles: Object.fromEntries(roles.map((role) => [role, { runtime: 'claude' }])),
+    // Встроенные роли — умолчание нового контура; профиль добавляет те, которых
+    // требует его поверхность, и уточняет их привязку.
+    roles: {
+      ...Object.fromEntries(
+        roles.map((role) => [
+          role,
+          {
+            runtime: 'claude',
+            title: builtinTitles[role],
+            ...(['backend', 'frontend'].includes(role) ? { requiresContract: true } : {}),
+          },
+        ]),
+      ),
+      ...selected.roles,
+    },
     reviewer: { runtime: 'codex' },
     concurrency: selected.concurrency ?? 2,
     gates: selected.gates,
@@ -276,7 +299,12 @@ export async function setupProject(options: {
               workspaceRoot,
             )
           : projectConfig(repository, selected, options.approvalMode)),
-        contextPacks: defaultContextPacks(),
+        // Пакеты строятся по объявленным ролям: роль без своей инструкции
+        // осталась бы с одним общим контекстом и не знала бы своего дела.
+        contextPacks: defaultContextPacks(
+          'main',
+          Object.keys(projectConfig(repository, selected, options.approvalMode).roles),
+        ),
       },
       null,
       2,

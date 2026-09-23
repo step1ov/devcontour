@@ -13,7 +13,15 @@ import {
   type DependencySnapshot,
   type Delivery,
 } from './integrations.ts';
+// Встроенные роли — умолчание для нового контура, а не полный список. Продукт
+// с мобильным приложением, админкой и бэкендом не укладывается в четыре: у
+// мобильной разработки своя область записи и свой инструментарий, а тестировщик
+// веба и тестировщик приложения гоняют разные прогоны. Роли объявляет workspace,
+// инструмент лишь требует, чтобы у объявленной роли были runtime и ревьюер.
 export const roles = ['architect', 'backend', 'frontend', 'qa'] as const;
+export const roleId = z
+  .string()
+  .regex(/^[a-z][a-z0-9-]{1,30}$/, 'Идентификатор роли: строчные латинские буквы, цифры и дефис');
 export const taskStatuses = [
   'draft',
   'ready',
@@ -25,7 +33,7 @@ export const taskStatuses = [
   'failed',
   'cancelled',
 ] as const;
-export type Role = (typeof roles)[number];
+export type Role = string;
 export type TaskStatus = (typeof taskStatuses)[number];
 export type RuntimeName = 'codex' | 'claude' | 'demo';
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
@@ -57,7 +65,7 @@ export const contextPackSchema = z.object({
   id,
   version: z.string().min(1),
   repositoryId: id.default('main'),
-  roles: z.array(z.enum(roles)).default([]),
+  roles: z.array(roleId).default([]),
   files: z.array(relativePath).min(1).max(30),
   revision: z
     .string()
@@ -100,7 +108,7 @@ export const taskInput = z.object({
   relatedRepositories: z.array(id).optional(),
   title: z.string().trim().min(3).max(180),
   description: z.string().trim().min(10).max(12000),
-  role: z.enum(roles),
+  role: roleId,
   dependsOn: z.array(id).max(100).default([]),
   acceptance: z.array(z.string().trim().min(3).max(1500)).min(1).max(30),
   contracts: z.array(id).max(30).default([]),
@@ -321,10 +329,18 @@ export const reviewerBindingSchema = z.object({
 export const roleBindingSchema = reviewerBindingSchema.extend({
   writePaths: z.array(relativePath).min(1).optional(),
   reviewer: reviewerBindingSchema.optional(),
+  /** Как роль называется в панели: «Мобильный разработчик», а не `mobile`. */
+  title: z.string().trim().min(2).max(40).optional(),
+  /**
+   * Роль реализует общую поверхность, поэтому её задача без утверждённого
+   * контракта не принимается. По умолчанию это backend и frontend — те, кто
+   * держал общий API до того, как роли стали объявляемыми.
+   */
+  requiresContract: z.boolean().optional(),
 });
 export const repositorySchema = z.object({
   configFile: relativePath.optional(),
-  roles: z.partialRecord(z.enum(roles), roleBindingSchema).optional(),
+  roles: z.record(roleId, roleBindingSchema).optional(),
   reviewer: reviewerBindingSchema.optional(),
   id,
   dependsOn: z.array(id).optional(),
@@ -455,22 +471,10 @@ export const configSchema = z.object({
   leaseMs: z.number().int().min(5000).default(30000),
   runTimeoutMs: z.number().int().min(1000).default(900000),
   maxAttempts: z.number().int().min(1).max(10).default(3),
-  roles: z.record(
-    z.enum(roles),
-    z.object({
-      runtime: z.enum(['codex', 'claude', 'demo']),
-      writePaths: z.array(relativePath).min(1).optional(),
-      model: z.string().optional(),
-      toolProfile: z.string().optional(),
-      reviewer: z
-        .object({
-          runtime: z.enum(['codex', 'claude', 'demo']),
-          model: z.string().optional(),
-          toolProfile: z.string().optional(),
-        })
-        .optional(),
-    }),
-  ),
+  // Одна форма привязки роли на весь конфиг: два описания одного и того же
+  // расходятся, и роль, объявленная компонентом, начинает уметь не то, что
+  // роль, объявленная workspace.
+  roles: z.record(roleId, roleBindingSchema),
   reviewer: z.object({
     toolProfile: z.string().optional(),
     runtime: z.enum(['codex', 'claude', 'demo']),

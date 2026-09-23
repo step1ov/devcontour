@@ -15,6 +15,7 @@ import {
   requirementSnapshot,
   correctRequirements,
 } from '../src/runner/requirements.ts';
+import { updateBase } from '../src/runner/base-update.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { adapters, type AgentRequest } from '../src/runner/adapters.ts';
 import { acceptBoard } from '../src/runner/agent-control.ts';
@@ -247,6 +248,9 @@ test('Real Git acceptance covers intent; criteria changes invalidate coverage an
     const task = f.h.addTask(board.id, { ...input(), requirements: links(f) });
     f.h.approve(board.id);
     await scheduler.init();
+    // Требование только что закоммичено в рабочую ветку: база прогонов должна
+    // его содержать, иначе исполнитель ищет источник в дереве без него.
+    await updateBase(f.config, f.root);
     f.h.pause(false);
     await scheduler.drain();
     assert.equal(f.store.read().tasks[0].status, 'done', f.store.read().tasks[0].failure);
@@ -266,6 +270,7 @@ test('Real Git acceptance covers intent; criteria changes invalidate coverage an
     const next = f.store.read().tasks.find((t) => t.supersedes === task.id)!;
     assert.equal(next.status, 'draft');
     f.h.approve(board.id);
+    await updateBase(f.config, f.root);
     await scheduler.drain();
     assert.equal(f.store.read().tasks.find((t) => t.id === next.id)!.status, 'done');
     assert.equal(f.report().coverageComplete, true);

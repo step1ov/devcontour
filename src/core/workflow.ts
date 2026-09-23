@@ -8,7 +8,13 @@ import {
   type ComponentImpact,
 } from './model.ts';
 import { createHash } from 'node:crypto';
-import { repositories, repository, roleBinding, reviewerBinding } from './repositories.ts';
+import {
+  repositories,
+  repository,
+  roleBinding,
+  reviewerBinding,
+  declaredRoles,
+} from './repositories.ts';
 
 export function orderedGates<T extends Gate>(gates: T[]): T[] {
   const byId = new Map(gates.map((g) => [g.id, g]));
@@ -69,7 +75,7 @@ export function validateWorkflow(config: Config) {
   }
   for (const repo of repos) {
     if (config.mode !== 'demo')
-      for (const role of ['architect', 'backend', 'frontend', 'qa'] as const) {
+      for (const role of declaredRoles(config, repo.id)) {
         const writer = roleBinding(config, role, repo.id),
           reviewer = reviewerBinding(config, role, repo.id);
         if (writer.runtime === 'demo' || reviewer.runtime === 'demo')
@@ -131,6 +137,13 @@ export function validateResources(config: Config, ids: string[]) {
 }
 export function validateTaskContext(config: Config, task: TaskInput) {
   validateResources(config, task.resources ?? []);
+  // Роль объявляет workspace, и задача может ссылаться только на объявленную:
+  // у неизвестной роли нет ни области записи, ни runtime, ни ревьюера, и
+  // исполнителя для неё просто не существует.
+  if (!declaredRoles(config, task.repositoryId).includes(task.role))
+    throw new DomainError(
+      `Роль ${task.role} не объявлена; доступны: ${declaredRoles(config, task.repositoryId).join(', ')}`,
+    );
   const keys = new Set<string>();
   for (const link of task.requirements ?? []) {
     const key = `${link.source}#${link.id}`;

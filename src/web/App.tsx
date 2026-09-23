@@ -28,8 +28,19 @@ import {
   Workflow,
   ChevronRight,
   Activity,
+  Bot,
+  Eye,
 } from 'lucide-react';
-import type { DevContourState, Task, Config, AuditEvent, Board, Role } from '../core/model.ts';
+import type {
+  DevContourState,
+  Task,
+  Config,
+  AuditEvent,
+  Board,
+  Role,
+  Run,
+  Evidence,
+} from '../core/model.ts';
 import { Alert, AlertDescription } from '@/ui/alert.tsx';
 import { Badge } from '@/ui/badge.tsx';
 import { Button } from '@/ui/button.tsx';
@@ -73,12 +84,9 @@ type Snapshot = Omit<DevContourState, 'tasks'> & {
     | 'workspaceGates'
   >;
 };
-const roleNames: Record<Role, string> = {
-  architect: 'Архитектор',
-  backend: 'Backend',
-  frontend: 'Frontend',
-  qa: 'Тестирование',
-};
+import { roleLabel, currentRoles, setRoleSource } from './roles.ts';
+import { Phases, engine, elapsed } from './Workers.tsx';
+
 const waitingReasons: Record<string, string> = {
   product_approval_required:
     'Нужно согласовать продукт и архитектуру или обновить привязку черновика задачи.',
@@ -130,6 +138,91 @@ const badgeTone: Record<string, 'secondary' | 'ready' | 'success' | 'warning' | 
   blocked: 'warning',
   failed: 'destructive',
 };
+// Строка задачи отвечала только «в каком она статусе». На вопрос «чем агент
+// занят прямо сейчас» это не отвечает: статус `running` одинаков и через минуту
+// после выдачи, и на третьей попытке в ревью. Живая часть строки показывает
+// фазу, исполнителя, пройденные проверки и причину ожидания — то, ради чего
+// иначе приходится открывать карточку задачи и читать журнал.
+function TaskLive({ task, runs }: { task: UITask; runs: Run[] }) {
+  const run = runs.filter((r) => r.taskId === task.id).at(-1);
+  const active = run?.status === 'active';
+  if (active)
+    return (
+      <div className="mt-2 grid gap-1">
+        <Phases current={run.phase} />
+        <span className="text-muted-foreground flex flex-wrap items-center gap-x-2 text-xs">
+          <Bot aria-hidden="true" className="size-3 shrink-0" />
+          {engine(run.runtime, run.model)}
+          <Eye aria-hidden="true" className="size-3 shrink-0" />
+          {engine(run.reviewer, run.reviewerModel)}
+          <span>· {elapsed(run.startedAt)}</span>
+          {run.attempt > 1 && <span>· попытка {run.attempt}</span>}
+        </span>
+        <GateChips run={run} />
+      </div>
+    );
+  if (task.status === 'ready' && task.blockers.length)
+    return (
+      <small className="text-muted-foreground mt-1 block">
+        Ждёт: {task.blockers.map(shortId).join(', ')}
+      </small>
+    );
+  if (task.status === 'ready')
+    return <small className="text-muted-foreground mt-1 block">Готова, ждёт свободного исполнителя</small>;
+  if (task.status === 'failed' && task.failure)
+    return (
+      <small className="text-destructive mt-1 block break-words">
+        {run?.blocked ? 'Отказ окружения, попытка не засчитана: ' : ''}
+        {task.failure}
+      </small>
+    );
+  if (task.status === 'done' && run)
+    return <GateChips run={run} />;
+  return null;
+}
+// Какие проверки задача уже прошла на своём SHA: зелёный gate — это и есть
+// доказательство, а не отметка «тесты запускались».
+function GateChips({ run }: { run: Run }) {
+  const latest = new Map<string, Evidence>();
+  for (const e of run.evidence) latest.set(e.gate + e.phase, e);
+  const gates = [...latest.values()];
+  if (!gates.length) return null;
+  return (
+    <span className="mt-1 flex flex-wrap gap-1">
+      {gates.map((e) => (
+        <Badge
+          key={e.id}
+          variant={e.passed ? 'success' : 'destructive'}
+          className="font-mono text-[11px]"
+          title={`${e.gate} · ${e.phase} · ${e.summary}`}
+        >
+          {e.passed ? '✓' : '✗'} {e.gate}
+        </Badge>
+      ))}
+    </span>
+  );
+}
+// Очередь встаёт не только по команде оператора: диспетчер останавливает её
+// сам, когда выдавать работу нельзя — база отстала, checkout команды разошёлся.
+// Причина лежит в журнале, и без неё панель показывает молчаливую паузу.
+function stopReason(data: Snapshot) {
+  if (data.pauseReason === 'operator' || data.pauseReason === 'shutdown') return undefined;
+  const failure = [...(data.events ?? [])]
+    .reverse()
+    .find((e) => e.type === 'scheduler.error');
+  const detail = (failure?.data as { error?: string } | undefined)?.error;
+  return detail ? detail.replace(/^Error:\s*/, '') : undefined;
+}
+// «Где сейчас разработка» — это соотношение принятого, идущего и оставшегося,
+// а не название ревизии. Одна строка под доской отвечает на это без открытия.
+function boardProgress(data: Snapshot, board: Board) {
+  const ids = new Set(board.revisions.flatMap((r) => r.taskIds));
+  const own = data.tasks.filter((t) => ids.has(t.id) && t.status !== 'cancelled');
+  if (!own.length) return '';
+  const done = own.filter((t) => t.status === 'done').length;
+  const running = own.filter((t) => t.activeRunId).length;
+  return `${done} из ${own.length}` + (running ? ` · ${running} в работе` : '');
+}
 function StatusBadge({ value, children }: { value: string; children?: ReactNode }) {
   return (
     <Badge variant={badgeTone[value] ?? 'secondary'}>
@@ -270,7 +363,7 @@ export function App() {
   const filtered = graphTasks.filter(
     (t) =>
       (!repositoryFilter || t.repositoryId === repositoryFilter) &&
-      `${t.title} ${t.id} ${t.repositoryId} ${roleNames[t.role]}`
+      `${t.title} ${t.id} ${t.repositoryId} ${roleLabel(t.role)}`
         .toLowerCase()
         .includes(query.toLowerCase()),
   );
@@ -348,7 +441,7 @@ export function App() {
             shortId: shortId(t.id),
             title: t.title,
             repositoryId: t.repositoryId,
-            role: roleNames[t.role],
+            role: roleLabel(t.role),
             status: status(t),
             statusLabel: taskStatusName(t),
           },
@@ -382,6 +475,9 @@ export function App() {
         )}
       </main>
     );
+  // Имена ролей объявляет workspace, а нужны они и там, где конфигурации под
+  // рукой нет: источник ставится один раз, как только состояние загружено.
+  setRoleSource(data.config);
   const done = tasks.filter((t) => t.status === 'done').length;
   const blocked = tasks.filter((t) => status(t) === 'blocked').length;
   const ready = tasks.filter((t) => data.ready.includes(t.id)).length;
@@ -464,6 +560,7 @@ export function App() {
                   <small>
                     {b.revisions.at(-1)!.status === 'accepted' ? 'Принята' : 'В работе'} · ревизия{' '}
                     {b.revisions.at(-1)!.number}
+                    {boardProgress(data, b) && ' · ' + boardProgress(data, b)}
                   </small>
                 </span>
                 {b.revisions.at(-1)!.status === 'accepted' && <Check className="nav-check" />}
@@ -480,6 +577,12 @@ export function App() {
             />
             <strong>{data.paused ? 'Очередь на паузе' : 'Оркестратор работает'}</strong>
           </div>
+          {/* Очередь останавливается не только по команде: диспетчер тормозит
+              сам, когда выдавать работу нельзя. Без причины на виду панель
+              просто молчит, и приходится читать журнал. */}
+          {data.paused && stopReason(data) && (
+            <p className="text-destructive break-words">{stopReason(data)}</p>
+          )}
           <p>
             {data.runs.filter((r) => r.status === 'active').length} из {data.config.concurrency}{' '}
             исполнителей занято
@@ -816,12 +919,13 @@ export function App() {
                           <span className="text-muted-foreground min-w-8 text-xs" title={t.id}>
                             {shortId(t.id)}
                           </span>
-                          <div>
+                          <div className="min-w-0 flex-1">
                             <strong>{t.title}</strong>
                             <small>
-                              {t.repositoryId} · {roleNames[t.role]}
+                              {t.repositoryId} · {roleLabel(t.role)}
                               {t.dependsOn.length ? ` · после ${t.dependsOn.join(', ')}` : ''}
                             </small>
+                            <TaskLive task={t} runs={data.runs} />
                           </div>
                           <StatusBadge value={status(t)}>{taskStatusName(t)}</StatusBadge>
                           <ChevronRight />
@@ -1216,7 +1320,7 @@ export function App() {
                     <dl>
                       <div>
                         <dt>Роль</dt>
-                        <dd>{roleNames[task.role]}</dd>
+                        <dd>{roleLabel(task.role)}</dd>
                       </div>
                       <div>
                         <dt>Исполнитель</dt>
@@ -1741,9 +1845,9 @@ function TaskForm({
       <label>
         Роль
         <select name="role" defaultValue={task?.role ?? 'backend'}>
-          {Object.entries(roleNames).map(([id, label]) => (
+          {currentRoles().map((id) => (
             <option key={id} value={id}>
-              {label}
+              {roleLabel(id)}
             </option>
           ))}
         </select>

@@ -16,6 +16,7 @@ import { git, command } from '../src/runner/process.ts';
 import { setupDemo } from '../src/demo.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Store } from '../src/core/store.ts';
+import { updateBase } from '../src/runner/base-update.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { adapters, type AgentRequest } from '../src/runner/adapters.ts';
 
@@ -178,6 +179,9 @@ test('Pinned role/library documents are selected reproducibly, delivered to writ
       },
     };
     const scheduler = new Scheduler(f.h, f.root, runtimes);
+    // Инструкции только что закоммичены в рабочую ветку: пока база прогонов их
+    // не содержит, исполнитель получил бы дерево без закреплённого контекста.
+    await updateBase(f.c, f.root);
     f.h.pause(false);
     await scheduler.drain();
     assert.ok(f.store.read().tasks.every((t) => t.status === 'done'));

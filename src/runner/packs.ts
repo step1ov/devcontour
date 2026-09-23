@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
-import { gateList, relativePath, type Config } from '../core/model.ts';
+import { gateList, relativePath, roleId, roleBindingSchema, type Config } from '../core/model.ts';
 import { environmentSchema, lifecycleSchema, stepSchema } from '../core/integrations.ts';
 import { orderedGates } from '../core/workflow.ts';
 
@@ -21,6 +21,10 @@ export const profileSchema = z.strictObject({
   protectedPaths: z.array(relativePath).max(100).default([]),
   generatedPaths: z.array(relativePath).max(100).default([]),
   concurrency: z.number().int().min(1).max(4).optional(),
+  // Роли, которых требует поверхность профиля. Мобильное приложение — это своя
+  // область записи и свой инструментарий прогона; профиль знает это о себе, а
+  // контур заранее не знает, какие роли бывают у продукта.
+  roles: z.record(roleId, roleBindingSchema).default({}),
 });
 type Manifest = z.infer<typeof profileSchema>;
 type Source = { repositoryId: string; path: string };
@@ -119,6 +123,9 @@ export function resolveProfile(ref: string, repositoryRoot?: string, repositoryI
     protectedPaths: [...new Set([...layers.flatMap((p) => p.protectedPaths), ...files])],
     generatedPaths: [...new Set(layers.flatMap((p) => p.generatedPaths))],
     concurrency: limits.length ? Math.min(...limits) : undefined,
+    // Слои складываются: базовый профиль даёт роль, надстройка уточняет её
+    // привязку, не переписывая остальные.
+    roles: Object.assign({}, ...layers.map((p) => p.roles)) as Manifest['roles'],
     ...(source ? { source } : {}),
     // Preserve existing leaf builtin locks without a migration.
     digest: closure.length === 1 && !source ? hash(raw) : hash(JSON.stringify(closure)),

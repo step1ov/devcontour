@@ -1,6 +1,6 @@
 import { validatePreparation } from './preparation.ts';
 import { digest, specDigest, type DevContour } from './service.ts';
-import { repository } from './repositories.ts';
+import { repository, requiresContract } from './repositories.ts';
 import { assertDag } from './graph.ts';
 import { validateTaskContext } from './workflow.ts';
 import { taskInput, type DevContourState, type Task, type Approval, type Board } from './model.ts';
@@ -268,7 +268,7 @@ export function stateFromRecords(
         (t.status === 'ready' || t.status === 'done') &&
         (!t.approvedDigest ||
           !t.approval ||
-          (['backend', 'frontend'].includes(t.role) && !t.contracts.length))
+          (requiresContract(h.config, t.role, t.repositoryId) && !t.contracts.length))
       )
         throw new Error('Нет утверждённой постановки: ' + t.id);
       if (

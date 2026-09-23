@@ -3,7 +3,12 @@ import { constants } from 'node:fs';
 import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Config, Role } from '../core/model.ts';
-import { repositories, roleBinding, reviewerBinding } from '../core/repositories.ts';
+import {
+  repositories,
+  roleBinding,
+  reviewerBinding,
+  declaredRoles,
+} from '../core/repositories.ts';
 import { validateWorkflow } from '../core/workflow.ts';
 import { command, git } from './process.ts';
 import { executionEnvironment, runSteps, withEnvironment } from './environment.ts';
@@ -43,8 +48,10 @@ export async function doctor(config: Config, root: string, probe = false) {
     validateWorkflow(config);
     return 'Графы и профили согласованы';
   });
+  // Роли берутся объявленные, а не только workspace-уровня: роль, добавленную
+  // компонентом, doctor иначе не проверил бы вовсе.
   const bindings = repositories(config).flatMap((repo) =>
-    (Object.keys(config.roles) as Role[]).flatMap((role) =>
+    declaredRoles(config, repo.id).flatMap((role) =>
       [false, true].map((review) => ({
         repo,
         role,
@@ -189,9 +196,9 @@ export async function doctor(config: Config, root: string, probe = false) {
   }
   if (config.contextPacks.length)
     await check('context', async () => {
-      for (const role of Object.keys(config.roles))
+      for (const role of declaredRoles(config))
         await taskContext(config, {
-          role: role as Role,
+          role,
           contextPacks: config.contextPacks.map((p) => p.id),
         } as Parameters<typeof taskContext>[1]);
       return 'Закреплённые инструкции доступны и совпадают с digest';

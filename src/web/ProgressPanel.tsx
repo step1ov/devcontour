@@ -20,6 +20,7 @@ import type {
   TaskStatus,
   Role,
 } from '../core/model.ts';
+import { roleLabel } from './roles.ts';
 import { WorkerCards } from './Workers.tsx';
 import { Badge } from '@/ui/badge.tsx';
 import { Card, CardContent, CardHeader, CardTitle } from '@/ui/card.tsx';
@@ -29,12 +30,6 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/ui/card.tsx';
 // what the tests actually cover. All of it already lives in the state; this
 // view only arranges it.
 
-const roleNames: Record<Role, string> = {
-  architect: 'Архитектор',
-  backend: 'Разработчик бэкенда',
-  frontend: 'Разработчик интерфейса',
-  qa: 'Тестировщик',
-};
 const statusNames: Record<TaskStatus, string> = {
   draft: 'Черновик',
   ready: 'Готова к выдаче',
@@ -79,7 +74,7 @@ function elapsed(from: string) {
 function workerName(run: Run, task: Task, runs: Run[]) {
   const peers = [...new Set(runs.filter((r) => r.owner).map((r) => r.owner))].sort();
   const index = peers.indexOf(run.owner) + 1;
-  return roleNames[task.role] + (peers.length > 1 ? ' ' + index : '');
+  return roleLabel(task.role) + (peers.length > 1 ? ' ' + index : '');
 }
 
 function Bar({ done, total, label }: { done: number; total: number; label: string }) {
@@ -522,7 +517,7 @@ export function ProgressPanel({
                     <code className="text-muted-foreground font-mono text-xs">
                       {t.repositoryId}
                     </code>
-                    <span className="text-muted-foreground text-xs">{roleNames[t.role]}</span>
+                    <span className="text-muted-foreground text-xs">{roleLabel(t.role)}</span>
                     <Badge variant={statusTone[t.status]}>{statusNames[t.status]}</Badge>
                   </li>
                 ))}

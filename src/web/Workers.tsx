@@ -2,6 +2,7 @@ import { Bot, CircleDashed, Eye, Loader2 } from 'lucide-react';
 import { Badge } from '@/ui/badge.tsx';
 import { Card, CardContent } from '@/ui/card.tsx';
 import { cn } from '@/lib/utils.ts';
+import { roleLabel } from './roles.ts';
 
 // «Кто сейчас работает» — первый вопрос оператора, пока идёт выдача. Строка
 // таблицы на него отвечает плохо: нужно видеть роль, фазу и модель сразу, не
@@ -21,12 +22,6 @@ export type Worker = {
   startedAt: string;
 };
 
-const roleNames: Record<string, string> = {
-  architect: 'Архитектор',
-  backend: 'Разработчик бэкенда',
-  frontend: 'Разработчик интерфейса',
-  qa: 'Тестировщик',
-};
 // Фазы идут по порядку: видно не только где агент сейчас, но и сколько позади.
 const phases = [
   { id: 'running', label: 'пишет код' },
@@ -35,16 +30,16 @@ const phases = [
   { id: 'integrating', label: 'интегрирует' },
 ] as const;
 
-function elapsed(from: string) {
+export function elapsed(from: string) {
   const seconds = Math.max(0, Math.round((Date.now() - new Date(from).getTime()) / 1000));
   if (seconds < 60) return seconds + ' с';
   if (seconds < 3600) return Math.floor(seconds / 60) + ' мин';
   return Math.floor(seconds / 3600) + ' ч ' + Math.floor((seconds % 3600) / 60) + ' мин';
 }
-const engine = (runtime?: string, model?: string) =>
+export const engine = (runtime?: string, model?: string) =>
   [runtime, model].filter(Boolean).join(' · ') || '—';
 
-function Phases({ current }: { current?: string }) {
+export function Phases({ current }: { current?: string }) {
   const at = phases.findIndex((p) => p.id === current);
   return (
     <ol className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
@@ -86,7 +81,7 @@ export function WorkerCards({ workers, concurrency }: { workers: Worker[]; concu
             <div className="flex flex-wrap items-center gap-3">
               <Bot className="text-primary size-5 shrink-0" aria-hidden="true" />
               <strong className="text-md">
-                {w.role ? (roleNames[w.role] ?? w.role) : 'Исполнитель'}
+                {w.role ? roleLabel(w.role) : 'Исполнитель'}
               </strong>
               <Badge variant="secondary" className="font-mono text-xs">
                 {engine(w.runtime, w.model)}
