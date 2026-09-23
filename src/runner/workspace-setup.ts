@@ -125,6 +125,17 @@ export async function setupWorkspace(file: string, data?: string) {
     )
       throw new Error('Существующая конфигурация относится к другому workspace или профилю');
     await reserveRepositories(existing, root);
+    // The workspace and its repositories are the same, so joint gates may still
+    // be declared after the fact. A product configured by `setup` starts without
+    // them, and without this there is no route to add one: a release feature
+    // check requires a workspace test gate, which could then never exist.
+    if (JSON.stringify(existing.workspaceGates) !== JSON.stringify(config.workspaceGates)) {
+      await writeFile(
+        configPath,
+        JSON.stringify({ ...existing, workspaceGates: config.workspaceGates }, null, 2),
+      );
+      return { status: 'gates-updated', data: root, config: configPath };
+    }
     return { status: 'preserved', data: root, config: configPath };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;

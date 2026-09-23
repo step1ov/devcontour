@@ -323,6 +323,29 @@ test('Workspace setup preserves policy on repeat and detects a competing control
     await writeFile(configPath, JSON.stringify(c));
     assert.equal((await setupWorkspace(path, f.data)).status, 'preserved');
     assert.equal(loadConfig(configPath).approvalMode, 'operator');
+    // A joint gate can still be declared after configuration: a release feature
+    // check needs one, and a workspace set up without gates would never get it.
+    const registry = JSON.parse(await readFile(path, 'utf8'));
+    registry.workspaceGates = [
+      {
+        id: 'release-acceptance',
+        kind: 'test',
+        repositoryId: f.c.repositories[0].id,
+        command: ['npm', 'run', 'test:acceptance'],
+        timeoutMs: 600000,
+        report: { type: 'junit', path: '.reports/junit.xml' },
+        artifacts: ['.reports/junit.xml'],
+      },
+    ];
+    await writeFile(path, JSON.stringify(registry));
+    assert.equal((await setupWorkspace(path, f.data)).status, 'gates-updated');
+    assert.deepEqual(
+      loadConfig(configPath).workspaceGates.map((g) => g.id),
+      ['release-acceptance'],
+    );
+    // Everything else the operator changed by hand survives the update.
+    assert.equal(loadConfig(configPath).approvalMode, 'operator');
+    assert.equal((await setupWorkspace(path, f.data)).status, 'preserved');
     await assert.rejects(
       setupWorkspace(path, join(f.root, 'another')),
       /workspace|владел|управля/i,
