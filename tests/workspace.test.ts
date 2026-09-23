@@ -347,6 +347,36 @@ test('Workspace setup preserves policy on repeat and detects a competing control
     // Everything else the operator changed by hand survives the update.
     assert.equal(loadConfig(configPath).approvalMode, 'operator');
     assert.equal((await setupWorkspace(path, f.data)).status, 'preserved');
+
+    // Закрепление context pack переживает соседнее изменение объявления.
+    // Реестр закрепления не содержит: перенеся объявление целиком, setup
+    // сбросил бы revision и digest, и очередь встала бы на «пакет не закреплён»
+    // из-за правки, которая пакетов не касалась.
+    registry.contextPacks = [
+      {
+        id: 'workflow',
+        version: '1.0.0',
+        repositoryId: f.c.repositories[0].id,
+        roles: ['backend'],
+        files: ['.agents/context/workflow.md'],
+      },
+    ];
+    await writeFile(path, JSON.stringify(registry));
+    assert.equal((await setupWorkspace(path, f.data)).status, 'declaration-updated');
+    const locked = JSON.parse(await readFile(configPath, 'utf8')) as {
+      contextPacks: Record<string, unknown>[];
+      workspaceGates: Record<string, unknown>[];
+    };
+    locked.contextPacks[0].revision = 'a'.repeat(40);
+    locked.contextPacks[0].digest = 'b'.repeat(64);
+    await writeFile(configPath, JSON.stringify(locked));
+    registry.workspaceGates[0].timeoutMs = 700000;
+    await writeFile(path, JSON.stringify(registry));
+    assert.equal((await setupWorkspace(path, f.data)).status, 'declaration-updated');
+    const after = loadConfig(configPath);
+    assert.equal(after.contextPacks[0].revision, 'a'.repeat(40));
+    assert.equal(after.contextPacks[0].digest, 'b'.repeat(64));
+    assert.equal(after.workspaceGates[0].timeoutMs, 700000);
     await assert.rejects(
       setupWorkspace(path, join(f.root, 'another')),
       /workspace|владел|управля/i,

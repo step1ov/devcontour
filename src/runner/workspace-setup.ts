@@ -180,6 +180,19 @@ export async function setupWorkspace(file: string, data?: string) {
           config.contextPacks.map(({ id, version, files }) => ({ id, version, files })),
         );
     if (declarationChanged) {
+      // Реестр объявляет пакеты, но не закрепляет их: revision и digest
+      // появляются только при context-lock. Переносить объявление целиком
+      // значило бы сбрасывать закрепление всякий раз, когда меняется что-то
+      // рядом, и останавливать очередь на «пакет не закреплён». Поэтому
+      // неизменившийся пакет сохраняет своё закрепление, а изменившийся —
+      // теряет его честно и требует нового lock.
+      const pinned = new Map(
+        existing.contextPacks.map((p) => [JSON.stringify({ id: p.id, files: p.files }), p]),
+      );
+      const contextPacks = config.contextPacks.map((p) => {
+        const was = pinned.get(JSON.stringify({ id: p.id, files: p.files }));
+        return was && was.version === p.version ? { ...p, ...was } : p;
+      });
       await writeFile(
         configPath,
         JSON.stringify(
@@ -188,7 +201,7 @@ export async function setupWorkspace(file: string, data?: string) {
             workspaceGates: config.workspaceGates,
             gates: config.gates,
             repositories: repos,
-            contextPacks: config.contextPacks,
+            contextPacks,
             environment: config.environment,
           },
           null,
