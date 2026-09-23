@@ -120,11 +120,30 @@ test('Blocking findings reject even approved=true and do not enable execution', 
     // Отклонённая попытка стоила вызова модели и остаётся в состоянии с
     // находками: иначе процесс виден только файлами на диске.
     const attempts = f.store.read().contractAttempts ?? [];
-    assert.equal(attempts.length, 1);
-    assert.equal(attempts[0].approved, false);
-    assert.equal(attempts[0].title, 'API');
-    assert.ok(attempts[0].findings.some((finding) => finding.severity === 'blocking'));
-    assert.ok(attempts[0].artifact.length > 0);
+    assert.equal(attempts.length, 2, 'план и контракт считаются оба');
+    const contract = attempts.find((a) => a.title === 'API')!;
+    assert.equal(contract.approved, false);
+    assert.equal(contract.attempt, 1);
+    assert.equal(contract.subject, 'contract / architecture decision');
+    assert.ok(contract.findings.some((finding) => finding.severity === 'blocking'));
+    assert.ok(contract.artifact.length > 0);
+    // Вторая попытка того же контракта нумеруется по порядку: по этому номеру
+    // видно, сходится процесс или кружит на месте.
+    await assert.rejects(
+      reviewContract(
+        f.h,
+        f.root,
+        { title: 'API', content: 'Ambiguous, second try' },
+        'codex',
+        runtimes(undefined, true),
+      ),
+      /отклонено/,
+    );
+    const again = (f.store.read().contractAttempts ?? []).filter((a) => a.title === 'API');
+    assert.deepEqual(
+      again.map((a) => a.attempt),
+      [1, 2],
+    );
   } finally {
     f.cleanup();
   }

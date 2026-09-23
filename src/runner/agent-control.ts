@@ -27,6 +27,22 @@ function recordContractAttempt(h: DevContour, attempt: ContractAttempt) {
     s.contractAttempts = [...(s.contractAttempts ?? []), attempt].slice(-MAX_CONTRACT_ATTEMPTS);
   });
 }
+// Ревью каждой попытки читало предложение с нуля: прошлые находки ему не
+// показывали. Поэтому автор не видел, что закрыто, а что вернулось, а рецензент
+// мог заново поднять то, что уже поправлено, или противоречить прежнему совету.
+// Передаём предыдущие находки и просим отметить их состояние.
+function previousFindings(h: DevContour, subject: string, title: string) {
+  const attempts = (h.store.read().contractAttempts ?? []).filter(
+    (a) => a.subject === subject && a.title === title,
+  );
+  const last = attempts.at(-1);
+  if (!last) return undefined;
+  return {
+    attempt: attempts.length,
+    summary: last.summary,
+    findings: last.findings.map((f) => f.message),
+  };
+}
 
 async function review(
   h: DevContour,
@@ -45,6 +61,7 @@ async function review(
     throw new DomainError('Неверный runtime независимого reviewer');
   const artifact = join(root, 'decisions', randomUUID());
   await mkdir(artifact, { recursive: true });
+  const previous = previousFindings(h, subject, (proposal as { title?: string }).title ?? subject);
   const prompt = [
     `Independently review this ${subject}. The author runtime is ${author}; you are ${reviewer}.`,
     'Read repo AGENTS.md and docs/spec.md (or the specification referenced in the proposal). Do not edit files, approve work yourself, or run implementation agents.',
@@ -53,6 +70,12 @@ async function review(
     'For plans, check writePaths, selected library contextPacks, device resources, consumer verification and separation of proposed discoveries from validated knowledge. Findings should include rule, consequence and evidence; do not invent violations to fill the report.',
     'Declared context packs: ' + JSON.stringify(h.config.contextPacks),
     'Return approved=false and concrete blocking findings when revision is needed. Routine technical choices within the specification do not need human approval.',
+    ...(previous
+      ? [
+          'This proposal has been reviewed before. Previous findings follow. For each, state in your summary whether it is now resolved, still open, or superseded, before raising anything new. Do not re-raise a finding that the current proposal addresses, and do not contradict earlier guidance without saying why.',
+          JSON.stringify(previous, null, 2),
+        ]
+      : []),
     'Workspace repositories: ' +
       JSON.stringify(
         repositories(h.config).map(({ id, name, kind, path }) => ({ id, name, kind, path })),
@@ -87,19 +110,20 @@ async function review(
   );
   await writeFile(join(artifact, 'runtime.log'), result.log);
   const rejected = !parsed.approved || parsed.findings.some((f) => f.severity === 'blocking');
-  if (subject !== 'task plan')
-    recordContractAttempt(h, {
-      id: artifact.split('/').at(-1) ?? artifact,
-      at: new Date().toISOString(),
-      title: (proposal as { title?: string }).title ?? subject,
-      repositoryId,
-      approved: !rejected,
-      summary: parsed.summary,
-      findings: parsed.findings.map((f) => ({ severity: f.severity, message: f.message })),
-      artifact,
-      authorRuntime: author,
-      reviewerRuntime: reviewer,
-    });
+  recordContractAttempt(h, {
+    id: artifact.split('/').at(-1) ?? artifact,
+    at: new Date().toISOString(),
+    subject,
+    title: (proposal as { title?: string }).title ?? subject,
+    repositoryId,
+    attempt: (previous?.attempt ?? 0) + 1,
+    approved: !rejected,
+    summary: parsed.summary,
+    findings: parsed.findings.map((f) => ({ severity: f.severity, message: f.message })),
+    artifact,
+    authorRuntime: author,
+    reviewerRuntime: reviewer,
+  });
   if (rejected)
     throw new DomainError(`Независимое ревью отклонено: ${parsed.summary}. Артефакты: ${artifact}`);
   return {

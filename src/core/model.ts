@@ -246,6 +246,10 @@ export interface Run {
 export interface ContractAttempt {
   id: string;
   at: string;
+  /** Что ревьюировали: контракт или план задач. */
+  subject: string;
+  /** Номер попытки для этого предмета: видно, сходится процесс или кружит. */
+  attempt: number;
   title: string;
   repositoryId?: string;
   approved: boolean;

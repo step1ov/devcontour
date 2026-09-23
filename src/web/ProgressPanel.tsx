@@ -254,7 +254,7 @@ function Contracts({
       <CardHeader className="pb-3">
         <CardTitle className="flex items-center gap-2">
           <FileSignature className="text-primary size-4" aria-hidden="true" />
-          Контракты ({contracts.length} принято, попыток {attempts.length})
+          Ревью ({contracts.length} принято, попыток {attempts.length})
         </CardTitle>
       </CardHeader>
       <CardContent className="grid gap-4">
@@ -269,14 +269,31 @@ function Contracts({
             ))}
           </ul>
         )}
+        {/* Число замечаний по попыткам: по нему видно, сходится процесс или
+            кружит. Без этого автор сравнивает круги вручную. */}
+        {recent.length > 1 && (
+          <p className="text-muted-foreground text-sm">
+            Замечаний по попыткам:{' '}
+            {[...attempts].map((a, i) => (
+              <span key={a.id}>
+                {i > 0 && ' → '}
+                <span className={a.approved ? 'text-primary' : undefined}>{a.findings.length}</span>
+              </span>
+            ))}
+          </p>
+        )}
         {recent.length ? (
           <ol className="grid gap-3">
             {recent.map((a, i) => (
               <li key={a.id} className="border-b pb-3 last:border-0">
                 <div className="flex flex-wrap items-center gap-2">
                   <Badge variant={a.approved ? 'success' : 'destructive'}>
-                    Попытка {attempts.length - i}
+                    Попытка {a.attempt ?? attempts.length - i}
                   </Badge>
+                  <span className="text-muted-foreground text-xs">
+                    {a.subject === 'task plan' ? 'план задач' : 'контракт'} · {a.findings.length}{' '}
+                    замечаний
+                  </span>
                   <strong className="min-w-0 flex-1">{a.title}</strong>
                   <code className="text-muted-foreground font-mono text-xs">
                     {a.authorRuntime} → {a.reviewerRuntime}
