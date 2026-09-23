@@ -362,7 +362,10 @@ export function ProgressPanel({
   };
   onSelect?: (taskId: string) => void;
 }) {
-  const tasks = state.tasks.filter((t) => t.status !== 'cancelled' && t.status !== 'draft');
+  // Черновик — это запланированная работа, а не мусор: до утверждения плана
+  // все задачи именно черновики, и прятать их значит показывать пустую доску
+  // там, где объём уже собран. Скрывается только отменённое.
+  const tasks = state.tasks.filter((t) => t.status !== 'cancelled');
   const runs = state.runs.filter((r) => r.status === 'active');
 
   const blocks = useMemo(() => {
@@ -437,6 +440,12 @@ export function ProgressPanel({
           {!tasks.length && (
             <p className="text-muted-foreground">
               Задач ещё нет. Полосы заполнятся, когда агент соберёт доску.
+            </p>
+          )}
+          {tasks.length > 0 && tasks.every((t) => t.status === 'draft') && (
+            <p className="text-muted-foreground text-sm">
+              Все задачи в черновике: план ещё не прошёл независимое ревью, поэтому очередь их не
+              выдаёт.
             </p>
           )}
         </CardContent>
