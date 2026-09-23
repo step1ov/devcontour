@@ -15,7 +15,7 @@ import {
   relativePath,
 } from '../core/model.ts';
 import { adapters, reviewResult, type AgentAdapter } from './adapters.ts';
-import { repositories, repository } from '../core/repositories.ts';
+import { repositories, repository, declaredRoles } from '../core/repositories.ts';
 import { git } from './process.ts';
 
 // Контракт живёт в репозитории, и предложение должно на него ссылаться, а не
@@ -99,7 +99,11 @@ async function review(
   ].join('\n\n');
   await writeFile(join(artifact, 'proposal.json'), JSON.stringify(proposal, null, 2) + '\n');
   await writeFile(join(artifact, 'prompt.txt'), prompt);
-  const toolProfile = toolProfileFor(h.config, reviewer, 'architect', true);
+  // Ревью читает архитектуру, но роль architect не обязана существовать:
+  // конфигурация вправе объявить только свои. Берётся объявленная.
+  const declared = declaredRoles(h.config, repositoryId);
+  const reviewRole = declared.includes('architect') ? 'architect' : declared[0];
+  const toolProfile = toolProfileFor(h.config, reviewer, reviewRole, true);
   const result = await measuredExecute(
     h,
     runtimes[reviewer],
@@ -157,7 +161,13 @@ async function contractContent(
   proposal: { content?: string; file?: string; repositoryId?: string },
 ) {
   if (!proposal.file) return proposal.content!;
-  const base = await realpath(repository(h.config, proposal.repositoryId).path);
+  // Компонент может называться не main: в workspace из product и library
+  // предложение без repositoryId иначе искало бы несуществующий репозиторий,
+  // хотя inline-вариант там работал.
+  const owner =
+    proposal.repositoryId ??
+    (repositories(h.config).some((r) => r.id === 'main') ? 'main' : repositories(h.config)[0].id);
+  const base = await realpath(repository(h.config, owner).path);
   const file = resolve(base, proposal.file);
   let resolved: string;
   try {
@@ -285,11 +295,33 @@ export async function acceptBoard(
   const tasks = revision.taskIds.map((id) => state.tasks.find((t) => t.id === id)!);
   if (!tasks.length || tasks.some((t) => t.status !== 'done' || !t.resultSha))
     throw new DomainError('Приёмка требует done, проверки и интеграцию всех задач');
+  // Принятие относится к доказанному SHA, а не к текущей вершине ветки. Вершину
+  // двигает и перенос базы: подготовка попадает туда без гейтов, и приёмка,
+  // читавшая вершину, закрепляла бы непроверенный код как принятую работу.
+  // Берётся самый поздний результат задач доски — он прошёл проверки на
+  // интеграции, — и проверяется, что он действительно лежит в ветке.
   const heads: Record<string, string> = {};
   for (const task of tasks) {
     const repo = repository(h.config, task.repositoryId);
-    heads[repo.id] ??= await git(repo.path, 'rev-parse', `refs/heads/${repo.targetBranch}`);
-    await git(repo.path, 'merge-base', '--is-ancestor', task.resultSha!, heads[repo.id]);
+    const tip = await git(repo.path, 'rev-parse', `refs/heads/${repo.targetBranch}`);
+    await git(repo.path, 'merge-base', '--is-ancestor', task.resultSha!, tip);
+    const current = heads[repo.id];
+    if (!current) heads[repo.id] = task.resultSha!;
+    else if (current !== task.resultSha) {
+      // Поздний — тот, для кого другой является предком. Равных нет: коммиты
+      // интеграции выстроены в одну ветку.
+      const currentIsOlder = await git(
+        repo.path,
+        'merge-base',
+        '--is-ancestor',
+        current,
+        task.resultSha!,
+      )
+        .then(() => true)
+        .catch(() => false);
+      if (currentIsOlder) heads[repo.id] = task.resultSha!;
+      else await git(repo.path, 'merge-base', '--is-ancestor', task.resultSha!, current);
+    }
   }
   beforeCommit();
   const head = Object.values(heads)[0];

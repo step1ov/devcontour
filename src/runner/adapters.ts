@@ -224,6 +224,13 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
         await writeFile(r.mcpConfigPath, JSON.stringify(claudeMcp(r.toolProfile), null, 2));
       }
       const argv = cliArguments(name, r, schemaPath, resultPath);
+      // Отсутствующий или незапускаемый исполняемый файл — тоже отказ
+      // окружения, хотя он приходит обычной ошибкой запуска, а не кодом
+      // выхода. Без этого «команда не найдена» тратила попытку задачи.
+      const blockedStart = (error: unknown) => {
+        const code = (error as NodeJS.ErrnoException).code;
+        return code === 'ENOENT' || code === 'EACCES' || code === 'EPERM';
+      };
       const version = await runtimeVersion(name, r.execution?.env);
       const logPath = join(r.artifactDir, 'runtime.log');
       await writeFile(logPath, `Runtime ${name}; started ${new Date().toISOString()}\n`);
@@ -255,6 +262,10 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
               redact: r.execution.redact,
             }
           : {}),
+      }).catch((error: unknown) => {
+        if (blockedStart(error))
+          throw new BlockedError(`${name}: runtime не запускается: ${String(error)}`);
+        throw error;
       });
       await writeFile(
         join(r.artifactDir, 'runtime.json'),

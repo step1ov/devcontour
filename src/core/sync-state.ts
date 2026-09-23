@@ -147,6 +147,9 @@ export function recordsFromState(h: DevContour, s: DevContourState) {
         title: c.title,
         content: c.content,
         digest: c.digest,
+        // Путь к документу — часть происхождения контракта. Без него клон
+        // восстанавливает текст, не зная, какому файлу в дереве он отвечает.
+        source: c.source,
         approvedAt: c.approvedAt,
       },
     });

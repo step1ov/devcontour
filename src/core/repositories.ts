@@ -59,8 +59,10 @@ export function reviewerBinding(
   role: import('./model.ts').Role,
   repositoryId = 'main',
 ) {
+  // Роль может быть не объявлена — конфигурация вправе не содержать ни одной
+  // встроенной. Тогда ревьюер берётся общий, а не роняет вызов на undefined.
   return (
-    roleBinding(config, role, repositoryId).reviewer ??
+    roleBinding(config, role, repositoryId)?.reviewer ??
     repository(config, repositoryId).reviewer ??
     config.reviewer
   );

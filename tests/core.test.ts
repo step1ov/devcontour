@@ -62,21 +62,26 @@ test('Concurrent store clients cannot claim one task twice', () => {
     f.cleanup();
   }
 });
-test('A projection in flight does not block a write from another process', () => {
+test('A projection serialises, so a stale snapshot cannot overwrite a newer journal', () => {
   const f = fixture();
   const second = new Store(join(f.root, 'state.sqlite'));
   try {
     f.h.createBoard('Board');
-    let wrote = false;
-    // Проекция пишет журнал на диск и делает это долго. Пока она читает,
-    // соседний процесс обязан суметь записать: иначе панель, обновляющая
-    // журнал, роняет агента с «database is locked».
+    // Журнал пишут оба процесса в одни и те же файлы. Если проекции идут
+    // одновременно, младший снимок ложится поверх старшего и запись, уже
+    // попавшая в журнал, из него исчезает — а журнал обещан append-only.
+    let concurrent = true;
     f.store.project(() => {
-      new DevContour(second, f.h.config).createBoard('Second board');
-      wrote = true;
+      try {
+        second.project(() => undefined);
+      } catch {
+        concurrent = false;
+      }
+      // Соседний процесс не должен успеть спроецировать более новое состояние
+      // раньше, чем эта проекция закончит писать свои файлы.
+      assert.equal(concurrent, false, 'проекции обязаны идти по очереди');
     });
-    assert.ok(wrote);
-    assert.equal(f.store.read().boards.length, 2);
+    assert.equal(f.store.read().boards.length, 1);
   } finally {
     second.close();
     f.cleanup();
@@ -380,6 +385,8 @@ test('An environment refusal does not spend the task attempt budget', () => {
     // не дойдя до исполнителя.
     const blocked = f.h.claim('one')!;
     f.h.fail(blocked.id, blocked.token, 'runtime: Not logged in', true);
+    // Классификацию самого отказа проверяет runner.test.ts: там она проходит
+    // через scheduler, а здесь — только учёт попытки.
     assert.equal(f.store.read().tasks[0].attempt, 0);
     assert.equal(f.store.read().runs[0].blocked, true);
     f.h.retry(t.id);
@@ -421,6 +428,13 @@ test('An exhausted attempt budget can be reset, but only deliberately and with a
       reset: { spent: f.h.config.maxAttempts, reason: 'Окружение исправлено: runtime авторизован' },
     });
     assert.equal(f.store.read().runs.length, f.h.config.maxAttempts);
+
+    // О сбросе сообщается только когда он случился: после одного сбоя бюджет
+    // не исчерпан, попытка сохраняется, и запись о сбросе была бы неправдой.
+    const run = f.h.claim('one')!;
+    f.h.fail(run.id, run.token, 'Исполнитель сообщил о незавершённой работе');
+    assert.deepEqual(f.h.retry(t.id, { reason: 'на всякий случай' }), { taskId: t.id });
+    assert.equal(f.store.read().tasks[0].attempt, 1);
   } finally {
     f.cleanup();
   }

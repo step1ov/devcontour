@@ -2,7 +2,7 @@ import { selectedWorkspaceMode, assertControllerCheckout } from './workspace-mod
 import { mkdir, readFile, writeFile, realpath, mkdtemp, rm } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
 import { z } from 'zod';
-import { configSchema, repositorySchema } from '../core/model.ts';
+import { configSchema, repositorySchema, type ContextPack } from '../core/model.ts';
 import { profile, packKey, profileMetadata } from './packs.ts';
 import { projectConfig, profileLock } from './setup.ts';
 import { loadConfig, readComponentConfig, scopedConfig } from './config.ts';
@@ -41,15 +41,22 @@ const registrySchema = z.object({
 // Реестр объявляет пакеты, но не закрепляет их: revision и digest появляются
 // только при context-lock. Переносить объявление целиком значит сбрасывать
 // закрепление каждый раз, когда рядом меняется что-то другое, и останавливать
-// очередь на «пакет не закреплён». Неизменившийся пакет закрепление сохраняет.
-const withPins = (
-  existing: { id: string; version: string; files: string[] }[],
-  declared: { id: string; version: string; files: string[] }[],
-) => {
-  const pinned = new Map(existing.map((p) => [JSON.stringify([p.id, p.files]), p]));
+// очередь на «пакет не закреплён».
+//
+// Переносится только само закрепление, а не прежний пакет целиком: иначе
+// переехавший в другой компонент или сменивший роли пакет возвращался бы к
+// старому объявлению молча, и исполнитель получал бы устаревшие инструкции.
+// Сравнивается всё объявление; изменилось что-нибудь — закрепление теряется
+// честно и требует нового lock.
+const declaration = (p: ContextPack) =>
+  JSON.stringify([p.id, p.version, p.repositoryId, p.roles, p.files]);
+const withPins = (existing: ContextPack[], declared: ContextPack[]) => {
+  const pinned = new Map(existing.map((p) => [declaration(p), p]));
   return declared.map((p) => {
-    const was = pinned.get(JSON.stringify([p.id, p.files]));
-    return was && was.version === p.version ? { ...p, ...was } : p;
+    const was = pinned.get(declaration(p));
+    return was?.revision && was.digest
+      ? { ...p, revision: was.revision, digest: was.digest }
+      : p;
   });
 };
 
@@ -80,7 +87,10 @@ export async function setupWorkspace(file: string, data?: string) {
     input.repositories.map(async (r, i) => ({
       id: r.id,
       configFile: r.configFile,
-      roles: r.roles,
+      // Роли профиля принадлежат тому компоненту, чей это профиль: второй
+      // репозиторий на react-native иначе остался бы без мобильных ролей,
+      // потому что общие роли берутся только из профиля первого.
+      roles: { ...selected[i].roles, ...r.roles },
       reviewer: r.reviewer,
       name: r.name,
       kind: r.kind,
@@ -174,8 +184,7 @@ export async function setupWorkspace(file: string, data?: string) {
             repositories: repos,
             workspaceGates: config.workspaceGates,
             contextPacks: withPins(
-              (raw as { contextPacks?: { id: string; version: string; files: string[] }[] })
-                .contextPacks ?? [],
+              (raw as { contextPacks?: ContextPack[] }).contextPacks ?? [],
               config.contextPacks,
             ),
             roles: withDeclaredRoles(
@@ -215,6 +224,11 @@ export async function setupWorkspace(file: string, data?: string) {
       // Новая роль ищется по множеству имён, а не сравнением привязок: конфигурация
       // хранит их уже нормализованными, и побайтовое сравнение объявляло бы
       // изменение на каждом запуске.
+      repos.some((repo, i) =>
+        Object.keys(repo.roles ?? {}).some(
+          (role) => !(role in (existing.repositories[i]?.roles ?? {})),
+        ),
+      ) ||
       declaredNames(config, repos).some((role) => !known.includes(role)) ||
       JSON.stringify(
         existing.contextPacks.map(({ id, version, files }) => ({ id, version, files })),

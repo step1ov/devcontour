@@ -560,7 +560,16 @@ export class Scheduler {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       try {
-        this.h.fail(run.id, run.token, message, error instanceof BlockedError);
+        // Отказ окружения возвращает попытку только пока работа не начата.
+        // Таймаут ревьюера после готового кандидата — это настоящая попытка:
+        // она стоила денег и прогонов, и не засчитывать её значит разрешить
+        // дорогому циклу крутиться без предела.
+        this.h.fail(
+          run.id,
+          run.token,
+          message,
+          error instanceof BlockedError && !run.candidateSha,
+        );
       } catch {
         /* A cancelled or fenced run cannot publish a late failure. */
       }

@@ -1,6 +1,6 @@
 {
   "id": "react-native",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "extends": [
     "node-checks",
     "mobile-maestro"
@@ -25,7 +25,6 @@
     "qa-mobile": {
       "runtime": "codex",
       "title": "Тестировщик приложения",
-      "toolProfile": "mobile",
       "reviewer": {
         "runtime": "claude"
       }

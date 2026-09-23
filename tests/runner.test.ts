@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { BlockedError } from '../src/core/model.ts';
 import { mkdtemp, readFile, writeFile, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -358,12 +359,94 @@ test('A stale run base stops the queue and base-update brings the preparation in
     await git(repo.path, 'update-ref', target, await git(accepted, 'rev-parse', 'HEAD'));
     await git(repo.path, 'worktree', 'remove', '--force', accepted);
 
+    const acceptedTip = await git(repo.path, 'rev-parse', target);
     const merged = await updateBase(f.config, f.root);
     assert.equal(merged.updated[0].kind, 'merge');
     const tip = await git(repo.path, 'rev-parse', target);
-    // Обе линии в базе: и подготовка, и принятая работа.
+    // Обе линии в базе. Проверять только рабочую ветку мало: разрушительный
+    // перевод ссылки на её вершину прошёл бы такую проверку, потеряв принятое.
     await git(repo.path, 'merge-base', '--is-ancestor', prepared, tip);
+    await git(repo.path, 'merge-base', '--is-ancestor', acceptedTip, tip);
+    assert.notEqual(tip, prepared);
+    assert.notEqual(tip, acceptedTip);
     assert.deepEqual(await new Scheduler(f.h, f.root).baseDrift(), []);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('Acceptance records the proven SHA, so a base update cannot slip unverified work in', async () => {
+  const f = await runtimeFixture();
+  try {
+    const repo = repositories(f.config)[0];
+    const target = `refs/heads/${repo.targetBranch}`;
+    await git(repo.path, 'update-ref', target, await git(repo.path, 'rev-parse', 'HEAD'));
+    const scheduler = new Scheduler(f.h, f.root);
+    await scheduler.init();
+    const board = f.h.createBoard('Проверяемая доска');
+    const task = f.h.addTask(board.id, input('Задача с доказательством'));
+    f.h.approve(board.id);
+    f.h.pause(false);
+    await scheduler.drain();
+    const proven = f.store.read().tasks.find((t) => t.id === task.id)!.resultSha!;
+    assert.ok(proven, 'задача должна завершиться интеграцией');
+
+    // Перенос базы двигает вершину ветки подготовкой, которую гейты не видели.
+    // Приёмка, читавшая вершину, закрепила бы её как проверенную работу.
+    await writeFile(join(repo.path, 'REGRESSION.md'), '# not proven by any gate\n');
+    await git(repo.path, 'add', 'REGRESSION.md');
+    await git(repo.path, '-c', 'core.hooksPath=/dev/null', 'commit', '--no-gpg-sign', '-m', 'unproven');
+    await updateBase(f.config, f.root);
+    const tip = await git(repo.path, 'rev-parse', target);
+    assert.notEqual(tip, proven, 'вершина ушла вперёд непроверенным коммитом');
+
+    const accepted = await acceptBoard(f.h, board.id, 'codex');
+    assert.equal(accepted.status, 'accepted');
+    const snapshot = f.store.read().boards.find((b) => b.id === board.id)!.revisions.at(-1)!
+      .snapshot!;
+    assert.equal(snapshot.sha, proven, 'принят доказанный SHA, а не вершина ветки');
+    assert.notEqual(snapshot.sha, tip);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('The scheduler classifies a refusal itself: a runtime that never ran refunds, one that worked does not', async () => {
+  const f = await runtimeFixture();
+  const refusing = (error: Error) => ({
+    ...adapters,
+    demo: {
+      ...adapters.demo,
+      name: 'demo' as const,
+      execute: () => Promise.reject(error),
+    },
+  });
+  try {
+    const repo = repositories(f.config)[0];
+    await git(repo.path, 'update-ref', `refs/heads/${repo.targetBranch}`, await git(repo.path, 'rev-parse', 'HEAD'));
+    const board = f.h.createBoard('Доска');
+    const refused = f.h.addTask(board.id, input('Задача с отказом окружения'));
+    f.h.approve(board.id);
+    f.h.pause(false);
+
+    // Отказ окружения приходит исключением из runtime — классифицирует его
+    // scheduler, а не вызывающий. Тест, подставляющий флаг руками, прошёл бы
+    // и с удалённой классификацией.
+    const blocked = new Scheduler(f.h, f.root, refusing(new BlockedError('demo: Not logged in')));
+    await blocked.drain();
+    assert.equal(f.store.read().tasks.find((t) => t.id === refused.id)!.status, 'failed');
+    assert.equal(f.store.read().tasks.find((t) => t.id === refused.id)!.attempt, 0);
+    assert.equal(f.store.read().runs.at(-1)!.blocked, true);
+    await blocked.stop();
+
+    // Обычный сбой исполнителя попытку расходует.
+    f.h.retry(refused.id);
+    f.h.pause(false);
+    const failing = new Scheduler(f.h, f.root, refusing(new Error('demo: не справился')));
+    await failing.drain();
+    assert.equal(f.store.read().tasks.find((t) => t.id === refused.id)!.attempt, 1);
+    assert.equal(f.store.read().runs.at(-1)!.blocked, undefined);
+    await failing.stop();
   } finally {
     await f.cleanup();
   }

@@ -729,7 +729,10 @@ export class DevContour {
       if (!['failed', 'cancelled'].includes(t.status))
         throw new DomainError('Повтор доступен после сбоя или отмены');
       const spent = t.attempt;
-      if (t.attempt >= this.config.maxAttempts) {
+      // Сбрасывать нечего, пока бюджет не исчерпан: сообщать о сбросе, которого
+      // не было, значит записать в журнал неправду.
+      const exhausted = t.attempt >= this.config.maxAttempts;
+      if (exhausted) {
         if (!reset?.reason.trim())
           throw new DomainError(
             'Исчерпан лимит попыток. Устраните причину и повторите со сбросом, указав его причину',
@@ -738,7 +741,7 @@ export class DevContour {
       }
       t.status = t.approvedDigest ? 'ready' : 'draft';
       t.failure = undefined;
-      return reset?.reason.trim()
+      return exhausted && reset
         ? { taskId: id, reset: { spent, reason: reset.reason.trim() } }
         : { taskId: id };
     });

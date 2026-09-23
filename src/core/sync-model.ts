@@ -1,6 +1,6 @@
 import { preparationState } from './preparation-model.ts';
 import { z } from 'zod';
-import { taskInput } from './model.ts';
+import { taskInput, relativePath } from './model.ts';
 
 export const syncId = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -86,6 +86,7 @@ export const recordSchema = z.discriminatedUnion('kind', [
       title: z.string().min(1).max(180),
       content: z.string().min(1).max(60000),
       digest: hash,
+      source: relativePath.optional(),
       approvedAt: date,
     }),
   }),
