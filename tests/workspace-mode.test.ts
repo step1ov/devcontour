@@ -446,3 +446,37 @@ test('Embedded product map and local intent drive real worktrees, joint verifica
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('Handoff files are served from docs only, with their own type, and never from outside it', async () => {
+  const root = temp(),
+    repo = join(root, 'gym');
+  try {
+    mkdirSync(join(repo, 'docs/design/sketches'), { recursive: true });
+    writeFileSync(join(repo, 'docs/design/sketches/screen.html'), '<p>Экран</p>');
+    writeFileSync(join(repo, 'docs/design/sketches/screen.css'), '.a{color:#fff}');
+    writeFileSync(join(repo, 'docs/notes.env'), 'SECRET=1');
+    writeFileSync(join(repo, 'secrets.json'), '{"token":"1"}');
+    const app = await startWorkspace(repo, { port: 0, workspaceMode: 'embedded' });
+    try {
+      const get = (path: string) => fetch(app.url + '/api/design/file/' + path);
+      const page = await get('docs/design/sketches/screen.html');
+      assert.equal(page.status, 200);
+      assert.match(page.headers.get('content-type')!, /^text\/html/);
+      // A page keeps its own stylesheet; isolation is the sandboxed frame.
+      assert.match(page.headers.get('content-security-policy')!, /style-src 'self'/);
+      assert.equal(await page.text(), '<p>Экран</p>');
+      const style = await get('docs/design/sketches/screen.css');
+      assert.equal(style.status, 200);
+      assert.match(style.headers.get('content-type')!, /^text\/css/);
+      // Outside docs, above it, and an extension nobody hands off are all refused.
+      assert.equal((await get('secrets.json')).status, 400);
+      assert.equal((await get('docs/../secrets.json')).status, 400);
+      assert.equal((await get('docs/notes.env')).status, 415);
+      assert.equal((await get('docs/design/sketches/missing.html')).status, 404);
+    } finally {
+      await app.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

@@ -165,6 +165,51 @@ export async function serve(
           res.end(await readFile(file));
           return;
         }
+        // The handoff package is read in the panel, not only listed there. Files
+        // are served under a path-shaped URL so a sketch's own stylesheet and
+        // script resolve relatively, and only from docs/ of this workspace.
+        if (req.method === 'GET' && path.startsWith('/api/design/file/')) {
+          const root = h?.config.workspaceRoot ?? options.bootstrap?.workspace;
+          const wanted = decodeURIComponent(path.slice('/api/design/file/'.length));
+          if (!root || !wanted.startsWith('docs/') || wanted.split('/').includes('..'))
+            throw new DomainError('Путь не разрешён', 400);
+          const directory = await realpath(join(root, 'docs'));
+          const file = await realpath(join(root, wanted));
+          if (!file.startsWith(directory + sep)) throw new DomainError('Путь не разрешён', 403);
+          const types: Record<string, string> = {
+            '.html': 'text/html; charset=utf-8',
+            '.css': 'text/css; charset=utf-8',
+            '.js': 'text/javascript; charset=utf-8',
+            '.mjs': 'text/javascript; charset=utf-8',
+            '.json': 'application/json; charset=utf-8',
+            '.md': 'text/plain; charset=utf-8',
+            '.txt': 'text/plain; charset=utf-8',
+            '.svg': 'image/svg+xml',
+            '.png': 'image/png',
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.webp': 'image/webp',
+          };
+          const type = types[extname(file).toLowerCase()];
+          if (!type) throw new DomainError('Неподдерживаемый тип файла', 415);
+          // A document keeps its own subresources; isolation comes from the
+          // sandboxed frame the panel renders it in, not from blocking its CSS.
+          const html = type.startsWith('text/html');
+          res.writeHead(200, {
+            'Content-Type': type,
+            'Cache-Control': 'no-cache',
+            'X-Content-Type-Options': 'nosniff',
+            'Content-Security-Policy': html
+              ? "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; " +
+                "font-src 'self' data:; " +
+                "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; " +
+                "connect-src 'self' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; " +
+                "frame-ancestors 'self'; base-uri 'none'; form-action 'none'"
+              : "default-src 'none'; sandbox",
+          });
+          res.end(await readFile(file));
+          return;
+        }
         if (req.method === 'POST' && path === '/api/preparation/answer' && preparationStore) {
           json(res, 200, new Preparation(preparationStore).answer(await body(req)));
           return;

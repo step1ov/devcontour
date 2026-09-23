@@ -9,6 +9,58 @@ import { Label } from '@/ui/label.tsx';
 import { Textarea } from '@/ui/textarea.tsx';
 import { EditActions, Lines, Section, SectionNav, useSectionDraft } from './BriefEditing.tsx';
 
+const fileUrl = (path: string) =>
+  '/api/design/file/' + path.split('/').map(encodeURIComponent).join('/');
+const extensionOf = (path: string) => (path.match(/\.([a-z0-9]+)$/i)?.[1] ?? '').toLowerCase();
+const images = new Set(['png', 'jpg', 'jpeg', 'webp', 'svg']);
+const pages = new Set(['html', 'htm']);
+
+// A handoff entry is meant to be looked at. A page renders in a sandboxed frame
+// and an export as an image; everything else stays a link, because a stylesheet
+// tells the reader nothing when embedded.
+function Artifact({ title, path }: { title: string; path: string }) {
+  const extension = extensionOf(path);
+  const url = fileUrl(path);
+  return (
+    <Card>
+      <CardContent className="grid gap-3 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="flex items-center gap-2">
+            <Palette className="text-primary size-4 shrink-0" aria-hidden="true" />
+            <strong>{title}</strong>
+          </span>
+          <a
+            href={url}
+            target="_blank"
+            rel="noreferrer"
+            className="text-primary text-sm underline-offset-4 hover:underline"
+          >
+            Открыть отдельно
+            <ExternalLink aria-hidden="true" className="ml-1 inline size-3" />
+          </a>
+        </div>
+        <code className="text-muted-foreground font-mono text-xs break-all">{path}</code>
+        {pages.has(extension) ? (
+          <iframe
+            src={url}
+            title={title}
+            loading="lazy"
+            sandbox="allow-scripts"
+            className="bg-background h-[34rem] w-full rounded-sm border"
+          />
+        ) : images.has(extension) ? (
+          <img
+            src={url}
+            alt={title}
+            loading="lazy"
+            className="max-h-[34rem] w-auto rounded-sm border"
+          />
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
 const sections = [
   ['palette', 'Палитра'],
   ['tokens', 'Токены'],
@@ -468,14 +520,10 @@ export function DesignBriefView({
             <EditActions onCancel={close} busy={busy} />
           </form>
         ) : content.handoff.length ? (
-          <ul className="grid gap-2">
+          <ul className="grid gap-5">
             {content.handoff.map((item, i) => (
-              <li key={i} className="flex items-center gap-2">
-                <Palette className="text-primary size-4 shrink-0" aria-hidden="true" />
-                <span>{item.title}</span>
-                <code className="text-muted-foreground font-mono text-sm break-all">
-                  {item.path}
-                </code>
+              <li key={i}>
+                <Artifact title={item.title} path={item.path} />
               </li>
             ))}
           </ul>
