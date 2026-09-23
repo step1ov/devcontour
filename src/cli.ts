@@ -27,6 +27,7 @@ import { doctor } from './runner/doctor.ts';
 import { cleanupEnvironment } from './runner/environment.ts';
 import { importKnowledge } from './runner/knowledge.ts';
 import { DeliveryRunner } from './runner/forge.ts';
+import { updateBase } from './runner/base-update.ts';
 import { lockContextFile, taskContext } from './runner/context.ts';
 import { ResourcePool, resourceDatabase, processAlive } from './runner/resources.ts';
 import { mkdir, writeFile, readFile, realpath, rename } from 'node:fs/promises';
@@ -154,7 +155,7 @@ async function main() {
       'DevContour · AI-native разработка\nЗапуск: npm run devcontour -- <команда> [параметры]\n\n' +
         'devcontour evals [--live --runtime codex|claude --model MODEL --repetitions 3 --max-calls 18]\ndevcontour metrics [--repository-id main] --workspace ...\ndevcontour requirements-snapshot --repository-id main --file docs/spec.md --workspace ...\ndevcontour requirements-report --repository-id main --workspace ...\ndevcontour requirements-correct --board ID --reason ... --workspace ...\ndevcontour capabilities\ndevcontour mcp --workspace /absolute/workspace\ndevcontour agent --file request.json --workspace /absolute/workspace\n' +
         'devcontour sync [--member alice] [--allow-branch-change] [--resolutions file.json] --workspace ...\ndevcontour sync-status --workspace ...\ndevcontour assign-task --task <id> --member alice --workspace ...\n' +
-        'devcontour storage-migrate --workspace ...\ndevcontour doctor [--probe] --workspace ...\ndevcontour handoff | remote-check --changeset CHG-1 --workspace ...\ndevcontour knowledge-import --source /donor --files README.md,docs/api.md [--ref HEAD] --workspace ...\ndevcontour environment-cleanup --receipt /absolute/receipt/environment.json --workspace ...\nДля нового проекта агент спрашивает абсолютный путь workspace. Все команды принимают --workspace /absolute/path вместо --data.\ndevcontour workspace-init --file /workspace/workspace.json [--data ...]\ndevcontour changeset-create --file changeset.json --data ...\ndevcontour workspace-verify | changeset-accept --changeset CHG-1 --data ...\ndevcontour journal --data ...\ndevcontour context-lock [--ref HEAD] | context-show --task T1 --workspace ...\ndevcontour resources | resource-release --key <key> --token <token> --cleanup-confirmed --workspace ...\ndevcontour setup --repository /absolute/product --profile <id> --workspace /absolute/workspace [--brief docs/spec.md] [--approval-mode agent|operator]\ndevcontour demo [--port 4317] | serve --workspace /absolute/workspace [--port 4317] [--dev]\ndevcontour init --repository /absolute/repo --data .devcontour-local\ndevcontour run | export | import-plan --file plan.json | doctor --data ...\ndevcontour plan --brief brief.md --runtime codex --data .devcontour-local\ndevcontour review-contract --file contract.json --author-runtime codex|claude --data ...\ndevcontour review-plan | accept --board B1 --author-runtime codex|claude --data ...\ndevcontour queue --start | --pause --data ...\ndevcontour retry --task T1 | edit-task --task T1 --file task.json | correct --board B1 --roots T1,T2 --reason ... --data ...',
+        'devcontour storage-migrate --workspace ...\ndevcontour doctor [--probe] --workspace ...\ndevcontour handoff | remote-check --changeset CHG-1 --workspace ...\ndevcontour knowledge-import --source /donor --files README.md,docs/api.md [--ref HEAD] --workspace ...\ndevcontour environment-cleanup --receipt /absolute/receipt/environment.json --workspace ...\nДля нового проекта агент спрашивает абсолютный путь workspace. Все команды принимают --workspace /absolute/path вместо --data.\ndevcontour workspace-init --file /workspace/workspace.json [--data ...]\ndevcontour changeset-create --file changeset.json --data ...\ndevcontour workspace-verify | changeset-accept --changeset CHG-1 --data ...\ndevcontour journal --data ...\ndevcontour context-lock [--ref HEAD] | context-show --task T1 --workspace ...\ndevcontour base-update --workspace ... (переносит подготовку рабочей ветки в базу прогонов; очередь на паузе)\ndevcontour resources | resource-release --key <key> --token <token> --cleanup-confirmed --workspace ...\ndevcontour setup --repository /absolute/product --profile <id> --workspace /absolute/workspace [--brief docs/spec.md] [--approval-mode agent|operator]\ndevcontour demo [--port 4317] | serve --workspace /absolute/workspace [--port 4317] [--dev]\ndevcontour init --repository /absolute/repo --data .devcontour-local\ndevcontour run | export | import-plan --file plan.json | doctor --data ...\ndevcontour plan --brief brief.md --runtime codex --data .devcontour-local\ndevcontour review-contract --file contract.json --author-runtime codex|claude --data ...\ndevcontour review-plan | accept --board B1 --author-runtime codex|claude --data ...\ndevcontour queue --start | --pause --data ...\ndevcontour retry --task T1 | edit-task --task T1 --file task.json | correct --board B1 --roots T1,T2 --reason ... --data ...',
     );
     return;
   }
@@ -339,6 +340,7 @@ async function main() {
     'knowledge-import',
     'environment-cleanup',
     'context-lock',
+    'base-update',
     'context-show',
     'resources',
     'resource-release',
@@ -592,6 +594,12 @@ async function main() {
           packs: await lockContextFile(config, join(root, 'config.json'), option('--ref', 'HEAD')),
           next: 'Перезапустите сервер, чтобы загрузить закреплённый контекст.',
         };
+      } else if (operation === 'base-update') {
+        const s = store.read();
+        if (!s.paused) throw new Error('Сначала приостановите очередь: queue --pause');
+        if (s.runs.some((r) => r.status === 'active'))
+          throw new Error('Дождитесь завершения попыток перед переносом базы');
+        result = await updateBase(config, root);
       } else if (operation === 'context-show') {
         const task = store.read().tasks.find((t) => t.id === option('--task', ''));
         if (!task) throw new Error('Задача не найдена');

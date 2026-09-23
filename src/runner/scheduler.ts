@@ -62,6 +62,43 @@ export class Scheduler {
       await this.assertTargetDetached(repo.id);
     }
   }
+  /**
+   * Насколько база прогонов отстала от рабочей ветки репозитория.
+   *
+   * Прогон ответвляется от ветки интеграции, а контракты, схемы и каркас
+   * ведущий агент и человек готовят на рабочей ветке. Пока эти линии не
+   * сведены, исполнитель молча получает дерево без контракта, который ему
+   * поручено выполнить, — и тратит настоящий прогон впустую.
+   */
+  async baseDrift() {
+    const drift: { repositoryId: string; branch: string; behind: number; ahead: number }[] = [];
+    for (const repo of repositories(this.h.config)) {
+      const target = this.targetFor(repo.id);
+      const head = await git(repo.path, 'rev-parse', 'HEAD');
+      const tip = await git(repo.path, 'rev-parse', target);
+      if (head === tip) continue;
+      const behind = Number(await git(repo.path, 'rev-list', '--count', `${target}..HEAD`));
+      if (!behind) continue;
+      drift.push({
+        repositoryId: repo.id,
+        branch: repo.targetBranch,
+        behind,
+        ahead: Number(await git(repo.path, 'rev-list', '--count', `HEAD..${target}`)),
+      });
+    }
+    return drift;
+  }
+  private async assertBaseCurrent() {
+    const drift = await this.baseDrift();
+    if (!drift.length) return;
+    throw new Error(
+      'База прогонов отстала от рабочей ветки: ' +
+        drift
+          .map((d) => `${d.repositoryId} — ${d.branch} без ${d.behind} коммитов`)
+          .join('; ') +
+        '. Выполните devcontour base-update, иначе исполнитель получит дерево без подготовленной работы.',
+    );
+  }
   private async assertTargetDetached(repositoryId = 'main') {
     const repo = repository(this.h.config, repositoryId);
     const list = await git(repo.path, 'worktree', 'list', '--porcelain');
@@ -108,6 +145,8 @@ export class Scheduler {
         const r = this.h.store.read().runs.find((r) => r.id === id);
         if (r?.status !== 'active') job.controller.abort();
       }
+      if (!this.h.store.read().paused && this.jobs.size < this.h.config.concurrency)
+        await this.assertBaseCurrent();
       while (this.jobs.size < this.h.config.concurrency) {
         if (!this.h.store.read().paused) assertTeamCheckout(this.h);
         const run = this.h.claim(this.owner);

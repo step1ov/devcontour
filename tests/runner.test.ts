@@ -14,6 +14,8 @@ import { junitSummary } from '../src/runner/gates.ts';
 import { input } from './helpers.ts';
 import { acceptBoard } from '../src/runner/agent-control.ts';
 import { ProjectMemory } from '../src/application/memory.ts';
+import { repositories } from '../src/core/repositories.ts';
+import { updateBase } from '../src/runner/base-update.ts';
 async function runtimeFixture() {
   const root = await mkdtemp(join(tmpdir(), 'devcontour-runner-'));
   await setupDemo(root);
@@ -308,4 +310,61 @@ test('Process timeout interrupts actual child processes', async () => {
   });
   assert.equal(r.timedOut, true);
   assert.notEqual(r.code, 0);
+});
+
+test('A stale run base stops the queue and base-update brings the preparation in', async () => {
+  const f = await runtimeFixture();
+  try {
+    const repo = repositories(f.config)[0];
+    const target = `refs/heads/${repo.targetBranch}`;
+    const commit = async (name: string) => {
+      await writeFile(join(repo.path, name), '# ' + name + '\n');
+      await git(repo.path, 'add', name);
+      await git(repo.path, '-c', 'core.hooksPath=/dev/null', 'commit', '--no-gpg-sign', '-m', name);
+      return git(repo.path, 'rev-parse', 'HEAD');
+    };
+
+    // База начинает совпадать с рабочей веткой: дальше проверяется расхождение,
+    // а не то, что демо-фикстура уже успела проинтегрировать.
+    await git(repo.path, 'update-ref', target, await git(repo.path, 'rev-parse', 'HEAD'));
+
+    // Ведущий агент готовит контракт на рабочей ветке. База прогонов его не
+    // содержит, поэтому исполнитель получил бы дерево без контракта.
+    const prepared = await commit('CONTRACT.md');
+    const scheduler = new Scheduler(f.h, f.root);
+    await scheduler.init();
+    f.h.pause(false);
+    const before = f.store.read().runs.length;
+    // Диспетчер отказывается выдавать работу и называет команду, которой это
+    // чинится. Цикл планировщика такой отказ превращает в паузу очереди.
+    await assert.rejects(scheduler.tick(), /base-update/);
+    assert.equal(f.store.read().runs.length, before, 'ни одного прогона на устаревшей базе');
+    await scheduler.stop();
+
+    // Перемотка: цель — предок рабочей ветки, история не переписывается.
+    const ff = await updateBase(f.config, f.root);
+    assert.equal(ff.updated[0].kind, 'fast-forward');
+    assert.equal(await git(repo.path, 'rev-parse', target), prepared);
+    assert.deepEqual(await new Scheduler(f.h, f.root).baseDrift(), []);
+
+    // Слияние: обе линии несут работу — принятый прогон в базе и новая
+    // подготовка в рабочей ветке. Контур сводит их явной командой.
+    await git(repo.path, 'update-ref', target, await git(repo.path, 'rev-parse', 'HEAD~1'));
+    const accepted = join(f.root, 'worktrees', 'accepted-fixture');
+    await git(repo.path, 'worktree', 'add', '--detach', accepted, target);
+    await writeFile(join(accepted, 'ACCEPTED.md'), '# accepted\n');
+    await git(accepted, 'add', 'ACCEPTED.md');
+    await git(accepted, '-c', 'core.hooksPath=/dev/null', 'commit', '--no-gpg-sign', '-m', 'accepted');
+    await git(repo.path, 'update-ref', target, await git(accepted, 'rev-parse', 'HEAD'));
+    await git(repo.path, 'worktree', 'remove', '--force', accepted);
+
+    const merged = await updateBase(f.config, f.root);
+    assert.equal(merged.updated[0].kind, 'merge');
+    const tip = await git(repo.path, 'rev-parse', target);
+    // Обе линии в базе: и подготовка, и принятая работа.
+    await git(repo.path, 'merge-base', '--is-ancestor', prepared, tip);
+    assert.deepEqual(await new Scheduler(f.h, f.root).baseDrift(), []);
+  } finally {
+    await f.cleanup();
+  }
 });
