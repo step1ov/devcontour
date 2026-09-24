@@ -32,8 +32,7 @@ function runtimeReason(
   let reason: string | undefined;
   if (name === 'claude') {
     const last = runtimeEvents(stdout).events.findLast((e) => e.type === 'result') as
-      | { result?: unknown }
-      | undefined;
+      { result?: unknown } | undefined;
     if (typeof last?.result === 'string') reason = last.result;
   }
   reason ??= stderr
@@ -45,7 +44,6 @@ function runtimeReason(
   const cleaned = (redact ? redact(reason) : reason).slice(0, 300);
   return `: ${cleaned}`;
 }
-
 
 // Какую модель runtime выбрал на самом деле. Записывалась запрошенная, а при
 // незакреплённой модели — null: оператор не мог увидеть, что прогон ушёл на
@@ -153,6 +151,26 @@ export interface AgentAdapter {
   name: RuntimeName;
   execute(request: AgentRequest): Promise<AgentResult>;
 }
+/**
+ * Может ли ревьюер этого профиля запускать проверки.
+ *
+ * Возможности ревьюеров разных рантаймов разошлись: codex получал shell по
+ * умолчанию, а claude-ревьюер был жёстко ограничен чтением и не мог выполнить
+ * ни одной проверки — независимое ревью сводилось к чтению diff. Теперь право
+ * запускать команды даётся одинаково и только явно, профилем инструментов.
+ *
+ * Правка проверяемого кода остаётся запрещённой в любом случае, и это не
+ * держится на одном запрете инструмента: после ревью контур сверяет состояние
+ * worktree и HEAD с исходным, и любое изменение отменяет одобрение.
+ */
+function reviewRunsChecks(profile?: ToolProfile) {
+  return profile?.runtime === 'codex'
+    ? profile.codexShell
+    : !!profile?.claudeTools?.includes('Bash');
+}
+function reviewTools(profile?: ToolProfile) {
+  return ['Read', 'Glob', 'Grep', ...(reviewRunsChecks(profile) ? ['Bash'] : [])];
+}
 export function cliArguments(
   runtime: 'claude' | 'codex',
   r: AgentRequest,
@@ -186,7 +204,9 @@ export function cliArguments(
       // который не смог авторизоваться, убивал прогон на стадии ревью —
       // работа была сделана и проверена, а результат терялся из-за сервера,
       // к контуру отношения не имеющего. Прогон начинается с пустого набора.
-      ...(r.toolProfile ? codexTools(r.toolProfile) : ['--ignore-user-config', '-c', 'mcp_servers={}']),
+      ...(r.toolProfile
+        ? codexTools(r.toolProfile)
+        : ['--ignore-user-config', '-c', 'mcp_servers={}']),
       '-',
     ];
   return [
@@ -201,15 +221,29 @@ export function cliArguments(
     r.review ? 'dontAsk' : 'acceptEdits',
     '--tools',
     (r.review
-      ? ['Read', 'Glob', 'Grep']
+      ? reviewTools(r.toolProfile)
       : (r.toolProfile?.claudeTools ?? ['Read', 'Glob', 'Grep', 'Edit', 'Write'])
     ).join(','),
-    ...(r.review ? ['--disallowedTools', 'Bash,Edit,Write,NotebookEdit'] : []),
+    // Правка проверяемого кода ревьюеру запрещена всегда. Запуск проверок —
+    // только если профиль его дал.
+    ...(r.review
+      ? [
+          '--disallowedTools',
+          [
+            'Edit',
+            'Write',
+            'NotebookEdit',
+            ...(reviewRunsChecks(r.toolProfile) ? [] : ['Bash']),
+          ].join(','),
+        ]
+      : []),
     ...(r.toolProfile
       ? [
           '--allowedTools',
           claudeRules(r.toolProfile)
-            .filter((rule) => !r.review || !rule.startsWith('Bash'))
+            .filter(
+              (rule) => !r.review || reviewRunsChecks(r.toolProfile) || !rule.startsWith('Bash'),
+            )
             .join(','),
         ]
       : []),

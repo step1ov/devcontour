@@ -314,8 +314,10 @@ test('CLI adapters use structured outputs, stdin prompts and restricted review p
   assert.equal(codex.at(-1), '-');
   const claude = cliArguments('claude', r, 'schema.json', 'result.json');
   assert.ok(claude.includes('dontAsk'));
+  // Без профиля ревьюер только читает: право запускать проверки даётся явно,
+  // а не подразумевается.
   assert.ok(claude.includes('Read,Glob,Grep'));
-  assert.ok(claude.includes('Bash,Edit,Write,NotebookEdit'));
+  assert.ok(claude.includes('Edit,Write,NotebookEdit,Bash'));
   assert.ok(!claude.includes('--dangerously-skip-permissions'));
   // Прогон не наследует конфигурацию оператора: чужой MCP-сервер, не сумевший
   // авторизоваться, убивал ревью — работа была сделана и проверена, а

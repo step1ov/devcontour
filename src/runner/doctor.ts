@@ -3,12 +3,7 @@ import { constants } from 'node:fs';
 import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Config, Role } from '../core/model.ts';
-import {
-  repositories,
-  roleBinding,
-  reviewerBinding,
-  declaredRoles,
-} from '../core/repositories.ts';
+import { repositories, roleBinding, reviewerBinding, declaredRoles } from '../core/repositories.ts';
 import { validateWorkflow } from '../core/workflow.ts';
 import { command, git } from './process.ts';
 import { outdatedContextPacks } from './context-library.ts';
@@ -63,6 +58,22 @@ export async function doctor(config: Config, root: string, probe = false) {
       })),
     ),
   );
+  // Независимое ревью, которое может только читать diff, слабее ревью,
+  // которое может запустить проверки. Право даётся профилем инструментов, и
+  // разойтись оно может незаметно: раньше codex-ревьюер получал shell по
+  // умолчанию, а claude-ревьюер — нет. Doctor называет это прямо.
+  for (const { repo, role, review, binding } of bindings.filter((b) => b.review)) {
+    const profile = toolProfileFor(config, binding.runtime, role, review, repo.id);
+    const runsChecks =
+      binding.runtime === 'codex' ? profile?.codexShell : !!profile?.claudeTools?.includes('Bash');
+    checks.push({
+      id: `reviewer:${repo.id}:${role}`,
+      status: runsChecks ? 'passed' : 'not-checked',
+      detail: runsChecks
+        ? `${binding.runtime} может выполнить проверки при ревью`
+        : `${binding.runtime} проверяет только чтением: профиль не даёт запускать команды. Ревью не обнаружит то, что видно лишь прогоном.`,
+    });
+  }
   const runtimes = new Set(bindings.map((b) => b.binding.runtime));
   for (const runtime of ['git', ...runtimes].filter((s) => s !== 'demo'))
     await check('cli:' + runtime, async () => {
@@ -85,7 +96,10 @@ export async function doctor(config: Config, root: string, probe = false) {
             : ['codex', 'exec', '--sandbox', 'read-only', '-c', 'approval_policy="never"', 'ping'];
         const r = await command(argv, config.repository, { ...execution, timeoutMs: 120000 });
         const output = r.stdout + r.stderr;
-        if (r.code || /not logged in|please run \/login|invalid api key|credit balance/i.test(output))
+        if (
+          r.code ||
+          /not logged in|please run \/login|invalid api key|credit balance/i.test(output)
+        )
           throw new Error(
             `Runtime не авторизован в окружении прогона: ${output.trim().slice(-200) || 'код ' + r.code}`,
           );

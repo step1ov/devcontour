@@ -171,7 +171,7 @@ test('Execution environment is explicit, missing secrets fail and logs redact in
   assert.throws(() => environmentSchema.parse({ values: { DEVCONTOUR_RUN_ID: 'spoof' } }));
 });
 
-test('Runtime profiles carry only explicit MCP definitions and reviewer has no editing/Bash tools', () => {
+test('Runtime profiles carry only explicit MCP definitions; a reviewer edits nothing and runs checks only when granted', () => {
   const p = toolProfileSchema.parse({
     runtime: 'claude',
     claudeTools: ['Read', 'Bash', 'Edit'],
@@ -193,9 +193,18 @@ test('Runtime profiles carry only explicit MCP definitions and reviewer has no e
     's',
     'r',
   );
-  assert.ok(args.includes('Read,Glob,Grep'));
-  assert.ok(args.includes('mcp__gitlab__get_project'));
-  assert.ok(!args.some((s) => s.includes('Bash(npm')));
+  // Профиль дал ревьюеру Bash — значит он может запустить проверки, и его
+  // правила запуска остаются в силе. Право явное: без Bash в claudeTools
+  // ревьюер по-прежнему только читает. Раньше запрет был жёстким для claude и
+  // отсутствовал для codex, и сила независимого ревью зависела от рантайма.
+  assert.ok(args.includes('Read,Glob,Grep,Bash'));
+  assert.ok(args.some((s) => s.includes('mcp__gitlab__get_project')));
+  assert.ok(args.some((s) => s.includes('Bash(npm')));
+  // Править проверяемый код нельзя в любом случае.
+  const denied = args[args.indexOf('--disallowedTools') + 1];
+  assert.match(denied, /Edit/);
+  assert.match(denied, /Write/);
+  assert.equal(denied.includes('Bash'), false);
   assert.match(codexTools({ ...p, runtime: 'codex' }).join(' '), /enabled_tools.*get_project/);
 });
 

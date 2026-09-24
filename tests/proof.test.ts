@@ -16,6 +16,7 @@ import { git } from '../src/runner/process.ts';
 import { acceptBoard } from '../src/runner/agent-control.ts';
 import { requirementSnapshot, requirementReport } from '../src/runner/requirements.ts';
 import { input } from './helpers.ts';
+import { cliArguments } from '../src/runner/adapters.ts';
 
 const SHA = 'a'.repeat(40);
 const OTHER = 'b'.repeat(40);
@@ -234,4 +235,47 @@ test('На настоящем прогоне приёмка требует им�
     store.close();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('Ревьюер запускает проверки одинаково в обоих рантаймах и только по профилю', () => {
+  // Возможности разошлись: codex получал shell по умолчанию, а claude-ревьюер
+  // был ограничен чтением и не мог выполнить ни одной проверки — независимое
+  // ревью сводилось к чтению diff. Право даётся явно и одинаково.
+  const base = {
+    runtime: 'claude' as const,
+    mcp: {},
+    claudeAllowedTools: [],
+    codexShell: false,
+    codexNetwork: false,
+  };
+  const request = (profile: typeof base & { claudeTools?: string[] }) =>
+    cliArguments(
+      'claude',
+      {
+        review: true,
+        toolProfile: profile,
+        prompt: 'p',
+        cwd: '/tmp',
+        artifactDir: '/tmp',
+        task: {} as never,
+        signal: new AbortController().signal,
+        timeoutMs: 1000,
+      } as never,
+      '/tmp/schema.json',
+      '/tmp/result.json',
+    );
+
+  const reading = request({ ...base, claudeTools: ['Read', 'Glob', 'Grep'] });
+  const tools = reading[reading.indexOf('--tools') + 1];
+  assert.equal(tools.includes('Bash'), false, 'без права проверок shell не даётся');
+  assert.match(reading[reading.indexOf('--disallowedTools') + 1], /Bash/);
+
+  const running = request({ ...base, claudeTools: ['Read', 'Glob', 'Grep', 'Bash'] });
+  assert.match(running[running.indexOf('--tools') + 1], /Bash/, 'профиль дал право проверок');
+  const denied = running[running.indexOf('--disallowedTools') + 1];
+  assert.equal(denied.includes('Bash'), false);
+  // Править проверяемый код нельзя в любом случае: это запрет инструмента,
+  // а сверх него — сверка worktree и HEAD после ревью.
+  for (const forbidden of ['Edit', 'Write', 'NotebookEdit'])
+    assert.match(denied, new RegExp(forbidden));
 });
