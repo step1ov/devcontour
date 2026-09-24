@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { roles, taskInput } from './model.ts';
+import { taskInput } from './model.ts';
 export const planResult = z.object({
   title: z.string().min(3).max(180),
   description: z.string().max(5000),
@@ -18,7 +18,11 @@ export const planResult = z.object({
         key: z.string().regex(/^[A-Za-z0-9_-]+$/),
         title: z.string().min(3).max(180),
         description: z.string().min(10).max(12000),
-        role: z.enum(roles),
+        // Роли объявляет workspace, и схема плана не может знать их заранее.
+        // Перечисление из четырёх встроенных отклоняло бы верный план как
+        // «неизвестная роль»; принадлежность объявленным проверяет домен при
+        // импорте — там есть конфигурация и внятное сообщение.
+        role: taskInput.shape.role,
         dependsOn: z.array(z.string()),
         acceptance: z.array(z.string().min(3)).min(1),
         contracts: z.array(z.string()),

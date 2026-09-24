@@ -75,10 +75,14 @@ test('A workspace declares its own roles, and a task cannot name one that is not
       writePaths: ['apps/mobile'],
       reviewer: { runtime: 'claude' },
     };
-    assert.deepEqual(
-      declaredRoles(f.h.config).sort(),
-      ['architect', 'backend', 'frontend', 'mobile', 'qa', 'qa-mobile'],
-    );
+    assert.deepEqual(declaredRoles(f.h.config).sort(), [
+      'architect',
+      'backend',
+      'frontend',
+      'mobile',
+      'qa',
+      'qa-mobile',
+    ]);
 
     const b = f.h.createBoard('Board');
     const mobile = f.h.addTask(b.id, { ...input('Экран тренировки'), role: 'mobile' });
@@ -131,9 +135,8 @@ test('A component keeps the roles its own profile brought, across a config reloa
 });
 
 test('A stack pack arrives on declaration, and a library that moved ahead is a decision', async () => {
-  const { deliverContextPacks, outdatedContextPacks, adoptContextPack } = await import(
-    '../src/runner/context-library.ts'
-  );
+  const { deliverContextPacks, outdatedContextPacks, adoptContextPack } =
+    await import('../src/runner/context-library.ts');
   const repo = mkdtempSync(join(tmpdir(), 'devcontour-library-'));
   const pack = {
     id: 'design-system',
@@ -198,6 +201,67 @@ test('A task whose write scope cannot meet its role is refused before dispatch',
     });
     assert.equal(ok.role, 'engine');
   } finally {
+    f.cleanup();
+  }
+});
+
+test('The planner is told the declared roles and checks, not four fixed ones', async () => {
+  const { plan } = await import('../src/runner/planner.ts');
+  const f = fixture();
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-plan-'));
+  try {
+    f.h.config.mode = 'local';
+    // Конфигурация вправе не содержать ни одной встроенной роли. Подсказка,
+    // требующая architect/backend/frontend/qa, даёт план, который домен
+    // отклоняет как ссылку на несуществующую роль.
+    f.h.config.roles = {
+      engine: {
+        runtime: 'claude',
+        title: 'Разработчик ядра',
+        writePaths: ['packages/engine/src'],
+        requiresContract: true,
+        reviewer: { runtime: 'codex' },
+      },
+      'qa-api': { runtime: 'codex', writePaths: ['e2e/api'], reviewer: { runtime: 'claude' } },
+    };
+    let prompt = '';
+    await plan(f.h, root, 'Небольшой первый срез', 'claude', undefined, {
+      claude: {
+        name: 'claude' as const,
+        execute: (request: { prompt: string }) => {
+          prompt = request.prompt;
+          return Promise.resolve({
+            data: {
+              title: 'План',
+              description: 'Первый срез',
+              tasks: [
+                {
+                  key: 'engine-core',
+                  title: 'Ядро расчёта',
+                  description: 'Реализовать перебор сборки по утверждённому контракту.',
+                  role: 'engine',
+                  dependsOn: [],
+                  acceptance: ['Гейт задачи проходит целиком.'],
+                  contracts: [],
+                  writePaths: ['packages/engine/src'],
+                },
+              ],
+            },
+            log: '',
+            command: ['fixture'],
+          });
+        },
+      },
+    } as never);
+    assert.match(prompt, /engine/);
+    assert.match(prompt, /qa-api/);
+    assert.match(prompt, /packages\/engine\/src/);
+    assert.doesNotMatch(prompt, /Use architect, backend, frontend, qa roles/);
+    // Проверки компонента тоже названы: без них задача не может объявить
+    // область доказательства, а требование — сослаться на test gate.
+    assert.match(prompt, /Configured checks/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
     f.cleanup();
   }
 });
