@@ -167,3 +167,37 @@ test('A stack pack arrives on declaration, and a library that moved ahead is a d
     rmSync(repo, { recursive: true, force: true });
   }
 });
+
+test('A task whose write scope cannot meet its role is refused before dispatch', () => {
+  const f = fixture();
+  try {
+    f.h.config.roles.engine = {
+      runtime: 'claude',
+      title: 'Разработчик ядра',
+      writePaths: ['packages/engine/src'],
+      reviewer: { runtime: 'codex' },
+    };
+    const b = f.h.createBoard('Board');
+    // Область записи — пересечение роли и задачи. Когда они не пересекаются,
+    // исполнитель не вправе изменить ни одного файла: прогон отработал бы,
+    // потратил попытку и упёрся в «файлы вне области», хотя причина в
+    // постановке и видна была до выдачи.
+    assert.throws(
+      () =>
+        f.h.addTask(b.id, {
+          ...input('Задача мимо роли'),
+          role: 'engine',
+          writePaths: ['apps/api'],
+        }),
+      /не пересекается с областью роли/,
+    );
+    const ok = f.h.addTask(b.id, {
+      ...input('Задача внутри роли'),
+      role: 'engine',
+      writePaths: ['packages/engine/src/solve.ts'],
+    });
+    assert.equal(ok.role, 'engine');
+  } finally {
+    f.cleanup();
+  }
+});

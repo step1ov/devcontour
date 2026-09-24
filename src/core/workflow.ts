@@ -158,6 +158,21 @@ export function validateTaskContext(config: Config, task: TaskInput) {
     )
       throw new DomainError('Требование должно ссылаться на test gate: ' + link.gate);
   }
+  // Область записи — пересечение роли и задачи. Когда они не пересекаются,
+  // исполнитель не вправе изменить ни одного файла: прогон отработает, потратит
+  // попытку и упрётся в «изменены файлы вне области задачи/роли» — а причина в
+  // постановке, и видна она была ещё до выдачи.
+  const roleScope = roleBinding(config, task.role, task.repositoryId)?.writePaths;
+  if (task.writePaths?.length && roleScope?.length) {
+    const reachable = task.writePaths.filter(
+      (path) => withinPaths(path, roleScope) || roleScope.some((p) => withinPaths(p, [path])),
+    );
+    if (!reachable.length)
+      throw new DomainError(
+        `Область записи задачи (${task.writePaths.join(', ')}) не пересекается с областью роли ` +
+          `${task.role} (${roleScope.join(', ')}): исполнитель не сможет изменить ни одного файла`,
+      );
+  }
   if (task.gates) {
     const own = repository(config, task.repositoryId).gates;
     for (const id of task.gates)
