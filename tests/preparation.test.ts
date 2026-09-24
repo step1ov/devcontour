@@ -827,3 +827,72 @@ test('C3 is optional, scoped to a real container and consistent with C2', () => 
     f.cleanup();
   }
 });
+
+test('Setup пропускается только после всей цепочки: три согласования без интерфейса, пять с ним', () => {
+  // Инструкции агента обещали setup сразу после архитектуры, а CLI требовал
+  // референсы: агент, исполняющий инструкцию точно, упирался в запрещённый
+  // переход. Договор закрепляется здесь, на реальной проверке CLI, чтобы
+  // документация сверялась с ним, а не он с документацией.
+  for (const applicable of [false, true]) {
+    const root = mkdtempSync(join(tmpdir(), 'devcontour-chain-')),
+      data = join(root, 'workspace', '.devcontour-local');
+    mkdirSync(data, { recursive: true });
+    writeFileSync(
+      join(root, 'workspace', 'devcontour.workspace.json'),
+      JSON.stringify({ version: 1, mode: 'separate' }) + '\n',
+    );
+    const store = preparationStore(data);
+    try {
+      const p = new Preparation(store);
+      const changeId = approveProductOnly(p);
+      p.execute('preparation_architecture', {
+        changeId,
+        expectedDigest: null,
+        reason: 'Первая архитектура',
+        content: architecture,
+      });
+      approveStage(p, changeId, 'architecture');
+
+      // Два согласования — ровно то состояние, которое инструкции называли
+      // достаточным для setup.
+      assert.throws(() => requirePreparation(data), /референсы/);
+
+      p.execute('preparation_references', {
+        changeId,
+        expectedDigest: null,
+        reason: applicable ? 'Референсы собраны' : 'Интерфейс не затронут',
+        content: applicable
+          ? references
+          : { ...references, applicable: false, reason: 'Изменение без интерфейса' },
+      });
+      approveStage(p, changeId, 'references');
+
+      if (!applicable) {
+        // Три согласования: дизайн неприменим, и это решение тоже утверждено.
+        assert.ok(requirePreparation(data), 'setup допустим без дизайн-шагов');
+        continue;
+      }
+      // При применимом интерфейсе трёх мало.
+      assert.throws(() => requirePreparation(data), /концепт|эскиз/);
+      p.execute('preparation_concept', {
+        changeId,
+        expectedDigest: null,
+        reason: 'Концепт и эскизы',
+        content: concept,
+      });
+      approveStage(p, changeId, 'concept');
+      assert.throws(() => requirePreparation(data), /макет|дизайн-систем/);
+      p.execute('preparation_design', {
+        changeId,
+        expectedDigest: null,
+        reason: 'Палитра, токены и guidelines',
+        content: design,
+      });
+      approveStage(p, changeId, 'design');
+      assert.ok(requirePreparation(data), 'setup допустим после пяти согласований');
+    } finally {
+      store.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
