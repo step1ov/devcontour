@@ -768,7 +768,11 @@ export class DevContour {
   retry(id: string, reset?: { reason: string }) {
     return this.store.change('task.retry', (s) => {
       const t = task(s, id);
-      if (!['failed', 'cancelled'].includes(t.status))
+      // Задача на потолке попыток стоит в ready и молча не выдаётся: диспетчер
+      // её не берёт, а повтор отказывал, потому что она не «сбой». Сброс
+      // доступен из любого состояния, кроме идущей попытки: тупик одинаков.
+      const exhaustedReady = t.attempt >= this.config.maxAttempts && !t.activeRunId;
+      if (!['failed', 'cancelled'].includes(t.status) && !exhaustedReady)
         throw new DomainError('Повтор доступен после сбоя или отмены');
       const spent = t.attempt;
       // Сбрасывать нечего, пока бюджет не исчерпан: сообщать о сбросе, которого

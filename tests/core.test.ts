@@ -500,3 +500,32 @@ test('A task that produced nothing can return to draft, one that delivered canno
     f.cleanup();
   }
 });
+
+test('A ready task at the attempt ceiling is not a silent dead end', () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const t = f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    f.h.pause(false);
+    for (let i = 0; i < f.h.config.maxAttempts; i++) {
+      const run = f.h.claim('one')!;
+      f.h.fail(run.id, run.token, 'Исполнитель сообщил о незавершённой работе');
+      if (i + 1 < f.h.config.maxAttempts) f.h.retry(t.id);
+    }
+    // Постановку исправили и утвердили заново: задача снова ready, но бюджет
+    // остался израсходованным. Диспетчер её не берёт и ничего не говорит, а
+    // повтор отказывал, потому что она уже не «сбой», — тупик тот же.
+    f.h.reopen(t.id, 'Контракт исправлен, постановка обновлена');
+    f.h.approve(b.id);
+    assert.equal(f.store.read().tasks[0].status, 'ready');
+    assert.equal(f.store.read().tasks[0].attempt, f.h.config.maxAttempts);
+    assert.equal(f.h.claim('one'), undefined, 'диспетчер такую задачу не берёт');
+
+    f.h.retry(t.id, { reason: 'Причина устранена, даём задаче ход' });
+    assert.equal(f.store.read().tasks[0].attempt, 0);
+    assert.ok(f.h.claim('one'), 'после сброса задача выдаётся');
+  } finally {
+    f.cleanup();
+  }
+});

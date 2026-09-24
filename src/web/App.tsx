@@ -155,6 +155,7 @@ function TaskLive({
 }) {
   const run = runs.filter((r) => r.taskId === task.id).at(-1);
   const active = run?.status === 'active';
+  const exhausted = maxAttempts !== undefined && task.attempt >= maxAttempts;
   if (active)
     return (
       <div className="mt-2 grid gap-1">
@@ -177,7 +178,15 @@ function TaskLive({
       </small>
     );
   if (task.status === 'ready')
-    return <small className="text-muted-foreground mt-1 block">Готова, ждёт свободного исполнителя</small>;
+    return (
+      <small className={cn('mt-1 block', exhausted ? 'text-destructive' : 'text-muted-foreground')}>
+        {/* Задача на потолке попыток стоит в ready и молча не выдаётся:
+            диспетчер её не берёт, а строка обещала «ждёт исполнителя». */}
+        {exhausted
+          ? `Бюджет попыток исчерпан (${task.attempt} из ${maxAttempts}) — очередь её не выдаст. Повторите со сбросом: retry --task ${task.id} --reset --reason …`
+          : 'Готова, ждёт свободного исполнителя'}
+      </small>
+    );
   if (task.status === 'failed' && task.failure)
     return (
       <small className="text-destructive mt-1 block break-words">
@@ -185,7 +194,7 @@ function TaskLive({
         {task.failure}
         {/* Исчерпанный бюджет — тупик, пока о сбросе никто не знает: без этой
             строки остаётся только править базу руками. */}
-        {maxAttempts !== undefined && task.attempt >= maxAttempts && (
+        {exhausted && (
           <>
             {' '}
             Бюджет попыток исчерпан ({task.attempt} из {maxAttempts}). Устраните причину и
