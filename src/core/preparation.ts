@@ -670,6 +670,13 @@ export class Preparation {
         total: live.length,
         done: live.filter((t) => t.status === 'done').length,
         failed: live.filter((t) => t.status === 'failed').length,
+        // Счётчик сбоев без причины отправляет оператора искать её в журнале.
+        // Сама причина — самое важное на экране: она объясняет, почему работа
+        // не движется, и говорит, что делать.
+        failures: live
+          .filter((t) => t.status === 'failed' && t.failure)
+          .slice(-3)
+          .map((t) => ({ id: t.id, title: t.title, reason: t.failure! })),
         boards: s.boards
           .filter((b) =>
             b.revisions.some((r) => r.taskIds.some((id) => live.some((t) => t.id === id))),

@@ -197,6 +197,24 @@ function AgentWork({
 }) {
   const [open, setOpen] = useState(false);
   const recent = latest && Date.now() - new Date(latest.at).getTime() < 5 * 60 * 1000;
+  // Пока агент пишет — это главное на экране. Остывшая запись главной быть
+  // перестаёт: она занимала целую карточку над сгибом и отодвигала вниз то,
+  // что происходит сейчас.
+  if (latest && !recent && !open)
+    return (
+      <p className="text-muted-foreground mb-6 flex flex-wrap items-baseline gap-2 text-sm">
+        <CircleDot className="size-4 shrink-0 self-center" aria-hidden="true" />
+        <span className="min-w-0 break-words">
+          Последняя запись агента: {latest.note} · {ago(latest.at)}
+        </span>
+        {activity.length > 1 && (
+          <Button variant="ghost" size="sm" onClick={() => setOpen(true)} aria-expanded={false}>
+            <History aria-hidden="true" />
+            Вся история ({activity.length})
+          </Button>
+        )}
+      </p>
+    );
   return (
     <Card className="mb-6">
       <CardHeader className="flex-row items-center justify-between gap-3 pb-3">
@@ -206,7 +224,10 @@ function AgentWork({
           ) : (
             <CircleDot className="text-muted-foreground size-4" aria-hidden="true" />
           )}
-          Работа агента
+          {/* Заголовок «Работа агента» над сообщением восемнадцатичасовой
+              давности утверждает, что агент занят этим сейчас. Пока запись
+              свежая — это работа; дальше это последняя запись, и только. */}
+          {recent ? 'Работа агента' : 'Последняя запись агента'}
         </CardTitle>
         {activity.length > 1 && (
           <Button variant="ghost" size="sm" onClick={() => setOpen(!open)} aria-expanded={open}>
@@ -394,6 +415,23 @@ function SetupProgress({ setup, tasks }: { setup: View['setup']; tasks: number }
   ];
   const done = steps.filter((s) => s.done).length;
   const percent = Math.round((done / steps.length) * 100);
+  // Законченная настройка занимала лучшее место на экране и отодвигала живое
+  // состояние под сгиб. Пока она идёт — это главное, что происходит; когда
+  // закончена — одна строка, которую можно развернуть.
+  if (done === steps.length)
+    return (
+      <details className="text-muted-foreground mt-4 text-sm">
+        <summary className="cursor-pointer">Настройка контура завершена ({done} из {done})</summary>
+        <ul className="mt-2 grid gap-1">
+          {steps.map((step) => (
+            <li key={step.id} className="flex items-center gap-2">
+              <Check className="size-4 shrink-0" aria-hidden="true" />
+              {step.label}
+            </li>
+          ))}
+        </ul>
+      </details>
+    );
   return (
     <div className="mt-4 grid gap-3">
       <div className="flex items-baseline justify-between gap-3">
@@ -828,6 +866,18 @@ export function PreparationPanel() {
                     Принято задач: {view.delivery.done} из {view.delivery.total}. Сбоев:{' '}
                     {view.delivery.failed}.
                   </p>
+                  {/* Счёт сбоев без причины отправляет читателя в журнал, хотя
+                      причина — самое важное на экране: она объясняет, почему
+                      работа стоит. */}
+                  {view.delivery.failures?.length ? (
+                    <ul className="text-destructive mt-2 grid gap-1 text-sm">
+                      {view.delivery.failures.map((f) => (
+                        <li key={f.id} className="break-words">
+                          <strong className="font-medium">{f.title}</strong>: {f.reason}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
                   <Workers workers={view.workers ?? []} concurrency={view.setup?.concurrency} />
                   {view.delivery.boards.length > 0 && (
                     <ul className="mt-2 grid gap-2">
