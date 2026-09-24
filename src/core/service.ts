@@ -750,11 +750,17 @@ export class DevContour {
       if (t.resultSha)
         throw new DomainError('Задача дала принятый результат; нужна корректировка доски');
       if (t.activeRunId) throw new DomainError('Дождитесь завершения текущей попытки');
-      if (t.status === 'draft') return { taskId: id, alreadyDraft: true };
+      // Черновик тоже возвращается: снятое утверждение могло оставить за собой
+      // digest контрактов, и задача продолжала бы закреплять одну редакцию,
+      // ссылаясь на другую. Операция идемпотентна.
       const approved = t.approvedDigest;
       t.status = 'draft';
       t.approvedDigest = undefined;
       t.approval = undefined;
+      // Digest контрактов принадлежит снятому утверждению. Оставить его значит
+      // сказать, что задача закрепляет одну редакцию контракта, а ссылается на
+      // другую: исполнитель получил бы противоречащие обязательства.
+      t.contractDigests = {};
       t.failure = undefined;
       return { taskId: id, reason: reason.trim(), wasApproved: Boolean(approved) };
     });

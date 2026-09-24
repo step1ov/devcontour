@@ -473,6 +473,16 @@ test('A task that produced nothing can return to draft, one that delivered canno
     // был бы обход независимого согласования.
     assert.equal(draft.approvedDigest, undefined);
     assert.equal(draft.approval, undefined);
+    // Digest контрактов принадлежал снятому утверждению: оставить его значит
+    // закреплять одну редакцию контракта, ссылаясь на другую.
+    assert.deepEqual(draft.contractDigests, {});
+    // Идемпотентно: черновик со следами снятого утверждения тоже вычищается,
+    // иначе digest переживает возврат и противоречит новой привязке.
+    assert.deepEqual(f.h.reopen(t.id, 'Повторный возврат ничего не ломает'), {
+      taskId: t.id,
+      reason: 'Повторный возврат ничего не ломает',
+      wasApproved: false,
+    });
 
     // Задача с принятым результатом возвращается только корректировкой доски:
     // под неё уже велась работа, и история этого не должна терять.
