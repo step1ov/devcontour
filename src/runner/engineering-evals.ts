@@ -211,10 +211,13 @@ export async function engineeringEvals(raw: unknown = {}, fixtureAdapter?: Agent
         results.push({
           caseId: scenario.id,
           repetition,
+          // Провалившийся прогон — это «не справился», а не «не проверено»:
+          // отказ до первого гейта тоже обнаружение. «Не проверено» остаётся
+          // для случая, до которого не дошли вовсе.
           status:
             task.status === 'done'
               ? 'passed'
-              : run?.evidence.some((e) => !e.passed)
+              : run?.status === 'failed' || run?.evidence.some((e) => !e.passed)
                 ? 'failed'
                 : 'unverified',
           durationMs: Date.now() - started,

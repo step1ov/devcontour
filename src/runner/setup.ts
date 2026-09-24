@@ -69,21 +69,22 @@ export function projectConfig(
     repository,
     mode: 'local',
     approvalMode,
-    // Встроенные роли — умолчание нового контура; профиль добавляет те, которых
-    // требует его поверхность, и уточняет их привязку.
-    roles: {
-      ...Object.fromEntries(
-        roles.map((role) => [
-          role,
-          {
-            runtime: 'claude',
-            title: builtinTitles[role],
-            ...(['backend', 'frontend'].includes(role) ? { requiresContract: true } : {}),
-          },
-        ]),
-      ),
-      ...selected.roles,
-    },
+    // Встроенные роли — умолчание для профиля, которому роли безразличны.
+    // Профиль, объявивший свои, заменяет их целиком: иначе рядом с точными
+    // ролями продукта навсегда остаются четыре чужие, без области записи и без
+    // задач, и каждая проверка честно сообщает, что они не ограничены ничем.
+    roles: Object.keys(selected.roles).length
+      ? { ...selected.roles }
+      : Object.fromEntries(
+          roles.map((role) => [
+            role,
+            {
+              runtime: 'claude',
+              title: builtinTitles[role],
+              ...(['backend', 'frontend'].includes(role) ? { requiresContract: true } : {}),
+            },
+          ]),
+        ),
     reviewer: { runtime: 'codex' },
     concurrency: selected.concurrency ?? 2,
     gates: selected.gates,

@@ -75,14 +75,13 @@ const withDeclaredRoles = (
   upgrade = false,
 ) => {
   // Поднятая версия профиля — заявление «изменилось намеренно», та же логика,
-  // что и у lock-файла: объявленные поля роли выигрывают. Иначе профиль не мог
-  // бы даже закрепить модель у роли, которую сам же и создал, и настройка
-  // оставалась бы замороженной с первой установки.
-  if (!upgrade) return { ...declared, ...existing };
-  const merged: Record<string, Record<string, unknown>> = { ...existing };
-  for (const [role, binding] of Object.entries(declared))
-    merged[role] = { ...existing[role], ...binding };
-  return merged;
+  // что и у lock-файла: на upgrade набор ролей задаёт профиль целиком.
+  //
+  // Аддитивный перенос оставлял роль, которую профиль перестал объявлять,
+  // навсегда: она доживала до состояния, в котором исполнитель и ревьюер
+  // оказывались на одном runtime, и конфигурация переставала загружаться.
+  // Роли компонента объявляются отдельно, в реестре, и это не затрагивает.
+  return upgrade ? { ...declared } : { ...declared, ...existing };
 };
 export async function setupWorkspace(file: string, data?: string) {
   const source = await realpath(resolve(file));
@@ -187,11 +186,19 @@ export async function setupWorkspace(file: string, data?: string) {
         raw.packs?.length === config.packs.length &&
         raw.packs.every((p, i) => p.id === config.packs[i].id);
       const versionBumped = raw.packs?.some((p, i) => p.version !== config.packs[i].version);
-      if (!/Профиль изменился/.test(String(error)) || !sameProfiles || !versionBumped) throw error;
-      await writeFile(join(root, 'packs.lock.json'), JSON.stringify(lock, null, 2) + '\n');
-      await writeFile(
-        configPath,
-        JSON.stringify(
+      // Признак намеренного изменения — те же профили с поднятой версией, а не
+      // конкретный текст ошибки. Конфигурация могла перестать загружаться и по
+      // другой причине: роль, которую профиль больше не объявляет, доживала до
+      // совпадения runtime исполнителя и ревьюера. Чинить её было нечем —
+      // обновление профиля и есть тот момент, когда объявление переписывается.
+      if (!sameProfiles || !versionBumped) throw error;
+      // Обновление проверяется до записи. Раньше файл переписывался, а
+      // валидация шла после: неудачная попытка успевала записать новую версию
+      // профиля, после чего поднятие версии переставало считаться намеренным —
+      // и конфигурация оставалась сломанной без единого способа её починить.
+      const previousConfig = await readFile(configPath, 'utf8');
+      const previousLock = await readFile(join(root, 'packs.lock.json'), 'utf8').catch(() => null);
+      const upgraded = JSON.stringify(
           {
             ...raw,
             packs: config.packs,
@@ -210,9 +217,17 @@ export async function setupWorkspace(file: string, data?: string) {
           },
           null,
           2,
-        ),
-      );
-      await reserveRepositories(loadConfig(configPath), root);
+        );
+      await writeFile(join(root, 'packs.lock.json'), JSON.stringify(lock, null, 2) + '\n');
+      await writeFile(configPath, upgraded);
+      try {
+        await reserveRepositories(loadConfig(configPath), root);
+      } catch (invalid) {
+        // Вернуть как было: иначе номер версии израсходован, а починить нечем.
+        await writeFile(configPath, previousConfig);
+        if (previousLock !== null) await writeFile(join(root, 'packs.lock.json'), previousLock);
+        throw invalid;
+      }
       return { status: 'profile-updated', data: root, config: configPath };
     }
     if (
