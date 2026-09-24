@@ -10,6 +10,7 @@ import {
   requiresContract,
 } from './repositories.ts';
 import { Store } from './store.ts';
+import { failureFingerprint, type FailureKind } from './failure.ts';
 import { planResult } from './plan.ts';
 import { assertDag, descendants, readyTasks, latestTaskId, impactGraph } from './graph.ts';
 import {
@@ -616,20 +617,28 @@ export class DevContour {
       return { taskId: t.id, runId: id, sha };
     });
   }
-  fail(id: string, token: string, error: string, blocked = false) {
+  fail(id: string, token: string, error: string, blocked = false, kind: FailureKind = 'unknown') {
     return this.withRun(id, token, 'run.failed', (r, t) => {
+      // Класс и отпечаток записываются вместе с отказом: решение о починке
+      // принимается позже, возможно после перезапуска, и восстанавливать
+      // причину из текста сообщения тогда уже нечем.
+      const fingerprint = failureFingerprint(kind, error);
       r.status = 'failed';
       r.error = error;
       r.blocked = blocked || undefined;
+      r.failureKind = kind;
+      r.failureFingerprint = fingerprint;
       r.finishedAt = now();
       t.status = 'failed';
       t.failure = error;
+      t.failureKind = kind;
+      t.failureFingerprint = fingerprint;
       t.activeRunId = undefined;
       // Отказ окружения задачу не пробовал: попытка возвращается, иначе бюджет
       // сгорает на неполадках контура и задача блокируется, ни разу не дойдя
       // до исполнителя.
       if (blocked && t.attempt > 0) t.attempt--;
-      return { taskId: t.id, runId: id, error, blocked };
+      return { taskId: t.id, runId: id, error, blocked, kind };
     });
   }
   discoveries(id: string, token: string, sha: string, input: unknown) {

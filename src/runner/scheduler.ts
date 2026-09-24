@@ -18,6 +18,7 @@ import { mkdir, writeFile, readFile, realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { DevContour, digest } from '../core/service.ts';
 import { BlockedError, type Run, type Task, type Evidence, type Gate } from '../core/model.ts';
+import { TaskFailure, type FailureKind } from '../core/failure.ts';
 import { adapters, implementationResult, reviewResult, type AgentAdapter } from './adapters.ts';
 import { git } from './process.ts';
 import { repositories, repository, roleBinding } from '../core/repositories.ts';
@@ -31,7 +32,9 @@ import { runGate } from './gates.ts';
 // кто к нему не притрагивался. Зависимости по dependsOn покрывают порядок;
 // доказывает задача своё.
 const runGates = (repo: { gates: Gate[] }, task: Task) =>
-  orderedGates(task.gates?.length ? repo.gates.filter((g) => task.gates!.includes(g.id)) : repo.gates);
+  orderedGates(
+    task.gates?.length ? repo.gates.filter((g) => task.gates!.includes(g.id)) : repo.gates,
+  );
 
 // Отказ провайдера, а не задачи: он повторится на любой следующей выдаче.
 // Список узкий намеренно — временные ошибки сети и лимиты частоты сюда не
@@ -40,6 +43,18 @@ const providerRefusal = (message: string) =>
   /credit balance|not logged in|please run \/login|invalid api key|authentication_error|insufficient_quota/i.test(
     message,
   );
+// Класс отказа для тех случаев, где он не поставлен в точке обнаружения.
+// Отказ провайдера проверяется раньше окружения: «кончились кредиты» приходит
+// тем же BlockedError, но чинится деньгами, а не повтором.
+function classifyFailure(error: unknown, message: string): FailureKind {
+  if (error instanceof TaskFailure) return error.kind;
+  if (providerRefusal(message)) return 'provider-auth';
+  // Прерывание попытки — отказ окружения, а не решение о работе: так его
+  // видит и остановка сервера, и обрыв рантайма.
+  if (error instanceof BlockedError || /отменен|прерван|abort/i.test(message)) return 'environment';
+  if (/истек|тайм-?аут|timeout|превысил/i.test(message)) return 'timeout';
+  return 'unknown';
+}
 export class Scheduler {
   readonly owner = randomUUID();
   private jobs = new Map<string, { promise: Promise<void>; controller: AbortController }>();
@@ -108,11 +123,10 @@ export class Scheduler {
   private async assertBaseCurrent() {
     const drift = await this.baseDrift();
     if (!drift.length) return;
-    throw new Error(
+    throw new TaskFailure(
+      'stale-base',
       'База прогонов отстала от рабочей ветки: ' +
-        drift
-          .map((d) => `${d.repositoryId} — ${d.branch} без ${d.behind} коммитов`)
-          .join('; ') +
+        drift.map((d) => `${d.repositoryId} — ${d.branch} без ${d.behind} коммитов`).join('; ') +
         '. Выполните devcontour base-update, иначе исполнитель получит дерево без подготовленной работы.',
     );
   }
@@ -352,7 +366,8 @@ export class Scheduler {
         line: f.line ?? null,
       })),
     });
-    if (!passed) throw new Error('Независимое ревью отклонило результат: ' + parsed.summary);
+    if (!passed)
+      throw new TaskFailure('review', 'Независимое ревью отклонило результат: ' + parsed.summary);
   }
   private async execute(run: Run, controller: AbortController) {
     const signal = controller.signal;
@@ -533,7 +548,10 @@ export class Scheduler {
                 ]),
               );
               if (forbidden.length)
-                throw new Error(`Изменены защищённые файлы: ${forbidden.join(', ')}`);
+                throw new TaskFailure(
+                  'scope-violation',
+                  `Изменены защищённые файлы: ${forbidden.join(', ')}`,
+                );
               // Исполнитель отчитался «сделано», не изменив ни файла. Гейты на
               // таком кандидате зелены — они и были зелены до него, — и вся
               // проверка ложится на независимое ревью, которое каждый раз
@@ -541,7 +559,8 @@ export class Scheduler {
               // областью записи обязана что-то изменить; отказ здесь дешевле и
               // говорит исполнителю ровно то, что нужно.
               if (!changed.length && task.writePaths?.length)
-                throw new Error(
+                throw new TaskFailure(
+                  'empty-result',
                   'Изменений нет: задача отчиталась о выполнении пустым коммитом. ' +
                     'Выполните работу по критериям приёмки либо объясните в отчёте, ' +
                     'почему изменения не требуются.',
@@ -553,7 +572,10 @@ export class Scheduler {
                 ].some((scope) => scope && !withinPaths(p, scope)),
               );
               if (outside.length)
-                throw new Error('Изменены файлы вне области задачи/роли: ' + outside.join(', '));
+                throw new TaskFailure(
+                  'scope-violation',
+                  'Изменены файлы вне области задачи/роли: ' + outside.join(', '),
+                );
               await git(
                 cwd,
                 '-c',
@@ -623,6 +645,7 @@ export class Scheduler {
           run.token,
           message,
           error instanceof BlockedError && !run.candidateSha,
+          classifyFailure(error, message),
         );
         // Отказ, который повторится на любой задаче — кончились кредиты,
         // runtime не авторизован, — останавливает выдачу. Иначе очередь
@@ -651,16 +674,23 @@ export class Scheduler {
     const base = await git(repo.path, 'rev-parse', target);
     const cwd = join(this.runRoot(task.repositoryId), 'worktrees', `${run.id}-integration`);
     await git(repo.path, 'worktree', 'add', '--detach', cwd, base);
-    await git(
-      cwd,
-      '-c',
-      'core.hooksPath=/dev/null',
-      'merge',
-      '--no-ff',
-      '--no-edit',
-      '--no-gpg-sign',
-      run.candidateSha!,
-    );
+    try {
+      await git(
+        cwd,
+        '-c',
+        'core.hooksPath=/dev/null',
+        'merge',
+        '--no-ff',
+        '--no-edit',
+        '--no-gpg-sign',
+        run.candidateSha!,
+      );
+    } catch (error) {
+      // Конфликт слияния — отдельный класс: кандидат цел, разошлась база.
+      // Следующая попытка ответвляется от нового состояния интеграции, и
+      // потому повтор здесь осмыслен, в отличие от провала проверки.
+      throw new TaskFailure('merge', error instanceof Error ? error.message : String(error));
+    }
     const sha = await git(cwd, 'rev-parse', 'HEAD');
     run.integrationSha = sha;
     this.h.phase(run.id, run.token, 'integrating', { integrationSha: sha });

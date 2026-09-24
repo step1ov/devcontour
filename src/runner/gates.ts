@@ -6,6 +6,7 @@ import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import { command, git } from './process.ts';
 import { digest, DevContour } from '../core/service.ts';
 import type { Run, Gate, Evidence } from '../core/model.ts';
+import { TaskFailure } from '../core/failure.ts';
 export function junitSummary(xml: string): { tests: number; failures: number; skipped: number } {
   if (xml.includes('<!DOCTYPE') || XMLValidator.validate(xml) !== true)
     throw new Error('Некорректный JUnit XML');
@@ -105,5 +106,5 @@ async function executeGate(
     digest: digest(log),
     summary,
   });
-  if (!passed) throw new Error(`${phase}/${gate.id}: ${summary}`);
+  if (!passed) throw new TaskFailure('gate', `${phase}/${gate.id}: ${summary}`);
 }

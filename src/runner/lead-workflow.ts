@@ -8,6 +8,7 @@ import { WorkspaceRunner } from './workspace.ts';
 import { adapters } from './adapters.ts';
 import { assertRequirements } from './requirements.ts';
 import { IntentService } from './intent.ts';
+import { repairDecision } from '../core/repair.ts';
 
 export class LeadRunner {
   readonly workflow: LeadWorkflow;
@@ -80,6 +81,35 @@ export class LeadRunner {
         }
       }
   }
+  /**
+   * Упала задача доски. Раньше здесь цикл останавливался словами «Task failure
+   * requires diagnosis», и дальше требовался человек — даже когда причина была
+   * технической и известной. Теперь решение принимает домен по записанному
+   * классу отказа, а исполняется оно ровно одним разрешённым действием.
+   *
+   * Возвращает true, когда повтор назначен и результата нужно дождаться.
+   */
+  private repair(job: WorkflowJob, taskIds: string[]) {
+    // Состояние читается здесь и целиком: задачи и прогоны должны быть из
+    // одного снимка, иначе решение принимается по несуществующему сочетанию.
+    const state = this.h.store.read();
+    const tasks = state.tasks.filter((t) => taskIds.includes(t.id));
+    const decision = repairDecision(state, tasks, {
+      budgetLeft: this.h.config.repairBudget - (job.repairs ?? 0),
+      maxAttempts: this.h.config.maxAttempts,
+    });
+    if (!decision) return false;
+    if (decision.action === 'stop') throw new Error(decision.reason);
+    this.workflow.repair(job, `repair:${decision.kind}`, () => {
+      this.h.retry(decision.taskId);
+      // Отказ окружения останавливает выдачу — иначе очередь сожгла бы бюджет
+      // каждой задачи на одной и той же внешней причине. Раз причина признана
+      // разовой и повтор назначен, выдачу нужно вернуть, иначе повтор никогда
+      // не будет выдан.
+      if (decision.resumeQueue) this.h.pause(false);
+    });
+    return true;
+  }
   async execute(job: WorkflowJob, signal: AbortSignal): Promise<boolean> {
     const guard = () => {
       signal.throwIfAborted();
@@ -123,16 +153,14 @@ export class LeadRunner {
           await reviewPlan(this.h, root, b.id, job.authorRuntime, runtimes, guard);
         }
       } else if (job.stage === 1) {
-        if (tasks.some((t) => ['failed', 'cancelled'].includes(t.status)))
-          throw new Error('Task failure requires diagnosis');
+        if (this.repair(job, revision.taskIds)) return true;
         if (!tasks.every((t) => t.status === 'done'))
           this.h.store.atomic(() => {
             guard();
             this.h.pause(false);
           });
       } else {
-        if (tasks.some((t) => ['failed', 'cancelled'].includes(t.status)))
-          throw new Error('Task failure requires diagnosis');
+        if (this.repair(job, revision.taskIds)) return true;
         if (!tasks.every((t) => t.status === 'done')) {
           if (s.paused && s.pauseReason === 'shutdown')
             this.h.store.atomic(() => {

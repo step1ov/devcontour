@@ -1,4 +1,5 @@
 import { preparationBinding, featureId, type PreparationState } from './preparation-model.ts';
+import type { FailureKind } from './failure.ts';
 import { priceSchema } from './usage.ts';
 import type { ReviewInspection } from './review.ts';
 import { z } from 'zod';
@@ -156,6 +157,10 @@ export interface Task extends TaskInput {
   attempt: number;
   resultSha?: string;
   failure?: string;
+  /** Класс последнего отказа, поставленный в точке его обнаружения. */
+  failureKind?: FailureKind;
+  /** Отпечаток последнего отказа: по нему считаются одинаковые повторы. */
+  failureFingerprint?: string;
   approval?: Approval;
 }
 export interface Approval {
@@ -263,6 +268,8 @@ export interface Run {
   error?: string;
   /** Отказ окружения: исполнителю не дали работать, попытка не засчитана. */
   blocked?: boolean;
+  failureKind?: FailureKind;
+  failureFingerprint?: string;
   evidence: Evidence[];
   context?: {
     id: string;
@@ -488,6 +495,11 @@ export const configSchema = z.object({
   leaseMs: z.number().int().min(5000).default(30000),
   runTimeoutMs: z.number().int().min(1000).default(900000),
   maxAttempts: z.number().int().min(1).max(10).default(3),
+  // Сколько раз ведущий цикл вправе сам починить упавшую задачу доски,
+  // прежде чем позвать человека. Предел общий на доску, а не на задачу:
+  // локально допустимые повторы складываются, и без общего потолка доска
+  // из пятнадцати задач может занять пятнадцать бюджетов подряд.
+  repairBudget: z.number().int().min(0).max(50).default(6),
   // Одна форма привязки роли на весь конфиг: два описания одного и того же
   // расходятся, и роль, объявленная компонентом, начинает уметь не то, что
   // роль, объявленная workspace.

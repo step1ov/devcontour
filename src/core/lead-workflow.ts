@@ -20,6 +20,8 @@ export type WorkflowJob = z.infer<typeof workflowInput> & {
   stage: number;
   attempts: number;
   status: 'queued' | 'running' | 'failed' | 'stale' | 'completed';
+  /** Сколько раз цикл уже чинил упавшие задачи этой работы. */
+  repairs?: number;
   token?: string;
   leaseUntil?: number;
   startedAt: string;
@@ -163,9 +165,15 @@ export class LeadWorkflow {
         current.stage++;
         current.attempts = 0;
       } else {
+        // Ожидание доменного состояния не выполняет внешнего действия, поэтому
+        // попытка стадии возвращается, а её запись о захвате снимается. Именно
+        // запись о захвате: последней в истории теперь может стоять решение о
+        // восстановлении, и оно должно остаться — по нему человек видит, что
+        // цикл делал сам.
         current.attempts--;
-        current.history.pop();
-      } // Waiting for domain state performs no external action.
+        const claimed = current.history.map((h) => h.event).lastIndexOf('running');
+        if (claimed >= 0) current.history.splice(claimed, 1);
+      }
       current.status = current.stage >= 3 ? 'completed' : 'queued';
       if (current.status === 'completed') current.finishedAt = new Date().toISOString();
       current.token = undefined;
@@ -189,6 +197,24 @@ export class LeadWorkflow {
       current.token = undefined;
       current.leaseUntil = undefined;
       this.h.store.saveLocal('lead', job.owner, job.key, current);
+    });
+  }
+  /**
+   * Записать восстановление и выполнить его одной транзакцией.
+   *
+   * Счётчик и само действие неразделимы намеренно: прерывание между записью
+   * решения и его исполнением иначе дало бы либо повтор без учёта — и цикл
+   * крутился бы мимо бюджета, — либо учёт без повтора, и работа встала бы,
+   * считая потраченным то, чего не было.
+   */
+  repair(job: WorkflowJob, event: string, apply: () => void) {
+    return this.h.store.atomic(() => {
+      const current = this.guard(job);
+      current.repairs = (current.repairs ?? 0) + 1;
+      current.history.push({ at: new Date().toISOString(), stage: job.stage, event });
+      this.h.store.saveLocal('lead', job.owner, job.key, current);
+      apply();
+      return current;
     });
   }
   retry(key: string, owner?: string) {
