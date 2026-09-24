@@ -12,6 +12,7 @@ test-results/
 
 # Local research, reviews and verification artifacts are not public source.
 /.private/
+/evidence/
 /docs/research/
 /docs/evidence/
 /docs/verification*.md
