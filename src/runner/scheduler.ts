@@ -474,6 +474,18 @@ export class Scheduler {
                     review: false,
                     task,
                     model: run.model,
+                    // Модель, которую runtime выбрал сам, записывается на
+                    // прогон: без закреплённой модели панель показывала один
+                    // runtime, и переход на дорогой длинноконтекстный вариант
+                    // оставался невидимым до счёта.
+                    onUsage: (_usage, _version, model) => {
+                      if (!model || run.model === model) return;
+                      run.model = model;
+                      this.h.withRun(run.id, run.token, 'run.model', (stored) => {
+                        stored.model = model;
+                        return { runId: run.id, model };
+                      });
+                    },
                     signal,
                     timeoutMs: this.h.config.runTimeoutMs,
                     resourcesJson: JSON.stringify(resources),

@@ -46,6 +46,22 @@ function runtimeReason(
   return `: ${cleaned}`;
 }
 
+
+// Какую модель runtime выбрал на самом деле. Записывалась запрошенная, а при
+// незакреплённой модели — null: оператор не мог увидеть, что прогон ушёл на
+// длинноконтекстный вариант, который подпиской не покрыт и требует кредитов.
+// Имя приходит от самого runtime: у claude — в событии system, у codex — в
+// ключах modelUsage.
+function reportedModel(stdout: string): string | undefined {
+  for (const event of runtimeEvents(stdout).events) {
+    if (typeof event.model === 'string' && event.model && event.model !== '<synthetic>')
+      return event.model;
+    const usage = event.modelUsage as Record<string, unknown> | undefined;
+    const [name] = Object.keys(usage ?? {});
+    if (name) return name;
+  }
+  return undefined;
+}
 export const reviewResult = z.object({
   execution: reviewExecution.optional(),
   approved: z.boolean(),
@@ -111,7 +127,7 @@ const reviewSchema = {
 };
 export interface AgentRequest {
   onDiagnostics?: (diagnostics: RuntimeDiagnostics) => void;
-  onUsage?: (usage: Usage, runtimeVersion?: string | null) => void;
+  onUsage?: (usage: Usage, runtimeVersion?: string | null, model?: string) => void;
   purpose?: 'plan' | 'evaluation';
   toolProfile?: ToolProfile;
   execution?: { env: NodeJS.ProcessEnv; redact: Redactor };
@@ -277,6 +293,7 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
         JSON.stringify(result.diagnostics, null, 2),
       );
       r.onDiagnostics?.(result.diagnostics);
+      const usedModel = reportedModel(result.stdout);
       r.onUsage?.(
         parseUsage(
           name,
@@ -287,6 +304,7 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
             result.stdout.length < 2_000_000,
         ),
         version,
+        usedModel,
       );
       const log = result.stdout + '\n' + result.stderr;
       // Отказ окружения — это когда runtime не начал работать: не запустился,

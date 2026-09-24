@@ -60,15 +60,30 @@ const withPins = (existing: ContextPack[], declared: ContextPack[]) => {
   });
 };
 
+/** Привязки ролей в устойчивом порядке: сравнивается объявление, а не порядок ключей. */
+const sortedRoles = (roles?: Record<string, unknown>) =>
+  roles ? Object.fromEntries(Object.entries(roles).sort(([a], [b]) => a.localeCompare(b))) : {};
+
 /** Имена ролей, объявленных конфигурацией: workspace плюс каждый компонент. */
 const declaredNames = (
   scope: { roles: Record<string, unknown> },
   components: { roles?: Record<string, unknown> }[],
 ) => [...new Set([...Object.keys(scope.roles), ...components.flatMap((r) => Object.keys(r.roles ?? {}))])];
 const withDeclaredRoles = (
-  existing: Record<string, unknown>,
-  declared: Record<string, unknown>,
-) => ({ ...declared, ...existing });
+  existing: Record<string, Record<string, unknown>>,
+  declared: Record<string, Record<string, unknown>>,
+  upgrade = false,
+) => {
+  // Поднятая версия профиля — заявление «изменилось намеренно», та же логика,
+  // что и у lock-файла: объявленные поля роли выигрывают. Иначе профиль не мог
+  // бы даже закрепить модель у роли, которую сам же и создал, и настройка
+  // оставалась бы замороженной с первой установки.
+  if (!upgrade) return { ...declared, ...existing };
+  const merged: Record<string, Record<string, unknown>> = { ...existing };
+  for (const [role, binding] of Object.entries(declared))
+    merged[role] = { ...existing[role], ...binding };
+  return merged;
+};
 export async function setupWorkspace(file: string, data?: string) {
   const source = await realpath(resolve(file));
   const workspaceRoot = dirname(source);
@@ -188,8 +203,9 @@ export async function setupWorkspace(file: string, data?: string) {
               config.contextPacks,
             ),
             roles: withDeclaredRoles(
-              (raw as { roles?: Record<string, unknown> }).roles ?? {},
+              (raw as { roles?: Record<string, Record<string, unknown>> }).roles ?? {},
               config.roles,
+              true,
             ),
           },
           null,
@@ -224,11 +240,12 @@ export async function setupWorkspace(file: string, data?: string) {
       // Новая роль ищется по множеству имён, а не сравнением привязок: конфигурация
       // хранит их уже нормализованными, и побайтовое сравнение объявляло бы
       // изменение на каждом запуске.
-      repos.some((repo, i) =>
-        Object.keys(repo.roles ?? {}).some(
-          (role) => !(role in (existing.repositories[i]?.roles ?? {})),
-        ),
-      ) ||
+      // Привязки ролей компонента сравниваются целиком, а не по одним именам.
+      // Проверка «появилась ли новая роль» не замечала ни закреплённой модели,
+      // ни снятого дубля: объявление менялось, а конфигурация оставалась
+      // прежней, и прогон шёл с настройкой, которой в реестре уже нет.
+      JSON.stringify(existing.repositories.map((r) => sortedRoles(r.roles))) !==
+        JSON.stringify(repos.map((r) => sortedRoles(r.roles))) ||
       declaredNames(config, repos).some((role) => !known.includes(role)) ||
       // Сравнивается всё объявление пакета. По id, version и files пакет,
       // сменивший компонент или роли, выглядел неизменившимся: перенос не

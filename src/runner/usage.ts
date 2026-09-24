@@ -117,12 +117,15 @@ export async function measuredExecute(
         save();
         request.onDiagnostics?.(diagnostics);
       },
-      onUsage: (usage, version) => {
+      onUsage: (usage, version, model) => {
         record.usage = usageSchema.parse(usage);
         record.runtimeVersion = version ?? record.runtimeVersion;
+        // Модель, которую runtime выбрал сам, а не только запрошенную: иначе
+        // в учёте остаётся null, и переход на дорогой вариант не виден.
+        record.model = model ?? record.model;
         Object.assign(record, priceUsage(record.usage, price));
         save();
-        request.onUsage?.(usage, version);
+        request.onUsage?.(usage, version, model);
       },
     });
     record.outcome = 'returned';

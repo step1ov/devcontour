@@ -373,6 +373,16 @@ test('Workspace setup preserves policy on repeat and detects a competing control
     assert.ok(declaredRoles(withRole, withRole.repositories[0].id).includes('mobile'));
     assert.equal(withRole.roles.backend.model, 'chosen-by-operator', 'выбор оператора сохранён');
 
+    // Изменившаяся привязка роли переносится, а не только новое имя: проверка
+    // «появилась ли роль» не замечала ни закреплённой модели, ни снятого
+    // дубля, и прогон шёл с настройкой, которой в реестре уже нет.
+    registry.repositories[0].roles.mobile.model = 'claude-opus-5';
+    await writeFile(path, JSON.stringify(registry));
+    assert.equal((await setupWorkspace(path, f.data)).status, 'declaration-updated');
+    assert.equal(loadConfig(configPath).repositories[0].roles!.mobile.model, 'claude-opus-5');
+    // Повтор без изменений ничего не переносит: сравнение устойчиво.
+    assert.equal((await setupWorkspace(path, f.data)).status, 'preserved');
+
     // Закрепление context pack переживает соседнее изменение объявления.
     // Реестр закрепления не содержит: перенеся объявление целиком, setup
     // сбросил бы revision и digest, и очередь встала бы на «пакет не закреплён»
