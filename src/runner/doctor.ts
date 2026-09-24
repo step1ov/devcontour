@@ -70,6 +70,26 @@ export async function doctor(config: Config, root: string, probe = false) {
       if (r.code) throw new Error('CLI --version завершился с ошибкой');
       return r.stdout.trim().slice(0, 200);
     });
+  // `--version` проходит и у неавторизованного CLI: он доказывает, что файл
+  // на месте, а не что им можно работать. Отказ авторизации выяснялся только
+  // на первой выданной задаче — прогоном, который тратил время и попытку.
+  // Проверяется то самое окружение, которое получит исполнитель.
+  if (probe)
+    for (const runtime of [...runtimes].filter((s) => s !== 'demo'))
+      await check('auth:' + runtime, async () => {
+        const execution = agentEnvironment(config, toolProfileFor(config, runtime));
+        const argv =
+          runtime === 'claude'
+            ? ['claude', '--print', '--setting-sources', '', 'ping']
+            : ['codex', 'exec', '--sandbox', 'read-only', '-c', 'approval_policy="never"', 'ping'];
+        const r = await command(argv, config.repository, { ...execution, timeoutMs: 120000 });
+        const output = r.stdout + r.stderr;
+        if (r.code || /not logged in|please run \/login|invalid api key|credit balance/i.test(output))
+          throw new Error(
+            `Runtime не авторизован в окружении прогона: ${output.trim().slice(-200) || 'код ' + r.code}`,
+          );
+        return 'Авторизован в том окружении, которое получит исполнитель';
+      });
   await check('environment', async () => {
     executionEnvironment([config.environment]);
     return 'Обязательные переменные заданы; значения скрыты';

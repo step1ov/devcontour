@@ -154,6 +154,13 @@ test('Execution environment is explicit, missing secrets fail and logs redact in
   );
   assert.equal(e.env.UNRELATED, undefined);
   assert.equal(e.env.NPM_TOKEN, 'hidden-secret');
+  // Имя учётной записи проходит: без него runtime не найдёт свои учётные
+  // данные в системном хранилище и потребует API-ключ — то есть оплату за
+  // то, что уже оплачено подпиской. Это адрес в хранилище, а не секрет.
+  const named = executionEnvironment([], {}, { PATH: '/usr/bin', USER: 'alice' });
+  assert.equal(named.env.USER, 'alice');
+  assert.equal(named.env.LOGNAME, 'alice');
+  assert.equal(named.env.UNRELATED, undefined);
   const r = await command(
     [process.execPath, '-e', 'console.log(process.env.NPM_TOKEN,process.env.REGISTRY)'],
     process.cwd(),

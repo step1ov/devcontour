@@ -14,10 +14,18 @@ export function executionEnvironment(
   devcontour: NodeJS.ProcessEnv = {},
   source = process.env,
 ) {
+  // Окружение прогона — минимальное: исполнитель не должен наследовать всё,
+  // что оказалось у оператора. Но учётные данные runtime живут в системном
+  // хранилище, а найти их там нельзя, не зная имени учётной записи: без USER
+  // claude на macOS отвечает «Not logged in», и единственным выходом остаётся
+  // передать API-ключ — то есть платить за то, что уже оплачено подпиской.
+  // USER и LOGNAME — не секреты, а адрес в хранилище.
   const env: NodeJS.ProcessEnv = {
     PATH: source.PATH,
     HOME: source.HOME,
     TMPDIR: source.TMPDIR,
+    USER: source.USER,
+    LOGNAME: source.LOGNAME ?? source.USER,
     CI: '1',
   };
   const secretValues: string[] = [];
