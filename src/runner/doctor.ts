@@ -90,6 +90,18 @@ export async function doctor(config: Config, root: string, probe = false) {
           );
         return 'Авторизован в том окружении, которое получит исполнитель';
       });
+  // Область записи — пересечение роли и задачи. Роль без неё не ограничивает
+  // ничего, и всё держится на том, что область указана у каждой задачи. Роль,
+  // владеющая сквозными решениями, оказывается при этом самой широкой — это
+  // стоит видеть, а не обнаруживать по принятому diff.
+  await check('write-scope', async () => {
+    const open = bindings
+      .filter((b) => !b.review && !roleBinding(config, b.role, b.repo.id)?.writePaths?.length)
+      .map((b) => `${b.repo.id}:${b.role}`);
+    if (open.length)
+      return `Область записи задаётся только задачами у ролей: ${[...new Set(open)].join(', ')}`;
+    return 'У каждой роли объявлена область записи';
+  });
   await check('environment', async () => {
     executionEnvironment([config.environment]);
     return 'Обязательные переменные заданы; значения скрыты';
