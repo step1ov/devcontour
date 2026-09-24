@@ -103,6 +103,17 @@ export const requirementLink = z.strictObject({
   text: z.string().min(3).max(12000),
   gate: id,
   scenario: z.string().min(3).max(1500),
+  /**
+   * Идентификатор testcase, который проверяет этот сценарий, — как его
+   * называет отчёт проверки (`classname.name` в JUnit).
+   *
+   * Без него подтверждение означает лишь «на этом SHA у этого гейта есть
+   * зелёное evidence»: зелёным гейт бывает и когда заявленное поведение не
+   * проверяет никто. Поле необязательное намеренно — прежние задачи его не
+   * содержат и читаются с прежним, более слабым уровнем доказательства,
+   * названным прямо, а не переписываются задним числом.
+   */
+  testId: z.string().min(1).max(300).optional(),
 });
 export type RequirementLink = z.infer<typeof requirementLink>;
 export const taskInput = z.object({
@@ -225,6 +236,17 @@ export interface Evidence {
    * что делать, — и круг повторяется с тем же замечанием.
    */
   findings?: { severity: string; message: string; path?: string | null; line?: number | null }[];
+  /**
+   * Что именно выполнилось: идентификаторы testcases и их исход. Итоговый код
+   * возврата не говорит, проверялось ли заявленное поведение; манифест говорит.
+   */
+  tests?: { id: string; status: 'passed' | 'failed' | 'skipped' }[];
+  /**
+   * Манифест обрезан по пределу размера: по нему нельзя судить об отсутствии
+   * теста, поэтому подтверждение на уровне testcase по такому evidence не
+   * выдаётся.
+   */
+  testsTruncated?: boolean;
 }
 export interface Run {
   memory?: { revision: string; ids: string[]; digest: string; bytes: number };

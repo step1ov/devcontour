@@ -17,6 +17,7 @@ import {
 import { adapters, reviewResult, type AgentAdapter } from './adapters.ts';
 import { repositories, repository, declaredRoles } from '../core/repositories.ts';
 import { git } from './process.ts';
+import { assertRequirementProof } from './requirements.ts';
 
 // Контракт живёт в репозитории, и предложение должно на него ссылаться, а не
 // нести копию: копию легко отправить на ревью устаревшей, и тогда принятый
@@ -298,6 +299,10 @@ export async function acceptBoard(
   const tasks = revision.taskIds.map((id) => state.tasks.find((t) => t.id === id)!);
   if (!tasks.length || tasks.some((t) => t.status !== 'done' || !t.resultSha))
     throw new DomainError('Приёмка требует done, проверки и интеграцию всех задач');
+  // Критерий, назвавший свой тест, предъявляет его здесь: приёмка относится к
+  // принятому SHA, а зелёная проверка сама по себе не говорит, что заявленное
+  // поведение проверял кто-нибудь.
+  for (const task of tasks) assertRequirementProof(h, task);
   // Принятие относится к доказанному SHA, а не к текущей вершине ветки. Вершину
   // двигает и перенос базы: подготовка попадает туда без гейтов, и приёмка,
   // читавшая вершину, закрепляла бы непроверенный код как принятую работу.

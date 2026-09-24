@@ -282,6 +282,10 @@ export class Scheduler {
         ),
       `Base commit: ${run.baseSha}. ${sha ? `Review commit: ${sha}.` : ''}`,
       'Review against the pinned conventions. Report verified causal regressions, including unchanged consumers. Findings need path/line, rule, consequence and evidence; use null only when not applicable. Do not demand unrelated legacy cleanup.',
+      // Разметка id ничего не доказывает сама по себе: тест может носить
+      // имя сценария и не проверять его. Судит об этом ревью — оно видит
+      // и сценарий, и названный тест, и код.
+      'Where a requirement names a testId, open that test. Reject it when the test does not exercise the stated scenario, or when it would still pass if the behaviour it claims to prove were broken. A matching name is not proof.',
       'Report unrelated bugs or debt in discoveries with a reproducible observation; these become unapproved tasks, not accepted knowledge. Never weaken a test to hide an application bug.',
       'Write scope: ' +
         JSON.stringify({

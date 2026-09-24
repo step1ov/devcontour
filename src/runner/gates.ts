@@ -7,17 +7,30 @@ import { command, git } from './process.ts';
 import { digest, DevContour } from '../core/service.ts';
 import type { Run, Gate, Evidence } from '../core/model.ts';
 import { TaskFailure } from '../core/failure.ts';
+/** Предел манифеста: полный список тестов крупного проекта в состояние не кладётся. */
+const MANIFEST_LIMIT = 2000;
 export function junitSummary(xml: string): {
   tests: number;
   failures: number;
   skipped: number;
   /** Имена провалившихся testcases: по ним различаются разные провалы. */
   failed: string[];
+  /** Что именно выполнилось и с каким исходом. */
+  cases: { id: string; status: 'passed' | 'failed' | 'skipped' }[];
+  /** Список обрезан: отсутствие теста по нему доказать нельзя. */
+  truncated: boolean;
 } {
   if (xml.includes('<!DOCTYPE') || XMLValidator.validate(xml) !== true)
     throw new Error('Некорректный JUnit XML');
   const document = new XMLParser({ ignoreAttributes: false, processEntities: false }).parse(xml);
-  const summary = { tests: 0, failures: 0, skipped: 0, failed: [] as string[] };
+  const summary = {
+    tests: 0,
+    failures: 0,
+    skipped: 0,
+    failed: [] as string[],
+    cases: [] as { id: string; status: 'passed' | 'failed' | 'skipped' }[],
+    truncated: false,
+  };
   function visit(value: unknown, key = '') {
     if (Array.isArray(value)) {
       value.forEach((v) => visit(v, key));
@@ -26,13 +39,22 @@ export function junitSummary(xml: string): {
     if (key === 'testcase') {
       summary.tests++;
       if (value && typeof value === 'object') {
-        if ('failure' in value || 'error' in value) {
+        const named = value as Record<string, unknown>;
+        const name = [named['@_classname'], named['@_name']].filter(Boolean).join('.');
+        const broken = 'failure' in value || 'error' in value;
+        if (broken) {
           summary.failures++;
-          const named = value as Record<string, unknown>;
-          const name = [named['@_classname'], named['@_name']].filter(Boolean).join('.');
           if (name && summary.failed.length < 10) summary.failed.push(String(name));
         }
         if ('skipped' in value) summary.skipped++;
+        if (name) {
+          if (summary.cases.length < MANIFEST_LIMIT)
+            summary.cases.push({
+              id: String(name),
+              status: broken ? 'failed' : 'skipped' in value ? 'skipped' : 'passed',
+            });
+          else summary.truncated = true;
+        }
       }
       return;
     }
@@ -89,7 +111,8 @@ async function executeGate(
     summary = '',
     log = '',
     exitCode = -1,
-    redact: ((value: string) => string) | undefined;
+    redact: ((value: string) => string) | undefined,
+    manifest: ReturnType<typeof junitSummary> | undefined;
   try {
     const environment = runEnvironment(h.config, run, phase, cwd);
     redact = environment.redact;
@@ -112,7 +135,7 @@ async function executeGate(
       if (!real.startsWith((await realpath(cwd)) + sep))
         throw new Error('Report symlink выходит из worktree');
       const xml = await readFile(real, 'utf8');
-      const counts = junitSummary(xml);
+      const counts = (manifest = junitSummary(xml));
       summary = `${counts.tests} tests, ${counts.failures} failures, ${counts.skipped} skipped`;
       if (counts.failures || counts.skipped)
         throw new Error(summary + (counts.failed.length ? `: ${counts.failed.join(', ')}` : ''));
@@ -142,6 +165,8 @@ async function executeGate(
     log: logPath,
     digest: digest(log),
     summary,
+    tests: manifest?.cases,
+    testsTruncated: manifest?.truncated || undefined,
   });
   if (!passed) throw new TaskFailure('gate', `${phase}/${gate.id}: ${summary}`);
 }

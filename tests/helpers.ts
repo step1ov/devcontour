@@ -49,7 +49,18 @@ export function fixture() {
     },
   };
 }
-export function complete(h: DevContour, id: string) {
+/**
+ * Довести задачу до принятого результата.
+ *
+ * `tests` задаёт манифест выполненных testcases: без него проверка
+ * сообщает только «прошла», и критерий с названным тестом подтвердить
+ * нечем — это и есть разница уровней доказательства.
+ */
+export function complete(
+  h: DevContour,
+  id: string,
+  tests?: { id: string; status: 'passed' | 'failed' | 'skipped' }[],
+) {
   h.pause(false);
   const run = h.claim('test')!;
   if (run.taskId !== id) throw new Error('Wrong claim');
@@ -71,8 +82,25 @@ export function complete(h: DevContour, id: string) {
         log: 'fixture',
         digest: 'fixture',
         summary: 'Unit-test fixture',
+        tests: kind === 'test' ? tests : undefined,
       });
   }
+  // Настоящий прогон записывает и закрепление источника требований; без него
+  // приёмка задачи с требованиями отказывает раньше проверки доказательства.
+  if (h.store.read().tasks.find((t) => t.id === id)?.requirements?.length)
+    for (const phase of ['candidate', 'integration'] as const)
+      h.evidence(run.id, run.token, {
+        kind: 'test',
+        phase,
+        sha: phase === 'candidate' ? 'candidate' : 'merged',
+        gate: 'requirement-source',
+        passed: true,
+        command: ['fixture'],
+        exitCode: 0,
+        log: '',
+        digest: 'fixture',
+        summary: 'Pinned requirement sections match',
+      });
   h.finish(run.id, run.token, 'merged');
   return run;
 }

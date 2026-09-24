@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { DevContour, digest } from '../core/service.ts';
-import { DomainError, relativePath, type Task, type Run } from '../core/model.ts';
+import { DomainError, relativePath, type Task, type Run, type Evidence } from '../core/model.ts';
+import { requirementProof, unprovenRequirements } from '../core/proof.ts';
 import { repository } from '../core/repositories.ts';
 
 // A requirement ends at the next level-1/2 heading. Ignore fenced code examples.
@@ -71,6 +72,25 @@ export function assertRequirements(h: DevContour, task: Task, cwd?: string, ref?
       'Требования изменились или удалены: ' + stale.map((r) => r.id).join(', '),
     );
 }
+/**
+ * Критерий, назвавший свой тест, обязан его предъявить на принятом SHA.
+ *
+ * Проверяется при приёмке, а не при записи evidence: до интеграции доказан
+ * кандидат, а принимается результат слияния. Задачи без `testId` проходят на
+ * прежнем уровне — история не переписывается.
+ */
+export function assertRequirementProof(h: DevContour, task: Task) {
+  if (!task.requirements?.some((r) => r.testId)) return;
+  const s = h.store.read();
+  const run = s.runs.findLast((r) => r.taskId === task.id && r.status === 'succeeded');
+  const evidence = (run?.evidence ?? task.sharedCompletion?.receipt.checks ?? []) as Evidence[];
+  const unproven = unprovenRequirements(task.requirements, evidence, task.resultSha);
+  if (unproven.length)
+    throw new DomainError(
+      'Сценарий не подтверждён выполненным тестом: ' +
+        unproven.map((p) => `${p.id} — ${p.reason}`).join('; '),
+    );
+}
 export function recordRequirements(
   h: DevContour,
   run: Run,
@@ -112,19 +132,30 @@ export function requirementReport(h: DevContour, repositoryId: string) {
           specDigest: t.approvedDigest,
           resultSha: t.resultSha,
           requirements: currentRequirements(h, t).map(
-            ({ currentText: _text, text: _old, ...r }) => ({
-              ...r,
-              verified:
-                r.fresh &&
-                t.status === 'done' &&
-                !!(run?.evidence ?? t.sharedCompletion?.receipt.checks)?.some(
-                  (e) =>
-                    e.gate === r.gate &&
-                    e.phase === 'integration' &&
-                    e.sha === t.resultSha &&
-                    e.passed,
-                ),
-            }),
+            ({ currentText: _text, text: _old, ...r }) => {
+              const evidence = (run?.evidence ??
+                t.sharedCompletion?.receipt.checks ??
+                []) as Evidence[];
+              const proof =
+                r.fresh && t.status === 'done'
+                  ? requirementProof(r, evidence, t.resultSha)
+                  : {
+                      level: 'none' as const,
+                      reason: r.fresh
+                        ? 'Задача ещё не принята'
+                        : 'Требование изменилось в источнике',
+                    };
+              return {
+                ...r,
+                // Прежнее поле сохраняется: оно означало «проверка была
+                // зелёной» и продолжает означать ровно это.
+                verified: proof.level !== 'none',
+                // Уровень называется прямо, чтобы зелёная проверка без
+                // связанного теста не читалась как подтверждённый сценарий.
+                proof: proof.level,
+                proofReason: proof.reason,
+              };
+            },
           ),
         };
       }),

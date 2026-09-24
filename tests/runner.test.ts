@@ -290,7 +290,20 @@ test('JUnit rejects empty/malformed reports and distinguishes skipped tests from
     junitSummary(
       '<testsuites><testsuite><testcase name="a"/><testcase name="b"><skipped/></testcase><testcase name="c"><failure/></testcase></testsuite></testsuites>',
     ),
-    { tests: 3, failures: 1, skipped: 1, failed: ['c'] },
+    {
+      tests: 3,
+      failures: 1,
+      skipped: 1,
+      failed: ['c'],
+      // Манифест называет каждый testcase и его исход: по нему критерий
+      // связывается с конкретным выполненным тестом, а не с зелёным гейтом.
+      cases: [
+        { id: 'a', status: 'passed' },
+        { id: 'b', status: 'skipped' },
+        { id: 'c', status: 'failed' },
+      ],
+      truncated: false,
+    },
   );
 });
 test('CLI adapters use structured outputs, stdin prompts and restricted review permissions', () => {
