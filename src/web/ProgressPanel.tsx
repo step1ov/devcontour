@@ -374,12 +374,13 @@ function Stage({
   const done = tasks.filter((t) => t.status === 'done').length;
   const failed = tasks.filter((t) => t.status === 'failed').length;
   const drafts = tasks.filter((t) => t.status === 'draft').length;
+  // Пауза рантайма называется своим именем; прежние записи её не называли
+  // вовсе, поэтому обе формы означают одно: выдачу остановил сам диспетчер.
   const stopped =
-    paused && !pauseReason
+    paused && (!pauseReason || pauseReason === 'runtime')
       ? (
           [...events].reverse().find((e) => e.type === 'scheduler.error')?.data as
-            | { error?: string }
-            | undefined
+            { error?: string } | undefined
         )?.error?.replace(/^Error:\s*/, '')
       : undefined;
   const line = !tasks.length
@@ -420,7 +421,7 @@ export function ProgressPanel({
     contractAttempts?: ContractAttempt[];
     concurrency?: number;
     paused?: boolean;
-    pauseReason?: 'operator' | 'shutdown';
+    pauseReason?: 'operator' | 'shutdown' | 'runtime';
     config: {
       repositories?: { id: string; name?: string; kind?: string }[];
       gates?: Gate[];

@@ -5,6 +5,9 @@ import { failureFingerprint, repairPolicy, type FailureKind } from '../src/core/
 import { repairDecision } from '../src/core/repair.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
+import { classifyFailure } from '../src/runner/scheduler.ts';
+import { BlockedError } from '../src/core/model.ts';
+import { TaskFailure } from '../src/core/failure.ts';
 import type { DevContour } from '../src/core/service.ts';
 
 /** Довести задачу до падения с заданным классом и вернуть её id. */
@@ -242,6 +245,203 @@ test('Исчерпанный класс останавливает работу 
     // Задача осталась упавшей: остановка не маскирует причину сменой статуса.
     assert.equal(f.store.read().tasks[0].status, 'failed');
     assert.equal(flow.get(job.key, job.owner).repairs, undefined);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Восстановление снимает только свою паузу выдачи', async () => {
+  // Очередь общая на весь workspace. Снять чужую паузу значит выдать работу
+  // под ту самую причину, из-за которой выдача и остановлена: пауза человека —
+  // его решение, а пауза от отказа провайдера по соседней доске стоит денег.
+  for (const [reason, failure, expected] of [
+    ['runtime', 'environment', false],
+    ['runtime', 'provider-auth', true],
+    ['operator', undefined, true],
+  ] as const) {
+    const f = fixture();
+    try {
+      const b = f.h.createBoard('Board');
+      const t = f.h.addTask(b.id, input());
+      f.h.approve(b.id);
+      breakTask(f.h, t.id, 'environment', 'runtime: транспорт оборван');
+      // Выдача остановлена: одной причиной — сам рантайм, другой — человек.
+      f.store.change('test.pause', (s) => {
+        s.paused = true;
+        s.pauseReason = reason;
+        s.pauseFailure = failure;
+        return {};
+      });
+
+      const flow = new LeadWorkflow(f.h);
+      const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex', maxAttempts: 3 });
+      const claimed = flow.claim(job.key, job.owner)!;
+      f.store.atomic(() => f.store.saveLocal('lead', job.owner, job.key, { ...claimed, stage: 1 }));
+
+      const runner = new LeadRunner(f.h, f.root);
+      await runner.execute(flow.get(job.key, job.owner), new AbortController().signal);
+
+      assert.equal(f.store.read().tasks[0].status, 'ready', 'повтор назначен в обоих случаях');
+      assert.equal(
+        f.store.read().paused,
+        expected,
+        `пауза ${reason}/${failure} ${expected ? 'должна остаться' : 'должна быть снята'}`,
+      );
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test('Классификатор узнаёт настоящие тексты отказов, а не только выдуманные', () => {
+  // Каждая строка встречалась или может встретиться в выводе рантайма. Без
+  // этого теста любая реализация, возвращающая один класс на всё, проходила бы
+  // остальные проверки: они подставляют класс напрямую.
+  const cases: [string, FailureKind, unknown?][] = [
+    ['claude: runtime завершился с кодом 1: Credit balance is too low', 'provider-auth'],
+    ['claude: runtime завершился с кодом 1: Insufficient credits to use this API', 'provider-auth'],
+    ['codex: runtime завершился с кодом 1: 401 Unauthorized: OAuth token expired', 'provider-auth'],
+    ['claude: runtime завершился с кодом 1: Not logged in', 'provider-auth'],
+    [
+      'claude: runtime завершился с кодом 143 (исчерпан лимит времени прогона: 900 с). Лог: /tmp/a',
+      'timeout',
+    ],
+    ['codex: runtime завершился с кодом 1: connection reset by peer', 'environment'],
+    ['claude: runtime завершился с кодом 1: socket hang up', 'environment'],
+    ['claude: runtime завершился с кодом 143 (прогон прерван). Лог: /tmp/a', 'environment'],
+    ['Истёк срок владения. Проверьте worktree и повторите явно.', 'timeout'],
+    ['Агент изменил HEAD; интеграцией владеет devcontour', 'unknown'],
+  ];
+  for (const [message, expected] of cases)
+    assert.equal(classifyFailure(new Error(message), message), expected, message);
+
+  // Отказ окружения без узнаваемого текста остаётся окружением по типу ошибки.
+  assert.equal(
+    classifyFailure(new BlockedError('codex: runtime не запускается'), 'x'),
+    'environment',
+  );
+  // Класс, поставленный в точке отказа, классификатор не переопределяет.
+  assert.equal(
+    classifyFailure(new TaskFailure('gate', 'candidate/tests: 401 Unauthorized в ответе'), 'x'),
+    'gate',
+  );
+});
+
+test('Отпечаток различает классы при дословно одинаковом сообщении', () => {
+  const message = 'candidate/independent-review: результат отклонён';
+  assert.notEqual(failureFingerprint('gate', message), failureFingerprint('review', message));
+});
+
+test('Бюджет восстановлений тратится накопительно и останавливает цикл сам', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const t = f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex', maxAttempts: 5 });
+    const runner = new LeadRunner(f.h, f.root);
+    const stage = () => {
+      const claimed = flow.claim(job.key, job.owner)!;
+      f.store.atomic(() => f.store.saveLocal('lead', job.owner, job.key, { ...claimed, stage: 1 }));
+      return flow.get(job.key, job.owner);
+    };
+
+    // Бюджет доски — 6 по умолчанию. Каждое восстановление тратит ровно один,
+    // и счётчик обязан накапливаться: реализация, выставляющая единицу, дошла
+    // бы до бесконечности.
+    // Причины намеренно разные по тексту: одинаковые остановил бы предел
+    // повторов класса, а проверяется здесь именно бюджет доски. Числами их
+    // различить нельзя — отпечаток числа нормализует.
+    const causes = ['typecheck', 'lint', 'unit', 'contract', 'build', 'smoke'];
+    for (let i = 1; i <= causes.length; i++) {
+      breakTask(f.h, t.id, 'gate', `candidate/${causes[i - 1]}: проверка не прошла`);
+      const running = stage();
+      assert.equal(await runner.execute(running, new AbortController().signal), true);
+      flow.finish(running, true);
+      assert.equal(flow.get(job.key, job.owner).repairs, i, `восстановление ${i} учтено`);
+      f.store.change('test.attempts', (s) => {
+        s.tasks[0].attempt = 0;
+        return {};
+      });
+    }
+
+    // Седьмой отказ бюджета не находит и останавливает работу с этой причиной.
+    breakTask(f.h, t.id, 'gate', 'candidate/e2e: проверка не прошла');
+    await assert.rejects(
+      () => runner.execute(stage(), new AbortController().signal),
+      /бюджет автоматических восстановлений/,
+    );
+    assert.equal(flow.get(job.key, job.owner).repairs, 6, 'остановка бюджет не тратит');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Сорванное восстановление не оставляет ни учёта без повтора, ни повтора без учёта', () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const t = f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    breakTask(f.h, t.id, 'gate', 'candidate/typecheck: ошибка');
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex', maxAttempts: 3 });
+    const running = flow.claim(job.key, job.owner)!;
+
+    assert.throws(
+      () =>
+        flow.repair(running, 'repair:gate', () => {
+          f.h.retry(t.id);
+          throw new Error('Прерывание между решением и его исполнением');
+        }),
+      /Прерывание/,
+    );
+    // Счётчик и повтор либо оба состоялись, либо ни один.
+    assert.equal(flow.get(job.key, job.owner).repairs, undefined);
+    assert.equal(f.store.read().tasks[0].status, 'failed');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Предел одинаковых повторов задан числом, а не сам собой', () => {
+  // Проверка, читающая предел из проверяемой политики, согласится с любым его
+  // значением. Числа здесь названы прямо: их изменение — решение, а не правка.
+  assert.equal(repairPolicy.gate.repeats, 2);
+  assert.equal(repairPolicy.review.repeats, 2);
+  assert.equal(repairPolicy.environment.repeats, 1);
+  assert.equal(repairPolicy['empty-result'].repeats, 1);
+  assert.equal(repairPolicy['provider-auth'].action, 'stop');
+  assert.equal(repairPolicy.cancelled.action, 'stop');
+  assert.equal(repairPolicy['stale-base'].action, 'stop');
+  assert.equal(repairPolicy.unknown.action, 'stop');
+});
+
+test('Потерянное владение чинится как окружение, а не по классу прошлой попытки', () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const t = f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    // Прошлая попытка упала по своей причине и была починена.
+    breakTask(f.h, t.id, 'gate', 'candidate/typecheck: ошибка');
+    f.h.retry(t.id);
+    assert.equal(f.store.read().tasks[0].failureKind, undefined, 'повтор снимает прошлый класс');
+
+    // Следующая попытка теряет владение.
+    const run = f.h.claim('test')!;
+    f.store.change('test.lease', (s) => {
+      s.runs.find((r) => r.id === run.id)!.leaseUntil = 0;
+      return {};
+    });
+    f.h.expire();
+
+    const s = f.store.read();
+    assert.equal(s.tasks[0].failureKind, 'environment');
+    const decision = repairDecision(s, s.tasks, { budgetLeft: 6, maxAttempts: 3 })!;
+    assert.equal(decision.action, 'retry');
+    assert.equal(decision.action === 'retry' && decision.kind, 'environment');
   } finally {
     f.cleanup();
   }

@@ -40,19 +40,31 @@ const runGates = (repo: { gates: Gate[] }, task: Task) =>
 // Список узкий намеренно — временные ошибки сети и лимиты частоты сюда не
 // входят: остановить очередь из-за них значило бы звать человека без нужды.
 const providerRefusal = (message: string) =>
-  /credit balance|not logged in|please run \/login|invalid api key|authentication_error|insufficient_quota/i.test(
+  /credit balance|insufficient credit|not logged in|please run \/login|invalid api key|authentication_error|insufficient_quota|unauthorized|oauth token|token expired|401/i.test(
     message,
   );
 // Класс отказа для тех случаев, где он не поставлен в точке обнаружения.
 // Отказ провайдера проверяется раньше окружения: «кончились кредиты» приходит
 // тем же BlockedError, но чинится деньгами, а не повтором.
-function classifyFailure(error: unknown, message: string): FailureKind {
+export function classifyFailure(error: unknown, message: string): FailureKind {
   if (error instanceof TaskFailure) return error.kind;
   if (providerRefusal(message)) return 'provider-auth';
-  // Прерывание попытки — отказ окружения, а не решение о работе: так его
-  // видит и остановка сервера, и обрыв рантайма.
-  if (error instanceof BlockedError || /отменен|прерван|abort/i.test(message)) return 'environment';
-  if (/истек|тайм-?аут|timeout|превысил/i.test(message)) return 'timeout';
+  // Исчерпанное время проверяется раньше прерывания: по сигналу это одно и то
+  // же прерывание, но чинится оно по-разному — повтор с тем же пределом
+  // кончится тем же, и об этом должен узнать человек, а не следующая попытка.
+  if (/исчерпан лимит времени|истёк|истек|тайм-?аут|timeout|превысил/i.test(message))
+    return 'timeout';
+  // Обрыв транспорта — отказ окружения и после того, как работа началась.
+  // Признак «работа началась» решает, тратится ли попытка; причину отказа он
+  // не меняет, и смешивать эти два вопроса значит останавливать цикл там, где
+  // достаточно повтора.
+  if (
+    error instanceof BlockedError ||
+    /отменен|прерван|abort|econnreset|epipe|socket hang up|connection reset|stream closed|fetch failed|network error/i.test(
+      message,
+    )
+  )
+    return 'environment';
   return 'unknown';
 }
 export class Scheduler {
@@ -371,7 +383,13 @@ export class Scheduler {
   }
   private async execute(run: Run, controller: AbortController) {
     const signal = controller.signal;
-    const timeout = setTimeout(() => controller.abort(), this.h.config.runTimeoutMs);
+    // Причина прерывания называется явно: без неё адаптер пишет «прогон
+    // прерван», и исчерпанное время неотличимо от остановки сервера — а
+    // чинятся они по-разному.
+    const timeout = setTimeout(
+      () => controller.abort(new DOMException('Исчерпан лимит времени прогона', 'TimeoutError')),
+      this.h.config.runTimeoutMs,
+    );
     const heartbeat = setInterval(
       () => {
         try {
@@ -653,6 +671,13 @@ export class Scheduler {
         // хотя причина у всех одна и находится вне контура.
         if (error instanceof BlockedError || providerRefusal(message))
           this.h.store.change('scheduler.error', (s) => {
+            // Своя пауза называется своим именем: восстановление вправе снять
+            // только её. Уже стоящую паузу — человека или штатной остановки —
+            // она не перебивает, иначе цикл снял бы чужое решение.
+            if (!s.paused) {
+              s.pauseReason = 'runtime';
+              s.pauseFailure = classifyFailure(error, message);
+            }
             s.paused = true;
             return { error: `Выдача остановлена: ${message}` };
           });

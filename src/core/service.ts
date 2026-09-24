@@ -441,6 +441,10 @@ export class DevContour {
         return { paused: true, reason: s.pauseReason };
       s.paused = value;
       s.pauseReason = value ? reason : undefined;
+      // Класс отказа принадлежит конкретной паузе: пережив её, он разрешил бы
+      // снять следующую паузу, к которой не имеет отношения. Эта операция —
+      // решение человека или штатная остановка, и класса у неё нет.
+      s.pauseFailure = undefined;
       return { paused: value, reason: s.pauseReason };
     });
   }
@@ -795,7 +799,11 @@ export class DevContour {
         t.attempt = 0;
       }
       t.status = t.approvedDigest ? 'ready' : 'draft';
+      // Вместе с текстом отказа снимаются класс и отпечаток: пережив повтор,
+      // они решали бы судьбу следующего отказа по причине предыдущего.
       t.failure = undefined;
+      t.failureKind = undefined;
+      t.failureFingerprint = undefined;
       return exhausted && reset
         ? { taskId: id, reset: { spent, reason: reset.reason.trim() } }
         : { taskId: id };
@@ -809,10 +817,17 @@ export class DevContour {
           r.status = 'expired';
           r.finishedAt = now();
           r.error = 'Истёк срок владения. Проверьте worktree и повторите явно.';
+          // Потерянное владение — отказ окружения: исполнитель не довёл работу
+          // не потому, что не справился. Класс ставится здесь, иначе решение о
+          // починке прочитает класс прошлой попытки и починит не то.
+          r.failureKind = 'environment';
+          r.failureFingerprint = failureFingerprint('environment', r.error);
           const t = task(s, r.taskId);
           if (t.activeRunId === r.id) {
             t.status = 'failed';
             t.failure = r.error;
+            t.failureKind = r.failureKind;
+            t.failureFingerprint = r.failureFingerprint;
             t.activeRunId = undefined;
           }
           ids.push(r.id);

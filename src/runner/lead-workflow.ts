@@ -90,24 +90,42 @@ export class LeadRunner {
    * Возвращает true, когда повтор назначен и результата нужно дождаться.
    */
   private repair(job: WorkflowJob, taskIds: string[]) {
-    // Состояние читается здесь и целиком: задачи и прогоны должны быть из
-    // одного снимка, иначе решение принимается по несуществующему сочетанию.
-    const state = this.h.store.read();
-    const tasks = state.tasks.filter((t) => taskIds.includes(t.id));
-    const decision = repairDecision(state, tasks, {
-      budgetLeft: this.h.config.repairBudget - (job.repairs ?? 0),
-      maxAttempts: this.h.config.maxAttempts,
+    // Решение и его исполнение — одна транзакция.
+    //
+    // Раньше состояние читалось до неё, и между чтением и записью другой
+    // клиент успевал отменить задачу: проверка отмены защищала прочитанный
+    // снимок, а повтор назначался уже отменённой работе. Внутри транзакции
+    // такого промежутка нет, а остановка ничего не пишет и откатывается.
+    const decision = this.h.store.atomic(() => {
+      const state = this.h.store.read();
+      const tasks = state.tasks.filter((t) => taskIds.includes(t.id));
+      const decided = repairDecision(state, tasks, {
+        budgetLeft: this.h.config.repairBudget - (job.repairs ?? 0),
+        maxAttempts: this.h.config.maxAttempts,
+      });
+      if (!decided || decided.action === 'stop') return decided;
+      this.workflow.repair(job, `repair:${decided.kind}`, () => {
+        this.h.retry(decided.taskId);
+        // Отказ окружения останавливает выдачу — иначе очередь сожгла бы
+        // бюджет каждой задачи на одной и той же внешней причине. Раз причина
+        // признана разовой и повтор назначен, выдачу нужно вернуть.
+        //
+        // Снимается при этом только пауза, поставленная тем же классом отказа.
+        // Очередь общая: пауза могла прийти от отказа провайдера по соседней
+        // доске, и снять её значило бы выдать работу под тот самый отказ,
+        // из-за которого выдача и остановлена.
+        if (
+          decided.resumeQueue &&
+          state.paused &&
+          state.pauseReason === 'runtime' &&
+          state.pauseFailure === decided.kind
+        )
+          this.h.pause(false);
+      });
+      return decided;
     });
     if (!decision) return false;
     if (decision.action === 'stop') throw new Error(decision.reason);
-    this.workflow.repair(job, `repair:${decision.kind}`, () => {
-      this.h.retry(decision.taskId);
-      // Отказ окружения останавливает выдачу — иначе очередь сожгла бы бюджет
-      // каждой задачи на одной и той же внешней причине. Раз причина признана
-      // разовой и повтор назначен, выдачу нужно вернуть, иначе повтор никогда
-      // не будет выдан.
-      if (decision.resumeQueue) this.h.pause(false);
-    });
     return true;
   }
   async execute(job: WorkflowJob, signal: AbortSignal): Promise<boolean> {

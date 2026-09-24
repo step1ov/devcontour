@@ -312,7 +312,10 @@ export interface DevContourState {
   changeSets: ChangeSet[];
   leader?: { owner: string; leaseUntil: number };
   paused: boolean;
-  pauseReason?: 'operator' | 'shutdown';
+  /** Кто остановил выдачу: человек, штатная остановка или отказ рантайма. */
+  pauseReason?: 'operator' | 'shutdown' | 'runtime';
+  /** Какой класс отказа остановил выдачу: снять паузу вправе только он. */
+  pauseFailure?: FailureKind;
   sequence: number;
 }
 export interface AuditEvent {
