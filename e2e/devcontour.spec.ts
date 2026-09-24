@@ -5,8 +5,13 @@ test('Plan → parallel execution → acceptance → correction → acceptance p
   request,
 }) => {
   // Two full queue cycles run here: the default 60s budget leaves no margin and
-  // any load on the machine turns a real pass into a timeout.
+  // any load on the machine turns a real pass into a timeout. test.slow()
+  // stretches the test's own budget but not the waits inside it, and a full
+  // demo cycle takes around forty seconds on an idle machine — so a fixed 45s
+  // wait reported a working queue as broken whenever anything else was running.
+  // The assertion is unchanged: the board still has to become acceptable.
   test.slow();
+  const cycle = { timeout: 150_000 };
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto('/');
@@ -16,7 +21,7 @@ test('Plan → parallel execution → acceptance → correction → acceptance p
     'Очередь на паузе',
   );
   await page.getByRole('button', { name: 'Запустить очередь' }).click();
-  await expect(page.getByRole('button', { name: 'Принять доску' })).toBeVisible({ timeout: 45000 });
+  await expect(page.getByRole('button', { name: 'Принять доску' })).toBeVisible(cycle);
   await page.getByRole('button', { name: 'Принять доску' }).click();
   await expect(page.getByRole('button', { name: 'Создать корректировку' })).toBeVisible();
   const before = await (await request.get('/api/state')).json();
@@ -37,7 +42,7 @@ test('Plan → parallel execution → acceptance → correction → acceptance p
   await expect(page.getByText('r2', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Утвердить план' })).toBeVisible();
   await page.getByRole('button', { name: 'Утвердить план' }).click();
-  await expect(page.getByRole('button', { name: 'Принять доску' })).toBeVisible({ timeout: 45000 });
+  await expect(page.getByRole('button', { name: 'Принять доску' })).toBeVisible(cycle);
   await page.getByRole('button', { name: 'Принять доску' }).click();
   // Acceptance is confirmed by the correction action appearing; reading the API
   // before that races the click.

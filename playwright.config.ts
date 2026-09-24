@@ -4,7 +4,10 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   retries: 0,
-  timeout: 60000,
+  // Сценарий с двумя полными циклами очереди на незагруженной машине идёт
+  // около сорока секунд; под посторонней нагрузкой — заметно дольше.
+  // test.slow() умножает именно этот бюджет.
+  timeout: 90000,
   reporter: [['list'], ['html', { open: 'never' }]],
   use: {
     baseURL: 'http://127.0.0.1:4399',
