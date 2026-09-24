@@ -45,7 +45,12 @@ test('Setup starts from only a Markdown spec, copies hidden roles and pins an ag
     );
     await access(join(root, 'docs/devcontour-workspaces.md'));
     await access(join(root, 'docs/devcontour-engineering.md'));
-    await access(join(root, '.agents/context/mobile-maestro.md'));
+    // Инструкции стека приезжают по объявлению профиля, а не всем подряд:
+    // проекту без мобильной поверхности мобильные инструкции не нужны, и
+    // библиотека, копируемая целиком, перестаёт быть выбором.
+    await assert.rejects(access(join(root, '.agents/context/mobile-maestro.md')));
+    // А объявленные профилем — приезжают: у веб-поверхности есть общий дизайн.
+    await access(join(root, '.agents/context/design-system.md'));
     await access(join(root, 'CLAUDE.md'));
     assert.match(
       await readFile(join(root, 'docs/devcontour-start.md'), 'utf8'),

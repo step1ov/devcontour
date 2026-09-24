@@ -4,7 +4,7 @@ import { profile } from '../src/runner/packs.ts';
 import { config, fixture, input } from './helpers.ts';
 import { declaredRoles, requiresContract } from '../src/core/repositories.ts';
 import { loadConfig, readComponentConfig } from '../src/runner/config.ts';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 test('Every pinned profile has an executable test gate and mobile limits concurrency', async () => {
@@ -127,5 +127,42 @@ test('A component keeps the roles its own profile brought, across a config reloa
     assert.equal(entry.roles.backend.runtime, 'codex', 'компонент уточняет свою роль');
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('A stack pack arrives on declaration, and a library that moved ahead is a decision', async () => {
+  const { deliverContextPacks, outdatedContextPacks, adoptContextPack } = await import(
+    '../src/runner/context-library.ts'
+  );
+  const repo = mkdtempSync(join(tmpdir(), 'devcontour-library-'));
+  const pack = {
+    id: 'design-system',
+    version: '1.0.0',
+    files: ['.agents/context/design-system.md'],
+  };
+  try {
+    // Знание стека приезжает по объявлению, а не лежит в каждом проекте.
+    assert.deepEqual(await deliverContextPacks(repo, [pack]), pack.files);
+    const delivered = readFileSync(join(repo, pack.files[0]), 'utf8');
+    assert.match(delivered, /Общий дизайн/);
+
+    // Повторная доставка не трогает файл: продукт мог его дополнить, а пакет
+    // закреплён по digest — молчаливая замена сделала бы закрепление ложью.
+    writeFileSync(join(repo, pack.files[0]), delivered + '\n<!-- дополнение продукта -->\n');
+    assert.deepEqual(await deliverContextPacks(repo, [pack]), []);
+    assert.match(readFileSync(join(repo, pack.files[0]), 'utf8'), /дополнение продукта/);
+
+    // Библиотека ушла вперёд — это видно и решается явно.
+    const stale = await outdatedContextPacks(repo, [pack]);
+    assert.equal(stale.length, 1);
+    assert.equal(stale[0].id, 'design-system');
+    assert.notEqual(stale[0].library, pack.version);
+
+    const adopted = await adoptContextPack(repo, pack);
+    assert.equal(adopted.version, stale[0].library);
+    assert.doesNotMatch(readFileSync(join(repo, pack.files[0]), 'utf8'), /дополнение продукта/);
+    assert.deepEqual(await outdatedContextPacks(repo, [{ ...pack, version: adopted.version }]), []);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
   }
 });

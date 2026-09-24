@@ -7,6 +7,7 @@ import { profile, packKey, profileMetadata } from './packs.ts';
 import { projectConfig, profileLock } from './setup.ts';
 import { loadConfig, readComponentConfig, scopedConfig } from './config.ts';
 import { reserveRepositories } from './ownership.ts';
+import { deliverContextPacks } from './context-library.ts';
 
 const registrySchema = z.object({
   version: z.literal(1),
@@ -155,10 +156,15 @@ export async function setupWorkspace(file: string, data?: string) {
     // пакет с тем же id, объявленный workspace, переопределяет профильный.
     contextPacks: [
       ...new Map(
-        [...selected.flatMap((p) => p.contextPacks), ...input.contextPacks].map((pack) => [
-          pack.id,
-          pack,
-        ]),
+        [
+          // Пакет принадлежит тому компоненту, чей профиль его принёс: по
+          // умолчанию у него repositoryId «main», а в workspace из product и
+          // library такого репозитория нет вовсе.
+          ...selected.flatMap((p, i) =>
+            p.contextPacks.map((pack) => ({ ...pack, repositoryId: repos[i].id })),
+          ),
+          ...input.contextPacks,
+        ].map((pack) => [pack.id, pack]),
       ).values(),
     ],
     resources: input.resources,
@@ -177,6 +183,16 @@ export async function setupWorkspace(file: string, data?: string) {
     packs: packs.map(profileMetadata),
   });
   const configPath = join(root, 'config.json');
+  // Инструкции объявленных пакетов приезжают в репозиторий до закрепления:
+  // context-lock считает digest по файлам в дереве, и файла там ещё нет.
+  const delivered: string[] = [];
+  for (const [i, repo] of repos.entries())
+    delivered.push(
+      ...(await deliverContextPacks(
+        repo.path,
+        config.contextPacks.filter((pack) => pack.repositoryId === repos[i].id),
+      )),
+    );
   const lock = { version: 1, packs: packs.flatMap((p) => profileLock(p).packs) };
   try {
     await readFile(configPath);
@@ -237,7 +253,7 @@ export async function setupWorkspace(file: string, data?: string) {
         if (previousLock !== null) await writeFile(join(root, 'packs.lock.json'), previousLock);
         throw invalid;
       }
-      return { status: 'profile-updated', data: root, config: configPath };
+      return { status: 'profile-updated', data: root, config: configPath, delivered };
     }
     if (
       existing.workspaceRoot !== workspaceRoot ||
@@ -295,9 +311,9 @@ export async function setupWorkspace(file: string, data?: string) {
           2,
         ),
       );
-      return { status: 'declaration-updated', data: root, config: configPath };
+      return { status: 'declaration-updated', data: root, config: configPath, delivered };
     }
-    return { status: 'preserved', data: root, config: configPath };
+    return { status: 'preserved', data: root, config: configPath, delivered };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }

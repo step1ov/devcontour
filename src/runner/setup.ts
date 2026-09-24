@@ -15,6 +15,7 @@ import { profile, profileMetadata, profilePin, packKey } from './packs.ts';
 import { git } from './process.ts';
 
 const templateRoot = fileURLToPath(new URL('../../templates/project/', import.meta.url));
+const libraryRoot = fileURLToPath(new URL('../../packs/context/', import.meta.url));
 const devcontourRoot = fileURLToPath(new URL('../../', import.meta.url));
 // Чему учить роль, кроме её собственной инструкции: тестировщика — проверкам,
 // тех, кто делает интерфейс, — дизайну, остальных — контрактам. Правило по виду
@@ -234,6 +235,19 @@ export async function setupProject(options: {
       ? resolve(options.data)
       : join(repository, '.devcontour-local');
   const files = new Map<string, string>();
+  // Инструкции стека приезжают из библиотеки DevContour по объявлению профиля,
+  // а не лежат в каждом проекте заранее: подтвердили мобильное приложение —
+  // приехали мобильные инструкции, и только они.
+  for (const pack of selected.contextPacks)
+    for (const file of pack.files) {
+      const source = join(libraryRoot, file);
+      if (files.has(join(repository, file))) continue;
+      try {
+        files.set(join(repository, file), await readFile(source, 'utf8'));
+      } catch {
+        /* Пакет вправе ссылаться на файл, который пишет сам продукт. */
+      }
+    }
   for (const name of await templateFiles())
     files.set(join(repository, name), await readFile(join(templateRoot, name), 'utf8'));
   files.set(

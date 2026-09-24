@@ -11,6 +11,7 @@ import {
 } from '../core/repositories.ts';
 import { validateWorkflow } from '../core/workflow.ts';
 import { command, git } from './process.ts';
+import { outdatedContextPacks } from './context-library.ts';
 import { executionEnvironment, runSteps, withEnvironment } from './environment.ts';
 import { withResources } from './resources.ts';
 import { agentEnvironment, toolProfileFor } from './tools.ts';
@@ -94,6 +95,26 @@ export async function doctor(config: Config, root: string, probe = false) {
   // ничего, и всё держится на том, что область указана у каждой задачи. Роль,
   // владеющая сквозными решениями, оказывается при этом самой широкой — это
   // стоит видеть, а не обнаруживать по принятому diff.
+  // Инструкция, по которой написан код, — часть договора. Библиотека DevContour
+  // живёт своей жизнью: её пакет обновляется, а копия в проекте остаётся. Молча
+  // подменять нельзя, молчать о расхождении — тоже: проект узнал бы о нём на
+  // ревью, когда код уже не отвечает правилам.
+  await check('context-library', async () => {
+    const stale = (
+      await Promise.all(
+        repositories(config).map((repo) =>
+          outdatedContextPacks(
+            repo.path,
+            config.contextPacks.filter((pack) => pack.repositoryId === repo.id),
+          ),
+        ),
+      )
+    ).flat();
+    if (!stale.length) return 'Пакеты контекста совпадают с библиотекой';
+    return `Библиотека ушла вперёд: ${stale
+      .map((p) => `${p.id} ${p.version} → ${p.library}`)
+      .join('; ')}. Решите: остаться на своей версии или перейти — context-adopt --pack <id>`;
+  });
   await check('write-scope', async () => {
     const open = bindings
       .filter((b) => !b.review && !roleBinding(config, b.role, b.repo.id)?.writePaths?.length)

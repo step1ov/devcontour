@@ -51,6 +51,7 @@ Setup не вызывает модель, не устанавливает зав
 | `plan`            | `--brief FILE --runtime codex\|claude`, опционально `--model NAME` | Вызывает модель, сохраняет и импортирует новый черновой план                                          |
 | `import-plan`     | `--file FILE`                                                      | Импортирует готовый JSON, создаёт новую доску и draft-задачи                                          |
 | `edit-task`       | `--task ID --file FILE`                                            | Меняет допустимый черновик с проверкой digest; передавайте полный TaskInput без служебных полей       |
+| `context-adopt`   | `--pack ID`                                                        | Берёт версию пакета из библиотеки DevContour, снимает закрепление; требует паузы очереди и последующего `context-lock` |
 | `base-update`     | —                                                                  | Переносит подготовку рабочей ветки в базу прогонов: перемотка либо слияние. Требует паузы очереди |
 | `review-contract` | `--file FILE --author-runtime codex\|claude`                       | Независимое review предложения; при agent mode регистрирует контракт, при operator ждёт подтверждения |
 | `review-plan`     | `--board ID --author-runtime codex\|claude`                        | Проверяет текущий план и утверждает черновики по политике                                             |

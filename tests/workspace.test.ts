@@ -402,26 +402,32 @@ test('Workspace setup preserves policy on repeat and detects a competing control
       contextPacks: Record<string, unknown>[];
       workspaceGates: Record<string, unknown>[];
     };
-    locked.contextPacks[0].revision = 'a'.repeat(40);
-    locked.contextPacks[0].digest = 'b'.repeat(64);
+    // Пакет адресуется по id: первым в списке может идти пакет профиля.
+    const own = (list: { id: string }[]) => list.findIndex((p) => p.id === 'workflow');
+    locked.contextPacks[own(locked.contextPacks as { id: string }[])].revision = 'a'.repeat(40);
+    locked.contextPacks[own(locked.contextPacks as { id: string }[])].digest = 'b'.repeat(64);
     await writeFile(configPath, JSON.stringify(locked));
     registry.workspaceGates[0].timeoutMs = 700000;
     await writeFile(path, JSON.stringify(registry));
     assert.equal((await setupWorkspace(path, f.data)).status, 'declaration-updated');
     const after = loadConfig(configPath);
-    assert.equal(after.contextPacks[0].revision, 'a'.repeat(40));
-    assert.equal(after.contextPacks[0].digest, 'b'.repeat(64));
+    const pinned = after.contextPacks.find((p) => p.id === 'workflow')!;
+    assert.equal(pinned.revision, 'a'.repeat(40));
+    assert.equal(pinned.digest, 'b'.repeat(64));
     assert.equal(after.workspaceGates[0].timeoutMs, 700000);
 
     // Сменились роли пакета — это другое объявление. По id, version и files
     // оно выглядело прежним: перенос не запускался, и исполнитель продолжал
     // получать устаревшие инструкции вместе с их закреплением.
-    registry.contextPacks[0].roles = ['backend', 'qa'];
+    registry.contextPacks[own(registry.contextPacks as { id: string }[])].roles = [
+      'backend',
+      'qa',
+    ];
     await writeFile(path, JSON.stringify(registry));
     assert.equal((await setupWorkspace(path, f.data)).status, 'declaration-updated');
-    const reselected = loadConfig(configPath);
-    assert.deepEqual(reselected.contextPacks[0].roles, ['backend', 'qa']);
-    assert.equal(reselected.contextPacks[0].revision, undefined, 'закрепление потеряно честно');
+    const reselected = loadConfig(configPath).contextPacks.find((p) => p.id === 'workflow')!;
+    assert.deepEqual(reselected.roles, ['backend', 'qa']);
+    assert.equal(reselected.revision, undefined, 'закрепление потеряно честно');
     await assert.rejects(
       setupWorkspace(path, join(f.root, 'another')),
       /workspace|владел|управля/i,
