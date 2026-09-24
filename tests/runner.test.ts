@@ -547,3 +547,47 @@ test('A refusal that will repeat on every task stops the queue instead of burnin
     await f.cleanup();
   }
 });
+
+test('An empty candidate is refused before an independent review is spent on it', async () => {
+  const f = await runtimeFixture();
+  try {
+    const repo = repositories(f.config)[0];
+    await git(repo.path, 'update-ref', `refs/heads/${repo.targetBranch}`, await git(repo.path, 'rev-parse', 'HEAD'));
+    const board = f.h.createBoard('Доска');
+    const task = f.h.addTask(board.id, { ...input('Задача с областью записи'), writePaths: ['src'] });
+    f.h.approve(board.id);
+    f.h.pause(false);
+
+    // Исполнитель отчитался «сделано», не изменив ни файла. Гейты на таком
+    // кандидате зелены — они были зелены и до него, — а всю проверку принимает
+    // на себя независимое ревью: пустой коммит стоил полного ревью, чтобы
+    // услышать «diff пуст».
+    let reviews = 0;
+    const idle = {
+      ...adapters,
+      demo: {
+        ...adapters.demo,
+        name: 'demo' as const,
+        execute: (request: AgentRequest) => {
+          if (request.review) reviews++;
+          return Promise.resolve({
+            data: request.review
+              ? { approved: true, summary: 'Нечего смотреть', findings: [], discoveries: [] }
+              : { completed: true, summary: 'Всё уже готово', discoveries: [] },
+            log: '',
+            command: ['fixture'],
+          });
+        },
+      },
+    };
+    const scheduler = new Scheduler(f.h, f.root, idle);
+    await scheduler.drain();
+    const failed = f.store.read().tasks.find((t) => t.id === task.id)!;
+    assert.equal(failed.status, 'failed');
+    assert.match(failed.failure ?? '', /Изменений нет/);
+    assert.equal(reviews, 0, 'ревью на пустом кандидате не запускается');
+    await scheduler.stop();
+  } finally {
+    await f.cleanup();
+  }
+});
