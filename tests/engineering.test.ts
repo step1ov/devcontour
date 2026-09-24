@@ -143,6 +143,7 @@ test('Pinned role/library documents are selected reproducibly, delivered to writ
         repositoryId: 'main',
         roles: ['architect', 'backend', 'frontend', 'qa'],
         files: ['instructions/common.md'],
+        references: [],
       },
       {
         id: 'library',
@@ -150,6 +151,7 @@ test('Pinned role/library documents are selected reproducibly, delivered to writ
         repositoryId: 'main',
         roles: [],
         files: ['instructions/library.md'],
+        references: [],
       },
     ];
     f.c.contextPacks = await pinContext(f.c);
@@ -224,6 +226,7 @@ test('Unknown context/resources and unpinned instructions cannot silently run', 
         repositoryId: 'main',
         roles: ['architect'],
         files: ['missing.md'],
+        references: [],
       },
     ];
     f.h.pause(false);
@@ -434,7 +437,14 @@ test('CLI context-lock pins committed instructions, context-show resolves task s
     const c = config({
       repository: repo,
       contextPacks: [
-        { id: 'sdk', version: '1', repositoryId: 'main', roles: ['qa'], files: ['guide.md'] },
+        {
+          id: 'sdk',
+          version: '1',
+          repositoryId: 'main',
+          roles: ['qa'],
+          files: ['guide.md'],
+          references: [],
+        },
       ],
     });
     await writeFile(join(data, 'config.json'), JSON.stringify(c));
@@ -459,5 +469,47 @@ test('CLI context-lock pins committed instructions, context-show resolves task s
     assert.match(rejected.stderr, /приостановите очередь/);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('A pack names its references instead of inlining them, and pins them all the same', async () => {
+  const f = await runnerFixture();
+  try {
+    await mkdir(join(f.c.repository, 'standards'), { recursive: true });
+    await writeFile(join(f.c.repository, 'standards/rules.md'), 'Короткие правила на каждый день.');
+    await writeFile(
+      join(f.c.repository, 'standards/reference.md'),
+      '# Справка\n' + 'подробности. '.repeat(400),
+    );
+    await git(f.c.repository, 'add', 'standards');
+    await git(f.c.repository, 'commit', '-m', 'standards');
+    f.c.contextPacks = [
+      {
+        id: 'standards',
+        version: '1.0',
+        repositoryId: 'main',
+        roles: ['backend'],
+        files: ['standards/rules.md'],
+        references: ['standards/reference.md'],
+      },
+    ];
+    f.c.contextPacks = await pinContext(f.c);
+    const pinned = f.c.contextPacks[0].digest;
+
+    const ctx = await taskContext(f.c, { role: 'backend', repositoryId: 'main' } as never);
+    // Правила вкладываются, справка называется: библиотека стандартов на сотни
+    // килобайт в промпт не помещается, а выбросить её — значит потерять именно
+    // те детали, ради которых её писали.
+    assert.match(ctx.text, /Короткие правила на каждый день/);
+    assert.doesNotMatch(ctx.text, /подробности\. подробности/);
+    assert.match(ctx.text, /- standards\/reference\.md/);
+
+    // Справка закреплена наравне с правилами: её правка делает пин недействительным.
+    await writeFile(join(f.c.repository, 'standards/reference.md'), '# Справка\nдругое\n');
+    await git(f.c.repository, 'add', 'standards');
+    await git(f.c.repository, 'commit', '-m', 'reference changed');
+    assert.notEqual((await pinContext(f.c))[0].digest, pinned);
+  } finally {
+    await f.cleanup();
   }
 });

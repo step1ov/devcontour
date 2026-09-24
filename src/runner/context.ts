@@ -8,7 +8,10 @@ import { git } from './process.ts';
 async function contents(config: Config, pack: ContextPack, revision: string) {
   const repo = repository(config, pack.repositoryId);
   const documents = [];
-  for (const file of [...pack.files].sort()) {
+  // Справочные файлы входят в digest наравне с правилами: изменилась справка —
+  // закрепление недействительно. В промпт они не вкладываются, но исполнитель
+  // читает именно закреплённую редакцию.
+  for (const file of [...pack.files, ...pack.references].sort()) {
     const entry = await git(repo.path, 'ls-tree', revision, '--', file);
     if (!/^100(644|755) blob /.test(entry) || entry.includes('\n'))
       throw new Error('Context требует обычный Git-файл: ' + file);
@@ -71,9 +74,22 @@ export async function taskContext(config: Config, task: Task) {
       revision: pack.revision,
       digest: pack.digest,
     });
+    // Правила вкладываются, справка — называется. Библиотека стандартов на
+    // сотни килобайт в промпт не помещается, а выбросить её значит потерять
+    // именно те детали, ради которых её писали. Исполнитель читает справку в
+    // рабочем дереве, когда тема всплыла; её содержимое входит в digest, так
+    // что читается закреплённая редакция, а не случайная.
+    const inlined = documents.filter((d) => pack.files.includes(d.file));
+    const named = pack.references.filter((file) => documents.some((d) => d.file === file));
     sections.push(
       `Context pack ${pack.id}@${pack.version}; source ${pack.repositoryId}@${pack.revision}; digest ${pack.digest}\n` +
-        documents.map((d) => `Document: ${d.file}\n${d.content}`).join('\n\n'),
+        inlined.map((d) => `Document: ${d.file}\n${d.content}`).join('\n\n') +
+        (named.length
+          ? `\n\nReference documents of this pack, pinned at the same revision. They are not` +
+            ` included above: read them from the worktree when the topic comes up, do not guess` +
+            ` their content.\n` +
+            named.map((file) => `- ${file}`).join('\n')
+          : ''),
     );
   }
   const text = sections.join('\n\n');
