@@ -139,6 +139,7 @@ test('A stack pack arrives on declaration, and a library that moved ahead is a d
     id: 'design-system',
     version: '1.0.0',
     files: ['.agents/context/design-system.md'],
+    references: [],
   };
   try {
     // Знание стека приезжает по объявлению, а не лежит в каждом проекте.

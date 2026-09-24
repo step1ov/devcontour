@@ -1,0 +1,41 @@
+{
+  "source": "matt-pocock",
+  "repository": "https://github.com/mattpocock/skills.git",
+  "commit": "c55ee46073ed923f86ce59a5eb3b6d895095d1b7",
+  "license": "MIT",
+  "importedAt": "2026-09-24T07:28:48.407Z",
+  "files": [
+    {
+      "file": ".agents/context/vendor/matt-pocock/skills--engineering--code-review--SKILL.md",
+      "upstream": "skills/engineering/code-review/SKILL.md"
+    },
+    {
+      "file": ".agents/context/vendor/matt-pocock/skills--engineering--diagnosing-bugs--SKILL.md",
+      "upstream": "skills/engineering/diagnosing-bugs/SKILL.md"
+    },
+    {
+      "file": ".agents/context/vendor/matt-pocock/skills--engineering--domain-modeling--ADR-FORMAT.md",
+      "upstream": "skills/engineering/domain-modeling/ADR-FORMAT.md"
+    },
+    {
+      "file": ".agents/context/vendor/matt-pocock/skills--engineering--domain-modeling--CONTEXT-FORMAT.md",
+      "upstream": "skills/engineering/domain-modeling/CONTEXT-FORMAT.md"
+    },
+    {
+      "file": ".agents/context/vendor/matt-pocock/skills--engineering--domain-modeling--SKILL.md",
+      "upstream": "skills/engineering/domain-modeling/SKILL.md"
+    },
+    {
+      "file": ".agents/context/vendor/matt-pocock/skills--engineering--tdd--SKILL.md",
+      "upstream": "skills/engineering/tdd/SKILL.md"
+    },
+    {
+      "file": ".agents/context/vendor/matt-pocock/skills--engineering--tdd--mocking.md",
+      "upstream": "skills/engineering/tdd/mocking.md"
+    },
+    {
+      "file": ".agents/context/vendor/matt-pocock/skills--engineering--tdd--tests.md",
+      "upstream": "skills/engineering/tdd/tests.md"
+    }
+  ]
+}

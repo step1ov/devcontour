@@ -28,11 +28,15 @@ const exists = (path: string) =>
  */
 export async function deliverContextPacks(
   repository: string,
-  packs: Pick<ContextPack, 'id' | 'files'>[],
+  packs: Pick<ContextPack, 'id' | 'files' | 'references'>[],
 ): Promise<string[]> {
   const root = resolve(repository);
   const delivered: string[] = [];
-  for (const file of [...new Set(packs.flatMap((pack) => pack.files))]) {
+  // Справка доставляется наравне с правилами: исполнителю называют путь, и
+  // файл обязан по нему быть, иначе указание читать его — пустой звук.
+  for (const file of [
+    ...new Set(packs.flatMap((pack) => [...pack.files, ...(pack.references ?? [])])),
+  ]) {
     const source = resolve(libraryRoot, file);
     if (!source.startsWith(resolve(libraryRoot) + sep) || !(await exists(source))) continue;
     const target = join(root, file);
@@ -54,7 +58,7 @@ export async function deliverContextPacks(
  */
 export async function outdatedContextPacks(
   repository: string,
-  packs: Pick<ContextPack, 'id' | 'version' | 'files'>[],
+  packs: Pick<ContextPack, 'id' | 'version' | 'files' | 'references'>[],
 ): Promise<{ id: string; version: string; library: string; files: string[] }[]> {
   const root = resolve(repository);
   const outdated = [];
@@ -62,7 +66,7 @@ export async function outdatedContextPacks(
     const library = await libraryVersion(pack.id);
     if (!library || library === pack.version) continue;
     const differing: string[] = [];
-    for (const file of pack.files) {
+    for (const file of [...pack.files, ...(pack.references ?? [])]) {
       const source = resolve(libraryRoot, file);
       const target = join(root, file);
       if (!source.startsWith(resolve(libraryRoot) + sep)) continue;
@@ -97,11 +101,11 @@ async function libraryVersion(id: string): Promise<string | undefined> {
  */
 export async function adoptContextPack(
   repository: string,
-  pack: Pick<ContextPack, 'id' | 'files'>,
+  pack: Pick<ContextPack, 'id' | 'files' | 'references'>,
 ): Promise<{ id: string; version?: string; files: string[] }> {
   const root = resolve(repository);
   const taken: string[] = [];
-  for (const file of pack.files) {
+  for (const file of [...pack.files, ...(pack.references ?? [])]) {
     const source = resolve(libraryRoot, file);
     if (!source.startsWith(resolve(libraryRoot) + sep) || !(await exists(source))) continue;
     const target = join(root, file);

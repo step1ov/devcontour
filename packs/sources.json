@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "sources": {
+    "superpowers": {
+      "repository": "https://github.com/obra/superpowers.git",
+      "commit": "5bf4e78011075bcfc0dc295f0724994cd123ee71",
+      "license": "MIT",
+      "licenseFile": "LICENSE",
+      "allow": ["skills/"]
+    },
+    "matt-pocock": {
+      "repository": "https://github.com/mattpocock/skills.git",
+      "commit": "c55ee46073ed923f86ce59a5eb3b6d895095d1b7",
+      "license": "MIT",
+      "licenseFile": "LICENSE",
+      "allow": ["skills/engineering/", "skills/misc/"]
+    }
+  }
+}
