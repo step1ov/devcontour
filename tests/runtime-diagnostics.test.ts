@@ -93,7 +93,9 @@ else { process.stderr.write('loading private-token and waiting for provider\\n')
         runId: 'fixture-run',
         stage: 'implementation',
       }),
-      /timeout/,
+      // Отказ называет сам лимит: «код -1» не давал отличить исчерпанное время
+      // от остановки сервера, и оператор шёл смотреть логи, чтобы это понять.
+      /исчерпан лимит времени прогона: 5 с/,
     );
     const log = await readFile(join(artifactDir, 'runtime.log'), 'utf8');
     assert.match(log, /loading \[REDACTED\]/);
