@@ -37,7 +37,15 @@ try {
   assert.ok(archive.files.some((f) => f.path === 'lib/cli.js'));
   assert.ok(archive.files.some((f) => f.path === 'dist/index.html'));
   assert.ok(archive.files.some((f) => f.path === 'templates/project/.agents/roles/backend.md'));
-  assert.ok(!archive.files.some((f) => /^(evidence|docs\/evidence|\.idea)\//.test(f.path)));
+  assert.ok(
+    !archive.files.some((f) =>
+      /^(\.private|evidence|docs\/(?:evidence|research)|\.idea)\//.test(f.path),
+    ),
+  );
+  assert.ok(!archive.files.some((f) => /^docs\/verification(?:-[^/]+)?\.md$/.test(f.path)));
+  assert.ok(
+    !archive.files.some((f) => /^todo\/roadmap\/(?:evidence\/|[^/]*-review\.md$)/.test(f.path)),
+  );
   assert.ok(
     !archive.files.some((f) => /^(src|tests|node_modules|\.devcontour-local)\//.test(f.path)),
   );

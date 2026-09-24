@@ -9,3 +9,11 @@ test-results/
 !.env.example
 .DS_Store
 .idea/
+
+# Local research, reviews and verification artifacts are not public source.
+/.private/
+/docs/research/
+/docs/evidence/
+/docs/verification*.md
+/todo/roadmap/evidence/
+/todo/roadmap/*-review.md
