@@ -151,7 +151,16 @@ export async function setupWorkspace(file: string, data?: string) {
     concurrency: Math.min(...selected.map((p) => p.concurrency ?? 2)),
     repositories: repos,
     workspaceGates: input.workspaceGates,
-    contextPacks: input.contextPacks,
+    // Пакеты профиля приезжают вместе со стеком, реестр остаётся сильнее:
+    // пакет с тем же id, объявленный workspace, переопределяет профильный.
+    contextPacks: [
+      ...new Map(
+        [...selected.flatMap((p) => p.contextPacks), ...input.contextPacks].map((pack) => [
+          pack.id,
+          pack,
+        ]),
+      ).values(),
+    ],
     resources: input.resources,
     resourceDatabase: input.resourceDatabase,
     verificationMode: input.verificationMode,

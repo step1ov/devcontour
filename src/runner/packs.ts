@@ -3,7 +3,14 @@ import { createHash } from 'node:crypto';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
-import { gateList, relativePath, roleId, roleBindingSchema, type Config } from '../core/model.ts';
+import {
+  gateList,
+  relativePath,
+  roleId,
+  roleBindingSchema,
+  contextPackSchema,
+  type Config,
+} from '../core/model.ts';
 import { environmentSchema, lifecycleSchema, stepSchema } from '../core/integrations.ts';
 import { orderedGates } from '../core/workflow.ts';
 
@@ -25,6 +32,12 @@ export const profileSchema = z.strictObject({
   // область записи и свой инструментарий прогона; профиль знает это о себе, а
   // контур заранее не знает, какие роли бывают у продукта.
   roles: z.record(roleId, roleBindingSchema).default({}),
+  // Инструкции, которых требует стек профиля. Роли профиль объявлять умел, а
+  // знание — нет: файлы копировались в продукт при setup, и библиотека не
+  // росла, потому что её некуда было положить так, чтобы она сама приезжала
+  // в проект. Реестр workspace остаётся сильнее: пакет с тем же id он
+  // переопределяет.
+  contextPacks: z.array(contextPackSchema).max(50).default([]),
 });
 type Manifest = z.infer<typeof profileSchema>;
 type Source = { repositoryId: string; path: string };
@@ -126,6 +139,13 @@ export function resolveProfile(ref: string, repositoryRoot?: string, repositoryI
     // Слои складываются: базовый профиль даёт роль, надстройка уточняет её
     // привязку, не переписывая остальные.
     roles: Object.assign({}, ...layers.map((p) => p.roles)) as Manifest['roles'],
+    // Пакеты слоёв складываются по id: надстройка уточняет инструкцию базового
+    // профиля, не отменяя остальные.
+    contextPacks: [
+      ...new Map(
+        layers.flatMap((p) => p.contextPacks).map((pack) => [pack.id, pack]),
+      ).values(),
+    ],
     ...(source ? { source } : {}),
     // Preserve existing leaf builtin locks without a migration.
     digest: closure.length === 1 && !source ? hash(raw) : hash(JSON.stringify(closure)),

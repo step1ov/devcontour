@@ -346,3 +346,18 @@ sys.exit(0 if ok else 1)
     await f.close();
   }
 });
+
+test('A profile carries the instructions its stack needs, and the registry still wins', async () => {
+  // Роли профиль объявлять умел, а знание — нет: файлы копировались в продукт
+  // при setup, и библиотека не росла, потому что её некуда было положить так,
+  // чтобы она сама приезжала в проект.
+  const resolved = await profile('react-native');
+  const design = resolved.contextPacks.find((p) => p.id === 'design-system');
+  assert.ok(design, 'профиль приносит инструкции своей поверхности');
+  assert.ok(design.files.includes('.agents/context/design-system.md'));
+  assert.ok(design.roles.includes('ui-tokens'));
+
+  // Надстройка уточняет пакет базового профиля, не отменяя остальные.
+  const expo = await profile('expo-mobile');
+  assert.ok(expo.contextPacks.some((p) => p.id === 'design-system'));
+});

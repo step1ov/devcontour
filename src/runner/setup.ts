@@ -302,10 +302,18 @@ export async function setupProject(options: {
           : projectConfig(repository, selected, options.approvalMode)),
         // Пакеты строятся по объявленным ролям: роль без своей инструкции
         // осталась бы с одним общим контекстом и не знала бы своего дела.
-        contextPacks: defaultContextPacks(
-          'main',
-          Object.keys(projectConfig(repository, selected, options.approvalMode).roles),
-        ),
+        contextPacks: [
+          ...new Map(
+            [
+              ...defaultContextPacks(
+                'main',
+                Object.keys(projectConfig(repository, selected, options.approvalMode).roles),
+              ),
+              // Пакеты профиля приезжают вместе со стеком и уточняют умолчания.
+              ...selected.contextPacks,
+            ].map((pack) => [pack.id, pack]),
+          ).values(),
+        ],
       },
       null,
       2,
