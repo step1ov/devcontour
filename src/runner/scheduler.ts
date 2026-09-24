@@ -105,16 +105,8 @@ export class Scheduler {
     }
     return drift;
   }
-  private baseCheckedAt = 0;
   private async assertBaseCurrent() {
-    // Тик идёт каждые 750 мс, а проверка базы — это несколько вызовов git на
-    // репозиторий. Опрашивать дерево четыре раза в секунду значит тратить
-    // заметную часть машины на вопрос, ответ на который меняется вручную.
-    // Раз в пять секунд отставание замечается всё равно быстрее, чем человек
-    // успевает на него посмотреть.
-    if (Date.now() - this.baseCheckedAt < 5000) return;
     const drift = await this.baseDrift();
-    this.baseCheckedAt = Date.now();
     if (!drift.length) return;
     throw new Error(
       'База прогонов отстала от рабочей ветки: ' +
