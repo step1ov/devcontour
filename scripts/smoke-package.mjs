@@ -135,7 +135,11 @@ try {
     const stages = new Preparation(stageStore);
     const created = stages.execute('preparation_create', { title: 'Packaged product fixture' });
     const changeId = created.activeChangeId;
-    for (const stage of ['product', 'architecture']) {
+    // Весь продуктовый маршрут, а не два первых шага: домен допускает
+    // разработку только после product, architecture и references, а при
+    // применимом интерфейсе ещё concept и design. Фикстура утверждала
+    // готовность после двух стадий и потому не могла пройти.
+    for (const stage of ['product', 'architecture', 'references', 'concept', 'design']) {
       const draft = stages.execute('preparation_' + stage, {
         changeId,
         expectedDigest: null,
