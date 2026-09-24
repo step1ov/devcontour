@@ -236,7 +236,7 @@ export class Scheduler {
       ),
       'Approved contracts: ' +
         JSON.stringify(s.contracts.filter((c) => task.contracts.includes(c.id))),
-      'Previous attempts: ' +
+      'Previous attempts, with the findings each review left. Address every finding that is still open before anything else, and say in your summary what you changed for it: ' +
         JSON.stringify(
           s.runs
             .filter((r) => r.taskId === task.id && r.id !== run.id)
@@ -247,6 +247,10 @@ export class Scheduler {
                 gate: e.gate,
                 passed: e.passed,
                 summary: e.summary,
+                // Находки прошлого ревью с путём и строкой: без них попытка
+                // знает, что «что-то не так», но не знает где, и круг
+                // повторяется с тем же замечанием.
+                findings: e.passed ? undefined : e.findings,
               })),
             })),
         ),
@@ -338,6 +342,15 @@ export class Scheduler {
       log,
       digest: digest(review),
       summary: `[${inspection.mode}] ${parsed.summary}`,
+      // Находки сохраняются на прогоне: следующая попытка должна получить путь,
+      // строку и следствие, а не одно краткое изложение. Иначе исполнитель
+      // знает, что «что-то не так», и круг повторяется с тем же замечанием.
+      findings: parsed.findings.map((f) => ({
+        severity: f.severity,
+        message: f.message,
+        path: f.path ?? null,
+        line: f.line ?? null,
+      })),
     });
     if (!passed) throw new Error('Независимое ревью отклонило результат: ' + parsed.summary);
   }

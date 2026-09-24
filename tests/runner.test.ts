@@ -591,3 +591,71 @@ test('An empty candidate is refused before an independent review is spent on it'
     await f.cleanup();
   }
 });
+
+test('A retry is told where the previous review objected, not only that it did', async () => {
+  const f = await runtimeFixture();
+  try {
+    const repo = repositories(f.config)[0];
+    await git(repo.path, 'update-ref', `refs/heads/${repo.targetBranch}`, await git(repo.path, 'rev-parse', 'HEAD'));
+    const board = f.h.createBoard('Доска');
+    const task = f.h.addTask(board.id, input('Задача с замечанием'));
+    f.h.approve(board.id);
+    f.h.pause(false);
+
+    const prompts: string[] = [];
+    const runtimes = (approve: boolean) => ({
+      ...adapters,
+      demo: {
+        ...adapters.demo,
+        name: 'demo' as const,
+        execute: async (request: AgentRequest) => {
+          if (request.review) {
+            prompts.push(request.prompt);
+            return {
+              data: {
+                approved: approve,
+                summary: 'Порядок выбора нарушен',
+                discoveries: [],
+                findings: approve
+                  ? []
+                  : [
+                      {
+                        severity: 'blocking',
+                        message: 'Списки сохраняют порядок обхода: нужна канонизация',
+                        path: 'src/assembly.ts',
+                        line: 296,
+                      },
+                    ],
+              },
+              log: '',
+              command: ['fixture'],
+            };
+          }
+          prompts.push(request.prompt);
+          return adapters.demo.execute(request);
+        },
+      },
+    });
+    const rejecting = new Scheduler(f.h, f.root, runtimes(false));
+    await rejecting.drain();
+    assert.equal(f.store.read().tasks.find((t) => t.id === task.id)!.status, 'failed');
+    await rejecting.stop();
+
+    // Следующая попытка получает саму находку — путь, строку и формулировку, а
+    // не только «ревью отклонило». Без этого круг повторяется с тем же
+    // замечанием, что и случилось на живом продукте дважды подряд.
+    prompts.length = 0;
+    f.h.retry(task.id);
+    f.h.pause(false);
+    const retrying = new Scheduler(f.h, f.root, runtimes(true));
+    await retrying.drain();
+    const implementation = prompts.find((p) => p.includes('Previous attempts'))!;
+    assert.ok(implementation, 'попытка получает историю прошлых прогонов');
+    assert.match(implementation, /нужна канонизация/);
+    assert.match(implementation, /src\/assembly\.ts/);
+    assert.match(implementation, /296/);
+    await retrying.stop();
+  } finally {
+    await f.cleanup();
+  }
+});

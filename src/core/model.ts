@@ -214,6 +214,12 @@ export interface Evidence {
   log: string;
   digest: string;
   summary: string;
+  /**
+   * Находки ревью: путь, строка и следствие, а не только краткое изложение.
+   * Без них следующая попытка знает, что «что-то не так», но не знает где и
+   * что делать, — и круг повторяется с тем же замечанием.
+   */
+  findings?: { severity: string; message: string; path?: string | null; line?: number | null }[];
 }
 export interface Run {
   memory?: { revision: string; ids: string[]; digest: string; bytes: number };

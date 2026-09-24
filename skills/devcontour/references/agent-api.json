@@ -3029,12 +3029,7 @@
               },
               "role": {
                 "type": "string",
-                "enum": [
-                  "architect",
-                  "backend",
-                  "frontend",
-                  "qa"
-                ]
+                "pattern": "^[a-z][a-z0-9-]{1,30}$"
               },
               "dependsOn": {
                 "default": [],
@@ -3327,12 +3322,7 @@
               },
               "role": {
                 "type": "string",
-                "enum": [
-                  "architect",
-                  "backend",
-                  "frontend",
-                  "qa"
-                ]
+                "pattern": "^[a-z][a-z0-9-]{1,30}$"
               },
               "dependsOn": {
                 "default": [],
