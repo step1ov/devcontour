@@ -110,17 +110,19 @@ export class LeadRunner {
         // бюджет каждой задачи на одной и той же внешней причине. Раз причина
         // признана разовой и повтор назначен, выдачу нужно вернуть.
         //
-        // Снимается при этом только пауза, поставленная тем же классом отказа.
-        // Очередь общая: пауза могла прийти от отказа провайдера по соседней
-        // доске, и снять её значило бы выдать работу под тот самый отказ,
-        // из-за которого выдача и остановлена.
-        if (
-          decided.resumeQueue &&
-          state.paused &&
-          state.pauseReason === 'runtime' &&
-          state.pauseFailure === decided.kind
-        )
-          this.h.pause(false);
+        // Снимается при этом только своя причина. Очередь общая на весь
+        // workspace: блокировок может быть несколько — обрыв связи по одной
+        // доске и отказ провайдера по другой, — и выдача возвращается, только
+        // когда не осталось ни одной. Пауза человека не снимается вовсе.
+        if (decided.blocksQueue && state.paused && state.pauseReason === 'runtime') {
+          const left = (state.pauseFailures ?? []).filter((k) => k !== decided.kind);
+          if (left.length)
+            this.h.store.change('scheduler.blockers', (s) => {
+              s.pauseFailures = left;
+              return { left };
+            });
+          else this.h.pause(false);
+        }
       });
       return decided;
     });
@@ -172,7 +174,18 @@ export class LeadRunner {
         }
       } else if (job.stage === 1) {
         if (this.repair(job, revision.taskIds)) return true;
-        if (!tasks.every((t) => t.status === 'done'))
+        // Стадия включает выдачу — но не отменяет чужих решений. Остановка
+        // человека («operator») и блокировка по отказу рантайма («runtime»)
+        // сохраняются: разрешение начать работу однажды не означает права
+        // снимать любые будущие паузы, а критерий восстановления прямо
+        // требует, чтобы пауза останавливала новые выдачи. Снимаются только
+        // штатная остановка сервера и исходное «очередь ещё не запускали», у
+        // которого причины нет: это не решение о работе.
+        const decided =
+          s.paused &&
+          (s.pauseReason === 'runtime' ||
+            (s.pauseReason === 'operator' && (s.pausedAt ?? '') >= job.startedAt));
+        if (!tasks.every((t) => t.status === 'done') && !decided)
           this.h.store.atomic(() => {
             guard();
             this.h.pause(false);

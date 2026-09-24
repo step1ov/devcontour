@@ -290,7 +290,7 @@ test('JUnit rejects empty/malformed reports and distinguishes skipped tests from
     junitSummary(
       '<testsuites><testsuite><testcase name="a"/><testcase name="b"><skipped/></testcase><testcase name="c"><failure/></testcase></testsuite></testsuites>',
     ),
-    { tests: 3, failures: 1, skipped: 1 },
+    { tests: 3, failures: 1, skipped: 1, failed: ['c'] },
   );
 });
 test('CLI adapters use structured outputs, stdin prompts and restricted review permissions', () => {
@@ -365,7 +365,15 @@ test('A stale run base stops the queue and base-update brings the preparation in
     await git(repo.path, 'worktree', 'add', '--detach', accepted, target);
     await writeFile(join(accepted, 'ACCEPTED.md'), '# accepted\n');
     await git(accepted, 'add', 'ACCEPTED.md');
-    await git(accepted, '-c', 'core.hooksPath=/dev/null', 'commit', '--no-gpg-sign', '-m', 'accepted');
+    await git(
+      accepted,
+      '-c',
+      'core.hooksPath=/dev/null',
+      'commit',
+      '--no-gpg-sign',
+      '-m',
+      'accepted',
+    );
     await git(repo.path, 'update-ref', target, await git(accepted, 'rev-parse', 'HEAD'));
     await git(repo.path, 'worktree', 'remove', '--force', accepted);
 
@@ -405,15 +413,25 @@ test('Acceptance records the proven SHA, so a base update cannot slip unverified
     // Приёмка, читавшая вершину, закрепила бы её как проверенную работу.
     await writeFile(join(repo.path, 'REGRESSION.md'), '# not proven by any gate\n');
     await git(repo.path, 'add', 'REGRESSION.md');
-    await git(repo.path, '-c', 'core.hooksPath=/dev/null', 'commit', '--no-gpg-sign', '-m', 'unproven');
+    await git(
+      repo.path,
+      '-c',
+      'core.hooksPath=/dev/null',
+      'commit',
+      '--no-gpg-sign',
+      '-m',
+      'unproven',
+    );
     await updateBase(f.config, f.root);
     const tip = await git(repo.path, 'rev-parse', target);
     assert.notEqual(tip, proven, 'вершина ушла вперёд непроверенным коммитом');
 
     const accepted = await acceptBoard(f.h, board.id, 'codex');
     assert.equal(accepted.status, 'accepted');
-    const snapshot = f.store.read().boards.find((b) => b.id === board.id)!.revisions.at(-1)!
-      .snapshot!;
+    const snapshot = f.store
+      .read()
+      .boards.find((b) => b.id === board.id)!
+      .revisions.at(-1)!.snapshot!;
     assert.equal(snapshot.sha, proven, 'принят доказанный SHA, а не вершина ветки');
     assert.notEqual(snapshot.sha, tip);
   } finally {
@@ -433,7 +451,12 @@ test('The scheduler classifies a refusal itself: a runtime that never ran refund
   });
   try {
     const repo = repositories(f.config)[0];
-    await git(repo.path, 'update-ref', `refs/heads/${repo.targetBranch}`, await git(repo.path, 'rev-parse', 'HEAD'));
+    await git(
+      repo.path,
+      'update-ref',
+      `refs/heads/${repo.targetBranch}`,
+      await git(repo.path, 'rev-parse', 'HEAD'),
+    );
     const board = f.h.createBoard('Доска');
     const refused = f.h.addTask(board.id, input('Задача с отказом окружения'));
     f.h.approve(board.id);
@@ -466,7 +489,12 @@ test('A task runs its own scope of proof, not every gate the profile declares', 
   const f = await runtimeFixture();
   try {
     const repo = repositories(f.config)[0];
-    await git(repo.path, 'update-ref', `refs/heads/${repo.targetBranch}`, await git(repo.path, 'rev-parse', 'HEAD'));
+    await git(
+      repo.path,
+      'update-ref',
+      `refs/heads/${repo.targetBranch}`,
+      await git(repo.path, 'rev-parse', 'HEAD'),
+    );
     // Гейт соседней, ещё не сделанной задачи. Раньше он ложился на любую
     // задачу компонента: параллельная декомпозиция не могла пройти, пока не
     // сделаны все соседи, хотя область доказательства у каждой своя.
@@ -514,7 +542,12 @@ test('A refusal that will repeat on every task stops the queue instead of burnin
   });
   try {
     const repo = repositories(f.config)[0];
-    await git(repo.path, 'update-ref', `refs/heads/${repo.targetBranch}`, await git(repo.path, 'rev-parse', 'HEAD'));
+    await git(
+      repo.path,
+      'update-ref',
+      `refs/heads/${repo.targetBranch}`,
+      await git(repo.path, 'rev-parse', 'HEAD'),
+    );
     const board = f.h.createBoard('Доска');
     const first = f.h.addTask(board.id, input('Первая задача'));
     const second = f.h.addTask(board.id, input('Вторая задача'));
@@ -552,9 +585,17 @@ test('An empty candidate is refused before an independent review is spent on it'
   const f = await runtimeFixture();
   try {
     const repo = repositories(f.config)[0];
-    await git(repo.path, 'update-ref', `refs/heads/${repo.targetBranch}`, await git(repo.path, 'rev-parse', 'HEAD'));
+    await git(
+      repo.path,
+      'update-ref',
+      `refs/heads/${repo.targetBranch}`,
+      await git(repo.path, 'rev-parse', 'HEAD'),
+    );
     const board = f.h.createBoard('Доска');
-    const task = f.h.addTask(board.id, { ...input('Задача с областью записи'), writePaths: ['src'] });
+    const task = f.h.addTask(board.id, {
+      ...input('Задача с областью записи'),
+      writePaths: ['src'],
+    });
     f.h.approve(board.id);
     f.h.pause(false);
 
@@ -596,7 +637,12 @@ test('A retry is told where the previous review objected, not only that it did',
   const f = await runtimeFixture();
   try {
     const repo = repositories(f.config)[0];
-    await git(repo.path, 'update-ref', `refs/heads/${repo.targetBranch}`, await git(repo.path, 'rev-parse', 'HEAD'));
+    await git(
+      repo.path,
+      'update-ref',
+      `refs/heads/${repo.targetBranch}`,
+      await git(repo.path, 'rev-parse', 'HEAD'),
+    );
     const board = f.h.createBoard('Доска');
     const task = f.h.addTask(board.id, input('Задача с замечанием'));
     f.h.approve(board.id);
@@ -658,4 +704,73 @@ test('A retry is told where the previous review objected, not only that it did',
   } finally {
     await f.cleanup();
   }
+});
+test('Замечание ревью про HTTP 401 не останавливает выдачу как отказ провайдера', async () => {
+  const f = await runtimeFixture();
+  try {
+    // Ревью говорит о поведении разрабатываемого приложения. Сам рантайм
+    // отработал и вернул структурированный вердикт: внешнего отказа нет.
+    // Разбор этого текста вторым проходом делал из замечания отказ провайдера
+    // и останавливал очередь навсегда — повтор назначался и никогда не
+    // выдавался, потому что класс review паузу снимать не вправе.
+    const scheduler = new Scheduler(f.h, f.root, {
+      ...adapters,
+      demo: {
+        name: 'demo' as const,
+        async execute(r: AgentRequest) {
+          if (r.review)
+            return {
+              data: {
+                approved: false,
+                summary: 'Missing handling for HTTP 401 Unauthorized in the client',
+                findings: [
+                  { severity: 'blocking', message: 'Unauthorized response is not handled' },
+                ],
+              },
+              log: 'rejected',
+              command: ['fixture-review'],
+            };
+          return adapters.demo.execute(r);
+        },
+      },
+    });
+    f.h.pause(false);
+    await scheduler.drain();
+
+    const state = f.store.read();
+    const failed = state.tasks.find((t) => t.status === 'failed')!;
+    assert.equal(failed.failureKind, 'review');
+    assert.equal(state.paused, false, 'выдача продолжается: внешнего отказа не было');
+    assert.deepEqual(state.pauseFailures ?? [], []);
+  } finally {
+    await f.cleanup();
+  }
+});
+test('Провал проверки несёт свою причину: разные ошибки не считаются одной', async () => {
+  // Полный вывод лежит в артефакте, но исполнителю следующей попытки он
+  // недоступен, а в отказ попадало только «Код выхода 1». Два несвязанных
+  // провала одной проверки выглядели одной причиной, и предел одинаковых
+  // повторов исчерпывался впустую.
+  const fingerprints: string[] = [];
+  for (const marker of ['EXPECTED_TOTAL_WRONG', 'MISSING_REQUIRED_FIELD']) {
+    const f = await runtimeFixture();
+    try {
+      f.h.config.gates[0].command = ['sh', '-c', `echo ${marker} >&2; exit 1`];
+      f.h.pause(false);
+      await new Scheduler(f.h, f.root).drain();
+
+      const failed = f.store.read().tasks.find((t) => t.status === 'failed')!;
+      assert.match(failed.failure!, new RegExp(marker), 'причина названа в отказе');
+      const run = f.store.read().runs.findLast((r) => r.taskId === failed.id)!;
+      assert.match(
+        run.evidence.find((e) => !e.passed)!.summary,
+        new RegExp(marker),
+        'причина доходит до подсказки следующей попытки через evidence',
+      );
+      fingerprints.push(failed.failureFingerprint!);
+    } finally {
+      await f.cleanup();
+    }
+  }
+  assert.notEqual(fingerprints[0], fingerprints[1], 'разные причины — разные отпечатки');
 });

@@ -18,7 +18,7 @@ import { mkdir, writeFile, readFile, realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { DevContour, digest } from '../core/service.ts';
 import { BlockedError, type Run, type Task, type Evidence, type Gate } from '../core/model.ts';
-import { TaskFailure, type FailureKind } from '../core/failure.ts';
+import { TaskFailure, repairPolicy, type FailureKind } from '../core/failure.ts';
 import { adapters, implementationResult, reviewResult, type AgentAdapter } from './adapters.ts';
 import { git } from './process.ts';
 import { repositories, repository, roleBinding } from '../core/repositories.ts';
@@ -658,28 +658,32 @@ export class Scheduler {
         // Таймаут ревьюера после готового кандидата — это настоящая попытка:
         // она стоила денег и прогонов, и не засчитывать её значит разрешить
         // дорогому циклу крутиться без предела.
+        // Класс считается один раз и дальше используется как есть: и для
+        // записи отказа, и для решения о паузе. Второй разбор того же текста
+        // принимал замечание ревью про «401 Unauthorized» в разрабатываемом
+        // приложении за отказ провайдера и останавливал выдачу насовсем.
+        const kind = classifyFailure(error, message);
         this.h.fail(
           run.id,
           run.token,
           message,
           error instanceof BlockedError && !run.candidateSha,
-          classifyFailure(error, message),
+          kind,
         );
         // Отказ, который повторится на любой задаче — кончились кредиты,
         // runtime не авторизован, — останавливает выдачу. Иначе очередь
         // перебирает задачи одну за другой и сжигает бюджет попыток каждой,
         // хотя причина у всех одна и находится вне контура.
-        if (error instanceof BlockedError || providerRefusal(message))
+        if (repairPolicy[kind].blocksQueue)
           this.h.store.change('scheduler.error', (s) => {
-            // Своя пауза называется своим именем: восстановление вправе снять
-            // только её. Уже стоящую паузу — человека или штатной остановки —
-            // она не перебивает, иначе цикл снял бы чужое решение.
-            if (!s.paused) {
-              s.pauseReason = 'runtime';
-              s.pauseFailure = classifyFailure(error, message);
-            }
+            // Причина добавляется к уже стоящим, а не теряется за ними: иначе
+            // отказ провайдера, пришедший вторым, снялся бы вместе с чужим
+            // обрывом связи. Пауза человека своё имя сохраняет — снимать её
+            // восстановление не вправе.
+            s.pauseFailures = [...new Set([...(s.pauseFailures ?? []), kind])];
+            if (!s.paused) s.pauseReason = 'runtime';
             s.paused = true;
-            return { error: `Выдача остановлена: ${message}` };
+            return { error: `Выдача остановлена: ${message}`, kind };
           });
       } catch {
         /* A cancelled or fenced run cannot publish a late failure. */

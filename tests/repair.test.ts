@@ -254,9 +254,13 @@ test('Восстановление снимает только свою пауз
   // Очередь общая на весь workspace. Снять чужую паузу значит выдать работу
   // под ту самую причину, из-за которой выдача и остановлена: пауза человека —
   // его решение, а пауза от отказа провайдера по соседней доске стоит денег.
-  for (const [reason, failure, expected] of [
-    ['runtime', 'environment', false],
-    ['runtime', 'provider-auth', true],
+  for (const [reason, failures, expected] of [
+    ['runtime', ['environment'], false],
+    ['runtime', ['provider-auth'], true],
+    // Обе очерёдности прихода: более строгая причина не теряется за уже
+    // стоящей паузой, и починка обрыва связи её не снимает.
+    ['runtime', ['environment', 'provider-auth'], true],
+    ['runtime', ['provider-auth', 'environment'], true],
     ['operator', undefined, true],
   ] as const) {
     const f = fixture();
@@ -269,7 +273,7 @@ test('Восстановление снимает только свою пауз
       f.store.change('test.pause', (s) => {
         s.paused = true;
         s.pauseReason = reason;
-        s.pauseFailure = failure;
+        s.pauseFailures = failures ? [...failures] : undefined;
         return {};
       });
 
@@ -281,11 +285,18 @@ test('Восстановление снимает только свою пауз
       const runner = new LeadRunner(f.h, f.root);
       await runner.execute(flow.get(job.key, job.owner), new AbortController().signal);
 
-      assert.equal(f.store.read().tasks[0].status, 'ready', 'повтор назначен в обоих случаях');
+      assert.equal(f.store.read().tasks[0].status, 'ready', 'повтор назначается всегда');
+      // Починенная причина уходит из списка, даже когда пауза остаётся.
+      if (reason === 'runtime')
+        assert.equal(
+          (f.store.read().pauseFailures ?? []).includes('environment'),
+          false,
+          'своя причина снята',
+        );
       assert.equal(
         f.store.read().paused,
         expected,
-        `пауза ${reason}/${failure} ${expected ? 'должна остаться' : 'должна быть снята'}`,
+        `пауза ${reason}/${failures?.join('+') ?? '—'} ${expected ? 'должна остаться' : 'должна быть снята'}`,
       );
     } finally {
       f.cleanup();
@@ -442,6 +453,69 @@ test('Потерянное владение чинится как окружен
     const decision = repairDecision(s, s.tasks, { budgetLeft: 6, maxAttempts: 3 })!;
     assert.equal(decision.action, 'retry');
     assert.equal(decision.action === 'retry' && decision.kind, 'environment');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Отпечаток не зависит от UUID запроса, SHA, пути и времени', () => {
+  // Шаблон SHA съедал группы UUID, и один и тот же обрыв с новым request id
+  // выглядел новой причиной: предел одинаковых повторов не срабатывал.
+  const one = failureFingerprint(
+    'environment',
+    'connection reset, request id 11111111-aaaa-4bbb-8ccc-111111111111',
+  );
+  const two = failureFingerprint(
+    'environment',
+    'connection reset, request id 22222222-dddd-4eee-8fff-222222222222',
+  );
+  assert.equal(one, two);
+  // Префикс перед UUID и путь прогона тоже не создают новой причины.
+  assert.equal(
+    failureFingerprint('environment', 'connection reset in R-33333333-bbbb-4ccc-8ddd-333333333333'),
+    failureFingerprint('environment', 'connection reset in R-44444444-eeee-4fff-8aaa-444444444444'),
+  );
+  // Содержательная разница по-прежнему различается.
+  assert.notEqual(one, failureFingerprint('environment', 'socket hang up'));
+});
+
+test('Пауза оператора переживает и восстановление, и следующий шаг стадии', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const t = f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    breakTask(f.h, t.id, 'gate', 'candidate/typecheck: ошибка');
+
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex', maxAttempts: 5 });
+    const runner = new LeadRunner(f.h, f.root);
+    const stage = () => {
+      const claimed = flow.claim(job.key, job.owner)!;
+      f.store.atomic(() => f.store.saveLocal('lead', job.owner, job.key, { ...claimed, stage: 1 }));
+      return flow.get(job.key, job.owner);
+    };
+
+    // Человек останавливает выдачу уже после регистрации работы.
+    f.h.pause(true);
+    const first = stage();
+    assert.equal(await runner.execute(first, new AbortController().signal), true);
+    flow.finish(first, true);
+    assert.equal(f.store.read().paused, true, 'восстановление паузу не снимает');
+
+    // Следующий шаг той же стадии снимал её безусловно: разрешение начать
+    // работу однажды не должно отменять все будущие остановки.
+    const second = stage();
+    flow.finish(second, await runner.execute(second, new AbortController().signal));
+    assert.equal(f.store.read().paused, true, 'шаг стадии паузу не снимает');
+    assert.equal(f.store.read().pauseReason, 'operator');
+
+    // Штатная остановка сервера — не решение о работе, её цикл снимает сам.
+    f.h.pause(false);
+    f.h.pause(true, 'shutdown');
+    const third = stage();
+    flow.finish(third, await runner.execute(third, new AbortController().signal));
+    assert.equal(f.store.read().paused, false, 'остановка сервера выдачу не держит');
   } finally {
     f.cleanup();
   }

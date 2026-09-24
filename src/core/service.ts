@@ -441,10 +441,11 @@ export class DevContour {
         return { paused: true, reason: s.pauseReason };
       s.paused = value;
       s.pauseReason = value ? reason : undefined;
+      s.pausedAt = value ? now() : undefined;
       // Класс отказа принадлежит конкретной паузе: пережив её, он разрешил бы
       // снять следующую паузу, к которой не имеет отношения. Эта операция —
       // решение человека или штатная остановка, и класса у неё нет.
-      s.pauseFailure = undefined;
+      s.pauseFailures = undefined;
       return { paused: value, reason: s.pauseReason };
     });
   }

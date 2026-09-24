@@ -7,8 +7,8 @@ export type RepairDecision =
       taskId: string;
       kind: FailureKind;
       fingerprint: string;
-      /** Снять паузу выдачи перед повтором. */
-      resumeQueue: boolean;
+      /** Класс держит выдачу: починив его, нужно снять его блокировку. */
+      blocksQueue: boolean;
       reason: string;
     }
   | { action: 'stop'; taskId?: string; kind?: FailureKind; reason: string };
@@ -98,7 +98,7 @@ export function repairDecision(
     taskId: task.id,
     kind,
     fingerprint,
-    resumeQueue: rule.resumeQueue ?? false,
+    blocksQueue: rule.blocksQueue ?? false,
     reason: `${task.id}: ${kind}, повтор ${identical} из ${rule.repeats}.${detail}`,
   };
 }

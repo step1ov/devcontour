@@ -355,6 +355,15 @@ function Journal({ events }: { events: AuditEvent[] }) {
   );
 }
 
+/** Безопасное представление работы: без fencing-полей, только для показа. */
+type WorkflowView = {
+  key: string;
+  status: string;
+  error?: string;
+  repairs: number;
+  repairBudget: number;
+};
+
 // Вкладка отвечала графиками, но не отвечала одним предложением: на каком
 // этапе разработка и чего она ждёт. Полосы показывают объём, карточки — кто
 // занят; между ними не было ответа на вопрос, с которого читатель начинает.
@@ -364,12 +373,14 @@ function Stage({
   paused,
   pauseReason,
   events,
+  workflows,
 }: {
   tasks: Task[];
   running: number;
   paused?: boolean;
   pauseReason?: string;
   events: AuditEvent[];
+  workflows?: WorkflowView[];
 }) {
   const done = tasks.filter((t) => t.status === 'done').length;
   const failed = tasks.filter((t) => t.status === 'failed').length;
@@ -383,6 +394,10 @@ function Stage({
             { error?: string } | undefined
         )?.error?.replace(/^Error:\s*/, '')
       : undefined;
+  // Остановленный цикл восстановления выглядел как обычное ожидание свободного
+  // исполнителя: причина лежала в записи работы и доходила до агентского API,
+  // но не до интерфейса. Человек не видел, что чинить уже никто не будет.
+  const halted = (workflows ?? []).filter((w) => w.status === 'failed' && w.error);
   const line = !tasks.length
     ? 'Объём ещё не собран: доска пуста.'
     : drafts === tasks.length
@@ -408,6 +423,11 @@ function Stage({
             Очередь остановилась сама: {stopped}
           </p>
         )}
+        {halted.map((w) => (
+          <p key={w.key} className="text-destructive m-0 text-sm break-words">
+            Автоматическое восстановление остановлено ({w.repairs} из {w.repairBudget}): {w.error}
+          </p>
+        ))}
       </CardContent>
     </Card>
   );
@@ -422,6 +442,7 @@ export function ProgressPanel({
     concurrency?: number;
     paused?: boolean;
     pauseReason?: 'operator' | 'shutdown' | 'runtime';
+    workflows?: WorkflowView[];
     config: {
       repositories?: { id: string; name?: string; kind?: string }[];
       gates?: Gate[];
@@ -497,6 +518,7 @@ export function ProgressPanel({
         paused={state.paused}
         pauseReason={state.pauseReason}
         events={state.events ?? []}
+        workflows={state.workflows}
       />
       <Setup
         repositories={state.config.repositories}

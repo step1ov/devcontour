@@ -22,6 +22,7 @@ import { WorkspaceRunner } from '../runner/workspace.ts';
 import { IntentService } from '../runner/intent.ts';
 import { attachJournal, renderJournal } from '../runner/journal.ts';
 import { runActivity } from '../runner/activity.ts';
+import { LeadWorkflow } from '../core/lead-workflow.ts';
 const json = (res: ServerResponse, status: number, value: unknown) => {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
@@ -138,7 +139,7 @@ export async function serve(
                   gates: h.config.gates.map((g) => g.id),
                   workspaceGates: h.config.workspaceGates.map((g) => g.id),
                   concurrency: h.config.concurrency,
-              maxAttempts: h.config.maxAttempts,
+                  maxAttempts: h.config.maxAttempts,
                 }
               : undefined,
             workers: (engine?.runs ?? [])
@@ -278,6 +279,7 @@ export async function serve(
             })),
             events: h.store.events(),
             journalError: h.store.projectionError,
+            workflows: new LeadWorkflow(h).view(),
             dataRoot: resolve(scheduler.root),
             ready: readyTasks(state).map((t) => t.id),
             config: {

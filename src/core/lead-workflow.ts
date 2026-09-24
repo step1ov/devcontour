@@ -74,6 +74,32 @@ export class LeadWorkflow {
   list(owner?: string) {
     return Object.values(this.h.store.localRecords<WorkflowJob>('lead', owner));
   }
+  /**
+   * Безопасное представление работ для панели.
+   *
+   * Причина окончательной остановки жила только в local_workflow и доходила до
+   * агентского API, но не до интерфейса: человек видел «ожидание выдачи» там,
+   * где восстановление уже прекращено навсегда. Fencing-поля наружу не идут —
+   * интерфейсу они не нужны и не должны быть доступны.
+   */
+  view() {
+    return [undefined, ...repositories(this.h.config).map((r) => r.id)].flatMap((owner) =>
+      this.list(owner).map((job) => ({
+        key: job.key,
+        kind: job.kind,
+        id: job.id,
+        owner: job.owner,
+        stage: job.stage,
+        status: job.status,
+        error: job.error,
+        attempts: job.attempts,
+        maxAttempts: job.maxAttempts,
+        repairs: job.repairs ?? 0,
+        repairBudget: this.h.config.repairBudget,
+        history: job.history.slice(-20),
+      })),
+    );
+  }
   get(key: string, owner?: string) {
     const job = this.h.store.localRecords<WorkflowJob>('lead', owner)[key];
     if (!job) throw new DomainError('Workflow не найден');
