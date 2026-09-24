@@ -316,13 +316,24 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
       // события: незалогиненный claude тоже печатает system и result. Работой
       // считается ход агента — ответ, вызов инструмента, сообщение. Таймаут —
       // всегда работа: он израсходовал весь отведённый бюджет.
+      // Прерывание по лимиту времени прогона приходит отдельным сигналом и не
+      // попадает в result.timedOut: оператор видел «код 143» и не мог отличить
+      // исчерпанное время от остановки сервера.
+      const expired =
+        r.signal.aborted && (r.signal.reason as Error | undefined)?.name === 'TimeoutError';
       const bookkeeping = ['system', 'result', 'error', 'session.created', 'thread.started'];
       const started =
         result.timedOut ||
+        expired ||
         runtimeEvents(result.stdout).events.some((e) => !bookkeeping.includes(String(e.type)));
       if (result.code !== 0 || result.timedOut || r.signal.aborted)
         throw new (started ? Error : BlockedError)(
-          `${name}: runtime завершился с кодом ${result.code}${result.timedOut ? ' (timeout)' : ''}` +
+          `${name}: runtime завершился с кодом ${result.code}` +
+            (result.timedOut || expired
+              ? ` (исчерпан лимит времени прогона: ${Math.round(r.timeoutMs / 1000)} с)`
+              : r.signal.aborted
+                ? ' (прогон прерван)'
+                : '') +
             // Причина отказа приходит от самого runtime — «Not logged in», исчерпанный
             // лимит, недоступная модель. Без неё сообщение говорит только «код 1», и
             // отказ окружения выглядит как провал задачи, пока кто-то не откроет лог.

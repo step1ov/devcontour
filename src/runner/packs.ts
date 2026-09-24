@@ -28,6 +28,10 @@ export const profileSchema = z.strictObject({
   protectedPaths: z.array(relativePath).max(100).default([]),
   generatedPaths: z.array(relativePath).max(100).default([]),
   concurrency: z.number().int().min(1).max(4).optional(),
+  // Сколько времени профиль отводит одной попытке. Пятнадцати минут хватает на
+  // правку, но не на реализацию с нуля: агент упирается в предел посреди
+  // работы, и попытка расходуется впустую. Знает об этом стек, а не контур.
+  runTimeoutMs: z.number().int().min(60_000).max(7_200_000).optional(),
   // Роли, которых требует поверхность профиля. Мобильное приложение — это своя
   // область записи и свой инструментарий прогона; профиль знает это о себе, а
   // контур заранее не знает, какие роли бывают у продукта.
@@ -136,6 +140,12 @@ export function resolveProfile(ref: string, repositoryRoot?: string, repositoryI
     protectedPaths: [...new Set([...layers.flatMap((p) => p.protectedPaths), ...files])],
     generatedPaths: [...new Set(layers.flatMap((p) => p.generatedPaths))],
     concurrency: limits.length ? Math.min(...limits) : undefined,
+    // Из слоёв берётся наибольший предел: надстройка знает о своей поверхности
+    // больше базового профиля и вправе попросить больше времени.
+    runTimeoutMs: layers.reduce<number | undefined>(
+      (max, p) => (p.runTimeoutMs && (!max || p.runTimeoutMs > max) ? p.runTimeoutMs : max),
+      undefined,
+    ),
     // Слои складываются: базовый профиль даёт роль, надстройка уточняет её
     // привязку, не переписывая остальные.
     roles: Object.assign({}, ...layers.map((p) => p.roles)) as Manifest['roles'],

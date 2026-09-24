@@ -88,6 +88,7 @@ export function projectConfig(
         ),
     reviewer: { runtime: 'codex' },
     concurrency: selected.concurrency ?? 2,
+    ...(selected.runTimeoutMs ? { runTimeoutMs: selected.runTimeoutMs } : {}),
     gates: selected.gates,
     prepare: selected.prepare,
     environment: selected.environment,

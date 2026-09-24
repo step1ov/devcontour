@@ -150,6 +150,9 @@ export async function setupWorkspace(file: string, data?: string) {
     workspaceMode,
     targetBranch: repos[0].targetBranch,
     concurrency: Math.min(...selected.map((p) => p.concurrency ?? 2)),
+    ...(selected.some((p) => p.runTimeoutMs)
+      ? { runTimeoutMs: Math.max(...selected.map((p) => p.runTimeoutMs ?? 0)) }
+      : {}),
     repositories: repos,
     workspaceGates: input.workspaceGates,
     // Пакеты профиля приезжают вместе со стеком, реестр остаётся сильнее:
@@ -234,6 +237,7 @@ export async function setupWorkspace(file: string, data?: string) {
               (raw as { contextPacks?: ContextPack[] }).contextPacks ?? [],
               config.contextPacks,
             ),
+            runTimeoutMs: config.runTimeoutMs,
             roles: withDeclaredRoles(
               (raw as { roles?: Record<string, Record<string, unknown>> }).roles ?? {},
               config.roles,

@@ -361,3 +361,52 @@ test('A profile carries the instructions its stack needs, and the registry still
   const expo = await profile('expo-mobile');
   assert.ok(expo.contextPacks.some((p) => p.id === 'design-system'));
 });
+
+test('A profile sets how long one attempt may take, and layers take the larger limit', async () => {
+  // Пятнадцати минут хватает на правку, но не на реализацию с нуля: агент
+  // упирается в предел посреди работы, и попытка расходуется впустую. Сколько
+  // нужно — знает стек, а не контур.
+  const root = await mkdtemp(join(tmpdir(), 'devcontour-timeout-'));
+  try {
+    await writeFile(
+      join(root, 'base.json'),
+      JSON.stringify({
+        id: 'base',
+        version: '1.0.0',
+        runTimeoutMs: 1_200_000,
+        gates: [{
+      id: 'acceptance',
+      kind: 'test',
+      command: ['npm', 'test'],
+      timeoutMs: 240000,
+      report: { type: 'junit', path: '.reports/junit.xml' },
+    }],
+      }),
+    );
+    await writeFile(
+      join(root, 'leaf.json'),
+      JSON.stringify({
+        id: 'leaf',
+        version: '1.0.0',
+        extends: ['./base.json'],
+        runTimeoutMs: 2_700_000,
+      }),
+    );
+    const resolved = await profile('./leaf.json', root);
+    assert.equal(resolved.runTimeoutMs, 2_700_000, 'надстройка вправе попросить больше времени');
+
+    await writeFile(
+      join(root, 'quiet.json'),
+      JSON.stringify({ id: 'quiet', version: '1.0.0', gates: [{
+      id: 'acceptance',
+      kind: 'test',
+      command: ['npm', 'test'],
+      timeoutMs: 240000,
+      report: { type: 'junit', path: '.reports/junit.xml' },
+    }] }),
+    );
+    assert.equal((await profile('./quiet.json', root)).runTimeoutMs, undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
