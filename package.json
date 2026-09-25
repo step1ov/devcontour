@@ -41,7 +41,8 @@
     "test:evals": "node --import tsx src/cli.ts evals",
     "lint:report": "eslint .",
     "test:live": "npm run build && node scripts/live-pilot.mjs",
-    "build:lib": "npm run typecheck && tsc -p tsconfig.build.json"
+    "build:lib": "npm run typecheck && tsc -p tsconfig.build.json",
+    "test:live:review-sandbox": "node --import tsx scripts/live-review-sandbox.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.0.0",

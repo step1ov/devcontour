@@ -288,6 +288,10 @@ test('Ревьюер запускает проверки одинаково в �
   assert.equal(settings.sandbox.allowUnsandboxedCommands, false);
   assert.deepEqual(settings.sandbox.network.allowedDomains, []);
   assert.deepEqual(settings.sandbox.filesystem.denyWrite, ['/tmp']);
+  // Живой запуск показал, что песочница по умолчанию читает $HOME: каталоги
+  // учётных данных закрываются явно.
+  for (const path of ['~/.ssh', '~/.aws', '~/.config/gh', '~/.npmrc'])
+    assert.ok(settings.sandbox.filesystem.denyRead.includes(path), path);
   // Настройки пользователя не подмешиваются и не ослабляют песочницу.
   assert.equal(running[running.indexOf('--setting-sources') + 1], '');
   assert.equal(reading.includes('--settings'), false, 'без shell песочница не нужна');
