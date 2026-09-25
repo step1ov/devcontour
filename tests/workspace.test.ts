@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { config, input, fixture, complete } from './helpers.ts';
 import { repositorySchema } from '../src/core/model.ts';
@@ -419,10 +420,7 @@ test('Workspace setup preserves policy on repeat and detects a competing control
     // Сменились роли пакета — это другое объявление. По id, version и files
     // оно выглядело прежним: перенос не запускался, и исполнитель продолжал
     // получать устаревшие инструкции вместе с их закреплением.
-    registry.contextPacks[own(registry.contextPacks as { id: string }[])].roles = [
-      'backend',
-      'qa',
-    ];
+    registry.contextPacks[own(registry.contextPacks as { id: string }[])].roles = ['backend', 'qa'];
     await writeFile(path, JSON.stringify(registry));
     assert.equal((await setupWorkspace(path, f.data)).status, 'declaration-updated');
     const reselected = loadConfig(configPath).contextPacks.find((p) => p.id === 'workflow')!;
@@ -668,5 +666,45 @@ test('A task proves itself with its own gates; the rest of the profile stays req
     );
   } finally {
     f.cleanup();
+  }
+});
+
+test('Совместная проверка workspace исполняется в той же песочнице, что и проверки задач', async () => {
+  // Проверки задач уже шли в песочнице, а общая приёмка — процессом хоста:
+  // читала базу контура и писала рядом. Полезное должно работать — снимки
+  // компонентов и manifest читаются, отчёт пишется, — запрещённое нет.
+  const f = await multiRepo();
+  try {
+    const outside = join(f.root, 'outside.txt');
+    f.c.workspaceGates[0].command = [
+      process.execPath,
+      '-e',
+      `const fs=require('fs');const cases=[];const ok=(id,v)=>cases.push('<testcase name="'+id+'">'+(v?'':'<failure message="'+id+'"/>')+'</testcase>');
+const tryDo=(f)=>{try{f();return true}catch{return false}};
+const paths=JSON.parse(process.env.DEVCONTOUR_COMPONENTS_JSON);
+ok('reads-components', tryDo(()=>fs.readFileSync(paths.library+'/value.json')));
+ok('reads-manifest', tryDo(()=>fs.readFileSync(process.env.DEVCONTOUR_MANIFEST_PATH)));
+ok('controller-db-hidden', !tryDo(()=>fs.readFileSync(${JSON.stringify(join(f.data, 'state.sqlite'))})));
+ok('write-outside-denied', !tryDo(()=>fs.writeFileSync(${JSON.stringify(outside)},'x')));
+fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite>'+cases.join('')+'</testsuite>');`,
+    ];
+    const b = f.h.createBoard('Workspace isolation');
+    f.h.addTask(b.id, { ...input('Library change'), repositoryId: 'library' });
+    f.h.addTask(b.id, { ...input('Product change'), repositoryId: 'product' });
+    f.h.approve(b.id);
+    f.h.pause(false);
+    await f.scheduler.drain();
+    assert.ok(f.store.read().tasks.every((t) => t.status === 'done'));
+    const c = f.runner.workspace.create({
+      title: 'Workspace isolation',
+      description: 'Synthetic workspace boundary check',
+      boardIds: [b.id],
+    });
+    await f.runner.verify(c.id);
+    const result = f.store.read().changeSets[0].verifications.at(-1)!;
+    assert.equal(result.status, 'passed', JSON.stringify(result.evidence?.map((e) => e.summary)));
+    assert.equal(existsSync(outside), false, 'внешняя сверка: файла вне компонента нет');
+  } finally {
+    await f.cleanup();
   }
 });

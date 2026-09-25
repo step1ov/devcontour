@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { BlockedError } from '../src/core/model.ts';
-import { mkdtemp, readFile, writeFile, rm, mkdir } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm, mkdir, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -12,7 +12,12 @@ import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { adapters, cliArguments, type AgentRequest } from '../src/runner/adapters.ts';
 import { git, command } from '../src/runner/process.ts';
-import { junitSummary, sandboxNotStarted } from '../src/runner/gates.ts';
+import {
+  junitSummary,
+  sandboxNotStarted,
+  isolationBackend,
+  prepareReportPath,
+} from '../src/runner/gates.ts';
 import { input } from './helpers.ts';
 import { acceptBoard } from '../src/runner/agent-control.ts';
 import { ProjectMemory } from '../src/application/memory.ts';
@@ -1003,23 +1008,63 @@ const s=net.createServer(c=>c.end('pong')).listen(0,'127.0.0.1',()=>{
 });
 test('Без механизма песочницы проверка не запускается; снять изоляцию можно только явно', async () => {
   const f = await runtimeFixture();
+  const marker = join(f.root, 'host-write.txt');
+  const original = isolationBackend.check;
   try {
     assert.equal(f.h.config.isolation.mode, 'os', 'по умолчанию изоляция включена');
-    f.h.config.isolation.mode = 'none';
     f.h.config.gates[0].command = [
       process.execPath,
       '-e',
-      `require('fs').writeFileSync(${JSON.stringify(join(f.root, 'host-write.txt'))},'x')`,
+      `require('fs').writeFileSync(${JSON.stringify(marker)},'x')`,
     ];
+    // Механизма нет: проверка отказывает, не запуская команду на хосте.
+    isolationBackend.check = () => ({ ok: false, detail: 'bubblewrap не найден' });
+    const scheduler = new Scheduler(f.h, f.root);
     f.h.pause(false);
-    await new Scheduler(f.h, f.root).drain();
+    await scheduler.drain();
+    const failed = f.store.read().tasks.find((t) => t.status === 'failed')!;
+    assert.match(failed.failure!, /Изоляция проверок недоступна: bubblewrap не найден/);
+    assert.equal(existsSync(marker), false, 'команда не запускалась');
+
     // Явный выбор none — обычный процесс хоста, без скрытого ограничения.
-    assert.equal(existsSync(join(f.root, 'host-write.txt')), true);
+    isolationBackend.check = original;
+    f.h.config.isolation.mode = 'none';
+    f.h.retry(failed.id);
+    f.h.pause(false);
+    await scheduler.drain();
+    assert.equal(existsSync(marker), true);
   } finally {
+    isolationBackend.check = original;
     await f.cleanup();
   }
 });
-
+test('Путь отчёта через symlink отвергается до любой записи снаружи', async () => {
+  // Каталоги отчёта создавались рекурсивно, а граница проверялась после:
+  // symlink внутри worktree уводил создание каталога наружу до отказа.
+  const root = await mkdtemp(join(tmpdir(), 'devcontour-report-'));
+  try {
+    const worktree = join(root, 'worktree'),
+      outside = join(root, 'outside');
+    await mkdir(worktree);
+    await mkdir(outside);
+    await symlink(outside, join(worktree, '.reports'));
+    await assert.rejects(
+      () => prepareReportPath(worktree, '.reports/new/report.xml', 'Report выходит из worktree'),
+      /Report выходит из worktree/,
+    );
+    assert.equal(existsSync(join(outside, 'new')), false, 'снаружи ничего не создано');
+    await assert.rejects(
+      () => prepareReportPath(worktree, '../escape.xml', 'Report выходит из worktree'),
+      /Report выходит/,
+    );
+    // Обычный путь создаётся внутри worktree.
+    const path = await prepareReportPath(worktree, 'reports/unit/report.xml', 'x');
+    assert.ok(existsSync(join(worktree, 'reports', 'unit')));
+    assert.ok(path.endsWith(join('reports', 'unit', 'report.xml')));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 test('Истёкшая проверка в песочнице не оставляет процессов', async () => {
   // Проверка запускает долгий дочерний процесс и не выходит сама. По
   // таймауту должна завершиться вся группа — и песочница, и её дети.

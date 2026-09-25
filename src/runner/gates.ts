@@ -1,10 +1,10 @@
 import { timed } from './timing.ts';
 import { runEnvironment, assertDependencies } from './dependencies.ts';
-import { readFile, writeFile, mkdir, mkdtemp, rm, realpath } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, mkdtemp, rm, realpath, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { isolation, isolatedCommand, isolationSupport } from './isolation.ts';
-import { join, resolve, sep, delimiter } from 'node:path';
+import { join, resolve, sep, delimiter, relative, dirname } from 'node:path';
 import { accessSync, constants } from 'node:fs';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import { command, git } from './process.ts';
@@ -194,6 +194,101 @@ async function readReport(reportPath: string, cwd: string, redact?: (value: stri
   const xml = await readFile(real, 'utf8');
   return { ...junitSummary(xml, redact), xml };
 }
+/**
+ * Путь отчёта внутри корня, созданный без выхода за него.
+ *
+ * Раньше каталоги создавались рекурсивно, а граница проверялась потом:
+ * symlink внутри worktree успевал увести создание каталога наружу до отказа.
+ * Теперь путь проходится от корня по одному компоненту: существующий symlink
+ * или не-каталог — отказ до любой записи, недостающий каталог создаётся
+ * только внутри уже проверенного родителя.
+ */
+export async function prepareReportPath(root: string, path: string, escape: string) {
+  const base = await realpath(root);
+  const target = resolve(base, path);
+  if (!target.startsWith(base + sep)) throw new Error(escape);
+  let current = base;
+  for (const part of relative(base, dirname(target)).split(sep).filter(Boolean)) {
+    current = join(current, part);
+    let stat = await lstat(current).catch(() => undefined);
+    if (!stat) {
+      await mkdir(current);
+      stat = await lstat(current);
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error(escape);
+  }
+  await rm(target, { force: true });
+  return target;
+}
+/**
+ * Команда проверки — задачи или общей приёмки workspace — в песочнице ОС.
+ *
+ * Прежде проверка шла обычным процессом хоста и могла читать базу контура и
+ * соседние файлы, писать вне worktree и ходить в сеть: сверка HEAD и
+ * отслеживаемых файлов после неё этого не видит. Без механизма песочницы
+ * проверка не запускается — снять изоляцию можно только явным
+ * isolation.mode: none. Запись — в `write` и собственный scratch (TMPDIR).
+ */
+export async function runCheck(
+  h: DevContour,
+  options: {
+    argv: string[];
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    redact?: (value: string) => string;
+    timeoutMs?: number;
+    signal: AbortSignal;
+    write: string[];
+    readable: string[];
+    controller: string[];
+    settingsDir: string;
+  },
+) {
+  let argv = options.argv,
+    env = options.env;
+  const scratch = await realpath(await mkdtemp(join(tmpdir(), 'dc-gate-')));
+  try {
+    if (h.config.isolation.mode === 'os') {
+      const support = isolationBackend.check();
+      if (!support.ok)
+        throw new Error(
+          `Изоляция проверок недоступна: ${support.detail}. Установите зависимости или явно задайте isolation.mode: none`,
+        );
+      // Отсутствующая команда внутри песочницы выглядела бы как «код 127»
+      // от обёртки. Причина та же, что и без неё, — называем её так же.
+      assertExecutable(argv[0], env.PATH, options.cwd);
+      const policy = isolation({
+        write: [...options.write, scratch],
+        controller: options.controller,
+        readable: options.readable,
+        domains: h.config.isolation.domains,
+      });
+      const wrapped = await isolatedCommand(policy, argv, options.settingsDir, scratch);
+      argv = wrapped.argv;
+      env = { ...env, ...wrapped.env };
+    }
+    const execute = () =>
+      command(argv, options.cwd, {
+        signal: options.signal,
+        timeoutMs: options.timeoutMs,
+        env,
+        redact: options.redact,
+      });
+    let result = await execute();
+    // sandbox-runtime ищет shell через `which` с таймаутом в секунду и под
+    // нагрузкой отказывает до запуска команды. Команда проверки при этом не
+    // исполнялась, поэтому повтор безопасен; любой другой отказ — итог.
+    for (let attempt = 1; attempt < 3 && sandboxNotStarted(argv, result); attempt++) {
+      await new Promise((r) => setTimeout(r, 500 * attempt));
+      result = await execute();
+    }
+    return result;
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
+}
+/** Проверка механизма песочницы; тест подменяет её, чтобы проверить отказ. */
+export const isolationBackend = { check: isolationSupport };
 export async function runGate(...args: Parameters<typeof executeGate>) {
   return timed(args[0], args[1], `${args[4]}-test:${args[5].id}`, () => executeGate(...args));
 }
@@ -212,66 +307,30 @@ async function executeGate(
   const gateCwd = gate.cwd ? await realpath(resolve(cwd, gate.cwd)) : await realpath(cwd);
   if (gateCwd !== (await realpath(cwd)) && !gateCwd.startsWith((await realpath(cwd)) + sep))
     throw new Error('Gate cwd выходит из worktree');
-  const reportPath = gate.report ? resolve(cwd, gate.report.path) : undefined;
-  if (reportPath) {
-    await mkdir(join(reportPath, '..'), { recursive: true });
-    const parent = await realpath(join(reportPath, '..'));
-    if (!parent.startsWith((await realpath(cwd)) + sep))
-      throw new Error('Report выходит из worktree');
-    await rm(reportPath, { force: true });
-  }
+  const reportPath = gate.report
+    ? await prepareReportPath(cwd, gate.report.path, 'Report выходит из worktree')
+    : undefined;
   let passed = false,
     summary = '',
     log = '',
     exitCode = -1,
     redact: ((value: string) => string) | undefined,
     manifest: ReturnType<typeof junitSummary> | undefined;
-  // Временный каталог проверки: единственное место записи вне worktree.
-  const scratch = await realpath(await mkdtemp(join(tmpdir(), 'dc-gate-')));
   try {
     const environment = runEnvironment(h.config, run, phase, cwd);
     redact = environment.redact;
-    let argv = gate.command,
-      env: NodeJS.ProcessEnv = { ...environment.env, DEVCONTOUR_REPORT_PATH: reportPath };
-    // Проверка исполняется в песочнице ОС. Прежде она шла обычным процессом
-    // хоста и могла читать базу контура и соседние файлы, писать вне
-    // worktree и ходить в сеть: сверка HEAD и отслеживаемых файлов после неё
-    // этого не видит. Без механизма песочницы проверка не запускается —
-    // снять изоляцию можно только явным isolation.mode: none.
-    if (h.config.isolation.mode === 'os') {
-      const support = isolationSupport();
-      if (!support.ok)
-        throw new Error(
-          `Изоляция проверок недоступна: ${support.detail}. Установите зависимости или явно задайте isolation.mode: none`,
-        );
-      // Отсутствующая команда внутри песочницы выглядела бы как «код 127»
-      // от обёртки. Причина та же, что и без неё, — называем её так же.
-      assertExecutable(gate.command[0], env.PATH, gateCwd);
-      const policy = isolation({
-        write: [cwd, scratch],
-        controller,
-        readable: (run.dependencies ?? []).map((d) => d.path),
-        domains: h.config.isolation.domains,
-      });
-      const wrapped = await isolatedCommand(
-        policy,
-        gate.command,
-        join(artifactDir, gate.id),
-        scratch,
-      );
-      argv = wrapped.argv;
-      env = { ...env, ...wrapped.env };
-    }
-    const execute = () =>
-      command(argv, gateCwd, { signal, timeoutMs: gate.timeoutMs, env, redact });
-    let result = await execute();
-    // sandbox-runtime ищет shell через `which` с таймаутом в секунду и под
-    // нагрузкой отказывает до запуска команды. Команда проверки при этом не
-    // исполнялась, поэтому повтор безопасен; любой другой отказ — итог.
-    for (let attempt = 1; attempt < 3 && sandboxNotStarted(argv, result); attempt++) {
-      await new Promise((r) => setTimeout(r, 500 * attempt));
-      result = await execute();
-    }
+    const result = await runCheck(h, {
+      argv: gate.command,
+      cwd: gateCwd,
+      env: { ...environment.env, DEVCONTOUR_REPORT_PATH: reportPath },
+      redact,
+      timeoutMs: gate.timeoutMs,
+      signal,
+      write: [cwd],
+      readable: (run.dependencies ?? []).map((d) => d.path),
+      controller,
+      settingsDir: join(artifactDir, gate.id),
+    });
     exitCode = result.code;
     log = result.stdout + '\n' + result.stderr;
     if (result.timedOut || signal.aborted)
@@ -311,8 +370,6 @@ async function executeGate(
   } catch (error) {
     summary = error instanceof Error ? error.message : String(error);
     log += '\n' + summary;
-  } finally {
-    await rm(scratch, { recursive: true, force: true });
   }
   await mkdir(artifactDir, { recursive: true });
   const logPath = join(artifactDir, `${gate.id}.log`);

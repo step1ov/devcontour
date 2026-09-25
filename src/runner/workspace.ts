@@ -11,7 +11,7 @@ import { repositories } from '../core/repositories.ts';
 import type { Verification, WorkspaceEvidence } from '../core/model.ts';
 import { reserveRepositories } from './ownership.ts';
 import { command, git } from './process.ts';
-import { junitSummary } from './gates.ts';
+import { junitSummary, prepareReportPath, runCheck } from './gates.ts';
 
 export class WorkspaceRunner {
   readonly workspace: Workspace;
@@ -136,22 +136,25 @@ export class WorkspaceRunner {
                   summary = '';
                 const artifacts: WorkspaceEvidence['artifacts'] = [];
                 try {
-                  const reportPath = gate.report ? resolve(cwd, gate.report.path) : undefined;
-                  if (reportPath) {
-                    await mkdir(join(reportPath, '..'), { recursive: true });
-                    if (
-                      (await realpath(join(reportPath, '..'))) !== cwd &&
-                      !(await realpath(join(reportPath, '..'))).startsWith(cwd + sep)
-                    )
-                      throw new Error('Report выходит из компонента');
-                    await rm(reportPath, { force: true });
-                  }
+                  const reportPath = gate.report
+                    ? await prepareReportPath(cwd, gate.report.path, 'Report выходит из компонента')
+                    : undefined;
                   const gateCwd = gate.cwd ? await realpath(resolve(cwd, gate.cwd)) : cwd;
                   if (gateCwd !== cwd && !gateCwd.startsWith(cwd + sep))
                     throw new Error('Gate cwd выходит из компонента');
-                  const result = await command(gate.command, gateCwd, {
+                  // Совместная проверка — в той же песочнице, что и проверки
+                  // задач: пишет только в свой компонент и scratch, читает
+                  // закреплённые снимки компонентов и manifest, а база и
+                  // рабочие каталоги контура ей закрыты.
+                  const result = await runCheck(this.h, {
+                    argv: gate.command,
+                    cwd: gateCwd,
                     signal,
                     timeoutMs: gate.timeoutMs,
+                    write: [cwd],
+                    readable: [...Object.values(paths), manifestPath],
+                    controller: [this.root],
+                    settingsDir: join(dir, gate.id),
                     env: executionEnvironment(
                       [
                         this.h.config.environment,
