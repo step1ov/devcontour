@@ -2,6 +2,7 @@ import { timed } from './timing.ts';
 import { runEnvironment, assertDependencies } from './dependencies.ts';
 import { readFile, writeFile, mkdir, mkdtemp, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { isolation, isolatedCommand, isolationSupport } from './isolation.ts';
 import { join, resolve, sep, delimiter } from 'node:path';
 import { accessSync, constants } from 'node:fs';
@@ -12,14 +13,20 @@ import type { Run, Gate, Evidence } from '../core/model.ts';
 import { TaskFailure } from '../core/failure.ts';
 /** Предел манифеста: полный список тестов крупного проекта в состояние не кладётся. */
 const MANIFEST_LIMIT = 2000;
-/** Текст провала testcase: атрибут message или содержимое элемента. */
+/** Предел имени testcase: столько же переносит receipt между клонами. */
+const ID_LIMIT = 1000;
+/**
+ * Полный текст провала testcase: атрибут message или содержимое элемента.
+ * Первая строка выделяется после redaction: многострочный секрет, обрезанный
+ * до первой строки раньше, redactor уже не узнал бы.
+ */
 function failureText(value: unknown): string {
   const first = Array.isArray(value) ? value[0] : value;
-  if (typeof first === 'string') return first.trim().split('\n')[0];
+  if (typeof first === 'string') return first;
   if (first && typeof first === 'object') {
     const node = first as Record<string, unknown>;
     const text = node['@_message'] ?? node['#text'];
-    if (typeof text === 'string') return text.trim().split('\n')[0];
+    if (typeof text === 'string') return text;
   }
   return '';
 }
@@ -44,7 +51,7 @@ export function junitSummary(
   /** Те же testcases с первыми словами сообщения о провале. */
   failedDetails: string[];
   /** Что именно выполнилось и с каким исходом. */
-  cases: { id: string; status: 'passed' | 'failed' | 'skipped' }[];
+  cases: NonNullable<Evidence['tests']>;
   /** Список обрезан: отсутствие теста по нему доказать нельзя. */
   truncated: boolean;
 } {
@@ -57,7 +64,7 @@ export function junitSummary(
     skipped: 0,
     failed: [] as string[],
     failedDetails: [] as string[],
-    cases: [] as { id: string; status: 'passed' | 'failed' | 'skipped' }[],
+    cases: [] as NonNullable<Evidence['tests']>,
     truncated: false,
   };
   function visit(value: unknown, key = '') {
@@ -69,14 +76,27 @@ export function junitSummary(
       summary.tests++;
       if (value && typeof value === 'object') {
         const named = value as Record<string, unknown>;
-        const name = redact([named['@_classname'], named['@_name']].filter(Boolean).join('.'));
+        const raw = [named['@_classname'], named['@_name']].filter(Boolean).join('.');
+        const redacted = redact(raw);
+        // Длинное имя заменяется хешем: обрезка дала бы коллизии и ложные
+        // совпадения, а без замены receipt не перенёс бы манифест.
+        const name =
+          redacted.length > ID_LIMIT
+            ? 'sha256:' + createHash('sha256').update(redacted).digest('hex')
+            : redacted;
+        const opaque = name !== raw;
         const broken = 'failure' in value || 'error' in value;
         if (broken) {
           summary.failures++;
           if (name && summary.failed.length < 10) {
             summary.failed.push(String(name));
             summary.failedDetails.push(
-              [String(name), redact(failureText(named['failure'] ?? named['error']))]
+              [
+                String(name),
+                redact(failureText(named['failure'] ?? named['error']))
+                  .trim()
+                  .split('\n')[0],
+              ]
                 .filter(Boolean)
                 .join(': ')
                 .slice(0, 200),
@@ -89,6 +109,7 @@ export function junitSummary(
             summary.cases.push({
               id: String(name),
               status: broken ? 'failed' : 'skipped' in value ? 'skipped' : 'passed',
+              ...(opaque ? { opaque: true as const } : {}),
             });
           else summary.truncated = true;
         }

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { requirementProof, unprovenRequirements } from '../src/core/proof.ts';
 import { junitSummary } from '../src/runner/gates.ts';
+import { redactor } from '../src/runner/redaction.ts';
 import type { Evidence } from '../src/core/model.ts';
 import { mkdtemp, writeFile, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -610,4 +611,55 @@ test('Исполнитель получает ту же границу: свой
   assert.ok(codex.includes('"/var/devcontour-data"="none"'), codex);
   assert.ok(codex.includes(JSON.stringify(realpathSync('/tmp')) + '="write"'), codex);
   assert.match(codex, /network=\{enabled=true\}/, 'сеть исполнителя — по профилю');
+});
+
+test('Имя, изменённое redaction или хешем, не подтверждает критерий', () => {
+  // Redacted-имя `case-[REDACTED]` совпало бы с таким же testId постановки,
+  // хотя теста с этим именем никто не запускал. Длинное имя заменяется
+  // хешем: обрезка дала бы коллизии и ложные совпадения.
+  const redact = redactor([
+    'SYNTHETIC_PRIVATE_442211',
+    'SYNTHETIC_MULTILINE_PRIVATE\nSECOND_LINE_1234',
+  ]);
+  const long = (tail: string) => 'p'.repeat(1001) + tail;
+  const summary = junitSummary(
+    '<testsuite>' +
+      '<testcase name="case-SYNTHETIC_PRIVATE_442211"/>' +
+      `<testcase name="${long('a')}"/><testcase name="${long('b')}"/>` +
+      '<testcase classname="auth" name="multi"><failure><![CDATA[SYNTHETIC_MULTILINE_PRIVATE\nSECOND_LINE_1234]]></failure></testcase>' +
+      '<testcase name="plain"/>' +
+      '</testsuite>',
+    redact,
+  );
+  const byId = new Map(summary.cases.map((c) => [c.id, c]));
+  assert.equal(byId.get('case-[REDACTED]')?.opaque, true);
+  assert.equal(byId.get('plain')?.opaque, undefined, 'обычное имя остаётся сопоставимым');
+  const hashed = summary.cases.filter((c) => c.id.startsWith('sha256:'));
+  assert.equal(hashed.length, 2);
+  assert.notEqual(hashed[0].id, hashed[1].id, 'разные длинные имена не сливаются');
+  assert.ok(hashed.every((c) => c.opaque && c.id.length <= 1000));
+  // Многострочный секрет не остаётся ни целиком, ни частями.
+  const text = JSON.stringify(summary);
+  for (const piece of [
+    'SYNTHETIC_MULTILINE_PRIVATE',
+    'SECOND_LINE_1234',
+    'SYNTHETIC_PRIVATE_442211',
+  ])
+    assert.equal(text.includes(piece), false, piece);
+
+  const proof = requirementProof(
+    { id: 'REQ-1', gate: 'unit', testId: 'case-[REDACTED]' },
+    [evidence({ tests: summary.cases })],
+    SHA,
+  );
+  assert.equal(proof.level, 'none');
+  assert.match(proof.reason, /redaction/);
+  assert.equal(
+    requirementProof(
+      { id: 'REQ-2', gate: 'unit', testId: 'plain' },
+      [evidence({ tests: summary.cases })],
+      SHA,
+    ).level,
+    'testcase',
+  );
 });

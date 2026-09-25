@@ -695,7 +695,15 @@ test('Независимый клон получает манифест testcase
           log: '',
           digest: digest('fixture'),
           summary: 'fixture',
-          tests: gate === 'test' ? [{ id: 'named-case', status: 'passed' }] : undefined,
+          tests:
+            gate === 'test'
+              ? [
+                  { id: 'named-case', status: 'passed' },
+                  // Длинное имя из отчёта приходит хешем с пометкой — и
+                  // переносится, а не останавливает sync.
+                  { id: 'sha256:' + 'f'.repeat(64), status: 'passed', opaque: true },
+                ]
+              : undefined,
         });
     }
     a.h.finish(r.id, r.token, sha);
@@ -717,7 +725,10 @@ test('Независимый клон получает манифест testcase
     const integration = taskB.sharedCompletion!.receipt.checks.find(
       (c) => c.gate === 'test' && c.phase === 'integration',
     )!;
-    assert.deepEqual(integration.tests, [{ id: 'named-case', status: 'passed' }]);
+    assert.deepEqual(integration.tests, [
+      { id: 'named-case', status: 'passed' },
+      { id: 'sha256:' + 'f'.repeat(64), status: 'passed', opaque: true },
+    ]);
     assert.equal(proofB.proof, 'testcase', proofB.proofReason);
     assertRequirementProof(b.h, taskB);
   } finally {

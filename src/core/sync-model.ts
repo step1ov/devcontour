@@ -37,6 +37,7 @@ export const receiptSchema = z.strictObject({
             z.strictObject({
               id: z.string().min(1).max(1000),
               status: z.enum(['passed', 'failed', 'skipped']),
+              opaque: z.literal(true).optional(),
             }),
           )
           .max(2000)

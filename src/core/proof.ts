@@ -73,8 +73,21 @@ export function requirementProof(
       level: 'none',
       reason: 'Список выполненных тестов обрезан: отсутствие теста по нему не доказать',
     };
-  const found = withManifest.flatMap((e) => e.tests!.filter((t) => t.id === link.testId));
-  if (!found.length) return { ...base, level: 'none', reason: `Тест ${link.testId} не выполнялся` };
+  // Имя, изменённое redaction или заменённое хешем, не сопоставляется: оно
+  // могло совпасть с названным тестом случайно или по подстановке.
+  const found = withManifest.flatMap((e) =>
+    e.tests!.filter((t) => !t.opaque && t.id === link.testId),
+  );
+  if (!found.length) {
+    const opaque = withManifest.some((e) => e.tests!.some((t) => t.opaque));
+    return {
+      ...base,
+      level: 'none',
+      reason:
+        `Тест ${link.testId} не выполнялся` +
+        (opaque ? ' (имена части тестов скрыты redaction или хешем и не сопоставляются)' : ''),
+    };
+  }
   if (found.length > 1)
     return {
       ...base,
