@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { BlockedError } from '../src/core/model.ts';
 import { mkdtemp, readFile, writeFile, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { setupDemo } from '../src/demo.ts';
 import { loadConfig } from '../src/runner/config.ts';
@@ -311,7 +312,13 @@ test('JUnit rejects empty/malformed reports and distinguishes skipped tests from
 test('CLI adapters use structured outputs, stdin prompts and restricted review permissions', () => {
   const r = { review: true, model: 'configured-model' } as AgentRequest;
   const codex = cliArguments('codex', r, 'schema.json', 'result.json');
-  assert.ok(codex.includes('read-only'));
+  // Ревьюер codex пишет только во временный каталог: граница — профиль прав.
+  const permissions = codex.find((a) => a.startsWith('permissions.devcontour='))!;
+  assert.match(permissions, /":tmpdir"="write"/);
+  assert.deepEqual(
+    [...permissions.matchAll(/"([^"]+)"="write"/g)].map((m) => m[1]).filter((p) => p !== ':tmpdir'),
+    [],
+  );
   assert.ok(codex.includes('configured-model'));
   assert.equal(codex.at(-1), '-');
   const claude = cliArguments('claude', r, 'schema.json', 'result.json');
@@ -935,4 +942,80 @@ test('Длинный вывод одного потока не вытесняе�
     }
   }
   assert.notEqual(fingerprints[0], fingerprints[1]);
+});
+test('Проверка исполняется в песочнице: полезное работает, запрещённое отклоняется', async () => {
+  // Прежде проверка шла обычным процессом хоста: читала базу контура,
+  // писала рядом с worktree и ходила в сеть, а сверка HEAD и отслеживаемых
+  // файлов после неё этого не видела. Сама проверка записывает в отчёт, что
+  // удалось; внешняя сверка ниже не доверяет её словам.
+  const f = await runtimeFixture();
+  try {
+    const outside = join(f.root, 'outside-write.txt');
+    const script = `
+const fs=require('fs'),net=require('net'),https=require('https'),path=require('path');
+const cases=[];const ok=(id,v)=>cases.push('<testcase name="'+id+'">'+(v?'':'<failure message="'+id+'"/>')+'</testcase>');
+const tryDo=(f)=>{try{f();return true}catch{return false}};
+ok('reads-own-worktree', tryDo(()=>fs.readdirSync('.')));
+ok('writes-scratch', tryDo(()=>fs.writeFileSync(path.join(process.env.TMPDIR,'t'),'x')));
+ok('controller-db-hidden', !tryDo(()=>fs.readFileSync(${JSON.stringify(join(f.root, 'state.sqlite'))})));
+ok('write-outside-denied', !tryDo(()=>fs.writeFileSync(${JSON.stringify(outside)},'x')));
+const done=()=>{fs.mkdirSync('.reports',{recursive:true});fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite>'+cases.join('')+'</testsuite>');process.exit(0)};
+const s=net.createServer(c=>c.end('pong')).listen(0,'127.0.0.1',()=>{
+  net.connect(s.address().port,'127.0.0.1').on('data',()=>{ok('localhost-works',true);s.close();
+    https.get('https://example.com',{timeout:5000},()=>{ok('egress-denied',false);done()}).on('error',()=>{ok('egress-denied',true);done()}).on('timeout',function(){this.destroy()});
+  }).on('error',()=>{ok('localhost-works',false);done()});
+});`;
+    f.h.config.gates[0].command = [process.execPath, '-e', script];
+    f.h.config.gates[0].report = { type: 'junit', path: '.reports/isolation.xml' };
+    f.h.pause(false);
+    await new Scheduler(f.h, f.root).drain();
+
+    // Демо-фикстура приходит с уже выполненными задачами: берётся прогон,
+    // созданный этим запуском.
+    const run = f.store.read().runs.at(-1)!;
+    const task = f.store.read().tasks.find((t) => t.id === run.taskId)!;
+    const evidence = run.evidence.find((e) => e.gate === f.h.config.gates[0].id)!;
+    assert.deepEqual(
+      Object.fromEntries((evidence.tests ?? []).map((t) => [t.id, t.status])),
+      {
+        'reads-own-worktree': 'passed',
+        'writes-scratch': 'passed',
+        'controller-db-hidden': 'passed',
+        'write-outside-denied': 'passed',
+        'localhost-works': 'passed',
+        'egress-denied': 'passed',
+      },
+      evidence.summary,
+    );
+    assert.equal(existsSync(outside), false, 'внешняя сверка: файла вне worktree нет');
+    assert.equal(task.status, 'done', task.failure);
+    // Политика записана рядом с артефактами проверки — видно, чем её ограничили.
+    const policy = JSON.parse(
+      await readFile(
+        join(f.root, 'artifacts', run.id, 'candidate', f.h.config.gates[0].id, 'isolation.json'),
+        'utf8',
+      ),
+    );
+    assert.ok(policy.filesystem.denyRead.some((p: string) => p.endsWith('/.ssh')));
+  } finally {
+    await f.cleanup();
+  }
+});
+test('Без механизма песочницы проверка не запускается; снять изоляцию можно только явно', async () => {
+  const f = await runtimeFixture();
+  try {
+    assert.equal(f.h.config.isolation.mode, 'os', 'по умолчанию изоляция включена');
+    f.h.config.isolation.mode = 'none';
+    f.h.config.gates[0].command = [
+      process.execPath,
+      '-e',
+      `require('fs').writeFileSync(${JSON.stringify(join(f.root, 'host-write.txt'))},'x')`,
+    ];
+    f.h.pause(false);
+    await new Scheduler(f.h, f.root).drain();
+    // Явный выбор none — обычный процесс хоста, без скрытого ограничения.
+    assert.equal(existsSync(join(f.root, 'host-write.txt')), true);
+  } finally {
+    await f.cleanup();
+  }
 });

@@ -1,6 +1,8 @@
 import { timed } from './timing.ts';
 import { runEnvironment, assertDependencies } from './dependencies.ts';
-import { readFile, writeFile, mkdir, rm, realpath } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, mkdtemp, rm, realpath } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { isolation, isolatedCommand, isolationSupport } from './isolation.ts';
 import { join, resolve, sep } from 'node:path';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import { command, git } from './process.ts';
@@ -150,6 +152,8 @@ async function executeGate(
   gate: Gate,
   artifactDir: string,
   signal: AbortSignal,
+  /** Каталоги контура — база, worktrees, артефакты: проверке они закрыты. */
+  controller: string[] = [],
 ) {
   const gateCwd = gate.cwd ? await realpath(resolve(cwd, gate.cwd)) : await realpath(cwd);
   if (gateCwd !== (await realpath(cwd)) && !gateCwd.startsWith((await realpath(cwd)) + sep))
@@ -168,13 +172,43 @@ async function executeGate(
     exitCode = -1,
     redact: ((value: string) => string) | undefined,
     manifest: ReturnType<typeof junitSummary> | undefined;
+  // Временный каталог проверки: единственное место записи вне worktree.
+  const scratch = await realpath(await mkdtemp(join(tmpdir(), 'dc-gate-')));
   try {
     const environment = runEnvironment(h.config, run, phase, cwd);
     redact = environment.redact;
-    const result = await command(gate.command, gateCwd, {
+    let argv = gate.command,
+      env: NodeJS.ProcessEnv = { ...environment.env, DEVCONTOUR_REPORT_PATH: reportPath };
+    // Проверка исполняется в песочнице ОС. Прежде она шла обычным процессом
+    // хоста и могла читать базу контура и соседние файлы, писать вне
+    // worktree и ходить в сеть: сверка HEAD и отслеживаемых файлов после неё
+    // этого не видит. Без механизма песочницы проверка не запускается —
+    // снять изоляцию можно только явным isolation.mode: none.
+    if (h.config.isolation.mode === 'os') {
+      const support = isolationSupport();
+      if (!support.ok)
+        throw new Error(
+          `Изоляция проверок недоступна: ${support.detail}. Установите зависимости или явно задайте isolation.mode: none`,
+        );
+      const policy = isolation({
+        write: [cwd, scratch],
+        controller,
+        readable: (run.dependencies ?? []).map((d) => d.path),
+        domains: h.config.isolation.domains,
+      });
+      const wrapped = await isolatedCommand(
+        policy,
+        gate.command,
+        join(artifactDir, gate.id),
+        scratch,
+      );
+      argv = wrapped.argv;
+      env = { ...env, ...wrapped.env };
+    }
+    const result = await command(argv, gateCwd, {
       signal,
       timeoutMs: gate.timeoutMs,
-      env: { ...environment.env, DEVCONTOUR_REPORT_PATH: reportPath },
+      env,
       redact,
     });
     exitCode = result.code;
@@ -216,6 +250,8 @@ async function executeGate(
   } catch (error) {
     summary = error instanceof Error ? error.message : String(error);
     log += '\n' + summary;
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
   }
   await mkdir(artifactDir, { recursive: true });
   const logPath = join(artifactDir, `${gate.id}.log`);

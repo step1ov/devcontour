@@ -24,6 +24,7 @@ import { git } from './process.ts';
 import { repositories, repository, roleBinding } from '../core/repositories.ts';
 import { reserveRepositories } from './ownership.ts';
 import { runGate } from './gates.ts';
+import { isolation } from './isolation.ts';
 
 // Гейты прогона — область доказательства задачи, если она объявлена. Полный
 // набор профиля остаётся обязательным для приёмки доски и релиза, но требовать
@@ -79,6 +80,25 @@ export class Scheduler {
     readonly root: string,
     readonly runtimes: typeof adapters = adapters,
   ) {}
+  /**
+   * Граница исполнителя и ревьюера: свой worktree (ревьюеру — только на
+   * чтение), закреплённые зависимости на чтение; база и рабочие каталоги
+   * контура и учётные данные закрыты. `isolation.mode: none` снимает только
+   * изоляцию проверок: песочницы рантаймов остаются, как были.
+   */
+  agentIsolation(run: Run, task: Task, cwd: string, review: boolean) {
+    if (this.h.config.isolation.mode !== 'os') return undefined;
+    return isolation({
+      write: review ? [] : [cwd],
+      controller: this.controllerRoots(task.repositoryId),
+      readable: [cwd, ...(run.dependencies ?? []).map((d) => d.path)],
+      domains: this.h.config.isolation.domains,
+    });
+  }
+  /** Каталоги контура, закрытые исполнителю, ревьюеру и проверкам. */
+  controllerRoots(repositoryId = 'main') {
+    return [...new Set([this.root, this.runRoot(repositoryId)])];
+  }
   runRoot(repositoryId = 'main') {
     return this.h.config.storage === 'component'
       ? join(repository(this.h.config, repositoryId).path, '.devcontour-local')
@@ -338,6 +358,7 @@ export class Scheduler {
           artifactDir: dir,
           prompt: this.prompt(task, run, true, sha) + '\n\nExact diff to review:\n' + diff,
           review: true,
+          isolation: this.agentIsolation(run, task, cwd, true),
           task,
           model: run.reviewerModel,
           signal,
@@ -522,6 +543,7 @@ export class Scheduler {
                     artifactDir: dir,
                     prompt: this.prompt(task, run),
                     review: false,
+                    isolation: this.agentIsolation(run, task, cwd, false),
                     task,
                     model: run.model,
                     // Модель, которую runtime выбрал сам, записывается на
@@ -622,6 +644,7 @@ export class Scheduler {
                   gate,
                   join(this.runRoot(task.repositoryId), 'artifacts', run.id, 'candidate'),
                   signal,
+                  this.controllerRoots(task.repositoryId),
                 );
               recordRequirements(this.h, run, task, cwd, sha, 'candidate');
               this.h.phase(run.id, run.token, 'reviewing');
@@ -752,6 +775,7 @@ export class Scheduler {
             gate,
             join(this.runRoot(task.repositoryId), 'artifacts', run.id, 'integration'),
             signal,
+            this.controllerRoots(task.repositoryId),
           );
         recordRequirements(this.h, run, task, cwd, sha, 'integration');
         await this.review(this.runtimes[run.reviewer], run, task, cwd, sha, 'integration', signal);

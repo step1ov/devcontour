@@ -3,6 +3,7 @@ import type { Usage } from '../core/usage.ts';
 import { evaluationResult } from '../core/evaluation.ts';
 import type { ToolProfile } from '../core/integrations.ts';
 import { codexTools, claudeMcp, claudeRules } from './tools.ts';
+import { isolation, claudeSandbox, codexPermissions, type Isolation } from './isolation.ts';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -139,6 +140,12 @@ export interface AgentRequest {
   resourcesJson?: string;
   signal: AbortSignal;
   timeoutMs: number;
+  /**
+   * Граница доступа shell исполнителя или ревьюера. Без неё — граница по
+   * умолчанию: запись только в свой каталог (ревьюеру — никуда), учётные
+   * данные закрыты. Контур передаёт сюда свои каталоги, чтобы закрыть и их.
+   */
+  isolation?: Isolation;
 }
 export interface AgentResult {
   inspection?: ReviewInspection;
@@ -166,58 +173,12 @@ export interface AgentAdapter {
  * Сверка worktree не видит того, что shell сделал за его пределами: запись в
  * базу контура или соседний checkout, чтение секретов из домашнего каталога,
  * сетевой запрос. Поэтому shell ревьюера всегда исполняется в песочнице ОС:
- * у codex это `--sandbox read-only`, у claude — `reviewSandbox`.
+ * у codex это профиль прав, у claude — `claudeSandbox` (см. isolation.ts).
  */
 function reviewRunsChecks(profile?: ToolProfile) {
   return profile?.runtime === 'codex'
     ? profile.codexShell
     : !!profile?.claudeTools?.includes('Bash');
-}
-/**
- * Каталоги учётных данных, закрытые для чтения shell ревьюера.
- *
- * Песочница Claude Code по умолчанию разрешает читать домашний каталог —
- * это показал живой запуск: запись и сеть были закрыты, а файл из $HOME
- * прочитан. Закрыть весь $HOME нельзя: там лежат и проверяемый checkout, и
- * инструменты, которыми запускаются проверки. Поэтому закрываются известные
- * места хранения ключей и токенов. Это не полная изоляция секретов — её даёт
- * отдельный исполнитель (A06), — а снятие самых очевидных путей утечки.
- */
-export const credentialPaths = [
-  '~/.ssh',
-  '~/.aws',
-  '~/.gnupg',
-  '~/.netrc',
-  '~/.npmrc',
-  '~/.docker',
-  '~/.kube',
-  '~/.config/gh',
-  '~/.config/gcloud',
-  '~/.git-credentials',
-  '~/.codex',
-  '~/.claude',
-  '~/.claude.json',
-];
-/**
- * Песочница shell для claude-ревьюера.
- *
- * Сеть закрыта, проверяемый каталог недоступен на запись: ревью плана идёт
- * прямо в основном checkout, и сверки worktree после него нет. Каталоги
- * учётных данных закрыты на чтение. Команду нельзя вывести из песочницы, а
- * без механизма песочницы запуск отказывает, а не исполняет shell без
- * ограничений. Проверки, которым нужна запись, пишут во временный каталог.
- */
-export function reviewSandbox(cwd: string) {
-  return {
-    sandbox: {
-      enabled: true,
-      failIfUnavailable: true,
-      allowUnsandboxedCommands: false,
-      autoAllowBashIfSandboxed: true,
-      network: { allowedDomains: [] as string[] },
-      filesystem: { denyWrite: [cwd], denyRead: credentialPaths },
-    },
-  };
 }
 function reviewTools(profile?: ToolProfile) {
   return ['Read', 'Glob', 'Grep', ...(reviewRunsChecks(profile) ? ['Bash'] : [])];
@@ -236,13 +197,15 @@ export function cliArguments(
         : r.review
           ? reviewSchema
           : implementationSchema;
+  const policy = r.isolation ?? isolation({ write: r.review ? [] : [r.cwd], controller: [] });
   if (runtime === 'codex')
     return [
       'codex',
       'exec',
       '--json',
-      '--sandbox',
-      r.review ? 'read-only' : 'workspace-write',
+      // Границу задаёт профиль прав ниже. С флагом --sandbox codex его
+      // игнорирует: живой запуск показал, что тогда исполнитель и ревьюер
+      // читают и базу контура, и учётные данные.
       '-c',
       'approval_policy="never"',
       '--output-schema',
@@ -266,6 +229,10 @@ export function cliArguments(
             // запрет записан явно.
             ...(r.review ? ['-c', 'features.shell_tool=false'] : []),
           ]),
+      // Та же граница, что у проверок и claude: профиль прав codex закрывает
+      // каталоги контура и учётных данных. Без него workspace-write читал
+      // любые файлы пользователя.
+      ...codexPermissions(policy, !r.review && !!r.toolProfile?.codexNetwork),
       '-',
     ];
   return [
@@ -306,8 +273,11 @@ export function cliArguments(
             .join(','),
         ]
       : []),
-    ...(r.review && reviewRunsChecks(r.toolProfile)
-      ? ['--settings', JSON.stringify(reviewSandbox(r.cwd))]
+    // Shell исполнителя и ревьюера — в песочнице ОС с той же политикой.
+    ...((
+      r.review ? reviewRunsChecks(r.toolProfile) : !!r.toolProfile?.claudeTools?.includes('Bash')
+    )
+      ? ['--settings', JSON.stringify(claudeSandbox(policy, r.review, r.cwd))]
       : []),
     ...(r.mcpConfigPath ? ['--mcp-config', r.mcpConfigPath] : []),
     '--setting-sources',

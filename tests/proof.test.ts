@@ -5,7 +5,8 @@ import { junitSummary } from '../src/runner/gates.ts';
 import type { Evidence } from '../src/core/model.ts';
 import { mkdtemp, writeFile, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
+import { realpathSync } from 'node:fs';
 import { setupDemo } from '../src/demo.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Store } from '../src/core/store.ts';
@@ -17,6 +18,7 @@ import { acceptBoard } from '../src/runner/agent-control.ts';
 import { requirementSnapshot, requirementReport } from '../src/runner/requirements.ts';
 import { fixture, input } from './helpers.ts';
 import { adapters, cliArguments, type AgentRequest } from '../src/runner/adapters.ts';
+import { isolation } from '../src/runner/isolation.ts';
 
 const SHA = 'a'.repeat(40);
 const OTHER = 'b'.repeat(40);
@@ -287,16 +289,16 @@ test('Ревьюер запускает проверки одинаково в �
   assert.equal(settings.sandbox.failIfUnavailable, true);
   assert.equal(settings.sandbox.allowUnsandboxedCommands, false);
   assert.deepEqual(settings.sandbox.network.allowedDomains, []);
-  assert.deepEqual(settings.sandbox.filesystem.denyWrite, ['/tmp']);
+  assert.deepEqual(settings.sandbox.filesystem.denyWrite, [realpathSync('/tmp')]);
   // Живой запуск показал, что песочница по умолчанию читает $HOME: каталоги
   // учётных данных закрываются явно.
-  for (const path of ['~/.ssh', '~/.aws', '~/.config/gh', '~/.npmrc'])
-    assert.ok(settings.sandbox.filesystem.denyRead.includes(path), path);
+  for (const path of ['.ssh', '.aws', '.config/gh', '.npmrc'])
+    assert.ok(settings.sandbox.filesystem.denyRead.includes(join(homedir(), path)), path);
   // Настройки пользователя не подмешиваются и не ослабляют песочницу.
   assert.equal(running[running.indexOf('--setting-sources') + 1], '');
   assert.equal(reading.includes('--settings'), false, 'без shell песочница не нужна');
 
-  // Codex: ревьюер всегда в read-only песочнице ОС, а без права проверок —
+  // Codex: ревьюер пишет только во временный каталог, а без права проверок —
   // и без shell, в том числе когда профиля нет вовсе.
   const codex = (toolProfile?: object) => {
     const args = cliArguments(
@@ -317,11 +319,29 @@ test('Ревьюер запускает проверки одинаково в �
     return args.join(' ');
   };
   for (const argv of [codex(), codex({ ...base, runtime: 'codex', codexShell: false })]) {
-    assert.match(argv, /--sandbox read-only/);
+    // Граница — профиль прав; флаг --sandbox codex заставил бы его игнорировать.
+    assert.doesNotMatch(argv, /--sandbox/);
+    assert.deepEqual(
+      [...argv.matchAll(/"([^"]+)"="write"/g)].map((m) => m[1]).filter((p) => p !== ':tmpdir'),
+      [],
+    );
     assert.match(argv, /features\.shell_tool=false/);
   }
+  // Профиль прав codex закрывает учётные данные и у ревьюера, и без профиля
+  // инструментов; сеть ревьюеру закрыта.
+  for (const argv of [codex(), codex({ ...base, runtime: 'codex', codexShell: true })]) {
+    assert.match(argv, /default_permissions="devcontour"/);
+    assert.ok(argv.includes(JSON.stringify(join(homedir(), '.ssh')) + '="none"'), argv);
+    assert.match(argv, /network=\{enabled=false\}/);
+  }
   const shell = codex({ ...base, runtime: 'codex', codexShell: true });
-  assert.match(shell, /--sandbox read-only/, 'shell ревьюера codex — только в read-only');
+  assert.doesNotMatch(shell, /--sandbox/);
+  // Ревьюер с shell не получает на запись ничего, кроме временного каталога.
+  assert.deepEqual(
+    [...shell.matchAll(/"([^"]+)"="write"/g)].map((m) => m[1]).filter((p) => p !== ':tmpdir'),
+    [],
+    'проверяемый каталог ревьюеру на запись закрыт',
+  );
   assert.match(shell, /features\.shell_tool=true/);
 });
 
@@ -529,4 +549,42 @@ test('Доменная приёмка требует названный testcase
   } finally {
     f.cleanup();
   }
+});
+
+test('Исполнитель получает ту же границу: свой worktree на запись, контур и учётные данные закрыты', () => {
+  const request = (runtime: 'claude' | 'codex', toolProfile?: object) =>
+    cliArguments(
+      runtime,
+      {
+        review: false,
+        toolProfile,
+        prompt: 'p',
+        cwd: '/tmp',
+        artifactDir: '/tmp',
+        task: {} as never,
+        signal: new AbortController().signal,
+        timeoutMs: 1000,
+        isolation: isolation({ write: ['/tmp'], controller: ['/var/devcontour-data'] }),
+      } as never,
+      '/tmp/schema.json',
+      '/tmp/result.json',
+    );
+  const profile = { mcp: {}, claudeAllowedTools: [], codexShell: true, codexNetwork: false };
+  const claude = request('claude', {
+    ...profile,
+    runtime: 'claude',
+    claudeTools: ['Read', 'Bash'],
+  });
+  const sandbox = JSON.parse(claude[claude.indexOf('--settings') + 1]).sandbox;
+  assert.deepEqual(sandbox.filesystem.allowWrite, [realpathSync('/tmp')]);
+  assert.ok(sandbox.filesystem.denyRead.includes('/var/devcontour-data'));
+  assert.equal(sandbox.filesystem.denyWrite, undefined, 'исполнитель пишет в свой worktree');
+  // Без Bash песочница не нужна: писать исполнитель может только инструментами.
+  assert.equal(request('claude').includes('--settings'), false);
+
+  const codex = request('codex', { ...profile, runtime: 'codex', codexNetwork: true }).join(' ');
+  assert.doesNotMatch(codex, /--sandbox/);
+  assert.ok(codex.includes('"/var/devcontour-data"="none"'), codex);
+  assert.ok(codex.includes(JSON.stringify(realpathSync('/tmp')) + '="write"'), codex);
+  assert.match(codex, /network=\{enabled=true\}/, 'сеть исполнителя — по профилю');
 });

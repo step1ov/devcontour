@@ -17,6 +17,14 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci
+      # Проверки исполняются в песочнице ОС (sandbox-runtime): на Linux ей
+      # нужны bubblewrap, socat и ripgrep, а Ubuntu 24.04 по умолчанию
+      # отнимает у непривилегированных user namespaces нужные права.
+      - name: Install the check sandbox
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap socat ripgrep
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: npx playwright install --with-deps chromium
       - name: Verify and retain the complete log
         shell: bash

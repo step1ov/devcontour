@@ -4,6 +4,7 @@ import { boardOwner } from '../core/sync-state.ts';
 import { toolProfileFor, agentEnvironment } from './tools.ts';
 import { mkdir, writeFile, readFile, realpath } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
+import { isolation } from './isolation.ts';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { DevContour, digest, specDigest } from '../core/service.ts';
@@ -115,6 +116,18 @@ async function review(
       artifactDir: artifact,
       prompt,
       review: true,
+      // Ревью идёт прямо в основном checkout: shell ревьюера пишет никуда,
+      // а база и журналы контура закрыты даже тогда, когда лежат внутри
+      // checkout (embedded): более конкретный путь побеждает.
+      isolation:
+        h.config.isolation.mode === 'os'
+          ? isolation({
+              write: [],
+              controller: [root],
+              readable: [h.config.repository],
+              domains: h.config.isolation.domains,
+            })
+          : undefined,
       task: {} as Task,
       model: h.config.reviewer.runtime === reviewer ? h.config.reviewer.model : undefined,
       signal: AbortSignal.timeout(h.config.runTimeoutMs),

@@ -42,9 +42,10 @@
     "lint:report": "eslint .",
     "test:live": "npm run build && node scripts/live-pilot.mjs",
     "build:lib": "npm run typecheck && tsc -p tsconfig.build.json",
-    "test:live:review-sandbox": "node --import tsx scripts/live-review-sandbox.ts"
+    "test:live:isolation": "node --import tsx scripts/live-isolation.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.77",
     "@modelcontextprotocol/server": "2.0.0",
     "@radix-ui/react-accordion": "^1.2.20",
     "@radix-ui/react-collapsible": "^1.1.20",

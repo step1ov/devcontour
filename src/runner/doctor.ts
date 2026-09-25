@@ -4,6 +4,7 @@ import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Config, Role } from '../core/model.ts';
 import { repositories, roleBinding, reviewerBinding, declaredRoles } from '../core/repositories.ts';
+import { isolationSupport } from './isolation.ts';
 import { validateWorkflow } from '../core/workflow.ts';
 import { command, git } from './process.ts';
 import { outdatedContextPacks } from './context-library.ts';
@@ -113,6 +114,18 @@ export async function doctor(config: Config, root: string, probe = false) {
   // живёт своей жизнью: её пакет обновляется, а копия в проекте остаётся. Молча
   // подменять нельзя, молчать о расхождении — тоже: проект узнал бы о нём на
   // ревью, когда код уже не отвечает правилам.
+  // Проверки исполняются в песочнице ОС. Без её механизма они не запустятся —
+  // об этом лучше узнать здесь, а не на первой задаче.
+  await check('isolation', async () => {
+    if (config.isolation.mode === 'none')
+      return 'Изоляция проверок снята явно (isolation.mode: none): проверки идут процессом хоста';
+    const support = isolationSupport();
+    if (!support.ok) throw new Error(support.detail + '. Или явно задайте isolation.mode: none');
+    return (
+      'Проверки, исполнитель и ревьюер — в песочнице ОС' +
+      (support.detail ? `; ${support.detail}` : '')
+    );
+  });
   await check('context-library', async () => {
     const stale = (
       await Promise.all(
