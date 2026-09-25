@@ -7,6 +7,7 @@ import {
   isolation,
   claudeSandbox,
   claudeFileDenies,
+  claudeFileTools,
   codexPermissions,
   type Isolation,
 } from './isolation.ts';
@@ -275,6 +276,15 @@ export function cliArguments(
           claudeRules(r.toolProfile)
             .filter(
               (rule) => !r.review || reviewRunsChecks(r.toolProfile) || !rule.startsWith('Bash'),
+            )
+            // Заранее выданное разрешение файлового инструмента открыло бы
+            // чтение вне рабочего каталога, где правила запрета покрывают
+            // только известные на старте элементы. В своём каталоге чтение
+            // разрешено и без него.
+            .filter(
+              (rule) =>
+                !r.isolation ||
+                !claudeFileTools.some((tool) => rule === tool || rule.startsWith(tool + '(')),
             )
             .join(','),
         ]

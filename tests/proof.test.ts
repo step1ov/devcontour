@@ -794,3 +794,63 @@ test('Codex закрывает содержимое скрытого катал�
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('Широкое разрешение профиля и скрытое внутри открытого не открывают контур', async () => {
+  // Ревью в embedded checkout: база контура внутри открытого cwd. У codex
+  // правило none для неё терялось. У claude широкий Read из профиля
+  // перекрывал режим прав для каталога контура над worktree.
+  const root = realpathSync(await mkdtemp(join(tmpdir(), 'devcontour-bounds-')));
+  try {
+    const checkout = join(root, 'checkout');
+    const controller = join(checkout, '.devcontour-local');
+    await mkdir(join(controller, 'worktrees', 'R1'), { recursive: true });
+    await writeFile(join(controller, 'state.sqlite'), 'db');
+    await writeFile(join(controller, 'journal.txt'), 'log');
+
+    // Codex, embedded review: checkout открыт, база внутри — закрыта.
+    const embedded = codexPermissions(
+      isolation({ write: [], controller: [controller], readable: [checkout] }),
+      false,
+    ).join(' ');
+    assert.ok(embedded.includes(`${JSON.stringify(controller)}="none"`), embedded);
+
+    // Claude, исполнитель в worktree под каталогом контура с Read в профиле.
+    const worktree = join(controller, 'worktrees', 'R1');
+    const argv = cliArguments(
+      'claude',
+      {
+        review: false,
+        toolProfile: {
+          runtime: 'claude',
+          mcp: {},
+          claudeTools: ['Read', 'Edit'],
+          claudeAllowedTools: ['Read', 'Bash(npm test)'],
+          codexShell: false,
+          codexNetwork: false,
+        },
+        prompt: 'p',
+        cwd: worktree,
+        artifactDir: root,
+        task: {} as never,
+        signal: new AbortController().signal,
+        timeoutMs: 1000,
+        isolation: isolation({ write: [worktree], controller: [controller], readable: [] }),
+      } as never,
+      '/tmp/schema.json',
+      '/tmp/result.json',
+    );
+    const allowed = argv[argv.indexOf('--allowedTools') + 1].split(',');
+    assert.equal(allowed.includes('Read'), false, 'широкий Read снят');
+    assert.ok(allowed.includes('Bash(npm test)'), 'прочие разрешения профиля сохранены');
+    const deny = JSON.parse(argv[argv.indexOf('--settings') + 1]).permissions.deny as string[];
+    for (const file of ['state.sqlite', 'journal.txt'])
+      assert.ok(deny.includes(`Read(/${join(controller, file)})`), file);
+    assert.equal(
+      deny.some((rule) => rule.startsWith(`Read(/${worktree}`)),
+      false,
+      'свой worktree не закрыт',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

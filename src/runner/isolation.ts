@@ -122,15 +122,27 @@ export function claudeSandbox(policy: Isolation, review: boolean, cwd: string) {
  * база контура в embedded-режиме лежит прямо в проверяемом checkout.
  */
 export function claudeFileDenies(policy: Isolation, cwd: string) {
+  // Предок рабочего каталога целиком закрыть нельзя — закрылся бы сам
+  // worktree; закрываются его элементы, кроме ветки к рабочему каталогу.
+  // Правило запрета сильнее любого разрешения профиля.
   const [root] = isolation({ write: [cwd], controller: [] }).write;
-  const hidden = policy.hidden.filter((path) => !(root + sep).startsWith(path + sep));
-  return hidden.flatMap((path) =>
+  return closedEntries({ ...policy, readable: [...policy.readable, root] }).flatMap((path) =>
     ['Read', 'Edit'].flatMap((tool) => [`${tool}(/${path})`, `${tool}(/${path}/**)`]),
   );
 }
+/** Файловые инструменты claude: их заранее выданные разрешения при изоляции снимаются. */
+export const claudeFileTools = [
+  'Read',
+  'Edit',
+  'Write',
+  'MultiEdit',
+  'NotebookEdit',
+  'Glob',
+  'Grep',
+];
 const tomlString = (value: string) => JSON.stringify(value);
 /**
- * Скрытые пути в форме, пригодной для codex.
+ * Скрытые пути в форме, пригодной для codex и правил файловых инструментов claude.
  *
  * `none` у codex запрещает и метаданные: скрытый каталог, внутри которого
  * лежит открытый путь (каталог контура над worktree, исходный checkout над
@@ -140,12 +152,15 @@ const tomlString = (value: string) => JSON.stringify(value);
  * появившийся в нём после построения политики, не закрыт — это граница
  * подхода; seatbelt sandbox-runtime и claude закрывают каталог целиком.
  */
-function codexHidden(policy: Isolation) {
+function closedEntries(policy: Isolation) {
   const open = [...policy.readable, ...policy.write];
   const within = (path: string, root: string) => path === root || path.startsWith(root + sep);
   const expand = (hidden: string): string[] => {
+    // Скрытое внутри открытого остаётся скрытым: база контура в embedded
+    // checkout закрыта и тогда, когда сам checkout открыт на чтение.
+    if (open.includes(hidden)) return [];
     const inner = open.filter((p) => p !== hidden && within(p, hidden));
-    if (!inner.length) return open.some((p) => within(hidden, p) && p !== hidden) ? [] : [hidden];
+    if (!inner.length) return [hidden];
     let entries: string[];
     try {
       entries = readdirSync(hidden).map((name) => join(hidden, name));
@@ -172,7 +187,7 @@ export function codexPermissions(policy: Isolation, network: boolean) {
   const entries: [string, string][] = [
     [':root', 'read'],
     [':tmpdir', 'write'],
-    ...codexHidden(policy).map((p) => [p, 'none'] as [string, string]),
+    ...closedEntries(policy).map((p) => [p, 'none'] as [string, string]),
     ...policy.readable.map((p) => [p, 'read'] as [string, string]),
     ...policy.write.map((p) => [p, 'write'] as [string, string]),
   ];
