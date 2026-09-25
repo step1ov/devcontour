@@ -9,12 +9,25 @@ import type { Run, Gate, Evidence } from '../core/model.ts';
 import { TaskFailure } from '../core/failure.ts';
 /** Предел манифеста: полный список тестов крупного проекта в состояние не кладётся. */
 const MANIFEST_LIMIT = 2000;
+/** Текст провала testcase: атрибут message или содержимое элемента. */
+function failureText(value: unknown): string {
+  const first = Array.isArray(value) ? value[0] : value;
+  if (typeof first === 'string') return first.trim().split('\n')[0];
+  if (first && typeof first === 'object') {
+    const node = first as Record<string, unknown>;
+    const text = node['@_message'] ?? node['#text'];
+    if (typeof text === 'string') return text.trim().split('\n')[0];
+  }
+  return '';
+}
 export function junitSummary(xml: string): {
   tests: number;
   failures: number;
   skipped: number;
   /** Имена провалившихся testcases: по ним различаются разные провалы. */
   failed: string[];
+  /** Те же testcases с первыми словами сообщения о провале. */
+  failedDetails: string[];
   /** Что именно выполнилось и с каким исходом. */
   cases: { id: string; status: 'passed' | 'failed' | 'skipped' }[];
   /** Список обрезан: отсутствие теста по нему доказать нельзя. */
@@ -28,6 +41,7 @@ export function junitSummary(xml: string): {
     failures: 0,
     skipped: 0,
     failed: [] as string[],
+    failedDetails: [] as string[],
     cases: [] as { id: string; status: 'passed' | 'failed' | 'skipped' }[],
     truncated: false,
   };
@@ -44,7 +58,15 @@ export function junitSummary(xml: string): {
         const broken = 'failure' in value || 'error' in value;
         if (broken) {
           summary.failures++;
-          if (name && summary.failed.length < 10) summary.failed.push(String(name));
+          if (name && summary.failed.length < 10) {
+            summary.failed.push(String(name));
+            summary.failedDetails.push(
+              [String(name), failureText(named['failure'] ?? named['error'])]
+                .filter(Boolean)
+                .join(': ')
+                .slice(0, 200),
+            );
+          }
         }
         if ('skipped' in value) summary.skipped++;
         if (name) {
@@ -71,17 +93,38 @@ export function junitSummary(xml: string): {
  * доступен, а в отказ попадал только «Код выхода 1». Два разных провала одной
  * проверки выглядели одной причиной — предел одинаковых повторов исчерпывался
  * на несвязанных ошибках, и подсказка повтора не содержала ничего, кроме кода
- * возврата. Берутся последние содержательные строки: там диагностика
- * большинства инструментов. Секреты снимаются тем же redact, что и в логе.
+ * возврата. Берутся последние содержательные строки обоих потоков: ошибку
+ * одни инструменты пишут в stdout, другие в stderr, и одинаковое
+ * предупреждение в одном потоке не должно закрывать ошибку в другом. Секреты
+ * снимаются тем же redact, что и в логе; объём ограничен.
  */
 function diagnostic(stderr: string, stdout: string, redact?: (value: string) => string) {
-  const lines = (stderr.trim() || stdout.trim())
-    .split('\n')
-    .map((line) => line.trimEnd())
-    .filter(Boolean);
+  const tail = (text: string) =>
+    text
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(-4)
+      // Каждая строка короткая: одна длинная строка одного потока иначе
+      // съедает весь лимит и прячет ошибку другого.
+      .map((line) => (line.length > 140 ? line.slice(0, 140) + '…' : line));
+  const lines = [...tail(stdout), ...tail(stderr)];
   if (!lines.length) return '';
-  const tail = lines.slice(-6).join(' | ');
-  return ': ' + (redact ? redact(tail) : tail).slice(0, 600);
+  const text = lines.join(' | ');
+  return (redact ? redact(text) : text).slice(0, 600);
+}
+/** Упавшие testcases с их сообщениями — то, чем провалы отличаются друг от друга. */
+function failedCases(counts: ReturnType<typeof junitSummary>, redact?: (value: string) => string) {
+  const text = counts.failedDetails.join('; ');
+  return (redact ? redact(text) : text).slice(0, 600);
+}
+/** Отчёт внутри worktree, прочитанный без выхода за его границы. */
+async function readReport(reportPath: string, cwd: string) {
+  const real = await realpath(reportPath);
+  if (!real.startsWith((await realpath(cwd)) + sep))
+    throw new Error('Report symlink выходит из worktree');
+  const xml = await readFile(real, 'utf8');
+  return { ...junitSummary(xml), xml };
 }
 export async function runGate(...args: Parameters<typeof executeGate>) {
   return timed(args[0], args[1], `${args[4]}-test:${args[5].id}`, () => executeGate(...args));
@@ -126,21 +169,29 @@ async function executeGate(
     log = result.stdout + '\n' + result.stderr;
     if (result.timedOut || signal.aborted)
       throw new Error('Проверка прервана или превысила timeout');
-    if (result.code !== 0)
-      throw new Error(
-        `Код выхода ${result.code}${diagnostic(result.stderr, result.stdout, redact)}`,
-      );
+    if (result.code !== 0) {
+      // Отчёт читается и при ненулевом коде: упавшие testcases — главная
+      // причина провала, а многие раннеры пишут их только в отчёт. Код выхода
+      // по-прежнему означает провал; повреждённый или отсутствующий отчёт
+      // не заменяет исходную ошибку команды, а только не добавляет к ней.
+      const counts = reportPath
+        ? await readReport(reportPath, cwd).catch(() => undefined)
+        : undefined;
+      if (counts) manifest = counts;
+      const parts = [
+        `Код выхода ${result.code}`,
+        counts?.failures ? `упали ${failedCases(counts, redact)}` : '',
+        diagnostic(result.stderr, result.stdout, redact),
+      ].filter(Boolean);
+      throw new Error(parts.join(': '));
+    }
     if (reportPath) {
-      const real = await realpath(reportPath);
-      if (!real.startsWith((await realpath(cwd)) + sep))
-        throw new Error('Report symlink выходит из worktree');
-      const xml = await readFile(real, 'utf8');
-      const counts = (manifest = junitSummary(xml));
+      const counts = (manifest = await readReport(reportPath, cwd));
       summary = `${counts.tests} tests, ${counts.failures} failures, ${counts.skipped} skipped`;
       if (counts.failures || counts.skipped)
-        throw new Error(summary + (counts.failed.length ? `: ${counts.failed.join(', ')}` : ''));
+        throw new Error(summary + (counts.failures ? `: ${failedCases(counts, redact)}` : ''));
       await mkdir(artifactDir, { recursive: true });
-      await writeFile(join(artifactDir, `${gate.id}.xml`), xml);
+      await writeFile(join(artifactDir, `${gate.id}.xml`), counts.xml);
     } else summary = 'Команда завершилась успешно';
     await assertDependencies(run.dependencies ?? []);
     if ((await git(cwd, 'rev-parse', 'HEAD')) !== sha) throw new Error('Gate изменил HEAD');
@@ -165,6 +216,8 @@ async function executeGate(
     log: logPath,
     digest: digest(log),
     summary,
+    // Манифест упавшей проверки тоже записывается: он показывает, какие
+    // testcases упали. Подтвердить критерий он не может — evidence не passed.
     tests: manifest?.cases,
     testsTruncated: manifest?.truncated || undefined,
   });

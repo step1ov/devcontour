@@ -789,3 +789,116 @@ test('Провал проверки несёт свою причину: разн
   }
   assert.notEqual(fingerprints[0], fingerprints[1], 'разные причины — разные отпечатки');
 });
+test('Провал проверки называет упавший testcase и ошибку из любого потока', async () => {
+  // Раннеры, записывающие упавшие testcases только в отчёт и выходящие с
+  // кодом 1, давали «Код выхода 1» без причины: отчёт при ненулевом коде не
+  // читался. А одинаковое предупреждение в stderr закрывало ошибку в stdout.
+  // В обоих случаях разные провалы получали один отпечаток.
+  const junit = (name: string) =>
+    `<testsuite><testcase classname="total" name="ok"/><testcase classname="total" name="${name}"><failure message="${name} broke"/></testcase></testsuite>`;
+  const scenarios: [string, (marker: string) => string][] = [
+    [
+      'отчёт и код 1 без вывода',
+      (m) =>
+        `require('fs').mkdirSync('.reports',{recursive:true});require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,${JSON.stringify(junit(m))});process.exit(1)`,
+    ],
+    [
+      'ошибка в stdout, предупреждение в stderr',
+      (m) =>
+        `console.log('error: ${m}');console.error('Warning: experimental runtime feature');process.exit(1)`,
+    ],
+  ];
+  for (const [label, script] of scenarios) {
+    const fingerprints: string[] = [];
+    for (const marker of ['EXPECTED_TOTAL_WRONG', 'MISSING_REQUIRED_FIELD']) {
+      const f = await runtimeFixture();
+      try {
+        f.h.config.gates[0].command = [process.execPath, '-e', script(marker)];
+        f.h.config.gates[0].report = { type: 'junit', path: '.reports/unit.xml' };
+        f.h.pause(false);
+        await new Scheduler(f.h, f.root).drain();
+
+        const failed = f.store.read().tasks.find((t) => t.status === 'failed')!;
+        assert.match(failed.failure!, new RegExp(marker), `${label}: причина названа`);
+        const run = f.store.read().runs.findLast((r) => r.taskId === failed.id)!;
+        const evidence = run.evidence.find((e) => !e.passed)!;
+        assert.match(evidence.summary, new RegExp(marker), `${label}: причина в evidence`);
+        assert.match(evidence.summary, /Код выхода 1/, `${label}: код выхода остаётся провалом`);
+        fingerprints.push(failed.failureFingerprint!);
+      } finally {
+        await f.cleanup();
+      }
+    }
+    assert.notEqual(
+      fingerprints[0],
+      fingerprints[1],
+      `${label}: разные причины — разные отпечатки`,
+    );
+  }
+});
+test('Повреждённый отчёт не затирает ошибку команды, секреты и объём ограничены', async () => {
+  const f = await runtimeFixture();
+  const secret = 'gate-secret-value-5821';
+  process.env.DEVCONTOUR_TEST_GATE_SECRET = secret;
+  try {
+    f.h.config.environment = {
+      inherit: [],
+      values: {},
+      secrets: { GATE_TOKEN: 'DEVCONTOUR_TEST_GATE_SECRET' },
+    };
+    f.h.config.gates[0].command = [
+      process.execPath,
+      '-e',
+      `require('fs').mkdirSync('.reports',{recursive:true});require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase');` +
+        `console.log('x'.repeat(5000));console.error('fatal: token '+process.env.GATE_TOKEN+' rejected');process.exit(2)`,
+    ];
+    f.h.config.gates[0].report = { type: 'junit', path: '.reports/unit.xml' };
+    f.h.pause(false);
+    await new Scheduler(f.h, f.root).drain();
+
+    const failed = f.store.read().tasks.find((t) => t.status === 'failed')!;
+    const summary = f.store
+      .read()
+      .runs.findLast((r) => r.taskId === failed.id)!
+      .evidence.find((e) => !e.passed)!.summary;
+    assert.match(summary, /Код выхода 2/, 'исходный код выхода сохранён');
+    assert.match(summary, /fatal: token .* rejected/, 'ошибка команды не затёрта отчётом');
+    assert.doesNotMatch(summary, /Некорректный JUnit/, 'повреждённый отчёт не подменяет причину');
+    assert.ok(!summary.includes(secret) && !failed.failure!.includes(secret), 'секрет снят');
+    assert.ok(summary.length < 1000, `объём ограничен: ${summary.length}`);
+  } finally {
+    delete process.env.DEVCONTOUR_TEST_GATE_SECRET;
+    await f.cleanup();
+  }
+});
+test('Текст провала из отчёта проходит тот же redact, что и вывод команды', async () => {
+  // Отчёт пишет раннер, и секрет попадает туда так же легко, как в вывод.
+  const f = await runtimeFixture();
+  const secret = 'gate-secret-value-7310';
+  process.env.DEVCONTOUR_TEST_GATE_SECRET = secret;
+  try {
+    f.h.config.environment = {
+      inherit: [],
+      values: {},
+      secrets: { GATE_TOKEN: 'DEVCONTOUR_TEST_GATE_SECRET' },
+    };
+    f.h.config.gates[0].command = [
+      process.execPath,
+      '-e',
+      `require('fs').mkdirSync('.reports',{recursive:true});require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase classname="auth" name="LEAKS_TOKEN"><failure message="sent '+process.env.GATE_TOKEN+'"/></testcase></testsuite>');process.exit(1)`,
+    ];
+    f.h.config.gates[0].report = { type: 'junit', path: '.reports/unit.xml' };
+    f.h.pause(false);
+    await new Scheduler(f.h, f.root).drain();
+    const failed = f.store.read().tasks.find((t) => t.status === 'failed')!;
+    const reported = f.store
+      .read()
+      .runs.findLast((r) => r.taskId === failed.id)!
+      .evidence.find((e) => !e.passed)!.summary;
+    assert.match(reported, /LEAKS_TOKEN/);
+    assert.ok(!reported.includes(secret) && !failed.failure!.includes(secret), reported);
+  } finally {
+    delete process.env.DEVCONTOUR_TEST_GATE_SECRET;
+    await f.cleanup();
+  }
+});
