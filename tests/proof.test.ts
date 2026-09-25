@@ -16,7 +16,7 @@ import { git } from '../src/runner/process.ts';
 import { acceptBoard } from '../src/runner/agent-control.ts';
 import { requirementSnapshot, requirementReport } from '../src/runner/requirements.ts';
 import { input } from './helpers.ts';
-import { cliArguments } from '../src/runner/adapters.ts';
+import { adapters, cliArguments, type AgentRequest } from '../src/runner/adapters.ts';
 
 const SHA = 'a'.repeat(40);
 const OTHER = 'b'.repeat(40);
@@ -291,4 +291,113 @@ test('Ревьюер запускает проверки одинаково в �
   // Настройки пользователя не подмешиваются и не ослабляют песочницу.
   assert.equal(running[running.indexOf('--setting-sources') + 1], '');
   assert.equal(reading.includes('--settings'), false, 'без shell песочница не нужна');
+});
+
+test('Намеренно внесённый дефект ловится названным тестом: без этого нет ни done, ни приёмки', async () => {
+  // Подтверждение уровня testcase ничего не стоит, если названный тест не
+  // замечает сломанного поведения. Здесь тест настоящий: он вызывает то, что
+  // написал исполнитель, и пишет в отчёт исход каждого testcase. Исполнитель
+  // сначала вносит значимый дефект (вычитание вместо сложения), затем чинит.
+  const root = await mkdtemp(join(tmpdir(), 'devcontour-oracle-'));
+  await setupDemo(root);
+  const config = loadConfig(join(root, 'config.json'));
+  const store = new Store(join(root, 'state.sqlite'));
+  const h = new DevContour(store, config);
+  try {
+    store.change('fixture.reset', (s) => {
+      s.tasks = [];
+      s.boards = [];
+      s.runs = [];
+    });
+    await mkdir(join(config.repository, 'docs'), { recursive: true });
+    await writeFile(join(config.repository, 'docs/spec.md'), '## REQ-sum: Sum\nAdd two numbers.\n');
+    await writeFile(
+      join(config.repository, 'oracle.mjs'),
+      `import { writeFile, mkdir } from 'node:fs/promises';
+const cases = [];
+const check = async (id, fn) => { try { await fn(); cases.push('<testcase name="'+id+'"/>'); } catch (e) { cases.push('<testcase name="'+id+'"><failure message="'+String(e.message).replace(/[<&"]/g,'')+'"/></testcase>'); } };
+const { sum } = await import('./sum.mjs').catch(() => ({ sum: () => NaN }));
+await check('sum-adds', () => { if (sum(2, 3) !== 5) throw new Error('sum(2,3)='+sum(2,3)); });
+await check('sum-module-loads', () => { if (typeof sum !== 'function') throw new Error('no sum'); });
+await mkdir('.reports', { recursive: true });
+await writeFile(process.env.DEVCONTOUR_REPORT_PATH, '<testsuite>'+cases.join('')+'</testsuite>');
+process.exit(cases.some((c) => c.includes('<failure')) ? 1 : 0);
+`,
+    );
+    await git(config.repository, 'add', '.');
+    await git(config.repository, 'commit', '-m', 'Specify sum and its oracle');
+    await git(config.repository, 'update-ref', 'refs/heads/' + config.targetBranch, 'HEAD');
+    config.gates = [
+      {
+        ...config.gates[0],
+        id: 'oracle',
+        command: [process.execPath, 'oracle.mjs'],
+        report: { type: 'junit', path: '.reports/oracle.xml' },
+      },
+    ];
+    const snapshot = requirementSnapshot(config.repository, 'docs/spec.md');
+    const board = h.createBoard('Sum with oracle');
+    const task = h.addTask(board.id, {
+      ...input(),
+      requirements: [
+        {
+          ...snapshot.requirements[0],
+          source: snapshot.source,
+          gate: 'oracle',
+          scenario: 'Two numbers are added',
+          testId: 'sum-adds',
+        },
+      ],
+    });
+    h.approve(board.id);
+    let body = 'export const sum = (a, b) => a - b;\n';
+    const runtimes = {
+      ...adapters,
+      demo: {
+        name: 'demo' as const,
+        async execute(r: AgentRequest) {
+          if (r.review)
+            return {
+              data: { approved: true, summary: 'Looks fine', findings: [] },
+              log: 'fixture',
+              command: ['fixture'],
+            };
+          await writeFile(join(r.cwd, 'sum.mjs'), body);
+          return {
+            data: { completed: true, summary: 'Implemented sum' },
+            log: 'fixture',
+            command: ['fixture'],
+          };
+        },
+      },
+    };
+    const scheduler = new Scheduler(h, root, runtimes);
+    await scheduler.init();
+    await updateBase(config, root);
+    h.pause(false);
+    await scheduler.drain();
+
+    // Дефект пойман: задача не done, отказ называет упавший сценарий, и
+    // одобрившее ревью этого не отменяет.
+    let state = store.read();
+    assert.equal(state.tasks[0].status, 'failed');
+    assert.equal(state.tasks[0].failureKind, 'gate');
+    assert.match(state.tasks[0].failure!, /sum-adds/);
+    await assert.rejects(() => acceptBoard(h, board.id, 'codex'));
+    assert.notEqual(store.read().boards[0].revisions.at(-1)!.status, 'accepted');
+
+    // Исправленная реализация проходит, и критерий подтверждён тем же тестом.
+    body = 'export const sum = (a, b) => a + b;\n';
+    h.retry(task.id);
+    h.pause(false);
+    await scheduler.drain();
+    state = store.read();
+    assert.equal(state.tasks[0].status, 'done', state.tasks[0].failure);
+    await acceptBoard(h, board.id, 'codex');
+    assert.equal(requirementReport(h, 'main').tasks[0].requirements[0].proof, 'testcase');
+    await scheduler.stop();
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
