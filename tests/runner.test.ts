@@ -964,6 +964,8 @@ ok('reads-own-worktree', tryDo(()=>fs.readdirSync('.')));
 ok('writes-scratch', tryDo(()=>fs.writeFileSync(path.join(process.env.TMPDIR,'t'),'x')));
 ok('controller-db-hidden', !tryDo(()=>fs.readFileSync(${JSON.stringify(join(f.root, 'state.sqlite'))})));
 ok('write-outside-denied', !tryDo(()=>fs.writeFileSync(${JSON.stringify(outside)},'x')));
+ok('source-checkout-hidden', !tryDo(()=>fs.readFileSync(${JSON.stringify(join(f.config.repository, 'verify.mjs'))})));
+ok('git-in-own-worktree', tryDo(()=>require('child_process').execFileSync('git',['status','--porcelain'],{stdio:'pipe'})));
 const done=()=>{fs.mkdirSync('.reports',{recursive:true});fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite>'+cases.join('')+'</testsuite>');process.exit(0)};
 const s=net.createServer(c=>c.end('pong')).listen(0,'127.0.0.1',()=>{
   net.connect(s.address().port,'127.0.0.1').on('data',()=>{ok('localhost-works',true);s.close();
@@ -987,6 +989,8 @@ const s=net.createServer(c=>c.end('pong')).listen(0,'127.0.0.1',()=>{
         'writes-scratch': 'passed',
         'controller-db-hidden': 'passed',
         'write-outside-denied': 'passed',
+        'source-checkout-hidden': 'passed',
+        'git-in-own-worktree': 'passed',
         'localhost-works': 'passed',
         'egress-denied': 'passed',
       },
@@ -1144,4 +1148,20 @@ test('Проверка повторяется, только если песоч�
     sandboxNotStarted(['node', 'verify.mjs'], failed('', "Error: Shell 'bash' not found in PATH")),
     false,
   );
+});
+
+test('Граница закрывает исходные checkout всех репозиториев, оставляя их .git', async () => {
+  // Работа идёт в своём worktree; чужое рабочее дерево исполнителю и
+  // проверке не нужно. В демо-фикстуре репозиторий лежит внутри каталога
+  // контура, поэтому здесь проверяется сама граница, а её исполнение — в
+  // тесте песочницы проверки выше.
+  const f = await runtimeFixture();
+  try {
+    const boundary = new Scheduler(f.h, f.root).boundary('main');
+    assert.ok(boundary.hidden.includes(f.config.repository), 'исходный checkout закрыт');
+    assert.ok(boundary.hidden.includes(f.root), 'каталог контура закрыт');
+    assert.deepEqual(boundary.readable, [join(f.config.repository, '.git')]);
+  } finally {
+    await f.cleanup();
+  }
 });

@@ -90,14 +90,27 @@ export class Scheduler {
     if (this.h.config.isolation.mode !== 'os') return undefined;
     return isolation({
       write: review ? [] : [cwd],
-      controller: this.controllerRoots(task.repositoryId),
-      readable: [cwd, ...(run.dependencies ?? []).map((d) => d.path)],
+      controller: this.boundary(task.repositoryId).hidden,
+      readable: [
+        cwd,
+        ...(run.dependencies ?? []).map((d) => d.path),
+        ...this.boundary(task.repositoryId).readable,
+      ],
       domains: this.h.config.isolation.domains,
     });
   }
-  /** Каталоги контура, закрытые исполнителю, ревьюеру и проверкам. */
-  controllerRoots(repositoryId = 'main') {
-    return [...new Set([this.root, this.runRoot(repositoryId)])];
+  /**
+   * Что закрыто исполнителю, ревьюеру и проверкам: база и рабочие каталоги
+   * контура и исходные checkout репозиториев — работа идёт в своём worktree,
+   * а не в чужом рабочем дереве. Открыт только `.git` репозиториев: linked
+   * worktree читает из него объекты и refs.
+   */
+  boundary(repositoryId = 'main') {
+    const repos = repositories(this.h.config);
+    return {
+      hidden: [...new Set([this.root, this.runRoot(repositoryId), ...repos.map((r) => r.path)])],
+      readable: repos.map((r) => join(r.path, '.git')),
+    };
   }
   runRoot(repositoryId = 'main') {
     return this.h.config.storage === 'component'
@@ -644,7 +657,7 @@ export class Scheduler {
                   gate,
                   join(this.runRoot(task.repositoryId), 'artifacts', run.id, 'candidate'),
                   signal,
-                  this.controllerRoots(task.repositoryId),
+                  this.boundary(task.repositoryId),
                 );
               recordRequirements(this.h, run, task, cwd, sha, 'candidate');
               this.h.phase(run.id, run.token, 'reviewing');
@@ -775,7 +788,7 @@ export class Scheduler {
             gate,
             join(this.runRoot(task.repositoryId), 'artifacts', run.id, 'integration'),
             signal,
-            this.controllerRoots(task.repositoryId),
+            this.boundary(task.repositoryId),
           );
         recordRequirements(this.h, run, task, cwd, sha, 'integration');
         await this.review(this.runtimes[run.reviewer], run, task, cwd, sha, 'integration', signal);

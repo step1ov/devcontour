@@ -304,8 +304,8 @@ async function executeGate(
   gate: Gate,
   artifactDir: string,
   signal: AbortSignal,
-  /** Каталоги контура — база, worktrees, артефакты: проверке они закрыты. */
-  controller: string[] = [],
+  /** Закрытое проверке (база, рабочие каталоги, исходные checkout) и открытое внутри. */
+  boundary: { hidden: string[]; readable: string[] } = { hidden: [], readable: [] },
 ) {
   const gateCwd = gate.cwd ? await realpath(resolve(cwd, gate.cwd)) : await realpath(cwd);
   if (gateCwd !== (await realpath(cwd)) && !gateCwd.startsWith((await realpath(cwd)) + sep))
@@ -330,8 +330,8 @@ async function executeGate(
       timeoutMs: gate.timeoutMs,
       signal,
       write: [cwd],
-      readable: (run.dependencies ?? []).map((d) => d.path),
-      controller,
+      readable: [...(run.dependencies ?? []).map((d) => d.path), ...boundary.readable],
+      controller: boundary.hidden,
       settingsDir: join(artifactDir, gate.id),
     });
     exitCode = result.code;

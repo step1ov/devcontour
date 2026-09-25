@@ -152,8 +152,12 @@ export class WorkspaceRunner {
                     signal,
                     timeoutMs: gate.timeoutMs,
                     write: [cwd],
-                    readable: [...Object.values(paths), manifestPath],
-                    controller: [this.root],
+                    readable: [
+                      ...Object.values(paths),
+                      manifestPath,
+                      ...repositories(this.h.config).map((r) => join(r.path, '.git')),
+                    ],
+                    controller: [this.root, ...repositories(this.h.config).map((r) => r.path)],
                     settingsDir: join(dir, gate.id),
                     env: executionEnvironment(
                       [
