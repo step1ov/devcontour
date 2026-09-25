@@ -852,7 +852,7 @@ test('Повреждённый отчёт не затирает ошибку к�
       process.execPath,
       '-e',
       `require('fs').mkdirSync('.reports',{recursive:true});require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase');` +
-        `console.log('x'.repeat(5000));console.error('fatal: token '+process.env.GATE_TOKEN+' rejected');process.exit(2)`,
+        `console.log('x'.repeat(5000));console.log('stdout-cause: schema mismatch');console.error('fatal: token '+process.env.GATE_TOKEN+' rejected');process.exit(2)`,
     ];
     f.h.config.gates[0].report = { type: 'junit', path: '.reports/unit.xml' };
     f.h.pause(false);
@@ -865,6 +865,11 @@ test('Повреждённый отчёт не затирает ошибку к�
       .evidence.find((e) => !e.passed)!.summary;
     assert.match(summary, /Код выхода 2/, 'исходный код выхода сохранён');
     assert.match(summary, /fatal: token .* rejected/, 'ошибка команды не затёрта отчётом');
+    assert.match(
+      summary,
+      /stdout-cause: schema mismatch/,
+      'stdout входит в причину вместе с stderr',
+    );
     assert.doesNotMatch(summary, /Некорректный JUnit/, 'повреждённый отчёт не подменяет причину');
     assert.ok(!summary.includes(secret) && !failed.failure!.includes(secret), 'секрет снят');
     assert.ok(summary.length < 1000, `объём ограничен: ${summary.length}`);
@@ -874,9 +879,10 @@ test('Повреждённый отчёт не затирает ошибку к�
   }
 });
 test('Текст провала из отчёта проходит тот же redact, что и вывод команды', async () => {
-  // Отчёт пишет раннер, и секрет попадает туда так же легко, как в вывод.
+  // Отчёт пишет раннер, и секрет попадает туда так же легко, как в вывод:
+  // в сообщение провала, в том числе на границе обрезки, и в имя testcase.
   const f = await runtimeFixture();
-  const secret = 'gate-secret-value-7310';
+  const secret = 'gate-secret-value-7310-abcdefgh';
   process.env.DEVCONTOUR_TEST_GATE_SECRET = secret;
   try {
     f.h.config.environment = {
@@ -887,20 +893,46 @@ test('Текст провала из отчёта проходит тот же r
     f.h.config.gates[0].command = [
       process.execPath,
       '-e',
-      `require('fs').mkdirSync('.reports',{recursive:true});require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase classname="auth" name="LEAKS_TOKEN"><failure message="sent '+process.env.GATE_TOKEN+'"/></testcase></testsuite>');process.exit(1)`,
+      `const t=process.env.GATE_TOKEN;require('fs').mkdirSync('.reports',{recursive:true});require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase classname="auth" name="LEAKS_TOKEN"><failure message="'+'p'.repeat(184)+t+'"/></testcase><testcase name="case-'+t+'"><failure message="named"/></testcase></testsuite>');process.exit(1)`,
     ];
     f.h.config.gates[0].report = { type: 'junit', path: '.reports/unit.xml' };
     f.h.pause(false);
     await new Scheduler(f.h, f.root).drain();
     const failed = f.store.read().tasks.find((t) => t.status === 'failed')!;
-    const reported = f.store
-      .read()
-      .runs.findLast((r) => r.taskId === failed.id)!
-      .evidence.find((e) => !e.passed)!.summary;
-    assert.match(reported, /LEAKS_TOKEN/);
-    assert.ok(!reported.includes(secret) && !failed.failure!.includes(secret), reported);
+    const run = f.store.read().runs.findLast((r) => r.taskId === failed.id)!;
+    const evidence = run.evidence.find((e) => !e.passed)!;
+    assert.match(evidence.summary, /LEAKS_TOKEN/, 'причина из отчёта дошла');
+    assert.ok(evidence.tests?.length, 'манифест упавшей проверки записан');
+    // Ни целиком, ни префиксом — ни в сводке, ни в манифесте, ни в отказе.
+    const stored = JSON.stringify(f.store.read());
+    for (const piece of [secret, secret.slice(0, 12)])
+      assert.ok(!stored.includes(piece), `в состоянии нет «${piece}»`);
   } finally {
     delete process.env.DEVCONTOUR_TEST_GATE_SECRET;
     await f.cleanup();
   }
+});
+test('Длинный вывод одного потока не вытесняет различающуюся ошибку другого', async () => {
+  // Четыре длинные строки stdout, три длинных предупреждения в stderr и одна
+  // ошибка, которая меняется. Общий лимит, заполняемый stdout первым,
+  // оставлял обоим провалам один и тот же текст и один отпечаток.
+  const fingerprints: string[] = [];
+  for (const marker of ['EXPECTED_TOTAL_WRONG', 'MISSING_REQUIRED_FIELD']) {
+    const f = await runtimeFixture();
+    try {
+      f.h.config.gates[0].command = [
+        process.execPath,
+        '-e',
+        `for(let i=0;i<4;i++)console.log('progress '+'o'.repeat(300));for(let i=0;i<3;i++)console.error('warning '+'w'.repeat(300));console.error('error: ${marker}');process.exit(1)`,
+      ];
+      f.h.pause(false);
+      await new Scheduler(f.h, f.root).drain();
+      const failed = f.store.read().tasks.find((t) => t.status === 'failed')!;
+      assert.match(failed.failure!, new RegExp(marker));
+      fingerprints.push(failed.failureFingerprint!);
+    } finally {
+      await f.cleanup();
+    }
+  }
+  assert.notEqual(fingerprints[0], fingerprints[1]);
 });

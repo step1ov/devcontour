@@ -20,7 +20,19 @@ function failureText(value: unknown): string {
   }
   return '';
 }
-export function junitSummary(xml: string): {
+/**
+ * Сводка JUnit-отчёта.
+ *
+ * `redact` применяется к именам и сообщениям до любой обрезки: обрезанный
+ * секрет redactor уже не узнаёт, и в сводке оставался бы его префикс. Имя
+ * testcase тоже проходит redact — оно попадает в состояние, журнал и API.
+ * Изменённое так имя не совпадёт с названным критерием, и подтверждения
+ * не будет: для секрета в имени теста это правильный исход.
+ */
+export function junitSummary(
+  xml: string,
+  redact: (value: string) => string = (value) => value,
+): {
   tests: number;
   failures: number;
   skipped: number;
@@ -54,14 +66,14 @@ export function junitSummary(xml: string): {
       summary.tests++;
       if (value && typeof value === 'object') {
         const named = value as Record<string, unknown>;
-        const name = [named['@_classname'], named['@_name']].filter(Boolean).join('.');
+        const name = redact([named['@_classname'], named['@_name']].filter(Boolean).join('.'));
         const broken = 'failure' in value || 'error' in value;
         if (broken) {
           summary.failures++;
           if (name && summary.failed.length < 10) {
             summary.failed.push(String(name));
             summary.failedDetails.push(
-              [String(name), failureText(named['failure'] ?? named['error'])]
+              [String(name), redact(failureText(named['failure'] ?? named['error']))]
                 .filter(Boolean)
                 .join(': ')
                 .slice(0, 200),
@@ -99,32 +111,32 @@ export function junitSummary(xml: string): {
  * снимаются тем же redact, что и в логе; объём ограничен.
  */
 function diagnostic(stderr: string, stdout: string, redact?: (value: string) => string) {
-  const tail = (text: string) =>
-    text
+  // У каждого потока свой бюджет: общий лимит, заполняемый по очереди,
+  // позволял нескольким длинным строкам одного потока вытеснить ошибку
+  // другого. Redact — до обрезки, иначе префикс секрета остаётся.
+  const tail = (text: string) => {
+    const joined = text
       .split('\n')
-      .map((line) => line.trim())
+      .map((line) => (redact ? redact(line) : line).trim())
       .filter(Boolean)
       .slice(-4)
-      // Каждая строка короткая: одна длинная строка одного потока иначе
-      // съедает весь лимит и прячет ошибку другого.
-      .map((line) => (line.length > 140 ? line.slice(0, 140) + '…' : line));
-  const lines = [...tail(stdout), ...tail(stderr)];
-  if (!lines.length) return '';
-  const text = lines.join(' | ');
-  return (redact ? redact(text) : text).slice(0, 600);
+      .map((line) => (line.length > 140 ? line.slice(0, 140) + '…' : line))
+      .join(' | ');
+    return joined.length > 290 ? '…' + joined.slice(-290) : joined;
+  };
+  return [tail(stdout), tail(stderr)].filter(Boolean).join(' | ');
 }
 /** Упавшие testcases с их сообщениями — то, чем провалы отличаются друг от друга. */
-function failedCases(counts: ReturnType<typeof junitSummary>, redact?: (value: string) => string) {
-  const text = counts.failedDetails.join('; ');
-  return (redact ? redact(text) : text).slice(0, 600);
+function failedCases(counts: ReturnType<typeof junitSummary>) {
+  return counts.failedDetails.join('; ').slice(0, 600);
 }
 /** Отчёт внутри worktree, прочитанный без выхода за его границы. */
-async function readReport(reportPath: string, cwd: string) {
+async function readReport(reportPath: string, cwd: string, redact?: (value: string) => string) {
   const real = await realpath(reportPath);
   if (!real.startsWith((await realpath(cwd)) + sep))
     throw new Error('Report symlink выходит из worktree');
   const xml = await readFile(real, 'utf8');
-  return { ...junitSummary(xml), xml };
+  return { ...junitSummary(xml, redact), xml };
 }
 export async function runGate(...args: Parameters<typeof executeGate>) {
   return timed(args[0], args[1], `${args[4]}-test:${args[5].id}`, () => executeGate(...args));
@@ -175,23 +187,26 @@ async function executeGate(
       // по-прежнему означает провал; повреждённый или отсутствующий отчёт
       // не заменяет исходную ошибку команды, а только не добавляет к ней.
       const counts = reportPath
-        ? await readReport(reportPath, cwd).catch(() => undefined)
+        ? await readReport(reportPath, cwd, redact).catch(() => undefined)
         : undefined;
       if (counts) manifest = counts;
       const parts = [
         `Код выхода ${result.code}`,
-        counts?.failures ? `упали ${failedCases(counts, redact)}` : '',
+        counts?.failures ? `упали ${failedCases(counts)}` : '',
         diagnostic(result.stderr, result.stdout, redact),
       ].filter(Boolean);
       throw new Error(parts.join(': '));
     }
     if (reportPath) {
-      const counts = (manifest = await readReport(reportPath, cwd));
+      const counts = (manifest = await readReport(reportPath, cwd, redact));
       summary = `${counts.tests} tests, ${counts.failures} failures, ${counts.skipped} skipped`;
       if (counts.failures || counts.skipped)
-        throw new Error(summary + (counts.failures ? `: ${failedCases(counts, redact)}` : ''));
+        throw new Error(summary + (counts.failures ? `: ${failedCases(counts)}` : ''));
       await mkdir(artifactDir, { recursive: true });
-      await writeFile(join(artifactDir, `${gate.id}.xml`), counts.xml);
+      await writeFile(
+        join(artifactDir, `${gate.id}.xml`),
+        redact ? redact(counts.xml) : counts.xml,
+      );
     } else summary = 'Команда завершилась успешно';
     await assertDependencies(run.dependencies ?? []);
     if ((await git(cwd, 'rev-parse', 'HEAD')) !== sha) throw new Error('Gate изменил HEAD');
