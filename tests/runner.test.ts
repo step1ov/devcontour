@@ -1117,7 +1117,9 @@ test(
             "require('fs').mkdirSync('.reports',{recursive:true});require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase name=\\'ok\\'/></testsuite>')",
         }[outcome];
         f.h.config.gates[0].command = [process.execPath, '-e', spawnOrphan + tail];
-        f.h.config.gates[0].timeoutMs = outcome === 'timeout' ? 4000 : 60000;
+        // Таймаут с запасом на старт node под нагрузкой полного прогона: при
+        // 4 с проверка иногда истекала раньше, чем потомок успевал запуститься.
+        f.h.config.gates[0].timeoutMs = outcome === 'timeout' ? 15000 : 60000;
         f.h.pause(false);
         const scheduler = new Scheduler(f.h, f.root);
         const draining = scheduler.drain();

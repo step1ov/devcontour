@@ -121,7 +121,11 @@ export function claudeSandbox(policy: Isolation, review: boolean, cwd: string) {
  * режиме и так отклоняется. Главное здесь — скрытое внутри рабочего каталога:
  * база контура в embedded-режиме лежит прямо в проверяемом checkout.
  */
-export function claudeFileDenies(policy: Isolation, cwd: string) {
+export function claudeFileDenies(policy: Isolation, cwd: string | undefined) {
+  if (!cwd)
+    return closedEntries(policy).flatMap((path) =>
+      ['Read', 'Edit'].flatMap((tool) => [`${tool}(/${path})`, `${tool}(/${path}/**)`]),
+    );
   // Предок рабочего каталога целиком закрыть нельзя — закрылся бы сам
   // worktree; закрываются его элементы, кроме ветки к рабочему каталогу.
   // Правило запрета сильнее любого разрешения профиля.

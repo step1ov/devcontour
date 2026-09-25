@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync, execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import { StringDecoder } from 'node:string_decoder';
@@ -104,11 +104,21 @@ export async function command(
     // Опрос дерева: потомок, успевший отсоединиться и сменить окружение,
     // остаётся узнаваемым по PID и времени старта, пока он жив.
     const seen = new Map<number, string>();
+    // Опрос не блокирует event loop: синхронный ps каждые 200 мс под
+    // нагрузкой задерживал обработку выхода команды, и срабатывал таймаут.
+    let polling = false;
     const poll = mark
       ? setInterval(() => {
-          if (child.pid)
-            for (const [pid, start] of descendants(child.pid, seen)) seen.set(pid, start);
-        }, 200)
+          if (polling || !child.pid) return;
+          polling = true;
+          void descendants(child.pid, seen)
+            .then((found) => {
+              for (const [pid, start] of found) seen.set(pid, start);
+            })
+            .finally(() => {
+              polling = false;
+            });
+        }, 250)
       : undefined;
     poll?.unref();
     const dirs = typeof options.contain === 'object' ? options.contain.dirs : [];
@@ -137,9 +147,11 @@ export async function command(
       });
     const finish = async (code: number | null, signal: NodeJS.Signals | null) => {
       if (code !== 0 || options.signal?.aborted || timedOut) signalGroup('SIGKILL');
-      if (child.pid && mark)
-        for (const [pid, start] of descendants(child.pid, seen)) seen.set(pid, start);
+      // Таймер снимается сразу по выходу: иначе он срабатывал во время
+      // очистки и помечал завершившуюся команду как истёкшую.
       cleanup();
+      if (child.pid && mark)
+        for (const [pid, start] of await descendants(child.pid, seen)) seen.set(pid, start);
       const survivors = mark ? await sweep(mark, seen, dirs, Date.parse(startedAt)) : [];
       if (survivors.length) {
         reject(
@@ -239,8 +251,16 @@ export async function git(cwd: string, ...args: string[]) {
   return result.stdout.trim();
 }
 
+/** Вывод команды или null, если она не выполнилась. Не блокирует event loop. */
+function output(command: string, args: string[], timeout: number): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile(command, args, { encoding: 'utf8', timeout, maxBuffer: 64_000_000 }, (error, stdout) =>
+      resolve(error ? null : stdout),
+    );
+  });
+}
 /** Процессы пользователя, в окружении которых есть метка. */
-function marked(mark: string): number[] {
+async function marked(mark: string): Promise<number[]> {
   const needle = `DEVCONTOUR_PROCESS_MARK=${mark}`;
   if (process.platform === 'linux') {
     return readdirSync('/proc').flatMap((entry) => {
@@ -255,33 +275,25 @@ function marked(mark: string): number[] {
     });
   }
   // macOS: -E добавляет окружение к команде для процессов своего пользователя.
-  const result = spawnSync('ps', ['-Eww', '-ax', '-o', 'pid=,command='], {
-    encoding: 'utf8',
-    timeout: 5000,
-    maxBuffer: 64_000_000,
-  });
-  if (result.status !== 0) throw new Error('Не удалось перечислить процессы проверки');
-  return result.stdout.split('\n').flatMap((line) => {
+  const stdout = await output('ps', ['-Eww', '-ax', '-o', 'pid=,command='], 10000);
+  if (stdout === null) throw new Error('Не удалось перечислить процессы проверки');
+  return stdout.split('\n').flatMap((line) => {
     const m = /^\s*(\d+)\s+(.*)$/.exec(line);
     return m && m[2].includes(needle) && Number(m[1]) !== process.pid ? [Number(m[1])] : [];
   });
 }
-/** Живые процессы пользователя: PID → время старта. */
-function processTable(): { pid: number; ppid: number; start: string }[] {
-  const result = spawnSync('ps', ['-axo', 'pid=,ppid=,lstart='], {
-    encoding: 'utf8',
-    timeout: 5000,
-    maxBuffer: 64_000_000,
-  });
-  if (result.status !== 0) return [];
-  return result.stdout.split('\n').flatMap((line) => {
+/** Живые процессы: PID, родитель, время старта. */
+async function processTable(): Promise<{ pid: number; ppid: number; start: string }[]> {
+  const stdout = await output('ps', ['-axo', 'pid=,ppid=,lstart='], 10000);
+  if (stdout === null) return [];
+  return stdout.split('\n').flatMap((line) => {
     const m = /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(line);
     return m ? [{ pid: Number(m[1]), ppid: Number(m[2]), start: m[3].trim() }] : [];
   });
 }
 /** Потомки процесса и уже замеченных потомков, с временем старта. */
-function descendants(root: number, known: Map<number, string>): Map<number, string> {
-  const table = processTable();
+async function descendants(root: number, known: Map<number, string>) {
+  const table = await processTable();
   const found = new Map<number, string>();
   const parents = new Set([root, ...known.keys()]);
   for (let size = -1; size !== found.size;) {
@@ -299,7 +311,7 @@ function descendants(root: number, known: Map<number, string>): Map<number, stri
  * одного из её каталогов. Время старта отсекает процессы пользователя —
  * например, терминал, открытый в worktree раньше.
  */
-function inside(dirs: string[], since: number): number[] {
+async function inside(dirs: string[], since: number): Promise<number[]> {
   if (!dirs.length) return [];
   // lsof и /proc сообщают настоящие пути; временный каталог macOS — за symlink.
   dirs = dirs.map((d) => {
@@ -309,7 +321,7 @@ function inside(dirs: string[], since: number): number[] {
       return d;
     }
   });
-  const started = new Map(processTable().map((r) => [r.pid, Date.parse(r.start)]));
+  const started = new Map((await processTable()).map((r) => [r.pid, Date.parse(r.start)]));
   const fresh = (pid: number) => (started.get(pid) ?? 0) >= since - 1000;
   const within = (path: string) => dirs.some((d) => path === d || path.startsWith(d + '/'));
   if (process.platform === 'linux')
@@ -323,14 +335,14 @@ function inside(dirs: string[], since: number): number[] {
         return [];
       }
     });
-  const result = spawnSync('lsof', ['-a', '-d', 'cwd', '-Fpn', '-u', String(process.getuid?.())], {
-    encoding: 'utf8',
-    timeout: 10000,
-    maxBuffer: 64_000_000,
-  });
+  const stdout = await output(
+    'lsof',
+    ['-a', '-d', 'cwd', '-Fpn', '-u', String(process.getuid?.())],
+    15000,
+  );
   const pids: number[] = [];
   let pid = 0;
-  for (const line of (result.stdout ?? '').split('\n')) {
+  for (const line of (stdout ?? '').split('\n')) {
     if (line.startsWith('p')) pid = Number(line.slice(1));
     else if (line.startsWith('n') && within(line.slice(1)) && pid !== process.pid && fresh(pid))
       pids.push(pid);
@@ -346,16 +358,15 @@ async function sweep(
 ): Promise<number[]> {
   let left: number[] = [];
   for (let attempt = 0; attempt < 20; attempt++) {
-    let table: Map<number, string>;
     try {
-      table = new Map(processTable().map((r) => [r.pid, r.start]));
+      const table = new Map((await processTable()).map((r) => [r.pid, r.start]));
       left = [
         ...new Set([
-          ...marked(mark),
+          ...(await marked(mark)),
           // Замеченный опросом потомок — только если это тот же процесс, а
           // не новый, получивший освободившийся PID.
           ...[...seen].filter(([pid, start]) => table.get(pid) === start).map(([pid]) => pid),
-          ...inside(dirs, since),
+          ...(await inside(dirs, since)),
         ]),
       ];
     } catch {

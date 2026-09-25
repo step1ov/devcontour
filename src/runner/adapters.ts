@@ -204,7 +204,8 @@ export function cliArguments(
         : r.review
           ? reviewSchema
           : implementationSchema;
-  const policy = r.isolation ?? isolation({ write: r.review ? [] : [r.cwd], controller: [] });
+  const policy =
+    r.isolation ?? isolation({ write: r.review || !r.cwd ? [] : [r.cwd], controller: [] });
   if (runtime === 'codex')
     return [
       'codex',
