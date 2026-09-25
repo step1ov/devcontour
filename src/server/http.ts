@@ -4,6 +4,7 @@ import { PreparationAgent } from '../application/preparation-agent.ts';
 import type { Store } from '../core/store.ts';
 import { LeadRunner } from '../runner/lead-workflow.ts';
 import { PreviewRunner } from '../runner/preview.ts';
+import { authorOverview } from '../application/overview.ts';
 import { DeliveryRunner } from '../runner/forge.ts';
 import { AgentService, capabilities } from '../application/agent.ts';
 import { taskProgress } from '../application/context.ts';
@@ -270,6 +271,8 @@ export async function serve(
           result = capabilities();
         } else if (req.method === 'POST' && path === '/api/agent') {
           result = new AgentService(h).execute(await body(req));
+        } else if (req.method === 'GET' && path === '/api/overview') {
+          result = authorOverview(h);
         } else if (req.method === 'GET' && path === '/api/state') {
           const state = h.store.read();
           result = {

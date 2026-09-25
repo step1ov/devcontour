@@ -54,6 +54,9 @@ const GraphPanel = lazy(() => import('./GraphPanel.tsx'));
 const ProgressPanel = lazy(() =>
   import('./ProgressPanel.tsx').then((module) => ({ default: module.ProgressPanel })),
 );
+const AuthorOverviewPanel = lazy(() =>
+  import('./AuthorOverview.tsx').then((module) => ({ default: module.AuthorOverviewPanel })),
+);
 const ProductPanel = lazy(() =>
   import('./ProductPanel.tsx').then((module) => ({ default: module.ProductPanel })),
 );
@@ -197,14 +200,13 @@ function TaskLive({
         {exhausted && (
           <>
             {' '}
-            Бюджет попыток исчерпан ({task.attempt} из {maxAttempts}). Устраните причину и
-            повторите со сбросом: <code>retry --task {task.id} --reset --reason …</code>
+            Бюджет попыток исчерпан ({task.attempt} из {maxAttempts}). Устраните причину и повторите
+            со сбросом: <code>retry --task {task.id} --reset --reason …</code>
           </>
         )}
       </small>
     );
-  if (task.status === 'done' && run)
-    return <GateChips run={run} />;
+  if (task.status === 'done' && run) return <GateChips run={run} />;
   return null;
 }
 // Какие проверки задача уже прошла на своём SHA: зелёный gate — это и есть
@@ -234,9 +236,7 @@ function GateChips({ run }: { run: Run }) {
 // Причина лежит в журнале, и без неё панель показывает молчаливую паузу.
 function stopReason(data: Snapshot) {
   if (data.pauseReason === 'operator' || data.pauseReason === 'shutdown') return undefined;
-  const failure = [...(data.events ?? [])]
-    .reverse()
-    .find((e) => e.type === 'scheduler.error');
+  const failure = [...(data.events ?? [])].reverse().find((e) => e.type === 'scheduler.error');
   const detail = (failure?.data as { error?: string } | undefined)?.error;
   return detail ? detail.replace(/^Error:\s*/, '') : undefined;
 }
@@ -319,8 +319,10 @@ export function App() {
   const [selected, setSelected] = useState('');
   // An empty graph is the least informative thing to land on: before the first
   // board exists, what the operator needs to see is how the contour is set up.
-  const [tab, setTab] = useState('progress');
-  const landed = useRef(false);
+  // Автор продукта начинает с обзора: что попробовать и какое решение нужно.
+  const [tab, setTab] = useState('overview');
+  // Обзор и карта продукта — представления всего workspace, а не одной доски.
+  const workspaceView = tab === 'product' || tab === 'overview';
   const [query, setQuery] = useState('');
   const [repositoryFilter, setRepositoryFilter] = useState('');
   const [modal, setModal] = useState<
@@ -352,13 +354,9 @@ export function App() {
       clearInterval(id);
     };
   }, [refresh]);
-  // Once there is work to look at, the graph becomes the useful default. This
-  // fires once, so it never overrides a tab the operator chose.
-  useEffect(() => {
-    if (landed.current || !data) return;
-    landed.current = true;
-    if (data.tasks.length) setTab('graph');
-  }, [data]);
+  // Панель открывается обзором для автора продукта: что попробовать и какое
+  // решение нужно. Граф и списки — технические представления, к ним
+  // переходят вкладкой. Раньше при наличии задач панель сама открывала граф.
   useEffect(() => {
     if (!data) return;
     if (!boardId)
@@ -373,7 +371,7 @@ export function App() {
     board?.revisions.find((r) => r.number === revisionNumber) ?? board?.revisions.at(-1);
   const current = revision?.number === board?.revisions.at(-1)?.number;
   const editable =
-    revision?.status === 'active' && current && tab !== 'workspace' && tab !== 'product';
+    revision?.status === 'active' && current && tab !== 'workspace' && !workspaceView;
   const tasks = useMemo(
     () => data?.tasks.filter((t) => revision?.taskIds.includes(t.id)) ?? [],
     [data, revision],
@@ -446,6 +444,8 @@ export function App() {
     setRevisionNumber(null);
     setSelected('');
     setQuery('');
+    // Выбор доски из обзора или карты продукта — просьба показать доску.
+    if (workspaceView) setTab('graph');
   }
   const graph = useMemo(() => {
     const columns = new Map<number, number>();
@@ -625,7 +625,11 @@ export function App() {
         <div className="bg-card text-muted-foreground flex flex-wrap items-center justify-between gap-4 border-b px-8 py-4 text-xs max-[1180px]:px-5 max-[760px]:p-3 [&_svg]:size-3.5 [&>span:first-child]:flex [&>span:first-child]:items-center [&>span:first-child]:gap-2">
           <span>
             Проект <ChevronRight />{' '}
-            {tab === 'product' ? 'Карта продукта' : (board?.title ?? 'Новая доска')}
+            {tab === 'overview'
+              ? 'Обзор'
+              : tab === 'product'
+                ? 'Карта продукта'
+                : (board?.title ?? 'Новая доска')}
           </span>
           <span className="text-primary bg-accent rounded-sm px-2 py-1">
             {data.config.mode === 'demo'
@@ -638,22 +642,28 @@ export function App() {
             <div>
               <div className="flex items-center gap-3">
                 <h1>
-                  {tab === 'product' ? 'Карта продукта' : (board?.title ?? 'Создайте первую доску')}
+                  {tab === 'overview'
+                    ? 'Обзор'
+                    : tab === 'product'
+                      ? 'Карта продукта'
+                      : (board?.title ?? 'Создайте первую доску')}
                 </h1>
-                {revision && tab !== 'product' && (
+                {revision && !workspaceView && (
                   <span className="text-muted-foreground rounded-sm border px-2 py-1 text-sm">
                     r{revision.number}
                   </span>
                 )}
               </div>
               <p>
-                {tab === 'product'
-                  ? 'Пользовательские возможности, приложения и проверенный результат.'
-                  : (board?.description ?? 'Опишите цель, добавьте задачи и их зависимости.')}
+                {tab === 'overview'
+                  ? 'Что можно попробовать, какое решение нужно и что делает система.'
+                  : tab === 'product'
+                    ? 'Пользовательские возможности, приложения и проверенный результат.'
+                    : (board?.description ?? 'Опишите цель, добавьте задачи и их зависимости.')}
               </p>
             </div>
             <div className="flex shrink-0 flex-wrap gap-2 max-[760px]:w-full">
-              {tab !== 'product' && board && current && revision?.status === 'accepted' && (
+              {!workspaceView && board && current && revision?.status === 'accepted' && (
                 <Button
                   variant="outline"
                   className="primary"
@@ -741,7 +751,7 @@ export function App() {
               </Button>
             </div>
           )}
-          {tab !== 'product' && revision?.status === 'accepted' && (
+          {!workspaceView && revision?.status === 'accepted' && (
             <div className="text-success bg-success-foreground mb-5 flex items-center gap-3 rounded-md p-4 text-sm [&>svg]:size-6 [&>svg]:shrink-0 [&_span]:block [&_code]:ml-auto">
               <CircleCheck />
               <div>
@@ -753,7 +763,7 @@ export function App() {
               <code>{revision.snapshot?.sha.slice(0, 8)}</code>
             </div>
           )}
-          {tab !== 'product' && (
+          {!workspaceView && (
             <section
               className="bg-card mb-6 flex flex-wrap items-center gap-8 rounded-md border px-5 py-4 max-[1180px]:gap-4 max-[760px]:mb-4 max-[760px]:p-3 [&>div]:flex [&>div]:items-center [&>div]:gap-2 [&>div]:max-[760px]:flex-auto [&>div>span]:text-muted-foreground [&>div>span]:text-sm [&>div>svg]:text-muted-foreground [&>div>svg]:size-4.5 [&_strong]:text-md [&_strong>span]:text-muted-foreground [&_strong>span]:font-normal"
               aria-label="Прогресс доски"
@@ -804,6 +814,7 @@ export function App() {
               aria-label="Представление доски"
             >
               {[
+                { key: 'overview', label: 'Обзор', icon: <Eye /> },
                 { key: 'product', label: 'Карта продукта', icon: <LayoutGrid /> },
                 { key: 'progress', label: 'Ход работ', icon: <Activity /> },
                 { key: 'graph', label: 'Граф', icon: <GitBranch /> },
@@ -825,7 +836,7 @@ export function App() {
                 </Button>
               ))}
             </div>
-            {tab !== 'product' && (
+            {!workspaceView && (
               <>
                 <label className="max-w-60 max-[760px]:w-full max-[760px]:max-w-none">
                   <span className="sr-only">Репозиторий</span>
@@ -856,7 +867,7 @@ export function App() {
           <div
             className={cn(
               'grid items-start gap-4',
-              tab === 'changesets' || tab === 'product' || tab === 'progress'
+              tab === 'changesets' || workspaceView || tab === 'progress'
                 ? 'grid-cols-[minmax(0,1fr)]'
                 : 'grid-cols-[minmax(0,1fr)_var(--inspector-width)] max-[1180px]:grid-cols-[minmax(0,1fr)]',
             )}
@@ -875,6 +886,11 @@ export function App() {
                         setTab('list');
                       }}
                     />
+                  </div>
+                )}
+                {tab === 'overview' && (
+                  <div className="p-4">
+                    <AuthorOverviewPanel />
                   </div>
                 )}
                 {tab === 'product' && (
@@ -952,7 +968,11 @@ export function App() {
                               {t.repositoryId} · {roleLabel(t.role)}
                               {t.dependsOn.length ? ` · после ${t.dependsOn.join(', ')}` : ''}
                             </small>
-                            <TaskLive task={t} runs={data.runs} maxAttempts={data.config.maxAttempts} />
+                            <TaskLive
+                              task={t}
+                              runs={data.runs}
+                              maxAttempts={data.config.maxAttempts}
+                            />
                           </div>
                           <StatusBadge value={status(t)}>{taskStatusName(t)}</StatusBadge>
                           <ChevronRight />
@@ -1279,7 +1299,7 @@ export function App() {
                 )}
               </Suspense>
             </section>
-            {tab !== 'changesets' && tab !== 'product' && (
+            {tab !== 'changesets' && !workspaceView && (
               <aside
                 className="bg-card max-h-[calc(var(--canvas-height)+var(--space-10))] overflow-auto rounded-lg border p-5 text-sm max-[1180px]:max-h-none"
                 aria-label="Детали задачи"

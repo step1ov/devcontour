@@ -15,6 +15,12 @@ test('Plan → parallel execution → acceptance → correction → acceptance p
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto('/');
+  // Автор попадает на обзор; доску открывает навигацией.
+  await expect(page.getByRole('tab', { name: 'Обзор' })).toHaveAttribute('aria-selected', 'true');
+  await page
+    .getByRole('navigation', { name: 'Доски' })
+    .getByRole('button', { name: /Каталог продуктов/ })
+    .click();
   await expect(page.getByRole('heading', { name: 'Каталог продуктов', exact: true })).toBeVisible();
   await expect(page.getByText('Учебный режим · без вызовов моделей')).toBeVisible();
   await expect(page.getByRole('region', { name: 'Что нужно для продолжения' })).toContainText(
