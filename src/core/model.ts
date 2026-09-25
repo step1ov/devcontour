@@ -11,6 +11,7 @@ import {
   toolProfileSchema,
   forgeSchema,
   forgeConnectionSchema,
+  previewSchema,
   type DependencySnapshot,
   type Delivery,
 } from './integrations.ts';
@@ -337,6 +338,8 @@ export interface DevContourState {
   contractAttempts?: ContractAttempt[];
   runs: Run[];
   changeSets: ChangeSet[];
+  /** Выкладки preview проверенных ChangeSet; локальные, в sync не входят. */
+  previews?: import('./preview.ts').Preview[];
   leader?: { owner: string; leaseUntil: number };
   paused: boolean;
   /** Кто остановил выдачу: человек, штатная остановка или отказ рантайма. */
@@ -527,6 +530,7 @@ export const configSchema = z.object({
   generatedPaths: z.array(relativePath).default([]),
   repositories: z.array(repositorySchema).default([]),
   workspaceGates: z.array(workspaceGateSchema).default([]),
+  preview: previewSchema.optional(),
   repository: z.string().min(1),
   targetBranch: z
     .string()

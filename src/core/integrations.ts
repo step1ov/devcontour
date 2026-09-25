@@ -119,3 +119,38 @@ export interface Delivery {
 }
 
 export class CleanupFailure extends Error {}
+
+/** Preview: локальная выкладка проверенного результата в Docker (см. core/preview.ts). */
+export const previewSchema = z.object({
+  /** Compose-файл относительно корня сборки, где компоненты лежат в `<repositoryId>/`. */
+  compose: z.string().regex(/^(?!\/)(?!.*(?:^|\/)\.\.(?:\/|$)).+$/),
+  /** Сервис, публикующий URL на `${DEVCONTOUR_PREVIEW_PORT}`. */
+  service: z.string().regex(/^[a-z0-9][a-z0-9_.-]{0,62}$/),
+  /** Публичный порт preview: URL — http://127.0.0.1:<port>. */
+  port: z.number().int().min(1024).max(65535),
+  health: z
+    .object({
+      path: z
+        .string()
+        .regex(/^\/[^\s]*$/)
+        .default('/health'),
+      timeoutMs: z.number().int().min(1000).max(600000).default(60000),
+    })
+    .default({ path: '/health', timeoutMs: 60000 }),
+  /**
+   * Путь, отвечающий идентификатором релиза. Без него принадлежность URL
+   * новому релизу подтверждается только тем, какой compose-проект держит
+   * порт; с ним — ещё и ответом самого приложения.
+   */
+  version: z.object({ path: z.string().regex(/^\/[^\s]*$/) }).optional(),
+  /** Пользовательский сценарий против URL (переменная PREVIEW_URL). */
+  smoke: z
+    .object({
+      command: z.array(z.string().min(1)).min(1),
+      timeoutMs: z.number().int().min(1000).max(1800000).default(300000),
+    })
+    .optional(),
+  /** Окружение сборки и запуска: только явно перечисленное, секреты — по имени. */
+  environment: environmentSchema.optional(),
+});
+export type PreviewConfig = z.infer<typeof previewSchema>;
