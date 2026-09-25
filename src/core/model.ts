@@ -340,6 +340,8 @@ export interface DevContourState {
   changeSets: ChangeSet[];
   /** Выкладки preview проверенных ChangeSet; локальные, в sync не входят. */
   previews?: import('./preview.ts').Preview[];
+  /** Одна операция над URL preview за раз — выкладка или откат. */
+  previewLock?: import('./preview.ts').PreviewLock;
   leader?: { owner: string; leaseUntil: number };
   paused: boolean;
   /** Кто остановил выдачу: человек, штатная остановка или отказ рантайма. */
