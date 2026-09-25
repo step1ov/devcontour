@@ -295,6 +295,8 @@ test('JUnit rejects empty/malformed reports and distinguishes skipped tests from
       failures: 1,
       skipped: 1,
       failed: ['c'],
+      // Без сообщения о провале остаётся одно имя testcase.
+      failedDetails: ['c'],
       // Манифест называет каждый testcase и его исход: по нему критерий
       // связывается с конкретным выполненным тестом, а не с зелёным гейтом.
       cases: [
