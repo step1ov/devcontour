@@ -21,7 +21,7 @@ import { fixture, input } from './helpers.ts';
 import { Workspace } from '../src/core/workspace.ts';
 import { completion } from '../src/core/sync-state.ts';
 import { adapters, cliArguments, type AgentRequest } from '../src/runner/adapters.ts';
-import { isolation } from '../src/runner/isolation.ts';
+import { isolation, claudeFileDenies } from '../src/runner/isolation.ts';
 
 const SHA = 'a'.repeat(40);
 const OTHER = 'b'.repeat(40);
@@ -322,7 +322,14 @@ test('Ревьюер запускает проверки одинаково в �
     assert.ok(settings.sandbox.filesystem.denyRead.includes(join(homedir(), path)), path);
   // Настройки пользователя не подмешиваются и не ослабляют песочницу.
   assert.equal(running[running.indexOf('--setting-sources') + 1], '');
-  assert.equal(reading.includes('--settings'), false, 'без shell песочница не нужна');
+  // Без shell песочница Bash не нужна, но запреты файловых инструментов
+  // действуют всегда: песочница Claude Code их не охватывает.
+  const readingSettings = JSON.parse(reading[reading.indexOf('--settings') + 1]);
+  assert.equal(readingSettings.sandbox, undefined, 'без shell песочница не нужна');
+  assert.ok(
+    readingSettings.permissions.deny.includes(`Read(/${join(homedir(), '.ssh')}/**)`),
+    'Read закрыт для учётных данных и без shell',
+  );
 
   // Codex: ревьюер пишет только во временный каталог, а без права проверок —
   // и без shell, в том числе когда профиля нет вовсе.
@@ -606,7 +613,16 @@ test('Исполнитель получает ту же границу: свой
   assert.ok(sandbox.filesystem.denyRead.includes('/var/devcontour-data'));
   assert.equal(sandbox.filesystem.denyWrite, undefined, 'исполнитель пишет в свой worktree');
   // Без Bash песочница не нужна: писать исполнитель может только инструментами.
-  assert.equal(request('claude').includes('--settings'), false);
+  const noShell = request('claude');
+  const noShellSettings = JSON.parse(noShell[noShell.indexOf('--settings') + 1]);
+  assert.equal(noShellSettings.sandbox, undefined);
+  // Каталог контура — предок worktree: правило для него закрыло бы и сам
+  // worktree, поэтому оно не ставится; закрыты учётные данные.
+  assert.equal(
+    noShellSettings.permissions.deny.some((r: string) => r.includes('/var/devcontour-data')),
+    true,
+    'каталог контура, не являющийся предком worktree, закрыт для Read',
+  );
 
   const codex = request('codex', { ...profile, runtime: 'codex', codexNetwork: true }).join(' ');
   assert.doesNotMatch(codex, /--sandbox/);
@@ -719,4 +735,26 @@ test('Смена изоляции — другой договор исполне
   } finally {
     f.cleanup();
   }
+});
+
+test('Скрытое внутри рабочего каталога закрыто для файловых инструментов claude', () => {
+  // Ревью плана идёт прямо в checkout, а база контура в embedded-режиме лежит
+  // внутри него. Песочница Bash не охватывает Read/Edit: нужен явный запрет.
+  // Предок рабочего каталога не закрывается: иначе закрылся бы и он сам.
+  const checkout = realpathSync(tmpdir());
+  const policy = isolation({
+    write: [],
+    controller: [join(checkout, '.devcontour-local'), join(checkout, '..')],
+    readable: [checkout],
+  });
+  const denies = claudeFileDenies(policy, checkout);
+  const inside = join(checkout, '.devcontour-local');
+  assert.ok(denies.includes(`Read(/${inside}/**)`));
+  assert.ok(denies.includes(`Edit(/${inside}/**)`));
+  assert.ok(denies.includes(`Read(/${join(homedir(), '.ssh')}/**)`));
+  assert.equal(
+    denies.some((rule) => rule === `Read(/${realpathSync(join(checkout, '..'))}/**)`),
+    false,
+    'предок рабочего каталога не закрыт',
+  );
 });

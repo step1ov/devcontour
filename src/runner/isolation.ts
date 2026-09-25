@@ -1,5 +1,5 @@
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { createRequire } from 'node:module';
 import { writeFile, mkdir } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
@@ -92,6 +92,7 @@ export function isolation(options: {
 /** Sandbox Claude Code: применяется к Bash; без запасного выхода из песочницы. */
 export function claudeSandbox(policy: Isolation, review: boolean, cwd: string) {
   return {
+    permissions: { deny: claudeFileDenies(policy, cwd) },
     sandbox: {
       enabled: true,
       failIfUnavailable: true,
@@ -110,6 +111,23 @@ export function claudeSandbox(policy: Isolation, review: boolean, cwd: string) {
   };
 }
 
+/**
+ * Запреты для встроенных файловых инструментов claude (Read, Edit, Write…).
+ *
+ * Песочница Claude Code применяется только к Bash; файловые инструменты
+ * подчиняются правилам прав. Скрытый путь закрывается правилом, если он не
+ * предок рабочего каталога: иначе запрет закрыл бы и сам worktree. Такие
+ * предки лежат вне рабочего каталога, а чтение вне него в неинтерактивном
+ * режиме и так отклоняется. Главное здесь — скрытое внутри рабочего каталога:
+ * база контура в embedded-режиме лежит прямо в проверяемом checkout.
+ */
+export function claudeFileDenies(policy: Isolation, cwd: string) {
+  const [root] = isolation({ write: [cwd], controller: [] }).write;
+  const hidden = policy.hidden.filter((path) => !(root + sep).startsWith(path + sep));
+  return hidden.flatMap((path) =>
+    ['Read', 'Edit'].flatMap((tool) => [`${tool}(/${path})`, `${tool}(/${path}/**)`]),
+  );
+}
 const tomlString = (value: string) => JSON.stringify(value);
 /**
  * Профиль прав codex: карта путей с уровнем доступа. Более конкретный путь

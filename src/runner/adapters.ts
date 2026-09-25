@@ -3,7 +3,13 @@ import type { Usage } from '../core/usage.ts';
 import { evaluationResult } from '../core/evaluation.ts';
 import type { ToolProfile } from '../core/integrations.ts';
 import { codexTools, claudeMcp, claudeRules } from './tools.ts';
-import { isolation, claudeSandbox, codexPermissions, type Isolation } from './isolation.ts';
+import {
+  isolation,
+  claudeSandbox,
+  claudeFileDenies,
+  codexPermissions,
+  type Isolation,
+} from './isolation.ts';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -273,12 +279,15 @@ export function cliArguments(
             .join(','),
         ]
       : []),
-    // Shell исполнителя и ревьюера — в песочнице ОС с той же политикой.
-    ...((
-      r.review ? reviewRunsChecks(r.toolProfile) : !!r.toolProfile?.claudeTools?.includes('Bash')
-    )
-      ? ['--settings', JSON.stringify(claudeSandbox(policy, r.review, r.cwd))]
-      : []),
+    // Shell исполнителя и ревьюера — в песочнице ОС с той же политикой, а
+    // встроенные файловые инструменты — под её запретами всегда: песочница
+    // Claude Code их не охватывает.
+    '--settings',
+    JSON.stringify(
+      (r.review ? reviewRunsChecks(r.toolProfile) : !!r.toolProfile?.claudeTools?.includes('Bash'))
+        ? claudeSandbox(policy, r.review, r.cwd)
+        : { permissions: { deny: claudeFileDenies(policy, r.cwd) } },
+    ),
     ...(r.mcpConfigPath ? ['--mcp-config', r.mcpConfigPath] : []),
     '--setting-sources',
     '',
@@ -323,6 +332,9 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
       await writeFile(logPath, `Runtime ${name}; started ${new Date().toISOString()}\n`);
       let loggedBytes = 0;
       const result = await command(argv, r.cwd, {
+        // Потомки рантайма — shell-команды, серверы проверок — не переживают
+        // прогон, даже отсоединившись от его группы.
+        contain: true,
         onOutput: (stream, text) => {
           // Keep live logs bounded; final diagnostics retain both stream tails.
           if (loggedBytes >= 10_000_000) return;
