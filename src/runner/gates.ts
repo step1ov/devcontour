@@ -3,7 +3,8 @@ import { runEnvironment, assertDependencies } from './dependencies.ts';
 import { readFile, writeFile, mkdir, mkdtemp, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isolation, isolatedCommand, isolationSupport } from './isolation.ts';
-import { join, resolve, sep } from 'node:path';
+import { join, resolve, sep, delimiter } from 'node:path';
+import { accessSync, constants } from 'node:fs';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import { command, git } from './process.ts';
 import { digest, DevContour } from '../core/service.ts';
@@ -132,6 +133,26 @@ function diagnostic(stderr: string, stdout: string, redact?: (value: string) => 
 function failedCases(counts: ReturnType<typeof junitSummary>) {
   return counts.failedDetails.join('; ').slice(0, 600);
 }
+/** Команда проверки находится — иначе ENOENT, как при обычном запуске. */
+function assertExecutable(name: string, path: string | undefined, cwd: string) {
+  const candidates = name.includes('/')
+    ? [resolve(cwd, name)]
+    : (path ?? '')
+        .split(delimiter)
+        .filter(Boolean)
+        .map((dir) => join(dir, name));
+  if (
+    !candidates.some((file) => {
+      try {
+        accessSync(file, constants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    })
+  )
+    throw new Error(`spawn ${name} ENOENT`);
+}
 /** Отчёт внутри worktree, прочитанный без выхода за его границы. */
 async function readReport(reportPath: string, cwd: string, redact?: (value: string) => string) {
   const real = await realpath(reportPath);
@@ -190,6 +211,9 @@ async function executeGate(
         throw new Error(
           `Изоляция проверок недоступна: ${support.detail}. Установите зависимости или явно задайте isolation.mode: none`,
         );
+      // Отсутствующая команда внутри песочницы выглядела бы как «код 127»
+      // от обёртки. Причина та же, что и без неё, — называем её так же.
+      assertExecutable(gate.command[0], env.PATH, gateCwd);
       const policy = isolation({
         write: [cwd, scratch],
         controller,
