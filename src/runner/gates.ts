@@ -271,7 +271,9 @@ export async function runCheck(
         redact: options.redact,
         // Отсоединившийся потомок проверки не переживает её: и при успехе,
         // и по таймауту, отмене или падению.
-        contain: true,
+        // Каталоги проверки принадлежат только ей: процесс, запущенный в них
+        // во время проверки, — её потомок, даже без метки и родства.
+        contain: { dirs: [...options.write, scratch, marks] },
       });
     let result = await execute(),
       attempts = 1;

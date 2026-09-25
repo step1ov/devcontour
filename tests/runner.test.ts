@@ -1069,65 +1069,90 @@ test('Путь отчёта через symlink отвергается до лю�
     await rm(root, { recursive: true, force: true });
   }
 });
-test('Проверка не оставляет процессов — ни по таймауту, ни при отмене, ни при падении', async () => {
-  // Сигнал группе не достаёт потомка, сменившего группу и сессию: такой
-  // процесс переживал проверку и продолжал вычисление. Каждый исход — с
-  // отсоединившимся потомком внутри песочницы; живость проверяется по PID.
-  const alive = (pid: number) => {
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  for (const outcome of ['timeout', 'cancel', 'crash', 'success'] as const) {
-    const f = await runtimeFixture();
-    try {
-      const spawnOrphan = `const c=require('child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'ignore'});c.unref();console.log('ORPHAN-PID:'+c.pid);`;
-      const tail = {
-        timeout: 'setInterval(()=>{},1000)',
-        cancel: 'setInterval(()=>{},1000)',
-        crash: 'process.exit(2)',
-        success:
-          "require('fs').mkdirSync('.reports',{recursive:true});require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase name=\\'ok\\'/></testsuite>')",
-      }[outcome];
-      f.h.config.gates[0].command = [process.execPath, '-e', spawnOrphan + tail];
-      f.h.config.gates[0].timeoutMs = outcome === 'timeout' ? 4000 : 60000;
-      f.h.pause(false);
-      const scheduler = new Scheduler(f.h, f.root);
-      const draining = scheduler.drain();
-      if (outcome === 'cancel') {
-        // Отмена приходит, когда потомок уже запущен.
-        for (
-          let i = 0;
-          i < 100 &&
-          !f.store.read().runs.some((r) => r.status === 'active' && r.phase === 'verifying');
-          i++
-        )
-          await new Promise((r) => setTimeout(r, 100));
-        await new Promise((r) => setTimeout(r, 1500));
-        const active = f.store.read().runs.find((r) => r.status === 'active')!;
-        f.h.cancel(active.taskId);
+// Предел времени: возврат к очистке по close повесил бы тест на унаследованном
+// pipe — регресс должен быть провалом, а не зависанием.
+test(
+  'Проверка не оставляет процессов — ни по таймауту, ни при отмене, ни при падении',
+  { timeout: 300_000 },
+  async () => {
+    // Сигнал группе не достаёт потомка, сменившего группу и сессию: такой
+    // процесс переживал проверку и продолжал вычисление. Каждый исход — с
+    // отсоединившимся потомком внутри песочницы; живость проверяется по PID.
+    const alive = (pid: number) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
       }
-      await draining;
-      await scheduler.stop();
-      // PID потомка — из лога проверки: worktree и scratch к этому моменту
-      // удалены, а лог остаётся в артефактах.
-      const run = f.store.read().runs.at(-1)!;
-      const log = await readFile(
-        join(f.root, 'artifacts', run.id, 'candidate', f.h.config.gates[0].id + '.log'),
-        'utf8',
-      );
-      const pid = Number(/ORPHAN-PID:(\d+)/.exec(log)?.[1]);
-      assert.ok(pid > 0, `${outcome}: потомок был запущен`);
-      await new Promise((r) => setTimeout(r, 300));
-      assert.equal(alive(pid), false, `${outcome}: отсоединившийся потомок ${pid} завершён`);
-    } finally {
-      await f.cleanup();
+    };
+    // Кроме обычного потомка — два обхода: потомок с очищенным окружением (без
+    // метки) и потомок, унаследовавший stdout/stderr, из-за которого close не
+    // наступал, и очистка не начиналась.
+    for (const outcome of [
+      'timeout',
+      'cancel',
+      'crash',
+      'success',
+      'clean-env',
+      'inherited-pipes',
+    ] as const) {
+      const f = await runtimeFixture();
+      try {
+        const spawnOrphan =
+          outcome === 'clean-env'
+            ? `const c=require('child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'ignore',env:{PATH:process.env.PATH}});c.unref();console.log('ORPHAN-PID:'+c.pid);`
+            : outcome === 'inherited-pipes'
+              ? `const c=require('child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:['ignore','inherit','inherit']});c.unref();console.log('ORPHAN-PID:'+c.pid);`
+              : `const c=require('child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'ignore'});c.unref();console.log('ORPHAN-PID:'+c.pid);`;
+        const tail = {
+          timeout: 'setInterval(()=>{},1000)',
+          cancel: 'setInterval(()=>{},1000)',
+          crash: 'process.exit(2)',
+          success:
+            "require('fs').mkdirSync('.reports',{recursive:true});require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase name=\\'ok\\'/></testsuite>')",
+          'clean-env':
+            "require('fs').mkdirSync('.reports',{recursive:true});require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase name=\\'ok\\'/></testsuite>')",
+          'inherited-pipes':
+            "require('fs').mkdirSync('.reports',{recursive:true});require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase name=\\'ok\\'/></testsuite>')",
+        }[outcome];
+        f.h.config.gates[0].command = [process.execPath, '-e', spawnOrphan + tail];
+        f.h.config.gates[0].timeoutMs = outcome === 'timeout' ? 4000 : 60000;
+        f.h.pause(false);
+        const scheduler = new Scheduler(f.h, f.root);
+        const draining = scheduler.drain();
+        if (outcome === 'cancel') {
+          // Отмена приходит, когда потомок уже запущен.
+          for (
+            let i = 0;
+            i < 100 &&
+            !f.store.read().runs.some((r) => r.status === 'active' && r.phase === 'verifying');
+            i++
+          )
+            await new Promise((r) => setTimeout(r, 100));
+          await new Promise((r) => setTimeout(r, 1500));
+          const active = f.store.read().runs.find((r) => r.status === 'active')!;
+          f.h.cancel(active.taskId);
+        }
+        await draining;
+        await scheduler.stop();
+        // PID потомка — из лога проверки: worktree и scratch к этому моменту
+        // удалены, а лог остаётся в артефактах.
+        const run = f.store.read().runs.at(-1)!;
+        const log = await readFile(
+          join(f.root, 'artifacts', run.id, 'candidate', f.h.config.gates[0].id + '.log'),
+          'utf8',
+        );
+        const pid = Number(/ORPHAN-PID:(\d+)/.exec(log)?.[1]);
+        assert.ok(pid > 0, `${outcome}: потомок был запущен`);
+        await new Promise((r) => setTimeout(r, 300));
+        assert.equal(alive(pid), false, `${outcome}: отсоединившийся потомок ${pid} завершён`);
+      } finally {
+        await f.cleanup();
+      }
     }
-  }
-});
+  },
+);
 test('Проверка повторяется, только если песочница отказала до запуска команды', async () => {
   // Повтор по тексту stderr перезапускал уже начавшуюся команду: её первый
   // провал терялся, а побочные эффекты удваивались. Признак — метка старта,

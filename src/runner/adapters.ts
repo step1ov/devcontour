@@ -344,7 +344,9 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
       const result = await command(argv, r.cwd, {
         // Потомки рантайма — shell-команды, серверы проверок — не переживают
         // прогон, даже отсоединившись от его группы.
-        contain: true,
+        // Каталог по признаку владения — только worktree исполнителя: ревью
+        // плана идёт в основном checkout, где работает и человек.
+        contain: { dirs: r.review ? [] : (r.isolation?.write ?? []) },
         onOutput: (stream, text) => {
           // Keep live logs bounded; final diagnostics retain both stream tails.
           if (loggedBytes >= 10_000_000) return;
