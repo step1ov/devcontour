@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { DevContourState, Evidence, RequirementLink, Task } from './model.ts';
 
 /**
@@ -137,4 +138,17 @@ export function unprovenReason(
     ? 'Сценарий не подтверждён выполненным тестом: ' +
         unproven.map((p) => `${p.id} — ${p.reason}`).join('; ')
     : undefined;
+}
+
+/** Предел имени testcase: столько переносит receipt между клонами. */
+export const TEST_ID_LIMIT = 1000;
+/**
+ * Имя testcase, пригодное для переноса. Длинное заменяется хешем, а не
+ * обрезается: обрезка дала бы коллизии и ложные совпадения. Такое имя
+ * помечено opaque и ничего не подтверждает.
+ */
+export function portableTest<T extends { id: string; opaque?: true }>(test: T): T {
+  return test.id.length > TEST_ID_LIMIT
+    ? { ...test, id: 'sha256:' + createHash('sha256').update(test.id).digest('hex'), opaque: true }
+    : test;
 }

@@ -1,4 +1,4 @@
-import { unprovenReason } from './proof.ts';
+import { portableTest, unprovenReason } from './proof.ts';
 import { validatePreparation } from './preparation.ts';
 import { digest, specDigest, type DevContour } from './service.ts';
 import { repository, requiresContract } from './repositories.ts';
@@ -84,7 +84,9 @@ export function completion(h: DevContour, s: DevContourState, t: Task): Completi
         passed,
         exitCode,
         digest,
-        ...(tests ? { tests } : {}),
+        // Evidence прежней версии хранило имена без предела длины: одно
+        // длинное постороннее имя делало весь receipt непереносимым.
+        ...(tests ? { tests: tests.map(portableTest) } : {}),
         ...(testsTruncated ? { testsTruncated } : {}),
       }),
     ),

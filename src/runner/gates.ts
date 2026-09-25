@@ -2,7 +2,6 @@ import { timed } from './timing.ts';
 import { runEnvironment, assertDependencies } from './dependencies.ts';
 import { readFile, writeFile, mkdir, mkdtemp, rm, realpath, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { createHash } from 'node:crypto';
 import { isolation, isolatedCommand, isolationSupport } from './isolation.ts';
 import { join, resolve, sep, delimiter, relative, dirname } from 'node:path';
 import { accessSync, constants } from 'node:fs';
@@ -11,10 +10,9 @@ import { command, git } from './process.ts';
 import { digest, DevContour } from '../core/service.ts';
 import type { Run, Gate, Evidence } from '../core/model.ts';
 import { TaskFailure } from '../core/failure.ts';
+import { portableTest } from '../core/proof.ts';
 /** Предел манифеста: полный список тестов крупного проекта в состояние не кладётся. */
 const MANIFEST_LIMIT = 2000;
-/** Предел имени testcase: столько же переносит receipt между клонами. */
-const ID_LIMIT = 1000;
 /**
  * Полный текст провала testcase: атрибут message или содержимое элемента.
  * Первая строка выделяется после redaction: многострочный секрет, обрезанный
@@ -80,10 +78,7 @@ export function junitSummary(
         const redacted = redact(raw);
         // Длинное имя заменяется хешем: обрезка дала бы коллизии и ложные
         // совпадения, а без замены receipt не перенёс бы манифест.
-        const name =
-          redacted.length > ID_LIMIT
-            ? 'sha256:' + createHash('sha256').update(redacted).digest('hex')
-            : redacted;
+        const name = portableTest({ id: redacted }).id;
         const opaque = name !== raw;
         const broken = 'failure' in value || 'error' in value;
         if (broken) {

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Preparation } from '../src/core/preparation.ts';
 import { approvePreparation } from './preparation-fixture.ts';
 import { test } from 'node:test';
@@ -699,9 +700,9 @@ test('Независимый клон получает манифест testcase
             gate === 'test'
               ? [
                   { id: 'named-case', status: 'passed' },
-                  // Длинное имя из отчёта приходит хешем с пометкой — и
-                  // переносится, а не останавливает sync.
-                  { id: 'sha256:' + 'f'.repeat(64), status: 'passed', opaque: true },
+                  // Evidence прежней версии хранило имя без предела длины.
+                  // Receipt переносит его хешем с пометкой, а не падает.
+                  { id: 'x'.repeat(1001), status: 'passed' },
                 ]
               : undefined,
         });
@@ -727,7 +728,11 @@ test('Независимый клон получает манифест testcase
     )!;
     assert.deepEqual(integration.tests, [
       { id: 'named-case', status: 'passed' },
-      { id: 'sha256:' + 'f'.repeat(64), status: 'passed', opaque: true },
+      {
+        id: 'sha256:' + createHash('sha256').update('x'.repeat(1001)).digest('hex'),
+        status: 'passed',
+        opaque: true,
+      },
     ]);
     assert.equal(proofB.proof, 'testcase', proofB.proofReason);
     assertRequirementProof(b.h, taskB);
