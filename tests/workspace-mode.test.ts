@@ -144,16 +144,15 @@ test('Embedded startup attaches approved single-repository setup without a secon
     assert.equal(c.repositories[0].path, root);
     assert.ok(existsSync(join(root, 'devcontour.component.json')));
     assert.match(readFileSync(join(root, '.gitignore'), 'utf8'), /\.devcontour-local/);
-    let connected = false;
-    for (let i = 0; i < 40; i++) {
-      const s = await (await fetch(app.url + '/api/preparation')).json();
-      if (s.engineConnected) {
-        connected = true;
-        break;
-      }
+    // Подключение идёт в фоне, и под нагрузкой полного прогона четырёх секунд
+    // не хватало. Дедлайн с запасом; при отказе видно последнее состояние.
+    let preparation: { engineConnected?: boolean } = {};
+    for (const deadline = Date.now() + 30_000; Date.now() < deadline;) {
+      preparation = await (await fetch(app.url + '/api/preparation')).json();
+      if (preparation.engineConnected) break;
       await new Promise((r) => setTimeout(r, 100));
     }
-    assert.equal(connected, true);
+    assert.equal(preparation.engineConnected, true, JSON.stringify(preparation).slice(0, 2000));
     const s = await (await fetch(app.url + '/api/state')).json();
     assert.equal(s.config.workspaceMode, 'embedded');
     assert.equal(s.dataRoot, join(root, '.devcontour-local'));

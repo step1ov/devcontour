@@ -506,10 +506,19 @@ test('Changing the product map after joint verification blocks acceptance and re
     assert.throws(() => f.runner.workspace.accept(change.id), /карта изменилась/);
     const workflow = new LeadWorkflow(f.h);
     const job = workflow.start({ kind: 'changeset', id: change.id, authorRuntime: 'codex' });
-    await lead.tick();
-    await lead.tick();
-    await lead.tick();
-    assert.equal(workflow.get(job.key).status, 'completed');
+    // Стадий три, но стадия вправе ответить «жду» — например, пока не истёк
+    // lease прежней проверки, — и под нагрузкой полного прогона одного tick на
+    // стадию не хватает. Ждём итога с дедлайном; failed и stale — итог, не
+    // повод ждать дальше, и при отказе печатается история задания.
+    const deadline = Date.now() + 60_000;
+    let current = workflow.get(job.key);
+    while (['queued', 'running'].includes(current.status) && Date.now() < deadline) {
+      await lead.tick();
+      current = workflow.get(job.key);
+      if (['queued', 'running'].includes(current.status))
+        await new Promise((r) => setTimeout(r, 100));
+    }
+    assert.equal(current.status, 'completed', JSON.stringify(current));
     assert.equal(f.view().releaseAccepted, true);
     assert.deepEqual(f.store.read().changeSets[0].verifications[0].productRelease, oldProof);
     await writeFile(join(f.repos[1].path, 'spec.md'), source + 'Новое обязательное условие.\n');
