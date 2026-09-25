@@ -3,6 +3,32 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { emptyState, type DevContourState, type AuditEvent } from './model.ts';
+/**
+ * Пауза, записанная прежней версией, читается по её правилам.
+ *
+ * Обновление DevContour — не разрешение продолжать очередь. Прежняя версия
+ * хранила одну причину в `pauseFailure`; если её не прочитать, список
+ * блокировок выглядит пустым, и первое же восстановление снимает паузу, под
+ * которой стоит отказ провайдера. Поэтому старая причина переносится в
+ * список, а пауза рантайма, причины которой не записаны вовсе, получает
+ * `unknown`: восстановление снимает только названную причину, а неизвестную
+ * не называет никто — такую паузу снимает человек.
+ *
+ * Идемпотентно: повторное чтение ничего не меняет.
+ */
+function normalizePause(state: DevContourState & { pauseFailure?: unknown }) {
+  const legacy = state.pauseFailure;
+  delete state.pauseFailure;
+  if (typeof legacy === 'string')
+    state.pauseFailures = [
+      ...new Set([
+        ...(state.pauseFailures ?? []),
+        legacy as NonNullable<typeof state.pauseFailures>[number],
+      ]),
+    ];
+  if (state.paused && state.pauseReason === 'runtime' && !state.pauseFailures?.length)
+    state.pauseFailures = ['unknown'];
+}
 export class Store {
   private db: DatabaseSync;
   private components?: ComponentStorage;
@@ -110,6 +136,7 @@ export class Store {
     if (state.version !== 1) throw new Error('Unsupported state version');
     state.changeSets ??= [];
     for (const task of state.tasks) task.repositoryId ??= 'main';
+    normalizePause(state);
     return state;
   }
   // Synchronous composition: local idempotency records and domain mutations commit together.

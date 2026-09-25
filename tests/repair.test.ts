@@ -8,7 +8,12 @@ import { LeadRunner } from '../src/runner/lead-workflow.ts';
 import { classifyFailure } from '../src/runner/scheduler.ts';
 import { BlockedError } from '../src/core/model.ts';
 import { TaskFailure } from '../src/core/failure.ts';
-import type { DevContour } from '../src/core/service.ts';
+import { DevContour } from '../src/core/service.ts';
+import { Store } from '../src/core/store.ts';
+import { DatabaseSync } from 'node:sqlite';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 /** Довести задачу до падения с заданным классом и вернуть её id. */
 function breakTask(h: DevContour, taskId: string, kind: FailureKind, message: string) {
@@ -518,5 +523,141 @@ test('Пауза оператора переживает и восстановл
     assert.equal(f.store.read().paused, false, 'остановка сервера выдачу не держит');
   } finally {
     f.cleanup();
+  }
+});
+
+/** Записать состояние в обход Store — так, как его оставила прежняя версия. */
+function writeLegacy(path: string, patch: (raw: any) => void) {
+  const db = new DatabaseSync(path);
+  try {
+    const raw = JSON.parse(
+      (db.prepare('SELECT data FROM main.state WHERE id=1').get() as { data: string }).data,
+    );
+    patch(raw);
+    db.prepare('UPDATE main.state SET data=? WHERE id=1').run(JSON.stringify(raw));
+  } finally {
+    db.close();
+  }
+}
+
+test('Обновление не снимает паузу, записанную прежней версией', async () => {
+  // Прежняя версия хранила одну причину в pauseFailure, а пауза человека —
+  // без времени. Новый код, не прочитав их, видел пустой список блокировок и
+  // «раннюю» паузу — и выдавал работу вопреки отказу провайдера и человеку.
+  for (const legacy of [
+    { pauseReason: 'runtime', pauseFailure: 'provider-auth' },
+    { pauseReason: 'runtime' },
+  ]) {
+    const f = fixture();
+    let store: Store | undefined;
+    try {
+      const a = f.h.createBoard('Board A');
+      const t = f.h.addTask(a.id, input());
+      f.h.approve(a.id);
+      const b = f.h.createBoard('Board B');
+      f.h.addTask(b.id, input('Вторая'));
+      breakTask(f.h, t.id, 'environment', 'runtime: транспорт оборван');
+      const flow = new LeadWorkflow(f.h);
+      const job = flow.start({ kind: 'board', id: a.id, authorRuntime: 'codex', maxAttempts: 3 });
+      const claimed = flow.claim(job.key, job.owner)!;
+      f.store.atomic(() => f.store.saveLocal('lead', job.owner, job.key, { ...claimed, stage: 1 }));
+      f.store.close();
+      writeLegacy(join(f.root, 'state.sqlite'), (raw) => {
+        raw.paused = true;
+        delete raw.pausedAt;
+        delete raw.pauseFailures;
+        Object.assign(raw, legacy);
+      });
+
+      store = new Store(join(f.root, 'state.sqlite'));
+      const h = new DevContour(store, f.h.config);
+      const runner = new LeadRunner(h, f.root);
+      const reflow = new LeadWorkflow(h);
+      await runner.execute(reflow.get(job.key, job.owner), new AbortController().signal);
+
+      const label = JSON.stringify(legacy);
+      assert.equal(store.read().tasks[0].status, 'ready', `${label}: повтор назначен`);
+      assert.equal(store.read().paused, true, `${label}: пауза пережила обновление`);
+      assert.equal(store.read().pauseReason, legacy.pauseReason);
+      if (legacy.pauseFailure)
+        assert.deepEqual(
+          store.read().pauseFailures,
+          ['provider-auth'],
+          `${label}: причина сохранена`,
+        );
+      // Явное решение человека по-прежнему снимает паузу.
+      h.pause(false);
+      assert.equal(store.read().paused, false, `${label}: явное продолжение работает`);
+    } finally {
+      store?.close();
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('Прежняя причина паузы переносится и в component storage', () => {
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-legacy-'));
+  try {
+    for (const id of ['app', 'lib']) mkdirSync(join(root, id));
+    const locations = ['app', 'lib'].map((id) => ({ id, path: join(root, id) }));
+    const path = join(root, 'coordinator', 'state.sqlite');
+    new Store(path, locations).close();
+    writeLegacy(path, (raw) => {
+      raw.paused = true;
+      raw.pauseReason = 'runtime';
+      raw.pauseFailure = 'provider-auth';
+    });
+    const store = new Store(path, locations);
+    try {
+      const s = store.read();
+      assert.deepEqual(s.pauseFailures, ['provider-auth']);
+      assert.equal((s as { pauseFailure?: unknown }).pauseFailure, undefined);
+      // Идемпотентно: запись нормализованного состояния и повторное чтение
+      // ничего не добавляют.
+      store.change('test.touch', (state) => {
+        state.sequence += 1;
+        return {};
+      });
+      assert.deepEqual(store.read().pauseFailures, ['provider-auth']);
+    } finally {
+      store.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Пауза человека без времени не снимается стадией выдачи', async () => {
+  // Прежняя версия не записывала время паузы. Сравнение с началом работы
+  // принимало такую паузу за «раньше регистрации» и снимало её.
+  const f = fixture();
+  let store: Store | undefined;
+  try {
+    const b = f.h.createBoard('Board');
+    f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex', maxAttempts: 3 });
+    const claimed = flow.claim(job.key, job.owner)!;
+    f.store.atomic(() => f.store.saveLocal('lead', job.owner, job.key, { ...claimed, stage: 1 }));
+    f.store.close();
+    writeLegacy(join(f.root, 'state.sqlite'), (raw) => {
+      raw.paused = true;
+      raw.pauseReason = 'operator';
+      delete raw.pausedAt;
+    });
+
+    store = new Store(join(f.root, 'state.sqlite'));
+    const h = new DevContour(store, f.h.config);
+    await new LeadRunner(h, f.root).execute(
+      new LeadWorkflow(h).get(job.key, job.owner),
+      new AbortController().signal,
+    );
+    assert.equal(store.read().paused, true, 'пауза человека стоит до явного продолжения');
+    h.pause(false);
+    assert.equal(store.read().paused, false);
+  } finally {
+    store?.close();
+    rmSync(f.root, { recursive: true, force: true });
   }
 });

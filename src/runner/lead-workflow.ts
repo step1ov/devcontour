@@ -114,7 +114,14 @@ export class LeadRunner {
         // workspace: блокировок может быть несколько — обрыв связи по одной
         // доске и отказ провайдера по другой, — и выдача возвращается, только
         // когда не осталось ни одной. Пауза человека не снимается вовсе.
-        if (decided.blocksQueue && state.paused && state.pauseReason === 'runtime') {
+        // Причина, которой нет в списке, ничего не снимает: пустой или чужой
+        // список — не разрешение продолжать.
+        if (
+          decided.blocksQueue &&
+          state.paused &&
+          state.pauseReason === 'runtime' &&
+          state.pauseFailures?.includes(decided.kind)
+        ) {
           const left = (state.pauseFailures ?? []).filter((k) => k !== decided.kind);
           if (left.length)
             this.h.store.change('scheduler.blockers', (s) => {
@@ -181,10 +188,15 @@ export class LeadRunner {
         // требует, чтобы пауза останавливала новые выдачи. Снимаются только
         // штатная остановка сервера и исходное «очередь ещё не запускали», у
         // которого причины нет: это не решение о работе.
+        //
+        // Пауза человека без времени записана прежней версией. Когда она
+        // поставлена, неизвестно, а отсутствие сведений — не разрешение:
+        // такая пауза стоит до явного продолжения.
         const decided =
           s.paused &&
           (s.pauseReason === 'runtime' ||
-            (s.pauseReason === 'operator' && (s.pausedAt ?? '') >= job.startedAt));
+            (s.pauseReason === 'operator' &&
+              (s.pausedAt === undefined || s.pausedAt >= job.startedAt)));
         if (!tasks.every((t) => t.status === 'done') && !decided)
           this.h.store.atomic(() => {
             guard();
