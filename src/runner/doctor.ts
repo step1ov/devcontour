@@ -70,7 +70,7 @@ export async function doctor(config: Config, root: string, probe = false) {
       id: `reviewer:${repo.id}:${role}`,
       status: runsChecks ? 'passed' : 'not-checked',
       detail: runsChecks
-        ? `${binding.runtime} может выполнить проверки при ревью`
+        ? `${binding.runtime} может выполнить проверки при ревью — в песочнице ОС без сети и без записи в проверяемый каталог`
         : `${binding.runtime} проверяет только чтением: профиль не даёт запускать команды. Ревью не обнаружит то, что видно лишь прогоном.`,
     });
   }

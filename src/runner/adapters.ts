@@ -162,11 +162,38 @@ export interface AgentAdapter {
  * Правка проверяемого кода остаётся запрещённой в любом случае, и это не
  * держится на одном запрете инструмента: после ревью контур сверяет состояние
  * worktree и HEAD с исходным, и любое изменение отменяет одобрение.
+ *
+ * Сверка worktree не видит того, что shell сделал за его пределами: запись в
+ * базу контура или соседний checkout, чтение секретов из домашнего каталога,
+ * сетевой запрос. Поэтому shell ревьюера всегда исполняется в песочнице ОС:
+ * у codex это `--sandbox read-only`, у claude — `reviewSandbox`.
  */
 function reviewRunsChecks(profile?: ToolProfile) {
   return profile?.runtime === 'codex'
     ? profile.codexShell
     : !!profile?.claudeTools?.includes('Bash');
+}
+/**
+ * Песочница shell для claude-ревьюера — та же граница, что у codex read-only.
+ *
+ * Сеть закрыта, проверяемый каталог недоступен на запись: ревью плана идёт
+ * прямо в основном checkout, и сверки worktree после него нет. Домашний
+ * каталог с учётными данными песочница закрывает сама. Команду нельзя вывести
+ * из песочницы, а без механизма песочницы запуск отказывает, а не исполняет
+ * shell без ограничений. Проверки, которым нужна запись, пишут во временный
+ * каталог.
+ */
+export function reviewSandbox(cwd: string) {
+  return {
+    sandbox: {
+      enabled: true,
+      failIfUnavailable: true,
+      allowUnsandboxedCommands: false,
+      autoAllowBashIfSandboxed: true,
+      network: { allowedDomains: [] as string[] },
+      filesystem: { denyWrite: [cwd] },
+    },
+  };
 }
 function reviewTools(profile?: ToolProfile) {
   return ['Read', 'Glob', 'Grep', ...(reviewRunsChecks(profile) ? ['Bash'] : [])];
@@ -246,6 +273,9 @@ export function cliArguments(
             )
             .join(','),
         ]
+      : []),
+    ...(r.review && reviewRunsChecks(r.toolProfile)
+      ? ['--settings', JSON.stringify(reviewSandbox(r.cwd))]
       : []),
     ...(r.mcpConfigPath ? ['--mcp-config', r.mcpConfigPath] : []),
     '--setting-sources',

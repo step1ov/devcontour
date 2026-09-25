@@ -278,4 +278,17 @@ test('Ревьюер запускает проверки одинаково в �
   // а сверх него — сверка worktree и HEAD после ревью.
   for (const forbidden of ['Edit', 'Write', 'NotebookEdit'])
     assert.match(denied, new RegExp(forbidden));
+
+  // Сверка worktree не видит записи за его пределами, чтения секретов и сети.
+  // Shell ревьюера исполняется в песочнице ОС, как у codex read-only, и не
+  // может из неё выйти или запуститься без неё.
+  const settings = JSON.parse(running[running.indexOf('--settings') + 1]);
+  assert.equal(settings.sandbox.enabled, true);
+  assert.equal(settings.sandbox.failIfUnavailable, true);
+  assert.equal(settings.sandbox.allowUnsandboxedCommands, false);
+  assert.deepEqual(settings.sandbox.network.allowedDomains, []);
+  assert.deepEqual(settings.sandbox.filesystem.denyWrite, ['/tmp']);
+  // Настройки пользователя не подмешиваются и не ослабляют песочницу.
+  assert.equal(running[running.indexOf('--setting-sources') + 1], '');
+  assert.equal(reading.includes('--settings'), false, 'без shell песочница не нужна');
 });
