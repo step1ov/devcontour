@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useId, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { ArrowUpRight, RotateCcw } from 'lucide-react';
-import type { AuthorOverview, Decision, DecisionKind } from '../application/overview.ts';
+import type { AuthorOverview, Decision, DecisionKind, Evidence } from '../application/overview.ts';
 import { Alert, AlertDescription } from '@/ui/alert.tsx';
 import { Badge } from '@/ui/badge.tsx';
 import { Button } from '@/ui/button.tsx';
@@ -41,21 +41,72 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   const id = useId();
   return (
     <section aria-labelledby={id}>
-      <Card>
+      <Card className="min-w-0">
         <CardHeader>
           <CardTitle id={id}>{title}</CardTitle>
         </CardHeader>
-        <CardContent className="grid gap-3 text-sm break-words">{children}</CardContent>
+        <CardContent className="grid min-w-0 gap-3 text-sm [overflow-wrap:anywhere]">
+          {children}
+        </CardContent>
       </Card>
     </section>
   );
 }
 
-export function AuthorOverviewPanel() {
+// Кнопка действия не шире своей колонки: длинная подпись переносится, а не
+// растягивает карточку за край экрана.
+const action = 'h-auto max-w-full justify-start whitespace-normal text-left';
+const when = (at?: string) => (at ? new Date(at).toLocaleString('ru-RU') : 'неизвестно');
+
+function EvidenceDetails({
+  evidence,
+  onOpen,
+}: {
+  evidence: Evidence;
+  onOpen?: (changeSetId: string) => void;
+}) {
+  const preview = evidence.preview;
+  return (
+    <details>
+      <summary className="text-muted-foreground cursor-pointer">Доказательства</summary>
+      <dl className="my-2 grid grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
+        <dt>Совместная проверка</dt>
+        <dd className="m-0">{when(evidence.verifiedAt)}</dd>
+        <dt>Manifest</dt>
+        <dd className="m-0 font-mono">{evidence.manifestDigest?.slice(0, 16) ?? '—'}</dd>
+        {preview && (
+          <>
+            <dt>Версия в preview</dt>
+            <dd className="m-0 font-mono">{preview.release}</dd>
+            <dt>Артефакт</dt>
+            <dd className="m-0 font-mono">{preview.artifactDigest?.slice(0, 16) ?? '—'}</dd>
+            <dt>Здоровье проверено</dt>
+            <dd className="m-0">{when(preview.checkedAt)}</dd>
+            <dt>Сценарий</dt>
+            <dd className="m-0">
+              {preview.scenario === 'confirmed' ? 'Прошёл' : 'Не подтверждён'}
+              {preview.smoke ? ` — ${preview.smoke}` : ''}
+            </dd>
+          </>
+        )}
+      </dl>
+      {onOpen && (
+        <Button variant="outline" className={action} onClick={() => onOpen(evidence.changeSetId)}>
+          Открыть проверку
+        </Button>
+      )}
+    </details>
+  );
+}
+
+export function AuthorOverviewPanel({ onOpenChange }: { onOpenChange?: (id: string) => void }) {
   const [overview, setOverview] = useState<AuthorOverview>();
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
+  // После действия карточка решения исчезает; фокус переходит к сообщению
+  // об итоге, а не теряется на body.
+  const status = useRef<HTMLParagraphElement>(null);
   const load = useCallback(async (signal?: AbortSignal) => {
     try {
       const response = await fetch('/api/overview', { signal });
@@ -87,6 +138,7 @@ export function AuthorOverviewPanel() {
       setNotice('Не выполнено: ' + (e instanceof Error ? e.message : String(e)));
     } finally {
       setBusy(false);
+      status.current?.focus();
     }
   };
   const decide = (d: Decision) => {
@@ -95,6 +147,7 @@ export function AuthorOverviewPanel() {
     if (a.type === 'accept-changeset')
       return (
         <Button
+          className={action}
           disabled={busy}
           onClick={() =>
             void act('Изменение принято', () => post(`changesets/${a.changeSetId}/accept`))
@@ -106,6 +159,7 @@ export function AuthorOverviewPanel() {
     if (a.type === 'deploy-preview')
       return (
         <Button
+          className={action}
           disabled={busy}
           onClick={() =>
             void act('Выкладка preview начата', () => post(`changesets/${a.changeSetId}/preview`))
@@ -116,6 +170,7 @@ export function AuthorOverviewPanel() {
       );
     return (
       <Button
+        className={action}
         disabled={busy}
         onClick={() => void act('Выдача продолжена', () => post('scheduler', { start: true }))}
       >
@@ -143,7 +198,10 @@ export function AuthorOverviewPanel() {
     );
   const o = overview;
   return (
-    <div className="grid gap-4" aria-label="Обзор для автора продукта">
+    <div
+      className="grid min-w-0 gap-4 [overflow-wrap:anywhere]"
+      aria-label="Обзор для автора продукта"
+    >
       <header className="grid gap-1">
         <h2 className="m-0 text-lg font-semibold">{o.headline}</h2>
         <p className="text-muted-foreground m-0 text-sm">{o.activity.doing}</p>
@@ -152,7 +210,7 @@ export function AuthorOverviewPanel() {
             Сводка не обновилась: {error}
           </p>
         )}
-        <p className="m-0 text-sm" role="status" aria-live="polite">
+        <p ref={status} tabIndex={-1} className="m-0 text-sm" role="status" aria-live="polite">
           {notice}
         </p>
       </header>
@@ -169,7 +227,7 @@ export function AuthorOverviewPanel() {
               </Badge>
             </p>
             <div className="flex flex-wrap gap-2">
-              <Button asChild>
+              <Button asChild className={action}>
                 <a href={o.tryNow.url} target="_blank" rel="noreferrer">
                   <ArrowUpRight />
                   Открыть версию
@@ -178,6 +236,7 @@ export function AuthorOverviewPanel() {
               {o.preview.canRollback && (
                 <Button
                   variant="outline"
+                  className={action}
                   disabled={busy}
                   onClick={() =>
                     void act('Возвращена прежняя версия', () => post('preview/rollback'))
@@ -189,6 +248,9 @@ export function AuthorOverviewPanel() {
               )}
             </div>
             <p className="text-muted-foreground m-0 break-all">{o.tryNow.url}</p>
+            <p className="text-muted-foreground m-0">
+              Здоровье проверено {when(o.tryNow.checkedAt)}; непрерывно не отслеживается.
+            </p>
           </>
         ) : o.preview.deploying ? (
           <p className="m-0">Выкладывается «{o.preview.deploying.changeSetTitle}»…</p>
@@ -199,6 +261,11 @@ export function AuthorOverviewPanel() {
           </p>
         ) : (
           <p className="m-0">Пока нечего попробовать: нет выложенной проверенной версии.</p>
+        )}
+        {o.preview.lost && (
+          <p className="text-destructive m-0">
+            Версия «{o.preview.lost.changeSetTitle}» не отвечает: {o.preview.lost.reason}
+          </p>
         )}
         {o.preview.lastFailure && (
           <p className="text-destructive m-0">
@@ -212,13 +279,14 @@ export function AuthorOverviewPanel() {
         {o.decisions.length ? (
           <ul className="m-0 grid list-none gap-3 p-0">
             {o.decisions.map((d, i) => (
-              <li key={i} className="grid gap-2 rounded-md border p-3">
-                <div className="flex flex-wrap items-center gap-2">
+              <li key={i} className="grid min-w-0 gap-2 rounded-md border p-3">
+                <div className="flex min-w-0 flex-wrap items-center gap-2">
                   <Badge variant={kindTone[d.kind]}>{kinds[d.kind]}</Badge>
-                  <strong>{d.title}</strong>
+                  <strong className="min-w-0">{d.title}</strong>
                 </div>
                 <p className="m-0">{d.detail}</p>
                 {d.kind !== 'technical' && decide(d)}
+                {d.evidence && <EvidenceDetails evidence={d.evidence} onOpen={onOpenChange} />}
                 {!!d.refs?.length && (
                   <details>
                     <summary className="text-muted-foreground cursor-pointer">Подробности</summary>

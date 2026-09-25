@@ -323,6 +323,17 @@ export function App() {
   const [tab, setTab] = useState('overview');
   // Обзор и карта продукта — представления всего workspace, а не одной доски.
   const workspaceView = tab === 'product' || tab === 'overview';
+  // Переход из обзора к проверке изменения: фокус и прокрутка к его карточке.
+  const [focusChange, setFocusChange] = useState('');
+  useEffect(() => {
+    if (!focusChange || tab !== 'changesets') return;
+    const element = document.getElementById('changeset-' + focusChange);
+    if (!element) return;
+    element.scrollIntoView({ block: 'start' });
+    element.focus();
+    setFocusChange('');
+    // Карточка появляется после отрисовки вкладки и очередного опроса.
+  }, [focusChange, tab, data]);
   const [query, setQuery] = useState('');
   const [repositoryFilter, setRepositoryFilter] = useState('');
   const [modal, setModal] = useState<
@@ -889,8 +900,13 @@ export function App() {
                   </div>
                 )}
                 {tab === 'overview' && (
-                  <div className="p-4">
-                    <AuthorOverviewPanel />
+                  <div className="min-w-0 p-4">
+                    <AuthorOverviewPanel
+                      onOpenChange={(id) => {
+                        setTab('changesets');
+                        setFocusChange(id);
+                      }}
+                    />
                   </div>
                 )}
                 {tab === 'product' && (
@@ -1024,7 +1040,7 @@ export function App() {
                             ? 'running'
                             : 'ready';
                       return (
-                        <article key={c.id}>
+                        <article key={c.id} id={'changeset-' + c.id} tabIndex={-1}>
                           <div>
                             <strong>
                               {c.id} · {c.title}

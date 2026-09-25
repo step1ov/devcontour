@@ -158,3 +158,104 @@ test('Остановленное восстановление — техниче
     f.cleanup();
   }
 });
+
+test('Повторная проверка того же кода не запирает автора на выкладке', () => {
+  // Выкладка переиспользуется по manifest, и обзор должен узнавать её по нему
+  // же — иначе после повторной проверки кнопка «выложить» не сменялась на
+  // «принять», сколько её ни нажимай.
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    const change = new Workspace(f.h).create({
+      title: 'Каталог',
+      description: 'Поиск по каталогу',
+      boardIds: [b.id],
+    });
+    f.h.config.preview = {
+      compose: 'main/c.yml',
+      service: 'web',
+      port: 45997,
+      health: { path: '/health', timeoutMs: 1000 },
+    };
+    const manifest = { main: { sha: 'a'.repeat(40), tree: 'b'.repeat(40) } };
+    const verification = () =>
+      f.store.change('fixture.verified', (s) => {
+        const cs = s.changeSets.find((x) => x.id === change.id)!;
+        const id = randomUUID();
+        cs.verifications.push({
+          id,
+          token: randomUUID(),
+          leaseUntil: 0,
+          startedAt: new Date().toISOString(),
+          status: 'passed',
+          policyDigest: new Workspace(f.h).policyDigest(),
+          specDigest: snapshotDigest(changeSnapshot(s, cs)),
+          tasks: [],
+          boards: [],
+          manifest,
+          manifestDigest: digest(manifest),
+          evidence: [],
+        });
+        return id;
+      });
+    const first = verification();
+    f.store.change('fixture.preview', (s) => {
+      s.previews = [
+        {
+          id: randomUUID(),
+          changeSetId: change.id,
+          verificationId: first,
+          manifestDigest: digest(manifest),
+          policyDigest: 'p',
+          release: 'r1',
+          project: 'dc-x-r1',
+          token: 't',
+          leaseUntil: 0,
+          status: 'confirmed',
+          active: false,
+          startedAt: new Date().toISOString(),
+          url: 'http://127.0.0.1:45997',
+        },
+      ];
+    });
+    verification();
+    const product = authorOverview(f.h).decisions.find((d) => d.kind === 'product')!;
+    assert.deepEqual(product.action, { type: 'accept-changeset', changeSetId: change.id });
+    assert.equal(product.evidence?.preview?.release, 'r1');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Упавшая задача без восстановления объяснена, отмена показана как отмена', () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const failing = f.h.addTask(b.id, input('Сломанная задача'));
+    f.h.addTask(b.id, input('Зависимая', [failing.id]));
+    f.h.approve(b.id);
+    f.h.pause(false);
+    const run = f.h.claim('w')!;
+    f.h.fail(run.id, run.token, 'candidate/test: Код выхода 1', false, 'gate');
+    let o = authorOverview(f.h);
+    const technical = o.decisions.find((d) => d.kind === 'technical')!;
+    assert.match(technical.title, /Сломанная задача/);
+    assert.match(technical.detail, /Код выхода 1/);
+    assert.match(technical.detail, /Ждут её результата: 1/);
+    assert.doesNotMatch(o.headline, /ведущий агент/, 'не утверждает работу, которой не видно');
+
+    const other = f.h.createBoard('Cancelled board');
+    const t = f.h.addTask(other.id, input('Отменённая'));
+    f.store.change('fixture.cancel-all', (s) => {
+      for (const x of s.tasks) x.status = 'cancelled';
+    });
+    void t;
+    o = authorOverview(f.h);
+    assert.match(o.headline, /отменена/);
+    assert.equal(o.counts.cancelled, 3);
+  } finally {
+    f.cleanup();
+  }
+});
