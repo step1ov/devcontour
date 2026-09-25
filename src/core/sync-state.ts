@@ -55,7 +55,8 @@ export function completion(h: DevContour, s: DevContourState, t: Task): Completi
   if (!run) throw new Error(`Нет завершённой попытки для ${t.id}`);
   const requiredGates =
     run.requiredGates ??
-    (run.policyDigest === h.policyDigest(t.repositoryId)
+    (run.policyDigest === h.policyDigest(t.repositoryId) ||
+    run.policyDigest === h.policyDigest(t.repositoryId, true)
       ? repository(h.config, t.repositoryId).gates.map((g) => g.id)
       : undefined);
   if (!requiredGates)

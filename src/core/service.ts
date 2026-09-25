@@ -74,9 +74,17 @@ export class DevContour {
   ) {
     validateWorkflow(config);
   }
-  policyDigest(repositoryId = 'main') {
+  /**
+   * Договор исполнения задачи. Изоляция входит в него: смена режима или
+   * доменов посреди прогона — другие условия, и прежнее evidence не должно
+   * выглядеть полученным в новых. `legacy` — тот же договор без изоляции,
+   * как его считала прежняя версия; он нужен только чтобы восстановить
+   * receipt уже завершённой задачи, не выдавая её за исполненную в песочнице.
+   */
+  policyDigest(repositoryId = 'main', legacy = false) {
     const repo = repository(this.config, repositoryId);
     return digest({
+      ...(legacy ? {} : { isolation: this.config.isolation }),
       ...(this.config.repositories.length
         ? { repositoryId, path: repo.path, targetBranch: repo.targetBranch }
         : {}),

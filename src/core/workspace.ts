@@ -86,6 +86,9 @@ export class Workspace {
       verificationMode: this.h.config.verificationMode,
       resources: this.h.config.resources,
       resourceDatabase: this.h.config.resourceDatabase,
+      // Совместные проверки исполняются в той же песочнице, что и проверки
+      // задач: её смена делает прежнюю проверку другой по условиям.
+      isolation: this.h.config.isolation,
     });
   }
   create(input: unknown) {

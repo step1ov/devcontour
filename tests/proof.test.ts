@@ -18,6 +18,8 @@ import { git } from '../src/runner/process.ts';
 import { acceptBoard } from '../src/runner/agent-control.ts';
 import { requirementSnapshot, requirementReport } from '../src/runner/requirements.ts';
 import { fixture, input } from './helpers.ts';
+import { Workspace } from '../src/core/workspace.ts';
+import { completion } from '../src/core/sync-state.ts';
 import { adapters, cliArguments, type AgentRequest } from '../src/runner/adapters.ts';
 import { isolation } from '../src/runner/isolation.ts';
 
@@ -662,4 +664,59 @@ test('Имя, изменённое redaction или хешем, не подтв�
     ).level,
     'testcase',
   );
+});
+
+test('Смена изоляции — другой договор исполнения: активный прогон отвергается, история читается', () => {
+  // Раньше изоляция не входила в policy digest: прогон, начатый в песочнице,
+  // продолжался после её снятия, и evidence не различало условия.
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const t = f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    f.h.pause(false);
+    const run = f.h.claim('worker')!;
+    const before = f.h.policyDigest('main');
+    const workspace = new Workspace(f.h).policyDigest();
+    f.h.config.isolation = { mode: 'none', domains: ['example.com'] };
+    assert.notEqual(f.h.policyDigest('main'), before);
+    assert.notEqual(new Workspace(f.h).policyDigest(), workspace);
+    assert.throws(() => f.h.heartbeat(run.id, run.token));
+
+    // Задача, завершённая прежней версией, записала договор без изоляции.
+    // Её receipt восстанавливается по нему и ничего не выдаёт за песочницу.
+    f.h.config.isolation = { mode: 'os', domains: [] };
+    f.store.change('fixture.legacy-done', (s) => {
+      const task = s.tasks.find((x) => x.id === t.id)!;
+      const stored = s.runs.find((r) => r.id === run.id)!;
+      Object.assign(stored, {
+        status: 'succeeded',
+        policyDigest: f.h.policyDigest('main', true),
+        requiredGates: undefined,
+        candidateSha: SHA,
+        integrationSha: OTHER,
+        finishedAt: new Date().toISOString(),
+        runtime: 'codex',
+        reviewer: 'claude',
+        evidence: ['candidate', 'integration'].flatMap((phase) =>
+          ['test', 'independent-review'].map((gate) =>
+            evidence({
+              kind: gate === 'test' ? 'test' : 'review',
+              phase: phase as never,
+              sha: phase === 'candidate' ? SHA : OTHER,
+              gate,
+              digest: 'a'.repeat(64),
+            }),
+          ),
+        ),
+      });
+      task.status = 'done';
+      task.resultSha = OTHER;
+    });
+    const receipt = completion(f.h, f.store.read(), f.store.read().tasks[0]);
+    assert.equal(receipt.policyDigest, f.h.policyDigest('main', true));
+    assert.deepEqual(receipt.requiredGates, ['test']);
+  } finally {
+    f.cleanup();
+  }
 });
