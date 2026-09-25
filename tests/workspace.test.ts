@@ -269,39 +269,58 @@ test('Verification fences expired runs, stops task claims, checks gate coverage 
 });
 
 test('Workspace gates cannot change manifest or another component source', async () => {
-  const f = await multiRepo();
-  try {
-    const b = f.h.createBoard('Already completed fixture');
-    for (const r of f.c.repositories) {
-      const t = f.h.addTask(b.id, { ...input(r.id + ' fixture task'), repositoryId: r.id });
-      const sha = await git(r.path, 'rev-parse', r.targetBranch);
-      f.store.change('fixture.completed', (s) => {
-        const task = s.tasks.find((x) => x.id === t.id)!;
-        task.status = 'done';
-        task.resultSha = sha;
+  // Два независимых барьера. В песочнице запись в manifest и чужой
+  // компонент отклоняет сама ОС — раньше сверки. Без песочницы запись
+  // удаётся, и её ловит сверка целостности после проверки. Оба пути
+  // проверяются отдельно: общий «отказ» не различил бы их.
+  for (const mode of ['os', 'none'] as const) {
+    const f = await multiRepo();
+    try {
+      f.c.isolation.mode = mode;
+      const b = f.h.createBoard('Already completed fixture');
+      for (const r of f.c.repositories) {
+        const t = f.h.addTask(b.id, { ...input(r.id + ' fixture task'), repositoryId: r.id });
+        const sha = await git(r.path, 'rev-parse', r.targetBranch);
+        f.store.change('fixture.completed', (s) => {
+          const task = s.tasks.find((x) => x.id === t.id)!;
+          task.status = 'done';
+          task.resultSha = sha;
+        });
+      }
+      const c = f.runner.workspace.create({
+        title: 'Integrity checks',
+        description: 'Tests must preserve the pinned components',
+        boardIds: [b.id],
       });
+      const gate = f.c.workspaceGates[0];
+      const lastLog = async () =>
+        readFile(f.store.read().changeSets[0].verifications.at(-1)!.evidence.at(-1)!.log, 'utf8');
+      gate.command = [
+        process.execPath,
+        '-e',
+        `require('node:fs').writeFileSync(process.env.DEVCONTOUR_MANIFEST_PATH,'{}');require('node:fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase name="x"/></testsuite>')`,
+      ];
+      if (mode === 'os') {
+        await assert.rejects(f.runner.verify(c.id), /exit=1/);
+        assert.match(await lastLog(), /EPERM|not permitted/, 'запись в manifest отклонена ОС');
+      } else await assert.rejects(f.runner.verify(c.id), /manifest/);
+      gate.command = [
+        process.execPath,
+        '-e',
+        `require('node:fs').writeFileSync(JSON.parse(process.env.DEVCONTOUR_COMPONENTS_JSON).library+'/value.json','99');require('node:fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase name="x"/></testsuite>')`,
+      ];
+      if (mode === 'os') {
+        await assert.rejects(f.runner.verify(c.id), /exit=1/);
+        assert.match(
+          await lastLog(),
+          /EPERM|not permitted/,
+          'запись в чужой компонент отклонена ОС',
+        );
+      } else await assert.rejects(f.runner.verify(c.id), /исходники/);
+      assert.throws(() => f.runner.workspace.accept(c.id), /успешной/);
+    } finally {
+      await f.cleanup();
     }
-    const c = f.runner.workspace.create({
-      title: 'Integrity checks',
-      description: 'Tests must preserve the pinned components',
-      boardIds: [b.id],
-    });
-    const gate = f.c.workspaceGates[0];
-    gate.command = [
-      process.execPath,
-      '-e',
-      `require('node:fs').writeFileSync(process.env.DEVCONTOUR_MANIFEST_PATH,'{}');require('node:fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase name="x"/></testsuite>')`,
-    ];
-    await assert.rejects(f.runner.verify(c.id), /manifest/);
-    gate.command = [
-      process.execPath,
-      '-e',
-      `require('node:fs').writeFileSync(JSON.parse(process.env.DEVCONTOUR_COMPONENTS_JSON).library+'/value.json','99');require('node:fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase name="x"/></testsuite>')`,
-    ];
-    await assert.rejects(f.runner.verify(c.id), /исходники/);
-    assert.throws(() => f.runner.workspace.accept(c.id), /успешной/);
-  } finally {
-    await f.cleanup();
   }
 });
 
