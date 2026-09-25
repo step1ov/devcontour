@@ -790,6 +790,9 @@ test('Codex закрывает содержимое скрытого катал�
     assert.equal(level(worktree), 'write');
     assert.equal(level(join(source, 'SOURCE.txt')), 'none');
     assert.equal(level(join(source, '.git')), 'read');
+    // База и журналы контура закрыты и тогда, когда появятся после старта.
+    for (const late of ['state.sqlite-wal', 'artifacts', 'dependencies'])
+      assert.equal(level(join(controller, late)), 'none', late);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

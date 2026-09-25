@@ -152,6 +152,23 @@ const tomlString = (value: string) => JSON.stringify(value);
  * появившийся в нём после построения политики, не закрыт — это граница
  * подхода; seatbelt sandbox-runtime и claude закрывают каталог целиком.
  */
+/** Элементы каталога контура, известные заранее. */
+const controllerEntries = [
+  'state.sqlite',
+  'state.sqlite-wal',
+  'state.sqlite-shm',
+  'state.sqlite-journal',
+  'resources.sqlite',
+  'config.json',
+  'doctor.json',
+  'packs.lock.json',
+  'workspace-selection.json',
+  'artifacts',
+  'decisions',
+  'dependencies',
+  'journal',
+  'profiles',
+];
 function closedEntries(policy: Isolation) {
   const open = [...policy.readable, ...policy.write];
   const within = (path: string, root: string) => path === root || path.startsWith(root + sep);
@@ -163,7 +180,12 @@ function closedEntries(policy: Isolation) {
     if (!inner.length) return [hidden];
     let entries: string[];
     try {
-      entries = readdirSync(hidden).map((name) => join(hidden, name));
+      // Известные элементы каталога контура закрываются и тогда, когда их
+      // ещё нет: база, её журналы и рабочие каталоги появляются по ходу
+      // работы, а правило, построенное по снимку, их бы пропустило.
+      entries = [...new Set([...readdirSync(hidden), ...controllerEntries])].map((name) =>
+        join(hidden, name),
+      );
     } catch {
       return [];
     }
