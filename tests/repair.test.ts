@@ -579,12 +579,13 @@ test('Обновление не снимает паузу, записанную 
       assert.equal(store.read().tasks[0].status, 'ready', `${label}: повтор назначен`);
       assert.equal(store.read().paused, true, `${label}: пауза пережила обновление`);
       assert.equal(store.read().pauseReason, legacy.pauseReason);
-      if (legacy.pauseFailure)
-        assert.deepEqual(
-          store.read().pauseFailures,
-          ['provider-auth'],
-          `${label}: причина сохранена`,
-        );
+      // Старая причина сохранена; пауза без записанной причины помечена
+      // неизвестной — её не снимает ни одно восстановление.
+      assert.deepEqual(
+        store.read().pauseFailures,
+        legacy.pauseFailure ? ['provider-auth'] : ['unknown'],
+        `${label}: причина сохранена`,
+      );
       // Явное решение человека по-прежнему снимает паузу.
       h.pause(false);
       assert.equal(store.read().paused, false, `${label}: явное продолжение работает`);
@@ -602,15 +603,18 @@ test('Прежняя причина паузы переносится и в comp
     const locations = ['app', 'lib'].map((id) => ({ id, path: join(root, id) }));
     const path = join(root, 'coordinator', 'state.sqlite');
     new Store(path, locations).close();
+    // Смешанное состояние: старое поле рядом с новым списком, одна причина
+    // повторяется. Список объединяется без повторов.
     writeLegacy(path, (raw) => {
       raw.paused = true;
       raw.pauseReason = 'runtime';
       raw.pauseFailure = 'provider-auth';
+      raw.pauseFailures = ['environment', 'provider-auth'];
     });
     const store = new Store(path, locations);
     try {
       const s = store.read();
-      assert.deepEqual(s.pauseFailures, ['provider-auth']);
+      assert.deepEqual(s.pauseFailures, ['environment', 'provider-auth']);
       assert.equal((s as { pauseFailure?: unknown }).pauseFailure, undefined);
       // Идемпотентно: запись нормализованного состояния и повторное чтение
       // ничего не добавляют.
@@ -618,7 +622,7 @@ test('Прежняя причина паузы переносится и в comp
         state.sequence += 1;
         return {};
       });
-      assert.deepEqual(store.read().pauseFailures, ['provider-auth']);
+      assert.deepEqual(store.read().pauseFailures, ['environment', 'provider-auth']);
     } finally {
       store.close();
     }

@@ -1019,3 +1019,28 @@ test('Без механизма песочницы проверка не зап�
     await f.cleanup();
   }
 });
+
+test('Истёкшая проверка в песочнице не оставляет процессов', async () => {
+  // Проверка запускает долгий дочерний процесс и не выходит сама. По
+  // таймауту должна завершиться вся группа — и песочница, и её дети.
+  const f = await runtimeFixture();
+  const marker = 'dc-gate-orphan-' + Date.now();
+  try {
+    f.h.config.gates[0].command = [
+      process.execPath,
+      '-e',
+      `require('child_process').spawn('/bin/sleep',['300'],{stdio:'ignore',argv0:'${marker}'});setInterval(()=>{},1000)`,
+    ];
+    f.h.config.gates[0].timeoutMs = 3000;
+    f.h.pause(false);
+    await new Scheduler(f.h, f.root).drain();
+    const run = f.store.read().runs.at(-1)!;
+    assert.equal(run.status, 'failed');
+    assert.match(run.error!, /timeout|прервана/i);
+    await new Promise((r) => setTimeout(r, 500));
+    const left = await command(['/bin/ps', '-axo', 'command'], f.root);
+    assert.equal(left.stdout.includes(marker), false, 'дочерний процесс проверки завершён');
+  } finally {
+    await f.cleanup();
+  }
+});
