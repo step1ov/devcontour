@@ -104,7 +104,10 @@ export async function command(
       cleanup();
       reject(e);
     });
-    child.once('close', async (code, signal) => {
+    child.once('close', (code, signal) => {
+      void finish(code, signal).catch(reject);
+    });
+    const finish = async (code: number | null, signal: NodeJS.Signals | null) => {
       if (code !== 0 || options.signal?.aborted || timedOut) signalGroup('SIGKILL');
       cleanup();
       const survivors = mark ? await sweep(mark) : [];
@@ -140,7 +143,7 @@ export async function command(
           processTree,
         },
       });
-    });
+    };
     child.stdin.on('error', () => {});
     child.stdin.end(options.input ?? '');
     if (options.signal?.aborted) stop();

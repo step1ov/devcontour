@@ -9,3 +9,4 @@ package-lock.json
 
 .idea
 evidence
+.private

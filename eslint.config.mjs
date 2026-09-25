@@ -12,6 +12,8 @@ export default tseslint.config(
       'playwright-report/**',
       'test-results/**',
       '.idea/**',
+      // Приватные исследования, клоны ревью и их логи — не исходники проекта.
+      '.private/**',
     ],
   },
   {
