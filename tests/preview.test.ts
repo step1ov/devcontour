@@ -5,14 +5,19 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
 import { randomUUID } from 'node:crypto';
-import { config, input } from './helpers.ts';
+import { config, input, fixture } from './helpers.ts';
+import { Previews } from '../src/core/preview.ts';
+import { AgentService } from '../src/application/agent.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour, digest } from '../src/core/service.ts';
 import { Workspace, changeSnapshot, snapshotDigest } from '../src/core/workspace.ts';
 import { PreviewRunner } from '../src/runner/preview.ts';
 import { command, git } from '../src/runner/process.ts';
 
-const dockerfile = (health: boolean) => `FROM busybox:1.36
+// Локальное имя базового образа: сборка не ходит в реестр за метаданными,
+// и тест не зависит от сети в момент сборки.
+const BASE = 'devcontour-preview-test-base:1';
+const dockerfile = (health: boolean) => `FROM ${BASE}
 ARG DEVCONTOUR_RELEASE
 RUN mkdir -p /www && echo "$DEVCONTOUR_RELEASE" > /www/version${health ? ' && echo ok > /www/health' : ''}
 CMD ["httpd", "-f", "-p", "8080", "-h", "/www"]
@@ -44,6 +49,13 @@ test('Preview выкладывает проверенный релиз и не �
     t.skip('Docker недоступен: ' + docker.stderr.trim().slice(0, 200));
     return;
   }
+  let pulled = false;
+  for (let attempt = 0; attempt < 3 && !pulled; attempt++)
+    pulled =
+      (await command(['docker', 'pull', '-q', 'busybox:1.36'], tmpdir(), { timeoutMs: 120000 }))
+        .code === 0;
+  assert.ok(pulled, 'базовый образ busybox недоступен');
+  await command(['docker', 'tag', 'busybox:1.36', BASE], tmpdir());
   const root = await mkdtemp(join(tmpdir(), 'devcontour-preview-'));
   const repo = join(root, 'repo');
   const port = await freePort();
@@ -190,5 +202,68 @@ test('Preview выкладывает проверенный релиз и не �
       );
     store.close();
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Выкладка preview требует актуальной проверки и не идёт дважды одновременно', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Preview board');
+    f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    const change = new Workspace(f.h).create({
+      title: 'Preview change',
+      description: 'Release to try',
+      boardIds: [b.id],
+    });
+    // Без раздела preview — отказ сразу, а не молча в фоне.
+    assert.throws(() => new PreviewRunner(f.h, f.root).deploy(change.id), /Preview не настроен/);
+    f.h.config.preview = {
+      compose: 'main/compose.yml',
+      service: 'web',
+      port: 45999,
+      health: { path: '/health', timeoutMs: 1000 },
+    };
+    // Без успешной совместной проверки выкладывать нечего.
+    assert.throws(() => new Previews(f.h).start(change.id, 'k'), /актуальной успешной проверки/);
+
+    const manifest = { main: { sha: 'a'.repeat(40), tree: 'b'.repeat(40) } };
+    f.store.change('fixture.verified', (s) => {
+      const cs = s.changeSets.find((x) => x.id === change.id)!;
+      cs.verifications.push({
+        id: randomUUID(),
+        token: randomUUID(),
+        leaseUntil: 0,
+        startedAt: new Date().toISOString(),
+        status: 'passed',
+        policyDigest: new Workspace(f.h).policyDigest(),
+        specDigest: snapshotDigest(changeSnapshot(s, cs)),
+        tasks: [],
+        boards: [],
+        manifest,
+        manifestDigest: digest(manifest),
+        evidence: [],
+      });
+    });
+    const first = new Previews(f.h).start(change.id, 'k');
+    assert.equal(first.status, 'building');
+    assert.throws(() => new Previews(f.h).start(change.id, 'k'), /уже выполняется/);
+
+    // Процесс, который вёл выкладку, умер: по истечении lease попытка
+    // считается проваленной, и новая может начаться.
+    f.store.change('fixture.expire', (s) => {
+      s.previews![0].leaseUntil = 0;
+    });
+    new Previews(f.h).start(change.id, 'k');
+    const [expired] = f.store.read().previews!;
+    assert.equal(expired.status, 'failed');
+    assert.match(expired.error!, /Истёк срок/);
+
+    // Агент видит выкладки без токенов владения.
+    const status = new AgentService(f.h).execute({ operation: 'preview_status' });
+    assert.equal(status.configured, true);
+    assert.equal(JSON.stringify(status).includes('"token"'), false);
+  } finally {
+    f.cleanup();
   }
 });

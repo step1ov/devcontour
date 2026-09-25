@@ -173,8 +173,18 @@ export class PreviewRunner {
     if (failure) throw new Error('Health: ' + failure);
     await this.assertServes(p, url, port, env);
   }
-  deploy(changeSetId: string) {
-    const work = this.deployRun(changeSetId);
+  /**
+   * Начать выкладку. Захват в домене — синхронно: отказ (нет настроек,
+   * выкладка уже идёт, нет актуальной проверки) приходит вызывающему сразу,
+   * а не теряется в фоне. Повтор того же manifest возвращает обслуживающий
+   * релиз без сборки.
+   */
+  deploy(changeSetId: string): Promise<Preview> {
+    if (!this.h.config.preview)
+      throw new DomainError('Preview не настроен: добавьте раздел preview в config');
+    const started = this.state.start(changeSetId, this.key());
+    if ('reused' in started) return Promise.resolve(started);
+    const work = this.deployRun(started);
     this.pending.add(work);
     void work.then(
       () => this.pending.delete(work),
@@ -182,12 +192,8 @@ export class PreviewRunner {
     );
     return work;
   }
-  private async deployRun(changeSetId: string) {
-    const config = this.h.config.preview;
-    if (!config) throw new DomainError('Preview не настроен: добавьте раздел preview в config');
-    const started = this.state.start(changeSetId, this.key());
-    if ('reused' in started) return started;
-    const p = started as Preview & { manifest: Record<string, { sha: string }> };
+  private async deployRun(p: Preview & { manifest: Record<string, { sha: string }> }) {
+    const config = this.h.config.preview!;
     const state = this.h.store.read();
     const previous = state.previews?.find((x) => x.release === p.previous && x.id !== p.id);
     const heartbeat = setInterval(

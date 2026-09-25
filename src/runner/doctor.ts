@@ -126,6 +126,18 @@ export async function doctor(config: Config, root: string, probe = false) {
       (support.detail ? `; ${support.detail}` : '')
     );
   });
+  if (config.preview)
+    await check('preview', async () => {
+      const docker = await command(['docker', 'info', '--format', '{{.ServerVersion}}'], root);
+      if (docker.code !== 0)
+        throw new Error(
+          'Docker недоступен: preview не соберётся и не запустится. ' +
+            docker.stderr.trim().slice(0, 200),
+        );
+      const compose = await command(['docker', 'compose', 'version', '--short'], root);
+      if (compose.code !== 0) throw new Error('Нет docker compose: preview собирается через него');
+      return `Docker ${docker.stdout.trim()}, compose ${compose.stdout.trim()}; URL http://127.0.0.1:${config.preview!.port}`;
+    });
   await check('context-library', async () => {
     const stale = (
       await Promise.all(

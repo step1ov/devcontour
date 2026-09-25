@@ -3,6 +3,7 @@ import { Preparation } from '../core/preparation.ts';
 import { PreparationAgent } from '../application/preparation-agent.ts';
 import type { Store } from '../core/store.ts';
 import { LeadRunner } from '../runner/lead-workflow.ts';
+import { PreviewRunner } from '../runner/preview.ts';
 import { DeliveryRunner } from '../runner/forge.ts';
 import { AgentService, capabilities } from '../application/agent.ts';
 import { taskProgress } from '../application/context.ts';
@@ -58,6 +59,7 @@ export async function serve(
 ) {
   let workspaceRunner: WorkspaceRunner | undefined;
   let deliveryRunner: DeliveryRunner | undefined;
+  let previewRunner: PreviewRunner | undefined;
   let lead: LeadRunner | undefined;
   let connecting: Promise<void> | undefined;
   let startupError: string | undefined;
@@ -67,6 +69,7 @@ export async function serve(
     attachJournal(h);
     workspaceRunner = new WorkspaceRunner(h, scheduler.root);
     deliveryRunner = new DeliveryRunner(h, scheduler.root);
+    previewRunner = new PreviewRunner(h, scheduler.root);
     lead = new LeadRunner(h, scheduler.root);
     scheduler.start();
     lead.start();
@@ -362,9 +365,18 @@ export async function serve(
         } else if (req.method === 'POST' || req.method === 'PATCH') {
           const input = await body(req);
           if (path === '/api/changesets') result = workspaceRunner.workspace.create(input);
+          else if (path === '/api/preview/rollback') result = await previewRunner!.rollback();
           else if (parts[1] === 'changesets') {
             if (parts[3] === 'handoff' || parts[3] === 'remote-check') {
               result = await deliveryRunner[parts[3] === 'handoff' ? 'prepare' : 'check'](parts[2]);
+            } else if (parts[3] === 'preview') {
+              // Выкладка идёт минутами: итог записывается в состояние, а
+              // ответ сразу говорит, что она начата.
+              const pending = previewRunner!.deploy(parts[2]);
+              void pending.catch(() => {
+                /* Failure is persisted by PreviewRunner. */
+              });
+              result = { status: 'started', changeSetId: parts[2] };
             } else if (parts[3] === 'verify') {
               const pending = workspaceRunner.verify(parts[2]);
               void pending.catch(() => {
@@ -490,6 +502,7 @@ export async function serve(
       clearInterval(connectionTimer);
       await connecting;
       await deliveryRunner?.stop();
+      await previewRunner?.stop();
       await workspaceRunner?.stop();
       await lead?.stop();
       await scheduler?.stop();

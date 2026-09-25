@@ -19,6 +19,7 @@ import { DevContour, specDigest } from '../core/service.ts';
 import { taskInput, DomainError } from '../core/model.ts';
 import { planResult } from '../core/plan.ts';
 import { Workspace, changeSetInput } from '../core/workspace.ts';
+import { servingPreview } from '../core/preview.ts';
 import { attachJournal } from '../runner/journal.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
@@ -65,6 +66,7 @@ export const agentInputs = {
     .strict(),
   changeset_create: z.object({ changeSet: changeSetInput }).strict(),
   queue_set: z.object({ paused: z.boolean() }).strict(),
+  preview_status: z.strictObject({}),
 };
 export type AgentOperation = keyof typeof agentInputs;
 export const agentOperations = Object.keys(agentInputs) as AgentOperation[];
@@ -158,9 +160,12 @@ export const descriptions: Record<AgentOperation, string> = {
     'Declare a shared change across boards. Set releaseId to bind product release acceptance to the workspace INTENT map and mandatory joint tests. Verification and acceptance remain separate operations.',
   queue_set:
     'Pause or resume issuance of tasks. Resuming may invoke configured models in a running server; this does not launch a server or cancel active runs.',
+  preview_status:
+    'Read the local preview: which verified release serves the URL, its states (built, deployed, healthy, confirmed or unconfirmed), and past deployments with their errors. Deploying and rolling back are separate controlled actions through the CLI or panel.',
 };
 export const readOnly = (name: AgentOperation) =>
   [
+    'preview_status',
     'preparation_status',
     'intent_render',
     'intent_snapshot',
@@ -319,6 +324,16 @@ export class AgentService {
           changeSetId: new Workspace(h).create(agentInputs.changeset_create.parse(input).changeSet)
             .id,
         };
+      case 'preview_status': {
+        const s = h.store.read();
+        const serving = servingPreview(s);
+        return {
+          configured: !!h.config.preview,
+          url: serving?.url,
+          serving: serving?.release,
+          previews: (s.previews ?? []).slice(-20).map(({ token: _token, ...p }) => p),
+        };
+      }
       case 'queue_set': {
         const value = agentInputs.queue_set.parse(input);
         h.pause(value.paused);
