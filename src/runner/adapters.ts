@@ -257,7 +257,15 @@ export function cliArguments(
       // к контуру отношения не имеющего. Прогон начинается с пустого набора.
       ...(r.toolProfile
         ? codexTools(r.toolProfile)
-        : ['--ignore-user-config', '-c', 'mcp_servers={}']),
+        : [
+            '--ignore-user-config',
+            '-c',
+            'mcp_servers={}',
+            // Ревьюер без профиля только читает — так же, как claude и как
+            // это описывает doctor. Shell codex включён по умолчанию, поэтому
+            // запрет записан явно.
+            ...(r.review ? ['-c', 'features.shell_tool=false'] : []),
+          ]),
       '-',
     ];
   return [

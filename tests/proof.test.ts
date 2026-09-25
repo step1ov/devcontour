@@ -295,6 +295,34 @@ test('Ревьюер запускает проверки одинаково в �
   // Настройки пользователя не подмешиваются и не ослабляют песочницу.
   assert.equal(running[running.indexOf('--setting-sources') + 1], '');
   assert.equal(reading.includes('--settings'), false, 'без shell песочница не нужна');
+
+  // Codex: ревьюер всегда в read-only песочнице ОС, а без права проверок —
+  // и без shell, в том числе когда профиля нет вовсе.
+  const codex = (toolProfile?: object) => {
+    const args = cliArguments(
+      'codex',
+      {
+        review: true,
+        toolProfile,
+        prompt: 'p',
+        cwd: '/tmp',
+        artifactDir: '/tmp',
+        task: {} as never,
+        signal: new AbortController().signal,
+        timeoutMs: 1000,
+      } as never,
+      '/tmp/schema.json',
+      '/tmp/result.json',
+    );
+    return args.join(' ');
+  };
+  for (const argv of [codex(), codex({ ...base, runtime: 'codex', codexShell: false })]) {
+    assert.match(argv, /--sandbox read-only/);
+    assert.match(argv, /features\.shell_tool=false/);
+  }
+  const shell = codex({ ...base, runtime: 'codex', codexShell: true });
+  assert.match(shell, /--sandbox read-only/, 'shell ревьюера codex — только в read-only');
+  assert.match(shell, /features\.shell_tool=true/);
 });
 
 test('Намеренно внесённый дефект ловится названным тестом: без этого нет ни done, ни приёмки', async () => {
