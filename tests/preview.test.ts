@@ -12,6 +12,9 @@ import { Store } from '../src/core/store.ts';
 import { DevContour, digest } from '../src/core/service.ts';
 import { Workspace, changeSnapshot, snapshotDigest } from '../src/core/workspace.ts';
 import { PreviewRunner } from '../src/runner/preview.ts';
+import { serve } from '../src/server/http.ts';
+import { Scheduler } from '../src/runner/scheduler.ts';
+import { chromium } from '@playwright/test';
 import { command, git } from '../src/runner/process.ts';
 
 // Локальное имя базового образа: сборка не ходит в реестр за метаданными,
@@ -265,5 +268,121 @@ test('Выкладка preview требует актуальной провер�
     assert.equal(JSON.stringify(status).includes('"token"'), false);
   } finally {
     f.cleanup();
+  }
+});
+
+test('Автор пробует проверенную версию в браузере и принимает её, не видя внутренних сущностей', async (t) => {
+  // Полный пользовательский сценарий через настоящую панель, настоящий
+  // сервер и настоящий Docker: обзор → выложить в preview → открыть
+  // версию (URL называет проверенный релиз) → принять изменение. Проверка
+  // ChangeSet подставлена записью с теми же digest, что даёт совместная
+  // проверка: её собственный путь покрыт тестами workspace.
+  const docker = await command(['docker', 'info', '--format', '{{.ServerVersion}}'], tmpdir());
+  if (docker.code !== 0) {
+    t.skip('Docker недоступен: ' + docker.stderr.trim().slice(0, 200));
+    return;
+  }
+  await command(['docker', 'pull', '-q', 'busybox:1.36'], tmpdir(), { timeoutMs: 120000 });
+  await command(['docker', 'tag', 'busybox:1.36', BASE], tmpdir());
+  const root = await mkdtemp(join(tmpdir(), 'devcontour-preview-ui-'));
+  const repo = join(root, 'repo');
+  const port = await freePort();
+  const store = new Store(join(root, 'data', 'state.sqlite'));
+  let server: Awaited<ReturnType<typeof serve>> | undefined;
+  let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
+  let scheduler: Scheduler | undefined;
+  try {
+    await git(tmpdir(), 'init', '-q', '-b', 'main', repo);
+    await writeFile(join(repo, 'Dockerfile'), dockerfile(true));
+    await writeFile(join(repo, 'compose.preview.yml'), compose);
+    await git(repo, 'add', '.');
+    await git(repo, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'app');
+    const h = new DevContour(
+      store,
+      config({
+        repository: repo,
+        preview: {
+          compose: 'main/compose.preview.yml',
+          service: 'web',
+          port,
+          health: { path: '/health', timeoutMs: 20000 },
+          version: { path: '/version' },
+        },
+      }),
+    );
+    const b = h.createBoard('Каталог');
+    h.addTask(b.id, input());
+    h.approve(b.id);
+    const change = new Workspace(h).create({
+      title: 'Поиск по каталогу',
+      description: 'Автор хочет попробовать поиск',
+      boardIds: [b.id],
+    });
+    const sha = await git(repo, 'rev-parse', 'HEAD');
+    const tree = await git(repo, 'rev-parse', 'HEAD^{tree}');
+    const manifest = { main: { sha, tree } };
+    store.change('fixture.verified', (s) => {
+      const cs = s.changeSets.find((x) => x.id === change.id)!;
+      cs.verifications.push({
+        id: randomUUID(),
+        token: randomUUID(),
+        leaseUntil: 0,
+        startedAt: new Date().toISOString(),
+        finishedAt: new Date().toISOString(),
+        status: 'passed',
+        policyDigest: new Workspace(h).policyDigest(),
+        specDigest: snapshotDigest(changeSnapshot(s, cs)),
+        tasks: [],
+        boards: [],
+        manifest,
+        manifestDigest: digest(manifest),
+        evidence: [],
+      });
+    });
+    scheduler = new Scheduler(h, join(root, 'data'));
+    await scheduler.init();
+    server = await serve(h, scheduler, { port: 0 });
+    browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    const errors: string[] = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    await page.goto(server.url);
+
+    // Обзор: продуктовое решение по проверенному изменению — сначала попробовать.
+    await page.getByRole('heading', { name: 'Нужно ваше решение', exact: true }).waitFor();
+    await page.getByText('Принять «Поиск по каталогу»').waitFor();
+    await page.getByRole('button', { name: 'Выложить в preview' }).click();
+    const open = page.getByRole('link', { name: 'Открыть версию' });
+    await open.waitFor({ timeout: 180000 });
+    const href = await open.getAttribute('href');
+    assert.equal(href, `http://127.0.0.1:${port}`);
+    const release = 'r' + digest(manifest).slice(0, 12);
+    const version = await browser.newPage();
+    await version.goto(href + '/version');
+    assert.equal(
+      (await version.textContent('body'))?.trim(),
+      release,
+      'по ссылке — проверенный релиз',
+    );
+    await version.close();
+
+    // Попробовав, автор принимает изменение той же панелью.
+    await page.getByRole('button', { name: 'Принять изменение' }).click();
+    await page.getByText('Изменение принято').waitFor();
+    assert.ok(store.read().changeSets[0].acceptance, 'изменение принято');
+    // На экране не было внутренних идентификаторов вне раскрытий.
+    const visible = await page.locator('main').innerText();
+    assert.equal(/CHG-|T-[0-9a-f]{8}|R-[0-9a-f]{8}/.test(visible), false, visible.slice(0, 400));
+    assert.deepEqual(errors, []);
+  } finally {
+    await browser?.close();
+    if (server) await server.close();
+    else await scheduler?.stop();
+    for (const p of store.read().previews ?? [])
+      await command(['docker', 'compose', '-p', p.project, 'down', '-v'], tmpdir()).catch(
+        () => undefined,
+      );
+    store.close();
+    await rm(root, { recursive: true, force: true });
   }
 });
