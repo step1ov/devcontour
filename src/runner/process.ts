@@ -1,4 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { readdirSync, readFileSync } from 'node:fs';
 import { StringDecoder } from 'node:string_decoder';
 import { outputRedactor, type Redactor } from './redaction.ts';
 import type { RuntimeDiagnostics } from '../core/runtime-diagnostics.ts';
@@ -19,6 +21,12 @@ export async function command(
     env?: NodeJS.ProcessEnv;
     redact?: Redactor;
     onOutput?: (stream: 'stdout' | 'stderr', text: string) => void;
+    /**
+     * Владеть всеми потомками, включая сменивших группу или сессию: после
+     * завершения они останавливаются, и результат не возвращается, пока
+     * хотя бы один жив. Сигнал группе не достаёт отсоединившегося потомка.
+     */
+    contain?: boolean;
   } = {},
 ): Promise<CommandResult> {
   if (!argv.length) throw new Error('Пустая команда');
@@ -26,9 +34,14 @@ export async function command(
     const startedAt = new Date().toISOString();
     let lastOutputAt: string | null = null;
     let processTree: RuntimeDiagnostics['processTree'];
+    // Метку окружения наследуют все потомки, в том числе отсоединившиеся:
+    // по ней их находят после завершения.
+    const mark = options.contain ? randomUUID() : undefined;
     const child = spawn(argv[0], argv.slice(1), {
       cwd,
-      env: options.env ?? process.env,
+      env: mark
+        ? { ...(options.env ?? process.env), DEVCONTOUR_PROCESS_MARK: mark }
+        : (options.env ?? process.env),
       shell: false,
       detached: process.platform !== 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -91,9 +104,18 @@ export async function command(
       cleanup();
       reject(e);
     });
-    child.once('close', (code, signal) => {
+    child.once('close', async (code, signal) => {
       if (code !== 0 || options.signal?.aborted || timedOut) signalGroup('SIGKILL');
       cleanup();
+      const survivors = mark ? await sweep(mark) : [];
+      if (survivors.length) {
+        reject(
+          new Error(
+            `Не удалось завершить процессы проверки: ${survivors.join(', ')}. Ресурсы не освобождены`,
+          ),
+        );
+        return;
+      }
       append('stdout', maskOut(stdoutDecoder.end(), true));
       append('stderr', maskErr(stderrDecoder.end(), true));
       if (outputError) {
@@ -172,4 +194,52 @@ export async function git(cwd: string, ...args: string[]) {
   if (result.code !== 0)
     throw new Error(`git ${args[0]}: ${result.stderr.trim() || result.stdout.trim()}`);
   return result.stdout.trim();
+}
+
+/** Процессы пользователя, в окружении которых есть метка. */
+function marked(mark: string): number[] {
+  const needle = `DEVCONTOUR_PROCESS_MARK=${mark}`;
+  if (process.platform === 'linux') {
+    return readdirSync('/proc').flatMap((entry) => {
+      if (!/^\d+$/.test(entry)) return [];
+      try {
+        return readFileSync(`/proc/${entry}/environ`, 'utf8').split('\0').includes(needle)
+          ? [Number(entry)]
+          : [];
+      } catch {
+        return [];
+      }
+    });
+  }
+  // macOS: -E добавляет окружение к команде для процессов своего пользователя.
+  const result = spawnSync('ps', ['-Eww', '-ax', '-o', 'pid=,command='], {
+    encoding: 'utf8',
+    timeout: 5000,
+    maxBuffer: 64_000_000,
+  });
+  if (result.status !== 0) throw new Error('Не удалось перечислить процессы проверки');
+  return result.stdout.split('\n').flatMap((line) => {
+    const m = /^\s*(\d+)\s+(.*)$/.exec(line);
+    return m && m[2].includes(needle) && Number(m[1]) !== process.pid ? [Number(m[1])] : [];
+  });
+}
+/** Остановить всех помеченных потомков; вернуть тех, кто пережил попытки. */
+async function sweep(mark: string): Promise<number[]> {
+  let left: number[] = [];
+  for (let attempt = 0; attempt < 20; attempt++) {
+    try {
+      left = marked(mark);
+    } catch {
+      return [-1];
+    }
+    if (!left.length) return [];
+    for (const pid of left)
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        /* Already gone. */
+      }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return left;
 }

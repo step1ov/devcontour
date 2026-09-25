@@ -273,6 +273,9 @@ export async function runCheck(
         timeoutMs: options.timeoutMs,
         env,
         redact: options.redact,
+        // Отсоединившийся потомок проверки не переживает её: и при успехе,
+        // и по таймауту, отмене или падению.
+        contain: true,
       });
     let result = await execute();
     // sandbox-runtime ищет shell через `which` с таймаутом в секунду и под
