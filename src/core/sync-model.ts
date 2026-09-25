@@ -29,6 +29,19 @@ export const receiptSchema = z.strictObject({
         passed: z.boolean(),
         exitCode: z.number().int(),
         digest: hash,
+        // Манифест выполненных testcases: без него критерий, назвавший свой
+        // тест, в другом клоне подтвердить нечем. Поля необязательны —
+        // прежние receipts читаются на прежнем уровне доказательства.
+        tests: z
+          .array(
+            z.strictObject({
+              id: z.string().min(1).max(1000),
+              status: z.enum(['passed', 'failed', 'skipped']),
+            }),
+          )
+          .max(2000)
+          .optional(),
+        testsTruncated: z.literal(true).optional(),
       }),
     )
     .min(4),

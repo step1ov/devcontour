@@ -14,6 +14,7 @@ import {
   parseRequirements,
   requirementSnapshot,
   correctRequirements,
+  requirementReport,
 } from '../src/runner/requirements.ts';
 import { updateBase } from '../src/runner/base-update.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
@@ -422,6 +423,49 @@ test('Intent and task bindings survive an independent Git clone without centrali
     assert.equal(JSON.parse(check.stdout).coverageComplete, false);
   } finally {
     cloneStore?.close();
+    await f.close();
+  }
+});
+
+test('Покрытие INTENT подтверждается тем же правилом testcase, что и отчёт требований', async () => {
+  // INTENT проверял только зелёную проверку: при proof:none в отчёте
+  // требований покрытие объявлялось полным, а критерий — verified.
+  const f = await fixture();
+  const scheduler = new Scheduler(f.h, f.root);
+  try {
+    const board = f.h.createBoard('Required testcase coverage', '', 'main');
+    f.h.addTask(board.id, {
+      ...input(),
+      requirements: links(f).map((r) => ({ ...r, testId: 'current-task-result' })),
+    });
+    f.h.approve(board.id);
+    await scheduler.init();
+    await updateBase(f.config, f.root);
+    f.h.pause(false);
+    await scheduler.drain();
+    assert.equal(f.store.read().tasks[0].status, 'done');
+    // Названный тест выполнился: оба отчёта согласны, покрытие полное.
+    assert.ok(
+      requirementReport(f.h, 'main').tasks[0].requirements.every((r) => r.proof === 'testcase'),
+    );
+    assert.equal(f.report().coverageComplete, true);
+
+    // Тот же результат и та же постановка, но в манифесте выполненных тестов
+    // названного testcase нет. Постановку не трогаем: иначе покрытие
+    // сломалось бы по изменению digest, а не по отсутствию доказательства.
+    f.store.change('fixture.drop-testcase', (s) => {
+      for (const run of s.runs)
+        for (const e of run.evidence)
+          if (e.tests) e.tests = e.tests.filter((t) => t.id !== 'current-task-result');
+    });
+    assert.ok(
+      requirementReport(f.h, 'main').tasks[0].requirements.every((r) => r.proof === 'none'),
+    );
+    const report = f.report();
+    assert.equal(report.coverageComplete, false);
+    assert.equal(report.stories[0].criteria[0].verified, false);
+  } finally {
+    await scheduler.stop();
     await f.close();
   }
 });

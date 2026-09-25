@@ -15,7 +15,7 @@ import { updateBase } from '../src/runner/base-update.ts';
 import { git } from '../src/runner/process.ts';
 import { acceptBoard } from '../src/runner/agent-control.ts';
 import { requirementSnapshot, requirementReport } from '../src/runner/requirements.ts';
-import { input } from './helpers.ts';
+import { fixture, input } from './helpers.ts';
 import { adapters, cliArguments, type AgentRequest } from '../src/runner/adapters.ts';
 
 const SHA = 'a'.repeat(40);
@@ -403,5 +403,102 @@ process.exit(cases.some((c) => c.includes('<failure')) ? 1 : 0);
   } finally {
     store.close();
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Задача без названного testcase не публикуется и не открывает зависимые', async () => {
+  // Отказ при приёмке доски был поздним: задача уже получила done, её
+  // результат лежал в целевой ветке, и зависимая задача работала поверх
+  // неподтверждённого результата. Тест назван с момента утверждения.
+  const root = await mkdtemp(join(tmpdir(), 'devcontour-admission-'));
+  await setupDemo(root);
+  const config = loadConfig(join(root, 'config.json'));
+  const store = new Store(join(root, 'state.sqlite'));
+  const h = new DevContour(store, config);
+  try {
+    store.change('fixture.reset', (s) => {
+      s.tasks = [];
+      s.boards = [];
+      s.runs = [];
+    });
+    await mkdir(join(config.repository, 'docs'), { recursive: true });
+    await writeFile(
+      join(config.repository, 'docs/spec.md'),
+      '## REQ-catalog: Catalogue\nList the catalogue.\n',
+    );
+    await git(config.repository, 'add', 'docs/spec.md');
+    await git(config.repository, 'commit', '-m', 'Specify catalogue');
+    await git(config.repository, 'update-ref', 'refs/heads/' + config.targetBranch, 'HEAD');
+    const before = await git(config.repository, 'rev-parse', config.targetBranch);
+    const snapshot = requirementSnapshot(config.repository, 'docs/spec.md');
+    const board = h.createBoard('Traceable catalogue');
+    const task = h.addTask(board.id, {
+      ...input(),
+      requirements: [
+        {
+          ...snapshot.requirements[0],
+          source: snapshot.source,
+          gate: config.gates[0].id,
+          scenario: 'Catalogue listing',
+          testId: 'scenario-nobody-ran',
+        },
+      ],
+    });
+    const dependent = h.addTask(board.id, input('Dependent task', [task.id]));
+    h.approve(board.id);
+    const scheduler = new Scheduler(h, root);
+    await scheduler.init();
+    await updateBase(config, root);
+    h.pause(false);
+    await scheduler.drain();
+    await scheduler.stop();
+
+    const state = store.read();
+    const first = state.tasks.find((t) => t.id === task.id)!;
+    assert.equal(first.status, 'failed');
+    assert.equal(first.failureKind, 'gate');
+    assert.match(first.failure!, /scenario-nobody-ran/);
+    assert.equal(first.resultSha, undefined);
+    assert.equal(
+      await git(config.repository, 'rev-parse', config.targetBranch),
+      before,
+      'целевая ветка не сдвинута',
+    );
+    assert.equal(
+      state.runs.some((r) => r.taskId === dependent.id),
+      false,
+      'зависимая задача не выдавалась',
+    );
+    // Доменная приёмка тоже не обходит правило — ни в обход обёртки.
+    assert.throws(() => h.accept(board.id, before), /выполнены|проверки|интеграцию/);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Доменная приёмка требует названный testcase, а не только done', () => {
+  // Обёртка приёмки проверяла сценарий, а сама доменная операция — нет.
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const t = f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    f.store.change('fixture.done', (s) => {
+      const task = s.tasks.find((x) => x.id === t.id)!;
+      task.status = 'done';
+      task.resultSha = SHA;
+      task.requirements = [{ id: 'REQ-a', gate: 'unit', testId: 'named-case' }] as never;
+      s.runs.push({
+        id: 'R-fixture',
+        taskId: t.id,
+        status: 'succeeded',
+        evidence: [evidence({ tests: [{ id: 'unrelated', status: 'passed' }] })],
+      } as never);
+    });
+    assert.throws(() => f.h.accept(b.id, SHA), /named-case/);
+    assert.notEqual(f.store.read().boards[0].revisions.at(-1)!.status, 'accepted');
+  } finally {
+    f.cleanup();
   }
 });

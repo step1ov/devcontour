@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { DevContour, digest } from '../core/service.ts';
 import { DomainError, relativePath, type Task, type Run, type Evidence } from '../core/model.ts';
-import { requirementProof, unprovenRequirements } from '../core/proof.ts';
+import { requirementProof, taskEvidence, unprovenReason } from '../core/proof.ts';
 import { repository } from '../core/repositories.ts';
 
 // A requirement ends at the next level-1/2 heading. Ignore fenced code examples.
@@ -80,16 +80,12 @@ export function assertRequirements(h: DevContour, task: Task, cwd?: string, ref?
  * прежнем уровне — история не переписывается.
  */
 export function assertRequirementProof(h: DevContour, task: Task) {
-  if (!task.requirements?.some((r) => r.testId)) return;
-  const s = h.store.read();
-  const run = s.runs.findLast((r) => r.taskId === task.id && r.status === 'succeeded');
-  const evidence = (run?.evidence ?? task.sharedCompletion?.receipt.checks ?? []) as Evidence[];
-  const unproven = unprovenRequirements(task.requirements, evidence, task.resultSha);
-  if (unproven.length)
-    throw new DomainError(
-      'Сценарий не подтверждён выполненным тестом: ' +
-        unproven.map((p) => `${p.id} — ${p.reason}`).join('; '),
-    );
+  const unproven = unprovenReason(
+    task.requirements,
+    taskEvidence(h.store.read(), task),
+    task.resultSha,
+  );
+  if (unproven) throw new DomainError(unproven);
 }
 export function recordRequirements(
   h: DevContour,

@@ -6,8 +6,10 @@ import {
   relativePath,
   requireValue,
   type Task,
+  type RequirementLink,
   type Verification,
 } from '../core/model.ts';
+import { requirementProof, taskEvidence } from '../core/proof.ts';
 import {
   Workspace,
   changeSnapshot,
@@ -717,8 +719,7 @@ export class IntentService implements ProductReleaseGuard {
       return true;
     };
     const checked = (task: Task, gate: string) => {
-      const run = state.runs.findLast((r) => r.taskId === task.id && r.status === 'succeeded');
-      return (run?.evidence ?? task.sharedCompletion?.receipt.checks ?? []).some(
+      return taskEvidence(state, task).some(
         (e) =>
           e.kind === 'test' &&
           e.gate === gate &&
@@ -728,6 +729,13 @@ export class IntentService implements ProductReleaseGuard {
           e.exitCode === 0,
       );
     };
+    // Покрытие подтверждается тем же правилом, что и приёмка: связь, назвавшая
+    // свой тест, требует именно его на принятом SHA; без testId — прежний
+    // уровень зелёной проверки.
+    const proven = (task: Task, link: RequirementLink) =>
+      checked(task, link.gate) &&
+      (!link.testId ||
+        requirementProof(link, taskEvidence(state, task), task.resultSha).level === 'testcase');
     const stories = doc.stories
       .filter((s) => s.releaseId === releaseId)
       .map((story) => {
@@ -754,7 +762,7 @@ export class IntentService implements ProductReleaseGuard {
                 r.source === this.source(repositoryId) &&
                 r.id === binding.id &&
                 r.digest === binding.digest &&
-                checked(t, r.gate),
+                proven(t, r),
             ) &&
             checked(t, 'requirement-source'),
         );
@@ -772,9 +780,7 @@ export class IntentService implements ProductReleaseGuard {
                   eligible.includes(t) &&
                   t.requirements!.some(
                     (l) =>
-                      referenceKey(l) === referenceKey(r) &&
-                      l.digest === r.digest &&
-                      checked(t, l.gate),
+                      referenceKey(l) === referenceKey(r) && l.digest === r.digest && proven(t, l),
                   ),
               );
             return {

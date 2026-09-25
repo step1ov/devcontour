@@ -66,15 +66,19 @@ export function completion(h: DevContour, s: DevContourState, t: Task): Completi
     runtime: run.runtime,
     reviewer: run.reviewer,
     requiredGates,
-    checks: run.evidence.map(({ kind, phase, sha, gate, passed, exitCode, digest }) => ({
-      kind,
-      phase,
-      sha,
-      gate,
-      passed,
-      exitCode,
-      digest,
-    })),
+    checks: run.evidence.map(
+      ({ kind, phase, sha, gate, passed, exitCode, digest, tests, testsTruncated }) => ({
+        kind,
+        phase,
+        sha,
+        gate,
+        passed,
+        exitCode,
+        digest,
+        ...(tests ? { tests } : {}),
+        ...(testsTruncated ? { testsTruncated } : {}),
+      }),
+    ),
   });
 }
 export function recordsFromState(h: DevContour, s: DevContourState) {

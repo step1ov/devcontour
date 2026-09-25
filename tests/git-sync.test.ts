@@ -24,6 +24,11 @@ import { repositories } from '../src/core/repositories.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { repositorySchema } from '../src/core/model.ts';
 import { config, input } from './helpers.ts';
+import {
+  requirementSnapshot,
+  requirementReport,
+  assertRequirementProof,
+} from '../src/runner/requirements.ts';
 
 const git = (path: string, ...args: string[]) =>
   execFileSync('git', ['-C', path, ...args], {
@@ -641,6 +646,80 @@ test("A contract's document path survives export into Git", () => {
       'docs/contracts/catalog.md',
       'путь контракта должен уходить в Git вместе с текстом',
     );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Независимый клон получает манифест testcases и подтверждает критерий тем же уровнем', async () => {
+  const f = fixture();
+  try {
+    const a = f.create('alice');
+    writeFileSync(
+      join(a.repo, 'spec.md'),
+      '## REQ-test: Observed behaviour\nNamed testcase must run.\n',
+    );
+    git(a.repo, 'add', '.');
+    git(a.repo, 'commit', '-m', 'Requirement');
+    syncGit(a.h, { member: 'alice' });
+    const board = a.h.createBoard('Proof transfer', '', 'main');
+    const snap = requirementSnapshot(a.repo, 'spec.md');
+    const t = a.h.addTask(board.id, {
+      ...input(),
+      requirements: [
+        {
+          ...snap.requirements[0],
+          source: snap.source,
+          gate: 'test',
+          scenario: 'Observed behaviour',
+          testId: 'named-case',
+        },
+      ],
+    });
+    a.h.approve(board.id);
+    a.h.pause(false);
+    const r = a.h.claim('fixture')!;
+    const sha = git(a.repo, 'rev-parse', 'HEAD');
+    git(a.repo, 'update-ref', 'refs/heads/' + a.h.config.targetBranch, sha);
+    a.h.phase(r.id, r.token, 'integrating', { candidateSha: sha, integrationSha: sha });
+    for (const phase of ['candidate', 'integration'] as const) {
+      for (const gate of ['test', 'requirement-source', 'independent-review'])
+        a.h.evidence(r.id, r.token, {
+          kind: gate === 'independent-review' ? 'review' : 'test',
+          phase,
+          sha,
+          gate,
+          passed: true,
+          exitCode: 0,
+          command: ['fixture'],
+          log: '',
+          digest: digest('fixture'),
+          summary: 'fixture',
+          tests: gate === 'test' ? [{ id: 'named-case', status: 'passed' }] : undefined,
+        });
+    }
+    a.h.finish(r.id, r.token, sha);
+    const taskA = a.store.read().tasks.find((x) => x.id === t.id)!;
+    assertRequirementProof(a.h, taskA);
+    assert.equal(requirementReport(a.h, 'main').tasks[0].requirements[0].proof, 'testcase');
+    a.h.pause(true);
+    syncGit(a.h);
+    a.commit();
+    const b = f.create('bob', a);
+    git(b.repo, 'update-ref', 'refs/heads/' + b.h.config.targetBranch, sha);
+    syncGit(b.h, { member: 'bob' });
+    const taskB = b.store.read().tasks.find((x) => x.id === t.id)!;
+    const proofB = requirementReport(b.h, 'main').tasks[0].requirements[0];
+    // Receipt несёт манифест: в другом клоне критерий подтверждён тем же
+    // уровнем, а не падает до «проверка не сообщила, какие тесты выполнились».
+    assert.equal(taskB.id, t.id);
+    assert.equal(taskB.status, 'done');
+    const integration = taskB.sharedCompletion!.receipt.checks.find(
+      (c) => c.gate === 'test' && c.phase === 'integration',
+    )!;
+    assert.deepEqual(integration.tests, [{ id: 'named-case', status: 'passed' }]);
+    assert.equal(proofB.proof, 'testcase', proofB.proofReason);
+    assertRequirementProof(b.h, taskB);
   } finally {
     f.cleanup();
   }

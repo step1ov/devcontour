@@ -10,7 +10,8 @@ import {
   requiresContract,
 } from './repositories.ts';
 import { Store } from './store.ts';
-import { failureFingerprint, type FailureKind } from './failure.ts';
+import { failureFingerprint, TaskFailure, type FailureKind } from './failure.ts';
+import { taskEvidence, unprovenReason } from './proof.ts';
 import { planResult } from './plan.ts';
 import { assertDag, descendants, readyTasks, latestTaskId, impactGraph } from './graph.ts';
 import {
@@ -422,6 +423,10 @@ export class DevContour {
         throw new DomainError('Приёмка доступна, когда все задачи прошли интеграцию и проверки');
       const tasks = r.taskIds.map((id) => structuredClone(task(s, id)));
       tasks.forEach((t) => assertTaskPreparation(s, t));
+      for (const t of tasks) {
+        const unproven = unprovenReason(t.requirements, taskEvidence(s, t), t.resultSha);
+        if (unproven) throw new DomainError(unproven);
+      }
       r.status = 'accepted';
       r.acceptedAt = now();
       r.acceptance = approval;
@@ -613,6 +618,12 @@ export class DevContour {
           !last('review', phase, phase === 'candidate' ? r.candidateSha : sha, 'independent-review')
         )
           throw new DomainError(`Нет независимого ревью: ${phase}`);
+      // Названный сценарий предъявляется до публикации: опубликованный
+      // результат сразу становится входом зависимых задач, и отказ при
+      // приёмке доски был бы уже поздним. Задачи без testId проходят на
+      // прежнем уровне.
+      const unproven = unprovenReason(t.requirements, r.evidence, sha);
+      if (unproven) throw new TaskFailure('gate', unproven);
       publish?.();
       r.status = 'succeeded';
       r.finishedAt = now();

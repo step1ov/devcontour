@@ -1,4 +1,4 @@
-import type { Evidence, RequirementLink } from './model.ts';
+import type { DevContourState, Evidence, RequirementLink, Task } from './model.ts';
 
 /**
  * Уровни доказательства критерия — от сильного к отсутствующему.
@@ -102,4 +102,26 @@ export function unprovenRequirements(
     .filter((link) => link.testId)
     .map((link) => requirementProof(link, evidence, resultSha))
     .filter((proof) => proof.level !== 'testcase');
+}
+
+/**
+ * Evidence, которым задача подтверждает результат: последний успешный
+ * прогон, а для задачи, завершённой в другом клоне, — её receipt. Одно
+ * определение для всех потребителей: приёмки, INTENT и отчёта требований.
+ */
+export function taskEvidence(s: Pick<DevContourState, 'runs'>, task: Task): readonly Evidence[] {
+  const run = s.runs.findLast((r) => r.taskId === task.id && r.status === 'succeeded');
+  return (run?.evidence ?? task.sharedCompletion?.receipt.checks ?? []) as Evidence[];
+}
+/** Причина, по которой названные сценарии задачи не подтверждены, или undefined. */
+export function unprovenReason(
+  requirements: readonly RequirementLink[] | undefined,
+  evidence: readonly Evidence[],
+  resultSha: string | undefined,
+) {
+  const unproven = unprovenRequirements(requirements, evidence, resultSha);
+  return unproven.length
+    ? 'Сценарий не подтверждён выполненным тестом: ' +
+        unproven.map((p) => `${p.id} — ${p.reason}`).join('; ')
+    : undefined;
 }
