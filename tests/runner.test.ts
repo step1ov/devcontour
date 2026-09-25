@@ -12,7 +12,7 @@ import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { adapters, cliArguments, type AgentRequest } from '../src/runner/adapters.ts';
 import { git, command } from '../src/runner/process.ts';
-import { junitSummary } from '../src/runner/gates.ts';
+import { junitSummary, sandboxNotStarted } from '../src/runner/gates.ts';
 import { input } from './helpers.ts';
 import { acceptBoard } from '../src/runner/agent-control.ts';
 import { ProjectMemory } from '../src/application/memory.ts';
@@ -1043,4 +1043,25 @@ test('Истёкшая проверка в песочнице не оставл�
   } finally {
     await f.cleanup();
   }
+});
+test('Проверка повторяется, только если песочница отказала до запуска команды', () => {
+  // sandbox-runtime ищет shell через `which` с таймаутом в секунду и под
+  // нагрузкой отказывает, не запустив команду. Повтор допустим только тогда:
+  // провал самой проверки повтором не маскируется.
+  const srt = [process.execPath, '/x/node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js'];
+  const failed = (stdout: string, stderr: string, code = 1) => ({ code, stdout, stderr });
+  assert.equal(sandboxNotStarted(srt, failed('', "Error: Shell 'bash' not found in PATH\n")), true);
+  assert.equal(
+    sandboxNotStarted(srt, failed('1 test failed', "Error: Shell 'bash' not found in PATH")),
+    false,
+  );
+  assert.equal(sandboxNotStarted(srt, failed('', 'AssertionError: expected 5')), false);
+  assert.equal(
+    sandboxNotStarted(srt, failed('', "Error: Shell 'bash' not found in PATH", 0)),
+    false,
+  );
+  assert.equal(
+    sandboxNotStarted(['node', 'verify.mjs'], failed('', "Error: Shell 'bash' not found in PATH")),
+    false,
+  );
 });

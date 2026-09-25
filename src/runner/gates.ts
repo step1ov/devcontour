@@ -133,6 +133,18 @@ function diagnostic(stderr: string, stdout: string, redact?: (value: string) => 
 function failedCases(counts: ReturnType<typeof junitSummary>) {
   return counts.failedDetails.join('; ').slice(0, 600);
 }
+/** Песочница отказала до запуска команды: вывода команды нет, причина — поиск shell. */
+export function sandboxNotStarted(
+  argv: string[],
+  result: { code: number; stdout: string; stderr: string },
+) {
+  return (
+    argv[1]?.includes('sandbox-runtime') === true &&
+    result.code !== 0 &&
+    !result.stdout.trim() &&
+    /^Error: Shell '[^']+' not found in PATH\s*$/.test(result.stderr.trim())
+  );
+}
 /** Команда проверки находится — иначе ENOENT, как при обычном запуске. */
 function assertExecutable(name: string, path: string | undefined, cwd: string) {
   const candidates = name.includes('/')
@@ -229,12 +241,16 @@ async function executeGate(
       argv = wrapped.argv;
       env = { ...env, ...wrapped.env };
     }
-    const result = await command(argv, gateCwd, {
-      signal,
-      timeoutMs: gate.timeoutMs,
-      env,
-      redact,
-    });
+    const execute = () =>
+      command(argv, gateCwd, { signal, timeoutMs: gate.timeoutMs, env, redact });
+    let result = await execute();
+    // sandbox-runtime ищет shell через `which` с таймаутом в секунду и под
+    // нагрузкой отказывает до запуска команды. Команда проверки при этом не
+    // исполнялась, поэтому повтор безопасен; любой другой отказ — итог.
+    for (let attempt = 1; attempt < 3 && sandboxNotStarted(argv, result); attempt++) {
+      await new Promise((r) => setTimeout(r, 500 * attempt));
+      result = await execute();
+    }
     exitCode = result.code;
     log = result.stdout + '\n' + result.stderr;
     if (result.timedOut || signal.aborted)
