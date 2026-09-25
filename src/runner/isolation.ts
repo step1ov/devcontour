@@ -2,7 +2,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import { createRequire } from 'node:module';
 import { writeFile, mkdir } from 'node:fs/promises';
-import { realpathSync } from 'node:fs';
+import { realpathSync, readdirSync } from 'node:fs';
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
 
 /**
@@ -130,6 +130,39 @@ export function claudeFileDenies(policy: Isolation, cwd: string) {
 }
 const tomlString = (value: string) => JSON.stringify(value);
 /**
+ * Скрытые пути в форме, пригодной для codex.
+ *
+ * `none` у codex запрещает и метаданные: скрытый каталог, внутри которого
+ * лежит открытый путь (каталог контура над worktree, исходный checkout над
+ * своим .git), ломал realpath — `git status` и `node` в worktree падали с
+ * EPERM на lstat предка. Такой каталог не закрывается целиком: закрываются
+ * его элементы, кроме ветки, ведущей к открытому пути, и так вглубь. Элемент,
+ * появившийся в нём после построения политики, не закрыт — это граница
+ * подхода; seatbelt sandbox-runtime и claude закрывают каталог целиком.
+ */
+function codexHidden(policy: Isolation) {
+  const open = [...policy.readable, ...policy.write];
+  const within = (path: string, root: string) => path === root || path.startsWith(root + sep);
+  const expand = (hidden: string): string[] => {
+    const inner = open.filter((p) => p !== hidden && within(p, hidden));
+    if (!inner.length) return open.some((p) => within(hidden, p) && p !== hidden) ? [] : [hidden];
+    let entries: string[];
+    try {
+      entries = readdirSync(hidden).map((name) => join(hidden, name));
+    } catch {
+      return [];
+    }
+    return entries.flatMap((entry) =>
+      open.some((p) => p === entry)
+        ? []
+        : inner.some((p) => within(p, entry))
+          ? expand(entry)
+          : [entry],
+    );
+  };
+  return [...new Set(policy.hidden.flatMap(expand))];
+}
+/**
  * Профиль прав codex: карта путей с уровнем доступа. Более конкретный путь
  * побеждает, поэтому worktree внутри скрытого каталога контура остаётся
  * доступным. Временный каталог открыт на запись: проверкам ревьюера и
@@ -139,7 +172,7 @@ export function codexPermissions(policy: Isolation, network: boolean) {
   const entries: [string, string][] = [
     [':root', 'read'],
     [':tmpdir', 'write'],
-    ...policy.hidden.map((p) => [p, 'none'] as [string, string]),
+    ...codexHidden(policy).map((p) => [p, 'none'] as [string, string]),
     ...policy.readable.map((p) => [p, 'read'] as [string, string]),
     ...policy.write.map((p) => [p, 'write'] as [string, string]),
   ];

@@ -21,7 +21,7 @@ import { fixture, input } from './helpers.ts';
 import { Workspace } from '../src/core/workspace.ts';
 import { completion } from '../src/core/sync-state.ts';
 import { adapters, cliArguments, type AgentRequest } from '../src/runner/adapters.ts';
-import { isolation, claudeFileDenies } from '../src/runner/isolation.ts';
+import { isolation, claudeFileDenies, codexPermissions } from '../src/runner/isolation.ts';
 
 const SHA = 'a'.repeat(40);
 const OTHER = 'b'.repeat(40);
@@ -757,4 +757,40 @@ test('Скрытое внутри рабочего каталога закрыт
     false,
     'предок рабочего каталога не закрыт',
   );
+});
+
+test('Codex закрывает содержимое скрытого каталога, а не сам каталог над открытым путём', async () => {
+  // `none` у codex запрещает и метаданные: закрытый целиком каталог контура
+  // над worktree ломал realpath, и `git status` и `node` в worktree падали.
+  const root = realpathSync(await mkdtemp(join(tmpdir(), 'devcontour-codex-')));
+  try {
+    const controller = join(root, 'controller'),
+      source = join(root, 'source'),
+      worktree = join(controller, 'worktrees', 'R1');
+    await mkdir(join(controller, 'worktrees', 'R2'), { recursive: true });
+    await mkdir(worktree, { recursive: true });
+    await mkdir(join(source, '.git'), { recursive: true });
+    await writeFile(join(controller, 'state.sqlite'), 'db');
+    await writeFile(join(source, 'SOURCE.txt'), 'src');
+    const argv = codexPermissions(
+      isolation({
+        write: [worktree],
+        controller: [controller, source],
+        readable: [join(source, '.git')],
+      }),
+      false,
+    ).join(' ');
+    const level = (path: string) =>
+      new RegExp(`${JSON.stringify(path).replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}="(\\w+)"`).exec(
+        argv,
+      )?.[1];
+    assert.equal(level(controller), undefined, 'предок worktree не закрыт целиком');
+    assert.equal(level(join(controller, 'state.sqlite')), 'none');
+    assert.equal(level(join(controller, 'worktrees', 'R2')), 'none', 'чужой worktree закрыт');
+    assert.equal(level(worktree), 'write');
+    assert.equal(level(join(source, 'SOURCE.txt')), 'none');
+    assert.equal(level(join(source, '.git')), 'read');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
