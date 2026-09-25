@@ -4,7 +4,7 @@ import { readFile, writeFile, mkdir, mkdtemp, rm, realpath, lstat } from 'node:f
 import { tmpdir } from 'node:os';
 import { isolation, isolatedCommand, isolationSupport } from './isolation.ts';
 import { join, resolve, sep, delimiter, relative, dirname } from 'node:path';
-import { accessSync, constants } from 'node:fs';
+import { accessSync, constants, existsSync } from 'node:fs';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import { command, git } from './process.ts';
 import { digest, DevContour } from '../core/service.ts';
@@ -149,17 +149,13 @@ function diagnostic(stderr: string, stdout: string, redact?: (value: string) => 
 function failedCases(counts: ReturnType<typeof junitSummary>) {
   return counts.failedDetails.join('; ').slice(0, 600);
 }
-/** Песочница отказала до запуска команды: вывода команды нет, причина — поиск shell. */
-export function sandboxNotStarted(
-  argv: string[],
-  result: { code: number; stdout: string; stderr: string },
-) {
-  return (
-    argv[1]?.includes('sandbox-runtime') === true &&
-    result.code !== 0 &&
-    !result.stdout.trim() &&
-    /^Error: Shell '[^']+' not found in PATH\s*$/.test(result.stderr.trim())
-  );
+/**
+ * Песочница отказала до запуска команды: процесс завершился неуспешно, а
+ * метка старта, которую обёртка создаёт перед exec, не появилась. Текст
+ * stderr признаком не служит — его может напечатать и сама проверка.
+ */
+export function sandboxNotStarted(result: { code: number }, started: string | undefined) {
+  return started !== undefined && result.code !== 0 && !existsSync(started);
 }
 /** Команда проверки находится — иначе ENOENT, как при обычном запуске. */
 function assertExecutable(name: string, path: string | undefined, cwd: string) {
@@ -240,8 +236,12 @@ export async function runCheck(
   },
 ) {
   let argv = options.argv,
-    env = options.env;
+    env = options.env,
+    started: string | undefined;
   const scratch = await realpath(await mkdtemp(join(tmpdir(), 'dc-gate-')));
+  // Метка старта — вне TMPDIR команды: проверка, чистящая свой временный
+  // каталог, не должна стирать признак того, что она уже начиналась.
+  const marks = await realpath(await mkdtemp(join(tmpdir(), 'dc-start-')));
   try {
     if (h.config.isolation.mode === 'os') {
       const support = isolationBackend.check();
@@ -253,12 +253,13 @@ export async function runCheck(
       // от обёртки. Причина та же, что и без неё, — называем её так же.
       assertExecutable(argv[0], env.PATH, options.cwd);
       const policy = isolation({
-        write: [...options.write, scratch],
+        write: [...options.write, scratch, marks],
         controller: options.controller,
         readable: options.readable,
         domains: h.config.isolation.domains,
       });
-      const wrapped = await isolatedCommand(policy, argv, options.settingsDir, scratch);
+      started = join(marks, 'started');
+      const wrapped = await isolatedCommand(policy, argv, options.settingsDir, scratch, started);
       argv = wrapped.argv;
       env = { ...env, ...wrapped.env };
     }
@@ -272,17 +273,19 @@ export async function runCheck(
         // и по таймауту, отмене или падению.
         contain: true,
       });
-    let result = await execute();
+    let result = await execute(),
+      attempts = 1;
     // sandbox-runtime ищет shell через `which` с таймаутом в секунду и под
-    // нагрузкой отказывает до запуска команды. Команда проверки при этом не
-    // исполнялась, поэтому повтор безопасен; любой другой отказ — итог.
-    for (let attempt = 1; attempt < 3 && sandboxNotStarted(argv, result); attempt++) {
-      await new Promise((r) => setTimeout(r, 500 * attempt));
+    // нагрузкой отказывает до запуска команды. Повтор допустим, только если
+    // команда точно не начиналась: метки старта нет.
+    for (; attempts < 3 && sandboxNotStarted(result, started); attempts++) {
+      await new Promise((r) => setTimeout(r, 500 * attempts));
       result = await execute();
     }
-    return result;
+    return { ...result, attempts };
   } finally {
     await rm(scratch, { recursive: true, force: true });
+    await rm(marks, { recursive: true, force: true });
   }
 }
 /** Проверка механизма песочницы; тест подменяет её, чтобы проверить отказ. */

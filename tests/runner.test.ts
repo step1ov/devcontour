@@ -14,11 +14,11 @@ import { adapters, cliArguments, type AgentRequest } from '../src/runner/adapter
 import { git, command } from '../src/runner/process.ts';
 import {
   junitSummary,
-  sandboxNotStarted,
+  runCheck,
   isolationBackend,
   prepareReportPath,
 } from '../src/runner/gates.ts';
-import { input } from './helpers.ts';
+import { input, fixture } from './helpers.ts';
 import { acceptBoard } from '../src/runner/agent-control.ts';
 import { ProjectMemory } from '../src/application/memory.ts';
 import { repositories } from '../src/core/repositories.ts';
@@ -1128,26 +1128,53 @@ test('Проверка не оставляет процессов — ни по 
     }
   }
 });
-test('Проверка повторяется, только если песочница отказала до запуска команды', () => {
-  // sandbox-runtime ищет shell через `which` с таймаутом в секунду и под
-  // нагрузкой отказывает, не запустив команду. Повтор допустим только тогда:
-  // провал самой проверки повтором не маскируется.
-  const srt = [process.execPath, '/x/node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js'];
-  const failed = (stdout: string, stderr: string, code = 1) => ({ code, stdout, stderr });
-  assert.equal(sandboxNotStarted(srt, failed('', "Error: Shell 'bash' not found in PATH\n")), true);
-  assert.equal(
-    sandboxNotStarted(srt, failed('1 test failed', "Error: Shell 'bash' not found in PATH")),
-    false,
-  );
-  assert.equal(sandboxNotStarted(srt, failed('', 'AssertionError: expected 5')), false);
-  assert.equal(
-    sandboxNotStarted(srt, failed('', "Error: Shell 'bash' not found in PATH", 0)),
-    false,
-  );
-  assert.equal(
-    sandboxNotStarted(['node', 'verify.mjs'], failed('', "Error: Shell 'bash' not found in PATH")),
-    false,
-  );
+test('Проверка повторяется, только если песочница отказала до запуска команды', async () => {
+  // Повтор по тексту stderr перезапускал уже начавшуюся команду: её первый
+  // провал терялся, а побочные эффекты удваивались. Признак — метка старта,
+  // которую обёртка создаёт внутри песочницы перед exec.
+  const f = fixture();
+  const dir = await mkdtemp(join(tmpdir(), 'devcontour-retry-'));
+  try {
+    const count = join(dir, 'count.txt');
+    const run = (argv: string[], env: NodeJS.ProcessEnv) =>
+      runCheck(f.h, {
+        argv,
+        cwd: dir,
+        env,
+        signal: new AbortController().signal,
+        timeoutMs: 30_000,
+        write: [dir],
+        readable: [],
+        controller: [],
+        settingsDir: join(dir, 'settings'),
+      });
+    // Команда начала работу, напечатала ту же строку, что sandbox-runtime
+    // при отказе, и упала: это её провал, повтора нет.
+    const started = await run(
+      [
+        process.execPath,
+        '-e',
+        `const fs=require('fs');fs.appendFileSync(${JSON.stringify(count)},'x');console.error("Error: Shell 'bash' not found in PATH");process.exit(1)`,
+      ],
+      { PATH: process.env.PATH, HOME: process.env.HOME },
+    );
+    assert.equal(started.code, 1);
+    assert.equal(started.attempts, 1);
+    assert.equal(await readFile(count, 'utf8'), 'x', 'команда выполнилась ровно один раз');
+
+    // Песочница отказала до старта (в PATH нет даже `which`): повторы идут,
+    // а команда не выполнялась ни разу.
+    const refused = await run(
+      [process.execPath, '-e', `require('fs').appendFileSync(${JSON.stringify(count)},'y')`],
+      { PATH: '/nonexistent', HOME: process.env.HOME },
+    );
+    assert.notEqual(refused.code, 0);
+    assert.equal(refused.attempts, 3, 'отказ до старта повторяется');
+    assert.equal(await readFile(count, 'utf8'), 'x', 'непосредственно команда не запускалась');
+  } finally {
+    f.cleanup();
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('Граница закрывает исходные checkout всех репозиториев, оставляя их .git', async () => {

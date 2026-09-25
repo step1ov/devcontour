@@ -227,6 +227,11 @@ export async function isolatedCommand(
   argv: string[],
   settingsDir: string,
   scratch: string,
+  /**
+   * Файл, который обёртка создаёт внутри песочницы перед exec команды. Его
+   * отсутствие — единственный достоверный признак, что команда не начиналась.
+   */
+  started: string,
 ) {
   await mkdir(settingsDir, { recursive: true });
   const settings = join(settingsDir, 'isolation.json');
@@ -253,6 +258,10 @@ export async function isolatedCommand(
       '--settings',
       settings,
       '--',
+      '/bin/sh',
+      '-c',
+      ': > "$0" && exec "$@"',
+      started,
       '/usr/bin/env',
       `TMPDIR=${scratch}`,
       ...argv,
