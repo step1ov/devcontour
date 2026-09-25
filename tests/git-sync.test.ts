@@ -735,3 +735,79 @@ test('Независимый клон получает манифест testcase
     f.cleanup();
   }
 });
+
+test('Receipt, чей manifest не подтверждает названный testcase, не импортируется как done', async () => {
+  const f = fixture();
+  try {
+    const a = f.create('alice');
+    writeFileSync(
+      join(a.repo, 'spec.md'),
+      '## REQ-test: Observed behaviour\nNamed testcase must run.\n',
+    );
+    git(a.repo, 'add', '.');
+    git(a.repo, 'commit', '-m', 'Requirement');
+    syncGit(a.h, { member: 'alice' });
+    const board = a.h.createBoard('Proof transfer', '', 'main');
+    const snap = requirementSnapshot(a.repo, 'spec.md');
+    const t = a.h.addTask(board.id, {
+      ...input(),
+      requirements: [
+        {
+          ...snap.requirements[0],
+          source: snap.source,
+          gate: 'test',
+          scenario: 'Observed behaviour',
+          testId: 'named-case',
+        },
+      ],
+    });
+    a.h.approve(board.id);
+    a.h.pause(false);
+    const r = a.h.claim('fixture')!;
+    const sha = git(a.repo, 'rev-parse', 'HEAD');
+    git(a.repo, 'update-ref', 'refs/heads/' + a.h.config.targetBranch, sha);
+    a.h.phase(r.id, r.token, 'integrating', { candidateSha: sha, integrationSha: sha });
+    for (const phase of ['candidate', 'integration'] as const) {
+      for (const gate of ['test', 'requirement-source', 'independent-review'])
+        a.h.evidence(r.id, r.token, {
+          kind: gate === 'independent-review' ? 'review' : 'test',
+          phase,
+          sha,
+          gate,
+          passed: true,
+          exitCode: 0,
+          command: ['fixture'],
+          log: '',
+          digest: digest('fixture'),
+          summary: 'fixture',
+          tests: gate === 'test' ? [{ id: 'named-case', status: 'passed' }] : undefined,
+        });
+    }
+    a.h.finish(r.id, r.token, sha);
+    const taskA = a.store.read().tasks.find((x) => x.id === t.id)!;
+    assertRequirementProof(a.h, taskA);
+    assert.equal(requirementReport(a.h, 'main').tasks[0].requirements[0].proof, 'testcase');
+    a.h.pause(true);
+    syncGit(a.h);
+    a.commit();
+    const receipts = join(a.repo, '.devcontour', 'receipts');
+    for (const file of readdirSync(receipts))
+      rewrite(join(receipts, file), (record) => {
+        for (const check of record.data.checks)
+          if (check.tests) check.tests = [{ id: 'unrelated', status: 'passed' }];
+      });
+    a.commit();
+    // Доверенная история Git, но receipt противоречит постановке: названного
+    // теста в его manifest нет. Импорт отказывает целиком и ничего не меняет:
+    // задача не становится done и не открывает зависимые.
+    const b = f.create('bob', a);
+    git(b.repo, 'update-ref', 'refs/heads/' + b.h.config.targetBranch, sha);
+    assert.throws(() => syncGit(b.h, { member: 'bob' }), /named-case.*не выполнялся/);
+    assert.equal(
+      b.store.read().tasks.some((x) => x.id === t.id && x.status === 'done'),
+      false,
+    );
+  } finally {
+    f.cleanup();
+  }
+});

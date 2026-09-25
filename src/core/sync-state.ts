@@ -1,9 +1,17 @@
+import { unprovenReason } from './proof.ts';
 import { validatePreparation } from './preparation.ts';
 import { digest, specDigest, type DevContour } from './service.ts';
 import { repository, requiresContract } from './repositories.ts';
 import { assertDag } from './graph.ts';
 import { validateTaskContext } from './workflow.ts';
-import { taskInput, type DevContourState, type Task, type Approval, type Board } from './model.ts';
+import {
+  taskInput,
+  type DevContourState,
+  type Task,
+  type Approval,
+  type Board,
+  type Evidence,
+} from './model.ts';
 import {
   canonical,
   recordKey,
@@ -204,6 +212,13 @@ export function validateReceipt(receipt: CompletionReceipt, t: Task, demo: boole
           throw new Error(`Нет PASS в receipt ${t.id}: ${phase}/${gate}`);
       }
   }
+  // Названный сценарий подтверждается и в чужом receipt по тому же правилу,
+  // что при локальном finish: иначе импортированная задача становилась done и
+  // открывала зависимые, хотя её manifest прямо не содержит нужного теста.
+  // Receipt без manifest у задачи с testId тоже не подтверждает — такой
+  // задачи не существовало до появления testId.
+  const unproven = unprovenReason(t.requirements, receipt.checks as Evidence[], receipt.resultSha);
+  if (unproven) throw new Error(`Receipt ${t.id}: ${unproven}`);
 }
 
 // Shared records are peer attestations from a reviewed Git repository. They never
