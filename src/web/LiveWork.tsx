@@ -11,8 +11,20 @@ import { Activity, Phases, elapsed, engine } from './Workers.tsx';
 // них: роль и модель, задача и её доска, фаза, время и попытка. Свободные
 // места — одной строкой, а не пустыми карточками.
 
+/** Работа ведущего цикла, которую тоже делает агент: ревью плана, совместная проверка. */
+export type LiveWorkflow = {
+  key: string;
+  kind: 'board' | 'changeset';
+  id: string;
+  stage: number;
+  status: string;
+  authorRuntime?: string;
+  history?: { at: string; stage: number; event: string }[];
+};
 export type LiveState = {
   runs: Run[];
+  workflows?: LiveWorkflow[];
+  changeSets?: { id: string; title: string }[];
   tasks: (Task & { blockers?: string[] })[];
   boards: Board[];
   paused: boolean;
@@ -35,6 +47,39 @@ export function activeWork(state: LiveState) {
     });
 }
 
+// Ревью плана и совместная проверка идут без прогона задачи: раньше полоса
+// в это время говорила «никто не работает», хотя codex читал план.
+export function workflowWork(state: LiveState) {
+  return (state.workflows ?? [])
+    .filter(
+      (w) =>
+        w.status === 'running' &&
+        ((w.kind === 'board' && w.stage === 0) || (w.kind === 'changeset' && w.stage === 1)),
+    )
+    .map((w) => {
+      const board = w.kind === 'board' ? state.boards.find((b) => b.id === w.id) : undefined;
+      const change = state.changeSets?.find((c) => c.id === w.id);
+      const since =
+        [...(w.history ?? [])].reverse().find((h) => h.event === 'running')?.at ??
+        new Date().toISOString();
+      return w.kind === 'board'
+        ? {
+            key: w.key,
+            label: 'Ревью плана',
+            who: w.authorRuntime === 'codex' ? 'claude' : 'codex',
+            subject: board?.title ?? w.id,
+            since,
+          }
+        : {
+            key: w.key,
+            label: 'Совместная проверка',
+            who: 'проверки',
+            subject: change?.title ?? w.id,
+            since,
+          };
+    });
+}
+
 export function LiveWork({
   state,
   stopReason,
@@ -47,6 +92,7 @@ export function LiveWork({
   onStart?: () => void;
 }) {
   const work = activeWork(state);
+  const flows = workflowWork(state);
   const free = Math.max(0, state.config.concurrency - work.length);
   const failed = state.tasks.filter((t) => t.status === 'failed').length;
   const waiting = state.tasks.filter((t) => t.status === 'ready' && t.blockers?.length).length;
@@ -62,12 +108,14 @@ export function LiveWork({
             aria-hidden="true"
             className={cn(
               'inline-block size-2 rounded-full',
-              work.length ? 'bg-success animate-pulse' : 'bg-(--text-secondary)',
+              work.length || flows.length ? 'bg-success animate-pulse' : 'bg-(--text-secondary)',
             )}
           />
           {work.length
             ? `Работают: ${work.length} из ${state.config.concurrency}`
-            : 'Сейчас никто не работает'}
+            : flows.length
+              ? flows.map((f) => f.label).join(', ')
+              : 'Сейчас никто не работает'}
         </strong>
         {state.paused && (
           <span className="text-muted-foreground flex items-center gap-1">
@@ -86,6 +134,24 @@ export function LiveWork({
           </Button>
         )}
       </div>
+      {flows.length > 0 && (
+        <ul className="m-0 grid list-none gap-2 p-0" aria-label="Работа ведущего цикла">
+          {flows.map((f) => (
+            <li
+              key={f.key}
+              className="border-primary/30 bg-primary/5 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 rounded-md border px-3 py-2 text-sm"
+            >
+              <span className="flex items-center gap-1 font-medium">
+                <Eye aria-hidden="true" className="text-primary size-4 shrink-0" />
+                {f.label}
+              </span>
+              <span className="text-muted-foreground font-mono text-xs">{f.who}</span>
+              <span className="min-w-0 font-semibold [overflow-wrap:anywhere]">{f.subject}</span>
+              <span className="text-muted-foreground ml-auto text-xs">{elapsed(f.since)}</span>
+            </li>
+          ))}
+        </ul>
+      )}
       {work.length > 0 && (
         <ul className="m-0 grid list-none gap-2 p-0">
           {work.map(({ run, task, board, since }) => (

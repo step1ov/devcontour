@@ -171,3 +171,33 @@ test('Local API rejects foreign origins and malformed changes', async ({ request
   });
   expect(arbitrary.status()).toBe(404);
 });
+
+test('Ревью плана видно как работа агента, а не «никто не работает»', async ({ page }) => {
+  // Ревью плана идёт без прогона задачи: раньше полоса в это время молчала.
+  await page.route('**/api/state', async (route) => {
+    const response = await route.fetch();
+    const state = (await response.json()) as {
+      boards: { id: string; title: string }[];
+      workflows?: unknown[];
+    };
+    const board = state.boards.find((b) => b.title === 'Каталог продуктов')!;
+    state.workflows = [
+      {
+        key: 'k'.repeat(64),
+        kind: 'board',
+        id: board.id,
+        stage: 0,
+        status: 'running',
+        authorRuntime: 'claude',
+        history: [{ at: new Date().toISOString(), stage: 0, event: 'running' }],
+      },
+    ];
+    await route.fulfill({ response, json: state });
+  });
+  await page.goto('/');
+  const live = page.getByRole('region', { name: 'Сейчас работают' });
+  await expect(live).toContainText('Ревью плана');
+  const row = live.getByRole('list', { name: 'Работа ведущего цикла' }).getByRole('listitem');
+  await expect(row).toContainText('codex');
+  await expect(row).toContainText('Каталог продуктов');
+});
