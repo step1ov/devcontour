@@ -144,6 +144,8 @@ export interface AgentRequest {
   review: boolean;
   task: Task;
   model?: string;
+  /** Уровень рассуждения: codex получает его как model_reasoning_effort. */
+  effort?: string;
   resourcesJson?: string;
   signal: AbortSignal;
   timeoutMs: number;
@@ -221,6 +223,7 @@ export function cliArguments(
       '--output-last-message',
       resultPath,
       ...(r.model ? ['--model', r.model] : []),
+      ...(r.effort ? ['-c', `model_reasoning_effort="${r.effort}"`] : []),
       // Без объявленного профиля инструментов codex брал глобальную
       // конфигурацию оператора вместе с её MCP-серверами. Чужой сервер,
       // который не смог авторизоваться, убивал прогон на стадии ревью —

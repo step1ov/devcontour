@@ -283,6 +283,8 @@ export interface Run {
   reviewer: RuntimeName;
   model?: string;
   reviewerModel?: string;
+  effort?: string;
+  reviewerEffort?: string;
   policyDigest: string;
   status: 'active' | 'succeeded' | 'failed' | 'cancelled' | 'expired';
   phase: TaskStatus;
@@ -400,6 +402,12 @@ export const gateList = z
 export const reviewerBindingSchema = z.object({
   runtime: z.enum(['codex', 'claude', 'demo']),
   model: z.string().optional(),
+  /**
+   * Уровень рассуждения модели. Дешёвая роль (тестировщик по готовому
+   * сценарию) не обязана думать так же долго, как исполнитель ядра. Пока
+   * поддерживается только codex (`model_reasoning_effort`).
+   */
+  effort: z.enum(['low', 'medium', 'high', 'xhigh']).optional(),
   toolProfile: z.string().optional(),
 });
 export const roleBindingSchema = reviewerBindingSchema.extend({
@@ -571,11 +579,7 @@ export const configSchema = z.object({
   // расходятся, и роль, объявленная компонентом, начинает уметь не то, что
   // роль, объявленная workspace.
   roles: z.record(roleId, roleBindingSchema),
-  reviewer: z.object({
-    toolProfile: z.string().optional(),
-    runtime: z.enum(['codex', 'claude', 'demo']),
-    model: z.string().optional(),
-  }),
+  reviewer: reviewerBindingSchema,
   gates: gateList,
   protectedPaths: z
     .array(z.string().min(1))

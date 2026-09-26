@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BlockedError } from '../src/core/model.ts';
+import { BlockedError, type Task } from '../src/core/model.ts';
 import { mkdtemp, readFile, writeFile, rm, mkdir, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { existsSync } from 'node:fs';
@@ -346,6 +346,28 @@ test('CLI adapters use structured outputs, stdin prompts and restricted review p
     claude.slice(claude.indexOf('--setting-sources'), claude.indexOf('--setting-sources') + 2),
     ['--setting-sources', ''],
   );
+});
+test('Уровень рассуждения передаётся codex как model_reasoning_effort', () => {
+  const argv = (effort?: string) =>
+    cliArguments(
+      'codex',
+      {
+        review: false,
+        prompt: 'p',
+        cwd: '/tmp',
+        artifactDir: '/tmp',
+        task: {} as Task,
+        model: 'gpt-6-astra',
+        effort,
+        signal: new AbortController().signal,
+        timeoutMs: 1000,
+      },
+      '/tmp/schema.json',
+      '/tmp/result.json',
+    ).join(' ');
+  assert.match(argv('low'), /--model gpt-6-astra/);
+  assert.match(argv('low'), /model_reasoning_effort="low"/);
+  assert.doesNotMatch(argv(), /model_reasoning_effort/);
 });
 test('Process timeout interrupts actual child processes', async () => {
   const r = await command([process.execPath, '-e', 'setInterval(()=>{},1000)'], process.cwd(), {

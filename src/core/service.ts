@@ -562,6 +562,8 @@ export class DevContour {
         reviewer: reviewerBinding(this.config, t.role, t.repositoryId).runtime,
         model: roleBinding(this.config, t.role, t.repositoryId).model,
         reviewerModel: reviewerBinding(this.config, t.role, t.repositoryId).model,
+        effort: roleBinding(this.config, t.role, t.repositoryId).effort,
+        reviewerEffort: reviewerBinding(this.config, t.role, t.repositoryId).effort,
         policyDigest: this.policyDigest(t.repositoryId),
         status: 'active',
         phase: 'running',

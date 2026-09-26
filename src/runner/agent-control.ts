@@ -136,6 +136,7 @@ async function review(
           : undefined,
       task: {} as Task,
       model: h.config.reviewer.runtime === reviewer ? h.config.reviewer.model : undefined,
+      effort: h.config.reviewer.runtime === reviewer ? h.config.reviewer.effort : undefined,
       signal: AbortSignal.timeout(h.config.runTimeoutMs),
       timeoutMs: h.config.runTimeoutMs,
     },

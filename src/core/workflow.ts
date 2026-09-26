@@ -39,6 +39,25 @@ export function orderedGates<T extends Gate>(gates: T[]): T[] {
 
 export function validateWorkflow(config: Config) {
   const repos = repositories(config);
+  // Уровень рассуждения передаётся только codex: у claude поле молча ничего бы
+  // не меняло, а конфигурация обещала бы экономию, которой нет.
+  const effortBindings = [
+    ['reviewer', config.reviewer],
+    ...Object.entries(config.roles).flatMap(([id, b]) => [
+      [id, b],
+      [`${id}.reviewer`, b.reviewer],
+    ]),
+    ...repos.flatMap((r) => [
+      [`${r.id}.reviewer`, r.reviewer],
+      ...Object.entries(r.roles ?? {}).flatMap(([id, b]) => [
+        [`${r.id}.${id}`, b],
+        [`${r.id}.${id}.reviewer`, b.reviewer],
+      ]),
+    ]),
+  ] as [string, { runtime: string; effort?: string } | undefined][];
+  for (const [name, binding] of effortBindings)
+    if (binding?.effort && binding.runtime !== 'codex')
+      throw new DomainError(`effort поддерживается только для codex: ${name}`);
   if (
     config.workspaceMode === 'embedded' &&
     (!config.workspaceRoot ||

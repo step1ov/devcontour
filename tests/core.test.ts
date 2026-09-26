@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fixture, input, complete } from './helpers.ts';
+import { fixture, input, complete, config } from './helpers.ts';
 import { specDigest } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
@@ -553,5 +553,33 @@ test('Цель доски правится до утверждения план�
     );
   } finally {
     f.cleanup();
+  }
+});
+
+test('Уровень рассуждения роли доходит до прогона, а у claude отвергается', () => {
+  const f = fixture();
+  try {
+    f.h.config.roles.qa = { runtime: 'codex', model: 'gpt-6-astra', effort: 'low' };
+    const b = f.h.createBoard('Доска');
+    f.h.addTask(b.id, input('Сценарий'));
+    f.h.approve(b.id);
+    f.h.pause(false);
+    const run = f.h.claim('test')!;
+    assert.equal(run.model, 'gpt-6-astra');
+    assert.equal(run.effort, 'low');
+    assert.equal(run.reviewerEffort, undefined, 'ревьюер без своего уровня его не наследует');
+  } finally {
+    f.cleanup();
+  }
+  // Поле, которое claude не получит, не должно обещать экономию.
+  const g = fixture();
+  try {
+    assert.throws(
+      () =>
+        new DevContour(g.store, config({ roles: { qa: { runtime: 'claude', effort: 'low' } } })),
+      /effort поддерживается только для codex: qa/,
+    );
+  } finally {
+    g.cleanup();
   }
 });

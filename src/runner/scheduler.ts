@@ -453,6 +453,7 @@ export class Scheduler {
           isolation: this.agentIsolation(run, task, cwd, true),
           task,
           model: run.reviewerModel,
+          effort: run.reviewerEffort,
           signal,
           timeoutMs: this.h.config.runTimeoutMs,
           resourcesJson: JSON.stringify(run.resources ?? []),
@@ -669,6 +670,7 @@ export class Scheduler {
                           isolation: this.agentIsolation(run, task, cwd, false),
                           task,
                           model: run.model,
+                          effort: run.effort,
                           // Модель, которую runtime выбрал сам, записывается на
                           // прогон: без закреплённой модели панель показывала один
                           // runtime, и переход на дорогой длинноконтекстный вариант
