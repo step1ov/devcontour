@@ -72,7 +72,6 @@ export function Phases({ current }: { current?: string }) {
   );
 }
 
-
 // Фаза отвечает грубо: `running` одинаков и через минуту после выдачи, и на
 // десятом инструменте. Последние действия runtime показывают, чем агент занят
 // на самом деле — читать журнал для этого больше не нужно.
@@ -117,9 +116,7 @@ export function WorkerCards({ workers, concurrency }: { workers: Worker[]; concu
           <CardContent className="grid gap-3 p-4">
             <div className="flex flex-wrap items-center gap-3">
               <Bot className="text-primary size-5 shrink-0" aria-hidden="true" />
-              <strong className="text-md">
-                {w.role ? roleLabel(w.role) : 'Исполнитель'}
-              </strong>
+              <strong className="text-md">{w.role ? roleLabel(w.role) : 'Исполнитель'}</strong>
               <Badge variant="secondary" className="font-mono text-xs">
                 {engine(w.runtime, w.model)}
               </Badge>
@@ -140,14 +137,14 @@ export function WorkerCards({ workers, concurrency }: { workers: Worker[]; concu
           </CardContent>
         </Card>
       ))}
-      {Array.from({ length: free }, (_, i) => (
-        <Card key={'free-' + i} className="border-dashed">
-          <CardContent className="text-muted-foreground flex items-center gap-3 p-4 text-sm">
-            <CircleDashed aria-hidden="true" className="size-5 shrink-0" />
-            Исполнитель свободен
-          </CardContent>
-        </Card>
-      ))}
+      {/* Свободные места — одной строкой: пустые карточки на каждое место
+          занимали экран и ничего не сообщали. */}
+      {free > 0 && (
+        <p className="text-muted-foreground flex items-center gap-2 text-sm">
+          <CircleDashed aria-hidden="true" className="size-4 shrink-0" />
+          {workers.length ? `Свободно ещё мест: ${free}` : `Все исполнители свободны (${free})`}
+        </p>
+      )}
       {!workers.length && !free && (
         <p className="text-muted-foreground text-sm">
           Исполнители не запускались. Здесь появятся роль, фаза, модель и время работы.

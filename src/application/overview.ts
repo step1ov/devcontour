@@ -260,15 +260,23 @@ export function authorOverview(h: DevContour): AuthorOverview {
           : ('in-progress' as const),
       at: c.acceptance?.at ?? c.verifications.at(-1)?.finishedAt,
     })),
-    ...s.boards.map((b) => {
-      const r = b.revisions.at(-1)!;
-      return {
-        title: b.title,
-        kind: 'board' as const,
-        status: r.status === 'accepted' ? ('accepted' as const) : ('in-progress' as const),
-        at: r.acceptedAt ?? r.createdAt,
-      };
-    }),
+    // Доска, вся работа которой отменена, — след перепланирования, а не
+    // изменение продукта: на пилоте семь таких досок значились «в работе».
+    ...s.boards
+      .filter((b) => {
+        const ids = new Set(b.revisions.flatMap((r) => r.taskIds));
+        const own = s.tasks.filter((t) => ids.has(t.id));
+        return !own.length || own.some((t) => t.status !== 'cancelled');
+      })
+      .map((b) => {
+        const r = b.revisions.at(-1)!;
+        return {
+          title: b.title,
+          kind: 'board' as const,
+          status: r.status === 'accepted' ? ('accepted' as const) : ('in-progress' as const),
+          at: r.acceptedAt ?? r.createdAt,
+        };
+      }),
   ]
     .sort((a, b) => (b.at ?? '').localeCompare(a.at ?? ''))
     .slice(0, 8);

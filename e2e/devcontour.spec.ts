@@ -27,7 +27,16 @@ test('Plan → parallel execution → acceptance → correction → acceptance p
     'Очередь на паузе',
   );
   await page.getByRole('button', { name: 'Запустить очередь' }).click();
+  // Кто над чем работает — видно над вкладками, без перехода на ход работ:
+  // роль, задача и её фаза.
+  const live = page.getByRole('region', { name: 'Сейчас работают' });
+  await expect(live.getByRole('listitem').first()).toBeVisible(cycle);
+  await expect(live).toContainText(/Работают: [12] из 2/);
+  await expect(live.getByRole('listitem').first()).toContainText(
+    /пишет код|гоняет проверки|на ревью|интегрирует/,
+  );
   await expect(page.getByRole('button', { name: 'Принять доску' })).toBeVisible(cycle);
+  await expect(live).toContainText('Сейчас никто не работает');
   await page.getByRole('button', { name: 'Принять доску' }).click();
   await expect(page.getByRole('button', { name: 'Создать корректировку' })).toBeVisible();
   const before = await (await request.get('/api/state')).json();
@@ -64,6 +73,7 @@ test('Plan → parallel execution → acceptance → correction → acceptance p
 });
 test('Operator can create a board, tasks and dependency; invalid cycle is explained', async ({
   page,
+  request,
 }) => {
   await page.goto('/');
   await page.getByRole('button', { name: 'Создать доску', exact: true }).click();
@@ -91,7 +101,7 @@ test('Operator can create a board, tasks and dependency; invalid cycle is explai
     await expect(page.getByRole('dialog')).toHaveCount(0);
   }
   await page.getByRole('tab', { name: 'Список', exact: true }).click();
-  await page.getByRole('button', { name: /Контракт сервиса.*Черновик/ }).click();
+  await page.getByRole('button', { name: /^T-[0-9a-f]+ Контракт сервиса.*Черновик/ }).click();
   await page.getByRole('button', { name: 'Редактировать', exact: true }).click();
   await page
     .getByRole('dialog')
@@ -100,6 +110,23 @@ test('Operator can create a board, tasks and dependency; invalid cycle is explai
   await page.getByRole('button', { name: 'Сохранить черновик' }).click();
   await expect(page.getByRole('alert')).toContainText('Цикл зависимостей');
   await page.getByRole('button', { name: 'Закрыть диалог' }).click();
+  // Зависимость названа задачей, а не её UUID.
+  await expect(page.getByRole('button', { name: /Экран сервиса/ })).toContainText(
+    'после: Контракт сервиса',
+  );
+  // Отменённая задача — история: по умолчанию её не видно, по запросу видно.
+  const state = (await (await request.get('/api/state')).json()) as {
+    tasks: { id: string; title: string }[];
+  };
+  const screen = state.tasks.find((t) => t.title === 'Экран сервиса')!;
+  const cancelled = await request.post(`/api/tasks/${screen.id}/cancel`, {
+    headers: { 'X-DevContour-Request': '1' },
+    data: {},
+  });
+  expect(cancelled.ok()).toBe(true);
+  await expect(page.getByRole('button', { name: /Экран сервиса/ })).toHaveCount(0);
+  await page.getByLabel('Показать отменённые (1)').check();
+  await expect(page.getByRole('button', { name: /Экран сервиса.*Отменена/ })).toBeVisible();
 });
 test('Desktop and mobile views are accessible and do not overflow', async ({ page }) => {
   await page.goto('/');

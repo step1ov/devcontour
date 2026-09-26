@@ -30,6 +30,7 @@ import {
   Activity,
   Bot,
   Eye,
+  Loader2,
 } from 'lucide-react';
 import type {
   DevContourState,
@@ -90,6 +91,7 @@ type Snapshot = Omit<DevContourState, 'tasks'> & {
 };
 import { roleLabel, currentRoles, setRoleSource } from './roles.ts';
 import { Phases, engine, elapsed } from './Workers.tsx';
+import { LiveWork } from './LiveWork.tsx';
 
 const waitingReasons: Record<string, string> = {
   product_approval_required:
@@ -130,6 +132,22 @@ function status(t: UITask) {
 }
 const taskStatusName = (t: UITask) =>
   t.status === 'done' && t.sharedCompletion ? 'Принята из Git' : statusNames[status(t)];
+// Что делает агент на узле графа: модель и фаза. Без этого граф отвечал
+// только «в работе» и не показывал, кто и на каком шаге.
+const phaseLabel: Record<string, string> = {
+  running: 'пишет код',
+  verifying: 'проверки',
+  reviewing: 'на ревью',
+  integrating: 'интеграция',
+};
+function liveLabel(run?: Run) {
+  if (!run) return undefined;
+  const who =
+    run.phase === 'reviewing'
+      ? engine(run.reviewer, run.reviewerModel)
+      : engine(run.runtime, run.model);
+  return `${phaseLabel[run.phase] ?? run.phase} · ${who}${run.attempt > 1 ? ` · попытка ${run.attempt}` : ''}`;
+}
 const shortId = (id: string) =>
   /^[A-Z]+-[a-f0-9-]{36}$/.test(id) ? id.slice(0, id.indexOf('-') + 9) : id;
 const badgeTone: Record<string, 'secondary' | 'ready' | 'success' | 'warning' | 'destructive'> = {
@@ -250,6 +268,26 @@ function boardProgress(data: Snapshot, board: Board) {
   const running = own.filter((t) => t.activeRunId).length;
   return `${done} из ${own.length}` + (running ? ` · ${running} в работе` : '');
 }
+// Доска, где вся работа отменена, — история, а не выбор. Один и тот же
+// список решает и что показать в навигации, и какую доску открыть первой:
+// раньше панель открывала отменённую доску, которой в навигации не было.
+function liveBoards(data: Snapshot) {
+  const running = new Set(data.runs.filter((r) => r.status === 'active').map((r) => r.taskId));
+  const rank = (b: Board) => {
+    const ids = new Set(b.revisions.flatMap((r) => r.taskIds));
+    if (data.tasks.some((t) => ids.has(t.id) && running.has(t.id))) return 0;
+    return b.revisions.at(-1)!.status === 'active' ? 1 : 2;
+  };
+  return data.boards
+    .filter((b) => {
+      const ids = new Set(b.revisions.flatMap((r) => r.taskIds));
+      const own = data.tasks.filter((t) => ids.has(t.id));
+      return own.length === 0 || own.some((t) => t.status !== 'cancelled');
+    })
+    .map((b, i) => ({ b, i, rank: rank(b) }))
+    .sort((x, y) => x.rank - y.rank || x.i - y.i)
+    .map((x) => x.b);
+}
 function StatusBadge({ value, children }: { value: string; children?: ReactNode }) {
   return (
     <Badge variant={badgeTone[value] ?? 'secondary'}>
@@ -335,6 +373,9 @@ export function App() {
     // Карточка появляется после отрисовки вкладки и очередного опроса.
   }, [focusChange, tab, data]);
   const [query, setQuery] = useState('');
+  // Отменённые задачи — история перепланирования. На пилоте их было 70 из
+  // 83, и граф из них не давал увидеть живую работу; показываются по запросу.
+  const [showCancelled, setShowCancelled] = useState(false);
   const [repositoryFilter, setRepositoryFilter] = useState('');
   const [modal, setModal] = useState<
     'board' | 'task' | 'edit' | 'correct' | 'contract' | 'changeset' | null
@@ -370,12 +411,7 @@ export function App() {
   // переходят вкладкой. Раньше при наличии задач панель сама открывала граф.
   useEffect(() => {
     if (!data) return;
-    if (!boardId)
-      setBoardId(
-        data.boards.find((b) => b.revisions.at(-1)?.status === 'active')?.id ??
-          data.boards[0]?.id ??
-          '',
-      );
+    if (!boardId) setBoardId(liveBoards(data)[0]?.id ?? data.boards[0]?.id ?? '');
   }, [data, boardId]);
   const board = data?.boards.find((b) => b.id === boardId);
   const revision =
@@ -396,8 +432,10 @@ export function App() {
         : tasks,
     [tab, data, tasks],
   );
+  const cancelledCount = graphTasks.filter((t) => t.status === 'cancelled').length;
   const filtered = graphTasks.filter(
     (t) =>
+      (showCancelled || t.status !== 'cancelled') &&
       (!repositoryFilter || t.repositoryId === repositoryFilter) &&
       `${t.title} ${t.id} ${t.repositoryId} ${roleLabel(t.role)}`
         .toLowerCase()
@@ -405,9 +443,9 @@ export function App() {
   );
   const task = graphTasks.find((t) => t.id === selected);
   useEffect(() => {
-    if (graphTasks.length && !graphTasks.some((t) => t.id === selected))
-      setSelected(graphTasks[0].id);
-  }, [graphTasks, selected]);
+    const visible = graphTasks.filter((t) => showCancelled || t.status !== 'cancelled');
+    if (visible.length && !visible.some((t) => t.id === selected)) setSelected(visible[0].id);
+  }, [graphTasks, selected, showCancelled]);
   useEffect(() => {
     let valid = true;
     if (modal !== 'correct' || !roots.length) {
@@ -482,6 +520,9 @@ export function App() {
             role: roleLabel(t.role),
             status: status(t),
             statusLabel: taskStatusName(t),
+            live: liveLabel(
+              data?.runs.find((r) => r.id === t.activeRunId && r.status === 'active'),
+            ),
           },
           selected: t.id === selected,
           ariaLabel: `${t.id}: ${t.title}, ${taskStatusName(t)}`,
@@ -499,7 +540,7 @@ export function App() {
           })),
       ),
     };
-  }, [filtered, selected]);
+  }, [filtered, selected, data]);
   if (!data)
     return (
       <main className="grid min-h-dvh place-content-center justify-items-center gap-4">
@@ -516,7 +557,10 @@ export function App() {
   // Имена ролей объявляет workspace, а нужны они и там, где конфигурации под
   // рукой нет: источник ставится один раз, как только состояние загружено.
   setRoleSource(data.config);
-  const done = tasks.filter((t) => t.status === 'done').length;
+  const liveTasks = tasks.filter((t) => t.status !== 'cancelled');
+  const done = liveTasks.filter((t) => t.status === 'done').length;
+  const inWork = liveTasks.filter((t) => t.activeRunId).length;
+  const failedCount = liveTasks.filter((t) => t.status === 'failed').length;
   const blocked = tasks.filter((t) => status(t) === 'blocked').length;
   const ready = tasks.filter((t) => data.ready.includes(t.id)).length;
   const latestRun = task ? data.runs.filter((r) => r.taskId === task.id).at(-1) : undefined;
@@ -567,43 +611,29 @@ export function App() {
           </Button>
         </div>
         <nav aria-label="Доски">
-          {[...data.boards]
-            // Доска, где вся работа отменена, — история, а не выбор. Оставлять
-            // её в списке значит показывать три одноимённых доски и заставлять
-            // читателя угадывать живую.
-            .filter((b) => {
-              const ids = new Set(b.revisions.flatMap((r) => r.taskIds));
-              const own = data.tasks.filter((t) => ids.has(t.id));
-              return own.length === 0 || own.some((t) => t.status !== 'cancelled');
-            })
-            .sort(
-              (a, b) =>
-                Number(b.revisions.at(-1)!.status === 'active') -
-                Number(a.revisions.at(-1)!.status === 'active'),
-            )
-            .map((b) => (
-              <Button
-                variant="outline"
-                key={b.id}
-                className={cn(
-                  'mt-1 h-auto w-full justify-start gap-3 border-0 p-3 text-left text-sm whitespace-normal max-[760px]:w-auto max-[760px]:min-w-48 max-[760px]:shrink-0 max-[760px]:p-2',
-                  b.id === boardId && 'text-primary bg-accent',
-                )}
-                onClick={() => switchBoard(b.id)}
-                aria-current={b.id === boardId ? 'page' : undefined}
-              >
-                <LayoutGrid />
-                <span>
-                  {b.title}
-                  <small>
-                    {b.revisions.at(-1)!.status === 'accepted' ? 'Принята' : 'В работе'} · ревизия{' '}
-                    {b.revisions.at(-1)!.number}
-                    {boardProgress(data, b) && ' · ' + boardProgress(data, b)}
-                  </small>
-                </span>
-                {b.revisions.at(-1)!.status === 'accepted' && <Check className="nav-check" />}
-              </Button>
-            ))}
+          {liveBoards(data).map((b) => (
+            <Button
+              variant="outline"
+              key={b.id}
+              className={cn(
+                'mt-1 h-auto w-full justify-start gap-3 border-0 p-3 text-left text-sm whitespace-normal max-[760px]:w-auto max-[760px]:min-w-48 max-[760px]:shrink-0 max-[760px]:p-2',
+                b.id === boardId && 'text-primary bg-accent',
+              )}
+              onClick={() => switchBoard(b.id)}
+              aria-current={b.id === boardId ? 'page' : undefined}
+            >
+              <LayoutGrid />
+              <span>
+                {b.title}
+                <small>
+                  {b.revisions.at(-1)!.status === 'accepted' ? 'Принята' : 'В работе'} · ревизия{' '}
+                  {b.revisions.at(-1)!.number}
+                  {boardProgress(data, b) && ' · ' + boardProgress(data, b)}
+                </small>
+              </span>
+              {b.revisions.at(-1)!.status === 'accepted' && <Check className="nav-check" />}
+            </Button>
+          ))}
         </nav>
         <div className="text-muted-foreground mt-auto px-3 pt-8 text-xs [&_p]:my-2 max-[760px]:hidden">
           <div className="text-foreground flex items-center gap-2">
@@ -783,10 +813,22 @@ export function App() {
                 <CircleCheck />
                 <strong>
                   {done}
-                  <span> / {tasks.length}</span>
+                  <span> / {liveTasks.length}</span>
                 </strong>
                 <span>результатов принято</span>
               </div>
+              <div>
+                <Loader2 className={inWork ? 'animate-spin' : ''} />
+                <strong>{inWork}</strong>
+                <span>в работе</span>
+              </div>
+              {failedCount > 0 && (
+                <div>
+                  <X />
+                  <strong>{failedCount}</strong>
+                  <span>со сбоем</span>
+                </div>
+              )}
               <div>
                 <Play />
                 <strong>{ready}</strong>
@@ -816,8 +858,46 @@ export function App() {
                   {data.paused ? 'Запустить очередь' : 'Пауза очереди'}
                 </Button>
               </div>
+              {liveTasks.length > 0 && (
+                <div
+                  className="bg-muted h-1.5 w-full basis-full overflow-hidden rounded-full"
+                  role="progressbar"
+                  aria-label="Принято результатов"
+                  aria-valuemin={0}
+                  aria-valuemax={liveTasks.length}
+                  aria-valuenow={done}
+                >
+                  <div
+                    className="bg-success h-full"
+                    style={{ width: `${(done / liveTasks.length) * 100}%` }}
+                  />
+                </div>
+              )}
             </section>
           )}
+          <LiveWork
+            state={data}
+            stopReason={stopReason(data)}
+            onOpenTask={(id, taskId) => {
+              if (id && id !== boardId) {
+                setBoardId(id);
+                setRevisionNumber(null);
+              }
+              setQuery('');
+              setSelected(taskId);
+              if (workspaceView || tab === 'progress') setTab('graph');
+            }}
+            onStart={
+              workspaceView
+                ? () =>
+                    void act(
+                      () => api('scheduler', { start: true }),
+                      'Очередь всех досок запущена',
+                      false,
+                    )
+                : undefined
+            }
+          />
           <div className="mb-4 flex flex-wrap items-center justify-between gap-4">
             <div
               className="flex flex-wrap gap-1 max-[760px]:w-full max-[760px]:justify-between max-[760px]:gap-0"
@@ -864,6 +944,16 @@ export function App() {
                     ))}
                   </select>
                 </label>
+                {cancelledCount > 0 && (
+                  <label className="text-muted-foreground flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={showCancelled}
+                      onChange={(e) => setShowCancelled(e.target.checked)}
+                    />
+                    Показать отменённые ({cancelledCount})
+                  </label>
+                )}
                 <label className="max-w-60 max-[760px]:w-full max-[760px]:max-w-none">
                   <span className="sr-only">Поиск задач</span>
                   <Input
@@ -982,7 +1072,14 @@ export function App() {
                             <strong>{t.title}</strong>
                             <small>
                               {t.repositoryId} · {roleLabel(t.role)}
-                              {t.dependsOn.length ? ` · после ${t.dependsOn.join(', ')}` : ''}
+                              {t.dependsOn.length
+                                ? ` · после: ${t.dependsOn
+                                    .map(
+                                      (d) =>
+                                        data.tasks.find((x) => x.id === d)?.title ?? shortId(d),
+                                    )
+                                    .join('; ')}`
+                                : ''}
                             </small>
                             <TaskLive
                               task={t}

@@ -279,42 +279,10 @@ function Contracts({
           </p>
         )}
         {recent.length ? (
-          <ol className="grid gap-3">
-            {recent.map((a, i) => (
-              <li key={a.id} className="border-b pb-3 last:border-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <Badge variant={a.approved ? 'success' : 'destructive'}>
-                    Попытка {a.attempt ?? attempts.length - i}
-                  </Badge>
-                  <span className="text-muted-foreground text-xs">
-                    {a.subject === 'task plan' ? 'план задач' : 'контракт'} · {a.findings.length}{' '}
-                    замечаний
-                  </span>
-                  <strong className="min-w-0 flex-1">{a.title}</strong>
-                  <code className="text-muted-foreground font-mono text-xs">
-                    {a.authorRuntime} → {a.reviewerRuntime}
-                  </code>
-                  <span className="text-muted-foreground text-xs">{ago(a.at)}</span>
-                </div>
-                <p className="text-muted-foreground mt-1 max-w-[80ch] text-sm">{a.summary}</p>
-                {a.findings.length > 0 && (
-                  <ul className="mt-2 grid gap-1">
-                    {a.findings.map((f, at) => (
-                      <li key={at} className="flex gap-2 text-sm">
-                        <Badge
-                          variant={f.severity === 'blocking' ? 'destructive' : 'secondary'}
-                          className="shrink-0"
-                        >
-                          {f.severity === 'blocking' ? 'блокер' : f.severity}
-                        </Badge>
-                        <span className="max-w-[80ch]">{f.message}</span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </li>
-            ))}
-          </ol>
+          // Последняя попытка раскрыта, прежние свёрнуты: на пилоте двадцать
+          // попыток с находками занимали несколько экранов, и живая работа
+          // уходила далеко вниз.
+          <AttemptList attempts={attempts} recent={recent} />
         ) : (
           <p className="text-muted-foreground">
             Ревью контрактов ещё не запускалось. Здесь будет видно каждую попытку и её находки.
@@ -322,6 +290,60 @@ function Contracts({
         )}
       </CardContent>
     </Card>
+  );
+}
+function AttemptList({
+  attempts,
+  recent,
+}: {
+  attempts: ContractAttempt[];
+  recent: ContractAttempt[];
+}) {
+  const item = (a: ContractAttempt, i: number) => (
+    <li key={a.id} className="border-b pb-3 last:border-0">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge variant={a.approved ? 'success' : 'destructive'}>
+          Попытка {a.attempt ?? attempts.length - i}
+        </Badge>
+        <span className="text-muted-foreground text-xs">
+          {a.subject === 'task plan' ? 'план задач' : 'контракт'} · {a.findings.length} замечаний
+        </span>
+        <strong className="min-w-0 flex-1">{a.title}</strong>
+        <code className="text-muted-foreground font-mono text-xs">
+          {a.authorRuntime} → {a.reviewerRuntime}
+        </code>
+        <span className="text-muted-foreground text-xs">{ago(a.at)}</span>
+      </div>
+      <p className="text-muted-foreground mt-1 max-w-[80ch] text-sm">{a.summary}</p>
+      {a.findings.length > 0 && (
+        <ul className="mt-2 grid gap-1">
+          {a.findings.map((f, at) => (
+            <li key={at} className="flex gap-2 text-sm">
+              <Badge
+                variant={f.severity === 'blocking' ? 'destructive' : 'secondary'}
+                className="shrink-0"
+              >
+                {f.severity === 'blocking' ? 'блокер' : f.severity}
+              </Badge>
+              <span className="max-w-[80ch]">{f.message}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </li>
+  );
+  return (
+    <>
+      <ol className="grid gap-3">{recent.slice(0, 1).map(item)}</ol>
+      {recent.length > 1 && (
+        <details>
+          <summary className="text-muted-foreground cursor-pointer text-sm">
+            Прежние попытки ({recent.length - 1})
+          </summary>
+          <ol className="mt-3 grid gap-3">{recent.slice(1).map((a, i) => item(a, i + 1))}</ol>
+        </details>
+      )}
+    </>
   );
 }
 function Journal({ events }: { events: AuditEvent[] }) {
@@ -336,17 +358,26 @@ function Journal({ events }: { events: AuditEvent[] }) {
       </CardHeader>
       <CardContent>
         {recent.length ? (
-          <ul className="grid gap-2">
-            {recent.map((e) => (
-              <li key={e.id} className="flex flex-wrap items-baseline gap-3 border-b pb-2 text-sm">
-                <span className="text-muted-foreground font-mono text-xs">
-                  {new Date(e.at).toLocaleString('ru-RU')}
-                </span>
-                <span className="min-w-0 flex-1">{eventNames[e.type] ?? e.type}</span>
-                <code className="text-muted-foreground font-mono text-xs">{e.type}</code>
-              </li>
-            ))}
-          </ul>
+          <details>
+            <summary className="text-muted-foreground cursor-pointer text-sm">
+              Последние {recent.length} событий: {eventNames[recent[0].type] ?? recent[0].type},{' '}
+              {new Date(recent[0].at).toLocaleString('ru-RU')}
+            </summary>
+            <ul className="mt-3 grid gap-2">
+              {recent.map((e) => (
+                <li
+                  key={e.id}
+                  className="flex flex-wrap items-baseline gap-3 border-b pb-2 text-sm"
+                >
+                  <span className="text-muted-foreground font-mono text-xs">
+                    {new Date(e.at).toLocaleString('ru-RU')}
+                  </span>
+                  <span className="min-w-0 flex-1">{eventNames[e.type] ?? e.type}</span>
+                  <code className="text-muted-foreground font-mono text-xs">{e.type}</code>
+                </li>
+              ))}
+            </ul>
+          </details>
         ) : (
           <p className="text-muted-foreground">Событий пока нет.</p>
         )}
