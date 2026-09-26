@@ -147,8 +147,10 @@ export class Store {
     // Строка прежних версий может не иметь полей, которые тип считает
     // обязательными; ниже они восполняются.
     const raw = JSON.parse(row.data) as DevContourState & { componentLayout?: unknown };
-    const state: DevContourState & { componentLayout?: unknown; changeSets?: unknown[] } =
-      this.components ? this.components.read(raw) : raw;
+    const state: DevContourState & { componentLayout?: unknown; changeSets?: unknown[] } = this
+      .components
+      ? this.components.read(raw)
+      : raw;
     if (!this.components && state.componentLayout)
       throw new Error('Для этой БД требуется component storage');
     if (state.version !== 1) throw new Error('Unsupported state version');
