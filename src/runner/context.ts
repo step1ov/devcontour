@@ -1,6 +1,13 @@
 import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { BlockedError, type Config, type ContextPack, type Task, type Run } from '../core/model.ts';
+import {
+  BlockedError,
+  type Config,
+  type Contract,
+  type ContextPack,
+  type Task,
+  type Run,
+} from '../core/model.ts';
 import { digest } from '../core/service.ts';
 import { repository } from '../core/repositories.ts';
 import { git } from './process.ts';
@@ -51,7 +58,14 @@ export async function lockContextFile(config: Config, path: string, ref = 'HEAD'
   await rename(temp, path);
   return packs;
 }
-export async function taskContext(config: Config, task: Task) {
+/**
+ * Контекст задачи. `contracts` — утверждённые контракты задачи: если файл
+ * закреплённого пакета служит источником контракта, закреплённая редакция
+ * обязана совпадать с утверждённой. Иначе исполнитель получает в подсказке
+ * новый контракт, а в пакете — старый текст того же файла: на пилоте так и
+ * было, пока пакет не перезакрепили.
+ */
+export async function taskContext(config: Config, task: Task, contracts: Contract[] = []) {
   const selected = config.contextPacks.filter(
     (pack) =>
       task.contextPacks?.includes(pack.id) ||
@@ -67,6 +81,16 @@ export async function taskContext(config: Config, task: Task) {
     const documents = await contents(config, pack, pack.revision);
     if (digest({ id: pack.id, version: pack.version, documents }) !== pack.digest)
       throw new Error('Context digest не совпадает: ' + pack.id);
+    for (const contract of contracts) {
+      if (!contract.source || (contract.repositoryId ?? 'main') !== pack.repositoryId) continue;
+      const pinned = documents.find((d) => d.file === contract.source);
+      // Git отдаёт файл без завершающего перевода строки, реестр хранит его
+      // целиком: различие в хвостовых пробелах — не другая редакция.
+      if (pinned && pinned.content.trimEnd() !== contract.content.trimEnd())
+        throw new BlockedError(
+          `Context pack ${pack.id} закрепляет ${contract.source} в редакции, отличной от утверждённого контракта ${contract.id}; выполните context-lock после коммита контракта`,
+        );
+    }
     snapshots.push({
       id: pack.id,
       version: pack.version,

@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { config, fixture, input } from './helpers.ts';
 import { orderedGates, validateWorkflow } from '../src/core/workflow.ts';
-import { taskInput, type Task } from '../src/core/model.ts';
+import { BlockedError, taskInput, type Contract, type Task } from '../src/core/model.ts';
 import { specDigest, DevContour } from '../src/core/service.ts';
 import { ResourcePool, resourceKey, withResources } from '../src/runner/resources.ts';
 import { pinContext, taskContext } from '../src/runner/context.ts';
@@ -509,6 +509,52 @@ test('A pack names its references instead of inlining them, and pins them all th
     await git(f.c.repository, 'add', 'standards');
     await git(f.c.repository, 'commit', '-m', 'reference changed');
     assert.notEqual((await pinContext(f.c))[0].digest, pinned);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('Пакет, закрепивший старую редакцию утверждённого контракта, задачу не выдаёт', async () => {
+  const f = await runnerFixture();
+  try {
+    await mkdir(join(f.c.repository, 'docs'));
+    await writeFile(join(f.c.repository, 'docs/contract.md'), 'Причина привязана к максимуму.\n');
+    await git(f.c.repository, 'add', 'docs');
+    await git(f.c.repository, 'commit', '-m', 'contract v1');
+    f.c.contextPacks = [
+      {
+        id: 'engine',
+        version: '1.0',
+        repositoryId: 'main',
+        roles: ['architect', 'backend', 'frontend', 'qa'],
+        files: ['docs/contract.md'],
+        references: [],
+      },
+    ];
+    f.c.contextPacks = await pinContext(f.c);
+    // Контракт исправлен и утверждён, пакет не перезакреплён.
+    await writeFile(join(f.c.repository, 'docs/contract.md'), 'Причина привязана к цели.\n');
+    await git(f.c.repository, 'commit', '-qam', 'contract v2');
+    const approved = {
+      id: 'C-1',
+      title: 'Контракт',
+      content: 'Причина привязана к цели.\n',
+      source: 'docs/contract.md',
+      digest: 'd',
+    } as Contract;
+    const t = f.store.read().tasks[0];
+    await assert.rejects(taskContext(f.c, t, [approved]), (e: Error) => {
+      assert.ok(e instanceof BlockedError, 'не провал задачи, а блокировка до context-lock');
+      assert.match(e.message, /context-lock/);
+      assert.match(e.message, /C-1/);
+      return true;
+    });
+    // Контракт без файла-источника и контракт другого файла не мешают.
+    await taskContext(f.c, t, [{ ...approved, source: undefined }]);
+    await taskContext(f.c, t, [{ ...approved, source: 'docs/other.md' }]);
+    // Перезакрепление снимает блокировку.
+    f.c.contextPacks = await pinContext(f.c);
+    assert.match((await taskContext(f.c, t, [approved])).text, /привязана к цели/);
   } finally {
     await f.cleanup();
   }

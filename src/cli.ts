@@ -655,7 +655,11 @@ async function main() {
       } else if (operation === 'context-show') {
         const task = store.read().tasks.find((t) => t.id === option('--task', ''));
         if (!task) throw new Error('Задача не найдена');
-        result = await taskContext(config, task);
+        result = await taskContext(
+          config,
+          task,
+          store.read().contracts.filter((c) => task.contracts.includes(c.id)),
+        );
       } else if (operation === 'resources' || operation === 'resource-release') {
         const pool = new ResourcePool(resourceDatabase(config));
         try {

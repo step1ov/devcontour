@@ -528,7 +528,11 @@ export class Scheduler {
         signal,
         async (signal, resources) => {
           run.resources = resources;
-          const context = await taskContext(this.h.config, task);
+          const context = await taskContext(
+            this.h.config,
+            task,
+            this.h.store.read().contracts.filter((c) => task.contracts.includes(c.id)),
+          );
           run.context = context.snapshots;
           this.contexts.set(run.id, context.text);
           this.h.withRun(run.id, run.token, 'run.context', (stored) => {
