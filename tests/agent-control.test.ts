@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile, mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fixture, input } from './helpers.ts';
+import { complete, fixture, input } from './helpers.ts';
+import { execFileSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
 import { reviewContract, reviewPlan, acceptBoard } from '../src/runner/agent-control.ts';
 import { specDigest } from '../src/core/service.ts';
 import type { AgentAdapter, AgentRequest } from '../src/runner/adapters.ts';
@@ -159,13 +161,7 @@ test('A contract file outside the repository is refused', async () => {
     await mkdir(join(repo.path, 'docs'), { recursive: true });
     await symlink('/etc/hosts', join(repo.path, 'docs/escape.md'));
     await assert.rejects(
-      reviewContract(
-        f.h,
-        f.root,
-        { title: 'Escape', file: 'docs/escape.md' },
-        'codex',
-        runtimes(),
-      ),
+      reviewContract(f.h, f.root, { title: 'Escape', file: 'docs/escape.md' }, 'codex', runtimes()),
       /внутри репозитория/,
     );
     await assert.rejects(
@@ -391,5 +387,59 @@ test('A runtime that emitted work spends the attempt; one that never started doe
     );
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('Ревью плана читает ветку интеграции и видит статус внешней зависимости', async () => {
+  const f = fixture();
+  const repo = await repositoryFixture(f);
+  try {
+    const git = (...args: string[]) =>
+      execFileSync('git', ['-C', repo.path, '-c', 'user.name=t', '-c', 'user.email=t@e', ...args], {
+        encoding: 'utf8',
+      }).trim();
+    git('init', '-q', '-b', 'main');
+    await writeFile(join(repo.path, 'solve.ts'), 'notImplemented\n');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'main');
+    git('checkout', '-q', '-b', 'devcontour/accepted');
+    await writeFile(join(repo.path, 'solve.ts'), 'implemented\n');
+    git('commit', '-qam', 'accepted');
+    const accepted = git('rev-parse', 'HEAD');
+    git('checkout', '-q', 'main');
+
+    const first = f.h.createBoard('Принятое ядро');
+    const core = f.h.addTask(first.id, input('Ядро'));
+    f.h.approve(first.id);
+    complete(f.h, core.id);
+    const b = f.h.createBoard('Следующая часть');
+    f.h.addTask(b.id, input('Границы', [core.id]));
+
+    let seen = '';
+    let prompt = '';
+    let cwd = '';
+    await reviewPlan(
+      f.h,
+      f.root,
+      b.id,
+      'claude',
+      runtimes((r) => {
+        cwd = r.cwd;
+        prompt = r.prompt;
+        seen = readFileSync(join(r.cwd, 'solve.ts'), 'utf8');
+      }),
+    );
+    // Ревьюер видит то, от чего ответвятся задачи, а не отставший checkout.
+    assert.equal(seen, 'implemented\n');
+    assert.match(prompt, new RegExp(`devcontour/accepted at ${accepted}`));
+    assert.match(prompt, /"externalDependencies"/);
+    assert.match(prompt, new RegExp(`"id": "${core.id}"[\\s\\S]*"status": "done"`));
+    // Рабочая копия ревью удаляется, checkout человека не тронут.
+    assert.equal(existsSync(cwd), false);
+    assert.doesNotMatch(git('worktree', 'list'), /review-checkouts/);
+    assert.equal(git('rev-parse', '--abbrev-ref', 'HEAD'), 'main');
+  } finally {
+    await repo.remove();
+    f.cleanup();
   }
 });

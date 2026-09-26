@@ -70,6 +70,7 @@ async function review(
   runtimes: Runtimes,
   repositoryId?: string,
   subjectId?: string,
+  checkout?: { path: string; ref: string; sha: string },
 ): Promise<Approval> {
   if (h.config.mode !== 'local')
     throw new DomainError('AI-согласование доступно только для local mode');
@@ -93,6 +94,11 @@ async function review(
           JSON.stringify(previous, null, 2),
         ]
       : []),
+    ...(checkout
+      ? [
+          `Your working directory is a read-only checkout of the integration branch ${checkout.ref} at ${checkout.sha}. Tasks of this plan branch from it; the operator's own checkout may lag behind and is not the base.`,
+        ]
+      : []),
     'Workspace repositories: ' +
       JSON.stringify(
         repositories(h.config).map(({ id, name, kind, path }) => ({ id, name, kind, path })),
@@ -112,7 +118,7 @@ async function review(
     {
       toolProfile,
       execution: agentEnvironment(h.config, toolProfile),
-      cwd: h.config.repository,
+      cwd: checkout?.path ?? h.config.repository,
       artifactDir: artifact,
       prompt,
       review: true,
@@ -124,7 +130,7 @@ async function review(
           ? isolation({
               write: [],
               controller: [root],
-              readable: [h.config.repository],
+              readable: [checkout?.path ?? h.config.repository],
               domains: h.config.isolation.domains,
             })
           : undefined,
@@ -240,6 +246,35 @@ export async function reviewContract(
   };
 }
 
+/**
+ * Рабочая копия ветки интеграции для ревью плана. Задачи ответвляются от
+ * неё, а не от checkout человека: на пилоте ревьюер читал main, где ядро ещё
+ * не было реализовано, и требовал зависимость, давно принятую в интеграции.
+ * Нет ветки (контур ещё не создал её) — ревью идёт в основном checkout.
+ */
+async function withIntegrationCheckout<T>(
+  h: DevContour,
+  root: string,
+  repositoryId: string | undefined,
+  action: (checkout?: { path: string; ref: string; sha: string }) => Promise<T>,
+) {
+  const repo = repository(h.config, repositoryId ?? defaultOwner(h));
+  let sha: string;
+  try {
+    sha = await git(repo.path, 'rev-parse', '--verify', `refs/heads/${repo.targetBranch}^{commit}`);
+  } catch {
+    return action();
+  }
+  const path = join(root, 'review-checkouts', randomUUID());
+  await mkdir(join(root, 'review-checkouts'), { recursive: true });
+  await git(repo.path, 'worktree', 'add', '--detach', path, sha);
+  try {
+    return await action({ path, ref: repo.targetBranch, sha });
+  } finally {
+    await git(repo.path, 'worktree', 'remove', '--force', path).catch(() => undefined);
+  }
+}
+
 export async function reviewPlan(
   h: DevContour,
   root: string,
@@ -258,11 +293,22 @@ export async function reviewPlan(
   const drafts = tasks.filter((t) => t.status === 'draft');
   if (!drafts.length) return { status: 'already-approved', boardId };
   const contractIds = new Set(tasks.flatMap((t) => t.contracts));
+  // Зависимости на задачи других досок ревьюер проверить не может: база
+  // контура ему закрыта. Их статус и принятый SHA входят в предложение —
+  // иначе ревью плана требовало «карточку внешней зависимости».
+  const own = new Set(revision.taskIds);
+  const externalDependencies = [
+    ...new Set(tasks.flatMap((t) => t.dependsOn).filter((id) => !own.has(id))),
+  ].map((id) => {
+    const t = state.tasks.find((x) => x.id === id);
+    return { id, title: t?.title, status: t?.status, resultSha: t?.resultSha };
+  });
   const proposal = {
     title: board.title,
     description: board.description,
     revision: revision.number,
     tasks,
+    ...(externalDependencies.length ? { externalDependencies } : {}),
     contracts: state.contracts.filter((c) => contractIds.has(c.id)),
   };
   const expected = {
@@ -270,15 +316,9 @@ export async function reviewPlan(
     taskIds: revision.taskIds,
     tasks: Object.fromEntries(drafts.map((t) => [t.id, specDigest(t)])),
   };
-  const approval = await review(
-    h,
-    root,
-    author,
-    'task plan',
-    proposal,
-    runtimes,
-    boardOwner(board, state),
-    boardId,
+  const owner = boardOwner(board, state);
+  const approval = await withIntegrationCheckout(h, root, owner, (checkout) =>
+    review(h, root, author, 'task plan', proposal, runtimes, owner, boardId, checkout),
   );
   beforeCommit();
   if (h.config.approvalMode === 'operator')
