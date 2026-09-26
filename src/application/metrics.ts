@@ -1,10 +1,74 @@
 import { usageTotals, type UsageRecord } from '../core/usage.ts';
 import type { DevContour } from '../core/service.ts';
+import type { Run } from '../core/model.ts';
 import { repository } from '../core/repositories.ts';
 import { taskOwner, boardOwner } from '../core/sync-state.ts';
 
 const elapsed = (start?: string, end?: string) =>
   start && end ? Math.max(0, Date.parse(end) - Date.parse(start)) : null;
+
+// Семейство стадии: «candidate-test:install» и «candidate-test:unit» — одна
+// фаза проверки кандидата.
+const phaseOf = (stage: string) => stage.split(':')[0];
+const failedRun = (r: Run) => ['failed', 'expired', 'cancelled'].includes(r.status);
+
+/**
+ * Время и стоимость по фазам, отдельно — в попытках, которые не дали
+ * результата. Без этого нельзя сказать, какую фазу выгодно не повторять:
+ * дорогая, но редко теряемая фаза оптимизации не требует.
+ */
+function phaseBreakdown(runs: Run[], calls: UsageRecord[]) {
+  const phases: Record<
+    string,
+    {
+      durationMs: number;
+      lostMs: number;
+      costUsd: number;
+      lostCostUsd: number;
+      unknownCost: number;
+    }
+  > = {};
+  const at = (name: string) =>
+    (phases[name] ??= { durationMs: 0, lostMs: 0, costUsd: 0, lostCostUsd: 0, unknownCost: 0 });
+  for (const r of runs)
+    for (const t of r.timings ?? []) {
+      const ms = elapsed(t.startedAt, t.finishedAt);
+      if (ms === null) continue;
+      at(phaseOf(t.stage)).durationMs += ms;
+      if (failedRun(r)) at(phaseOf(t.stage)).lostMs += ms;
+    }
+  const byRun = new Map(runs.map((r) => [r.id, r]));
+  for (const c of calls) {
+    const r = c.runId ? byRun.get(c.runId) : undefined;
+    if (!r) continue;
+    const p = at(phaseOf(c.stage));
+    if (c.costUsd === null) p.unknownCost++;
+    p.costUsd += c.costUsd ?? 0;
+    if (failedRun(r)) p.lostCostUsd += c.costUsd ?? 0;
+  }
+  return phases;
+}
+
+/**
+ * Взятые реализации и то, во что обошлась бы каждая заново: длительность
+ * реализации той попытки, чей кандидат взят. Это наблюдённая цена, а не
+ * прогноз, и она не вычитается из расходов — прежние траты остаются на своей
+ * попытке.
+ */
+function reuseSummary(runs: Run[]) {
+  const byId = new Map(runs.map((r) => [r.id, r]));
+  const reused = runs.filter((r) => r.reusedFrom);
+  return {
+    attempts: reused.length,
+    implementationMsNotRepeated: reused.reduce((sum, r) => {
+      const source = byId.get(r.reusedFrom!.runId);
+      const span = source?.timings?.findLast(
+        (t) => t.stage === 'implementation' && t.outcome === 'passed',
+      );
+      return sum + (elapsed(span?.startedAt, span?.finishedAt) ?? 0);
+    }, 0),
+  };
+}
 export function workflowMetrics(
   h: DevContour,
   repositoryId?: string,
@@ -76,7 +140,10 @@ export function workflowMetrics(
         incomplete: !t.finishedAt,
       })),
       timingCoverage: r.timings?.length ? 'instrumented-stages-only' : 'unknown-historical',
+      reusedFrom: r.reusedFrom?.runId ?? null,
     })),
+    phases: phaseBreakdown(runs, calls),
+    reuse: reuseSummary(runs),
     boards: s.boards
       .filter((b) => boardOwner(b, s) === repositoryId)
       .map((b) => ({

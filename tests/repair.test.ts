@@ -324,6 +324,10 @@ test('Классификатор узнаёт настоящие тексты о
     ],
     ['codex: runtime завершился с кодом 1: connection reset by peer', 'environment'],
     ['claude: runtime завершился с кодом 1: socket hang up', 'environment'],
+    [
+      'codex: runtime завершился с кодом -1: 2026-09-23T23:12:05.502448Z ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed, when AuthRequired',
+      'environment',
+    ],
     ['claude: runtime завершился с кодом 143 (прогон прерван). Лог: /tmp/a', 'environment'],
     ['Истёк срок владения. Проверьте worktree и повторите явно.', 'timeout'],
     ['Агент изменил HEAD; интеграцией владеет devcontour', 'unknown'],

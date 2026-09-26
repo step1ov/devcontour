@@ -2,6 +2,7 @@ import { developmentBinding, assertTaskPreparation } from './preparation.ts';
 import { validateTaskContext, validateWorkflow } from './workflow.ts';
 import { entityId } from './ids.ts';
 import { createHash, randomUUID } from 'node:crypto';
+import { reusableImplementation } from './reuse.ts';
 import {
   repository,
   repositories,
@@ -572,6 +573,24 @@ export class DevContour {
       )
         throw new DomainError('Устаревшая попытка: владение утрачено');
       return fn(r, t, s);
+    });
+  }
+  /**
+   * Записывает основания реализации и решает, брать ли кандидата предыдущей
+   * попытки. Решение принимается в той же транзакции, что и запись: между
+   * чтением и записью предыдущую попытку никто не подменит.
+   */
+  implementationBasis(id: string, token: string, basis: string, reuse: boolean) {
+    return this.withRun(id, token, 'run.implementation-basis', (r, t, s) => {
+      r.implementationBasis = basis;
+      const decision = reuse
+        ? reusableImplementation(s, t, r.id, basis)
+        : ({ reuse: false, reason: 'переиспользование выключено' } as const);
+      if (decision.reuse)
+        r.reusedFrom = { runId: decision.from.id, candidateSha: decision.candidateSha };
+      return decision.reuse
+        ? { runId: id, basis, reusedFrom: r.reusedFrom }
+        : { runId: id, basis, reuse: decision.reason };
     });
   }
   heartbeat(id: string, token: string) {

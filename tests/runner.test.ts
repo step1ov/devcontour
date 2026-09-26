@@ -23,6 +23,8 @@ import { acceptBoard } from '../src/runner/agent-control.ts';
 import { ProjectMemory } from '../src/application/memory.ts';
 import { repositories } from '../src/core/repositories.ts';
 import { updateBase } from '../src/runner/base-update.ts';
+import { workflowMetrics } from '../src/application/metrics.ts';
+import { taskOwner } from '../src/core/sync-state.ts';
 async function runtimeFixture() {
   const root = await mkdtemp(join(tmpdir(), 'devcontour-runner-'));
   await setupDemo(root);
@@ -1216,6 +1218,191 @@ test('Граница закрывает исходные checkout всех ре�
     assert.ok(boundary.hidden.includes(f.config.repository), 'исходный checkout закрыт');
     assert.ok(boundary.hidden.includes(f.root), 'каталог контура закрыт');
     assert.deepEqual(boundary.readable, [join(f.config.repository, '.git')]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+// Сбой проверяющего после готового кандидата — обрыв транспорта, как у живого
+// codex: реализация уже прошла проверки, отказ ничего не говорит о коде.
+async function reuseFixture() {
+  const f = await runtimeFixture();
+  const repo = repositories(f.config)[0];
+  await git(
+    repo.path,
+    'update-ref',
+    `refs/heads/${repo.targetBranch}`,
+    await git(repo.path, 'rev-parse', 'HEAD'),
+  );
+  // Демо-задачи сливались бы параллельно и сдвигали базу: тогда основания
+  // расходятся честно, и сценарий проверял бы не то.
+  f.store.change('test.isolate', (s) => {
+    for (const t of s.tasks) t.status = 'cancelled';
+    return {};
+  });
+  const board = f.h.createBoard('Доска');
+  const task = f.h.addTask(board.id, input('Задача со сбоем ревьюера'));
+  f.h.approve(board.id);
+  f.h.pause(false);
+  const writes: string[] = [];
+  const reviews: string[] = [];
+  const runtimes = (review: 'crash' | 'reject' | 'approve') => ({
+    ...adapters,
+    demo: {
+      ...adapters.demo,
+      name: 'demo' as const,
+      execute: async (request: AgentRequest) => {
+        if (request.task?.id !== task.id) return adapters.demo.execute(request);
+        if (!request.review) {
+          writes.push(request.cwd);
+          return adapters.demo.execute(request);
+        }
+        reviews.push(request.cwd);
+        if (review === 'crash')
+          throw new Error(
+            'codex: runtime завершился с кодом -1: ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed',
+          );
+        return {
+          data: {
+            approved: review === 'approve',
+            summary: review === 'approve' ? 'ok' : 'Критерий не выполнен',
+            discoveries: [],
+            findings:
+              review === 'approve' ? [] : [{ severity: 'blocking', message: 'Нет поведения' }],
+          },
+          log: '',
+          command: ['fixture'],
+        };
+      },
+    },
+  });
+  const drain = async (review: 'crash' | 'reject' | 'approve') => {
+    const scheduler = new Scheduler(f.h, f.root, runtimes(review));
+    await scheduler.drain();
+    await scheduler.stop();
+  };
+  const retry = () => {
+    f.h.retry(task.id);
+    f.h.pause(false);
+  };
+  const runs = () => f.store.read().runs.filter((r) => r.taskId === task.id);
+  const current = () => f.store.read().tasks.find((t) => t.id === task.id)!;
+  return { ...f, repo, task, writes, reviews, drain, retry, runs, current };
+}
+
+test('После обрыва ревьюера повтор берёт готового кандидата и заново проверяет его', async () => {
+  const f = await reuseFixture();
+  try {
+    await f.drain('crash');
+    const [first] = f.runs();
+    assert.equal(f.current().status, 'failed');
+    assert.equal(first.failureKind, 'environment', 'обрыв канала — отказ окружения');
+    assert.ok(first.candidateSha && first.implementationBasis);
+    assert.equal(f.writes.length, 1);
+
+    f.retry();
+    await f.drain('approve');
+    const second = f.runs()[1];
+    assert.equal(f.current().status, 'done');
+    assert.equal(f.writes.length, 1, 'код не пишется заново');
+    assert.deepEqual(second.reusedFrom, { runId: first.id, candidateSha: first.candidateSha });
+    assert.equal(second.candidateSha, first.candidateSha);
+    assert.notEqual(second.token, first.token, 'новая попытка — новое владение');
+    // Проверки и ревью кандидата исполнены новой попыткой, а не взяты у старой.
+    assert.ok(
+      second.evidence.some((e) => e.kind === 'test' && e.phase === 'candidate' && e.passed),
+      'проверки кандидата прогнаны заново',
+    );
+    assert.ok(
+      second.evidence.some((e) => e.kind === 'review' && e.phase === 'candidate' && e.passed),
+    );
+    assert.ok(second.timings!.some((t) => t.stage === 'implementation-reuse'));
+    assert.ok(!second.timings!.some((t) => t.stage === 'implementation'));
+    // Прежняя попытка со своими тратами осталась как была.
+    assert.equal(f.runs()[0].status, 'failed');
+    const metrics = workflowMetrics(f.h, taskOwner(f.current()));
+    assert.equal(metrics.reuse.attempts, 1);
+    assert.ok(metrics.reuse.implementationMsNotRepeated > 0, 'цена неповторённой реализации');
+    assert.equal(metrics.attempts.find((a) => a.id === second.id)!.reusedFrom, first.id);
+    assert.ok(metrics.phases.implementation.lostMs > 0, 'реализация упавшей попытки учтена');
+    assert.ok(metrics.phases['implementation-reuse'].durationMs >= 0);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('Кандидат не берётся, если сдвинулась база, ревью отклонило код или reuse выключен', async () => {
+  const f = await reuseFixture();
+  try {
+    // Сдвинутая база: основания разошлись — код пишется с нуля.
+    await f.drain('crash');
+    const tip = await git(f.repo.path, 'rev-parse', `refs/heads/${f.repo.targetBranch}`);
+    const moved = await git(
+      f.repo.path,
+      'commit-tree',
+      `${tip}^{tree}`,
+      '-p',
+      tip,
+      '-m',
+      'another accepted change',
+    );
+    await git(f.repo.path, 'update-ref', `refs/heads/${f.repo.targetBranch}`, moved, tip);
+    f.retry();
+    await f.drain('crash');
+    assert.equal(f.writes.length, 2, 'новая база — новая реализация');
+    assert.equal(f.runs()[1].reusedFrom, undefined);
+
+    // Отказ ревью по существу: кандидат плох, повтор пишет код заново.
+    f.retry();
+    await f.drain('reject');
+    assert.equal(f.runs()[2].reusedFrom?.runId, f.runs()[1].id, 'после обрыва — взят');
+    assert.equal(f.writes.length, 2);
+    assert.equal(f.runs()[2].failureKind, 'review');
+    f.h.retry(f.task.id, { reason: 'продолжение теста за пределом попыток' });
+    f.h.pause(false);
+    await f.drain('crash');
+    assert.equal(f.writes.length, 3, 'отклонённый кандидат не переиспользуется');
+    assert.equal(f.runs()[3].reusedFrom, undefined);
+
+    // Выключенная настройка возвращает прежнее поведение.
+    f.h.config.reuseImplementation = false;
+    f.h.retry(f.task.id, { reason: 'продолжение теста за пределом попыток' });
+    f.h.pause(false);
+    await f.drain('approve');
+    assert.equal(f.writes.length, 4);
+    assert.equal(f.runs()[4].reusedFrom, undefined);
+    assert.equal(f.current().status, 'done');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('Взятый кандидат проходит ту же проверку области, что и новый', async () => {
+  const f = await reuseFixture();
+  try {
+    await f.drain('crash');
+    const [first] = f.runs();
+    // Запись о кандидате подменена: коммит поверх той же базы меняет
+    // защищённый файл. Совпавшие основания не делают такой код допустимым.
+    const worktree = join(f.root, 'tamper');
+    await git(f.repo.path, 'worktree', 'add', '--detach', worktree, first.baseSha!);
+    await writeFile(join(worktree, 'verify.mjs'), 'process.exit(0);\n');
+    await git(worktree, 'add', '-A');
+    await git(worktree, '-c', 'core.hooksPath=/dev/null', 'commit', '--no-gpg-sign', '-m', 'x');
+    const tampered = await git(worktree, 'rev-parse', 'HEAD');
+    f.store.change('test.tamper', (s) => {
+      s.runs.find((r) => r.id === first.id)!.candidateSha = tampered;
+      return {};
+    });
+    const before = await git(f.repo.path, 'rev-parse', `refs/heads/${f.repo.targetBranch}`);
+    f.retry();
+    await f.drain('approve');
+    const second = f.runs()[1];
+    assert.equal(second.reusedFrom?.candidateSha, tampered);
+    assert.equal(f.current().status, 'failed');
+    assert.equal(second.failureKind, 'scope-violation');
+    assert.equal(f.reviews.length, 1, 'ревью на недопустимого кандидата не тратится');
+    assert.equal(await git(f.repo.path, 'rev-parse', `refs/heads/${f.repo.targetBranch}`), before);
   } finally {
     await f.cleanup();
   }

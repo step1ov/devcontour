@@ -298,6 +298,10 @@ export interface Run {
   blocked?: boolean;
   failureKind?: FailureKind;
   failureFingerprint?: string;
+  /** Digest оснований реализации: по нему решается, можно ли взять кандидата. */
+  implementationBasis?: string;
+  /** Реализация взята у предыдущей попытки, а не написана заново. */
+  reusedFrom?: { runId: string; candidateSha: string };
   evidence: Evidence[];
   context?: {
     id: string;
@@ -544,6 +548,10 @@ export const configSchema = z.object({
   leaseMs: z.number().int().min(5000).default(30000),
   runTimeoutMs: z.number().int().min(1000).default(900000),
   maxAttempts: z.number().int().min(1).max(10).default(3),
+  // Кандидат предыдущей попытки берётся вместо новой реализации, если та
+  // попытка отказала не по коду, а все основания совпали. Выключение
+  // возвращает прежнее поведение: каждая попытка пишет код с нуля.
+  reuseImplementation: z.boolean().default(true),
   // Сколько раз ведущий цикл вправе сам починить упавшую задачу доски,
   // прежде чем позвать человека. Предел общий на доску, а не на задачу:
   // локально допустимые повторы складываются, и без общего потолка доска
