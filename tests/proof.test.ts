@@ -331,8 +331,9 @@ test('Ревьюер запускает проверки одинаково в �
     'Read закрыт для учётных данных и без shell',
   );
 
-  // Codex: ревьюер пишет только во временный каталог, а без права проверок —
-  // и без shell, в том числе когда профиля нет вовсе.
+  // Codex: ревьюер пишет только во временный каталог. Shell для него —
+  // единственный способ читать файлы, поэтому без профиля он включён, а
+  // явный профиль без shell оператор выбирает сам.
   const codex = (toolProfile?: object) => {
     const args = cliArguments(
       'codex',
@@ -358,8 +359,14 @@ test('Ревьюер запускает проверки одинаково в �
       [...argv.matchAll(/"([^"]+)"="write"/g)].map((m) => m[1]).filter((p) => p !== ':tmpdir'),
       [],
     );
-    assert.match(argv, /features\.shell_tool=false/);
   }
+  // Без профиля ревьюер читает репозиторий через shell; явный отказ от shell
+  // в профиле соблюдается.
+  assert.match(codex(), /features\.shell_tool=true/);
+  assert.match(
+    codex({ ...base, runtime: 'codex', codexShell: false }),
+    /features\.shell_tool=false/,
+  );
   // Профиль прав codex закрывает учётные данные и у ревьюера, и без профиля
   // инструментов; сеть ревьюеру закрыта.
   for (const argv of [codex(), codex({ ...base, runtime: 'codex', codexShell: true })]) {
