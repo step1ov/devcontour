@@ -16,7 +16,11 @@ import { emptyState, type DevContourState, type AuditEvent } from './model.ts';
  *
  * Идемпотентно: повторное чтение ничего не меняет.
  */
+/** Приводит паузу прежнего формата к текущему; `true` — если что-то изменилось. */
 function normalizePause(state: DevContourState & { pauseFailure?: unknown }) {
+  const changed =
+    'pauseFailure' in state ||
+    (state.paused && state.pauseReason === 'runtime' && !state.pauseFailures?.length);
   const legacy = state.pauseFailure;
   delete state.pauseFailure;
   if (typeof legacy === 'string')
@@ -28,6 +32,7 @@ function normalizePause(state: DevContourState & { pauseFailure?: unknown }) {
     ];
   if (state.paused && state.pauseReason === 'runtime' && !state.pauseFailures?.length)
     state.pauseFailures = ['unknown'];
+  return !!changed;
 }
 export class Store {
   private db: DatabaseSync;
@@ -128,16 +133,34 @@ export class Store {
     }
   }
   private readUnlocked(): DevContourState {
+    return this.load().state;
+  }
+  /**
+   * Состояние вместе с текстом строки, из которой оно прочитано. `text`
+   * возвращается, только если чтение ничего не нормализовало: тогда он равен
+   * сериализации состояния, и запись сравнивает с ним, не сериализуя всё
+   * состояние ещё раз. Сериализация большого состояния — основная цена каждой
+   * записи, включая heartbeat.
+   */
+  private load(): { state: DevContourState; text?: string } {
     const row = this.db.prepare('SELECT data FROM main.state WHERE id=1').get() as { data: string };
-    const raw = JSON.parse(row.data);
-    const state = this.components ? this.components.read(raw) : raw;
+    // Строка прежних версий может не иметь полей, которые тип считает
+    // обязательными; ниже они восполняются.
+    const raw = JSON.parse(row.data) as DevContourState & { componentLayout?: unknown };
+    const state: DevContourState & { componentLayout?: unknown; changeSets?: unknown[] } =
+      this.components ? this.components.read(raw) : raw;
     if (!this.components && state.componentLayout)
       throw new Error('Для этой БД требуется component storage');
     if (state.version !== 1) throw new Error('Unsupported state version');
+    let normalized = !state.changeSets;
     state.changeSets ??= [];
-    for (const task of state.tasks) task.repositoryId ??= 'main';
-    normalizePause(state);
-    return state;
+    for (const task of state.tasks)
+      if (!task.repositoryId) {
+        task.repositoryId = 'main';
+        normalized = true;
+      }
+    if (normalizePause(state)) normalized = true;
+    return { state, text: this.components || normalized ? undefined : row.data };
   }
   // Synchronous composition: local idempotency records and domain mutations commit together.
   atomic<T>(action: () => T): T {
@@ -167,12 +190,14 @@ export class Store {
   }
   change<T>(type: string, action: (state: DevContourState) => T): T {
     return this.atomic(() => {
-      const state = this.read();
-      const before = JSON.stringify(state);
+      const loaded = this.load();
+      const state = loaded.state;
+      const before = loaded.text ?? JSON.stringify(state);
       const result = action(state);
-      if (before === JSON.stringify(state)) return result;
+      const after = JSON.stringify(state);
+      if (before === after) return result;
       if (this.components) this.components.write(state);
-      else this.db.prepare('UPDATE main.state SET data=? WHERE id=1').run(JSON.stringify(state));
+      else this.db.prepare('UPDATE main.state SET data=? WHERE id=1').run(after);
       if (type !== 'heartbeat') {
         const at = new Date().toISOString();
         const inserted = this.db
@@ -269,6 +294,20 @@ export class Store {
     return this.components
       ? this.components.events(rows)
       : rows.map((e) => ({ ...e, data: JSON.parse(e.data) }));
+  }
+  /**
+   * Согласованная копия базы в новый файл. SQLite снимает её в одной
+   * транзакции чтения, поэтому работающий сервер не нужно останавливать.
+   * Компонентное хранение распределено по нескольким базам, и копия одной из
+   * них не была бы согласованной: такой случай отклоняется явно.
+   */
+  backup(out: string) {
+    if (this.components)
+      throw new Error('Backup компонентного хранения не поддерживается: базы копируются вместе');
+    this.db.prepare('VACUUM main INTO ?').run(out);
+  }
+  eventCount() {
+    return (this.db.prepare('SELECT count(*) AS n FROM main.events').get() as { n: number }).n;
   }
   close() {
     this.db.close();
