@@ -9,7 +9,7 @@ import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import { command, git } from './process.ts';
 import { digest, DevContour } from '../core/service.ts';
 import type { Run, Gate, Evidence } from '../core/model.ts';
-import { TaskFailure } from '../core/failure.ts';
+import { TaskFailure, type FailureKind } from '../core/failure.ts';
 import { portableTest } from '../core/proof.ts';
 /** Предел манифеста: полный список тестов крупного проекта в состояние не кладётся. */
 const MANIFEST_LIMIT = 2000;
@@ -295,6 +295,27 @@ export const isolationBackend = { check: isolationSupport };
 export async function runGate(...args: Parameters<typeof executeGate>) {
   return timed(args[0], args[1], `${args[4]}-test:${args[5].id}`, () => executeGate(...args));
 }
+/**
+ * Хосты, в сети к которым проверке, по всей видимости, отказала песочница.
+ *
+ * Прокси песочницы отвечает на запрещённый домен `403`, но клиенты вроде
+ * pnpm показывают только «Forbidden - 403» и URL. На пилоте такой отказ
+ * записывался провалом проверки, и контур переписывал код, который был ни
+ * при чём. Признак узкий: в выводе есть отказ (403, Forbidden, прокси или
+ * тело ответа песочницы) и URL хоста, которого нет в `isolation.domains`.
+ */
+export function sandboxBlockedHosts(output: string, allowed: string[]) {
+  if (!/\b403\b|forbidden|denied by sandbox policy|blocked-by-sandbox-runtime|proxy|connect EPERM/i.test(output))
+    return [];
+  const hosts = new Set<string>();
+  for (const m of output.matchAll(/\bhttps?:\/\/([a-z0-9-]+(?:\.[a-z0-9-]+)+)/gi))
+    hosts.add(m[1].toLowerCase());
+  return [...hosts].filter(
+    (host) =>
+      host !== '127.0.0.1' &&
+      !allowed.some((d) => host === d.toLowerCase() || host.endsWith('.' + d.toLowerCase())),
+  );
+}
 async function executeGate(
   h: DevContour,
   run: Run,
@@ -313,6 +334,7 @@ async function executeGate(
   const reportPath = gate.report
     ? await prepareReportPath(cwd, gate.report.path, 'Report выходит из worktree')
     : undefined;
+  let kind: FailureKind = 'gate';
   let passed = false,
     summary = '',
     log = '',
@@ -339,6 +361,20 @@ async function executeGate(
     if (result.timedOut || signal.aborted)
       throw new Error('Проверка прервана или превысила timeout');
     if (result.code !== 0) {
+      const blocked =
+        h.config.isolation.mode === 'os'
+          ? sandboxBlockedHosts(result.stdout + '\n' + result.stderr, h.config.isolation.domains)
+          : [];
+      if (blocked.length) {
+        // Отказ сети песочницы — окружение, а не код: повтор реализации его
+        // не исправит, исправляет список доменов.
+        kind = 'environment';
+        throw new Error(
+          `песочница проверки закрыла сеть к ${blocked.join(', ')}: этих доменов нет в isolation.domains. ` +
+            'Если проверке нужна эта сеть, добавьте домены в isolation.domains конфигурации; код кандидата тут ни при чём. ' +
+            `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`,
+        );
+      }
       // Отчёт читается и при ненулевом коде: упавшие testcases — главная
       // причина провала, а многие раннеры пишут их только в отчёт. Код выхода
       // по-прежнему означает провал; повреждённый или отсутствующий отчёт
@@ -393,5 +429,5 @@ async function executeGate(
     tests: manifest?.cases,
     testsTruncated: manifest?.truncated || undefined,
   });
-  if (!passed) throw new TaskFailure('gate', `${phase}/${gate.id}: ${summary}`);
+  if (!passed) throw new TaskFailure(kind, `${phase}/${gate.id}: ${summary}`);
 }

@@ -12,6 +12,7 @@ import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { adapters, cliArguments, type AgentRequest } from '../src/runner/adapters.ts';
 import { git, command } from '../src/runner/process.ts';
+import { sandboxBlockedHosts } from '../src/runner/gates.ts';
 import {
   junitSummary,
   runCheck,
@@ -1403,6 +1404,50 @@ test('Взятый кандидат проходит ту же проверку 
     assert.equal(second.failureKind, 'scope-violation');
     assert.equal(f.reviews.length, 1, 'ревью на недопустимого кандидата не тратится');
     assert.equal(await git(f.repo.path, 'rev-parse', `refs/heads/${f.repo.targetBranch}`), before);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('Отказ сети песочницы узнаётся по выводу и называет домен', () => {
+  // Настоящий вывод pnpm из пилота: прокси песочницы ответил 403, клиент
+  // показал только код и URL.
+  const pnpm =
+    'candidate/install: Код выхода 1: ERR_PNPM_FETCH_403  GET https://registry.npmjs.org/@types/node/-/node-24.3.0.tgz: Forbidden - 403 | No authorization header was set for the request.';
+  assert.deepEqual(sandboxBlockedHosts(pnpm, []), ['registry.npmjs.org']);
+  assert.deepEqual(
+    sandboxBlockedHosts(pnpm, ['npmjs.org']),
+    [],
+    'поддомен разрешённого домена открыт',
+  );
+  assert.deepEqual(
+    sandboxBlockedHosts('connect EPERM 104.16.0.1:443 https://api.example.test/v1', []),
+    ['api.example.test'],
+  );
+  // Провал теста, который просто упоминает URL, — не отказ сети.
+  assert.deepEqual(
+    sandboxBlockedHosts('expected link https://example.com/docs to be rendered', []),
+    [],
+  );
+  // Отказ локального сервиса — не песочница.
+  assert.deepEqual(sandboxBlockedHosts('GET http://127.0.0.1:4000/x 403 Forbidden', []), []);
+});
+
+test('Проверка, которой песочница закрыла сеть, — отказ окружения, а не провал кода', async () => {
+  const f = await runtimeFixture();
+  try {
+    f.h.config.gates[0].command = [
+      'sh',
+      '-c',
+      'echo "GET https://registry.npmjs.org/-/ping"; curl -sS -o /dev/null https://registry.npmjs.org/-/ping',
+    ];
+    f.h.config.gates[0].report = undefined;
+    f.h.pause(false);
+    await new Scheduler(f.h, f.root).drain();
+    const run = f.store.read().runs.at(-1)!;
+    assert.equal(run.failureKind, 'environment', run.error);
+    assert.match(run.error!, /registry\.npmjs\.org/);
+    assert.match(run.error!, /isolation\.domains/);
   } finally {
     await f.cleanup();
   }
