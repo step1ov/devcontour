@@ -1,5 +1,5 @@
 import { selectedWorkspaceMode, assertControllerCheckout } from './workspace-mode.ts';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { Store } from '../core/store.ts';
 import { developmentBinding } from '../core/preparation.ts';
@@ -11,10 +11,17 @@ export function preparationStore(root: string) {
   const workspace = dirname(root);
   if (selectedWorkspaceMode(workspace)) assertControllerCheckout(workspace);
   const path = join(root, 'config.json');
-  const config = existsSync(path) ? loadConfig(path) : undefined;
+  // Хранилищу подготовки из конфигурации нужен только способ хранения. Полная
+  // загрузка сверяет закреплённый профиль, и поднятая версия профиля делала
+  // недоступной саму команду, которая его обновляет: workspace-init падал с
+  // «Профиль изменился после установки», не дойдя до обновления.
+  const storage = existsSync(path)
+    ? (JSON.parse(readFileSync(path, 'utf8')) as { storage?: string }).storage
+    : undefined;
+  const config = storage === 'component' ? loadConfig(path) : undefined;
   const store = new Store(
     join(root, 'state.sqlite'),
-    config?.storage === 'component' ? repositories(config) : undefined,
+    config ? repositories(config) : undefined,
     false,
     'DELETE',
   );

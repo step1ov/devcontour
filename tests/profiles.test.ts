@@ -17,6 +17,7 @@ import { profile, resolveProfile, profilePin } from '../src/runner/packs.ts';
 import { setupProject } from '../src/runner/setup.ts';
 import { setupWorkspace } from '../src/runner/workspace-setup.ts';
 import { loadConfig } from '../src/runner/config.ts';
+import { preparationStore } from '../src/runner/preparation-store.ts';
 import { git, command } from '../src/runner/process.ts';
 import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
@@ -374,13 +375,15 @@ test('A profile sets how long one attempt may take, and layers take the larger l
         id: 'base',
         version: '1.0.0',
         runTimeoutMs: 1_200_000,
-        gates: [{
-      id: 'acceptance',
-      kind: 'test',
-      command: ['npm', 'test'],
-      timeoutMs: 240000,
-      report: { type: 'junit', path: '.reports/junit.xml' },
-    }],
+        gates: [
+          {
+            id: 'acceptance',
+            kind: 'test',
+            command: ['npm', 'test'],
+            timeoutMs: 240000,
+            report: { type: 'junit', path: '.reports/junit.xml' },
+          },
+        ],
       }),
     );
     await writeFile(
@@ -397,16 +400,50 @@ test('A profile sets how long one attempt may take, and layers take the larger l
 
     await writeFile(
       join(root, 'quiet.json'),
-      JSON.stringify({ id: 'quiet', version: '1.0.0', gates: [{
-      id: 'acceptance',
-      kind: 'test',
-      command: ['npm', 'test'],
-      timeoutMs: 240000,
-      report: { type: 'junit', path: '.reports/junit.xml' },
-    }] }),
+      JSON.stringify({
+        id: 'quiet',
+        version: '1.0.0',
+        gates: [
+          {
+            id: 'acceptance',
+            kind: 'test',
+            command: ['npm', 'test'],
+            timeoutMs: 240000,
+            report: { type: 'junit', path: '.reports/junit.xml' },
+          },
+        ],
+      }),
     );
     assert.equal((await profile('./quiet.json', root)).runTimeoutMs, undefined);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Хранилище подготовки открывается, пока профиль ждёт обновления', async () => {
+  // workspace-init с --workspace сначала проверяет подготовку. Открытие её
+  // хранилища загружало всю конфигурацию со сверкой профиля, и поднятая версия
+  // профиля делала недоступной ту самую команду, которая его обновляет.
+  const workspace = await mkdtemp(join(tmpdir(), 'devcontour-prep-'));
+  const root = join(workspace, '.devcontour-local');
+  try {
+    await mkdir(root);
+    const stale = {
+      version: 1,
+      name: 'Pilot',
+      repository: workspace,
+      storage: 'central',
+      packs: [{ id: 'pilot', version: '1.3.0', capabilities: [] }],
+    };
+    await json(join(root, 'config.json'), stale);
+    assert.throws(() => loadConfig(join(root, 'config.json')));
+    const store = preparationStore(root);
+    store.close();
+    // Компонентному хранению список репозиториев нужен, и сломанная
+    // конфигурация по-прежнему видна сразу.
+    await json(join(root, 'config.json'), { ...stale, storage: 'component' });
+    assert.throws(() => preparationStore(root));
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
   }
 });
