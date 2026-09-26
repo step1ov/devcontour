@@ -155,6 +155,14 @@ export async function serve(
                   taskId: r.taskId,
                   title: task?.title ?? r.taskId,
                   role: task?.role,
+                  // Имя роли объявляет workspace; экран этапа не читает всю
+                  // конфигурацию и без него показывал сырой ключ роли.
+                  roleTitle:
+                    task && h
+                      ? (h.config.repositories.find((x) => x.id === task.repositoryId)?.roles?.[
+                          task.role
+                        ]?.title ?? h.config.roles[task.role]?.title)
+                      : undefined,
                   phase: r.phase,
                   runtime: r.runtime,
                   model: r.model,

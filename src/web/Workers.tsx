@@ -14,6 +14,7 @@ export type Worker = {
   taskId: string;
   title: string;
   role?: string;
+  roleTitle?: string;
   phase?: string;
   runtime?: string;
   model?: string;
@@ -116,7 +117,9 @@ export function WorkerCards({ workers, concurrency }: { workers: Worker[]; concu
           <CardContent className="grid gap-3 p-4">
             <div className="flex flex-wrap items-center gap-3">
               <Bot className="text-primary size-5 shrink-0" aria-hidden="true" />
-              <strong className="text-md">{w.role ? roleLabel(w.role) : 'Исполнитель'}</strong>
+              <strong className="text-md">
+                {w.roleTitle ?? (w.role ? roleLabel(w.role) : 'Исполнитель')}
+              </strong>
               <Badge variant="secondary" className="font-mono text-xs">
                 {engine(w.runtime, w.model)}
               </Badge>

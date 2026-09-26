@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fixture } from './helpers.ts';
+import { fixture, input } from './helpers.ts';
 import { serve } from '../src/server/http.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { runActivity } from '../src/runner/activity.ts';
@@ -162,5 +162,28 @@ test('The panel can read what a run is doing right now', async () => {
     );
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Экран этапа называет исполнителя объявленным именем роли', async () => {
+  const f = fixture();
+  f.h.config.roles.qa = { ...f.h.config.roles.qa, title: 'Тестировщик веба' };
+  const scheduler = new Scheduler(f.h, f.root);
+  const app = await serve(f.h, scheduler, { port: 0 });
+  try {
+    const b = f.h.createBoard('Доска');
+    f.h.addTask(b.id, input('Сценарий входа'));
+    f.h.approve(b.id);
+    f.h.pause(false);
+    f.h.claim('test');
+    const view = (await (await fetch(app.url + '/api/preparation')).json()) as {
+      workers?: { title: string; roleTitle?: string }[];
+    };
+    assert.equal(view.workers?.[0]?.title, 'Сценарий входа');
+    assert.equal(view.workers?.[0]?.roleTitle, 'Тестировщик веба');
+  } finally {
+    await app.close();
+    await scheduler.stop();
+    f.cleanup();
   }
 });
