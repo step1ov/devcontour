@@ -37,6 +37,11 @@ test('Plan → parallel execution → acceptance → correction → acceptance p
   );
   await expect(page.getByRole('button', { name: 'Принять доску' })).toBeVisible(cycle);
   await expect(live).toContainText('Сейчас никто не работает');
+  // Карточка задачи показывает ход попыток: исход и длительность фаз.
+  const attempts = page.getByRole('region', { name: 'Ход попыток' });
+  await expect(attempts).toContainText('Попытка 1');
+  await expect(attempts).toContainText('принята');
+  await expect(attempts).toContainText(/код .*проверки .*ревью/);
   await page.getByRole('button', { name: 'Принять доску' }).click();
   await expect(page.getByRole('button', { name: 'Создать корректировку' })).toBeVisible();
   const before = await (await request.get('/api/state')).json();

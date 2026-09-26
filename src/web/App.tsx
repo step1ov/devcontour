@@ -91,7 +91,7 @@ type Snapshot = Omit<DevContourState, 'tasks'> & {
 };
 import { roleLabel, currentRoles, setRoleSource } from './roles.ts';
 import { Phases, engine, elapsed } from './Workers.tsx';
-import { LiveWork } from './LiveWork.tsx';
+import { AttemptTimeline, LiveWork } from './LiveWork.tsx';
 
 const waitingReasons: Record<string, string> = {
   product_approval_required:
@@ -1501,6 +1501,7 @@ export function App() {
                         <dd>{task.attempt}</dd>
                       </div>
                     </dl>
+                    <AttemptTimeline runs={data.runs.filter((r) => r.taskId === task.id)} />
                     {task.supersedes && (
                       <p className="bg-accent text-primary rounded-sm p-2">
                         Корректирует <strong>{task.supersedes}</strong>

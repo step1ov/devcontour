@@ -133,3 +133,113 @@ export function LiveWork({
     </section>
   );
 }
+
+// Ход попыток задачи. Карточка показывала одну цифру «Попытки: 3», и понять,
+// где уходило время и почему попытка кончилась, можно было только по журналу.
+// Здесь каждая попытка — строка: исход, модель, длительность фаз и причина.
+const stageNames: Record<string, string> = {
+  implementation: 'код',
+  'implementation-reuse': 'код взят у прошлой попытки',
+  'candidate-environment': 'окружение',
+  'candidate-test': 'проверки',
+  'candidate-review': 'ревью',
+  'integration-wait': 'очередь интеграции',
+  'integration-environment': 'окружение интеграции',
+  'integration-test': 'проверки интеграции',
+  'integration-review': 'ревью интеграции',
+};
+const outcomeNames: Record<Run['status'], string> = {
+  active: 'идёт',
+  succeeded: 'принята',
+  failed: 'не прошла',
+  cancelled: 'отменена',
+  expired: 'владение потеряно',
+};
+function span(ms: number) {
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return seconds + ' с';
+  const minutes = Math.round(seconds / 60);
+  return minutes < 60 ? minutes + ' мин' : `${Math.floor(minutes / 60)} ч ${minutes % 60} мин`;
+}
+function phaseDurations(run: Run) {
+  const totals = new Map<string, number>();
+  for (const t of run.timings ?? []) {
+    const family = t.stage.split(':')[0];
+    const end = t.finishedAt ?? (run.status === 'active' ? new Date().toISOString() : undefined);
+    if (!end) continue;
+    totals.set(family, (totals.get(family) ?? 0) + Date.parse(end) - Date.parse(t.startedAt));
+  }
+  return [...totals].map(([stage, ms]) => ({ stage, ms }));
+}
+function Attempt({ run, number, reset }: { run: Run; number: number; reset: boolean }) {
+  const end = run.finishedAt ?? new Date().toISOString();
+  return (
+    <li className="grid gap-1 border-b pb-2 text-sm last:border-b-0">
+      <div className="flex flex-wrap items-center gap-x-2">
+        <strong>Попытка {number}</strong>
+        {reset && <span className="text-muted-foreground text-xs">после сброса бюджета</span>}
+        <span
+          className={cn(
+            run.status === 'succeeded' && 'text-success',
+            run.status === 'failed' && 'text-destructive',
+            run.status === 'active' && 'text-primary',
+          )}
+        >
+          {outcomeNames[run.status]}
+        </span>
+        <span className="text-muted-foreground font-mono text-xs">
+          {engine(run.runtime, run.model)}
+        </span>
+        <span className="text-muted-foreground ml-auto text-xs">
+          {span(Date.parse(end) - Date.parse(run.startedAt))}
+        </span>
+      </div>
+      {phaseDurations(run).length > 0 && (
+        <p className="text-muted-foreground m-0 text-xs">
+          {phaseDurations(run)
+            .map((p) => `${stageNames[p.stage] ?? p.stage} ${span(p.ms)}`)
+            .join(' · ')}
+        </p>
+      )}
+      {run.error && (
+        <p className="text-destructive m-0 text-xs [overflow-wrap:anywhere]">
+          {run.error.slice(0, 300)}
+        </p>
+      )}
+    </li>
+  );
+}
+export function AttemptTimeline({ runs }: { runs: Run[] }) {
+  if (!runs.length) return null;
+  // Номер — сквозной порядок попыток: счётчик бюджета после сброса начинается
+  // заново, и «попытка 1» над «попыткой 3» читалась как ошибка.
+  const numbered = runs.map((run, i) => ({
+    run,
+    number: i + 1,
+    // Равный номер — возвращённая попытка (отказ окружения), не сброс.
+    reset: i > 0 && run.attempt < runs[i - 1].attempt,
+  }));
+  const ordered = [...numbered].reverse();
+  return (
+    <section aria-label="Ход попыток" className="my-4">
+      <h3>Ход попыток</h3>
+      <ol className="m-0 grid list-none gap-2 p-0">
+        {ordered.slice(0, 3).map((a) => (
+          <Attempt key={a.run.id} {...a} />
+        ))}
+      </ol>
+      {ordered.length > 3 && (
+        <details className="mt-2">
+          <summary className="text-muted-foreground cursor-pointer text-sm">
+            Более ранние попытки ({ordered.length - 3})
+          </summary>
+          <ol className="m-0 mt-2 grid list-none gap-2 p-0">
+            {ordered.slice(3).map((a) => (
+              <Attempt key={a.run.id} {...a} />
+            ))}
+          </ol>
+        </details>
+      )}
+    </section>
+  );
+}
