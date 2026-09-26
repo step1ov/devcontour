@@ -259,3 +259,46 @@ test('Упавшая задача без восстановления объяс
     f.cleanup();
   }
 });
+
+test('Упавший workflow, чья работа ушла дальше, не держит «нужен разбор»', () => {
+  const f = fixture();
+  try {
+    const job = (key: string, id: string, status: string, startedAt: string) =>
+      f.store.atomic(() =>
+        f.store.saveLocal('lead', undefined, key.repeat(64), {
+          key: key.repeat(64),
+          kind: 'board',
+          id,
+          stage: 0,
+          status,
+          error:
+            status === 'failed'
+              ? 'Независимое ревью отклонено: план требует исправлений'
+              : undefined,
+          attempts: 1,
+          maxAttempts: 3,
+          startedAt,
+          history: [],
+        }),
+      );
+    // План перепланирован: вся работа прежней доски отменена.
+    const old = f.h.createBoard('Прежний план');
+    const dropped = f.h.addTask(old.id, input('Отменённая'));
+    f.h.cancel(dropped.id);
+    job('a', old.id, 'failed', '2026-09-26T08:00:00.000Z');
+    // Та же доска получила новый workflow после исправления плана.
+    const current = f.h.createBoard('Текущий план');
+    f.h.addTask(current.id, input('Живая'));
+    job('b', current.id, 'failed', '2026-09-26T08:10:00.000Z');
+    job('c', current.id, 'running', '2026-09-26T08:20:00.000Z');
+    let o = authorOverview(f.h);
+    assert.equal(o.decisions.filter((d) => d.kind === 'technical').length, 0);
+    assert.doesNotMatch(o.headline, /технической проблеме/);
+    // Упавший последним — по-прежнему решение.
+    job('d', current.id, 'failed', '2026-09-26T08:30:00.000Z');
+    o = authorOverview(f.h);
+    assert.equal(o.decisions.filter((d) => d.kind === 'technical').length, 1);
+  } finally {
+    f.cleanup();
+  }
+});

@@ -178,8 +178,29 @@ export function authorOverview(h: DevContour): AuthorOverview {
   }
   // Технические исправления: восстановление остановлено — дальше нужен
   // ведущий агент, автору достаточно знать почему.
-  for (const w of new LeadWorkflow(h).view())
-    if (w.status === 'failed' && w.error)
+  // Упавший workflow, чья работа ушла дальше, решения не требует: доска
+  // принята или вся её работа отменена, либо по тому же входу запущен новый
+  // workflow. На пилоте три таких записи после перепланирования держали
+  // заголовок «нужен разбор», пока исполнители работали.
+  const jobs = new LeadWorkflow(h).view();
+  const superseded = (w: (typeof jobs)[number]) => {
+    if (
+      jobs.some(
+        (x) =>
+          x.id === w.id && x.key !== w.key && x.status !== 'failed' && x.startedAt > w.startedAt,
+      )
+    )
+      return true;
+    if (w.kind === 'board') {
+      const board = s.boards.find((b) => b.id === w.id);
+      const r = board?.revisions.at(-1);
+      if (!board || !r || r.status === 'accepted') return true;
+      return !tasks.some((t) => r.taskIds.includes(t.id) && t.status !== 'cancelled');
+    }
+    return !!s.changeSets.find((c) => c.id === w.id)?.acceptance;
+  };
+  for (const w of jobs)
+    if (w.status === 'failed' && w.error && !superseded(w))
       decisions.push({
         kind: 'technical',
         title: 'Автоматическое восстановление остановлено',

@@ -93,6 +93,7 @@ export class LeadWorkflow {
         status: job.status,
         error: job.error,
         attempts: job.attempts,
+        startedAt: job.startedAt,
         maxAttempts: job.maxAttempts,
         repairs: job.repairs ?? 0,
         repairBudget: this.h.config.repairBudget,

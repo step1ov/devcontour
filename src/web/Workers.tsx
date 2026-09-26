@@ -75,7 +75,7 @@ export function Phases({ current }: { current?: string }) {
 // Фаза отвечает грубо: `running` одинаков и через минуту после выдачи, и на
 // десятом инструменте. Последние действия runtime показывают, чем агент занят
 // на самом деле — читать журнал для этого больше не нужно.
-function Activity({ runId }: { runId: string }) {
+export function Activity({ runId, lines: limit = 3 }: { runId: string; lines?: number }) {
   const [lines, setLines] = useState<{ phase: string; text: string }[]>([]);
   useEffect(() => {
     let live = true;
@@ -84,7 +84,7 @@ function Activity({ runId }: { runId: string }) {
         const response = await fetch(`api/runs/${runId}/activity`);
         if (!response.ok) return;
         const data = (await response.json()) as { activity?: { phase: string; text: string }[] };
-        if (live) setLines(data.activity?.slice(-3) ?? []);
+        if (live) setLines(data.activity?.slice(-limit) ?? []);
       } catch {
         // Панель переживает недоступный сервер: строки просто не обновятся.
       }
@@ -95,7 +95,7 @@ function Activity({ runId }: { runId: string }) {
       live = false;
       clearInterval(timer);
     };
-  }, [runId]);
+  }, [runId, limit]);
   if (!lines.length) return null;
   return (
     <ol className="text-muted-foreground m-0 grid gap-0.5 font-mono text-xs">

@@ -3,7 +3,7 @@ import type { Board, Run, Task } from '../core/model.ts';
 import { Button } from '@/ui/button.tsx';
 import { cn } from '@/lib/utils.ts';
 import { roleLabel } from './roles.ts';
-import { Phases, elapsed, engine } from './Workers.tsx';
+import { Activity, Phases, elapsed, engine } from './Workers.tsx';
 
 // «Кто сейчас над чем работает» — первый вопрос, пока идёт разработка. Ответ
 // был на отдельной вкладке хода работ, ниже настроек контура; на графе и в
@@ -126,6 +126,9 @@ export function LiveWork({
                   </span>
                 )}
               </div>
+              {/* Последнее действие агента: фаза «пишет код» одинакова и на
+                  первой минуте, и на двадцатой. */}
+              <Activity runId={run.id} lines={1} />
             </li>
           ))}
         </ul>
