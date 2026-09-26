@@ -52,6 +52,62 @@ export default tseslint.config(
       ],
     },
   },
+  // Границы слоёв. Домен не знает ни процессов, ни сервера, ни интерфейса;
+  // интерфейс исполняется в браузере и не тянет код runner/server и модули
+  // Node. Нарушение — ошибка, а не предупреждение: граница, которую можно
+  // нарушить молча, со временем перестаёт существовать.
+  {
+    files: ['src/core/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['../application/*', '../runner/*', '../server/*', '../web/*', '../cli*'],
+              message: 'core — домен: он не зависит от application, runner, server и web.',
+            },
+            {
+              group: ['node:child_process', 'node:net', 'node:http', 'node:https'],
+              message: 'Процессы и сеть — дело runner и server, не домена.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    files: ['src/application/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['../server/*', '../web/*', '../cli*'],
+              message: 'application не зависит от транспорта и интерфейса.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    files: ['src/web/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['../runner/*', '../server/*', '../cli*', 'node:*'],
+              message: 'Интерфейс исполняется в браузере: только core, application и типы.',
+            },
+          ],
+        },
+      ],
+    },
+  },
   {
     files: ['src/web/**/*.{ts,tsx}'],
     plugins: { 'react-hooks': reactHooks },

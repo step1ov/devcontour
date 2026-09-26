@@ -23,6 +23,7 @@
     "node": ">=24.3.0"
   },
   "scripts": {
+    "bench:storage": "node --import tsx scripts/storage-bench.ts",
     "devcontour": "node --import tsx src/cli.ts",
     "dev": "node --import tsx src/cli.ts demo --dev",
     "start": "node --import tsx src/cli.ts serve",
@@ -34,7 +35,8 @@
     "test:package": "npm run build && node scripts/smoke-package.mjs",
     "test": "node --import tsx --test --test-concurrency=4 tests/*.test.ts",
     "test:e2e": "playwright test",
-    "lint": "node scripts/check-tokens.mjs && eslint . --quiet",
+    "lint": "node scripts/check-tokens.mjs && node scripts/lint-ratchet.mjs",
+    "lint:debt-update": "node scripts/lint-ratchet.mjs --update",
     "check": "npm run lint && npm run build:lib && npm run check:skill && npm run build && npm test && node scripts/smoke-package.mjs && npm run test:e2e",
     "hooks:install": "node scripts/install-hooks.mjs",
     "format": "prettier --write .",
