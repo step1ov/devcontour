@@ -495,7 +495,10 @@ test('A task that produced nothing can return to draft, one that delivered canno
       s.tasks[0].status = 'done';
       s.tasks[0].activeRunId = undefined;
     });
-    assert.throws(() => f.h.reopen(t.id, 'Контракт снова изменился, хочу переписать'), /корректировка/);
+    assert.throws(
+      () => f.h.reopen(t.id, 'Контракт снова изменился, хочу переписать'),
+      /корректировка/,
+    );
   } finally {
     f.cleanup();
   }
@@ -525,6 +528,29 @@ test('A ready task at the attempt ceiling is not a silent dead end', () => {
     f.h.retry(t.id, { reason: 'Причина устранена, даём задаче ход' });
     assert.equal(f.store.read().tasks[0].attempt, 0);
     assert.ok(f.h.claim('one'), 'после сброса задача выдаётся');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Цель доски правится до утверждения плана и не правится после', () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Границы и целостность прежней сборки', 'Обещает три результата');
+    const kept = f.h.addTask(b.id, input('Границы'));
+    const dropped = f.h.addTask(b.id, input('Целостность'));
+    f.h.cancel(dropped.id);
+    // План сузили — сузить можно и обещание доски, не пересоздавая её.
+    f.h.editBoard(b.id, { title: 'Границы', description: 'Обещает один результат' });
+    const edited = f.store.read().boards.find((x) => x.id === b.id)!;
+    assert.equal(edited.title, 'Границы');
+    assert.equal(edited.description, 'Обещает один результат');
+    assert.throws(() => f.h.editBoard(b.id, { title: 'x' }), /от 3 до 180/);
+    f.h.approve(b.id, [kept.id]);
+    assert.throws(
+      () => f.h.editBoard(b.id, { description: 'Другое обещание' }),
+      /до утверждения плана/,
+    );
   } finally {
     f.cleanup();
   }

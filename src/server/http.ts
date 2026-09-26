@@ -408,7 +408,17 @@ export async function serve(
             if (start) await scheduler.tick();
             result = { paused: !start };
           } else if (parts[1] === 'boards') {
-            if (parts[3] === 'tasks') result = h.addTask(parts[2], input);
+            if (req.method === 'PATCH' && parts.length === 3)
+              result = h.editBoard(
+                parts[2],
+                z
+                  .object({
+                    title: z.string().optional(),
+                    description: z.string().max(5000).optional(),
+                  })
+                  .parse(input),
+              );
+            else if (parts[3] === 'tasks') result = h.addTask(parts[2], input);
             else if (parts[3] === 'approve')
               result = h.approve(parts[2], z.array(z.string()).optional().parse(input.taskIds));
             else if (parts[3] === 'accept') {

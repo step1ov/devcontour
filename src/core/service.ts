@@ -180,6 +180,32 @@ export class DevContour {
       return { boardId: b.id, tasks: tasks.length };
     });
   }
+  /**
+   * Название и цель доски правятся, пока её план не утверждён. Цель входит в
+   * предложение, которое читает ревью плана: сузив план, ведущий обязан
+   * сузить и обещание доски, а до этой правки её приходилось пересоздавать.
+   * После утверждения цель — часть согласованного, и меняет её корректировка.
+   */
+  editBoard(id: string, input: { title?: string; description?: string }) {
+    return this.store.change('board.edited', (s) => {
+      const b = requireValue(
+        s.boards.find((x) => x.id === id),
+        'Доска не найдена',
+      );
+      const r = b.revisions.at(-1)!;
+      const approved = s.tasks.filter(
+        (t) => r.taskIds.includes(t.id) && t.status !== 'draft' && t.status !== 'cancelled',
+      );
+      if (r.status !== 'active' || approved.length)
+        throw new DomainError('Цель доски меняется только до утверждения плана', 409);
+      const title = input.title?.trim() ?? b.title;
+      if (title.length < 3 || title.length > 180)
+        throw new DomainError('Название: от 3 до 180 символов', 400);
+      b.title = title;
+      if (input.description !== undefined) b.description = input.description;
+      return { boardId: id, title: b.title, description: b.description };
+    });
+  }
   createBoard(title: string, description = '', repositoryId?: string) {
     if (repositoryId) repository(this.config, repositoryId);
     if (title.trim().length < 3 || title.length > 180)
