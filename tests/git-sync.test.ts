@@ -600,7 +600,7 @@ test('Product decisions and task bindings round-trip between independent compone
     const a = f.create('product-a');
     const changeId = approvePreparation(new Preparation(a.store));
     const board = a.h.createBoard('Approved product work', '', 'main');
-    const task = a.h.addTask(board.id, input());
+    const task = a.h.addTask(board.id, { ...input(), featureId: 'member-block' });
     a.h.approve(board.id);
     syncGit(a.h, { member: 'alice' });
     a.commit();
@@ -608,6 +608,8 @@ test('Product decisions and task bindings round-trip between independent compone
     syncGit(b.h, { member: 'bob' });
     assert.equal(b.store.read().preparation?.changes[0].id, changeId);
     assert.deepEqual(b.store.read().tasks[0].preparation, task.preparation);
+    // Карта продукта считает готовность по этой связи: она переезжает с задачей.
+    assert.equal(b.store.read().tasks[0].featureId, 'member-block');
     assert.equal(b.store.read().preparation?.changes[0].architecture[0].status, 'approved');
     const shared = readFileSync(
       join(a.workspace, '.devcontour/preparations/workspace-preparation.json'),

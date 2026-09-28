@@ -1,4 +1,9 @@
-import { developmentBinding, assertTaskPreparation } from './preparation.ts';
+import {
+  developmentBinding,
+  assertFeatureOf,
+  assertTaskFeature,
+  assertTaskPreparation,
+} from './preparation.ts';
 import { validateTaskContext, validateWorkflow } from './workflow.ts';
 import { entityId } from './ids.ts';
 import { createHash, randomUUID } from 'node:crypto';
@@ -20,6 +25,7 @@ import {
   requireValue,
   taskInput,
   discoveryInput,
+  type Contract,
   type Task,
   type DevContourState,
   type Config,
@@ -51,6 +57,24 @@ export const specDigest = (t: Task) =>
     ...(t.resources?.length ? { resources: t.resources } : {}),
     ...(t.finding ? { finding: t.finding } : {}),
   });
+/**
+ * Более поздняя утверждённая редакция того же контракта. Каждое утверждение
+ * создаёт новый id, и задача, привязанная к прежнему, проходила утверждение и
+ * запускалась на старом тексте, хотя в дереве уже лежала новая редакция того
+ * же файла. Редакции одного контракта — один источник в одном репозитории.
+ */
+export function supersededBy(contracts: Contract[], id: string): Contract | undefined {
+  // Реестр только дополняется, поэтому порядок в нём — порядок утверждения;
+  // отметки времени в пределах миллисекунды совпадают.
+  const at = contracts.findIndex((x) => x.id === id);
+  const c = contracts[at];
+  if (!c?.source) return undefined;
+  return contracts
+    .slice(at + 1)
+    .findLast(
+      (x) => x.source === c.source && (x.repositoryId ?? 'main') === (c.repositoryId ?? 'main'),
+    );
+}
 const now = () => new Date().toISOString();
 const task = (s: DevContourState, id: string) =>
   requireValue(
@@ -330,6 +354,7 @@ export class DevContour {
         const t = task(s, id);
         if (t.status !== 'draft') continue;
         assertTaskPreparation(s, t);
+        assertTaskFeature(s, t);
         validateTaskContext(this.config, t);
         if (requiresContract(this.config, t.role, t.repositoryId) && !t.contracts.length)
           throw new DomainError(`${t.id}: для ${t.role} сначала привяжите утверждённый контракт`);
@@ -341,6 +366,11 @@ export class DevContour {
             );
             if (c.repositoryId && c.repositoryId !== t.repositoryId)
               throw new DomainError('Для межпроектного интерфейса нужен общий контракт');
+            const newer = supersededBy(s.contracts, id);
+            if (newer)
+              throw new DomainError(
+                `${t.id}: контракт ${id} заменён редакцией ${newer.id} того же файла ${newer.source}; привяжите её`,
+              );
             return [id, c.digest];
           }),
         );
@@ -487,6 +517,34 @@ export class DevContour {
       // решение человека или штатная остановка, и класса у неё нет.
       s.pauseFailures = undefined;
       return { paused: value, reason: s.pauseReason };
+    });
+  }
+  // Карта продукта считает готовность по связи задачи с фичей. Задачи,
+  // выпущенные без неё, исправляются здесь — в том числе принятые: связь не
+  // входит в постановку, и приёмку она не затрагивает.
+  bindFeature(id: string, featureId: string) {
+    return this.store.change('task.feature', (s) => {
+      const t = task(s, id);
+      if (t.status === 'cancelled') throw new DomainError('Отменённая задача не относится к фиче');
+      if (!t.preparation)
+        throw new DomainError('Задача не связана с изменением продукта; фичу ей назначить нельзя');
+      assertFeatureOf(s, t.preparation.changeId, featureId);
+      const previous = t.featureId;
+      t.featureId = featureId;
+      return { taskId: t.id, featureId, previous };
+    });
+  }
+  // Перенос базы устраняет причину, по которой диспетчер встал, но очередь не
+  // запускает: сначала человек проверяет базу гейтами. Пауза переходит к нему,
+  // а прежний сбой перестаёт называться причиной — иначе экран продолжал
+  // советовать уже выполненный base-update. Событие оставляет перенос в журнале.
+  baseUpdated(updated: { repositoryId: string; from: string; to: string }[]) {
+    return this.store.change('base.updated', (s) => {
+      if (!s.paused) throw new DomainError('Перенос базы выполняется на остановленной очереди');
+      s.pauseReason = 'operator';
+      s.pausedAt = now();
+      s.pauseFailures = undefined;
+      return { updated };
     });
   }
   assign(id: string, member: string) {
@@ -786,7 +844,9 @@ export class DevContour {
       return created;
     });
   }
-  cancel(id: string) {
+  // Причина отмены остаётся в журнале: отменённая находка без неё неотличима
+  // от забытой. Панель отменяет без причины, ведущий агент — с ней.
+  cancel(id: string, reason?: string) {
     return this.store.change('task.cancelled', (s) => {
       const t = task(s, id);
       if (t.status === 'done')
@@ -798,7 +858,7 @@ export class DevContour {
       }
       t.status = 'cancelled';
       t.activeRunId = undefined;
-      return { taskId: id };
+      return reason ? { taskId: id, reason } : { taskId: id };
     });
   }
   /**

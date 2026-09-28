@@ -447,3 +447,64 @@ test('Хранилище подготовки открывается, пока �
     await rm(workspace, { recursive: true, force: true });
   }
 });
+
+test('Обновление профиля называет значения, которые переопределяет файл компонента', async () => {
+  // Файл компонента сильнее профиля. Поднятая версия профиля с новым гейтом
+  // сообщала «profile-updated», а гейт до конфигурации не доходил: файл
+  // компонента хранил прежний список. Теперь команда называет расхождение.
+  const f = await fixture();
+  try {
+    await git(f.repo, 'init', '-b', 'main');
+    await git(f.repo, 'config', 'user.name', 'Profile fixture');
+    await git(f.repo, 'config', 'user.email', 'fixture@example.invalid');
+    await git(f.repo, 'add', '.');
+    await git(f.repo, 'commit', '-m', 'Own profile');
+    const control = join(f.root, 'control');
+    await mkdir(control);
+    const registry = join(control, 'workspace.json');
+    await json(registry, {
+      version: 1,
+      name: 'Component file',
+      repositories: [
+        {
+          id: 'product',
+          name: 'Product',
+          path: f.repo,
+          profile: './profiles/main.json',
+          configFile: 'devcontour.component.json',
+        },
+      ],
+    });
+    const ownGate = { ...testGate, id: 'component-own' };
+    await json(join(f.repo, 'devcontour.component.json'), {
+      name: 'Product',
+      kind: 'product',
+      gates: [ownGate],
+      environment: { values: { PROJECT_MARKER: 'product' } },
+    });
+    const result = await setupWorkspace(registry);
+    await json(join(f.repo, 'profiles/tests.json'), {
+      id: 'checks',
+      version: '2.1.0',
+      gates: [testGate, { ...testGate, id: 'profile-new' }],
+    });
+    await json(join(f.repo, 'profiles/main.json'), {
+      id: 'custom-api',
+      version: '1.1.0',
+      extends: ['./stack.json', './tests.json', './env.json'],
+    });
+    const updated = await setupWorkspace(registry);
+    assert.equal(updated.status, 'profile-updated');
+    assert.deepEqual('shadowed' in updated ? updated.shadowed : undefined, [
+      { repositoryId: 'product', file: 'devcontour.component.json', keys: ['gates'] },
+    ]);
+    assert.match('warning' in updated ? String(updated.warning) : '', /gates/);
+    // Сам файл компонента по-прежнему решает: обновление ничего не подменяет.
+    assert.deepEqual(
+      loadConfig(result.config).repositories[0].gates.map((g) => g.id),
+      ['component-own'],
+    );
+  } finally {
+    await f.close();
+  }
+});

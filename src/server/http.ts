@@ -25,6 +25,7 @@ import { IntentService } from '../runner/intent.ts';
 import { attachJournal, renderJournal } from '../runner/journal.ts';
 import { runActivity } from '../runner/activity.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
+import { queueStopReason } from '../core/work-status.ts';
 const json = (res: ServerResponse, status: number, value: unknown) => {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
@@ -172,6 +173,11 @@ export async function serve(
                   startedAt: r.startedAt,
                 };
               }),
+            // Экран этапа говорил «все исполнители свободны», пока диспетчер
+            // стоял на ошибке: причина была видна только на досках.
+            queue: engine
+              ? { paused: engine.paused, stopReason: queueStopReason(engine, h!.store.events()) }
+              : undefined,
             startupError,
             workspace: root ? workspaceDescription(root) : undefined,
           });

@@ -55,9 +55,7 @@ const withPins = (existing: ContextPack[], declared: ContextPack[]) => {
   const pinned = new Map(existing.map((p) => [declaration(p), p]));
   return declared.map((p) => {
     const was = pinned.get(declaration(p));
-    return was?.revision && was.digest
-      ? { ...p, revision: was.revision, digest: was.digest }
-      : p;
+    return was?.revision && was.digest ? { ...p, revision: was.revision, digest: was.digest } : p;
   });
 };
 
@@ -69,7 +67,12 @@ const sortedRoles = (roles?: Record<string, unknown>) =>
 const declaredNames = (
   scope: { roles: Record<string, unknown> },
   components: { roles?: Record<string, unknown> }[],
-) => [...new Set([...Object.keys(scope.roles), ...components.flatMap((r) => Object.keys(r.roles ?? {}))])];
+) => [
+  ...new Set([
+    ...Object.keys(scope.roles),
+    ...components.flatMap((r) => Object.keys(r.roles ?? {})),
+  ]),
+];
 const withDeclaredRoles = (
   existing: Record<string, Record<string, unknown>>,
   declared: Record<string, Record<string, unknown>>,
@@ -90,6 +93,18 @@ export async function setupWorkspace(file: string, data?: string) {
   assertControllerCheckout(workspaceRoot);
   const workspaceMode = selectedWorkspaceMode(workspaceRoot) ?? 'separate';
   const raw = JSON.parse(await readFile(source, 'utf8'));
+  // Файлы компонентов до слияния: по ним видно, что компонент переопределяет.
+  const entries = (raw as { repositories: { id: string; path: string; configFile?: string }[] })
+    .repositories;
+  const componentFiles = entries.map((r) =>
+    r.configFile
+      ? (readComponentConfig({
+          path: resolve(workspaceRoot, r.path),
+          configFile: r.configFile,
+          id: r.id,
+        }) as Record<string, unknown>)
+      : undefined,
+  );
   raw.repositories = raw.repositories.map((r: any) =>
     readComponentConfig({ ...r, path: resolve(workspaceRoot, r.path) }),
   );
@@ -227,26 +242,26 @@ export async function setupWorkspace(file: string, data?: string) {
       const previousConfig = await readFile(configPath, 'utf8');
       const previousLock = await readFile(join(root, 'packs.lock.json'), 'utf8').catch(() => null);
       const upgraded = JSON.stringify(
-          {
-            ...raw,
-            packs: config.packs,
-            gates: config.gates,
-            repositories: repos,
-            workspaceGates: config.workspaceGates,
-            contextPacks: withPins(
-              (raw as { contextPacks?: ContextPack[] }).contextPacks ?? [],
-              config.contextPacks,
-            ),
-            runTimeoutMs: config.runTimeoutMs,
-            roles: withDeclaredRoles(
-              (raw as { roles?: Record<string, Record<string, unknown>> }).roles ?? {},
-              config.roles,
-              true,
-            ),
-          },
-          null,
-          2,
-        );
+        {
+          ...raw,
+          packs: config.packs,
+          gates: config.gates,
+          repositories: repos,
+          workspaceGates: config.workspaceGates,
+          contextPacks: withPins(
+            (raw as { contextPacks?: ContextPack[] }).contextPacks ?? [],
+            config.contextPacks,
+          ),
+          runTimeoutMs: config.runTimeoutMs,
+          roles: withDeclaredRoles(
+            (raw as { roles?: Record<string, Record<string, unknown>> }).roles ?? {},
+            config.roles,
+            true,
+          ),
+        },
+        null,
+        2,
+      );
       await writeFile(join(root, 'packs.lock.json'), JSON.stringify(lock, null, 2) + '\n');
       await writeFile(configPath, upgraded);
       try {
@@ -257,7 +272,51 @@ export async function setupWorkspace(file: string, data?: string) {
         if (previousLock !== null) await writeFile(join(root, 'packs.lock.json'), previousLock);
         throw invalid;
       }
-      return { status: 'profile-updated', data: root, config: configPath, delivered };
+      // Файл компонента сильнее профиля. Обновление профиля, чьи ключи
+      // компонент переопределяет, до конфигурации не доходило, а команда
+      // сообщала «profile-updated»: новый гейт профиля молча не появлялся.
+      const shadowed = selected.flatMap((p, i) => {
+        const file = componentFiles[i];
+        if (!file) return [];
+        const differs = (a: unknown, b: unknown) => JSON.stringify(a) !== JSON.stringify(b);
+        // Значение файла сравнивается в той же нормализованной форме, что и
+        // профиль: схема дописывает умолчания, и без этого равные значения
+        // выглядели бы переопределёнными.
+        const shape = (repositorySchema as unknown as { shape?: Record<string, z.ZodType> }).shape;
+        const normalized = (k: string) => {
+          const parsed = shape?.[k]?.safeParse(file[k]);
+          return parsed?.success ? parsed.data : file[k];
+        };
+        const profileKeys = p as unknown as Record<string, unknown>;
+        const keys = [
+          ...Object.keys(file)
+            .filter(
+              (k) =>
+                !['roles', 'id', 'path', 'dependsOn', 'configFile'].includes(k) &&
+                k in profileKeys &&
+                differs(normalized(k), profileKeys[k]),
+            )
+            .sort(),
+          ...Object.entries((file.roles ?? {}) as Record<string, unknown>)
+            .filter(([id, role]) => p.roles[id] && differs(role, p.roles[id]))
+            .map(([id]) => 'roles.' + id),
+        ];
+        return keys.length ? [{ repositoryId: repos[i].id, file: repos[i].configFile!, keys }] : [];
+      });
+      return {
+        status: 'profile-updated',
+        data: root,
+        config: configPath,
+        delivered,
+        ...(shadowed.length
+          ? {
+              shadowed,
+              warning: `Файл компонента переопределяет профиль, и эти значения профиля не применены: ${shadowed
+                .map((x) => `${x.file}: ${x.keys.join(', ')}`)
+                .join('; ')}. Перенесите изменение в файл компонента или удалите из него ключ.`,
+            }
+          : {}),
+      };
     }
     if (
       existing.workspaceRoot !== workspaceRoot ||

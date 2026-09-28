@@ -7,6 +7,8 @@ import { runActivity } from '../src/runner/activity.ts';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { boardPhase } from '../src/core/work-status.ts';
+import type { Task } from '../src/core/model.ts';
 test('Loopback API rejects cross-origin writes, validates input and survives missing assets', async () => {
   const f = fixture();
   const scheduler = new Scheduler(f.h, f.root);
@@ -186,4 +188,72 @@ test('Экран этапа называет исполнителя объявл
     await scheduler.stop();
     f.cleanup();
   }
+});
+
+test('Экран этапа называет последнюю причину остановки очереди, а не первую', async () => {
+  const f = fixture();
+  const scheduler = new Scheduler(f.h, f.root);
+  const app = await serve(f.h, scheduler, { port: 0 });
+  const read = async () =>
+    (
+      (await (await fetch(app.url + '/api/preparation')).json()) as {
+        queue?: { paused: boolean; stopReason?: string };
+      }
+    ).queue;
+  try {
+    // Выдача остановилась, причину устранили, очередь запустили снова — и она
+    // встала на новой. Экран должен назвать вторую.
+    for (const error of ['Error: старая причина', 'TaskFailure: База прогонов отстала']) {
+      f.h.pause(false);
+      f.h.store.change('scheduler.error', (s) => {
+        s.paused = true;
+        return { error };
+      });
+    }
+    assert.deepEqual(await read(), { paused: true, stopReason: 'База прогонов отстала' });
+    // Перенос базы устраняет причину: очередь ждёт человека, а экран не
+    // советует уже выполненный base-update.
+    f.h.baseUpdated([{ repositoryId: 'main', from: 'a', to: 'b' }]);
+    assert.deepEqual(await read(), { paused: true });
+    assert.equal(f.h.store.events()[0]?.type, 'base.updated');
+    f.h.pause(false);
+    f.h.store.change('scheduler.error', (s) => {
+      s.paused = true;
+      return { error: 'Error: снова' };
+    });
+    f.h.pause(true);
+    assert.deepEqual(
+      await read(),
+      { paused: true },
+      'пауза оператора не выдаёт прежний сбой за причину',
+    );
+  } finally {
+    await app.close();
+    await scheduler.stop();
+    f.cleanup();
+  }
+});
+
+test('Фаза доски выводится из задач: черновик плана не называется работой', () => {
+  const board = (status: 'active' | 'accepted') => ({
+    revisions: [{ number: 1, status, reason: '', taskIds: ['a', 'b'], createdAt: '' }],
+  });
+  const task = (id: string, status: Task['status'], activeRunId?: string) => ({
+    id,
+    status,
+    activeRunId,
+  });
+  assert.equal(boardPhase(board('active'), [task('a', 'draft'), task('b', 'draft')]), 'draft');
+  assert.equal(boardPhase(board('active'), [task('a', 'done'), task('b', 'ready')]), 'queued');
+  assert.equal(
+    boardPhase(board('active'), [task('a', 'failed'), task('b', 'running', 'r1')]),
+    'running',
+  );
+  assert.equal(boardPhase(board('active'), [task('a', 'failed'), task('b', 'ready')]), 'failed');
+  assert.equal(
+    boardPhase(board('active'), [task('a', 'done'), task('b', 'cancelled')]),
+    'acceptance',
+  );
+  assert.equal(boardPhase(board('active'), [task('a', 'cancelled')]), 'empty');
+  assert.equal(boardPhase(board('accepted'), [task('a', 'done')]), 'accepted');
 });

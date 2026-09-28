@@ -389,6 +389,7 @@ test('Embedded product map and local intent drive real worktrees, joint verifica
     const req = requirementSnapshot(root, 'docs/spec.md').requirements[0];
     f.h.addTask(board.id, {
       ...input(),
+      featureId: 'member-block',
       requirements: [snapshot.stories[0].requirement, { ...req, source: 'docs/spec.md' }].map(
         (r) => ({ ...r, gate: 'test', scenario: 'Blocked participant cannot post' }),
       ),

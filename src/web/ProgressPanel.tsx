@@ -24,6 +24,7 @@ import { roleLabel } from './roles.ts';
 import { WorkerCards } from './Workers.tsx';
 import { Badge } from '@/ui/badge.tsx';
 import { Card, CardContent, CardHeader, CardTitle } from '@/ui/card.tsx';
+import { queueStopReason } from '../core/work-status.ts';
 
 // What the operator wants to know while work runs: how far the whole thing is,
 // how far each architectural block is, who is holding which task right now, and
@@ -409,22 +410,14 @@ function Stage({
   tasks: Task[];
   running: number;
   paused?: boolean;
-  pauseReason?: string;
+  pauseReason?: 'operator' | 'shutdown' | 'runtime';
   events: AuditEvent[];
   workflows?: WorkflowView[];
 }) {
   const done = tasks.filter((t) => t.status === 'done').length;
   const failed = tasks.filter((t) => t.status === 'failed').length;
   const drafts = tasks.filter((t) => t.status === 'draft').length;
-  // Пауза рантайма называется своим именем; прежние записи её не называли
-  // вовсе, поэтому обе формы означают одно: выдачу остановил сам диспетчер.
-  const stopped =
-    paused && (!pauseReason || pauseReason === 'runtime')
-      ? (
-          [...events].reverse().find((e) => e.type === 'scheduler.error')?.data as
-            { error?: string } | undefined
-        )?.error?.replace(/^Error:\s*/, '')
-      : undefined;
+  const stopped = queueStopReason({ paused, pauseReason }, events);
   // Остановленный цикл восстановления выглядел как обычное ожидание свободного
   // исполнителя: причина лежала в записи работы и доходила до агентского API,
   // но не до интерфейса. Человек не видел, что чинить уже никто не будет.

@@ -132,6 +132,15 @@ test('An empty workspace shows live product review, C1/C2 and separate operator 
     expect((await (await request.get(app.url + '/api/preparation')).json()).developmentReady).toBe(
       true,
     );
+    // A bare address opens where the work is now, not the product brief, and
+    // replaces itself so Back does not land on the same redirect.
+    await page.goto(app.url);
+    await expect(
+      page.getByRole('heading', { name: 'Постановка и архитектура утверждены' }),
+    ).toBeVisible();
+    expect(new URL(page.url()).searchParams.get('stage')).toBe('development');
+    await page.goBack();
+    expect(new URL(page.url()).searchParams.get('stage')).toBe('development');
 
     // The concept step is read, edited and saved like every other one: the
     // operator picks between sketches there, so it cannot be display-only.

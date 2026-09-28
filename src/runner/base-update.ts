@@ -68,8 +68,35 @@ export async function updateBase(config: Config, dataRoot: string) {
       await git(repo.path, 'worktree', 'remove', '--force', cwd).catch(() => undefined);
     }
   }
+  // Обратное направление: принятая работа, которой нет в рабочей ветке. Правки
+  // контракта, подготовленные на такой ветке, ложатся на старые файлы приёмки
+  // и схемы и расходятся с принятыми при следующем переносе. Слияния не
+  // считаются: сам перенос оставляет в базе коммит слияния без новой работы.
+  const workingBehind: { repositoryId: string; branch: string; commits: number }[] = [];
+  for (const repo of repositories(config)) {
+    const commits = Number(
+      await git(
+        repo.path,
+        'rev-list',
+        '--no-merges',
+        '--count',
+        `HEAD..refs/heads/${repo.targetBranch}`,
+      ),
+    );
+    if (commits) workingBehind.push({ repositoryId: repo.id, branch: repo.targetBranch, commits });
+  }
   return {
     updated,
+    ...(workingBehind.length
+      ? {
+          workingBehind,
+          warning: `Рабочая ветка не содержит принятой работы (${workingBehind
+            .map((w) => `${w.repositoryId}: ${w.commits}`)
+            .join(
+              ', ',
+            )}). Перед правкой контрактов и файлов приёмки выполните git merge ${workingBehind[0].branch}, иначе правки лягут на устаревшие файлы.`,
+        }
+      : {}),
     next: updated.length
       ? 'База обновлена. Проверьте её гейтами и запустите очередь: queue --start.'
       : 'База уже содержит рабочую ветку; менять нечего.',

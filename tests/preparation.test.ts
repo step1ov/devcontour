@@ -171,7 +171,7 @@ test('Product and architecture require distinct operator decisions; no agent or 
     assert.throws(() => f.h.pause(false), /референсы/);
     assert.throws(() => f.h.addTask(b.id, input()), /референсы/);
     approveDesignTrack(p, f, id);
-    const t = f.h.addTask(b.id, input());
+    const t = f.h.addTask(b.id, { ...input(), featureId: 'member-block' });
     assert.equal(t.preparation?.changeId, id);
     f.h.approve(b.id);
     f.h.pause(false);
@@ -199,7 +199,7 @@ test('Revisions invalidate architecture and stale decisions, plans and task atte
     const id = approvePreparation(p),
       before = f.store.read().preparation!.changes[0];
     const b = f.h.createBoard('План первой версии');
-    const t = f.h.addTask(b.id, input());
+    const t = f.h.addTask(b.id, { ...input(), featureId: 'member-block' });
     f.h.approve(b.id);
     const original = specDigest(t);
     p.execute('preparation_product', {
@@ -894,5 +894,38 @@ test('Setup пропускается только после всей цепоч
       store.close();
       rmSync(root, { recursive: true, force: true });
     }
+  }
+});
+
+test('План выпускается в работу только с фичей; фичу принятой задачи можно исправить', () => {
+  const f = fixture(),
+    p = new Preparation(f.store);
+  try {
+    approvePreparation(p);
+    const b = f.h.createBoard('Разработка');
+    const t = f.h.addTask(b.id, input());
+    assert.throws(() => f.h.approve(b.id), /featureId.*member-block, moderation-log/);
+    assert.equal(f.store.read().tasks[0].status, 'draft', 'отказ не выпускает план частично');
+    assert.throws(() => f.h.bindFeature(t.id, 'chat-export'), /Фичи chat-export нет/);
+    const before = specDigest(f.store.read().tasks[0]);
+    f.h.bindFeature(t.id, 'member-block');
+    assert.equal(
+      specDigest(f.store.read().tasks[0]),
+      before,
+      'фича — классификация: постановка и её отпечаток не меняются',
+    );
+    f.h.approve(b.id);
+    assert.equal(f.store.read().tasks[0].status, 'ready');
+    // Переклассификация после выпуска — отдельное событие, работа не открывается.
+    f.h.bindFeature(t.id, 'moderation-log');
+    const task = f.store.read().tasks[0];
+    assert.equal(task.featureId, 'moderation-log');
+    assert.equal(task.status, 'ready');
+    assert.equal(f.store.events()[0]?.type, 'task.feature');
+    const view = p.status();
+    assert.ok(view.enabled);
+    assert.equal(view.delivery.unbound, 0);
+  } finally {
+    f.cleanup();
   }
 });

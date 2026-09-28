@@ -183,10 +183,19 @@ test('Pinned role/library documents are selected reproducibly, delivered to writ
     const scheduler = new Scheduler(f.h, f.root, runtimes);
     // Инструкции только что закоммичены в рабочую ветку: пока база прогонов их
     // не содержит, исполнитель получил бы дерево без закреплённого контекста.
-    await updateBase(f.c, f.root);
+    const first = await updateBase(f.c, f.root);
+    const before = first.workingBehind?.[0]?.commits ?? 0;
     f.h.pause(false);
     await scheduler.drain();
     assert.ok(f.store.read().tasks.every((t) => t.status === 'done'));
+    // Принятые задачи лежат в базе, но не в рабочей ветке: перенос это называет,
+    // иначе ведущий агент правит контракт поверх устаревших файлов.
+    const later = await updateBase(f.c, f.root);
+    assert.ok(
+      (later.workingBehind?.[0]?.commits ?? 0) > before,
+      'принятые задачи — коммиты, которых нет в рабочей ветке',
+    );
+    assert.match(later.warning ?? '', /git merge/);
     assert.ok(requests.some((r) => r.review));
     assert.ok(requests.every((r) => r.prompt.includes('Use approved domain contracts.')));
     assert.ok(

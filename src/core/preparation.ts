@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { DomainError, type DevContourState, type Task } from './model.ts';
 import type { Store } from './store.ts';
+import { boardPhase } from './work-status.ts';
 import {
   preparationInputs,
   preparationDecision,
@@ -181,6 +182,33 @@ export function assertTaskPreparation(
   )
     throw new DomainError(
       'Задача ссылается на фичу вне утверждённой постановки: ' + task.featureId,
+      409,
+    );
+}
+// Карта продукта считает готовность фичи по задачам, которые её называют.
+// Без этой связи весь принятый объём выглядел «незапланированным»: карта и
+// реальная работа расходились молча. План выпускается в работу только с ней.
+export function assertTaskFeature(
+  s: DevContourState,
+  task: Pick<Task, 'id' | 'preparation' | 'featureId'>,
+) {
+  if (!s.preparation || !task.preparation || task.featureId) return;
+  const features = productReady(change(s, task.preparation.changeId)).content.features;
+  if (features.length)
+    throw new DomainError(
+      `${task.id}: укажите featureId — фичу утверждённой постановки, которую двигает задача (${features
+        .map((f) => f.id)
+        .join(', ')}). Без неё карта продукта не видит эту работу`,
+      409,
+    );
+}
+// Связь с фичей — классификация, а не постановка: она не входит в specDigest,
+// поэтому её можно исправить и у принятой задачи, не открывая работу заново.
+export function assertFeatureOf(s: DevContourState, changeId: string, featureId: string) {
+  const features = productReady(change(s, changeId)).content.features;
+  if (!features.some((f) => f.id === featureId))
+    throw new DomainError(
+      `Фичи ${featureId} нет в утверждённой постановке: ${features.map((f) => f.id).join(', ')}`,
       409,
     );
 }
@@ -670,6 +698,9 @@ export class Preparation {
         total: live.length,
         done: live.filter((t) => t.status === 'done').length,
         failed: live.filter((t) => t.status === 'failed').length,
+        // Задачи без фичи карта продукта не учитывает; число держит расхождение
+        // на виду, пока их не привяжут.
+        unbound: live.filter((t) => !t.featureId).length,
         // Счётчик сбоев без причины отправляет оператора искать её в журнале.
         // Сама причина — самое важное на экране: она объясняет, почему работа
         // не движется, и говорит, что делать.
@@ -681,7 +712,7 @@ export class Preparation {
           .filter((b) =>
             b.revisions.some((r) => r.taskIds.some((id) => live.some((t) => t.id === id))),
           )
-          .map(({ id, title }) => ({ id, title })),
+          .map((b) => ({ id: b.id, title: b.title, phase: boardPhase(b, live) })),
       },
     };
   }

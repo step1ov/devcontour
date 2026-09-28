@@ -92,6 +92,7 @@ type Snapshot = Omit<DevContourState, 'tasks'> & {
 import { roleLabel, currentRoles, setRoleSource } from './roles.ts';
 import { Phases, engine, elapsed } from './Workers.tsx';
 import { AttemptTimeline, LiveWork } from './LiveWork.tsx';
+import { boardPhase, boardPhaseLabels, queueStopReason } from '../core/work-status.ts';
 
 const waitingReasons: Record<string, string> = {
   product_approval_required:
@@ -253,10 +254,7 @@ function GateChips({ run }: { run: Run }) {
 // сам, когда выдавать работу нельзя — база отстала, checkout команды разошёлся.
 // Причина лежит в журнале, и без неё панель показывает молчаливую паузу.
 function stopReason(data: Snapshot) {
-  if (data.pauseReason === 'operator' || data.pauseReason === 'shutdown') return undefined;
-  const failure = [...(data.events ?? [])].reverse().find((e) => e.type === 'scheduler.error');
-  const detail = (failure?.data as { error?: string } | undefined)?.error;
-  return detail ? detail.replace(/^Error:\s*/, '') : undefined;
+  return queueStopReason(data, data.events ?? []);
 }
 // «Где сейчас разработка» — это соотношение принятого, идущего и оставшегося,
 // а не название ревизии. Одна строка под доской отвечает на это без открытия.
@@ -626,7 +624,7 @@ export function App() {
               <span>
                 {b.title}
                 <small>
-                  {b.revisions.at(-1)!.status === 'accepted' ? 'Принята' : 'В работе'} · ревизия{' '}
+                  {boardPhaseLabels[boardPhase(b, data.tasks)]} · ревизия{' '}
                   {b.revisions.at(-1)!.number}
                   {boardProgress(data, b) && ' · ' + boardProgress(data, b)}
                 </small>

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import {
   Check,
   ChevronRight,
@@ -7,6 +7,7 @@ import {
   History,
   Loader2,
   MessageCircleQuestion,
+  PauseCircle,
   Scale,
   Send,
 } from 'lucide-react';
@@ -28,6 +29,7 @@ import { Label } from '@/ui/label.tsx';
 import { Separator } from '@/ui/separator.tsx';
 import { Textarea } from '@/ui/textarea.tsx';
 import { cn } from '@/lib/utils.ts';
+import { boardPhaseLabels } from '../core/work-status.ts';
 
 const Development = lazy(() => import('./App.tsx').then((m) => ({ default: m.App })));
 type View = ReturnType<Preparation['status']> & {
@@ -39,6 +41,7 @@ type View = ReturnType<Preparation['status']> & {
     concurrency?: number;
   };
   workers?: Worker[];
+  queue?: { paused: boolean; stopReason?: string };
   engineConnected?: boolean;
   startupError?: string;
   workspace?: { mode: 'embedded' | 'separate'; path: string };
@@ -83,7 +86,7 @@ function readLocation() {
     boards: params.get('view') === 'boards',
   };
 }
-function writeLocation(state: { change: string; tab: Stage; boards: boolean }) {
+function writeLocation(state: { change: string; tab: Stage; boards: boolean }, replace = false) {
   const params = new URLSearchParams();
   if (state.change) params.set('change', state.change);
   if (state.tab !== 'product') params.set('stage', state.tab);
@@ -91,7 +94,7 @@ function writeLocation(state: { change: string; tab: Stage; boards: boolean }) {
   const search = params.toString();
   const next = window.location.pathname + (search ? '?' + search : '');
   if (next !== window.location.pathname + window.location.search)
-    window.history.pushState(null, '', next);
+    window.history[replace ? 'replaceState' : 'pushState'](null, '', next);
 }
 type RevisionStatus = 'draft' | 'in-review' | 'approved' | 'changes-requested';
 const names: Record<RevisionStatus, string> = {
@@ -421,7 +424,9 @@ function SetupProgress({ setup, tasks }: { setup: View['setup']; tasks: number }
   if (done === steps.length)
     return (
       <details className="text-muted-foreground mt-4 text-sm">
-        <summary className="cursor-pointer">Настройка контура завершена ({done} из {done})</summary>
+        <summary className="cursor-pointer">
+          Настройка контура завершена ({done} из {done})
+        </summary>
         <ul className="mt-2 grid gap-1">
           {steps.map((step) => (
             <li key={step.id} className="flex items-center gap-2">
@@ -550,8 +555,24 @@ export function PreparationPanel() {
   const [busy, setBusy] = useState(false);
   const [tasks, showTasks] = useState(() => readLocation().boards);
   const [historyOpen, setHistoryOpen] = useState(false);
+  // Адрес без этапа открывал «Продукт» и во время разработки: вернувшийся
+  // человек видел постановку трёхдневной давности вместо того, что идёт сейчас.
+  // Этап выбирается по состоянию один раз и заменяет адрес, а не добавляет
+  // запись: иначе «Назад» возвращал бы на тот же выбор.
+  const landed = useRef(new URLSearchParams(window.location.search).has('stage'));
+  const replaceLocation = useRef(false);
   useEffect(() => {
-    writeLocation({ change: selected, tab, boards: tasks });
+    if (landed.current || !view?.enabled) return;
+    landed.current = true;
+    const phase = view.phase as Stage;
+    if (phase !== 'product' && stages.includes(phase)) {
+      replaceLocation.current = true;
+      setTab(phase);
+    }
+  }, [view]);
+  useEffect(() => {
+    writeLocation({ change: selected, tab, boards: tasks }, replaceLocation.current);
+    replaceLocation.current = false;
   }, [selected, tab, tasks]);
   useEffect(() => {
     const restore = () => {
@@ -866,6 +887,11 @@ export function PreparationPanel() {
                     Принято задач: {view.delivery.done} из {view.delivery.total}. Сбоев:{' '}
                     {view.delivery.failed}.
                   </p>
+                  {view.delivery.unbound ? (
+                    <p className="text-muted-foreground mt-1 text-sm">
+                      Без фичи: {view.delivery.unbound} — карта продукта эту работу не видит.
+                    </p>
+                  ) : null}
                   {/* Счёт сбоев без причины отправляет читателя в журнал, хотя
                       причина — самое важное на экране: она объясняет, почему
                       работа стоит. */}
@@ -878,11 +904,37 @@ export function PreparationPanel() {
                       ))}
                     </ul>
                   ) : null}
+                  {view.queue?.paused && (
+                    <p
+                      role="status"
+                      className={cn(
+                        'mt-4 flex items-start gap-2 text-sm break-words',
+                        view.queue.stopReason ? 'text-destructive' : 'text-muted-foreground',
+                      )}
+                    >
+                      <PauseCircle aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
+                      <span>
+                        Очередь на паузе
+                        {view.queue.stopReason ? `: ${view.queue.stopReason}` : ''}
+                      </span>
+                    </p>
+                  )}
                   <Workers workers={view.workers ?? []} concurrency={view.setup?.concurrency} />
                   {view.delivery.boards.length > 0 && (
-                    <ul className="mt-2 grid gap-2">
+                    <ul className="mt-2 grid gap-2" aria-label="Доски разработки">
                       {view.delivery.boards.map((b) => (
-                        <li key={b.id}>{b.title}</li>
+                        <li key={b.id} className="flex flex-wrap items-baseline gap-x-3">
+                          <span>{b.title}</span>
+                          <small
+                            className={cn(
+                              'text-muted-foreground',
+                              b.phase === 'failed' && 'text-destructive',
+                              b.phase === 'running' && 'text-primary',
+                            )}
+                          >
+                            {boardPhaseLabels[b.phase]}
+                          </small>
+                        </li>
                       ))}
                     </ul>
                   )}

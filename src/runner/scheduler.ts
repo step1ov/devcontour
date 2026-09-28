@@ -17,7 +17,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { mkdir, writeFile, readFile, realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { DevContour, digest } from '../core/service.ts';
+import { DevContour, digest, supersededBy } from '../core/service.ts';
 import { BlockedError, type Run, type Task, type Evidence, type Gate } from '../core/model.ts';
 import { TaskFailure, repairPolicy, type FailureKind } from '../core/failure.ts';
 import { adapters, implementationResult, reviewResult, type AgentAdapter } from './adapters.ts';
@@ -529,10 +529,20 @@ export class Scheduler {
         signal,
         async (signal, resources) => {
           run.resources = resources;
+          const contracts = this.h.store.read().contracts;
+          // Задача, утверждённая до новой редакции контракта, выполнялась бы
+          // по старому тексту в дереве с новым: она ждёт корректировки.
+          for (const id of task.contracts) {
+            const newer = supersededBy(contracts, id);
+            if (newer)
+              throw new BlockedError(
+                `Контракт ${id} заменён редакцией ${newer.id} (${newer.source}); скорректируйте задачу`,
+              );
+          }
           const context = await taskContext(
             this.h.config,
             task,
-            this.h.store.read().contracts.filter((c) => task.contracts.includes(c.id)),
+            contracts.filter((c) => task.contracts.includes(c.id)),
           );
           run.context = context.snapshots;
           this.contexts.set(run.id, context.text);

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fixture, input, complete, config } from './helpers.ts';
-import { specDigest } from '../src/core/service.ts';
+import { specDigest, supersededBy } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
 import { join } from 'node:path';
@@ -581,5 +581,29 @@ test('Уровень рассуждения роли доходит до про�
     );
   } finally {
     g.cleanup();
+  }
+});
+
+test('Задача не утверждается и не запускается по заменённой редакции контракта', () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const old = f.h.contract('API', 'v1', undefined, undefined, 'docs/contracts/api.md');
+    const other = f.h.contract('Другой', 'x', undefined, undefined, 'docs/contracts/other.md');
+    const t = f.h.addTask(b.id, { ...input('Task'), contracts: [old.id] });
+    const next = f.h.contract('API', 'v2', undefined, undefined, 'docs/contracts/api.md');
+    assert.equal(supersededBy(f.store.read().contracts, old.id)?.id, next.id);
+    assert.equal(supersededBy(f.store.read().contracts, other.id), undefined);
+    assert.equal(supersededBy(f.store.read().contracts, next.id), undefined);
+    assert.throws(() => f.h.approve(b.id), new RegExp(`${old.id} заменён редакцией ${next.id}`));
+    f.h.editTask(
+      t.id,
+      { ...input('Task'), contracts: [next.id] },
+      specDigest(f.store.read().tasks[0]),
+    );
+    f.h.approve(b.id);
+    assert.equal(f.store.read().tasks[0].status, 'ready');
+  } finally {
+    f.cleanup();
   }
 });
