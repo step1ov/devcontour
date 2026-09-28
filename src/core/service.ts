@@ -697,7 +697,13 @@ export class DevContour {
   continuation(id: string, token: string, from: NonNullable<Run['continuedFrom']>) {
     return this.withRun(id, token, 'run.continuation', (r) => {
       r.continuedFrom = from;
-      return { runId: id, draftOf: from.runId, applied: from.applied, files: from.files };
+      return {
+        runId: id,
+        draftOf: from.runId,
+        kind: from.kind,
+        applied: from.applied,
+        files: from.files,
+      };
     });
   }
   heartbeat(id: string, token: string) {

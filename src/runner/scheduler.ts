@@ -331,25 +331,50 @@ export class Scheduler {
     const draft = continuableDraft(this.h.store.read(), task, run.id);
     if (!draft) return;
     let applied = false;
+    let files: string[] = [];
     try {
-      const text = await readFile(draft.patch, 'utf8');
-      // Черновик подменённый или повреждённый не накладывается.
-      if (digest(text) === draft.digest) {
-        await git(cwd, 'apply', '--3way', '--whitespace=nowarn', draft.patch);
-        // --3way кладёт изменения в индекс; исполнитель видит их как свою
-        // незакоммиченную работу, как было в прерванной попытке.
-        await git(cwd, 'reset', '-q');
-        applied = true;
+      let patch: string;
+      if (draft.kind === 'timeout') {
+        patch = draft.patch;
+        files = draft.files;
+        // Черновик подменённый или повреждённый не накладывается.
+        if (digest(await readFile(patch, 'utf8')) !== draft.digest) throw new Error('digest');
+      } else {
+        // Отклонённый кандидат лежит коммитом в репозитории; его изменения
+        // относительно своей базы переносятся на текущую.
+        const repo = repository(this.h.config, task.repositoryId);
+        const scope = task.writePaths?.length ? ['--', ...task.writePaths] : [];
+        patch = join(dir, 'rejected-candidate.patch');
+        await git(
+          repo.path,
+          'diff',
+          '--binary',
+          `--output=${patch}`,
+          draft.baseSha,
+          draft.candidateSha,
+          ...scope,
+        );
+        if (!(await readFile(patch, 'utf8')).trim()) throw new Error('empty');
+        files = (
+          await git(repo.path, 'diff', '--name-only', draft.baseSha, draft.candidateSha, ...scope)
+        )
+          .split('\n')
+          .filter(Boolean);
       }
+      await git(cwd, 'apply', '--3way', '--whitespace=nowarn', patch);
+      // --3way кладёт изменения в индекс; исполнитель видит их как свою
+      // незакоммиченную работу.
+      await git(cwd, 'reset', '-q');
+      applied = true;
     } catch {
       await git(cwd, 'reset', '-q', '--hard').catch(() => undefined);
       await git(cwd, 'clean', '-fdq').catch(() => undefined);
     }
     await writeFile(
       join(dir, 'continuation.json'),
-      JSON.stringify({ from: draft.runId, applied, files: draft.files }, null, 2),
+      JSON.stringify({ from: draft.runId, kind: draft.kind, applied, files }, null, 2),
     );
-    run.continuedFrom = { runId: draft.runId, applied, files: draft.files };
+    run.continuedFrom = { runId: draft.runId, kind: draft.kind, applied, files };
     this.h.continuation(run.id, run.token, run.continuedFrom);
   }
   private prompt(task: Task, run: Run, review = false, sha?: string) {
@@ -392,7 +417,9 @@ export class Scheduler {
             })),
         ),
       !review && run.continuedFrom?.applied
-        ? `The previous attempt ran out of time before finishing. Its unfinished, unverified changes are already applied in this worktree as uncommitted edits (${run.continuedFrom.files.join(', ')}). Continue from them: check what is done and what is broken, finish the task and make the gates pass. Treat them as a draft, not as reviewed work.`
+        ? run.continuedFrom.kind === 'timeout'
+          ? `The previous attempt ran out of time before finishing. Its unfinished, unverified changes are already applied in this worktree as uncommitted edits (${run.continuedFrom.files.join(', ')}). Continue from them: check what is done and what is broken, finish the task and make the gates pass. Treat them as a draft, not as reviewed work.`
+          : `The previous attempt's candidate was rejected by review. Its changes are already applied in this worktree as uncommitted edits (${run.continuedFrom.files.join(', ')}). Fix the review findings listed below on top of them; if a finding shows the approach itself is wrong, replace it rather than patching around it. The gates and a new independent review decide again.`
         : '',
       `Base commit: ${run.baseSha}. ${sha ? `Review commit: ${sha}.` : ''}`,
       'Review against the pinned conventions. Report verified causal regressions, including unchanged consumers. Findings need path/line, rule, consequence and evidence; use null only when not applicable. Do not demand unrelated legacy cleanup.',

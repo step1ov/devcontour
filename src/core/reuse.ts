@@ -87,22 +87,53 @@ export function reusableImplementation(
 /**
  * Черновик предыдущей попытки, с которого стоит продолжить.
  *
- * Время реализации кончилось раньше работы: повтор с пустого дерева упирается
- * в тот же предел и тратит его на уже сделанное. Черновик берётся только у
- * непосредственно предыдущей попытки, оборванной по времени до кандидата, и
- * только если постановка и контракты с тех пор не менялись: иначе он написан
- * под другую задачу. Проверки и ревью он не заменяет — это отправная точка.
+ * Время реализации кончилось раньше работы — или ревью отклонило готового
+ * кандидата за конкретные находки. Повтор с пустого дерева тратит предел
+ * попытки на уже сделанное и нередко упирается в него снова. Черновик берётся
+ * только у непосредственно предыдущей попытки и только если постановка и
+ * контракты с тех пор не менялись: иначе он написан под другую задачу.
+ * Проверки и ревью он не заменяет — это отправная точка.
  */
-export function continuableDraft(s: DevContourState, task: Task, currentRunId: string) {
+export type Draft =
+  | { kind: 'timeout'; runId: string; patch: string; digest: string; files: string[] }
+  | { kind: 'review'; runId: string; baseSha: string; candidateSha: string };
+export function continuableDraft(
+  s: DevContourState,
+  task: Task,
+  currentRunId: string,
+): Draft | undefined {
   const previous = s.runs.findLast((r) => r.taskId === task.id && r.id !== currentRunId);
+  if (!previous || previous.status !== 'failed') return undefined;
   if (
-    !previous?.partial ||
-    previous.status !== 'failed' ||
+    previous.failureKind === 'review' &&
+    previous.candidateSha &&
+    previous.baseSha &&
+    previous.implementationBasis &&
+    task.approvedDigest
+  ) {
+    // Основания записаны хешем; постановку и контракты сверяет спецификация
+    // задачи, одобренная до этой попытки и не менявшаяся после.
+    if (previous.startedAt < (task.approvedAt ?? '')) return undefined;
+    return {
+      kind: 'review',
+      runId: previous.id,
+      baseSha: previous.baseSha,
+      candidateSha: previous.candidateSha,
+    };
+  }
+  if (
+    !previous.partial ||
     previous.failureKind !== 'timeout' ||
     previous.candidateSha ||
     previous.partial.spec !== task.approvedDigest ||
     JSON.stringify(previous.partial.contracts) !== JSON.stringify(task.contractDigests)
   )
     return undefined;
-  return { runId: previous.id, ...previous.partial };
+  return {
+    kind: 'timeout',
+    runId: previous.id,
+    patch: previous.partial.patch,
+    digest: previous.partial.digest,
+    files: previous.partial.files,
+  };
 }

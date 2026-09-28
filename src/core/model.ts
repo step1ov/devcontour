@@ -317,7 +317,13 @@ export interface Run {
     contracts: Record<string, string>;
   };
   /** Попытка начала с черновика предыдущей; applied=false — черновик не лёг на базу. */
-  continuedFrom?: { runId: string; applied: boolean; files: string[] };
+  continuedFrom?: {
+    runId: string;
+    /** Чем кончилась попытка-источник: временем или отклонением ревью. */
+    kind: 'timeout' | 'review';
+    applied: boolean;
+    files: string[];
+  };
   evidence: Evidence[];
   context?: {
     id: string;

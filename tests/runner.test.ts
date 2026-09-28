@@ -1526,11 +1526,77 @@ test('Попытка, оборванная по времени, оставляе
       { draft: undefined, told: false },
       { draft: 'половина работы', told: true },
     ]);
-    assert.deepEqual(second.continuedFrom, { runId: first.id, applied: true, files: [draftFile] });
+    assert.deepEqual(second.continuedFrom, {
+      runId: first.id,
+      kind: 'timeout',
+      applied: true,
+      files: [draftFile],
+    });
     // Черновик написан под прежнюю постановку: после её смены он не годится.
     const changed = { ...f.current(), approvedDigest: 'другая постановка' };
     const state = f.store.read();
     assert.equal(continuableDraft(state, changed, 'new-run'), undefined);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('Кандидат, отклонённый ревью, — отправная точка повтора, а не выброшенная работа', async () => {
+  const f = await reuseFixture();
+  try {
+    const deliverable = `deliverables/${f.task.id}.json`;
+    const seen: { present: boolean; told: boolean }[] = [];
+    const runtimes = (review: 'reject' | 'approve') => ({
+      ...adapters,
+      demo: {
+        ...adapters.demo,
+        name: 'demo' as const,
+        execute: async (request: AgentRequest) => {
+          if (request.task?.id !== f.task.id) return adapters.demo.execute(request);
+          if (!request.review) {
+            seen.push({
+              present: await readFile(join(request.cwd, deliverable), 'utf8').then(
+                () => true,
+                () => false,
+              ),
+              told: request.prompt.includes('rejected by review'),
+            });
+            return adapters.demo.execute(request);
+          }
+          return {
+            data: {
+              approved: review === 'approve',
+              summary: review === 'approve' ? 'ok' : 'Нет поведения',
+              discoveries: [],
+              findings:
+                review === 'approve' ? [] : [{ severity: 'blocking', message: 'Нет поведения' }],
+            },
+            log: '',
+            command: ['fixture'],
+          };
+        },
+      },
+    });
+    let scheduler = new Scheduler(f.h, f.root, runtimes('reject'));
+    await scheduler.drain();
+    await scheduler.stop();
+    const [first] = f.runs();
+    assert.equal(first.failureKind, 'review');
+    f.retry();
+    scheduler = new Scheduler(f.h, f.root, runtimes('approve'));
+    await scheduler.drain();
+    await scheduler.stop();
+    assert.equal(f.current().status, 'done');
+    assert.deepEqual(seen, [
+      { present: false, told: false },
+      { present: true, told: true },
+    ]);
+    assert.deepEqual(f.runs()[1].continuedFrom, {
+      runId: first.id,
+      kind: 'review',
+      applied: true,
+      files: [deliverable],
+    });
   } finally {
     await f.cleanup();
   }
