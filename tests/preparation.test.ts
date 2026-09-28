@@ -925,6 +925,12 @@ test('План выпускается в работу только с фичей
     const view = p.status();
     assert.ok(view.enabled);
     assert.equal(view.delivery.unbound, 0);
+    // Отменённая задача фичи не делает её незавершённой навсегда.
+    const extra = f.h.addTask(b.id, { ...input('Снятая'), featureId: 'moderation-log' });
+    f.h.cancel(extra.id, 'Решено иначе');
+    const after = p.status();
+    assert.ok(after.enabled);
+    assert.equal(after.current?.features.find((x) => x.id === 'moderation-log')?.tasks, 1);
   } finally {
     f.cleanup();
   }

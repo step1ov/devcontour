@@ -619,7 +619,9 @@ export class Preparation {
                     f.acceptance.some((a) => a.releaseId === r.id),
                   );
                   const ids = own.map((f) => f.id);
-                  const bound = tasks.filter((t) => t.featureId && ids.includes(t.featureId));
+                  // Отменённая задача — снятое решение, а не незавершённая
+                  // работа: с ней фича не становилась готовой никогда.
+                  const bound = live.filter((t) => t.featureId && ids.includes(t.featureId));
                   const done = bound.filter((t) => t.status === 'done').length;
                   return {
                     id: r.id,
@@ -645,7 +647,7 @@ export class Preparation {
             // and duplicating it pushed the agent response past its size budget.
             features: product
               ? product.content.features.map((f) => {
-                  const own = tasks.filter((t) => t.featureId === f.id);
+                  const own = live.filter((t) => t.featureId === f.id);
                   const done = own.filter((t) => t.status === 'done').length;
                   return {
                     id: f.id,
