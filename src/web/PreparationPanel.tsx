@@ -194,9 +194,12 @@ function Foldable({
 function AgentWork({
   activity,
   latest,
+  label = 'Последняя запись агента',
 }: {
   activity: { at: string; stage: string; note: string }[];
   latest?: { at: string; note: string };
+  /** Чья это запись. На этапе разработки журнал подготовки — не текущая работа. */
+  label?: string;
 }) {
   const [open, setOpen] = useState(false);
   const recent = latest && Date.now() - new Date(latest.at).getTime() < 5 * 60 * 1000;
@@ -208,7 +211,7 @@ function AgentWork({
       <p className="text-muted-foreground mb-6 flex flex-wrap items-baseline gap-2 text-sm">
         <CircleDot className="size-4 shrink-0 self-center" aria-hidden="true" />
         <span className="min-w-0 break-words">
-          Последняя запись агента: {latest.note} · {ago(latest.at)}
+          {label}: {latest.note} · {ago(latest.at)}
         </span>
         {activity.length > 1 && (
           <Button variant="ghost" size="sm" onClick={() => setOpen(true)} aria-expanded={false}>
@@ -230,7 +233,7 @@ function AgentWork({
           {/* Заголовок «Работа агента» над сообщением восемнадцатичасовой
               давности утверждает, что агент занят этим сейчас. Пока запись
               свежая — это работа; дальше это последняя запись, и только. */}
-          {recent ? 'Работа агента' : 'Последняя запись агента'}
+          {recent ? 'Работа агента' : label}
         </CardTitle>
         {activity.length > 1 && (
           <Button variant="ghost" size="sm" onClick={() => setOpen(!open)} aria-expanded={open}>
@@ -866,7 +869,14 @@ export function PreparationPanel() {
                 )}
               </div>
               <Separator className="my-4" />
-              <AgentWork activity={c.activity} latest={view.agentActivity ?? c.activity[0]} />
+              {/* Во время разработки записи подготовки старые, и «последняя запись
+                  агента» трёхдневной давности над карточками работающих
+                  исполнителей читалась как «никто ничего не делает». */}
+              <AgentWork
+                activity={c.activity}
+                latest={view.agentActivity ?? c.activity[0]}
+                label={tab === 'development' ? 'Последняя запись подготовки' : undefined}
+              />
               {tab === 'development' ? (
                 <Section
                   title={
