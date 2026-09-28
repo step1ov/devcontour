@@ -396,10 +396,12 @@ export function stateFromRecords(
             return before;
           }
           if (!r.accepted) return { ...r, status: 'active' as const };
-          if (!tasks.length || tasks.some((t) => t.status !== 'done'))
+          // Тот же объём, что при приёмке: отменённые задачи в снимок не входят.
+          const accepted = tasks.filter((t) => t.status !== 'cancelled');
+          if (!accepted.length || accepted.some((t) => t.status !== 'done'))
             throw new Error('Приёмка требует завершённых задач: ' + b.id);
           const snapshot = {
-            tasks,
+            tasks: accepted,
             sha: r.accepted.sha,
             ...(r.accepted.repositories ? { repositories: r.accepted.repositories } : {}),
           };

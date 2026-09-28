@@ -484,9 +484,16 @@ export class DevContour {
       const r = activeRevision(s, boardId);
       if (expectedDigest && digest(r) !== expectedDigest)
         throw new DomainError('Ревизия изменилась во время приёмки');
-      if (!r.taskIds.length || r.taskIds.some((id) => task(s, id).status !== 'done'))
+      // Отменённая задача — явное решение с причиной в журнале, а не
+      // незавершённая работа. Раньше она делала ревизию непринимаемой навсегда:
+      // убрать её из ревизии было нечем. Объём приёмки — выполненные задачи;
+      // хотя бы одна обязательна.
+      const tasks = r.taskIds
+        .map((id) => task(s, id))
+        .filter((t) => t.status !== 'cancelled')
+        .map((t) => structuredClone(t));
+      if (!tasks.length || tasks.some((t) => t.status !== 'done'))
         throw new DomainError('Приёмка доступна, когда все задачи прошли интеграцию и проверки');
-      const tasks = r.taskIds.map((id) => structuredClone(task(s, id)));
       tasks.forEach((t) => assertTaskPreparation(s, t));
       for (const t of tasks) {
         const unproven = unprovenReason(t.requirements, taskEvidence(s, t), t.resultSha);

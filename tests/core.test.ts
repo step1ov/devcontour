@@ -607,3 +607,30 @@ test('Задача не утверждается и не запускается 
     f.cleanup();
   }
 });
+
+test('Отменённая задача не делает ревизию непринимаемой и не входит в снимок', () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const kept = f.h.addTask(b.id, input('Kept'));
+    const dropped = f.h.addTask(b.id, input('Dropped'));
+    f.h.approve(b.id);
+    f.h.cancel(dropped.id, 'Решено в контракте');
+    complete(f.h, kept.id);
+    f.h.accept(b.id, 'merged');
+    const r = f.store.read().boards[0].revisions[0];
+    assert.equal(r.status, 'accepted');
+    assert.deepEqual(
+      r.snapshot?.tasks.map((t) => t.id),
+      [kept.id],
+    );
+    // Ревизия, где отменено всё, принимать нечего.
+    const empty = f.h.createBoard('Empty');
+    const only = f.h.addTask(empty.id, input('Only'));
+    f.h.approve(empty.id);
+    f.h.cancel(only.id, 'Не нужна');
+    assert.throws(() => f.h.accept(empty.id, 'merged'), /все задачи/);
+  } finally {
+    f.cleanup();
+  }
+});

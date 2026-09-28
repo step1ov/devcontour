@@ -350,7 +350,10 @@ export async function acceptBoard(
   if (!board) throw new DomainError('Доска не найдена');
   const revision = board.revisions.at(-1)!;
   if (revision.status === 'accepted') return { status: 'already-accepted', boardId };
-  const tasks = revision.taskIds.map((id) => state.tasks.find((t) => t.id === id)!);
+  // Отменённые задачи в объём приёмки не входят (см. DevContour.accept).
+  const tasks = revision.taskIds
+    .map((id) => state.tasks.find((t) => t.id === id)!)
+    .filter((t) => t.status !== 'cancelled');
   if (!tasks.length || tasks.some((t) => t.status !== 'done' || !t.resultSha))
     throw new DomainError('Приёмка требует done, проверки и интеграцию всех задач');
   // Критерий, назвавший свой тест, предъявляет его здесь: приёмка относится к
