@@ -23,6 +23,7 @@ import { input, fixture } from './helpers.ts';
 import { acceptBoard } from '../src/runner/agent-control.ts';
 import { ProjectMemory } from '../src/application/memory.ts';
 import { repositories } from '../src/core/repositories.ts';
+import { continuableDraft } from '../src/core/reuse.ts';
 import { updateBase } from '../src/runner/base-update.ts';
 import { workflowMetrics } from '../src/application/metrics.ts';
 import { taskOwner } from '../src/core/sync-state.ts';
@@ -1470,6 +1471,66 @@ test('Проверка, которой песочница закрыла сет�
     assert.equal(run.failureKind, 'environment', run.error);
     assert.match(run.error!, /registry\.npmjs\.org/);
     assert.match(run.error!, /isolation\.domains/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('Попытка, оборванная по времени, оставляет черновик, и повтор начинает с него', async () => {
+  const f = await reuseFixture();
+  try {
+    const draftFile = `deliverables/draft-${f.task.id}.txt`;
+    const seen: { draft?: string; told: boolean }[] = [];
+    const runtimes = (attempt: 'timeout' | 'finish') => ({
+      ...adapters,
+      demo: {
+        ...adapters.demo,
+        name: 'demo' as const,
+        execute: async (request: AgentRequest) => {
+          if (request.task?.id !== f.task.id || request.review)
+            return adapters.demo.execute(request);
+          const path = join(request.cwd, draftFile);
+          seen.push({
+            draft: await readFile(path, 'utf8').catch(() => undefined),
+            told: request.prompt.includes('ran out of time'),
+          });
+          if (attempt === 'finish') {
+            // Доделанная работа заменяет черновик: демо-проверка знает только
+            // свой результат.
+            await rm(path, { force: true });
+            return adapters.demo.execute(request);
+          }
+          await mkdir(join(request.cwd, 'deliverables'), { recursive: true });
+          await writeFile(path, 'половина работы');
+          throw new Error(
+            'claude: runtime завершился с кодом 143 (исчерпан лимит времени прогона: 1 с). Лог: /tmp/x',
+          );
+        },
+      },
+    });
+    let scheduler = new Scheduler(f.h, f.root, runtimes('timeout'));
+    await scheduler.drain();
+    await scheduler.stop();
+    const [first] = f.runs();
+    assert.equal(first.failureKind, 'timeout');
+    assert.deepEqual(first.partial?.files, [draftFile]);
+    assert.equal(first.candidateSha, undefined, 'черновик — не кандидат');
+
+    f.retry();
+    scheduler = new Scheduler(f.h, f.root, runtimes('finish'));
+    await scheduler.drain();
+    await scheduler.stop();
+    const second = f.runs()[1];
+    assert.equal(f.current().status, 'done');
+    assert.deepEqual(seen, [
+      { draft: undefined, told: false },
+      { draft: 'половина работы', told: true },
+    ]);
+    assert.deepEqual(second.continuedFrom, { runId: first.id, applied: true, files: [draftFile] });
+    // Черновик написан под прежнюю постановку: после её смены он не годится.
+    const changed = { ...f.current(), approvedDigest: 'другая постановка' };
+    const state = f.store.read();
+    assert.equal(continuableDraft(state, changed, 'new-run'), undefined);
   } finally {
     await f.cleanup();
   }

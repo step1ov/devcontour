@@ -83,3 +83,26 @@ export function reusableImplementation(
     return { reuse: false, reason: 'основания реализации изменились' };
   return { reuse: true, from: previous, candidateSha: previous.candidateSha };
 }
+
+/**
+ * Черновик предыдущей попытки, с которого стоит продолжить.
+ *
+ * Время реализации кончилось раньше работы: повтор с пустого дерева упирается
+ * в тот же предел и тратит его на уже сделанное. Черновик берётся только у
+ * непосредственно предыдущей попытки, оборванной по времени до кандидата, и
+ * только если постановка и контракты с тех пор не менялись: иначе он написан
+ * под другую задачу. Проверки и ревью он не заменяет — это отправная точка.
+ */
+export function continuableDraft(s: DevContourState, task: Task, currentRunId: string) {
+  const previous = s.runs.findLast((r) => r.taskId === task.id && r.id !== currentRunId);
+  if (
+    !previous?.partial ||
+    previous.status !== 'failed' ||
+    previous.failureKind !== 'timeout' ||
+    previous.candidateSha ||
+    previous.partial.spec !== task.approvedDigest ||
+    JSON.stringify(previous.partial.contracts) !== JSON.stringify(task.contractDigests)
+  )
+    return undefined;
+  return { runId: previous.id, ...previous.partial };
+}

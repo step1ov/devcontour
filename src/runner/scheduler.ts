@@ -26,7 +26,7 @@ import { repositories, repository, roleBinding } from '../core/repositories.ts';
 import { reserveRepositories } from './ownership.ts';
 import { runGate } from './gates.ts';
 import { isolation } from './isolation.ts';
-import { implementationBasis } from '../core/reuse.ts';
+import { continuableDraft, implementationBasis } from '../core/reuse.ts';
 
 // Гейты прогона — область доказательства задачи, если она объявлена. Полный
 // набор профиля остаётся обязательным для приёмки доски и релиза, но требовать
@@ -284,6 +284,74 @@ export class Scheduler {
     if (this.h.store.read().runs.some((r) => r.status === 'active' && r.leaseUntil <= Date.now()))
       this.h.expire();
   }
+  /**
+   * Время реализации кончилось раньше работы. Незакоммиченные изменения
+   * сохраняются патчем к базе: следующая попытка начнёт с них, а не с пустого
+   * дерева. Не удалось сохранить — попытка просто начнётся заново.
+   */
+  private async keepDraft(run: Run, task: Task) {
+    if (run.candidateSha || !run.worktree || !run.baseSha || !task.approvedDigest) return;
+    try {
+      const dir = join(this.runRoot(task.repositoryId), 'artifacts', run.id, 'implementation');
+      await mkdir(dir, { recursive: true });
+      const patch = join(dir, 'partial.patch');
+      // Только в области записи задачи: в дереве бывают и посторонние
+      // неотслеживаемые каталоги — кеш менеджера пакетов, отчёты.
+      const scope = task.writePaths?.length ? ['--', ...task.writePaths] : [];
+      await git(run.worktree, 'add', '-A', ...scope);
+      await git(
+        run.worktree,
+        'diff',
+        '--cached',
+        '--binary',
+        `--output=${patch}`,
+        run.baseSha,
+        ...scope,
+      );
+      const text = await readFile(patch, 'utf8');
+      if (!text.trim() || text.length > 5_000_000) return;
+      const files = (
+        await git(run.worktree, 'diff', '--cached', '--name-only', run.baseSha, ...scope)
+      )
+        .split('\n')
+        .filter(Boolean);
+      this.h.recordPartial(run.id, run.token, {
+        patch,
+        digest: digest(text),
+        files,
+        spec: task.approvedDigest,
+        contracts: task.contractDigests,
+      });
+    } catch {
+      /* Черновик — удобство, а не условие: без него попытка начнётся с нуля. */
+    }
+  }
+  /** Накладывает черновик предыдущей попытки, если он есть и годится. */
+  private async continueDraft(run: Run, task: Task, cwd: string, dir: string) {
+    const draft = continuableDraft(this.h.store.read(), task, run.id);
+    if (!draft) return;
+    let applied = false;
+    try {
+      const text = await readFile(draft.patch, 'utf8');
+      // Черновик подменённый или повреждённый не накладывается.
+      if (digest(text) === draft.digest) {
+        await git(cwd, 'apply', '--3way', '--whitespace=nowarn', draft.patch);
+        // --3way кладёт изменения в индекс; исполнитель видит их как свою
+        // незакоммиченную работу, как было в прерванной попытке.
+        await git(cwd, 'reset', '-q');
+        applied = true;
+      }
+    } catch {
+      await git(cwd, 'reset', '-q', '--hard').catch(() => undefined);
+      await git(cwd, 'clean', '-fdq').catch(() => undefined);
+    }
+    await writeFile(
+      join(dir, 'continuation.json'),
+      JSON.stringify({ from: draft.runId, applied, files: draft.files }, null, 2),
+    );
+    run.continuedFrom = { runId: draft.runId, applied, files: draft.files };
+    this.h.continuation(run.id, run.token, run.continuedFrom);
+  }
   private prompt(task: Task, run: Run, review = false, sha?: string) {
     const s = this.h.store.read();
     return [
@@ -323,6 +391,9 @@ export class Scheduler {
               })),
             })),
         ),
+      !review && run.continuedFrom?.applied
+        ? `The previous attempt ran out of time before finishing. Its unfinished, unverified changes are already applied in this worktree as uncommitted edits (${run.continuedFrom.files.join(', ')}). Continue from them: check what is done and what is broken, finish the task and make the gates pass. Treat them as a draft, not as reviewed work.`
+        : '',
       `Base commit: ${run.baseSha}. ${sha ? `Review commit: ${sha}.` : ''}`,
       'Review against the pinned conventions. Report verified causal regressions, including unchanged consumers. Findings need path/line, rule, consequence and evidence; use null only when not applicable. Do not demand unrelated legacy cleanup.',
       // Разметка id ничего не доказывает сама по себе: тест может носить
@@ -654,6 +725,7 @@ export class Scheduler {
                         2,
                       ),
                     );
+                    await this.continueDraft(run, task, cwd, dir);
                     const writer = this.runtimes[run.runtime];
                     const toolProfile = toolProfileFor(
                       this.h.config,
@@ -782,6 +854,7 @@ export class Scheduler {
         // принимал замечание ревью про «401 Unauthorized» в разрабатываемом
         // приложении за отказ провайдера и останавливал выдачу насовсем.
         const kind = classifyFailure(error, message);
+        if (kind === 'timeout') await this.keepDraft(run, task);
         this.h.fail(
           run.id,
           run.token,

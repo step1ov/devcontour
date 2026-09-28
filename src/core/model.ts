@@ -304,6 +304,20 @@ export interface Run {
   implementationBasis?: string;
   /** Реализация взята у предыдущей попытки, а не написана заново. */
   reusedFrom?: { runId: string; candidateSha: string };
+  /**
+   * Незавершённые изменения реализации, оборванной по времени. Это черновик,
+   * не кандидат: его не проверяли и не ревьюировали. Следующая попытка той же
+   * постановки начинает с него, а не с пустого дерева.
+   */
+  partial?: {
+    patch: string;
+    digest: string;
+    files: string[];
+    spec: string;
+    contracts: Record<string, string>;
+  };
+  /** Попытка начала с черновика предыдущей; applied=false — черновик не лёг на базу. */
+  continuedFrom?: { runId: string; applied: boolean; files: string[] };
   evidence: Evidence[];
   context?: {
     id: string;

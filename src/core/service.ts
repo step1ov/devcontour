@@ -686,6 +686,20 @@ export class DevContour {
         : { runId: id, basis, reuse: decision.reason };
     });
   }
+  /** Черновик реализации, оборванной по времени (см. Run.partial). */
+  recordPartial(id: string, token: string, partial: NonNullable<Run['partial']>) {
+    return this.withRun(id, token, 'run.partial', (r) => {
+      r.partial = partial;
+      return { runId: id, files: partial.files, digest: partial.digest };
+    });
+  }
+  /** Попытка начала с черновика предыдущей (см. Run.continuedFrom). */
+  continuation(id: string, token: string, from: NonNullable<Run['continuedFrom']>) {
+    return this.withRun(id, token, 'run.continuation', (r) => {
+      r.continuedFrom = from;
+      return { runId: id, draftOf: from.runId, applied: from.applied, files: from.files };
+    });
+  }
   heartbeat(id: string, token: string) {
     this.withRun(id, token, 'heartbeat', (r) => {
       r.leaseUntil = Date.now() + this.config.leaseMs;
