@@ -700,3 +700,93 @@ test('Потерявшая владение операция не трогает
     f.cleanup();
   }
 });
+
+test('Обзор называет неисправность текущей выкладки, а не последнюю из истории', () => {
+  const f = fixture();
+  try {
+    f.h.config.preview = {
+      compose: 'main/compose.yml',
+      service: 'web',
+      port: 45997,
+      health: { path: '/health', timeoutMs: 1000 },
+    };
+    const board = f.h.createBoard('Preview board');
+    f.h.addTask(board.id, input());
+    f.h.approve(board.id);
+    const change = new Workspace(f.h).create({
+      title: 'Preview change',
+      description: 'Release to try',
+      boardIds: [board.id],
+    });
+    const manifest = { main: { sha: 'a'.repeat(40), tree: 'b'.repeat(40) } };
+    f.store.change('fixture.verified', (s) => {
+      const cs = s.changeSets.find((x) => x.id === change.id)!;
+      cs.verifications.push({
+        id: randomUUID(),
+        token: randomUUID(),
+        leaseUntil: 0,
+        startedAt: new Date().toISOString(),
+        status: 'passed',
+        policyDigest: new Workspace(f.h).policyDigest(),
+        specDigest: snapshotDigest(changeSnapshot(s, cs)),
+        tasks: [],
+        boards: [],
+        manifest,
+        manifestDigest: digest(manifest),
+        evidence: [],
+      });
+    });
+    const state = new Previews(f.h);
+    const begin = () => {
+      const started = state.start(change.id);
+      const p = state.begin(
+        started.token,
+        {
+          changeSetId: change.id,
+          verificationId: started.verificationId,
+          manifestDigest: started.manifestDigest,
+        },
+        'k',
+      );
+      return { token: started.token, p };
+    };
+    const finish = () => {
+      const { token, p } = begin();
+      state.built(token, p.id, { web: 'sha256:fixture' });
+      state.deployed(token, p.id);
+      state.healthy(token, p.id);
+      return state.finish(token, p.id);
+    };
+    const outage = () =>
+      authorOverview(f.h).decisions.find((d) => d.title === 'Версия в preview не отвечает');
+    const markLost = (id: string, reason: string) => {
+      const claim = state.start(change.id);
+      state.lost(claim.token, id, reason);
+      state.release(claim.token);
+    };
+
+    // Текущая выкладка потеряна и её никто не сменил — это текущий отказ.
+    const a = finish();
+    markLost(a.id, 'контейнер A пропал');
+    assert.equal(outage()?.detail, 'контейнер A пропал');
+
+    // A потеряна, затем B выложена успешно: B обслуживает URL, отказа нет;
+    // потеря A осталась в истории.
+    const b = finish();
+    assert.equal(servingPreview(f.store.read())?.id, b.id);
+    assert.equal(outage(), undefined, 'старая потеря не выдаётся за текущую');
+    assert.equal(f.store.read().previews!.find((x) => x.id === a.id)?.lost, 'контейнер A пропал');
+
+    // C не выложилась, B возвращена: URL у B, отказа «не отвечает» нет.
+    const { token, p: c } = begin();
+    state.fail(token, c.id, { error: 'сборка упала', failure: 'build', restored: true });
+    assert.equal(servingPreview(f.store.read())?.id, b.id);
+    assert.equal(outage(), undefined);
+
+    // Теперь потеряна сама B — отказ снова текущий, с её причиной.
+    markLost(b.id, 'контейнер B пропал');
+    assert.equal(outage()?.detail, 'контейнер B пропал');
+  } finally {
+    f.cleanup();
+  }
+});

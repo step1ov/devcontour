@@ -113,7 +113,17 @@ export function authorOverview(h: DevContour): AuthorOverview {
   const deploying = s.previews?.find((p) => p.active && p.leaseUntil > Date.now());
   const lastPreview = s.previews?.at(-1);
   const failure = lastPreview?.status === 'failed' ? lastPreview : undefined;
-  const lost = s.previews?.findLast((p) => p.lost);
+  // Неисправность — свойство того, кто занимает URL сейчас, а не истории.
+  // Последняя потерянная выкладка из всей истории продолжала называться
+  // «не отвечает» и после того, как её сменила здоровая. Занимающая URL —
+  // последняя выкладка, дошедшая до обслуживания; потерянной она делает
+  // текущий отказ, прежние отказы остаются в истории.
+  const occupant = s.previews?.findLast(
+    (p) =>
+      (p.status === 'healthy' || p.status === 'confirmed' || p.status === 'unconfirmed') &&
+      !p.active,
+  );
+  const lost = occupant?.lost ? occupant : undefined;
   const evidence = (c: ChangeSet): Evidence => {
     const v = c.verifications.at(-1);
     const deployed =
