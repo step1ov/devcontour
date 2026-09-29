@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, rm, realpath } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join, sep } from 'node:path';
+import { isAbsolute, join, resolve, sep } from 'node:path';
 import { DevContour } from '../core/service.ts';
 import { DomainError } from '../core/model.ts';
 import { Previews, type Preview, type PreviewFailure } from '../core/preview.ts';
@@ -37,8 +37,20 @@ export class PreviewError extends Error {
 
 type Redact = (value: string) => string;
 type Execution = { env: NodeJS.ProcessEnv; redact: Redact };
+type ComposeResource = {
+  external?: unknown;
+  name?: string;
+  driver?: string;
+  driver_opts?: Record<string, unknown>;
+};
 type ComposeService = {
-  build?: { context?: string; additional_contexts?: Record<string, string> };
+  build?: {
+    context?: string;
+    dockerfile?: string;
+    additional_contexts?: Record<string, string>;
+    ssh?: unknown;
+    network?: string;
+  };
   ports?: { host_ip?: string; published?: string; target?: number }[];
   volumes?: { type?: string; source?: string }[];
   env_file?: ({ path?: string } | string)[];
@@ -182,11 +194,14 @@ export class PreviewRunner {
   }
   /**
    * Compose исполняется с правами пользователя Docker, поэтому его смысл
-   * ограничен явно — до сборки и запуска. Разрешено: контекст сборки и файлы
-   * окружения внутри проверенного manifest; порт только у входного сервиса и
+   * ограничен явно — до сборки и запуска. Разрешено: контекст сборки,
+   * Dockerfile, дополнительные контексты и файлы окружения внутри проверенного
+   * manifest (после разрешения symlink); порт только у входного сервиса и
    * только на loopback с назначенным номером; именованные тома этого проекта.
    * Запрещено всё, что выходит за выкладку: bind-mount хоста (в том числе
-   * сокет Docker), внешние тома и сети, privileged, host-сеть, pid и ipc,
+   * сокет Docker), внешние тома и сети, тома и сети с явным глобальным именем,
+   * параметрами или сторонним драйвером, ssh и сеть при сборке, privileged,
+   * host-сеть, pid и ipc,
    * добавленные capabilities и устройства.
    */
   private async assertCompose(
@@ -208,27 +223,45 @@ export class PreviewRunner {
       ),
     ) as {
       services?: Record<string, ComposeService>;
-      volumes?: Record<string, { external?: unknown } | null>;
-      networks?: Record<string, { external?: unknown } | null>;
+      volumes?: Record<string, ComposeResource | null>;
+      networks?: Record<string, ComposeResource | null>;
       configs?: Record<string, { file?: string } | null>;
       secrets?: Record<string, { file?: string } | null>;
     };
-    const roots = Object.keys(manifest).map((id) => join(context, id));
-    const inside = (path?: string) =>
-      !!path && roots.some((r) => path === r || path.startsWith(r + sep));
+    // Путь сравнивается после разрешения symlink: ссылка внутри manifest на
+    // файл снаружи — тот же выход за границу, что и явный внешний путь. Корни
+    // разрешаются так же, иначе /var и /private/var на macOS не совпадали бы.
+    const real = async (path: string) => realpath(path).catch(() => resolve(path));
+    const roots = await Promise.all(Object.keys(manifest).map((id) => real(join(context, id))));
+    const within = async (path?: string) => {
+      if (!path) return false;
+      const target = await real(path);
+      return roots.some((r) => target === r || target.startsWith(r + sep));
+    };
     const problems: string[] = [];
     const services = raw.services ?? {};
     if (!services[config.service]) problems.push(`нет входного сервиса ${config.service}`);
     for (const [name, s] of Object.entries(services)) {
       if (s.build) {
-        if (!inside(s.build.context))
+        if (!(await within(s.build.context)))
           problems.push(`${name}: контекст сборки вне проверенного manifest`);
+        // Dockerfile — такой же источник сборки, как контекст: внешний файл
+        // собирал образ, которого нет в проверенном manifest.
+        if (s.build.dockerfile && s.build.context) {
+          const file = isAbsolute(s.build.dockerfile)
+            ? s.build.dockerfile
+            : resolve(s.build.context, s.build.dockerfile);
+          if (!(await within(file))) problems.push(`${name}: Dockerfile вне manifest`);
+        }
         for (const extra of Object.values(s.build.additional_contexts ?? {}))
-          if (!inside(extra)) problems.push(`${name}: дополнительный контекст вне manifest`);
+          if (!(await within(extra)))
+            problems.push(`${name}: дополнительный контекст вне manifest`);
+        if (s.build.ssh) problems.push(`${name}: ssh при сборке`);
+        if (s.build.network) problems.push(`${name}: сеть сборки ${s.build.network}`);
       }
       for (const file of s.env_file ?? []) {
         const path = typeof file === 'string' ? file : file.path;
-        if (!inside(path)) problems.push(`${name}: env_file вне manifest`);
+        if (!(await within(path))) problems.push(`${name}: env_file вне manifest`);
       }
       for (const v of s.volumes ?? [])
         if (v.type !== 'volume' && v.type !== 'tmpfs')
@@ -260,14 +293,23 @@ export class PreviewRunner {
       ['том', raw.volumes],
       ['сеть', raw.networks],
     ] as const)
-      for (const [name, entry] of Object.entries(entries ?? {}))
+      for (const [name, entry] of Object.entries(entries ?? {})) {
         if (entry?.external) problems.push(`внешний ${kind} ${name}`);
+        // Явное глобальное имя делит ресурс между выкладками и проектами, а
+        // параметры драйвера превращают том в bind-mount хоста в обход запрета.
+        if (entry?.name) problems.push(`${kind} ${name}: явное глобальное имя ${entry.name}`);
+        if (entry?.driver_opts && Object.keys(entry.driver_opts).length)
+          problems.push(`${kind} ${name}: параметры драйвера`);
+        if (entry?.driver && !['local', 'bridge'].includes(entry.driver))
+          problems.push(`${kind} ${name}: драйвер ${entry.driver}`);
+      }
     for (const [kind, entries] of [
       ['config', raw.configs],
       ['secret', raw.secrets],
     ] as const)
       for (const [name, entry] of Object.entries(entries ?? {}))
-        if (entry?.file && !inside(entry.file)) problems.push(`${kind} ${name}: файл вне manifest`);
+        if (entry?.file && !(await within(entry.file)))
+          problems.push(`${kind} ${name}: файл вне manifest`);
     if (problems.length)
       throw new PreviewError(
         'compose-policy',

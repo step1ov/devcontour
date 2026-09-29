@@ -1,6 +1,6 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
@@ -272,6 +272,53 @@ test('Preview не обходит границы: настройки, Compose, �
     await assert.rejects(f.runner.deploy(f.change.id), /границы preview/);
     assert.equal(f.store.read().previews!.at(-1)!.failure, 'compose-policy');
     assert.equal(await f.read('/variant'), 'A', 'URL остался у прежней выкладки');
+
+    // Все файловые источники сборки — внутри manifest, после разрешения
+    // symlink; тома и сети не делятся с другими выкладками и не подключают
+    // хост через драйвер. Внешний Dockerfile собирал образ, которого нет в
+    // проверенном manifest.
+    const outside = await mkdtemp(join(tmpdir(), 'devcontour-outside-'));
+    await writeFile(join(outside, 'Dockerfile'), dockerfile());
+    await symlink(join(outside, 'Dockerfile'), join(f.repo, 'Linked.Dockerfile'));
+    const withBuild = (line: string) =>
+      compose().replace('      context: ./main\n', `      context: ./main\n${line}\n`);
+    const refused: [string, string, RegExp][] = [
+      [
+        withBuild('      dockerfile: ../../outside/Dockerfile'),
+        'relative dockerfile',
+        /Dockerfile вне manifest/,
+      ],
+      [
+        withBuild(`      dockerfile: ${join(outside, 'Dockerfile')}`),
+        'absolute dockerfile',
+        /Dockerfile вне manifest/,
+      ],
+      [
+        withBuild('      dockerfile: Linked.Dockerfile'),
+        'symlinked dockerfile',
+        /Dockerfile вне manifest/,
+      ],
+      [
+        compose('    volumes:\n      - data:/d\n') +
+          `volumes:\n  data:\n    name: shared-preview\n    driver_opts:\n      type: none\n      o: bind\n      device: ${outside}\n`,
+        'shared bind volume',
+        /явное глобальное имя shared-preview.*параметры драйвера/,
+      ],
+      [
+        compose('    networks:\n      - n\n') + 'networks:\n  n:\n    name: shared-net\n',
+        'shared network',
+        /сеть n: явное глобальное имя shared-net/,
+      ],
+    ];
+    for (const [text, message, reason] of refused) {
+      await f.commit({ 'compose.preview.yml': text }, message);
+      await f.verify();
+      await assert.rejects(f.runner.deploy(f.change.id), reason, message);
+      assert.equal(f.store.read().previews!.at(-1)!.failure, 'compose-policy', message);
+      assert.equal(await f.read('/variant'), 'A', `${message}: URL остался у прежней выкладки`);
+    }
+    await rm(join(f.repo, 'Linked.Dockerfile'));
+    await rm(outside, { recursive: true, force: true });
 
     // Здоровая по /health выкладка, которая называет чужой релиз, URL не
     // получает: принадлежность проверяется не только ответом health.
