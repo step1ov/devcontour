@@ -405,7 +405,7 @@ test('Workspace setup preserves policy on repeat and detects a competing control
 
     // Профиль инструментов — часть объявления: shell, добавленный исполнителю,
     // доходит до конфигурации, а не остаётся «preserved».
-    registry.toolProfiles = {
+    (registry as { toolProfiles?: unknown }).toolProfiles = {
       claude: { runtime: 'claude', claudeTools: ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash'] },
     };
     await writeFile(path, JSON.stringify(registry));
