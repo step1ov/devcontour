@@ -8,6 +8,10 @@ import { execFileSync } from 'node:child_process';
 import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { restoreBackup } from '../src/runner/backup.ts';
+import { randomUUID } from 'node:crypto';
+import { Previews } from '../src/core/preview.ts';
+import { Workspace, changeSnapshot, snapshotDigest } from '../src/core/workspace.ts';
+import { digest } from '../src/core/service.ts';
 import { complete, config, fixture, input } from './helpers.ts';
 
 const rows = (path: string) => {
@@ -111,7 +115,8 @@ test('Backup снимается на ходу и восстанавливает�
     const report = await restoreBackup(out, target, f.h.config);
     assert.equal(report.events, events, 'история перенесена целиком');
     assert.equal(report.tasks, 3);
-    assert.deepEqual(report.releasedOwnership, [active.id]);
+    assert.deepEqual(report.releasedOwnership.runs, [active.id]);
+    assert.equal(report.resultsAvailable, false, 'результат не найден в Git');
     assert.deepEqual(report.missingResults, [
       { taskId: lost.id, repositoryId: 'main', sha: 'd'.repeat(40) },
     ]);
@@ -131,5 +136,112 @@ test('Backup снимается на ходу и восстанавливает�
   } finally {
     f.cleanup();
     rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('Восстановление снимает всё оперативное владение и отличает его от доступности Git', async () => {
+  // Копия снята, пока шли выкладка preview, совместная проверка и работа
+  // ведущего цикла, а контроллер держал лидерство. Их процессы остались на
+  // прежней установке: восстановленная копия не должна ждать их токенов.
+  const f = fixture();
+  try {
+    f.h.config.preview = {
+      compose: 'main/compose.yml',
+      service: 'web',
+      port: 45996,
+      health: { path: '/health', timeoutMs: 1000 },
+    };
+    const b = f.h.createBoard('Board');
+    f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    const change = new Workspace(f.h).create({
+      title: 'Change',
+      description: 'Release to try',
+      boardIds: [b.id],
+    });
+    const manifest = { main: { sha: 'a'.repeat(40), tree: 'b'.repeat(40) } };
+    const verification = randomUUID();
+    f.store.change('fixture.verified', (s) => {
+      const cs = s.changeSets.find((x) => x.id === change.id)!;
+      const base = {
+        token: randomUUID(),
+        startedAt: new Date().toISOString(),
+        policyDigest: new Workspace(f.h).policyDigest(),
+        specDigest: snapshotDigest(changeSnapshot(s, cs)),
+        tasks: [],
+        boards: [],
+        manifest,
+        manifestDigest: digest(manifest),
+        evidence: [],
+      };
+      cs.verifications.push({
+        ...base,
+        id: verification,
+        leaseUntil: Date.now() + 60_000,
+        status: 'active',
+      });
+      cs.verifications.push({ ...base, id: randomUUID(), leaseUntil: 0, status: 'passed' });
+    });
+    const previews = new Previews(f.h);
+    const started = previews.start(change.id);
+    const preview = previews.begin(
+      started.token,
+      {
+        changeSetId: change.id,
+        verificationId: started.verificationId,
+        manifestDigest: started.manifestDigest,
+      },
+      'k',
+    );
+    f.h.leader('original-controller');
+    f.store.atomic(() =>
+      f.store.saveLocal('lead', undefined, 'board:x', {
+        key: 'board:x',
+        kind: 'board',
+        id: 'x',
+        status: 'running',
+        token: 'old-token',
+        leaseUntil: Date.now() + 60_000,
+        stage: 1,
+        attempts: 1,
+        history: [],
+      }),
+    );
+
+    const out = join(f.root, 'backup.sqlite');
+    f.store.backup(out);
+    const report = await restoreBackup(out, join(f.root, 'restored'), f.h.config);
+    assert.deepEqual(report.releasedOwnership.previews, [preview.id]);
+    assert.equal(report.releasedOwnership.previewLock, 'deploy');
+    assert.deepEqual(report.releasedOwnership.verifications, [verification]);
+    assert.equal(report.releasedOwnership.leader, 'original-controller');
+    assert.deepEqual(report.releasedOwnership.workflows, ['board:x']);
+    assert.deepEqual(report.remainingOwnership, []);
+    assert.equal(report.resultsAvailable, true);
+    assert.equal(report.ready, true);
+
+    const restored = new Store(report.path);
+    try {
+      const s = restored.read();
+      assert.equal(s.previewLock, undefined);
+      const p = s.previews!.find((x) => x.id === preview.id)!;
+      assert.equal(p.active, false);
+      assert.equal(p.status, 'failed');
+      assert.match(p.error ?? '', /восстановлением backup/);
+      const v = s.changeSets[0].verifications.find((x) => x.id === verification)!;
+      assert.equal(v.status, 'failed');
+      assert.equal(s.changeSets[0].verifications[1].status, 'passed', 'история проверок цела');
+      assert.equal(s.leader, undefined);
+      const job = restored.localRecords<{ status: string; token?: string }>('lead')['board:x'];
+      assert.equal(job.status, 'queued');
+      assert.equal(job.token, undefined);
+    } finally {
+      restored.close();
+    }
+    // Действующий workspace не тронут.
+    assert.equal(f.store.read().previewLock?.token, started.token);
+    assert.equal(f.store.read().leader?.owner, 'original-controller');
+  } finally {
+    f.cleanup();
   }
 });
