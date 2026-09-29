@@ -478,6 +478,24 @@ test('Doctor detects absent prerequisites; donor import records source SHA and d
         (c) => c.status === 'blocked' && c.detail.includes('absent-devcontour-tool'),
       ),
     );
+    // Исполнитель claude без shell пишет вслепую — doctor называет это; с Bash в
+    // профиле по умолчанию та же строка проходит.
+    const role = Object.keys(f.c.roles)[0]!;
+    f.c.roles[role] = { ...f.c.roles[role]!, runtime: 'claude' };
+    const blind = (await doctor(f.c, f.data)).checks.find(
+      (c) => c.id === `writer:${f.c.repositories[0]!.id}:${role}`,
+    );
+    assert.equal(blind?.status, 'not-checked');
+    assert.match(blind?.detail ?? '', /вслепую/);
+    f.c.toolProfiles.claude = {
+      runtime: 'claude',
+      claudeTools: ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash'],
+    } as never;
+    const sighted = (await doctor(f.c, f.data)).checks.find(
+      (c) => c.id === `writer:${f.c.repositories[0]!.id}:${role}`,
+    );
+    assert.equal(sighted?.status, 'passed');
+    delete f.c.toolProfiles.claude;
     const imported = await importKnowledge(f.workspace, f.c.repositories[0].path, ['README.md']);
     assert.equal(imported.status, 'unreviewed');
     assert.match(imported.revision, /^[a-f0-9]{40}$/);

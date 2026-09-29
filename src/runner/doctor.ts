@@ -75,6 +75,23 @@ export async function doctor(config: Config, root: string, probe = false) {
         : `${binding.runtime} проверяет только чтением: профиль не даёт запускать команды. Ревью не обнаружит то, что видно лишь прогоном.`,
     });
   }
+  // Исполнитель без shell пишет вслепую: не запускает ни тесты, ни проверку
+  // типов и узнаёт о провале только от гейтов после попытки. На пилоте так
+  // прошли все попытки сложной задачи — таймауты и круги находок ревью, хотя
+  // каждую из них исполнитель поймал бы сам первым же прогоном теста.
+  for (const { repo, role, binding } of bindings.filter((b) => !b.review)) {
+    if (binding.runtime === 'demo') continue;
+    const profile = toolProfileFor(config, binding.runtime, role, false, repo.id);
+    // У исполнителя codex shell есть всегда: codexShell управляет только ревью.
+    const runsChecks = binding.runtime === 'codex' || !!profile?.claudeTools?.includes('Bash');
+    checks.push({
+      id: `writer:${repo.id}:${role}`,
+      status: runsChecks ? 'passed' : 'not-checked',
+      detail: runsChecks
+        ? `${binding.runtime} может запускать тесты и проверки во время реализации`
+        : `${binding.runtime} пишет код вслепую: профиль инструментов не даёт shell, и тесты исполнитель не запустит. Добавьте Bash в claudeTools профиля toolProfiles.${binding.runtime}.`,
+    });
+  }
   const runtimes = new Set(bindings.map((b) => b.binding.runtime));
   for (const runtime of ['git', ...runtimes].filter((s) => s !== 'demo'))
     await check('cli:' + runtime, async () => {
