@@ -280,6 +280,12 @@ test('Preview не обходит границы: настройки, Compose, �
     const outside = await mkdtemp(join(tmpdir(), 'devcontour-outside-'));
     await writeFile(join(outside, 'Dockerfile'), dockerfile());
     await symlink(join(outside, 'Dockerfile'), join(f.repo, 'Linked.Dockerfile'));
+    // Внешний файл окружения: Compose прочитал бы его значения в environment
+    // ещё при разборе, и ссылка на источник исчезла бы из вывода.
+    const external = join(outside, 'external.env');
+    await writeFile(external, 'OUTSIDE=outside-manifest-sentinel\n');
+    await writeFile(join(outside, 'other.yml'), 'services:\n  side:\n    image: busybox:1.36\n');
+    await symlink(external, join(f.repo, 'linked.env'));
     const withBuild = (line: string) =>
       compose().replace('      context: ./main\n', `      context: ./main\n${line}\n`);
     const refused: [string, string, RegExp][] = [
@@ -309,6 +315,29 @@ test('Preview не обходит границы: настройки, Compose, �
         'shared network',
         /сеть n: явное глобальное имя shared-net/,
       ],
+      [compose(`    env_file: ${external}\n`), 'absolute env_file', /env_file вне manifest/],
+      [
+        compose('    env_file:\n      - path: ../../outside.env\n        required: false\n'),
+        'relative env_file',
+        /env_file вне manifest/,
+      ],
+      [compose('    env_file: ./main/linked.env\n'), 'symlinked env_file', /env_file вне manifest/],
+      [
+        compose('    env_file: ${HOME}/preview.env\n'),
+        'env_file from variable',
+        /env_file с подстановкой переменной/,
+      ],
+      [compose(`    label_file: ${external}\n`), 'external label_file', /label_file вне manifest/],
+      [
+        `include:\n  - ${join(outside, 'other.yml')}\n` + compose(),
+        'external include',
+        /include другого файла Compose/,
+      ],
+      [
+        compose(`    extends:\n      file: ${join(outside, 'other.yml')}\n      service: side\n`),
+        'external extends',
+        /web: extends из другого файла Compose/,
+      ],
     ];
     for (const [text, message, reason] of refused) {
       await f.commit({ 'compose.preview.yml': text }, message);
@@ -318,6 +347,17 @@ test('Preview не обходит границы: настройки, Compose, �
       assert.equal(await f.read('/variant'), 'A', `${message}: URL остался у прежней выкладки`);
     }
     await rm(join(f.repo, 'Linked.Dockerfile'));
+    await rm(join(f.repo, 'linked.env'));
+
+    // Неявный Dockerfile — тот же источник сборки: symlink наружу отклоняется
+    // политикой, а не оставляется на усмотрение сборщика.
+    await rm(join(f.repo, 'Dockerfile'));
+    await symlink(join(outside, 'Dockerfile'), join(f.repo, 'Dockerfile'));
+    await f.commit({ 'compose.preview.yml': compose() }, 'implicit dockerfile');
+    await f.verify();
+    await assert.rejects(f.runner.deploy(f.change.id), /web: Dockerfile вне manifest/);
+    assert.equal(f.store.read().previews!.at(-1)!.failure, 'compose-policy');
+    await rm(join(f.repo, 'Dockerfile'));
     await rm(outside, { recursive: true, force: true });
 
     // Здоровая по /health выкладка, которая называет чужой релиз, URL не
@@ -352,12 +392,30 @@ test('Preview не обходит границы: настройки, Compose, �
     );
 
     // Сценарий, который не запустился, — «не подтверждено», без отката здоровой выкладки.
-    await f.commit({ Dockerfile: dockerfile() }, 'fixed build');
+    // Файл окружения внутри manifest разрешён и доходит до контейнера.
+    await f.commit(
+      {
+        Dockerfile: dockerfile(),
+        'compose.preview.yml': compose('    env_file: ./main/local.env\n'),
+        'local.env': 'LOCAL_INPUT=inside-manifest\n',
+      },
+      'fixed build',
+    );
     f.h.config.preview!.smoke = { command: ['devcontour-no-such-smoke'], timeoutMs: 10000 };
     await f.verify();
     const c = await f.runner.deploy(f.change.id);
     assert.equal(c.status, 'unconfirmed');
     assert.equal(servingPreview(f.store.read())!.id, c.id);
+    const container = (
+      await command(
+        ['docker', 'ps', '--filter', `label=com.docker.compose.project=${c.project}`, '-q'],
+        tmpdir(),
+      )
+    ).stdout.trim();
+    const envs = (
+      await command(['docker', 'inspect', '--format', '{{json .Config.Env}}', container], tmpdir())
+    ).stdout;
+    assert.match(envs, /LOCAL_INPUT=inside-manifest/);
 
     // Откат к выкладке, которой больше нет, не удаётся — URL возвращают
     // текущей выкладке, и состояние это отражает.
@@ -694,6 +752,86 @@ test('Потерявшая владение операция не трогает
       /Владение/,
     );
     assert.deepEqual(cleanup.effects, []);
+
+    // 5. Переключение выкладки: пока останавливалась прежняя, владение
+    // перехвачено — публичный порт новая уже не занимает.
+    const next = state.start(change.id);
+    const q = state.begin(
+      next.token,
+      {
+        changeSetId: change.id,
+        verificationId: next.verificationId,
+        manifestDigest: next.manifestDigest,
+      },
+      'k',
+    );
+    let fifth = '';
+    const switching = runner((id, action) => {
+      if (id === q.previous && action === 'stop' && !fifth) fifth = takeover().id;
+    });
+    switching.r.materialize = () => Promise.resolve(context);
+    switching.r.assertCompose = async () => {};
+    switching.r.docker = () => Promise.resolve('sha256:fixture');
+    switching.r.compose = (_p: unknown, _c: string, args: string[], env: NodeJS.ProcessEnv) => {
+      if (args[0] === 'config')
+        return Promise.resolve(JSON.stringify({ services: { web: { build: {} } } }));
+      switching.effects.push({
+        id: q.id,
+        action: `${args.join(' ')} :${env.DEVCONTOUR_PREVIEW_PORT}`,
+        owner: state.owns(next.token),
+      });
+      return Promise.resolve('');
+    };
+    await assert.rejects(
+      (
+        switching.r.build as (
+          p: unknown,
+          m: unknown,
+          e: unknown,
+          l: AbortSignal,
+        ) => Promise<unknown>
+      )(q, manifest, { env: {}, redact: (s: string) => s }, new AbortController().signal),
+      /Владение/,
+    );
+    assert.ok(fifth, 'перехват произошёл во время остановки прежней');
+    assert.deepEqual(
+      switching.effects.filter((e) => !e.owner),
+      [],
+      'после потери владения публичный порт не занимается',
+    );
+    assert.equal(
+      switching.effects.some((e) => e.action.endsWith(':45998')),
+      false,
+    );
+    assert.equal(servingPreview(f.store.read())?.id, fifth, 'URL у преемника');
+    assert.equal(f.store.read().previews!.find((x) => x.id === fifth)?.lost, undefined);
+
+    // Без перехвата то же переключение проходит до конца: проверка владения
+    // не мешает законной выкладке.
+    const clean = state.start(change.id);
+    const r = state.begin(
+      clean.token,
+      {
+        changeSetId: change.id,
+        verificationId: clean.verificationId,
+        manifestDigest: clean.manifestDigest,
+      },
+      'k',
+    );
+    const legit = runner(() => {});
+    legit.r.materialize = () => Promise.resolve(context);
+    legit.r.assertCompose = async () => {};
+    legit.r.docker = () => Promise.resolve('sha256:fixture');
+    legit.r.compose = switching.r.compose;
+    const deployed = await (
+      legit.r.build as (
+        p: unknown,
+        m: unknown,
+        e: unknown,
+        l: AbortSignal,
+      ) => Promise<{ id: string }>
+    )(r, manifest, { env: {}, redact: (s: string) => s }, new AbortController().signal);
+    assert.equal(servingPreview(f.store.read())?.id, deployed.id);
     await rm(context, { recursive: true, force: true });
     void a;
   } finally {

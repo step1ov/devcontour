@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, rm, realpath } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, realpath } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve, sep } from 'node:path';
@@ -10,6 +10,7 @@ import { repository } from '../core/repositories.ts';
 import { command } from './process.ts';
 import { executionEnvironment } from './environment.ts';
 import { runCheck } from './gates.ts';
+import { parse } from 'yaml';
 
 /** Свободный порт на loopback для пробного запуска выкладки. */
 function freePort(): Promise<number> {
@@ -54,6 +55,7 @@ type ComposeService = {
   ports?: { host_ip?: string; published?: string; target?: number }[];
   volumes?: { type?: string; source?: string }[];
   env_file?: ({ path?: string } | string)[];
+  label_file?: string[];
   privileged?: boolean;
   network_mode?: string;
   pid?: string;
@@ -195,8 +197,10 @@ export class PreviewRunner {
   /**
    * Compose исполняется с правами пользователя Docker, поэтому его смысл
    * ограничен явно — до сборки и запуска. Разрешено: контекст сборки,
-   * Dockerfile, дополнительные контексты и файлы окружения внутри проверенного
-   * manifest (после разрешения symlink); порт только у входного сервиса и
+   * Dockerfile (в том числе неявный), дополнительные контексты, файлы
+   * окружения и меток внутри проверенного manifest (после разрешения
+   * symlink), конфигурация одним файлом без include и extends из другого
+   * файла; порт только у входного сервиса и
    * только на loopback с назначенным номером; именованные тома этого проекта.
    * Запрещено всё, что выходит за выкладку: bind-mount хоста (в том числе
    * сокет Docker), внешние тома и сети, тома и сети с явным глобальным именем,
@@ -212,6 +216,73 @@ export class PreviewRunner {
     redact: Redact,
   ) {
     const config = this.h.config.preview!;
+    // Путь сравнивается после разрешения symlink: ссылка внутри manifest на
+    // файл снаружи — тот же выход за границу, что и явный внешний путь. Корни
+    // разрешаются так же, иначе /var и /private/var на macOS не совпадали бы.
+    const real = async (path: string) => realpath(path).catch(() => resolve(path));
+    const roots = await Promise.all(Object.keys(manifest).map((id) => real(join(context, id))));
+    const within = async (path?: string) => {
+      if (!path) return false;
+      const target = await real(path);
+      return roots.some((r) => target === r || target.startsWith(r + sep));
+    };
+    const problems: string[] = [];
+    const refuse = () => {
+      if (problems.length)
+        throw new PreviewError(
+          'compose-policy',
+          'Compose выходит за границы preview: ' + problems.join('; '),
+        );
+    };
+    // Конфигурация — один файл из manifest. include и extends из другого
+    // файла Compose сливает молча, и в его выводе источник уже не виден;
+    // поэтому они запрещены по исходному тексту, а не по результату.
+    const source = join(context, config.compose);
+    if (!(await within(source))) problems.push('файл Compose вне manifest');
+    else
+      try {
+        const document = parse(await readFile(source, 'utf8'), { merge: true }) as {
+          include?: unknown;
+          services?: Record<string, { extends?: unknown } | null>;
+        } | null;
+        if (document?.include !== undefined) problems.push('include другого файла Compose');
+        for (const [name, s] of Object.entries(document?.services ?? {}))
+          if (s?.extends && typeof s.extends === 'object' && 'file' in s.extends)
+            problems.push(`${name}: extends из другого файла Compose`);
+      } catch (error) {
+        problems.push(
+          `файл Compose не разобран: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    refuse();
+    // Файлы окружения и меток Compose читает уже при разборе: в представлении
+    // с подстановкой переменных их значения перенесены в environment, а сами
+    // ссылки исчезают. Поэтому источники проверяются по отдельному
+    // представлению без подстановки и без чтения этих файлов — до сборки.
+    const sources = JSON.parse(
+      await this.compose(
+        p,
+        context,
+        ['config', '--no-normalize', '--no-interpolate', '--no-env-resolution', '--format', 'json'],
+        env,
+        redact,
+        'compose-policy',
+      ),
+    ) as { services?: Record<string, Pick<ComposeService, 'env_file' | 'label_file'>> };
+    for (const [name, s] of Object.entries(sources.services ?? {}))
+      for (const [key, files] of [
+        ['env_file', s.env_file],
+        ['label_file', s.label_file],
+      ] as const)
+        for (const file of files ?? []) {
+          const path = typeof file === 'string' ? file : file.path;
+          // Путь с переменной зависит от окружения выкладки, а не от manifest.
+          if (!path || path.includes('$'))
+            problems.push(`${name}: ${key} с подстановкой переменной`);
+          else if (!(await within(path))) problems.push(`${name}: ${key} вне manifest`);
+        }
+    // Источники проверены до того, как Compose разрешит их содержимое.
+    refuse();
     const raw = JSON.parse(
       await this.compose(
         p,
@@ -228,17 +299,6 @@ export class PreviewRunner {
       configs?: Record<string, { file?: string } | null>;
       secrets?: Record<string, { file?: string } | null>;
     };
-    // Путь сравнивается после разрешения symlink: ссылка внутри manifest на
-    // файл снаружи — тот же выход за границу, что и явный внешний путь. Корни
-    // разрешаются так же, иначе /var и /private/var на macOS не совпадали бы.
-    const real = async (path: string) => realpath(path).catch(() => resolve(path));
-    const roots = await Promise.all(Object.keys(manifest).map((id) => real(join(context, id))));
-    const within = async (path?: string) => {
-      if (!path) return false;
-      const target = await real(path);
-      return roots.some((r) => target === r || target.startsWith(r + sep));
-    };
-    const problems: string[] = [];
     const services = raw.services ?? {};
     if (!services[config.service]) problems.push(`нет входного сервиса ${config.service}`);
     for (const [name, s] of Object.entries(services)) {
@@ -246,11 +306,11 @@ export class PreviewRunner {
         if (!(await within(s.build.context)))
           problems.push(`${name}: контекст сборки вне проверенного manifest`);
         // Dockerfile — такой же источник сборки, как контекст: внешний файл
-        // собирал образ, которого нет в проверенном manifest.
-        if (s.build.dockerfile && s.build.context) {
-          const file = isAbsolute(s.build.dockerfile)
-            ? s.build.dockerfile
-            : resolve(s.build.context, s.build.dockerfile);
+        // собирал образ, которого нет в проверенном manifest. Неявное имя
+        // проверяется так же: Compose без нормализации его не подставляет.
+        if (s.build.context) {
+          const dockerfile = s.build.dockerfile ?? 'Dockerfile';
+          const file = isAbsolute(dockerfile) ? dockerfile : resolve(s.build.context, dockerfile);
           if (!(await within(file))) problems.push(`${name}: Dockerfile вне manifest`);
         }
         for (const extra of Object.values(s.build.additional_contexts ?? {}))
@@ -258,10 +318,6 @@ export class PreviewRunner {
             problems.push(`${name}: дополнительный контекст вне manifest`);
         if (s.build.ssh) problems.push(`${name}: ssh при сборке`);
         if (s.build.network) problems.push(`${name}: сеть сборки ${s.build.network}`);
-      }
-      for (const file of s.env_file ?? []) {
-        const path = typeof file === 'string' ? file : file.path;
-        if (!(await within(path))) problems.push(`${name}: env_file вне manifest`);
       }
       for (const v of s.volumes ?? [])
         if (v.type !== 'volume' && v.type !== 'tmpfs')
@@ -310,11 +366,7 @@ export class PreviewRunner {
       for (const [name, entry] of Object.entries(entries ?? {}))
         if (entry?.file && !(await within(entry.file)))
           problems.push(`${kind} ${name}: файл вне manifest`);
-    if (problems.length)
-      throw new PreviewError(
-        'compose-policy',
-        'Compose выходит за границы preview: ' + problems.join('; '),
-      );
+    refuse();
   }
   /** Ждать ответа 2xx; итог — последняя причина неудачи или undefined. */
   private async unhealthy(url: string, path: string, timeoutMs: number) {
@@ -530,7 +582,10 @@ export class PreviewRunner {
       ).services as Record<string, ComposeService>;
       for (const [name, service] of Object.entries(services)) {
         const image = service.build ? `${p.project}-${name}` : service.image!;
-        if (!service.build) await this.docker(['pull', '-q', image], base, redact, 'build');
+        if (!service.build) {
+          this.guard(p.token, lost);
+          await this.docker(['pull', '-q', image], base, redact, 'build');
+        }
         images[name] = (
           await this.docker(
             ['image', 'inspect', '--format', '{{.Id}}', image],
@@ -551,7 +606,12 @@ export class PreviewRunner {
       // возвращаются при отказе и по явному откату.
       this.guard(p.token, lost);
       switched = true;
-      if (previous) await this.project(previous, 'stop', run);
+      if (previous) {
+        await this.project(previous, 'stop', run);
+        // Остановка асинхронна: пока она шла, lease мог истечь, а URL —
+        // перейти к другой выкладке. Публичный порт занимает только владелец.
+        this.guard(p.token, lost);
+      }
       await this.compose(p, context, ['up', '-d'], at(config.port), redact, 'switch');
       p = this.state.deployed(p.token, p.id);
       await this.check(p, config.port, run);
@@ -561,6 +621,7 @@ export class PreviewRunner {
       // а не повод снимать здоровую выкладку.
       let smoke: Preview['smoke'];
       if (config.smoke) {
+        this.guard(p.token, lost);
         try {
           const result = await runCheck(this.h, {
             argv: config.smoke.command,
