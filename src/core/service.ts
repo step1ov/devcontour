@@ -864,6 +864,17 @@ export class DevContour {
           createdAt: now(),
           contractDigests: {},
         };
+        // Находка относится к той же постановке и фиче, что и задача, в которой
+        // её нашли. Без привязки черновик блокировал утверждение всей доски
+        // находок сообщением, которое не называло задачу.
+        if (source.preparation) {
+          try {
+            t.preparation = developmentBinding(s, source.preparation.changeId);
+          } catch {
+            /* Постановка сменилась: привязку даст правка черновика ведущим. */
+          }
+          if (source.featureId) t.featureId = source.featureId;
+        }
         s.tasks.push(t);
         inbox.revisions.at(-1)!.taskIds.push(t.id);
         created.push(t.id);

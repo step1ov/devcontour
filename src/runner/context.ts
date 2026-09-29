@@ -88,7 +88,7 @@ export async function taskContext(config: Config, task: Task, contracts: Contrac
       // целиком: различие в хвостовых пробелах — не другая редакция.
       if (pinned && pinned.content.trimEnd() !== contract.content.trimEnd())
         throw new BlockedError(
-          `Context pack ${pack.id} закрепляет ${contract.source} в редакции, отличной от утверждённого контракта ${contract.id}; выполните context-lock после коммита контракта`,
+          `Context pack ${pack.id} закрепляет ${contract.source} в редакции, отличной от утверждённого контракта ${contract.id}; выполните context-lock после коммита контракта и перезапустите сервер: запущенный сервер держит прежнее закрепление`,
         );
     }
     snapshots.push({

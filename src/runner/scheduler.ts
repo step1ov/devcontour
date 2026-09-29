@@ -340,8 +340,8 @@ export class Scheduler {
         // Черновик подменённый или повреждённый не накладывается.
         if (digest(await readFile(patch, 'utf8')) !== draft.digest) throw new Error('digest');
       } else {
-        // Отклонённый кандидат лежит коммитом в репозитории; его изменения
-        // относительно своей базы переносятся на текущую.
+        // Кандидат лежит коммитом в репозитории; его изменения относительно
+        // своей базы переносятся на текущую.
         const repo = repository(this.h.config, task.repositoryId);
         const scope = task.writePaths?.length ? ['--', ...task.writePaths] : [];
         patch = join(dir, 'rejected-candidate.patch');
@@ -372,9 +372,25 @@ export class Scheduler {
     }
     await writeFile(
       join(dir, 'continuation.json'),
-      JSON.stringify({ from: draft.runId, kind: draft.kind, applied, files }, null, 2),
+      JSON.stringify(
+        {
+          from: draft.runId,
+          kind: draft.kind,
+          ...(draft.kind === 'candidate' ? { reason: draft.reason } : {}),
+          applied,
+          files,
+        },
+        null,
+        2,
+      ),
     );
-    run.continuedFrom = { runId: draft.runId, kind: draft.kind, applied, files };
+    run.continuedFrom = {
+      runId: draft.runId,
+      kind: draft.kind,
+      ...(draft.kind === 'candidate' ? { reason: draft.reason } : {}),
+      applied,
+      files,
+    };
     this.h.continuation(run.id, run.token, run.continuedFrom);
   }
   private prompt(task: Task, run: Run, review = false, sha?: string) {
@@ -419,7 +435,7 @@ export class Scheduler {
       !review && run.continuedFrom?.applied
         ? run.continuedFrom.kind === 'timeout'
           ? `The previous attempt ran out of time before finishing. Its unfinished, unverified changes are already applied in this worktree as uncommitted edits (${run.continuedFrom.files.join(', ')}). Continue from them: check what is done and what is broken, finish the task and make the gates pass. Treat them as a draft, not as reviewed work.`
-          : `The previous attempt's candidate was rejected by review. Its changes are already applied in this worktree as uncommitted edits (${run.continuedFrom.files.join(', ')}). Fix the review findings listed below on top of them; if a finding shows the approach itself is wrong, replace it rather than patching around it. The gates and a new independent review decide again.`
+          : `The previous attempt produced a candidate that failed (${run.continuedFrom.reason === 'review' ? 'rejected by review' : run.continuedFrom.reason}); see its error and findings below. Its changes are already applied in this worktree as uncommitted edits (${run.continuedFrom.files.join(', ')}). Fix what failed on top of them; if the failure shows the approach itself is wrong, replace it rather than patching around it. The gates and a new independent review decide again.`
         : '',
       `Base commit: ${run.baseSha}. ${sha ? `Review commit: ${sha}.` : ''}`,
       'Review against the pinned conventions. Report verified causal regressions, including unchanged consumers. Findings need path/line, rule, consequence and evidence; use null only when not applicable. Do not demand unrelated legacy cleanup.',
@@ -428,6 +444,9 @@ export class Scheduler {
       // и сценарий, и названный тест, и код.
       'Where a requirement names a testId, open that test. Reject it when the test does not exercise the stated scenario, or when it would still pass if the behaviour it claims to prove were broken. A matching name is not proof.',
       'Report unrelated bugs or debt in discoveries with a reproducible observation; these become unapproved tasks, not accepted knowledge. Never weaken a test to hide an application bug.',
+      // Приёмка чужих задач красна по замыслу, пока их не сделали: исполнители,
+      // гонявшие весь набор тестов, заводили её падения находками.
+      `This task's gates are: ${(task.gates ?? []).join(', ') || 'the repository defaults'}. Acceptance files and gates of other tasks may be red by design until those tasks are done; their failures are not discoveries unless this change caused them.`,
       'Write scope: ' +
         JSON.stringify({
           role: roleBinding(this.h.config, task.role, task.repositoryId).writePaths,

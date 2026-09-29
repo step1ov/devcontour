@@ -96,7 +96,15 @@ export function reusableImplementation(
  */
 export type Draft =
   | { kind: 'timeout'; runId: string; patch: string; digest: string; files: string[] }
-  | { kind: 'review'; runId: string; baseSha: string; candidateSha: string };
+  | {
+      kind: 'candidate';
+      runId: string;
+      /** Чем кончилась попытка с готовым кандидатом: ревью, проверка, время ревью. */
+      reason: FailureKind;
+      error?: string;
+      baseSha: string;
+      candidateSha: string;
+    };
 export function continuableDraft(
   s: DevContourState,
   task: Task,
@@ -104,19 +112,18 @@ export function continuableDraft(
 ): Draft | undefined {
   const previous = s.runs.findLast((r) => r.taskId === task.id && r.id !== currentRunId);
   if (!previous || previous.status !== 'failed') return undefined;
-  if (
-    previous.failureKind === 'review' &&
-    previous.candidateSha &&
-    previous.baseSha &&
-    previous.implementationBasis &&
-    task.approvedDigest
-  ) {
-    // Основания записаны хешем; постановку и контракты сверяет спецификация
-    // задачи, одобренная до этой попытки и не менявшаяся после.
+  if (previous.candidateSha && previous.baseSha && previous.failureKind && task.approvedDigest) {
+    // Постановку и контракты сверяет утверждение задачи: переутверждённая
+    // после этой попытки задача начинает с чистого дерева.
     if (previous.startedAt < (task.approvedAt ?? '')) return undefined;
+    // Отказ окружения до кандидата сюда не доходит, а отказ провайдера кода не
+    // касается: такой кандидат берётся переиспользованием, а не черновиком.
+    if (previous.failureKind === 'provider-auth') return undefined;
     return {
-      kind: 'review',
+      kind: 'candidate',
       runId: previous.id,
+      reason: previous.failureKind,
+      error: previous.error,
       baseSha: previous.baseSha,
       candidateSha: previous.candidateSha,
     };

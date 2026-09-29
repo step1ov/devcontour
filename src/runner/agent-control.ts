@@ -283,14 +283,26 @@ export async function reviewPlan(
   author: Author,
   runtimes: Runtimes = adapters,
   beforeCommit: () => void = () => {},
+  /**
+   * Какие черновики выпустить. На доске находок разобранные находки соседствуют
+   * с неразобранными, а ревью выпускало все черновики сразу: выпустить одну
+   * было нельзя, пока не разобраны остальные. Невыбранные черновики в
+   * предложение не входят и остаются черновиками.
+   */
+  selected?: string[],
 ) {
   const state = h.store.read();
   const board = state.boards.find((b) => b.id === boardId);
   if (!board) throw new DomainError('Доска не найдена');
   const revision = board.revisions.at(-1)!;
   if (revision.status !== 'active') throw new DomainError('Доска уже принята');
-  const tasks = state.tasks.filter((t) => revision.taskIds.includes(t.id));
-  if (!tasks.length) throw new DomainError('Добавьте задачи перед ревью плана');
+  const all = state.tasks.filter((t) => revision.taskIds.includes(t.id));
+  if (!all.length) throw new DomainError('Добавьте задачи перед ревью плана');
+  const foreign = (selected ?? []).filter(
+    (id) => !all.some((t) => t.id === id && t.status === 'draft'),
+  );
+  if (foreign.length) throw new DomainError('Не черновики этой доски: ' + foreign.join(', '));
+  const tasks = selected ? all.filter((t) => t.status !== 'draft' || selected.includes(t.id)) : all;
   const drafts = tasks.filter((t) => t.status === 'draft');
   if (!drafts.length) return { status: 'already-approved', boardId };
   const contractIds = new Set(tasks.flatMap((t) => t.contracts));

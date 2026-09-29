@@ -1593,7 +1593,8 @@ test('Кандидат, отклонённый ревью, — отправна�
     ]);
     assert.deepEqual(f.runs()[1].continuedFrom, {
       runId: first.id,
-      kind: 'review',
+      kind: 'candidate',
+      reason: 'review',
       applied: true,
       files: [deliverable],
     });

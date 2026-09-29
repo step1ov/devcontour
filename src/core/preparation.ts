@@ -163,7 +163,7 @@ export function developmentBinding(
 }
 export function assertTaskPreparation(
   s: DevContourState,
-  task: Pick<Task, 'preparation' | 'featureId'>,
+  task: Pick<Task, 'id' | 'preparation' | 'featureId'>,
 ) {
   if (!s.preparation) return;
   if (
@@ -171,7 +171,7 @@ export function assertTaskPreparation(
     hash(task.preparation) !== hash(developmentBinding(s, task.preparation.changeId))
   )
     throw new DomainError(
-      'Задача не связана с текущими утверждёнными продуктом и архитектурой',
+      `${task.id}: задача не связана с текущими утверждёнными продуктом и архитектурой; обновите её привязку правкой черновика`,
       409,
     );
   if (

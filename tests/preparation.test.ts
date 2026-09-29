@@ -925,12 +925,31 @@ test('План выпускается в работу только с фичей
     const view = p.status();
     assert.ok(view.enabled);
     assert.equal(view.delivery.unbound, 0);
+    // Находка исполнителя наследует постановку и фичу своей задачи: без них
+    // черновик блокировал утверждение доски находок.
+    f.h.pause(false);
+    const run = f.h.claim('writer')!;
+    const [found] = f.h.discoveries(run.id, run.token, 'a'.repeat(40), [
+      {
+        kind: 'debt',
+        title: 'Находка',
+        path: 'src/a.ts',
+        line: 1,
+        observation: 'Наблюдение',
+        consequence: 'Следствие',
+        reproduction: 'Воспроизведение',
+      },
+    ]);
+    const discovered = f.store.read().tasks.find((x) => x.id === found)!;
+    assert.deepEqual(discovered.preparation, f.store.read().tasks[0].preparation);
+    assert.equal(discovered.featureId, 'moderation-log');
     // Отменённая задача фичи не делает её незавершённой навсегда.
     const extra = f.h.addTask(b.id, { ...input('Снятая'), featureId: 'moderation-log' });
     f.h.cancel(extra.id, 'Решено иначе');
     const after = p.status();
     assert.ok(after.enabled);
-    assert.equal(after.current?.features.find((x) => x.id === 'moderation-log')?.tasks, 1);
+    // Живые задачи фичи — исходная и её находка; отменённая не считается.
+    assert.equal(after.current?.features.find((x) => x.id === 'moderation-log')?.tasks, 2);
   } finally {
     f.cleanup();
   }

@@ -443,3 +443,37 @@ test('Ревью плана читает ветку интеграции и ви
     f.cleanup();
   }
 });
+
+test('Ревью плана выпускает только выбранные черновики, остальные ждут разбора', async () => {
+  const f = fixture();
+  try {
+    f.h.config.mode = 'local';
+    const b = f.h.createBoard('Находки');
+    const triaged = f.h.addTask(b.id, input('Разобранная'));
+    const pending = f.h.addTask(b.id, input('Неразобранная'));
+    const seen: string[] = [];
+    const result = await reviewPlan(
+      f.h,
+      f.root,
+      b.id,
+      'claude',
+      runtimes((r) => seen.push(r.prompt)),
+      undefined,
+      [triaged.id],
+    );
+    assert.equal(result.status, 'approved');
+    const status = (id: string) => f.store.read().tasks.find((t) => t.id === id)!.status;
+    assert.equal(status(triaged.id), 'ready');
+    assert.equal(status(pending.id), 'draft');
+    assert.ok(
+      seen.every((p) => !p.includes('Неразобранная')),
+      'в предложение не входит',
+    );
+    await assert.rejects(
+      reviewPlan(f.h, f.root, b.id, 'claude', runtimes(), undefined, [triaged.id]),
+      /Не черновики этой доски/,
+    );
+  } finally {
+    f.cleanup();
+  }
+});

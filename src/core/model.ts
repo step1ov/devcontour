@@ -319,8 +319,10 @@ export interface Run {
   /** Попытка начала с черновика предыдущей; applied=false — черновик не лёг на базу. */
   continuedFrom?: {
     runId: string;
-    /** Чем кончилась попытка-источник: временем или отклонением ревью. */
-    kind: 'timeout' | 'review';
+    /** Источник: черновик, оборванный по времени, или готовый кандидат. */
+    kind: 'timeout' | 'candidate';
+    /** Для кандидата — класс отказа, которым кончилась попытка. */
+    reason?: FailureKind;
     applied: boolean;
     files: string[];
   };
