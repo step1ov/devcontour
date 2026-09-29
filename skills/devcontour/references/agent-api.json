@@ -2693,6 +2693,10 @@
                 "items": {
                   "type": "object",
                   "properties": {
+                    "featureId": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9-]{1,48}$"
+                    },
                     "requirements": {
                       "maxItems": 30,
                       "type": "array",

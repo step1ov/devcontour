@@ -6,6 +6,9 @@ export const planResult = z.object({
   tasks: z
     .array(
       z.object({
+        // Импорт молча отбрасывал фичу: план с featureId у каждой задачи
+        // приходил без неё и не утверждался — связь с фичей обязательна.
+        featureId: taskInput.shape.featureId,
         requirements: taskInput.shape.requirements,
         assignee: taskInput.shape.assignee,
         scope: taskInput.shape.scope,

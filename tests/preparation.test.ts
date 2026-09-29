@@ -943,6 +943,27 @@ test('План выпускается в работу только с фичей
     const discovered = f.store.read().tasks.find((x) => x.id === found)!;
     assert.deepEqual(discovered.preparation, f.store.read().tasks[0].preparation);
     assert.equal(discovered.featureId, 'moderation-log');
+    // План, импортированный с фичами, сохраняет их и утверждается.
+    const imported = f.h.importPlan({
+      title: 'Импорт с фичей',
+      description: '',
+      tasks: [
+        {
+          key: 'a',
+          title: 'Импортированная',
+          description: 'Задача из плана с фичей.',
+          role: 'qa',
+          dependsOn: [],
+          acceptance: ['Проверено.'],
+          contracts: [],
+          featureId: 'member-block',
+        },
+      ],
+    });
+    const importedId = f.store.read().boards.find((x) => x.id === imported.boardId)!.revisions[0]
+      .taskIds[0];
+    const importedTask = f.store.read().tasks.find((x) => x.id === importedId)!;
+    assert.equal(importedTask.featureId, 'member-block');
     // Отменённая задача фичи не делает её незавершённой навсегда.
     const extra = f.h.addTask(b.id, { ...input('Снятая'), featureId: 'moderation-log' });
     f.h.cancel(extra.id, 'Решено иначе');
