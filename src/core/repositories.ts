@@ -41,7 +41,10 @@ export function declaredRoles(config: Config, repositoryId?: string): string[] {
   // несуществующем репозитории, хотя раньше эти пути работали.
   const owner = repositoryId ?? repositories(config)[0].id;
   return [
-    ...new Set([...Object.keys(config.roles), ...Object.keys(repository(config, owner).roles ?? {})]),
+    ...new Set([
+      ...Object.keys(config.roles),
+      ...Object.keys(repository(config, owner).roles ?? {}),
+    ]),
   ];
 }
 /**

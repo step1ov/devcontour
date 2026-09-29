@@ -10,3 +10,9 @@ package-lock.json
 .idea
 evidence
 .private
+
+# Встроенные профили закрепляются digest по сырому тексту файла: переформатирование
+# изменило бы digest, и установленные workspace перестали бы загружаться.
+packs/profiles/*.json
+# Вендорные документы хранятся как в источнике, чтобы сверка с ним оставалась побайтовой.
+packs/context/.agents/context/vendor/

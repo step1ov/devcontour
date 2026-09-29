@@ -117,8 +117,7 @@ export function readComponentConfig(entry: any) {
   // привязку своей роли, но роли, пришедшие из его профиля, при перезагрузке
   // конфигурации обязаны остаться — иначе mobile и qa-mobile исчезали у
   // компонента, который их и объявил.
-  const roles =
-    entry.roles || file.roles ? { ...entry.roles, ...file.roles } : undefined;
+  const roles = entry.roles || file.roles ? { ...entry.roles, ...file.roles } : undefined;
   return {
     ...entry,
     ...file,

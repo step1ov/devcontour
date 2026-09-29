@@ -305,7 +305,11 @@ export async function runGate(...args: Parameters<typeof executeGate>) {
  * тело ответа песочницы) и URL хоста, которого нет в `isolation.domains`.
  */
 export function sandboxBlockedHosts(output: string, allowed: string[]) {
-  if (!/\b403\b|forbidden|denied by sandbox policy|blocked-by-sandbox-runtime|proxy|connect EPERM/i.test(output))
+  if (
+    !/\b403\b|forbidden|denied by sandbox policy|blocked-by-sandbox-runtime|proxy|connect EPERM/i.test(
+      output,
+    )
+  )
     return [];
   const hosts = new Set<string>();
   for (const m of output.matchAll(/\bhttps?:\/\/([a-z0-9-]+(?:\.[a-z0-9-]+)+)/gi))

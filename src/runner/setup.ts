@@ -21,7 +21,11 @@ const devcontourRoot = fileURLToPath(new URL('../../', import.meta.url));
 // тех, кто делает интерфейс, — дизайну, остальных — контрактам. Правило по виду
 // роли, а не по списку имён: `qa-mobile` и `qa-web` — тоже тестировщики.
 const companionContext = (role: string) =>
-  role.startsWith('qa') ? 'testing' : ['frontend', 'mobile'].includes(role) ? 'design' : 'contracts';
+  role.startsWith('qa')
+    ? 'testing'
+    : ['frontend', 'mobile'].includes(role)
+      ? 'design'
+      : 'contracts';
 
 export function defaultContextPacks(repositoryId = 'main', declared: string[] = [...roles]) {
   const prefix = repositoryId === 'main' ? '' : repositoryId + '-';

@@ -152,9 +152,7 @@ export function resolveProfile(ref: string, repositoryRoot?: string, repositoryI
     // Пакеты слоёв складываются по id: надстройка уточняет инструкцию базового
     // профиля, не отменяя остальные.
     contextPacks: [
-      ...new Map(
-        layers.flatMap((p) => p.contextPacks).map((pack) => [pack.id, pack]),
-      ).values(),
+      ...new Map(layers.flatMap((p) => p.contextPacks).map((pack) => [pack.id, pack])).values(),
     ],
     ...(source ? { source } : {}),
     // Preserve existing leaf builtin locks without a migration.
