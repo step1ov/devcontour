@@ -110,7 +110,15 @@ export function continuableDraft(
   task: Task,
   currentRunId: string,
 ): Draft | undefined {
-  const previous = s.runs.findLast((r) => r.taskId === task.id && r.id !== currentRunId);
+  // Попытка, прерванная окружением до кандидата (остановка сервера, обрыв),
+  // о коде ничего не говорит и черновика не оставляет: черновик берётся у
+  // последней содержательной попытки до неё.
+  const previous = s.runs.findLast(
+    (r) =>
+      r.taskId === task.id &&
+      r.id !== currentRunId &&
+      !(r.status === 'failed' && r.failureKind === 'environment' && !r.candidateSha && !r.partial),
+  );
   if (!previous || previous.status !== 'failed') return undefined;
   if (previous.candidateSha && previous.baseSha && previous.failureKind && task.approvedDigest) {
     // Постановку и контракты сверяет утверждение задачи: переутверждённая

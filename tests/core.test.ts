@@ -6,6 +6,8 @@ import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
 import { join } from 'node:path';
 import { readyTasks } from '../src/core/graph.ts';
+import { continuableDraft } from '../src/core/reuse.ts';
+import type { DevContourState, Run, Task } from '../src/core/model.ts';
 
 test('DAG rejects cycles and missing dependencies atomically', () => {
   const f = fixture();
@@ -633,4 +635,28 @@ test('Отменённая задача не делает ревизию неп�
   } finally {
     f.cleanup();
   }
+});
+
+test('Черновик берётся у последней содержательной попытки, прерванная окружением пропускается', () => {
+  const task = {
+    id: 'T1',
+    approvedDigest: 'spec',
+    approvedAt: '2026-01-01T00:00:00.000Z',
+    contractDigests: {},
+  } as unknown as Task;
+  const run = (id: string, over: Partial<Run>) =>
+    ({ id, taskId: 'T1', status: 'failed', startedAt: '2026-01-02T00:00:00.000Z', ...over }) as Run;
+  const rejected = run('R1', {
+    failureKind: 'review',
+    candidateSha: 'c'.repeat(40),
+    baseSha: 'b'.repeat(40),
+    implementationBasis: 'x',
+  });
+  const interrupted = run('R2', { failureKind: 'environment' });
+  const state = { runs: [rejected, interrupted] } as unknown as DevContourState;
+  assert.equal(continuableDraft(state, task, 'R3')?.runId, 'R1');
+  // Содержательный отказ после отклонения — черновик уже его, а не старого кандидата.
+  const timedOut = run('R2b', { failureKind: 'timeout' });
+  const later = { runs: [rejected, timedOut] } as unknown as DevContourState;
+  assert.equal(continuableDraft(later, task, 'R3'), undefined);
 });
