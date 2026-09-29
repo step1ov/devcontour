@@ -660,8 +660,19 @@ test('Черновик берётся у последней содержател
   // остаётся черновиком, но помечен — его сверяют с новой постановкой.
   const reapproved = { ...task, approvedAt: '2026-01-03T00:00:00.000Z' } as Task;
   assert.equal(continuableDraft(state, reapproved, 'R3')?.respecified, true);
-  // Содержательный отказ после отклонения — черновик уже его, а не старого кандидата.
-  const timedOut = run('R2b', { failureKind: 'timeout' });
-  const later = { runs: [rejected, timedOut] } as unknown as DevContourState;
-  assert.equal(continuableDraft(later, task, 'R3'), undefined);
+  // Попытка, не оставившая ничего (ни кандидата, ни черновика), пропускается
+  // при любом отказе: «не закончил» без правок не должен терять кандидата до неё.
+  const empty = run('R2b', { failureKind: 'unknown' });
+  const later = { runs: [rejected, empty] } as unknown as DevContourState;
+  assert.equal(continuableDraft(later, task, 'R3')?.runId, 'R1');
+  // Попытка с черновиком после отклонения — продолжаем её черновик, а не старого кандидата.
+  const drafted = run('R2c', {
+    failureKind: 'unknown',
+    partial: { patch: '/p', digest: 'd', files: ['a.ts'], spec: 'spec', contracts: {} },
+  });
+  const newest = { runs: [rejected, drafted] } as unknown as DevContourState;
+  const draft = continuableDraft(newest, task, 'R3');
+  assert.equal(draft?.runId, 'R2c');
+  assert.equal(draft?.kind, 'unfinished');
+  assert.equal(draft?.reason, 'unknown');
 });

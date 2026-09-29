@@ -334,7 +334,7 @@ export class Scheduler {
     let files: string[] = [];
     try {
       let patch: string;
-      if (draft.kind === 'timeout') {
+      if (draft.kind === 'unfinished') {
         patch = draft.patch;
         files = draft.files;
         // Черновик подменённый или повреждённый не накладывается.
@@ -376,7 +376,7 @@ export class Scheduler {
         {
           from: draft.runId,
           kind: draft.kind,
-          ...(draft.kind === 'candidate' ? { reason: draft.reason } : {}),
+          reason: draft.reason,
           applied,
           files,
         },
@@ -387,7 +387,7 @@ export class Scheduler {
     run.continuedFrom = {
       runId: draft.runId,
       kind: draft.kind,
-      ...(draft.kind === 'candidate' ? { reason: draft.reason } : {}),
+      reason: draft.reason,
       ...(draft.respecified ? { respecified: true } : {}),
       applied,
       files,
@@ -434,8 +434,8 @@ export class Scheduler {
             })),
         ),
       !review && run.continuedFrom?.applied
-        ? run.continuedFrom.kind === 'timeout'
-          ? `The previous attempt ran out of time before finishing. Its unfinished, unverified changes are already applied in this worktree as uncommitted edits (${run.continuedFrom.files.join(', ')}). Continue from them: check what is done and what is broken, finish the task and make the gates pass. Treat them as a draft, not as reviewed work.`
+        ? run.continuedFrom.kind === 'unfinished'
+          ? `The previous attempt stopped before finishing (${run.continuedFrom.reason === 'timeout' ? 'ran out of time' : run.continuedFrom.reason}). Its unfinished, unverified changes are already applied in this worktree as uncommitted edits (${run.continuedFrom.files.join(', ')}). Continue from them: check what is done and what is broken, finish the task and make the gates pass. Treat them as a draft, not as reviewed work.`
           : `The previous attempt produced a candidate that failed (${run.continuedFrom.reason === 'review' ? 'rejected by review' : run.continuedFrom.reason}); see its error and findings below. Its changes are already applied in this worktree as uncommitted edits (${run.continuedFrom.files.join(', ')}). Fix what failed on top of them; if the failure shows the approach itself is wrong, replace it rather than patching around it. The gates and a new independent review decide again.`
         : '',
       !review && run.continuedFrom?.applied && run.continuedFrom.respecified
@@ -917,7 +917,10 @@ export class Scheduler {
         // принимал замечание ревью про «401 Unauthorized» в разрабатываемом
         // приложении за отказ провайдера и останавливал выдачу насовсем.
         const kind = classifyFailure(error, message);
-        if (kind === 'timeout') await this.keepDraft(run, task);
+        // Незакоммиченная работа сохраняется при любом отказе до кандидата:
+        // по времени, «не закончил», обрыв при перезапуске сервера. Иначе
+        // повтор начинал с пустого дерева и тратил попытку на сделанное.
+        if (kind !== 'provider-auth') await this.keepDraft(run, task);
         this.h.fail(
           run.id,
           run.token,

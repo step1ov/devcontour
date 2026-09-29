@@ -1528,7 +1528,8 @@ test('Попытка, оборванная по времени, оставляе
     ]);
     assert.deepEqual(second.continuedFrom, {
       runId: first.id,
-      kind: 'timeout',
+      kind: 'unfinished',
+      reason: 'timeout',
       applied: true,
       files: [draftFile],
     });

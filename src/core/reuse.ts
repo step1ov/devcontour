@@ -95,7 +95,15 @@ export function reusableImplementation(
  * Проверки и ревью он не заменяет — это отправная точка.
  */
 export type Draft = (
-  | { kind: 'timeout'; runId: string; patch: string; digest: string; files: string[] }
+  | {
+      kind: 'unfinished';
+      runId: string;
+      /** Чем кончилась попытка до кандидата: время, «не закончил», обрыв. */
+      reason: FailureKind;
+      patch: string;
+      digest: string;
+      files: string[];
+    }
   | {
       kind: 'candidate';
       runId: string;
@@ -125,7 +133,10 @@ export function continuableDraft(
     (r) =>
       r.taskId === task.id &&
       r.id !== currentRunId &&
-      !(r.status === 'failed' && r.failureKind === 'environment' && !r.candidateSha && !r.partial),
+      // Попытка, не оставившая ни кандидата, ни черновика (обрыв до начала
+      // работы, «не закончил» без правок), о коде ничего не говорит: черновик
+      // берётся у последней попытки, которая его оставила.
+      !(r.status === 'failed' && !r.candidateSha && !r.partial),
   );
   if (!previous || previous.status !== 'failed') return undefined;
   if (previous.candidateSha && previous.baseSha && previous.failureKind && task.approvedDigest) {
@@ -142,10 +153,10 @@ export function continuableDraft(
       respecified: previous.startedAt < (task.approvedAt ?? ''),
     };
   }
-  if (!previous.partial || previous.failureKind !== 'timeout' || previous.candidateSha)
-    return undefined;
+  if (!previous.partial || !previous.failureKind || previous.candidateSha) return undefined;
   return {
-    kind: 'timeout',
+    kind: 'unfinished',
+    reason: previous.failureKind,
     runId: previous.id,
     patch: previous.partial.patch,
     digest: previous.partial.digest,
