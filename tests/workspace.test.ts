@@ -403,6 +403,16 @@ test('Workspace setup preserves policy on repeat and detects a competing control
     // Повтор без изменений ничего не переносит: сравнение устойчиво.
     assert.equal((await setupWorkspace(path, f.data)).status, 'preserved');
 
+    // Профиль инструментов — часть объявления: shell, добавленный исполнителю,
+    // доходит до конфигурации, а не остаётся «preserved».
+    registry.toolProfiles = {
+      claude: { runtime: 'claude', claudeTools: ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash'] },
+    };
+    await writeFile(path, JSON.stringify(registry));
+    assert.equal((await setupWorkspace(path, f.data)).status, 'declaration-updated');
+    assert.ok(loadConfig(configPath).toolProfiles.claude?.claudeTools?.includes('Bash'));
+    assert.equal((await setupWorkspace(path, f.data)).status, 'preserved');
+
     // Закрепление context pack переживает соседнее изменение объявления.
     // Реестр закрепления не содержит: перенеся объявление целиком, setup
     // сбросил бы revision и digest, и очередь встала бы на «пакет не закреплён»

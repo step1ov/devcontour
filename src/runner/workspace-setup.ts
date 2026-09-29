@@ -340,6 +340,9 @@ export async function setupWorkspace(file: string, data?: string) {
       JSON.stringify(existing.repositories.map((r) => r.gates)) !==
         JSON.stringify(repos.map((r) => r.gates)) ||
       JSON.stringify(existing.environment) !== JSON.stringify(config.environment) ||
+      // Профили инструментов — тоже объявление реестра: добавленный исполнителю
+      // shell молча не применялся, и workspace-init отвечал «preserved».
+      JSON.stringify(existing.toolProfiles) !== JSON.stringify(config.toolProfiles) ||
       // Новая роль ищется по множеству имён, а не сравнением привязок: конфигурация
       // хранит их уже нормализованными, и побайтовое сравнение объявляло бы
       // изменение на каждом запуске.
@@ -368,6 +371,7 @@ export async function setupWorkspace(file: string, data?: string) {
             repositories: repos,
             contextPacks,
             environment: config.environment,
+            toolProfiles: config.toolProfiles,
             roles: withDeclaredRoles(existing.roles, config.roles),
           },
           null,
