@@ -587,9 +587,10 @@ export class PreviewRunner {
           };
         }
       }
-      const done = this.state.finish(p.token, p.id, smoke);
-      await this.retire(run, done);
-      return done;
+      // Уборка — тоже внешний эффект: она идёт под действующим владением, до
+      // того как finish снимет блокировку, а не после.
+      await this.retire(run, p, lost);
+      return this.state.finish(p.token, p.id, smoke);
     } catch (error) {
       const failure = error instanceof PreviewError ? error.failure : 'unknown';
       const message = redact(error instanceof Error ? error.message : String(error));
@@ -598,10 +599,13 @@ export class PreviewRunner {
       // Компенсация — только своими ресурсами и только при действующем
       // владении: проект этой выкладки уникален, чужой выкладки она не
       // касается, а потерявшая владение попытка ничего не трогает.
+      // Владение проверяется перед каждым внешним действием, а не один раз:
+      // пока снимается своя выкладка, lease может истечь и URL займёт другая.
       if (failure !== 'lease' && this.state.owns(p.token)) {
         await this.project(p, 'down', execution).catch(() => '');
-        if (switched && previous) {
+        if (switched && previous && this.state.owns(p.token)) {
           try {
+            this.guard(p.token, lost);
             await this.project(previous, 'start', execution);
             await this.check(previous, config.port, execution);
             restored = true;
@@ -622,14 +626,16 @@ export class PreviewRunner {
    * Снять старые выкладки. Остаётся только прежняя — для отката; остальные
    * удаляются вместе с их данными.
    */
-  private async retire(execution: Execution, current: Preview) {
+  private async retire(execution: Execution, current: Preview, lost: AbortSignal) {
     for (const old of this.h.store.read().previews ?? [])
       if (
         old.id !== current.id &&
         old.id !== current.previous &&
         (old.status === 'retired' || old.status === 'failed')
-      )
+      ) {
+        this.guard(current.token, lost);
         await this.project(old, 'down', execution).catch(() => '');
+      }
   }
   /**
    * Явный откат: вернуть на URL выкладку, которая обслуживала его до текущей.
@@ -652,12 +658,22 @@ export class PreviewRunner {
         await this.project(previous, 'start', execution);
         await this.check(previous, config.port, execution);
       } catch (error) {
-        await this.project(previous, 'stop', execution).catch(() => '');
+        // Потерявший владение откат ничего не компенсирует: URL уже может
+        // обслуживать выкладка нового владельца, и остановка или запуск
+        // старых проектов вмешались бы в неё. Владение проверяется перед
+        // каждым внешним действием компенсации.
+        if ((error instanceof PreviewError && error.failure === 'lease') || !this.state.owns(token))
+          throw error;
         let lostReason: string | undefined;
         try {
+          this.guard(token, alive.lost);
+          await this.project(previous, 'stop', execution).catch(() => '');
+          this.guard(token, alive.lost);
           await this.project(current, 'start', execution);
           await this.check(current, config.port, execution);
         } catch (back) {
+          if ((back instanceof PreviewError && back.failure === 'lease') || !this.state.owns(token))
+            throw back;
           lostReason =
             'Откат не удался, и текущая выкладка не вернулась: ' +
             execution.redact(back instanceof Error ? back.message : String(back));

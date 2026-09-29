@@ -520,3 +520,183 @@ test('Автор пробует проверенную версию в брау�
     await f.cleanup();
   }
 });
+
+test('Потерявшая владение операция не трогает внешние ресурсы: откат, компенсация и уборка', async () => {
+  // Настоящие Store, Previews и PreviewRunner; внешние действия Docker заменены
+  // регистратором, чтобы гонку передачи владения можно было задать точно.
+  const f = fixture();
+  try {
+    f.h.config.preview = {
+      compose: 'main/compose.yml',
+      service: 'web',
+      port: 45998,
+      health: { path: '/health', timeoutMs: 1000 },
+    };
+    const board = f.h.createBoard('Preview board');
+    f.h.addTask(board.id, input());
+    f.h.approve(board.id);
+    const change = new Workspace(f.h).create({
+      title: 'Preview change',
+      description: 'Release to try',
+      boardIds: [board.id],
+    });
+    const manifest = { main: { sha: 'a'.repeat(40), tree: 'b'.repeat(40) } };
+    f.store.change('fixture.verified', (s) => {
+      const cs = s.changeSets.find((x) => x.id === change.id)!;
+      cs.verifications.push({
+        id: randomUUID(),
+        token: randomUUID(),
+        leaseUntil: 0,
+        startedAt: new Date().toISOString(),
+        status: 'passed',
+        policyDigest: new Workspace(f.h).policyDigest(),
+        specDigest: snapshotDigest(changeSnapshot(s, cs)),
+        tasks: [],
+        boards: [],
+        manifest,
+        manifestDigest: digest(manifest),
+        evidence: [],
+      });
+    });
+    const state = new Previews(f.h);
+    /** Выкладка, завершённая другим владельцем, — обычным путём домена. */
+    const finish = () => {
+      const started = state.start(change.id);
+      const p = state.begin(
+        started.token,
+        {
+          changeSetId: change.id,
+          verificationId: started.verificationId,
+          manifestDigest: started.manifestDigest,
+        },
+        'k',
+      );
+      state.built(started.token, p.id, { web: 'sha256:fixture' });
+      state.deployed(started.token, p.id);
+      state.healthy(started.token, p.id);
+      return state.finish(started.token, p.id);
+    };
+    /** Перехват: lease текущей операции истёк, новый владелец выложил своё. */
+    const takeover = () => {
+      f.store.change('fixture.expire', (s) => {
+        s.previewLock!.leaseUntil = 0;
+      });
+      return finish();
+    };
+    const runner = (onProject: (id: string, action: string) => void) => {
+      const r = new PreviewRunner(f.h, f.root) as unknown as Record<string, unknown>;
+      const effects: { id: string; action: string; owner: boolean }[] = [];
+      let token = '';
+      r.assertDocker = async () => {};
+      r.check = async () => {};
+      r.project = (p: { id: string }, action: string) => {
+        token ||= f.store.read().previewLock!.token;
+        effects.push({ id: p.id, action, owner: state.owns(token) });
+        onProject(p.id, action);
+        return Promise.resolve('');
+      };
+      return { r, effects };
+    };
+
+    // 1. Откат: после остановки текущей выкладки владение перехвачено.
+    const a = finish();
+    const b = finish();
+    let successor = '';
+    const first = runner((id, action) => {
+      if (id === b.id && action === 'stop' && !successor) successor = takeover().id;
+    });
+    await assert.rejects((first.r.rollback as () => Promise<unknown>)(), /Владение/);
+    assert.deepEqual(
+      first.effects.filter((e) => !e.owner),
+      [],
+      'после потери владения ни одного внешнего действия',
+    );
+    assert.equal(servingPreview(f.store.read())?.id, successor, 'URL у преемника');
+    assert.equal(
+      f.store.read().previews!.find((x) => x.id === successor)?.lost,
+      undefined,
+      'состояние преемника не тронуто',
+    );
+
+    // 2. Компенсация отката: прежняя не поднялась, во время компенсации
+    // владение перехвачено — дальше ничего не запускается.
+    const current = f.store.read().previews!.find((x) => x.id === successor)!;
+    let second = '';
+    const compensating = runner((id, action) => {
+      if (id === current.previous && action === 'stop' && !second) second = takeover().id;
+    });
+    compensating.r.check = (p: { id: string }) =>
+      p.id === current.previous
+        ? Promise.reject(new Error('прежняя не отвечает'))
+        : Promise.resolve();
+    await assert.rejects((compensating.r.rollback as () => Promise<unknown>)());
+    assert.deepEqual(
+      compensating.effects.filter((e) => !e.owner),
+      [],
+    );
+    assert.equal(servingPreview(f.store.read())?.id, second);
+    assert.equal(f.store.read().previews!.find((x) => x.id === second)?.lost, undefined);
+
+    // 3. Компенсация выкладки: переключение не удалось, во время снятия своей
+    // выкладки владение перехвачено — прежнюю она уже не поднимает.
+    const started = state.start(change.id);
+    const p = state.begin(
+      started.token,
+      {
+        changeSetId: change.id,
+        verificationId: started.verificationId,
+        manifestDigest: started.manifestDigest,
+      },
+      'k',
+    );
+    let third = '';
+    const deploying = runner((id, action) => {
+      if (id === p.id && action === 'down' && !third) third = takeover().id;
+    });
+    const context = await mkdtemp(join(tmpdir(), 'devcontour-context-'));
+    deploying.r.materialize = () => Promise.resolve(context);
+    deploying.r.assertCompose = async () => {};
+    deploying.r.docker = () => Promise.resolve('sha256:fixture');
+    deploying.r.compose = (_p: unknown, _c: string, args: string[], env: NodeJS.ProcessEnv) => {
+      if (args[0] === 'config')
+        return Promise.resolve(JSON.stringify({ services: { web: { build: {} } } }));
+      if (args[0] === 'up' && env.DEVCONTOUR_PREVIEW_PORT === '45998')
+        return Promise.reject(new Error('публичный порт занят'));
+      return Promise.resolve('');
+    };
+    await assert.rejects(
+      (
+        deploying.r.build as (
+          p: unknown,
+          m: unknown,
+          e: unknown,
+          l: AbortSignal,
+        ) => Promise<unknown>
+      )(p, manifest, { env: {}, redact: (s: string) => s }, new AbortController().signal),
+    );
+    assert.deepEqual(
+      deploying.effects.filter((e) => !e.owner),
+      [],
+      'прежнюю выкладку поднимает только владелец',
+    );
+    assert.equal(servingPreview(f.store.read())?.id, third);
+    assert.equal(f.store.read().previews!.find((x) => x.id === third)?.lost, undefined);
+
+    // 4. Уборка — тоже внешний эффект: без владения ничего не снимается.
+    const cleanup = runner(() => {});
+    const done = f.store.read().previews!.find((x) => x.id === third)!;
+    await assert.rejects(
+      (cleanup.r.retire as (e: unknown, c: unknown, l: AbortSignal) => Promise<void>)(
+        { env: {}, redact: (s: string) => s },
+        { ...done, token: 'expired-token' },
+        new AbortController().signal,
+      ),
+      /Владение/,
+    );
+    assert.deepEqual(cleanup.effects, []);
+    await rm(context, { recursive: true, force: true });
+    void a;
+  } finally {
+    f.cleanup();
+  }
+});

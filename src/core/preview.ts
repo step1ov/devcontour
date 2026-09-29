@@ -334,7 +334,11 @@ export class Previews {
         p.failure = outcome.failure;
         p.rolledBack = outcome.restored || undefined;
         p.finishedAt = new Date().toISOString();
-        const previous = s.previews?.find((x) => x.id === p.previous);
+        // Соседние выкладки меняет только действующий владелец: запись отказа
+        // устаревшей попытки не трогает состояние преемника.
+        const owner =
+          !!s.previewLock && s.previewLock.token === token && s.previewLock.leaseUntil > Date.now();
+        const previous = owner ? s.previews?.find((x) => x.id === p.previous) : undefined;
         if (previous && outcome.restored && previous.status === 'retired') {
           previous.status = previous.retiredFrom ?? 'healthy';
           previous.retiredFrom = undefined;
@@ -378,8 +382,11 @@ export class Previews {
   /** Откат не удался. Что обслуживает URL — записано явно, без догадок. */
   rollbackFailed(token: string, currentId: string, lostReason?: string) {
     this.h.store.change('preview.rollback-failed', (s) => {
+      const owner =
+        !!s.previewLock && s.previewLock.token === token && s.previewLock.leaseUntil > Date.now();
       const current = s.previews?.find((p) => p.id === currentId);
-      if (current && lostReason) current.lost = lostReason;
+      // Устаревший откат не помечает чужую выкладку потерянной.
+      if (owner && current && lostReason) current.lost = lostReason;
       if (s.previewLock?.token === token) s.previewLock = undefined;
       return { currentId, lostReason };
     });
