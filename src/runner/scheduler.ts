@@ -388,6 +388,7 @@ export class Scheduler {
       runId: draft.runId,
       kind: draft.kind,
       ...(draft.kind === 'candidate' ? { reason: draft.reason } : {}),
+      ...(draft.respecified ? { respecified: true } : {}),
       applied,
       files,
     };
@@ -436,6 +437,9 @@ export class Scheduler {
         ? run.continuedFrom.kind === 'timeout'
           ? `The previous attempt ran out of time before finishing. Its unfinished, unverified changes are already applied in this worktree as uncommitted edits (${run.continuedFrom.files.join(', ')}). Continue from them: check what is done and what is broken, finish the task and make the gates pass. Treat them as a draft, not as reviewed work.`
           : `The previous attempt produced a candidate that failed (${run.continuedFrom.reason === 'review' ? 'rejected by review' : run.continuedFrom.reason}); see its error and findings below. Its changes are already applied in this worktree as uncommitted edits (${run.continuedFrom.files.join(', ')}). Fix what failed on top of them; if the failure shows the approach itself is wrong, replace it rather than patching around it. The gates and a new independent review decide again.`
+        : '',
+      !review && run.continuedFrom?.applied && run.continuedFrom.respecified
+        ? 'The specification or its contracts changed after that attempt: check the applied changes against the current approved specification and contracts below, not against the old ones.'
         : '',
       `Base commit: ${run.baseSha}. ${sha ? `Review commit: ${sha}.` : ''}`,
       'Review against the pinned conventions. Report verified causal regressions, including unchanged consumers. Findings need path/line, rule, consequence and evidence; use null only when not applicable. Do not demand unrelated legacy cleanup.',

@@ -323,6 +323,8 @@ export interface Run {
     kind: 'timeout' | 'candidate';
     /** Для кандидата — класс отказа, которым кончилась попытка. */
     reason?: FailureKind;
+    /** Постановка или контракты менялись после попытки-источника. */
+    respecified?: boolean;
     applied: boolean;
     files: string[];
   };

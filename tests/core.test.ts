@@ -655,6 +655,11 @@ test('Черновик берётся у последней содержател
   const interrupted = run('R2', { failureKind: 'environment' });
   const state = { runs: [rejected, interrupted] } as unknown as DevContourState;
   assert.equal(continuableDraft(state, task, 'R3')?.runId, 'R1');
+  assert.equal(continuableDraft(state, task, 'R3')?.respecified, false);
+  // Задачу переутвердили после попытки (новая редакция контракта): кандидат
+  // остаётся черновиком, но помечен — его сверяют с новой постановкой.
+  const reapproved = { ...task, approvedAt: '2026-01-03T00:00:00.000Z' } as Task;
+  assert.equal(continuableDraft(state, reapproved, 'R3')?.respecified, true);
   // Содержательный отказ после отклонения — черновик уже его, а не старого кандидата.
   const timedOut = run('R2b', { failureKind: 'timeout' });
   const later = { runs: [rejected, timedOut] } as unknown as DevContourState;

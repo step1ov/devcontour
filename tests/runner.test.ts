@@ -1532,10 +1532,11 @@ test('Попытка, оборванная по времени, оставляе
       applied: true,
       files: [draftFile],
     });
-    // Черновик написан под прежнюю постановку: после её смены он не годится.
+    // Черновик под прежнюю постановку не выбрасывается, но помечается: его
+    // сверяют с новой.
     const changed = { ...f.current(), approvedDigest: 'другая постановка' };
     const state = f.store.read();
-    assert.equal(continuableDraft(state, changed, 'new-run'), undefined);
+    assert.equal(continuableDraft(state, changed, second.id)?.respecified, true);
   } finally {
     await f.cleanup();
   }

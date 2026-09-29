@@ -94,7 +94,7 @@ export function reusableImplementation(
  * контракты с тех пор не менялись: иначе он написан под другую задачу.
  * Проверки и ревью он не заменяет — это отправная точка.
  */
-export type Draft =
+export type Draft = (
   | { kind: 'timeout'; runId: string; patch: string; digest: string; files: string[] }
   | {
       kind: 'candidate';
@@ -104,7 +104,15 @@ export type Draft =
       error?: string;
       baseSha: string;
       candidateSha: string;
-    };
+    }
+) & {
+  /**
+   * Постановка или контракты менялись после попытки-источника. Черновик всё
+   * равно берётся: переутверждение ради уточнения контракта выбрасывало
+   * почти готовую работу. Исполнитель узнаёт, что сверять его нужно с новой.
+   */
+  respecified: boolean;
+};
 export function continuableDraft(
   s: DevContourState,
   task: Task,
@@ -121,9 +129,6 @@ export function continuableDraft(
   );
   if (!previous || previous.status !== 'failed') return undefined;
   if (previous.candidateSha && previous.baseSha && previous.failureKind && task.approvedDigest) {
-    // Постановку и контракты сверяет утверждение задачи: переутверждённая
-    // после этой попытки задача начинает с чистого дерева.
-    if (previous.startedAt < (task.approvedAt ?? '')) return undefined;
     // Отказ окружения до кандидата сюда не доходит, а отказ провайдера кода не
     // касается: такой кандидат берётся переиспользованием, а не черновиком.
     if (previous.failureKind === 'provider-auth') return undefined;
@@ -134,15 +139,10 @@ export function continuableDraft(
       error: previous.error,
       baseSha: previous.baseSha,
       candidateSha: previous.candidateSha,
+      respecified: previous.startedAt < (task.approvedAt ?? ''),
     };
   }
-  if (
-    !previous.partial ||
-    previous.failureKind !== 'timeout' ||
-    previous.candidateSha ||
-    previous.partial.spec !== task.approvedDigest ||
-    JSON.stringify(previous.partial.contracts) !== JSON.stringify(task.contractDigests)
-  )
+  if (!previous.partial || previous.failureKind !== 'timeout' || previous.candidateSha)
     return undefined;
   return {
     kind: 'timeout',
@@ -150,5 +150,8 @@ export function continuableDraft(
     patch: previous.partial.patch,
     digest: previous.partial.digest,
     files: previous.partial.files,
+    respecified:
+      previous.partial.spec !== task.approvedDigest ||
+      JSON.stringify(previous.partial.contracts) !== JSON.stringify(task.contractDigests),
   };
 }
