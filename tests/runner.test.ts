@@ -1602,3 +1602,29 @@ test('Кандидат, отклонённый ревью, — отправна�
     await f.cleanup();
   }
 });
+
+test('Предел времени — на фазу: долгая реализация не отнимает время у ревью', async () => {
+  // Каждая фаза укладывается в предел, их сумма — нет. С общим таймером на
+  // попытку ревьюер получал остаток и кандидат падал «по времени».
+  const f = await reuseFixture();
+  try {
+    f.h.config.runTimeoutMs = 6_000;
+    const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const scheduler = new Scheduler(f.h, f.root, {
+      ...adapters,
+      demo: {
+        ...adapters.demo,
+        name: 'demo' as const,
+        execute: async (request: AgentRequest) => {
+          if (request.task?.id === f.task.id) await pause(4_000);
+          return adapters.demo.execute(request);
+        },
+      },
+    });
+    await scheduler.drain();
+    await scheduler.stop();
+    assert.equal(f.current().status, 'done', f.runs()[0]?.error);
+  } finally {
+    await f.cleanup();
+  }
+});

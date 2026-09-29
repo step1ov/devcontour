@@ -621,10 +621,18 @@ export class Scheduler {
     // Причина прерывания называется явно: без неё адаптер пишет «прогон
     // прерван», и исчерпанное время неотличимо от остановки сервера — а
     // чинятся они по-разному.
-    const timeout = setTimeout(
-      () => controller.abort(new DOMException('Исчерпан лимит времени прогона', 'TimeoutError')),
-      this.h.config.runTimeoutMs,
-    );
+    // Предел — на фазу, а не на всю попытку. Общий таймер отдавал ревью то,
+    // что осталось после реализации: долгая, но успешная реализация оставляла
+    // ревьюеру минуты, и готовый кандидат падал «по времени» без вердикта.
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const rearm = () => {
+      clearTimeout(timeout);
+      timeout = setTimeout(
+        () => controller.abort(new DOMException('Исчерпан лимит времени прогона', 'TimeoutError')),
+        this.h.config.runTimeoutMs,
+      );
+    };
+    rearm();
     const heartbeat = setInterval(
       () => {
         try {
@@ -843,6 +851,7 @@ export class Scheduler {
                     return sha;
                   })();
               run.candidateSha = sha;
+              rearm();
               this.h.phase(run.id, run.token, 'verifying', { candidateSha: sha });
               for (const gate of runGates(repo, task))
                 await runGate(
@@ -857,6 +866,7 @@ export class Scheduler {
                   this.boundary(task.repositoryId),
                 );
               recordRequirements(this.h, run, task, cwd, sha, 'candidate');
+              rearm();
               this.h.phase(run.id, run.token, 'reviewing');
               await this.review(
                 this.runtimes[run.reviewer],
@@ -882,7 +892,10 @@ export class Scheduler {
           );
           await timed(this.h, run, 'integration-wait', () => previous);
           try {
-            await this.integrate(run, task, signal);
+            // Интеграция — своя фаза со своими проверками: ожидание очереди
+            // слияния и ревью не отнимают у неё время.
+            rearm();
+            await this.integrate(run, task, signal, rearm);
           } finally {
             unlock();
           }
@@ -932,7 +945,7 @@ export class Scheduler {
       clearInterval(heartbeat);
     }
   }
-  private async integrate(run: Run, task: Task, signal: AbortSignal) {
+  private async integrate(run: Run, task: Task, signal: AbortSignal, rearm: () => void = () => {}) {
     this.h.heartbeat(run.id, run.token);
     if (signal.aborted) throw new Error('Попытка отменена');
     const repo = repository(this.h.config, task.repositoryId);
@@ -989,6 +1002,7 @@ export class Scheduler {
             this.boundary(task.repositoryId),
           );
         recordRequirements(this.h, run, task, cwd, sha, 'integration');
+        rearm();
         await this.review(this.runtimes[run.reviewer], run, task, cwd, sha, 'integration', signal);
       },
       (stage, action) => timed(this.h, run, 'integration-environment:' + stage, action),
