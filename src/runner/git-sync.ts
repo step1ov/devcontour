@@ -30,6 +30,7 @@ import {
   type SyncIdentity,
 } from '../core/sync-model.ts';
 import { completion, recordsFromState, stateFromRecords, taskOwner } from '../core/sync-state.ts';
+import { verifyArtifacts } from './contract-artifacts.ts';
 
 const directory = '.devcontour';
 const categories = ['tasks', 'boards', 'contracts', 'receipts', 'changesets', 'preparations'];
@@ -334,6 +335,11 @@ export function syncGit(h: DevContour, options: SyncOptions = {}) {
       new Map(locations.map((l) => [l.owner, l.commit])),
     );
     validateGitResults(h, state, next, locations, merged);
+    // Новые закрепления артефактов сверяются с Git: запись могли подменить.
+    verifyArtifacts(
+      (id) => repository(h.config, id).path,
+      next.contracts.filter((c) => !state.contracts.some((x) => x.id === c.id)),
+    );
     if (options.dryRun) return output;
     // Recheck the tree before any write. On a filesystem failure DB rollback leaves
     // the old baseline; rerunning the same three-way merge repairs partial output.

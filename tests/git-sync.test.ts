@@ -17,13 +17,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Store } from '../src/core/store.ts';
-import { DevContour, digest, specDigest } from '../src/core/service.ts';
-import { recordsFromState, stateFromRecords } from '../src/core/sync-state.ts';
+import { DevContour, contractDigest, digest, specDigest } from '../src/core/service.ts';
+import { pinArtifacts } from '../src/runner/contract-artifacts.ts';
+import { recordsFromState } from '../src/core/sync-state.ts';
 import { canonical } from '../src/core/sync-model.ts';
 import { syncGit, assertTeamCheckout } from '../src/runner/git-sync.ts';
 import { repositories } from '../src/core/repositories.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
-import { repositorySchema } from '../src/core/model.ts';
+import { repositorySchema, type ContractArtifact } from '../src/core/model.ts';
 import { config, input } from './helpers.ts';
 import {
   requirementSnapshot,
@@ -654,38 +655,59 @@ test("A contract's document path survives export into Git", () => {
   }
 });
 
-test('Pinned contract artifacts travel through Git and a changed artifact digest is refused', () => {
+test('Pinned contract artifacts travel through Git sync between clones and a substituted pin is refused', async () => {
   const f = fixture();
   try {
-    const a = f.create('alice');
-    const artifact = {
-      repositoryId: 'main',
-      path: 'schema.json',
-      purpose: 'Схема ответа',
-      revision: 'a'.repeat(40),
-      blob: 'b'.repeat(40),
-      digest: 'c'.repeat(64),
-    };
+    const a = f.create('artifacts-a');
+    syncGit(a.h, { member: 'alice' });
+    writeFileSync(join(a.repo, 'schema.json'), '{"price":"number"}\n');
+    writeFileSync(join(a.repo, 'other.json'), '{"price":"boolean"}\n');
+    git(a.repo, 'add', '.');
+    git(a.repo, 'commit', '-m', 'Schema');
+    const pinned = await pinArtifacts({ id: 'main', path: a.repo }, [
+      { path: 'schema.json', purpose: 'Схема ответа' },
+    ]);
     const contract = a.h.contract(
       'Каталог',
       'Ответ по schema.json.',
       { actor: 'operator' },
       'main',
       undefined,
-      [artifact],
+      pinned.artifacts,
     );
-    const records = recordsFromState(a.h, a.store.read());
-    const record = Object.values(records.get('main')!).find((r) => r.kind === 'contract')!;
-    assert.deepEqual((record.data as { artifacts?: unknown }).artifacts, [artifact]);
-    const b = f.create('bob');
-    const restored = stateFromRecords(b.h, b.store.read(), records, new Map());
-    assert.deepEqual(restored.contracts.find((c) => c.id === contract.id)?.artifacts, [artifact]);
-    // Подменённый артефакт при прежнем digest контракта — не тот договор.
-    (record.data as { artifacts: (typeof artifact)[] }).artifacts[0].digest = 'd'.repeat(64);
-    assert.throws(
-      () => stateFromRecords(b.h, b.store.read(), records, new Map()),
-      /digest контракта/,
+    syncGit(a.h);
+    a.commit();
+    // Независимый клон получает закрепление через Git.
+    const b = f.create('artifacts-b', a);
+    syncGit(b.h, { member: 'bob' });
+    assert.deepEqual(
+      b.store.read().contracts.find((c) => c.id === contract.id)?.artifacts,
+      pinned.artifacts,
     );
+    // Подмена в переносимой записи: другой blob того же репозитория.
+    const other = git(a.repo, 'rev-parse', 'HEAD:other.json');
+    type Pin = { data: { content: string; digest: string; artifacts: ContractArtifact[] } };
+    const tampered = (name: string, change: (record: Pin) => void) => {
+      const peer = f.create(name, a);
+      const file = readdirSync(join(peer.repo, '.devcontour'), { recursive: true })
+        .map((x) => join(peer.repo, '.devcontour', String(x)))
+        .find((x) => x.endsWith('.json') && readFileSync(x, 'utf8').includes(contract.id))!;
+      rewrite(file, (value) => change(value as Pin));
+      git(peer.repo, 'commit', '-am', 'Tamper');
+      return peer;
+    };
+    // Только blob: digest контракта охватывает blob и расходится.
+    const onlyBlob = tampered('artifacts-c', (r) => {
+      r.data.artifacts[0].blob = other;
+    });
+    assert.throws(() => syncGit(onlyBlob.h, { member: 'carol' }), /digest контракта/);
+    // Blob и согласованно пересчитанный digest: подмену ловит сверка с Git.
+    const consistent = tampered('artifacts-d', (r) => {
+      r.data.artifacts[0].blob = other;
+      r.data.digest = contractDigest(r.data.content, r.data.artifacts);
+    });
+    assert.throws(() => syncGit(consistent.h, { member: 'dave' }), /подменено/);
+    assert.equal(consistent.store.read().contracts.length, 0, 'импорт не применён');
   } finally {
     f.cleanup();
   }

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, writeFile, mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
@@ -732,6 +733,45 @@ test('Contract impact names changes, affected and transitive tasks, base state a
 
     await writeFile(join(repo.path, 'docs/contracts/catalog.md'), '# Catalog v2\n');
     await assert.rejects(contractImpact(f.h, proposal), /закоммитьте/);
+  } finally {
+    await repo.remove();
+    f.cleanup();
+  }
+});
+
+test('An artifact digest covers its exact bytes: a whitespace-only change needs a new review', async () => {
+  const f = fixture();
+  const repo = await repositoryFixture(f);
+  const sh = (...args: string[]) =>
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@e', ...args], {
+      cwd: repo.path,
+    });
+  try {
+    sh('init', '-q', '-b', 'main');
+    await writeFile(join(repo.path, 'schema.json'), '{"price":"number"}');
+    sh('add', '.');
+    sh('commit', '-qm', 'schema');
+    const proposal = {
+      title: 'Catalog',
+      content: 'Ответ по schema.json.',
+      artifacts: [{ path: 'schema.json', purpose: 'Схема' }],
+    };
+    let calls = 0;
+    const count = () => runtimes(() => calls++);
+    await reviewContract(f.h, f.root, proposal, 'codex', count());
+    // Только конечный перевод строки: blob другой — и договор другой.
+    await writeFile(join(repo.path, 'schema.json'), '{"price":"number"}\n\n');
+    sh('commit', '-qam', 'trailing newline');
+    const second = await reviewContract(f.h, f.root, proposal, 'codex', count());
+    assert.equal(second.status, 'approved');
+    assert.equal(calls, 2);
+    const [c1, c2] = f.store.read().contracts;
+    assert.notEqual(c1.artifacts![0].digest, c2.artifacts![0].digest);
+    assert.equal(
+      c2.artifacts![0].digest,
+      createHash('sha256').update('{"price":"number"}\n\n').digest('hex'),
+      'digest — по точным байтам blob',
+    );
   } finally {
     await repo.remove();
     f.cleanup();

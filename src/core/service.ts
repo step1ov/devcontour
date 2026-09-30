@@ -72,6 +72,9 @@ export function contractDigest(content: string, artifacts?: ContractArtifact[]) 
           repositoryId: a.repositoryId,
           path: a.path,
           purpose: a.purpose,
+          // Blob — часть закрепления: подменённый blob при прежнем digest
+          // содержимого даёт другой digest контракта.
+          blob: a.blob,
           digest: a.digest,
         })),
       })

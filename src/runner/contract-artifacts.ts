@@ -1,7 +1,8 @@
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { lstat, realpath } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 import { DomainError, type Contract, type ContractArtifact } from '../core/model.ts';
-import { digest } from '../core/service.ts';
 import { git } from './process.ts';
 
 /** Предел текста артефактов, передаваемого ревьюеру вместе с контрактом. */
@@ -49,8 +50,11 @@ export async function pinArtifacts(
         400,
       );
     const blob = await git(repo.path, 'rev-parse', `${revision}:${tracked}`);
-    const content = await git(repo.path, 'cat-file', 'blob', blob);
-    total += content.length;
+    // Digest — по точным байтам blob: вывод git() обрезан, и правка
+    // начальных или конечных пробелов не меняла бы digest.
+    const bytes = blobBytes(repo.path, blob);
+    const content = bytes.toString('utf8');
+    total += bytes.length;
     if (total > MAX_ARTIFACT_TEXT)
       throw new DomainError('Артефакты контракта слишком велики для ревью', 400);
     artifacts.push({
@@ -59,11 +63,46 @@ export async function pinArtifacts(
       purpose,
       revision,
       blob,
-      digest: digest(content),
+      digest: bytesDigest(bytes),
     });
     contents.push({ path: tracked, purpose, content });
   }
   return { artifacts, contents };
+}
+
+/** Точные байты Git blob, без обрезки и перекодирования. */
+export function blobBytes(repoPath: string, blob: string) {
+  return execFileSync('git', ['cat-file', 'blob', blob], {
+    cwd: repoPath,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+}
+export const bytesDigest = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
+
+/**
+ * Закрепление из переносимой записи сверяется с Git: blob лежит по своему
+ * пути в своей ревизии, и его байты дают записанный digest. Иначе запись с
+ * подменённым blob при прежнем digest проходила бы импорт, и проверка базы
+ * принимала бы другую схему.
+ */
+export function verifyArtifacts(repoPath: (repositoryId: string) => string, contracts: Contract[]) {
+  for (const c of contracts)
+    for (const a of c.artifacts ?? []) {
+      const path = repoPath(a.repositoryId);
+      let blob: string, bytes: Buffer;
+      try {
+        blob = execFileSync('git', ['rev-parse', `${a.revision}:${a.path}`], { cwd: path })
+          .toString()
+          .trim();
+        bytes = blobBytes(path, a.blob);
+      } catch {
+        throw new Error(`Артефакт ${a.path} контракта ${c.id} не найден в Git на ${a.revision}`);
+      }
+      if (blob !== a.blob || bytesDigest(bytes) !== a.digest)
+        throw new Error(
+          `Артефакт ${a.path} контракта ${c.id} не совпадает с Git: закрепление подменено`,
+        );
+    }
 }
 
 /** Артефакты контрактов задачи, которые лежат в данном компоненте. */
