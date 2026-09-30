@@ -7,6 +7,7 @@ import { complete, fixture, input } from './helpers.ts';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { reviewContract, reviewPlan, acceptBoard } from '../src/runner/agent-control.ts';
+import { contractImpact } from '../src/runner/contract-impact.ts';
 import { digest, specDigest, supersededBy } from '../src/core/service.ts';
 import type { AgentAdapter, AgentRequest } from '../src/runner/adapters.ts';
 
@@ -645,6 +646,94 @@ test('A blocking feasibility finding returns the contract with its own reason an
     assert.equal((await reviewContract(f.h, f.root, bounded, 'codex', both)).status, 'approved');
     assert.match(prompts[1], /\[feasibility\] O-2/);
   } finally {
+    f.cleanup();
+  }
+});
+
+test('Contract impact names changes, affected and transitive tasks, base state and reviews without changing anything', async () => {
+  const f = fixture();
+  const repo = await repositoryFixture(f);
+  const sh = (...args: string[]) =>
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@e', ...args], {
+      cwd: repo.path,
+    });
+  try {
+    sh('init', '-q', '-b', 'main');
+    await mkdir(join(repo.path, 'docs/contracts'), { recursive: true });
+    await writeFile(
+      join(repo.path, 'docs/contracts/catalog.md'),
+      '# Catalog\n\nSee schema.json.\n',
+    );
+    await writeFile(join(repo.path, 'schema.json'), '{"price":"string"}\n');
+    sh('add', '.');
+    sh('commit', '-qm', 'contract');
+    sh('branch', 'devcontour/accepted');
+    const proposal = {
+      title: 'Catalog API v1',
+      file: 'docs/contracts/catalog.md',
+      artifacts: [{ path: 'schema.json', purpose: 'Схема ответа' }],
+    };
+    await reviewContract(f.h, f.root, proposal, 'codex', runtimes());
+    const contract = f.store.read().contracts[0];
+    const board = f.h.createBoard('Catalog');
+    const api = f.h.addTask(board.id, {
+      ...input('API'),
+      role: 'backend',
+      contracts: [contract.id],
+    });
+    const screen = f.h.addTask(board.id, {
+      ...input('Screen', [api.id]),
+      role: 'frontend',
+      contracts: [],
+    });
+    const report = f.h.addTask(board.id, { ...input('Report', [screen.id]) });
+    const shipped = f.h.addTask(f.h.createBoard('Shipped').id, {
+      ...input('Shipped API'),
+      role: 'backend',
+      contracts: [contract.id],
+    });
+    f.store.change('fixture.done', (s) => {
+      s.tasks.find((t) => t.id === shipped.id)!.status = 'done';
+    });
+
+    // Неизменное предложение — ничего не затронуто.
+    const same = await contractImpact(f.h, proposal);
+    assert.equal(same.status, 'unchanged');
+    assert.deepEqual(same.requiredReviews, []);
+
+    await writeFile(join(repo.path, 'schema.json'), '{"price":"number"}\n');
+    sh('commit', '-qam', 'schema');
+    const events = f.store.eventCount();
+    const impact = await contractImpact(f.h, proposal);
+    assert.equal(impact.status, 'changed');
+    assert.equal(impact.changes.document, false);
+    assert.deepEqual(
+      impact.changes.artifacts.map((a) => [a.path, a.change]),
+      [['schema.json', 'changed']],
+    );
+    const direct = Object.fromEntries(impact.tasks.direct.map((t) => [t.id, t.action]));
+    assert.deepEqual(direct, { [api.id]: 'rebind-after-review', [shipped.id]: 'correction' });
+    // Потребители — транзитивно по зависимостям, а не только прямые.
+    assert.deepEqual(
+      impact.tasks.transitive.map((t) => t.id),
+      [screen.id, report.id],
+    );
+    // База ещё не содержит новой редакции схемы.
+    assert.deepEqual(impact.base.missing, ['schema.json']);
+    assert.equal(impact.base.behind, 1);
+    assert.deepEqual(
+      impact.requiredReviews.map((r) => r.kind),
+      ['contract', 'plan'],
+    );
+    // Отчёт только читает.
+    assert.equal(f.store.eventCount(), events);
+    assert.equal(f.store.read().contracts.length, 1);
+    assert.equal(impact.applied, false);
+
+    await writeFile(join(repo.path, 'docs/contracts/catalog.md'), '# Catalog v2\n');
+    await assert.rejects(contractImpact(f.h, proposal), /закоммитьте/);
+  } finally {
+    await repo.remove();
     f.cleanup();
   }
 });

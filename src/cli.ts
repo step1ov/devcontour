@@ -62,6 +62,7 @@ import { setupDemo, exists } from './demo.ts';
 import { restoreBackup } from './runner/backup.ts';
 import { serveReviewProbes } from './runner/review-probe.ts';
 import { contractEvals } from './runner/contract-evals.ts';
+import { contractImpact } from './runner/contract-impact.ts';
 const args = process.argv.slice(2),
   operation = args[0] ?? 'serve';
 const option = (name: string, fallback: string) =>
@@ -405,6 +406,7 @@ async function main() {
     'workspace-verify',
     'changeset-accept',
     'journal',
+    'contract-impact',
     'review-contract',
     'review-plan',
     'accept',
@@ -735,7 +737,12 @@ async function main() {
             : null,
           product: config.workspaceRoot ? join(config.workspaceRoot, 'docs', 'product') : null,
         };
-      } else if (operation === 'review-contract')
+      } else if (operation === 'contract-impact')
+        result = await contractImpact(
+          h,
+          JSON.parse(await readFile(resolve(option('--file', 'contract.json')), 'utf8')),
+        );
+      else if (operation === 'review-contract')
         result = await reviewContract(
           h,
           root,

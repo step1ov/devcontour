@@ -217,12 +217,12 @@ async function review(
 // Компонент по умолчанию — «main», если он есть, иначе первый настроенный:
 // workspace вправе называть репозитории product и library, и вызов без
 // repositoryId там не должен падать на несуществующем имени.
-const defaultOwner = (h: DevContour) =>
+export const defaultOwner = (h: DevContour) =>
   repositories(h.config).some((r) => r.id === 'main') ? 'main' : repositories(h.config)[0].id;
 
 // Контракт читается из дерева в момент ревью: ревьюер и реестр видят то же
 // самое, что лежит в репозитории, а не то, что автор скопировал когда-то.
-async function contractContent(
+export async function contractContent(
   h: DevContour,
   proposal: { content?: string; file?: string; repositoryId?: string },
 ) {
