@@ -63,6 +63,7 @@ import { restoreBackup } from './runner/backup.ts';
 import { serveReviewProbes } from './runner/review-probe.ts';
 import { contractEvals } from './runner/contract-evals.ts';
 import { contractImpact } from './runner/contract-impact.ts';
+import { ContractChanges } from './runner/contract-change.ts';
 const args = process.argv.slice(2),
   operation = args[0] ?? 'serve';
 const option = (name: string, fallback: string) =>
@@ -407,6 +408,7 @@ async function main() {
     'changeset-accept',
     'journal',
     'contract-impact',
+    'contract-change',
     'review-contract',
     'review-plan',
     'accept',
@@ -737,6 +739,19 @@ async function main() {
             : null,
           product: config.workspaceRoot ? join(config.workspaceRoot, 'docs', 'product') : null,
         };
+      } else if (operation === 'contract-change') {
+        const changes = new ContractChanges(h, root);
+        if (args.includes('--id') && args.includes('--abandon'))
+          result = changes.abandon(option('--id', ''));
+        else if (args.includes('--id')) result = await changes.advance(option('--id', ''));
+        else {
+          const started = await changes.start(
+            JSON.parse(await readFile(resolve(option('--file', 'contract.json')), 'utf8')),
+            authorRuntime(),
+          );
+          result =
+            started.status === 'unchanged' ? started : await changes.advance(started.operation.id);
+        }
       } else if (operation === 'contract-impact')
         result = await contractImpact(
           h,

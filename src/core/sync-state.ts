@@ -284,6 +284,8 @@ export function stateFromRecords(
       const t: Task = {
         ...data,
         status: progress.status,
+        // Удержание — локальная операция этой установки: импорт его не снимает.
+        ...(previous?.hold ? { hold: previous.hold } : {}),
         attempt: previous?.attempt ?? 0,
         contractDigests: progress.approvedDigest ? contractDigests : {},
         approvedDigest: progress.approvedDigest,

@@ -160,6 +160,11 @@ export interface Task extends TaskInput {
   sharedCompletion?: { receipt: CompletionReceipt; sourceCommit: string };
   id: string;
   status: TaskStatus;
+  /**
+   * Задачу удерживает операция изменения контракта: выдача её пропускает,
+   * пока задачи не перепривязаны к новой редакции и не утверждены заново.
+   */
+  hold?: { operation: string; reason: string };
   supersedes?: string;
   createdAt: string;
   approvedAt?: string;

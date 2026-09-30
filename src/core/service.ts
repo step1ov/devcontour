@@ -1007,6 +1007,62 @@ export class DevContour {
       return { taskId: id, reason: reason.trim(), wasApproved: Boolean(approved) };
     });
   }
+  /**
+   * Удержать задачи от выдачи на время изменения их контракта. Задача,
+   * удерживаемая другой операцией, — конфликт: две операции не меняют одну
+   * задачу одновременно. Повтор той же операции ничего не меняет.
+   */
+  hold(ids: string[], operation: string, reason: string) {
+    return this.store.change('task.held', (s) => {
+      const tasks = ids.map((id) => task(s, id));
+      const busy = tasks.filter((t) => t.hold && t.hold.operation !== operation);
+      if (busy.length)
+        throw new DomainError(
+          'Задачи удерживает другая операция: ' +
+            busy.map((t) => `${t.id} (${t.hold!.operation})`).join(', '),
+          409,
+        );
+      for (const t of tasks) t.hold = { operation, reason };
+      return tasks.map((t) => t.id);
+    });
+  }
+  /** Снять удержание операции. Чужие удержания не трогаются. */
+  release(operation: string) {
+    return this.store.change('task.released', (s) => {
+      const released = s.tasks.filter((t) => t.hold?.operation === operation);
+      for (const t of released) t.hold = undefined;
+      return released.map((t) => t.id);
+    });
+  }
+  /**
+   * Перепривязать задачи с прежних редакций контракта на новую. Задача
+   * возвращается в черновик: её утверждение относилось к прежнему договору и
+   * требует нового ревью плана. Выданные прогону и принятые задачи не
+   * трогаются — первые дожидаются, вторые меняются корректировкой.
+   */
+  rebind(ids: string[], from: string[], to: string) {
+    return this.store.change('task.rebound', (s) => {
+      requireValue(
+        s.contracts.find((c) => c.id === to),
+        'Новая редакция контракта не найдена',
+      );
+      const rebound: string[] = [];
+      for (const id of ids) {
+        const t = task(s, id);
+        if (t.activeRunId || t.resultSha || !['draft', 'ready', 'failed'].includes(t.status))
+          continue;
+        if (!t.contracts.some((c) => from.includes(c))) continue;
+        t.contracts = [...new Set(t.contracts.map((c) => (from.includes(c) ? to : c)))];
+        t.status = 'draft';
+        t.approvedDigest = undefined;
+        t.approval = undefined;
+        t.contractDigests = {};
+        t.failure = undefined;
+        rebound.push(t.id);
+      }
+      return rebound;
+    });
+  }
   retry(id: string, reset?: { reason: string }) {
     return this.store.change('task.retry', (s) => {
       const t = task(s, id);

@@ -39,7 +39,7 @@ export function readyTasks(state: DevContourState) {
     ),
   );
   return state.tasks.filter(
-    (t) => visible.has(t.id) && t.status === 'ready' && blockers(t, state).length === 0,
+    (t) => visible.has(t.id) && t.status === 'ready' && !t.hold && blockers(t, state).length === 0,
   );
 }
 export function levels(tasks: Task[]): Map<string, number> {
