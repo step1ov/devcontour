@@ -148,9 +148,18 @@ test('A generative gate catches defects that point tests pass, reproduces them b
       assert.equal(entry.status, 'failed');
       const c = entry.counterexample!;
       assert.notDeepEqual(c.expected, c.actual);
-      // Уменьшенный вход не больше исходного.
-      const size = (x: unknown) => JSON.stringify(x).length;
-      assert.ok(size(c.reduced ?? c.original) <= size(c.original));
+      // Уменьшение действительно работает: вход сведён к минимальному для
+      // дефекта — без него reduced отсутствовал бы, а исходный вход был бы
+      // случайным и крупнее.
+      const reduced = c.reduced as { items: { w: number; v: number }[]; cap: number };
+      assert.ok(reduced, `${name}: вход уменьшен`);
+      const minimal = { greedy: 3, firstThree: 4, zeroWeight: 1 }[name as 'greedy'];
+      assert.ok(
+        reduced.items.length <= minimal,
+        `${name}: ${JSON.stringify(reduced)} не длиннее ${minimal}`,
+      );
+      if (name === 'zeroWeight') assert.deepEqual(reduced, { items: [{ w: 0, v: 1 }], cap: 0 });
+      if (name === 'firstThree') assert.equal(reduced.items.length, 4);
       found[name] = c;
       // Тот же seed — тот же контрпример.
       const again = await run(p.repo, 'check.mjs', 7);

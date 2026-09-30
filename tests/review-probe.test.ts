@@ -351,6 +351,7 @@ test('A scheduled review hands the probe tool to the reviewer and records its ch
     assert.ok(reviews.length > 0);
     assert.ok(reviews.every((r) => r.probe && r.prompt.includes('run_check')));
     const writers = requests.filter((r) => !r.review);
+    assert.ok(writers.length > 0, 'исполнители вызывались');
     assert.ok(writers.every((r) => !r.probe));
     // Исполнитель с shell получает просьбу проверить себя командами гейтов.
     assert.ok(writers.every((r) => /You have a shell.*Gate commands: \[\{"id"/s.test(r.prompt)));
