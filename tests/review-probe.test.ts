@@ -55,9 +55,11 @@ test('A hanging reviewer check is stopped with its detached children and returne
     const probes = new ReviewProbes(s.spec);
     const pidFile = join(s.root, 'child.pid');
     const started = Date.now();
-    // Команда печатает, оставляет отсоединённого потомка и зависает.
+    // Команда печатает, оставляет потомка в собственной группе процессов
+    // (detached: сигнал группе проверки его не достаёт) и зависает.
+    const detach = `const c=require('child_process').spawn('sleep',['60'],{detached:true,stdio:'ignore'});require('fs').writeFileSync(${JSON.stringify(pidFile)},String(c.pid));c.unref();console.log('started');setInterval(()=>{},1000)`;
     const hung = await probes.run({
-      argv: ['sh', '-c', `echo started; (sleep 60 & echo $! > ${pidFile}); sleep 60`],
+      argv: [process.execPath, '-e', detach],
       // Просьба модели не расширяет предел контура.
       timeoutMs: 3600000,
     });
@@ -381,6 +383,50 @@ test('Reviewer check arguments are redacted in the result and the controller log
     assert.equal((await readFile(s.spec.log, 'utf8')).includes('argv-secret-5521'), false);
   } finally {
     delete process.env.DEVCONTOUR_TEST_PROBE_SECRET;
+    await s.cleanup();
+  }
+});
+
+test('Concurrent reviewer checks cannot exceed the shared budget, directly or through MCP', async () => {
+  const s = await stage({ commandTimeoutMs: 1800, budgetMs: 2000 });
+  try {
+    const marker = (i: number) => join(s.root, `ran-${i}`);
+    const hang = (i: number) => ['sh', '-c', `touch ${marker(i)}; sleep 30`];
+    // Один экземпляр — один бюджет: так его держит сервер ревью.
+    const probes = new ReviewProbes(s.spec);
+    const shared = await Promise.all([3, 4, 5].map((i) => probes.run({ argv: hang(i) })));
+    const ran = shared.filter((r) => r.status !== 'budget-exhausted');
+    assert.equal(ran.length, 1, JSON.stringify(shared.map((r) => [r.status, r.limitMs])));
+    assert.ok(
+      shared.reduce((sum, r) => sum + r.limitMs * Number(r.status !== 'budget-exhausted'), 0) <=
+        s.spec.budgetMs,
+    );
+    assert.equal([3, 4, 5].filter((i) => existsSync(marker(i))).length, 1, 'запущена одна');
+
+    // То же через stdio MCP: одновременные вызовы одного сервера.
+    const specPath = join(s.root, 'probe.json');
+    await writeFile(specPath, JSON.stringify(s.spec));
+    const { command, args } = probeCommand(specPath);
+    const c = client(command, args);
+    try {
+      await c.request('initialize', {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: { name: 'test', version: '1' },
+      });
+      c.notify('notifications/initialized');
+      const calls = (await Promise.all(
+        [6, 7, 8].map((i) =>
+          c.request('tools/call', { name: 'run_check', arguments: { argv: hang(i) } }),
+        ),
+      )) as { result: { structuredContent: { status: string } } }[];
+      const statuses = calls.map((x) => x.result.structuredContent.status);
+      assert.equal(statuses.filter((x) => x !== 'budget-exhausted').length, 1, statuses.join());
+      assert.equal([6, 7, 8].filter((i) => existsSync(marker(i))).length, 1);
+    } finally {
+      c.close();
+    }
+  } finally {
     await s.cleanup();
   }
 });

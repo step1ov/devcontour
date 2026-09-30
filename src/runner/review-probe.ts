@@ -106,6 +106,11 @@ export class ReviewProbes {
       };
     else {
       const started = this.now();
+      // Предел команды резервируется до запуска, в том же синхронном шаге,
+      // что и расчёт: одновременные вызовы иначе видели один остаток и
+      // вместе превышали бюджет. После завершения резерв заменяется
+      // фактической длительностью.
+      this.spent += limitMs;
       try {
         const r = await runCheck(
           { config: { isolation: this.spec.isolation } },
@@ -125,7 +130,7 @@ export class ReviewProbes {
           },
         );
         const durationMs = this.now() - started;
-        this.spent += durationMs;
+        this.spent += durationMs - limitMs;
         result = {
           ...base,
           status: r.timedOut ? 'timeout' : r.code === 0 ? 'passed' : 'failed',
@@ -142,7 +147,7 @@ export class ReviewProbes {
         };
       } catch (error) {
         const durationMs = this.now() - started;
-        this.spent += durationMs;
+        this.spent += durationMs - limitMs;
         result = {
           ...base,
           status: 'error',
