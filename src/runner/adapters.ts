@@ -2,7 +2,7 @@ import { parseUsage, runtimeVersion } from './usage.ts';
 import type { Usage } from '../core/usage.ts';
 import { evaluationResult } from '../core/evaluation.ts';
 import type { ToolProfile } from '../core/integrations.ts';
-import { codexTools, claudeMcp, claudeRules } from './tools.ts';
+import { codexTools, claudeMcp, claudeRules, writerRunsChecks, writerTools } from './tools.ts';
 import {
   isolation,
   claudeSandbox,
@@ -260,10 +260,7 @@ export function cliArguments(
     '--permission-mode',
     r.review ? 'dontAsk' : 'acceptEdits',
     '--tools',
-    (r.review
-      ? reviewTools(r.toolProfile)
-      : (r.toolProfile?.claudeTools ?? ['Read', 'Glob', 'Grep', 'Edit', 'Write'])
-    ).join(','),
+    (r.review ? reviewTools(r.toolProfile) : writerTools(r.toolProfile)).join(','),
     // Правка проверяемого кода ревьюеру запрещена всегда. Запуск проверок —
     // только если профиль его дал.
     ...(r.review
@@ -301,7 +298,7 @@ export function cliArguments(
     // Claude Code их не охватывает.
     '--settings',
     JSON.stringify(
-      (r.review ? reviewRunsChecks(r.toolProfile) : !!r.toolProfile?.claudeTools?.includes('Bash'))
+      (r.review ? reviewRunsChecks(r.toolProfile) : writerRunsChecks('claude', r.toolProfile))
         ? claudeSandbox(policy, r.review, r.cwd)
         : { permissions: { deny: claudeFileDenies(policy, r.cwd) } },
     ),

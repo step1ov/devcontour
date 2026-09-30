@@ -208,6 +208,37 @@ test('Runtime profiles carry only explicit MCP definitions; a reviewer edits not
   assert.match(codexTools({ ...p, runtime: 'codex' }).join(' '), /enabled_tools.*get_project/);
 });
 
+test('A writer runs checks by default inside the OS sandbox; an explicit refusal is kept', () => {
+  const writer = (toolProfile?: ReturnType<typeof toolProfileSchema.parse>) =>
+    cliArguments(
+      'claude',
+      { review: false, toolProfile, cwd: '/work/tree' } as AgentRequest,
+      's',
+      'r',
+    );
+  // Без профиля: shell есть, и он только в песочнице ОС, которая при
+  // недоступности отказывает, а не пускает команду без изоляции.
+  const settings = (argv: string[]) =>
+    JSON.parse(argv[argv.indexOf('--settings') + 1]) as {
+      sandbox?: { enabled: boolean; failIfUnavailable: boolean; allowUnsandboxedCommands: boolean };
+    };
+  const fallback = writer();
+  assert.equal(fallback[fallback.indexOf('--tools') + 1], 'Read,Glob,Grep,Edit,Write,Bash');
+  const sandbox = settings(fallback).sandbox;
+  assert.equal(sandbox?.enabled, true);
+  assert.equal(sandbox?.failIfUnavailable, true);
+  assert.equal(sandbox?.allowUnsandboxedCommands, false);
+  // Профиль без claudeTools — тот же набор по умолчанию.
+  const inherited = writer(toolProfileSchema.parse({ runtime: 'claude' }));
+  assert.match(inherited[inherited.indexOf('--tools') + 1], /Bash/);
+  // Явный список без Bash — осознанный отказ: ни shell, ни песочницы.
+  const refused = writer(
+    toolProfileSchema.parse({ runtime: 'claude', claudeTools: ['Read', 'Edit'] }),
+  );
+  assert.equal(refused[refused.indexOf('--tools') + 1], 'Read,Edit');
+  assert.equal(settings(refused).sandbox, undefined);
+});
+
 test('Environment cleanup runs after setup failure and cancellation; cleanup failure retains resource ownership', async () => {
   const root = await makeRoot();
   try {
@@ -478,24 +509,33 @@ test('Doctor detects absent prerequisites; donor import records source SHA and d
         (c) => c.status === 'blocked' && c.detail.includes('absent-devcontour-tool'),
       ),
     );
-    // Исполнитель claude без shell пишет вслепую — doctor называет это; с Bash в
-    // профиле по умолчанию та же строка проходит.
+    // Исполнитель получает shell по умолчанию; явный отказ профиля
+    // соблюдается, и doctor называет исполнителя, который пишет вслепую. У
+    // codex то же правило: codexShell: false выключает shell и исполнителю.
     const role = Object.keys(f.c.roles)[0];
+    const original = { roles: f.c.roles[role], profiles: { ...f.c.toolProfiles } };
+    const writer = async () =>
+      (await doctor(f.c, f.data)).checks.find(
+        (c) => c.id === `writer:${f.c.repositories[0].id}:${role}`,
+      );
     f.c.roles[role] = { ...f.c.roles[role], runtime: 'claude' };
-    const blind = (await doctor(f.c, f.data)).checks.find(
-      (c) => c.id === `writer:${f.c.repositories[0].id}:${role}`,
-    );
-    assert.equal(blind?.status, 'not-checked');
-    assert.match(blind?.detail ?? '', /вслепую/);
+    delete f.c.toolProfiles.claude;
+    assert.equal((await writer())?.status, 'passed', 'shell по умолчанию');
     f.c.toolProfiles.claude = {
       runtime: 'claude',
-      claudeTools: ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash'],
+      claudeTools: ['Read', 'Glob', 'Grep', 'Edit', 'Write'],
     } as never;
-    const sighted = (await doctor(f.c, f.data)).checks.find(
-      (c) => c.id === `writer:${f.c.repositories[0].id}:${role}`,
-    );
-    assert.equal(sighted?.status, 'passed');
+    const blind = await writer();
+    assert.equal(blind?.status, 'not-checked');
+    assert.match(blind?.detail ?? '', /вслепую.*явно/);
     delete f.c.toolProfiles.claude;
+    f.c.roles[role] = { ...f.c.roles[role], runtime: 'codex' };
+    f.c.toolProfiles.codex = { runtime: 'codex', codexShell: false } as never;
+    assert.equal((await writer())?.status, 'not-checked', 'codexShell: false соблюдается');
+    delete f.c.toolProfiles.codex;
+    assert.equal((await writer())?.status, 'passed');
+    f.c.roles[role] = original.roles;
+    f.c.toolProfiles = original.profiles;
     const imported = await importKnowledge(f.workspace, f.c.repositories[0].path, ['README.md']);
     assert.equal(imported.status, 'unreviewed');
     assert.match(imported.revision, /^[a-f0-9]{40}$/);

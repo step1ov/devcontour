@@ -10,7 +10,7 @@ import { command, git } from './process.ts';
 import { outdatedContextPacks } from './context-library.ts';
 import { executionEnvironment, runSteps, withEnvironment } from './environment.ts';
 import { withResources } from './resources.ts';
-import { agentEnvironment, toolProfileFor } from './tools.ts';
+import { agentEnvironment, toolProfileFor, writerRunsChecks } from './tools.ts';
 import { taskContext } from './context.ts';
 import { forgeAdapter } from './forge.ts';
 import { DevContour } from '../core/service.ts';
@@ -82,14 +82,20 @@ export async function doctor(config: Config, root: string, probe = false) {
   for (const { repo, role, binding } of bindings.filter((b) => !b.review)) {
     if (binding.runtime === 'demo') continue;
     const profile = toolProfileFor(config, binding.runtime, role, false, repo.id);
-    // У исполнителя codex shell есть всегда: codexShell управляет только ревью.
-    const runsChecks = binding.runtime === 'codex' || !!profile?.claudeTools?.includes('Bash');
+    // То же правило, что у адаптера: shell по умолчанию есть, явный отказ
+    // профиля соблюдается. Раньше codex-исполнитель считался способным
+    // запускать команды всегда, хотя codexShell: false выключал ему shell.
+    const runsChecks = writerRunsChecks(binding.runtime, profile);
+    const fix =
+      binding.runtime === 'codex'
+        ? 'уберите codexShell: false'
+        : 'добавьте Bash в claudeTools или уберите claudeTools, чтобы действовал набор по умолчанию';
     checks.push({
       id: `writer:${repo.id}:${role}`,
       status: runsChecks ? 'passed' : 'not-checked',
       detail: runsChecks
-        ? `${binding.runtime} может запускать тесты и проверки во время реализации`
-        : `${binding.runtime} пишет код вслепую: профиль инструментов не даёт shell, и тесты исполнитель не запустит. Добавьте Bash в claudeTools профиля toolProfiles.${binding.runtime}.`,
+        ? `${binding.runtime} может запускать тесты и проверки во время реализации — в песочнице ОС`
+        : `${binding.runtime} пишет код вслепую: профиль инструментов явно не даёт shell, и тесты исполнитель не запустит. Если отказ не намеренный, ${fix} в профиле ${binding.toolProfile ?? binding.runtime}.`,
     });
   }
   const runtimes = new Set(bindings.map((b) => b.binding.runtime));

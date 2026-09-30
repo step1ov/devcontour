@@ -22,6 +22,26 @@ export function toolProfileFor(
     throw new Error('Runtime профиля инструментов не совпадает');
   return profile;
 }
+/**
+ * Встроенные инструменты исполнителя claude, когда профиль их не называет.
+ *
+ * Shell входит в них: исполнитель без него писал вслепую — не запускал ни
+ * тестов, ни проверки типов и узнавал о провале только от гейтов после
+ * попытки. Shell исполняется в песочнице ОС с той же политикой, что у
+ * проверок; без песочницы запуск отказывает, а не идёт без изоляции.
+ * Профиль, явно перечисливший инструменты без Bash, — осознанный отказ, и он
+ * соблюдается.
+ */
+export const claudeWriterTools = ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash'] as const;
+export function writerTools(profile?: ToolProfile): readonly string[] {
+  return profile?.claudeTools ?? claudeWriterTools;
+}
+/** Может ли исполнитель запускать команды — одно правило для адаптера и doctor. */
+export function writerRunsChecks(runtime: RuntimeName, profile?: ToolProfile) {
+  // Codex без профиля не получает флаг shell_tool и остаётся со shell CLI.
+  if (runtime === 'codex') return profile ? profile.codexShell : true;
+  return writerTools(profile).includes('Bash');
+}
 export function agentEnvironment(
   config: Config,
   profile: ToolProfile | undefined,
