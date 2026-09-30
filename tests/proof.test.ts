@@ -619,8 +619,13 @@ test('Исполнитель получает ту же границу: свой
   assert.deepEqual(sandbox.filesystem.allowWrite, [realpathSync('/tmp')]);
   assert.ok(sandbox.filesystem.denyRead.includes('/var/devcontour-data'));
   assert.equal(sandbox.filesystem.denyWrite, undefined, 'исполнитель пишет в свой worktree');
-  // Без Bash песочница не нужна: писать исполнитель может только инструментами.
-  const noShell = request('claude');
+  // Явный отказ от Bash — песочница не нужна: писать исполнитель может только
+  // инструментами. Без профиля shell есть по умолчанию (F01).
+  const noShell = request('claude', {
+    ...profile,
+    runtime: 'claude',
+    claudeTools: ['Read', 'Edit'],
+  });
   const noShellSettings = JSON.parse(noShell[noShell.indexOf('--settings') + 1]);
   assert.equal(noShellSettings.sandbox, undefined);
   // Каталог контура — предок worktree: правило для него закрыло бы и сам

@@ -117,7 +117,11 @@ function codexProbe(probe?: ProbeServer) {
     : {};
 }
 export function codexServers(probe?: ProbeServer) {
-  return ['--ignore-user-config', '-c', `mcp_servers=${toml(codexProbe(probe))}`];
+  return [
+    '--ignore-user-config',
+    '-c',
+    probe ? `mcp_servers=${toml(codexProbe(probe))}` : 'mcp_servers={}',
+  ];
 }
 export function codexTools(profile: ToolProfile, probe?: ProbeServer) {
   const servers = Object.fromEntries(
