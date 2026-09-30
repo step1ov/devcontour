@@ -441,6 +441,27 @@ export class Scheduler {
               })),
             })),
         ),
+      // Воспроизведения из прошлых ревью — входы, на которых задача уже
+      // ломалась. Это диагностика: gate они не расширяют.
+      ...((s.reproductions ?? []).some((r) => r.taskId === task.id)
+        ? [
+            'Reproductions recorded by earlier reviews of this task (diagnostic, not a gate; "observed" means the controller saw the reviewer run the command). Check your change against each input: ' +
+              JSON.stringify(
+                (s.reproductions ?? [])
+                  .filter((r) => r.taskId === task.id)
+                  .slice(-20)
+                  .map(({ property, input, expected, actual, command, observed, runs }) => ({
+                    property,
+                    input,
+                    expected,
+                    actual,
+                    command,
+                    observed,
+                    seen: runs.length,
+                  })),
+              ),
+          ]
+        : []),
       !review && run.continuedFrom?.applied
         ? run.continuedFrom.kind === 'unfinished'
           ? `The previous attempt stopped before finishing (${run.continuedFrom.reason === 'timeout' ? 'ran out of time' : run.continuedFrom.reason}). Its unfinished, unverified changes are already applied in this worktree as uncommitted edits (${run.continuedFrom.files.join(', ')}). Continue from them: check what is done and what is broken, finish the task and make the gates pass. Treat them as a draft, not as reviewed work.`
@@ -451,6 +472,9 @@ export class Scheduler {
         : '',
       `Base commit: ${run.baseSha}. ${sha ? `Review commit: ${sha}.` : ''}`,
       'Review against the pinned conventions. Report verified causal regressions, including unchanged consumers. Findings need path/line, rule, consequence and evidence; use null only when not applicable. Do not demand unrelated legacy cleanup.',
+      // Контрпример с конкретным входом дешевле пересказа: он попадает в
+      // реестр задачи и следующая попытка проверяет себя на нём.
+      'When a finding fails on a concrete input, fill reproduction: property (the testId or acceptance criterion it violates), input (the exact input as JSON text), expected and actual, and command (argv) that shows it. Set executed=true only if you ran that command; otherwise it is a hypothesis. Use null for findings without such an input.',
       // Разметка id ничего не доказывает сама по себе: тест может носить
       // имя сценария и не проверять его. Судит об этом ревью — оно видит
       // и сценарий, и названный тест, и код.
@@ -677,6 +701,28 @@ export class Scheduler {
           })
       : undefined;
     const review = { ...parsed, inspection, ...(probes ? { probes } : {}) };
+    // Находки с воспроизводимым входом — в реестр задачи. Команда из текста
+    // находки не исполняется: запуск подтверждает только журнал контура.
+    const reproductions = parsed.findings.flatMap((f) => {
+      const r = f.reproduction;
+      if (!r) return [];
+      const redact = (text: string | null) => (text === null ? null : execution.redact(text));
+      return [
+        {
+          property: r.property,
+          input: execution.redact(r.input),
+          expected: redact(r.expected),
+          actual: redact(r.actual),
+          command: r.command?.map((part) => execution.redact(part)) ?? null,
+          message: execution.redact(f.message),
+          claimed: r.executed,
+          observed:
+            !!r.command &&
+            (probes ?? []).some((p) => JSON.stringify(p.argv) === JSON.stringify(r.command)),
+        },
+      ];
+    });
+    if (reproductions.length) this.h.reproductions(run.id, run.token, sha, reproductions);
     await writeFile(log, JSON.stringify(review, null, 2));
     this.h.evidence(run.id, run.token, {
       kind: 'review',

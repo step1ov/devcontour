@@ -375,6 +375,34 @@ export interface Run {
 // Ревью контракта — работа с попытками: отклонение оставляет находки, которые
 // стоили вызова модели. Без записи в состоянии они живут только файлами на
 // диске, и панель показывает пустоту там, где шёл процесс.
+/**
+ * Воспроизведение из находки ревью: вход, свойство, ожидаемое и фактическое.
+ *
+ * Контрпример ревьюера переносился в приёмку вручную, по одному, и решение
+ * подгонялось под точки. Реестр собирает их по задаче: одно свойство на
+ * одном входе — одна запись, сколько бы попыток её ни встретили. Это
+ * диагностика, а не проверка: обязательным gate воспроизведение становится
+ * только через новую ревизию договора проверки.
+ */
+export interface Reproduction {
+  id: string;
+  /** property + hash входа: повтор на том же входе не плодит записей. */
+  key: string;
+  taskId: string;
+  property: string | null;
+  input: string;
+  inputHash: string;
+  expected: string | null;
+  actual: string | null;
+  command: string[] | null;
+  message: string;
+  /** Ревьюер утверждает, что запускал воспроизведение. */
+  claimed: boolean;
+  /** Запуск подтверждён журналом проверок контура, а не словами модели. */
+  observed: boolean;
+  runs: { runId: string; sha: string; contracts: Record<string, string>; at: string }[];
+  status: 'proposed';
+}
 export interface ContractAttempt {
   id: string;
   at: string;
@@ -400,6 +428,7 @@ export interface DevContourState {
   tasks: Task[];
   contracts: Contract[];
   contractAttempts?: ContractAttempt[];
+  reproductions?: Reproduction[];
   runs: Run[];
   changeSets: ChangeSet[];
   /** Выкладки preview проверенных ChangeSet; локальные, в sync не входят. */

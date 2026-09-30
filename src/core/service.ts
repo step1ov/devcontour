@@ -27,6 +27,7 @@ import {
   discoveryInput,
   type Contract,
   type ContractArtifact,
+  type Reproduction,
   type Task,
   type DevContourState,
   type Config,
@@ -745,6 +746,48 @@ export class DevContour {
       t.status = phase;
       Object.assign(r, data);
       return { runId: id, taskId: t.id, phase, ...data };
+    });
+  }
+  /**
+   * Записать воспроизведения из находок ревью прогона. Одно свойство на одном
+   * входе — одна запись: повтор добавляет прогон, а не новую запись.
+   */
+  reproductions(
+    id: string,
+    token: string,
+    sha: string,
+    items: Omit<Reproduction, 'id' | 'key' | 'taskId' | 'inputHash' | 'runs' | 'status'>[],
+  ) {
+    return this.withRun(id, token, 'reproduction.recorded', (r, t, s) => {
+      s.reproductions ??= [];
+      const at = now();
+      const touched = items.map((item) => {
+        const inputHash = digest(item.input);
+        const key = digest({ taskId: t.id, property: item.property, inputHash });
+        const run = { runId: r.id, sha, contracts: t.contractDigests, at };
+        const existing = s.reproductions!.find((x) => x.key === key);
+        if (existing) {
+          if (!existing.runs.some((x) => x.runId === r.id)) existing.runs.push(run);
+          // Подтверждение контура не отменяется последующим неподтверждённым.
+          existing.observed ||= item.observed;
+          existing.claimed ||= item.claimed;
+          return existing;
+        }
+        const created: Reproduction = {
+          ...item,
+          id: randomUUID(),
+          key,
+          taskId: t.id,
+          inputHash,
+          runs: [run],
+          status: 'proposed',
+        };
+        s.reproductions!.push(created);
+        return created;
+      });
+      // Реестр ограничен: старые записи вытесняются, а не копятся без предела.
+      s.reproductions = s.reproductions.slice(-500);
+      return touched;
     });
   }
   evidence(id: string, token: string, evidence: Omit<Evidence, 'id' | 'runId' | 'createdAt'>) {

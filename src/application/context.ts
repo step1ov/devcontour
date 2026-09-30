@@ -350,6 +350,8 @@ export class AgentContext {
         section('contract', c.id, c.content);
       }
       if (t.failure) section('failure', t.id, t.failure);
+      for (const r of (s.reproductions ?? []).filter((r) => r.taskId === t.id).slice(-20))
+        section('reproduction', r.id, JSON.stringify(r));
       const repo = repository(h.config, t.repositoryId);
       const header = {
         task: {

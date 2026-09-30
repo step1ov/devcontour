@@ -79,6 +79,18 @@ function reportedModel(stdout: string): string | undefined {
   }
   return undefined;
 }
+/**
+ * Воспроизводимый вход находки. Вход — строка: для structured output схема
+ * должна быть закрытой, а форма входа у каждого проекта своя.
+ */
+export const reproductionInput = z.object({
+  property: z.string().max(200).nullable(),
+  input: z.string().min(1).max(8000),
+  expected: z.string().max(2000).nullable(),
+  actual: z.string().max(2000).nullable(),
+  command: z.array(z.string()).max(64).nullable(),
+  executed: z.boolean(),
+});
 export const reviewResult = z.object({
   execution: reviewExecution.optional(),
   approved: z.boolean(),
@@ -93,6 +105,7 @@ export const reviewResult = z.object({
       rule: z.string().nullable().optional(),
       consequence: z.string().nullable().optional(),
       evidence: z.string().nullable().optional(),
+      reproduction: reproductionInput.nullable().optional(),
     }),
   ),
 });
@@ -135,8 +148,36 @@ const reviewSchema = {
           rule: { type: ['string', 'null'] },
           consequence: { type: ['string', 'null'] },
           evidence: { type: ['string', 'null'] },
+          // Вход, на котором находка воспроизводится; null — находка без входа.
+          reproduction: {
+            anyOf: [
+              { type: 'null' },
+              {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  property: { type: ['string', 'null'] },
+                  input: { type: 'string' },
+                  expected: { type: ['string', 'null'] },
+                  actual: { type: ['string', 'null'] },
+                  command: { type: ['array', 'null'], items: { type: 'string' } },
+                  executed: { type: 'boolean' },
+                },
+                required: ['property', 'input', 'expected', 'actual', 'command', 'executed'],
+              },
+            ],
+          },
         },
-        required: ['severity', 'message', 'path', 'line', 'rule', 'consequence', 'evidence'],
+        required: [
+          'severity',
+          'message',
+          'path',
+          'line',
+          'rule',
+          'consequence',
+          'evidence',
+          'reproduction',
+        ],
       },
     },
   },
