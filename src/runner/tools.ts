@@ -36,6 +36,16 @@ export const claudeWriterTools = ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash
 export function writerTools(profile?: ToolProfile): readonly string[] {
   return profile?.claudeTools ?? claudeWriterTools;
 }
+/**
+ * Может ли ревьюер запускать проверки — одно правило для адаптера, doctor и
+ * выдачи инструмента проверок. У claude — только Bash, явно данный профилем.
+ * У codex нет инструмента чтения, кроме shell: без профиля он получает shell
+ * в песочнице только для чтения; явный codexShell: false соблюдается.
+ */
+export function reviewerRunsChecks(runtime: RuntimeName, profile?: ToolProfile) {
+  if (runtime === 'codex') return profile ? profile.codexShell : true;
+  return !!profile?.claudeTools?.includes('Bash');
+}
 /** Может ли исполнитель запускать команды — одно правило для адаптера и doctor. */
 export function writerRunsChecks(runtime: RuntimeName, profile?: ToolProfile) {
   // Codex без профиля не получает флаг shell_tool и остаётся со shell CLI.
@@ -74,7 +84,42 @@ const toml = (value: unknown): string => {
     );
   return JSON.stringify(value);
 };
-export function codexTools(profile: ToolProfile) {
+/** Имена сервера и инструмента проверок ревьюера в конфигурации CLI. */
+export const probeServer = 'devcontour_probe';
+export const probeTool = 'run_check';
+/**
+ * Сервер проверок ревьюера (см. review-probe.ts): команда запуска и имена
+ * переменных окружения, которые CLI передаст ему по имени.
+ */
+export type ProbeServer = {
+  command: string;
+  args: string[];
+  env: string[];
+  commandTimeoutMs: number;
+};
+/** Срок вызова инструмента в CLI — с запасом сверх предела команды контура. */
+export const probeCallMs = (probe: ProbeServer) => probe.commandTimeoutMs + 30000;
+function codexProbe(probe?: ProbeServer) {
+  return probe
+    ? {
+        [probeServer]: {
+          enabled: true,
+          required: true,
+          enabled_tools: [probeTool],
+          command: probe.command,
+          args: probe.args,
+          env_vars: probe.env,
+          // По умолчанию codex обрывает вызов инструмента через минуту —
+          // раньше, чем контур остановил бы команду сам.
+          tool_timeout_sec: Math.ceil(probeCallMs(probe) / 1000),
+        },
+      }
+    : {};
+}
+export function codexServers(probe?: ProbeServer) {
+  return ['--ignore-user-config', '-c', `mcp_servers=${toml(codexProbe(probe))}`];
+}
+export function codexTools(profile: ToolProfile, probe?: ProbeServer) {
   const servers = Object.fromEntries(
     Object.entries(profile.mcp).map(([id, s]) => [
       id,
@@ -91,34 +136,46 @@ export function codexTools(profile: ToolProfile) {
   return [
     '--ignore-user-config',
     '-c',
-    `mcp_servers=${toml(servers)}`,
+    `mcp_servers=${toml({ ...servers, ...codexProbe(probe) })}`,
     '-c',
     `features.shell_tool=${profile.codexShell}`,
     '-c',
     `sandbox_workspace_write.network_access=${profile.codexNetwork}`,
   ];
 }
-export function claudeMcp(profile: ToolProfile) {
+export function claudeMcp(profile: ToolProfile | undefined, probe?: ProbeServer) {
   return {
-    mcpServers: Object.fromEntries(
-      Object.entries(profile.mcp).map(([id, s]) => [
-        id,
-        s.transport === 'stdio'
-          ? {
+    mcpServers: {
+      ...Object.fromEntries(
+        Object.entries(profile?.mcp ?? {}).map(([id, s]) => [
+          id,
+          s.transport === 'stdio'
+            ? {
+                type: 'stdio',
+                command: s.command,
+                args: s.args,
+                env: Object.fromEntries(s.env.map((key) => [key, '${' + key + '}'])),
+              }
+            : {
+                type: 'http',
+                url: s.url,
+                ...(s.bearerTokenEnv
+                  ? { headers: { Authorization: 'Bearer ${' + s.bearerTokenEnv + '}' } }
+                  : {}),
+              },
+        ]),
+      ),
+      ...(probe
+        ? {
+            [probeServer]: {
               type: 'stdio',
-              command: s.command,
-              args: s.args,
-              env: Object.fromEntries(s.env.map((key) => [key, '${' + key + '}'])),
-            }
-          : {
-              type: 'http',
-              url: s.url,
-              ...(s.bearerTokenEnv
-                ? { headers: { Authorization: 'Bearer ${' + s.bearerTokenEnv + '}' } }
-                : {}),
+              command: probe.command,
+              args: probe.args,
+              env: Object.fromEntries(probe.env.map((key) => [key, '${' + key + '}'])),
             },
-      ]),
-    ),
+          }
+        : {}),
+    },
   };
 }
 export function claudeRules(profile: ToolProfile) {

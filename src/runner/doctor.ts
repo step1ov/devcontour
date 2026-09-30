@@ -10,7 +10,7 @@ import { command, git } from './process.ts';
 import { outdatedContextPacks } from './context-library.ts';
 import { executionEnvironment, runSteps, withEnvironment } from './environment.ts';
 import { withResources } from './resources.ts';
-import { agentEnvironment, toolProfileFor, writerRunsChecks } from './tools.ts';
+import { agentEnvironment, reviewerRunsChecks, toolProfileFor, writerRunsChecks } from './tools.ts';
 import { taskContext } from './context.ts';
 import { forgeAdapter } from './forge.ts';
 import { DevContour } from '../core/service.ts';
@@ -65,8 +65,7 @@ export async function doctor(config: Config, root: string, probe = false) {
   // умолчанию, а claude-ревьюер — нет. Doctor называет это прямо.
   for (const { repo, role, review, binding } of bindings.filter((b) => b.review)) {
     const profile = toolProfileFor(config, binding.runtime, role, review, repo.id);
-    const runsChecks =
-      binding.runtime === 'codex' ? profile?.codexShell : !!profile?.claudeTools?.includes('Bash');
+    const runsChecks = reviewerRunsChecks(binding.runtime, profile);
     checks.push({
       id: `reviewer:${repo.id}:${role}`,
       status: runsChecks ? 'passed' : 'not-checked',

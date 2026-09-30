@@ -7,7 +7,8 @@ import { timed } from './timing.ts';
 import { assertRequirements, recordRequirements } from './requirements.ts';
 import { snapshotDependencies, assertDependencies, runEnvironment } from './dependencies.ts';
 import { runSteps, withEnvironment } from './environment.ts';
-import { toolProfileFor, agentEnvironment } from './tools.ts';
+import { toolProfileFor, agentEnvironment, reviewerRunsChecks, writerRunsChecks } from './tools.ts';
+import { probeCommand, probeLimits, type ProbeSpec } from './review-probe.ts';
 import { orderedGates, withinPaths, validateWorkflow } from '../core/workflow.ts';
 import { taskContext } from './context.ts';
 import { assertTeamCheckout } from './git-sync.ts';
@@ -38,6 +39,12 @@ const runGates = (repo: { gates: Gate[] }, task: Task) =>
   orderedGates(
     task.gates?.length ? repo.gates.filter((g) => task.gates!.includes(g.id)) : repo.gates,
   );
+
+// Исполнитель с shell проверяет себя сам, до гейтов: теми же командами, что
+// их доказательство, — иначе о провале он узнавал только после попытки.
+const checkYourself = (repo: { gates: Gate[] }, task: Task) =>
+  'You have a shell in an OS sandbox limited to this worktree. Before returning, run the checks that prove this task and fix what fails; DevContour still runs the required gates and integration afterwards. Gate commands: ' +
+  JSON.stringify(runGates(repo, task).map((g) => ({ id: g.id, command: g.command, cwd: g.cwd })));
 
 // Отказ провайдера, а не задачи: он повторится на любой следующей выдаче.
 // Список узкий намеренно — временные ошибки сети и лимиты частоты сюда не
@@ -532,6 +539,54 @@ export class Scheduler {
     await this.assertScope(task, cwd, [base, sha]);
     return sha;
   }
+  /**
+   * Инструмент проверок ревьюера с пределами контура — только тому, кто и так
+   * может запускать команды: права ревьюера он не расширяет, а ограничивает
+   * срок. Спецификация лежит в каталоге ревью; значения переменных окружения
+   * CLI передаёт серверу по имени, на диск они не пишутся.
+   */
+  private async reviewProbe(
+    adapter: AgentAdapter,
+    run: Run,
+    task: Task,
+    cwd: string,
+    dir: string,
+    toolProfile: ReturnType<typeof toolProfileFor>,
+    execution: { env: NodeJS.ProcessEnv; redact: { secrets?: readonly string[] } },
+  ) {
+    if (adapter.name !== 'claude' && adapter.name !== 'codex') return undefined;
+    if (!reviewerRunsChecks(adapter.name, toolProfile)) return undefined;
+    const limits = probeLimits(this.h.config);
+    const boundary = this.boundary(task.repositoryId);
+    const secrets = new Set(execution.redact.secrets ?? []);
+    const spec: ProbeSpec = {
+      cwd,
+      controller: boundary.hidden,
+      readable: [cwd, ...(run.dependencies ?? []).map((d) => d.path), ...boundary.readable],
+      isolation: this.h.config.isolation,
+      commandTimeoutMs: limits.commandTimeoutMs,
+      budgetMs: limits.budgetMs,
+      deadline: Date.now() + this.h.config.runTimeoutMs - limits.reserveMs,
+      env: Object.keys(execution.env),
+      secrets: Object.entries(execution.env)
+        .filter(([, value]) => value !== undefined && secrets.has(value))
+        .map(([name]) => name),
+      settingsDir: join(dir, 'probe-settings'),
+      log: join(dir, 'probes.jsonl'),
+    };
+    const specPath = join(dir, 'probe.json');
+    await writeFile(specPath, JSON.stringify(spec, null, 2));
+    const seconds = (ms: number) => Math.round(ms / 1000);
+    return {
+      log: spec.log,
+      server: {
+        ...probeCommand(specPath),
+        env: spec.env,
+        commandTimeoutMs: limits.commandTimeoutMs,
+      },
+      prompt: `Run checks with the run_check tool (argv, no shell; sources are read-only, temporary files go to TMPDIR). The controller stops each command after ${seconds(limits.commandTimeoutMs)} s and all checks share ${seconds(limits.budgetMs)} s; ${seconds(limits.reserveMs)} s stay reserved for your verdict. A timeout is an observation about that command on that input, not proof of a defect: name the input and the limit if you report it, and give your verdict with what you have when the budget runs out.`,
+    };
+  }
   private async review(
     adapter: AgentAdapter,
     run: Run,
@@ -560,6 +615,7 @@ export class Scheduler {
       env: agent.env,
       redact: composeRedactors(agent.redact, baseExecution.redact),
     };
+    const probe = await this.reviewProbe(adapter, run, task, cwd, dir, toolProfile, execution);
     const result = await timed(this.h, run, phase + '-review', () =>
       measuredExecute(
         this.h,
@@ -569,8 +625,13 @@ export class Scheduler {
           execution,
           cwd,
           artifactDir: dir,
-          prompt: this.prompt(task, run, true, sha) + '\n\nExact diff to review:\n' + diff,
+          prompt:
+            this.prompt(task, run, true, sha) +
+            (probe ? '\n\n' + probe.prompt : '') +
+            '\n\nExact diff to review:\n' +
+            diff,
           review: true,
+          probe: probe?.server,
           isolation: this.agentIsolation(run, task, cwd, true),
           task,
           model: run.reviewerModel,
@@ -593,7 +654,22 @@ export class Scheduler {
       clean && parsed.approved && !parsed.findings.some((f) => f.severity === 'blocking');
     const log = join(dir, 'review.json');
     const inspection = result.inspection ?? unobservedReview();
-    const review = { ...parsed, inspection };
+    // Проверки ревьюера — по журналу контура, а не по самоотчёту модели.
+    const probes = probe
+      ? (await readFile(probe.log, 'utf8').catch(() => ''))
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => {
+            const p = JSON.parse(line) as Record<string, unknown>;
+            return {
+              argv: p.argv,
+              status: p.status,
+              durationMs: p.durationMs,
+              limitMs: p.limitMs,
+            };
+          })
+      : undefined;
+    const review = { ...parsed, inspection, ...(probes ? { probes } : {}) };
     await writeFile(log, JSON.stringify(review, null, 2));
     this.h.evidence(run.id, run.token, {
       kind: 'review',
@@ -805,7 +881,12 @@ export class Scheduler {
                           },
                           cwd,
                           artifactDir: dir,
-                          prompt: this.prompt(task, run),
+                          prompt:
+                            this.prompt(task, run) +
+                            (writer.name !== 'demo' && writerRunsChecks(writer.name, toolProfile)
+                              ? '\n\n' +
+                                checkYourself(repository(this.h.config, task.repositoryId), task)
+                              : ''),
                           review: false,
                           isolation: this.agentIsolation(run, task, cwd, false),
                           task,

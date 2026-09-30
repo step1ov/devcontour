@@ -8,7 +8,7 @@ import { accessSync, constants, existsSync } from 'node:fs';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import { command, git } from './process.ts';
 import { digest, DevContour } from '../core/service.ts';
-import type { Run, Gate, Evidence } from '../core/model.ts';
+import type { Config, Run, Gate, Evidence } from '../core/model.ts';
 import { TaskFailure, type FailureKind } from '../core/failure.ts';
 import { portableTest } from '../core/proof.ts';
 /** Предел манифеста: полный список тестов крупного проекта в состояние не кладётся. */
@@ -221,7 +221,8 @@ export async function prepareReportPath(root: string, path: string, escape: stri
  * isolation.mode: none. Запись — в `write` и собственный scratch (TMPDIR).
  */
 export async function runCheck(
-  h: DevContour,
+  // Нужна только политика изоляции: проверки ревьюера исполняются вне сервера.
+  h: { config: Pick<Config, 'isolation'> },
   options: {
     argv: string[];
     cwd: string;
