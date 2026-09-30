@@ -593,3 +593,58 @@ test('A contract pins its normative artifacts: a changed schema is a new contrac
     f.cleanup();
   }
 });
+
+test('A blocking feasibility finding returns the contract with its own reason and carries into the next round', async () => {
+  const f = fixture();
+  try {
+    f.h.config.mode = 'local';
+    const prompts: string[] = [];
+    let verdict: 'infeasible' | 'bounded' = 'infeasible';
+    const make = (name: 'codex' | 'claude'): AgentAdapter => ({
+      name,
+      execute(r) {
+        prompts.push(r.prompt);
+        return Promise.resolve({
+          data:
+            verdict === 'infeasible'
+              ? {
+                  approved: false,
+                  summary: 'Exact optimum without input bounds',
+                  findings: [
+                    {
+                      severity: 'blocking',
+                      message: 'O-2: exact optimum for any n in O(n log n); no size bound',
+                      rule: 'feasibility',
+                    },
+                  ],
+                }
+              : { approved: true, summary: 'Bounded', findings: [] },
+          log: 'Fixture only; no provider called',
+          command: ['fixture'],
+        });
+      },
+    });
+    const both = { codex: make('codex'), claude: make('claude') };
+    const proposal = { title: 'Packing', content: 'O-2: return the optimal packing for any n.' };
+    await assert.rejects(
+      reviewContract(f.h, f.root, proposal, 'codex', both),
+      /невыполнимы или неизмеримы.*O-2.*ограничения области входов/s,
+    );
+    // Ревьюер контракта получил чек-лист выполнимости.
+    assert.match(prompts[0], /input domain and size limits/);
+    assert.match(prompts[0], /Hardness alone is not infeasibility/);
+    const attempt = f.store.read().contractAttempts!.at(-1)!;
+    assert.equal(attempt.findings[0].rule, 'feasibility');
+
+    // Следующий раунд видит прежнюю находку с её классом.
+    verdict = 'bounded';
+    const bounded = {
+      ...proposal,
+      content: 'O-2: optimal packing for n ≤ 20; beyond that, refuse.',
+    };
+    assert.equal((await reviewContract(f.h, f.root, bounded, 'codex', both)).status, 'approved');
+    assert.match(prompts[1], /\[feasibility\] O-2/);
+  } finally {
+    f.cleanup();
+  }
+});

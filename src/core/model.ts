@@ -371,7 +371,8 @@ export interface ContractAttempt {
   repositoryId?: string;
   approved: boolean;
   summary: string;
-  findings: { severity: string; message: string }[];
+  /** rule — класс находки; `feasibility` — обязательство невыполнимо или неизмеримо. */
+  findings: { severity: string; message: string; rule?: string }[];
   artifact: string;
   authorRuntime: string;
   reviewerRuntime: string;

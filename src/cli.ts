@@ -61,6 +61,7 @@ import { syncGit, syncPreparation } from './runner/git-sync.ts';
 import { setupDemo, exists } from './demo.ts';
 import { restoreBackup } from './runner/backup.ts';
 import { serveReviewProbes } from './runner/review-probe.ts';
+import { contractEvals } from './runner/contract-evals.ts';
 const args = process.argv.slice(2),
   operation = args[0] ?? 'serve';
 const option = (name: string, fallback: string) =>
@@ -113,6 +114,27 @@ async function main() {
       repetitions: Number(option('--repetitions', '1')),
       maxCalls: Number(option('--max-calls', '9')),
       timeoutMs: Number(option('--timeout-ms', '120000')),
+    });
+    console.log(JSON.stringify(result, null, 2));
+    if (!result.passed) process.exitCode = 1;
+    return;
+  }
+  if (operation === 'contract-evals') {
+    if (
+      !args.includes('--live') &&
+      (args.includes('--runtime') || args.includes('--reviewer-model'))
+    )
+      throw new Error('Для моделей требуется --live');
+    if (
+      args.includes('--live') &&
+      (!args.includes('--runtime') || !args.includes('--reviewer-model'))
+    )
+      throw new Error('Укажите --runtime codex|claude (автор) и --reviewer-model');
+    const result = await contractEvals({
+      runtime: args.includes('--live') ? option('--runtime', '') : undefined,
+      reviewerModel: args.includes('--reviewer-model') ? option('--reviewer-model', '') : undefined,
+      maxCalls: Number(option('--max-calls', '6')),
+      timeoutMs: Number(option('--timeout-ms', '300000')),
     });
     console.log(JSON.stringify(result, null, 2));
     if (!result.passed) process.exitCode = 1;

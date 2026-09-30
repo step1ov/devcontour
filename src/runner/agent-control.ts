@@ -66,9 +66,22 @@ function previousFindings(h: DevContour, subject: string, title: string) {
   return {
     attempt: attempts.length,
     summary: last.summary,
-    findings: last.findings.map((f) => f.message),
+    findings: last.findings.map((f) => (f.rule ? `[${f.rule}] ${f.message}` : f.message)),
   };
 }
+
+/** Класс находки ревью контракта: обязательство невыполнимо или неизмеримо. */
+export const FEASIBILITY = 'feasibility';
+/**
+ * Проверка выполнимости обязательств контракта. Ревью одобрило обязательство,
+ * невыполнимое в общем виде, и это выяснилось только после серии попыток
+ * реализации. Трудность задачи сама по себе не невыполнимость: значат пределы
+ * входа, точность, допустимость приближения, время и память. Поэтому ревьюер
+ * проверяет, названы ли они, а не ищет в тексте слово «NP».
+ */
+const feasibilityReview = [
+  `Assess every obligation of the contract for feasibility. For each, check that the contract states: the input domain and size limits; exactness or optimality (or the allowed approximation); the worst case; allowed refusals or failures; the resource model (time, memory, environment); and how the obligation is measured. An obligation that cannot be met in general under the stated limits, or cannot be measured as written, is a blocking finding with rule "${FEASIBILITY}" — name the obligation, the missing or contradictory bound and a concrete input that shows it. Hardness alone is not infeasibility: an exact answer for a hard problem is acceptable when the contract bounds the input, justifies the assumptions or allows a documented fallback. Do not block an obligation only for its wording.`,
+];
 
 async function review(
   h: DevContour,
@@ -96,6 +109,7 @@ async function review(
     'For a plan, check dependencies, the first complete user scenario, requirement references, required real tests, and agreed API/design contracts. For architecture, assess the chosen stack and bootstrap verification evidence.',
     'For plans, check writePaths, selected library contextPacks, device resources, consumer verification and separation of proposed discoveries from validated knowledge. Findings should include rule, consequence and evidence; do not invent violations to fill the report.',
     'Declared context packs: ' + JSON.stringify(h.config.contextPacks),
+    ...(subject.startsWith('contract') ? feasibilityReview : []),
     'Return approved=false and concrete blocking findings when revision is needed. Routine technical choices within the specification do not need human approval.',
     ...(previous
       ? [
@@ -168,13 +182,29 @@ async function review(
     attempt: (previous?.attempt ?? 0) + 1,
     approved: !rejected,
     summary: parsed.summary,
-    findings: parsed.findings.map((f) => ({ severity: f.severity, message: f.message })),
+    findings: parsed.findings.map((f) => ({
+      severity: f.severity,
+      message: f.message,
+      ...(f.rule ? { rule: f.rule } : {}),
+    })),
     artifact,
     authorRuntime: author,
     reviewerRuntime: reviewer,
   });
-  if (rejected)
-    throw new DomainError(`Независимое ревью отклонено: ${parsed.summary}. Артефакты: ${artifact}`);
+  if (rejected) {
+    // Невыполнимое обязательство чинится не правкой текста, а ограничениями
+    // или изменением требования: автор должен увидеть это отдельно.
+    const feasibility = parsed.findings.filter(
+      (f) => f.severity === 'blocking' && f.rule === FEASIBILITY,
+    );
+    throw new DomainError(
+      `Независимое ревью отклонено: ${parsed.summary}.` +
+        (feasibility.length
+          ? ` Обязательства невыполнимы или неизмеримы в заявленном виде: ${feasibility.map((f) => f.message).join('; ')}. Добавьте ограничения области входов и ресурсов, допущения или измените требование.`
+          : '') +
+        ` Артефакты: ${artifact}`,
+    );
+  }
   return {
     actor: 'agent',
     authorRuntime: author,
