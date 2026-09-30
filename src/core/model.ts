@@ -271,6 +271,21 @@ export interface Evidence {
    * выдаётся.
    */
   testsTruncated?: boolean;
+  /**
+   * Доказательство генеративной проверки: seed контура и команда повтора,
+   * отчёт свойств с контрпримером, а также версии договора, по которому шла
+   * проверка, — digest контрактов задачи и blob закреплённых эталона и
+   * генератора. Новый эталон — новая ревизия; старое evidence ссылается на
+   * свою.
+   */
+  property?: {
+    seed: number;
+    reproduce: string;
+    report?: import('./property.ts').PropertyReport;
+    problem?: string;
+    contracts: Record<string, string>;
+    artifacts: { path: string; blob: string }[];
+  };
 }
 export interface Run {
   memory?: { revision: string; ids: string[]; digest: string; bytes: number };
@@ -424,6 +439,8 @@ export interface Gate {
   command: string[];
   timeoutMs: number;
   report?: { type: 'junit'; path: string };
+  /** Генеративная проверка: путь отчёта свойств (см. runner/property.ts). */
+  property?: { path: string };
   dependsOn?: string[];
   cwd?: string;
   resources?: string[];
@@ -439,6 +456,7 @@ export const gateList = z
       command: z.array(z.string().min(1)).min(1),
       timeoutMs: z.number().positive().default(120000),
       report: z.object({ type: z.literal('junit'), path: z.string().min(1) }).optional(),
+      property: z.object({ path: relativePath }).optional(),
     }),
   )
   .min(1);

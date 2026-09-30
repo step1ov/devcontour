@@ -11,6 +11,8 @@ import { digest, DevContour } from '../core/service.ts';
 import type { Config, Run, Gate, Evidence } from '../core/model.ts';
 import { TaskFailure, type FailureKind } from '../core/failure.ts';
 import { portableTest } from '../core/proof.ts';
+import { propertyFailure, propertySeed } from '../core/property.ts';
+import { readPropertyReport } from './property.ts';
 /** Предел манифеста: полный список тестов крупного проекта в состояние не кладётся. */
 const MANIFEST_LIMIT = 2000;
 /**
@@ -339,6 +341,12 @@ async function executeGate(
   const reportPath = gate.report
     ? await prepareReportPath(cwd, gate.report.path, 'Report выходит из worktree')
     : undefined;
+  // Генеративная проверка: seed задаёт контур, поэтому он известен и тогда,
+  // когда проверка зависла и не успела ничего записать.
+  const propertyPath = gate.property
+    ? await prepareReportPath(cwd, gate.property.path, 'Отчёт свойств выходит из worktree')
+    : undefined;
+  const seed = propertySeed(run.id, phase, gate.id);
   let kind: FailureKind = 'gate';
   let passed = false,
     summary = '',
@@ -352,7 +360,13 @@ async function executeGate(
     const result = await runCheck(h, {
       argv: gate.command,
       cwd: gateCwd,
-      env: { ...environment.env, DEVCONTOUR_REPORT_PATH: reportPath },
+      env: {
+        ...environment.env,
+        DEVCONTOUR_REPORT_PATH: reportPath,
+        ...(propertyPath
+          ? { DEVCONTOUR_SEED: String(seed), DEVCONTOUR_PROPERTY_REPORT: propertyPath }
+          : {}),
+      },
       redact,
       timeoutMs: gate.timeoutMs,
       signal,
@@ -415,6 +429,35 @@ async function executeGate(
     summary = error instanceof Error ? error.message : String(error);
     log += '\n' + summary;
   }
+  // Отчёт свойств читается при любом исходе: провал и таймаут — ровно те
+  // случаи, когда контрпример и вход нужны больше всего.
+  let property: Evidence['property'];
+  if (propertyPath) {
+    const read = await readPropertyReport(propertyPath, redact);
+    const failure = read.report ? propertyFailure(read.report) : '';
+    if (failure) {
+      passed = false;
+      summary =
+        summary && summary !== 'Команда завершилась успешно' ? `${summary}; ${failure}` : failure;
+    } else if (passed && read.problem) {
+      // Прошедшая команда без отчёта не доказывает свойство: зелёный код
+      // выхода был у неё и до реализации.
+      passed = false;
+      summary = `Генеративная проверка не отчиталась: ${read.problem}`;
+    }
+    const state = h.store.read();
+    const task = state.tasks.find((t) => t.id === run.taskId);
+    property = {
+      seed,
+      reproduce: `DEVCONTOUR_SEED=${seed} ${gate.command.join(' ')}`,
+      ...(read.report ? { report: read.report } : { problem: read.problem }),
+      contracts: task?.contractDigests ?? {},
+      artifacts: state.contracts
+        .filter((c) => task?.contracts.includes(c.id))
+        .flatMap((c) => (c.artifacts ?? []).map((a) => ({ path: a.path, blob: a.blob }))),
+    };
+    if (!passed) log += '\n' + summary;
+  }
   await mkdir(artifactDir, { recursive: true });
   const logPath = join(artifactDir, `${gate.id}.log`);
   await writeFile(logPath, log);
@@ -433,6 +476,7 @@ async function executeGate(
     // testcases упали. Подтвердить критерий он не может — evidence не passed.
     tests: manifest?.cases,
     testsTruncated: manifest?.truncated || undefined,
+    ...(property ? { property } : {}),
   });
   if (!passed) throw new TaskFailure(kind, `${phase}/${gate.id}: ${summary}`);
 }
