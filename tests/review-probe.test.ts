@@ -367,3 +367,20 @@ test('A scheduled review hands the probe tool to the reviewer and records its ch
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('Reviewer check arguments are redacted in the result and the controller log', async () => {
+  const s = await stage({ deadline: Date.now() });
+  process.env.DEVCONTOUR_TEST_PROBE_SECRET = 'argv-secret-5521';
+  try {
+    // Бюджет исчерпан: команда не запускается, но аргументы сохраняются.
+    const r = await new ReviewProbes(s.spec).run({
+      argv: ['curl', '-H', 'Authorization: argv-secret-5521', 'http://127.0.0.1'],
+    });
+    assert.equal(r.status, 'budget-exhausted');
+    assert.equal(JSON.stringify(r).includes('argv-secret-5521'), false);
+    assert.equal((await readFile(s.spec.log, 'utf8')).includes('argv-secret-5521'), false);
+  } finally {
+    delete process.env.DEVCONTOUR_TEST_PROBE_SECRET;
+    await s.cleanup();
+  }
+});

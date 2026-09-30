@@ -733,6 +733,13 @@ test('Contract impact names changes, affected and transitive tasks, base state a
 
     await writeFile(join(repo.path, 'docs/contracts/catalog.md'), '# Catalog v2\n');
     await assert.rejects(contractImpact(f.h, proposal), /закоммитьте/);
+    // Игнорируемый черновик «не изменён» для status, но его нет в HEAD.
+    await writeFile(join(repo.path, '.gitignore'), 'draft.md\n');
+    await writeFile(join(repo.path, 'draft.md'), '# Draft contract\n');
+    await assert.rejects(
+      contractImpact(f.h, { title: 'Draft', file: 'draft.md' }),
+      /не закоммичен/,
+    );
   } finally {
     await repo.remove();
     f.cleanup();

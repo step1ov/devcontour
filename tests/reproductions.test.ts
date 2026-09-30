@@ -20,6 +20,7 @@ test('Review reproductions form a deduplicated task registry, observed only thro
   const h = new DevContour(store, config);
   const requests: AgentRequest[] = [];
   const command = [process.execPath, '-e', 'process.exit(1)'];
+  const exhausted = [process.execPath, '-e', 'process.exit(2)'];
   // Ревьюер с именем codex получает инструмент проверок, запускает через него
   // воспроизведение и каждый раз отклоняет с тем же входом.
   const runtimes = {
@@ -30,9 +31,10 @@ test('Review reproductions form a deduplicated task registry, observed only thro
         requests.push(r);
         if (!r.review) return adapters.demo.execute(r);
         const path = r.probe!.args[r.probe!.args.indexOf('--spec') + 1];
-        await new ReviewProbes(probeSpec.parse(JSON.parse(await readFile(path, 'utf8')))).run({
-          argv: command,
-        });
+        const spec = probeSpec.parse(JSON.parse(await readFile(path, 'utf8')));
+        await new ReviewProbes(spec).run({ argv: command });
+        // Та же запись журнала, но команда не запускалась: бюджет исчерпан.
+        await new ReviewProbes({ ...spec, deadline: Date.now() }).run({ argv: exhausted });
         const finding = (message: string, reproduction: unknown) => ({
           severity: 'blocking',
           message,
@@ -64,6 +66,14 @@ test('Review reproductions form a deduplicated task registry, observed only thro
                 expected: null,
                 actual: null,
                 command: [process.execPath, '-e', '0'],
+                executed: true,
+              }),
+              finding('Large query may time out', {
+                property: 'catalog-search',
+                input: '{"q":"large"}',
+                expected: null,
+                actual: null,
+                command: exhausted,
                 executed: true,
               }),
               finding('Naming is unclear', null),
@@ -98,7 +108,7 @@ test('Review reproductions form a deduplicated task registry, observed only thro
     assert.equal(attempts.length, 2);
     const registry = (store.read().reproductions ?? []).filter((r) => r.taskId === task.id);
     // Один вход — одна запись, сколько бы попыток её ни встретили.
-    assert.equal(registry.length, 2);
+    assert.equal(registry.length, 3);
     const empty = registry.find((r) => r.input === '{"q":""}')!;
     assert.equal(empty.runs.length, attempts.length);
     assert.equal(empty.claimed, true);
@@ -107,6 +117,8 @@ test('Review reproductions form a deduplicated task registry, observed only thro
     assert.equal(unicode.claimed, true);
     assert.equal(unicode.observed, false, 'слова модели без запуска — гипотеза');
     assert.equal(empty.status, 'proposed');
+    // Запись журнала с исчерпанным бюджетом — не наблюдение запуска.
+    assert.equal(registry.find((r) => r.input === '{"q":"large"}')!.observed, false);
 
     // Следующая попытка исполнителя видит входы, на которых задача ломалась.
     const writers = requests.filter((r) => !r.review && r.task.id === task.id);
@@ -118,7 +130,7 @@ test('Review reproductions form a deduplicated task registry, observed only thro
       operation: 'task_briefing',
       input: { taskId: task.id },
     }) as { items: { kind: string }[] };
-    assert.equal(briefing.items.filter((s) => s.kind === 'reproduction').length, 2);
+    assert.equal(briefing.items.filter((s) => s.kind === 'reproduction').length, 3);
   } finally {
     await scheduler.stop();
     store.close();

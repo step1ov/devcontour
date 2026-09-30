@@ -433,7 +433,7 @@ async function executeGate(
   // случаи, когда контрпример и вход нужны больше всего.
   let property: Evidence['property'];
   if (propertyPath) {
-    const read = await readPropertyReport(propertyPath, redact);
+    const read = await readPropertyReport(propertyPath, cwd, redact);
     const failure = read.report ? propertyFailure(read.report) : '';
     if (failure) {
       passed = false;

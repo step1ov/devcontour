@@ -39,11 +39,17 @@ export async function contractImpact(h: DevContour, input: unknown) {
   const parsed = contractProposal.parse(input);
   const owner = repository(h.config, parsed.repositoryId ?? defaultOwner(h));
   // Отчёт строится по закоммиченной редакции: сверка базы идёт по HEAD.
-  if (parsed.file && (await git(owner.path, 'status', '--porcelain', '--', parsed.file)))
-    throw new DomainError(
-      'Документ контракта изменён после коммита — закоммитьте его: ' + parsed.file,
-      400,
-    );
+  // Чистый status не доказывает, что файл в истории: игнорируемый черновик
+  // тоже «не изменён». Документ обязан быть в HEAD.
+  if (parsed.file) {
+    if (!(await git(owner.path, 'rev-parse', '--verify', `HEAD:${parsed.file}`).catch(() => '')))
+      throw new DomainError('Документ контракта не закоммичен: ' + parsed.file, 400);
+    if (await git(owner.path, 'status', '--porcelain', '--', parsed.file))
+      throw new DomainError(
+        'Документ контракта изменён после коммита — закоммитьте его: ' + parsed.file,
+        400,
+      );
+  }
   const content = await contractContent(h, parsed);
   const pinned = await pinArtifacts(owner, parsed.artifacts ?? []);
   const digest = contractDigest(content, pinned.artifacts);

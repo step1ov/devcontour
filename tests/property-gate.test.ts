@@ -1,6 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { configSchema, type Evidence } from '../src/core/model.ts';
@@ -11,6 +20,7 @@ import { Scheduler } from '../src/runner/scheduler.ts';
 import { adapters, type AgentAdapter } from '../src/runner/adapters.ts';
 import { pinArtifacts } from '../src/runner/contract-artifacts.ts';
 import { command, git } from '../src/runner/process.ts';
+import { readPropertyReport } from '../src/runner/property.ts';
 
 // Проект-фикстура: рюкзак на малых входах. Эталон — полный перебор, он
 // закреплён контрактом; генератор и уменьшение входа — в проекте.
@@ -265,6 +275,123 @@ test('The controller seeds the gate, keeps the property report on failure and ti
     const passed = await evidenceOf();
     assert.equal(passed.gate.passed, true, passed.gate.summary);
     assert.equal(passed.gate.property?.report?.properties[0].status, 'passed');
+  } finally {
+    await scheduler?.stop();
+    store?.close();
+    await rm(p.root, { recursive: true, force: true });
+  }
+});
+
+test('A property report is read only as a regular file inside the worktree', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'devcontour-property-read-'));
+  try {
+    const tree = join(root, 'tree');
+    const outside = join(root, 'controller');
+    await mkdir(join(tree, '.reports'), { recursive: true });
+    await mkdir(outside);
+    const secret = JSON.stringify({
+      version: 1,
+      properties: [{ testId: 'private-marker-7717', status: 'passed', cases: 1 }],
+    });
+    await writeFile(join(outside, 'state.json'), secret);
+    // Отчёт — symlink на файл контура.
+    await symlink(join(outside, 'state.json'), join(tree, '.reports/property.json'));
+    const viaFile = await readPropertyReport(join(tree, '.reports/property.json'), tree);
+    assert.equal(viaFile.problem, 'отчёт свойств — symlink');
+    assert.equal(JSON.stringify(viaFile).includes('private-marker'), false);
+    // Каталог отчёта — symlink наружу.
+    await rm(join(tree, '.reports'), { recursive: true });
+    await symlink(outside, join(tree, '.reports'));
+    await rename(join(outside, 'state.json'), join(outside, 'property.json'));
+    const viaDir = await readPropertyReport(join(tree, '.reports/property.json'), tree);
+    assert.equal(viaDir.problem, 'отчёт свойств вне worktree');
+    // Обычный файл внутри worktree читается.
+    await rm(join(tree, '.reports'));
+    await mkdir(join(tree, '.reports'));
+    await writeFile(join(tree, '.reports/property.json'), secret);
+    assert.equal(
+      (await readPropertyReport(join(tree, '.reports/property.json'), tree)).report?.properties[0]
+        .testId,
+      'private-marker-7717',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('A property gate fails on exit 0 when the report is violated or missing', async () => {
+  const p = await project();
+  let store: Store | undefined, scheduler: Scheduler | undefined;
+  try {
+    // Команды, которые лгут кодом выхода.
+    await writeFile(
+      join(p.repo, 'violated.mjs'),
+      `import { writeFileSync } from 'node:fs';
+writeFileSync(process.env.DEVCONTOUR_PROPERTY_REPORT, JSON.stringify({ version: 1, properties: [
+  { testId: 'knapsack-optimal', status: 'failed', cases: 3, counterexample: { original: { items: [], cap: 1 }, expected: 1, actual: 0 } },
+] }));
+`,
+    );
+    await writeFile(join(p.repo, 'silent.mjs'), 'process.exitCode = 0;\n');
+    await git(p.repo, 'init', '-q', '-b', 'main');
+    await git(p.repo, 'add', '.');
+    await git(p.repo, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'project');
+    const gate = (command: string) => ({
+      id: 'properties',
+      kind: 'test' as const,
+      command: ['node', command],
+      timeoutMs: 5000,
+      property: { path: '.reports/property.json' },
+    });
+    const config = configSchema.parse({
+      version: 1,
+      name: 'Lying gate',
+      repository: p.repo,
+      mode: 'demo',
+      concurrency: 1,
+      maxAttempts: 1,
+      resourceDatabase: join(p.root, 'resources.sqlite'),
+      roles: { qa: { runtime: 'demo' } },
+      reviewer: { runtime: 'demo' },
+      gates: [gate('violated.mjs')],
+      protectedPaths: ['violated.mjs', 'silent.mjs'],
+    });
+    store = new Store(join(p.root, 'state.sqlite'));
+    const h = new DevContour(store, config);
+    const writer: AgentAdapter = {
+      name: 'demo',
+      async execute(r) {
+        if (r.review) return adapters.demo.execute(r);
+        await writeFile(join(r.cwd, 'src/knap.mjs'), variants.correct);
+        return { data: { completed: true, summary: 'ok', discoveries: [] }, log: '', command: [] };
+      },
+    };
+    scheduler = new Scheduler(h, p.root, { ...adapters, demo: writer });
+    await scheduler.init();
+    const evidence = async (title: string) => {
+      const board = h.createBoard(title);
+      const t = h.addTask(board.id, {
+        title,
+        description: 'Проверка лгущего кода выхода.',
+        role: 'qa',
+        acceptance: ['knapsack-optimal'],
+        writePaths: ['src/'],
+      });
+      h.approve(board.id);
+      h.pause(false);
+      await scheduler!.drain();
+      const r = store!.read().runs.findLast((x) => x.taskId === t.id)!;
+      return r.evidence.find((e) => e.gate === 'properties')!;
+    };
+    const violated = await evidence('Violated');
+    assert.equal(violated.exitCode, 0);
+    assert.equal(violated.passed, false);
+    assert.match(violated.summary, /свойство knapsack-optimal нарушено/);
+    h.config.gates = [gate('silent.mjs')];
+    const silent = await evidence('Silent');
+    assert.equal(silent.exitCode, 0);
+    assert.equal(silent.passed, false);
+    assert.match(silent.summary, /не отчиталась: отчёт свойств не записан/);
   } finally {
     await scheduler?.stop();
     store?.close();

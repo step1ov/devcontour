@@ -90,7 +90,8 @@ export class ReviewProbes {
       this.spec.secrets.flatMap((name) => (process.env[name] ? [process.env[name]] : [])),
     );
     const limitMs = this.limit(input.timeoutMs);
-    const base = { argv: input.argv, limitMs, stdout: '', stderr: '' };
+    // Аргументы — тоже сохраняемое поле: секрет в них попадал в результат и журнал.
+    const base = { argv: input.argv.map((part) => redact(part)), limitMs, stdout: '', stderr: '' };
     let result: ProbeResult;
     // Меньше секунды на команду — это уже не проверка, а гарантированный
     // таймаут: честнее сказать, что время кончилось.

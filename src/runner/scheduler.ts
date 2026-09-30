@@ -718,7 +718,13 @@ export class Scheduler {
           claimed: r.executed,
           observed:
             !!r.command &&
-            (probes ?? []).some((p) => JSON.stringify(p.argv) === JSON.stringify(r.command)),
+            // Подтверждает только состоявшийся запуск: исчерпанный бюджет и
+            // отказ до старта — не наблюдение, а его отсутствие.
+            (probes ?? []).some(
+              (p) =>
+                ['passed', 'failed', 'timeout'].includes(p.status as string) &&
+                JSON.stringify(p.argv) === JSON.stringify(r.command),
+            ),
         },
       ];
     });
