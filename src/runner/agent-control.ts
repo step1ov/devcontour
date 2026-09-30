@@ -7,7 +7,8 @@ import { join, resolve, sep } from 'node:path';
 import { isolation } from './isolation.ts';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { DevContour, digest, specDigest } from '../core/service.ts';
+import { DevContour, contractDigest, digest, specDigest } from '../core/service.ts';
+import { pinArtifacts } from './contract-artifacts.ts';
 import {
   type Approval,
   type ContractAttempt,
@@ -30,6 +31,14 @@ export const contractProposal = z
     title: z.string().trim().min(1).max(180),
     content: z.string().trim().min(1).max(60000).optional(),
     file: relativePath.optional(),
+    /**
+     * Нормативные файлы договора в том же компоненте: схема, приёмка, эталон.
+     * Их содержимое входит в ревью и в digest контракта.
+     */
+    artifacts: z
+      .array(z.object({ path: relativePath, purpose: z.string().trim().min(1).max(200) }))
+      .max(50)
+      .optional(),
   })
   .refine((p) => Boolean(p.content) !== Boolean(p.file), {
     message: 'Укажите либо file — путь к контракту в репозитории, либо content',
@@ -214,16 +223,33 @@ export async function reviewContract(
   runtimes: Runtimes = adapters,
 ) {
   const parsed = contractProposal.parse(input);
-  const proposal = { ...parsed, content: await contractContent(h, parsed) };
+  const content = await contractContent(h, parsed);
+  const owner = repository(h.config, parsed.repositoryId ?? defaultOwner(h));
+  const pinned = await pinArtifacts(owner, parsed.artifacts ?? []);
+  const contractId = contractDigest(content, pinned.artifacts);
+  // Повтор совпадает с утверждённым контрактом, только если совпали и
+  // артефакты: изменённая схема при прежнем тексте — новый договор.
   const existing = h.store
     .read()
     .contracts.find(
       (c) =>
-        c.title === proposal.title &&
-        c.content === proposal.content &&
-        c.repositoryId === proposal.repositoryId,
+        c.title === parsed.title &&
+        c.repositoryId === parsed.repositoryId &&
+        c.digest === contractId,
     );
-  if (existing) return { status: 'already-approved', contract: existing };
+  // Контракт без manifest по-прежнему работает, но закреплён только текст.
+  const warning = pinned.artifacts.length
+    ? undefined
+    : 'Контракт без artifacts: закреплён только документ; схемы и файлы приёмки, на которые он ссылается, могут измениться без ревью';
+  if (existing)
+    return { status: 'already-approved', contract: existing, ...(warning ? { warning } : {}) };
+  // Ревьюер читает неизменный снимок: закреплённое содержимое артефактов, а
+  // не рабочие файлы, которые могут измениться во время ревью.
+  const proposal = {
+    ...parsed,
+    content,
+    ...(pinned.contents.length ? { artifacts: pinned.contents } : {}),
+  };
   const approval = await review(
     h,
     root,
@@ -233,8 +259,17 @@ export async function reviewContract(
     runtimes,
     proposal.repositoryId,
   );
+  // Решение относится к просмотренному снимку. Если за время ревью изменился
+  // HEAD с другим содержимым артефактов или сам документ, одобрение к
+  // текущему дереву не относится.
+  const after = await pinArtifacts(owner, parsed.artifacts ?? []);
+  if (contractDigest(await contractContent(h, parsed), after.artifacts) !== contractId)
+    throw new DomainError(
+      'Контракт или его артефакты изменились во время ревью; отправьте его на ревью заново',
+      409,
+    );
   if (h.config.approvalMode === 'operator')
-    return { status: 'awaiting-operator', proposal, approval };
+    return { status: 'awaiting-operator', proposal, approval, ...(warning ? { warning } : {}) };
   return {
     status: 'approved',
     contract: h.contract(
@@ -243,7 +278,9 @@ export async function reviewContract(
       approval,
       proposal.repositoryId,
       proposal.file,
+      pinned.artifacts,
     ),
+    ...(warning ? { warning } : {}),
   };
 }
 

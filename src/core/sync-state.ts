@@ -1,6 +1,6 @@
 import { portableTest, unprovenReason } from './proof.ts';
 import { validatePreparation } from './preparation.ts';
-import { digest, specDigest, type DevContour } from './service.ts';
+import { contractDigest, digest, specDigest, type DevContour } from './service.ts';
 import { repository, requiresContract } from './repositories.ts';
 import { assertDag } from './graph.ts';
 import { validateTaskContext } from './workflow.ts';
@@ -165,6 +165,9 @@ export function recordsFromState(h: DevContour, s: DevContourState) {
         // Путь к документу — часть происхождения контракта. Без него клон
         // восстанавливает текст, не зная, какому файлу в дереве он отвечает.
         source: c.source,
+        // Закреплённые артефакты — часть договора: без них клон считал бы
+        // digest по одному тексту и не узнал бы, какие файлы закреплены.
+        ...(c.artifacts ? { artifacts: c.artifacts } : {}),
         approvedAt: c.approvedAt,
       },
     });
@@ -250,7 +253,10 @@ export function stateFromRecords(
   const contracts = all.filter((x) => x.record.kind === 'contract');
   s.contracts = contracts.map(({ owner, record }) => {
     if (record.kind !== 'contract') throw new Error('Contract expected');
-    if (owner !== record.data.repositoryId || digest(record.data.content) !== record.data.digest)
+    if (
+      owner !== record.data.repositoryId ||
+      contractDigest(record.data.content, record.data.artifacts) !== record.data.digest
+    )
       throw new Error('Неверный владелец или digest контракта: ' + record.data.id);
     const previous = old.contracts.find((c) => c.id === record.data.id);
     if (previous && (previous.digest !== record.data.digest || previous.repositoryId !== owner))

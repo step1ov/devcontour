@@ -28,6 +28,7 @@ import { reserveRepositories } from './ownership.ts';
 import { runGate } from './gates.ts';
 import { isolation } from './isolation.ts';
 import { continuableDraft, implementationBasis } from '../core/reuse.ts';
+import { assertArtifactsInBase, componentArtifacts } from './contract-artifacts.ts';
 
 // Гейты прогона — область доказательства задачи, если она объявлена. Полный
 // набор профиля остаётся обязательным для приёмки доски и релиза, но требовать
@@ -489,6 +490,12 @@ export class Scheduler {
         ...this.h.config.contextPacks
           .filter((pack) => pack.repositoryId === repo.id)
           .flatMap((pack) => pack.files),
+        // Нормативные артефакты контракта — договор, а не результат задачи:
+        // исполнитель, правящий эталон или приёмку, подгонял бы проверку.
+        ...componentArtifacts(
+          this.h.store.read().contracts.filter((c) => task.contracts.includes(c.id)),
+          repo.id,
+        ).map((a) => a.path),
       ]),
     );
     if (forbidden.length)
@@ -769,6 +776,21 @@ export class Scheduler {
             return { runId: run.id, dependencies: run.dependencies };
           });
           const base = await git(repo.path, 'rev-parse', this.targetFor(repo.id));
+          // Гейты и исполнитель читают артефакты из базы прогона: в ней должна
+          // лежать именно закреплённая контрактом редакция, а не более ранняя
+          // или правленная после ревью.
+          const stale = await assertArtifactsInBase(
+            repo.path,
+            base,
+            componentArtifacts(
+              contracts.filter((c) => task.contracts.includes(c.id)),
+              repo.id,
+            ),
+          );
+          if (stale.length)
+            throw new BlockedError(
+              `База прогона не содержит закреплённых контрактом редакций: ${stale.join(', ')}. Перенесите их в базу (update-base) или проведите ревью контракта по текущей редакции`,
+            );
           const cwd = join(this.runRoot(task.repositoryId), 'worktrees', run.id);
           run.baseSha = base;
           const memory = new ProjectMemory(this.h).recall(

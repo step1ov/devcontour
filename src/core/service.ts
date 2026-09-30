@@ -26,6 +26,7 @@ import {
   taskInput,
   discoveryInput,
   type Contract,
+  type ContractArtifact,
   type Task,
   type DevContourState,
   type Config,
@@ -57,6 +58,24 @@ export const specDigest = (t: Task) =>
     ...(t.resources?.length ? { resources: t.resources } : {}),
     ...(t.finding ? { finding: t.finding } : {}),
   });
+/**
+ * Digest контракта: документ и, если объявлены, нормативные артефакты —
+ * путь, назначение и содержимое. Контракт без артефактов сохраняет прежний
+ * digest текста, и утверждённые раньше задачи остаются действительными.
+ */
+export function contractDigest(content: string, artifacts?: ContractArtifact[]) {
+  return artifacts?.length
+    ? digest({
+        content,
+        artifacts: artifacts.map((a) => ({
+          repositoryId: a.repositoryId,
+          path: a.path,
+          purpose: a.purpose,
+          digest: a.digest,
+        })),
+      })
+    : digest(content);
+}
 /**
  * Более поздняя утверждённая редакция того же контракта. Каждое утверждение
  * создаёт новый id, и задача, привязанная к прежнему, проходила утверждение и
@@ -308,6 +327,7 @@ export class DevContour {
     approval: Approval = { actor: 'operator' },
     repositoryId?: string,
     source?: string,
+    artifacts?: ContractArtifact[],
   ) {
     if (repositoryId) repository(this.config, repositoryId);
     if (!title.trim() || !content.trim() || content.length > 60000)
@@ -319,7 +339,8 @@ export class DevContour {
         title,
         content,
         source,
-        digest: digest(content),
+        ...(artifacts?.length ? { artifacts } : {}),
+        digest: contractDigest(content, artifacts),
         approvedAt: now(),
         approval,
       };

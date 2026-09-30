@@ -7,7 +7,7 @@ import { complete, fixture, input } from './helpers.ts';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { reviewContract, reviewPlan, acceptBoard } from '../src/runner/agent-control.ts';
-import { specDigest } from '../src/core/service.ts';
+import { digest, specDigest, supersededBy } from '../src/core/service.ts';
 import type { AgentAdapter, AgentRequest } from '../src/runner/adapters.ts';
 
 function runtimes(action?: (r: AgentRequest) => void, blocking = false) {
@@ -474,6 +474,122 @@ test('Ревью плана выпускает только выбранные �
       /Не черновики этой доски/,
     );
   } finally {
+    f.cleanup();
+  }
+});
+
+test('A contract pins its normative artifacts: a changed schema is a new contract that needs review', async () => {
+  const f = fixture();
+  const repo = await repositoryFixture(f);
+  const sh = (...args: string[]) =>
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@e', ...args], {
+      cwd: repo.path,
+    });
+  try {
+    sh('init', '-q', '-b', 'main');
+    await mkdir(join(repo.path, 'docs/contracts'), { recursive: true });
+    await writeFile(
+      join(repo.path, 'docs/contracts/catalog.md'),
+      '# Catalog\n\nSee schema.json.\n',
+    );
+    await writeFile(join(repo.path, 'schema.json'), '{"price":"string"}\n');
+    sh('add', '.');
+    sh('commit', '-qm', 'contract');
+    const proposal = {
+      title: 'Catalog API v1',
+      file: 'docs/contracts/catalog.md',
+      artifacts: [{ path: 'schema.json', purpose: 'Схема ответа' }],
+    };
+    const prompts: string[] = [];
+    const count = () => runtimes((r) => prompts.push(r.prompt));
+
+    const first = (await reviewContract(f.h, f.root, proposal, 'codex', count())) as {
+      status: string;
+      warning?: string;
+    };
+    assert.equal(first.status, 'approved');
+    assert.equal(first.warning, undefined);
+    const pinned = f.store.read().contracts[0];
+    assert.equal(pinned.artifacts?.[0].path, 'schema.json');
+    assert.match(pinned.artifacts?.[0].revision ?? '', /^[a-f0-9]{40}$/);
+    assert.notEqual(pinned.digest, digest(pinned.content), 'digest охватывает артефакты');
+    // Ревьюер видит закреплённое содержимое артефакта, а не только ссылку.
+    assert.match(prompts[0], /\\"price\\":\\"string\\"/);
+
+    // Тот же текст и та же схема — повтор без нового ревью.
+    assert.equal(
+      (await reviewContract(f.h, f.root, proposal, 'codex', count())).status,
+      'already-approved',
+    );
+    assert.equal(prompts.length, 1);
+
+    // Схема изменилась, документ прежний: раньше это отвечало «уже
+    // утверждено» с прежним digest, и задачи шли по другому договору.
+    await writeFile(join(repo.path, 'schema.json'), '{"price":"number"}\n');
+    sh('commit', '-qam', 'schema');
+    const second = await reviewContract(f.h, f.root, proposal, 'codex', count());
+    assert.equal(second.status, 'approved');
+    assert.equal(prompts.length, 2, 'изменённый артефакт прошёл ревью');
+    const [c1, c2] = f.store.read().contracts;
+    assert.notEqual(c1.digest, c2.digest);
+    assert.equal(c1.content, c2.content);
+    assert.equal(supersededBy(f.store.read().contracts, c1.id)?.id, c2.id);
+
+    // Незакоммиченная правка не закрепляется: ревью видело бы то, чего нет
+    // в истории.
+    await writeFile(join(repo.path, 'schema.json'), '{"price":"boolean"}\n');
+    await assert.rejects(reviewContract(f.h, f.root, proposal, 'codex', count()), /закоммитьте/);
+    sh('checkout', '--', 'schema.json');
+    const refuse = async (artifacts: { path: string; purpose: string }[], reason: RegExp) =>
+      assert.rejects(
+        reviewContract(f.h, f.root, { ...proposal, artifacts }, 'codex', count()),
+        reason,
+      );
+    await symlink('/etc/hosts', join(repo.path, 'hosts.json'));
+    await refuse([{ path: 'hosts.json', purpose: 'x' }], /symlink/);
+    await writeFile(join(repo.path, 'untracked.json'), '{}');
+    await refuse([{ path: 'untracked.json', purpose: 'x' }], /не в Git/);
+    await refuse([{ path: 'none.json', purpose: 'x' }], /не найден/);
+    await refuse(
+      [
+        { path: 'schema.json', purpose: 'x' },
+        { path: 'schema.json', purpose: 'y' },
+      ],
+      /дважды/,
+    );
+    assert.equal(prompts.length, 2, 'отказы — до ревью');
+
+    // Подмена во время ревью: ревьюер видел одну редакцию, в дереве другая.
+    await writeFile(join(repo.path, 'schema.json'), '{"price":"decimal"}\n');
+    sh('commit', '-qam', 'decimal');
+    await assert.rejects(
+      reviewContract(
+        f.h,
+        f.root,
+        proposal,
+        'codex',
+        runtimes(() => {
+          execFileSync('sh', ['-c', 'echo \'{"price":"int"}\' > schema.json'], { cwd: repo.path });
+          sh('commit', '-qam', 'during review');
+        }),
+      ),
+      /изменились во время ревью/,
+    );
+    assert.equal(f.store.read().contracts.length, 2);
+
+    // Контракт без артефактов — прежний договор с видимым предупреждением.
+    const legacy = (await reviewContract(
+      f.h,
+      f.root,
+      { title: 'Legacy', content: 'Only text.' },
+      'codex',
+      count(),
+    )) as { warning?: string; contract: { digest: string; artifacts?: unknown } };
+    assert.match(legacy.warning ?? '', /только документ/);
+    assert.equal(legacy.contract.artifacts, undefined);
+    assert.equal(legacy.contract.digest, digest('Only text.'));
+  } finally {
+    await repo.remove();
     f.cleanup();
   }
 });

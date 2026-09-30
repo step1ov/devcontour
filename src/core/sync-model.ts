@@ -101,6 +101,19 @@ export const recordSchema = z.discriminatedUnion('kind', [
       content: z.string().min(1).max(60000),
       digest: hash,
       source: relativePath.optional(),
+      artifacts: z
+        .array(
+          z.strictObject({
+            repositoryId: syncId,
+            path: relativePath,
+            purpose: z.string().min(1).max(200),
+            revision: z.string().regex(/^[a-f0-9]{40,64}$/),
+            blob: z.string().regex(/^[a-f0-9]{40,64}$/),
+            digest: hash,
+          }),
+        )
+        .max(50)
+        .optional(),
       approvedAt: date,
     }),
   }),

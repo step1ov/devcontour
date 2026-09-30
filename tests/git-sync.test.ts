@@ -18,7 +18,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Store } from '../src/core/store.ts';
 import { DevContour, digest, specDigest } from '../src/core/service.ts';
-import { recordsFromState } from '../src/core/sync-state.ts';
+import { recordsFromState, stateFromRecords } from '../src/core/sync-state.ts';
 import { canonical } from '../src/core/sync-model.ts';
 import { syncGit, assertTeamCheckout } from '../src/runner/git-sync.ts';
 import { repositories } from '../src/core/repositories.ts';
@@ -648,6 +648,43 @@ test("A contract's document path survives export into Git", () => {
       (record.data as { source?: string }).source,
       'docs/contracts/catalog.md',
       'путь контракта должен уходить в Git вместе с текстом',
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Pinned contract artifacts travel through Git and a changed artifact digest is refused', () => {
+  const f = fixture();
+  try {
+    const a = f.create('alice');
+    const artifact = {
+      repositoryId: 'main',
+      path: 'schema.json',
+      purpose: 'Схема ответа',
+      revision: 'a'.repeat(40),
+      blob: 'b'.repeat(40),
+      digest: 'c'.repeat(64),
+    };
+    const contract = a.h.contract(
+      'Каталог',
+      'Ответ по schema.json.',
+      { actor: 'operator' },
+      'main',
+      undefined,
+      [artifact],
+    );
+    const records = recordsFromState(a.h, a.store.read());
+    const record = Object.values(records.get('main')!).find((r) => r.kind === 'contract')!;
+    assert.deepEqual((record.data as { artifacts?: unknown }).artifacts, [artifact]);
+    const b = f.create('bob');
+    const restored = stateFromRecords(b.h, b.store.read(), records, new Map());
+    assert.deepEqual(restored.contracts.find((c) => c.id === contract.id)?.artifacts, [artifact]);
+    // Подменённый артефакт при прежнем digest контракта — не тот договор.
+    (record.data as { artifacts: (typeof artifact)[] }).artifacts[0].digest = 'd'.repeat(64);
+    assert.throws(
+      () => stateFromRecords(b.h, b.store.read(), records, new Map()),
+      /digest контракта/,
     );
   } finally {
     f.cleanup();

@@ -200,6 +200,19 @@ export interface Board {
   description: string;
   revisions: Revision[];
 }
+/**
+ * Нормативный артефакт контракта: схема, файл приёмки, эталон. Закреплён
+ * закоммиченной ревизией: изменение содержимого — другой контракт.
+ */
+export interface ContractArtifact {
+  repositoryId: string;
+  path: string;
+  /** Зачем артефакт договору: «схема ответа», «приёмочные тесты». */
+  purpose: string;
+  revision: string;
+  blob: string;
+  digest: string;
+}
 export interface Contract {
   repositoryId?: string;
   id: string;
@@ -213,6 +226,11 @@ export interface Contract {
    * живёт контракт и что именно закреплено.
    */
   source?: string;
+  /**
+   * Нормативные артефакты, закреплённые вместе с документом. Нет поля —
+   * прежний договор: закреплён только текст контракта.
+   */
+  artifacts?: ContractArtifact[];
   approvedAt: string;
   approval?: Approval;
 }
