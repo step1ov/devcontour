@@ -239,6 +239,9 @@ export class ContractChanges {
     try {
       while (op.status === 'running' && op.step < steps.length) {
         const step = steps[op.step];
+        // Вход сверяется перед каждым шагом, а не только до ревью: редакция,
+        // появившаяся после ревью, иначе ушла бы в базу под чужим одобрением.
+        await this.assertInputs(op);
         const outcome = await this.run(step, op);
         if (outcome.wait) {
           this.settle(op, 'waiting', outcome.wait, outcome.waitingFor);
@@ -292,7 +295,6 @@ export class ContractChanges {
     const repo = repository(this.h.config, op.owner);
     switch (step) {
       case 'hold': {
-        await this.assertInputs(op);
         const impact = await contractImpact(this.h, op.proposal);
         const held = [...impact.tasks.direct, ...impact.tasks.transitive]
           .filter((t) => !['done', 'cancelled'].includes(t.status))
@@ -318,13 +320,15 @@ export class ContractChanges {
         return {};
       }
       case 'review': {
-        await this.assertInputs(op);
+        // Регистрация редакции — под проверкой владения в той же транзакции:
+        // ответ ревью, пришедший после перехвата операции, ничего не создаёт.
         const result = await reviewContract(
           this.h,
           this.root,
           op.proposal,
           op.authorRuntime,
           this.runtimes,
+          () => this.guard(op),
         );
         if (!('contract' in result) || !result.contract)
           throw new DomainError('Ревью контракта не зарегистрировало редакцию: ' + result.status);
@@ -397,25 +401,22 @@ export class ContractChanges {
           ...(op.proposal.file ? [op.proposal.file] : []),
           ...(op.proposal.artifacts ?? []).map((a) => a.path),
         ]);
-        for (const r of repositories(this.h.config)) {
-          const behind = Number(
-            await git(r.path, 'rev-list', '--count', `refs/heads/${r.targetBranch}..HEAD`),
+        // Переносится ровно проверенный commit и только в компоненте
+        // контракта: подготовка других компонентов остаётся за ведущим.
+        const reviewed = op.expected.head;
+        const paths = (
+          await git(repo.path, 'log', '--format=', '--name-only', `${target}..${reviewed}`)
+        )
+          .split('\n')
+          .filter(Boolean);
+        const extra = [...new Set(paths.filter((p) => !allowed.has(p)))];
+        if (extra.length)
+          throw new DomainError(
+            `Рабочая ветка несёт изменения вне контракта: ${extra.slice(0, 20).join(', ')}. Перенесите базу явно (base-update) и продолжите операцию`,
           );
-          if (!behind) continue;
-          if (r.id !== repo.id)
-            throw new DomainError(
-              `Компонент ${r.id} тоже несёт неперенесённую подготовку; перенесите базу явно (base-update) и продолжите операцию`,
-            );
-          const paths = (await git(r.path, 'log', '--format=', '--name-only', `${target}..HEAD`))
-            .split('\n')
-            .filter(Boolean);
-          const extra = [...new Set(paths.filter((p) => !allowed.has(p)))];
-          if (extra.length)
-            throw new DomainError(
-              `Рабочая ветка несёт изменения вне контракта: ${extra.slice(0, 20).join(', ')}. Перенесите базу явно (base-update) и продолжите операцию`,
-            );
-        }
-        const updated = await updateBase(this.h.config, this.root);
+        // Перенос базы — внешний эффект: только действующим владельцем.
+        this.guard(op);
+        const updated = await updateBase(this.h.config, this.root, { [repo.id]: reviewed });
         this.advanceStep(op, (current) => {
           if (updated.updated.length)
             this.log(

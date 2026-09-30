@@ -224,19 +224,14 @@ test('A contract change waits for running attempts, refuses concurrent changes a
 test('A contract change does not move base work that is not part of the contract, and holds stay consistent', async () => {
   const s = await stage();
   try {
+    // Посторонняя работа уже лежит в рабочей ветке к началу операции.
+    execFileSync('sh', ['-c', 'echo x > unrelated.txt'], { cwd: s.repo });
+    s.sh('add', 'unrelated.txt');
+    s.sh('commit', '-qm', 'unrelated');
     const { operation } = (await s.changes().start(s.proposal, 'codex')) as {
       operation: ContractChange;
     };
-    // После перепривязки в рабочую ветку попала посторонняя работа.
-    const failed = await s
-      .changes((step) => {
-        if (step === 'rebind') {
-          execFileSync('sh', ['-c', 'echo x > unrelated.txt'], { cwd: s.repo });
-          s.sh('add', 'unrelated.txt');
-          s.sh('commit', '-qm', 'unrelated');
-        }
-      })
-      .advance(operation.id);
+    const failed = await s.changes().advance(operation.id);
     assert.equal(failed.status, 'failed');
     assert.equal(failed.next, 'base');
     assert.match(failed.error ?? '', /вне контракта: unrelated\.txt/);
@@ -253,6 +248,82 @@ test('A contract change does not move base work that is not part of the contract
     );
     // Чужое удержание — конфликт для другой операции.
     assert.throws(() => s.h.hold([s.api.id], 'CC-other', 'test'), /другая операция/);
+  } finally {
+    await s.remove();
+  }
+});
+
+test('A redaction committed after review makes the operation stale and moves nothing', async () => {
+  const s = await stage();
+  try {
+    const { operation } = (await s.changes().start(s.proposal, 'codex')) as {
+      operation: ContractChange;
+    };
+    // Ревью одобрило схему number; после него в тот же файл закоммитили boolean.
+    const stopped = await s
+      .changes((step) => {
+        if (step === 'review') throw new Error('stop after review');
+      })
+      .advance(operation.id);
+    assert.equal(stopped.next, 'rebind');
+    const base = s.sh('rev-parse', 'devcontour/accepted');
+    await writeFile(join(s.repo, 'schema.json'), '{"price":"boolean"}\n');
+    s.sh('commit', '-qam', 'boolean after review');
+    const resumed = await s.changes().advance(operation.id);
+    assert.equal(resumed.status, 'stale', resumed.error);
+    assert.equal(s.sh('rev-parse', 'devcontour/accepted'), base, 'база не сдвинута');
+    assert.equal(s.task(s.api.id).hold?.operation, operation.id, 'удержание сохранено');
+    assert.deepEqual(s.task(s.api.id).contracts, [s.c1.id], 'перепривязки не было');
+  } finally {
+    await s.remove();
+  }
+});
+
+test('A review answer that arrives after the operation was taken over registers nothing', async () => {
+  const s = await stage();
+  try {
+    const { operation } = (await s.changes().start(s.proposal, 'codex')) as {
+      operation: ContractChange;
+    };
+    // Первый владелец зависает в ревью контракта дольше своего lease.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => (entered = resolve));
+    const slow = (name: 'codex' | 'claude'): AgentAdapter => ({
+      name,
+      async execute() {
+        entered();
+        await held;
+        return {
+          data: { approved: true, summary: 'Late', findings: [], discoveries: [] },
+          log: 'fixture',
+          command: ['fixture'],
+        };
+      },
+    });
+    const first = new ContractChanges(s.h, s.root, {
+      codex: slow('codex'),
+      claude: slow('claude'),
+    });
+    const late = first.advance(operation.id);
+    await started;
+    s.store.atomic(() =>
+      s.store.saveLocal('contract-change', operation.owner, operation.id, {
+        ...first.get(operation.id),
+        leaseUntil: Date.now() - 1,
+      }),
+    );
+    // Второй владелец штатно перехватывает и завершает операцию.
+    const second = await s.changes().advance(operation.id);
+    assert.equal(second.status, 'completed', second.error);
+    const c2 = s.store.read().contracts.at(-1)!;
+    // Запоздавший ответ первого владельца приходит после этого.
+    release();
+    await late;
+    assert.equal(s.store.read().contracts.length, 2, 'запоздавшее ревью не создало редакцию');
+    assert.deepEqual(s.task(s.api.id).contracts, [c2.id]);
+    assert.equal(s.changes().get(operation.id).status, 'completed');
   } finally {
     await s.remove();
   }

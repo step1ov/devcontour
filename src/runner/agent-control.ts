@@ -251,6 +251,11 @@ export async function reviewContract(
   input: unknown,
   author: Author,
   runtimes: Runtimes = adapters,
+  /**
+   * Проверка владельца перед регистрацией — в той же транзакции. Ответ ревью,
+   * пришедший после потери владения операцией, не создаёт редакцию.
+   */
+  beforeCommit: () => void = () => {},
 ) {
   const parsed = contractProposal.parse(input);
   const content = await contractContent(h, parsed);
@@ -302,14 +307,17 @@ export async function reviewContract(
     return { status: 'awaiting-operator', proposal, approval, ...(warning ? { warning } : {}) };
   return {
     status: 'approved',
-    contract: h.contract(
-      proposal.title,
-      proposal.content,
-      approval,
-      proposal.repositoryId,
-      proposal.file,
-      pinned.artifacts,
-    ),
+    contract: h.store.atomic(() => {
+      beforeCommit();
+      return h.contract(
+        proposal.title,
+        proposal.content,
+        approval,
+        proposal.repositoryId,
+        proposal.file,
+        pinned.artifacts,
+      );
+    }),
     ...(warning ? { warning } : {}),
   };
 }

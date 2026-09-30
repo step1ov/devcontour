@@ -8,7 +8,16 @@ import type { Config } from '../core/model.ts';
 // ветка интеграции оставалась там, где её создали, и исполнитель получал дерево
 // без работы, ради которой его запустили. Здесь перенос базы делается явно и
 // целиком: очередь стоит, попыток нет, результат — один SHA на репозиторий.
-export async function updateBase(config: Config, dataRoot: string) {
+export async function updateBase(
+  config: Config,
+  dataRoot: string,
+  /**
+   * Перенести только эти компоненты и ровно на эти commit, а не на текущий
+   * HEAD: операция, проверившая одну редакцию, не переносит ту, что появилась
+   * в рабочей ветке после проверки.
+   */
+  only?: Record<string, string>,
+) {
   const updated: {
     repositoryId: string;
     branch: string;
@@ -17,14 +26,14 @@ export async function updateBase(config: Config, dataRoot: string) {
     commits: number;
     kind: 'fast-forward' | 'merge';
   }[] = [];
-  for (const repo of repositories(config)) {
+  for (const repo of repositories(config).filter((r) => !only || r.id in only)) {
     const target = `refs/heads/${repo.targetBranch}`;
-    const head = await git(repo.path, 'rev-parse', 'HEAD');
+    const head = only?.[repo.id] ?? (await git(repo.path, 'rev-parse', 'HEAD'));
     const tip = await git(repo.path, 'rev-parse', target);
     if (head === tip) continue;
-    const behind = Number(await git(repo.path, 'rev-list', '--count', `${target}..HEAD`));
+    const behind = Number(await git(repo.path, 'rev-list', '--count', `${target}..${head}`));
     if (!behind) continue;
-    const ahead = Number(await git(repo.path, 'rev-list', '--count', `HEAD..${target}`));
+    const ahead = Number(await git(repo.path, 'rev-list', '--count', `${head}..${target}`));
     if (!ahead) {
       // Цель — предок рабочей ветки: история не теряется и не переписывается.
       await git(repo.path, 'update-ref', target, head, tip);
