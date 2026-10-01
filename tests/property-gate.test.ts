@@ -521,8 +521,14 @@ for (const [name, script, problem] of [
     `import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';\nimport { dirname, join } from 'node:path';\nconst report = process.env.DEVCONTOUR_PROPERTY_REPORT;\nwriteFileSync(report, JSON.stringify({ version: 1, properties: [{ testId: 'knapsack-optimal', status: 'passed', cases: 1 }] }));\nconst nested = join(dirname(report), process.env.SECRET);\nmkdirSync(join(nested, 'inner'), { recursive: true });\nchmodSync(nested, 0o000);\nconsole.log('DONE REPORT=' + report);\n`,
     /не убран/,
   ],
+  [
+    // FIFO на месте отчёта: чтение без писателя ждало бы бесконечно.
+    'replaces its report with a FIFO',
+    `import { execFileSync } from 'node:child_process';\nexecFileSync('mkfifo', [process.env.DEVCONTOUR_PROPERTY_REPORT]);\nconsole.log('DONE');\n`,
+    /не обычный файл/,
+  ],
 ] as const)
-  test(`A check that ${name} still leaves negative evidence`, async () => {
+  test(`A check that ${name} still leaves negative evidence`, { timeout: 60000 }, async () => {
     const p = await project();
     let store: Store | undefined, scheduler: Scheduler | undefined;
     let leftover: string | undefined;

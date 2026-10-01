@@ -439,6 +439,12 @@ test('A hung git update-ref inside the transaction is stopped by its time limit'
   const realGit = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
   const path = process.env.PATH;
   const limit = ContractChanges.refMoveTimeoutMs;
+  // Тест ставит свой короткий предел; рабочий предел должен быть конечным
+  // и короче lease, иначе зависший Git держал бы базу контура без срока.
+  assert.ok(
+    Number.isFinite(limit) && limit > 0 && limit <= 60000,
+    `рабочий предел сдвига ref: ${limit} мс`,
+  );
   try {
     // Git, который зависает только на сдвиге ref; остальное — настоящий Git.
     await writeFile(

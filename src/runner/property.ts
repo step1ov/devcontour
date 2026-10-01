@@ -33,7 +33,13 @@ export async function readPropertyReport(
     return { problem: 'отчёт свойств вне worktree' } as const;
   let text: string;
   try {
-    const handle = await open(join(dir, basename(path)), constants.O_RDONLY | constants.O_NOFOLLOW);
+    // O_NONBLOCK: FIFO на месте отчёта без писателя иначе держал бы open
+    // бесконечно, и evidence не записывалось бы вовсе. Тип проверяется по
+    // открытому дескриптору; обычный файл от флага не меняется.
+    const handle = await open(
+      join(dir, basename(path)),
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
     try {
       const stat = await handle.stat();
       if (!stat.isFile()) return { problem: 'отчёт свойств — не обычный файл' } as const;
