@@ -264,17 +264,23 @@ export function stateFromRecords(
     // Неизменяема вся запись, а не только digest: убранная версия
     // закрепления или другой blob при прежнем digest давали историю, которую
     // следующий клон уже не принимал.
+    // Сравниваются все переносимые поля: другое название при прежнем digest
+    // давало клоны с разными контрактами и разным составом затронутых задач.
     const pinned = (c: {
+      title: string;
       content: string;
       source?: string;
       artifacts?: unknown;
       pinVersion?: number;
+      approvedAt: string;
     }) =>
       JSON.stringify({
+        title: c.title,
         content: c.content,
         source: c.source ?? null,
         artifacts: c.artifacts ?? null,
         pinVersion: c.pinVersion ?? null,
+        approvedAt: c.approvedAt,
       });
     if (
       previous &&

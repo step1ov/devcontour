@@ -721,6 +721,25 @@ test('Pinned contract artifacts travel through Git sync between clones and a sub
     });
     git(a.repo, 'commit', '-am', 'Drop pin version');
     assert.throws(() => syncGit(a.h), /неизменяем|digest контракта/);
+    git(a.repo, 'reset', '-q', '--hard', 'HEAD~1');
+    // Поля вне digest ловит только сравнение всей записи: другое название
+    // или дата утверждения давали клоны с разными контрактами.
+    for (const [field, value] of [
+      ['title', 'Переименованный каталог'],
+      ['approvedAt', '2020-01-01T00:00:00.000Z'],
+    ] as const) {
+      rewrite(file, (record: { data: Record<string, unknown> }) => {
+        record.data[field] = value;
+      });
+      git(a.repo, 'commit', '-am', 'Change ' + field);
+      assert.throws(() => syncGit(a.h), /неизменяем/, field);
+      git(a.repo, 'reset', '-q', '--hard', 'HEAD~1');
+      assert.equal(
+        a.store.read().contracts.find((c) => c.id === contract.id)?.title,
+        'Каталог',
+        `${field}: локальная запись не тронута`,
+      );
+    }
   } finally {
     f.cleanup();
   }
