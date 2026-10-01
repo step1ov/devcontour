@@ -679,7 +679,12 @@ for (const [name, script, mode] of [
       let store: Store | undefined, scheduler: Scheduler | undefined;
       let scratch: string | undefined;
       process.env.DEVCONTOUR_TEST_PROPERTY_SECRET = SECRET;
-      // Только каталоги, появившиеся во время этого прогона.
+      // Свой временный каталог: файлы тестов идут параллельными процессами,
+      // и каталоги контура других проверок иначе попадали бы в сравнение.
+      // os.tmpdir() читает TMPDIR при каждом вызове.
+      const ownTmp = await realpath(await mkdtemp(join(tmpdir(), 'devcontour-own-tmp-')));
+      const systemTmp = process.env.TMPDIR;
+      process.env.TMPDIR = ownTmp;
       const before = new Set(await readdir(tmpdir()));
       try {
         await writeFile(join(p.repo, 'leak.mjs'), script);
@@ -775,6 +780,12 @@ for (const [name, script, mode] of [
       } finally {
         delete process.env.DEVCONTOUR_TEST_PROPERTY_SECRET;
         if (scratch) await removeControllerDir(scratch, 'dc-gate-', SECRET);
+        if (systemTmp === undefined) delete process.env.TMPDIR;
+        else process.env.TMPDIR = systemTmp;
+        // Удаляется только каталог, созданный этим тестом.
+        for (const entry of await readdir(ownTmp))
+          await chmod(join(ownTmp, entry), 0o700).catch(() => undefined);
+        await rm(ownTmp, { recursive: true, force: true });
         await scheduler?.stop();
         store?.close();
         await rm(p.root, { recursive: true, force: true });
