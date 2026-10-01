@@ -710,6 +710,17 @@ test('Pinned contract artifacts travel through Git sync between clones and a sub
     });
     assert.throws(() => syncGit(consistent.h, { member: 'dave' }), /подменено/);
     assert.equal(consistent.store.read().contracts.length, 0, 'импорт не применён');
+    // Убранная версия закрепления у уже известного контракта — изменение
+    // утверждённой записи, а не повод выгрузить историю, которую следующий
+    // клон не примет.
+    const file = readdirSync(join(a.repo, '.devcontour'), { recursive: true })
+      .map((x) => join(a.repo, '.devcontour', String(x)))
+      .find((x) => x.endsWith('.json') && readFileSync(x, 'utf8').includes(contract.id))!;
+    rewrite(file, (value: { data: { pinVersion?: number } }) => {
+      delete value.data.pinVersion;
+    });
+    git(a.repo, 'commit', '-am', 'Drop pin version');
+    assert.throws(() => syncGit(a.h), /неизменяем|digest контракта/);
   } finally {
     f.cleanup();
   }
@@ -814,6 +825,17 @@ test('Contracts pinned by the first formula keep syncing, stay approved and are 
     );
     git(peer.repo, 'commit', '-am', 'Tamper');
     assert.throws(() => syncGit(peer.h, { member: 'carol' }), /подменено/);
+    // У записи первой формулы blob не входит в digest: подмена blob у уже
+    // известного контракта сохраняет digest, а сверка с Git идёт только для
+    // новых. Её ловит сравнение всей записи.
+    const known = readdirSync(join(a.repo, '.devcontour'), { recursive: true })
+      .map((x) => join(a.repo, '.devcontour', String(x)))
+      .find((x) => x.endsWith('.json') && readFileSync(x, 'utf8').includes(legacy.id))!;
+    rewrite(known, (value: { data: { artifacts: ContractArtifact[] } }) => {
+      value.data.artifacts[0].blob = git(a.repo, 'rev-parse', 'HEAD:other.json');
+    });
+    git(a.repo, 'commit', '-am', 'Swap blob of a known record');
+    assert.throws(() => syncGit(a.h), /неизменяем/);
   } finally {
     f.cleanup();
   }

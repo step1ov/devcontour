@@ -261,7 +261,27 @@ export function stateFromRecords(
     )
       throw new Error('Неверный владелец или digest контракта: ' + record.data.id);
     const previous = old.contracts.find((c) => c.id === record.data.id);
-    if (previous && (previous.digest !== record.data.digest || previous.repositoryId !== owner))
+    // Неизменяема вся запись, а не только digest: убранная версия
+    // закрепления или другой blob при прежнем digest давали историю, которую
+    // следующий клон уже не принимал.
+    const pinned = (c: {
+      content: string;
+      source?: string;
+      artifacts?: unknown;
+      pinVersion?: number;
+    }) =>
+      JSON.stringify({
+        content: c.content,
+        source: c.source ?? null,
+        artifacts: c.artifacts ?? null,
+        pinVersion: c.pinVersion ?? null,
+      });
+    if (
+      previous &&
+      (previous.digest !== record.data.digest ||
+        previous.repositoryId !== owner ||
+        pinned(previous) !== pinned(record.data))
+    )
       throw new Error('Утверждённый контракт неизменяем: ' + record.data.id);
     return previous ?? record.data;
   });
