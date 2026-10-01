@@ -464,7 +464,7 @@ export class ContractChanges {
       );
     const content = await contractContent(this.h, op.proposal, op.expected.head);
     const pinned = await pinArtifacts(repo, op.proposal.artifacts ?? []);
-    if (contractDigest(content, pinned.artifacts) !== op.expected.proposedDigest)
+    if (contractDigest(content, pinned.artifacts, 2) !== op.expected.proposedDigest)
       throw new StaleChange('Предложение изменилось после начала операции');
   }
 }

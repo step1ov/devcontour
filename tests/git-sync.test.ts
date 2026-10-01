@@ -706,7 +706,7 @@ test('Pinned contract artifacts travel through Git sync between clones and a sub
     // Blob и согласованно пересчитанный digest: подмену ловит сверка с Git.
     const consistent = tampered('artifacts-d', (r) => {
       r.data.artifacts[0].blob = other;
-      r.data.digest = contractDigest(r.data.content, r.data.artifacts);
+      r.data.digest = contractDigest(r.data.content, r.data.artifacts, 2);
     });
     assert.throws(() => syncGit(consistent.h, { member: 'dave' }), /подменено/);
     assert.equal(consistent.store.read().contracts.length, 0, 'импорт не применён');
@@ -739,6 +739,23 @@ test('Contracts pinned by the first formula keep syncing, stay approved and are 
       },
     ];
     const content = 'Ответ по schema.json.';
+    // Формула первой версии записана здесь независимо от contractDigest:
+    // тест, считающий «старую» запись той же функцией, прошёл бы и при
+    // ошибочном выборе формулы в ней.
+    const firstFormula = (text: string, pins: ContractArtifact[]) =>
+      createHash('sha256')
+        .update(
+          JSON.stringify({
+            content: text,
+            artifacts: pins.map((a) => ({
+              repositoryId: a.repositoryId,
+              path: a.path,
+              purpose: a.purpose,
+              digest: a.digest,
+            })),
+          }),
+        )
+        .digest('hex');
     // Запись, как её сохранил прежний код: без версии и без blob в digest.
     const legacy = a.store.change('fixture.legacy-contract', (s) => {
       const c = {
@@ -747,13 +764,19 @@ test('Contracts pinned by the first formula keep syncing, stay approved and are 
         title: 'Каталог',
         content,
         artifacts,
-        digest: contractDigest(content, artifacts, undefined),
+        digest: firstFormula(content, artifacts),
         approvedAt: new Date().toISOString(),
         approval: { actor: 'operator' as const },
       };
       s.contracts.push(c);
       return c;
     });
+    // Утверждённая задача держит digest старой записи.
+    const board = a.h.createBoard('Каталог', '', 'main');
+    const task = a.h.addTask(board.id, { ...input(), role: 'backend', contracts: [legacy.id] });
+    a.h.approve(board.id);
+    const approved = a.store.read().tasks.find((t) => t.id === task.id)!;
+    assert.equal(approved.contractDigests[legacy.id], legacy.digest);
     syncGit(a.h);
     a.commit();
     // Существующая история синхронизируется и переносится в новый клон.
@@ -762,6 +785,9 @@ test('Contracts pinned by the first formula keep syncing, stay approved and are 
     const imported = b.store.read().contracts.find((c) => c.id === legacy.id)!;
     assert.equal(imported.digest, legacy.digest, 'digest истории не переписан');
     assert.equal(imported.pinVersion, undefined);
+    const moved = b.store.read().tasks.find((t) => t.id === task.id)!;
+    assert.equal(moved.approvedDigest, approved.approvedDigest, 'утверждение задачи перенесено');
+    assert.equal(moved.contractDigests[legacy.id], legacy.digest);
     // Тот же договор не требует нового ревью и не выглядит изменённым.
     const proposal = {
       title: 'Каталог',
@@ -783,7 +809,7 @@ test('Contracts pinned by the first formula keep syncing, stay approved and are 
       file,
       (value: { data: { content: string; digest: string; artifacts: ContractArtifact[] } }) => {
         value.data.artifacts[0].blob = git(a.repo, 'rev-parse', 'HEAD:other.json');
-        value.data.digest = contractDigest(value.data.content, value.data.artifacts, undefined);
+        value.data.digest = firstFormula(value.data.content, value.data.artifacts);
       },
     );
     git(peer.repo, 'commit', '-am', 'Tamper');

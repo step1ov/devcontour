@@ -280,7 +280,7 @@ export async function reviewContract(
   const content = await contractContent(h, parsed, revision);
   const owner = repository(h.config, parsed.repositoryId ?? defaultOwner(h));
   const pinned = await pinArtifacts(owner, parsed.artifacts ?? []);
-  const contractId = contractDigest(content, pinned.artifacts);
+  const contractId = contractDigest(content, pinned.artifacts, 2);
   // Повтор совпадает с утверждённым контрактом, только если совпали и
   // артефакты: изменённая схема при прежнем тексте — новый договор.
   const existing = h.store.read().contracts.find(
@@ -317,7 +317,7 @@ export async function reviewContract(
   // HEAD с другим содержимым артефактов или сам документ, одобрение к
   // текущему дереву не относится.
   const after = await pinArtifacts(owner, parsed.artifacts ?? []);
-  if (contractDigest(await contractContent(h, parsed, revision), after.artifacts) !== contractId)
+  if (contractDigest(await contractContent(h, parsed, revision), after.artifacts, 2) !== contractId)
     throw new DomainError(
       'Контракт или его артефакты изменились во время ревью; отправьте его на ревью заново',
       409,

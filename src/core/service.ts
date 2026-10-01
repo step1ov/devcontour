@@ -66,8 +66,13 @@ export const specDigest = (t: Task) =>
  */
 export function contractDigest(
   content: string,
-  artifacts?: ContractArtifact[],
-  pinVersion: 2 | undefined = 2,
+  artifacts: ContractArtifact[] | undefined,
+  /**
+   * Формула закрепления записи — всегда явно. Значение по умолчанию здесь
+   * опасно: явно переданный undefined тоже получил бы его, и запись первой
+   * формулы проверялась бы по второй.
+   */
+  pinVersion: 2 | undefined,
 ) {
   return artifacts?.length
     ? digest({
@@ -370,7 +375,7 @@ export class DevContour {
         content,
         source,
         ...(artifacts?.length ? { artifacts, pinVersion: 2 as const } : {}),
-        digest: contractDigest(content, artifacts),
+        digest: contractDigest(content, artifacts, artifacts?.length ? 2 : undefined),
         approvedAt: now(),
         approval,
       };
