@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { DomainError, type Contract } from '../core/model.ts';
@@ -414,9 +415,20 @@ export class ContractChanges {
           throw new DomainError(
             `Рабочая ветка несёт изменения вне контракта: ${extra.slice(0, 20).join(', ')}. Перенесите базу явно (base-update) и продолжите операцию`,
           );
-        // Перенос базы — внешний эффект: только действующим владельцем.
-        this.guard(op);
-        const updated = await updateBase(this.h.config, this.root, { [repo.id]: reviewed });
+        // Перенос базы — внешний эффект: сдвиг ref выполняется синхронно в той
+        // же транзакции, что проверка владения. Отмена или перехват операции
+        // либо видны проверке, либо происходят уже после сдвига — окна между
+        // ними нет. Слияние до этого шага ничего не публикует.
+        const updated = await updateBase(
+          this.h.config,
+          this.root,
+          { [repo.id]: reviewed },
+          (repoPath, target, to, from) =>
+            this.h.store.atomic(() => {
+              this.guard(op);
+              execFileSync('git', ['update-ref', target, to, from], { cwd: repoPath });
+            }),
+        );
         this.advanceStep(op, (current) => {
           if (updated.updated.length)
             this.log(

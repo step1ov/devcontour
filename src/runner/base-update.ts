@@ -17,6 +17,17 @@ export async function updateBase(
    * в рабочей ветке после проверки.
    */
   only?: Record<string, string>,
+  /**
+   * Сдвиг ref — единственный внешний эффект переноса. По умолчанию он идёт
+   * обычной командой; владелец операции передаёт сюда синхронный сдвиг внутри
+   * своей транзакции, чтобы проверка владения и сдвиг не разделялись окном.
+   */
+  move: (repoPath: string, target: string, to: string, from: string) => void | Promise<void> = (
+    repoPath,
+    target,
+    to,
+    from,
+  ) => git(repoPath, 'update-ref', target, to, from).then(() => undefined),
 ) {
   const updated: {
     repositoryId: string;
@@ -36,7 +47,7 @@ export async function updateBase(
     const ahead = Number(await git(repo.path, 'rev-list', '--count', `${head}..${target}`));
     if (!ahead) {
       // Цель — предок рабочей ветки: история не теряется и не переписывается.
-      await git(repo.path, 'update-ref', target, head, tip);
+      await move(repo.path, target, head, tip);
       updated.push({
         repositoryId: repo.id,
         branch: repo.targetBranch,
@@ -64,7 +75,7 @@ export async function updateBase(
         head,
       );
       const merged = await git(cwd, 'rev-parse', 'HEAD');
-      await git(repo.path, 'update-ref', target, merged, tip);
+      await move(repo.path, target, merged, tip);
       updated.push({
         repositoryId: repo.id,
         branch: repo.targetBranch,

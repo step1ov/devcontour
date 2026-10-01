@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import cp, { execFileSync } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,6 +10,8 @@ import { reviewContract } from '../src/runner/agent-control.ts';
 import { ContractChanges, type ContractChange } from '../src/runner/contract-change.ts';
 import type { AgentAdapter, AgentRequest } from '../src/runner/adapters.ts';
 import { readyTasks } from '../src/core/graph.ts';
+import { Store } from '../src/core/store.ts';
+import { DevContour } from '../src/core/service.ts';
 
 /** Ревьюер-фикстура: одобряет и считает вызовы по предмету ревью. */
 function reviewers(calls: string[]) {
@@ -335,6 +338,59 @@ test('Operator mode keeps contract changes with the operator', async () => {
     s.h.config.approvalMode = 'operator';
     await assert.rejects(s.changes().start(s.proposal, 'codex'), /оператор/);
   } finally {
+    await s.remove();
+  }
+});
+
+test('A base move cannot happen after the operation was abandoned inside the base step', async () => {
+  const s = await stage();
+  const other = new Store(join(s.root, 'state.sqlite'));
+  const second = new ContractChanges(
+    new DevContour(other, { ...s.h.config, mode: 'demo' }),
+    s.root,
+  );
+  const realSpawn = cp.spawn;
+  try {
+    const before = s.sh('rev-parse', 'devcontour/accepted');
+    let armed = false;
+    const held: { operation?: ContractChange } = {};
+    let abandoned: string | undefined;
+    // Окно — внутри переноса базы, после проверки входа и до сдвига ref:
+    // lease истекает, и другой процесс штатно отменяет операцию.
+    cp.spawn = function (this: unknown, command: string, args: string[], options: unknown) {
+      if (
+        armed &&
+        command === 'git' &&
+        args[0] === 'rev-parse' &&
+        args[1] === 'refs/heads/devcontour/accepted'
+      ) {
+        armed = false;
+        other.atomic(() =>
+          other.saveLocal('contract-change', held.operation!.owner, held.operation!.id, {
+            ...second.get(held.operation!.id),
+            leaseUntil: Date.now() - 1,
+          }),
+        );
+        abandoned = second.abandon(held.operation!.id).status;
+      }
+      return realSpawn.call(this, command, args, options as never);
+    } as typeof cp.spawn;
+    syncBuiltinESMExports();
+    const changes = s.changes((step) => {
+      if (step === 'plan') armed = true;
+    });
+    const { operation } = (await changes.start(s.proposal, 'codex')) as {
+      operation: ContractChange;
+    };
+    held.operation = operation;
+    await changes.advance(operation.id);
+    assert.equal(abandoned, 'abandoned');
+    assert.equal(s.sh('rev-parse', 'devcontour/accepted'), before, 'база не сдвинута после отмены');
+    assert.equal(s.changes().get(operation.id).status, 'abandoned');
+  } finally {
+    cp.spawn = realSpawn;
+    syncBuiltinESMExports();
+    other.close();
     await s.remove();
   }
 });
