@@ -62,6 +62,8 @@ const active = (op: ContractChange) =>
   ['queued', 'running', 'waiting', 'failed'].includes(op.status);
 
 export class ContractChanges {
+  /** Предел git update-ref внутри транзакции: зависший Git не держит базу контура. */
+  static refMoveTimeoutMs = 15000;
   constructor(
     readonly h: DevContour,
     readonly root: string,
@@ -435,7 +437,7 @@ export class ContractChanges {
               execFileSync(
                 'git',
                 ['-c', 'core.hooksPath=/dev/null', 'update-ref', target, to, from],
-                { cwd: repoPath, timeout: 15000 },
+                { cwd: repoPath, timeout: ContractChanges.refMoveTimeoutMs },
               );
             }),
         );

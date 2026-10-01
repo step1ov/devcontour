@@ -432,3 +432,40 @@ test('The base ref move inside the transaction runs no repository hooks', async 
     await s.remove();
   }
 });
+
+test('A hung git update-ref inside the transaction is stopped by its time limit', async () => {
+  const s = await stage();
+  const shim = await mkdtemp(join(tmpdir(), 'devcontour-git-shim-'));
+  const realGit = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
+  const path = process.env.PATH;
+  const limit = ContractChanges.refMoveTimeoutMs;
+  try {
+    // Git, который зависает только на сдвиге ref; остальное — настоящий Git.
+    await writeFile(
+      join(shim, 'git'),
+      `#!/bin/sh\nfor a in "$@"; do [ "$a" = update-ref ] && exec sleep 60; done\nexec ${JSON.stringify(realGit)} "$@"\n`,
+    );
+    await chmod(join(shim, 'git'), 0o755);
+    const { operation } = (await s.changes().start(s.proposal, 'codex')) as {
+      operation: ContractChange;
+    };
+    const before = s.sh('rev-parse', 'devcontour/accepted');
+    ContractChanges.refMoveTimeoutMs = 1500;
+    process.env.PATH = `${shim}:${path}`;
+    const started = Date.now();
+    const failed = await s.changes().advance(operation.id);
+    process.env.PATH = path;
+    assert.ok(Date.now() - started < 30000, 'сдвиг ref ограничен сроком');
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.next, 'base');
+    assert.equal(s.sh('rev-parse', 'devcontour/accepted'), before, 'база не сдвинута');
+    // Операция продолжается после устранения причины.
+    const done = await s.changes().advance(operation.id);
+    assert.equal(done.status, 'completed', done.error);
+  } finally {
+    process.env.PATH = path;
+    ContractChanges.refMoveTimeoutMs = limit;
+    await rm(shim, { recursive: true, force: true });
+    await s.remove();
+  }
+});
