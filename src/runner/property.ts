@@ -2,6 +2,7 @@ import { constants } from 'node:fs';
 import { open, realpath } from 'node:fs/promises';
 import { basename, dirname, join, sep } from 'node:path';
 import { propertyReport } from '../core/property.ts';
+import { redactDeep } from './redaction.ts';
 
 const MAX_REPORT = 64 * 1024;
 
@@ -60,7 +61,9 @@ export async function readPropertyReport(
   try {
     const parsed = propertyReport.safeParse(JSON.parse(text));
     if (!parsed.success) return { problem: 'отчёт свойств не по схеме' } as const;
-    return { report: parsed.data } as const;
+    // После разбора строки декодированы: `\\"` стал кавычкой, и форма
+    // секрета снова совпадает с исходной — маска повторяется по значениям.
+    return { report: redactDeep(parsed.data, redact) } as const;
   } catch {
     return { problem: 'отчёт свойств — не JSON' } as const;
   }

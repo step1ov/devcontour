@@ -13,6 +13,7 @@ import { TaskFailure, type FailureKind } from '../core/failure.ts';
 import { portableTest } from '../core/proof.ts';
 import { propertyFailure, propertySeed } from '../core/property.ts';
 import { readPropertyReport } from './property.ts';
+import { redactDeep } from './redaction.ts';
 /** Предел манифеста: полный список тестов крупного проекта в состояние не кладётся. */
 const MANIFEST_LIMIT = 2000;
 /**
@@ -498,23 +499,31 @@ async function executeGate(
   }
   await mkdir(artifactDir, { recursive: true });
   const logPath = join(artifactDir, `${gate.id}.log`);
+  // Сохраняемое доказательство маскируется целиком: команда и команда
+  // повтора несут аргументы, разобранный отчёт — декодированные строки, и
+  // маска отдельных полей в местах их сборки однажды пропускала одно из них.
+  if (redact) log = redact(log);
   await writeFile(logPath, log);
-  h.evidence(run.id, run.token, {
-    kind: 'test',
-    phase,
-    sha,
-    gate: gate.id,
-    passed,
-    command: gate.command,
-    exitCode,
-    log: logPath,
-    digest: digest(log),
-    summary,
-    // Манифест упавшей проверки тоже записывается: он показывает, какие
-    // testcases упали. Подтвердить критерий он не может — evidence не passed.
-    tests: manifest?.cases,
-    testsTruncated: manifest?.truncated || undefined,
-    ...(property ? { property } : {}),
-  });
-  if (!passed) throw new TaskFailure(kind, `${phase}/${gate.id}: ${summary}`);
+  const evidence = redactDeep(
+    {
+      kind: 'test' as const,
+      phase,
+      sha,
+      gate: gate.id,
+      passed,
+      command: gate.command,
+      exitCode,
+      log: logPath,
+      digest: digest(log),
+      summary,
+      // Манифест упавшей проверки тоже записывается: он показывает, какие
+      // testcases упали. Подтвердить критерий он не может — evidence не passed.
+      tests: manifest?.cases,
+      testsTruncated: manifest?.truncated || undefined,
+      ...(property ? { property } : {}),
+    },
+    redact,
+  );
+  h.evidence(run.id, run.token, evidence);
+  if (!passed) throw new TaskFailure(kind, `${phase}/${gate.id}: ${evidence.summary}`);
 }

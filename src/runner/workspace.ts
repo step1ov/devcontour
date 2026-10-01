@@ -12,6 +12,7 @@ import type { Verification, WorkspaceEvidence } from '../core/model.ts';
 import { reserveRepositories } from './ownership.ts';
 import { command, git } from './process.ts';
 import { junitSummary, prepareReportPath, runCheck } from './gates.ts';
+import { composeRedactors, redactDeep } from './redaction.ts';
 
 export class WorkspaceRunner {
   readonly workspace: Workspace;
@@ -135,7 +136,20 @@ export class WorkspaceRunner {
                   exitCode = -1,
                   summary = '';
                 const artifacts: WorkspaceEvidence['artifacts'] = [];
+                // Окружение и маска gate — одни на исполнение и на сохранение.
+                // Окружение строится внутри try: незаданный секрет — отказ gate
+                // с evidence, а не исключение до записи доказательства.
+                let redact = (text: string) => text;
                 try {
+                  const environment = executionEnvironment(
+                    [
+                      this.h.config.environment,
+                      repositories(this.h.config).find((r) => r.id === gate.repositoryId)
+                        ?.environment,
+                    ],
+                    { ...commonEnv },
+                  );
+                  redact = environment.redact;
                   const reportPath = gate.report
                     ? await prepareReportPath(cwd, gate.report.path, 'Report выходит из компонента')
                     : undefined;
@@ -159,19 +173,8 @@ export class WorkspaceRunner {
                     ],
                     controller: [this.root, ...repositories(this.h.config).map((r) => r.path)],
                     settingsDir: join(dir, gate.id),
-                    env: executionEnvironment(
-                      [
-                        this.h.config.environment,
-                        repositories(this.h.config).find((r) => r.id === gate.repositoryId)
-                          ?.environment,
-                      ],
-                      { ...commonEnv, DEVCONTOUR_REPORT_PATH: reportPath },
-                    ).env,
-                    redact: executionEnvironment([
-                      this.h.config.environment,
-                      repositories(this.h.config).find((r) => r.id === gate.repositoryId)
-                        ?.environment,
-                    ]).redact,
+                    env: { ...environment.env, DEVCONTOUR_REPORT_PATH: reportPath },
+                    redact,
                   });
                   exitCode = result.code;
                   log = result.stdout + '\n' + result.stderr;
@@ -184,7 +187,7 @@ export class WorkspaceRunner {
                       throw new Error('Report выходит из компонента');
                     const xml = await readFile(reportPath, 'utf8'),
                       counts = junitSummary(xml);
-                    await writeFile(join(dir, gate.id + '.xml'), xml);
+                    await writeFile(join(dir, gate.id + '.xml'), redact(xml));
                     summary = `${counts.tests} tests, ${counts.failures} failures, ${counts.skipped} skipped`;
                     if (counts.failures || counts.skipped) throw new Error(summary);
                   } else summary = 'Команда завершилась успешно';
@@ -201,21 +204,28 @@ export class WorkspaceRunner {
                   await clean();
                   passed = true;
                 } catch (error) {
-                  summary = error instanceof Error ? error.message : String(error);
+                  // Текст ошибки называет пути, выбранные проверкой: уборка
+                  // её временного каталога, чтение её отчёта.
+                  summary = redact(error instanceof Error ? error.message : String(error));
                   log += '\n' + summary;
                 }
+                log = redact(log);
                 await writeFile(logPath, log);
-                w.evidence(id, run.token, {
-                  gate: gate.id,
-                  command: gate.command,
-                  passed,
-                  exitCode,
-                  log: logPath,
-                  digest: digest(log),
-                  summary,
-                  artifacts,
-                });
-                if (!passed) throw new Error(summary);
+                const evidence = redactDeep(
+                  {
+                    gate: gate.id,
+                    command: gate.command,
+                    passed,
+                    exitCode,
+                    log: logPath,
+                    digest: digest(log),
+                    summary,
+                    artifacts,
+                  },
+                  redact,
+                );
+                w.evidence(id, run.token, evidence);
+                if (!passed) throw new Error(evidence.summary);
               }
             },
           );
@@ -225,8 +235,24 @@ export class WorkspaceRunner {
         },
       );
     } catch (error) {
-      w.fail(id, run.token, error instanceof Error ? error.message : String(error));
-      throw error;
+      // Ошибка проверки сохраняется в Verification и журнал: маска — по
+      // окружениям всех компонентов, чьи секреты могли в неё попасть.
+      // Незаданный секрет сам бывает причиной ошибки: маска строится по тем
+      // окружениям, что удалось собрать, и не подменяет исходную ошибку.
+      const masks = [
+        [this.h.config.environment],
+        ...repositories(this.h.config).map((r) => [this.h.config.environment, r.environment]),
+      ].flatMap((profiles) => {
+        try {
+          return [executionEnvironment(profiles).redact];
+        } catch {
+          return [];
+        }
+      });
+      const redact = composeRedactors(...masks);
+      const message = redact(error instanceof Error ? error.message : String(error));
+      w.fail(id, run.token, message);
+      throw error instanceof Error ? Object.assign(error, { message }) : new Error(message);
     } finally {
       clearTimeout(timer);
       clearInterval(heartbeat);

@@ -518,7 +518,17 @@ async function removeControllerDir(path: string, prefix: string, nested: string)
   await rm(dir, { recursive: true, force: true });
 }
 
-const SECRET = 'property-cleanup-secret-6613';
+// Секрет с кавычкой и обратной косой чертой: в JSON он выглядит как \" и
+// \\, в XML — как сущность. Проверки ищут все формы — проверка одной
+// исходной строки пропустила бы утечку экранированного секрета.
+const SECRET = 'property-cleanup"secret\\6613';
+const leaks = (text: string) =>
+  [
+    SECRET,
+    JSON.stringify(SECRET).slice(1, -1),
+    JSON.stringify(JSON.stringify(SECRET).slice(1, -1)).slice(1, -1),
+    SECRET.replace('"', '&quot;'),
+  ].filter((form) => text.includes(form));
 // Каждый скрипт печатает маркер только после настоящей операции: тест,
 // проходящий с пустым скриптом, ничего не доказывал бы.
 for (const [name, script, problem] of [
@@ -621,9 +631,9 @@ for (const [name, script, problem] of [
       assert.match(e.property?.problem ?? '', problem);
       // Сообщение об ошибке уборки проходит redaction: секрета нет ни в
       // evidence, ни в логе, ни в отказе попытки.
-      assert.equal(JSON.stringify(e).includes(SECRET), false);
-      assert.equal(log.includes(SECRET), false);
-      assert.equal((run.error ?? '').includes(SECRET), false);
+      assert.deepEqual(leaks(JSON.stringify(e)), []);
+      assert.deepEqual(leaks(log), []);
+      assert.deepEqual(leaks(run.error ?? ''), []);
     } finally {
       delete process.env.DEVCONTOUR_TEST_PROPERTY_SECRET;
       // Оставленный проверкой каталог убирается вручную: права вернуть.
@@ -647,6 +657,13 @@ for (const [name, script, mode] of [
   [
     'points its JUnit report at an unreadable file named after a secret',
     `import { chmodSync, symlinkSync, writeFileSync } from 'node:fs';\nimport { join } from 'node:path';\nconst target = join('.reports', process.env.SECRET);\nwriteFileSync(target, '<testsuite><testcase name="a"/></testsuite>');\nchmodSync(target, 0o000);\nsymlinkSync(process.env.SECRET, process.env.DEVCONTOUR_REPORT_PATH);\nconsole.log('DONE');\n`,
+    'none',
+  ],
+  [
+    // Секрет — аргумент команды gate и строка в JSON-отчёте свойств: в
+    // отчёте он экранирован, в команде и команде повтора — как есть.
+    'passes the secret as an argument and reports it in a property counterexample',
+    `import { writeFileSync } from 'node:fs';\nconst s = process.env.SECRET;\nwriteFileSync(process.env.DEVCONTOUR_PROPERTY_REPORT, JSON.stringify({ version: 1, properties: [{ testId: s, status: 'failed', cases: 1, counterexample: { original: { q: s }, expected: s, actual: process.argv[2] } }] }));\nconsole.log('DONE');\n`,
     'none',
   ],
 ] as const)
@@ -686,13 +703,21 @@ for (const [name, script, mode] of [
           roles: { qa: { runtime: 'demo' } },
           reviewer: { runtime: 'demo' },
           gates: [
-            {
-              id: 'tests',
-              kind: 'test',
-              command: ['node', 'leak.mjs'],
-              timeoutMs: 20000,
-              report: { type: 'junit', path: '.reports/junit.xml' },
-            },
+            name.includes('argument')
+              ? {
+                  id: 'tests',
+                  kind: 'test',
+                  command: ['node', 'leak.mjs', SECRET],
+                  timeoutMs: 20000,
+                  property: {},
+                }
+              : {
+                  id: 'tests',
+                  kind: 'test',
+                  command: ['node', 'leak.mjs'],
+                  timeoutMs: 20000,
+                  report: { type: 'junit', path: '.reports/junit.xml' },
+                },
           ],
           protectedPaths: ['leak.mjs'],
         });
@@ -737,11 +762,16 @@ for (const [name, script, mode] of [
           );
           assert.equal(left.length, 1, 'операция проверки действительно выполнена');
           scratch = join(tmpdir(), left[0]);
+          // Отказ уборки scratch не оставляет каталог меток старта.
+          assert.deepEqual(
+            (await readdir(tmpdir())).filter((n) => n.startsWith('dc-start-') && !before.has(n)),
+            [],
+          );
         } else assert.match(log, /DONE/, 'операция проверки действительно выполнена');
         assert.equal(e.passed, false);
-        assert.equal(JSON.stringify(e).includes(SECRET), false, 'нет в evidence');
-        assert.equal(log.includes(SECRET), false, 'нет в логе');
-        assert.equal((run.error ?? '').includes(SECRET), false, 'нет в отказе попытки');
+        assert.deepEqual(leaks(JSON.stringify(e)), [], 'нет в evidence');
+        assert.deepEqual(leaks(log), [], 'нет в логе');
+        assert.deepEqual(leaks(run.error ?? ''), [], 'нет в отказе попытки');
       } finally {
         delete process.env.DEVCONTOUR_TEST_PROPERTY_SECRET;
         if (scratch) await removeControllerDir(scratch, 'dc-gate-', SECRET);

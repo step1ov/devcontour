@@ -572,3 +572,58 @@ test('Git sync preserves product release binding across clones without importing
     await f.close();
   }
 });
+
+test('Joint verification masks secrets in its JUnit copy, evidence, failure and verification error', async () => {
+  const f = await fixture();
+  // Секрет с кавычкой: в JUnit он появляется как XML-сущность, в JSON — как \".
+  const secret = 'joint-secret"7781';
+  process.env.DEVCONTOUR_TEST_JOINT_SECRET = secret;
+  try {
+    f.plan();
+    const change = f.runner.workspace.create({
+      title: 'Релиз с секретом',
+      description: 'Совместная проверка видит секрет окружения.',
+      boardIds: f.boards,
+      releaseId: 'mvp',
+    });
+    await f.run();
+    await f.accept();
+    f.c.environment = {
+      inherit: ['PATH', 'HOME'],
+      values: {},
+      secrets: { SECRET: 'DEVCONTOUR_TEST_JOINT_SECRET' },
+    };
+    const forms = [secret, secret.replace('"', '&quot;'), secret.replace('"', '\\"')];
+    const leaks = (text: string) => forms.filter((form) => text.includes(form));
+    const check = async (script: string) => {
+      f.c.workspaceGates[0].command = [process.execPath, '-e', script];
+      await assert.rejects(f.runner.verify(change.id));
+      const verification = f.store
+        .read()
+        .changeSets.find((c) => c.id === change.id)!
+        .verifications.at(-1)!;
+      const evidence = verification.evidence.at(-1)!;
+      const files = [evidence.log, evidence.log.replace(/\.log$/, '.xml')];
+      for (const file of files) {
+        const text = await readFile(file, 'utf8').catch(() => '');
+        assert.deepEqual(leaks(text), [], file);
+      }
+      assert.deepEqual(leaks(JSON.stringify(evidence)), [], 'evidence');
+      assert.deepEqual(leaks(verification.error ?? ''), [], 'verification.error');
+      return evidence;
+    };
+    // Проваленный testcase с секретом в имени и сообщении.
+    const failed = await check(
+      `const fs=require('fs');fs.mkdirSync('.reports',{recursive:true});const s=process.env.SECRET.replace(/"/g,'&quot;');fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite tests="1" failures="1"><testcase name="'+s+'"><failure message="'+s+'"/></testcase></testsuite>');`,
+    );
+    assert.equal(failed.passed, false);
+    // Отчёт ссылается на недоступный файл, названный секретом: путь — в
+    // тексте ошибки чтения.
+    await check(
+      `const fs=require('fs'),p=require('path');fs.mkdirSync('.reports',{recursive:true});const t=p.join('.reports',process.env.SECRET);fs.writeFileSync(t,'<testsuite/>');fs.chmodSync(t,0);fs.rmSync(process.env.DEVCONTOUR_REPORT_PATH,{force:true});fs.symlinkSync(p.resolve(t),process.env.DEVCONTOUR_REPORT_PATH);`,
+    );
+  } finally {
+    delete process.env.DEVCONTOUR_TEST_JOINT_SECRET;
+    await f.close();
+  }
+});

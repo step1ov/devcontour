@@ -137,3 +137,77 @@ test('Review reproductions form a deduplicated task registry, observed only thro
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('Review findings, summary and review.json are masked in every secret form', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'devcontour-review-redaction-'));
+  await setupDemo(root);
+  const config = loadConfig(join(root, 'config.json'));
+  // Секрет с кавычкой: в review.json он экранирован как \".
+  const secret = 'review"secret-4419';
+  process.env.DEVCONTOUR_TEST_REVIEW_SECRET = secret;
+  config.environment = {
+    inherit: ['PATH', 'HOME'],
+    values: {},
+    secrets: { SECRET: 'DEVCONTOUR_TEST_REVIEW_SECRET' },
+  };
+  const store = new Store(join(root, 'state.sqlite'));
+  const h = new DevContour(store, config);
+  const runtimes = {
+    ...adapters,
+    demo: {
+      name: 'demo' as const,
+      async execute(r: AgentRequest) {
+        if (!r.review) return adapters.demo.execute(r);
+        return {
+          data: {
+            approved: false,
+            summary: 'Fails on ' + secret,
+            discoveries: [],
+            findings: [
+              {
+                severity: 'blocking',
+                message: 'Reads file ' + secret,
+                path: secret,
+                line: null,
+                rule: null,
+                consequence: secret,
+                evidence: 'cat ' + secret,
+                reproduction: null,
+              },
+            ],
+          },
+          log: 'fixture',
+          command: ['fixture', secret],
+        };
+      },
+    },
+  };
+  const scheduler = new Scheduler(h, root, runtimes);
+  const forms = [secret, JSON.stringify(secret).slice(1, -1)];
+  const leaks = (text: string) => forms.filter((form) => text.includes(form));
+  try {
+    await scheduler.init();
+    for (const t of store.read().tasks) if (t.status !== 'done') h.cancel(t.id);
+    const board = h.createBoard('Review secret');
+    const task = h.addTask(board.id, {
+      title: 'Review secret',
+      description: 'Ревьюер называет секрет.',
+      role: 'qa',
+      acceptance: ['catalog-search'],
+    });
+    h.approve(board.id);
+    h.pause(false);
+    await scheduler.drain();
+    const run = store.read().runs.findLast((r) => r.taskId === task.id)!;
+    const review = run.evidence.find((e) => e.kind === 'review')!;
+    assert.ok(review, 'ревью записано');
+    assert.deepEqual(leaks(JSON.stringify(review)), [], 'evidence ревью');
+    assert.deepEqual(leaks(await readFile(review.log, 'utf8')), [], 'review.json');
+    assert.deepEqual(leaks(run.error ?? ''), [], 'отказ попытки');
+  } finally {
+    delete process.env.DEVCONTOUR_TEST_REVIEW_SECRET;
+    await scheduler.stop();
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -1,8 +1,28 @@
 export type Redactor = ((text: string) => string) & { secrets?: readonly string[] };
+const xml = (s: string) =>
+  s.replace(
+    /[&<>"']/g,
+    (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;' })[c]!,
+  );
+/**
+ * Формы, в которых секрет встречается в сохраняемом тексте. Сырой вывод
+ * проверки — не единственный путь: секрет с кавычкой или переводом строки
+ * в JSON-отчёте выглядит как `\"`, в JSON внутри JSON — экранирован дважды,
+ * в JUnit — как XML-сущность. Маска только по исходной строке их пропускала.
+ */
+function forms(secret: string) {
+  const out = new Set([secret, encodeURIComponent(secret), xml(secret)]);
+  let escaped = secret;
+  for (let level = 0; level < 2; level++) {
+    escaped = JSON.stringify(escaped).slice(1, -1);
+    out.add(escaped);
+  }
+  return [...out];
+}
 export function redactor(values: readonly string[]): Redactor {
-  const secrets = [
-    ...new Set(values.filter(Boolean).flatMap((s) => [s, encodeURIComponent(s)])),
-  ].sort((a, b) => b.length - a.length);
+  const secrets = [...new Set(values.filter(Boolean).flatMap(forms))].sort(
+    (a, b) => b.length - a.length,
+  );
   return Object.assign(
     (text: string) => secrets.reduce((out, secret) => out.split(secret).join('[REDACTED]'), text),
     { secrets },
@@ -41,4 +61,25 @@ export function outputRedactor(redact?: Redactor) {
     if (pending.length > 2_000_000) pending = pending.slice(-2_000_000);
     return redact ? redact(ready) : ready;
   };
+}
+
+/**
+ * Замаскировать все строки во вложенной структуре перед сохранением.
+ *
+ * Доказательство собирается из многих полей: итог, команда, команда повтора,
+ * разобранный отчёт, находки ревью, наблюдённые команды. Маскировать каждое
+ * поле в месте его сборки — значит однажды пропустить одно; сохраняемая
+ * запись проходит через эту функцию целиком.
+ */
+export function redactDeep<T>(value: T, redact?: (text: string) => string): T {
+  if (!redact) return value;
+  const walk = (v: unknown): unknown =>
+    typeof v === 'string'
+      ? redact(v)
+      : Array.isArray(v)
+        ? v.map(walk)
+        : v && typeof v === 'object'
+          ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)]))
+          : v;
+  return walk(value) as T;
 }

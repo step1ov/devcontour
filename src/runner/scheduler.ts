@@ -2,7 +2,7 @@ import { taskOwner } from '../core/sync-state.ts';
 import { ProjectMemory } from '../application/memory.ts';
 import { measuredExecute } from './usage.ts';
 import { unobservedReview } from '../core/review.ts';
-import { composeRedactors } from './redaction.ts';
+import { composeRedactors, redactDeep } from './redaction.ts';
 import { timed } from './timing.ts';
 import { assertRequirements, recordRequirements } from './requirements.ts';
 import { snapshotDependencies, assertDependencies, runEnvironment } from './dependencies.ts';
@@ -700,7 +700,12 @@ export class Scheduler {
             };
           })
       : undefined;
-    const review = { ...parsed, inspection, ...(probes ? { probes } : {}) };
+    // Ответ ревьюера и наблюдённые команды CLI несут декодированные строки
+    // проверки — имена файлов, аргументы, вывод: запись маскируется целиком.
+    const review = redactDeep(
+      { ...parsed, inspection, ...(probes ? { probes } : {}) },
+      execution.redact,
+    );
     // Находки с воспроизводимым входом — в реестр задачи. Команда из текста
     // находки не исполняется: запуск подтверждает только журнал контура.
     const reproductions = parsed.findings.flatMap((f) => {
@@ -723,37 +728,43 @@ export class Scheduler {
             (probes ?? []).some(
               (p) =>
                 ['passed', 'failed', 'timeout'].includes(p.status as string) &&
-                JSON.stringify(p.argv) === JSON.stringify(r.command),
+                // Журнал контура хранит аргументы замаскированными.
+                JSON.stringify(p.argv) ===
+                  JSON.stringify(r.command!.map((part) => execution.redact(part))),
             ),
         },
       ];
     });
     if (reproductions.length) this.h.reproductions(run.id, run.token, sha, reproductions);
     await writeFile(log, JSON.stringify(review, null, 2));
-    this.h.evidence(run.id, run.token, {
-      kind: 'review',
-      inspection,
-      phase,
-      sha,
-      gate: 'independent-review',
-      passed,
-      command: result.command,
-      exitCode: passed ? 0 : 1,
-      log,
-      digest: digest(review),
-      summary: `[${inspection.mode}] ${parsed.summary}`,
-      // Находки сохраняются на прогоне: следующая попытка должна получить путь,
-      // строку и следствие, а не одно краткое изложение. Иначе исполнитель
-      // знает, что «что-то не так», и круг повторяется с тем же замечанием.
-      findings: parsed.findings.map((f) => ({
-        severity: f.severity,
-        message: f.message,
-        path: f.path ?? null,
-        line: f.line ?? null,
-      })),
-    });
+    const evidence = redactDeep(
+      {
+        kind: 'review' as const,
+        inspection: review.inspection,
+        phase,
+        sha,
+        gate: 'independent-review',
+        passed,
+        command: result.command,
+        exitCode: passed ? 0 : 1,
+        log,
+        digest: digest(review),
+        summary: `[${review.inspection.mode}] ${review.summary}`,
+        // Находки сохраняются на прогоне: следующая попытка должна получить путь,
+        // строку и следствие, а не одно краткое изложение. Иначе исполнитель
+        // знает, что «что-то не так», и круг повторяется с тем же замечанием.
+        findings: review.findings.map((f) => ({
+          severity: f.severity,
+          message: f.message,
+          path: f.path ?? null,
+          line: f.line ?? null,
+        })),
+      },
+      execution.redact,
+    );
+    this.h.evidence(run.id, run.token, evidence);
     if (!passed)
-      throw new TaskFailure('review', 'Независимое ревью отклонило результат: ' + parsed.summary);
+      throw new TaskFailure('review', 'Независимое ревью отклонило результат: ' + review.summary);
   }
   private async execute(run: Run, controller: AbortController) {
     const signal = controller.signal;
