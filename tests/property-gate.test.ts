@@ -6,13 +6,16 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
+  realpath,
   rename,
   rm,
   symlink,
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { configSchema, type Evidence } from '../src/core/model.ts';
 import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
@@ -500,6 +503,21 @@ console.log('REPORT=' + process.env.DEVCONTOUR_PROPERTY_REPORT + ' SWAPPED=' + s
   }
 });
 
+/**
+ * Убрать каталог, оставленный проверкой. Путь сообщает проверяемый скрипт,
+ * поэтому удаляется только каталог контура: прямо во временном каталоге
+ * системы и с префиксом контура. Любой другой путь — провал теста, а не
+ * удаление: без этой проверки тест однажды удалил весь системный TMPDIR.
+ */
+async function removeControllerDir(path: string, prefix: string, nested: string) {
+  const dir = await realpath(path).catch(() => undefined);
+  if (!dir) return;
+  assert.equal(dirname(dir), await realpath(tmpdir()), `не каталог контура: ${dir}`);
+  assert.ok(basename(dir).startsWith(prefix), `не каталог контура: ${dir}`);
+  await chmod(join(dir, nested), 0o700).catch(() => undefined);
+  await rm(dir, { recursive: true, force: true });
+}
+
 const SECRET = 'property-cleanup-secret-6613';
 // Каждый скрипт печатает маркер только после настоящей операции: тест,
 // проходящий с пустым скриптом, ничего не доказывал бы.
@@ -609,13 +627,127 @@ for (const [name, script, problem] of [
     } finally {
       delete process.env.DEVCONTOUR_TEST_PROPERTY_SECRET;
       // Оставленный проверкой каталог убирается вручную: права вернуть.
-      if (leftover) {
-        const nested = join(dirname(leftover), SECRET);
-        await chmod(nested, 0o700).catch(() => undefined);
-        await rm(dirname(leftover), { recursive: true, force: true });
-      }
+      if (leftover) await removeControllerDir(dirname(leftover), 'dc-property-', SECRET);
       await scheduler?.stop();
       store?.close();
       await rm(p.root, { recursive: true, force: true });
     }
   });
+
+// Общий обработчик ошибок gate: текст ошибки уборки временного каталога
+// проверки или чтения её отчёта называет пути, которые выбрала проверка.
+for (const [name, script, mode] of [
+  [
+    // TMPDIR проверки — каталог контура только под песочницей ОС; без неё
+    // проверка пишет в системный временный каталог.
+    'leaves an unremovable scratch directory named after a secret',
+    `import { chmodSync, mkdirSync } from 'node:fs';\nimport { join } from 'node:path';\nconst nested = join(process.env.TMPDIR, process.env.SECRET);\nmkdirSync(join(nested, 'inner'), { recursive: true });\nchmodSync(nested, 0o000);\nconsole.log('DONE SCRATCH=' + process.env.TMPDIR);\n`,
+    'os',
+  ],
+  [
+    'points its JUnit report at an unreadable file named after a secret',
+    `import { chmodSync, symlinkSync, writeFileSync } from 'node:fs';\nimport { join } from 'node:path';\nconst target = join('.reports', process.env.SECRET);\nwriteFileSync(target, '<testsuite><testcase name="a"/></testsuite>');\nchmodSync(target, 0o000);\nsymlinkSync(process.env.SECRET, process.env.DEVCONTOUR_REPORT_PATH);\nconsole.log('DONE');\n`,
+    'none',
+  ],
+] as const)
+  test(
+    `A check that ${name} does not leak the secret through the gate failure`,
+    { timeout: 60000 },
+    async (t) => {
+      if (mode === 'os' && !isolationSupport().ok) {
+        t.skip('Песочница ОС недоступна');
+        return;
+      }
+      const p = await project();
+      let store: Store | undefined, scheduler: Scheduler | undefined;
+      let scratch: string | undefined;
+      process.env.DEVCONTOUR_TEST_PROPERTY_SECRET = SECRET;
+      // Только каталоги, появившиеся во время этого прогона.
+      const before = new Set(await readdir(tmpdir()));
+      try {
+        await writeFile(join(p.repo, 'leak.mjs'), script);
+        await git(p.repo, 'init', '-q', '-b', 'main');
+        await git(p.repo, 'add', '.');
+        await git(p.repo, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'project');
+        const config = configSchema.parse({
+          version: 1,
+          name: 'Leaking failure',
+          repository: p.repo,
+          mode: 'demo',
+          concurrency: 1,
+          maxAttempts: 1,
+          resourceDatabase: join(p.root, 'resources.sqlite'),
+          isolation: { mode },
+          environment: {
+            inherit: ['PATH', 'HOME'],
+            values: {},
+            secrets: { SECRET: 'DEVCONTOUR_TEST_PROPERTY_SECRET' },
+          },
+          roles: { qa: { runtime: 'demo' } },
+          reviewer: { runtime: 'demo' },
+          gates: [
+            {
+              id: 'tests',
+              kind: 'test',
+              command: ['node', 'leak.mjs'],
+              timeoutMs: 20000,
+              report: { type: 'junit', path: '.reports/junit.xml' },
+            },
+          ],
+          protectedPaths: ['leak.mjs'],
+        });
+        store = new Store(join(p.root, 'state.sqlite'));
+        const h = new DevContour(store, config);
+        const writer: AgentAdapter = {
+          name: 'demo',
+          async execute(r) {
+            if (r.review) return adapters.demo.execute(r);
+            await writeFile(join(r.cwd, 'src/knap.mjs'), variants.correct);
+            return {
+              data: { completed: true, summary: 'ok', discoveries: [] },
+              log: '',
+              command: [],
+            };
+          },
+        };
+        scheduler = new Scheduler(h, p.root, { ...adapters, demo: writer });
+        await scheduler.init();
+        const board = h.createBoard('Leak');
+        const task = h.addTask(board.id, {
+          title: 'Leak',
+          description: 'Проверка оставляет путь с секретом в ошибке.',
+          role: 'qa',
+          acceptance: ['knapsack-optimal'],
+          writePaths: ['src/'],
+        });
+        h.approve(board.id);
+        h.pause(false);
+        await scheduler.drain();
+        const run = store.read().runs.findLast((x) => x.taskId === task.id)!;
+        const e = run.evidence.find((x) => x.gate === 'tests');
+        assert.ok(e, 'evidence записано');
+        const log = await readFile(e.log, 'utf8');
+        if (mode === 'os') {
+          // Отказ уборки обрывает runCheck до сохранения вывода команды:
+          // доказательство операции — оставленный каталог контура с
+          // каталогом-секретом внутри.
+          const left = (await readdir(tmpdir())).filter(
+            (n) =>
+              n.startsWith('dc-gate-') && !before.has(n) && existsSync(join(tmpdir(), n, SECRET)),
+          );
+          assert.equal(left.length, 1, 'операция проверки действительно выполнена');
+          scratch = join(tmpdir(), left[0]);
+        } else assert.match(log, /DONE/, 'операция проверки действительно выполнена');
+        assert.equal(e.passed, false);
+        assert.equal(JSON.stringify(e).includes(SECRET), false, 'нет в evidence');
+        assert.equal(log.includes(SECRET), false, 'нет в логе');
+        assert.equal((run.error ?? '').includes(SECRET), false, 'нет в отказе попытки');
+      } finally {
+        delete process.env.DEVCONTOUR_TEST_PROPERTY_SECRET;
+        if (scratch) await removeControllerDir(scratch, 'dc-gate-', SECRET);
+        await scheduler?.stop();
+        store?.close();
+        await rm(p.root, { recursive: true, force: true });
+      }
+    },
+  );

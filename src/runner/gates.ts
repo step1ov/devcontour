@@ -289,8 +289,14 @@ export async function runCheck(
     }
     return { ...result, attempts };
   } finally {
-    await rm(scratch, { recursive: true, force: true });
-    await rm(marks, { recursive: true, force: true });
+    // Каждый каталог убирается независимо: отказ уборки временного каталога
+    // проверки (она могла снять с него права) не должен оставлять и метки.
+    const removed = await Promise.allSettled([
+      rm(scratch, { recursive: true, force: true }),
+      rm(marks, { recursive: true, force: true }),
+    ]);
+    const failed = removed.find((r) => r.status === 'rejected');
+    if (failed) throw failed.reason;
   }
 }
 /** Проверка механизма песочницы; тест подменяет её, чтобы проверить отказ. */
@@ -431,7 +437,11 @@ async function executeGate(
       throw new Error('Gate изменил отслеживаемые файлы');
     passed = true;
   } catch (error) {
-    summary = error instanceof Error ? error.message : String(error);
+    // Текст ошибки называет пути и аргументы, а их задаёт проверка: уборка её
+    // временного каталога или чтение отчёта, на который она сослалась, иначе
+    // переносили бы секрет в итог, лог и отказ попытки мимо redaction.
+    const message = error instanceof Error ? error.message : String(error);
+    summary = redact ? redact(message) : message;
     log += '\n' + summary;
   }
   // Отчёт свойств читается при любом исходе: провал и таймаут — ровно те
