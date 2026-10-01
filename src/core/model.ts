@@ -474,7 +474,11 @@ export interface Gate {
   timeoutMs: number;
   report?: { type: 'junit'; path: string };
   /** Генеративная проверка: путь отчёта свойств (см. runner/property.ts). */
-  property?: { path: string };
+  /**
+   * Генеративная проверка (см. runner/property.ts). Путь отчёта выбирает
+   * контур — каталог вне worktree; `path` принимается для совместимости.
+   */
+  property?: { path?: string };
   dependsOn?: string[];
   cwd?: string;
   resources?: string[];
@@ -490,7 +494,7 @@ export const gateList = z
       command: z.array(z.string().min(1)).min(1),
       timeoutMs: z.number().positive().default(120000),
       report: z.object({ type: z.literal('junit'), path: z.string().min(1) }).optional(),
-      property: z.object({ path: relativePath }).optional(),
+      property: z.object({ path: relativePath.optional() }).optional(),
     }),
   )
   .min(1);

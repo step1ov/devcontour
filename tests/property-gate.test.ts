@@ -21,6 +21,7 @@ import { adapters, type AgentAdapter } from '../src/runner/adapters.ts';
 import { pinArtifacts } from '../src/runner/contract-artifacts.ts';
 import { command, git } from '../src/runner/process.ts';
 import { readPropertyReport } from '../src/runner/property.ts';
+import { isolationSupport } from '../src/runner/isolation.ts';
 
 // Проект-фикстура: рюкзак на малых входах. Эталон — полный перебор, он
 // закреплён контрактом; генератор и уменьшение входа — в проекте.
@@ -404,6 +405,96 @@ writeFileSync(process.env.DEVCONTOUR_PROPERTY_REPORT, JSON.stringify({ version: 
   } finally {
     await scheduler?.stop();
     store?.close();
+    await rm(p.root, { recursive: true, force: true });
+  }
+});
+
+test('Under OS isolation a property check cannot swap its report directory for a link outside', async (t) => {
+  if (!isolationSupport().ok) {
+    t.skip('Песочница ОС недоступна');
+    return;
+  }
+  const p = await project();
+  let store: Store | undefined, scheduler: Scheduler | undefined;
+  const outside = await mkdtemp(join(tmpdir(), 'devcontour-property-outside-'));
+  try {
+    await writeFile(
+      join(outside, 'report.json'),
+      JSON.stringify({
+        version: 1,
+        properties: [{ testId: 'PRIVATE_OUTSIDE_9922', status: 'passed', cases: 1 }],
+      }),
+    );
+    // Проверка пытается заменить каталог отчёта ссылкой на чужой отчёт.
+    await writeFile(
+      join(p.repo, 'swap.mjs'),
+      `import { renameSync, symlinkSync } from 'node:fs';
+import { dirname } from 'node:path';
+const dir = dirname(process.env.DEVCONTOUR_PROPERTY_REPORT);
+let swapped = false;
+try { renameSync(dir, dir + '-moved'); symlinkSync(${JSON.stringify(outside)}, dir); swapped = true; } catch {}
+console.log('REPORT=' + process.env.DEVCONTOUR_PROPERTY_REPORT + ' SWAPPED=' + swapped);
+`,
+    );
+    await git(p.repo, 'init', '-q', '-b', 'main');
+    await git(p.repo, 'add', '.');
+    await git(p.repo, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'project');
+    const config = configSchema.parse({
+      version: 1,
+      name: 'Swap gate',
+      repository: p.repo,
+      mode: 'demo',
+      concurrency: 1,
+      maxAttempts: 1,
+      resourceDatabase: join(p.root, 'resources.sqlite'),
+      roles: { qa: { runtime: 'demo' } },
+      reviewer: { runtime: 'demo' },
+      gates: [
+        {
+          id: 'properties',
+          kind: 'test',
+          command: ['node', 'swap.mjs'],
+          timeoutMs: 20000,
+          property: {},
+        },
+      ],
+      protectedPaths: ['swap.mjs'],
+    });
+    store = new Store(join(p.root, 'state.sqlite'));
+    const h = new DevContour(store, config);
+    const writer: AgentAdapter = {
+      name: 'demo',
+      async execute(r) {
+        if (r.review) return adapters.demo.execute(r);
+        await writeFile(join(r.cwd, 'src/knap.mjs'), variants.correct);
+        return { data: { completed: true, summary: 'ok', discoveries: [] }, log: '', command: [] };
+      },
+    };
+    scheduler = new Scheduler(h, p.root, { ...adapters, demo: writer });
+    await scheduler.init();
+    const board = h.createBoard('Swap');
+    const task = h.addTask(board.id, {
+      title: 'Swap',
+      description: 'Подмена каталога отчёта.',
+      role: 'qa',
+      acceptance: ['knapsack-optimal'],
+      writePaths: ['src/'],
+    });
+    h.approve(board.id);
+    h.pause(false);
+    await scheduler.drain();
+    const run = store.read().runs.findLast((x) => x.taskId === task.id)!;
+    const e = run.evidence.find((x) => x.gate === 'properties')!;
+    const log = await readFile(e.log, 'utf8');
+    assert.match(log, /SWAPPED=false/, 'песочница не дала заменить каталог отчёта');
+    const reported = /REPORT=(\S+)/.exec(log)![1];
+    assert.equal(reported.startsWith(run.worktree!), false, 'отчёт вне worktree');
+    assert.equal(e.passed, false);
+    assert.equal(JSON.stringify(e).includes('PRIVATE_OUTSIDE_9922'), false);
+  } finally {
+    await scheduler?.stop();
+    store?.close();
+    await rm(outside, { recursive: true, force: true });
     await rm(p.root, { recursive: true, force: true });
   }
 });

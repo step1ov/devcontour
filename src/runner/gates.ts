@@ -343,9 +343,14 @@ async function executeGate(
     : undefined;
   // Генеративная проверка: seed задаёт контур, поэтому он известен и тогда,
   // когда проверка зависла и не успела ничего записать.
-  const propertyPath = gate.property
-    ? await prepareReportPath(cwd, gate.property.path, 'Отчёт свойств выходит из worktree')
+  // Отчёт свойств лежит в каталоге контура вне worktree: проверка пишет
+  // внутрь него, но заменить сам каталог на ссылку наружу не может —
+  // запись в его родителя песочница не даёт. В worktree каталог отчёта
+  // проверка могла подменить между проверкой пути и чтением.
+  const propertyDir = gate.property
+    ? await realpath(await mkdtemp(join(tmpdir(), 'dc-property-')))
     : undefined;
+  const propertyPath = propertyDir ? join(propertyDir, 'report.json') : undefined;
   const seed = propertySeed(run.id, phase, gate.id);
   let kind: FailureKind = 'gate';
   let passed = false,
@@ -370,7 +375,7 @@ async function executeGate(
       redact,
       timeoutMs: gate.timeoutMs,
       signal,
-      write: [cwd],
+      write: [cwd, ...(propertyDir ? [propertyDir] : [])],
       readable: [...(run.dependencies ?? []).map((d) => d.path), ...boundary.readable],
       controller: boundary.hidden,
       settingsDir: join(artifactDir, gate.id),
@@ -433,7 +438,8 @@ async function executeGate(
   // случаи, когда контрпример и вход нужны больше всего.
   let property: Evidence['property'];
   if (propertyPath) {
-    const read = await readPropertyReport(propertyPath, cwd, redact);
+    const read = await readPropertyReport(propertyPath, propertyDir!, redact);
+    await rm(propertyDir!, { recursive: true, force: true });
     const failure = read.report ? propertyFailure(read.report) : '';
     if (failure) {
       passed = false;
