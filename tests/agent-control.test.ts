@@ -811,6 +811,7 @@ test('Contract impact takes the document and artifacts from one commit even if H
     await writeFile(join(repo.path, 'schema.json'), '{"price":"string"}\n');
     sh('add', '.');
     sh('commit', '-qm', 'A');
+    sh('branch', 'devcontour/accepted');
     let armed = true;
     // Между чтением HEAD и закреплением артефактов появляется commit B.
     cp.spawn = function (this: unknown, command: string, args: string[], options: unknown) {
@@ -830,6 +831,10 @@ test('Contract impact takes the document and artifacts from one commit even if H
     const a = impact.proposed.revision;
     assert.notEqual(a, sh('rev-parse', 'HEAD'), 'HEAD сдвинулся во время расчёта');
     assert.equal(impact.changes.artifacts[0].proposedBlob, sh('rev-parse', `${a}:schema.json`));
+    // База на A: для заявленного снимка отставания нет, хотя HEAD уже на B.
+    assert.equal(impact.base.tip, a);
+    assert.equal(impact.base.behind, 0);
+    assert.deepEqual(impact.base.missing, []);
   } finally {
     cp.spawn = realSpawn;
     syncBuiltinESMExports();

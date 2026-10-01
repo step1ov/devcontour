@@ -109,7 +109,9 @@ export async function contractImpact(h: DevContour, input: unknown) {
   const base = {
     branch: owner.targetBranch,
     tip: tip ?? null,
-    behind: tip ? Number(await git(owner.path, 'rev-list', '--count', `${tip}..HEAD`)) : null,
+    // Отставание — от того же commit, из которого взяты документ и
+    // артефакты, а не от позднего HEAD.
+    behind: tip ? Number(await git(owner.path, 'rev-list', '--count', `${tip}..${head}`)) : null,
     missing: [
       ...(parsed.file &&
       !(await inBase(
