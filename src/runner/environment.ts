@@ -47,6 +47,21 @@ export function executionEnvironment(
   Object.assign(env, devcontour);
   return { env, redact: redactor(secretValues) };
 }
+/**
+ * Маска по тем секретам и наследуемым значениям, что заданы, — даже когда
+ * окружение целиком собрать нельзя. Незаданный секрет — причина отказа, но не
+ * повод снимать маску с остальных: известный секрет иначе сохранялся бы в
+ * команде и итоге проверки.
+ */
+export function availableRedactor(profiles: (Environment | undefined)[], source = process.env) {
+  const values: string[] = [];
+  for (const profile of profiles) {
+    if (!profile) continue;
+    for (const key of profile.inherit) if (source[key]) values.push(source[key]);
+    for (const from of Object.values(profile.secrets)) if (source[from]) values.push(source[from]);
+  }
+  return redactor(values);
+}
 export async function runSteps(
   steps: Step[],
   cwd: string,

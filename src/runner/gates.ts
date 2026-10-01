@@ -14,6 +14,8 @@ import { portableTest } from '../core/proof.ts';
 import { propertyFailure, propertySeed } from '../core/property.ts';
 import { readPropertyReport } from './property.ts';
 import { redactDeep } from './redaction.ts';
+import { availableRedactor } from './environment.ts';
+import { repository } from '../core/repositories.ts';
 /** Предел манифеста: полный список тестов крупного проекта в состояние не кладётся. */
 const MANIFEST_LIMIT = 2000;
 /**
@@ -366,6 +368,12 @@ async function executeGate(
     exitCode = -1,
     redact: ((value: string) => string) | undefined,
     manifest: ReturnType<typeof junitSummary> | undefined;
+  // Маска есть до сборки окружения: незаданный секрет обрывает сборку, но
+  // остальные известные секреты всё равно маскируются в итоге и команде.
+  redact = availableRedactor([
+    h.config.environment,
+    repository(h.config, run.repositoryId ?? 'main').environment,
+  ]);
   try {
     const environment = runEnvironment(h.config, run, phase, cwd);
     redact = environment.redact;
@@ -504,26 +512,37 @@ async function executeGate(
   // маска отдельных полей в местах их сборки однажды пропускала одно из них.
   if (redact) log = redact(log);
   await writeFile(logPath, log);
-  const evidence = redactDeep(
-    {
-      kind: 'test' as const,
-      phase,
-      sha,
-      gate: gate.id,
-      passed,
-      command: gate.command,
-      exitCode,
-      log: logPath,
-      digest: digest(log),
-      summary,
-      // Манифест упавшей проверки тоже записывается: он показывает, какие
-      // testcases упали. Подтвердить критерий он не может — evidence не passed.
-      tests: manifest?.cases,
-      testsTruncated: manifest?.truncated || undefined,
-      ...(property ? { property } : {}),
-    },
-    redact,
-  );
+  // Маскируется только диагностика — то, что пришло от проверки или
+  // показывает её команду. Служебные поля (SHA, фаза, id gate, digest, путь
+  // к логу) маска не трогает: короткий секрет иначе портил их, и digest
+  // переставал соответствовать файлу, а ссылка вела в никуда.
+  const mask = (text: string) => (redact ? redact(text) : text);
+  const evidence = {
+    kind: 'test' as const,
+    phase,
+    sha,
+    gate: gate.id,
+    passed,
+    command: gate.command.map(mask),
+    exitCode,
+    log: logPath,
+    digest: digest(log),
+    summary: mask(summary),
+    // Манифест упавшей проверки тоже записывается: он показывает, какие
+    // testcases упали. Подтвердить критерий он не может — evidence не passed.
+    tests: manifest?.cases,
+    testsTruncated: manifest?.truncated || undefined,
+    ...(property
+      ? {
+          property: {
+            ...property,
+            reproduce: mask(property.reproduce),
+            ...(property.report ? { report: redactDeep(property.report, redact) } : {}),
+            ...(property.problem ? { problem: mask(property.problem) } : {}),
+          },
+        }
+      : {}),
+  };
   h.evidence(run.id, run.token, evidence);
   if (!passed) throw new TaskFailure(kind, `${phase}/${gate.id}: ${evidence.summary}`);
 }

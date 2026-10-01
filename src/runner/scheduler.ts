@@ -8,12 +8,12 @@ import { assertRequirements, recordRequirements } from './requirements.ts';
 import { snapshotDependencies, assertDependencies, runEnvironment } from './dependencies.ts';
 import { runSteps, withEnvironment } from './environment.ts';
 import { toolProfileFor, agentEnvironment, reviewerRunsChecks, writerRunsChecks } from './tools.ts';
-import { probeCommand, probeLimits, type ProbeSpec } from './review-probe.ts';
+import { argvDigest, probeCommand, probeLimits, type ProbeSpec } from './review-probe.ts';
 import { orderedGates, withinPaths, validateWorkflow } from '../core/workflow.ts';
 import { taskContext } from './context.ts';
 import { assertTeamCheckout } from './git-sync.ts';
 import { withResources } from './resources.ts';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { mkdir, writeFile, readFile, realpath } from 'node:fs/promises';
@@ -603,6 +603,7 @@ export class Scheduler {
         .filter(([, value]) => value !== undefined && secrets.has(value))
         .map(([name]) => name),
       settingsDir: join(dir, 'probe-settings'),
+      salt: randomBytes(16).toString('hex'),
       log: join(dir, 'probes.jsonl'),
     };
     const specPath = join(dir, 'probe.json');
@@ -610,6 +611,7 @@ export class Scheduler {
     const seconds = (ms: number) => Math.round(ms / 1000);
     return {
       log: spec.log,
+      salt: spec.salt,
       server: {
         ...probeCommand(specPath),
         env: spec.env,
@@ -694,6 +696,7 @@ export class Scheduler {
             const p = JSON.parse(line) as Record<string, unknown>;
             return {
               argv: p.argv,
+              argvDigest: p.argvDigest,
               status: p.status,
               durationMs: p.durationMs,
               limitMs: p.limitMs,
@@ -723,45 +726,48 @@ export class Scheduler {
           claimed: r.executed,
           observed:
             !!r.command &&
-            // Подтверждает только состоявшийся запуск: исчерпанный бюджет и
-            // отказ до старта — не наблюдение, а его отсутствие.
+            // Подтверждает только состоявшийся запуск именно этой команды:
+            // исчерпанный бюджет и отказ до старта — не наблюдение, а
+            // замаскированные аргументы разных команд могут совпадать, поэтому
+            // сравнивается отпечаток исходных.
             (probes ?? []).some(
               (p) =>
                 ['passed', 'failed', 'timeout'].includes(p.status as string) &&
-                // Журнал контура хранит аргументы замаскированными.
-                JSON.stringify(p.argv) ===
-                  JSON.stringify(r.command!.map((part) => execution.redact(part))),
+                p.argvDigest === argvDigest(probe!.salt, r.command!),
             ),
         },
       ];
     });
     if (reproductions.length) this.h.reproductions(run.id, run.token, sha, reproductions);
     await writeFile(log, JSON.stringify(review, null, 2));
-    const evidence = redactDeep(
-      {
-        kind: 'review' as const,
-        inspection: review.inspection,
-        phase,
-        sha,
-        gate: 'independent-review',
-        passed,
-        command: result.command,
-        exitCode: passed ? 0 : 1,
-        log,
-        digest: digest(review),
-        summary: `[${review.inspection.mode}] ${review.summary}`,
-        // Находки сохраняются на прогоне: следующая попытка должна получить путь,
-        // строку и следствие, а не одно краткое изложение. Иначе исполнитель
-        // знает, что «что-то не так», и круг повторяется с тем же замечанием.
-        findings: review.findings.map((f) => ({
+    // Маскируется диагностика ревью; служебные поля (фаза, SHA, id, путь к
+    // review.json и его digest) маска не трогает.
+    const mask = (text: string) => execution.redact(text);
+    const evidence = {
+      kind: 'review' as const,
+      inspection: redactDeep(review.inspection, execution.redact),
+      phase,
+      sha,
+      gate: 'independent-review',
+      passed,
+      command: result.command.map(mask),
+      exitCode: passed ? 0 : 1,
+      log,
+      digest: digest(review),
+      summary: mask(`[${review.inspection.mode}] ${review.summary}`),
+      // Находки сохраняются на прогоне: следующая попытка должна получить путь,
+      // строку и следствие, а не одно краткое изложение. Иначе исполнитель
+      // знает, что «что-то не так», и круг повторяется с тем же замечанием.
+      findings: redactDeep(
+        review.findings.map((f) => ({
           severity: f.severity,
           message: f.message,
           path: f.path ?? null,
           line: f.line ?? null,
         })),
-      },
-      execution.redact,
-    );
+        execution.redact,
+      ),
+    };
     this.h.evidence(run.id, run.token, evidence);
     if (!passed)
       throw new TaskFailure('review', 'Независимое ревью отклонило результат: ' + review.summary);

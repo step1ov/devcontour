@@ -1,4 +1,4 @@
-import { executionEnvironment, withEnvironment } from './environment.ts';
+import { availableRedactor, executionEnvironment, withEnvironment } from './environment.ts';
 import { orderedGates } from '../core/workflow.ts';
 import { withResources } from './resources.ts';
 import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
@@ -12,7 +12,7 @@ import type { Verification, WorkspaceEvidence } from '../core/model.ts';
 import { reserveRepositories } from './ownership.ts';
 import { command, git } from './process.ts';
 import { junitSummary, prepareReportPath, runCheck } from './gates.ts';
-import { composeRedactors, redactDeep } from './redaction.ts';
+import { composeRedactors } from './redaction.ts';
 
 export class WorkspaceRunner {
   readonly workspace: Workspace;
@@ -139,7 +139,10 @@ export class WorkspaceRunner {
                 // Окружение и маска gate — одни на исполнение и на сохранение.
                 // Окружение строится внутри try: незаданный секрет — отказ gate
                 // с evidence, а не исключение до записи доказательства.
-                let redact = (text: string) => text;
+                let redact: (text: string) => string = availableRedactor([
+                  this.h.config.environment,
+                  repositories(this.h.config).find((r) => r.id === gate.repositoryId)?.environment,
+                ]);
                 try {
                   const environment = executionEnvironment(
                     [
@@ -211,19 +214,18 @@ export class WorkspaceRunner {
                 }
                 log = redact(log);
                 await writeFile(logPath, log);
-                const evidence = redactDeep(
-                  {
-                    gate: gate.id,
-                    command: gate.command,
-                    passed,
-                    exitCode,
-                    log: logPath,
-                    digest: digest(log),
-                    summary,
-                    artifacts,
-                  },
-                  redact,
-                );
+                // Маскируется диагностика; id gate, путь к логу, digest и
+                // артефакты — служебные поля, маска их не трогает.
+                const evidence = {
+                  gate: gate.id,
+                  command: gate.command.map(redact),
+                  passed,
+                  exitCode,
+                  log: logPath,
+                  digest: digest(log),
+                  summary: redact(summary),
+                  artifacts,
+                };
                 w.evidence(id, run.token, evidence);
                 if (!passed) throw new Error(evidence.summary);
               }

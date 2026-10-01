@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { appendFile, readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { McpServer, type StandardSchemaWithJSON } from '@modelcontextprotocol/server';
@@ -34,8 +35,19 @@ export const probeSpec = z.object({
   secrets: z.array(z.string()),
   settingsDir: z.string().min(1),
   log: z.string().min(1),
+  /**
+   * Соль отпечатка исходных аргументов. Журнал хранит аргументы
+   * замаскированными, и команды, различающиеся только секретом, в нём
+   * совпадали: незапущенная получала «наблюдено». Отпечаток исходных
+   * аргументов их различает, не храня сам секрет.
+   */
+  salt: z.string().min(16).default('devcontour-probe'),
 });
 export type ProbeSpec = z.infer<typeof probeSpec>;
+
+/** Солёный отпечаток исходных аргументов команды проверки. */
+export const argvDigest = (salt: string, argv: readonly string[]) =>
+  createHash('sha256').update(salt).update('\0').update(JSON.stringify(argv)).digest('hex');
 
 export const probeInput = z.object({
   argv: z.array(z.string().min(1)).min(1).max(64),
@@ -163,7 +175,11 @@ export class ReviewProbes {
     // Журнал — наблюдение контура, а не самоотчёт модели.
     await appendFile(
       this.spec.log,
-      JSON.stringify({ at: new Date().toISOString(), ...result }) + '\n',
+      JSON.stringify({
+        at: new Date().toISOString(),
+        ...result,
+        argvDigest: argvDigest(this.spec.salt, input.argv),
+      }) + '\n',
     ).catch(() => undefined);
     return result;
   }

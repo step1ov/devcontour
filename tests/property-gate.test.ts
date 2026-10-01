@@ -17,12 +17,13 @@ import { tmpdir } from 'node:os';
 import { existsSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { configSchema, type Evidence } from '../src/core/model.ts';
-import { DevContour } from '../src/core/service.ts';
+import { DevContour, digest } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { propertySeed, type PropertyReport } from '../src/core/property.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { adapters, type AgentAdapter } from '../src/runner/adapters.ts';
 import { pinArtifacts } from '../src/runner/contract-artifacts.ts';
+import { runGate } from '../src/runner/gates.ts';
 import { command, git } from '../src/runner/process.ts';
 import { readPropertyReport } from '../src/runner/property.ts';
 import { isolationSupport } from '../src/runner/isolation.ts';
@@ -792,3 +793,187 @@ for (const [name, script, mode] of [
       }
     },
   );
+
+/** Прогон одной задачи с одним gate и заданным окружением; возвращает её попытку. */
+async function runWith(
+  environment: {
+    inherit: string[];
+    values: Record<string, string>;
+    secrets: Record<string, string>;
+  },
+  command: string[],
+) {
+  const p = await project();
+  await writeFile(
+    join(p.repo, 'ok.mjs'),
+    `import { mkdirSync, writeFileSync } from 'node:fs';\nmkdirSync('.reports', { recursive: true });\nwriteFileSync(process.env.DEVCONTOUR_REPORT_PATH, '<testsuite tests="1" failures="0"><testcase name="a test"/></testsuite>');\nconsole.log('a test passed');\n`,
+  );
+  await git(p.repo, 'init', '-q', '-b', 'main');
+  await git(p.repo, 'add', '.');
+  await git(p.repo, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'project');
+  const config = configSchema.parse({
+    version: 1,
+    name: 'Masked fields',
+    repository: p.repo,
+    mode: 'demo',
+    concurrency: 1,
+    maxAttempts: 1,
+    resourceDatabase: join(p.root, 'resources.sqlite'),
+    isolation: { mode: 'none' },
+    environment,
+    roles: { qa: { runtime: 'demo' } },
+    reviewer: { runtime: 'demo' },
+    gates: [
+      {
+        id: 'test',
+        kind: 'test',
+        command,
+        timeoutMs: 20000,
+        report: { type: 'junit', path: '.reports/junit.xml' },
+      },
+    ],
+    protectedPaths: ['ok.mjs'],
+  });
+  const store = new Store(join(p.root, 'state.sqlite'));
+  const h = new DevContour(store, config);
+  const writer: AgentAdapter = {
+    name: 'demo',
+    async execute(r) {
+      if (r.review) return adapters.demo.execute(r);
+      await writeFile(join(r.cwd, 'src/knap.mjs'), variants.correct);
+      return { data: { completed: true, summary: 'ok', discoveries: [] }, log: '', command: [] };
+    },
+  };
+  const scheduler = new Scheduler(h, p.root, { ...adapters, demo: writer });
+  await scheduler.init();
+  const board = h.createBoard('Masked fields');
+  const task = h.addTask(board.id, {
+    title: 'Masked fields',
+    description: 'Проверка служебных полей evidence.',
+    role: 'qa',
+    acceptance: ['a test'],
+    writePaths: ['src/'],
+  });
+  h.approve(board.id);
+  h.pause(false);
+  await scheduler.drain();
+  const run = store.read().runs.findLast((x) => x.taskId === task.id)!;
+  return {
+    run,
+    async close() {
+      await scheduler.stop();
+      store.close();
+      await rm(p.root, { recursive: true, force: true });
+    },
+  };
+}
+
+test('A short secret masks diagnostics but never the service fields of evidence', async () => {
+  // Секрет из одной буквы и наследуемое значение «test» совпадают с частью
+  // SHA, фазы, id gate, пути и digest: маска их не трогает.
+  process.env.DEVCONTOUR_TEST_SHORT_SECRET = 'a';
+  process.env.DCX_TEST_INHERITED = 'test';
+  const r = await runWith(
+    {
+      inherit: ['PATH', 'HOME', 'DCX_TEST_INHERITED'],
+      values: {},
+      secrets: { SHORT: 'DEVCONTOUR_TEST_SHORT_SECRET' },
+    },
+    ['node', 'ok.mjs'],
+  );
+  try {
+    assert.ok(r.run.evidence.length > 0);
+    for (const e of r.run.evidence) {
+      assert.match(e.sha, /^[0-9a-f]{40}$/, `${e.gate}: sha`);
+      assert.ok(['candidate', 'integration'].includes(e.phase), `${e.gate}: phase`);
+      assert.ok(['test', 'review'].includes(e.kind), `${e.gate}: kind`);
+      assert.ok(['test', 'independent-review'].includes(e.gate), `gate ${e.gate}`);
+      assert.match(e.digest, /^[0-9a-f]{64}$/, `${e.gate}: digest`);
+      assert.ok(existsSync(e.log), `${e.gate}: лог по ссылке существует`);
+      assert.equal(digest(await readFile(e.log, 'utf8')), e.digest, `${e.gate}: digest лога`);
+    }
+    // Диагностика при этом замаскирована.
+    const gate = r.run.evidence.find((e) => e.gate === 'test')!;
+    assert.equal(gate.summary.includes('a'), false, gate.summary);
+  } finally {
+    delete process.env.DEVCONTOUR_TEST_SHORT_SECRET;
+    delete process.env.DCX_TEST_INHERITED;
+    await r.close();
+  }
+});
+
+test('A missing secret does not unmask the secrets that are set', async () => {
+  // Gate вызывается напрямую: незаданный секрет ломает и окружение
+  // исполнителя, и до gate обычная попытка не дошла бы.
+  const known = 'known-secret-5512';
+  process.env.DEVCONTOUR_TEST_KNOWN_SECRET = known;
+  delete process.env.DEVCONTOUR_TEST_ABSENT_SECRET;
+  const p = await project();
+  const store = new Store(join(p.root, 'state.sqlite'));
+  try {
+    await git(p.repo, 'init', '-q', '-b', 'main');
+    await git(p.repo, 'add', '.');
+    await git(p.repo, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'project');
+    const gate = {
+      id: 'test',
+      kind: 'test' as const,
+      command: ['node', 'check.mjs', known],
+      timeoutMs: 20000,
+    };
+    const config = configSchema.parse({
+      version: 1,
+      name: 'Missing secret',
+      repository: p.repo,
+      mode: 'demo',
+      resourceDatabase: join(p.root, 'resources.sqlite'),
+      isolation: { mode: 'none' },
+      environment: {
+        inherit: ['PATH', 'HOME'],
+        values: {},
+        secrets: {
+          KNOWN: 'DEVCONTOUR_TEST_KNOWN_SECRET',
+          ABSENT: 'DEVCONTOUR_TEST_ABSENT_SECRET',
+        },
+      },
+      roles: { qa: { runtime: 'demo' } },
+      reviewer: { runtime: 'demo' },
+      gates: [gate],
+    });
+    const h = new DevContour(store, config);
+    const board = h.createBoard('Missing secret');
+    h.addTask(board.id, {
+      title: 'Missing secret',
+      description: 'Один секрет окружения не задан.',
+      role: 'qa',
+      acceptance: ['a test'],
+    });
+    h.approve(board.id);
+    h.pause(false);
+    const run = h.claim('missing-secret')!;
+    const sha = await git(p.repo, 'rev-parse', 'HEAD');
+    await assert.rejects(
+      runGate(
+        h,
+        run,
+        p.repo,
+        sha,
+        'candidate',
+        configSchema.parse(config).gates[0],
+        join(p.root, 'logs'),
+        new AbortController().signal,
+      ),
+      /Не задан секрет окружения/,
+    );
+    const e = store
+      .read()
+      .runs.find((x) => x.id === run.id)!
+      .evidence.at(-1)!;
+    assert.ok(e, 'evidence записано');
+    assert.equal(e.passed, false);
+    assert.equal(JSON.stringify(e).includes(known), false, 'известный секрет замаскирован');
+  } finally {
+    delete process.env.DEVCONTOUR_TEST_KNOWN_SECRET;
+    store.close();
+    await rm(p.root, { recursive: true, force: true });
+  }
+});

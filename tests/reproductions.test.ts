@@ -211,3 +211,84 @@ test('Review findings, summary and review.json are masked in every secret form',
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('Commands that differ only by a secret are not confused when matching observed runs', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'devcontour-observed-'));
+  await setupDemo(root);
+  const config = loadConfig(join(root, 'config.json'));
+  process.env.DEVCONTOUR_TEST_SECRET_A = 'secret-alpha-1123';
+  process.env.DEVCONTOUR_TEST_SECRET_B = 'secret-bravo-5813';
+  config.environment = {
+    inherit: ['PATH', 'HOME'],
+    values: {},
+    secrets: { A: 'DEVCONTOUR_TEST_SECRET_A', B: 'DEVCONTOUR_TEST_SECRET_B' },
+  };
+  const store = new Store(join(root, 'state.sqlite'));
+  const h = new DevContour(store, config);
+  const ran = [process.execPath, '-e', 'process.exit(1)', 'secret-alpha-1123'];
+  const notRun = [process.execPath, '-e', 'process.exit(1)', 'secret-bravo-5813'];
+  const finding = (input: string, command: string[]) => ({
+    severity: 'blocking',
+    message: 'Fails',
+    path: null,
+    line: null,
+    rule: null,
+    consequence: null,
+    evidence: null,
+    reproduction: {
+      property: 'catalog-search',
+      input,
+      expected: null,
+      actual: null,
+      command,
+      executed: true,
+    },
+  });
+  const runtimes = {
+    ...adapters,
+    demo: {
+      name: 'codex' as const,
+      async execute(r: AgentRequest) {
+        if (!r.review) return adapters.demo.execute(r);
+        const path = r.probe!.args[r.probe!.args.indexOf('--spec') + 1];
+        const spec = probeSpec.parse(JSON.parse(await readFile(path, 'utf8')));
+        // Запущена только команда с секретом A.
+        await new ReviewProbes(spec).run({ argv: ran });
+        return {
+          data: {
+            approved: false,
+            summary: 'Two inputs',
+            discoveries: [],
+            findings: [finding('{"q":"a"}', ran), finding('{"q":"b"}', notRun)],
+          },
+          log: 'fixture',
+          command: [],
+        };
+      },
+    },
+  };
+  const scheduler = new Scheduler(h, root, runtimes);
+  try {
+    await scheduler.init();
+    for (const t of store.read().tasks) if (t.status !== 'done') h.cancel(t.id);
+    const board = h.createBoard('Observed');
+    const task = h.addTask(board.id, {
+      title: 'Observed',
+      description: 'Две команды различаются секретом.',
+      role: 'qa',
+      acceptance: ['catalog-search'],
+    });
+    h.approve(board.id);
+    h.pause(false);
+    await scheduler.drain();
+    const registry = (store.read().reproductions ?? []).filter((r) => r.taskId === task.id);
+    assert.equal(registry.find((r) => r.input === '{"q":"a"}')?.observed, true, 'запущенная');
+    assert.equal(registry.find((r) => r.input === '{"q":"b"}')?.observed, false, 'незапущенная');
+  } finally {
+    delete process.env.DEVCONTOUR_TEST_SECRET_A;
+    delete process.env.DEVCONTOUR_TEST_SECRET_B;
+    await scheduler.stop();
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
