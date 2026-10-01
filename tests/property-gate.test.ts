@@ -498,3 +498,75 @@ console.log('REPORT=' + process.env.DEVCONTOUR_PROPERTY_REPORT + ' SWAPPED=' + s
     await rm(p.root, { recursive: true, force: true });
   }
 });
+
+test('A check that deletes its report directory still leaves negative evidence', async () => {
+  const p = await project();
+  let store: Store | undefined, scheduler: Scheduler | undefined;
+  try {
+    await writeFile(
+      join(p.repo, 'vanish.mjs'),
+      `import { rmSync } from 'node:fs';
+import { dirname } from 'node:path';
+rmSync(dirname(process.env.DEVCONTOUR_PROPERTY_REPORT), { recursive: true, force: true });
+`,
+    );
+    await git(p.repo, 'init', '-q', '-b', 'main');
+    await git(p.repo, 'add', '.');
+    await git(p.repo, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'project');
+    const config = configSchema.parse({
+      version: 1,
+      name: 'Vanishing report',
+      repository: p.repo,
+      mode: 'demo',
+      concurrency: 1,
+      maxAttempts: 1,
+      resourceDatabase: join(p.root, 'resources.sqlite'),
+      // Без песочницы проверка вправе удалить каталог отчёта.
+      isolation: { mode: 'none' },
+      roles: { qa: { runtime: 'demo' } },
+      reviewer: { runtime: 'demo' },
+      gates: [
+        {
+          id: 'properties',
+          kind: 'test',
+          command: ['node', 'vanish.mjs'],
+          timeoutMs: 20000,
+          property: {},
+        },
+      ],
+      protectedPaths: ['vanish.mjs'],
+    });
+    store = new Store(join(p.root, 'state.sqlite'));
+    const h = new DevContour(store, config);
+    const writer: AgentAdapter = {
+      name: 'demo',
+      async execute(r) {
+        if (r.review) return adapters.demo.execute(r);
+        await writeFile(join(r.cwd, 'src/knap.mjs'), variants.correct);
+        return { data: { completed: true, summary: 'ok', discoveries: [] }, log: '', command: [] };
+      },
+    };
+    scheduler = new Scheduler(h, p.root, { ...adapters, demo: writer });
+    await scheduler.init();
+    const board = h.createBoard('Vanish');
+    const task = h.addTask(board.id, {
+      title: 'Vanish',
+      description: 'Проверка удаляет каталог отчёта.',
+      role: 'qa',
+      acceptance: ['knapsack-optimal'],
+      writePaths: ['src/'],
+    });
+    h.approve(board.id);
+    h.pause(false);
+    await scheduler.drain();
+    const run = store.read().runs.findLast((x) => x.taskId === task.id)!;
+    const e = run.evidence.find((x) => x.gate === 'properties');
+    assert.ok(e, 'evidence записано');
+    assert.equal(e.passed, false);
+    assert.equal(e.property?.problem, 'отчёт свойств не записан');
+  } finally {
+    await scheduler?.stop();
+    store?.close();
+    await rm(p.root, { recursive: true, force: true });
+  }
+});

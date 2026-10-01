@@ -20,9 +20,11 @@ export async function readPropertyReport(
   root: string,
   redact?: (text: string) => string,
 ) {
-  const base = await realpath(root);
-  let dir: string;
+  // Каталог отчёта мог исчезнуть вместе с отчётом: проверка вправе удалить
+  // его. Это диагностический отказ, а не исключение — evidence записывается.
+  let base: string, dir: string;
   try {
+    base = await realpath(root);
     dir = await realpath(dirname(path));
   } catch {
     return { problem: 'отчёт свойств не записан' } as const;
