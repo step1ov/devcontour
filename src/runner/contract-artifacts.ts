@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { lstat, realpath } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 import { DomainError, type Contract, type ContractArtifact } from '../core/model.ts';
+import { digest } from '../core/service.ts';
 import { git } from './process.ts';
 
 /** Предел текста артефактов, передаваемого ревьюеру вместе с контрактом. */
@@ -98,7 +99,11 @@ export function verifyArtifacts(repoPath: (repositoryId: string) => string, cont
       } catch {
         throw new Error(`Артефакт ${a.path} контракта ${c.id} не найден в Git на ${a.revision}`);
       }
-      if (blob !== a.blob || bytesDigest(bytes) !== a.digest)
+      // Запись первой формулы хранит digest обрезанного текста — как его
+      // давал прежний вывод git; новая — digest точных байтов.
+      const expected =
+        c.pinVersion === 2 ? bytesDigest(bytes) : digest(bytes.toString('utf8').trim());
+      if (blob !== a.blob || expected !== a.digest)
         throw new Error(
           `Артефакт ${a.path} контракта ${c.id} не совпадает с Git: закрепление подменено`,
         );

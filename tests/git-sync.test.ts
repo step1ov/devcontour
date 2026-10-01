@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Preparation } from '../src/core/preparation.ts';
 import { approvePreparation } from './preparation-fixture.ts';
 import { test } from 'node:test';
@@ -19,6 +19,8 @@ import { DatabaseSync } from 'node:sqlite';
 import { Store } from '../src/core/store.ts';
 import { DevContour, contractDigest, digest, specDigest } from '../src/core/service.ts';
 import { pinArtifacts } from '../src/runner/contract-artifacts.ts';
+import { reviewContract } from '../src/runner/agent-control.ts';
+import { contractImpact } from '../src/runner/contract-impact.ts';
 import { recordsFromState } from '../src/core/sync-state.ts';
 import { canonical } from '../src/core/sync-model.ts';
 import { syncGit, assertTeamCheckout } from '../src/runner/git-sync.ts';
@@ -708,6 +710,84 @@ test('Pinned contract artifacts travel through Git sync between clones and a sub
     });
     assert.throws(() => syncGit(consistent.h, { member: 'dave' }), /подменено/);
     assert.equal(consistent.store.read().contracts.length, 0, 'импорт не применён');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Contracts pinned by the first formula keep syncing, stay approved and are still checked against Git', async () => {
+  const f = fixture();
+  try {
+    const a = f.create('legacy-a');
+    syncGit(a.h, { member: 'alice' });
+    // Файл с переводом строки в конце: первая формула брала digest
+    // обрезанного текста, и байтовая сверка его бы отвергла.
+    const schema = '{"price":"number"}\n';
+    writeFileSync(join(a.repo, 'schema.json'), schema);
+    writeFileSync(join(a.repo, 'other.json'), '{"price":"boolean"}\n');
+    git(a.repo, 'add', '.');
+    git(a.repo, 'commit', '-m', 'Schema');
+    const revision = git(a.repo, 'rev-parse', 'HEAD');
+    const artifacts: ContractArtifact[] = [
+      {
+        repositoryId: 'main',
+        path: 'schema.json',
+        purpose: 'Схема ответа',
+        revision,
+        blob: git(a.repo, 'rev-parse', 'HEAD:schema.json'),
+        digest: digest(schema.trim()),
+      },
+    ];
+    const content = 'Ответ по schema.json.';
+    // Запись, как её сохранил прежний код: без версии и без blob в digest.
+    const legacy = a.store.change('fixture.legacy-contract', (s) => {
+      const c = {
+        id: 'C-' + randomUUID(),
+        repositoryId: 'main',
+        title: 'Каталог',
+        content,
+        artifacts,
+        digest: contractDigest(content, artifacts, undefined),
+        approvedAt: new Date().toISOString(),
+        approval: { actor: 'operator' as const },
+      };
+      s.contracts.push(c);
+      return c;
+    });
+    syncGit(a.h);
+    a.commit();
+    // Существующая история синхронизируется и переносится в новый клон.
+    const b = f.create('legacy-b', a);
+    syncGit(b.h, { member: 'bob' });
+    const imported = b.store.read().contracts.find((c) => c.id === legacy.id)!;
+    assert.equal(imported.digest, legacy.digest, 'digest истории не переписан');
+    assert.equal(imported.pinVersion, undefined);
+    // Тот же договор не требует нового ревью и не выглядит изменённым.
+    const proposal = {
+      title: 'Каталог',
+      content,
+      repositoryId: 'main',
+      artifacts: [{ path: 'schema.json', purpose: 'Схема ответа' }],
+    };
+    assert.equal(
+      (await reviewContract(a.h, join(f.root, 'legacy-review'), proposal, 'codex')).status,
+      'already-approved',
+    );
+    assert.equal((await contractImpact(a.h, proposal)).status, 'unchanged');
+    // Подмена blob в записи первой формулы ловится сверкой с Git.
+    const peer = f.create('legacy-c', a);
+    const file = readdirSync(join(peer.repo, '.devcontour'), { recursive: true })
+      .map((x) => join(peer.repo, '.devcontour', String(x)))
+      .find((x) => x.endsWith('.json') && readFileSync(x, 'utf8').includes(legacy.id))!;
+    rewrite(
+      file,
+      (value: { data: { content: string; digest: string; artifacts: ContractArtifact[] } }) => {
+        value.data.artifacts[0].blob = git(a.repo, 'rev-parse', 'HEAD:other.json');
+        value.data.digest = contractDigest(value.data.content, value.data.artifacts, undefined);
+      },
+    );
+    git(peer.repo, 'commit', '-am', 'Tamper');
+    assert.throws(() => syncGit(peer.h, { member: 'carol' }), /подменено/);
   } finally {
     f.cleanup();
   }

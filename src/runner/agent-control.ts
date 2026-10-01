@@ -7,7 +7,7 @@ import { join, resolve, sep } from 'node:path';
 import { isolation } from './isolation.ts';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { DevContour, contractDigest, digest, specDigest } from '../core/service.ts';
+import { DevContour, contractDigest, digest, samePin, specDigest } from '../core/service.ts';
 import { pinArtifacts } from './contract-artifacts.ts';
 import {
   type Approval,
@@ -264,14 +264,14 @@ export async function reviewContract(
   const contractId = contractDigest(content, pinned.artifacts);
   // Повтор совпадает с утверждённым контрактом, только если совпали и
   // артефакты: изменённая схема при прежнем тексте — новый договор.
-  const existing = h.store
-    .read()
-    .contracts.find(
-      (c) =>
-        c.title === parsed.title &&
-        c.repositoryId === parsed.repositoryId &&
-        c.digest === contractId,
-    );
+  const existing = h.store.read().contracts.find(
+    (c) =>
+      c.title === parsed.title &&
+      c.repositoryId === parsed.repositoryId &&
+      // По тексту и blob, а не по digest: запись прежней формулы с тем же
+      // содержимым — тот же договор, а не повод для нового ревью.
+      samePin(c, content, pinned.artifacts),
+  );
   // Контракт без manifest по-прежнему работает, но закреплён только текст.
   const warning = pinned.artifacts.length
     ? undefined

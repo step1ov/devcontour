@@ -114,6 +114,7 @@ export const recordSchema = z.discriminatedUnion('kind', [
         )
         .max(50)
         .optional(),
+      pinVersion: z.literal(2).optional(),
       approvedAt: date,
     }),
   }),

@@ -236,6 +236,13 @@ export interface Contract {
    * прежний договор: закреплён только текст контракта.
    */
   artifacts?: ContractArtifact[];
+  /**
+   * Формула закрепления. 2 — digest артефакта по точным байтам blob, blob
+   * входит в digest контракта. Нет поля — первая формула: digest обрезанного
+   * текста, blob в digest контракта не входит. Утверждённая история
+   * проверяется по своей формуле и не переписывается.
+   */
+  pinVersion?: 2;
   approvedAt: string;
   approval?: Approval;
 }

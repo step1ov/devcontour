@@ -5,7 +5,7 @@ import {
   type Task,
   type TaskStatus,
 } from '../core/model.ts';
-import { contractDigest, type DevContour } from '../core/service.ts';
+import { contractDigest, samePin, type DevContour } from '../core/service.ts';
 import { repository } from '../core/repositories.ts';
 import { contractContent, contractProposal, defaultOwner } from './agent-control.ts';
 import { pinArtifacts } from './contract-artifacts.ts';
@@ -61,7 +61,11 @@ export async function contractImpact(h: DevContour, input: unknown) {
     (parsed.file ? c.source === parsed.file : !c.source && c.title === parsed.title);
   const revisions = s.contracts.filter(same);
   const current = revisions.at(-1);
-  const status = !current ? 'new' : current.digest === digest ? 'unchanged' : 'changed';
+  const status = !current
+    ? 'new'
+    : samePin(current, content, pinned.artifacts)
+      ? 'unchanged'
+      : 'changed';
 
   const before = new Map((current?.artifacts ?? []).map((a) => [a.path, a]));
   const after = new Map(pinned.artifacts.map((a) => [a.path, a]));
@@ -70,7 +74,7 @@ export async function contractImpact(h: DevContour, input: unknown) {
       next = after.get(path);
     return {
       path,
-      change: !old ? 'added' : !next ? 'removed' : old.digest === next.digest ? 'same' : 'changed',
+      change: !old ? 'added' : !next ? 'removed' : old.blob === next.blob ? 'same' : 'changed',
       ...(old ? { pinnedBlob: old.blob } : {}),
       ...(next ? { proposedBlob: next.blob } : {}),
     };

@@ -64,7 +64,11 @@ export const specDigest = (t: Task) =>
  * путь, назначение и содержимое. Контракт без артефактов сохраняет прежний
  * digest текста, и утверждённые раньше задачи остаются действительными.
  */
-export function contractDigest(content: string, artifacts?: ContractArtifact[]) {
+export function contractDigest(
+  content: string,
+  artifacts?: ContractArtifact[],
+  pinVersion: 2 | undefined = 2,
+) {
   return artifacts?.length
     ? digest({
         content,
@@ -73,12 +77,34 @@ export function contractDigest(content: string, artifacts?: ContractArtifact[]) 
           path: a.path,
           purpose: a.purpose,
           // Blob — часть закрепления: подменённый blob при прежнем digest
-          // содержимого даёт другой digest контракта.
-          blob: a.blob,
+          // содержимого даёт другой digest контракта. Первая формула его не
+          // включала; её записи сверяются с Git при импорте.
+          ...(pinVersion === 2 ? { blob: a.blob } : {}),
           digest: a.digest,
         })),
       })
     : digest(content);
+}
+/**
+ * Тот же ли это договор: текст и закреплённые файлы совпадают. Сравнение — по
+ * blob, а не по digest: у записей разных формул digest разный при одном и том
+ * же содержимом.
+ */
+export function samePin(c: Contract, content: string, artifacts: ContractArtifact[]) {
+  const pinned = c.artifacts ?? [];
+  return (
+    c.content === content &&
+    pinned.length === artifacts.length &&
+    pinned.every((a) =>
+      artifacts.some(
+        (b) =>
+          b.path === a.path &&
+          b.blob === a.blob &&
+          b.purpose === a.purpose &&
+          b.repositoryId === a.repositoryId,
+      ),
+    )
+  );
 }
 /**
  * Более поздняя утверждённая редакция того же контракта. Каждое утверждение
@@ -343,7 +369,7 @@ export class DevContour {
         title,
         content,
         source,
-        ...(artifacts?.length ? { artifacts } : {}),
+        ...(artifacts?.length ? { artifacts, pinVersion: 2 as const } : {}),
         digest: contractDigest(content, artifacts),
         approvedAt: now(),
         approval,

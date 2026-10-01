@@ -168,6 +168,7 @@ export function recordsFromState(h: DevContour, s: DevContourState) {
         // Закреплённые артефакты — часть договора: без них клон считал бы
         // digest по одному тексту и не узнал бы, какие файлы закреплены.
         ...(c.artifacts ? { artifacts: c.artifacts } : {}),
+        ...(c.pinVersion ? { pinVersion: c.pinVersion } : {}),
         approvedAt: c.approvedAt,
       },
     });
@@ -255,7 +256,8 @@ export function stateFromRecords(
     if (record.kind !== 'contract') throw new Error('Contract expected');
     if (
       owner !== record.data.repositoryId ||
-      contractDigest(record.data.content, record.data.artifacts) !== record.data.digest
+      contractDigest(record.data.content, record.data.artifacts, record.data.pinVersion) !==
+        record.data.digest
     )
       throw new Error('Неверный владелец или digest контракта: ' + record.data.id);
     const previous = old.contracts.find((c) => c.id === record.data.id);
