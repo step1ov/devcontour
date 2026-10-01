@@ -450,9 +450,10 @@ async function executeGate(
         await chmod(propertyDir!, 0o700);
         await rm(propertyDir!, { recursive: true, force: true });
       } catch (error) {
-        cleanup =
-          'каталог отчёта свойств не убран: ' +
-          (error instanceof Error ? error.message : String(error));
+        // Сообщение называет пути внутри каталога, а их имена задаёт
+        // проверка: оно проходит redaction, как и её вывод.
+        const message = error instanceof Error ? error.message : String(error);
+        cleanup = 'каталог отчёта свойств не убран: ' + (redact ? redact(message) : message);
       }
     }
     if (cleanup) {

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  chmod,
   copyFile,
   mkdir,
   mkdtemp,
@@ -11,7 +12,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { configSchema, type Evidence } from '../src/core/model.ts';
 import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
@@ -499,19 +500,33 @@ console.log('REPORT=' + process.env.DEVCONTOUR_PROPERTY_REPORT + ' SWAPPED=' + s
   }
 });
 
-for (const [name, script] of [
+const SECRET = 'property-cleanup-secret-6613';
+// Каждый скрипт печатает маркер только после настоящей операции: тест,
+// проходящий с пустым скриптом, ничего не доказывал бы.
+for (const [name, script, problem] of [
   [
     'deletes its report directory',
-    `import { rmSync } from 'node:fs';\nimport { dirname } from 'node:path';\nrmSync(dirname(process.env.DEVCONTOUR_PROPERTY_REPORT), { recursive: true, force: true });\n`,
+    `import { rmSync } from 'node:fs';\nimport { dirname } from 'node:path';\nrmSync(dirname(process.env.DEVCONTOUR_PROPERTY_REPORT), { recursive: true, force: true });\nconsole.log('DONE');\n`,
+    /не записан/,
   ],
   [
     'locks its report directory',
-    `import { chmodSync, writeFileSync } from 'node:fs';\nimport { dirname } from 'node:path';\nconst report = process.env.DEVCONTOUR_PROPERTY_REPORT;\nwriteFileSync(report, JSON.stringify({ version: 1, properties: [{ testId: 'knapsack-optimal', status: 'passed', cases: 1 }] }));\nchmodSync(dirname(report), 0o000);\n`,
+    `import { chmodSync, writeFileSync } from 'node:fs';\nimport { dirname } from 'node:path';\nconst report = process.env.DEVCONTOUR_PROPERTY_REPORT;\nwriteFileSync(report, JSON.stringify({ version: 1, properties: [{ testId: 'knapsack-optimal', status: 'passed', cases: 1 }] }));\nchmodSync(dirname(report), 0o000);\nconsole.log('DONE');\n`,
+    /не записан/,
+  ],
+  [
+    // Вложенный каталог без прав не убирается и после возврата прав
+    // корню; его имя — секрет, и сообщение об ошибке его называет.
+    'leaves an unremovable directory named after a secret',
+    `import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';\nimport { dirname, join } from 'node:path';\nconst report = process.env.DEVCONTOUR_PROPERTY_REPORT;\nwriteFileSync(report, JSON.stringify({ version: 1, properties: [{ testId: 'knapsack-optimal', status: 'passed', cases: 1 }] }));\nconst nested = join(dirname(report), process.env.SECRET);\nmkdirSync(join(nested, 'inner'), { recursive: true });\nchmodSync(nested, 0o000);\nconsole.log('DONE REPORT=' + report);\n`,
+    /не убран/,
   ],
 ] as const)
   test(`A check that ${name} still leaves negative evidence`, async () => {
     const p = await project();
     let store: Store | undefined, scheduler: Scheduler | undefined;
+    let leftover: string | undefined;
+    process.env.DEVCONTOUR_TEST_PROPERTY_SECRET = SECRET;
     try {
       await writeFile(join(p.repo, 'vanish.mjs'), script);
       await git(p.repo, 'init', '-q', '-b', 'main');
@@ -527,6 +542,11 @@ for (const [name, script] of [
         resourceDatabase: join(p.root, 'resources.sqlite'),
         // Без песочницы проверка вправе удалить каталог отчёта.
         isolation: { mode: 'none' },
+        environment: {
+          inherit: ['PATH', 'HOME'],
+          values: {},
+          secrets: { SECRET: 'DEVCONTOUR_TEST_PROPERTY_SECRET' },
+        },
         roles: { qa: { runtime: 'demo' } },
         reviewer: { runtime: 'demo' },
         gates: [
@@ -570,9 +590,24 @@ for (const [name, script] of [
       const run = store.read().runs.findLast((x) => x.taskId === task.id)!;
       const e = run.evidence.find((x) => x.gate === 'properties');
       assert.ok(e, 'evidence записано');
+      const log = await readFile(e.log, 'utf8');
+      assert.match(log, /DONE/, 'операция проверки действительно выполнена');
+      leftover = /REPORT=(\S+)/.exec(log)?.[1];
       assert.equal(e.passed, false);
-      assert.match(e.property?.problem ?? '', /не записан|не убран/);
+      assert.match(e.property?.problem ?? '', problem);
+      // Сообщение об ошибке уборки проходит redaction: секрета нет ни в
+      // evidence, ни в логе, ни в отказе попытки.
+      assert.equal(JSON.stringify(e).includes(SECRET), false);
+      assert.equal(log.includes(SECRET), false);
+      assert.equal((run.error ?? '').includes(SECRET), false);
     } finally {
+      delete process.env.DEVCONTOUR_TEST_PROPERTY_SECRET;
+      // Оставленный проверкой каталог убирается вручную: права вернуть.
+      if (leftover) {
+        const nested = join(dirname(leftover), SECRET);
+        await chmod(nested, 0o700).catch(() => undefined);
+        await rm(dirname(leftover), { recursive: true, force: true });
+      }
       await scheduler?.stop();
       store?.close();
       await rm(p.root, { recursive: true, force: true });
