@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import cp, { execFileSync } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fixture, input } from './helpers.ts';
@@ -391,6 +392,43 @@ test('A base move cannot happen after the operation was abandoned inside the bas
     cp.spawn = realSpawn;
     syncBuiltinESMExports();
     other.close();
+    await s.remove();
+  }
+});
+
+test('The base ref move inside the transaction runs no repository hooks', async () => {
+  const s = await stage();
+  try {
+    // Hook reference-transaction, который ждёт ту же базу, — взаимное
+    // ожидание, пока транзакция держит её на время git update-ref.
+    const marker = join(s.root, 'hook-ran');
+    const hook = join(s.repo, '.git', 'hooks', 'reference-transaction');
+    // Срабатывает только на сдвиге ветки интеграции: Git передаёт
+    // обновляемые ref на stdin.
+    await writeFile(
+      hook,
+      `#!/bin/sh\nif grep -q 'refs/heads/devcontour/accepted'; then touch ${JSON.stringify(marker)}; sleep 5; fi\n`,
+    );
+    await chmod(hook, 0o755);
+    const { operation } = (await s.changes().start(s.proposal, 'codex')) as {
+      operation: ContractChange;
+    };
+    let worst = 0;
+    let last = Date.now();
+    const probe = setInterval(() => {
+      worst = Math.max(worst, Date.now() - last);
+      last = Date.now();
+    }, 20);
+    const done = await s.changes().advance(operation.id);
+    clearInterval(probe);
+    assert.equal(done.status, 'completed', done.error);
+    assert.equal(existsSync(marker), false, 'hook внутри транзакции не запускался');
+    assert.ok(worst < 4000, `event loop стоял ${worst} мс`);
+    assert.equal(
+      s.sh('rev-parse', 'devcontour/accepted:schema.json'),
+      s.sh('rev-parse', 'HEAD:schema.json'),
+    );
+  } finally {
     await s.remove();
   }
 });

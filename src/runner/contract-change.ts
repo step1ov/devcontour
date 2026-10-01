@@ -427,7 +427,16 @@ export class ContractChanges {
           (repoPath, target, to, from) =>
             this.h.store.atomic(() => {
               this.guard(op);
-              execFileSync('git', ['update-ref', target, to, from], { cwd: repoPath });
+              // Внутри транзакции не исполняется чужой код: hook
+              // reference-transaction, пишущий в ту же базу, ждал бы её, а
+              // она — его. Ветка интеграции принадлежит контуру, и её
+              // слияние уже идёт без hooks; срок ограничен на случай
+              // зависшего Git.
+              execFileSync(
+                'git',
+                ['-c', 'core.hooksPath=/dev/null', 'update-ref', target, to, from],
+                { cwd: repoPath, timeout: 15000 },
+              );
             }),
         );
         this.advanceStep(op, (current) => {
