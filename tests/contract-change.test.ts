@@ -451,11 +451,21 @@ test('A hung git update-ref inside the transaction is stopped by its time limit'
     };
     const before = s.sh('rev-parse', 'devcontour/accepted');
     ContractChanges.refMoveTimeoutMs = 1500;
-    process.env.PATH = `${shim}:${path}`;
-    const started = Date.now();
-    const failed = await s.changes().advance(operation.id);
+    // Обёртка действует только на шаге переноса базы: замер не зависит от
+    // скорости предыдущих шагов под нагрузкой.
+    let baseStarted = 0;
+    const failed = await s
+      .changes((step) => {
+        if (step === 'plan') {
+          process.env.PATH = `${shim}:${path}`;
+          baseStarted = Date.now();
+        }
+      })
+      .advance(operation.id);
+    const baseTook = Date.now() - baseStarted;
     process.env.PATH = path;
-    assert.ok(Date.now() - started < 30000, 'сдвиг ref ограничен сроком');
+    // Без предела шаг ждал бы зависший Git целиком (60 с).
+    assert.ok(baseTook < 30000, `шаг переноса базы занял ${baseTook} мс`);
     assert.equal(failed.status, 'failed');
     assert.equal(failed.next, 'base');
     assert.equal(s.sh('rev-parse', 'devcontour/accepted'), before, 'база не сдвинута');
