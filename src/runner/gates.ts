@@ -1,6 +1,6 @@
 import { timed } from './timing.ts';
 import { runEnvironment, assertDependencies } from './dependencies.ts';
-import { readFile, writeFile, mkdir, mkdtemp, rm, realpath, lstat } from 'node:fs/promises';
+import { chmod, readFile, writeFile, mkdir, mkdtemp, rm, realpath, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isolation, isolatedCommand, isolationSupport } from './isolation.ts';
 import { join, resolve, sep, delimiter, relative, dirname } from 'node:path';
@@ -439,7 +439,27 @@ async function executeGate(
   let property: Evidence['property'];
   if (propertyPath) {
     const read = await readPropertyReport(propertyPath, propertyDir!, redact);
-    await rm(propertyDir!, { recursive: true, force: true });
+    // Уборка каталога — не повод потерять evidence: проверка могла снять с
+    // него права. Права возвращаются; если убрать всё же не удалось, это
+    // отказ gate с причиной, а не исключение до записи доказательства.
+    let cleanup: string | undefined;
+    try {
+      await rm(propertyDir!, { recursive: true, force: true });
+    } catch {
+      try {
+        await chmod(propertyDir!, 0o700);
+        await rm(propertyDir!, { recursive: true, force: true });
+      } catch (error) {
+        cleanup =
+          'каталог отчёта свойств не убран: ' +
+          (error instanceof Error ? error.message : String(error));
+      }
+    }
+    if (cleanup) {
+      passed = false;
+      summary =
+        summary && summary !== 'Команда завершилась успешно' ? `${summary}; ${cleanup}` : cleanup;
+    }
     const failure = read.report ? propertyFailure(read.report) : '';
     if (failure) {
       passed = false;
@@ -457,6 +477,7 @@ async function executeGate(
       seed,
       reproduce: `DEVCONTOUR_SEED=${seed} ${gate.command.join(' ')}`,
       ...(read.report ? { report: read.report } : { problem: read.problem }),
+      ...(cleanup && read.report ? { problem: cleanup } : {}),
       contracts: task?.contractDigests ?? {},
       artifacts: state.contracts
         .filter((c) => task?.contracts.includes(c.id))
