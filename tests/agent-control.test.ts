@@ -5,8 +5,9 @@ import { readFile, writeFile, mkdir, mkdtemp, rm, symlink } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { complete, fixture, input } from './helpers.ts';
-import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import cp, { execFileSync } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { reviewContract, reviewPlan, acceptBoard } from '../src/runner/agent-control.ts';
 import { contractImpact } from '../src/runner/contract-impact.ts';
 import { digest, specDigest, supersededBy } from '../src/core/service.ts';
@@ -788,6 +789,50 @@ test('An artifact digest covers its exact bytes: a whitespace-only change needs 
       'digest — по точным байтам blob',
     );
   } finally {
+    await repo.remove();
+    f.cleanup();
+  }
+});
+
+test('Contract impact takes the document and artifacts from one commit even if HEAD moves meanwhile', async () => {
+  const f = fixture();
+  const repo = await repositoryFixture(f);
+  const sh = (...args: string[]) =>
+    execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@e', ...args], {
+      cwd: repo.path,
+    })
+      .toString()
+      .trim();
+  const realSpawn = cp.spawn;
+  try {
+    sh('init', '-q', '-b', 'main');
+    await mkdir(join(repo.path, 'docs/contracts'), { recursive: true });
+    await writeFile(join(repo.path, 'docs/contracts/catalog.md'), '# Catalog\n');
+    await writeFile(join(repo.path, 'schema.json'), '{"price":"string"}\n');
+    sh('add', '.');
+    sh('commit', '-qm', 'A');
+    let armed = true;
+    // Между чтением HEAD и закреплением артефактов появляется commit B.
+    cp.spawn = function (this: unknown, command: string, args: string[], options: unknown) {
+      if (armed && command === 'git' && args[0] === 'status') {
+        armed = false;
+        writeFileSync(join(repo.path, 'schema.json'), '{"price":"number"}\n');
+        sh('commit', '-qam', 'B');
+      }
+      return realSpawn.call(this, command, args, options as never);
+    } as typeof cp.spawn;
+    syncBuiltinESMExports();
+    const impact = await contractImpact(f.h, {
+      title: 'Catalog',
+      file: 'docs/contracts/catalog.md',
+      artifacts: [{ path: 'schema.json', purpose: 'Схема' }],
+    });
+    const a = impact.proposed.revision;
+    assert.notEqual(a, sh('rev-parse', 'HEAD'), 'HEAD сдвинулся во время расчёта');
+    assert.equal(impact.changes.artifacts[0].proposedBlob, sh('rev-parse', `${a}:schema.json`));
+  } finally {
+    cp.spawn = realSpawn;
+    syncBuiltinESMExports();
     await repo.remove();
     f.cleanup();
   }

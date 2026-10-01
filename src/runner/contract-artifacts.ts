@@ -22,11 +22,17 @@ const MAX_ARTIFACT_TEXT = 400000;
 export async function pinArtifacts(
   repo: { id: string; path: string },
   declared: { path: string; purpose: string }[],
+  /**
+   * Commit, из которого закрепляются артефакты. Отчёт или операция, читающие
+   * документ из определённого commit, передают его сюда: иначе документ и
+   * артефакты могли бы оказаться из разных снимков.
+   */
+  at?: string,
 ) {
   if (!declared.length) return { artifacts: [], contents: [] };
   const seen = new Set<string>();
   const base = await realpath(repo.path);
-  const revision = await git(repo.path, 'rev-parse', 'HEAD');
+  const revision = at ?? (await git(repo.path, 'rev-parse', 'HEAD'));
   const artifacts: ContractArtifact[] = [];
   const contents: { path: string; purpose: string; content: string }[] = [];
   let total = 0;

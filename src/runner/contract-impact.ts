@@ -47,7 +47,7 @@ export async function contractImpact(h: DevContour, input: unknown) {
       400,
     );
   const content = await contractContent(h, parsed, head);
-  const pinned = await pinArtifacts(owner, parsed.artifacts ?? []);
+  const pinned = await pinArtifacts(owner, parsed.artifacts ?? [], head);
   const digest = contractDigest(content, pinned.artifacts, 2);
   const s = h.store.read();
   // Редакции одного контракта — один источник в одном компоненте; у inline

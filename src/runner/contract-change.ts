@@ -472,7 +472,7 @@ export class ContractChanges {
         `Рабочая ветка сдвинулась (${op.expected.head.slice(0, 12)} → ${head.slice(0, 12)}): начните операцию заново по текущей редакции`,
       );
     const content = await contractContent(this.h, op.proposal, op.expected.head);
-    const pinned = await pinArtifacts(repo, op.proposal.artifacts ?? []);
+    const pinned = await pinArtifacts(repo, op.proposal.artifacts ?? [], op.expected.head);
     if (contractDigest(content, pinned.artifacts, 2) !== op.expected.proposedDigest)
       throw new StaleChange('Предложение изменилось после начала операции');
   }
