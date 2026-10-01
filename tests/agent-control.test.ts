@@ -731,6 +731,14 @@ test('Contract impact names changes, affected and transitive tasks, base state a
     assert.equal(f.store.read().contracts.length, 1);
     assert.equal(impact.applied, false);
 
+    // Правка, скрытая от status через assume-unchanged, в отчёт не попадает:
+    // документ читается из HEAD, а не из рабочего дерева.
+    sh('update-index', '--assume-unchanged', 'docs/contracts/catalog.md');
+    await writeFile(join(repo.path, 'docs/contracts/catalog.md'), '# Catalog hidden\n');
+    const hidden = await contractImpact(f.h, proposal);
+    assert.equal(hidden.changes.document, false, 'текст HEAD, а не рабочего файла');
+    assert.equal(hidden.proposed.digest, impact.proposed.digest);
+    sh('update-index', '--no-assume-unchanged', 'docs/contracts/catalog.md');
     await writeFile(join(repo.path, 'docs/contracts/catalog.md'), '# Catalog v2\n');
     await assert.rejects(contractImpact(f.h, proposal), /закоммитьте/);
     // Игнорируемый черновик «не изменён» для status, но его нет в HEAD.

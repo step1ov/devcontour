@@ -156,10 +156,28 @@ test('Reviewer checks cannot write the reviewed sources under OS isolation', asy
 });
 
 /** Минимальный клиент MCP по stdio: запрос — ответ с тем же id. */
-function client(command: string, args: string[]) {
+/**
+ * Минимальный клиент MCP по stdio: запрос — ответ с тем же id. У каждого
+ * запроса свой срок, а завершение сервера отклоняет ожидающие: сбой сервера
+ * даёт понятную ошибку теста, а не зависший файл.
+ */
+function client(command: string, args: string[], timeoutMs = 60000) {
   const child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'], env: process.env });
   let buffer = '';
-  const waiting = new Map<number, (value: unknown) => void>();
+  let stderr = '';
+  const waiting = new Map<
+    number,
+    { resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
+  >();
+  const settle = (id: number) => {
+    const entry = waiting.get(id);
+    if (entry) clearTimeout(entry.timer);
+    waiting.delete(id);
+    return entry;
+  };
+  child.stderr.on('data', (chunk: Buffer) => {
+    stderr = (stderr + chunk.toString()).slice(-2000);
+  });
   child.stdout.on('data', (chunk: Buffer) => {
     buffer += chunk.toString();
     let index;
@@ -168,15 +186,25 @@ function client(command: string, args: string[]) {
       buffer = buffer.slice(index + 1);
       if (!line.trim()) continue;
       const message = JSON.parse(line) as { id?: number };
-      if (message.id !== undefined) waiting.get(message.id)?.(message);
+      if (message.id !== undefined) settle(message.id)?.resolve(message);
     }
+  });
+  child.on('exit', (code, signal) => {
+    for (const id of [...waiting.keys()])
+      settle(id)?.reject(
+        new Error(`MCP-сервер завершился (${code ?? signal}) до ответа: ${stderr.trim()}`),
+      );
   });
   let next = 1;
   return {
     request(method: string, params: unknown) {
       const id = next++;
-      return new Promise<Record<string, unknown>>((resolve) => {
-        waiting.set(id, resolve as (value: unknown) => void);
+      return new Promise<Record<string, unknown>>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          settle(id);
+          reject(new Error(`MCP ${method}: нет ответа за ${timeoutMs} мс; ${stderr.trim()}`));
+        }, timeoutMs);
+        waiting.set(id, { resolve: resolve as (value: unknown) => void, reject, timer });
         child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
       });
     },
@@ -430,4 +458,9 @@ test('Concurrent reviewer checks cannot exceed the shared budget, directly or th
   } finally {
     await s.cleanup();
   }
+});
+
+test('The stdio test client rejects pending requests when the server dies', async () => {
+  const c = client(process.execPath, ['-e', 'setTimeout(() => process.exit(3), 100)'], 5000);
+  await assert.rejects(c.request('initialize', {}), /завершился \(3\)/);
 });

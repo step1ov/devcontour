@@ -8,7 +8,7 @@ import { isolation } from './isolation.ts';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { DevContour, contractDigest, digest, samePin, specDigest } from '../core/service.ts';
-import { pinArtifacts } from './contract-artifacts.ts';
+import { blobBytes, pinArtifacts } from './contract-artifacts.ts';
 import {
   type Approval,
   type ContractAttempt,
@@ -225,8 +225,25 @@ export const defaultOwner = (h: DevContour) =>
 export async function contractContent(
   h: DevContour,
   proposal: { content?: string; file?: string; repositoryId?: string },
+  /**
+   * Читать документ из этого commit, а не из рабочего дерева. Чистый status
+   * не доказывает совпадения с HEAD: файл с assume-unchanged показывает
+   * «не изменён» при другом тексте. Отчёт или операция, которые ссылаются на
+   * commit, читают именно его.
+   */
+  revision?: string,
 ) {
   if (!proposal.file) return proposal.content!;
+  if (revision) {
+    const repo = repository(h.config, proposal.repositoryId ?? defaultOwner(h));
+    const entry = await git(repo.path, 'ls-tree', revision, '--', proposal.file).catch(() => '');
+    if (!entry) throw new DomainError('Документ контракта не закоммичен: ' + proposal.file, 400);
+    if (entry.startsWith('120000'))
+      throw new DomainError('Контракт должен лежать внутри репозитория', 400);
+    const content = blobBytes(repo.path, entry.split(/\s+/)[2]).toString('utf8');
+    if (!content.trim()) throw new DomainError('Файл контракта пуст: ' + proposal.file, 400);
+    return content;
+  }
   // Компонент может называться не main: в workspace из product и library
   // предложение без repositoryId иначе искало бы несуществующий репозиторий,
   // хотя inline-вариант там работал.
@@ -256,9 +273,11 @@ export async function reviewContract(
    * пришедший после потери владения операцией, не создаёт редакцию.
    */
   beforeCommit: () => void = () => {},
+  /** Ревьюировать документ из этого commit (см. contractContent). */
+  revision?: string,
 ) {
   const parsed = contractProposal.parse(input);
-  const content = await contractContent(h, parsed);
+  const content = await contractContent(h, parsed, revision);
   const owner = repository(h.config, parsed.repositoryId ?? defaultOwner(h));
   const pinned = await pinArtifacts(owner, parsed.artifacts ?? []);
   const contractId = contractDigest(content, pinned.artifacts);
@@ -298,7 +317,7 @@ export async function reviewContract(
   // HEAD с другим содержимым артефактов или сам документ, одобрение к
   // текущему дереву не относится.
   const after = await pinArtifacts(owner, parsed.artifacts ?? []);
-  if (contractDigest(await contractContent(h, parsed), after.artifacts) !== contractId)
+  if (contractDigest(await contractContent(h, parsed, revision), after.artifacts) !== contractId)
     throw new DomainError(
       'Контракт или его артефакты изменились во время ревью; отправьте его на ревью заново',
       409,

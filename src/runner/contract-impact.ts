@@ -38,19 +38,15 @@ const boardOf = (s: DevContourState, t: Task) =>
 export async function contractImpact(h: DevContour, input: unknown) {
   const parsed = contractProposal.parse(input);
   const owner = repository(h.config, parsed.repositoryId ?? defaultOwner(h));
-  // Отчёт строится по закоммиченной редакции: сверка базы идёт по HEAD.
-  // Чистый status не доказывает, что файл в истории: игнорируемый черновик
-  // тоже «не изменён». Документ обязан быть в HEAD.
-  if (parsed.file) {
-    if (!(await git(owner.path, 'rev-parse', '--verify', `HEAD:${parsed.file}`).catch(() => '')))
-      throw new DomainError('Документ контракта не закоммичен: ' + parsed.file, 400);
-    if (await git(owner.path, 'status', '--porcelain', '--', parsed.file))
-      throw new DomainError(
-        'Документ контракта изменён после коммита — закоммитьте его: ' + parsed.file,
-        400,
-      );
-  }
-  const content = await contractContent(h, parsed);
+  // Отчёт строится по одному закреплённому commit: документ, digest,
+  // revision и сверка базы берутся из HEAD, а не из рабочего дерева.
+  const head = await git(owner.path, 'rev-parse', 'HEAD');
+  if (parsed.file && (await git(owner.path, 'status', '--porcelain', '--', parsed.file)))
+    throw new DomainError(
+      'Документ контракта изменён после коммита — закоммитьте его: ' + parsed.file,
+      400,
+    );
+  const content = await contractContent(h, parsed, head);
   const pinned = await pinArtifacts(owner, parsed.artifacts ?? []);
   const digest = contractDigest(content, pinned.artifacts);
   const s = h.store.read();
@@ -110,7 +106,6 @@ export async function contractImpact(h: DevContour, input: unknown) {
   const tip = await git(owner.path, 'rev-parse', '--verify', target).catch(() => undefined);
   const inBase = async (path: string, blob: string) =>
     tip ? (await git(owner.path, 'rev-parse', `${tip}:${path}`).catch(() => '')) === blob : false;
-  const head = await git(owner.path, 'rev-parse', 'HEAD');
   const base = {
     branch: owner.targetBranch,
     tip: tip ?? null,

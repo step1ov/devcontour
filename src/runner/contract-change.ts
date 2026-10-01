@@ -330,6 +330,7 @@ export class ContractChanges {
           op.authorRuntime,
           this.runtimes,
           () => this.guard(op),
+          op.expected.head,
         );
         if (!('contract' in result) || !result.contract)
           throw new DomainError('Ревью контракта не зарегистрировало редакцию: ' + result.status);
@@ -461,7 +462,7 @@ export class ContractChanges {
       throw new StaleChange(
         `Рабочая ветка сдвинулась (${op.expected.head.slice(0, 12)} → ${head.slice(0, 12)}): начните операцию заново по текущей редакции`,
       );
-    const content = await contractContent(this.h, op.proposal);
+    const content = await contractContent(this.h, op.proposal, op.expected.head);
     const pinned = await pinArtifacts(repo, op.proposal.artifacts ?? []);
     if (contractDigest(content, pinned.artifacts) !== op.expected.proposedDigest)
       throw new StaleChange('Предложение изменилось после начала операции');
