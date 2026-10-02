@@ -9,7 +9,7 @@ test('The contract feasibility corpus scores false rejections and misses separat
   assert.equal(protocol.judgementMeasured, false);
   assert.equal(protocol.passed, true);
   assert.deepEqual(protocol.summary, {
-    correct: 5,
+    correct: 7,
     falseRejections: 0,
     missed: 0,
     recorded: 1,
@@ -18,18 +18,18 @@ test('The contract feasibility corpus scores false rejections and misses separat
 
   // Ревьюер, отклоняющий всё по выполнимости, — ложные отказы, а не успех.
   const strict = await contractEvals({}, () => ({ approved: false, feasibility: true }));
-  assert.equal(strict.summary.falseRejections, 2);
+  assert.equal(strict.summary.falseRejections, 3);
   assert.equal(strict.summary.missed, 0);
   assert.equal(strict.passed, false);
 
   // Ревьюер, одобряющий всё, пропускает невыполнимые обязательства.
   const lenient = await contractEvals({}, () => ({ approved: true, feasibility: false }));
-  assert.equal(lenient.summary.missed, 3);
+  assert.equal(lenient.summary.missed, 4);
   assert.equal(lenient.passed, false);
 
   // Отказ без находки класса feasibility — не обнаружение невыполнимости.
   const vague = await contractEvals({}, () => ({ approved: false, feasibility: false }));
-  assert.equal(vague.summary.missed, 3);
+  assert.equal(vague.summary.missed, 4);
   assert.equal(vague.summary.falseRejections, 0);
 
   await assert.rejects(contractEvals({ runtime: 'codex' }), /reviewer model/);

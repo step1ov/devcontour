@@ -50,6 +50,20 @@ const corpus = [
       'O-1: Sort up to 10^6 32-bit integers in non-decreasing order. Stable. Time ≤ 2 s and memory ≤ 512 MB for n = 10^6 on the reference machine, measured by the acceptance benchmark. Empty input returns an empty array.',
   },
   {
+    // Трудность спрятана в ограничении на каждую сторону: при произвольных
+    // длинах вопрос «поместится ли выбор поровну в два отсека» — разбиение.
+    id: 'hidden-partition',
+    expect: 'reject',
+    content:
+      'O-1: Given up to 60 parcels, each with an integer weight ≤ 10^5 g and a real length ≤ 200 cm, and two identical cargo bays of length L ≤ 300 cm, return the complete set of total weights achievable by loading the same number of parcels into each bay without exceeding L in either bay. Complete for every input, no refusal and no approximation. Time ≤ 2 s for n = 60 on the reference machine, measured by the acceptance benchmark; memory ≤ 512 MB.',
+  },
+  {
+    id: 'partition-with-flag',
+    expect: 'approve',
+    content:
+      'O-1: Given up to 60 parcels, each with an integer weight ≤ 10^5 g and a real length ≤ 200 cm, and two identical cargo bays of length L ≤ 300 cm, return total weights achievable by loading the same number of parcels into each bay without exceeding L in either bay. Every returned weight is achievable. The answer carries complete = true when the set is exhaustive; complete = true is required when no bay can overflow or when the parcels have at most two distinct lengths, otherwise complete = false is allowed. Time ≤ 2 s for n = 60 on the reference machine, measured by the acceptance benchmark; memory ≤ 512 MB.',
+  },
+  {
     id: 'exact-with-fallback',
     expect: 'either',
     content:
@@ -60,7 +74,7 @@ const corpus = [
 const optionsSchema = z.strictObject({
   runtime: z.enum(['codex', 'claude']).optional(),
   reviewerModel: z.string().min(1).optional(),
-  maxCalls: z.number().int().min(1).max(30).default(6),
+  maxCalls: z.number().int().min(1).max(30).default(corpus.length),
   timeoutMs: z.number().int().min(1000).max(900000).default(300000),
 });
 
