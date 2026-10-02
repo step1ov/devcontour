@@ -36,7 +36,6 @@ async function stage(overrides: Partial<ProbeSpec> = {}) {
     secrets: ['DEVCONTOUR_TEST_PROBE_SECRET'],
     settingsDir: join(root, 'settings'),
     log: join(root, 'probes.jsonl'),
-    salt: 'test-salt-0123456789',
     ...overrides,
   };
   return { root, spec, cleanup: () => rm(root, { recursive: true, force: true }) };

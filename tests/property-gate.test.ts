@@ -840,8 +840,11 @@ async function runWith(
     name: 'demo',
     async execute(r) {
       if (r.review) return adapters.demo.execute(r);
+      // Demo-исполнитель создаёт артефакт, который проверяет demo-ревьюер:
+      // без него попытка не дошла бы до ревью и интеграции.
+      const result = await adapters.demo.execute(r);
       await writeFile(join(r.cwd, 'src/knap.mjs'), variants.correct);
-      return { data: { completed: true, summary: 'ok', discoveries: [] }, log: '', command: [] };
+      return result;
     },
   };
   const scheduler = new Scheduler(h, p.root, { ...adapters, demo: writer });
@@ -852,7 +855,7 @@ async function runWith(
     description: 'Проверка служебных полей evidence.',
     role: 'qa',
     acceptance: ['a test'],
-    writePaths: ['src/'],
+    writePaths: ['src/', 'deliverables/'],
   });
   h.approve(board.id);
   h.pause(false);
@@ -860,6 +863,7 @@ async function runWith(
   const run = store.read().runs.findLast((x) => x.taskId === task.id)!;
   return {
     run,
+    task: store.read().tasks.find((t) => t.id === task.id)!,
     async close() {
       await scheduler.stop();
       store.close();
@@ -882,7 +886,16 @@ test('A short secret masks diagnostics but never the service fields of evidence'
     ['node', 'ok.mjs'],
   );
   try {
-    assert.ok(r.run.evidence.length > 0);
+    // Задача проходит весь путь: кандидат, ревью, интеграция и приёмка.
+    assert.equal(r.task.status, 'done', r.task.failure);
+    assert.ok(
+      r.run.evidence.some((e) => e.kind === 'review'),
+      'ревью записано',
+    );
+    assert.ok(
+      r.run.evidence.some((e) => e.phase === 'integration'),
+      'интеграция записана',
+    );
     for (const e of r.run.evidence) {
       assert.match(e.sha, /^[0-9a-f]{40}$/, `${e.gate}: sha`);
       assert.ok(['candidate', 'integration'].includes(e.phase), `${e.gate}: phase`);
@@ -890,7 +903,13 @@ test('A short secret masks diagnostics but never the service fields of evidence'
       assert.ok(['test', 'independent-review'].includes(e.gate), `gate ${e.gate}`);
       assert.match(e.digest, /^[0-9a-f]{64}$/, `${e.gate}: digest`);
       assert.ok(existsSync(e.log), `${e.gate}: лог по ссылке существует`);
-      assert.equal(digest(await readFile(e.log, 'utf8')), e.digest, `${e.gate}: digest лога`);
+      // Digest gate — от текста лога, digest ревью — от записи review.json.
+      const text = await readFile(e.log, 'utf8');
+      assert.equal(
+        digest(e.kind === 'review' ? (JSON.parse(text) as unknown) : text),
+        e.digest,
+        `${e.gate}: digest соответствует сохранённому`,
+      );
     }
     // Диагностика при этом замаскирована.
     const gate = r.run.evidence.find((e) => e.gate === 'test')!;

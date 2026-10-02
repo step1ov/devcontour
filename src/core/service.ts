@@ -804,6 +804,7 @@ export class DevContour {
           if (!existing.runs.some((x) => x.runId === r.id)) existing.runs.push(run);
           // Подтверждение контура не отменяется последующим неподтверждённым.
           existing.observed ||= item.observed;
+          existing.run ??= item.run;
           existing.claimed ||= item.claimed;
           return existing;
         }

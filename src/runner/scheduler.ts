@@ -8,12 +8,12 @@ import { assertRequirements, recordRequirements } from './requirements.ts';
 import { snapshotDependencies, assertDependencies, runEnvironment } from './dependencies.ts';
 import { runSteps, withEnvironment } from './environment.ts';
 import { toolProfileFor, agentEnvironment, reviewerRunsChecks, writerRunsChecks } from './tools.ts';
-import { argvDigest, probeCommand, probeLimits, type ProbeSpec } from './review-probe.ts';
+import { probeCommand, probeLimits, type ProbeSpec } from './review-probe.ts';
 import { orderedGates, withinPaths, validateWorkflow } from '../core/workflow.ts';
 import { taskContext } from './context.ts';
 import { assertTeamCheckout } from './git-sync.ts';
 import { withResources } from './resources.ts';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { mkdir, writeFile, readFile, realpath } from 'node:fs/promises';
@@ -474,7 +474,7 @@ export class Scheduler {
       'Review against the pinned conventions. Report verified causal regressions, including unchanged consumers. Findings need path/line, rule, consequence and evidence; use null only when not applicable. Do not demand unrelated legacy cleanup.',
       // Контрпример с конкретным входом дешевле пересказа: он попадает в
       // реестр задачи и следующая попытка проверяет себя на нём.
-      'When a finding fails on a concrete input, fill reproduction: property (the testId or acceptance criterion it violates), input (the exact input as JSON text), expected and actual, and command (argv) that shows it. Set executed=true only if you ran that command; otherwise it is a hypothesis. Use null for findings without such an input.',
+      'When a finding fails on a concrete input, fill reproduction: property (the testId or acceptance criterion it violates), input (the exact input as JSON text), expected and actual, and command (argv) that shows it. If you ran it with run_check, set run to the runId it returned and executed=true; the controller confirms the run from its own log and records the command that actually ran. Otherwise run=null and it is a hypothesis. Use null for findings without such an input.',
       // Разметка id ничего не доказывает сама по себе: тест может носить
       // имя сценария и не проверять его. Судит об этом ревью — оно видит
       // и сценарий, и названный тест, и код.
@@ -603,7 +603,6 @@ export class Scheduler {
         .filter(([, value]) => value !== undefined && secrets.has(value))
         .map(([name]) => name),
       settingsDir: join(dir, 'probe-settings'),
-      salt: randomBytes(16).toString('hex'),
       log: join(dir, 'probes.jsonl'),
     };
     const specPath = join(dir, 'probe.json');
@@ -611,7 +610,6 @@ export class Scheduler {
     const seconds = (ms: number) => Math.round(ms / 1000);
     return {
       log: spec.log,
-      salt: spec.salt,
       server: {
         ...probeCommand(specPath),
         env: spec.env,
@@ -696,7 +694,7 @@ export class Scheduler {
             const p = JSON.parse(line) as Record<string, unknown>;
             return {
               argv: p.argv,
-              argvDigest: p.argvDigest,
+              runId: p.runId,
               status: p.status,
               durationMs: p.durationMs,
               limitMs: p.limitMs,
@@ -715,26 +713,26 @@ export class Scheduler {
       const r = f.reproduction;
       if (!r) return [];
       const redact = (text: string | null) => (text === null ? null : execution.redact(text));
+      // Наблюдение — по запуску, на который сослался ревьюер, в журнале
+      // контура: он состоялся (исчерпанный бюджет и отказ до старта — не
+      // наблюдение), и команда в реестре — та, что действительно запускалась.
+      // Текст команды из ответа к разбору уже замаскирован, и команды,
+      // различающиеся только секретом, по нему не различить.
+      const cited = r.run ? (probes ?? []).find((p) => p.runId === r.run) : undefined;
+      const ran = !!cited && ['passed', 'failed', 'timeout'].includes(cited.status as string);
       return [
         {
           property: r.property,
           input: execution.redact(r.input),
           expected: redact(r.expected),
           actual: redact(r.actual),
-          command: r.command?.map((part) => execution.redact(part)) ?? null,
+          command: ran
+            ? (cited.argv as string[])
+            : (r.command?.map((part) => execution.redact(part)) ?? null),
           message: execution.redact(f.message),
           claimed: r.executed,
-          observed:
-            !!r.command &&
-            // Подтверждает только состоявшийся запуск именно этой команды:
-            // исчерпанный бюджет и отказ до старта — не наблюдение, а
-            // замаскированные аргументы разных команд могут совпадать, поэтому
-            // сравнивается отпечаток исходных.
-            (probes ?? []).some(
-              (p) =>
-                ['passed', 'failed', 'timeout'].includes(p.status as string) &&
-                p.argvDigest === argvDigest(probe!.salt, r.command!),
-            ),
+          observed: ran,
+          run: ran ? (cited.runId as string) : null,
         },
       ];
     });

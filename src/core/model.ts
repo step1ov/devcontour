@@ -412,6 +412,11 @@ export interface Reproduction {
   claimed: boolean;
   /** Запуск подтверждён журналом проверок контура, а не словами модели. */
   observed: boolean;
+  /**
+   * Запуск run_check, на котором подтверждено наблюдение. Замаскированные
+   * команды разных запусков могут выглядеть одинаково; различает их id.
+   */
+  run?: string | null;
   runs: { runId: string; sha: string; contracts: Record<string, string>; at: string }[];
   status: 'proposed';
 }

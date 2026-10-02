@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { appendFile, readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { McpServer, type StandardSchemaWithJSON } from '@modelcontextprotocol/server';
@@ -35,19 +35,8 @@ export const probeSpec = z.object({
   secrets: z.array(z.string()),
   settingsDir: z.string().min(1),
   log: z.string().min(1),
-  /**
-   * Соль отпечатка исходных аргументов. Журнал хранит аргументы
-   * замаскированными, и команды, различающиеся только секретом, в нём
-   * совпадали: незапущенная получала «наблюдено». Отпечаток исходных
-   * аргументов их различает, не храня сам секрет.
-   */
-  salt: z.string().min(16).default('devcontour-probe'),
 });
 export type ProbeSpec = z.infer<typeof probeSpec>;
-
-/** Солёный отпечаток исходных аргументов команды проверки. */
-export const argvDigest = (salt: string, argv: readonly string[]) =>
-  createHash('sha256').update(salt).update('\0').update(JSON.stringify(argv)).digest('hex');
 
 export const probeInput = z.object({
   argv: z.array(z.string().min(1)).min(1).max(64),
@@ -55,6 +44,13 @@ export const probeInput = z.object({
 });
 
 export type ProbeResult = {
+  /**
+   * Id запуска. Ревьюер ссылается на него в воспроизведении, и «наблюдено»
+   * ставится по журналу контура, а не по тексту команды: замаскированные
+   * аргументы разных команд могут совпадать, а ответ ревьюера к разбору уже
+   * замаскирован.
+   */
+  runId: string;
   argv: string[];
   /**
    * `timeout` — команда не уложилась в предел и остановлена вместе с
@@ -103,7 +99,13 @@ export class ReviewProbes {
     );
     const limitMs = this.limit(input.timeoutMs);
     // Аргументы — тоже сохраняемое поле: секрет в них попадал в результат и журнал.
-    const base = { argv: input.argv.map((part) => redact(part)), limitMs, stdout: '', stderr: '' };
+    const base = {
+      runId: randomUUID(),
+      argv: input.argv.map((part) => redact(part)),
+      limitMs,
+      stdout: '',
+      stderr: '',
+    };
     let result: ProbeResult;
     // Меньше секунды на команду — это уже не проверка, а гарантированный
     // таймаут: честнее сказать, что время кончилось.
@@ -178,7 +180,6 @@ export class ReviewProbes {
       JSON.stringify({
         at: new Date().toISOString(),
         ...result,
-        argvDigest: argvDigest(this.spec.salt, input.argv),
       }) + '\n',
     ).catch(() => undefined);
     return result;
@@ -192,7 +193,7 @@ export async function serveReviewProbes(specPath: string) {
   server.registerTool<StandardSchemaWithJSON, StandardSchemaWithJSON>(
     probeTool,
     {
-      description: `Run a check command (argv, no shell) in the candidate's directory with read-only sources. The controller stops it after ${probes.spec.commandTimeoutMs} ms per command and a total probe budget of ${probes.spec.budgetMs} ms; a timeout is returned as a result.`,
+      description: `Run a check command (argv, no shell) in the candidate's directory with read-only sources. The controller stops it after ${probes.spec.commandTimeoutMs} ms per command and a total probe budget of ${probes.spec.budgetMs} ms; a timeout is returned as a result. The result carries a runId: cite it in reproduction.run when a finding rests on that run.`,
       inputSchema: probeInput,
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },

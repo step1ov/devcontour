@@ -90,6 +90,8 @@ export const reproductionInput = z.object({
   actual: z.string().max(2000).nullable(),
   command: z.array(z.string()).max(64).nullable(),
   executed: z.boolean(),
+  /** runId запуска run_check, на котором находка воспроизведена; null — гипотеза. */
+  run: z.string().max(100).nullable().optional(),
 });
 export const reviewResult = z.object({
   execution: reviewExecution.optional(),
@@ -162,8 +164,9 @@ const reviewSchema = {
                   actual: { type: ['string', 'null'] },
                   command: { type: ['array', 'null'], items: { type: 'string' } },
                   executed: { type: 'boolean' },
+                  run: { type: ['string', 'null'] },
                 },
-                required: ['property', 'input', 'expected', 'actual', 'command', 'executed'],
+                required: ['property', 'input', 'expected', 'actual', 'command', 'executed', 'run'],
               },
             ],
           },

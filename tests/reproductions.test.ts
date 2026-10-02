@@ -32,9 +32,11 @@ test('Review reproductions form a deduplicated task registry, observed only thro
         if (!r.review) return adapters.demo.execute(r);
         const path = r.probe!.args[r.probe!.args.indexOf('--spec') + 1];
         const spec = probeSpec.parse(JSON.parse(await readFile(path, 'utf8')));
-        await new ReviewProbes(spec).run({ argv: command });
+        const ran = await new ReviewProbes(spec).run({ argv: command });
         // Та же запись журнала, но команда не запускалась: бюджет исчерпан.
-        await new ReviewProbes({ ...spec, deadline: Date.now() }).run({ argv: exhausted });
+        const late = await new ReviewProbes({ ...spec, deadline: Date.now() }).run({
+          argv: exhausted,
+        });
         const finding = (message: string, reproduction: unknown) => ({
           severity: 'blocking',
           message,
@@ -58,6 +60,7 @@ test('Review reproductions form a deduplicated task registry, observed only thro
                 actual: 'TypeError',
                 command,
                 executed: true,
+                run: ran.runId,
               }),
               // Гипотеза: запуска не было, и журнал контура его не видел.
               finding('Unicode query may break', {
@@ -67,6 +70,7 @@ test('Review reproductions form a deduplicated task registry, observed only thro
                 actual: null,
                 command: [process.execPath, '-e', '0'],
                 executed: true,
+                run: null,
               }),
               finding('Large query may time out', {
                 property: 'catalog-search',
@@ -75,6 +79,7 @@ test('Review reproductions form a deduplicated task registry, observed only thro
                 actual: null,
                 command: exhausted,
                 executed: true,
+                run: late.runId,
               }),
               finding('Naming is unclear', null),
             ],
@@ -218,6 +223,12 @@ test('Commands that differ only by a secret are not confused when matching obser
   const config = loadConfig(join(root, 'config.json'));
   process.env.DEVCONTOUR_TEST_SECRET_A = 'secret-alpha-1123';
   process.env.DEVCONTOUR_TEST_SECRET_B = 'secret-bravo-5813';
+  // Сервер проверок получает секреты под их именами в окружении прогона — так
+  // их передаёт CLI ревьюера; заглушка запускает его в этом процессе.
+  process.env.A = 'secret-alpha-1123';
+  process.env.B = 'secret-bravo-5813';
+  let recorded: string[] = [];
+  const runs = { a: '', literal: '' };
   config.environment = {
     inherit: ['PATH', 'HOME'],
     values: {},
@@ -227,7 +238,8 @@ test('Commands that differ only by a secret are not confused when matching obser
   const h = new DevContour(store, config);
   const ran = [process.execPath, '-e', 'process.exit(1)', 'secret-alpha-1123'];
   const notRun = [process.execPath, '-e', 'process.exit(1)', 'secret-bravo-5813'];
-  const finding = (input: string, command: string[]) => ({
+  const literalArgv = [process.execPath, '-e', 'process.exit(1)', '[REDACTED]'];
+  const finding = (input: string, command: string[], run: string | null) => ({
     severity: 'blocking',
     message: 'Fails',
     path: null,
@@ -242,6 +254,7 @@ test('Commands that differ only by a secret are not confused when matching obser
       actual: null,
       command,
       executed: true,
+      run,
     },
   });
   const runtimes = {
@@ -252,15 +265,27 @@ test('Commands that differ only by a secret are not confused when matching obser
         if (!r.review) return adapters.demo.execute(r);
         const path = r.probe!.args[r.probe!.args.indexOf('--spec') + 1];
         const spec = probeSpec.parse(JSON.parse(await readFile(path, 'utf8')));
-        // Запущена только команда с секретом A.
-        await new ReviewProbes(spec).run({ argv: ran });
+        // Запущены команда с секретом A и команда с буквальным [REDACTED].
+        const a = await new ReviewProbes(spec).run({ argv: ran });
+        recorded = a.argv;
+        runs.a = a.runId;
+        const literal = await new ReviewProbes(spec).run({ argv: literalArgv });
+        runs.literal = literal.runId;
+        const data = {
+          approved: false,
+          summary: 'Three inputs',
+          discoveries: [],
+          findings: [
+            finding('{"q":"a"}', ran, a.runId),
+            finding('{"q":"b"}', notRun, null),
+            // Ревьюер сообщает команду с секретом B, ссылаясь на запуск с
+            // буквальным [REDACTED]: реестр записывает то, что запускалось.
+            finding('{"q":"c"}', notRun, literal.runId),
+          ],
+        };
+        // Как штатный адаптер: ответ маскируется до разбора.
         return {
-          data: {
-            approved: false,
-            summary: 'Two inputs',
-            discoveries: [],
-            findings: [finding('{"q":"a"}', ran), finding('{"q":"b"}', notRun)],
-          },
+          data: JSON.parse(r.execution!.redact(JSON.stringify(data))) as unknown,
           log: 'fixture',
           command: [],
         };
@@ -282,11 +307,24 @@ test('Commands that differ only by a secret are not confused when matching obser
     h.pause(false);
     await scheduler.drain();
     const registry = (store.read().reproductions ?? []).filter((r) => r.taskId === task.id);
-    assert.equal(registry.find((r) => r.input === '{"q":"a"}')?.observed, true, 'запущенная');
-    assert.equal(registry.find((r) => r.input === '{"q":"b"}')?.observed, false, 'незапущенная');
+    const byInput = (input: string) => registry.find((r) => r.input === input)!;
+    assert.equal(byInput('{"q":"a"}').observed, true, 'запущенная — несмотря на маску ответа');
+    assert.equal(recorded.includes('secret-alpha-1123'), false, 'журнал хранит маску');
+    assert.deepEqual(byInput('{"q":"a"}').command, recorded, 'команда — из журнала контура');
+    assert.equal(byInput('{"q":"b"}').observed, false, 'без ссылки на запуск — гипотеза');
+    // Ссылка на чужой запуск подтверждает только тот запуск: команда в
+    // реестре — его, а не сообщённая ревьюером.
+    // Замаскированные команды A и C выглядят одинаково; наблюдения различает
+    // id запуска — у каждого свой.
+    assert.equal(byInput('{"q":"a"}').run, runs.a);
+    assert.equal(byInput('{"q":"c"}').run, runs.literal);
+    assert.notEqual(runs.a, runs.literal);
+    assert.equal(byInput('{"q":"b"}').run, null);
   } finally {
     delete process.env.DEVCONTOUR_TEST_SECRET_A;
     delete process.env.DEVCONTOUR_TEST_SECRET_B;
+    delete process.env.A;
+    delete process.env.B;
     await scheduler.stop();
     store.close();
     await rm(root, { recursive: true, force: true });
