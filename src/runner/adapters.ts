@@ -90,8 +90,13 @@ export const reproductionInput = z.object({
   actual: z.string().max(2000).nullable(),
   command: z.array(z.string()).max(64).nullable(),
   executed: z.boolean(),
-  /** runId запуска run_check, на котором находка воспроизведена; null — гипотеза. */
-  run: z.string().max(100).nullable().optional(),
+  /**
+   * runId запуска run_check, на котором находка воспроизведена; null —
+   * гипотеза. Длина не ограничивается: ревью без run_check (контракт, план)
+   * вписывает сюда описание запуска, и «наблюдено» всё равно ставится только
+   * по id из журнала контура.
+   */
+  run: z.string().nullable().optional(),
 });
 export const reviewResult = z.object({
   execution: reviewExecution.optional(),
@@ -107,7 +112,9 @@ export const reviewResult = z.object({
       rule: z.string().nullable().optional(),
       consequence: z.string().nullable().optional(),
       evidence: z.string().nullable().optional(),
-      reproduction: reproductionInput.nullable().optional(),
+      // Воспроизведение — дополнение к находке: его негодная форма отбрасывает
+      // только его, а не весь вердикт ревью, за который уже заплачено.
+      reproduction: reproductionInput.nullable().optional().catch(null),
     }),
   ),
 });
