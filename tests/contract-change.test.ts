@@ -369,7 +369,7 @@ test('Work reverted within the branch does not stop the base move; a file rename
   }
 });
 
-test('Tasks stay held while a context pack pins the previous contract text, and are released after the relock', async () => {
+test('Tasks stay held and the plan is not reviewed while a context pack pins the previous contract text', async () => {
   const s = await stage();
   try {
     // Пакет контекста включает документ контракта и закреплён на прежней
@@ -394,7 +394,9 @@ test('Tasks stay held while a context pack pins the previous contract text, and 
     };
     const failed = await s.changes().advance(operation.id);
     assert.equal(failed.status, 'failed');
-    assert.equal(failed.next, 'release');
+    // Остановка до ревью плана: рецензент не видит прежний текст в контексте.
+    assert.equal(failed.next, 'plan');
+    assert.deepEqual(s.calls, ['contract / architecture decision']);
     assert.match(failed.error ?? '', /Context pack contracts закрепляет прежнюю редакцию/);
     assert.equal(s.task(s.api.id).hold?.operation, operation.id, 'задача удержана');
     assert.equal(

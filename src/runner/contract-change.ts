@@ -300,6 +300,21 @@ export class ContractChanges {
     });
   }
 
+  /**
+   * Горячей перезагрузки конфигурации нет: пакет контекста с прежней
+   * редакцией контракта заблокировал бы задачи на первом запуске и истратил бы
+   * попытку, а рецензент плана видел бы два разных текста. Удержание
+   * остаётся до перезакрепления.
+   */
+  private async assertContextPinned(op: ContractChange) {
+    const contract = this.h.store.read().contracts.find((c) => c.id === op.contractId);
+    const stale = contract ? await stalePins(this.h.config, contract) : [];
+    if (stale.length)
+      throw new DomainError(
+        `Context pack ${stale.join(', ')} закрепляет прежнюю редакцию ${contract!.source}: задачи заблокировались бы на первом запуске. Выполните context-lock, перезапустите сервер и продолжите: contract-change --id ${op.id}`,
+      );
+  }
+
   private revisions(op: ContractChange) {
     const p = op.proposal;
     return this.h.store
@@ -389,6 +404,11 @@ export class ContractChanges {
         return {};
       }
       case 'plan': {
+        // Рецензент плана читает закреплённый контекст: с прежней редакцией
+        // контракта в нём он справедливо отклонил бы план. При прежнем порядке
+        // шагов база ещё не перенесена, и проверка остаётся за release.
+        if (stepsOf(op).indexOf('base') < stepsOf(op).indexOf('plan'))
+          await this.assertContextPinned(op);
         for (const boardId of op.boards) {
           const s = this.h.store.read();
           const drafts = op.rebound.filter(
@@ -477,15 +497,7 @@ export class ContractChanges {
         return {};
       }
       case 'release': {
-        // Горячей перезагрузки конфигурации нет: пакет контекста с прежней
-        // редакцией контракта заблокировал бы отпущенные задачи на первом
-        // запуске и истратил бы попытку. Удержание остаётся до перезакрепления.
-        const contract = this.h.store.read().contracts.find((c) => c.id === op.contractId);
-        const stale = contract ? await stalePins(this.h.config, contract) : [];
-        if (stale.length)
-          throw new DomainError(
-            `Context pack ${stale.join(', ')} закрепляет прежнюю редакцию ${contract!.source}: отпущенные задачи заблокировались бы на первом запуске. Выполните context-lock, перезапустите сервер и продолжите: contract-change --id ${op.id}`,
-          );
+        await this.assertContextPinned(op);
         this.advanceStep(op, () => {
           this.h.release(op.id);
         });
