@@ -718,7 +718,15 @@ export class Scheduler {
       // наблюдение), и команда в реестре — та, что действительно запускалась.
       // Текст команды из ответа к разбору уже замаскирован, и команды,
       // различающиеся только секретом, по нему не различить.
-      const cited = r.run ? (probes ?? []).find((p) => p.runId === r.run) : undefined;
+      // Ответ ревьюера маскируется до разбора, и короткий секрет может
+      // задеть символы id. Id журнала сравниваются в той же маске, и
+      // совпадение должно быть единственным — иначе это не подтверждение.
+      const matches = r.run
+        ? (probes ?? []).filter(
+            (p) => p.runId === r.run || execution.redact(String(p.runId)) === r.run,
+          )
+        : [];
+      const cited = matches.length === 1 ? matches[0] : undefined;
       const ran = !!cited && ['passed', 'failed', 'timeout'].includes(cited.status as string);
       return [
         {

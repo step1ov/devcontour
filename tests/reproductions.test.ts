@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setupDemo } from '../src/demo.ts';
@@ -8,7 +8,7 @@ import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
-import { adapters, type AgentRequest } from '../src/runner/adapters.ts';
+import { adapters, cliAdapter, type AgentRequest } from '../src/runner/adapters.ts';
 import { ReviewProbes, probeSpec } from '../src/runner/review-probe.ts';
 import { AgentService } from '../src/application/agent.ts';
 
@@ -325,6 +325,102 @@ test('Commands that differ only by a secret are not confused when matching obser
     delete process.env.DEVCONTOUR_TEST_SECRET_B;
     delete process.env.A;
     delete process.env.B;
+    await scheduler.stop();
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Through the real Codex adapter a short secret neither breaks the run id nor leaves a hypothesis command on an observed record', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'devcontour-observed-cli-'));
+  await setupDemo(root);
+  const config = loadConfig(join(root, 'config.json'));
+  // Секрет из одной цифры задевает символы id запуска в ответе, который
+  // штатный адаптер маскирует до разбора.
+  process.env.DEVCONTOUR_TEST_DIGIT_SECRET = '1';
+  config.environment = {
+    inherit: ['PATH', 'HOME'],
+    values: {},
+    secrets: { DIGIT: 'DEVCONTOUR_TEST_DIGIT_SECRET' },
+  };
+  const store = new Store(join(root, 'state.sqlite'));
+  const h = new DevContour(store, config);
+  // Фиктивный codex: запускает проверку через сервер проверок по своей
+  // MCP-конфигурации и пишет ответ ревьюера, как настоящий CLI.
+  const bin = join(root, 'fake-bin');
+  await mkdir(bin);
+  const fake = join(root, 'fake-codex.mjs');
+  await writeFile(
+    fake,
+    `import { readFileSync, writeFileSync } from 'node:fs';
+const args = process.argv.slice(2);
+if (args[0] === '--version') { console.log('codex-cli 0.0.0-fake'); process.exit(0); }
+readFileSync(0, 'utf8');
+const out = args[args.indexOf('--output-last-message') + 1];
+const spec = /"([^"]*probe\\.json)"/.exec(args.find((a) => a.startsWith('mcp_servers=')) ?? '')[1];
+const { ReviewProbes, probeSpec } = await import(${JSON.stringify(new URL('../src/runner/review-probe.ts', import.meta.url).href)});
+const argv = [process.execPath, '-e', 'process.exit(2)'];
+const ran = await new ReviewProbes(probeSpec.parse(JSON.parse(readFileSync(spec, 'utf8')))).run({ argv });
+const finding = (command, run) => ({ severity: 'blocking', message: 'Fails', path: null, line: null, rule: null, consequence: null, evidence: null,
+  reproduction: { property: 'catalog-search', input: '{"q":"x"}', expected: null, actual: null, command, executed: run !== null, run } });
+writeFileSync(out, JSON.stringify({ approved: false, summary: 'Fails', discoveries: [],
+  execution: { commands: [], noCommandsReason: 'fixture' },
+  findings: [finding([process.execPath, '-e', 'process.exit(73)', 'NEVER_EXECUTED'], null), finding(argv, ran.runId)] }));
+`,
+  );
+  await writeFile(
+    join(bin, 'codex'),
+    `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} --import ${JSON.stringify(import.meta.resolve('tsx'))} ${JSON.stringify(fake)} "$@"\n`,
+  );
+  await chmod(join(bin, 'codex'), 0o755);
+  const codex = cliAdapter('codex');
+  const runtimes = {
+    ...adapters,
+    demo: {
+      name: 'codex' as const,
+      execute(r: AgentRequest) {
+        if (!r.review) return adapters.demo.execute(r);
+        return codex.execute({
+          ...r,
+          execution: {
+            ...r.execution!,
+            env: { ...r.execution!.env, PATH: `${bin}:${r.execution!.env.PATH}` },
+          },
+        });
+      },
+    },
+  };
+  const scheduler = new Scheduler(h, root, runtimes);
+  try {
+    await scheduler.init();
+    for (const t of store.read().tasks) if (t.status !== 'done') h.cancel(t.id);
+    const board = h.createBoard('Observed through CLI');
+    const task = h.addTask(board.id, {
+      title: 'Observed through CLI',
+      description: 'Ответ ревьюера идёт через штатный адаптер.',
+      role: 'qa',
+      acceptance: ['catalog-search'],
+    });
+    h.approve(board.id);
+    h.pause(false);
+    await scheduler.drain();
+    const registry = (store.read().reproductions ?? []).filter((r) => r.taskId === task.id);
+    assert.equal(registry.length, 1, 'один вход — одна запись');
+    const record = registry[0];
+    assert.equal(record.observed, true, 'id запуска пережил маску ответа');
+    // Команда и id — из журнала контура, а не из гипотезы на тот же вход.
+    const dir = store.read().runs.findLast((r) => r.taskId === task.id)!;
+    const logged = (
+      await readFile(join(root, 'artifacts', dir.id, 'candidate', 'review', 'probes.jsonl'), 'utf8')
+    )
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { runId: string; argv: string[] });
+    assert.equal(record.run, logged[0].runId);
+    assert.deepEqual(record.command, logged[0].argv);
+    assert.equal(JSON.stringify(record.command).includes('NEVER_EXECUTED'), false);
+  } finally {
+    delete process.env.DEVCONTOUR_TEST_DIGIT_SECRET;
     await scheduler.stop();
     store.close();
     await rm(root, { recursive: true, force: true });

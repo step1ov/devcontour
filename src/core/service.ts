@@ -803,8 +803,14 @@ export class DevContour {
         if (existing) {
           if (!existing.runs.some((x) => x.runId === r.id)) existing.runs.push(run);
           // Подтверждение контура не отменяется последующим неподтверждённым.
-          existing.observed ||= item.observed;
-          existing.run ??= item.run;
+          // Гипотеза, подтверждённая запуском, получает команду и id этого
+          // запуска вместе: иначе запись связывала бы действительный запуск с
+          // командой, которая не запускалась.
+          if (item.observed && !existing.observed) {
+            existing.observed = true;
+            existing.run = item.run;
+            existing.command = item.command;
+          }
           existing.claimed ||= item.claimed;
           return existing;
         }
