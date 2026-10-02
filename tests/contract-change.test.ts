@@ -132,6 +132,70 @@ test('A contract change runs as one command: review, rebind, plan review, base a
   }
 });
 
+test('The plan reviewer sees the base the tasks will run on: the base moves before the plan review', async () => {
+  const s = await stage();
+  try {
+    // Рецензент плана читает базу в момент ревью: при обратном порядке он
+    // видел прежнюю схему и отклонял план, которому новая ещё не досталась.
+    const seen: string[] = [];
+    const base = reviewers(s.calls);
+    const planReader: AgentAdapter = {
+      ...base.codex,
+      execute(r: AgentRequest) {
+        if (/Independently review this task plan\./.test(r.prompt))
+          seen.push(s.sh('show', 'devcontour/accepted:schema.json'));
+        return base.codex.execute(r);
+      },
+    };
+    const changes = new ContractChanges(s.h, s.root, { codex: planReader, claude: planReader });
+    const { operation } = (await changes.start(s.proposal, 'claude')) as {
+      operation: ContractChange;
+    };
+    const done = await changes.advance(operation.id);
+    assert.equal(done.status, 'completed', done.error);
+    assert.deepEqual(seen, ['{"price":"number"}']);
+    const order = done.history.filter((h) => h.event === 'done').map((h) => h.step);
+    assert.deepEqual(order, ['hold', 'drain', 'review', 'rebind', 'base', 'plan', 'release']);
+  } finally {
+    await s.remove();
+  }
+});
+
+test('An operation started with the previous step order continues by it', async () => {
+  const s = await stage();
+  try {
+    // Операция прежнего порядка остановилась перед ревью планов (индекс 4):
+    // при новом порядке тот же индекс — перенос базы, и без учёта порядка
+    // операция, уже прошедшая план, пропустила бы перенос.
+    const legacy = s.changes((step) => {
+      if (step === 'rebind') throw new Error('stop after rebind');
+    });
+    const { operation } = (await legacy.start(s.proposal, 'codex')) as {
+      operation: ContractChange;
+    };
+    await legacy.advance(operation.id);
+    const stopped = s.changes().get(operation.id);
+    assert.equal(stopped.step, 4);
+    s.store.atomic(() => {
+      const { order, ...rest } = s.changes().get(operation.id);
+      void order;
+      s.store.saveLocal('contract-change', rest.owner, rest.id, rest);
+    });
+    assert.equal(s.changes().view(s.changes().get(operation.id)).next, 'plan');
+    const done = await s.changes().advance(operation.id);
+    assert.equal(done.status, 'completed', done.error);
+    const order = done.history.filter((h) => h.event === 'done').map((h) => h.step);
+    assert.deepEqual(order, ['hold', 'drain', 'review', 'rebind', 'plan', 'base', 'release']);
+    assert.equal(
+      s.sh('rev-parse', 'devcontour/accepted:schema.json'),
+      s.sh('rev-parse', 'HEAD:schema.json'),
+      'перенос базы не пропущен',
+    );
+  } finally {
+    await s.remove();
+  }
+});
+
 test('A contract change resumes after a crash without repeating the review, and a live owner is not overtaken', async () => {
   const s = await stage();
   try {
@@ -379,7 +443,7 @@ test('A base move cannot happen after the operation was abandoned inside the bas
     } as typeof cp.spawn;
     syncBuiltinESMExports();
     const changes = s.changes((step) => {
-      if (step === 'plan') armed = true;
+      if (step === 'rebind') armed = true;
     });
     const { operation } = (await changes.start(s.proposal, 'codex')) as {
       operation: ContractChange;
@@ -463,7 +527,7 @@ test('A hung git update-ref inside the transaction is stopped by its time limit'
     let baseStarted = 0;
     const failed = await s
       .changes((step) => {
-        if (step === 'plan') {
+        if (step === 'rebind') {
           process.env.PATH = `${shim}:${path}`;
           baseStarted = Date.now();
         }

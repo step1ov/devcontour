@@ -29,8 +29,19 @@ import { git } from './process.ts';
  * же места, не повторяя необратимого. У Git, SQLite и внешнего ревью нет общей
  * транзакции — согласованность держат ожидаемые digest и SHA, а не атомарность.
  */
-const steps = ['hold', 'drain', 'review', 'rebind', 'plan', 'base', 'release'] as const;
-type Step = (typeof steps)[number];
+/**
+ * Порядок шагов. База переносится до ревью планов: рецензент плана видит
+ * задачи на той базе, с которой они будут выполняться, — с новой редакцией
+ * контракта и её артефактами. При обратном порядке он видел прежнюю базу без
+ * них и справедливо отклонял план. Шаг хранится индексом, поэтому операция,
+ * начатая при прежнем порядке (без order), продолжает по нему.
+ */
+const orders = {
+  1: ['hold', 'drain', 'review', 'rebind', 'plan', 'base', 'release'],
+  2: ['hold', 'drain', 'review', 'rebind', 'base', 'plan', 'release'],
+} as const;
+type Step = (typeof orders)[2][number];
+const stepsOf = (op: { order?: 2 }): readonly Step[] => orders[op.order ?? 1];
 
 export type ContractChange = {
   id: string;
@@ -41,6 +52,8 @@ export type ContractChange = {
   authorRuntime: 'codex' | 'claude';
   expected: { head: string; proposedDigest: string; current: string | null };
   step: number;
+  /** Порядок шагов; отсутствует у операций, начатых при прежнем порядке. */
+  order?: 2;
   status: 'queued' | 'running' | 'waiting' | 'failed' | 'completed' | 'stale' | 'abandoned';
   waitingFor?: string[];
   token?: string;
@@ -98,7 +111,7 @@ export class ContractChanges {
     const { token, leaseUntil, ...rest } = op;
     void token;
     void leaseUntil;
-    return { ...rest, next: steps[op.step] ?? null };
+    return { ...rest, next: stepsOf(op)[op.step] ?? null };
   }
 
   /** Начать операцию или вернуть уже идущую по тому же предложению. */
@@ -140,6 +153,7 @@ export class ContractChanges {
           current: impact.current?.id ?? null,
         },
         step: 0,
+        order: 2,
         status: 'queued',
         startedAt: new Date().toISOString(),
         held: [],
@@ -197,9 +211,9 @@ export class ContractChanges {
     return this.h.store.atomic(() => {
       const current = this.guard(op);
       effect(current);
-      this.log(current, steps[current.step], 'done');
+      this.log(current, stepsOf(current)[current.step], 'done');
       current.step++;
-      if (current.step >= steps.length) {
+      if (current.step >= stepsOf(current).length) {
         current.status = 'completed';
         current.finishedAt = new Date().toISOString();
         current.token = undefined;
@@ -223,7 +237,7 @@ export class ContractChanges {
       current.waitingFor = waitingFor;
       current.token = undefined;
       current.leaseUntil = undefined;
-      this.log(current, steps[current.step], status, message.slice(0, 500));
+      this.log(current, stepsOf(current)[current.step], status, message.slice(0, 500));
       this.save(current);
     });
   }
@@ -245,8 +259,8 @@ export class ContractChanges {
     );
     heartbeat.unref();
     try {
-      while (op.status === 'running' && op.step < steps.length) {
-        const step = steps[op.step];
+      while (op.status === 'running' && op.step < stepsOf(op).length) {
+        const step = stepsOf(op)[op.step];
         // Вход сверяется перед каждым шагом, а не только до ревью: редакция,
         // появившаяся после ревью, иначе ушла бы в базу под чужим одобрением.
         await this.assertInputs(op);
@@ -279,7 +293,7 @@ export class ContractChanges {
       op.token = undefined;
       op.leaseUntil = undefined;
       op.finishedAt = new Date().toISOString();
-      this.log(op, steps[op.step] ?? 'release', 'abandoned');
+      this.log(op, stepsOf(op)[op.step] ?? 'release', 'abandoned');
       this.save(op);
       return this.view(op);
     });
