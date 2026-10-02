@@ -336,8 +336,9 @@ test('Through the real Codex adapter a short secret neither breaks the run id no
   await setupDemo(root);
   const config = loadConfig(join(root, 'config.json'));
   // Секрет из одной цифры задевает символы id запуска в ответе, который
-  // штатный адаптер маскирует до разбора.
-  process.env.DEVCONTOUR_TEST_DIGIT_SECRET = '1';
+  // штатный адаптер маскирует до разбора. «4» — номер версии UUID v4: он
+  // есть в каждом id, и маска задевает его в каждом прогоне, а не случайно.
+  process.env.DEVCONTOUR_TEST_DIGIT_SECRET = '4';
   config.environment = {
     inherit: ['PATH', 'HOME'],
     values: {},
@@ -416,6 +417,7 @@ writeFileSync(out, JSON.stringify({ approved: false, summary: 'Fails', discoveri
       .trim()
       .split('\n')
       .map((line) => JSON.parse(line) as { runId: string; argv: string[] });
+    assert.equal(logged[0].runId[14], '4', 'id запуска задет маской');
     assert.equal(record.run, logged[0].runId);
     assert.deepEqual(record.command, logged[0].argv);
     assert.equal(JSON.stringify(record.command).includes('NEVER_EXECUTED'), false);
