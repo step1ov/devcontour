@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { fixture, input } from './helpers.ts';
 import { reviewContract } from '../src/runner/agent-control.ts';
 import { ContractChanges, type ContractChange } from '../src/runner/contract-change.ts';
+import { contractImpact } from '../src/runner/contract-impact.ts';
 import type { AgentAdapter, AgentRequest } from '../src/runner/adapters.ts';
 import { readyTasks } from '../src/core/graph.ts';
 import { Store } from '../src/core/store.ts';
@@ -482,6 +483,26 @@ test('A hung git update-ref inside the transaction is stopped by its time limit'
     process.env.PATH = path;
     ContractChanges.refMoveTimeoutMs = limit;
     await rm(shim, { recursive: true, force: true });
+    await s.remove();
+  }
+});
+
+test('A contract file registered under another component is named, not treated as a new contract', async () => {
+  const s = await stage();
+  try {
+    // Контракт зарегистрирован как общий; предложение называет компонент.
+    const other = { ...s.proposal, repositoryId: 'main' };
+    const impact = (await contractImpact(s.h, other)) as {
+      status: string;
+      warning?: string;
+      registeredUnder?: string[];
+    };
+    assert.equal(impact.status, 'new');
+    assert.deepEqual(impact.registeredUnder, ['(общий)']);
+    assert.match(impact.warning ?? '', /уже зарегистрирован как контракт/);
+    await assert.rejects(s.changes().start(other, 'codex'), /уже зарегистрирован/);
+    assert.equal(s.store.read().contracts.length, 1, 'параллельный контракт не заведён');
+  } finally {
     await s.remove();
   }
 });

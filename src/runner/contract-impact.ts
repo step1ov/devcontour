@@ -57,6 +57,18 @@ export async function contractImpact(h: DevContour, input: unknown) {
     (parsed.file ? c.source === parsed.file : !c.source && c.title === parsed.title);
   const revisions = s.contracts.filter(same);
   const current = revisions.at(-1);
+  // Тот же файл, зарегистрированный под другим компонентом, — почти всегда
+  // пропущенный repositoryId в предложении, а не новый договор. Молча назвать
+  // его новым значило бы завести параллельный контракт без перепривязки задач.
+  const elsewhere = parsed.file
+    ? [
+        ...new Set(
+          s.contracts
+            .filter((c) => c.source === parsed.file && !same(c))
+            .map((c) => c.repositoryId ?? '(общий)'),
+        ),
+      ]
+    : [];
   const status = !current
     ? 'new'
     : samePin(current, content, pinned.artifacts)
@@ -160,5 +172,11 @@ export async function contractImpact(h: DevContour, input: unknown) {
     requiredReviews,
     // Отчёт ничего не меняет: применение — отдельный шаг после ревью.
     applied: false as const,
+    ...(!current && elsewhere.length
+      ? {
+          warning: `Файл ${parsed.file} уже зарегистрирован как контракт компонента ${elsewhere.join(', ')}; укажите repositoryId, если меняется он`,
+          registeredUnder: elsewhere,
+        }
+      : {}),
   };
 }

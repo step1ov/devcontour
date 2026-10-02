@@ -111,6 +111,11 @@ export class ContractChanges {
     const proposal = contractProposal.parse(input);
     const impact = await contractImpact(this.h, proposal);
     if (impact.status === 'unchanged') return { status: 'unchanged' as const, impact };
+    // Операция не заводит параллельный контракт для файла, который уже
+    // зарегистрирован под другим компонентом: задачи прежнего остались бы
+    // привязаны к нему.
+    if ('registeredUnder' in impact && impact.registeredUnder?.length)
+      throw new DomainError(impact.warning!, 409);
     const owner = impact.repositoryId;
     const key = digest({ owner, source: proposal.file ?? `title:${proposal.title}` });
     return this.h.store.atomic(() => {
