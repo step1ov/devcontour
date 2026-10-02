@@ -59,6 +59,28 @@ export async function lockContextFile(config: Config, path: string, ref = 'HEAD'
   return packs;
 }
 /**
+ * Пакеты, которые закрепляют источник контракта в другой редакции, чем
+ * утверждённая. Задача с таким контрактом заблокируется на первом же запуске
+ * (taskContext), поэтому изменение контракта не отпускает задачи, пока пакет
+ * не перезакреплён.
+ */
+export async function stalePins(config: Config, contract: Contract) {
+  const stale: string[] = [];
+  if (!contract.source) return stale;
+  for (const pack of config.contextPacks) {
+    if ((contract.repositoryId ?? 'main') !== pack.repositoryId || !pack.revision) continue;
+    if (![...pack.files, ...pack.references].includes(contract.source)) continue;
+    const repo = repository(config, pack.repositoryId);
+    const pinned = await git(repo.path, 'show', `${pack.revision}:${contract.source}`);
+    if (!sameText(pinned, contract.content)) stale.push(pack.id);
+  }
+  return stale;
+}
+// Git отдаёт файл без завершающего перевода строки, реестр хранит его
+// целиком: различие в хвостовых пробелах — не другая редакция.
+const sameText = (a: string, b: string) => a.trimEnd() === b.trimEnd();
+
+/**
  * Контекст задачи. `contracts` — утверждённые контракты задачи: если файл
  * закреплённого пакета служит источником контракта, закреплённая редакция
  * обязана совпадать с утверждённой. Иначе исполнитель получает в подсказке
@@ -84,9 +106,7 @@ export async function taskContext(config: Config, task: Task, contracts: Contrac
     for (const contract of contracts) {
       if (!contract.source || (contract.repositoryId ?? 'main') !== pack.repositoryId) continue;
       const pinned = documents.find((d) => d.file === contract.source);
-      // Git отдаёт файл без завершающего перевода строки, реестр хранит его
-      // целиком: различие в хвостовых пробелах — не другая редакция.
-      if (pinned && pinned.content.trimEnd() !== contract.content.trimEnd())
+      if (pinned && !sameText(pinned.content, contract.content))
         throw new BlockedError(
           `Context pack ${pack.id} закрепляет ${contract.source} в редакции, отличной от утверждённого контракта ${contract.id}; выполните context-lock после коммита контракта и перезапустите сервер: запущенный сервер держит прежнее закрепление`,
         );

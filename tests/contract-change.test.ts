@@ -14,6 +14,7 @@ import type { AgentAdapter, AgentRequest } from '../src/runner/adapters.ts';
 import { readyTasks } from '../src/core/graph.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
+import { pinContext } from '../src/runner/context.ts';
 
 /** Ревьюер-фикстура: одобряет и считает вызовы по предмету ревью. */
 function reviewers(calls: string[]) {
@@ -365,6 +366,48 @@ test('Work reverted within the branch does not stop the base move; a file rename
     assert.match(failed.error ?? '', /вне контракта: notes\.txt/);
   } finally {
     await r.remove();
+  }
+});
+
+test('Tasks stay held while a context pack pins the previous contract text, and are released after the relock', async () => {
+  const s = await stage();
+  try {
+    // Пакет контекста включает документ контракта и закреплён на прежней
+    // редакции; затем документ меняется вместе со схемой.
+    s.h.config.contextPacks = await pinContext({
+      ...s.h.config,
+      contextPacks: [
+        {
+          id: 'contracts',
+          version: '1.0',
+          repositoryId: 'main',
+          roles: ['backend'],
+          files: ['docs/contracts/catalog.md'],
+          references: [],
+        },
+      ],
+    });
+    await writeFile(join(s.repo, 'docs/contracts/catalog.md'), '# Catalog\n\nPrice is a number.\n');
+    s.sh('commit', '-qam', 'contract text');
+    const { operation } = (await s.changes().start(s.proposal, 'codex')) as {
+      operation: ContractChange;
+    };
+    const failed = await s.changes().advance(operation.id);
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.next, 'release');
+    assert.match(failed.error ?? '', /Context pack contracts закрепляет прежнюю редакцию/);
+    assert.equal(s.task(s.api.id).hold?.operation, operation.id, 'задача удержана');
+    assert.equal(
+      readyTasks(s.store.read()).some((t) => t.id === s.api.id),
+      false,
+    );
+    // Перезакрепление на новой базе — и операция продолжается с того же шага.
+    s.h.config.contextPacks = await pinContext(s.h.config, 'HEAD');
+    const done = await s.changes().advance(operation.id);
+    assert.equal(done.status, 'completed', done.error);
+    assert.ok(s.store.read().tasks.every((t) => !t.hold));
+  } finally {
+    await s.remove();
   }
 });
 
