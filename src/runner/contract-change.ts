@@ -427,8 +427,12 @@ export class ContractChanges {
         // Переносится ровно проверенный commit и только в компоненте
         // контракта: подготовка других компонентов остаётся за ведущим.
         const reviewed = op.expected.head;
+        // Итоговое изменение от общей базы, а не каждый промежуточный commit:
+        // правка, отменённая позже в той же ветке, в базу не попадает. Без
+        // переименований: перенос постороннего файла на путь артефакта
+        // виден удалением прежнего пути.
         const paths = (
-          await git(repo.path, 'log', '--format=', '--name-only', `${target}..${reviewed}`)
+          await git(repo.path, 'diff', '--name-only', '--no-renames', `${target}...${reviewed}`)
         )
           .split('\n')
           .filter(Boolean);

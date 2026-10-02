@@ -322,6 +322,52 @@ test('A contract change does not move base work that is not part of the contract
   }
 });
 
+test('Work reverted within the branch does not stop the base move; a file renamed onto an artifact does', async () => {
+  const s = await stage();
+  try {
+    // Посторонняя правка и её отмена: итог ветки — только изменение контракта.
+    execFileSync('sh', ['-c', 'echo x > scratch.txt'], { cwd: s.repo });
+    s.sh('add', 'scratch.txt');
+    s.sh('commit', '-qm', 'scratch');
+    s.sh('rm', '-q', 'scratch.txt');
+    s.sh('commit', '-qm', 'revert scratch');
+    const { operation } = (await s.changes().start(s.proposal, 'codex')) as {
+      operation: ContractChange;
+    };
+    const done = await s.changes().advance(operation.id);
+    assert.equal(done.status, 'completed', done.error);
+    assert.equal(
+      s.sh('rev-parse', 'devcontour/accepted:schema.json'),
+      s.sh('rev-parse', 'HEAD:schema.json'),
+    );
+  } finally {
+    await s.remove();
+  }
+  const r = await stage();
+  try {
+    // Посторонний файл переименован в новый артефакт: Git показал бы только
+    // новый путь, а удаление прежнего — тоже изменение вне контракта.
+    await writeFile(join(r.repo, 'notes.txt'), 'notes about types\n');
+    r.sh('add', 'notes.txt');
+    r.sh('commit', '-qm', 'notes');
+    r.sh('branch', '-f', 'devcontour/accepted', 'HEAD');
+    r.sh('mv', 'notes.txt', 'types.txt');
+    r.sh('commit', '-qm', 'rename notes into a new artifact');
+    const proposal = {
+      ...r.proposal,
+      artifacts: [...r.proposal.artifacts, { path: 'types.txt', purpose: 'Типы' }],
+    };
+    const { operation } = (await r.changes().start(proposal, 'codex')) as {
+      operation: ContractChange;
+    };
+    const failed = await r.changes().advance(operation.id);
+    assert.equal(failed.status, 'failed');
+    assert.match(failed.error ?? '', /вне контракта: notes\.txt/);
+  } finally {
+    await r.remove();
+  }
+});
+
 test('A redaction committed after review makes the operation stale and moves nothing', async () => {
   const s = await stage();
   try {
