@@ -29,7 +29,7 @@ import { Label } from '@/ui/label.tsx';
 import { Separator } from '@/ui/separator.tsx';
 import { Textarea } from '@/ui/textarea.tsx';
 import { cn } from '@/lib/utils.ts';
-import { boardPhaseLabels } from '../core/work-status.ts';
+import { boardPhaseLabels, type BoardPhase } from '../core/work-status.ts';
 
 const Development = lazy(() => import('./App.tsx').then((m) => ({ default: m.App })));
 type View = ReturnType<Preparation['status']> & {
@@ -548,6 +548,33 @@ function Decisions({
     </Foldable>
   );
 }
+function BoardPhases({
+  label,
+  boards,
+}: {
+  label: string;
+  boards: { id: string; title: string; phase: BoardPhase }[];
+}) {
+  return (
+    <ul className="mt-2 grid gap-2" aria-label={label}>
+      {boards.map((b) => (
+        <li key={b.id} className="flex flex-wrap items-baseline gap-x-3">
+          <span>{b.title}</span>
+          <small
+            className={cn(
+              'text-muted-foreground',
+              b.phase === 'failed' && 'text-destructive',
+              b.phase === 'running' && 'text-primary',
+            )}
+          >
+            {boardPhaseLabels[b.phase]}
+          </small>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export function PreparationPanel() {
   const [view, setView] = useState<View>();
   const [selected, setSelected] = useState(() => readLocation().change);
@@ -930,23 +957,25 @@ export function PreparationPanel() {
                     </p>
                   )}
                   <Workers workers={view.workers ?? []} concurrency={view.setup?.concurrency} />
-                  {view.delivery.boards.length > 0 && (
-                    <ul className="mt-2 grid gap-2" aria-label="Доски разработки">
-                      {view.delivery.boards.map((b) => (
-                        <li key={b.id} className="flex flex-wrap items-baseline gap-x-3">
-                          <span>{b.title}</span>
-                          <small
-                            className={cn(
-                              'text-muted-foreground',
-                              b.phase === 'failed' && 'text-destructive',
-                              b.phase === 'running' && 'text-primary',
-                            )}
-                          >
-                            {boardPhaseLabels[b.phase]}
-                          </small>
-                        </li>
-                      ))}
-                    </ul>
+                  {/* Принятые доски — история релиза. В общем списке они
+                      выглядели параллельными потоками рядом с текущей работой. */}
+                  {view.delivery.boards.some((b) => b.phase !== 'accepted') && (
+                    <BoardPhases
+                      label="Доски разработки"
+                      boards={view.delivery.boards.filter((b) => b.phase !== 'accepted')}
+                    />
+                  )}
+                  {view.delivery.boards.some((b) => b.phase === 'accepted') && (
+                    <details className="mt-2">
+                      <summary className="text-muted-foreground cursor-pointer text-sm">
+                        Принятые доски (
+                        {view.delivery.boards.filter((b) => b.phase === 'accepted').length})
+                      </summary>
+                      <BoardPhases
+                        label="Принятые доски"
+                        boards={view.delivery.boards.filter((b) => b.phase === 'accepted')}
+                      />
+                    </details>
                   )}
                   {view.engineConnected && (
                     <Button className="mt-4" onClick={() => showTasks(true)}>
