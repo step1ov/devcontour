@@ -1,6 +1,7 @@
 import type { DevContour } from '../core/service.ts';
 import type { ChangeSet, DevContourState, Task } from '../core/model.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
+import { boardPhase } from '../core/work-status.ts';
 import { repositories } from '../core/repositories.ts';
 import { servingPreview, type Preview } from '../core/preview.ts';
 import { currentVerification } from '../core/delivery.ts';
@@ -69,7 +70,7 @@ export interface AuthorOverview {
   changes: {
     title: string;
     kind: 'changeset' | 'board';
-    status: 'accepted' | 'verified' | 'in-progress';
+    status: 'accepted' | 'verified' | 'in-progress' | 'planned';
     at?: string;
   }[];
   decisions: Decision[];
@@ -301,10 +302,17 @@ export function authorOverview(h: DevContour): AuthorOverview {
       })
       .map((b) => {
         const r = b.revisions.at(-1)!;
+        // Черновой план — ещё не работа: «в работе» звало ждать результата.
+        const phase = boardPhase(b, s.tasks);
         return {
           title: b.title,
           kind: 'board' as const,
-          status: r.status === 'accepted' ? ('accepted' as const) : ('in-progress' as const),
+          status:
+            r.status === 'accepted'
+              ? ('accepted' as const)
+              : phase === 'draft'
+                ? ('planned' as const)
+                : ('in-progress' as const),
           at: r.acceptedAt ?? r.createdAt,
         };
       }),

@@ -24,6 +24,7 @@ const changeStatus = {
   accepted: 'Принято',
   verified: 'Проверено, ждёт приёмки',
   'in-progress': 'В работе',
+  planned: 'План не утверждён',
 } as const;
 
 async function post(path: string, input: unknown = {}) {

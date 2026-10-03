@@ -302,3 +302,20 @@ test('Упавший workflow, чья работа ушла дальше, не �
     f.cleanup();
   }
 });
+
+test('Доска с неутверждённым планом в «Что изменилось» — план, а не работа', () => {
+  const f = fixture();
+  try {
+    const drafts = f.h.createBoard('Находки');
+    f.h.addTask(drafts.id, input('Черновик'));
+    const working = f.h.createBoard('Этап');
+    f.h.addTask(working.id, input('Утверждённая'));
+    f.h.approve(working.id);
+    const status = (title: string) =>
+      authorOverview(f.h).changes.find((c) => c.title === title)?.status;
+    assert.equal(status('Находки'), 'planned');
+    assert.equal(status('Этап'), 'in-progress');
+  } finally {
+    f.cleanup();
+  }
+});
