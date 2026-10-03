@@ -254,6 +254,16 @@ test('Фаза доски выводится из задач: черновик �
     boardPhase(board('active'), [task('a', 'done'), task('b', 'cancelled')]),
     'acceptance',
   );
-  assert.equal(boardPhase(board('active'), [task('a', 'cancelled')]), 'empty');
+  assert.equal(
+    boardPhase(board('active'), [task('a', 'cancelled'), task('b', 'cancelled')]),
+    'closed',
+  );
+  assert.equal(
+    boardPhase(
+      { revisions: [{ number: 1, status: 'active', reason: '', taskIds: [], createdAt: '' }] },
+      [],
+    ),
+    'empty',
+  );
   assert.equal(boardPhase(board('accepted'), [task('a', 'done')]), 'accepted');
 });

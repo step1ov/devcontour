@@ -213,6 +213,58 @@ test('Operator mode reviews but does not register contracts or approve draft tas
   }
 });
 
+test('Ревью этапа видит его цель и новые задачи, принятые — кратко, без находок ревизии 1', async () => {
+  const f = fixture();
+  try {
+    f.h.config.mode = 'local';
+    const plan = (title: string, key: string, description: string, dependsOn: string[] = []) => ({
+      title,
+      description: 'Цель: ' + title,
+      tasks: [{ ...input('Task ' + key), description, key, dependsOn, contracts: [] }],
+    });
+    const { boardId } = f.h.importPlan(plan('Release', 'one', 'First stage body text'));
+    await assert.rejects(reviewPlan(f.h, f.root, boardId, 'codex', runtimes(undefined, true)));
+    await reviewPlan(f.h, f.root, boardId, 'codex', runtimes());
+    const one = f.store.read().tasks[0];
+    complete(f.h, one.id);
+    f.h.accept(boardId, 'merged');
+    f.h.importPlan(plan('Stage two', 'two', 'Second stage body text', [one.id]), boardId);
+    const prompts: string[] = [];
+    const proposals: Record<string, unknown>[] = [];
+    const result = await reviewPlan(
+      f.h,
+      f.root,
+      boardId,
+      'codex',
+      runtimes((r) => {
+        prompts.push(r.prompt);
+        proposals.push(
+          JSON.parse(readFileSync(join(r.artifactDir, 'proposal.json'), 'utf8')) as Record<
+            string,
+            unknown
+          >,
+        );
+      }),
+    );
+    assert.equal(result.status, 'approved');
+    const [proposal] = proposals;
+    assert.equal(proposal.title, 'Release — ревизия 2');
+    assert.match(String(proposal.goal), /^Следующий этап: Stage two/);
+    assert.deepEqual(
+      (proposal.tasks as { title: string }[]).map((t) => t.title),
+      ['Task two'],
+    );
+    assert.deepEqual(proposal.acceptedEarlier, [
+      { id: one.id, title: 'Task one', status: 'done', resultSha: 'merged' },
+    ]);
+    assert.doesNotMatch(prompts[0], /First stage body text/);
+    assert.doesNotMatch(prompts[0], /reviewed before/, 'находки плана ревизии 1 не переносятся');
+    assert.equal(f.store.read().tasks.find((t) => t.title === 'Task two')!.status, 'ready');
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('Blocking findings reject even approved=true and do not enable execution', async () => {
   const f = fixture();
   try {

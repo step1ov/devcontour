@@ -307,6 +307,56 @@ test('Plan import accepts forward references, rejects cycles without partial wri
   }
 });
 
+test('Следующий этап — ревизия той же доски, а не новая доска', () => {
+  const f = fixture();
+  try {
+    const plan = (title: string, key: string, dependsOn: string[] = []) => ({
+      title,
+      description: 'Цель: ' + title,
+      tasks: [{ ...input('Task ' + key), key, dependsOn, contracts: [] }],
+    });
+    const first = f.h.importPlan(plan('Release 0.1, stage 1', 'one'));
+    const one = f.store.read().tasks[0];
+    assert.throws(
+      () => f.h.importPlan(plan('Release 0.1, stage 2', 'two'), first.boardId),
+      /после приёмки текущей ревизии/,
+    );
+    f.h.approve(first.boardId);
+    complete(f.h, one.id);
+    f.h.accept(first.boardId, 'merged');
+    const accepted = structuredClone(f.store.read().boards[0].revisions[0]);
+    const before = f.store.read();
+    assert.throws(() => f.h.importPlan(plan('Stage', 'x'), 'B-missing'), /не найдена/);
+    assert.deepEqual(f.store.read(), before);
+
+    const second = f.h.importPlan(plan('Release 0.1, stage 2', 'two', [one.id]), first.boardId);
+    const s = f.store.read();
+    assert.equal(s.boards.length, 1, 'этап не заводит новую доску');
+    assert.deepEqual(second, { boardId: first.boardId, revision: 2, tasks: 1 });
+    const [r1, r2] = s.boards[0].revisions;
+    assert.deepEqual(r1, accepted, 'принятая ревизия неизменна');
+    const two = s.tasks.find((t) => t.title === 'Task two')!;
+    assert.deepEqual(r2.taskIds, [one.id, two.id]);
+    assert.equal(r2.status, 'active');
+    assert.match(r2.reason, /^Следующий этап: Release 0.1, stage 2\n\nЦель: /);
+    assert.deepEqual(two.dependsOn, [one.id]);
+    assert.equal(s.boards[0].title, 'Release 0.1, stage 1', 'название доски не меняется');
+
+    f.h.approve(first.boardId);
+    assert.equal(f.store.read().tasks.find((t) => t.id === one.id)!.status, 'done');
+    assert.throws(() => f.h.accept(first.boardId, 'merged'), /все задачи/);
+    complete(f.h, two.id);
+    f.h.accept(first.boardId, 'merged');
+    const done = f.store.read().boards[0].revisions[1];
+    assert.equal(done.status, 'accepted');
+    assert.deepEqual(
+      done.snapshot?.tasks.map((t) => t.id),
+      [one.id, two.id],
+    );
+  } finally {
+    f.cleanup();
+  }
+});
 test('Contract approval is a real gate: architecture can start while implementation stays draft', () => {
   const f = fixture();
   try {
@@ -535,7 +585,7 @@ test('A ready task at the attempt ceiling is not a silent dead end', () => {
   }
 });
 
-test('Цель доски правится до утверждения плана и не правится после', () => {
+test('Цель доски правится до утверждения плана и после приёмки, но не во время работы', () => {
   const f = fixture();
   try {
     const b = f.h.createBoard('Границы и целостность прежней сборки', 'Обещает три результата');
@@ -551,8 +601,16 @@ test('Цель доски правится до утверждения план�
     f.h.approve(b.id, [kept.id]);
     assert.throws(
       () => f.h.editBoard(b.id, { description: 'Другое обещание' }),
-      /до утверждения плана/,
+      /до утверждения плана или после приёмки/,
     );
+    complete(f.h, kept.id);
+    f.h.accept(b.id, 'merged');
+    const accepted = structuredClone(f.store.read().boards[0].revisions[0]);
+    // Принятая доска ведёт релиз дальше: название становится названием релиза.
+    f.h.editBoard(b.id, { title: 'Релиз 0.1', description: 'Весь релиз' });
+    const renamed = f.store.read().boards[0];
+    assert.equal(renamed.title, 'Релиз 0.1');
+    assert.deepEqual(renamed.revisions[0], accepted, 'принятая ревизия не меняется');
   } finally {
     f.cleanup();
   }

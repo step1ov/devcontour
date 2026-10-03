@@ -20,7 +20,7 @@ export function queueStopReason(
 }
 
 export type BoardPhase =
-  'accepted' | 'running' | 'failed' | 'acceptance' | 'queued' | 'draft' | 'empty';
+  'accepted' | 'running' | 'failed' | 'acceptance' | 'queued' | 'draft' | 'empty' | 'closed';
 
 export const boardPhaseLabels: Record<BoardPhase, string> = {
   accepted: 'Принята',
@@ -30,6 +30,7 @@ export const boardPhaseLabels: Record<BoardPhase, string> = {
   queued: 'В очереди',
   draft: 'План не утверждён',
   empty: 'Без задач',
+  closed: 'Закрыта',
 };
 
 /**
@@ -44,7 +45,9 @@ export function boardPhase(
   if (board.revisions.at(-1)?.status === 'accepted') return 'accepted';
   const ids = new Set(board.revisions.flatMap((r) => r.taskIds));
   const own = tasks.filter((t) => ids.has(t.id) && t.status !== 'cancelled');
-  if (!own.length) return 'empty';
+  // Доска, где отменено всё, — брошенный план, а не пустая заготовка: работы
+  // на ней не будет. «Без задач» звало её наполнить.
+  if (!own.length) return ids.size ? 'closed' : 'empty';
   if (own.some((t) => t.activeRunId)) return 'running';
   if (own.some((t) => t.status === 'failed')) return 'failed';
   const open = own.filter((t) => t.status !== 'done');

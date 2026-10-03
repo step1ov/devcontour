@@ -2668,7 +2668,7 @@
     },
     {
       "name": "plan_import",
-      "description": "Import a draft task DAG. This does not approve the plan or execute agents. Do not blindly retry creation after an uncertain response.",
+      "description": "Import a draft task DAG. Without boardId it opens a new board; with boardId of an accepted board it opens the next stage as that board's next revision, so one release stays on one board. This does not approve the plan or execute agents. Do not blindly retry creation after an uncertain response.",
       "readOnly": false,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2860,6 +2860,10 @@
               "description",
               "tasks"
             ]
+          },
+          "boardId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
           }
         },
         "required": [

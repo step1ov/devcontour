@@ -19,6 +19,7 @@ import { Store } from './store.ts';
 import { failureFingerprint, TaskFailure, type FailureKind } from './failure.ts';
 import { taskEvidence, unprovenReason } from './proof.ts';
 import { planResult } from './plan.ts';
+import { boardOwner } from './sync-state.ts';
 import { assertDag, descendants, readyTasks, latestTaskId, impactGraph } from './graph.ts';
 import {
   DomainError,
@@ -207,9 +208,27 @@ export class DevContour {
       ...(repo.generatedPaths?.length ? { generatedPaths: repo.generatedPaths } : {}),
     });
   }
-  importPlan(input: unknown) {
+  /**
+   * План без доски открывает новую доску. План с доской — следующий этап её
+   * работы: ревизия N+1 принятой доски. Раньше каждая порция работы одного
+   * релиза заводила свою доску, и наблюдатель видел россыпь «частей 1»,
+   * похожих на параллельные потоки. Этап несёт прежние задачи, как и
+   * корректировка: последняя ревизия — весь состав доски, её приёмка
+   * проверяет и прежние результаты. Цель этапа хранится в причине ревизии.
+   */
+  importPlan(input: unknown, boardId?: string) {
     const plan = planResult.parse(input);
+    const stage = boardId ? `Следующий этап: ${plan.title}\n\n${plan.description}`.trim() : '';
+    if (stage.length > 5000)
+      throw new DomainError('Цель этапа: название и описание вместе до 5000 символов', 400);
     return this.store.change('plan.imported', (s) => {
+      const target = boardId ? board(s, boardId) : undefined;
+      const previous = target?.revisions.at(-1);
+      if (previous && previous.status !== 'accepted')
+        throw new DomainError(
+          'Следующий этап открывается после приёмки текущей ревизии; до неё добавляйте задачи в неё',
+          409,
+        );
       const ids = new Map<string, string>();
       for (const t of plan.tasks) {
         if (ids.has(t.key)) throw new DomainError('Ключи задач должны быть уникальны', 400);
@@ -227,6 +246,9 @@ export class DevContour {
         });
         repository(this.config, parsed.repositoryId);
         validateTaskContext(this.config, parsed);
+        const owner = target && boardOwner(target, s);
+        if (owner && (parsed.repositoryId !== owner || parsed.scope === 'workspace'))
+          throw new DomainError('Локальная доска принимает только задачи своего компонента');
         return {
           ...parsed,
           preparation: developmentBinding(s),
@@ -240,6 +262,17 @@ export class DevContour {
       });
       s.tasks.push(...tasks);
       assertDag(s.tasks);
+      if (target && previous) {
+        const revision = {
+          number: previous.number + 1,
+          status: 'active' as const,
+          reason: stage,
+          taskIds: [...previous.taskIds, ...tasks.map((t) => t.id)],
+          createdAt: now(),
+        };
+        target.revisions.push(revision);
+        return { boardId: target.id, revision: revision.number, tasks: tasks.length };
+      }
       const b = {
         id: entityId(s, 'B'),
         title: plan.title,
@@ -263,6 +296,9 @@ export class DevContour {
    * предложение, которое читает ревью плана: сузив план, ведущий обязан
    * сузить и обещание доски, а до этой правки её приходилось пересоздавать.
    * После утверждения цель — часть согласованного, и меняет её корректировка.
+   * Между этапами, когда текущая ревизия принята, доска снова свободна: она
+   * ведёт релиз, а цель следующего этапа ревью прочтёт уже в новой редакции.
+   * Принятые снимки названия не хранят и от правки не меняются.
    */
   editBoard(id: string, input: { title?: string; description?: string }) {
     return this.store.change('board.edited', (s) => {
@@ -274,8 +310,11 @@ export class DevContour {
       const approved = s.tasks.filter(
         (t) => r.taskIds.includes(t.id) && t.status !== 'draft' && t.status !== 'cancelled',
       );
-      if (r.status !== 'active' || approved.length)
-        throw new DomainError('Цель доски меняется только до утверждения плана', 409);
+      if (r.status === 'active' && approved.length)
+        throw new DomainError(
+          'Цель доски меняется до утверждения плана или после приёмки ревизии',
+          409,
+        );
       const title = input.title?.trim() ?? b.title;
       if (title.length < 3 || title.length > 180)
         throw new DomainError('Название: от 3 до 180 символов', 400);

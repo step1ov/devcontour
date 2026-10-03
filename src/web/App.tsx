@@ -286,6 +286,39 @@ function liveBoards(data: Snapshot) {
     .sort((x, y) => x.rank - y.rank || x.i - y.i)
     .map((x) => x.b);
 }
+function BoardLink({
+  board: b,
+  data,
+  current,
+  onSelect,
+}: {
+  board: Board;
+  data: Snapshot;
+  current: boolean;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <Button
+      variant="outline"
+      className={cn(
+        'mt-1 h-auto w-full justify-start gap-3 border-0 p-3 text-left text-sm whitespace-normal max-[760px]:w-auto max-[760px]:min-w-48 max-[760px]:shrink-0 max-[760px]:p-2',
+        current && 'text-primary bg-accent',
+      )}
+      onClick={() => onSelect(b.id)}
+      aria-current={current ? 'page' : undefined}
+    >
+      <LayoutGrid />
+      <span>
+        {b.title}
+        <small>
+          {boardPhaseLabels[boardPhase(b, data.tasks)]} · ревизия {b.revisions.at(-1)!.number}
+          {boardProgress(data, b) && ' · ' + boardProgress(data, b)}
+        </small>
+      </span>
+      {b.revisions.at(-1)!.status === 'accepted' && <Check className="nav-check" />}
+    </Button>
+  );
+}
 function StatusBadge({ value, children }: { value: string; children?: ReactNode }) {
   return (
     <Badge variant={badgeTone[value] ?? 'secondary'}>
@@ -609,29 +642,41 @@ export function App() {
           </Button>
         </div>
         <nav aria-label="Доски">
-          {liveBoards(data).map((b) => (
-            <Button
-              variant="outline"
-              key={b.id}
-              className={cn(
-                'mt-1 h-auto w-full justify-start gap-3 border-0 p-3 text-left text-sm whitespace-normal max-[760px]:w-auto max-[760px]:min-w-48 max-[760px]:shrink-0 max-[760px]:p-2',
-                b.id === boardId && 'text-primary bg-accent',
-              )}
-              onClick={() => switchBoard(b.id)}
-              aria-current={b.id === boardId ? 'page' : undefined}
+          {liveBoards(data)
+            .filter((b) => b.revisions.at(-1)!.status !== 'accepted')
+            .map((b) => (
+              <BoardLink
+                key={b.id}
+                board={b}
+                data={data}
+                current={b.id === boardId}
+                onSelect={switchBoard}
+              />
+            ))}
+          {/* Принятые доски — история, а не текущая работа. Вперемешку с
+              активными они выглядели параллельными потоками того же релиза. */}
+          {liveBoards(data).some((b) => b.revisions.at(-1)!.status === 'accepted') && (
+            <details
+              className="mt-3 max-[760px]:mt-0 max-[760px]:shrink-0"
+              open={board?.revisions.at(-1)?.status === 'accepted' || undefined}
             >
-              <LayoutGrid />
-              <span>
-                {b.title}
-                <small>
-                  {boardPhaseLabels[boardPhase(b, data.tasks)]} · ревизия{' '}
-                  {b.revisions.at(-1)!.number}
-                  {boardProgress(data, b) && ' · ' + boardProgress(data, b)}
-                </small>
-              </span>
-              {b.revisions.at(-1)!.status === 'accepted' && <Check className="nav-check" />}
-            </Button>
-          ))}
+              <summary className="text-muted-foreground cursor-pointer px-3 py-1 text-sm">
+                Принятые (
+                {liveBoards(data).filter((b) => b.revisions.at(-1)!.status === 'accepted').length})
+              </summary>
+              {liveBoards(data)
+                .filter((b) => b.revisions.at(-1)!.status === 'accepted')
+                .map((b) => (
+                  <BoardLink
+                    key={b.id}
+                    board={b}
+                    data={data}
+                    current={b.id === boardId}
+                    onSelect={switchBoard}
+                  />
+                ))}
+            </details>
+          )}
         </nav>
         <div className="text-muted-foreground mt-auto px-3 pt-8 text-xs [&_p]:my-2 max-[760px]:hidden">
           <div className="text-foreground flex items-center gap-2">

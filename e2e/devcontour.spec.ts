@@ -135,10 +135,11 @@ test('Operator can create a board, tasks and dependency; invalid cycle is explai
 });
 test('Desktop and mobile views are accessible and do not overflow', async ({ page }) => {
   await page.goto('/');
-  await page
-    .getByRole('navigation', { name: 'Доски' })
-    .getByRole('button', { name: /Каталог продуктов/ })
-    .click();
+  const boards = page.getByRole('navigation', { name: 'Доски' });
+  const catalog = boards.getByRole('button', { name: /Каталог продуктов/ });
+  // Принятая к этому моменту доска лежит в свёрнутой группе «Принятые».
+  if (!(await catalog.isVisible())) await boards.getByText(/^Принятые \(\d+\)$/).click();
+  await catalog.click();
   await expect(page.getByRole('heading', { name: 'Каталог продуктов', exact: true })).toBeVisible();
   const desktop = await new AxeBuilder({ page }).analyze();
   expect(desktop.violations).toEqual([]);

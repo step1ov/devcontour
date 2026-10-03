@@ -410,11 +410,31 @@ export async function reviewPlan(
     const t = state.tasks.find((x) => x.id === id);
     return { id, title: t?.title, status: t?.status, resultSha: t?.resultSha };
   });
+  // Следующий этап и корректировка несут задачи принятой ревизии. Их
+  // результат уже принят, и ревьюер получает их кратко: полный текст прежних
+  // постановок раздувал бы предложение с каждым этапом и выдавал принятое за
+  // предмет нового ревью. Цель ревизии — её причина.
+  const earlier = board.revisions.at(-2);
+  const carried = new Set(
+    earlier?.status === 'accepted'
+      ? earlier.taskIds.filter((id) => tasks.some((t) => t.id === id && t.status === 'done'))
+      : [],
+  );
   const proposal = {
-    title: board.title,
+    // Прошлые находки ревью ищутся по названию. Без номера ревизии этап или
+    // корректировка получали находки к плану первой ревизии как «открытые».
+    title: revision.number > 1 ? `${board.title} — ревизия ${revision.number}` : board.title,
     description: board.description,
     revision: revision.number,
-    tasks,
+    ...(revision.number > 1 ? { goal: revision.reason } : {}),
+    tasks: tasks.filter((t) => !carried.has(t.id)),
+    ...(carried.size
+      ? {
+          acceptedEarlier: tasks
+            .filter((t) => carried.has(t.id))
+            .map((t) => ({ id: t.id, title: t.title, status: t.status, resultSha: t.resultSha })),
+        }
+      : {}),
     ...(externalDependencies.length ? { externalDependencies } : {}),
     contracts: state.contracts.filter((c) => contractIds.has(c.id)),
   };
