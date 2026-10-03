@@ -3,14 +3,14 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fixture, input } from './helpers.ts';
+import { complete, fixture, input } from './helpers.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour, specDigest } from '../src/core/service.ts';
 import { setupDemo } from '../src/demo.ts';
 import { loadConfig } from '../src/runner/config.ts';
-import { Workspace } from '../src/core/workspace.ts';
+import { Workspace, changeSnapshot } from '../src/core/workspace.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 
 test('Workflow enqueue is idempotent, expired owners are fenced and changed inputs become stale', () => {
@@ -218,6 +218,65 @@ test('Waiting cycles resume shutdown pauses but preserve explicit user pauses', 
     assert.equal(flow.get(job.key, 'main').stage, 2);
     assert.equal(flow.get(job.key, 'main').attempts, 0);
     await runner.stop();
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Отмена из принятой ревизии не останавливает workflow следующего этапа', async () => {
+  const f = fixture();
+  try {
+    const plan = (title: string, keys: string[]) => ({
+      title,
+      description: 'Цель: ' + title,
+      tasks: keys.map((key) => ({ ...input('Task ' + key), key, dependsOn: [], contracts: [] })),
+    });
+    const { boardId } = f.h.importPlan(plan('Release', ['done', 'dropped']));
+    const [kept, dropped] = f.store.read().tasks;
+    f.h.approve(boardId);
+    f.h.cancel(dropped.id, 'Решено в контракте');
+    complete(f.h, kept.id);
+    f.h.accept(boardId, 'merged');
+    f.h.importPlan(plan('Stage two', ['next']), boardId);
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: boardId, authorRuntime: 'codex' });
+    const runner = new LeadRunner(f.h, f.root);
+    await runner.tick();
+    await runner.tick();
+    await runner.tick();
+    await runner.stop();
+    const state = flow.get(job.key, 'main');
+    assert.notEqual(state.status, 'failed', String(state.error));
+    assert.equal(state.stage, 2);
+    assert.equal(f.store.read().tasks.find((t) => t.title === 'Task next')!.status, 'ready');
+    // Отмена в самой ревизии этапа по-прежнему останавливает работу.
+    f.h.cancel(f.store.read().tasks.find((t) => t.title === 'Task next')!.id, 'Не нужна');
+    const again = new LeadRunner(f.h, f.root);
+    await again.tick();
+    await again.stop();
+    assert.equal(flow.get(job.key, 'main').status, 'failed');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('ChangeSet не требует done от отменённой задачи доски', () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const kept = f.h.addTask(b.id, input('Kept'));
+    const dropped = f.h.addTask(b.id, input('Dropped'));
+    f.h.approve(b.id);
+    f.h.cancel(dropped.id, 'Решено в контракте');
+    complete(f.h, kept.id);
+    f.h.accept(b.id, 'merged');
+    const snapshot = changeSnapshot(f.store.read(), {
+      boardIds: [b.id],
+    } as Parameters<typeof changeSnapshot>[1]);
+    assert.deepEqual(
+      snapshot.tasks.map((t) => t.id),
+      [kept.id],
+    );
   } finally {
     f.cleanup();
   }

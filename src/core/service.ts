@@ -20,6 +20,7 @@ import { failureFingerprint, TaskFailure, type FailureKind } from './failure.ts'
 import { taskEvidence, unprovenReason } from './proof.ts';
 import { planResult } from './plan.ts';
 import { boardOwner } from './sync-state.ts';
+import { carriedTaskIds } from './work-status.ts';
 import { assertDag, descendants, readyTasks, latestTaskId, impactGraph } from './graph.ts';
 import {
   DomainError,
@@ -426,7 +427,12 @@ export class DevContour {
     boardId: string,
     taskIds?: string[],
     approval: Approval = { actor: 'operator' },
-    expected?: { revision: number; taskIds: string[]; tasks: Record<string, string> },
+    expected?: {
+      revision: number;
+      taskIds: string[];
+      tasks: Record<string, string>;
+      reason?: string;
+    },
   ) {
     return this.store.change('board.approved', (s) => {
       developmentBinding(s);
@@ -438,6 +444,7 @@ export class DevContour {
       if (
         expected &&
         (expected.revision !== r.number ||
+          (expected.reason !== undefined && expected.reason !== r.reason) ||
           digest(expected.taskIds) !== digest(r.taskIds) ||
           selected.some((id) => {
             const current = task(s, id);
@@ -589,8 +596,11 @@ export class DevContour {
         .map((t) => structuredClone(t));
       if (!tasks.length || tasks.some((t) => t.status !== 'done'))
         throw new DomainError('Приёмка доступна, когда все задачи прошли интеграцию и проверки');
-      tasks.forEach((t) => assertTaskPreparation(s, t));
-      for (const t of tasks) {
+      // Перенесённые из принятой ревизии задачи уже проверены её приёмкой.
+      const carried = carriedTaskIds(board(s, boardId));
+      const work = tasks.filter((t) => !carried.has(t.id));
+      work.forEach((t) => assertTaskPreparation(s, t));
+      for (const t of work) {
         const unproven = unprovenReason(t.requirements, taskEvidence(s, t), t.resultSha);
         if (unproven) throw new DomainError(unproven);
       }

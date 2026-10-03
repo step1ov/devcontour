@@ -224,7 +224,16 @@ test('Ревью этапа видит его цель и новые задач�
     });
     const { boardId } = f.h.importPlan(plan('Release', 'one', 'First stage body text'));
     await assert.rejects(reviewPlan(f.h, f.root, boardId, 'codex', runtimes(undefined, true)));
-    await reviewPlan(f.h, f.root, boardId, 'codex', runtimes());
+    // Контроль: история находок работает — повтор ревью первой ревизии её видит.
+    const firstPrompts: string[] = [];
+    await reviewPlan(
+      f.h,
+      f.root,
+      boardId,
+      'codex',
+      runtimes((r) => firstPrompts.push(r.prompt)),
+    );
+    assert.match(firstPrompts[0], /reviewed before/);
     const one = f.store.read().tasks[0];
     complete(f.h, one.id);
     f.h.accept(boardId, 'merged');
@@ -260,6 +269,40 @@ test('Ревью этапа видит его цель и новые задач�
     assert.doesNotMatch(prompts[0], /First stage body text/);
     assert.doesNotMatch(prompts[0], /reviewed before/, 'находки плана ревизии 1 не переносятся');
     assert.equal(f.store.read().tasks.find((t) => t.title === 'Task two')!.status, 'ready');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Смена цели этапа во время ревью отменяет утверждение', async () => {
+  const f = fixture();
+  try {
+    f.h.config.mode = 'local';
+    const plan = (title: string, key: string) => ({
+      title,
+      description: 'Цель: ' + title,
+      tasks: [{ ...input('Task ' + key), key, dependsOn: [], contracts: [] }],
+    });
+    const { boardId } = f.h.importPlan(plan('Release', 'one'));
+    f.h.approve(boardId);
+    complete(f.h, f.store.read().tasks[0].id);
+    f.h.accept(boardId, 'merged');
+    f.h.importPlan(plan('Stage two', 'two'), boardId);
+    await assert.rejects(
+      reviewPlan(
+        f.h,
+        f.root,
+        boardId,
+        'codex',
+        runtimes(() =>
+          f.store.change('test.goal', (s) => {
+            s.boards[0].revisions[1].reason = 'Следующий этап: другая цель';
+          }),
+        ),
+      ),
+      /План изменился/,
+    );
+    assert.equal(f.store.read().tasks.find((t) => t.title === 'Task two')!.status, 'draft');
   } finally {
     f.cleanup();
   }

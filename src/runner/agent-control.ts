@@ -1,4 +1,5 @@
 import { measuredExecute } from './usage.ts';
+import { carriedTaskIds } from '../core/work-status.ts';
 import { unobservedReview } from '../core/review.ts';
 import { boardOwner } from '../core/sync-state.ts';
 import { toolProfileFor, agentEnvironment } from './tools.ts';
@@ -414,12 +415,7 @@ export async function reviewPlan(
   // результат уже принят, и ревьюер получает их кратко: полный текст прежних
   // постановок раздувал бы предложение с каждым этапом и выдавал принятое за
   // предмет нового ревью. Цель ревизии — её причина.
-  const earlier = board.revisions.at(-2);
-  const carried = new Set(
-    earlier?.status === 'accepted'
-      ? earlier.taskIds.filter((id) => tasks.some((t) => t.id === id && t.status === 'done'))
-      : [],
-  );
+  const carried = carriedTaskIds(board);
   const proposal = {
     // Прошлые находки ревью ищутся по названию. Без номера ревизии этап или
     // корректировка получали находки к плану первой ревизии как «открытые».
@@ -438,8 +434,11 @@ export async function reviewPlan(
     ...(externalDependencies.length ? { externalDependencies } : {}),
     contracts: state.contracts.filter((c) => contractIds.has(c.id)),
   };
+  // Цель ревизии входит в предложение и потому — в то, что утверждается:
+  // смена цели во время ревью (например, через sync) отменяет утверждение.
   const expected = {
     revision: revision.number,
+    reason: revision.reason,
     taskIds: revision.taskIds,
     tasks: Object.fromEntries(drafts.map((t) => [t.id, specDigest(t)])),
   };
@@ -485,7 +484,10 @@ export async function acceptBoard(
   // Критерий, назвавший свой тест, предъявляет его здесь: приёмка относится к
   // принятому SHA, а зелёная проверка сама по себе не говорит, что заявленное
   // поведение проверял кто-нибудь.
-  for (const task of tasks) assertRequirementProof(h, task);
+  // Перенесённые из принятой ревизии задачи предъявили доказательства при её
+  // приёмке; заново их не требуют (см. carriedTaskIds).
+  const carried = carriedTaskIds(board);
+  for (const task of tasks) if (!carried.has(task.id)) assertRequirementProof(h, task);
   // Принятие относится к доказанному SHA, а не к текущей вершине ветки. Вершину
   // двигает и перенос базы: подготовка попадает туда без гейтов, и приёмка,
   // читавшая вершину, закрепляла бы непроверенный код как принятую работу.

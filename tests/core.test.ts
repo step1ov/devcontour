@@ -327,6 +327,21 @@ test('Следующий этап — ревизия той же доски, а 
     const accepted = structuredClone(f.store.read().boards[0].revisions[0]);
     const before = f.store.read();
     assert.throws(() => f.h.importPlan(plan('Stage', 'x'), 'B-missing'), /не найдена/);
+    // Отказ после того, как задачи этапа уже добавлены, тоже ничего не оставляет.
+    assert.throws(
+      () =>
+        f.h.importPlan(
+          {
+            ...plan('Cyclic stage', 'x'),
+            tasks: [
+              { ...input('Task x'), key: 'x', dependsOn: ['y'], contracts: [] },
+              { ...input('Task y'), key: 'y', dependsOn: ['x'], contracts: [] },
+            ],
+          },
+          first.boardId,
+        ),
+      /Цикл/,
+    );
     assert.deepEqual(f.store.read(), before);
 
     const second = f.h.importPlan(plan('Release 0.1, stage 2', 'two', [one.id]), first.boardId);
@@ -610,6 +625,7 @@ test('Цель доски правится до утверждения план�
     f.h.editBoard(b.id, { title: 'Релиз 0.1', description: 'Весь релиз' });
     const renamed = f.store.read().boards[0];
     assert.equal(renamed.title, 'Релиз 0.1');
+    assert.equal(renamed.description, 'Весь релиз');
     assert.deepEqual(renamed.revisions[0], accepted, 'принятая ревизия не меняется');
   } finally {
     f.cleanup();

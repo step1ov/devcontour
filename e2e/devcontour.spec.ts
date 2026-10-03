@@ -137,8 +137,13 @@ test('Desktop and mobile views are accessible and do not overflow', async ({ pag
   await page.goto('/');
   const boards = page.getByRole('navigation', { name: 'Доски' });
   const catalog = boards.getByRole('button', { name: /Каталог продуктов/ });
-  // Принятая к этому моменту доска лежит в свёрнутой группе «Принятые».
-  if (!(await catalog.isVisible())) await boards.getByText(/^Принятые \(\d+\)$/).click();
+  // Принятые доски лежат в свёрнутой группе «Принятые»; текущая работа — над ней.
+  const accepted = boards.getByText(/^Принятые \(\d+\)$/);
+  await expect(accepted).toBeVisible();
+  const startup = boards.getByRole('button', { name: /Стартовая инфраструктура/ });
+  await expect(startup).toBeHidden();
+  await accepted.click();
+  await expect(startup).toBeVisible();
   await catalog.click();
   await expect(page.getByRole('heading', { name: 'Каталог продуктов', exact: true })).toBeVisible();
   const desktop = await new AxeBuilder({ page }).analyze();

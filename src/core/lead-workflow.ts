@@ -1,4 +1,5 @@
 import { developmentBinding, assertTaskPreparation } from './preparation.ts';
+import { carriedTaskIds } from './work-status.ts';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { DevContour, digest } from './service.ts';
@@ -45,7 +46,10 @@ export class LeadWorkflow {
     const taskIds = new Set(boards.flatMap((b) => b.revisions.at(-1)!.taskIds));
     const tasks = s.tasks.filter((t) => taskIds.has(t.id));
     if (!tasks.length) throw new DomainError('В workflow нет задач');
-    tasks.forEach((task) => assertTaskPreparation(s, task));
+    // Перенесённые из принятой ревизии задачи — уже принятая работа: их
+    // привязку к подготовке проверила та приёмка (см. carriedTaskIds).
+    const carried = new Set(boards.flatMap((b) => [...carriedTaskIds(b)]));
+    tasks.filter((t) => !carried.has(t.id)).forEach((task) => assertTaskPreparation(s, task));
     const owner = kind === 'board' ? boardOwner(boards[0], s) : undefined;
     return {
       owner,
@@ -60,6 +64,9 @@ export class LeadWorkflow {
           title: b.title,
           description: b.description,
           revision: b.revisions.at(-1)!.number,
+          // Цель этапа — часть утверждаемого. У первой ревизии причина
+          // постоянна; без неё digest прежних jobs не меняется при обновлении.
+          ...(b.revisions.length > 1 ? { reason: b.revisions.at(-1)!.reason } : {}),
           taskIds: b.revisions.at(-1)!.taskIds,
         })),
         tasks: tasks.map((t) => ({ id: t.id, ...taskInput.parse(t) })),

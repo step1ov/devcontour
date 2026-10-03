@@ -18,7 +18,7 @@ import { execFileSync } from 'node:child_process';
 import { Preparation, developmentBinding } from '../src/core/preparation.ts';
 import { PreparationAgent } from '../src/application/preparation-agent.ts';
 import { startWorkspace, preparationStore, requirePreparation } from '../src/runner/start.ts';
-import { fixture, input, config } from './helpers.ts';
+import { complete, fixture, input, config } from './helpers.ts';
 import {
   architecture,
   concept,
@@ -971,6 +971,48 @@ test('План выпускается в работу только с фичей
     assert.ok(after.enabled);
     // Живые задачи фичи — исходная и её находка; отменённая не считается.
     assert.equal(after.current?.features.find((x) => x.id === 'moderation-log')?.tasks, 2);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Перенесённая задача с прежней подготовкой не блокирует приёмку этапа, новая — блокирует', () => {
+  const f = fixture(),
+    p = new Preparation(f.store);
+  try {
+    approvePreparation(p);
+    const plan = (title: string, key: string) => ({
+      title,
+      description: 'Цель: ' + title,
+      tasks: [
+        { ...input('Task ' + key), featureId: 'member-block', key, dependsOn: [], contracts: [] },
+      ],
+    });
+    const { boardId } = f.h.importPlan(plan('Release', 'one'));
+    const one = f.store.read().tasks[0];
+    f.h.approve(boardId);
+    complete(f.h, one.id);
+    f.h.accept(boardId, 'merged');
+    // Подготовка сменилась после приёмки: привязка принятой задачи устарела.
+    const stale = (id: string) =>
+      f.store.change('test.stale-preparation', (s) => {
+        const t = s.tasks.find((t) => t.id === id)!;
+        t.preparation = { ...t.preparation!, productDigest: '0'.repeat(64) };
+      });
+    stale(one.id);
+    f.h.importPlan(plan('Stage two', 'two'), boardId);
+    const two = f.store.read().tasks.find((t) => t.title === 'Task two')!;
+    new LeadWorkflow(f.h).input('board', boardId);
+    f.h.approve(boardId);
+    complete(f.h, two.id);
+    // Своя задача этапа с устаревшей привязкой по-прежнему не принимается.
+    stale(two.id);
+    assert.throws(() => f.h.accept(boardId, 'merged'), /не связана с текущими/);
+    f.store.change('test.fresh-preparation', (s) => {
+      s.tasks.find((t) => t.id === two.id)!.preparation = developmentBinding(s);
+    });
+    f.h.accept(boardId, 'merged');
+    assert.equal(f.store.read().boards[0].revisions[1].status, 'accepted');
   } finally {
     f.cleanup();
   }

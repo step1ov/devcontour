@@ -40,7 +40,10 @@ export function changeSnapshot(s: DevContourState, c: ChangeSet) {
     ),
   );
   const ids = new Set(boards.flatMap((b) => b.revisions.at(-1)!.taskIds));
-  const tasks = s.tasks.filter((t) => ids.has(t.id));
+  // Отменённая задача — учтённое решение, а не незавершённая работа: её нет и
+  // в снимке приёмки доски. Здесь она требовала done, и ChangeSet доски с
+  // отменой нельзя было даже начать проверять.
+  const tasks = s.tasks.filter((t) => ids.has(t.id) && t.status !== 'cancelled');
   return {
     boards: boards.map((b) => ({ id: b.id, title: b.title, revision: b.revisions.at(-1)!.number })),
     tasks,

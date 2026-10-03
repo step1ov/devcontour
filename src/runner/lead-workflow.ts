@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { carriedTaskIds } from '../core/work-status.ts';
 import { LeadWorkflow, type WorkflowJob } from '../core/lead-workflow.ts';
 import type { DevContour } from '../core/service.ts';
 import { repositories, repository } from '../core/repositories.ts';
@@ -147,7 +148,10 @@ export class LeadRunner {
     if (job.kind === 'board') {
       const b = s.boards.find((b) => b.id === job.id)!,
         revision = b.revisions.at(-1)!;
-      const tasks = s.tasks.filter((t) => revision.taskIds.includes(t.id));
+      // Работа ревизии — без задач, перенесённых из принятой предыдущей: их
+      // результат и отмены уже учтены приёмкой (см. carriedTaskIds).
+      const carried = carriedTaskIds(b);
+      const tasks = s.tasks.filter((t) => revision.taskIds.includes(t.id) && !carried.has(t.id));
       if (job.stage === 0) {
         if (revision.status === 'accepted' || tasks.every((t) => t.status !== 'draft'))
           return false;
@@ -180,7 +184,13 @@ export class LeadRunner {
           await reviewPlan(this.h, root, b.id, job.authorRuntime, runtimes, guard);
         }
       } else if (job.stage === 1) {
-        if (this.repair(job, revision.taskIds)) return true;
+        if (
+          this.repair(
+            job,
+            tasks.map((t) => t.id),
+          )
+        )
+          return true;
         // Стадия включает выдачу — но не отменяет чужих решений. Остановка
         // человека («operator») и блокировка по отказу рантайма («runtime»)
         // сохраняются: разрешение начать работу однажды не означает права
@@ -203,7 +213,13 @@ export class LeadRunner {
             this.h.pause(false);
           });
       } else {
-        if (this.repair(job, revision.taskIds)) return true;
+        if (
+          this.repair(
+            job,
+            tasks.map((t) => t.id),
+          )
+        )
+          return true;
         if (!tasks.every((t) => t.status === 'done')) {
           if (s.paused && s.pauseReason === 'shutdown')
             this.h.store.atomic(() => {

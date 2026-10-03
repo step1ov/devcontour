@@ -54,3 +54,18 @@ export function boardPhase(
   if (!open.length) return 'acceptance';
   return open.every((t) => t.status === 'draft') ? 'draft' : 'queued';
 }
+
+/**
+ * Задачи последней ревизии, перенесённые из предыдущей принятой: следующий
+ * этап и корректировка несут прежний состав доски. Их результат уже принят
+ * (или отмена уже учтена приёмкой), поэтому работой новой ревизии они не
+ * являются: их не перепроверяют на свежесть подготовки и требований, они не
+ * останавливают workflow и не нужны заново как доказательство. Иначе
+ * изменение подготовки или старая отмена делали этап непринимаемым, а
+ * корректировка требовала сначала его принять.
+ */
+export function carriedTaskIds(board: Pick<Board, 'revisions'>): Set<string> {
+  const [previous, current] = board.revisions.slice(-2);
+  if (!current || previous.status !== 'accepted') return new Set();
+  return new Set(current.taskIds.filter((id) => previous.taskIds.includes(id)));
+}
