@@ -146,10 +146,30 @@ test('Desktop and mobile views are accessible and do not overflow', async ({ pag
   await expect(startup).toBeVisible();
   await catalog.click();
   await expect(page.getByRole('heading', { name: 'Каталог продуктов', exact: true })).toBeVisible();
+  // Доска открывается колонками, как привычная доска задач: карточка стоит в
+  // колонке своего статуса и открывает детали.
+  await expect(page.getByRole('tab', { name: 'Колонки' })).toHaveAttribute('aria-selected', 'true');
+  const columns = page.getByRole('region', {
+    name: /^(Входящие|К выполнению|В работе|На проверке|Готово)$/,
+  });
+  await expect(columns).toHaveCount(5);
+  const card = page
+    .getByRole('region', { name: /^(К выполнению|В работе|На проверке|Готово)$/ })
+    .getByRole('button', { name: /Зафиксировать API и состояния/ });
+  await card.click();
+  await expect(
+    page
+      .getByRole('complementary', { name: 'Детали задачи' })
+      .getByRole('heading', { name: 'Зафиксировать API и состояния' }),
+  ).toBeVisible();
   const desktop = await new AxeBuilder({ page }).analyze();
   expect(desktop.violations).toEqual([]);
   await page.screenshot({ path: 'test-results/desktop.png', fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
+  // Колонки прокручиваются внутри себя, страница — нет.
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(
+    true,
+  );
   await page.getByRole('tab', { name: 'Список', exact: true }).click();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(
     true,

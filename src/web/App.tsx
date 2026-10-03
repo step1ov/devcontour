@@ -31,6 +31,7 @@ import {
   Bot,
   Eye,
   Loader2,
+  SquareKanban,
 } from 'lucide-react';
 import type {
   DevContourState,
@@ -107,6 +108,22 @@ const waitingReasons: Record<string, string> = {
   failure_requires_diagnosis: 'Разберите причину сбоя перед повторной попыткой.',
   attempts_exhausted: 'Лимит попыток исчерпан. Нужна диагностика и пересмотр решения.',
 };
+// Колонки привычной доски задач. Статус задачи и фаза её прогона уже
+// говорят, где она: черновик ждёт утверждения плана, готовая — исполнителя,
+// разработка и сбой — в работе, проверки, ревью и интеграция — на проверке.
+// Сбой остаётся в работе с красной меткой, а не прячется в отдельную колонку.
+const kanbanColumns: { key: string; label: string; hint: string; statuses: string[] }[] = [
+  { key: 'inbox', label: 'Входящие', hint: 'План не утверждён', statuses: ['draft'] },
+  { key: 'todo', label: 'К выполнению', hint: 'Утверждены, ждут исполнителя', statuses: ['ready'] },
+  { key: 'doing', label: 'В работе', hint: 'Разработка и сбои', statuses: ['running', 'failed'] },
+  {
+    key: 'review',
+    label: 'На проверке',
+    hint: 'Проверки, ревью, интеграция',
+    statuses: ['verifying', 'reviewing', 'integrating'],
+  },
+  { key: 'done', label: 'Готово', hint: 'Прошли проверки', statuses: ['done', 'cancelled'] },
+];
 const statusNames: Record<string, string> = {
   draft: 'Черновик',
   ready: 'Готова к запуску',
@@ -525,7 +542,7 @@ export function App() {
     setSelected('');
     setQuery('');
     // Выбор доски из обзора или карты продукта — просьба показать доску.
-    if (workspaceView) setTab('graph');
+    if (workspaceView) setTab('kanban');
   }
   const graph = useMemo(() => {
     const columns = new Map<number, number>();
@@ -951,6 +968,7 @@ export function App() {
                 { key: 'overview', label: 'Обзор', icon: <Eye /> },
                 { key: 'product', label: 'Карта продукта', icon: <LayoutGrid /> },
                 { key: 'progress', label: 'Ход работ', icon: <Activity /> },
+                { key: 'kanban', label: 'Колонки', icon: <SquareKanban /> },
                 { key: 'graph', label: 'Граф', icon: <GitBranch /> },
                 { key: 'workspace', label: 'Общий граф', icon: <Workflow /> },
                 { key: 'changesets', label: 'Изменения', icon: <FileCheck /> },
@@ -1049,6 +1067,54 @@ export function App() {
                       setTab('workspace');
                     }}
                   />
+                )}
+                {tab === 'kanban' && (
+                  <div
+                    className="grid min-h-(--canvas-height) auto-cols-[minmax(10.5rem,1fr)] grid-flow-col gap-3 overflow-x-auto p-3"
+                    aria-label="Колонки задач"
+                  >
+                    {kanbanColumns.map((column) => {
+                      const cards = filtered.filter((t) => column.statuses.includes(t.status));
+                      return (
+                        <section
+                          key={column.key}
+                          aria-label={column.label}
+                          className="bg-muted/40 flex min-w-0 flex-col gap-2 rounded-md p-2"
+                        >
+                          <header className="px-1 pt-1">
+                            <h2 className="m-0 flex items-baseline justify-between gap-2 text-sm">
+                              {column.label}
+                              <span className="text-muted-foreground text-xs">{cards.length}</span>
+                            </h2>
+                            <small className="text-muted-foreground">{column.hint}</small>
+                          </header>
+                          {cards.map((t) => (
+                            <Button
+                              variant="outline"
+                              key={t.id}
+                              className={cn(
+                                'bg-card h-auto w-full flex-col items-start gap-1 p-3 text-left font-normal whitespace-normal',
+                                selected === t.id && 'border-primary bg-accent',
+                              )}
+                              aria-current={selected === t.id ? 'true' : undefined}
+                              onClick={() => setSelected(t.id)}
+                            >
+                              <span className="text-muted-foreground text-xs" title={t.id}>
+                                {shortId(t.id)} · {roleLabel(t.role)}
+                              </span>
+                              <strong className="text-sm">{t.title}</strong>
+                              <TaskLive
+                                task={t}
+                                runs={data.runs}
+                                maxAttempts={data.config.maxAttempts}
+                              />
+                              <StatusBadge value={status(t)}>{taskStatusName(t)}</StatusBadge>
+                            </Button>
+                          ))}
+                        </section>
+                      );
+                    })}
+                  </div>
                 )}
                 {(tab === 'graph' || tab === 'workspace') &&
                   (filtered.length ? (
