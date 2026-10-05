@@ -148,6 +148,7 @@ function activeRevision(s: DevContourState, id: string) {
   if (r.status !== 'active') throw new DomainError('Доска принята. Создайте корректировку.');
   return r;
 }
+const HEARTBEAT_FAILED = 'Продление владения не удалось';
 export class DevContour {
   constructor(
     readonly store: Store,
@@ -825,6 +826,20 @@ export class DevContour {
       r.leaseUntil = Date.now() + this.config.leaseMs;
     });
   }
+  /**
+   * Продление владения не удалось. Планировщик прерывал попытку молча, и
+   * снаружи оставалось только «истёк срок владения» — причину (сменившаяся
+   * политика, привязка к подготовке, сбой хранилища) узнать было неоткуда.
+   * Причина записывается в попытку; истечение её не затирает.
+   */
+  heartbeatFailed(id: string, reason: string) {
+    return this.store.change('run.heartbeat-failed', (s) => {
+      const r = s.runs.find((r) => r.id === id);
+      if (r?.status !== 'active') return;
+      r.error = `${HEARTBEAT_FAILED}: ${reason.slice(0, 500)}`;
+      return { runId: id, error: r.error };
+    });
+  }
   phase(
     id: string,
     token: string,
@@ -1200,7 +1215,9 @@ export class DevContour {
         if (r.status === 'active' && r.leaseUntil <= at) {
           r.status = 'expired';
           r.finishedAt = now();
-          r.error = 'Истёк срок владения. Проверьте worktree и повторите явно.';
+          r.error =
+            (r.error?.startsWith(HEARTBEAT_FAILED) ? r.error + '. ' : '') +
+            'Истёк срок владения. Проверьте worktree и повторите явно.';
           // Потерянное владение — отказ окружения: исполнитель не довёл работу
           // не потому, что не справился. Класс ставится здесь, иначе решение о
           // починке прочитает класс прошлой попытки и починит не то.

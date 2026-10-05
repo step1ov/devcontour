@@ -799,7 +799,14 @@ export class Scheduler {
       () => {
         try {
           this.h.heartbeat(run.id, run.token);
-        } catch {
+        } catch (e) {
+          const reason = e instanceof Error ? e.message : String(e);
+          console.error(`DevContour: продление ${run.id} не удалось: ${reason}`);
+          try {
+            this.h.heartbeatFailed(run.id, reason);
+          } catch {
+            // Хранилище недоступно — причина осталась в логе сервера.
+          }
           controller.abort();
         }
       },

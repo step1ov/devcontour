@@ -750,3 +750,23 @@ test('Черновик берётся у последней содержател
   assert.equal(draft?.kind, 'unfinished');
   assert.equal(draft?.reason, 'unknown');
 });
+
+test('Причина неудавшегося продления владения сохраняется и не затирается истечением', () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    f.h.pause(false);
+    const run = f.h.claim('worker')!;
+    f.h.heartbeatFailed(run.id, 'Политика проверок изменилась; нужна новая попытка');
+    f.h.expire(Date.now() + 10 * 60_000);
+    const r = f.store.read().runs.find((x) => x.id === run.id)!;
+    assert.equal(r.status, 'expired');
+    assert.match(r.error!, /^Продление владения не удалось: Политика проверок изменилась/);
+    assert.match(r.error!, /Истёк срок владения/);
+    assert.ok(f.store.events().some((e) => e.type === 'run.heartbeat-failed'));
+  } finally {
+    f.cleanup();
+  }
+});
