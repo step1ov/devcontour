@@ -73,7 +73,10 @@ test('Requirements survive real Git execution; changed spec loses current covera
         }),
       /digest/,
     );
+    // Отменённая задача с тем же требованием — не корень корректировки.
+    const dropped = h.addTask(board.id, { ...input('Dropped'), requirements: [requirement] });
     h.approve(board.id);
+    h.cancel(dropped.id, 'Решено в другой задаче');
     await scheduler.init();
     // Требование только что закоммичено в рабочую ветку: база прогонов должна
     // его содержать, иначе исполнитель ищет источник в дереве без него.
@@ -111,6 +114,11 @@ test('Requirements survive real Git execution; changed spec loses current covera
       replacement = state.tasks.find((t) => t.supersedes === task.id)!;
     assert.equal(state.boards[0].revisions[0].snapshot!.digest, original);
     assert.equal(replacement.status, 'draft');
+    assert.equal(
+      state.tasks.find((t) => t.supersedes === dropped.id),
+      undefined,
+      'отменённая задача не корректируется',
+    );
     assert.notEqual(replacement.requirements![0].digest, requirement.digest);
     assert.notEqual(specDigest(replacement), done.approvedDigest);
     // Задача цитирует новую редакцию спецификации, а база прогонов её ещё не
@@ -125,7 +133,11 @@ test('Requirements survive real Git execution; changed spec loses current covera
     await scheduler.drain();
     const redone = store.read().tasks.find((t) => t.id === replacement.id)!;
     assert.equal(redone.status, 'done', redone.failure);
-    assert.equal(requirementReport(h, 'main').tasks[0].requirements[0].verified, true);
+    assert.equal(
+      requirementReport(h, 'main').tasks.find((t) => t.taskId === replacement.id)!.requirements[0]
+        .verified,
+      true,
+    );
   } finally {
     await scheduler.stop();
     store.close();

@@ -150,7 +150,7 @@ export class LeadRunner {
         revision = b.revisions.at(-1)!;
       // Работа ревизии — без задач, перенесённых из принятой предыдущей: их
       // результат и отмены уже учтены приёмкой (см. carriedTaskIds).
-      const carried = carriedTaskIds(b);
+      const carried = carriedTaskIds(b, s.tasks);
       const tasks = s.tasks.filter((t) => revision.taskIds.includes(t.id) && !carried.has(t.id));
       if (job.stage === 0) {
         if (revision.status === 'accepted' || tasks.every((t) => t.status !== 'draft'))

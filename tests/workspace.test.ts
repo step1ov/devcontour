@@ -737,3 +737,59 @@ fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite>'+cases.join('')
     await f.cleanup();
   }
 });
+
+test('Этап локальной доски принимает только задачи своего компонента', async () => {
+  const f = await multiRepo();
+  try {
+    const b = f.h.createBoard('Library board', '', 'library');
+    const t = f.h.addTask(b.id, { ...input('Library change'), repositoryId: 'library' });
+    f.h.approve(b.id);
+    f.store.change('test.done', (s) => {
+      const x = s.tasks.find((x) => x.id === t.id)!;
+      x.status = 'done';
+      x.resultSha = 'merged';
+    });
+    f.h.accept(b.id, 'merged');
+    const before = f.store.read();
+    assert.throws(
+      () =>
+        f.h.importPlan(
+          {
+            title: 'Stage',
+            description: '',
+            tasks: [
+              {
+                ...input('Product change'),
+                repositoryId: 'product',
+                key: 'x',
+                dependsOn: [],
+                contracts: [],
+              },
+            ],
+          },
+          b.id,
+        ),
+      /своего компонента/,
+    );
+    assert.deepEqual(f.store.read(), before);
+    f.h.importPlan(
+      {
+        title: 'Stage',
+        description: '',
+        tasks: [
+          {
+            ...input('Library next'),
+            repositoryId: 'library',
+            key: 'y',
+            dependsOn: [],
+            contracts: [],
+          },
+        ],
+      },
+      b.id,
+    );
+    assert.equal(f.store.read().boards.find((x) => x.id === b.id)!.revisions.length, 2);
+  } finally {
+    await f.cleanup();
+  }
+});

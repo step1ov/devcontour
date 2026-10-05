@@ -73,6 +73,7 @@ function approveDesignTrack(
   approveStage(p, id, 'design');
 }
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
+import { Workspace } from '../src/core/workspace.ts';
 import { specDigest } from '../src/core/service.ts';
 
 test('Product and architecture require distinct operator decisions; no agent or queue bypass', () => {
@@ -1007,12 +1008,56 @@ test('Перенесённая задача с прежней подготовк
     complete(f.h, two.id);
     // Своя задача этапа с устаревшей привязкой по-прежнему не принимается.
     stale(two.id);
-    assert.throws(() => f.h.accept(boardId, 'merged'), /не связана с текущими/);
+    assert.throws(
+      () => f.h.accept(boardId, 'merged'),
+      (e: Error) => e.message.startsWith(two.id + ':') && /не связана с текущими/.test(e.message),
+    );
     f.store.change('test.fresh-preparation', (s) => {
       s.tasks.find((t) => t.id === two.id)!.preparation = developmentBinding(s);
     });
     f.h.accept(boardId, 'merged');
     assert.equal(f.store.read().boards[0].revisions[1].status, 'accepted');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Workflow ChangeSet не проверяет привязку отменённой задачи, которой нет в результате', () => {
+  const f = fixture(),
+    p = new Preparation(f.store);
+  try {
+    approvePreparation(p);
+    const { boardId } = f.h.importPlan({
+      title: 'Release',
+      description: 'Цель: Release',
+      tasks: ['kept', 'dropped'].map((key) => ({
+        ...input('Task ' + key),
+        featureId: 'member-block',
+        key,
+        dependsOn: [],
+        contracts: [],
+      })),
+    });
+    const [kept, dropped] = f.store.read().tasks;
+    f.h.approve(boardId);
+    f.h.cancel(dropped.id, 'Отложено');
+    f.store.change('test.stale-preparation', (s) => {
+      const t = s.tasks.find((t) => t.id === dropped.id)!;
+      t.preparation = { ...t.preparation!, productDigest: '0'.repeat(64) };
+    });
+    complete(f.h, kept.id);
+    f.h.accept(boardId, 'merged');
+    const change = new Workspace(f.h).create({
+      title: 'Релиз',
+      description: 'Совместная проверка',
+      boardIds: [boardId],
+    });
+    const job = new LeadWorkflow(f.h).start({
+      kind: 'changeset',
+      id: change.id,
+      authorRuntime: 'codex',
+    });
+    assert.equal(job.kind, 'changeset');
   } finally {
     f.cleanup();
   }

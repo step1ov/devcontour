@@ -48,8 +48,12 @@ export class LeadWorkflow {
     if (!tasks.length) throw new DomainError('В workflow нет задач');
     // Перенесённые из принятой ревизии задачи — уже принятая работа: их
     // привязку к подготовке проверила та приёмка (см. carriedTaskIds).
-    const carried = new Set(boards.flatMap((b) => [...carriedTaskIds(b)]));
-    tasks.filter((t) => !carried.has(t.id)).forEach((task) => assertTaskPreparation(s, task));
+    const carried = new Set(boards.flatMap((b) => [...carriedTaskIds(b, s.tasks)]));
+    // Отменённая задача не входит ни в приёмку доски, ни в снимок ChangeSet:
+    // проверять её привязку значило бы блокировать результат, где её нет.
+    tasks
+      .filter((t) => !carried.has(t.id) && t.status !== 'cancelled')
+      .forEach((task) => assertTaskPreparation(s, task));
     const owner = kind === 'board' ? boardOwner(boards[0], s) : undefined;
     return {
       owner,

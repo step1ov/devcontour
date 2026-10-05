@@ -56,16 +56,34 @@ export function boardPhase(
 }
 
 /**
- * Задачи последней ревизии, перенесённые из предыдущей принятой: следующий
- * этап и корректировка несут прежний состав доски. Их результат уже принят
- * (или отмена уже учтена приёмкой), поэтому работой новой ревизии они не
- * являются: их не перепроверяют на свежесть подготовки и требований, они не
- * останавливают workflow и не нужны заново как доказательство. Иначе
- * изменение подготовки или старая отмена делали этап непринимаемым, а
- * корректировка требовала сначала его принять.
+ * Задачи последней ревизии, перенесённые из предыдущей принятой в том
+ * состоянии, в каком их приняли: следующий этап и корректировка несут
+ * прежний состав доски. Такой результат уже принят (или отмена уже учтена
+ * приёмкой), поэтому работой новой ревизии он не является: его не
+ * перепроверяют на свежесть подготовки и требований, он не останавливает
+ * workflow и не нужен заново как доказательство. Иначе изменение подготовки
+ * или старая отмена делали этап непринимаемым.
+ *
+ * Задача, возвращённая после приёмки (reopen, retry), — снова работа: её
+ * новую постановку должен увидеть ревьюер, а результат — пройти проверки.
+ * Поэтому перенесённой считается только done с тем же SHA, что в снимке
+ * приёмки, или по-прежнему отменённая.
  */
-export function carriedTaskIds(board: Pick<Board, 'revisions'>): Set<string> {
+export function carriedTaskIds(
+  board: Pick<Board, 'revisions'>,
+  tasks: Pick<Task, 'id' | 'status' | 'resultSha'>[],
+): Set<string> {
   const [previous, current] = board.revisions.slice(-2);
   if (!current || previous.status !== 'accepted') return new Set();
-  return new Set(current.taskIds.filter((id) => previous.taskIds.includes(id)));
+  return new Set(
+    current.taskIds.filter((id) => {
+      if (!previous.taskIds.includes(id)) return false;
+      const t = tasks.find((x) => x.id === id);
+      if (t?.status === 'cancelled') return true;
+      return (
+        t?.status === 'done' &&
+        previous.snapshot?.tasks.some((x) => x.id === id && x.resultSha === t.resultSha) === true
+      );
+    }),
+  );
 }

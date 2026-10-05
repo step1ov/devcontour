@@ -415,7 +415,7 @@ export async function reviewPlan(
   // результат уже принят, и ревьюер получает их кратко: полный текст прежних
   // постановок раздувал бы предложение с каждым этапом и выдавал принятое за
   // предмет нового ревью. Цель ревизии — её причина.
-  const carried = carriedTaskIds(board);
+  const carried = carriedTaskIds(board, state.tasks);
   const proposal = {
     // Прошлые находки ревью ищутся по названию. Без номера ревизии этап или
     // корректировка получали находки к плану первой ревизии как «открытые».
@@ -434,6 +434,11 @@ export async function reviewPlan(
     ...(externalDependencies.length ? { externalDependencies } : {}),
     contracts: state.contracts.filter((c) => contractIds.has(c.id)),
   };
+  // Утверждается только то, что ревьюер прочёл целиком: черновик, ушедший
+  // в краткую сводку принятого, означал бы утверждение без ревью.
+  const hidden = drafts.filter((t) => !proposal.tasks.includes(t));
+  if (hidden.length)
+    throw new DomainError('Черновики вне предложения ревью: ' + hidden.map((t) => t.id).join(', '));
   // Цель ревизии входит в предложение и потому — в то, что утверждается:
   // смена цели во время ревью (например, через sync) отменяет утверждение.
   const expected = {
@@ -486,7 +491,7 @@ export async function acceptBoard(
   // поведение проверял кто-нибудь.
   // Перенесённые из принятой ревизии задачи предъявили доказательства при её
   // приёмке; заново их не требуют (см. carriedTaskIds).
-  const carried = carriedTaskIds(board);
+  const carried = carriedTaskIds(board, state.tasks);
   for (const task of tasks) if (!carried.has(task.id)) assertRequirementProof(h, task);
   // Принятие относится к доказанному SHA, а не к текущей вершине ветки. Вершину
   // двигает и перенос базы: подготовка попадает туда без гейтов, и приёмка,

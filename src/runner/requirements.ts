@@ -161,7 +161,11 @@ export function correctRequirements(h: DevContour, boardId: string, reason: stri
   const s = h.store.read(),
     board = s.boards.find((b) => b.id === boardId);
   if (!board) throw new DomainError('Доска не найдена');
-  const tasks = s.tasks.filter((t) => board.revisions.at(-1)!.taskIds.includes(t.id));
+  // Отменённая задача — не результат, который можно скорректировать: корнем
+  // она делала корректировку невозможной («незавершённая цепочка»).
+  const tasks = s.tasks.filter(
+    (t) => board.revisions.at(-1)!.taskIds.includes(t.id) && t.status !== 'cancelled',
+  );
   const updates: Record<string, Task['requirements']> = {};
   for (const task of tasks) {
     const links = currentRequirements(h, task);

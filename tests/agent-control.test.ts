@@ -274,6 +274,72 @@ test('Ревью этапа видит его цель и новые задач�
   }
 });
 
+test('Отменённая в принятой ревизии и возвращённая задача ревьюируется целиком', async () => {
+  const f = fixture();
+  try {
+    f.h.config.mode = 'local';
+    const { boardId } = f.h.importPlan({
+      title: 'Release',
+      description: 'Цель: Release',
+      tasks: ['kept', 'dropped'].map((key) => ({
+        ...input('Task ' + key),
+        key,
+        dependsOn: [],
+        contracts: [],
+      })),
+    });
+    const [kept, dropped] = f.store.read().tasks;
+    f.h.approve(boardId);
+    f.h.cancel(dropped.id, 'Отложено');
+    complete(f.h, kept.id);
+    f.h.accept(boardId, 'merged');
+    f.h.importPlan(
+      {
+        title: 'Stage two',
+        description: 'Цель: Stage two',
+        tasks: [{ ...input('Task next'), key: 'next', dependsOn: [], contracts: [] }],
+      },
+      boardId,
+    );
+    f.h.reopen(dropped.id, 'Возвращаем отложенную задачу в этап');
+    const reopened = f.store.read().tasks.find((t) => t.id === dropped.id)!;
+    f.h.editTask(
+      dropped.id,
+      { ...input('Task dropped'), description: 'Returned scope body text' },
+      specDigest(reopened),
+    );
+    const proposals: {
+      tasks: { id: string; description: string }[];
+      acceptedEarlier?: { id: string }[];
+    }[] = [];
+    await reviewPlan(
+      f.h,
+      f.root,
+      boardId,
+      'codex',
+      runtimes((r) =>
+        proposals.push(
+          JSON.parse(
+            readFileSync(join(r.artifactDir, 'proposal.json'), 'utf8'),
+          ) as (typeof proposals)[number],
+        ),
+      ),
+    );
+    const [proposal] = proposals;
+    assert.equal(
+      proposal.tasks.find((t) => t.id === dropped.id)?.description,
+      'Returned scope body text',
+    );
+    assert.deepEqual(
+      proposal.acceptedEarlier?.map((t) => t.id),
+      [kept.id],
+    );
+    assert.equal(f.store.read().tasks.find((t) => t.id === dropped.id)!.status, 'ready');
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('Смена цели этапа во время ревью отменяет утверждение', async () => {
   const f = fixture();
   try {

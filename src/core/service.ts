@@ -597,7 +597,7 @@ export class DevContour {
       if (!tasks.length || tasks.some((t) => t.status !== 'done'))
         throw new DomainError('Приёмка доступна, когда все задачи прошли интеграцию и проверки');
       // Перенесённые из принятой ревизии задачи уже проверены её приёмкой.
-      const carried = carriedTaskIds(board(s, boardId));
+      const carried = carriedTaskIds(board(s, boardId), s.tasks);
       const work = tasks.filter((t) => !carried.has(t.id));
       work.forEach((t) => assertTaskPreparation(s, t));
       for (const t of work) {
