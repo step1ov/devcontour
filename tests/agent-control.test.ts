@@ -274,7 +274,7 @@ test('Ревью этапа видит его цель и новые задач�
   }
 });
 
-test('Отменённая в принятой ревизии и возвращённая задача ревьюируется целиком', async () => {
+test('Задача принятой ревизии не возвращается в работу: reopen и retry отказывают', async () => {
   const f = fixture();
   try {
     f.h.config.mode = 'local';
@@ -301,17 +301,19 @@ test('Отменённая в принятой ревизии и возвращ�
       },
       boardId,
     );
-    f.h.reopen(dropped.id, 'Возвращаем отложенную задачу в этап');
-    const reopened = f.store.read().tasks.find((t) => t.id === dropped.id)!;
-    f.h.editTask(
-      dropped.id,
-      { ...input('Task dropped'), description: 'Returned scope body text' },
-      specDigest(reopened),
+    const before = f.store.read();
+    assert.throws(
+      () => f.h.reopen(dropped.id, 'Возвращаем отложенную задачу в этап'),
+      /принятую ревизию 1.*новой задачей/,
     );
-    const proposals: {
-      tasks: { id: string; description: string }[];
-      acceptedEarlier?: { id: string }[];
-    }[] = [];
+    assert.throws(() => f.h.retry(dropped.id), /принятую ревизию 1/);
+    assert.deepEqual(f.store.read(), before);
+    // Отмена в текущем этапе по-прежнему обратима.
+    const next = f.store.read().tasks.find((t) => t.title === 'Task next')!;
+    f.h.cancel(next.id, 'Передумали');
+    f.h.retry(next.id);
+    assert.equal(f.store.read().tasks.find((t) => t.id === next.id)!.status, 'draft');
+    const proposals: { tasks: { id: string }[]; acceptedEarlier?: { id: string }[] }[] = [];
     await reviewPlan(
       f.h,
       f.root,
@@ -325,16 +327,14 @@ test('Отменённая в принятой ревизии и возвращ�
         ),
       ),
     );
-    const [proposal] = proposals;
-    assert.equal(
-      proposal.tasks.find((t) => t.id === dropped.id)?.description,
-      'Returned scope body text',
+    assert.deepEqual(
+      proposals[0].acceptedEarlier?.map((t) => t.id).sort(),
+      [kept.id, dropped.id].sort(),
     );
     assert.deepEqual(
-      proposal.acceptedEarlier?.map((t) => t.id),
-      [kept.id],
+      proposals[0].tasks.map((t) => t.id),
+      [next.id],
     );
-    assert.equal(f.store.read().tasks.find((t) => t.id === dropped.id)!.status, 'ready');
   } finally {
     f.cleanup();
   }
@@ -413,6 +413,50 @@ test('Ревью плана не тратится, если черновик н�
     );
     assert.equal(calls, 0, 'модель не вызывалась');
     assert.equal(f.store.read().tasks[0].status, 'draft');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Изменение показанной ревьюеру зависимости во время ревью отменяет утверждение', async () => {
+  const f = fixture();
+  try {
+    f.h.config.mode = 'local';
+    const { boardId } = f.h.importPlan({
+      title: 'Release',
+      description: 'Цель',
+      tasks: [
+        {
+          ...input('Schema fix'),
+          description: 'Schema format v1 body',
+          key: 'a',
+          dependsOn: [],
+          contracts: [],
+        },
+        { ...input('Engine work'), key: 'b', dependsOn: ['a'], contracts: [] },
+      ],
+    });
+    const [schema, engine] = f.store.read().tasks;
+    await assert.rejects(
+      reviewPlan(
+        f.h,
+        f.root,
+        boardId,
+        'codex',
+        runtimes(() => {
+          const current = f.store.read().tasks.find((t) => t.id === schema.id)!;
+          f.h.editTask(
+            schema.id,
+            { ...input('Schema fix'), description: 'Format v2, incompatible' },
+            specDigest(current),
+          );
+        }),
+        () => {},
+        [engine.id],
+      ),
+      /План изменился/,
+    );
+    assert.equal(f.store.read().tasks.find((t) => t.id === engine.id)!.status, 'draft');
   } finally {
     f.cleanup();
   }

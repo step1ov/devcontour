@@ -8,7 +8,14 @@ import { join, resolve, sep } from 'node:path';
 import { isolation } from './isolation.ts';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { DevContour, contractDigest, digest, samePin, specDigest } from '../core/service.ts';
+import {
+  DevContour,
+  contractDigest,
+  dependencyDigest,
+  digest,
+  samePin,
+  specDigest,
+} from '../core/service.ts';
 import { blobBytes, pinArtifacts } from './contract-artifacts.ts';
 import {
   type Approval,
@@ -459,6 +466,12 @@ export async function reviewPlan(
     revision: revision.number,
     reason: revision.reason,
     taskIds: revision.taskIds,
+    dependencies: Object.fromEntries(
+      externalDependencies.map((d) => [
+        d.id,
+        dependencyDigest(state.tasks.find((t) => t.id === d.id)!),
+      ]),
+    ),
     tasks: Object.fromEntries(drafts.map((t) => [t.id, specDigest(t)])),
   };
   const owner = boardOwner(board, state);

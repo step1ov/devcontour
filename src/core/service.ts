@@ -149,6 +149,24 @@ function activeRevision(s: DevContourState, id: string) {
   return r;
 }
 const HEARTBEAT_FAILED = 'Продление владения не удалось';
+/** То, что ревьюер видел о зависимости вне предложения: постановка и статус. */
+export const dependencyDigest = (t: Task) => digest({ spec: specDigest(t), status: t.status });
+/**
+ * Задача принятой ревизии неизменяема: следующий этап и корректировка несут
+ * её как принятую работу. Вернуть её в работу (reopen, retry) значило бы
+ * переписать принятое и заново отменять уже учтённое — повторная отмена
+ * такой задачи выглядела бы исторической, и workflow её не замечал. Работа
+ * возвращается в этап новой задачей.
+ */
+function assertNotAccepted(s: DevContourState, t: Task) {
+  for (const b of s.boards)
+    for (const r of b.revisions)
+      if (r.status === 'accepted' && r.taskIds.includes(t.id))
+        throw new DomainError(
+          `${t.id} входит в принятую ревизию ${r.number} доски «${b.title}»; верните работу в этап новой задачей`,
+          409,
+        );
+}
 export class DevContour {
   constructor(
     readonly store: Store,
@@ -462,6 +480,8 @@ export class DevContour {
       taskIds: string[];
       tasks: Record<string, string>;
       reason?: string;
+      /** Зависимости, показанные ревьюеру вне предложения: digest постановки и статус. */
+      dependencies?: Record<string, string>;
     },
   ) {
     return this.store.change('board.approved', (s) => {
@@ -475,6 +495,9 @@ export class DevContour {
         expected &&
         (expected.revision !== r.number ||
           (expected.reason !== undefined && expected.reason !== r.reason) ||
+          Object.entries(expected.dependencies ?? {}).some(
+            ([id, pinned]) => dependencyDigest(task(s, id)) !== pinned,
+          ) ||
           digest(expected.taskIds) !== digest(r.taskIds) ||
           selected.some((id) => {
             const current = task(s, id);
@@ -502,9 +525,12 @@ export class DevContour {
       throw new DomainError('Корректировка создаётся после приёмки текущей ревизии');
     if (!roots.length || roots.some((id) => !r.taskIds.includes(id)))
       throw new DomainError('Выберите принятые задачи этой доски', 400);
+    // Отменённый потребитель — не результат: корректировать его нечего, а
+    // требование done делало корректировку предшественника невозможной.
+    // Обход через него к живым потребителям сохраняется.
     const ids = descendants(impactGraph(s.tasks), [
       ...new Set(roots.map((id) => latestTaskId(s.tasks, id))),
-    ]);
+    ]).filter((id) => task(s, id).status !== 'cancelled');
     return {
       taskIds: ids,
       boards: s.boards
@@ -531,7 +557,7 @@ export class DevContour {
         throw new DomainError('Выберите задачи текущей принятой ревизии', 400);
       const impacted = descendants(impactGraph(s.tasks), [
         ...new Set(roots.map((id) => latestTaskId(s.tasks, id))),
-      ]);
+      ]).filter((id) => task(s, id).status !== 'cancelled');
       if (impacted.some((id) => task(s, id).status !== 'done'))
         throw new DomainError(
           'В затронутой цепочке есть незавершённые задачи. Сначала завершите их.',
@@ -1106,6 +1132,7 @@ export class DevContour {
       if (t.resultSha)
         throw new DomainError('Задача дала принятый результат; нужна корректировка доски');
       if (t.activeRunId) throw new DomainError('Дождитесь завершения текущей попытки');
+      assertNotAccepted(s, t);
       // Черновик тоже возвращается: снятое утверждение могло оставить за собой
       // digest контрактов, и задача продолжала бы закреплять одну редакцию,
       // ссылаясь на другую. Операция идемпотентна.
@@ -1186,6 +1213,7 @@ export class DevContour {
       const exhaustedReady = t.attempt >= this.config.maxAttempts && !t.activeRunId;
       if (!['failed', 'cancelled'].includes(t.status) && !exhaustedReady)
         throw new DomainError('Повтор доступен после сбоя или отмены');
+      assertNotAccepted(s, t);
       const spent = t.attempt;
       // Сбрасывать нечего, пока бюджет не исчерпан: сообщать о сбросе, которого
       // не было, значит записать в журнал неправду.

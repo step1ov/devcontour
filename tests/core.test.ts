@@ -770,3 +770,21 @@ test('Причина неудавшегося продления владени�
     f.cleanup();
   }
 });
+
+test('Отменённый потребитель не мешает корректировке предшественника', () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const a = f.h.addTask(b.id, input('Root task'));
+    const dropped = f.h.addTask(b.id, input('Dropped consumer', [a.id]));
+    f.h.approve(b.id);
+    f.h.cancel(dropped.id, 'Решено иначе');
+    complete(f.h, a.id);
+    f.h.accept(b.id, 'merged');
+    assert.deepEqual(f.h.impact(b.id, [a.id]).taskIds, [a.id]);
+    const result = f.h.correct(b.id, [a.id], 'Change the root behaviour');
+    assert.deepEqual(Object.keys(result.replacements), [a.id]);
+  } finally {
+    f.cleanup();
+  }
+});
