@@ -462,6 +462,41 @@ test('Изменение показанной ревьюеру зависимо�
   }
 });
 
+test('Смена только гейтов показанной зависимости во время ревью тоже отменяет утверждение', async () => {
+  const f = fixture();
+  try {
+    f.h.config.mode = 'local';
+    const { boardId } = f.h.importPlan({
+      title: 'Release',
+      description: 'Цель',
+      tasks: [
+        { ...input('Schema fix'), key: 'a', dependsOn: [], contracts: [] },
+        { ...input('Engine work'), key: 'b', dependsOn: ['a'], contracts: [] },
+      ],
+    });
+    const [schema, engine] = f.store.read().tasks;
+    await assert.rejects(
+      reviewPlan(
+        f.h,
+        f.root,
+        boardId,
+        'codex',
+        runtimes(() =>
+          f.store.change('test.gates', (s) => {
+            s.tasks.find((t) => t.id === schema.id)!.gates = ['other'];
+          }),
+        ),
+        () => {},
+        [engine.id],
+      ),
+      /План изменился/,
+    );
+    assert.equal(f.store.read().tasks.find((t) => t.id === engine.id)!.status, 'draft');
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('Смена цели этапа во время ревью отменяет утверждение', async () => {
   const f = fixture();
   try {

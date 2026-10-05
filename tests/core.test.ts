@@ -759,7 +759,9 @@ test('Причина неудавшегося продления владени�
     f.h.approve(b.id);
     f.h.pause(false);
     const run = f.h.claim('worker')!;
-    f.h.heartbeatFailed(run.id, 'Политика проверок изменилась; нужна новая попытка');
+    f.h.heartbeatFailed(run.id, 'other-token', 'Чужой владелец');
+    assert.equal(f.store.read().runs.find((x) => x.id === run.id)!.error, undefined);
+    f.h.heartbeatFailed(run.id, run.token, 'Политика проверок изменилась; нужна новая попытка');
     f.h.expire(Date.now() + 10 * 60_000);
     const r = f.store.read().runs.find((x) => x.id === run.id)!;
     assert.equal(r.status, 'expired');
@@ -784,6 +786,27 @@ test('Отменённый потребитель не мешает коррек
     assert.deepEqual(f.h.impact(b.id, [a.id]).taskIds, [a.id]);
     const result = f.h.correct(b.id, [a.id], 'Change the root behaviour');
     assert.deepEqual(Object.keys(result.replacements), [a.id]);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Отказ после неудавшегося продления сохраняет его причину впереди', () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    f.h.pause(false);
+    const run = f.h.claim('worker')!;
+    f.h.heartbeatFailed(run.id, run.token, 'Хранилище временно недоступно');
+    f.h.fail(run.id, run.token, 'Попытка прервана');
+    const r = f.store.read().runs.find((x) => x.id === run.id)!;
+    assert.match(
+      r.error!,
+      /^Продление владения не удалось: Хранилище временно недоступно\. Попытка прервана$/,
+    );
+    assert.match(f.store.read().tasks[0].failure!, /Хранилище временно недоступно/);
   } finally {
     f.cleanup();
   }

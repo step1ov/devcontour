@@ -329,6 +329,35 @@ test('Peer completion needs a committed receipt and present Git result; it never
   }
 });
 
+test('Синхронизация не возрождает задачу, отменённую в ревизии, которую другой clone уже принял', () => {
+  const f = fixture();
+  try {
+    const a = f.create('alice'),
+      board = a.h.createBoard('Release board', '', 'main');
+    const kept = a.h.addTask(board.id, input('Kept task'));
+    const dropped = a.h.addTask(board.id, input('Dropped task'));
+    a.h.approve(board.id);
+    a.h.cancel(dropped.id, 'Решено в другой задаче');
+    complete(a, kept.id);
+    syncGit(a.h, { member: 'alice' });
+    a.commit();
+    const b = f.create('bob', a);
+    syncGit(b.h, { member: 'bob' });
+    // Alice ещё не знает о приёмке и законно возвращает отменённую задачу.
+    a.h.retry(dropped.id);
+    syncGit(a.h);
+    a.commit();
+    // Bob тем временем принимает ревизию, затем получает коммит Alice.
+    b.h.accept(board.id, git(b.repo, 'rev-parse', 'HEAD'));
+    b.pull();
+    const before = canonical(b.store.read());
+    assert.throws(() => syncGit(b.h), /изменилась после приёмки/);
+    assert.equal(canonical(b.store.read()), before);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('Broken receipts, absent commits, graph cycles, deleted history and forged done all roll back', () => {
   const f = fixture();
   try {

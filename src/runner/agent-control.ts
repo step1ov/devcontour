@@ -519,7 +519,7 @@ export async function acceptBoard(
   // Перенесённые из принятой ревизии задачи предъявили доказательства при её
   // приёмке; заново их не требуют (см. carriedTaskIds).
   const carried = carriedTaskIds(board, state.tasks);
-  for (const task of tasks) if (!carried.has(task.id)) assertRequirementProof(h, task);
+  for (const task of tasks) if (!carried.has(task.id)) assertRequirementProof(h, task, state);
   // Принятие относится к доказанному SHA, а не к текущей вершине ветки. Вершину
   // двигает и перенос базы: подготовка попадает туда без гейтов, и приёмка,
   // читавшая вершину, закрепляла бы непроверенный код как принятую работу.

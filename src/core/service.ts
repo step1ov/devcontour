@@ -149,8 +149,13 @@ function activeRevision(s: DevContourState, id: string) {
   return r;
 }
 const HEARTBEAT_FAILED = 'Продление владения не удалось';
-/** То, что ревьюер видел о зависимости вне предложения: постановка и статус. */
-export const dependencyDigest = (t: Task) => digest({ spec: specDigest(t), status: t.status });
+/**
+ * То, что ревьюер видел о зависимости вне предложения: постановка, статус,
+ * гейты и принятый SHA. Гейты в specDigest не входят — они часть политики, —
+ * но ревьюер их видел, и их смена меняет то, на что опирается план.
+ */
+export const dependencyDigest = (t: Task) =>
+  digest({ spec: specDigest(t), status: t.status, gates: t.gates, resultSha: t.resultSha });
 /**
  * Задача принятой ревизии неизменяема: следующий этап и корректировка несут
  * её как принятую работу. Вернуть её в работу (reopen, retry) значило бы
@@ -858,10 +863,12 @@ export class DevContour {
    * политика, привязка к подготовке, сбой хранилища) узнать было неоткуда.
    * Причина записывается в попытку; истечение её не затирает.
    */
-  heartbeatFailed(id: string, reason: string) {
+  heartbeatFailed(id: string, token: string, reason: string) {
     return this.store.change('run.heartbeat-failed', (s) => {
       const r = s.runs.find((r) => r.id === id);
-      if (r?.status !== 'active') return;
+      // Истёкший срок допустим — ради него запись и делается, — но смена
+      // токена означает нового владельца: прежний не пишет в его попытку.
+      if (r?.status !== 'active' || r.token !== token) return;
       r.error = `${HEARTBEAT_FAILED}: ${reason.slice(0, 500)}`;
       return { runId: id, error: r.error };
     });
@@ -983,14 +990,18 @@ export class DevContour {
       // принимается позже, возможно после перезапуска, и восстанавливать
       // причину из текста сообщения тогда уже нечем.
       const fingerprint = failureFingerprint(kind, error);
+      // Отказ после неудавшегося продления — его следствие («попытка
+      // прервана»); причина продления остаётся впереди, иначе снова видно
+      // только следствие.
+      const shown = r.error?.startsWith(HEARTBEAT_FAILED) ? `${r.error}. ${error}` : error;
       r.status = 'failed';
-      r.error = error;
+      r.error = shown;
       r.blocked = blocked || undefined;
       r.failureKind = kind;
       r.failureFingerprint = fingerprint;
       r.finishedAt = now();
       t.status = 'failed';
-      t.failure = error;
+      t.failure = shown;
       t.failureKind = kind;
       t.failureFingerprint = fingerprint;
       t.activeRunId = undefined;

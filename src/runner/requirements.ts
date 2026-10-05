@@ -1,6 +1,13 @@
 import { execFileSync } from 'node:child_process';
 import { DevContour, digest } from '../core/service.ts';
-import { DomainError, relativePath, type Task, type Run, type Evidence } from '../core/model.ts';
+import {
+  DomainError,
+  relativePath,
+  type Task,
+  type Run,
+  type Evidence,
+  type DevContourState,
+} from '../core/model.ts';
 import { requirementProof, taskEvidence, unprovenReason } from '../core/proof.ts';
 import { repository } from '../core/repositories.ts';
 
@@ -79,12 +86,16 @@ export function assertRequirements(h: DevContour, task: Task, cwd?: string, ref?
  * кандидат, а принимается результат слияния. Задачи без `testId` проходят на
  * прежнем уровне — история не переписывается.
  */
-export function assertRequirementProof(h: DevContour, task: Task) {
-  const unproven = unprovenReason(
-    task.requirements,
-    taskEvidence(h.store.read(), task),
-    task.resultSha,
-  );
+/**
+ * `state` — уже прочитанное состояние: приёмка доски проверяет задачи в
+ * цикле, и чтение всего хранилища на каждую задачу росло как задачи × история.
+ */
+export function assertRequirementProof(
+  h: DevContour,
+  task: Task,
+  state: DevContourState = h.store.read(),
+) {
+  const unproven = unprovenReason(task.requirements, taskEvidence(state, task), task.resultSha);
   if (unproven) throw new DomainError(unproven);
 }
 export function recordRequirements(

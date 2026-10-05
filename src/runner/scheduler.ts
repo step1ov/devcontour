@@ -807,7 +807,7 @@ export class Scheduler {
           const reason = e instanceof Error ? e.message : String(e);
           console.error(`DevContour: продление ${run.id} не удалось: ${reason}`);
           try {
-            this.h.heartbeatFailed(run.id, reason);
+            this.h.heartbeatFailed(run.id, run.token, reason);
           } catch {
             // Хранилище недоступно — причина осталась в логе сервера.
           }

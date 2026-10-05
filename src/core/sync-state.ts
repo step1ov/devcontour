@@ -459,6 +459,26 @@ export function stateFromRecords(
     });
   const visible = new Set(s.boards.flatMap((b) => b.revisions.flatMap((r) => r.taskIds)));
   if (s.tasks.some((t) => !visible.has(t.id))) throw new Error('Задача без доски');
+  // Задачи принятой ревизии неизменяемы (D11) и после слияния истории: clone,
+  // ещё не знавший о приёмке, мог законно вернуть отменённую задачу в работу.
+  // Локальный запрет такое объединение не видит, а возрождённая задача потом
+  // снова отменялась бы «исторически», не останавливая workflow.
+  for (const b of s.boards)
+    for (const r of b.revisions) {
+      if (r.status !== 'accepted') continue;
+      for (const id of r.taskIds) {
+        const t = s.tasks.find((t) => t.id === id)!;
+        const accepted = r.snapshot?.tasks.find((x) => x.id === id);
+        if (
+          accepted
+            ? t.status !== 'done' || t.resultSha !== accepted.resultSha
+            : t.status !== 'cancelled'
+        )
+          throw new Error(
+            `Задача ${id} принятой ревизии ${r.number} доски ${b.id} изменилась после приёмки; верните её работу новой задачей`,
+          );
+      }
+    }
   s.changeSets = all
     .filter((x) => x.record.kind === 'changeset')
     .map(({ owner, record }) => {
