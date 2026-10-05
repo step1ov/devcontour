@@ -799,12 +799,17 @@ export class Scheduler {
       );
     };
     rearm();
+    // Первая причина неудавшегося продления хранится и здесь: запись в
+    // хранилище сама может не удаться, а итоговый отказ иначе покажет только
+    // следствие («попытка прервана»).
+    let heartbeatCause: string | undefined;
     const heartbeat = setInterval(
       () => {
         try {
           this.h.heartbeat(run.id, run.token);
         } catch (e) {
           const reason = e instanceof Error ? e.message : String(e);
+          heartbeatCause ??= reason;
           console.error(`DevContour: продление ${run.id} не удалось: ${reason}`);
           try {
             this.h.heartbeatFailed(run.id, run.token, reason);
@@ -1116,6 +1121,7 @@ export class Scheduler {
           message,
           error instanceof BlockedError && !run.candidateSha,
           kind,
+          heartbeatCause,
         );
         // Отказ, который повторится на любой задаче — кончились кредиты,
         // runtime не авторизован, — останавливает выдачу. Иначе очередь

@@ -147,6 +147,7 @@ export function recordsFromState(h: DevContour, s: DevContourState) {
                   at: r.acceptedAt!,
                   sha: r.snapshot!.sha,
                   repositories: r.snapshot!.repositories,
+                  results: Object.fromEntries(r.snapshot!.tasks.map((t) => [t.id, t.resultSha!])),
                 }
               : undefined,
         })),
@@ -426,14 +427,35 @@ export function stateFromRecords(
               before.snapshot?.sha !== r.accepted.sha ||
               before.reason !== r.reason ||
               before.acceptedAt !== r.accepted.at ||
-              canonical(before.snapshot?.repositories) !== canonical(r.accepted.repositories)
+              canonical(before.snapshot?.repositories) !== canonical(r.accepted.repositories) ||
+              (r.accepted.results !== undefined &&
+                canonical(r.accepted.results) !==
+                  canonical(
+                    Object.fromEntries(
+                      (before.snapshot?.tasks ?? []).map((t) => [t.id, t.resultSha]),
+                    ),
+                  ))
             )
               throw new Error('Принятая ревизия неизменяема: ' + b.id);
             return before;
           }
           if (!r.accepted) return { ...r, status: 'active' as const };
           // Тот же объём, что при приёмке: отменённые задачи в снимок не входят.
-          const accepted = tasks.filter((t) => t.status !== 'cancelled');
+          // Манифест отправителя задаёт состав: задачи вне него — отменённые,
+          // а свои результаты объединение изменить не вправе.
+          const results = r.accepted.results;
+          const accepted = results
+            ? tasks.filter((t) => t.id in results)
+            : tasks.filter((t) => t.status !== 'cancelled');
+          if (
+            results &&
+            (Object.keys(results).some((id) => !r.taskIds.includes(id)) ||
+              accepted.some((t) => t.status !== 'done' || t.resultSha !== results[t.id]) ||
+              tasks.some((t) => !(t.id in results) && t.status !== 'cancelled'))
+          )
+            throw new Error(
+              `Принятая ревизия ${r.number} доски ${b.id} расходится с манифестом приёмки; верните работу новой задачей`,
+            );
           if (!accepted.length || accepted.some((t) => t.status !== 'done'))
             throw new Error('Приёмка требует завершённых задач: ' + b.id);
           const snapshot = {

@@ -358,6 +358,37 @@ test('Синхронизация не возрождает задачу, отм�
   }
 });
 
+test('Впервые полученная приёмка сверяется с манифестом, а не со своими задачами', () => {
+  const f = fixture();
+  try {
+    const a = f.create('alice'),
+      board = a.h.createBoard('Release board', '', 'main');
+    const kept = a.h.addTask(board.id, input('Kept task'));
+    const dropped = a.h.addTask(board.id, input('Dropped task'));
+    a.h.approve(board.id);
+    a.h.cancel(dropped.id, 'Решено в другой задаче');
+    complete(a, kept.id);
+    syncGit(a.h, { member: 'alice' });
+    a.commit();
+    const b = f.create('bob', a);
+    syncGit(b.h, { member: 'bob' });
+    // Bob ещё не знает о приёмке: возвращает отменённую задачу и доводит её до done.
+    b.h.retry(dropped.id);
+    b.h.assign(dropped.id, 'bob');
+    complete(b, dropped.id);
+    // Alice принимает ревизию со снимком [kept] и публикует приёмку.
+    a.h.accept(board.id, git(a.repo, 'rev-parse', 'HEAD'));
+    syncGit(a.h);
+    a.commit();
+    b.pull();
+    const before = canonical(b.store.read());
+    assert.throws(() => syncGit(b.h), /расходится с манифестом приёмки/);
+    assert.equal(canonical(b.store.read()), before);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('Broken receipts, absent commits, graph cycles, deleted history and forged done all roll back', () => {
   const f = fixture();
   try {

@@ -73,6 +73,13 @@ const revision = z.strictObject({
       at: date,
       sha,
       repositories: z.record(syncId, sha).optional(),
+      /**
+       * Манифест приёмки: выполненные задачи снимка и их SHA. Без него
+       * clone, впервые получивший приёмку, собирал снимок из уже
+       * объединённых задач — и задача, доведённая им до done после чужой
+       * приёмки, попадала в принятое. Отсутствует в записях прежних версий.
+       */
+      results: z.record(syncId, sha).optional(),
     })
     .optional(),
 });

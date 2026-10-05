@@ -868,7 +868,9 @@ export class DevContour {
       const r = s.runs.find((r) => r.id === id);
       // Истёкший срок допустим — ради него запись и делается, — но смена
       // токена означает нового владельца: прежний не пишет в его попытку.
-      if (r?.status !== 'active' || r.token !== token) return;
+      // Записывается первая причина: следующие — её следствия.
+      if (r?.status !== 'active' || r.token !== token || r.error?.startsWith(HEARTBEAT_FAILED))
+        return;
       r.error = `${HEARTBEAT_FAILED}: ${reason.slice(0, 500)}`;
       return { runId: id, error: r.error };
     });
@@ -984,7 +986,15 @@ export class DevContour {
       return { taskId: t.id, runId: id, sha };
     });
   }
-  fail(id: string, token: string, error: string, blocked = false, kind: FailureKind = 'unknown') {
+  fail(
+    id: string,
+    token: string,
+    error: string,
+    blocked = false,
+    kind: FailureKind = 'unknown',
+    /** Первая причина неудавшегося продления, известная планировщику. */
+    heartbeatCause?: string,
+  ) {
     return this.withRun(id, token, 'run.failed', (r, t) => {
       // Класс и отпечаток записываются вместе с отказом: решение о починке
       // принимается позже, возможно после перезапуска, и восстанавливать
@@ -993,7 +1003,12 @@ export class DevContour {
       // Отказ после неудавшегося продления — его следствие («попытка
       // прервана»); причина продления остаётся впереди, иначе снова видно
       // только следствие.
-      const shown = r.error?.startsWith(HEARTBEAT_FAILED) ? `${r.error}. ${error}` : error;
+      const prefix = r.error?.startsWith(HEARTBEAT_FAILED)
+        ? r.error
+        : heartbeatCause
+          ? `${HEARTBEAT_FAILED}: ${heartbeatCause.slice(0, 500)}`
+          : undefined;
+      const shown = prefix ? `${prefix}. ${error}` : error;
       r.status = 'failed';
       r.error = shown;
       r.blocked = blocked || undefined;

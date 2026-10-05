@@ -811,3 +811,31 @@ test('Отказ после неудавшегося продления сохр
     f.cleanup();
   }
 });
+
+test('Первая причина продления не затирается следующей и доходит до отказа без записи в хранилище', () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    f.h.addTask(b.id, input('First'));
+    f.h.addTask(b.id, input('Second'));
+    f.h.approve(b.id);
+    f.h.pause(false);
+    const one = f.h.claim('worker')!;
+    f.h.heartbeatFailed(one.id, one.token, 'Первая причина');
+    f.h.heartbeatFailed(one.id, one.token, 'Вторая причина');
+    assert.equal(
+      f.store.read().runs.find((x) => x.id === one.id)!.error,
+      'Продление владения не удалось: Первая причина',
+    );
+    // Запись причины не удалась — планировщик передаёт её сам.
+    f.h.fail(one.id, one.token, 'Attempt aborted');
+    const two = f.h.claim('worker')!;
+    f.h.fail(two.id, two.token, 'Attempt aborted', false, 'unknown', 'Хранилище недоступно');
+    const r = f.store.read().runs.find((x) => x.id === two.id)!;
+    assert.equal(r.error, 'Продление владения не удалось: Хранилище недоступно. Attempt aborted');
+    const plain = f.store.read().runs.find((x) => x.id === one.id)!;
+    assert.equal(r.failureFingerprint, plain.failureFingerprint, 'отпечаток — по исходной ошибке');
+  } finally {
+    f.cleanup();
+  }
+});
