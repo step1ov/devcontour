@@ -340,6 +340,58 @@ test('Отменённая в принятой ревизии и возвращ�
   }
 });
 
+test('Невыбранный черновик-предшественник своей доски виден ревьюеру с постановкой', async () => {
+  const f = fixture();
+  try {
+    f.h.config.mode = 'local';
+    const { boardId } = f.h.importPlan({
+      title: 'Release',
+      description: 'Цель',
+      tasks: [
+        {
+          ...input('Schema fix'),
+          description: 'Schema body text',
+          key: 'a',
+          dependsOn: [],
+          contracts: [],
+        },
+        { ...input('Engine work'), key: 'b', dependsOn: ['a'], contracts: [] },
+      ],
+    });
+    const [schema, engine] = f.store.read().tasks;
+    const proposals: {
+      tasks: { id: string }[];
+      externalDependencies?: { id: string; description?: string }[];
+    }[] = [];
+    await reviewPlan(
+      f.h,
+      f.root,
+      boardId,
+      'codex',
+      runtimes((r) =>
+        proposals.push(
+          JSON.parse(
+            readFileSync(join(r.artifactDir, 'proposal.json'), 'utf8'),
+          ) as (typeof proposals)[number],
+        ),
+      ),
+      () => {},
+      [engine.id],
+    );
+    const [proposal] = proposals;
+    assert.deepEqual(
+      proposal.tasks.map((t) => t.id),
+      [engine.id],
+    );
+    assert.equal(
+      proposal.externalDependencies?.find((d) => d.id === schema.id)?.description,
+      'Schema body text',
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('Смена цели этапа во время ревью отменяет утверждение', async () => {
   const f = fixture();
   try {

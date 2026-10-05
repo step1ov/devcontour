@@ -401,15 +401,26 @@ export async function reviewPlan(
   const drafts = tasks.filter((t) => t.status === 'draft');
   if (!drafts.length) return { status: 'already-approved', boardId };
   const contractIds = new Set(tasks.flatMap((t) => t.contracts));
-  // Зависимости на задачи других досок ревьюер проверить не может: база
-  // контура ему закрыта. Их статус и принятый SHA входят в предложение —
-  // иначе ревью плана требовало «карточку внешней зависимости».
-  const own = new Set(revision.taskIds);
+  // Зависимости вне предложения ревьюер проверить не может: база контура
+  // ему закрыта. Это задачи других досок и невыбранные черновики своей —
+  // ревью планов при смене контракта выбирает только перепривязанные, и
+  // предшественник из той же доски пропадал из виду. Статус и принятый SHA
+  // входят в предложение, а у ещё не выполненной — и её постановка: иначе
+  // ревью требовало «карточку внешней зависимости».
+  const shown = new Set(tasks.map((t) => t.id));
   const externalDependencies = [
-    ...new Set(tasks.flatMap((t) => t.dependsOn).filter((id) => !own.has(id))),
+    ...new Set(tasks.flatMap((t) => t.dependsOn).filter((id) => !shown.has(id))),
   ].map((id) => {
     const t = state.tasks.find((x) => x.id === id);
-    return { id, title: t?.title, status: t?.status, resultSha: t?.resultSha };
+    return {
+      id,
+      title: t?.title,
+      status: t?.status,
+      resultSha: t?.resultSha,
+      ...(t && t.status !== 'done' && t.status !== 'cancelled'
+        ? { description: t.description, acceptance: t.acceptance, gates: t.gates }
+        : {}),
+    };
   });
   // Следующий этап и корректировка несут задачи принятой ревизии. Их
   // результат уже принят, и ревьюер получает их кратко: полный текст прежних
