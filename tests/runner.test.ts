@@ -267,6 +267,44 @@ test('Changes to gate policy files are rejected before commit', async () => {
     await f.cleanup();
   }
 });
+test('Тысячи посторонних файлов в кандидате не перечитывают состояние на каждый файл', async () => {
+  const f = await runtimeFixture();
+  try {
+    const junk = {
+      ...adapters,
+      demo: {
+        name: 'demo' as const,
+        async execute(r: AgentRequest) {
+          const result = await adapters.demo.execute(r);
+          if (!r.review) {
+            // Как хранилище пакетов, созданное установкой прямо в worktree.
+            await mkdir(join(r.cwd, '.pnpm-store-fixture'), { recursive: true });
+            for (let i = 0; i < 3000; i++)
+              await writeFile(join(r.cwd, '.pnpm-store-fixture', `f${i}`), String(i));
+          }
+          return result;
+        },
+      },
+    };
+    const read = f.store.read.bind(f.store);
+    let reads = 0;
+    f.store.read = () => {
+      reads++;
+      return read();
+    };
+    const scheduler = new Scheduler(f.h, f.root, junk);
+    f.h.pause(false);
+    await scheduler.drain();
+    f.store.read = read;
+    assert.ok(reads < 3000, `состояние прочитано ${reads} раз`);
+    assert.ok(
+      !f.store.read().runs.some((r) => r.status === 'expired'),
+      'попытка завершилась своим исходом, а не истечением владения',
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
 test('Crash after Git publication is reconciled from persisted evidence without running models again', async () => {
   const f = await runtimeFixture();
   try {

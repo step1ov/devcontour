@@ -504,24 +504,28 @@ export class Scheduler {
     const changed = (await git(cwd, 'diff', ...range, '--no-renames', '--name-only', '-z'))
       .split('\0')
       .filter(Boolean);
-    const forbidden = changed.filter((p) =>
-      withinPaths(p, [
-        ...repo.protectedPaths,
-        repo.configFile ?? 'devcontour.component.json',
-        '.devcontour-local/',
-        '.devcontour/',
-        ...(repo.generatedPaths ?? []),
-        ...this.h.config.contextPacks
-          .filter((pack) => pack.repositoryId === repo.id)
-          .flatMap((pack) => pack.files),
-        // Нормативные артефакты контракта — договор, а не результат задачи:
-        // исполнитель, правящий эталон или приёмку, подгонял бы проверку.
-        ...componentArtifacts(
-          this.h.store.read().contracts.filter((c) => task.contracts.includes(c.id)),
-          repo.id,
-        ).map((a) => a.path),
-      ]),
-    );
+    // Список строится один раз. Внутри фильтра он собирался заново для каждого
+    // изменённого файла — с чтением всего состояния и артефактов контракта, —
+    // и кандидат с тысячами файлов (чужое хранилище пакетов в worktree)
+    // держал поток больше минуты: владение истекало, а настоящий отказ
+    // «вне области записи» терялся.
+    const protectedList = [
+      ...repo.protectedPaths,
+      repo.configFile ?? 'devcontour.component.json',
+      '.devcontour-local/',
+      '.devcontour/',
+      ...(repo.generatedPaths ?? []),
+      ...this.h.config.contextPacks
+        .filter((pack) => pack.repositoryId === repo.id)
+        .flatMap((pack) => pack.files),
+      // Нормативные артефакты контракта — договор, а не результат задачи:
+      // исполнитель, правящий эталон или приёмку, подгонял бы проверку.
+      ...componentArtifacts(
+        this.h.store.read().contracts.filter((c) => task.contracts.includes(c.id)),
+        repo.id,
+      ).map((a) => a.path),
+    ];
+    const forbidden = changed.filter((p) => withinPaths(p, protectedList));
     if (forbidden.length)
       throw new TaskFailure(
         'scope-violation',
@@ -540,11 +544,11 @@ export class Scheduler {
           'Выполните работу по критериям приёмки либо объясните в отчёте, ' +
           'почему изменения не требуются.',
       );
-    const outside = changed.filter((p) =>
-      [roleBinding(this.h.config, task.role, task.repositoryId).writePaths, task.writePaths].some(
-        (scope) => scope && !withinPaths(p, scope),
-      ),
-    );
+    const scopes = [
+      roleBinding(this.h.config, task.role, task.repositoryId).writePaths,
+      task.writePaths,
+    ];
+    const outside = changed.filter((p) => scopes.some((scope) => scope && !withinPaths(p, scope)));
     if (outside.length)
       throw new TaskFailure(
         'scope-violation',
@@ -1128,8 +1132,13 @@ export class Scheduler {
             s.paused = true;
             return { error: `Выдача остановлена: ${message}`, kind };
           });
-      } catch {
-        /* A cancelled or fenced run cannot publish a late failure. */
+      } catch (late) {
+        // Отменённая или потерявшая владение попытка не публикует поздний
+        // отказ, но его причина не должна пропадать: снаружи иначе видно
+        // только «истёк срок владения».
+        console.error(
+          `DevContour: отказ попытки ${run.id} не записан (${late instanceof Error ? late.message : String(late)}): ${message}`,
+        );
       }
     } finally {
       this.contexts.delete(run.id);
