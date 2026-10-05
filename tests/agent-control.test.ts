@@ -392,6 +392,32 @@ test('Невыбранный черновик-предшественник св�
   }
 });
 
+test('Ревью плана не тратится, если черновик нельзя утвердить', async () => {
+  const f = fixture();
+  try {
+    f.h.config.mode = 'local';
+    const b = f.h.createBoard('Board');
+    const old = f.h.contract('API', 'v1', undefined, undefined, 'docs/contracts/api.md');
+    f.h.addTask(b.id, { ...input('Task'), contracts: [old.id] });
+    const next = f.h.contract('API', 'v2', undefined, undefined, 'docs/contracts/api.md');
+    let calls = 0;
+    await assert.rejects(
+      reviewPlan(
+        f.h,
+        f.root,
+        b.id,
+        'codex',
+        runtimes(() => calls++),
+      ),
+      new RegExp(`${old.id} заменён редакцией ${next.id}`),
+    );
+    assert.equal(calls, 0, 'модель не вызывалась');
+    assert.equal(f.store.read().tasks[0].status, 'draft');
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('Смена цели этапа во время ревью отменяет утверждение', async () => {
   const f = fixture();
   try {

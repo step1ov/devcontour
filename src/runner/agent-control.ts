@@ -400,6 +400,9 @@ export async function reviewPlan(
   const tasks = selected ? all.filter((t) => t.status !== 'draft' || selected.includes(t.id)) : all;
   const drafts = tasks.filter((t) => t.status === 'draft');
   if (!drafts.length) return { status: 'already-approved', boardId };
+  // Предусловия утверждения — до ревью: отказ после одобрения тратил вызов
+  // модели впустую.
+  drafts.forEach((t) => h.approvable(state, t));
   const contractIds = new Set(tasks.flatMap((t) => t.contracts));
   // Зависимости вне предложения ревьюер проверить не может: база контура
   // ему закрыта. Это задачи других досок и невыбранные черновики своей —

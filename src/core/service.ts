@@ -423,6 +423,35 @@ export class DevContour {
       return c;
     });
   }
+  /**
+   * Предусловия утверждения черновика; возвращает закреплённые digests его
+   * контрактов. Ревью плана вызывает их до модели: иначе ревью тратилось и
+   * одобряло план, который утверждение затем отвергало — например, из-за
+   * контракта, заменённого новой редакцией того же файла.
+   */
+  approvable(s: DevContourState, t: Task): Record<string, string> {
+    assertTaskPreparation(s, t);
+    assertTaskFeature(s, t);
+    validateTaskContext(this.config, t);
+    if (requiresContract(this.config, t.role, t.repositoryId) && !t.contracts.length)
+      throw new DomainError(`${t.id}: для ${t.role} сначала привяжите утверждённый контракт`);
+    return Object.fromEntries(
+      t.contracts.map((id) => {
+        const c = requireValue(
+          s.contracts.find((c) => c.id === id),
+          `Контракт ${id} не утверждён`,
+        );
+        if (c.repositoryId && c.repositoryId !== t.repositoryId)
+          throw new DomainError('Для межпроектного интерфейса нужен общий контракт');
+        const newer = supersededBy(s.contracts, id);
+        if (newer)
+          throw new DomainError(
+            `${t.id}: контракт ${id} заменён редакцией ${newer.id} того же файла ${newer.source}; привяжите её`,
+          );
+        return [id, c.digest];
+      }),
+    );
+  }
   approve(
     boardId: string,
     taskIds?: string[],
@@ -455,27 +484,7 @@ export class DevContour {
       for (const id of selected) {
         const t = task(s, id);
         if (t.status !== 'draft') continue;
-        assertTaskPreparation(s, t);
-        assertTaskFeature(s, t);
-        validateTaskContext(this.config, t);
-        if (requiresContract(this.config, t.role, t.repositoryId) && !t.contracts.length)
-          throw new DomainError(`${t.id}: для ${t.role} сначала привяжите утверждённый контракт`);
-        t.contractDigests = Object.fromEntries(
-          t.contracts.map((id) => {
-            const c = requireValue(
-              s.contracts.find((c) => c.id === id),
-              `Контракт ${id} не утверждён`,
-            );
-            if (c.repositoryId && c.repositoryId !== t.repositoryId)
-              throw new DomainError('Для межпроектного интерфейса нужен общий контракт');
-            const newer = supersededBy(s.contracts, id);
-            if (newer)
-              throw new DomainError(
-                `${t.id}: контракт ${id} заменён редакцией ${newer.id} того же файла ${newer.source}; привяжите её`,
-              );
-            return [id, c.digest];
-          }),
-        );
+        t.contractDigests = this.approvable(s, t);
         t.approvedAt = now();
         t.approvedDigest = specDigest(t);
         t.approval = approval;
