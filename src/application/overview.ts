@@ -195,12 +195,10 @@ export function authorOverview(h: DevContour): AuthorOverview {
   // заголовок «нужен разбор», пока исполнители работали.
   const jobs = new LeadWorkflow(h).view();
   const superseded = (w: (typeof jobs)[number]) => {
-    if (
-      jobs.some(
-        (x) =>
-          x.id === w.id && x.key !== w.key && x.status !== 'failed' && x.startedAt > w.startedAt,
-      )
-    )
+    // Решение относится к последнему workflow доски или ChangeSet: прежний,
+    // упавший раньше, — история, даже если упал и новый. Иначе панель
+    // показывала устаревший отказ рядом с актуальным.
+    if (jobs.some((x) => x.id === w.id && x.key !== w.key && x.startedAt > w.startedAt))
       return true;
     if (w.kind === 'board') {
       const board = s.boards.find((b) => b.id === w.id);

@@ -4,6 +4,7 @@ import { Button } from '@/ui/button.tsx';
 import { cn } from '@/lib/utils.ts';
 import { roleLabel } from './roles.ts';
 import { Activity, Phases, elapsed, engine } from './Workers.tsx';
+import { chainBlockers } from '../core/work-status.ts';
 
 // «Кто сейчас над чем работает» — первый вопрос, пока идёт разработка. Ответ
 // был на отдельной вкладке хода работ, ниже настроек контура; на графе и в
@@ -97,6 +98,10 @@ export function LiveWork({
   const failed = state.tasks.filter((t) => t.status === 'failed').length;
   const waiting = state.tasks.filter((t) => t.status === 'ready' && t.blockers?.length).length;
   const ready = state.ready.length;
+  // Исполнители свободны, а задачи ждут: чего именно. Без этого полоса
+  // говорила «никто не работает» и только числом «ждут зависимостей».
+  const stuck =
+    work.length || flows.length ? [] : chainBlockers(state.tasks, state.config.maxAttempts);
   return (
     <section
       aria-label="Сейчас работают"
@@ -134,6 +139,34 @@ export function LiveWork({
           </Button>
         )}
       </div>
+      {stuck.length > 0 && (
+        <ul className="m-0 grid list-none gap-2 p-0" aria-label="Чего ждёт цепочка">
+          {stuck.map((b) => {
+            const board = state.boards.find((x) =>
+              x.revisions.some((r) => r.taskIds.includes(b.taskId)),
+            );
+            return (
+              <li
+                key={b.taskId}
+                className="border-warning/40 bg-warning/5 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 rounded-md border px-3 py-2 text-sm"
+              >
+                <span className="text-muted-foreground">Цепочка ждёт</span>
+                <Button
+                  variant="link"
+                  className="h-auto p-0 text-sm font-semibold whitespace-normal"
+                  onClick={() => onOpenTask(board?.id, b.taskId)}
+                >
+                  {b.title}
+                </Button>
+                <span>{b.reason}</span>
+                <span className="text-muted-foreground">
+                  → {b.next} · ждут задач: {b.waiting}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
       {flows.length > 0 && (
         <ul className="m-0 grid list-none gap-2 p-0" aria-label="Работа ведущего цикла">
           {flows.map((f) => (

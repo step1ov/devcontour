@@ -298,6 +298,10 @@ test('Упавший workflow, чья работа ушла дальше, не �
     job('d', current.id, 'failed', '2026-09-26T08:30:00.000Z');
     o = authorOverview(f.h);
     assert.equal(o.decisions.filter((d) => d.kind === 'technical').length, 1);
+    // Упал и следующий — решение одно, по последнему; прежний отказ — история.
+    job('e', current.id, 'failed', '2026-09-26T08:40:00.000Z');
+    o = authorOverview(f.h);
+    assert.equal(o.decisions.filter((d) => d.kind === 'technical').length, 1);
   } finally {
     f.cleanup();
   }

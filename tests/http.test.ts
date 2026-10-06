@@ -7,7 +7,7 @@ import { runActivity } from '../src/runner/activity.ts';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { boardPhase } from '../src/core/work-status.ts';
+import { boardPhase, chainBlockers } from '../src/core/work-status.ts';
 import type { Task } from '../src/core/model.ts';
 test('Loopback API rejects cross-origin writes, validates input and survives missing assets', async () => {
   const f = fixture();
@@ -266,4 +266,52 @@ test('Фаза доски выводится из задач: черновик �
     'empty',
   );
   assert.equal(boardPhase(board('accepted'), [task('a', 'done')]), 'accepted');
+});
+
+test('Свободные исполнители: панель называет, чего ждёт цепочка', () => {
+  const task = (
+    id: string,
+    status: Task['status'],
+    dependsOn: string[] = [],
+    extra: Partial<Task> = {},
+  ) => ({ id, title: 'Задача ' + id, status, dependsOn, attempt: 0, ...extra });
+  // Корень упал с исчерпанным бюджетом; за ним цепочка из трёх готовых.
+  const stuck = chainBlockers(
+    [
+      task('root', 'failed', [], { attempt: 3 }),
+      task('a', 'ready', ['root']),
+      task('b', 'ready', ['a']),
+      task('c', 'ready', ['b']),
+      task('done', 'done'),
+      task('free', 'ready', ['done']),
+    ],
+    3,
+  );
+  assert.deepEqual(
+    stuck.map((b) => [b.taskId, b.reason, b.waiting]),
+    [['root', 'сбой, бюджет попыток исчерпан', 3]],
+  );
+  assert.match(stuck[0].next, /повторяет со сбросом/);
+  // Черновик, удержание и отмена — свои причины; идущая работа корнем не считается.
+  const kinds = chainBlockers(
+    [
+      task('d', 'draft'),
+      task('h', 'ready', [], { hold: { operation: 'op', reason: 'Меняется контракт X' } }),
+      task('x', 'cancelled'),
+      task('r', 'running'),
+      task('w1', 'ready', ['d']),
+      task('w2', 'ready', ['h']),
+      task('w3', 'ready', ['x']),
+      task('w4', 'ready', ['r']),
+    ],
+    3,
+  );
+  assert.deepEqual(
+    kinds.map((b) => [b.taskId, b.reason]),
+    [
+      ['d', 'план не утверждён'],
+      ['h', 'удержана: Меняется контракт X'],
+      ['x', 'отменена'],
+    ],
+  );
 });

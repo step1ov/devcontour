@@ -87,3 +87,71 @@ export function carriedTaskIds(
     }),
   );
 }
+
+export type ChainBlocker = {
+  taskId: string;
+  title: string;
+  /** Почему задача держит цепочку, человеческими словами. */
+  reason: string;
+  /** Что нужно, чтобы цепочка пошла дальше. */
+  next: string;
+  /** Сколько готовых задач ждут её прямо или через других. */
+  waiting: number;
+};
+
+/**
+ * Чего ждёт цепочка, когда исполнители свободны. Счётчик «ждут зависимостей»
+ * говорил, что работа стоит, но не почему: на пилоте четыре задачи этапа
+ * ждали одну упавшую с исчерпанным бюджетом, а панель писала «никто не
+ * работает». Корень — незавершённая предшественница, которая сама не
+ * выполняется: упала, не утверждена, удержана операцией или отменена.
+ */
+export function chainBlockers(
+  tasks: Pick<
+    Task,
+    'id' | 'title' | 'status' | 'dependsOn' | 'attempt' | 'hold' | 'activeRunId' | 'failure'
+  >[],
+  maxAttempts = 3,
+): ChainBlocker[] {
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const active = ['running', 'verifying', 'reviewing', 'integrating'];
+  const waiting = tasks.filter(
+    (t) => t.status === 'ready' && t.dependsOn.some((d) => byId.get(d)?.status !== 'done'),
+  );
+  const roots = new Map<string, Set<string>>();
+  for (const w of waiting) {
+    const seen = new Set<string>();
+    const walk = (id: string) => {
+      if (seen.has(id)) return;
+      seen.add(id);
+      const t = byId.get(id);
+      if (!t || t.status === 'done') return;
+      const open = t.dependsOn.filter((d) => byId.get(d)?.status !== 'done');
+      if (open.length && t.status === 'ready') return open.forEach(walk);
+      if (active.includes(t.status) || t.activeRunId) return;
+      if (t.status === 'ready' && !t.hold && t.attempt < maxAttempts) return;
+      roots.set(id, (roots.get(id) ?? new Set()).add(w.id));
+    };
+    w.dependsOn.forEach(walk);
+  }
+  return [...roots].map(([id, dependents]) => {
+    const t = byId.get(id)!;
+    const exhausted = t.attempt >= maxAttempts;
+    const [reason, next] =
+      t.status === 'failed'
+        ? exhausted
+          ? [
+              'сбой, бюджет попыток исчерпан',
+              'ведущий устраняет причину и повторяет со сбросом бюджета',
+            ]
+          : ['сбой', 'повтор назначит восстановление или ведущий']
+        : t.status === 'draft'
+          ? ['план не утверждён', 'ревью и утверждение плана']
+          : t.status === 'cancelled'
+            ? ['отменена', 'перепланировать зависимые задачи']
+            : t.hold
+              ? [`удержана: ${t.hold.reason}`, 'дождаться завершения операции']
+              : ['исчерпан бюджет попыток', 'повтор со сбросом бюджета'];
+    return { taskId: id, title: t.title, reason, next, waiting: dependents.size };
+  });
+}
