@@ -647,12 +647,14 @@ test('A refusal that will repeat on every task stops the queue instead of burnin
     f.h.approve(board.id);
     f.h.pause(false);
 
-    // Кончились кредиты: причина вне контура и одна для всех задач. Очередь,
+    // Кончился лимит сессии провайдера: причина вне контура и одна для всех задач. Очередь,
     // которая продолжит перебор, сожжёт бюджет попыток каждой из них.
     const scheduler = new Scheduler(
       f.h,
       f.root,
-      refusing('demo: runtime завершился с кодом 1: Credit balance is too low'),
+      refusing(
+        "demo: runtime завершился с кодом 1: You've hit your session limit · resets 2:40am (Europe/Moscow)",
+      ),
     );
     await scheduler.drain();
     const state = f.store.read();
@@ -662,11 +664,13 @@ test('A refusal that will repeat on every task stops the queue instead of burnin
       0,
       'вторая задача не выдавалась',
     );
-    assert.equal(state.tasks.find((t) => t.id === first.id)!.attempt, 1);
+    // Провайдер задачу не пробовал: попытка возвращается.
+    assert.equal(state.tasks.find((t) => t.id === first.id)!.attempt, 0);
+    assert.equal(state.tasks.find((t) => t.id === first.id)!.failureKind, 'provider-auth');
     assert.equal(state.tasks.find((t) => t.id === second.id)!.attempt, 0);
     assert.match(
       (f.store.events().find((e) => e.type === 'scheduler.error')?.data as { error: string }).error,
-      /Credit balance/,
+      /session limit/,
     );
     await scheduler.stop();
   } finally {

@@ -50,8 +50,11 @@ const checkYourself = (repo: { gates: Gate[] }, task: Task) =>
 // Отказ провайдера, а не задачи: он повторится на любой следующей выдаче.
 // Список узкий намеренно — временные ошибки сети и лимиты частоты сюда не
 // входят: остановить очередь из-за них значило бы звать человека без нужды.
+// Лимит сессии или частоты у провайдера — тоже его отказ, а не дефект задачи:
+// на пилоте «You've hit your session limit · resets 2:40am» считался неизвестным
+// классом, останавливал восстановление и тратил попытку задачи.
 const providerRefusal = (message: string) =>
-  /credit balance|insufficient credit|not logged in|please run \/login|invalid api key|authentication_error|insufficient_quota|unauthorized|oauth token|token expired|401/i.test(
+  /credit balance|insufficient credit|not logged in|please run \/login|invalid api key|authentication_error|insufficient_quota|unauthorized|oauth token|token expired|401|session limit|usage limit|rate limit|rate_limit|limit reached|too many requests|429|overloaded/i.test(
     message,
   );
 // Класс отказа для тех случаев, где он не поставлен в точке обнаружения.
@@ -1119,7 +1122,9 @@ export class Scheduler {
           run.id,
           run.token,
           message,
-          error instanceof BlockedError && !run.candidateSha,
+          // Отказ провайдера, как и окружения, задачу не пробовал: попытка
+          // возвращается, пока нет кандидата.
+          (error instanceof BlockedError || kind === 'provider-auth') && !run.candidateSha,
           kind,
           heartbeatCause,
         );

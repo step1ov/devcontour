@@ -319,6 +319,12 @@ test('Классификатор узнаёт настоящие тексты о
     ['codex: runtime завершился с кодом 1: 401 Unauthorized: OAuth token expired', 'provider-auth'],
     ['claude: runtime завершился с кодом 1: Not logged in', 'provider-auth'],
     [
+      "claude: runtime завершился с кодом 1: You've hit your session limit · resets 2:40am (Europe/Moscow). Лог: /tmp/a",
+      'provider-auth',
+    ],
+    ['codex: runtime завершился с кодом 1: Rate limit reached for requests', 'provider-auth'],
+    ['claude: runtime завершился с кодом 1: Claude usage limit reached', 'provider-auth'],
+    [
       'claude: runtime завершился с кодом 143 (исчерпан лимит времени прогона: 900 с). Лог: /tmp/a',
       'timeout',
     ],
