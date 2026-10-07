@@ -231,7 +231,7 @@ function TaskLive({
     );
   if (task.status === 'failed' && task.failure)
     return (
-      <small className="text-destructive mt-1 block break-words">
+      <small className="text-destructive mt-1 block w-full min-w-0 break-words [overflow-wrap:anywhere]">
         {run?.blocked ? 'Отказ окружения, попытка не засчитана: ' : ''}
         {task.failure}
         {/* Исчерпанный бюджет — тупик, пока о сбросе никто не знает: без этой
@@ -1096,7 +1096,7 @@ export function App() {
                               variant="outline"
                               key={t.id}
                               className={cn(
-                                'bg-card h-auto w-full flex-col items-start gap-1 p-3 text-left font-normal whitespace-normal',
+                                'bg-card h-auto w-full min-w-0 flex-col items-start gap-1 overflow-hidden p-3 text-left font-normal whitespace-normal',
                                 selected === t.id && 'border-primary bg-accent',
                               )}
                               aria-current={selected === t.id ? 'true' : undefined}
@@ -1750,7 +1750,7 @@ export function App() {
                       </p>
                     )}
                     {task.failure && (
-                      <p className="bg-destructive-foreground text-destructive rounded-sm p-3 break-words">
+                      <p className="bg-destructive-foreground text-destructive rounded-sm p-3 break-words [overflow-wrap:anywhere]">
                         {task.failure}
                       </p>
                     )}

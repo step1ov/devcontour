@@ -32,14 +32,23 @@ const MANIFEST_LIMIT = 2000;
  */
 function failureText(value: unknown): string {
   const first = Array.isArray(value) ? value[0] : value;
-  if (typeof first === 'string') return first;
+  if (typeof first === 'string') return entities(first);
   if (first && typeof first === 'object') {
     const node = first as Record<string, unknown>;
     const text = node['@_message'] ?? node['#text'];
-    if (typeof text === 'string') return text;
+    if (typeof text === 'string') return entities(text);
   }
   return '';
 }
+/**
+ * Пять предопределённых сущностей XML. Разбор идёт без обработки сущностей
+ * (DOCTYPE запрещён), и сообщение с JSON показывалось как `&quot;`.
+ */
+const entities = (text: string) =>
+  text.replace(
+    /&(quot|apos|lt|gt|amp);/g,
+    (_m, name: string) => ({ quot: '"', apos: "'", lt: '<', gt: '>', amp: '&' })[name]!,
+  );
 /**
  * Сводка JUnit-отчёта.
  *

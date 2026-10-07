@@ -2792,6 +2792,14 @@
                         "pattern": "^[A-Za-z0-9_-]{1,80}$"
                       }
                     },
+                    "properties": {
+                      "maxItems": 30,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9_.:-]{1,200}$"
+                      }
+                    },
                     "resources": {
                       "maxItems": 20,
                       "type": "array",
@@ -3098,6 +3106,14 @@
                   "pattern": "^[A-Za-z0-9_-]{1,80}$"
                 }
               },
+              "properties": {
+                "maxItems": 30,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_.:-]{1,200}$"
+                }
+              },
               "resources": {
                 "maxItems": 20,
                 "type": "array",
@@ -3396,6 +3412,14 @@
                   "pattern": "^[A-Za-z0-9_-]{1,80}$"
                 }
               },
+              "properties": {
+                "maxItems": 30,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_.:-]{1,200}$"
+                }
+              },
               "resources": {
                 "maxItems": 20,
                 "type": "array",
@@ -3648,6 +3672,414 @@
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "feasibility_spike",
+      "description": "Run a bounded feasibility experiment before implementation: the given argv of an oracle or prototype at a pinned commit, per input size (DEVCONTOUR_SPIKE_SIZE) and seed, under a time limit. Stores commands, versions, times, outcome and limits of inference. A timeout is inconclusive for that method and budget; it never proves hardness or permits weakening a requirement.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "repositoryId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "sha": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{40,64}$"
+          },
+          "command": {
+            "minItems": 1,
+            "maxItems": 50,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "sizes": {
+            "minItems": 1,
+            "maxItems": 20,
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1000000000
+            }
+          },
+          "seed": {
+            "default": 1,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 600000
+          },
+          "question": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "command",
+          "sizes",
+          "timeoutMs",
+          "question"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "feasibility_spikes",
+      "description": "Read stored feasibility experiments of a component with their outcome, versions and limits of inference. No commands run.",
+      "readOnly": true,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "repositoryId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "checks_view",
+      "description": "Read the check contract of a task: effective check version, declared properties and actual coverage of the last gates, confirmed/proposed/disputed corpus cases (paginated with cursor), failure history by property, the recovery episode, remaining budgets and the next step with who must act. Read-only; starts nothing.",
+      "readOnly": true,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "taskId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "limit": {
+            "default": 20,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50
+          },
+          "cursor": {
+            "default": 0,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "taskId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "checks_case_submit",
+      "description": "Submit a concrete input for a declared property. The controller runs the pinned oracle and the implementation on the defective commit twice; only a reproducible discrepancy becomes an immutable corpus version adopted by the listed unfinished tasks (waiting for an active run). Wrong expectations are refuted, timeouts inconclusive; nothing in the input or a reproduction command is executed. Idempotent by key. Removal, replaced expectations, tolerance, checker or command changes are refused: use contract-change.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "taskId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "property": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "input": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 65536
+          },
+          "expected": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 65536
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "actual": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 65536
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reproductionId": {
+            "type": "string",
+            "maxLength": 80
+          },
+          "sourceSha": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{40,64}$"
+          },
+          "sourceRunId": {
+            "type": "string",
+            "maxLength": 80
+          },
+          "adopt": {
+            "maxItems": 30,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,80}$"
+            }
+          },
+          "key": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.:-]{8,120}$"
+          },
+          "change": {
+            "default": "add",
+            "type": "string",
+            "enum": [
+              "add",
+              "remove",
+              "replace-expected",
+              "tolerance",
+              "coverage",
+              "checker",
+              "command"
+            ]
+          },
+          "origin": {
+            "default": "agent",
+            "type": "string",
+            "enum": [
+              "review",
+              "lead",
+              "agent",
+              "operator"
+            ]
+          },
+          "runtime": {
+            "type": "string",
+            "maxLength": 40
+          }
+        },
+        "required": [
+          "taskId",
+          "property",
+          "input",
+          "key"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "checks_adopt",
+      "description": "Adopt an existing corpus version by explicitly listed unfinished tasks of the same check contract. Waits for active runs and holds their issuance; accepted tasks are never changed.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "suiteId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "version": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "tasks": {
+            "minItems": 1,
+            "maxItems": 30,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,80}$"
+            }
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "suiteId",
+          "version",
+          "tasks",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "recovery_decide",
+      "description": "Record the lead decision for a recovery episode (two failures on one property) with the expected record version: add confirmed cases under the pinned oracle, one retry with a new hypothesis, a proposal for normal review (strengthen checker, split task), a product conflict for the user, or an environment stop. Never resets attempts.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "taskId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "recoveryId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "expectedVersion": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "add-cases",
+              "new-approach",
+              "strengthen-checker",
+              "split-task",
+              "clarify-obligation",
+              "environment"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 4000
+          },
+          "evidence": {
+            "default": [],
+            "maxItems": 20,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 2000
+            }
+          },
+          "hypothesis": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "plan": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "cases": {
+            "maxItems": 10,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "input": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 65536
+                },
+                "expected": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 65536
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "input"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "proposal": {
+            "type": "string",
+            "maxLength": 8000
+          },
+          "conflict": {
+            "type": "string",
+            "maxLength": 4000
+          }
+        },
+        "required": [
+          "taskId",
+          "recoveryId",
+          "expectedVersion",
+          "action",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "contract_change_status",
+      "description": "Read a contract-change operation: its step, holds, history, earlier redactions and the next step. Read-only.",
+      "readOnly": true,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^CC-[A-Za-z0-9-]{1,80}$"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "contract_change_revise",
+      "description": "Revise a failed, stale or waiting contract change to the current committed redaction with the expected record version. Before side effects the same operation is re-reviewed with its history kept; after them a linked successor takes the holds over. Effects are never rolled back.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^CC-[A-Za-z0-9-]{1,80}$"
+          },
+          "expectedVersion": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "include": {
+            "maxItems": 30,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,80}$"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "expectedVersion"
+        ],
         "additionalProperties": false
       }
     }
