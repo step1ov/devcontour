@@ -1,6 +1,8 @@
 import { portableTest, unprovenReason } from './proof.ts';
 import { validatePreparation } from './preparation.ts';
 import { contractDigest, digest, specDigest, type DevContour } from './service.ts';
+import { effectiveChecks } from './checks.ts';
+import { CheckCorpus, portableSuite, type PortableSuite } from './check-store.ts';
 import { repository, requiresContract } from './repositories.ts';
 import { assertDag } from './graph.ts';
 import { validateTaskContext } from './workflow.ts';
@@ -76,7 +78,19 @@ export function completion(h: DevContour, s: DevContourState, t: Task): Completi
     reviewer: run.reviewer,
     requiredGates,
     checks: run.evidence.map(
-      ({ kind, phase, sha, gate, passed, exitCode, digest, tests, testsTruncated }) => ({
+      ({
+        kind,
+        phase,
+        sha,
+        gate,
+        passed,
+        exitCode,
+        digest,
+        tests,
+        testsTruncated,
+        checks,
+        property,
+      }) => ({
         kind,
         phase,
         sha,
@@ -88,8 +102,26 @@ export function completion(h: DevContour, s: DevContourState, t: Task): Completi
         // длинное постороннее имя делало весь receipt непереносимым.
         ...(tests ? { tests: tests.map(portableTest) } : {}),
         ...(testsTruncated ? { testsTruncated } : {}),
+        ...(checks ? { checks } : {}),
+        ...(property?.level
+          ? {
+              property: {
+                level: property.level,
+                seed: property.seed,
+                ...(property.manifest ? { manifest: property.manifest } : {}),
+              },
+            }
+          : {}),
       }),
     ),
+    ...(run.checks
+      ? {
+          checkVersion: {
+            effective: run.checks.effective,
+            ...(run.checks.corpus ? { corpus: run.checks.corpus } : {}),
+          },
+        }
+      : {}),
   });
 }
 export function recordsFromState(h: DevContour, s: DevContourState) {
@@ -123,6 +155,7 @@ export function recordsFromState(h: DevContour, s: DevContourState) {
         approvedDigest: t.approvedDigest,
         approval: approval(t.approval),
         receiptId,
+        ...(t.checkVersion ? { checkVersion: t.checkVersion } : {}),
       },
     });
   }
@@ -170,9 +203,14 @@ export function recordsFromState(h: DevContour, s: DevContourState) {
         // digest по одному тексту и не узнал бы, какие файлы закреплены.
         ...(c.artifacts ? { artifacts: c.artifacts } : {}),
         ...(c.pinVersion ? { pinVersion: c.pinVersion } : {}),
+        ...(c.checks ? { checks: c.checks } : {}),
         approvedAt: c.approvedAt,
       },
     });
+  // Корпус проверок — запись владельца компонента: случаи, версии, решения и
+  // принятия. Локальные операции и команды checker в Git не уходят.
+  for (const suite of new CheckCorpus(h).all())
+    add(suite.repositoryId, { version: 1, kind: 'check', data: portableSuite(suite) });
   for (const c of s.changeSets)
     add(undefined, {
       version: 1,
@@ -190,7 +228,13 @@ export function recordsFromState(h: DevContour, s: DevContourState) {
   if (s.preparation) add(undefined, { version: 1, kind: 'preparation', data: s.preparation });
   return records;
 }
-export function validateReceipt(receipt: CompletionReceipt, t: Task, demo: boolean) {
+export function validateReceipt(
+  receipt: CompletionReceipt,
+  t: Task,
+  demo: boolean,
+  /** Корпус по id: версия, на которую ссылается receipt, должна существовать. */
+  suites: (id: string) => PortableSuite | undefined = () => undefined,
+) {
   if (
     receipt.taskId !== t.id ||
     receipt.repositoryId !== t.repositoryId ||
@@ -227,6 +271,42 @@ export function validateReceipt(receipt: CompletionReceipt, t: Task, demo: boole
   // задачи не существовало до появления testId.
   const unproven = unprovenReason(t.requirements, receipt.checks as Evidence[], receipt.resultSha);
   if (unproven) throw new Error(`Receipt ${t.id}: ${unproven}`);
+  // Задача с договором проверки принимается только с версией проверок:
+  // receipt без неё — неполный новый формат, а не прежний уровень.
+  if (t.properties?.length && !receipt.checkVersion)
+    throw new Error(`Receipt ${t.id} задачи с договором проверки без версии проверок`);
+  const version = receipt.checkVersion;
+  if (version) {
+    if (
+      version.effective !==
+      effectiveChecks(
+        {
+          approvedDigest: receipt.specDigest,
+          contractDigests: t.contractDigests,
+          checkVersion: version.corpus,
+        },
+        receipt.policyDigest,
+      )
+    )
+      throw new Error(`Receipt ${t.id}: версия проверок не соответствует постановке и корпусу`);
+    for (const phase of ['candidate', 'integration'] as const) {
+      const sha = phase === 'candidate' ? receipt.candidateSha : receipt.resultSha;
+      for (const gate of [...receipt.requiredGates, 'independent-review']) {
+        const check = receipt.checks.findLast(
+          (c) => c.phase === phase && c.gate === gate && c.sha === sha,
+        );
+        if (check?.checks !== version.effective)
+          throw new Error(`Receipt ${t.id}: ${phase}/${gate} получен под другой версией проверок`);
+      }
+    }
+    if (version.corpus) {
+      const suite = suites(version.corpus.suite);
+      if (!suite?.versions.some((v) => v.digest === version.corpus!.digest))
+        throw new Error(
+          `Receipt ${t.id} ссылается на версию корпуса ${version.corpus.suite}#${version.corpus.number}, которой нет в Git`,
+        );
+    }
+  }
 }
 
 // Shared records are peer attestations from a reviewed Git repository. They never
@@ -257,8 +337,12 @@ export function stateFromRecords(
     if (record.kind !== 'contract') throw new Error('Contract expected');
     if (
       owner !== record.data.repositoryId ||
-      contractDigest(record.data.content, record.data.artifacts, record.data.pinVersion) !==
-        record.data.digest
+      contractDigest(
+        record.data.content,
+        record.data.artifacts,
+        record.data.pinVersion,
+        record.data.checks,
+      ) !== record.data.digest
     )
       throw new Error('Неверный владелец или digest контракта: ' + record.data.id);
     const previous = old.contracts.find((c) => c.id === record.data.id);
@@ -273,6 +357,7 @@ export function stateFromRecords(
       source?: string;
       artifacts?: unknown;
       pinVersion?: number;
+      checks?: unknown;
       approvedAt: string;
     }) =>
       JSON.stringify({
@@ -281,6 +366,7 @@ export function stateFromRecords(
         source: c.source ?? null,
         artifacts: c.artifacts ?? null,
         pinVersion: c.pinVersion ?? null,
+        checks: c.checks ?? null,
         approvedAt: c.approvedAt,
       });
     if (
@@ -318,6 +404,7 @@ export function stateFromRecords(
         attempt: previous?.attempt ?? 0,
         contractDigests: progress.approvedDigest ? contractDigests : {},
         approvedDigest: progress.approvedDigest,
+        ...(progress.checkVersion ? { checkVersion: progress.checkVersion } : {}),
         approval:
           previous?.approvedDigest === progress.approvedDigest &&
           canonical(approval(previous?.approval)) === canonical(progress.approval)
@@ -354,7 +441,17 @@ export function stateFromRecords(
         if (entry?.record.kind !== 'receipt')
           throw new Error('Нет receipt завершённой задачи: ' + t.id);
         const receipt = entry.record.data;
-        validateReceipt(receipt, t, h.config.mode === 'demo');
+        validateReceipt(receipt, t, h.config.mode === 'demo', (id) => {
+          const found = all.find((x) => x.record.kind === 'check' && x.record.data.id === id);
+          return found?.record.kind === 'check' ? found.record.data : undefined;
+        });
+        // Принятая задача закреплена за той версией корпуса, под которой её
+        // проверили: другая привязка в записи — подмена.
+        if (
+          canonical(receipt.checkVersion?.corpus ?? null) !==
+          canonical(progress.checkVersion ?? null)
+        )
+          throw new Error('Привязка корпуса не совпадает с receipt: ' + t.id);
         if (previous?.resultSha && previous.resultSha !== receipt.resultSha)
           throw new Error('Нельзя заменить принятый SHA: ' + t.id);
         t.resultSha = receipt.resultSha;

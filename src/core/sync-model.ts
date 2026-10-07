@@ -1,6 +1,7 @@
 import { preparationState } from './preparation-model.ts';
 import { z } from 'zod';
 import { taskInput, relativePath } from './model.ts';
+import { checkDeclaration } from './checks.ts';
 
 export const syncId = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 const hash = z.string().regex(/^[a-f0-9]{64}$/);
@@ -43,9 +44,41 @@ export const receiptSchema = z.strictObject({
           .max(2000)
           .optional(),
         testsTruncated: z.literal(true).optional(),
+        /** Версия проверок, под которой получено evidence. */
+        checks: hash.optional(),
+        /**
+         * Манифест генеративной проверки: уровень доказательства, seed и
+         * ожидавшиеся свойства и корпус. Переносится то, что исполнялось, —
+         * клон не дорисовывает evidence из наличия файла корпуса.
+         */
+        property: z
+          .strictObject({
+            level: z.enum(['manifest', 'legacy']),
+            seed: z.number().int().min(0),
+            manifest: z
+              .strictObject({
+                digest: hash,
+                properties: z.array(z.string().min(1).max(200)).max(30),
+                corpus: z.strictObject({ digest: hash, cases: z.number().int().min(0) }).optional(),
+              })
+              .optional(),
+          })
+          .optional(),
       }),
     )
     .min(4),
+  /**
+   * Действующая версия проверок попытки и принятый ею корпус. Нет поля —
+   * receipt прежнего формата: читается с прежней гарантией.
+   */
+  checkVersion: z
+    .strictObject({
+      effective: hash,
+      corpus: z
+        .strictObject({ suite: syncId, number: z.number().int().min(1), digest: hash })
+        .optional(),
+    })
+    .optional(),
 });
 export type CompletionReceipt = z.infer<typeof receiptSchema>;
 const task = taskInput
@@ -60,6 +93,10 @@ export const sharedApprovalSchema = z.strictObject({
 const progress = z.strictObject({
   status: z.enum(['draft', 'ready', 'done', 'failed', 'cancelled']),
   receiptId: syncId.optional(),
+  /** Принятая задачей версия корпуса; вне постановки, переносится отдельно. */
+  checkVersion: z
+    .strictObject({ suite: syncId, number: z.number().int().min(1), digest: hash })
+    .optional(),
   approvedDigest: hash.optional(),
   approval: sharedApprovalSchema.optional(),
 });
@@ -82,6 +119,119 @@ const revision = z.strictObject({
       results: z.record(syncId, sha).optional(),
     })
     .optional(),
+});
+const text = (max: number) => z.string().min(1).max(max);
+const portableSuiteSchema = z.strictObject({
+  id: syncId,
+  repositoryId: syncId,
+  contractId: syncId,
+  contractDigest: hash,
+  gate: syncId,
+  basis: hash,
+  cases: z
+    .array(
+      z.strictObject({
+        id: syncId,
+        property: text(200),
+        input: text(64 * 1024),
+        expected: text(64 * 1024),
+        source: z.strictObject({
+          kind: z.literal('oracle'),
+          decision: syncId,
+          sha,
+          runId: text(80).optional(),
+          taskId: syncId.optional(),
+          reproduction: text(80).optional(),
+        }),
+        addedAt: date,
+      }),
+    )
+    .max(5000),
+  versions: z
+    .array(
+      z.strictObject({
+        number: z.number().int().min(1),
+        digest: hash,
+        previous: hash.nullable(),
+        cases: z.array(syncId).max(5000),
+        blob: sha,
+        createdAt: date,
+        reason: text(2000),
+        decisions: z.array(syncId).max(5000),
+      }),
+    )
+    .max(5000),
+  decisions: z
+    .array(
+      z.strictObject({
+        id: syncId,
+        key: text(120).optional(),
+        property: text(200),
+        input: z.string().max(64 * 1024),
+        inputHash: z.string().max(64),
+        outcome: z.enum(['confirmed', 'refuted', 'inconclusive', 'rejected']),
+        reason: z.string().max(4000),
+        claimed: z
+          .strictObject({
+            expected: z
+              .string()
+              .max(64 * 1024)
+              .nullable(),
+            actual: z
+              .string()
+              .max(64 * 1024)
+              .nullable(),
+            reproduction: text(80).optional(),
+          })
+          .optional(),
+        source: z.strictObject({ sha, runId: text(80).optional(), taskId: syncId.optional() }),
+        observed: z
+          .strictObject({
+            expected: z
+              .string()
+              .max(64 * 1024)
+              .optional(),
+            actual: z
+              .string()
+              .max(64 * 1024)
+              .optional(),
+            equal: z.boolean().optional(),
+            repeats: z.number().int().min(0),
+            durationsMs: z.array(z.number().min(0)).max(10),
+          })
+          .optional(),
+        method: z
+          .strictObject({
+            gate: syncId,
+            artifacts: z.array(z.strictObject({ path: relativePath, blob: sha })).max(50),
+            contract: syncId,
+            basis: hash,
+          })
+          .optional(),
+        caseId: syncId.optional(),
+        version: z.number().int().min(1).optional(),
+        origin: z.strictObject({
+          kind: z.enum(['review', 'lead', 'agent', 'operator']),
+          runtime: text(40).optional(),
+        }),
+        at: date,
+      }),
+    )
+    .max(10000),
+  adoptions: z
+    .array(
+      z.strictObject({
+        id: syncId,
+        taskId: syncId,
+        from: z.strictObject({ number: z.number().int().min(1), digest: hash }).nullable(),
+        to: z.strictObject({ number: z.number().int().min(1), digest: hash }),
+        actor: text(80),
+        reason: z.string().max(4000),
+        operation: syncId,
+        at: date,
+      }),
+    )
+    .max(10000),
 });
 export const recordSchema = z.discriminatedUnion('kind', [
   z.strictObject({ version: z.literal(1), kind: z.literal('preparation'), data: preparationState }),
@@ -122,9 +272,11 @@ export const recordSchema = z.discriminatedUnion('kind', [
         .max(50)
         .optional(),
       pinVersion: z.literal(2).optional(),
+      checks: checkDeclaration.optional(),
       approvedAt: date,
     }),
   }),
+  z.strictObject({ version: z.literal(1), kind: z.literal('check'), data: portableSuiteSchema }),
   z.strictObject({ version: z.literal(1), kind: z.literal('receipt'), data: receiptSchema }),
   z.strictObject({
     version: z.literal(1),

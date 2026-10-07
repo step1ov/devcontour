@@ -31,9 +31,25 @@ import {
 } from '../core/sync-model.ts';
 import { completion, recordsFromState, stateFromRecords, taskOwner } from '../core/sync-state.ts';
 import { verifyArtifacts } from './contract-artifacts.ts';
+import {
+  CheckCorpus,
+  SUITES,
+  localSuite,
+  mergeSuites,
+  verifySuite,
+  type PortableSuite,
+} from '../core/check-store.ts';
 
 const directory = '.devcontour';
-const categories = ['tasks', 'boards', 'contracts', 'receipts', 'changesets', 'preparations'];
+const categories = [
+  'tasks',
+  'boards',
+  'contracts',
+  'receipts',
+  'changesets',
+  'preparations',
+  'checks',
+];
 const baselineSchema = z.object({
   version: z.literal(1),
   identity: identitySchema,
@@ -256,6 +272,54 @@ function atomicWrite(root: string, relative: string, value: unknown) {
   writeFileSync(temp, content, { flag: 'wx' });
   renameSync(temp, path);
 }
+function mergeCheckRecord(base: unknown, local: unknown, remote: unknown) {
+  const data = (r: unknown) => (r as { data?: PortableSuite } | undefined)?.data;
+  const merged = mergeSuites(data(base), data(local), data(remote));
+  return merged ? { version: 1 as const, kind: 'check' as const, data: merged } : undefined;
+}
+/** Проверить корпуса объединённого состояния и вернуть их для сохранения владельцу. */
+function checkSuites(
+  h: DevContour,
+  next: DevContourState,
+  merged: Map<string | undefined, Records>,
+  write: boolean,
+) {
+  const suites: PortableSuite[] = [];
+  for (const [owner, records] of merged)
+    for (const record of Object.values(records)) {
+      if (record.kind !== 'check') continue;
+      const suite = record.data;
+      if (owner !== suite.repositoryId)
+        throw new Error('Корпус проверок вне своего компонента: ' + suite.id);
+      const contract = next.contracts.find((c) => c.id === suite.contractId);
+      if (!contract?.checks || contract.digest !== suite.contractDigest)
+        throw new Error('Корпус ссылается на неизвестный договор проверки: ' + suite.id);
+      const contents = verifySuite(suite);
+      const repo = repository(h.config, suite.repositoryId).path;
+      for (const v of suite.versions) {
+        const blob = execFileSync(
+          'git',
+          ['-C', repo, 'hash-object', ...(write ? ['-w'] : []), '--stdin'],
+          { input: contents.get(v.digest), encoding: 'utf8' },
+        ).trim();
+        if (blob !== v.blob)
+          throw new Error(`Blob версии ${v.number} корпуса ${suite.id} не совпадает с данными`);
+      }
+      suites.push(suite);
+    }
+  // Привязки задач ссылаются на существующие версии корпуса.
+  for (const t of next.tasks)
+    if (
+      t.checkVersion &&
+      !suites.some(
+        (x) =>
+          x.id === t.checkVersion!.suite &&
+          x.versions.some((v) => v.digest === t.checkVersion!.digest),
+      )
+    )
+      throw new Error(`Задача ${t.id} закреплена за отсутствующей версией корпуса`);
+  return suites;
+}
 export function syncGit(h: DevContour, options: SyncOptions = {}) {
   if (options.resolutions)
     z.record(z.string(), z.enum(['local', 'git'])).parse(options.resolutions);
@@ -292,9 +356,11 @@ export function syncGit(h: DevContour, options: SyncOptions = {}) {
       ].sort()) {
         const fullKey = label + '/' + key;
         try {
-          let value;
+          let value: unknown;
           try {
-            value = mergeValue(base[key], current[key], scope.remote[key]);
+            value = key.startsWith('checks/')
+              ? mergeCheckRecord(base[key], current[key], scope.remote[key])
+              : mergeValue(base[key], current[key], scope.remote[key]);
           } catch (e) {
             const selected = options.resolutions?.[fullKey];
             if (!selected) throw e;
@@ -340,6 +406,11 @@ export function syncGit(h: DevContour, options: SyncOptions = {}) {
       (id) => repository(h.config, id).path,
       next.contracts.filter((c) => !state.contracts.some((x) => x.id === c.id)),
     );
+    // Корпус проверок: версии собираются из случаев и сверяются с digest,
+    // а Git blob канонического файла должен совпасть с записанным — он
+    // записывается в репозиторий компонента, чтобы данные были доступны
+    // проверкам этого клона.
+    const suites = checkSuites(h, next, merged, !options.dryRun);
     if (options.dryRun) return output;
     // Recheck the tree before any write. On a filesystem failure DB rollback leaves
     // the old baseline; rerunning the same three-way merge repairs partial output.
@@ -349,6 +420,16 @@ export function syncGit(h: DevContour, options: SyncOptions = {}) {
         canonical(readRecords(scope.path, scope.directory)) !== canonical(scope.remote)
       )
         throw new Error('Git tree изменилось во время sync; повторите команду');
+    for (const suite of suites)
+      h.store.saveLocal(
+        SUITES,
+        suite.repositoryId,
+        suite.id,
+        localSuite(
+          suite,
+          new CheckCorpus(h).all(suite.repositoryId).find((x) => x.id === suite.id),
+        ),
+      );
     for (const scope of locations) {
       atomicWrite(scope.path, scope.directory + '/identity.json', scope.identity);
       for (const [key, record] of Object.entries(merged.get(scope.owner)!))
