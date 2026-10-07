@@ -97,6 +97,10 @@ export const resourceSchema = z.object({
 });
 export type Resource = z.infer<typeof resourceSchema>;
 
+/** Стабильный id свойства: testcase в JUnit, testId в отчёте свойств. */
+export const propertyIdSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9_.:-]{1,200}$/, 'property ID без пробелов');
 export const requirementLink = z.strictObject({
   id: z.string().regex(/^REQ-[A-Za-z0-9_-]{1,64}$/),
   source: relativePath,
@@ -144,6 +148,13 @@ export const taskInput = z.object({
   // зелёный gate не различает, чьи ожидания закрыты. Полный набор остаётся
   // обязательным для приёмки доски и релиза.
   gates: z.array(id).max(20).optional(),
+  /**
+   * Область задачи в договоре проверки: свойства, которые эта задача обязана
+   * подтвердить сейчас. Остальные свойства договора относятся к зависимостям
+   * или следующим задачам. Нет поля — прежний договор: механизм для задачи
+   * не включён, доказательство прежнего уровня.
+   */
+  properties: z.array(propertyIdSchema).max(30).optional(),
   resources: z.array(id).max(20).optional(),
   finding: discoveryInput
     .extend({
@@ -243,6 +254,12 @@ export interface Contract {
    * проверяется по своей формуле и не переписывается.
    */
   pinVersion?: 2;
+  /**
+   * Договор проверки: обязательства, способ проверки, покрытие и политика
+   * расширения корпуса (см. core/checks.ts). Входит в digest контракта. Нет
+   * поля — прежний договор без структурированных обязательств.
+   */
+  checks?: import('./checks.ts').CheckDeclaration;
   approvedAt: string;
   approval?: Approval;
 }
@@ -297,7 +314,28 @@ export interface Evidence {
     problem?: string;
     contracts: Record<string, string>;
     artifacts: { path: string; blob: string }[];
+    /**
+     * Уровень доказательства: `manifest` — отчёт сверен с закреплённым
+     * манифестом свойств, выборок и корпуса; `legacy` — договор без
+     * объявленных свойств, проверены только непустота и самосогласованность
+     * отчёта. Нет поля — evidence прежней версии.
+     */
+    level?: 'manifest' | 'legacy';
+    /** Ожидавшаяся проверка: digest манифеста, свойства и закреплённый корпус. */
+    manifest?: {
+      digest: string;
+      properties: string[];
+      corpus?: { digest: string; cases: number };
+    };
+    /** Почему отчёт не подтвердил покрытие; пусто — подтвердил. */
+    coverage?: string[];
   };
+  /**
+   * Действующая версия проверок, под которой получено evidence: digest
+   * постановки, контрактов и принятого snapshot корпуса. Evidence другой
+   * версии не подтверждает новую.
+   */
+  checks?: string;
 }
 export interface Run {
   memory?: { revision: string; ids: string[]; digest: string; bytes: number };

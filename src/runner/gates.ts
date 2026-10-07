@@ -11,7 +11,13 @@ import { digest, DevContour } from '../core/service.ts';
 import type { Config, Run, Gate, Evidence } from '../core/model.ts';
 import { TaskFailure, type FailureKind } from '../core/failure.ts';
 import { portableTest } from '../core/proof.ts';
-import { propertyFailure, propertySeed } from '../core/property.ts';
+import {
+  manifestDigest,
+  propertyCoverage,
+  propertyFailure,
+  propertySeed,
+} from '../core/property.ts';
+import { taskCheckManifest } from '../core/checks.ts';
 import { readPropertyReport } from './property.ts';
 import { redactDeep } from './redaction.ts';
 import { availableRedactor } from './environment.ts';
@@ -361,6 +367,13 @@ async function executeGate(
     : undefined;
   const propertyPath = propertyDir ? join(propertyDir, 'report.json') : undefined;
   const seed = propertySeed(run.id, phase, gate.id);
+  // Ожидаемая проверка закреплена договором задачи: свойства, выборки и
+  // корпус. Селектор свойств передаётся проверке, чтобы общий файл тестов
+  // проверял ровно область этой задачи, а не сценарии следующих.
+  const owned = h.store.read();
+  const ownTask = owned.tasks.find((t) => t.id === run.taskId);
+  const expected =
+    gate.property && ownTask ? taskCheckManifest(ownTask, owned.contracts, gate.id) : undefined;
   let kind: FailureKind = 'gate';
   let passed = false,
     summary = '',
@@ -384,7 +397,13 @@ async function executeGate(
         ...environment.env,
         DEVCONTOUR_REPORT_PATH: reportPath,
         ...(propertyPath
-          ? { DEVCONTOUR_SEED: String(seed), DEVCONTOUR_PROPERTY_REPORT: propertyPath }
+          ? {
+              DEVCONTOUR_SEED: String(seed),
+              DEVCONTOUR_PROPERTY_REPORT: propertyPath,
+              ...(expected
+                ? { DEVCONTOUR_PROPERTIES: expected.properties.map((p) => p.id).join(',') }
+                : {}),
+            }
           : {}),
       },
       redact,
@@ -481,10 +500,27 @@ async function executeGate(
         summary && summary !== 'Команда завершилась успешно' ? `${summary}; ${cleanup}` : cleanup;
     }
     const failure = read.report ? propertyFailure(read.report) : '';
+    // Покрытие сверяется всегда, когда отчёт прочитан: зелёный код выхода
+    // при пустом отчёте, нуле входов или пропущенном свойстве не доказывает
+    // объявленного. Провал свойства уже назван выше — недобор при нём
+    // следствие.
+    const coverage = read.report
+      ? propertyCoverage(
+          read.report,
+          expected,
+          gate.report && manifest
+            ? { cases: manifest.cases, truncated: manifest.truncated }
+            : undefined,
+        )
+      : [];
     if (failure) {
       passed = false;
       summary =
         summary && summary !== 'Команда завершилась успешно' ? `${summary}; ${failure}` : failure;
+    } else if (coverage.length) {
+      passed = false;
+      const text = 'Генеративная проверка не подтвердила покрытие: ' + coverage.join('; ');
+      summary = summary && summary !== 'Команда завершилась успешно' ? `${summary}; ${text}` : text;
     } else if (passed && read.problem) {
       // Прошедшая команда без отчёта не доказывает свойство: зелёный код
       // выхода был у неё и до реализации.
@@ -502,6 +538,21 @@ async function executeGate(
       artifacts: state.contracts
         .filter((c) => task?.contracts.includes(c.id))
         .flatMap((c) => (c.artifacts ?? []).map((a) => ({ path: a.path, blob: a.blob }))),
+      level: expected ? 'manifest' : 'legacy',
+      ...(expected
+        ? {
+            manifest: {
+              digest: manifestDigest(expected),
+              properties: expected.properties.map((p) => p.id),
+              ...(expected.corpus
+                ? {
+                    corpus: { digest: expected.corpus.digest, cases: expected.corpus.cases.length },
+                  }
+                : {}),
+            },
+          }
+        : {}),
+      ...(coverage.length ? { coverage } : {}),
     };
     if (!passed) log += '\n' + summary;
   }

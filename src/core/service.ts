@@ -18,6 +18,7 @@ import {
 import { Store } from './store.ts';
 import { failureFingerprint, TaskFailure, type FailureKind } from './failure.ts';
 import { taskEvidence, unprovenReason } from './proof.ts';
+import { assertTaskProperties, type CheckDeclaration } from './checks.ts';
 import { planResult } from './plan.ts';
 import { boardOwner } from './sync-state.ts';
 import { carriedTaskIds } from './work-status.ts';
@@ -60,6 +61,9 @@ export const specDigest = (t: Task) =>
     ...(t.writePaths?.length ? { writePaths: t.writePaths } : {}),
     ...(t.resources?.length ? { resources: t.resources } : {}),
     ...(t.finding ? { finding: t.finding } : {}),
+    // Область задачи в договоре проверки — часть утверждаемого: включение
+    // механизма для задачи проходит обычное ревью плана.
+    ...(t.properties?.length ? { properties: t.properties } : {}),
   });
 /**
  * Digest контракта: документ и, если объявлены, нормативные артефакты —
@@ -75,7 +79,25 @@ export function contractDigest(
    * формулы проверялась бы по второй.
    */
   pinVersion: 2 | undefined,
+  /**
+   * Договор проверки входит в digest, если объявлен: изменённое обязательство,
+   * покрытие или политика расширения — другой договор. Без него формула
+   * прежняя, и утверждённые раньше контракты остаются действительными.
+   */
+  checks?: CheckDeclaration,
 ) {
+  if (checks)
+    return digest({
+      content,
+      artifacts: (artifacts ?? []).map((a) => ({
+        repositoryId: a.repositoryId,
+        path: a.path,
+        purpose: a.purpose,
+        blob: a.blob,
+        digest: a.digest,
+      })),
+      checks,
+    });
   return artifacts?.length
     ? digest({
         content,
@@ -97,10 +119,16 @@ export function contractDigest(
  * blob, а не по digest: у записей разных формул digest разный при одном и том
  * же содержимом.
  */
-export function samePin(c: Contract, content: string, artifacts: ContractArtifact[]) {
+export function samePin(
+  c: Contract,
+  content: string,
+  artifacts: ContractArtifact[],
+  checks?: CheckDeclaration,
+) {
   const pinned = c.artifacts ?? [];
   return (
     c.content === content &&
+    JSON.stringify(c.checks ?? null) === JSON.stringify(checks ?? null) &&
     pinned.length === artifacts.length &&
     pinned.every((a) =>
       artifacts.some(
@@ -427,6 +455,7 @@ export class DevContour {
     repositoryId?: string,
     source?: string,
     artifacts?: ContractArtifact[],
+    checks?: CheckDeclaration,
   ) {
     if (repositoryId) repository(this.config, repositoryId);
     if (!title.trim() || !content.trim() || content.length > 60000)
@@ -439,7 +468,8 @@ export class DevContour {
         content,
         source,
         ...(artifacts?.length ? { artifacts, pinVersion: 2 as const } : {}),
-        digest: contractDigest(content, artifacts, artifacts?.length ? 2 : undefined),
+        ...(checks ? { checks } : {}),
+        digest: contractDigest(content, artifacts, artifacts?.length ? 2 : undefined, checks),
         approvedAt: now(),
         approval,
       };
@@ -459,6 +489,7 @@ export class DevContour {
     validateTaskContext(this.config, t);
     if (requiresContract(this.config, t.role, t.repositoryId) && !t.contracts.length)
       throw new DomainError(`${t.id}: для ${t.role} сначала привяжите утверждённый контракт`);
+    assertTaskProperties(t, s.contracts);
     return Object.fromEntries(
       t.contracts.map((id) => {
         const c = requireValue(

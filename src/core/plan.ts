@@ -16,6 +16,7 @@ export const planResult = z.object({
         contextPacks: taskInput.shape.contextPacks,
         writePaths: taskInput.shape.writePaths,
         gates: taskInput.shape.gates,
+        properties: taskInput.shape.properties,
         resources: taskInput.shape.resources,
         repositoryId: z.string().default('main'),
         key: z.string().regex(/^[A-Za-z0-9_-]+$/),
