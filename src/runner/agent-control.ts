@@ -337,7 +337,12 @@ export async function reviewContract(
   const parsed = contractProposal.parse(input);
   const content = await contractContent(h, parsed, revision);
   const owner = repository(h.config, parsed.repositoryId ?? defaultOwner(h));
-  const pinned = await pinArtifacts(owner, parsed.artifacts ?? [], revision);
+  const pinned = await pinArtifacts(
+    owner,
+    parsed.artifacts ?? [],
+    revision,
+    h.config.contractArtifacts,
+  );
   // Структура договора проверки — до вызова модели: пропущенная область,
   // способ проверки без закреплённого эталона или эксперимент, на который
   // никто не ссылается, стоили бы вызова и были бы отклонены всё равно.
@@ -381,7 +386,12 @@ export async function reviewContract(
   // Решение относится к просмотренному снимку. Если за время ревью изменился
   // HEAD с другим содержимым артефактов или сам документ, одобрение к
   // текущему дереву не относится.
-  const after = await pinArtifacts(owner, parsed.artifacts ?? [], revision);
+  const after = await pinArtifacts(
+    owner,
+    parsed.artifacts ?? [],
+    revision,
+    h.config.contractArtifacts,
+  );
   if (
     contractDigest(
       await contractContent(h, parsed, revision),

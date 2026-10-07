@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { lstat, realpath } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
@@ -6,8 +6,44 @@ import { DomainError, type Contract, type ContractArtifact } from '../core/model
 import { digest } from '../core/service.ts';
 import { git } from './process.ts';
 
-/** Предел текста артефактов, передаваемого ревьюеру вместе с контрактом. */
-const MAX_ARTIFACT_TEXT = 400000;
+/**
+ * Пределы закрепления. Закрепление и текст для ревьюера — разные вещи: прежде
+ * суммарные 400000 байт текста запрещали закрепить сам эталонный набор, и
+ * его выводили из договора, защищая только protectedPaths. Теперь полный
+ * объект закрепляется по точным байтам в своём пределе, а ревьюер получает
+ * манифест, статистику и ограниченную выборку.
+ */
+export interface ArtifactLimits {
+  /** Предел одного файла. */
+  maxFileBytes: number;
+  /** Предел суммы артефактов одного договора. */
+  maxTotalBytes: number;
+  /** Сколько текста артефактов выдаётся ревьюеру. */
+  reviewTextBytes: number;
+}
+export const defaultArtifactLimits: ArtifactLimits = {
+  maxFileBytes: 16 * 1024 * 1024,
+  maxTotalBytes: 64 * 1024 * 1024,
+  reviewTextBytes: 400000,
+};
+/** Сколько байт начала большого файла показывается ревьюеру. */
+const SAMPLE_BYTES = 16 * 1024;
+
+/** То, что ревьюер видит об артефакте: полный текст или выборку с манифестом. */
+export type ArtifactView =
+  | { path: string; purpose: string; content: string }
+  | {
+      path: string;
+      purpose: string;
+      blob: string;
+      digest: string;
+      bytes: number;
+      lines: number;
+      binary: boolean;
+      /** Начало файла — выборка, а не полное содержимое. */
+      sample?: string;
+      note: string;
+    };
 
 /**
  * Закрепить нормативные артефакты контракта: схему, файлы приёмки, эталон.
@@ -18,6 +54,9 @@ const MAX_ARTIFACT_TEXT = 400000;
  * ревизией: путь, blob и digest содержимого на HEAD компонента. Незакоммиченная
  * правка, symlink, выход из репозитория и неотслеживаемый файл — отказ с
  * причиной: закреплять то, чего нет в истории, значит закреплять ничто.
+ *
+ * Digest считается потоком по точным байтам blob, без чтения большого файла
+ * в память целиком и без синхронного обхода, который держал бы heartbeat.
  */
 export async function pinArtifacts(
   repo: { id: string; path: string },
@@ -28,14 +67,16 @@ export async function pinArtifacts(
    * артефакты могли бы оказаться из разных снимков.
    */
   at?: string,
+  limits: ArtifactLimits = defaultArtifactLimits,
 ) {
-  if (!declared.length) return { artifacts: [], contents: [] };
+  if (!declared.length) return { artifacts: [], contents: [] as ArtifactView[] };
   const seen = new Set<string>();
   const base = await realpath(repo.path);
   const revision = at ?? (await git(repo.path, 'rev-parse', 'HEAD'));
   const artifacts: ContractArtifact[] = [];
-  const contents: { path: string; purpose: string; content: string }[] = [];
+  const contents: ArtifactView[] = [];
   let total = 0;
+  let review = limits.reviewTextBytes;
   for (const { path, purpose } of declared) {
     if (seen.has(path)) throw new DomainError('Артефакт указан дважды: ' + path, 400);
     seen.add(path);
@@ -57,31 +98,112 @@ export async function pinArtifacts(
         400,
       );
     const blob = await git(repo.path, 'rev-parse', `${revision}:${tracked}`);
+    const size = Number(await git(repo.path, 'cat-file', '-s', blob));
+    if (size > limits.maxFileBytes)
+      throw new DomainError(
+        `Артефакт ${path} — ${size} байт, больше предела файла ${limits.maxFileBytes} (contractArtifacts.maxFileBytes)`,
+        400,
+      );
+    total += size;
+    if (total > limits.maxTotalBytes)
+      throw new DomainError(
+        `Артефакты договора вместе больше предела ${limits.maxTotalBytes} байт (contractArtifacts.maxTotalBytes)`,
+        400,
+      );
     // Digest — по точным байтам blob: вывод git() обрезан, и правка
     // начальных или конечных пробелов не меняла бы digest.
-    const bytes = blobBytes(repo.path, blob);
-    const content = bytes.toString('utf8');
-    total += bytes.length;
-    if (total > MAX_ARTIFACT_TEXT)
-      throw new DomainError('Артефакты контракта слишком велики для ревью', 400);
+    const read = await streamBlob(repo.path, blob, size <= review ? size : SAMPLE_BYTES);
+    if (read.bytes !== size) throw new DomainError('Blob артефакта прочитан не полностью: ' + path);
     artifacts.push({
       repositoryId: repo.id,
       path: tracked,
       purpose,
       revision,
       blob,
-      digest: bytesDigest(bytes),
+      digest: read.digest,
     });
-    contents.push({ path: tracked, purpose, content });
+    if (size <= review && !read.binary) {
+      contents.push({ path: tracked, purpose, content: read.head.toString('utf8') });
+      review -= size;
+    } else {
+      // Выборка не называется полным содержимым: любой байт вне неё меняет
+      // digest, и закрепление относится к полному файлу.
+      const sample = read.binary
+        ? undefined
+        : cutAtLine(read.head.subarray(0, Math.max(0, Math.min(SAMPLE_BYTES, review))));
+      if (sample) review -= Buffer.byteLength(sample);
+      contents.push({
+        path: tracked,
+        purpose,
+        blob,
+        digest: read.digest,
+        bytes: size,
+        lines: read.lines,
+        binary: read.binary,
+        ...(sample ? { sample } : {}),
+        note: `Выборка, не полное содержимое: закреплён полный файл (${size} байт, sha256 ${read.digest}). Прочитать его целиком: git cat-file blob ${blob}.`,
+      });
+    }
   }
   return { artifacts, contents };
+}
+
+const cutAtLine = (bytes: Buffer) => {
+  const end = bytes.lastIndexOf(0x0a);
+  return (end > 0 ? bytes.subarray(0, end + 1) : bytes).toString('utf8');
+};
+
+/**
+ * Поток байтов blob: digest, число байт и строк, первые `keep` байт и
+ * признак двоичного содержимого. Файл целиком в память не читается.
+ */
+export function streamBlob(repoPath: string, blob: string, keep: number) {
+  return new Promise<{
+    digest: string;
+    bytes: number;
+    lines: number;
+    head: Buffer;
+    binary: boolean;
+  }>((ok, fail) => {
+    const child = spawn('git', ['cat-file', 'blob', blob], {
+      cwd: repoPath,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const hash = createHash('sha256');
+    const head: Buffer[] = [];
+    let kept = 0,
+      bytes = 0,
+      lines = 0,
+      binary = false,
+      error = '';
+    child.stdout.on('data', (chunk: Buffer) => {
+      hash.update(chunk);
+      bytes += chunk.length;
+      for (const byte of chunk) if (byte === 0x0a) lines++;
+      if (kept < Math.max(keep, 8192)) {
+        const part = chunk.subarray(0, Math.max(keep, 8192) - kept);
+        if (part.includes(0)) binary = true;
+        if (kept < keep) head.push(part.subarray(0, keep - kept));
+        kept += part.length;
+      }
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      error += chunk.toString();
+    });
+    child.on('error', fail);
+    child.on('close', (code) =>
+      code === 0
+        ? ok({ digest: hash.digest('hex'), bytes, lines, head: Buffer.concat(head), binary })
+        : fail(new Error(`git cat-file ${blob}: ${error.trim()}`)),
+    );
+  });
 }
 
 /** Точные байты Git blob, без обрезки и перекодирования. */
 export function blobBytes(repoPath: string, blob: string) {
   return execFileSync('git', ['cat-file', 'blob', blob], {
     cwd: repoPath,
-    maxBuffer: 64 * 1024 * 1024,
+    maxBuffer: 520 * 1024 * 1024,
   });
 }
 export const bytesDigest = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');

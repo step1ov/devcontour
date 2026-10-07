@@ -714,6 +714,33 @@ export const configSchema = z.object({
       reserveMs: z.number().int().min(0).default(120000),
     })
     .default({ commandTimeoutMs: 120000, budgetMs: 600000, reserveMs: 120000 }),
+  // Пределы закрепления артефактов договора: файл, сумма и текст для
+  // ревьюера — раздельно. Полный объект закрепляется по digest, ревьюер
+  // получает манифест и выборку.
+  contractArtifacts: z
+    .object({
+      maxFileBytes: z
+        .number()
+        .int()
+        .min(1024)
+        .max(512 * 1024 * 1024)
+        .default(16 * 1024 * 1024),
+      maxTotalBytes: z
+        .number()
+        .int()
+        .min(1024)
+        .max(2 * 1024 * 1024 * 1024)
+        .default(64 * 1024 * 1024),
+      reviewTextBytes: z.number().int().min(10000).max(2_000_000).default(400000),
+    })
+    .refine((l) => l.maxFileBytes <= l.maxTotalBytes, {
+      message: 'contractArtifacts.maxFileBytes не может превышать maxTotalBytes',
+    })
+    .default({
+      maxFileBytes: 16 * 1024 * 1024,
+      maxTotalBytes: 64 * 1024 * 1024,
+      reviewTextBytes: 400000,
+    }),
   maxAttempts: z.number().int().min(1).max(10).default(3),
   // Кандидат предыдущей попытки берётся вместо новой реализации, если та
   // попытка отказала не по коду, а все основания совпали. Выключение
