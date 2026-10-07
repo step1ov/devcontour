@@ -544,7 +544,7 @@ export class CheckCorpus {
           from,
           to: { number: version.number, digest: version.digest },
           actor: pending.actor,
-          reason: pending.reason,
+          reason: scrubLocalPaths(pending.reason),
           operation: pending.id,
           at: new Date().toISOString(),
         });
@@ -622,7 +622,7 @@ export class CheckCorpus {
         status: 'waiting',
         results: {},
         actor,
-        reason,
+        reason: scrubLocalPaths(reason),
         requestedAt: new Date().toISOString(),
         ...(manual ? { awaitingOperator: true } : {}),
       };
@@ -723,7 +723,6 @@ export function portableSuite(suite: CheckSuite): PortableSuite {
     gate: suite.gate,
     basis: suite.basis,
     cases: Object.values(suite.cases).sort((a, b) => a.id.localeCompare(b.id)),
-    versions: suite.versions,
     // Диагностические поля проходят очистку путей и на экспорте: запись
     // прежней версии могла сохранить их до появления очистки при записи.
     decisions: suite.decisions.map(({ method, ...d }) => {
@@ -761,7 +760,8 @@ export function portableSuite(suite: CheckSuite): PortableSuite {
           }
         : clean;
     }),
-    adoptions: suite.adoptions,
+    adoptions: suite.adoptions.map((a) => ({ ...a, reason: scrubLocalPaths(a.reason) })),
+    versions: suite.versions.map((v) => ({ ...v, reason: scrubLocalPaths(v.reason) })),
   };
 }
 

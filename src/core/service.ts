@@ -817,6 +817,26 @@ export class DevContour {
       return { taskId: id, assignee };
     });
   }
+  private awaitsOperator(t: Task) {
+    // Корпус хранится у компонента-владельца договора, не обязательно у
+    // компонента задачи: смотрим всех владельцев, как CheckCorpus.all().
+    const owners = this.config.repositories.length
+      ? this.config.repositories.map((r) => r.id)
+      : ['main'];
+    return owners
+      .flatMap((owner) =>
+        Object.values(
+          this.store.localRecords<{
+            pending: { tasks: string[]; status: string; awaitingOperator?: boolean }[];
+          }>('check-suites', owner),
+        ),
+      )
+      .some((suite) =>
+        suite.pending.some(
+          (p) => p.status === 'waiting' && p.awaitingOperator && p.tasks.includes(t.id),
+        ),
+      );
+  }
   claim(owner: string): Run | undefined {
     return this.store.change('run.claimed', (s) => {
       if (
@@ -837,7 +857,11 @@ export class DevContour {
           (!s.team || t.assignee === s.team.member) &&
           // Два содержательных отказа по одному свойству: третья выдача —
           // только после разбора. Независимые задачи выдаются как обычно.
-          !blocksClaim(t),
+          !blocksClaim(t) &&
+          // Принятие корпуса, ждущее оператора, удерживает выдачу, даже если
+          // его собственное удержание не было поставлено (задача была занята
+          // другим) или снято принятием соседнего запроса.
+          !this.awaitsOperator(t),
       );
       const t = eligible[0];
       if (!t) return;
@@ -1533,8 +1557,10 @@ export class DevContour {
         t.contracts = [...new Set(t.contracts.map((c) => (from.includes(c) ? to : c)))];
         // Корпус принадлежит прежнему договору и его основанию эталона: новая
         // редакция начинает со своего корпуса. История принятий остаётся в
-        // корпусе прежнего договора.
-        t.checkVersion = undefined;
+        // корпусе прежнего договора. Корпус другого, не заменённого договора
+        // задачи остаётся обязательным.
+        if (t.checkVersion && !t.contracts.includes(t.checkVersion.suite.replace(/^KS-/, '')))
+          t.checkVersion = undefined;
         t.status = 'draft';
         t.approvedDigest = undefined;
         t.approval = undefined;

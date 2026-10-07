@@ -266,8 +266,19 @@ export function validateReceipt(
         c.gate === gate &&
         c.sha === (phase === 'candidate' ? receipt.candidateSha : receipt.resultSha),
     );
+  // Гейты объявленных свойств задачи обязательны независимо от содержимого
+  // requiredGates: иначе receipt мог бы исключить проваленный гейт свойства
+  // и подставить вместо него другой PASS.
+  const byGate = new Map<string, string[]>();
+  for (const id of t.properties ?? []) {
+    const found = obligationOf(t, contracts, id);
+    if (!found) throw new Error(`Receipt ${t.id}: свойство ${id} не объявлено в договорах задачи`);
+    byGate.set(found.gate, [...(byGate.get(found.gate) ?? []), id]);
+  }
   const required = [
-    ...receipt.requiredGates.map((gate) => ['test', gate] as const),
+    ...[...new Set([...receipt.requiredGates, ...byGate.keys()])].map(
+      (gate) => ['test', gate] as const,
+    ),
     ['review', 'independent-review'] as const,
   ];
   for (const phase of ['candidate', 'integration'] as const)
@@ -305,34 +316,44 @@ export function validateReceipt(
     for (const [kind, gate] of required)
       if (decisive(kind, phase, gate)!.checks !== version.effective)
         throw new Error(`Receipt ${t.id}: ${phase}/${gate} получен под другой версией проверок`);
-  // Манифест свойств обеих фаз переносится вместе с результатом: без него
-  // импорт выдал бы сильный уровень за прежний.
-  const byGate = new Map<string, string[]>();
-  for (const id of t.properties ?? []) {
-    const found = obligationOf(t, contracts, id);
-    if (!found) throw new Error(`Receipt ${t.id}: свойство ${id} не объявлено в договорах задачи`);
-    byGate.set(found.gate, [...(byGate.get(found.gate) ?? []), id]);
+  // Случаи принятой версии корпуса берутся из Git, а не из receipt.
+  let corpusCases: { id: string; property: string }[] = [];
+  if (version.corpus) {
+    const suite = suites(version.corpus.suite);
+    const pinned = suite?.versions.find((v) => v.digest === version.corpus!.digest);
+    if (!suite || !pinned)
+      throw new Error(
+        `Receipt ${t.id} ссылается на версию корпуса ${version.corpus.suite}#${version.corpus.number}, которой нет в Git`,
+      );
+    corpusCases = pinned.cases.map((id) => ({
+      id,
+      property: suite.cases.find((c) => c.id === id)?.property ?? '',
+    }));
   }
-  for (const [gate, ids] of byGate)
+  // Манифест свойств обеих фаз переносится вместе с результатом: без него
+  // импорт выдал бы сильный уровень за прежний. Обязательный корпус гейта
+  // сверяется с версией из Git: убрать его из манифеста или занизить число
+  // случаев нельзя; гейт без случаев выбранного корпуса манифеста корпуса не несёт.
+  for (const [gate, ids] of byGate) {
+    const own = corpusCases.filter((c) => ids.includes(c.property)).length;
     for (const phase of ['candidate', 'integration'] as const) {
       const check = decisive('test', phase, gate);
       const manifest = check?.property?.manifest;
       if (
         check?.property?.level !== 'manifest' ||
         !manifest ||
-        ids.some((id) => !manifest.properties.includes(id)) ||
-        (version.corpus &&
-          manifest.corpus?.digest !== version.corpus.digest &&
-          manifest.corpus !== undefined)
+        ids.some((id) => !manifest.properties.includes(id))
       )
         throw new Error(`Receipt ${t.id}: ${phase}/${gate} без манифеста свойств задачи`);
+      if (
+        own
+          ? manifest.corpus?.digest !== version.corpus!.digest || manifest.corpus.cases !== own
+          : manifest.corpus !== undefined
+      )
+        throw new Error(
+          `Receipt ${t.id}: ${phase}/${gate} не исполнял обязательный корпус версии ${version.corpus?.suite ?? ''}`,
+        );
     }
-  if (version.corpus) {
-    const suite = suites(version.corpus.suite);
-    if (!suite?.versions.some((v) => v.digest === version.corpus!.digest))
-      throw new Error(
-        `Receipt ${t.id} ссылается на версию корпуса ${version.corpus.suite}#${version.corpus.number}, которой нет в Git`,
-      );
   }
 }
 

@@ -551,3 +551,175 @@ await properties([{testId:'knapsack-optimal', valid:()=>true, oracle:()=>9, subj
     d.close();
   }
 });
+
+test('F10: every operator request holds issuance; confirming one of two, or releasing a foreign hold, does not release the task', () => {
+  const d = domain();
+  try {
+    const t = d.add('Two operator requests');
+    const v1 = d.seed(t.id, 5).suite.versions.at(-1)!;
+    const v2 = d.seed(t.id, 6).suite.versions.at(-1)!;
+    d.h.config.approvalMode = 'operator';
+    // Чужое удержание: собственное удержание оператора не ставится.
+    d.h.hold([t.id], 'other:op', 'Другая операция');
+    const a = d.corpus.request('KS-' + d.c.id, { digest: v1.digest }, [t.id], 'agent', 'A', true);
+    const b = d.corpus.request('KS-' + d.c.id, { digest: v2.digest }, [t.id], 'agent', 'B', true);
+    d.h.release('other:op');
+    d.h.pause(false);
+    assert.equal(d.get(t.id).hold, undefined, 'своего удержания у запросов нет');
+    assert.equal(d.h.claim('probe'), undefined, 'два запроса ждут оператора');
+    d.corpus.approveAdoption('KS-' + d.c.id, a.pending.id);
+    assert.equal(d.get(t.id).checkVersion?.digest, v1.digest);
+    assert.equal(d.h.claim('probe'), undefined, 'второй запрос всё ещё ждёт оператора');
+    d.corpus.approveAdoption('KS-' + d.c.id, b.pending.id);
+    const run = d.h.claim('probe')!;
+    assert.equal(run.checks?.corpus?.digest, v2.digest);
+  } finally {
+    d.close();
+  }
+});
+
+test('F11: a rebind of another contract keeps the corpus of the unchanged check contract', () => {
+  const d = domain();
+  try {
+    const plain = (title: string) => d.h.contract(title, 'Plain API contract ' + title);
+    const a1 = plain('API v1');
+    const b = d.h.createBoard('Two contracts');
+    const t = d.h.addTask(b.id, {
+      ...input('Two contracts'),
+      contracts: [d.c.id, a1.id],
+      properties: ['knapsack-optimal'],
+    });
+    d.h.approve(b.id);
+    const seeded = d.seed(t.id, 5, [t.id]);
+    const before = d.get(t.id).checkVersion!;
+    assert.equal(before.digest, seeded.suite.versions[0].digest);
+    const a2 = plain('API v2');
+    assert.deepEqual(d.h.rebind([t.id], [a1.id], a2.id), [t.id]);
+    assert.deepEqual(d.get(t.id).checkVersion, before, 'корпус C не снят');
+    d.h.approve(b.id);
+    d.h.pause(false);
+    const run = d.h.claim('probe')!;
+    assert.equal(run.checks?.corpus?.digest, before.digest);
+  } finally {
+    d.close();
+  }
+});
+
+/** Завершённая задача с корпусом и корректный receipt для неё. */
+function receiptWithCorpus(d: ReturnType<typeof domain>) {
+  const rt = d.add('Receipt corpus');
+  const seeded = d.seed(rt.id, 5, [rt.id]);
+  const corpusDigest = seeded.suite.versions[0].digest;
+  d.h.pause(false);
+  const run = d.h.claim('probe')!;
+  d.h.phase(run.id, run.token, 'integrating', {
+    candidateSha: 'a'.repeat(40),
+    integrationSha: 'b'.repeat(40),
+  });
+  for (const phase of ['candidate', 'integration'] as const)
+    for (const kind of ['test', 'review'] as const)
+      d.h.evidence(run.id, run.token, {
+        kind,
+        phase,
+        sha: (phase === 'candidate' ? 'a' : 'b').repeat(40),
+        gate: kind === 'test' ? 'properties' : 'independent-review',
+        passed: true,
+        command: [],
+        exitCode: 0,
+        log: '',
+        digest: 'c'.repeat(64),
+        summary: 'fixture',
+        ...(kind === 'test'
+          ? {
+              property: {
+                level: 'manifest' as const,
+                seed: 1,
+                reproduce: '',
+                contracts: {},
+                artifacts: [],
+                manifest: {
+                  digest: 'd'.repeat(64),
+                  properties: ['knapsack-optimal'],
+                  corpus: { digest: corpusDigest, cases: 1 },
+                },
+              },
+            }
+          : {}),
+      });
+  d.h.finish(run.id, run.token, 'b'.repeat(40));
+  const done = d.get(rt.id);
+  const receipt = completion(d.h, d.store.read(), done);
+  receipt.runtime = 'codex';
+  receipt.reviewer = 'claude';
+  const contracts = d.store.read().contracts;
+  const suites = (id: string) => portableSuite(d.corpus.get(id));
+  const validate = (r: typeof receipt) =>
+    validateReceipt(receiptSchema.parse(r), done, false, suites, contracts);
+  return { receipt, validate };
+}
+
+test('F12: a declared property gate cannot be excluded from required gates and replaced by another PASS', () => {
+  const d = domain();
+  try {
+    const { receipt, validate } = receiptWithCorpus(d);
+    validate(receipt);
+    const swapped = structuredClone(receipt);
+    swapped.requiredGates = ['lint'];
+    for (const e of [...swapped.checks])
+      if (e.gate === 'properties') {
+        swapped.checks.push({ ...e, gate: 'lint', property: undefined });
+        e.passed = false;
+        e.exitCode = 1;
+        e.checks = 'f'.repeat(64);
+      }
+    assert.throws(() => validate(swapped), /Нет PASS в receipt .*: candidate\/properties/);
+  } finally {
+    d.close();
+  }
+});
+
+test('F13: the mandatory corpus cannot be stripped from the manifests of a receipt or understated', () => {
+  const d = domain();
+  try {
+    const { receipt, validate } = receiptWithCorpus(d);
+    validate(receipt);
+    const stripped = structuredClone(receipt);
+    for (const e of stripped.checks) delete e.property?.manifest?.corpus;
+    assert.throws(() => validate(stripped), /не исполнял обязательный корпус/);
+    const zero = structuredClone(receipt);
+    for (const e of zero.checks)
+      if (e.property?.manifest?.corpus) e.property.manifest.corpus.cases = 0;
+    assert.throws(() => validate(zero), /не исполнял обязательный корпус/);
+  } finally {
+    d.close();
+  }
+});
+
+test('F14: a local path in an adoption reason given through the agent API never reaches the portable record', async () => {
+  const d = domain();
+  try {
+    const t = d.add('Adoption reason');
+    const seeded = d.seed(t.id, 5);
+    const api = new AgentService(d.h, d.root);
+    await api.run({
+      operation: 'checks_adopt',
+      input: {
+        suiteId: seeded.suite.id,
+        digest: seeded.suite.versions[0].digest,
+        tasks: [t.id],
+        reason: `подтверждена ошибка в ${d.root}/private-input.json`,
+      },
+    });
+    assert.equal(d.get(t.id).checkVersion?.digest, seeded.suite.versions[0].digest);
+    const suite = d.corpus.get(seeded.suite.id);
+    assert.equal(JSON.stringify(suite.adoptions).includes(d.root), false, 'запись очищена');
+    // Запись прежнего формата с путём: экспорт всё равно очищает.
+    suite.adoptions[0].reason = `ошибка в ${d.root}/old.json`;
+    d.store.atomic(() => d.corpus.save(suite));
+    const portable = JSON.stringify(portableSuite(d.corpus.get(seeded.suite.id)));
+    assert.equal(portable.includes(d.root), false);
+    assert.match(portable, /<local-path>/);
+  } finally {
+    d.close();
+  }
+});
