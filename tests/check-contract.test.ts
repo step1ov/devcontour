@@ -5,7 +5,6 @@ import { reviewContract, reviewPlan } from '../src/runner/agent-control.ts';
 import type { AgentAdapter, AgentRequest } from '../src/runner/adapters.ts';
 import { AgentService } from '../src/application/agent.ts';
 import type { Spike } from '../src/runner/checks.ts';
-import type { Evidence } from '../src/core/model.ts';
 import { specDigest } from '../src/core/service.ts';
 import { git } from '../src/runner/process.ts';
 import { checkProject, declaration, fixture, knap, reach, removeRoot } from './check-fixture.ts';
@@ -18,14 +17,14 @@ function runtimes(decide: (r: AgentRequest) => Verdict = () => ({ approved: true
   const prompts: string[] = [];
   const make = (name: 'codex' | 'claude'): AgentAdapter => ({
     name,
-    async execute(r) {
+    execute(r) {
       prompts.push(r.prompt);
       const verdict = decide(r);
-      return {
+      return Promise.resolve({
         data: { summary: 'Fixture reviewer', ...verdict },
         log: 'Fixture only; no provider called',
         command: ['fixture'],
-      };
+      });
     },
   });
   return { prompts, adapters: { codex: make('codex'), claude: make('claude') } };
@@ -223,7 +222,7 @@ test('AC06: two tasks of one chain share a check file through selectors and the 
     const t1 = s1.tasks.find((t) => t.id === first.id)!;
     assert.equal(t1.status, 'done', t1.failure);
     const run1 = s1.runs.find((r) => r.taskId === first.id && r.status === 'succeeded')!;
-    const gates = run1.evidence.filter((e) => e.gate === 'properties') as Evidence[];
+    const gates = run1.evidence.filter((e) => e.gate === 'properties');
     assert.equal(gates.length, 2, 'кандидат и интеграция');
     for (const e of gates)
       assert.deepEqual(
