@@ -11,7 +11,7 @@ import {
 } from '../application/agent.ts';
 import { DomainError } from '../core/model.ts';
 
-export function createMcpServer(service: Pick<AgentService, 'execute'>) {
+export function createMcpServer(service: Pick<AgentService, 'run'>) {
   const { version } = capabilities();
   const server = new McpServer({ name: 'devcontour', version });
   for (const name of agentOperations) {
@@ -31,7 +31,7 @@ export function createMcpServer(service: Pick<AgentService, 'execute'>) {
       },
       async (input: unknown) => {
         try {
-          const result = service.execute({ operation: name, input });
+          const result = await service.run({ operation: name, input });
           return {
             content: [{ type: 'text', text: JSON.stringify(result) }],
             structuredContent: result,
@@ -58,7 +58,7 @@ export function createMcpServer(service: Pick<AgentService, 'execute'>) {
   return server;
 }
 
-export async function serveMcp(service: Pick<AgentService, 'execute'>) {
+export async function serveMcp(service: Pick<AgentService, 'run'>) {
   const server = createMcpServer(service);
   await server.connect(
     new StdioServerTransport(process.stdin, process.stdout, { maxBufferSize: 128 * 1024 }),

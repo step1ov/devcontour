@@ -520,7 +520,7 @@ async function main() {
     return;
   }
   if (operation === 'mcp') {
-    const server = await serveMcp(new AgentService(h));
+    const server = await serveMcp(new AgentService(h, root));
     let closed = false;
     const close = () => {
       if (!closed) {
@@ -540,7 +540,7 @@ async function main() {
       if (!args.includes('--file'))
         throw new Error('Укажите --file request.json с operation и input');
       const request = JSON.parse(await readFile(resolve(option('--file', '')), 'utf8'));
-      console.log(JSON.stringify(new AgentService(h).execute(request), null, 2));
+      console.log(JSON.stringify(await new AgentService(h, root).run(request), null, 2));
     } finally {
       store.close();
     }

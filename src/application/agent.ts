@@ -11,7 +11,7 @@ import {
   requirementReport,
   correctRequirements,
 } from '../runner/requirements.ts';
-import { repository } from '../core/repositories.ts';
+import { repositories, repository } from '../core/repositories.ts';
 import { z } from 'zod';
 import { readFileSync } from 'node:fs';
 import { AgentContext, contextInputs, type ContextOperation } from './context.ts';
@@ -21,6 +21,7 @@ import { planResult } from '../core/plan.ts';
 import { Workspace, changeSetInput } from '../core/workspace.ts';
 import { servingPreview } from '../core/preview.ts';
 import { attachJournal } from '../runner/journal.ts';
+import { runSpike, spikeInput, spikesOf } from '../runner/checks.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 export const agentInputs = {
@@ -67,7 +68,15 @@ export const agentInputs = {
   changeset_create: z.object({ changeSet: changeSetInput }).strict(),
   queue_set: z.object({ paused: z.boolean() }).strict(),
   preview_status: z.strictObject({}),
+  feasibility_spike: spikeInput,
+  feasibility_spikes: z.strictObject({ repositoryId: id.optional() }),
 };
+/**
+ * Операции, которые запускают внешние процессы: эксперимент, подтверждение
+ * примера эталоном, пересмотр операции изменения контракта. Транспорты
+ * вызывают их через `run`; синхронный `execute` их не выполняет.
+ */
+export const asyncOperations = new Set<string>(['feasibility_spike']);
 export type AgentOperation = keyof typeof agentInputs;
 export const agentOperations = Object.keys(agentInputs) as AgentOperation[];
 export const agentRequest = z
@@ -160,6 +169,10 @@ export const descriptions: Record<AgentOperation, string> = {
     'Declare a shared change across boards. Set releaseId to bind product release acceptance to the workspace INTENT map and mandatory joint tests. Verification and acceptance remain separate operations.',
   queue_set:
     'Pause or resume issuance of tasks. Resuming may invoke configured models in a running server; this does not launch a server or cancel active runs.',
+  feasibility_spike:
+    'Run a bounded feasibility experiment before implementation: the given argv of an oracle or prototype at a pinned commit, per input size (DEVCONTOUR_SPIKE_SIZE) and seed, under a time limit. Stores commands, versions, times, outcome and limits of inference. A timeout is inconclusive for that method and budget; it never proves hardness or permits weakening a requirement.',
+  feasibility_spikes:
+    'Read stored feasibility experiments of a component with their outcome, versions and limits of inference. No commands run.',
   preview_status:
     'Read the local preview: which verified release serves the URL, its states (built, deployed, healthy, confirmed or unconfirmed), and past deployments with their errors. Deploying and rolling back are separate controlled actions through the CLI or panel.',
 };
@@ -184,6 +197,7 @@ export const readOnly = (name: AgentOperation) =>
     'workflow_metrics',
     'workflow_status',
     'signal_status',
+    'feasibility_spikes',
   ].includes(name);
 export function capabilities() {
   const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
@@ -204,12 +218,36 @@ export function capabilities() {
 
 // CLI, HTTP and MCP use this layer. Review/evidence remain owned by existing runners.
 export class AgentService {
-  constructor(readonly h: DevContour) {}
+  constructor(
+    readonly h: DevContour,
+    /** Каталог данных контура: в нём асинхронные операции создают рабочие деревья. */
+    readonly root?: string,
+  ) {}
   execute(raw: unknown): Record<string, unknown> {
     const result = this.dispatch(raw);
+    return this.bounded(result);
+  }
+  private bounded(result: Record<string, unknown>) {
     if (Buffer.byteLength(JSON.stringify(result)) > 65536)
       throw new DomainError('Ответ превышает 64 KiB; сузьте запрос или используйте CLI-отчёт', 413);
     return result;
+  }
+  /** Общий вход транспортов: синхронные операции и операции с внешними процессами. */
+  async run(raw: unknown): Promise<Record<string, unknown>> {
+    if (Buffer.byteLength(JSON.stringify(raw)) > 100000)
+      throw new DomainError('Запрос превышает 100000 байт', 413);
+    const request = agentRequest.parse(raw);
+    if (!asyncOperations.has(request.operation)) return this.execute(raw);
+    if (!this.root)
+      throw new DomainError('Операция запускает процессы и требует каталога данных контура', 409);
+    if (this.h.store.projectionKind !== 'full') attachJournal(this.h);
+    const input = request.input ?? {};
+    switch (request.operation) {
+      case 'feasibility_spike':
+        return this.bounded({ spike: await runSpike(this.h, this.root, input) });
+      default:
+        throw new DomainError('Неизвестная операция', 400);
+    }
   }
   private workflowView(job: ReturnType<LeadWorkflow['start']>) {
     const { token: _token, ...publicJob } = job;
@@ -221,6 +259,8 @@ export class AgentService {
     const request = agentRequest.parse(raw),
       { operation } = request;
     const input = request.input ?? {};
+    if (asyncOperations.has(operation))
+      throw new DomainError('Операция запускает процессы: вызовите её через run', 409);
     if (operation in contextInputs) {
       const result = new AgentContext(this.h).execute(
         operation as ContextOperation,
@@ -334,6 +374,18 @@ export class AgentService {
           url: serving?.url,
           serving: serving?.release,
           previews: (s.previews ?? []).slice(-20).map(({ token: _token, ...p }) => p),
+        };
+      }
+      case 'feasibility_spikes': {
+        const v = agentInputs.feasibility_spikes.parse(input);
+        return {
+          spikes: spikesOf(
+            h,
+            v.repositoryId ??
+              (repositories(h.config).find((r) => r.id === 'main') ?? repositories(h.config)[0]).id,
+          )
+            .sort((a, b) => b.at.localeCompare(a.at))
+            .slice(0, 20),
         };
       }
       case 'queue_set': {

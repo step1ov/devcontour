@@ -48,7 +48,7 @@ export async function contractImpact(h: DevContour, input: unknown) {
     );
   const content = await contractContent(h, parsed, head);
   const pinned = await pinArtifacts(owner, parsed.artifacts ?? [], head);
-  const digest = contractDigest(content, pinned.artifacts, 2);
+  const digest = contractDigest(content, pinned.artifacts, 2, parsed.checks);
   const s = h.store.read();
   // Редакции одного контракта — один источник в одном компоненте; у inline
   // предложения источника нет, и его редакции узнаются по названию.
@@ -71,7 +71,7 @@ export async function contractImpact(h: DevContour, input: unknown) {
     : [];
   const status = !current
     ? 'new'
-    : samePin(current, content, pinned.artifacts)
+    : samePin(current, content, pinned.artifacts, parsed.checks)
       ? 'unchanged'
       : 'changed';
 

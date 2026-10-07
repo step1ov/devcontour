@@ -489,7 +489,7 @@ export class DevContour {
     validateTaskContext(this.config, t);
     if (requiresContract(this.config, t.role, t.repositoryId) && !t.contracts.length)
       throw new DomainError(`${t.id}: для ${t.role} сначала привяжите утверждённый контракт`);
-    assertTaskProperties(t, s.contracts);
+    assertTaskProperties(t, s.contracts, repository(this.config, t.repositoryId).gates);
     return Object.fromEntries(
       t.contracts.map((id) => {
         const c = requireValue(

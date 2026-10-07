@@ -48,4 +48,17 @@ export class WorkspaceAgent {
       store.close();
     }
   }
+  /** Тот же вход для операций, которые запускают процессы. */
+  async run(raw: unknown): Promise<Record<string, unknown>> {
+    if (!existsSync(join(this.root, 'config.json'))) return this.execute(raw);
+    const store = preparationStore(this.root);
+    try {
+      return await new AgentService(
+        new DevContour(store, loadConfig(join(this.root, 'config.json'))),
+        this.root,
+      ).run(raw);
+    } finally {
+      store.close();
+    }
+  }
 }

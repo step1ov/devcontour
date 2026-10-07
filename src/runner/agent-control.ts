@@ -28,6 +28,8 @@ import { adapters, reviewResult, type AgentAdapter } from './adapters.ts';
 import { repositories, repository, declaredRoles } from '../core/repositories.ts';
 import { git } from './process.ts';
 import { assertRequirementProof } from './requirements.ts';
+import { checkDeclaration, declarationProblems, type CheckDeclaration } from '../core/checks.ts';
+import { spikeRecord, spikesOf } from './checks.ts';
 
 // Контракт живёт в репозитории, и предложение должно на него ссылаться, а не
 // нести копию: копию легко отправить на ревью устаревшей, и тогда принятый
@@ -47,6 +49,12 @@ export const contractProposal = z
       .array(z.object({ path: relativePath, purpose: z.string().trim().min(1).max(200) }))
       .max(50)
       .optional(),
+    /**
+     * Договор проверки: обязательства, независимый способ проверки, покрытие
+     * и политика расширения корпуса (core/checks.ts). Структурные пропуски
+     * отклоняются до вызова модели; смысл оценивает ревьюер.
+     */
+    checks: checkDeclaration.optional(),
   })
   .refine((p) => Boolean(p.content) !== Boolean(p.file), {
     message: 'Укажите либо file — путь к контракту в репозитории, либо content',
@@ -80,6 +88,18 @@ function previousFindings(h: DevContour, subject: string, title: string) {
 
 /** Класс находки ревью контракта: обязательство невыполнимо или неизмеримо. */
 export const FEASIBILITY = 'feasibility';
+/** Класс находки: обязательство нечем независимо проверить. */
+export const VERIFIABILITY = 'verifiability';
+/**
+ * Проверяемость обязательств. Ревью выполнимости оценивало формулировки, а
+ * не то, можно ли проверить обещание на классе входов: контрпримеры ловились
+ * по одному после серии попыток. Структуру договора проверки контур
+ * сверяет сам; ревьюер оценивает смысл — полноту классификации, независимость
+ * эталона от проверяемого кода и пределы вывода эксперимента.
+ */
+const verifiabilityReview = [
+  `Assess verifiability. Every computational promise of the contract (accuracy, optimality, completeness, performance) must appear as an obligation of that kind in the structured "checks" declaration, with its input domain, answer rules, an independent verification method with its applicability, coverage families including boundary and adversarial inputs, and separate resource budgets for the implementation and the oracle. A contract with such promises and no checks declaration, an incomplete classification, or a method whose expected answers are derived from the implementation under test or its key algorithm (a shared input format is fine) is a blocking finding with rule "${VERIFIABILITY}". Name the provenance of expected answers you relied on. For obligations marked hard, read the spike: a timeout is inconclusive for that method and budget — it neither proves hardness or impossibility nor allows weakening the obligation; success on a sample does not prove a bound for every input. Ordinary CRUD needs only concrete scenarios with independently stated expected behaviour; do not demand an oracle there.`,
+];
 /**
  * Проверка выполнимости обязательств контракта. Ревью одобрило обязательство,
  * невыполнимое в общем виде, и это выяснилось только после серии попыток
@@ -91,6 +111,14 @@ const feasibilityReview = [
   `Assess every obligation of the contract for feasibility. For each, check that the contract states: the input domain and size limits; exactness or optimality (or the allowed approximation); the worst case; allowed refusals or failures; the resource model (time, memory, environment); and how the obligation is measured. An obligation that cannot be met in general under the stated limits, or cannot be measured as written, is a blocking finding with rule "${FEASIBILITY}" — name the obligation, the missing or contradictory bound and a concrete input that shows it. Hardness alone is not infeasibility: an exact answer for a hard problem is acceptable when the contract bounds the input, justifies the assumptions or allows a documented fallback. Do not block an obligation only for its wording.`,
 ];
 
+/**
+ * Независимая принимаемость задачи. Гейт первой задачи цепочки включал
+ * сценарии следующих, и она не могла пройти; общий файл тестов сам по себе
+ * при этом не виноват — виноват выбор сценариев.
+ */
+const acceptabilityReview = [
+  'Assess independent acceptability of every task. A task must be acceptable without the result of a not-yet-accepted downstream task of the graph. Each task lists "properties": the check-contract obligations it must satisfy now, selected from a shared check file by property id; a shared test file is fine when the selection is exact, and a new function may legitimately have a red test on the current base. Reject, with rule "acceptability", a task whose properties, gates or requirement test ids need behaviour that a later task delivers, or that references properties no contract declares.',
+];
 async function review(
   h: DevContour,
   root: string,
@@ -117,7 +145,8 @@ async function review(
     'For a plan, check dependencies, the first complete user scenario, requirement references, required real tests, and agreed API/design contracts. For architecture, assess the chosen stack and bootstrap verification evidence.',
     'For plans, check writePaths, selected library contextPacks, device resources, consumer verification and separation of proposed discoveries from validated knowledge. Findings should include rule, consequence and evidence; do not invent violations to fill the report.',
     'Declared context packs: ' + JSON.stringify(h.config.contextPacks),
-    ...(subject.startsWith('contract') ? feasibilityReview : []),
+    ...(subject.startsWith('contract') ? [...feasibilityReview, ...verifiabilityReview] : []),
+    ...(subject === 'task plan' ? acceptabilityReview : []),
     'Return approved=false and concrete blocking findings when revision is needed. Routine technical choices within the specification do not need human approval.',
     ...(previous
       ? [
@@ -222,6 +251,27 @@ async function review(
   };
 }
 
+/** Структурные пропуски договора проверки — отказ до вызова модели. */
+export function assertDeclaration(
+  h: DevContour,
+  repositoryId: string,
+  declaration: CheckDeclaration,
+  artifacts: { path: string }[],
+) {
+  const problems = declarationProblems(declaration, {
+    config: h.config,
+    repositoryId,
+    artifacts: artifacts.map((a) => a.path),
+    spike: (id) => spikeRecord(h, repositoryId, id),
+  });
+  if (problems.length)
+    throw new DomainError('Договор проверки неполон: ' + problems.join('; '), 400);
+}
+function referencedSpikes(h: DevContour, repositoryId: string, declaration: CheckDeclaration) {
+  const ids = new Set(declaration.obligations.flatMap((o) => o.feasibility?.spike ?? []));
+  return spikesOf(h, repositoryId).filter((s) => ids.has(s.id));
+}
+
 // Компонент по умолчанию — «main», если он есть, иначе первый настроенный:
 // workspace вправе называть репозитории product и library, и вызов без
 // repositoryId там не должен падать на несуществующем имени.
@@ -288,7 +338,11 @@ export async function reviewContract(
   const content = await contractContent(h, parsed, revision);
   const owner = repository(h.config, parsed.repositoryId ?? defaultOwner(h));
   const pinned = await pinArtifacts(owner, parsed.artifacts ?? [], revision);
-  const contractId = contractDigest(content, pinned.artifacts, 2);
+  // Структура договора проверки — до вызова модели: пропущенная область,
+  // способ проверки без закреплённого эталона или эксперимент, на который
+  // никто не ссылается, стоили бы вызова и были бы отклонены всё равно.
+  if (parsed.checks) assertDeclaration(h, owner.id, parsed.checks, pinned.artifacts);
+  const contractId = contractDigest(content, pinned.artifacts, 2, parsed.checks);
   // Повтор совпадает с утверждённым контрактом, только если совпали и
   // артефакты: изменённая схема при прежнем тексте — новый договор.
   const existing = h.store.read().contracts.find(
@@ -297,7 +351,7 @@ export async function reviewContract(
       c.repositoryId === parsed.repositoryId &&
       // По тексту и blob, а не по digest: запись прежней формулы с тем же
       // содержимым — тот же договор, а не повод для нового ревью.
-      samePin(c, content, pinned.artifacts),
+      samePin(c, content, pinned.artifacts, parsed.checks),
   );
   // Контракт без manifest по-прежнему работает, но закреплён только текст.
   const warning = pinned.artifacts.length
@@ -311,6 +365,9 @@ export async function reviewContract(
     ...parsed,
     content,
     ...(pinned.contents.length ? { artifacts: pinned.contents } : {}),
+    // Эксперименты выполнимости, на которые ссылаются обязательства: их
+    // результат и пределы вывода ревьюер читает сам, а не со слов автора.
+    ...(parsed.checks ? { spikes: referencedSpikes(h, owner.id, parsed.checks) } : {}),
   };
   const approval = await review(
     h,
@@ -325,7 +382,14 @@ export async function reviewContract(
   // HEAD с другим содержимым артефактов или сам документ, одобрение к
   // текущему дереву не относится.
   const after = await pinArtifacts(owner, parsed.artifacts ?? [], revision);
-  if (contractDigest(await contractContent(h, parsed, revision), after.artifacts, 2) !== contractId)
+  if (
+    contractDigest(
+      await contractContent(h, parsed, revision),
+      after.artifacts,
+      2,
+      parsed.checks,
+    ) !== contractId
+  )
     throw new DomainError(
       'Контракт или его артефакты изменились во время ревью; отправьте его на ревью заново',
       409,
@@ -343,6 +407,7 @@ export async function reviewContract(
         proposal.repositoryId,
         proposal.file,
         pinned.artifacts,
+        parsed.checks,
       );
     }),
     ...(warning ? { warning } : {}),
@@ -454,6 +519,18 @@ export async function reviewPlan(
       : {}),
     ...(externalDependencies.length ? { externalDependencies } : {}),
     contracts: state.contracts.filter((c) => contractIds.has(c.id)),
+    // Какие задачи обязаны подтвердить каждое свойство договора проверки:
+    // по нему ревьюер видит, не требует ли задача результата следующей.
+    ...(tasks.some((t) => t.properties?.length)
+      ? {
+          propertyScope: Object.fromEntries(
+            [...new Set(tasks.flatMap((t) => t.properties ?? []))].map((p) => [
+              p,
+              tasks.filter((t) => t.properties?.includes(p)).map((t) => t.id),
+            ]),
+          ),
+        }
+      : {}),
   };
   // Утверждается только то, что ревьюер прочёл целиком: черновик, ушедший
   // в краткую сводку принятого, означал бы утверждение без ревью.

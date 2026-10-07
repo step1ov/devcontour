@@ -215,6 +215,8 @@ function declared(task: Pick<Task, 'contracts'>, contracts: Contract[], gate?: s
 export function taskPropertyProblems(
   task: Pick<Task, 'id' | 'contracts' | 'properties' | 'gates' | 'requirements'>,
   contracts: Contract[],
+  /** Настроенные гейты компонента: проверка свойства должна быть подготовлена. */
+  gates?: { id: string; property?: unknown }[],
 ) {
   if (!task.properties?.length) return [];
   const problems: string[] = [];
@@ -232,6 +234,15 @@ export function taskPropertyProblems(
     const gate = found[0].gate;
     if (task.gates?.length && !task.gates.includes(gate))
       problems.push(`${task.id}: свойство ${id} проверяет гейт ${gate}, которого нет в задаче`);
+    // Селектор свойств передаёт контур, а исполняет harness генеративного
+    // гейта: без него область задачи в общем файле проверок не выбрать.
+    const configured = gates?.find((g) => g.id === gate);
+    if (gates && !configured)
+      problems.push(`${task.id}: гейт ${gate} свойства ${id} не настроен в компоненте`);
+    else if (configured && !configured.property)
+      problems.push(
+        `${task.id}: гейт ${gate} свойства ${id} не генеративный — селектор свойств не подготовлен`,
+      );
   }
   // Сценарий, названный тем же id, проверяет тот же гейт: иначе требование
   // ссылается на свойство, а подтверждается другой проверкой.
@@ -287,7 +298,8 @@ export function obligationOf(task: Pick<Task, 'contracts'>, contracts: Contract[
 export function assertTaskProperties(
   task: Pick<Task, 'id' | 'contracts' | 'properties' | 'gates' | 'requirements'>,
   contracts: Contract[],
+  gates?: { id: string; property?: unknown }[],
 ) {
-  const problems = taskPropertyProblems(task, contracts);
+  const problems = taskPropertyProblems(task, contracts, gates);
   if (problems.length) throw new DomainError(problems.join('; '), 400);
 }

@@ -280,7 +280,11 @@ export async function fixture(
           const data = await options.reviewer(r, calls);
           if (data) return { data, log: '', command: ['reviewer'] };
         }
-        return adapters.demo.execute(r);
+        return {
+          data: { approved: true, summary: 'Fixture review approves', findings: [] },
+          log: '',
+          command: ['reviewer'],
+        };
       }
       calls.implementation++;
       for (const [path, content] of Object.entries(files))

@@ -284,7 +284,7 @@ export async function serve(
         if (req.method === 'GET' && path === '/api/capabilities') {
           result = capabilities();
         } else if (req.method === 'POST' && path === '/api/agent') {
-          result = new AgentService(h).execute(await body(req));
+          result = await new AgentService(h, scheduler.root).run(await body(req));
         } else if (req.method === 'GET' && path === '/api/overview') {
           result = authorOverview(h);
         } else if (req.method === 'GET' && path === '/api/state') {
