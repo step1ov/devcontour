@@ -55,7 +55,33 @@ export type ContractChange = {
   step: number;
   /** Порядок шагов; отсутствует у операций, начатых при прежнем порядке. */
   order?: 2;
-  status: 'queued' | 'running' | 'waiting' | 'failed' | 'completed' | 'stale' | 'abandoned';
+  status:
+    | 'queued'
+    | 'running'
+    | 'waiting'
+    | 'failed'
+    | 'completed'
+    | 'stale'
+    | 'abandoned'
+    | 'superseded';
+  /** Версия записи: пересмотр сверяет ожидаемую версию. */
+  version?: number;
+  /**
+   * Прежние редакции этой операции: что ревьюировалось и чем закончилось.
+   * Пересмотр не стирает историю, а добавляет к ней.
+   */
+  revisions?: {
+    at: string;
+    head: string;
+    digest: string;
+    reason: string;
+    reviews: { id: string; approved: boolean; summary: string }[];
+  }[];
+  /** Подготовленные новые черновики, явно включённые в ревью плана для утверждения. */
+  include?: string[];
+  /** Связанная редакция: операция, которую эта продолжила после побочных эффектов. */
+  previous?: string;
+  next?: string;
   waitingFor?: string[];
   token?: string;
   leaseUntil?: number;
@@ -96,6 +122,7 @@ export class ContractChanges {
     return op;
   }
   private save(op: ContractChange) {
+    op.version = (op.version ?? 0) + 1;
     this.h.store.saveLocal(KIND, op.owner, op.id, op);
   }
   private log(
@@ -116,7 +143,7 @@ export class ContractChanges {
   }
 
   /** Начать операцию или вернуть уже идущую по тому же предложению. */
-  async start(input: unknown, authorRuntime: 'codex' | 'claude') {
+  async start(input: unknown, authorRuntime: 'codex' | 'claude', include: string[] = []) {
     if (this.h.config.approvalMode === 'operator')
       throw new DomainError(
         'В режиме operator изменение контракта проводит оператор: ревью ждёт его подтверждения',
@@ -162,6 +189,7 @@ export class ContractChanges {
         boards: [],
         corrections: [],
         history: [],
+        ...(include.length ? { include } : {}),
       };
       this.log(
         op,
@@ -282,6 +310,146 @@ export class ContractChanges {
     return this.view(this.get(id));
   }
 
+  /**
+   * Пересмотреть предложение по той же операции после отказа ревью.
+   *
+   * Раньше отклонённый контракт после правки документа требовал отменить
+   * операцию и начать новую. Пересмотр берёт текущий закоммиченный HEAD явно
+   * — обычное продолжение по прежнему входу его не подхватывает — и сверяет
+   * ожидаемую версию записи.
+   *
+   * До регистрации новой редакции побочных эффектов, кроме удержаний, нет:
+   * операция получает новую редакцию входа, прежняя редакция и её ревью
+   * остаются в истории, влияние и удержания пересчитываются в одной
+   * транзакции без окна выдачи, ревью повторяется. Поздний ответ прежнего
+   * ревьюера не утверждает новую редакцию: владение сброшено.
+   *
+   * После регистрации, перепривязки или переноса базы эти эффекты не
+   * отменяются: создаётся связанная следующая операция, которой удержания
+   * передаются атомарно, а прежняя помечается заменённой.
+   */
+  async revise(id: string, expectedVersion: number, include?: string[]) {
+    const op = this.get(id);
+    if ((op.version ?? 0) !== expectedVersion)
+      throw new DomainError('Операция изменилась; прочитайте её заново и повторите', 409);
+    if (op.status === 'running' && op.leaseUntil! > Date.now())
+      throw new DomainError('Операция выполняется; дождитесь окончания шага', 409);
+    // Выполняющаяся операция с истёкшим lease — владелец её потерял: пересмотр
+    // допустим, его поздний ответ отсечёт проверка владения.
+    if (!['failed', 'stale', 'waiting', 'queued', 'running'].includes(op.status))
+      throw new DomainError(`Пересмотр недоступен операции в состоянии ${op.status}`, 409);
+    const impact = await contractImpact(this.h, op.proposal);
+    if (
+      impact.proposed.revision === op.expected.head &&
+      impact.proposed.digest === op.expected.proposedDigest
+    )
+      throw new DomainError('Редакция не изменилась: закоммитьте исправленный документ', 400);
+    if (impact.status === 'unchanged')
+      throw new DomainError('Новая редакция совпадает с утверждённой: менять нечего', 400);
+    const effects =
+      !!op.contractId || op.rebound.length > 0 || op.step > stepsOf(op).indexOf('review');
+    const at = new Date().toISOString();
+    const reviews = (this.h.store.read().contractAttempts ?? [])
+      .filter(
+        (a) =>
+          a.subject.startsWith('contract') && a.title === op.proposal.title && a.at >= op.startedAt,
+      )
+      .map((a) => ({ id: a.id, approved: a.approved, summary: a.summary.slice(0, 500) }));
+    const held = [...impact.tasks.direct, ...impact.tasks.transitive]
+      .filter((t) => !['done', 'cancelled'].includes(t.status))
+      .map((t) => t.id);
+    return this.h.store.atomic(() => {
+      const current = this.get(id);
+      if ((current.version ?? 0) !== expectedVersion)
+        throw new DomainError('Операция изменилась; прочитайте её заново и повторите', 409);
+      const reason = 'Меняется контракт ' + (op.proposal.file ?? op.proposal.title);
+      if (!effects) {
+        current.revisions = [
+          ...(current.revisions ?? []),
+          {
+            at,
+            head: current.expected.head,
+            digest: current.expected.proposedDigest,
+            reason: current.error ?? current.status,
+            reviews,
+          },
+        ];
+        current.expected = {
+          head: impact.proposed.revision,
+          proposedDigest: impact.proposed.digest,
+          current: impact.current?.id ?? null,
+        };
+        // Удержания пересчитываются в той же транзакции: новые задачи
+        // удерживаются до снятия старых, окна выдачи по неподтверждённому
+        // договору нет.
+        this.h.hold(held, current.id, reason);
+        this.h.releaseTasks(
+          current.id,
+          current.held.filter((t) => !held.includes(t)),
+        );
+        current.held = held;
+        current.step = stepsOf(current).indexOf('drain');
+        current.status = 'queued';
+        current.error = undefined;
+        current.waitingFor = undefined;
+        current.token = undefined;
+        current.leaseUntil = undefined;
+        if (include) current.include = include;
+        this.log(current, 'start', 'revised', `${impact.proposed.revision.slice(0, 12)}`);
+        this.save(current);
+        return { status: 'revised' as const, operation: this.view(current) };
+      }
+      const next: ContractChange = {
+        id: 'CC-' + randomUUID(),
+        key: current.key,
+        owner: current.owner,
+        proposal: current.proposal,
+        authorRuntime: current.authorRuntime,
+        expected: {
+          head: impact.proposed.revision,
+          proposedDigest: impact.proposed.digest,
+          current: impact.current?.id ?? null,
+        },
+        step: 0,
+        order: 2,
+        status: 'queued',
+        startedAt: at,
+        held: [],
+        rebound: [],
+        boards: [],
+        corrections: [],
+        history: [],
+        previous: current.id,
+        ...((include ?? current.include)?.length ? { include: include ?? current.include } : {}),
+      };
+      this.h.transferHold(current.id, next.id, reason);
+      next.held = this.h.store
+        .read()
+        .tasks.filter((t) => t.hold?.operation === next.id)
+        .map((t) => t.id);
+      current.status = 'superseded';
+      current.next = next.id;
+      current.token = undefined;
+      current.leaseUntil = undefined;
+      current.finishedAt = at;
+      this.log(
+        current,
+        stepsOf(current)[current.step] ?? 'release',
+        'superseded',
+        `следующая редакция ${next.id}; эффекты этой операции остаются в истории`,
+      );
+      this.log(next, 'start', 'queued', `продолжает ${current.id}`);
+      this.h.clearWait('context-lock', current.id);
+      this.save(current);
+      this.save(next);
+      return {
+        status: 'superseded' as const,
+        operation: this.view(next),
+        previous: this.view(current),
+      };
+    });
+  }
+
   /** Отменить операцию: снять удержание. Перепривязанные задачи остаются черновиками. */
   abandon(id: string) {
     return this.h.store.atomic(() => {
@@ -290,6 +458,7 @@ export class ContractChanges {
         throw new DomainError('Операция выполняется; дождитесь окончания шага', 409);
       if (!active(op) && op.status !== 'stale') return this.view(op);
       this.h.release(op.id);
+      this.h.clearWait('context-lock', op.id);
       op.status = 'abandoned';
       op.token = undefined;
       op.leaseUntil = undefined;
@@ -306,13 +475,18 @@ export class ContractChanges {
    * попытку, а рецензент плана видел бы два разных текста. Удержание
    * остаётся до перезакрепления.
    */
-  private async assertContextPinned(op: ContractChange) {
+  private async contextWait(op: ContractChange) {
     const contract = this.h.store.read().contracts.find((c) => c.id === op.contractId);
     const stale = contract ? await stalePins(this.h.config, contract) : [];
-    if (stale.length)
-      throw new DomainError(
-        `Context pack ${stale.join(', ')} закрепляет прежнюю редакцию ${contract!.source}: задачи заблокировались бы на первом запуске. Выполните context-lock, перезапустите сервер и продолжите: contract-change --id ${op.id}`,
-      );
+    if (!stale.length) {
+      this.h.clearWait('context-lock', op.id);
+      return undefined;
+    }
+    // Не отказ, а возобновляемое ожидание с точным следующим шагом: уже
+    // действительное ревью не повторяется, удержания остаются.
+    const detail = `Context pack ${stale.join(', ')} закрепляет прежнюю редакцию ${contract!.source}: задачи заблокировались бы на первом запуске. Выполните context-lock, перезапустите сервер и продолжите: contract-change --id ${op.id}`;
+    this.h.waitFor('context-lock', op.id, detail);
+    return { wait: detail, waitingFor: ['context-lock'] };
   }
 
   private revisions(op: ContractChange) {
@@ -407,18 +581,27 @@ export class ContractChanges {
         // Рецензент плана читает закреплённый контекст: с прежней редакцией
         // контракта в нём он справедливо отклонил бы план. При прежнем порядке
         // шагов база ещё не перенесена, и проверка остаётся за release.
-        if (stepsOf(op).indexOf('base') < stepsOf(op).indexOf('plan'))
-          await this.assertContextPinned(op);
-        for (const boardId of op.boards) {
+        if (stepsOf(op).indexOf('base') < stepsOf(op).indexOf('plan')) {
+          const wait = await this.contextWait(op);
+          if (wait) return wait;
+        }
+        const state = this.h.store.read();
+        const includeBoards = (op.include ?? [])
+          .map((id) => state.boards.find((b) => b.revisions.at(-1)!.taskIds.includes(id))?.id)
+          .filter((id): id is string => Boolean(id));
+        for (const boardId of [...new Set([...op.boards, ...includeBoards])]) {
           const s = this.h.store.read();
           const drafts = op.rebound.filter(
             (id) => s.tasks.find((t) => t.id === id)?.status === 'draft',
           );
-          const onBoard = drafts.filter((id) =>
-            s.boards
-              .find((b) => b.id === boardId)
-              ?.revisions.at(-1)!
-              .taskIds.includes(id),
+          const revision = s.boards.find((b) => b.id === boardId)?.revisions.at(-1);
+          // Утверждаются перепривязанные и явно включённые подготовленные
+          // черновики; остальные задачи ревизии ревьюер видит как контекст.
+          const included = (op.include ?? []).filter(
+            (id) => s.tasks.find((t) => t.id === id)?.status === 'draft',
+          );
+          const onBoard = [...new Set([...drafts, ...included])].filter((id) =>
+            revision?.taskIds.includes(id),
           );
           if (!onBoard.length) continue;
           const result = await reviewPlan(
@@ -429,6 +612,7 @@ export class ContractChanges {
             this.runtimes,
             () => this.guard(op),
             onBoard,
+            true,
           );
           if (result.status === 'awaiting-operator')
             throw new DomainError('Ревью плана ждёт оператора: ' + boardId);
@@ -497,7 +681,8 @@ export class ContractChanges {
         return {};
       }
       case 'release': {
-        await this.assertContextPinned(op);
+        const wait = await this.contextWait(op);
+        if (wait) return wait;
         this.advanceStep(op, () => {
           this.h.release(op.id);
         });

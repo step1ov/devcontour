@@ -404,13 +404,15 @@ function Stage({
   running,
   paused,
   pauseReason,
+  waits,
   events,
   workflows,
 }: {
   tasks: Task[];
   running: number;
   paused?: boolean;
-  pauseReason?: 'operator' | 'shutdown' | 'runtime';
+  pauseReason?: DevContourState['pauseReason'];
+  waits?: DevContourState['waits'];
   events: AuditEvent[];
   workflows?: WorkflowView[];
 }) {
@@ -434,9 +436,13 @@ function Stage({
           ? 'Весь объём принят исполнителями; доска ждёт приёмки.'
           : running
             ? `Идёт выдача: занято исполнителей — ${running}, принято ${done} из ${tasks.length}.`
-            : paused
-              ? `Выдача остановлена, принято ${done} из ${tasks.length}.`
-              : `Ожидание выдачи: принято ${done} из ${tasks.length}.`;
+            : paused && pauseReason === 'base-check'
+              ? `Выдача ждёт проверки перенесённой базы — это техническое ожидание, а не пауза человека; принято ${done} из ${tasks.length}.`
+              : paused && pauseReason === 'operator'
+                ? `Выдача остановлена человеком, принято ${done} из ${tasks.length}.`
+                : paused
+                  ? `Выдача остановлена, принято ${done} из ${tasks.length}.`
+                  : `Ожидание выдачи: принято ${done} из ${tasks.length}.`;
   return (
     <Card>
       <CardContent className="grid gap-2 p-4">
@@ -454,6 +460,18 @@ function Stage({
             Очередь остановилась сама: {stopped}
           </p>
         )}
+        {(waits ?? []).map((w) => (
+          <p
+            key={w.kind + (w.operation ?? '')}
+            className="text-muted-foreground m-0 text-sm break-words"
+            data-wait={w.kind}
+          >
+            {w.kind === 'base-check'
+              ? 'Ожидает проверки базы'
+              : 'Ожидает перезакрепления контекста'}
+            {pauseReason === 'operator' ? ' (пауза человека действует отдельно)' : ''}: {w.detail}
+          </p>
+        ))}
         {halted.map((w) => (
           <p key={w.key} className="text-destructive m-0 text-sm break-words">
             Автоматическое восстановление остановлено ({w.repairs} из {w.repairBudget}): {w.error}
@@ -472,7 +490,8 @@ export function ProgressPanel({
     contractAttempts?: ContractAttempt[];
     concurrency?: number;
     paused?: boolean;
-    pauseReason?: 'operator' | 'shutdown' | 'runtime';
+    pauseReason?: DevContourState['pauseReason'];
+    waits?: DevContourState['waits'];
     workflows?: WorkflowView[];
     config: {
       repositories?: { id: string; name?: string; kind?: string }[];
@@ -548,6 +567,7 @@ export function ProgressPanel({
         running={runs.length}
         paused={state.paused}
         pauseReason={state.pauseReason}
+        waits={state.waits}
         events={state.events ?? []}
         workflows={state.workflows}
       />

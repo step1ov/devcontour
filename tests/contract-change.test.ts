@@ -393,11 +393,15 @@ test('Tasks stay held and the plan is not reviewed while a context pack pins the
       operation: ContractChange;
     };
     const failed = await s.changes().advance(operation.id);
-    assert.equal(failed.status, 'failed');
+    // Не отказ, а возобновляемое техническое ожидание с точным шагом.
+    assert.equal(failed.status, 'waiting');
+    assert.deepEqual(failed.waitingFor, ['context-lock']);
     // Остановка до ревью плана: рецензент не видит прежний текст в контексте.
     assert.equal(failed.next, 'plan');
     assert.deepEqual(s.calls, ['contract / architecture decision']);
-    assert.match(failed.error ?? '', /Context pack contracts закрепляет прежнюю редакцию/);
+    const wait = s.store.read().waits?.find((w) => w.kind === 'context-lock');
+    assert.match(wait?.detail ?? '', /Context pack contracts закрепляет прежнюю редакцию/);
+    assert.equal(wait?.operation, operation.id);
     assert.equal(s.task(s.api.id).hold?.operation, operation.id, 'задача удержана');
     assert.equal(
       readyTasks(s.store.read()).some((t) => t.id === s.api.id),
@@ -408,6 +412,8 @@ test('Tasks stay held and the plan is not reviewed while a context pack pins the
     const done = await s.changes().advance(operation.id);
     assert.equal(done.status, 'completed', done.error);
     assert.ok(s.store.read().tasks.every((t) => !t.hold));
+    assert.equal(s.store.read().waits, undefined, 'ожидание снято');
+    assert.deepEqual(s.calls, ['contract / architecture decision', 'task plan']);
   } finally {
     await s.remove();
   }

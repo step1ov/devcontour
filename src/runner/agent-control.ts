@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
   DevContour,
+  contextDigest,
   contractDigest,
   dependencyDigest,
   digest,
@@ -117,7 +118,7 @@ const feasibilityReview = [
  * при этом не виноват — виноват выбор сценариев.
  */
 const acceptabilityReview = [
-  'Assess independent acceptability of every task. A task must be acceptable without the result of a not-yet-accepted downstream task of the graph. Each task lists "properties": the check-contract obligations it must satisfy now, selected from a shared check file by property id; a shared test file is fine when the selection is exact, and a new function may legitimately have a red test on the current base. Reject, with rule "acceptability", a task whose properties, gates or requirement test ids need behaviour that a later task delivers, or that references properties no contract declares.',
+  'Only the tasks listed in "approving" are approved by this review; the other tasks of the revision are shown as context, do not count them as missing and do not approve them. Assess independent acceptability of every task. A task must be acceptable without the result of a not-yet-accepted downstream task of the graph. Each task lists "properties": the check-contract obligations it must satisfy now, selected from a shared check file by property id; a shared test file is fine when the selection is exact, and a new function may legitimately have a red test on the current base. Reject, with rule "acceptability", a task whose properties, gates or requirement test ids need behaviour that a later task delivers, or that references properties no contract declares.',
 ];
 async function review(
   h: DevContour,
@@ -467,6 +468,12 @@ export async function reviewPlan(
    * предложение не входят и остаются черновиками.
    */
   selected?: string[],
+  /**
+   * Показать ревьюеру невыбранные черновики ревизии как контекст. Смена
+   * контракта включает: её план иначе казался ревьюеру неполным. Доска
+   * находок — нет: неразобранные находки в предложение не входят.
+   */
+  context = false,
 ) {
   const state = h.store.read();
   const board = state.boards.find((b) => b.id === boardId);
@@ -479,8 +486,14 @@ export async function reviewPlan(
     (id) => !all.some((t) => t.id === id && t.status === 'draft'),
   );
   if (foreign.length) throw new DomainError('Не черновики этой доски: ' + foreign.join(', '));
-  const tasks = selected ? all.filter((t) => t.status !== 'draft' || selected.includes(t.id)) : all;
-  const drafts = tasks.filter((t) => t.status === 'draft');
+  // С контекстом ревьюер видит всю ревизию — и невыбранные черновики, — но
+  // утверждаются только выбранные. «Видно ревьюеру» и «можно выпустить» не
+  // смешиваются: соседний черновик не утверждается побочно.
+  const tasks =
+    selected && !context ? all.filter((t) => t.status !== 'draft' || selected.includes(t.id)) : all;
+  const drafts = selected
+    ? all.filter((t) => t.status === 'draft' && selected.includes(t.id))
+    : all.filter((t) => t.status === 'draft');
   if (!drafts.length) return { status: 'already-approved', boardId };
   // Предусловия утверждения — до ревью: отказ после одобрения тратил вызов
   // модели впустую.
@@ -520,6 +533,9 @@ export async function reviewPlan(
     revision: revision.number,
     ...(revision.number > 1 ? { goal: revision.reason } : {}),
     tasks: tasks.filter((t) => !carried.has(t.id)),
+    // Что утверждает это ревью; остальные задачи — контекст, их состав и
+    // постановки закреплены, и их изменение во время ревью делает его устаревшим.
+    approving: drafts.map((t) => t.id),
     ...(carried.size
       ? {
           acceptedEarlier: tasks
@@ -558,6 +574,12 @@ export async function reviewPlan(
         d.id,
         dependencyDigest(state.tasks.find((t) => t.id === d.id)!),
       ]),
+    ),
+    // Показанный контекст закрепляется по смыслу: постановка, гейты и
+    // принятый результат. Ход чужой попытки (running → verifying) — не
+    // смысловое изменение и ревью не обесценивает.
+    context: Object.fromEntries(
+      proposal.tasks.filter((t) => !drafts.includes(t)).map((t) => [t.id, contextDigest(t)]),
     ),
     tasks: Object.fromEntries(drafts.map((t) => [t.id, specDigest(t)])),
   };

@@ -318,6 +318,9 @@ export class LeadRunner {
         const decided =
           s.paused &&
           (s.pauseReason === 'runtime' ||
+            // Перенесённую базу проверяет ведущий или человек: цикл не снимает
+            // это ожидание сам.
+            s.pauseReason === 'base-check' ||
             (s.pauseReason === 'operator' &&
               (s.pausedAt === undefined || s.pausedAt >= job.startedAt)));
         if (!tasks.every((t) => t.status === 'done') && !decided)

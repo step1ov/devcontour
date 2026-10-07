@@ -193,6 +193,14 @@ const HEARTBEAT_FAILED = 'Продление владения не удалос�
  */
 export const dependencyDigest = (t: Task) =>
   digest({ spec: specDigest(t), status: t.status, gates: t.gates, resultSha: t.resultSha });
+/** Смысловые данные задачи, показанной ревью плана как контекст. */
+export const contextDigest = (t: Task) =>
+  digest({
+    spec: specDigest(t),
+    gates: t.gates,
+    resultSha: t.resultSha,
+    cancelled: t.status === 'cancelled',
+  });
 /**
  * Задача принятой ревизии неизменяема: следующий этап и корректировка несут
  * её как принятую работу. Вернуть её в работу (reopen, retry) значило бы
@@ -527,6 +535,8 @@ export class DevContour {
       reason?: string;
       /** Зависимости, показанные ревьюеру вне предложения: digest постановки и статус. */
       dependencies?: Record<string, string>;
+      /** Задачи ревизии, показанные ревьюеру как контекст и не утверждаемые им. */
+      context?: Record<string, string>;
     },
   ) {
     return this.store.change('board.approved', (s) => {
@@ -542,6 +552,9 @@ export class DevContour {
           (expected.reason !== undefined && expected.reason !== r.reason) ||
           Object.entries(expected.dependencies ?? {}).some(
             ([id, pinned]) => dependencyDigest(task(s, id)) !== pinned,
+          ) ||
+          Object.entries(expected.context ?? {}).some(
+            ([id, pinned]) => contextDigest(task(s, id)) !== pinned,
           ) ||
           digest(expected.taskIds) !== digest(r.taskIds) ||
           selected.some((id) => {
@@ -705,6 +718,12 @@ export class DevContour {
       s.paused = value;
       s.pauseReason = value ? reason : undefined;
       s.pausedAt = value ? now() : undefined;
+      // Продолжение очереди — решение после проверки базы: её ожидание снято.
+      // Ожидание перезакрепления контекста держит операция, а не очередь.
+      if (!value && s.waits?.length) {
+        s.waits = s.waits.filter((w) => w.kind !== 'base-check');
+        if (!s.waits.length) s.waits = undefined;
+      }
       // Класс отказа принадлежит конкретной паузе: пережив её, он разрешил бы
       // снять следующую паузу, к которой не имеет отношения. Эта операция —
       // решение человека или штатная остановка, и класса у неё нет.
@@ -734,10 +753,54 @@ export class DevContour {
   baseUpdated(updated: { repositoryId: string; from: string; to: string }[]) {
     return this.store.change('base.updated', (s) => {
       if (!s.paused) throw new DomainError('Перенос базы выполняется на остановленной очереди');
-      s.pauseReason = 'operator';
+      // Пауза человека остаётся его паузой; иначе очередь ждёт проверки базы —
+      // это техническое ожидание, а не решение человека.
+      if (s.pauseReason !== 'operator') s.pauseReason = 'base-check';
       s.pausedAt = now();
       s.pauseFailures = undefined;
+      s.waits = [
+        ...(s.waits ?? []).filter((w) => w.kind !== 'base-check'),
+        {
+          kind: 'base-check',
+          detail: `База прогонов перенесена (${updated.map((u) => u.repositoryId).join(', ')}): проверьте её гейтами и продолжите очередь`,
+          at: now(),
+        },
+      ];
       return { updated };
+    });
+  }
+  /** Техническое ожидание операции: видно отдельно от паузы и её не трогает. */
+  waitFor(kind: 'context-lock', operation: string, detail: string) {
+    return this.store.change('wait.started', (s) => {
+      s.waits = [
+        ...(s.waits ?? []).filter((w) => !(w.kind === kind && w.operation === operation)),
+        { kind, detail, operation, at: now() },
+      ];
+      return { kind, operation };
+    });
+  }
+  clearWait(kind: 'context-lock', operation: string) {
+    return this.store.change('wait.cleared', (s) => {
+      const left = (s.waits ?? []).filter((w) => !(w.kind === kind && w.operation === operation));
+      if (left.length === (s.waits ?? []).length) return;
+      s.waits = left.length ? left : undefined;
+      return { kind, operation };
+    });
+  }
+  /** Передать удержание задач от одной операции другой без окна выдачи. */
+  transferHold(from: string, to: string, reason: string) {
+    return this.store.change('task.hold-transferred', (s) => {
+      const moved = s.tasks.filter((t) => t.hold?.operation === from);
+      for (const t of moved) t.hold = { operation: to, reason };
+      return moved.map((t) => t.id);
+    });
+  }
+  /** Снять удержание операции с перечисленных задач; чужие не трогаются. */
+  releaseTasks(operation: string, ids: string[]) {
+    return this.store.change('task.released', (s) => {
+      const released = s.tasks.filter((t) => ids.includes(t.id) && t.hold?.operation === operation);
+      for (const t of released) t.hold = undefined;
+      return released.map((t) => t.id);
     });
   }
   assign(id: string, member: string) {
