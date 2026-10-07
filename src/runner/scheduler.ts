@@ -533,7 +533,7 @@ export class Scheduler {
     const parts: string[] = [];
     if (binding) {
       const suite = new CheckCorpus(this.h).get(binding.suite);
-      const version = suite.versions.find((v) => v.number === binding.number)!;
+      const version = suite.versions.find((v) => v.digest === binding.digest)!;
       parts.push(
         `Mandatory corpus ${suite.id} version ${version.number} (sha256 ${version.digest}): ${version.cases.length} cases confirmed by the pinned oracle on defective commits. They are part of the gate and run before review on both phases. ${version.cases.length > 20 ? 'First 20 shown; the full corpus is in the self-check directory. ' : ''}Cases: ` +
           JSON.stringify(

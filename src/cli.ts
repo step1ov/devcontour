@@ -65,6 +65,7 @@ import { contractEvals } from './runner/contract-evals.ts';
 import { contractImpact } from './runner/contract-impact.ts';
 import { ContractChanges } from './runner/contract-change.ts';
 import { writeSelfCheck } from './runner/checks.ts';
+import { CheckCorpus } from './core/check-store.ts';
 import { propertySeed } from './core/property.ts';
 const args = process.argv.slice(2),
   operation = args[0] ?? 'serve';
@@ -412,6 +413,7 @@ async function main() {
     'contract-impact',
     'contract-change',
     'self-check',
+    'checks-approve',
     'review-contract',
     'review-plan',
     'accept',
@@ -768,6 +770,13 @@ async function main() {
           result =
             started.status === 'unchanged' ? started : await changes.advance(started.operation.id);
         }
+      } else if (operation === 'checks-approve') {
+        // Ручное техническое подтверждение принятия корпуса (operator mode):
+        // команда оператора, в агентском API её нет.
+        result = new CheckCorpus(h).approveAdoption(
+          option('--suite', ''),
+          option('--pending', ''),
+        ).pending;
       } else if (operation === 'self-check') {
         // Диагностика рабочего кода тем же закреплённым checker, полным
         // корпусом, seed и селектором задачи. Evidence контура не заменяет.

@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { arch, cpus, platform, tmpdir } from 'node:os';
+import { arch, cpus, homedir, platform, tmpdir } from 'node:os';
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { z } from 'zod';
@@ -12,6 +12,7 @@ import {
   CheckCorpus,
   MAX_CASE_BYTES,
   canonicalJson,
+  scrubLocalPaths,
   sha256,
   type CheckSuite,
 } from '../core/check-store.ts';
@@ -281,7 +282,7 @@ export async function submitCase(h: DevContour, root: string, raw: unknown) {
     const done = started.done;
     const suite = corpus.get(ref.suite.id);
     for (const p of suite.pending.filter(
-      (x) => x.status === 'waiting' && x.version === done.version,
+      (x) => x.status === 'waiting' && !x.awaitingOperator && x.version === done.version,
     ))
       corpus.adopt(suite.id, p.id);
     return view(corpus.get(suite.id), done.id, true);
@@ -306,7 +307,24 @@ export async function submitCase(h: DevContour, root: string, raw: unknown) {
   );
   heartbeat.unref();
   try {
-    const verdict = await decide(h, root, task, ref, input, source);
+    const decided = await decide(h, root, task, ref, input, source);
+    // Диагностика решения уходит в Git: локальные каталоги из исключений
+    // реализации заменяются меткой до записи.
+    const roots = [root, repository(h.config, task.repositoryId).path, tmpdir(), homedir()];
+    const verdict = {
+      ...decided,
+      reason: scrubLocalPaths(decided.reason, roots),
+      ...(decided.observed
+        ? {
+            observed: {
+              ...decided.observed,
+              ...(decided.observed.actual !== undefined
+                ? { actual: scrubLocalPaths(decided.observed.actual, roots) }
+                : {}),
+            },
+          }
+        : {}),
+    };
     const recorded = corpus.record(
       corpus.get(ref.suite.id),
       input.key,
@@ -338,10 +356,14 @@ export async function submitCase(h: DevContour, root: string, raw: unknown) {
       {
         tasks: input.adopt ?? [task.id],
         actor: `${origin.kind}${origin.runtime ? ':' + origin.runtime : ''}`,
+        // operator mode: данные корпуса записываются, принятие задачей ждёт
+        // ручного технического подтверждения.
+        manual: h.config.approvalMode === 'operator',
       },
     );
     caseHooks.afterRecord();
-    if (recorded.pending) corpus.adopt(ref.suite.id, recorded.pending.id);
+    if (recorded.pending && !recorded.pending.awaitingOperator)
+      corpus.adopt(ref.suite.id, recorded.pending.id);
     return view(corpus.get(ref.suite.id), recorded.decision.id, false);
   } finally {
     clearInterval(heartbeat);
@@ -372,7 +394,12 @@ function view(suite: CheckSuite, decisionId: string, repeated: boolean) {
     version: head ? { number: head.number, digest: head.digest, cases: head.cases.length } : null,
     adoption: suite.pending
       .filter((p) => p.version === decision.version)
-      .map(({ id, status, results }) => ({ id, status, results })),
+      .map(({ id, status, results, awaitingOperator }) => ({
+        id,
+        status,
+        results,
+        ...(awaitingOperator ? { awaitingOperator } : {}),
+      })),
   };
 }
 

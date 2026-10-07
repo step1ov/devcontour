@@ -1,7 +1,7 @@
 import { portableTest, unprovenReason } from './proof.ts';
 import { validatePreparation } from './preparation.ts';
 import { contractDigest, digest, specDigest, type DevContour } from './service.ts';
-import { effectiveChecks } from './checks.ts';
+import { effectiveChecks, obligationOf } from './checks.ts';
 import { CheckCorpus, portableSuite, type PortableSuite } from './check-store.ts';
 import { repository, requiresContract } from './repositories.ts';
 import { assertDag } from './graph.ts';
@@ -13,6 +13,7 @@ import {
   type Approval,
   type Board,
   type Evidence,
+  type Contract,
 } from './model.ts';
 import {
   canonical,
@@ -234,6 +235,8 @@ export function validateReceipt(
   demo: boolean,
   /** Корпус по id: версия, на которую ссылается receipt, должна существовать. */
   suites: (id: string) => PortableSuite | undefined = () => undefined,
+  /** Контракты состояния: по ним находятся гейты объявленных свойств задачи. */
+  contracts: Contract[] = [],
 ) {
   if (
     receipt.taskId !== t.id ||
@@ -250,20 +253,29 @@ export function validateReceipt(
     throw new Error(`Нет независимого runtime review: ${t.id}`);
   if (t.requirements?.length && !receipt.requiredGates.includes('requirement-source'))
     throw new Error('Receipt не проверяет требования: ' + t.id);
-  for (const phase of ['candidate', 'integration'] as const) {
-    const sha = phase === 'candidate' ? receipt.candidateSha : receipt.resultSha;
-    for (const [kind, gates] of [
-      ['test', receipt.requiredGates],
-      ['review', ['independent-review']],
-    ] as const)
-      for (const gate of gates) {
-        const check = receipt.checks.findLast(
-          (c) => c.kind === kind && c.phase === phase && c.gate === gate && c.sha === sha,
-        );
-        if (!check?.passed || check.exitCode !== 0)
-          throw new Error(`Нет PASS в receipt ${t.id}: ${phase}/${gate}`);
-      }
-  }
+  // Вид записи и гейт согласованы: ревью — только независимое ревью, тест —
+  // только гейт. Иначе одну проверку могли бы закрыть две разные записи.
+  if (receipt.checks.some((c) => (c.kind === 'review') !== (c.gate === 'independent-review')))
+    throw new Error(`Receipt ${t.id}: вид проверки не соответствует гейту`);
+  // Решающая запись проверки — одна и та же для PASS, версии и манифеста.
+  const decisive = (kind: 'test' | 'review', phase: 'candidate' | 'integration', gate: string) =>
+    receipt.checks.findLast(
+      (c) =>
+        c.kind === kind &&
+        c.phase === phase &&
+        c.gate === gate &&
+        c.sha === (phase === 'candidate' ? receipt.candidateSha : receipt.resultSha),
+    );
+  const required = [
+    ...receipt.requiredGates.map((gate) => ['test', gate] as const),
+    ['review', 'independent-review'] as const,
+  ];
+  for (const phase of ['candidate', 'integration'] as const)
+    for (const [kind, gate] of required) {
+      const check = decisive(kind, phase, gate);
+      if (!check?.passed || check.exitCode !== 0)
+        throw new Error(`Нет PASS в receipt ${t.id}: ${phase}/${gate}`);
+    }
   // Названный сценарий подтверждается и в чужом receipt по тому же правилу,
   // что при локальном finish: иначе импортированная задача становилась done и
   // открывала зависимые, хотя её manifest прямо не содержит нужного теста.
@@ -276,36 +288,51 @@ export function validateReceipt(
   if (t.properties?.length && !receipt.checkVersion)
     throw new Error(`Receipt ${t.id} задачи с договором проверки без версии проверок`);
   const version = receipt.checkVersion;
-  if (version) {
-    if (
-      version.effective !==
-      effectiveChecks(
-        {
-          approvedDigest: receipt.specDigest,
-          contractDigests: t.contractDigests,
-          checkVersion: version.corpus,
-        },
-        receipt.policyDigest,
-      )
+  if (!version) return;
+  if (
+    version.effective !==
+    effectiveChecks(
+      {
+        approvedDigest: receipt.specDigest,
+        contractDigests: t.contractDigests,
+        checkVersion: version.corpus,
+      },
+      receipt.policyDigest,
     )
-      throw new Error(`Receipt ${t.id}: версия проверок не соответствует постановке и корпусу`);
+  )
+    throw new Error(`Receipt ${t.id}: версия проверок не соответствует постановке и корпусу`);
+  for (const phase of ['candidate', 'integration'] as const)
+    for (const [kind, gate] of required)
+      if (decisive(kind, phase, gate)!.checks !== version.effective)
+        throw new Error(`Receipt ${t.id}: ${phase}/${gate} получен под другой версией проверок`);
+  // Манифест свойств обеих фаз переносится вместе с результатом: без него
+  // импорт выдал бы сильный уровень за прежний.
+  const byGate = new Map<string, string[]>();
+  for (const id of t.properties ?? []) {
+    const found = obligationOf(t, contracts, id);
+    if (!found) throw new Error(`Receipt ${t.id}: свойство ${id} не объявлено в договорах задачи`);
+    byGate.set(found.gate, [...(byGate.get(found.gate) ?? []), id]);
+  }
+  for (const [gate, ids] of byGate)
     for (const phase of ['candidate', 'integration'] as const) {
-      const sha = phase === 'candidate' ? receipt.candidateSha : receipt.resultSha;
-      for (const gate of [...receipt.requiredGates, 'independent-review']) {
-        const check = receipt.checks.findLast(
-          (c) => c.phase === phase && c.gate === gate && c.sha === sha,
-        );
-        if (check?.checks !== version.effective)
-          throw new Error(`Receipt ${t.id}: ${phase}/${gate} получен под другой версией проверок`);
-      }
+      const check = decisive('test', phase, gate);
+      const manifest = check?.property?.manifest;
+      if (
+        check?.property?.level !== 'manifest' ||
+        !manifest ||
+        ids.some((id) => !manifest.properties.includes(id)) ||
+        (version.corpus &&
+          manifest.corpus?.digest !== version.corpus.digest &&
+          manifest.corpus !== undefined)
+      )
+        throw new Error(`Receipt ${t.id}: ${phase}/${gate} без манифеста свойств задачи`);
     }
-    if (version.corpus) {
-      const suite = suites(version.corpus.suite);
-      if (!suite?.versions.some((v) => v.digest === version.corpus!.digest))
-        throw new Error(
-          `Receipt ${t.id} ссылается на версию корпуса ${version.corpus.suite}#${version.corpus.number}, которой нет в Git`,
-        );
-    }
+  if (version.corpus) {
+    const suite = suites(version.corpus.suite);
+    if (!suite?.versions.some((v) => v.digest === version.corpus!.digest))
+      throw new Error(
+        `Receipt ${t.id} ссылается на версию корпуса ${version.corpus.suite}#${version.corpus.number}, которой нет в Git`,
+      );
   }
 }
 
@@ -441,10 +468,16 @@ export function stateFromRecords(
         if (entry?.record.kind !== 'receipt')
           throw new Error('Нет receipt завершённой задачи: ' + t.id);
         const receipt = entry.record.data;
-        validateReceipt(receipt, t, h.config.mode === 'demo', (id) => {
-          const found = all.find((x) => x.record.kind === 'check' && x.record.data.id === id);
-          return found?.record.kind === 'check' ? found.record.data : undefined;
-        });
+        validateReceipt(
+          receipt,
+          t,
+          h.config.mode === 'demo',
+          (id) => {
+            const found = all.find((x) => x.record.kind === 'check' && x.record.data.id === id);
+            return found?.record.kind === 'check' ? found.record.data : undefined;
+          },
+          s.contracts,
+        );
         // Принятая задача закреплена за той версией корпуса, под которой её
         // проверили: другая привязка в записи — подмена.
         if (

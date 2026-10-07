@@ -267,7 +267,7 @@ test('Autonomous loop end to end on a real Git fixture with counted deterministi
     f.h.approve(mergeBoard.id);
     new CheckCorpus(f.h).request(
       suite.id,
-      head.number,
+      { digest: head.digest },
       [late.id],
       'agent',
       'Принять корпус перед первой попыткой.',

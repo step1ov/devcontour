@@ -88,7 +88,21 @@ const brief = (v: unknown) => {
 
 /** Строка для итога гейта: её видит следующая попытка в истории отказов. */
 export function propertyFailure(report: PropertyReport) {
-  return report.properties
+  // Провал случая корпуса — провал свойства, даже если отчёт оставил статус
+  // свойства зелёным: отчёт противоречит сам себе, и верится провалу.
+  const corpus = (report.corpus?.failed ?? [])
+    .filter(
+      (c) =>
+        !report.properties.some(
+          (p) =>
+            p.testId === c.property && p.status !== 'passed' && p.counterexample?.case === c.id,
+        ),
+    )
+    .map(
+      (c) =>
+        `случай корпуса ${c.id} свойства ${c.property} провален: ожидалось ${brief(c.expected)}, получено ${brief(c.actual)}`,
+    );
+  const own = report.properties
     .filter((p) => p.status !== 'passed')
     .map((p) =>
       p.status === 'running'
@@ -100,8 +114,8 @@ export function propertyFailure(report: PropertyReport) {
             (p.counterexample && 'expected' in p.counterexample
               ? `: ожидалось ${brief(p.counterexample.expected)}, получено ${brief(p.counterexample.actual)}`
               : ''),
-    )
-    .join('; ');
+    );
+  return [...own, ...corpus].join('; ');
 }
 
 /**
@@ -193,13 +207,38 @@ export function propertyCoverage(
     if (!ran) problems.push(`обязательный корпус (${corpus.cases.length} случаев) не выполнялся`);
     else if (ran.digest !== corpus.digest)
       problems.push('выполнен корпус другой версии, чем закреплён за задачей');
-    else if (!ran.failed.length) {
-      // Провалы корпуса — отказ свойства; здесь проверяется полнота:
-      // свидетельство всех случаев манифеста, каждый пройден.
-      const expected = corpusWitness(corpus.cases.map((c) => ({ id: c.id, passed: true })));
-      if (ran.witness !== expected || ran.executed !== corpus.cases.length)
+    else {
+      // Полнота проверяется всегда, с провалами и без: иначе один упавший
+      // случай выключал сверку, и отчёт с нулём выполненных случаев проходил.
+      // Свидетельство пересчитывается по манифесту с исходами, названными
+      // отчётом; если упавших больше, чем помещается в отчёт, исход каждого
+      // случая не доказать — это тоже отказ.
+      const failed = new Set(ran.failed.map((c) => c.id));
+      const declared = new Set(corpus.cases.map((c) => c.id));
+      const foreign = [...failed].filter((id) => !declared.has(id));
+      const complete = ran.failed.length === ran.executed - ran.passed;
+      const expected = corpusWitness(
+        corpus.cases.map((c) => ({ id: c.id, passed: !failed.has(c.id) })),
+      );
+      if (
+        ran.executed !== corpus.cases.length ||
+        !complete ||
+        foreign.length ||
+        ran.witness !== expected
+      )
         problems.push(
-          `выполнены не все обязательные случаи корпуса: ${ran.executed} из ${corpus.cases.length}`,
+          `выполнены не все обязательные случаи корпуса или исходы не доказаны: ${ran.executed} из ${corpus.cases.length}` +
+            (foreign.length ? `; в отчёте чужие случаи: ${foreign.slice(0, 5).join(', ')}` : ''),
+        );
+      if (ran.failed.length || ran.passed < ran.executed)
+        problems.push(
+          `случаи корпуса провалены: ${ran.executed - ran.passed}` +
+            (ran.failed.length
+              ? ` (${ran.failed
+                  .slice(0, 5)
+                  .map((c) => `${c.property}/${c.id}`)
+                  .join(', ')})`
+              : ''),
         );
     }
   }

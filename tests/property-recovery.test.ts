@@ -5,6 +5,8 @@ import assert from 'node:assert/strict';
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
 import type { AgentAdapter, AgentRequest } from '../src/runner/adapters.ts';
 import { CheckCorpus } from '../src/core/check-store.ts';
+import { Store } from '../src/core/store.ts';
+import { DevContour } from '../src/core/service.ts';
 import {
   check,
   checkProject,
@@ -121,11 +123,12 @@ test('AC24: two substantive failures on one property with different messages and
 
 test('AC25: an infrastructure failure between failures neither counts nor resets, two findings of one run count once, and properties are not glued together', async () => {
   const p = await checkProject(weak());
-  let mode: 'reject-twice' | 'approve' | 'reject-reach' = 'reject-twice';
+  let mode: 'reject-twice' | 'approve' | 'reject-reach' | 'hang-up' = 'reject-twice';
   const f = await fixture(p, {
     config: { maxAttempts: 5 },
-    reviewer: () =>
-      mode === 'approve'
+    reviewer: () => {
+      if (mode === 'hang-up') throw new Error('socket hang up');
+      return mode === 'approve'
         ? undefined
         : mode === 'reject-reach'
           ? rejection({
@@ -150,7 +153,8 @@ test('AC25: an infrastructure failure between failures neither counts nor resets
                   run: null,
                 },
               })),
-            },
+            };
+    },
   });
   try {
     f.write('src/knap.mjs', knap.zeroWeight);
@@ -161,14 +165,26 @@ test('AC25: an infrastructure failure between failures neither counts nor resets
     f.h.pause(false);
     await f.scheduler.drain(); // отказ 1 по knapsack: две находки одного прогона
     assert.equal(task(f, t.id).recovery, undefined, 'две находки одного прогона — один отказ');
-    // Отказ окружения: исполнитель не дошёл до кандидата.
-    const original = f.scheduler.runtimes.demo.execute.bind(f.scheduler.runtimes.demo);
-    f.scheduler.runtimes.demo.execute = () => Promise.reject(new Error('socket hang up'));
+    // Отказ окружения после кандидата: гейт успел записать отчёт, где
+    // свойство прошло, — это отрицательная диагностика попытки, а не
+    // проверенное прохождение, и серию оно не обнуляет.
+    f.write('src/knap.mjs', knap.correct);
+    mode = 'hang-up';
     f.h.retry(t.id);
     await f.scheduler.drain();
-    assert.equal(runs(f, t.id).at(-1)!.failureKind, 'environment');
+    const middle = runs(f, t.id).at(-1)!;
+    assert.equal(middle.failureKind, 'environment', middle.error);
+    assert.ok(
+      middle.evidence.some((e) =>
+        e.property?.report?.properties.some(
+          (x) => x.testId === 'knapsack-optimal' && x.status === 'passed',
+        ),
+      ),
+      'отчёт свойства сохранён в отказавшей попытке',
+    );
     assert.equal(task(f, t.id).recovery, undefined);
-    f.scheduler.runtimes.demo.execute = original;
+    f.write('src/knap.mjs', knap.zeroWeight);
+    mode = 'reject-twice';
     // Отказ окружения остановил выдачу; восстановление снимает эту причину.
     f.h.pause(false);
     // Второй содержательный отказ по knapsack: окружение между ними не в счёт.
@@ -304,33 +320,62 @@ test('AC27: a restart, a duplicate or re-registered workflow and a repeated fail
   const l = lead(() =>
     decision('new-approach', { hypothesis: 'Брать нулевые веса.', plan: 'Корпус.' }),
   );
-  const runner = new LeadRunner(f.h, p.root, l.runtimes);
+  // Первый процесс: ведущий отвечает только после того, как процесс «умер»
+  // (его ответ придёт поздно), и сигнал отмены он не слышит.
+  let release!: (data: unknown) => void;
+  const late = new Promise<unknown>((resolve) => (release = resolve));
+  const hanging: AgentAdapter = {
+    name: 'codex',
+    async execute(r) {
+      l.calls.push(r);
+      return { data: await late, log: 'late lead', command: ['lead'] };
+    },
+  };
+  const first = new LeadRunner(f.h, p.root, { codex: hanging, claude: l.runtimes.claude });
+  let second: LeadRunner | undefined;
+  let secondStore: Store | undefined;
   try {
     f.write('src/knap.mjs', knap.zeroWeight);
     const board = f.h.createBoard('Restart');
     const t = addTask(f, board.id, 'Knapsack');
-    const job = runner.workflow.start({ kind: 'board', id: board.id, authorRuntime: 'codex' });
-    await runner.tick(); // ревью плана
-    await runner.tick(); // выдача
+    const job = first.workflow.start({ kind: 'board', id: board.id, authorRuntime: 'codex' });
+    await first.tick(); // ревью плана
+    await first.tick(); // выдача
     await f.scheduler.drain();
     f.h.retry(t.id);
     await f.scheduler.drain();
     const opened = task(f, t.id).recovery!;
     assert.equal(opened.status, 'awaiting-lead');
-    // Прежний процесс учёл разбор и умер до ответа модели.
-    f.h.recoveryReserve(t.id, opened.id);
+    // Первый процесс резервирует разбор и зависает на вызове модели.
+    const pending = first.tick();
+    while (!l.calls.length) await new Promise((r) => setTimeout(r, 20));
     assert.equal(task(f, t.id).recovery?.status, 'analyzing');
-    await runner.tick();
+    // Замена процесса: новая база-соединение и новый runner после истечения lease.
+    secondStore = new Store(join(p.root, 'state.sqlite'));
+    const h2 = new DevContour(secondStore, f.h.config);
+    second = new LeadRunner(h2, p.root, l.runtimes);
+    secondStore.atomic(() => {
+      const current = second!.workflow.get(job.key, job.owner);
+      current.leaseUntil = 0;
+      secondStore!.saveLocal('lead', job.owner, job.key, current);
+    });
+    await second.tick();
     const after = task(f, t.id).recovery!;
     assert.equal(after.status, 'awaiting-user');
     assert.match(after.reason!, /прерван/);
-    assert.equal(l.calls.length, 0, 'вызов после рестарта не повторён');
+    assert.equal(l.calls.length, 1, 'вызов после замены процесса не повторён');
+    // Поздний ответ прежнего процесса ничего не решает: владение утрачено.
+    release(decision('new-approach', { hypothesis: 'Поздняя гипотеза.', plan: 'Поздний план.' }));
+    await pending.catch(() => undefined);
+    assert.equal(task(f, t.id).recovery?.status, 'awaiting-user');
+    assert.equal(task(f, t.id).recovery?.decision, undefined, 'поздний ответ не записан');
+    const runner = second;
     // Повторная регистрация того же входа и повтор стадии бюджета не дают.
     const again = runner.workflow.start({ kind: 'board', id: board.id, authorRuntime: 'codex' });
     assert.equal(again.key, job.key);
     runner.workflow.retry(job.key, job.owner);
     await runner.tick();
-    assert.equal(l.calls.length, 0);
+    assert.equal(l.calls.length, 1);
     assert.equal(runner.workflow.get(job.key, job.owner).status, 'failed');
     // Повторная резервация того же эпизода — тоже без вызова.
     f.h.store.change('test.reopen', (s) => {
@@ -377,9 +422,12 @@ test('AC27: a restart, a duplicate or re-registered workflow and a repeated fail
     assert.equal(f.h.claim('probe'), undefined, 'бесконечного повтора нет');
     assert.equal(task(f, t.id).attempt, attempts, 'сброса попыток нет');
     assert.ok(stopped.history.some((h) => h.event === 'interrupted'));
-    assert.equal(l.calls.length, 0);
+    assert.equal(l.calls.length, 1);
   } finally {
-    await runner.stop();
+    release(decision('environment'));
+    await first.stop();
+    await second?.stop();
+    secondStore?.close();
     await f.close();
     await removeRoot(p.root);
   }
@@ -426,17 +474,23 @@ test('AC28: a human pause, a cancellation, operator mode and a product conflict 
       'awaiting-lead',
       JSON.stringify(runs(f, blocked.id).map((x) => [x.failureKind, x.properties, x.error])),
     );
+    // Operator mode на живой работе (не упавшей и без паузы): цикл не
+    // вызывает модель и работу не трогает.
+    assert.notEqual(runner.workflow.get(job.key, job.owner).status, 'failed');
+    f.h.config.approvalMode = 'operator';
+    const beforeOperator = JSON.stringify(runner.workflow.get(job.key, job.owner));
+    await runner.tick();
+    await runner.tick();
+    assert.equal(l.calls.length, 0, 'operator mode без автоматического вызова');
+    assert.equal(JSON.stringify(runner.workflow.get(job.key, job.owner)), beforeOperator);
+    assert.equal(task(f, blocked.id).recovery?.status, 'awaiting-lead');
+    f.h.config.approvalMode = 'agent';
     // Пауза человека после старта работы: разбор её не обходит.
     f.h.pause(true);
     await runner.tick();
     assert.equal(l.calls.length, 0);
     assert.equal(f.store.read().paused, true);
-    // Operator mode: никаких автоматических вызовов.
     f.h.pause(false);
-    f.h.config.approvalMode = 'operator';
-    await runner.tick();
-    assert.equal(l.calls.length, 0);
-    f.h.config.approvalMode = 'agent';
     // Конфликт продуктового смысла — решение пользователя.
     // Причина остановки названа в работе; ведущий повторяет стадию явно.
     assert.match(runner.workflow.get(job.key, job.owner).error ?? '', /снятия паузы человеком/);

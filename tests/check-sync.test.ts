@@ -10,12 +10,13 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
 import { CheckCorpus } from '../src/core/check-store.ts';
+import { effectiveChecks } from '../src/core/checks.ts';
 import { configSchema, type Config } from '../src/core/model.ts';
 import { repositories } from '../src/core/repositories.ts';
 import { canonical } from '../src/core/sync-model.ts';
@@ -64,16 +65,20 @@ async function peer(
   root: string,
   name: string,
   source?: Peer,
-  storage: Config['storage'] = 'component',
+  storage: Config['storage'] | 'embedded' = 'component',
 ): Promise<Peer> {
+  const embedded = storage === 'embedded';
   const base = join(root, name),
-    workspace = join(base, 'workspace'),
-    repo = join(base, 'product');
+    repo = join(base, 'product'),
+    // Embedded: workspace — корень единственного репозитория, одна SQLite.
+    workspace = embedded ? repo : join(base, 'workspace');
   mkdirSync(base);
-  for (const [path, from] of [
-    [workspace, source?.workspace],
-    [repo, source?.repo],
-  ] as const) {
+  for (const [path, from] of (embedded
+    ? [[repo, source?.repo]]
+    : [
+        [workspace, source?.workspace],
+        [repo, source?.repo],
+      ]) as [string, string | undefined][]) {
     if (from) git(base, 'clone', '--no-local', from, path);
     else {
       mkdirSync(path);
@@ -101,7 +106,8 @@ async function peer(
     name: 'Check sync',
     repository: repo,
     workspaceRoot: workspace,
-    storage,
+    storage: embedded ? 'central' : storage,
+    ...(embedded ? { workspaceMode: 'embedded' } : {}),
     mode: 'demo',
     concurrency: 1,
     maxAttempts: 3,
@@ -125,6 +131,7 @@ async function peer(
     join(data, 'state.sqlite'),
     storage === 'component' ? repositories(c) : undefined,
   );
+  const paths = embedded ? [repo] : [repo, workspace];
   const h = new DevContour(store, c);
   const self: Peer = {
     name,
@@ -137,14 +144,14 @@ async function peer(
     reject: false,
     scheduler: undefined as unknown as Scheduler,
     commit() {
-      for (const path of [repo, workspace]) {
+      for (const path of paths) {
         git(path, 'add', '.devcontour');
         if (git(path, 'diff', '--cached', '--name-only'))
           git(path, 'commit', '-m', 'Sync development state');
       }
     },
     pull() {
-      for (const path of [repo, workspace]) git(path, 'pull', '--ff-only');
+      for (const path of paths) git(path, 'pull', '--ff-only');
     },
   };
   const writer: AgentAdapter = {
@@ -241,7 +248,7 @@ function fixture() {
   const peers: Peer[] = [];
   return {
     root,
-    async create(name: string, source?: Peer, storage?: Config['storage']) {
+    async create(name: string, source?: Peer, storage?: Config['storage'] | 'embedded') {
       const p = await peer(root, name, source, storage);
       peers.push(p);
       return p;
@@ -325,7 +332,9 @@ async function secondCase(p: Peer, title: string, v: number, defect: string) {
   assert.equal(r.decision.outcome, 'confirmed', r.decision.reason);
   return t;
 }
-const suiteFile = (p: Peer, id: string) => join(p.repo, '.devcontour/checks', id + '.json');
+const stateDir = (p: Peer) =>
+  p.h.config.workspaceMode === 'embedded' ? '.devcontour/components/main' : '.devcontour';
+const suiteFile = (p: Peer, id: string) => join(p.repo, stateDir(p), 'checks', id + '.json');
 const snapshot = (p: Peer) => ({
   state: JSON.stringify(p.store.read()),
   suites: JSON.stringify(new CheckCorpus(p.h).all()),
@@ -371,6 +380,19 @@ test('AC21: independent additions merge three-way; a conflicting expectation or 
     syncGit(a.h);
     assert.equal(Object.keys(new CheckCorpus(a.h).get(suite).cases).length, 3);
 
+    // Черновик той же доски — для проверки невалидного DAG ниже.
+    const draftBoard = b.store
+      .read()
+      .boards.find((x) => x.revisions.at(-1)!.taskIds.includes(fromB.id))!;
+    const draft = b.h.addTask(draftBoard.id, {
+      title: 'Draft follow-up',
+      description: 'Черновик следующей работы той же доски.',
+      role: 'backend',
+      acceptance: ['AC-draft'],
+      contracts: [b.store.read().contracts[0].id],
+    });
+    syncGit(b.h);
+    b.commit();
     // Противоречивое ожидание в Git: тот же вход, другой ответ.
     const before = snapshot(b);
     const baseline = JSON.stringify(b.store.syncBaseline('main'));
@@ -388,14 +410,14 @@ test('AC21: independent additions merge three-way; a conflicting expectation or 
     git(b.repo, 'reset', '-q', '--hard', 'HEAD~1');
 
     // Невалидный DAG в Git откатывает и корпус.
-    const taskFile = join(b.repo, '.devcontour/tasks', fromB.id + '.json');
+    const taskFile = join(b.repo, '.devcontour/tasks', draft.id + '.json');
     const taskRecord = JSON.parse(readFileSync(taskFile, 'utf8')) as {
       data: { dependsOn: string[] };
     };
-    taskRecord.data.dependsOn = [fromB.id];
+    taskRecord.data.dependsOn = [draft.id];
     writeFileSync(taskFile, canonical(taskRecord));
     git(b.repo, 'commit', '-qam', 'cycle');
-    assert.throws(() => syncGit(b.h), /Цикл|Постановка изменилась/);
+    assert.throws(() => syncGit(b.h), /Цикл зависимостей/);
     assert.deepEqual(snapshot(b).suites, before.suites);
     assert.equal(JSON.stringify(b.store.syncBaseline('main')), baseline);
   } finally {
@@ -406,7 +428,7 @@ test('AC21: independent additions merge three-way; a conflicting expectation or 
 test('AC22: central, component and embedded storage keep the corpus with its owner; leases, commands and paths never reach Git', async () => {
   const f = fixture();
   try {
-    for (const storage of ['component', 'central'] as const) {
+    for (const storage of ['component', 'central', 'embedded'] as const) {
       const p = await f.create(storage, undefined, storage);
       syncGit(p.h, { member: storage });
       const { suite } = await deliver(p, 'Optimal ' + storage);
@@ -432,7 +454,7 @@ test('AC22: central, component and embedded storage keep the corpus with its own
         assert.equal(component.length, 1, 'корпус — в БД компонента');
         assert.ok(component[0].data.includes('"cap\\":0'));
         assert.equal(coordinator.length, 0, 'тела корпуса не в coordinator');
-      } else assert.equal(coordinator.length, 1, 'central: корпус в единственной БД');
+      } else assert.equal(coordinator.length, 1, `${storage}: корпус в единственной БД`);
       // В Git — данные корпуса, но не операции, токены, команды и пути.
       const text = readFileSync(suiteFile(p, suite), 'utf8');
       assert.ok(text.includes('"expected": "5"'));
@@ -444,10 +466,12 @@ test('AC22: central, component and embedded storage keep the corpus with its own
         '"command"',
         p.data,
         p.workspace,
+        tmpdir(),
+        homedir(),
       ])
         assert.equal(text.includes(banned), false, `${storage}: ${banned} не в Git`);
-      const receipts = readdirSync(join(p.repo, '.devcontour/receipts')).map((x) =>
-        readFileSync(join(p.repo, '.devcontour/receipts', x), 'utf8'),
+      const receipts = readdirSync(join(p.repo, stateDir(p), 'receipts')).map((x) =>
+        readFileSync(join(p.repo, stateDir(p), 'receipts', x), 'utf8'),
       );
       for (const r of receipts) assert.equal(r.includes(p.data), false);
     }
@@ -491,14 +515,37 @@ test('AC23: an old receipt keeps its level, an incomplete new one is refused, an
     assert.equal(c.store.read().tasks.length, 0, 'ничего не импортировано');
     // Ссылка на версию корпуса, которой нет в Git.
     const d = await f.create('dave', a);
+    // Согласованная подделка: версия, evidence, манифест и привязка задачи
+    // указывают на корпус, которого в Git нет, — остаётся только проверка
+    // наличия версии.
+    const missing = 'e'.repeat(64);
+    const doneTask = a.store.read().tasks.find((x) => x.id === task.id)!;
     strip(d, (r) => {
-      const v = r.data.checkVersion as { corpus: { digest: string } };
-      v.corpus.digest = 'e'.repeat(64);
+      const v = r.data.checkVersion as { effective: string; corpus: { digest: string } };
+      v.corpus.digest = missing;
+      v.effective = effectiveChecks(
+        {
+          approvedDigest: r.data.specDigest as string,
+          contractDigests: doneTask.contractDigests,
+          checkVersion: v.corpus as never,
+        },
+        r.data.policyDigest as string,
+      );
+      for (const c of r.data.checks as {
+        checks?: string;
+        property?: { manifest?: { corpus?: { digest: string } } };
+      }[]) {
+        if (c.checks) c.checks = v.effective;
+        if (c.property?.manifest?.corpus) c.property.manifest.corpus.digest = missing;
+      }
     });
-    assert.throws(
-      () => syncGit(d.h, { member: 'dave' }),
-      /версия проверок не соответствует|которой нет в Git|Привязка корпуса/,
-    );
+    const taskFile2 = join(d.repo, '.devcontour/tasks', task.id + '.json');
+    const taskRecord2 = readRecord<{ progress: { checkVersion: { digest: string } } }>(taskFile2);
+    taskRecord2.progress.checkVersion.digest = missing;
+    writeFileSync(taskFile2, canonical(taskRecord2));
+    git(d.repo, 'commit', '-qam', 'binding to a missing corpus version');
+    assert.throws(() => syncGit(d.h, { member: 'dave' }), /которой нет в Git/);
+    assert.equal(d.store.read().tasks.length, 0, 'ничего не импортировано');
     // Старый receipt задачи без договора проверки читается на прежнем уровне.
     const contract = a.store.read().contracts[0];
     const board = a.h.createBoard('Legacy', '', 'main');

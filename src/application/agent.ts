@@ -79,7 +79,12 @@ export const agentInputs = {
   checks_case_submit: caseInput,
   checks_adopt: z.strictObject({
     suiteId: id,
-    version: z.number().int().min(1),
+    version: z.number().int().min(1).optional(),
+    /** Однозначная ссылка на версию; номер после объединения клонов может совпасть. */
+    digest: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
     tasks: z.array(id).min(1).max(30),
     reason: z.string().trim().min(10).max(2000),
   }),
@@ -496,12 +501,35 @@ export class AgentService {
         return taskChecks(h, input);
       case 'checks_adopt': {
         const v = agentInputs.checks_adopt.parse(input);
-        const result = new CheckCorpus(h).request(v.suiteId, v.version, v.tasks, 'agent', v.reason);
+        // В operator mode агент только запрашивает принятие: задачи
+        // удерживаются, подтверждает человек (checks-approve в CLI или панели).
+        const manual = h.config.approvalMode === 'operator';
+        if (v.version === undefined && !v.digest)
+          throw new DomainError(
+            'Укажите digest версии корпуса (или номер, если он однозначен)',
+            400,
+          );
+        const result = new CheckCorpus(h).request(
+          v.suiteId,
+          { number: v.version, digest: v.digest },
+          v.tasks,
+          'agent',
+          v.reason,
+          manual,
+        );
         return {
           suiteId: v.suiteId,
-          version: v.version,
+          pendingId: result.pending.id,
+          version: result.pending.version,
+          digest: result.pending.digest,
           status: result.pending.status,
           results: result.pending.results,
+          ...(manual
+            ? {
+                awaitingOperator: true,
+                nextStep: `operator: devcontour checks-approve --suite ${v.suiteId} --pending ${result.pending.id}`,
+              }
+            : {}),
         };
       }
       case 'contract_change_status': {

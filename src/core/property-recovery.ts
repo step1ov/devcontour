@@ -110,6 +110,9 @@ function verifiedPass(r: Run, property: string) {
   return r.evidence.some(
     (e) =>
       e.kind === 'test' &&
+      // Гейт завершился штатно: обрыв, таймаут или ошибка уборки дают
+      // exitCode -1 и не являются проверкой свойства.
+      e.exitCode >= 0 &&
       e.property?.level === 'manifest' &&
       !e.property.coverage?.length &&
       e.property.report?.properties.some((p) => p.testId === property && p.status === 'passed'),
@@ -128,8 +131,11 @@ export function propertyStreak(s: DevContourState, task: Task, property: string)
     const r = own[i];
     if (r.episodeBasis !== basis) break;
     if (r.status === 'succeeded') break;
-    if (verifiedPass(r, property)) break;
+    // Инфраструктурный отказ нейтрален и проверяется раньше прохождения:
+    // отчёт, сохранённый как отрицательная диагностика, не доказывает, что
+    // свойство проверено.
     if (r.blocked || (r.failureKind && neutral.includes(r.failureKind))) continue;
+    if (verifiedPass(r, property)) break;
     if (substantive(r) && r.properties?.includes(property)) runs.push(r.id);
     else if (substantive(r)) continue;
   }
@@ -191,6 +197,16 @@ export function afterFailure(s: DevContourState, task: Task, run: Run) {
     return task.recovery;
   }
   return undefined;
+}
+
+/**
+ * Утверждённое изменение основания — постановки или контрактов — завершает
+ * эпизод. Проверяется при утверждении и перед выдачей: иначе блокировка
+ * старого эпизода не давала дойти до попытки, где её снял бы отказ.
+ */
+export function closeIfBasisChanged(task: Task) {
+  if (task.recovery && task.approvedDigest && task.recovery.basis !== episodeBasis(task))
+    close(task, new Date().toISOString(), 'утверждено новое основание задачи');
 }
 
 /** Попытка прошла: эпизод по её свойствам завершён. */

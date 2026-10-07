@@ -9,6 +9,8 @@ import { serve } from '../src/server/http.ts';
 import { workflowMetrics } from '../src/application/metrics.ts';
 import { command, git } from '../src/runner/process.ts';
 import { submitCase } from '../src/runner/checks.ts';
+import { analyzeRecovery } from '../src/runner/recovery.ts';
+import type { AgentAdapter } from '../src/runner/adapters.ts';
 import { check, checkProject, fixture, knap, rejection, removeRoot } from './check-fixture.ts';
 
 const zero = (v: number) => JSON.stringify({ items: [{ w: 0, v }], cap: 0 });
@@ -230,17 +232,37 @@ test('AC35: metrics keep their denominators over gate, review and infrastructure
     f.h.retry(t.id);
     f.h.pause(false);
     await f.scheduler.drain(); // тот же случай корпуса: повторный дефект, отказ гейта
-    // Два отказа по свойству открыли эпизод: повтор — по ручному решению.
+    // Два отказа по свойству открыли эпизод: разбор ведущего идёт штатным
+    // путём, и его вызов регистрируется в usage настоящей обёрткой.
     const episode = f.store.read().tasks.find((x) => x.id === t.id)!.recovery!;
-    f.h.recoveryDecide(t.id, episode.id, {
-      action: 'new-approach',
-      reason: 'Ручное решение: нулевые веса нужно брать всегда.',
-      evidence: [],
-      hypothesis: 'Брать предметы нулевого веса.',
-      plan: 'Корпус и генератор.',
-      source: { kind: 'operator' },
-      decidedAt: new Date().toISOString(),
+    assert.equal(f.h.recoveryReserve(t.id, episode.id).status, 'analyzing');
+    const leadAdapter = (name: 'codex' | 'claude'): AgentAdapter => ({
+      name,
+      execute: () =>
+        Promise.resolve({
+          data: {
+            action: 'new-approach',
+            reason: 'Нулевые веса нужно брать всегда: они не тратят вместимость.',
+            evidence: ['оба отказа на w=0'],
+            hypothesis: 'Брать предметы нулевого веса.',
+            plan: 'Корпус и генератор.',
+            cases: null,
+            proposal: null,
+            conflict: null,
+          },
+          log: 'fixture lead without provider telemetry',
+          command: ['lead'],
+        }),
     });
+    const decision = await analyzeRecovery(
+      f.h,
+      p.root,
+      f.store.read().tasks.find((x) => x.id === t.id)!,
+      'codex',
+      AbortSignal.timeout(60000),
+      { codex: leadAdapter('codex'), claude: leadAdapter('claude') },
+    );
+    assert.equal(f.h.recoveryDecide(t.id, episode.id, decision).status, 'retry');
     // Отказ окружения: не дефект и не отказ ревью.
     const original = f.scheduler.runtimes.demo.execute.bind(f.scheduler.runtimes.demo);
     f.scheduler.runtimes.demo.execute = () => Promise.reject(new Error('socket hang up'));
@@ -248,32 +270,16 @@ test('AC35: metrics keep their denominators over gate, review and infrastructure
     f.h.pause(false);
     await f.scheduler.drain();
     f.scheduler.runtimes.demo.execute = original;
-    // Неизвестная цена: вызов без тарифа и без отчёта провайдера.
-    f.h.store.atomic(() =>
-      f.h.store.saveLocal('usage', 'main', 'manual-call', {
-        repositoryId: 'main',
-        id: 'manual-call',
-        stage: 'property-recovery',
-        runtime: 'codex',
-        model: null,
-        runtimeVersion: null,
-        startedAt: new Date(Date.now() - 1000).toISOString(),
-        finishedAt: new Date().toISOString(),
-        outcome: 'returned',
-        promptBytes: 10,
-        promptDigest: 'x',
-        usage: {
-          complete: false,
-          inputTokens: null,
-          outputTokens: null,
-          cacheReadTokens: null,
-          cacheWriteTokens: null,
-          reportedUsd: null,
-        },
-        costUsd: null,
-        costSource: 'unknown',
-      }),
-    );
+    // Вызов ведущего записан до и после исполнения; цена неизвестна.
+    const calls = Object.values(
+      f.h.store.localRecords<{ stage: string; outcome: string; costSource: string }>(
+        'usage',
+        'main',
+      ),
+    ).filter((c) => c.stage === 'property-recovery');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].outcome, 'returned');
+    assert.equal(calls[0].costSource, 'unknown');
     // Импортированный результат соседнего клона.
     f.store.change('test.imported', (s) => {
       const other = structuredClone(s.tasks.find((x) => x.id === t.id)!);
@@ -312,8 +318,8 @@ test('AC35: metrics keep their denominators over gate, review and infrastructure
       runs.map((r) => r.failureKind),
       ['review', 'gate', 'environment'],
     );
-    // Ручное решение разбора — наблюдаемое техническое вмешательство.
-    assert.ok(feedback.feedbackCost.technicalInterventions >= 1);
+    // Решение ведущего — не ручное вмешательство: контур его не считает.
+    assert.equal(feedback.feedbackCost.technicalInterventions, 0);
     assert.equal(
       f.store.read().tasks.find((x) => x.id === t.id)!.recovery?.status,
       'retry',

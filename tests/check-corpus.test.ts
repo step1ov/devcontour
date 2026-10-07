@@ -5,6 +5,8 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Evidence } from '../src/core/model.ts';
 import { CheckCorpus } from '../src/core/check-store.ts';
+import { Store } from '../src/core/store.ts';
+import { DevContour } from '../src/core/service.ts';
 import { caseHooks, submitCase } from '../src/runner/checks.ts';
 import { command, git } from '../src/runner/process.ts';
 import {
@@ -436,13 +438,17 @@ test('AC16: an attempt cannot edit the checker or pass evidence of another check
     f.write('src/knap.mjs', knap.zeroWeight);
     const t = await startTask(f);
     await f.scheduler.drain();
-    await submitCase(f.h, p.root, {
+    const confirmed = await submitCase(f.h, p.root, {
       taskId: t.id,
       property: 'knapsack-optimal',
       input: zero,
       key: 'case-zero',
     });
-    const v1 = task(f, t.id).checkVersion!;
+    assert.equal(confirmed.decision.outcome, 'confirmed', confirmed.decision.reason);
+    const v1 = task(f, t.id).checkVersion;
+    assert.ok(v1, 'задача приняла версию корпуса');
+    assert.equal(v1.digest, confirmed.version!.digest);
+    const approved = task(f, t.id).approvedDigest;
     // Попытка правит checker: отказ области записи.
     f.write('check.mjs', check(1));
     f.write('src/knap.mjs', knap.correct);
@@ -472,6 +478,15 @@ test('AC16: an attempt cannot edit the checker or pass evidence of another check
       /другой версии проверок/,
     );
     assert.deepEqual(task(f, t.id).checkVersion, v1);
+    assert.equal(task(f, t.id).approvedDigest, approved, 'утверждённая постановка не переписана');
+    // Evidence прежних попыток не переписано принятием новой версии.
+    const first = f.store.read().runs.find((r) => r.taskId === t.id)!;
+    assert.ok(first.evidence.every((e) => e.checks === first.checks?.effective));
+    assert.notEqual(
+      first.checks?.effective,
+      run.checks?.effective,
+      'новая попытка — под новой версией',
+    );
     f.h.fail(run.id, run.token, 'test end', false, 'environment');
   } finally {
     await f.close();
@@ -609,13 +624,16 @@ test('AC17: adoption waits for an active run, a stale owner cannot finish or rel
     caseHooks.afterRecord = () => undefined;
     const decisions = corpus.get(a.suite).decisions.length;
     assert.equal(task(f, other.id).checkVersion, undefined, 'принятие не успело');
-    const resumed = await submitCase(f.h, p.root, {
+    // Перезапуск: новый процесс открывает ту же базу и продолжает по ключу.
+    const restarted = new DevContour(new Store(join(p.root, 'state.sqlite')), f.h.config);
+    const resumed = await submitCase(restarted, p.root, {
       taskId: other.id,
       property: 'knapsack-optimal',
       input: JSON.stringify({ items: [{ w: 0, v: 8 }], cap: 0 }),
       key: 'case-crash',
     });
     assert.equal(resumed.repeated, true);
+    restarted.store.close();
     assert.equal(corpus.get(a.suite).decisions.length, decisions, 'второго подтверждения нет');
     assert.equal(task(f, other.id).checkVersion?.number, corpus.get(a.suite).versions.length);
   } finally {

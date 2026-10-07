@@ -8,6 +8,7 @@ import { authorOverview } from '../application/overview.ts';
 import { DeliveryRunner } from '../runner/forge.ts';
 import { AgentService, capabilities } from '../application/agent.ts';
 import { checksSummary, taskChecks } from '../application/checks.ts';
+import { CheckCorpus } from '../core/check-store.ts';
 import { taskProgress } from '../application/context.ts';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -454,6 +455,9 @@ export async function serve(
                 z.string().parse(input.reason),
               );
             else throw new DomainError('Команда не найдена', 404);
+          } else if (parts[1] === 'checks' && parts[3] === 'pending' && parts[5] === 'approve') {
+            // Подтверждение оператора из панели: тот же доменный метод, что CLI.
+            result = new CheckCorpus(h).approveAdoption(parts[2], parts[4]).pending;
           } else if (parts[1] === 'tasks') {
             if (parts[3] === 'retry') result = h.retry(parts[2]);
             else if (parts[3] === 'cancel') result = h.cancel(parts[2]);

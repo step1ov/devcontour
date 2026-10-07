@@ -3905,6 +3905,10 @@
             "minimum": 1,
             "maximum": 9007199254740991
           },
+          "digest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
           "tasks": {
             "minItems": 1,
             "maxItems": 30,
@@ -3922,7 +3926,6 @@
         },
         "required": [
           "suiteId",
-          "version",
           "tasks",
           "reason"
         ],

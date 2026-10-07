@@ -23,6 +23,7 @@ import {
   afterFailure,
   afterSuccess,
   blocksClaim,
+  closeIfBasisChanged,
   episodeBasis,
   recoveryActions,
   type PropertyRecovery,
@@ -461,6 +462,9 @@ export class DevContour {
       )
         throw new DomainError('Локальная доска принимает только задачи своего компонента');
       Object.assign(t, parsed, { preparation: developmentBinding(s) });
+      // Корпус договора, которого задача больше не касается, не переносится.
+      if (t.checkVersion && !t.contracts.includes(t.checkVersion.suite.replace(/^KS-/, '')))
+        t.checkVersion = undefined;
       assertDag(s.tasks);
       return t;
     });
@@ -571,6 +575,7 @@ export class DevContour {
         t.approvedDigest = specDigest(t);
         t.approval = approval;
         t.status = 'ready';
+        closeIfBasisChanged(t);
       }
       return { boardId, revision: r.number, approval };
     });
@@ -825,6 +830,7 @@ export class DevContour {
       )
         return;
       if (s.runs.filter((r) => r.status === 'active').length >= this.config.concurrency) return;
+      for (const ready of readyTasks(s)) closeIfBasisChanged(ready);
       const eligible = readyTasks(s).filter(
         (t) =>
           t.attempt < this.config.maxAttempts &&
@@ -1318,7 +1324,7 @@ export class DevContour {
       throw new DomainError('Неизвестное действие восстановления', 400);
     if (decision.reason.trim().length < 10)
       throw new DomainError('Решение требует причины не короче 10 символов', 400);
-    return this.store.change('recovery.decided', (s) => {
+    this.store.change('recovery.decided', (s) => {
       const t = task(s, taskId);
       const r = t.recovery;
       if (!r || r.id !== recoveryId) throw new DomainError('Эпизод восстановления не найден', 404);
@@ -1367,8 +1373,9 @@ export class DevContour {
         event: 'decided',
         detail: `${decision.action}: ${decision.reason.slice(0, 300)}`,
       });
-      return structuredClone(r);
+      return { taskId, recovery: r.id, status: r.status, action: decision.action };
     });
+    return structuredClone(task(this.store.read(), taskId).recovery!);
   }
   /** Итог добавления случаев: подтверждённый случай разрешает один повтор. */
   recoveryApplied(
@@ -1376,7 +1383,7 @@ export class DevContour {
     recoveryId: string,
     outcomes: { outcome: string; reason: string }[],
   ) {
-    return this.store.change('recovery.applied', (s) => {
+    this.store.change('recovery.applied', (s) => {
       const t = task(s, taskId);
       const r = t.recovery;
       if (!r || r.id !== recoveryId || r.status !== 'applying')
@@ -1399,8 +1406,9 @@ export class DevContour {
         event: 'applied',
         detail: `${confirmed} из ${outcomes.length} подтверждено`,
       });
-      return structuredClone(r);
+      return { taskId, recovery: r.id, status: r.status };
     });
+    return structuredClone(task(this.store.read(), taskId).recovery!);
   }
   /** Разбор прервался без решения: вызов учтён, повтор не бесплатен. */
   recoveryInterrupted(taskId: string, recoveryId: string, reason: string) {
@@ -1523,6 +1531,10 @@ export class DevContour {
           continue;
         if (!t.contracts.some((c) => from.includes(c))) continue;
         t.contracts = [...new Set(t.contracts.map((c) => (from.includes(c) ? to : c)))];
+        // Корпус принадлежит прежнему договору и его основанию эталона: новая
+        // редакция начинает со своего корпуса. История принятий остаётся в
+        // корпусе прежнего договора.
+        t.checkVersion = undefined;
         t.status = 'draft';
         t.approvedDigest = undefined;
         t.approval = undefined;

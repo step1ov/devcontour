@@ -101,6 +101,13 @@ export interface Adoption {
 export interface PendingAdoption {
   id: string;
   version: number;
+  /**
+   * Версия адресуется digest: после объединения клонов номера могут
+   * совпадать у разных версий. Нет поля — запись прежнего формата.
+   */
+  digest?: string;
+  /** operator mode: принятие ждёт ручного технического подтверждения. */
+  awaitingOperator?: boolean;
   tasks: string[];
   status: 'waiting' | 'completed';
   results: Record<string, string>;
@@ -188,10 +195,45 @@ export function corpusFile(suite: CheckSuite, cases: string[], number: number) {
     }) + '\n'
   );
 }
+/**
+ * Убрать локальные пути из диагностики: исключение реализации или эталона
+ * называет рабочие каталоги, домашний каталог и временные файлы, а запись
+ * корпуса уходит в Git. Нормативные поля (вход, ожидание) не трогаются.
+ */
+const LOCAL_PATH =
+  /(?:file:\/\/)?(?:\/(?:Users|home|private|var|tmp|Volumes|opt|root|mnt|srv|workspace)\/|[A-Za-z]:\\(?:Users|Windows|Temp|tmp)\\)[^\s"'`<>|,;)\]}]*/g;
+export function scrubLocalPaths(text: string, roots: string[] = []) {
+  let out = text;
+  for (const root of roots.filter((r) => r.length > 1).sort((a, b) => b.length - a.length))
+    out = out.split(root).join('<local-path>');
+  return out.replace(LOCAL_PATH, '<local-path>');
+}
 export const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
 export const caseId = (property: string, input: string, basis: string) =>
   'K-' + sha256(JSON.stringify([property, input, basis])).slice(0, 32);
 
+/**
+ * Версия корпуса по ссылке. Digest однозначен; номер — только если в истории
+ * одна версия с ним: после объединения клонов номера могут совпасть.
+ */
+export function versionOf(suite: CheckSuite, ref: { number?: number; digest?: string }) {
+  if (ref.digest) {
+    const found = suite.versions.find((v) => v.digest === ref.digest);
+    if (!found)
+      throw new DomainError(`Версии ${ref.digest.slice(0, 12)} корпуса ${suite.id} нет`, 404);
+    if (ref.number !== undefined && found.number !== ref.number)
+      throw new DomainError('Номер и digest версии корпуса не совпадают', 409);
+    return found;
+  }
+  const same = suite.versions.filter((v) => v.number === ref.number);
+  if (!same.length) throw new DomainError(`Версии ${ref.number} корпуса ${suite.id} нет`, 404);
+  if (same.length > 1)
+    throw new DomainError(
+      `Номер версии ${ref.number} неоднозначен после объединения клонов: укажите digest`,
+      409,
+    );
+  return same[0];
+}
 export class CheckCorpus {
   constructor(readonly h: DevContour) {}
   all(repositoryId?: string) {
@@ -303,7 +345,9 @@ export class CheckCorpus {
     this.h.store.atomic(() => {
       const suite = this.get(suiteId);
       const op = suite.operations[key];
-      if (op?.token !== token || op.status !== 'running') return;
+      // Истёкший lease не продлевается: владение уже потеряно, и продление
+      // вернуло бы право записи тому, кого мог сменить новый владелец.
+      if (op?.token !== token || op.status !== 'running' || op.leaseUntil! <= Date.now()) return;
       op.leaseUntil = Date.now() + this.h.config.leaseMs * 4;
       this.save(suite);
     });
@@ -337,7 +381,7 @@ export class CheckCorpus {
     token: string,
     decision: Omit<CaseDecision, 'id' | 'at' | 'caseId' | 'version'>,
     blobFor: (content: string) => string,
-    adopt: { tasks: string[]; actor: string },
+    adopt: { tasks: string[]; actor: string; manual?: boolean },
   ) {
     return this.h.store.atomic(() => {
       const suite =
@@ -411,6 +455,8 @@ export class CheckCorpus {
               pending = {
                 id: 'AD-' + randomUUID(),
                 version: made.version,
+                digest: this.head(suite)!.digest,
+                ...(adopt.manual ? { awaitingOperator: true } : {}),
                 tasks: adopt.tasks,
                 status: 'waiting',
                 results: {},
@@ -419,6 +465,7 @@ export class CheckCorpus {
                 requestedAt: at,
               };
               suite.pending.push(pending);
+              if (pending.awaitingOperator) this.holdForOperator(pending, suite.id);
             }
           }
         }
@@ -448,12 +495,19 @@ export class CheckCorpus {
    * идемпотентен; снимается только собственное удержание операции.
    */
   adopt(suiteId: string, pendingId: string) {
-    return this.h.store.change('checks.adopted', (s) => {
+    // Событие журнала несёт только id и итоги: тела случаев корпуса в журнал
+    // (и в опрашиваемое состояние, и в coordinator) не попадают.
+    this.h.store.change('checks.adopted', (s) => {
       const suite = this.get(suiteId);
       const pending = suite.pending.find((p) => p.id === pendingId);
       if (!pending) throw new DomainError('Принятие версии не найдено', 404);
-      if (pending.status === 'completed') return { pending, suite };
-      const version = suite.versions.find((v) => v.number === pending.version)!;
+      if (pending.status === 'completed') return undefined;
+      if (pending.awaitingOperator)
+        throw new DomainError(
+          `Принятие ${pending.id} ждёт ручного технического подтверждения (operator mode): devcontour checks-approve --suite ${suite.id} --pending ${pending.id}`,
+          409,
+        );
+      const version = versionOf(suite, { number: pending.version, digest: pending.digest });
       const operation = 'checks:' + pending.id;
       const waiting: string[] = [];
       for (const id of pending.tasks) {
@@ -501,8 +555,15 @@ export class CheckCorpus {
         pending.completedAt = new Date().toISOString();
       }
       this.save(suite);
-      return { pending, suite };
+      return {
+        suite: suite.id,
+        pending: pending.id,
+        status: pending.status,
+        results: pending.results,
+      };
     });
+    const suite = this.get(suiteId);
+    return { pending: suite.pending.find((p) => p.id === pendingId)!, suite };
   }
   private adoptable(
     s: DevContourState,
@@ -540,32 +601,76 @@ export class CheckCorpus {
    * Явно принять уже существующую версию корпуса перечисленными задачами —
    * например, соседней задачей того же договора. Новых случаев не создаёт.
    */
-  request(suiteId: string, number: number, tasks: string[], actor: string, reason: string) {
+  request(
+    suiteId: string,
+    ref: { number?: number; digest?: string },
+    tasks: string[],
+    actor: string,
+    reason: string,
+    /** operator mode: агент только запрашивает, подтверждает человек. */
+    manual = false,
+  ) {
     const pending = this.h.store.atomic(() => {
       const suite = this.get(suiteId);
-      if (!suite.versions.some((v) => v.number === number))
-        throw new DomainError(`Версии ${number} корпуса ${suiteId} нет`, 404);
+      const version = versionOf(suite, ref);
       if (!tasks.length) throw new DomainError('Перечислите задачи, принимающие версию', 400);
       const made: PendingAdoption = {
         id: 'AD-' + randomUUID(),
-        version: number,
+        version: version.number,
+        digest: version.digest,
         tasks,
         status: 'waiting',
         results: {},
         actor,
         reason,
         requestedAt: new Date().toISOString(),
+        ...(manual ? { awaitingOperator: true } : {}),
       };
       suite.pending.push(made);
+      if (manual) this.holdForOperator(made, suite.id);
       this.save(suite);
       return made;
     });
+    if (manual) return { pending, suite: this.get(suiteId) };
     return this.adopt(suiteId, pending.id);
+  }
+  /**
+   * В operator mode выдача перечисленных незавершённых задач удерживается до
+   * ручного подтверждения: иначе следующая попытка шла бы без нового корпуса.
+   */
+  private holdForOperator(pending: PendingAdoption, suiteId: string) {
+    this.h.store.change('checks.awaiting-operator', (s) => {
+      for (const t of s.tasks)
+        if (pending.tasks.includes(t.id) && !t.hold && !['done', 'cancelled'].includes(t.status))
+          t.hold = {
+            operation: 'checks:' + pending.id,
+            reason: `Принятие версии корпуса ${suiteId} ждёт подтверждения оператора`,
+          };
+      return { pending: pending.id };
+    });
+  }
+  /**
+   * Ручное техническое подтверждение принятия (operator mode). Вызывается
+   * человеком через CLI или панель, а не агентским API.
+   */
+  approveAdoption(suiteId: string, pendingId: string) {
+    this.h.store.atomic(() => {
+      const suite = this.get(suiteId);
+      const pending = suite.pending.find((p) => p.id === pendingId);
+      if (!pending) throw new DomainError('Принятие версии не найдено', 404);
+      if (!pending.awaitingOperator) return;
+      pending.awaitingOperator = undefined;
+      pending.actor += ' + operator';
+      this.save(suite);
+    });
+    return this.adopt(suiteId, pendingId);
   }
   /** Продолжить отложенные принятия: задача освободилась. Ничего не запускает. */
   resume() {
     for (const suite of this.all())
-      for (const pending of suite.pending.filter((p) => p.status === 'waiting'))
+      for (const pending of suite.pending.filter(
+        (p) => p.status === 'waiting' && !p.awaitingOperator,
+      ))
         try {
           this.adopt(suite.id, pending.id);
         } catch {
@@ -619,10 +724,34 @@ export function portableSuite(suite: CheckSuite): PortableSuite {
     basis: suite.basis,
     cases: Object.values(suite.cases).sort((a, b) => a.id.localeCompare(b.id)),
     versions: suite.versions,
-    decisions: suite.decisions.map(({ method, ...d }) =>
-      method
+    // Диагностические поля проходят очистку путей и на экспорте: запись
+    // прежней версии могла сохранить их до появления очистки при записи.
+    decisions: suite.decisions.map(({ method, ...d }) => {
+      const clean = {
+        ...d,
+        reason: scrubLocalPaths(d.reason),
+        ...(d.observed
+          ? {
+              observed: {
+                ...d.observed,
+                ...(d.observed.actual !== undefined
+                  ? { actual: scrubLocalPaths(d.observed.actual) }
+                  : {}),
+              },
+            }
+          : {}),
+        ...(d.claimed
+          ? {
+              claimed: {
+                ...d.claimed,
+                actual: d.claimed.actual === null ? null : scrubLocalPaths(d.claimed.actual),
+              },
+            }
+          : {}),
+      };
+      return method
         ? {
-            ...d,
+            ...clean,
             method: {
               gate: method.gate,
               artifacts: method.artifacts,
@@ -630,8 +759,8 @@ export function portableSuite(suite: CheckSuite): PortableSuite {
               basis: method.basis,
             },
           }
-        : d,
-    ),
+        : clean;
+    }),
     adoptions: suite.adoptions,
   };
 }

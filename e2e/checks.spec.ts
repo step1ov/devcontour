@@ -33,6 +33,10 @@ test.afterAll(async () => {
   await exited;
 });
 
+const taskIdOf = (state: string) =>
+  (JSON.parse(state) as { tasks: { id: string; title: string }[] }).tasks.find(
+    (t) => t.title === 'Оптимальный рюкзак',
+  )!.id;
 async function openTask(page: Page) {
   await page.goto(base + '/');
   await page
@@ -67,8 +71,15 @@ test('The check card shows version, coverage, corpus pages, failure history, rec
   await expect(cases).toHaveCount(25);
   await expect(card.getByRole('button', { name: 'Показать ещё' })).toHaveCount(0);
   // Опрашиваемое состояние не несёт входов корпуса.
+  // Входа корпуса нет ни как JSON, ни как строки внутри JSON.
   const state = await (await page.request.get(base + '/api/state')).text();
-  expect(state).not.toContain('"cap":0,"items":[{"v":17,"w":0}]');
+  for (const form of ['"v":17,"w":0', '\\"v\\":17,\\"w\\":0', '{"w":0,"v":17}'])
+    expect(state).not.toContain(form);
+  // Сама карточка — по запросу — этот вход содержит.
+  const details = await (
+    await page.request.get(`${base}/api/tasks/${taskIdOf(state)}/checks?limit=50`)
+  ).text();
+  expect(details).toContain('\\"v\\":17,\\"w\\":0');
   const axe = await new AxeBuilder({ page }).include('[aria-label="Договор проверки"]').analyze();
   expect(axe.violations).toEqual([]);
   expect(errors).toEqual([]);

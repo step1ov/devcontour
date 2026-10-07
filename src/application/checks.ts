@@ -134,7 +134,10 @@ export function taskChecks(h: DevContour, raw: unknown) {
   const disputed = decisions.filter((d) => d.outcome !== 'confirmed');
   const proposed = (s.reproductions ?? []).filter((r) => r.taskId === task.id);
   const waitingAdoption = !!suite?.pending.some(
-    (p) => p.status === 'waiting' && p.tasks.includes(task.id),
+    (p) => p.status === 'waiting' && !p.awaitingOperator && p.tasks.includes(task.id),
+  );
+  const awaitingOperator = suite?.pending.find(
+    (p) => p.status === 'waiting' && p.awaitingOperator && p.tasks.includes(task.id),
   );
   const history: Record<
     string,
@@ -247,7 +250,12 @@ export function taskChecks(h: DevContour, raw: unknown) {
       repairsUsed: job?.repairs ?? 0,
       repairBudget: h.config.repairBudget,
     },
-    next: nextStep(h, task, waitingAdoption),
+    next: awaitingOperator
+      ? {
+          actor: 'user' as Actor,
+          step: `Принятие версии корпуса ждёт подтверждения оператора: devcontour checks-approve --suite ${suite!.id} --pending ${awaitingOperator.id}`,
+        }
+      : nextStep(h, task, waitingAdoption),
   };
 }
 

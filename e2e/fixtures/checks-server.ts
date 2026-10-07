@@ -4,6 +4,7 @@
 // подтверждённых случаев — больше одной страницы карточки.
 import { serve } from '../../src/server/http.ts';
 import { submitCase } from '../../src/runner/checks.ts';
+import { CheckCorpus } from '../../src/core/check-store.ts';
 import {
   check,
   checkProject,
@@ -45,6 +46,11 @@ for (let v = 1; v <= 25; v++)
     key: `fixture-case-${v}`,
     origin: 'lead',
   });
+// operator mode: принятие корпуса подтверждает оператор (как checks-approve).
+const corpus = new CheckCorpus(f.h);
+for (const suite of corpus.all())
+  for (const pending of suite.pending.filter((x) => x.awaitingOperator))
+    corpus.approveAdoption(suite.id, pending.id);
 f.h.retry(t.id);
 await f.scheduler.drain();
 f.h.pause(true);
