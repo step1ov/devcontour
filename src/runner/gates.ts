@@ -18,6 +18,7 @@ import {
   propertySeed,
 } from '../core/property.ts';
 import { taskCheckManifest } from '../core/checks.ts';
+import { CheckCorpus } from '../core/check-store.ts';
 import { readPropertyReport } from './property.ts';
 import { redactDeep } from './redaction.ts';
 import { availableRedactor } from './environment.ts';
@@ -372,8 +373,25 @@ async function executeGate(
   // проверял ровно область этой задачи, а не сценарии следующих.
   const owned = h.store.read();
   const ownTask = owned.tasks.find((t) => t.id === run.taskId);
+  // Корпус закреплён за попыткой при выдаче: его случаи материализуются из
+  // закреплённых байтов в каталоге контура вне worktree, только для чтения
+  // проверкой. Принятую ветку ради нового JSON-входа двигать не нужно.
+  const corpus =
+    gate.property && run.checks?.corpus
+      ? new CheckCorpus(h).snapshot(run.checks.corpus)
+      : undefined;
   const expected =
-    gate.property && ownTask ? taskCheckManifest(ownTask, owned.contracts, gate.id) : undefined;
+    gate.property && ownTask
+      ? taskCheckManifest(ownTask, owned.contracts, gate.id, corpus)
+      : undefined;
+  const corpusDir = expected?.corpus
+    ? await realpath(await mkdtemp(join(tmpdir(), 'dc-corpus-')))
+    : undefined;
+  const corpusPath = corpusDir ? join(corpusDir, 'corpus.json') : undefined;
+  if (corpusPath) {
+    await writeFile(corpusPath, corpus!.content);
+    await chmod(corpusPath, 0o444);
+  }
   let kind: FailureKind = 'gate';
   let passed = false,
     summary = '',
@@ -403,6 +421,7 @@ async function executeGate(
               ...(expected
                 ? { DEVCONTOUR_PROPERTIES: expected.properties.map((p) => p.id).join(',') }
                 : {}),
+              ...(corpusPath ? { DEVCONTOUR_CORPUS: corpusPath } : {}),
             }
           : {}),
       },
@@ -410,7 +429,11 @@ async function executeGate(
       timeoutMs: gate.timeoutMs,
       signal,
       write: [cwd, ...(propertyDir ? [propertyDir] : [])],
-      readable: [...(run.dependencies ?? []).map((d) => d.path), ...boundary.readable],
+      readable: [
+        ...(run.dependencies ?? []).map((d) => d.path),
+        ...boundary.readable,
+        ...(corpusDir ? [corpusDir] : []),
+      ],
       controller: boundary.hidden,
       settingsDir: join(artifactDir, gate.id),
     });
@@ -498,6 +521,18 @@ async function executeGate(
       passed = false;
       summary =
         summary && summary !== 'Команда завершилась успешно' ? `${summary}; ${cleanup}` : cleanup;
+    }
+    // Корпус исполнялся из закреплённых байтов: проверка без песочницы могла
+    // бы их переписать, и тогда свидетельство относилось бы к другим случаям.
+    if (corpusDir) {
+      const intact = await readFile(corpusPath!, 'utf8')
+        .then((text) => text === corpus!.content)
+        .catch(() => false);
+      await rm(corpusDir, { recursive: true, force: true }).catch(() => undefined);
+      if (!intact) {
+        passed = false;
+        summary = 'Проверка изменила файл закреплённого корпуса';
+      }
     }
     const failure = read.report ? propertyFailure(read.report) : '';
     // Покрытие сверяется всегда, когда отчёт прочитан: зелёный код выхода
@@ -595,5 +630,18 @@ async function executeGate(
       : {}),
   };
   h.evidence(run.id, run.token, evidence);
-  if (!passed) throw new TaskFailure(kind, `${phase}/${gate.id}: ${evidence.summary}`);
+  if (!passed) {
+    // Отказ связывается со свойствами по отчёту проверки, а не по тексту:
+    // объявленные задачей — для эпизода восстановления, прочие — для разбора.
+    const report = property?.report;
+    const failing = [
+      ...(report?.properties.filter((p) => p.status === 'failed').map((p) => p.testId) ?? []),
+      ...(report?.corpus?.failed.map((c) => c.property) ?? []),
+    ];
+    const declared = new Set(expected?.properties.map((p) => p.id) ?? []);
+    throw new TaskFailure(kind, `${phase}/${gate.id}: ${evidence.summary}`, {
+      bound: [...new Set(failing.filter((id) => declared.has(id)))],
+      unbound: [...new Set(failing.filter((id) => !declared.has(id)))],
+    });
+  }
 }

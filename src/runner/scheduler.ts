@@ -29,6 +29,9 @@ import { runGate } from './gates.ts';
 import { isolation } from './isolation.ts';
 import { continuableDraft, implementationBasis } from '../core/reuse.ts';
 import { assertArtifactsInBase, componentArtifacts } from './contract-artifacts.ts';
+import { CheckCorpus } from '../core/check-store.ts';
+import { propertySeed } from '../core/property.ts';
+import { writeSelfCheck } from './checks.ts';
 
 // Гейты прогона — область доказательства задачи, если она объявлена. Полный
 // набор профиля остаётся обязательным для приёмки доски и релиза, но требовать
@@ -95,6 +98,11 @@ export class Scheduler {
   private timer?: NodeJS.Timeout;
   private ticking = false;
   private contexts = new Map<string, string>();
+  /** Команда самопроверки исполнителя и её каталог — только для чтения. */
+  private selfChecks = new Map<
+    string,
+    { dir: string; plan: NonNullable<Awaited<ReturnType<typeof writeSelfCheck>>> }
+  >();
   private mergeTails = new Map<string, Promise<void>>();
   constructor(
     readonly h: DevContour,
@@ -116,6 +124,7 @@ export class Scheduler {
         cwd,
         ...(run.dependencies ?? []).map((d) => d.path),
         ...this.boundary(task.repositoryId).readable,
+        ...(!review && this.selfChecks.has(run.id) ? [this.selfChecks.get(run.id)!.dir] : []),
       ],
       domains: this.h.config.isolation.domains,
     });
@@ -238,6 +247,9 @@ export class Scheduler {
         return;
       }
       await this.recover();
+      // Отложенные принятия версии корпуса завершаются, когда задача
+      // освободилась: до выдачи, чтобы новая попытка шла уже по новой версии.
+      new CheckCorpus(this.h).resume();
       for (const [id, job] of this.jobs) {
         const r = this.h.store.read().runs.find((r) => r.id === id);
         if (r?.status !== 'active') job.controller.abort();
@@ -444,6 +456,11 @@ export class Scheduler {
               })),
             })),
         ),
+      // Обязательный корпус: подтверждённые эталоном случаи, принятые задачей.
+      // Они исполняются гейтом до ревью; подсказка показывает их часть, а
+      // полный список доступен файлом самопроверки.
+      ...this.corpusPrompt(run, review),
+      ...this.recoveryPrompt(task, review),
       // Воспроизведения из прошлых ревью — входы, на которых задача уже
       // ломалась. Это диагностика: gate они не расширяют.
       ...((s.reproductions ?? []).some((r) => r.taskId === task.id)
@@ -497,6 +514,41 @@ export class Scheduler {
       this.contexts.get(run.id) ?? '',
       'Use repo AGENTS.md and scoped memory. Never mark a task done yourself. No secrets in output. Explain actions and evidence, not private reasoning.',
     ].join('\n\n');
+  }
+  /** Решение разбора ведущего, под которым выдан повтор: гипотеза и её источник. */
+  private recoveryPrompt(task: Task, review: boolean) {
+    const r = this.h.store.read().tasks.find((t) => t.id === task.id)?.recovery;
+    if (review || !r?.decision || r.status !== 'retrying') return [];
+    const d = r.decision;
+    const source = `${d.source.kind}${d.source.runtime ? ' (' + d.source.runtime + ')' : ''}, recovery ${r.id}`;
+    return [
+      d.action === 'new-approach'
+        ? `Lead decision after two failures on property ${r.property} (source: ${source}): change the implementation approach. Hypothesis: ${d.hypothesis}. Verification plan: ${d.plan}. Reason: ${d.reason}`
+        : `Lead decision after two failures on property ${r.property} (source: ${source}): confirmed cases were added to the mandatory corpus. Reason: ${d.reason}. Fix the class of defect, not only these inputs.`,
+    ];
+  }
+  private corpusPrompt(run: Run, review: boolean) {
+    const binding = run.checks?.corpus;
+    const self = this.selfChecks.get(run.id);
+    const parts: string[] = [];
+    if (binding) {
+      const suite = new CheckCorpus(this.h).get(binding.suite);
+      const version = suite.versions.find((v) => v.number === binding.number)!;
+      parts.push(
+        `Mandatory corpus ${suite.id} version ${version.number} (sha256 ${version.digest}): ${version.cases.length} cases confirmed by the pinned oracle on defective commits. They are part of the gate and run before review on both phases. ${version.cases.length > 20 ? 'First 20 shown; the full corpus is in the self-check directory. ' : ''}Cases: ` +
+          JSON.stringify(
+            version.cases.slice(0, 20).map((id) => {
+              const c = suite.cases[id];
+              return { id, property: c.property, input: c.input, expected: c.expected };
+            }),
+          ),
+      );
+    }
+    if (!review && self)
+      parts.push(
+        `Self-check: run \`${self.plan.command.join(' ')}\` from the worktree root before returning. It runs the pinned checker on your working tree with ${self.plan.cases} mandatory corpus cases, the generator with seed ${self.plan.seed} and your properties (${self.plan.properties.join(', ')}). A non-zero exit names the property, the exact input and the reason. It is diagnostic: DevContour still runs the gates on your commit.`,
+      );
+    return parts;
   }
   /**
    * Область изменений кандидата. `range` — что сравнивать: индекс против HEAD
@@ -782,8 +834,16 @@ export class Scheduler {
       ),
     };
     this.h.evidence(run.id, run.token, evidence);
-    if (!passed)
-      throw new TaskFailure('review', 'Независимое ревью отклонило результат: ' + review.summary);
+    if (!passed) {
+      // Свойство находки — только объявленное задачей; свободная строка
+      // ревьюера сохраняется для разбора, но эпизод не открывает.
+      const named = reproductions.map((r) => r.property).filter((p): p is string => !!p);
+      const declared = new Set(task.properties ?? []);
+      throw new TaskFailure('review', 'Независимое ревью отклонило результат: ' + review.summary, {
+        bound: [...new Set(named.filter((p) => declared.has(p)))],
+        unbound: [...new Set(named.filter((p) => !declared.has(p)))],
+      });
+    }
   }
   private async execute(run: Run, controller: AbortController) {
     const signal = controller.signal;
@@ -976,6 +1036,20 @@ export class Scheduler {
                       ),
                     );
                     await this.continueDraft(run, task, cwd, dir);
+                    const selfDir = join(
+                      this.runRoot(task.repositoryId),
+                      'artifacts',
+                      run.id,
+                      'self-check',
+                    );
+                    const plan = await writeSelfCheck(
+                      this.h,
+                      task,
+                      selfDir,
+                      propertySeed(run.id, 'self', task.id),
+                      run.checks?.corpus,
+                    );
+                    if (plan) this.selfChecks.set(run.id, { dir: selfDir, plan });
                     const writer = this.runtimes[run.runtime];
                     const toolProfile = toolProfileFor(
                       this.h.config,
@@ -1127,6 +1201,7 @@ export class Scheduler {
           (error instanceof BlockedError || kind === 'provider-auth') && !run.candidateSha,
           kind,
           heartbeatCause,
+          error instanceof TaskFailure ? error.properties : undefined,
         );
         // Отказ, который повторится на любой задаче — кончились кредиты,
         // runtime не авторизован, — останавливает выдачу. Иначе очередь
@@ -1153,6 +1228,7 @@ export class Scheduler {
       }
     } finally {
       this.contexts.delete(run.id);
+      this.selfChecks.delete(run.id);
       clearTimeout(timeout);
       clearInterval(heartbeat);
     }

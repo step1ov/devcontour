@@ -185,6 +185,18 @@ export interface Task extends TaskInput {
   attempt: number;
   resultSha?: string;
   failure?: string;
+  /**
+   * Принятая задачей версия корпуса подтверждённых случаев. В постановку не
+   * входит: утверждённый digest задачи не меняется, а действующая версия
+   * проверок считается из постановки, контрактов, политики и этой версии.
+   */
+  checkVersion?: { suite: string; number: number; digest: string };
+  /**
+   * Эпизод повторяющихся отказов по свойству (core/property-recovery.ts).
+   * Локальная операция установки: в Git не переносится.
+   */
+  recovery?: import('./property-recovery.ts').PropertyRecovery;
+  recoveryHistory?: import('./property-recovery.ts').PropertyRecovery[];
   /** Класс последнего отказа, поставленный в точке его обнаружения. */
   failureKind?: FailureKind;
   /** Отпечаток последнего отказа: по нему считаются одинаковые повторы. */
@@ -356,6 +368,11 @@ export interface Run {
     outcome?: 'passed' | 'failed';
   }[];
   requiredGates?: string[];
+  /**
+   * Версия проверок, под которой выдана попытка: закреплена при claim и не
+   * меняется до её конца. Принятие новой версии корпуса ждёт окончания.
+   */
+  checks?: { effective: string; corpus?: { suite: string; number: number; digest: string } };
   id: string;
   taskId: string;
   repositoryId?: string;
@@ -383,6 +400,12 @@ export interface Run {
   blocked?: boolean;
   failureKind?: FailureKind;
   failureFingerprint?: string;
+  /** Объявленные свойства, с которыми связан блокирующий отказ попытки. */
+  properties?: string[];
+  /** Свойства, названные ревьюером, но не объявленные: только для разбора. */
+  unboundProperties?: string[];
+  /** Основание эпизода восстановления при выдаче: постановка и контракты. */
+  episodeBasis?: string;
   /** Digest оснований реализации: по нему решается, можно ли взять кандидата. */
   implementationBasis?: string;
   /** Реализация взята у предыдущей попытки, а не написана заново. */

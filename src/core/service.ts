@@ -18,7 +18,16 @@ import {
 import { Store } from './store.ts';
 import { failureFingerprint, TaskFailure, type FailureKind } from './failure.ts';
 import { taskEvidence, unprovenReason } from './proof.ts';
-import { assertTaskProperties, type CheckDeclaration } from './checks.ts';
+import { assertTaskProperties, effectiveChecks, type CheckDeclaration } from './checks.ts';
+import {
+  afterFailure,
+  afterSuccess,
+  blocksClaim,
+  episodeBasis,
+  recoveryActions,
+  type PropertyRecovery,
+  type RecoveryDecision,
+} from './property-recovery.ts';
 import { planResult } from './plan.ts';
 import { boardOwner } from './sync-state.ts';
 import { carriedTaskIds } from './work-status.ts';
@@ -754,7 +763,12 @@ export class DevContour {
         return;
       if (s.runs.filter((r) => r.status === 'active').length >= this.config.concurrency) return;
       const eligible = readyTasks(s).filter(
-        (t) => t.attempt < this.config.maxAttempts && (!s.team || t.assignee === s.team.member),
+        (t) =>
+          t.attempt < this.config.maxAttempts &&
+          (!s.team || t.assignee === s.team.member) &&
+          // Два содержательных отказа по одному свойству: третья выдача —
+          // только после разбора. Независимые задачи выдаются как обычно.
+          !blocksClaim(t),
       );
       const t = eligible[0];
       if (!t) return;
@@ -807,12 +821,27 @@ export class DevContour {
         effort: roleBinding(this.config, t.role, t.repositoryId).effort,
         reviewerEffort: reviewerBinding(this.config, t.role, t.repositoryId).effort,
         policyDigest: this.policyDigest(t.repositoryId),
+        // Версия проверок закрепляется при выдаче: принятие нового корпуса
+        // посередине попытки ждёт её окончания, и evidence этой попытки
+        // относится к этой версии.
+        checks: {
+          effective: effectiveChecks(t, this.policyDigest(t.repositoryId)),
+          ...(t.checkVersion ? { corpus: t.checkVersion } : {}),
+        },
         status: 'active',
         phase: 'running',
         startedAt: now(),
         leaseUntil: Date.now() + this.config.leaseMs,
         evidence: [],
       };
+      run.episodeBasis = episodeBasis(t);
+      if (t.recovery?.status === 'retry') {
+        // Разрешённый разбором повтор выдан: второй раз он не выдаётся.
+        t.recovery.status = 'retrying';
+        t.recovery.retryRun = run.id;
+        t.recovery.version++;
+        t.recovery.history.push({ at: now(), event: 'retry-claimed', detail: run.id });
+      }
       t.status = 'running';
       t.activeRunId = run.id;
       t.failure = undefined;
@@ -972,7 +1001,17 @@ export class DevContour {
   }
   evidence(id: string, token: string, evidence: Omit<Evidence, 'id' | 'runId' | 'createdAt'>) {
     return this.withRun(id, token, 'evidence.recorded', (r) => {
-      const e = { ...evidence, id: randomUUID(), runId: id, createdAt: now() };
+      // Evidence относится к версии проверок попытки. Чужая версия не
+      // записывается: старое evidence не выдаётся за проверку новой.
+      if (evidence.checks !== undefined && evidence.checks !== r.checks?.effective)
+        throw new DomainError('Evidence другой версии проверок, чем у попытки');
+      const e = {
+        ...evidence,
+        ...(r.checks ? { checks: r.checks.effective } : {}),
+        id: randomUUID(),
+        runId: id,
+        createdAt: now(),
+      };
       r.evidence.push(e);
       return e;
     });
@@ -981,9 +1020,18 @@ export class DevContour {
     return this.withRun(id, token, 'task.done', (r, t) => {
       if (r.phase !== 'integrating' || !r.candidateSha || r.integrationSha !== sha)
         throw new DomainError('Нет интеграционного коммита');
+      // Принять можно только под той версией проверок, под которой шла
+      // попытка: новый корпус, принятый задачей, требует новой попытки.
+      if (r.checks && effectiveChecks(t, this.policyDigest(t.repositoryId)) !== r.checks.effective)
+        throw new DomainError('Версия проверок задачи изменилась; нужна новая попытка');
       const last = (kind: Evidence['kind'], phase: Evidence['phase'], sha: string, gate: string) =>
         r.evidence.findLast(
-          (e) => e.kind === kind && e.phase === phase && e.sha === sha && e.gate === gate,
+          (e) =>
+            e.kind === kind &&
+            e.phase === phase &&
+            e.sha === sha &&
+            e.gate === gate &&
+            (!r.checks || e.checks === r.checks.effective),
         )?.passed === true;
       // Доказательства требуются по области доказательства прогона — той же,
       // по которой гейты и запускались. Требовать весь набор профиля значит
@@ -1011,6 +1059,7 @@ export class DevContour {
       publish?.();
       r.status = 'succeeded';
       r.finishedAt = now();
+      afterSuccess(t);
       t.status = 'done';
       t.resultSha = sha;
       t.activeRunId = undefined;
@@ -1025,8 +1074,10 @@ export class DevContour {
     kind: FailureKind = 'unknown',
     /** Первая причина неудавшегося продления, известная планировщику. */
     heartbeatCause?: string,
+    /** Свойства, с которыми связан отказ: объявленные и только названные. */
+    properties?: { bound: string[]; unbound: string[] },
   ) {
-    return this.withRun(id, token, 'run.failed', (r, t) => {
+    return this.withRun(id, token, 'run.failed', (r, t, s) => {
       // Класс и отпечаток записываются вместе с отказом: решение о починке
       // принимается позже, возможно после перезапуска, и восстанавливать
       // причину из текста сообщения тогда уже нечем.
@@ -1051,11 +1102,24 @@ export class DevContour {
       t.failureKind = kind;
       t.failureFingerprint = fingerprint;
       t.activeRunId = undefined;
+      // Свойство отказа — только объявленное задачей: неизвестное сохраняется
+      // для разбора, но счётчик эпизода не выбирает.
+      if (properties?.bound.length) r.properties = [...new Set(properties.bound)];
+      if (properties?.unbound.length) r.unboundProperties = [...new Set(properties.unbound)];
       // Отказ окружения задачу не пробовал: попытка возвращается, иначе бюджет
       // сгорает на неполадках контура и задача блокируется, ни разу не дойдя
       // до исполнителя.
       if (blocked && t.attempt > 0) t.attempt--;
-      return { taskId: t.id, runId: id, error, blocked, kind };
+      const recovery = afterFailure(s, t, r);
+      return {
+        taskId: t.id,
+        runId: id,
+        error,
+        blocked,
+        kind,
+        ...(r.properties ? { properties: r.properties } : {}),
+        ...(recovery ? { recovery: { id: recovery.id, status: recovery.status } } : {}),
+      };
     });
   }
   discoveries(id: string, token: string, sha: string, input: unknown) {
@@ -1141,6 +1205,151 @@ export class DevContour {
         created.push(t.id);
       }
       return created;
+    });
+  }
+  /**
+   * Учесть разбор ведущего до вызова модели. Один автоматический разбор на
+   * эпизод: повторная регистрация, рестарт или дубликат события бесплатного
+   * вызова не получают. Исчерпанные попытки задачи — решение пользователя.
+   */
+  recoveryReserve(taskId: string, recoveryId: string) {
+    return this.store.change('recovery.reserved', (s) => {
+      const t = task(s, taskId);
+      const r = t.recovery;
+      if (!r || r.id !== recoveryId) throw new DomainError('Эпизод восстановления не найден', 404);
+      if (r.status !== 'awaiting-lead')
+        throw new DomainError(`Эпизод ${r.id} не ждёт разбора: ${r.status}`, 409);
+      const at = now();
+      if (r.calls >= 1) {
+        r.status = 'awaiting-user';
+        r.reason = 'Автоматический разбор эпизода уже использован; повторный вызов не выполняется.';
+      } else if (t.attempt >= this.config.maxAttempts) {
+        r.status = 'awaiting-user';
+        r.reason =
+          'Попытки задачи исчерпаны: разрешённого повтора не осталось, сброс — решение человека.';
+      } else {
+        r.calls++;
+        r.status = 'analyzing';
+      }
+      r.version++;
+      r.history.push({
+        at,
+        event: r.status === 'analyzing' ? 'analysis-reserved' : 'refused',
+        detail: r.reason,
+      });
+      return { taskId, recovery: r.id, status: r.status, reason: r.reason };
+    });
+  }
+  /**
+   * Записать решение разбора — ведущего (автоматического) или ручное через
+   * API — и перевести эпизод в состояние разрешённого действия. Ручное
+   * решение сверяет версию записи: устаревшее не применяется.
+   */
+  recoveryDecide(
+    taskId: string,
+    recoveryId: string,
+    decision: RecoveryDecision,
+    expectedVersion?: number,
+  ): PropertyRecovery {
+    if (!recoveryActions.includes(decision.action))
+      throw new DomainError('Неизвестное действие восстановления', 400);
+    if (decision.reason.trim().length < 10)
+      throw new DomainError('Решение требует причины не короче 10 символов', 400);
+    return this.store.change('recovery.decided', (s) => {
+      const t = task(s, taskId);
+      const r = t.recovery;
+      if (!r || r.id !== recoveryId) throw new DomainError('Эпизод восстановления не найден', 404);
+      if (expectedVersion !== undefined && r.version !== expectedVersion)
+        throw new DomainError('Эпизод изменился; прочитайте его заново', 409);
+      const manual = decision.source.kind === 'operator';
+      if (!manual && r.status !== 'analyzing')
+        throw new DomainError(`Эпизод ${r.id} не в разборе: ${r.status}`, 409);
+      if (manual && !['awaiting-lead', 'awaiting-user', 'stopped', 'analyzing'].includes(r.status))
+        throw new DomainError(`Эпизод ${r.id} уже исполняет решение: ${r.status}`, 409);
+      if (t.status === 'cancelled') throw new DomainError('Задача отменена', 409);
+      const at = now();
+      r.decision = decision;
+      const retryable = t.attempt < this.config.maxAttempts;
+      switch (decision.action) {
+        case 'add-cases':
+          if (!decision.cases?.length) throw new DomainError('add-cases без случаев', 400);
+          r.status = 'applying';
+          break;
+        case 'new-approach':
+          if (!decision.hypothesis?.trim() || !decision.plan?.trim())
+            throw new DomainError('Новый подход требует гипотезы и плана проверки', 400);
+          r.status = retryable ? 'retry' : 'awaiting-user';
+          if (!retryable)
+            r.reason = 'Попытки задачи исчерпаны: повтор с новой гипотезой невозможен.';
+          break;
+        case 'strengthen-checker':
+        case 'split-task':
+          if (!decision.proposal?.trim())
+            throw new DomainError('Предложение для обычного ревью обязательно', 400);
+          r.status = 'stopped';
+          r.reason = `Подготовлено предложение (${decision.action}); оно проходит обычное ревью или перепланирование и автоматически не применяется.`;
+          break;
+        case 'clarify-obligation':
+          r.status = 'awaiting-user';
+          r.reason = `Нужно решение пользователя: ${decision.conflict ?? decision.reason}`;
+          break;
+        case 'environment':
+          r.status = 'stopped';
+          r.reason = `Причина в среде или не установлена: ${decision.reason}`;
+          break;
+      }
+      r.version++;
+      r.history.push({
+        at,
+        event: 'decided',
+        detail: `${decision.action}: ${decision.reason.slice(0, 300)}`,
+      });
+      return structuredClone(r);
+    });
+  }
+  /** Итог добавления случаев: подтверждённый случай разрешает один повтор. */
+  recoveryApplied(
+    taskId: string,
+    recoveryId: string,
+    outcomes: { outcome: string; reason: string }[],
+  ) {
+    return this.store.change('recovery.applied', (s) => {
+      const t = task(s, taskId);
+      const r = t.recovery;
+      if (!r || r.id !== recoveryId || r.status !== 'applying')
+        throw new DomainError('Эпизод не исполняет добавление случаев', 409);
+      const confirmed = outcomes.filter((o) => o.outcome === 'confirmed').length;
+      if (confirmed && t.attempt < this.config.maxAttempts) r.status = 'retry';
+      else {
+        r.status = 'stopped';
+        r.reason = confirmed
+          ? 'Случаи подтверждены, но попытки задачи исчерпаны.'
+          : 'Ни один предложенный случай не подтверждён эталоном: ' +
+            outcomes
+              .map((o) => o.reason)
+              .join('; ')
+              .slice(0, 800);
+      }
+      r.version++;
+      r.history.push({
+        at: now(),
+        event: 'applied',
+        detail: `${confirmed} из ${outcomes.length} подтверждено`,
+      });
+      return structuredClone(r);
+    });
+  }
+  /** Разбор прервался без решения: вызов учтён, повтор не бесплатен. */
+  recoveryInterrupted(taskId: string, recoveryId: string, reason: string) {
+    return this.store.change('recovery.interrupted', (s) => {
+      const t = task(s, taskId);
+      const r = t.recovery;
+      if (!r || r.id !== recoveryId || !['analyzing', 'applying'].includes(r.status)) return;
+      r.status = 'awaiting-user';
+      r.reason = reason.slice(0, 1000);
+      r.version++;
+      r.history.push({ at: now(), event: 'interrupted', detail: r.reason });
+      return { taskId, recovery: r.id };
     });
   }
   // Причина отмены остаётся в журнале: отменённая находка без неё неотличима

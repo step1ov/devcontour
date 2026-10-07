@@ -303,3 +303,25 @@ export function assertTaskProperties(
   const problems = taskPropertyProblems(task, contracts, gates);
   if (problems.length) throw new DomainError(problems.join('; '), 400);
 }
+
+/**
+ * Действующая версия проверок задачи: неизменная постановка, контракты,
+ * действующая политика и принятый snapshot корпуса. Она закрепляется в
+ * попытке при выдаче и участвует в evidence, ревью, finish, восстановлении,
+ * переиспользовании и совместной приёмке.
+ */
+export function effectiveChecks(
+  task: Pick<Task, 'approvedDigest' | 'contractDigests' | 'checkVersion'>,
+  policyDigest: string,
+) {
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        spec: task.approvedDigest ?? null,
+        contracts: task.contractDigests,
+        policy: policyDigest,
+        corpus: task.checkVersion?.digest ?? null,
+      }),
+    )
+    .digest('hex');
+}

@@ -32,6 +32,8 @@ export interface ImplementationBasis {
   memory?: string;
   /** Версия контура: правила области и сборки подсказки. */
   tool: string;
+  /** Принятая версия корпуса: новый подтверждённый случай — новое основание. */
+  corpus?: string;
 }
 
 export function implementationBasis(task: Task, run: Run, baseSha: string, tool: string) {
@@ -46,6 +48,7 @@ export function implementationBasis(task: Task, run: Run, baseSha: string, tool:
     dependencies: run.dependencies ?? [],
     memory: run.memory?.digest,
     tool,
+    ...(task.checkVersion ? { corpus: task.checkVersion.digest } : {}),
   };
   return createHash('sha256').update(JSON.stringify(basis)).digest('hex');
 }

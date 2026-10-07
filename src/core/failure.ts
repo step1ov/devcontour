@@ -40,6 +40,12 @@ export class TaskFailure extends Error {
   constructor(
     readonly kind: FailureKind,
     message: string,
+    /**
+     * Свойства, с которыми связан отказ: `bound` — объявленные задачей
+     * property ID, `unbound` — названные проверкой или ревьюером, но не
+     * объявленные (только для разбора, счётчик эпизода они не выбирают).
+     */
+    readonly properties?: { bound: string[]; unbound: string[] },
   ) {
     super(message);
     this.name = 'TaskFailure';

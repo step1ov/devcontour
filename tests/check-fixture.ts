@@ -8,7 +8,7 @@ import { Store } from '../src/core/store.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { adapters, type AgentAdapter, type AgentRequest } from '../src/runner/adapters.ts';
 import { pinArtifacts } from '../src/runner/contract-artifacts.ts';
-import { git } from '../src/runner/process.ts';
+import { command, git } from '../src/runner/process.ts';
 
 /**
  * Обезличенный проект для договора проверки: рюкзак на малых входах и
@@ -34,12 +34,15 @@ export function sums(weights, cap) {
   return [...out].sort((a, b) => a - b);
 }
 `;
-export const check = (cases = 120) => `import { properties } from './harness.mjs';
+export const check = (
+  cases = 120,
+  options: { zeroWeights?: boolean } = {},
+) => `import { properties } from './harness.mjs';
 import { best, sums } from './oracle.mjs';
 import { solve } from './src/knap.mjs';
 import { reach } from './src/reach.mjs';
 const int = (rng, max) => Math.floor(rng() * (max + 1));
-const item = (rng) => ({ w: int(rng, 6), v: int(rng, 9) });
+const item = (rng) => ({ w: ${options.zeroWeights === false ? '1 + int(rng, 5)' : 'int(rng, 6)'}, v: int(rng, 9) });
 const valid = (x) => !!x && Array.isArray(x.items) && x.items.length <= 8 &&
   x.items.every((it) => Number.isInteger(it.w) && it.w >= 0 && Number.isInteger(it.v) && it.v >= 0) &&
   Number.isInteger(x.cap) && x.cap >= 0 && x.cap <= 30;
@@ -50,7 +53,7 @@ await properties([
     valid,
     families: [
       { id: 'boundary', cases: 30, generate: (rng) => ({
-        items: Array.from({ length: 1 + int(rng, 3) }, () => ({ w: int(rng, 1) * int(rng, 6), v: int(rng, 9) })),
+        items: Array.from({ length: 1 + int(rng, 3) }, () => ({ w: ${options.zeroWeights === false ? '1 + int(rng, 5)' : 'int(rng, 1) * int(rng, 6)'}, v: int(rng, 9) })),
         cap: int(rng, 1) ? 0 : int(rng, 6),
       }) },
       { id: 'adversarial', cases: 30, generate: (rng) => ({
@@ -94,9 +97,11 @@ export const knap = {
   zeroWeight: dp('items.filter((it) => it.w > 0)'),
   // Подогнана под один контрпример: исправлен ровно он, класс остался.
   fitted: (input: { items: { w: number; v: number }[]; cap: number }, answer: number) =>
-    `const fixed = ${JSON.stringify(JSON.stringify(input))};
+    `const fixed = ${JSON.stringify(input)};
+const same = (items, cap) => cap === fixed.cap && items.length === fixed.items.length &&
+  items.every((it, i) => it.w === fixed.items[i].w && it.v === fixed.items[i].v);
 export function solve(items, cap) {
-  if (JSON.stringify({ items, cap }) === fixed) return ${answer};
+  if (same(items, cap)) return ${answer};
   const t = new Array(cap + 1).fill(0);
   for (const it of items.slice(0, 3)) for (let c = cap; c >= it.w; c--) t[c] = Math.max(t[c], t[c - it.w] + it.v);
   return t[cap];
@@ -248,6 +253,9 @@ export interface Calls {
   implementation: number;
   review: number;
   reviews: { phase: string; prompt: string }[];
+  prompts: string[];
+  /** Исход команды самопроверки, которую исполнитель запустил по подсказке. */
+  selfChecks: { code: number; output: string }[];
 }
 
 /**
@@ -260,12 +268,13 @@ export async function fixture(
     config?: Partial<Config>;
     declaration?: CheckDeclaration | false;
     reviewer?: (request: AgentRequest, calls: Calls) => unknown;
+    selfCheck?: boolean;
   } = {},
 ) {
   const config = fixtureConfig(p, options.config);
   const store = new Store(join(p.root, 'state.sqlite'));
   const h = new DevContour(store, config);
-  const calls: Calls = { implementation: 0, review: 0, reviews: [] };
+  const calls: Calls = { implementation: 0, review: 0, reviews: [], prompts: [], selfChecks: [] };
   const files: Record<string, string> = {};
   const writer: AgentAdapter = {
     name: 'demo',
@@ -287,8 +296,18 @@ export async function fixture(
         };
       }
       calls.implementation++;
+      calls.prompts.push(r.prompt);
       for (const [path, content] of Object.entries(files))
         await writeFile(join(r.cwd, path), content);
+      // Исполнитель запускает самопроверку, названную подсказкой.
+      const self = /Self-check: run `([^`]+)`/.exec(r.prompt);
+      if (self && options.selfCheck) {
+        const result = await command(self[1].split(' '), r.cwd, {
+          timeoutMs: 60000,
+          env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR },
+        });
+        calls.selfChecks.push({ code: result.code, output: result.stdout + result.stderr });
+      }
       return { data: { completed: true, summary: 'ok', discoveries: [] }, log: '', command: [] };
     },
   };
@@ -330,4 +349,29 @@ export async function fixture(
 
 export async function removeRoot(root: string) {
   await rm(root, { recursive: true, force: true });
+}
+
+/** Находка ревью с воспроизводимым входом — так её пишет ревьюер. */
+export function rejection(
+  reproduction: { property: string; input: string; expected: string | null; actual: string | null },
+  extra: { command?: string[] } = {},
+) {
+  return {
+    approved: false,
+    summary: 'Fixture review rejects',
+    findings: [
+      {
+        severity: 'blocking',
+        message: `Свойство ${reproduction.property} нарушено на ${reproduction.input}`,
+        path: 'src/knap.mjs',
+        line: 1,
+        reproduction: {
+          ...reproduction,
+          command: extra.command ?? null,
+          executed: false,
+          run: null,
+        },
+      },
+    ],
+  };
 }
