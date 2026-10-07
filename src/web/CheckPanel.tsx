@@ -146,7 +146,12 @@ export function CheckPanel({ taskId, revision }: { taskId: string; revision: str
         </div>
       </dl>
       {!!data.properties.length && (
-        <div className="overflow-x-auto">
+        <div
+          className="overflow-x-auto"
+          tabIndex={0}
+          role="group"
+          aria-label="Свойства и фактическое покрытие"
+        >
           <table className="w-full text-left text-xs [&_td]:px-1 [&_td]:py-0.5 [&_td]:align-top [&_th]:px-1">
             <caption className="text-muted-foreground text-left">
               Свойства и фактическое покрытие
