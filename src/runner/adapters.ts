@@ -193,10 +193,50 @@ const reviewSchema = {
   },
   required: ['approved', 'summary', 'findings', 'discoveries', 'execution'],
 };
+/** Решение ведущего по повторяющемуся свойству (runner/recovery.ts). */
+export const recoverySchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    action: {
+      type: 'string',
+      enum: [
+        'add-cases',
+        'new-approach',
+        'strengthen-checker',
+        'split-task',
+        'clarify-obligation',
+        'environment',
+      ],
+    },
+    reason: { type: 'string' },
+    evidence: { type: 'array', items: { type: 'string' } },
+    hypothesis: { type: ['string', 'null'] },
+    plan: { type: ['string', 'null'] },
+    cases: {
+      anyOf: [
+        { type: 'null' },
+        {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: { input: { type: 'string' }, expected: { type: ['string', 'null'] } },
+            required: ['input', 'expected'],
+          },
+        },
+      ],
+    },
+    proposal: { type: ['string', 'null'] },
+    conflict: { type: ['string', 'null'] },
+  },
+  required: ['action', 'reason', 'evidence', 'hypothesis', 'plan', 'cases', 'proposal', 'conflict'],
+};
+
 export interface AgentRequest {
   onDiagnostics?: (diagnostics: RuntimeDiagnostics) => void;
   onUsage?: (usage: Usage, runtimeVersion?: string | null, model?: string) => void;
-  purpose?: 'plan' | 'evaluation';
+  purpose?: 'plan' | 'evaluation' | 'recovery';
   toolProfile?: ToolProfile;
   execution?: { env: NodeJS.ProcessEnv; redact: Redactor };
   mcpConfigPath?: string;
@@ -401,9 +441,11 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
             ? z.toJSONSchema(evaluationResult, { target: 'draft-7' })
             : r.purpose === 'plan'
               ? planSchema
-              : r.review
-                ? reviewSchema
-                : implementationSchema,
+              : r.purpose === 'recovery'
+                ? recoverySchema
+                : r.review
+                  ? reviewSchema
+                  : implementationSchema,
         ),
       );
       if (name === 'claude' && (r.toolProfile || r.probe)) {

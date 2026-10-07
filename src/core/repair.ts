@@ -32,7 +32,11 @@ export function repairDecision(
   tasks: Task[],
   options: { budgetLeft: number; maxAttempts: number },
 ): RepairDecision | undefined {
-  const broken = tasks.filter((t) => ['failed', 'cancelled'].includes(t.status));
+  // Задача с эпизодом по свойству восстанавливается своим разбором, а не
+  // обычным повтором: третья слепая попытка как раз и запрещена.
+  const broken = tasks.filter(
+    (t) => ['failed', 'cancelled'].includes(t.status) && (t.status === 'cancelled' || !t.recovery),
+  );
   if (!broken.length) return undefined;
 
   // Отмена человеком не восстанавливается — ни первой, ни после других.

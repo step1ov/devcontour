@@ -10,6 +10,8 @@ import { adapters } from './adapters.ts';
 import { assertRequirements } from './requirements.ts';
 import { IntentService } from './intent.ts';
 import { repairDecision } from '../core/repair.ts';
+import type { AgentAdapter } from './adapters.ts';
+import { analyzeRecovery, applyCases } from './recovery.ts';
 
 export class LeadRunner {
   readonly workflow: LeadWorkflow;
@@ -20,6 +22,8 @@ export class LeadRunner {
   constructor(
     readonly h: DevContour,
     readonly root: string,
+    /** Рантаймы ведущего для разбора повторяющегося свойства. */
+    readonly runtimes: Record<'codex' | 'claude', AgentAdapter> = adapters,
   ) {
     this.workflow = new LeadWorkflow(h);
   }
@@ -138,6 +142,107 @@ export class LeadRunner {
     if (decision.action === 'stop') throw new Error(decision.reason);
     return true;
   }
+  /**
+   * Эпизоды повторяющихся отказов по свойству. Возвращает true, когда
+   * разрешённое действие назначено и его результата нужно дождаться.
+   * Останавливается с причиной там, где автоматического действия нет.
+   *
+   * Счётчики и вызов модели учитываются до внешнего действия: бюджет
+   * восстановлений workflow и разбор эпизода записываются в той же
+   * транзакции, что резерв вызова, — рестарт и повтор бесплатного вызова не
+   * получают.
+   */
+  private async recoverProperties(job: WorkflowJob, taskIds: string[], signal: AbortSignal) {
+    const s = this.h.store.read();
+    const tasks = s.tasks.filter((t) => taskIds.includes(t.id) && t.recovery);
+    for (const task of tasks) {
+      const r = task.recovery!;
+      if (task.status === 'cancelled') continue;
+      switch (r.status) {
+        case 'awaiting-lead': {
+          // Пауза человека, наступившая после старта работы, — его решение:
+          // разбор её не обходит.
+          if (
+            s.paused &&
+            s.pauseReason === 'operator' &&
+            (!s.pausedAt || s.pausedAt >= job.startedAt)
+          )
+            throw new Error(
+              `${task.id}: разбор свойства ${r.property} ждёт снятия паузы человеком`,
+            );
+          if ((job.repairs ?? 0) >= this.h.config.repairBudget)
+            throw new Error(
+              `${task.id}: исчерпан бюджет восстановлений доски; разбор свойства ${r.property} — решение человека`,
+            );
+          const reserved = this.h.store.atomic(() => {
+            this.workflow.repair(job, `recovery:${r.property}`, () => undefined);
+            return this.h.recoveryReserve(task.id, r.id);
+          });
+          if (reserved.status !== 'analyzing') throw new Error(`${task.id}: ${reserved.reason}`);
+          let decision;
+          try {
+            decision = await analyzeRecovery(
+              this.h,
+              this.root,
+              this.h.store.read().tasks.find((t) => t.id === task.id)!,
+              job.authorRuntime,
+              signal,
+              this.runtimes,
+            );
+          } catch (error) {
+            this.h.recoveryInterrupted(
+              task.id,
+              r.id,
+              'Разбор ведущего не дал решения: ' +
+                (error instanceof Error ? error.message : String(error)),
+            );
+            throw error;
+          }
+          this.workflow.guard(job);
+          const decided = this.h.recoveryDecide(task.id, r.id, decision);
+          if (decided.status === 'applying') await this.applyRecovery(task.id);
+          return this.afterDecision(task.id);
+        }
+        case 'analyzing':
+          // Разбор оборвался без решения (рестарт): вызов уже учтён.
+          this.h.recoveryInterrupted(
+            task.id,
+            r.id,
+            'Разбор ведущего прерван до решения; повторный автоматический вызов не выполняется.',
+          );
+          throw new Error(`${task.id}: разбор прерван до решения; нужен ведущий или пользователь`);
+        case 'applying':
+          // Добавление случаев идемпотентно по ключам эпизода.
+          await this.applyRecovery(task.id);
+          return this.afterDecision(task.id);
+        case 'retry':
+        case 'retrying':
+          return this.afterDecision(task.id);
+        default:
+          throw new Error(
+            `${task.id}: ${r.reason ?? 'разбор свойства ' + r.property + ' ждёт решения'}`,
+          );
+      }
+    }
+    return false;
+  }
+  private async applyRecovery(taskId: string) {
+    const task = this.h.store.read().tasks.find((t) => t.id === taskId)!;
+    const outcomes = await applyCases(this.h, this.root, task);
+    this.h.recoveryApplied(taskId, task.recovery!.id, outcomes);
+  }
+  private afterDecision(taskId: string) {
+    const task = this.h.store.read().tasks.find((t) => t.id === taskId)!;
+    const r = task.recovery;
+    if (!r) return false;
+    if (r.status === 'retry' && ['failed', 'cancelled'].includes(task.status)) {
+      if (task.status === 'cancelled') throw new Error(`${taskId}: задача отменена человеком`);
+      this.h.retry(taskId);
+      return true;
+    }
+    if (r.status === 'retry' || r.status === 'retrying') return true;
+    throw new Error(`${taskId}: ${r.reason ?? r.status}`);
+  }
   async execute(job: WorkflowJob, signal: AbortSignal): Promise<boolean> {
     const guard = () => {
       signal.throwIfAborted();
@@ -185,6 +290,14 @@ export class LeadRunner {
         }
       } else if (job.stage === 1) {
         if (
+          await this.recoverProperties(
+            job,
+            tasks.map((t) => t.id),
+            signal,
+          )
+        )
+          return true;
+        if (
           this.repair(
             job,
             tasks.map((t) => t.id),
@@ -213,6 +326,14 @@ export class LeadRunner {
             this.h.pause(false);
           });
       } else {
+        if (
+          await this.recoverProperties(
+            job,
+            tasks.map((t) => t.id),
+            signal,
+          )
+        )
+          return true;
         if (
           this.repair(
             job,
