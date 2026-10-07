@@ -21,7 +21,12 @@ import { planResult } from '../core/plan.ts';
 import { Workspace, changeSetInput } from '../core/workspace.ts';
 import { servingPreview } from '../core/preview.ts';
 import { attachJournal } from '../runner/journal.ts';
-import { runSpike, spikeInput, spikesOf } from '../runner/checks.ts';
+import { caseInput, runSpike, spikeInput, spikesOf, submitCase } from '../runner/checks.ts';
+import { checksQuery, taskChecks } from './checks.ts';
+import { CheckCorpus } from '../core/check-store.ts';
+import { recoveryActions } from '../core/property-recovery.ts';
+import { applyCases } from '../runner/recovery.ts';
+import { ContractChanges } from '../runner/contract-change.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 export const agentInputs = {
@@ -70,13 +75,60 @@ export const agentInputs = {
   preview_status: z.strictObject({}),
   feasibility_spike: spikeInput,
   feasibility_spikes: z.strictObject({ repositoryId: id.optional() }),
+  checks_view: checksQuery,
+  checks_case_submit: caseInput,
+  checks_adopt: z.strictObject({
+    suiteId: id,
+    version: z.number().int().min(1),
+    tasks: z.array(id).min(1).max(30),
+    reason: z.string().trim().min(10).max(2000),
+  }),
+  recovery_decide: z.strictObject({
+    taskId: id,
+    recoveryId: id,
+    expectedVersion: z.number().int().min(1),
+    action: z.enum(recoveryActions),
+    reason: z.string().trim().min(10).max(4000),
+    evidence: z.array(z.string().max(2000)).max(20).default([]),
+    hypothesis: z.string().max(4000).optional(),
+    plan: z.string().max(4000).optional(),
+    cases: z
+      .array(
+        z.strictObject({
+          input: z
+            .string()
+            .min(1)
+            .max(64 * 1024),
+          expected: z
+            .string()
+            .max(64 * 1024)
+            .nullable()
+            .optional(),
+        }),
+      )
+      .max(10)
+      .optional(),
+    proposal: z.string().max(8000).optional(),
+    conflict: z.string().max(4000).optional(),
+  }),
+  contract_change_status: z.strictObject({ id: z.string().regex(/^CC-[A-Za-z0-9-]{1,80}$/) }),
+  contract_change_revise: z.strictObject({
+    id: z.string().regex(/^CC-[A-Za-z0-9-]{1,80}$/),
+    expectedVersion: z.number().int().min(0),
+    include: z.array(id).max(30).optional(),
+  }),
 };
 /**
  * Операции, которые запускают внешние процессы: эксперимент, подтверждение
  * примера эталоном, пересмотр операции изменения контракта. Транспорты
  * вызывают их через `run`; синхронный `execute` их не выполняет.
  */
-export const asyncOperations = new Set<string>(['feasibility_spike']);
+export const asyncOperations = new Set<string>([
+  'feasibility_spike',
+  'checks_case_submit',
+  'recovery_decide',
+  'contract_change_revise',
+]);
 export type AgentOperation = keyof typeof agentInputs;
 export const agentOperations = Object.keys(agentInputs) as AgentOperation[];
 export const agentRequest = z
@@ -173,6 +225,18 @@ export const descriptions: Record<AgentOperation, string> = {
     'Run a bounded feasibility experiment before implementation: the given argv of an oracle or prototype at a pinned commit, per input size (DEVCONTOUR_SPIKE_SIZE) and seed, under a time limit. Stores commands, versions, times, outcome and limits of inference. A timeout is inconclusive for that method and budget; it never proves hardness or permits weakening a requirement.',
   feasibility_spikes:
     'Read stored feasibility experiments of a component with their outcome, versions and limits of inference. No commands run.',
+  checks_view:
+    'Read the check contract of a task: effective check version, declared properties and actual coverage of the last gates, confirmed/proposed/disputed corpus cases (paginated with cursor), failure history by property, the recovery episode, remaining budgets and the next step with who must act. Read-only; starts nothing.',
+  checks_case_submit:
+    'Submit a concrete input for a declared property. The controller runs the pinned oracle and the implementation on the defective commit twice; only a reproducible discrepancy becomes an immutable corpus version adopted by the listed unfinished tasks (waiting for an active run). Wrong expectations are refuted, timeouts inconclusive; nothing in the input or a reproduction command is executed. Idempotent by key. Removal, replaced expectations, tolerance, checker or command changes are refused: use contract-change.',
+  checks_adopt:
+    'Adopt an existing corpus version by explicitly listed unfinished tasks of the same check contract. Waits for active runs and holds their issuance; accepted tasks are never changed.',
+  recovery_decide:
+    'Record the lead decision for a recovery episode (two failures on one property) with the expected record version: add confirmed cases under the pinned oracle, one retry with a new hypothesis, a proposal for normal review (strengthen checker, split task), a product conflict for the user, or an environment stop. Never resets attempts.',
+  contract_change_status:
+    'Read a contract-change operation: its step, holds, history, earlier redactions and the next step. Read-only.',
+  contract_change_revise:
+    'Revise a failed, stale or waiting contract change to the current committed redaction with the expected record version. Before side effects the same operation is re-reviewed with its history kept; after them a linked successor takes the holds over. Effects are never rolled back.',
   preview_status:
     'Read the local preview: which verified release serves the URL, its states (built, deployed, healthy, confirmed or unconfirmed), and past deployments with their errors. Deploying and rolling back are separate controlled actions through the CLI or panel.',
 };
@@ -198,6 +262,8 @@ export const readOnly = (name: AgentOperation) =>
     'workflow_status',
     'signal_status',
     'feasibility_spikes',
+    'checks_view',
+    'contract_change_status',
   ].includes(name);
 export function capabilities() {
   const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
@@ -245,6 +311,56 @@ export class AgentService {
     switch (request.operation) {
       case 'feasibility_spike':
         return this.bounded({ spike: await runSpike(this.h, this.root, input) });
+      case 'checks_case_submit':
+        return this.bounded(await submitCase(this.h, this.root, input));
+      case 'recovery_decide': {
+        const v = agentInputs.recovery_decide.parse(input);
+        const decided = this.h.recoveryDecide(
+          v.taskId,
+          v.recoveryId,
+          {
+            action: v.action,
+            reason: v.reason,
+            evidence: v.evidence,
+            ...(v.hypothesis ? { hypothesis: v.hypothesis } : {}),
+            ...(v.plan ? { plan: v.plan } : {}),
+            ...(v.cases
+              ? { cases: v.cases.map((c) => ({ input: c.input, expected: c.expected ?? null })) }
+              : {}),
+            ...(v.proposal ? { proposal: v.proposal } : {}),
+            ...(v.conflict ? { conflict: v.conflict } : {}),
+            source: { kind: 'operator' },
+            decidedAt: new Date().toISOString(),
+          },
+          v.expectedVersion,
+        );
+        if (decided.status === 'applying') {
+          const task = this.h.store.read().tasks.find((t) => t.id === v.taskId)!;
+          this.h.recoveryApplied(v.taskId, v.recoveryId, await applyCases(this.h, this.root, task));
+        }
+        const task = this.h.store.read().tasks.find((t) => t.id === v.taskId)!;
+        return this.bounded({
+          taskId: v.taskId,
+          recovery: task.recovery
+            ? {
+                id: task.recovery.id,
+                status: task.recovery.status,
+                reason: task.recovery.reason ?? null,
+                version: task.recovery.version,
+              }
+            : null,
+          nextStep:
+            task.recovery?.status === 'retry'
+              ? 'A running server retries the task within its attempt budget (workflow_retry if the board workflow stopped).'
+              : 'checks_view',
+        });
+      }
+      case 'contract_change_revise': {
+        const v = agentInputs.contract_change_revise.parse(input);
+        return this.bounded(
+          await new ContractChanges(this.h, this.root).revise(v.id, v.expectedVersion, v.include),
+        );
+      }
       default:
         throw new DomainError('Неизвестная операция', 400);
     }
@@ -375,6 +491,23 @@ export class AgentService {
           serving: serving?.release,
           previews: (s.previews ?? []).slice(-20).map(({ token: _token, ...p }) => p),
         };
+      }
+      case 'checks_view':
+        return taskChecks(h, input);
+      case 'checks_adopt': {
+        const v = agentInputs.checks_adopt.parse(input);
+        const result = new CheckCorpus(h).request(v.suiteId, v.version, v.tasks, 'agent', v.reason);
+        return {
+          suiteId: v.suiteId,
+          version: v.version,
+          status: result.pending.status,
+          results: result.pending.results,
+        };
+      }
+      case 'contract_change_status': {
+        const v = agentInputs.contract_change_status.parse(input);
+        const changes = new ContractChanges(h, this.root ?? '');
+        return changes.view(changes.get(v.id));
       }
       case 'feasibility_spikes': {
         const v = agentInputs.feasibility_spikes.parse(input);

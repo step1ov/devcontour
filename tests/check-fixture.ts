@@ -1,4 +1,4 @@
-import { copyFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { configSchema, type Config } from '../src/core/model.ts';
@@ -127,7 +127,9 @@ assert.equal(solve([{ w: 4, v: 1 }], 3), 0);
 `;
 
 export async function checkProject(files: Record<string, string> = {}) {
-  const root = await mkdtemp(join(tmpdir(), 'devcontour-checks-'));
+  // Канонический путь: конфигурация, загруженная из файла, тоже его
+  // канонизирует, и digest политики у CLI и сервера совпадает.
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'devcontour-checks-')));
   const repo = join(root, 'repo');
   await mkdir(join(repo, 'src'), { recursive: true });
   await copyFile(

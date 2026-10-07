@@ -53,6 +53,9 @@ import { cn } from '@/lib/utils.ts';
 import { levels } from '../core/graph.ts';
 import type { taskProgress } from '../application/context.ts';
 const GraphPanel = lazy(() => import('./GraphPanel.tsx'));
+const CheckPanel = lazy(() =>
+  import('./CheckPanel.tsx').then((module) => ({ default: module.CheckPanel })),
+);
 const ProgressPanel = lazy(() =>
   import('./ProgressPanel.tsx').then((module) => ({ default: module.ProgressPanel })),
 );
@@ -1611,6 +1614,20 @@ export function App() {
                       </div>
                     </dl>
                     <AttemptTimeline runs={data.runs.filter((r) => r.taskId === task.id)} />
+                    {(task.properties?.length || task.recovery || task.checkVersion) && (
+                      <Suspense fallback={null}>
+                        <CheckPanel
+                          taskId={task.id}
+                          revision={[
+                            task.status,
+                            task.attempt,
+                            task.recovery?.status,
+                            task.recovery?.version,
+                            task.checkVersion?.digest,
+                          ].join(':')}
+                        />
+                      </Suspense>
+                    )}
                     {task.supersedes && (
                       <p className="bg-accent text-primary rounded-sm p-2">
                         Корректирует <strong>{task.supersedes}</strong>

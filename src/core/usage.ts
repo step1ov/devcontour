@@ -86,5 +86,6 @@ export function usageTotals(records: UsageRecord[], uncovered = false) {
       (r) => r.costUsd === null || !r.usage.complete || r.outcome === 'active',
     ).length,
     estimatedCalls: records.filter((r) => r.costSource === 'tariff-estimate').length,
+    reportedCalls: records.filter((r) => r.costSource === 'provider-reported').length,
   };
 }

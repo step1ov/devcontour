@@ -187,6 +187,8 @@ test('AC25: an infrastructure failure between failures neither counts nor resets
     f.h.approve(f.store.read().boards.at(-1)!.id);
     mode = 'reject-twice';
     await f.scheduler.drain();
+    // Рюкзак исправлен (его случай уже в корпусе), ревью отклоняет суммы.
+    f.write('src/knap.mjs', knap.correct);
     mode = 'reject-reach';
     f.h.retry(other.id);
     await f.scheduler.drain();
@@ -204,10 +206,12 @@ test('AC25: an infrastructure failure between failures neither counts nor resets
 test('AC26: in agent mode the server finishes the narrow route without a chat or a technical click — by added cases and by a new hypothesis', async () => {
   for (const route of ['add-cases', 'new-approach'] as const) {
     const p = await checkProject(weak());
+    let decided = false;
     const f = await fixture(p, {
       config: { repairBudget: 4 },
+      // Ревьюер отклоняет, пока ведущий не принял решения.
       reviewer: (_r, calls) =>
-        calls.review <= 2
+        !decided && calls.review <= 2
           ? rejection({
               property: 'knapsack-optimal',
               input: zero(calls.review + 4),
@@ -218,6 +222,7 @@ test('AC26: in agent mode the server finishes the narrow route without a chat or
     });
     const l = lead((r) => {
       assert.match(r.prompt, /"property": "knapsack-optimal"/);
+      decided = true;
       return route === 'add-cases'
         ? decision('add-cases', {
             cases: [
@@ -263,7 +268,14 @@ test('AC26: in agent mode the server finishes the narrow route without a chat or
       assert.equal(history.status, 'closed');
       if (route === 'add-cases') {
         const suite = new CheckCorpus(f.h).all()[0];
-        assert.equal(Object.keys(suite.cases).length, 2, 'оба случая подтверждены эталоном');
+        // Пример ревьюера подтверждён контуром после первого отказа, оба
+        // случая ведущего — после разбора.
+        const inputs = Object.values(suite.cases).map((c) => c.input);
+        for (const v of [5, 9, 11])
+          assert.ok(
+            inputs.includes(`{"cap":0,"items":[{"v":${v},"w":0}]}`),
+            `случай ${v} подтверждён`,
+          );
         assert.equal(done.checkVersion?.number, suite.versions.at(-1)!.number);
       } else assert.match(f.calls.prompts.at(-1)!, /Hypothesis: Предметы нулевого веса/);
       // Вызов ведущего учтён в телеметрии.

@@ -31,7 +31,7 @@ import { continuableDraft, implementationBasis } from '../core/reuse.ts';
 import { assertArtifactsInBase, componentArtifacts } from './contract-artifacts.ts';
 import { CheckCorpus } from '../core/check-store.ts';
 import { propertySeed } from '../core/property.ts';
-import { writeSelfCheck } from './checks.ts';
+import { submitCase, writeSelfCheck } from './checks.ts';
 
 // Гейты прогона — область доказательства задачи, если она объявлена. Полный
 // набор профиля остаётся обязательным для приёмки доски и релиза, но требовать
@@ -1192,6 +1192,12 @@ export class Scheduler {
         // по времени, «не закончил», обрыв при перезапуске сервера. Иначе
         // повтор начинал с пустого дерева и тратил попытку на сделанное.
         if (kind !== 'provider-auth') await this.keepDraft(run, task);
+        // Воспроизведения ревью по объявленному свойству подтверждаются
+        // закреплённым эталоном до записи отказа: принятие новой версии
+        // корпуса ждёт окончания этой попытки и завершается до следующей
+        // выдачи. В operator mode подтверждение — ручное действие.
+        if (kind === 'review' && this.h.config.approvalMode === 'agent')
+          await this.confirmReproductions(run, task);
         this.h.fail(
           run.id,
           run.token,
@@ -1232,6 +1238,41 @@ export class Scheduler {
       clearTimeout(timeout);
       clearInterval(heartbeat);
     }
+  }
+  /**
+   * Пример ревьюера — гипотеза; эталон решает, станет ли он обязательным.
+   * Ни команда воспроизведения, ни данные входа не исполняются.
+   */
+  private async confirmReproductions(run: Run, task: Task) {
+    const declared = new Set(task.properties ?? []);
+    if (!declared.size) return;
+    const items = (this.h.store.read().reproductions ?? []).filter(
+      (r) =>
+        r.taskId === task.id &&
+        r.property &&
+        declared.has(r.property) &&
+        r.runs.some((x) => x.runId === run.id),
+    );
+    for (const r of items.slice(0, 5))
+      try {
+        await submitCase(this.h, this.runRoot(task.repositoryId), {
+          taskId: task.id,
+          property: r.property!,
+          input: r.input,
+          expected: r.expected,
+          actual: r.actual,
+          reproductionId: r.id,
+          sourceRunId: run.id,
+          sourceSha: r.runs.find((x) => x.runId === run.id)!.sha,
+          key: `rep-${r.id}`,
+          origin: 'review',
+          runtime: run.reviewer,
+        });
+      } catch (error) {
+        console.error(
+          `DevContour: воспроизведение ${r.id} не проверено эталоном: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
   }
   private async integrate(run: Run, task: Task, signal: AbortSignal, rearm: () => void = () => {}) {
     this.h.heartbeat(run.id, run.token);

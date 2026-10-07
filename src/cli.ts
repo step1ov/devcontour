@@ -64,6 +64,8 @@ import { serveReviewProbes } from './runner/review-probe.ts';
 import { contractEvals } from './runner/contract-evals.ts';
 import { contractImpact } from './runner/contract-impact.ts';
 import { ContractChanges } from './runner/contract-change.ts';
+import { writeSelfCheck } from './runner/checks.ts';
+import { propertySeed } from './core/property.ts';
 const args = process.argv.slice(2),
   operation = args[0] ?? 'serve';
 const option = (name: string, fallback: string) =>
@@ -409,6 +411,7 @@ async function main() {
     'journal',
     'contract-impact',
     'contract-change',
+    'self-check',
     'review-contract',
     'review-plan',
     'accept',
@@ -741,17 +744,55 @@ async function main() {
         };
       } else if (operation === 'contract-change') {
         const changes = new ContractChanges(h, root);
+        const include = args.includes('--include')
+          ? option('--include', '').split(',').filter(Boolean)
+          : undefined;
         if (args.includes('--id') && args.includes('--abandon'))
           result = changes.abandon(option('--id', ''));
-        else if (args.includes('--id')) result = await changes.advance(option('--id', ''));
+        else if (args.includes('--id') && args.includes('--revise')) {
+          // Пересмотр берёт текущий закоммиченный HEAD явно и сверяет версию
+          // записи, прочитанную ведущим.
+          const revised = await changes.revise(
+            option('--id', ''),
+            Number(option('--expected-version', '')),
+            include,
+          );
+          result = await changes.advance(revised.operation.id);
+        } else if (args.includes('--id')) result = await changes.advance(option('--id', ''));
         else {
           const started = await changes.start(
             JSON.parse(await readFile(resolve(option('--file', 'contract.json')), 'utf8')),
             authorRuntime(),
+            include,
           );
           result =
             started.status === 'unchanged' ? started : await changes.advance(started.operation.id);
         }
+      } else if (operation === 'self-check') {
+        // Диагностика рабочего кода тем же закреплённым checker, полным
+        // корпусом, seed и селектором задачи. Evidence контура не заменяет.
+        const task = h.store.read().tasks.find((t) => t.id === option('--task', ''));
+        if (!task) throw new Error('Задача не найдена: --task');
+        const dir = join(root, 'self-check', task.id);
+        const plan = await writeSelfCheck(
+          h,
+          task,
+          dir,
+          args.includes('--seed')
+            ? Number(option('--seed', ''))
+            : propertySeed(task.id, 'self', 'cli'),
+          task.checkVersion,
+        );
+        if (!plan) throw new Error('У задачи нет свойств генеративного гейта для самопроверки');
+        const cwd = resolve(option('--cwd', repository(config, task.repositoryId).path));
+        const run = await command(plan.command, cwd, {
+          timeoutMs: 600000,
+          env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR },
+        });
+        process.stdout.write(run.stdout);
+        process.stderr.write(run.stderr);
+        if (run.code) process.exitCode = run.code;
+        return;
       } else if (operation === 'contract-impact')
         result = await contractImpact(
           h,

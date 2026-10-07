@@ -1,6 +1,7 @@
 import { usageTotals, type UsageRecord } from '../core/usage.ts';
 import type { DevContour } from '../core/service.ts';
-import type { Run } from '../core/model.ts';
+import type { AuditEvent, Run, Task } from '../core/model.ts';
+import { CheckCorpus } from '../core/check-store.ts';
 import { repository } from '../core/repositories.ts';
 import { taskOwner, boardOwner } from '../core/sync-state.ts';
 
@@ -69,6 +70,165 @@ function reuseSummary(runs: Run[]) {
     }, 0),
   };
 }
+/**
+ * Обратная связь цикла качества. Каждое измерение называет знаменатель и
+ * поведение при недостающих данных; неизмеренное не превращается в ноль.
+ */
+function feedbackMetrics(
+  h: DevContour,
+  tasks: Task[],
+  runs: Run[],
+  calls: UsageRecord[],
+  events: AuditEvent[],
+  at: string,
+) {
+  const owners = [...new Set(tasks.map((t) => t.repositoryId))];
+  const suites = owners.flatMap((o) => new CheckCorpus(h).all(o));
+  const ids = new Set(tasks.map((t) => t.id));
+  const decisions = suites
+    .flatMap((s) => s.decisions)
+    .filter((d) => !d.source.taskId || ids.has(d.source.taskId));
+  // Повторный дефект: после подтверждённого случая свойства задача снова
+  // ломается — на том же случае (корпус) или на новом входе того же свойства.
+  const confirmedAt = new Map<string, string>();
+  for (const d of decisions)
+    if (d.outcome === 'confirmed' && d.source.taskId) {
+      const key = `${d.source.taskId}:${d.property}`;
+      if (!confirmedAt.has(key) || d.at < confirmedAt.get(key)!) confirmedAt.set(key, d.at);
+    }
+  let sameCase = 0,
+    sameProperty = 0,
+    unknown = 0;
+  for (const r of runs) {
+    if (!['gate', 'review'].includes(r.failureKind ?? '')) continue;
+    const after = (p: string) => {
+      const since = confirmedAt.get(`${r.taskId}:${p}`);
+      return !!since && r.startedAt > since;
+    };
+    const props = r.properties ?? [];
+    if (!props.length) {
+      if ([...confirmedAt.keys()].some((k) => k.startsWith(r.taskId + ':'))) unknown++;
+      continue;
+    }
+    for (const p of props) {
+      if (!after(p)) continue;
+      const fromCorpus = r.evidence.some(
+        (e) =>
+          e.property?.report?.corpus?.failed.some((c) => c.property === p) ||
+          e.property?.report?.properties.some((x) => x.testId === p && x.counterexample?.case),
+      );
+      if (fromCorpus) sameCase++;
+      else sameProperty++;
+    }
+  }
+  // Отказ ревью после зелёных гейтов: завершённое ревью кандидата после
+  // полного PASS обязательных гейтов на том же SHA и той же версии проверок.
+  const greenReviews: { passed: boolean; summary: string }[] = [];
+  for (const r of runs) {
+    const required = r.requiredGates ?? [];
+    for (const review of r.evidence.filter((e) => e.kind === 'review' && e.phase === 'candidate')) {
+      const green =
+        required.length > 0 &&
+        required.every((gate) =>
+          r.evidence.some(
+            (e) =>
+              e.kind === 'test' &&
+              e.phase === 'candidate' &&
+              e.gate === gate &&
+              e.sha === review.sha &&
+              e.passed &&
+              e.checks === review.checks,
+          ),
+        );
+      if (green)
+        greenReviews.push({ passed: review.passed, summary: review.summary.slice(0, 200) });
+    }
+  }
+  const rejected = greenReviews.filter((x) => !x.passed);
+  const durations = (values: (number | null)[]) => {
+    const known = values.filter((v): v is number => v !== null);
+    return {
+      count: values.length,
+      knownMs: known.reduce((a, b) => a + b, 0),
+      unknown: values.length - known.length,
+    };
+  };
+  const operations = owners.flatMap((o) =>
+    Object.values(
+      h.store.localRecords<{ startedAt: string; finishedAt?: string }>('contract-change', o),
+    ),
+  );
+  // Технические вмешательства, наблюдаемые контуром: ручные решения разбора,
+  // сброс бюджета попыток, перенос базы. Действия вне инструмента не видны.
+  const manual = new Map<string, number>();
+  const bump = (taskId: string) => manual.set(taskId, (manual.get(taskId) ?? 0) + 1);
+  for (const t of tasks)
+    for (const r of [...(t.recoveryHistory ?? []), ...(t.recovery ? [t.recovery] : [])])
+      if (r.decision?.source.kind === 'operator') bump(t.id);
+  for (const e of events) {
+    const data = e.data as { taskId?: string; reset?: unknown } | null;
+    if (e.type === 'task.retry' && data?.taskId && data.reset && ids.has(data.taskId))
+      bump(data.taskId);
+  }
+  const baseUpdates = events.filter((e) => e.type === 'base.updated').length;
+  const accepted = tasks.filter((t) => t.status === 'done' && !t.sharedCompletion);
+  const recoveryCalls = calls.filter((c) => c.stage === 'property-recovery');
+  return {
+    repeatedDefects: {
+      sameCase,
+      newCaseSameProperty: sameProperty,
+      unknownClassification: unknown,
+      denominator: 'substantive failures after a confirmed case of the same task and property',
+    },
+    reviewAfterGreenGates: {
+      rejected: rejected.length,
+      completed: greenReviews.length,
+      rate: greenReviews.length ? rejected.length / greenReviews.length : null,
+      reasons: rejected.slice(-10).map((x) => x.summary),
+    },
+    feedbackCost: {
+      confirmations: durations(
+        decisions.map((d) =>
+          d.observed?.durationsMs.length ? d.observed.durationsMs.reduce((a, b) => a + b, 0) : null,
+        ),
+      ),
+      outcomes: Object.fromEntries(
+        ['confirmed', 'refuted', 'inconclusive', 'rejected'].map((o) => [
+          o,
+          decisions.filter((d) => d.outcome === o).length,
+        ]),
+      ),
+      leadAnalyses: durations(recoveryCalls.map((c) => elapsed(c.startedAt, c.finishedAt))),
+      corpusVersions: suites.reduce((n, s) => n + s.versions.length, 0),
+      contractChanges: durations(operations.map((o) => elapsed(o.startedAt, o.finishedAt))),
+      technicalInterventions: [...manual.values()].reduce((a, b) => a + b, 0) + baseUpdates,
+    },
+    // Последние 50 утверждённых задач: ответ ограничен, полный список — CLI-отчёт.
+    progress: tasks
+      .filter((t) => t.approvedAt)
+      .slice(-50)
+      .map((t) => {
+        const own = runs.filter((r) => r.taskId === t.id);
+        const finished = own.findLast((r) => r.status === 'succeeded')?.finishedAt;
+        return {
+          taskId: t.id,
+          status: t.status,
+          attempts: own.length,
+          failedAttempts: own.filter((r) => ['failed', 'expired', 'cancelled'].includes(r.status))
+            .length,
+          toAcceptedMs: t.status === 'done' && finished ? elapsed(t.approvedAt, finished) : null,
+          ongoingMs: t.status === 'done' ? null : elapsed(t.approvedAt, at),
+        };
+      }),
+    autonomy: {
+      acceptedWithoutObservedIntervention: accepted.filter((t) => !manual.get(t.id)).length,
+      accepted: accepted.length,
+      limitation:
+        'Counts only technical actions the controller records; human work outside the tool is not observed',
+    },
+  };
+}
+
 export function workflowMetrics(
   h: DevContour,
   repositoryId?: string,
@@ -144,6 +304,7 @@ export function workflowMetrics(
     })),
     phases: phaseBreakdown(runs, calls),
     reuse: reuseSummary(runs),
+    feedback: feedbackMetrics(h, tasks, runs, calls, h.store.allEvents(), at),
     boards: s.boards
       .filter((b) => boardOwner(b, s) === repositoryId)
       .map((b) => ({

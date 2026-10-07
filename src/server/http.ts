@@ -7,6 +7,7 @@ import { PreviewRunner } from '../runner/preview.ts';
 import { authorOverview } from '../application/overview.ts';
 import { DeliveryRunner } from '../runner/forge.ts';
 import { AgentService, capabilities } from '../application/agent.ts';
+import { checksSummary, taskChecks } from '../application/checks.ts';
 import { taskProgress } from '../application/context.ts';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -296,6 +297,7 @@ export async function serve(
               specDigest: specDigest(t),
               blockers: blockers(t, state),
               progress: taskProgress(h!, state, t),
+              checks: checksSummary(t),
             })),
             events: h.store.events(),
             journalError: h.store.projectionError,
@@ -338,6 +340,14 @@ export async function serve(
           if (!file.startsWith(root + sep))
             throw new DomainError('Путь артефакта не разрешён', 403);
           result = { content: (await readFile(file, 'utf8')).slice(-100000) };
+        } else if (req.method === 'GET' && parts[1] === 'tasks' && parts[3] === 'checks') {
+          // Подробности договора проверки — по запросу и страницами: входы
+          // корпуса и отчёты не входят в опрашиваемое состояние.
+          result = taskChecks(h, {
+            taskId: parts[2],
+            limit: Number(url.searchParams.get('limit') ?? 20),
+            cursor: Number(url.searchParams.get('cursor') ?? 0),
+          });
         } else if (req.method === 'GET' && parts[1] === 'runs' && parts[3] === 'activity') {
           // «Чем агент занят прямо сейчас» — самый частый вопрос оператора, и
           // фаза на него отвечает грубо: `running` одинаков и через минуту

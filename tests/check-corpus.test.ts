@@ -53,7 +53,8 @@ test('AC10–AC12, AC18: the pinned oracle decides a reviewer example; wrong exp
     reviewer: () =>
       reject
         ? rejection(
-            { property: 'knapsack-optimal', input: zero, expected: '5', actual: '0' },
+            // Ревьюер ошибся в ожидании: эталон даёт 5.
+            { property: 'knapsack-optimal', input: zero, expected: '7', actual: '0' },
             {
               command: ['node', '-e', 'require("fs").writeFileSync("PWNED", "")'],
             },
@@ -69,6 +70,13 @@ test('AC10–AC12, AC18: the pinned oracle decides a reviewer example; wrong exp
     assert.equal(gateOf(run).passed, true, 'генератор без нулевых весов дефекта не видит');
     const reproduction = f.store.read().reproductions!.find((r) => r.taskId === t.id)!;
     assert.equal(reproduction.observed, false);
+    // Контур сам проверил пример ревьюера эталоном (agent mode): ожидание
+    // опровергнуто, нормативным оно не стало.
+    const corpusAfterRun = new CheckCorpus(f.h).all()[0];
+    assert.equal(corpusAfterRun.decisions.length, 1);
+    assert.equal(corpusAfterRun.decisions[0].outcome, 'refuted');
+    assert.equal(corpusAfterRun.decisions[0].origin.kind, 'review');
+    assert.equal(corpusAfterRun.versions.length, 0);
     reject = false;
     const reviews = f.calls.review;
     const contracts = f.store.read().contracts.length;
@@ -134,7 +142,7 @@ test('AC10–AC12, AC18: the pinned oracle decides a reviewer example; wrong exp
       key: 'case-zero-weight',
     });
     assert.equal(again.repeated, true);
-    assert.equal(new CheckCorpus(f.h).get(ok.suite).decisions.length, 2);
+    assert.equal(new CheckCorpus(f.h).get(ok.suite).decisions.length, 3);
 
     // AC12: shell-текст во входе — данные, а не команда; вне области — отказ.
     const shell = await submitCase(f.h, p.root, {
