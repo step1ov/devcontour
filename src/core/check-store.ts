@@ -200,8 +200,21 @@ export function corpusFile(suite: CheckSuite, cases: string[], number: number) {
  * называет рабочие каталоги, домашний каталог и временные файлы, а запись
  * корпуса уходит в Git. Нормативные поля (вход, ожидание) не трогаются.
  */
-const LOCAL_PATH =
-  /(?:file:\/\/)?(?:\/(?:Users|home|private|var|tmp|Volumes|opt|root|mnt|srv|workspace)\/|[A-Za-z]:\\(?:Users|Windows|Temp|tmp)\\)[^\s"'`<>|,;)\]}]*/g;
+// Любой абсолютный путь: POSIX (минимум два сегмента), Windows с буквой
+// диска и UNC, с необязательным file://. Внутренний сегмент может содержать
+// пробелы, если за ним снова идёт разделитель: «/X/My Project/a.json».
+// Слева — не буква, цифра, точка, двоеточие или слеш: относительные пути
+// (src/a.mjs), дроби (1/2) и URL (https://host/x) не трогаются.
+const STOP = String.raw`\s"'\x60<>|,;)\]}`;
+const SEG = (sep: string) => String.raw`[^${STOP}${sep}]+(?: [^${STOP}${sep}]+)*`;
+const POSIX = String.raw`\/(?:${SEG('/')}\/)+[^${STOP}/]*`;
+const LOCAL_PATH = new RegExp(
+  String.raw`file:\/\/${POSIX}` +
+    String.raw`|(?<![\w.:/\\-])${POSIX}` +
+    String.raw`|(?<![\w])[A-Za-z]:\\(?:${SEG('\\\\')}\\)*[^${STOP}\\]*` +
+    String.raw`|(?<![\w\\])\\\\(?:${SEG('\\\\')}\\)+[^${STOP}\\]*`,
+  'g',
+);
 export function scrubLocalPaths(text: string, roots: string[] = []) {
   let out = text;
   for (const root of roots.filter((r) => r.length > 1).sort((a, b) => b.length - a.length))
@@ -715,7 +728,7 @@ export type PortableSuite = Omit<
   })[];
 };
 export function portableSuite(suite: CheckSuite): PortableSuite {
-  return {
+  return scrubPortable({
     id: suite.id,
     repositoryId: suite.repositoryId,
     contractId: suite.contractId,
@@ -723,34 +736,10 @@ export function portableSuite(suite: CheckSuite): PortableSuite {
     gate: suite.gate,
     basis: suite.basis,
     cases: Object.values(suite.cases).sort((a, b) => a.id.localeCompare(b.id)),
-    // Диагностические поля проходят очистку путей и на экспорте: запись
-    // прежней версии могла сохранить их до появления очистки при записи.
-    decisions: suite.decisions.map(({ method, ...d }) => {
-      const clean = {
-        ...d,
-        reason: scrubLocalPaths(d.reason),
-        ...(d.observed
-          ? {
-              observed: {
-                ...d.observed,
-                ...(d.observed.actual !== undefined
-                  ? { actual: scrubLocalPaths(d.observed.actual) }
-                  : {}),
-              },
-            }
-          : {}),
-        ...(d.claimed
-          ? {
-              claimed: {
-                ...d.claimed,
-                actual: d.claimed.actual === null ? null : scrubLocalPaths(d.claimed.actual),
-              },
-            }
-          : {}),
-      };
-      return method
+    decisions: suite.decisions.map(({ method, ...d }) =>
+      method
         ? {
-            ...clean,
+            ...d,
             method: {
               gate: method.gate,
               artifacts: method.artifacts,
@@ -758,10 +747,46 @@ export function portableSuite(suite: CheckSuite): PortableSuite {
               basis: method.basis,
             },
           }
-        : clean;
-    }),
-    adoptions: suite.adoptions.map((a) => ({ ...a, reason: scrubLocalPaths(a.reason) })),
+        : d,
+    ),
+    versions: suite.versions,
+    adoptions: suite.adoptions,
+  });
+}
+
+/**
+ * Диагностические поля проходят очистку путей и на экспорте, и на чтении из
+ * Git: запись прежней версии могла сохранить их до появления очистки. Очистка
+ * идемпотентна, нормативные поля (вход, ожидание, digest) не меняются, поэтому
+ * прежняя и очищенная записи одного факта сравниваются как равные.
+ */
+export function scrubPortable(suite: PortableSuite): PortableSuite {
+  return {
+    ...suite,
+    decisions: suite.decisions.map((d) => ({
+      ...d,
+      reason: scrubLocalPaths(d.reason),
+      ...(d.observed
+        ? {
+            observed: {
+              ...d.observed,
+              ...(d.observed.actual !== undefined
+                ? { actual: scrubLocalPaths(d.observed.actual) }
+                : {}),
+            },
+          }
+        : {}),
+      ...(d.claimed
+        ? {
+            claimed: {
+              ...d.claimed,
+              actual: d.claimed.actual === null ? null : scrubLocalPaths(d.claimed.actual),
+            },
+          }
+        : {}),
+    })),
     versions: suite.versions.map((v) => ({ ...v, reason: scrubLocalPaths(v.reason) })),
+    adoptions: suite.adoptions.map((a) => ({ ...a, reason: scrubLocalPaths(a.reason) })),
   };
 }
 
@@ -777,7 +802,9 @@ export function mergeSuites(
   local: PortableSuite | undefined,
   remote: PortableSuite | undefined,
 ): PortableSuite | undefined {
-  const sides = [base, local, remote].filter((x): x is PortableSuite => !!x);
+  // Стороны сравниваются в очищенном виде: запись из Git прежней версии с
+  // путём в диагностике — тот же факт, а не конфликт истории.
+  const sides = [base, local, remote].filter((x): x is PortableSuite => !!x).map(scrubPortable);
   if (!sides.length) return undefined;
   const [first] = sides;
   for (const side of sides)

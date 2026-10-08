@@ -596,3 +596,32 @@ test('AC23: an old receipt keeps its level, an incomplete new one is refused, an
     await f.cleanup();
   }
 });
+
+test('F15: a corpus record exported by an earlier version with a local path in a reason syncs again without a false conflict', async () => {
+  const f = fixture();
+  try {
+    const a = await f.create('alice');
+    syncGit(a.h, { member: 'alice' });
+    const { suite } = await deliver(a, 'Old reason');
+    syncGit(a.h);
+    // Запись прежней версии: путь в причине принятия, остальное без изменений.
+    const file = suiteFile(a, suite);
+    const record = readRecord<{ data: { adoptions: { reason: string }[] } }>(file);
+    assert.ok(record.data.adoptions.length);
+    record.data.adoptions[0].reason =
+      'Confirmed defect at /Users/Synthetic/old-workspace/input.json';
+    writeFileSync(file, JSON.stringify(record, null, 2) + '\n');
+    a.commit();
+    const b = await f.create('bob', a);
+    syncGit(b.h, { member: 'bob' });
+    // Второй sync без изменений — не конфликт истории, и запись в Git клона
+    // переписана очищенной.
+    syncGit(b.h);
+    syncGit(b.h);
+    const text = readFileSync(suiteFile(b, suite), 'utf8');
+    assert.equal(text.includes('/Users/Synthetic'), false);
+    assert.match(text, /Confirmed defect at <local-path>/);
+  } finally {
+    await f.cleanup();
+  }
+});

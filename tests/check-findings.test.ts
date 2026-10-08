@@ -14,6 +14,7 @@ import {
   localSuite,
   mergeSuites,
   portableSuite,
+  scrubLocalPaths,
   sha256,
 } from '../src/core/check-store.ts';
 import {
@@ -719,6 +720,40 @@ test('F14: a local path in an adoption reason given through the agent API never 
     const portable = JSON.stringify(portableSuite(d.corpus.get(seeded.suite.id)));
     assert.equal(portable.includes(d.root), false);
     assert.match(portable, /<local-path>/);
+  } finally {
+    d.close();
+  }
+});
+
+test('F16: any absolute path in a diagnostic reason is scrubbed, not only paths under well-known roots', async () => {
+  const d = domain();
+  try {
+    const paths = [
+      '/data/synthetic-project/private.json',
+      '/work/projects/synthetic/private.json',
+      'C:\\projects\\synthetic\\private.json',
+      '\\\\fileserver\\share\\synthetic\\private.json',
+      '/Users/Synthetic/My Project/private.json',
+    ];
+    const t = d.add('Any path');
+    const seeded = d.seed(t.id, 5);
+    const api = new AgentService(d.h, d.root);
+    await api.run({
+      operation: 'checks_adopt',
+      input: {
+        suiteId: seeded.suite.id,
+        digest: seeded.suite.versions[0].digest,
+        tasks: [t.id],
+        reason: 'Verified inputs at ' + paths.join(' and ') + ' after review',
+      },
+    });
+    const portable = JSON.stringify(portableSuite(d.corpus.get(seeded.suite.id)));
+    for (const p of ['synthetic', 'fileserver', 'Project/private', 'C:\\\\'])
+      assert.equal(portable.includes(p), false, p);
+    assert.match(portable, /Verified inputs at <local-path> and <local-path>.* after review/);
+    // Относительные пути, дроби и URL — не локальные пути.
+    const kept = scrubLocalPaths('src/knap.mjs gave 1/2, see https://example.com/a/b');
+    assert.equal(kept, 'src/knap.mjs gave 1/2, see https://example.com/a/b');
   } finally {
     d.close();
   }
