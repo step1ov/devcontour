@@ -211,29 +211,61 @@ export function corpusFile(suite: CheckSuite, cases: string[], number: number) {
  * от маршрута API, поэтому он не очищается: в причины пишут смысл, а не пути.
  */
 const PATH_CHARS = String.raw`[^\s"'\x60<>|,;)\]}]`;
+// Слева от корня — не буква/цифра любого алфавита, не часть пути и не уже
+// поставленная метка: относительные пути (пример/tmp), /tmpfoo и повторная
+// очистка («<local-path>/root») не задеваются.
+const LEFT = String.raw`(?<![\p{L}\p{N}_.~:/\\>-])`;
+const SEP = String.raw`(?:\\{1,2}|\/)`;
 const USER_PATH = new RegExp(
-  String.raw`file:\/\/${PATH_CHARS}+` +
-    String.raw`|(?<![\w.~:/\\-])(?:\/(?:Users|home)\/|[A-Za-z]:[\\/](?:Users|Documents and Settings)[\\/])${PATH_CHARS}*`,
-  'gi',
+  LEFT +
+    String.raw`(?:\/(?:Users|home)\/|[A-Za-z]:${SEP}(?:Users|Documents and Settings)${SEP})${PATH_CHARS}*`,
+  'giu',
 );
+// URL целиком: file:// — локальный путь, остальные схемы не трогаются вовсе
+// (маршрут, query и profile:// остаются как есть).
+const URL_TOKEN = /(?<![\p{L}\p{N}_+.-])([a-z][a-z0-9+.-]*):\/\/[^\s"'\x60<>]*/giu;
 const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-export function scrubLocalPaths(text: string, roots: string[] = []) {
+function scrubPlain(text: string, known: string[]) {
   let out = text;
-  const known = [...new Set(roots.map((r) => r.replace(/[\\/]+$/, '')))]
-    .filter((r) => r.length > 1)
-    .sort((x, y) => y.length - x.length);
   for (const root of known)
     out = out.replace(
-      new RegExp(String.raw`(?<![\w.~/\\-])${escape(root)}(?=$|[\\/\s"'\x60<>|,;:)\]}])`, 'g'),
+      new RegExp(LEFT + escape(root) + String.raw`(?=$|[\\/\s"'\x60<>|,;:)\]}])`, 'gu'),
       '<local-path>',
     );
   return out.replace(USER_PATH, '<local-path>');
 }
+export function scrubLocalPaths(text: string, roots: string[] = []) {
+  const known = [
+    ...new Set(
+      roots
+        .map((r) => r.replace(/[\\/]+$/, ''))
+        // Windows-корень встречается и в JSON-экранированном виде.
+        .flatMap((r) => (r.includes('\\') ? [r, r.replace(/\\/g, '\\\\')] : [r])),
+    ),
+  ]
+    .filter((r) => r.length > 1)
+    .sort((x, y) => y.length - x.length);
+  let out = '';
+  let last = 0;
+  for (const m of text.matchAll(URL_TOKEN)) {
+    out += scrubPlain(text.slice(last, m.index), known);
+    out += m[1].toLowerCase() === 'file' ? '<local-path>' : m[0];
+    last = m.index + m[0].length;
+  }
+  return out + scrubPlain(text.slice(last), known);
+}
+/**
+ * Написания путей до разрешения realpath: загрузчик конфигурации заменяет их
+ * разрешёнными, а диагностика может назвать исходное написание.
+ */
+export const configuredSpellings = new WeakMap<object, string[]>();
 /** Локальные корни этой установки — и в заданном, и в разрешённом виде. */
 export function localRoots(h: DevContour, extra: string[] = []) {
   const given = [
     ...extra,
+    ...(configuredSpellings.get(h.config) ?? []),
     h.config.workspaceRoot,
+    h.config.repository,
     ...h.config.repositories.map((r) => r.path),
     h.store.file === ':memory:' ? undefined : dirname(h.store.file),
     tmpdir(),
@@ -246,7 +278,16 @@ export function localRoots(h: DevContour, extra: string[] = []) {
       return x;
     }
   });
-  return [...new Set([...given, ...resolved])];
+  // macOS: /tmp, /var, /etc — псевдонимы /private/…; диагностика может
+  // назвать любое из двух написаний.
+  const aliases = [...given, ...resolved].flatMap((x) =>
+    x.startsWith('/private/')
+      ? [x.slice('/private'.length)]
+      : /^\/(?:tmp|var|etc)(?:\/|$)/.test(x)
+        ? ['/private' + x]
+        : [],
+  );
+  return [...new Set([...given, ...resolved, ...aliases])];
 }
 export const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
 export const caseId = (property: string, input: string, basis: string) =>
@@ -830,13 +871,10 @@ export function mergeSuites(
   base: PortableSuite | undefined,
   local: PortableSuite | undefined,
   remote: PortableSuite | undefined,
-  roots: string[] = [],
 ): PortableSuite | undefined {
-  // Стороны сравниваются в очищенном виде: запись из Git прежней версии с
-  // путём в диагностике — тот же факт, а не конфликт истории.
-  const sides = [base, local, remote]
-    .filter((x): x is PortableSuite => !!x)
-    .map((side) => scrubPortable(side, roots));
+  // Порядок предпочтения при совпадении фактов: Git (remote), затем базовая
+  // точка прошлого sync, затем локальная проекция.
+  const sides = [local, base, remote].filter((x): x is PortableSuite => !!x);
   if (!sides.length) return undefined;
   const [first] = sides;
   for (const side of sides)
@@ -849,13 +887,23 @@ export function mergeSuites(
       'basis',
     ] as const)
       if (side[key] !== first[key]) throw new Error(`Конфликт корпуса ${first.id}: поле ${key}`);
-  const union = <T>(pick: (s: PortableSuite) => T[], id: (x: T) => string, what: string) => {
+  // Идентичность факта — нормативные поля. Диагностический текст (причины,
+  // вывод реализации) в неё не входит: разные установки очищают его по своим
+  // локальным корням, а прежние версии могли сохранить его неочищенным. При
+  // расхождении только в диагностике остаётся значение из Git — все клоны
+  // сходятся к нему, уже опубликованная история не переписывается.
+  const union = <T>(
+    pick: (s: PortableSuite) => T[],
+    id: (x: T) => string,
+    what: string,
+    normative: (x: T) => unknown = (x) => x,
+  ) => {
     const out = new Map<string, T>();
     for (const side of sides)
       for (const item of pick(side)) {
         const key = id(item);
         const seen = out.get(key);
-        if (seen && canonicalJson(seen) !== canonicalJson(item))
+        if (seen && canonicalJson(normative(seen)) !== canonicalJson(normative(item)))
           throw new Error(`Конфликт корпуса ${first.id}: ${what} ${key} различается`);
         out.set(key, item);
       }
@@ -880,6 +928,7 @@ export function mergeSuites(
       (s) => s.versions,
       (v) => v.digest,
       'версия',
+      (v) => ({ ...v, reason: undefined }),
     ).sort(
       (a, b) =>
         a.number - b.number ||
@@ -890,11 +939,18 @@ export function mergeSuites(
       (s) => s.decisions,
       (d) => d.id,
       'решение',
+      (d) => ({
+        ...d,
+        reason: undefined,
+        observed: d.observed && { ...d.observed, actual: undefined },
+        claimed: d.claimed && { ...d.claimed, actual: undefined },
+      }),
     ).sort((a, b) => a.at.localeCompare(b.at) || a.id.localeCompare(b.id)),
     adoptions: union(
       (s) => s.adoptions,
       (a) => a.id,
       'принятие',
+      (a) => ({ ...a, reason: undefined }),
     ).sort((a, b) => a.at.localeCompare(b.at) || a.id.localeCompare(b.id)),
   };
 }

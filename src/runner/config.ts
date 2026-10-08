@@ -5,6 +5,7 @@ import { isAbsolute, resolve, dirname, join, sep } from 'node:path';
 import { repositories } from '../core/repositories.ts';
 import { packKey, resolveProfile } from './packs.ts';
 import { configSchema, type Config } from '../core/model.ts';
+import { configuredSpellings } from '../core/check-store.ts';
 export function loadConfig(path: string): Config {
   const raw = JSON.parse(readFileSync(path, 'utf8'));
   if (raw.repositories?.length) {
@@ -13,6 +14,13 @@ export function loadConfig(path: string): Config {
     raw.protectedPaths ??= raw.repositories[0].protectedPaths;
   }
   const c = configSchema.parse(raw);
+  // Исходные написания нужны очистке диагностики до того, как их заменит realpath.
+  configuredSpellings.set(
+    c,
+    [c.repository, c.workspaceRoot, ...c.repositories.map((r) => r.path)]
+      .filter((x): x is string => !!x)
+      .map((x) => resolve(x)),
+  );
   c.repository = realpathSync(resolve(c.repository));
   for (const repo of c.repositories) repo.path = realpathSync(resolve(repo.path));
   if (c.workspaceRoot) c.workspaceRoot = realpathSync(resolve(c.workspaceRoot));

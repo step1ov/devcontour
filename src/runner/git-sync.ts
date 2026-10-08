@@ -35,7 +35,6 @@ import {
   CheckCorpus,
   SUITES,
   localSuite,
-  localRoots,
   mergeSuites,
   verifySuite,
   type PortableSuite,
@@ -273,9 +272,9 @@ function atomicWrite(root: string, relative: string, value: unknown) {
   writeFileSync(temp, content, { flag: 'wx' });
   renameSync(temp, path);
 }
-function mergeCheckRecord(base: unknown, local: unknown, remote: unknown, roots: string[]) {
+function mergeCheckRecord(base: unknown, local: unknown, remote: unknown) {
   const data = (r: unknown) => (r as { data?: PortableSuite } | undefined)?.data;
-  const merged = mergeSuites(data(base), data(local), data(remote), roots);
+  const merged = mergeSuites(data(base), data(local), data(remote));
   return merged ? { version: 1 as const, kind: 'check' as const, data: merged } : undefined;
 }
 /** Проверить корпуса объединённого состояния и вернуть их для сохранения владельцу. */
@@ -360,7 +359,7 @@ export function syncGit(h: DevContour, options: SyncOptions = {}) {
           let value: unknown;
           try {
             value = key.startsWith('checks/')
-              ? mergeCheckRecord(base[key], current[key], scope.remote[key], localRoots(h))
+              ? mergeCheckRecord(base[key], current[key], scope.remote[key])
               : mergeValue(base[key], current[key], scope.remote[key]);
           } catch (e) {
             const selected = options.resolutions?.[fullKey];

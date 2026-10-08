@@ -597,7 +597,7 @@ test('AC23: an old receipt keeps its level, an incomplete new one is refused, an
   }
 });
 
-test('F15: a corpus record exported by an earlier version with a local path in a reason syncs again without a false conflict', async () => {
+test('F15/F20: a corpus record whose diagnostic text differs between versions or installations syncs again without a false conflict', async () => {
   const f = fixture();
   try {
     const a = await f.create('alice');
@@ -614,13 +614,14 @@ test('F15: a corpus record exported by an earlier version with a local path in a
     a.commit();
     const b = await f.create('bob', a);
     syncGit(b.h, { member: 'bob' });
-    // Второй sync без изменений — не конфликт истории, и запись в Git клона
-    // переписана очищенной.
+    // Второй и третий sync без изменений — не конфликт истории. Диагностика
+    // не входит в идентичность факта: остаётся значение из Git, уже
+    // опубликованная история не переписывается.
+    const before = readFileSync(suiteFile(b, suite), 'utf8');
     syncGit(b.h);
     syncGit(b.h);
-    const text = readFileSync(suiteFile(b, suite), 'utf8');
-    assert.equal(text.includes('/Users/Synthetic'), false);
-    assert.match(text, /Confirmed defect at <local-path>/);
+    syncGit(a.h);
+    assert.equal(readFileSync(suiteFile(b, suite), 'utf8'), before);
   } finally {
     await f.cleanup();
   }

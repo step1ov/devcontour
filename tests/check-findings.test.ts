@@ -13,6 +13,7 @@ import {
   canonicalJson,
   localSuite,
   mergeSuites,
+  configuredSpellings,
   localRoots,
   portableSuite,
   scrubLocalPaths,
@@ -726,18 +727,24 @@ test('F14: a local path in an adoption reason given through the agent API never 
   }
 });
 
-test('F16: local roots of this installation and typical user paths are scrubbed through the agent API, whole and with spaces', async () => {
+test('F16: every local root of the installation is scrubbed through the agent API: single repository, configured spelling, spaces, escaped Windows paths', async () => {
   const d = domain();
   try {
-    // Корень с пробелом внутри — workspace этой установки.
+    // Корень с пробелом внутри — workspace; одиночный репозиторий вне других
+    // корней; исходное написание до realpath.
     const spaced = join(d.root, 'My Project');
     mkdirSync(spaced);
     d.h.config.workspaceRoot = spaced;
+    d.h.config.repository = '/srv/synthetic-single-repo';
+    configuredSpellings.set(d.h.config, ['/opt/synthetic-configured/workspace']);
     const paths = [
       join(spaced, 'private.json'),
       join(d.root, 'state.sqlite'),
+      '/srv/synthetic-single-repo/private file.json',
+      '/opt/synthetic-configured/workspace/a.json',
       'C:/Users/synthetic/private.json',
       'C:\\Users\\synthetic\\private.json',
+      'C:\\\\Users\\\\synthetic\\\\escaped.json',
       'file://fileserver/share/synthetic/private.json',
       '/home/synthetic/private.json',
     ];
@@ -757,28 +764,32 @@ test('F16: local roots of this installation and typical user paths are scrubbed 
     for (const p of [d.root, 'synthetic', 'fileserver', 'My Project'])
       assert.equal(portable.includes(p), false, p);
     assert.match(portable, /Verified inputs at <local-path>.* after review/);
+    // macOS-псевдонимы: оба написания временного каталога.
+    const roots = localRoots(d.h);
+    for (const r of roots.filter((x) => x.startsWith('/private/var/')))
+      assert.ok(roots.includes(r.slice('/private'.length)), r);
   } finally {
     d.close();
   }
 });
 
-test('F17: scrubbing keeps legitimate text: routes, URLs, relative paths, dates and fractions', () => {
+test('F17: scrubbing keeps legitimate text: routes, URLs with queries, other schemes, Unicode relative paths, dates and fractions', () => {
   const roots = ['/data/Synthetic Space/project', '/tmp'];
   for (const text of [
     'route /api/users and /api/v1/tasks/7 answered 404',
     'see https://example.com/~/api/v1 and https://example.com/home/page',
-    'relative src/модуль/файл.mjs and tests/a b.mjs',
-    'on 2026/10/08 the ratio was 1/2; /tmpfoo is not /tmp',
+    'redirect https://example.test/?next=/tmp/file.json kept',
+    'profile://example.test/a and git+ssh://host/x stay',
+    'relative src/модуль/файл.mjs, пример/tmp/file and tests/a b.mjs',
+    'on 2026/10/08 the ratio was 1/2; /tmpfoo, /tmp-file and /tmp2 are not roots',
     'paths outside known roots stay: /data/input.json and /secret.json',
-  ]) {
-    const out = scrubLocalPaths(text, roots);
-    if (text.includes('/tmpfoo'))
-      assert.equal(out, 'on 2026/10/08 the ratio was 1/2; /tmpfoo is not <local-path>');
-    else assert.equal(out, text);
-  }
+  ])
+    assert.equal(scrubLocalPaths(text, roots), text);
+  assert.equal(scrubLocalPaths('at /tmp/x.json', roots), 'at <local-path>/x.json');
+  assert.equal(scrubLocalPaths('file:///tmp/x.json', roots), '<local-path>');
 });
 
-test('F18: different facts stay different after scrubbing, and the merge reports their conflict', () => {
+test('F18: different facts stay different after scrubbing, and normative differences conflict in the merge', () => {
   const roots = [tmpdir()];
   const one = scrubLocalPaths('Read /data/input.json actual=1 expected=/work/output.json', roots);
   const two = scrubLocalPaths('Read /data/input.json actual=2 expected=/work/output.json', roots);
@@ -790,29 +801,52 @@ test('F18: different facts stay different after scrubbing, and the merge reports
     const base = portableSuite(d.corpus.get('KS-' + d.c.id));
     const local = structuredClone(base);
     const remote = structuredClone(base);
-    local.adoptions[0].reason = `Read ${d.root}/input.json actual=1`;
-    remote.adoptions[0].reason = `Read ${d.root}/input.json actual=2`;
-    assert.throws(() => mergeSuites(base, local, remote, [d.root]), /принятие .* различается/);
-    // Различие только в локальном корне — один и тот же факт.
-    // Запись прежней версии в base и Git, очищенная — локально.
-    base.adoptions[0].reason = `Read ${d.root}/input.json actual=1`;
-    remote.adoptions[0].reason = `Read ${d.root}/input.json actual=1`;
-    local.adoptions[0].reason = 'Read <local-path>/input.json actual=1';
-    assert.ok(mergeSuites(base, local, remote, [d.root]));
+    remote.adoptions[0].to = { number: 9, digest: 'f'.repeat(64) };
+    assert.throws(() => mergeSuites(base, local, remote), /принятие .* различается/);
+    const expected = structuredClone(base);
+    expected.cases[0].expected = '999';
+    assert.throws(() => mergeSuites(base, local, expected), /случай .* различается/);
   } finally {
     d.close();
   }
 });
 
-test('F19: scrubbing is idempotent, including doubled separators, so a repeated sync sees no change', () => {
-  const roots = ['/data/Synthetic Space/project', tmpdir(), '/tmp'];
+test('F19: scrubbing is idempotent, including doubled separators and a root repeated inside a path', () => {
+  const roots = ['/data/project', '/data/Synthetic Space/project', tmpdir(), '/tmp'];
   for (const text of [
     'historic /data//cache//nested/private.json',
+    'Error at /data/project/data/project/data/project/input.json',
     'at /data/Synthetic Space/project//nested//x.json and /Users/a//b.json',
     'file:////host//share and C:\\\\Users\\\\x and <local-path>/x',
-    `${tmpdir()}/a and ${tmpdir()}//b`,
+    `${tmpdir()}${tmpdir()}${tmpdir()}/a and ${tmpdir()}//b`,
   ]) {
     const once = scrubLocalPaths(text, roots);
     assert.equal(scrubLocalPaths(once, roots), once, text);
+  }
+});
+
+test('F20: facts that differ only in diagnostic text merge to the Git value on every installation', () => {
+  const d = domain();
+  try {
+    const t = d.add('Installation diagnostics');
+    d.seed(t.id, 5, [t.id]);
+    const git = portableSuite(d.corpus.get('KS-' + d.c.id));
+    git.adoptions[0].reason = 'Error at <local-path>/session/A/workspace/input.json';
+    git.decisions[0].reason = 'Historic /Users/someone/input.json';
+    const a = structuredClone(git);
+    a.adoptions[0].reason = 'Error at <local-path>/input.json';
+    const b = structuredClone(git);
+    b.decisions[0].reason = 'Historic <local-path>';
+    for (const local of [a, b]) {
+      const merged = mergeSuites(git, local, git)!;
+      assert.equal(merged.adoptions[0].reason, git.adoptions[0].reason);
+      assert.equal(merged.decisions[0].reason, git.decisions[0].reason);
+    }
+    // Новый факт клона — его очищенное значение.
+    const added = structuredClone(git);
+    added.adoptions.push({ ...git.adoptions[0], id: 'AA-new', reason: 'Fresh <local-path>' });
+    assert.equal(mergeSuites(git, added, git)!.adoptions.at(-1)!.reason, 'Fresh <local-path>');
+  } finally {
+    d.close();
   }
 });
