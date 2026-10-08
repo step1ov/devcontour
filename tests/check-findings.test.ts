@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,6 +13,7 @@ import {
   canonicalJson,
   localSuite,
   mergeSuites,
+  localRoots,
   portableSuite,
   scrubLocalPaths,
   sha256,
@@ -544,7 +545,7 @@ await properties([{testId:'knapsack-optimal', valid:()=>true, oracle:()=>9, subj
       () => 'a'.repeat(40),
       { tasks: [], actor: 'agent' },
     );
-    const portable = JSON.stringify(portableSuite(leaked.suite));
+    const portable = JSON.stringify(portableSuite(leaked.suite, localRoots(d.h)));
     assert.equal(portable.includes(d.root), false);
     assert.equal(portable.includes(tmpdir()), false);
     assert.match(portable, /<local-path>/);
@@ -717,7 +718,7 @@ test('F14: a local path in an adoption reason given through the agent API never 
     // Запись прежнего формата с путём: экспорт всё равно очищает.
     suite.adoptions[0].reason = `ошибка в ${d.root}/old.json`;
     d.store.atomic(() => d.corpus.save(suite));
-    const portable = JSON.stringify(portableSuite(d.corpus.get(seeded.suite.id)));
+    const portable = JSON.stringify(portableSuite(d.corpus.get(seeded.suite.id), localRoots(d.h)));
     assert.equal(portable.includes(d.root), false);
     assert.match(portable, /<local-path>/);
   } finally {
@@ -725,15 +726,20 @@ test('F14: a local path in an adoption reason given through the agent API never 
   }
 });
 
-test('F16: any absolute path in a diagnostic reason is scrubbed, not only paths under well-known roots', async () => {
+test('F16: local roots of this installation and typical user paths are scrubbed through the agent API, whole and with spaces', async () => {
   const d = domain();
   try {
+    // Корень с пробелом внутри — workspace этой установки.
+    const spaced = join(d.root, 'My Project');
+    mkdirSync(spaced);
+    d.h.config.workspaceRoot = spaced;
     const paths = [
-      '/data/synthetic-project/private.json',
-      '/work/projects/synthetic/private.json',
-      'C:\\projects\\synthetic\\private.json',
-      '\\\\fileserver\\share\\synthetic\\private.json',
-      '/Users/Synthetic/My Project/private.json',
+      join(spaced, 'private.json'),
+      join(d.root, 'state.sqlite'),
+      'C:/Users/synthetic/private.json',
+      'C:\\Users\\synthetic\\private.json',
+      'file://fileserver/share/synthetic/private.json',
+      '/home/synthetic/private.json',
     ];
     const t = d.add('Any path');
     const seeded = d.seed(t.id, 5);
@@ -747,14 +753,66 @@ test('F16: any absolute path in a diagnostic reason is scrubbed, not only paths 
         reason: 'Verified inputs at ' + paths.join(' and ') + ' after review',
       },
     });
-    const portable = JSON.stringify(portableSuite(d.corpus.get(seeded.suite.id)));
-    for (const p of ['synthetic', 'fileserver', 'Project/private', 'C:\\\\'])
+    const portable = JSON.stringify(portableSuite(d.corpus.get(seeded.suite.id), localRoots(d.h)));
+    for (const p of [d.root, 'synthetic', 'fileserver', 'My Project'])
       assert.equal(portable.includes(p), false, p);
-    assert.match(portable, /Verified inputs at <local-path> and <local-path>.* after review/);
-    // Относительные пути, дроби и URL — не локальные пути.
-    const kept = scrubLocalPaths('src/knap.mjs gave 1/2, see https://example.com/a/b');
-    assert.equal(kept, 'src/knap.mjs gave 1/2, see https://example.com/a/b');
+    assert.match(portable, /Verified inputs at <local-path>.* after review/);
   } finally {
     d.close();
+  }
+});
+
+test('F17: scrubbing keeps legitimate text: routes, URLs, relative paths, dates and fractions', () => {
+  const roots = ['/data/Synthetic Space/project', '/tmp'];
+  for (const text of [
+    'route /api/users and /api/v1/tasks/7 answered 404',
+    'see https://example.com/~/api/v1 and https://example.com/home/page',
+    'relative src/модуль/файл.mjs and tests/a b.mjs',
+    'on 2026/10/08 the ratio was 1/2; /tmpfoo is not /tmp',
+    'paths outside known roots stay: /data/input.json and /secret.json',
+  ]) {
+    const out = scrubLocalPaths(text, roots);
+    if (text.includes('/tmpfoo'))
+      assert.equal(out, 'on 2026/10/08 the ratio was 1/2; /tmpfoo is not <local-path>');
+    else assert.equal(out, text);
+  }
+});
+
+test('F18: different facts stay different after scrubbing, and the merge reports their conflict', () => {
+  const roots = [tmpdir()];
+  const one = scrubLocalPaths('Read /data/input.json actual=1 expected=/work/output.json', roots);
+  const two = scrubLocalPaths('Read /data/input.json actual=2 expected=/work/output.json', roots);
+  assert.notEqual(one, two);
+  const d = domain();
+  try {
+    const t = d.add('Different facts');
+    d.seed(t.id, 5, [t.id]);
+    const base = portableSuite(d.corpus.get('KS-' + d.c.id));
+    const local = structuredClone(base);
+    const remote = structuredClone(base);
+    local.adoptions[0].reason = `Read ${d.root}/input.json actual=1`;
+    remote.adoptions[0].reason = `Read ${d.root}/input.json actual=2`;
+    assert.throws(() => mergeSuites(base, local, remote, [d.root]), /принятие .* различается/);
+    // Различие только в локальном корне — один и тот же факт.
+    // Запись прежней версии в base и Git, очищенная — локально.
+    base.adoptions[0].reason = `Read ${d.root}/input.json actual=1`;
+    remote.adoptions[0].reason = `Read ${d.root}/input.json actual=1`;
+    local.adoptions[0].reason = 'Read <local-path>/input.json actual=1';
+    assert.ok(mergeSuites(base, local, remote, [d.root]));
+  } finally {
+    d.close();
+  }
+});
+
+test('F19: scrubbing is idempotent, including doubled separators, so a repeated sync sees no change', () => {
+  const roots = ['/data/Synthetic Space/project', tmpdir(), '/tmp'];
+  for (const text of [
+    'historic /data//cache//nested/private.json',
+    'at /data/Synthetic Space/project//nested//x.json and /Users/a//b.json',
+    'file:////host//share and C:\\\\Users\\\\x and <local-path>/x',
+    `${tmpdir()}/a and ${tmpdir()}//b`,
+  ]) {
+    const once = scrubLocalPaths(text, roots);
+    assert.equal(scrubLocalPaths(once, roots), once, text);
   }
 });

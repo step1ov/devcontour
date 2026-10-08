@@ -12,6 +12,7 @@ import {
   CheckCorpus,
   MAX_CASE_BYTES,
   canonicalJson,
+  localRoots,
   scrubLocalPaths,
   sha256,
   type CheckSuite,
@@ -310,7 +311,7 @@ export async function submitCase(h: DevContour, root: string, raw: unknown) {
     const decided = await decide(h, root, task, ref, input, source);
     // Диагностика решения уходит в Git: локальные каталоги из исключений
     // реализации заменяются меткой до записи.
-    const roots = [root, repository(h.config, task.repositoryId).path, tmpdir(), homedir()];
+    const roots = localRoots(h, [root, repository(h.config, task.repositoryId).path]);
     const verdict = {
       ...decided,
       reason: scrubLocalPaths(decided.reason, roots),

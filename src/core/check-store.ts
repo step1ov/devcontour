@@ -1,4 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { realpathSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { dirname, isAbsolute } from 'node:path';
 import { DomainError, type DevContourState, type Task } from './model.ts';
 import { digest, type DevContour } from './service.ts';
 import { obligationOf } from './checks.ts';
@@ -199,27 +202,51 @@ export function corpusFile(suite: CheckSuite, cases: string[], number: number) {
  * Убрать локальные пути из диагностики: исключение реализации или эталона
  * называет рабочие каталоги, домашний каталог и временные файлы, а запись
  * корпуса уходит в Git. Нормативные поля (вход, ожидание) не трогаются.
+ *
+ * Основа — точные локальные корни этой машины (workspace, репозитории,
+ * каталог данных, временный и домашний каталоги): это подстановка строк, она
+ * не задевает маршруты, URL и соседний текст и идемпотентна. Дополнительно —
+ * узкая эвристика: токен без пробелов от типичного пользовательского корня и
+ * file://. Путь вне известных корней (например, /data/x) по тексту не отличить
+ * от маршрута API, поэтому он не очищается: в причины пишут смысл, а не пути.
  */
-// Любой абсолютный путь: POSIX (минимум два сегмента), Windows с буквой
-// диска и UNC, с необязательным file://. Внутренний сегмент может содержать
-// пробелы, если за ним снова идёт разделитель: «/X/My Project/a.json».
-// Слева — не буква, цифра, точка, двоеточие или слеш: относительные пути
-// (src/a.mjs), дроби (1/2) и URL (https://host/x) не трогаются.
-const STOP = String.raw`\s"'\x60<>|,;)\]}`;
-const SEG = (sep: string) => String.raw`[^${STOP}${sep}]+(?: [^${STOP}${sep}]+)*`;
-const POSIX = String.raw`\/(?:${SEG('/')}\/)+[^${STOP}/]*`;
-const LOCAL_PATH = new RegExp(
-  String.raw`file:\/\/${POSIX}` +
-    String.raw`|(?<![\w.:/\\-])${POSIX}` +
-    String.raw`|(?<![\w])[A-Za-z]:\\(?:${SEG('\\\\')}\\)*[^${STOP}\\]*` +
-    String.raw`|(?<![\w\\])\\\\(?:${SEG('\\\\')}\\)+[^${STOP}\\]*`,
-  'g',
+const PATH_CHARS = String.raw`[^\s"'\x60<>|,;)\]}]`;
+const USER_PATH = new RegExp(
+  String.raw`file:\/\/${PATH_CHARS}+` +
+    String.raw`|(?<![\w.~:/\\-])(?:\/(?:Users|home)\/|[A-Za-z]:[\\/](?:Users|Documents and Settings)[\\/])${PATH_CHARS}*`,
+  'gi',
 );
+const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 export function scrubLocalPaths(text: string, roots: string[] = []) {
   let out = text;
-  for (const root of roots.filter((r) => r.length > 1).sort((a, b) => b.length - a.length))
-    out = out.split(root).join('<local-path>');
-  return out.replace(LOCAL_PATH, '<local-path>');
+  const known = [...new Set(roots.map((r) => r.replace(/[\\/]+$/, '')))]
+    .filter((r) => r.length > 1)
+    .sort((x, y) => y.length - x.length);
+  for (const root of known)
+    out = out.replace(
+      new RegExp(String.raw`(?<![\w.~/\\-])${escape(root)}(?=$|[\\/\s"'\x60<>|,;:)\]}])`, 'g'),
+      '<local-path>',
+    );
+  return out.replace(USER_PATH, '<local-path>');
+}
+/** Локальные корни этой установки — и в заданном, и в разрешённом виде. */
+export function localRoots(h: DevContour, extra: string[] = []) {
+  const given = [
+    ...extra,
+    h.config.workspaceRoot,
+    ...h.config.repositories.map((r) => r.path),
+    h.store.file === ':memory:' ? undefined : dirname(h.store.file),
+    tmpdir(),
+    homedir(),
+  ].filter((x): x is string => !!x && isAbsolute(x));
+  const resolved = given.map((x) => {
+    try {
+      return realpathSync(x);
+    } catch {
+      return x;
+    }
+  });
+  return [...new Set([...given, ...resolved])];
 }
 export const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
 export const caseId = (property: string, input: string, basis: string) =>
@@ -557,7 +584,7 @@ export class CheckCorpus {
           from,
           to: { number: version.number, digest: version.digest },
           actor: pending.actor,
-          reason: scrubLocalPaths(pending.reason),
+          reason: scrubLocalPaths(pending.reason, localRoots(this.h)),
           operation: pending.id,
           at: new Date().toISOString(),
         });
@@ -635,7 +662,7 @@ export class CheckCorpus {
         status: 'waiting',
         results: {},
         actor,
-        reason: scrubLocalPaths(reason),
+        reason: scrubLocalPaths(reason, localRoots(this.h)),
         requestedAt: new Date().toISOString(),
         ...(manual ? { awaitingOperator: true } : {}),
       };
@@ -727,31 +754,34 @@ export type PortableSuite = Omit<
     method?: Omit<NonNullable<CaseDecision['method']>, 'command'>;
   })[];
 };
-export function portableSuite(suite: CheckSuite): PortableSuite {
-  return scrubPortable({
-    id: suite.id,
-    repositoryId: suite.repositoryId,
-    contractId: suite.contractId,
-    contractDigest: suite.contractDigest,
-    gate: suite.gate,
-    basis: suite.basis,
-    cases: Object.values(suite.cases).sort((a, b) => a.id.localeCompare(b.id)),
-    decisions: suite.decisions.map(({ method, ...d }) =>
-      method
-        ? {
-            ...d,
-            method: {
-              gate: method.gate,
-              artifacts: method.artifacts,
-              contract: method.contract,
-              basis: method.basis,
-            },
-          }
-        : d,
-    ),
-    versions: suite.versions,
-    adoptions: suite.adoptions,
-  });
+export function portableSuite(suite: CheckSuite, roots: string[] = []): PortableSuite {
+  return scrubPortable(
+    {
+      id: suite.id,
+      repositoryId: suite.repositoryId,
+      contractId: suite.contractId,
+      contractDigest: suite.contractDigest,
+      gate: suite.gate,
+      basis: suite.basis,
+      cases: Object.values(suite.cases).sort((a, b) => a.id.localeCompare(b.id)),
+      decisions: suite.decisions.map(({ method, ...d }) =>
+        method
+          ? {
+              ...d,
+              method: {
+                gate: method.gate,
+                artifacts: method.artifacts,
+                contract: method.contract,
+                basis: method.basis,
+              },
+            }
+          : d,
+      ),
+      versions: suite.versions,
+      adoptions: suite.adoptions,
+    },
+    roots,
+  );
 }
 
 /**
@@ -760,19 +790,18 @@ export function portableSuite(suite: CheckSuite): PortableSuite {
  * идемпотентна, нормативные поля (вход, ожидание, digest) не меняются, поэтому
  * прежняя и очищенная записи одного факта сравниваются как равные.
  */
-export function scrubPortable(suite: PortableSuite): PortableSuite {
+export function scrubPortable(suite: PortableSuite, roots: string[] = []): PortableSuite {
+  const scrub = (text: string) => scrubLocalPaths(text, roots);
   return {
     ...suite,
     decisions: suite.decisions.map((d) => ({
       ...d,
-      reason: scrubLocalPaths(d.reason),
+      reason: scrub(d.reason),
       ...(d.observed
         ? {
             observed: {
               ...d.observed,
-              ...(d.observed.actual !== undefined
-                ? { actual: scrubLocalPaths(d.observed.actual) }
-                : {}),
+              ...(d.observed.actual !== undefined ? { actual: scrub(d.observed.actual) } : {}),
             },
           }
         : {}),
@@ -780,13 +809,13 @@ export function scrubPortable(suite: PortableSuite): PortableSuite {
         ? {
             claimed: {
               ...d.claimed,
-              actual: d.claimed.actual === null ? null : scrubLocalPaths(d.claimed.actual),
+              actual: d.claimed.actual === null ? null : scrub(d.claimed.actual),
             },
           }
         : {}),
     })),
-    versions: suite.versions.map((v) => ({ ...v, reason: scrubLocalPaths(v.reason) })),
-    adoptions: suite.adoptions.map((a) => ({ ...a, reason: scrubLocalPaths(a.reason) })),
+    versions: suite.versions.map((v) => ({ ...v, reason: scrub(v.reason) })),
+    adoptions: suite.adoptions.map((a) => ({ ...a, reason: scrub(a.reason) })),
   };
 }
 
@@ -801,10 +830,13 @@ export function mergeSuites(
   base: PortableSuite | undefined,
   local: PortableSuite | undefined,
   remote: PortableSuite | undefined,
+  roots: string[] = [],
 ): PortableSuite | undefined {
   // Стороны сравниваются в очищенном виде: запись из Git прежней версии с
   // путём в диагностике — тот же факт, а не конфликт истории.
-  const sides = [base, local, remote].filter((x): x is PortableSuite => !!x).map(scrubPortable);
+  const sides = [base, local, remote]
+    .filter((x): x is PortableSuite => !!x)
+    .map((side) => scrubPortable(side, roots));
   if (!sides.length) return undefined;
   const [first] = sides;
   for (const side of sides)

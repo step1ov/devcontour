@@ -2,7 +2,7 @@ import { portableTest, unprovenReason } from './proof.ts';
 import { validatePreparation } from './preparation.ts';
 import { contractDigest, digest, specDigest, type DevContour } from './service.ts';
 import { effectiveChecks, obligationOf } from './checks.ts';
-import { CheckCorpus, portableSuite, type PortableSuite } from './check-store.ts';
+import { CheckCorpus, localRoots, portableSuite, type PortableSuite } from './check-store.ts';
 import { repository, requiresContract } from './repositories.ts';
 import { assertDag } from './graph.ts';
 import { validateTaskContext } from './workflow.ts';
@@ -210,8 +210,9 @@ export function recordsFromState(h: DevContour, s: DevContourState) {
     });
   // Корпус проверок — запись владельца компонента: случаи, версии, решения и
   // принятия. Локальные операции и команды checker в Git не уходят.
+  const roots = localRoots(h);
   for (const suite of new CheckCorpus(h).all())
-    add(suite.repositoryId, { version: 1, kind: 'check', data: portableSuite(suite) });
+    add(suite.repositoryId, { version: 1, kind: 'check', data: portableSuite(suite, roots) });
   for (const c of s.changeSets)
     add(undefined, {
       version: 1,

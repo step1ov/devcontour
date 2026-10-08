@@ -36,6 +36,8 @@ function normalizePause(state: DevContourState & { pauseFailure?: unknown }) {
 }
 export class Store {
   private db: DatabaseSync;
+  /** Файл БД: его каталог — локальный корень, который не должен попадать в Git. */
+  readonly file: string;
   private components?: ComponentStorage;
   private transaction = false;
   private savepoint = 0;
@@ -51,6 +53,7 @@ export class Store {
     migrate = false,
     journalMode?: 'DELETE',
   ) {
+    this.file = path;
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
     if (
