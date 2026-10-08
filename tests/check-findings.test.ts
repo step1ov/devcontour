@@ -850,3 +850,43 @@ test('F20: facts that differ only in diagnostic text merge to the Git value on e
     d.close();
   }
 });
+
+test('F09/F16 residue: a path after an escaped newline or a colon is scrubbed; F17 residue: combining marks and link framing survive', () => {
+  const ws = '/srv/synthetic-ws';
+  const roots = [ws, '/tmp'];
+  const actual = canonicalJson({
+    error: `Error:\n${ws}/private.json\n\tC:\\Users\\Synthetic\\private.json`,
+  });
+  const out = scrubLocalPaths(actual, roots);
+  assert.equal(out.includes('synthetic'), false, out);
+  assert.equal(out.includes('Synthetic'), false, out);
+  assert.equal(scrubLocalPaths('ENOENT:/tmp/x.json', roots), 'ENOENT:<local-path>/x.json');
+  const combining = 'café/tmp/file';
+  assert.equal(scrubLocalPaths(combining, roots), combining);
+  assert.equal(
+    scrubLocalPaths('see [input](file:///tmp/input.json), then', roots),
+    'see [input](<local-path>), then',
+  );
+  for (const text of [out, 'see [input](<local-path>), then'])
+    assert.equal(scrubLocalPaths(text, roots), text);
+});
+
+test('F21: after a Git edit of only diagnostic text the local projection shows the Git value', () => {
+  const d = domain();
+  try {
+    const t = d.add('Diagnostic edit');
+    d.seed(t.id, 5, [t.id]);
+    const local = d.corpus.get('KS-' + d.c.id);
+    const git = portableSuite(local);
+    git.decisions[0].reason = 'Edited in Git';
+    git.adoptions[0].reason = 'Edited adoption in Git';
+    const merged = mergeSuites(portableSuite(local), portableSuite(local), git)!;
+    const next = localSuite(merged, local);
+    assert.equal(next.decisions[0].reason, 'Edited in Git');
+    assert.equal(next.adoptions[0].reason, 'Edited adoption in Git');
+    // Повторный экспорт совпадает с Git: следующий sync ничего не обещает.
+    assert.equal(canonicalJson(portableSuite(next)), canonicalJson(git));
+  } finally {
+    d.close();
+  }
+});

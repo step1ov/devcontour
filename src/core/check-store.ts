@@ -211,10 +211,12 @@ export function corpusFile(suite: CheckSuite, cases: string[], number: number) {
  * от маршрута API, поэтому он не очищается: в причины пишут смысл, а не пути.
  */
 const PATH_CHARS = String.raw`[^\s"'\x60<>|,;)\]}]`;
-// Слева от корня — не буква/цифра любого алфавита, не часть пути и не уже
-// поставленная метка: относительные пути (пример/tmp), /tmpfoo и повторная
-// очистка («<local-path>/root») не задеваются.
-const LEFT = String.raw`(?<![\p{L}\p{N}_.~:/\\>-])`;
+// Слева от корня — не буква/цифра любого алфавита (с комбинируемыми знаками),
+// не часть пути и не уже поставленная метка: относительные пути (пример/tmp,
+// café/tmp), /tmpfoo и повторная очистка («<local-path>/root») не задеваются.
+// JSON-экранированный перевод строки или табуляция (\n, \r, \t) — граница:
+// исключение часто называет путь с новой строки.
+const LEFT = String.raw`(?:(?<=\\[nrt])|(?<![\p{L}\p{M}\p{N}_.~/\\>-]))`;
 const SEP = String.raw`(?:\\{1,2}|\/)`;
 const USER_PATH = new RegExp(
   LEFT +
@@ -249,7 +251,11 @@ export function scrubLocalPaths(text: string, roots: string[] = []) {
   let last = 0;
   for (const m of text.matchAll(URL_TOKEN)) {
     out += scrubPlain(text.slice(last, m.index), known);
-    out += m[1].toLowerCase() === 'file' ? '<local-path>' : m[0];
+    if (m[1].toLowerCase() === 'file') {
+      // Путь file:// кончается там же, где путь: обрамление ссылки остаётся.
+      const path = new RegExp(String.raw`^file:\/\/${PATH_CHARS}*`, 'iu').exec(m[0])![0];
+      out += '<local-path>' + scrubPlain(m[0].slice(path.length), known);
+    } else out += m[0];
     last = m.index + m[0].length;
   }
   return out + scrubPlain(text.slice(last), known);
@@ -989,8 +995,10 @@ export function verifySuite(suite: PortableSuite) {
 /** Локальная запись из переносимой; локальные операции клона сохраняются. */
 export function localSuite(portable: PortableSuite, previous?: CheckSuite): CheckSuite {
   const decisions = portable.decisions.map((d) => {
+    // Значение из Git, включая диагностику; локально остаётся только команда
+    // checker, которая в Git не уходит.
     const own = previous?.decisions.find((x) => x.id === d.id);
-    return (own ?? d) as CaseDecision;
+    return (own?.method ? { ...d, method: { ...own.method, ...d.method } } : d) as CaseDecision;
   });
   return {
     ...portable,
