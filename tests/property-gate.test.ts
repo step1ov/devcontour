@@ -365,7 +365,9 @@ writeFileSync(process.env.DEVCONTOUR_PROPERTY_REPORT, JSON.stringify({ version: 
       id: 'properties',
       kind: 'test' as const,
       command: ['node', command],
-      timeoutMs: 5000,
+      // Под нагрузкой полного прогона короткий предел обрывал проверку раньше,
+      // чем она успевала отчитаться; здесь ничего не зависает.
+      timeoutMs: 60000,
       property: { path: '.reports/property.json' },
     });
     const config = configSchema.parse({
