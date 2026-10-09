@@ -288,7 +288,7 @@ test('The controller seeds the gate, keeps the property report on failure and ti
 
     // Таймаут гейта: отчёт свойств и seed сохранены, вход назван.
     variant = 'hang';
-    config.gates[0].timeoutMs = 5000;
+    config.gates[0].timeoutMs = 15000;
     const hung = await evidenceOf();
     config.gates[0].timeoutMs = 60000;
     assert.equal(hung.gate.passed, false);
