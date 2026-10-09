@@ -84,8 +84,15 @@ export class Store {
       `PRAGMA journal_mode=${journalMode ?? (locations?.length ? 'DELETE' : 'WAL')}; PRAGMA busy_timeout=20000; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;`,
     );
     this.db.exec(
-      'CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, type TEXT NOT NULL, data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS revision (id INTEGER PRIMARY KEY CHECK(id=1), n INTEGER NOT NULL); INSERT OR IGNORE INTO revision (id,n) VALUES(1,0);',
+      'CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, type TEXT NOT NULL, data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS revision (id INTEGER PRIMARY KEY CHECK(id=1), n INTEGER NOT NULL, lease INTEGER NOT NULL DEFAULT 0); INSERT OR IGNORE INTO revision (id,n) VALUES(1,0);',
     );
+    // Таблица ревизии первой редакции не имела счётчика сроков владения.
+    if (
+      !(this.db.prepare('PRAGMA main.table_info(revision)').all() as { name: string }[]).some(
+        (c) => c.name === 'lease',
+      )
+    )
+      this.db.exec('ALTER TABLE main.revision ADD COLUMN lease INTEGER NOT NULL DEFAULT 0');
     this.db
       .prepare('INSERT OR IGNORE INTO main.state (id,data) VALUES(1,?)')
       .run(JSON.stringify(emptyState()));
@@ -136,9 +143,11 @@ export class Store {
     }
   }
   /** Согласованное чтение: ревизия и состояние из одного снимка БД. */
+  private reading = false;
   private atomicRead<T>(read: () => T): T {
-    if (this.transaction) return read();
+    if (this.transaction || this.reading) return read();
     this.db.exec('BEGIN');
+    this.reading = true;
     try {
       const value = read();
       this.db.exec('COMMIT');
@@ -146,6 +155,8 @@ export class Store {
     } catch (e) {
       this.db.exec('ROLLBACK');
       throw e;
+    } finally {
+      this.reading = false;
     }
   }
   private readUnlocked(): DevContourState {
@@ -195,6 +206,7 @@ export class Store {
       this.db.exec(outer ? `RELEASE ${point}` : 'COMMIT');
     } catch (error) {
       this.db.exec(outer ? `ROLLBACK TO ${point}; RELEASE ${point}` : 'ROLLBACK');
+      this.cached = undefined;
       this.projectionPending = pending;
       this.transaction = outer;
       throw error;
@@ -219,7 +231,7 @@ export class Store {
       // Heartbeat продлевает только сроки владения (lease), которых читатели
       // проекций не показывают: ревизия от них не растёт, иначе каждый опрос
       // панели видел бы «изменение».
-      if (type !== 'heartbeat') this.bump();
+      this.bump(type === 'heartbeat' ? 'lease' : 'data');
       if (type !== 'heartbeat') {
         const at = new Date().toISOString();
         const inserted = this.db
@@ -255,33 +267,48 @@ export class Store {
     this.db
       .prepare(`INSERT OR REPLACE INTO ${schema}.local_workflow VALUES(?,?,?,?)`)
       .run(namespace, owner ?? '@workspace', key, JSON.stringify(value));
-    this.bump();
+    this.bump('data');
   }
-  private bump() {
-    this.db.prepare('UPDATE main.revision SET n=n+1 WHERE id=1').run();
+  private bump(kind: 'data' | 'lease') {
+    this.db
+      .prepare(`UPDATE main.revision SET ${kind === 'data' ? 'n=n+1' : 'lease=lease+1'} WHERE id=1`)
+      .run();
   }
   /**
-   * Ревизия данных: растёт при каждой записи состояния, кроме продления
-   * lease, и при каждой локальной записи, в том числе из других процессов той
-   * же БД. Читатель,
-   * у которого ревизия не изменилась, может не читать состояние заново.
+   * Ревизия данных: растёт при каждой записи состояния и каждой локальной
+   * записи, в том числе из других процессов той же БД. Продление lease
+   * (heartbeat) ведёт отдельный счётчик `lease`: сроки владения меняются
+   * часто, а видимые данные — нет.
    */
   revision(): number {
-    return (this.db.prepare('SELECT n FROM main.revision WHERE id=1').get() as { n: number }).n;
+    return this.version().revision;
   }
-  private cached?: { revision: number; state: DevContourState };
+  version(): { revision: number; lease: number } {
+    const row = this.db.prepare('SELECT n, lease FROM main.revision WHERE id=1').get() as {
+      n: number;
+      lease: number;
+    };
+    return { revision: row.n, lease: row.lease };
+  }
+  private cached?: { revision: number; lease: number; state: DevContourState };
   /**
-   * Состояние только для чтения, разобранное один раз на ревизию. Для
-   * проекций, которые опрашиваются часто: большое состояние не разбирается
-   * на каждый запрос. Возвращаемый объект нельзя менять.
+   * Состояние только для чтения, разобранное один раз на версию данных и
+   * сроков владения. Для проекций, которые опрашиваются часто. Объект
+   * заморожен целиком: изменение не может испортить кэш. Внутри транзакции
+   * записи кэш не используется — она может откатиться.
    */
-  readShared(): { revision: number; state: Readonly<DevContourState> } {
+  readShared(): { revision: number; lease: number; state: Readonly<DevContourState> } {
     return this.atomicRead(() => {
-      const revision = this.revision();
-      if (this.cached?.revision !== revision)
-        this.cached = { revision, state: this.readUnlocked() };
+      const version = this.version();
+      if (this.transaction) return { ...version, state: deepFreeze(this.readUnlocked()) };
+      if (this.cached?.revision !== version.revision || this.cached.lease !== version.lease)
+        this.cached = { ...version, state: deepFreeze(this.readUnlocked()) };
       return this.cached;
     });
+  }
+  /** Согласованное чтение нескольких значений из одного снимка БД. */
+  snapshot<T>(read: () => T): T {
+    return this.atomicRead(read);
   }
   refreshProjection() {
     try {
@@ -396,4 +423,12 @@ export class Store {
       .prepare(`INSERT OR REPLACE INTO ${schema}.git_sync(owner,data) VALUES(?,?)`)
       .run(owner ?? '@workspace', JSON.stringify(value));
   }
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const item of Object.values(value)) deepFreeze(item);
+  }
+  return value;
 }

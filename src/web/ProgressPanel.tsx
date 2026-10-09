@@ -1,4 +1,5 @@
-import { useMemo } from 'react';
+import { useEffect, useState } from 'react';
+import { Button } from '@/ui/button.tsx';
 import {
   Bot,
   CheckCircle2,
@@ -24,7 +25,6 @@ import { roleLabel } from './roles.ts';
 import { WorkerCards } from './Workers.tsx';
 import { Badge } from '@/ui/badge.tsx';
 import { Card, CardContent, CardHeader, CardTitle } from '@/ui/card.tsx';
-import { queueStopReason } from '../core/work-status.ts';
 
 // What the operator wants to know while work runs: how far the whole thing is,
 // how far each architectural block is, who is holding which task right now, and
@@ -238,20 +238,59 @@ function Setup({
 
 // Ревью контракта — работа с попытками, и каждая стоила вызова модели.
 // Показываем их целиком: отклонение с находками полезнее, чем тишина.
+/** Страница JSON с сервера панели; ошибка — текст сервера. */
+async function getPage<T>(
+  path: string,
+): Promise<{ total: number; items: T[]; next: number | null }> {
+  const response = await fetch('/api/' + path);
+  const body = (await response.json()) as { error?: string };
+  if (!response.ok) throw new Error(body.error ?? 'Ошибка запроса');
+  return body as { total: number; items: T[]; next: number | null };
+}
+// Попытки ревью с находками — страницами по запросу, а не в сводке: на
+// пилоте их были десятки, и каждая несла список замечаний.
 function Contracts({
   contracts,
-  attempts,
+  count,
 }: {
   contracts: { id: string; title: string; approvedAt: string }[];
-  attempts: ContractAttempt[];
+  count: number;
 }) {
-  const recent = [...attempts].reverse();
+  const [recent, setRecent] = useState<ContractAttempt[]>([]);
+  const [next, setNext] = useState<number | null>(null);
+  const [error, setError] = useState('');
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    let valid = true;
+    setError('');
+    getPage<ContractAttempt>('contract-attempts?limit=20')
+      .then((page) => {
+        if (!valid) return;
+        setRecent(page.items);
+        setNext(page.next);
+      })
+      .catch((e: Error) => valid && setError(e.message));
+    return () => {
+      valid = false;
+    };
+  }, [count, attempt]);
+  const more = () =>
+    getPage<ContractAttempt>(`contract-attempts?limit=20&cursor=${next}`)
+      .then((page) => {
+        setRecent((items) => [
+          ...items,
+          ...page.items.filter((a) => !items.some((x) => x.id === a.id)),
+        ]);
+        setNext(page.next);
+      })
+      .catch((e: Error) => setError(e.message));
+  const attempts = [...recent].reverse();
   return (
     <Card>
       <CardHeader className="pb-3">
         <CardTitle className="flex items-center gap-2">
           <FileSignature className="text-primary size-4" aria-hidden="true" />
-          Ревью ({contracts.length} принято, попыток {attempts.length})
+          Ревью ({contracts.length} принято, попыток {count})
         </CardTitle>
       </CardHeader>
       <CardContent className="grid gap-4">
@@ -266,12 +305,20 @@ function Contracts({
             ))}
           </ul>
         )}
+        {error && (
+          <p role="alert" className="text-destructive text-sm">
+            Попытки ревью не загрузились: {error}{' '}
+            <Button variant="outline" size="sm" onClick={() => setAttempt((n) => n + 1)}>
+              Повторить
+            </Button>
+          </p>
+        )}
         {/* Число замечаний по попыткам: по нему видно, сходится процесс или
             кружит. Без этого автор сравнивает круги вручную. */}
         {recent.length > 1 && (
           <p className="text-muted-foreground text-sm">
-            Замечаний по попыткам:{' '}
-            {[...attempts].map((a, i) => (
+            Замечаний по попыткам{next !== null ? ` (последние ${recent.length} из ${count})` : ''}:{' '}
+            {attempts.map((a, i) => (
               <span key={a.id}>
                 {i > 0 && ' → '}
                 <span className={a.approved ? 'text-primary' : undefined}>{a.findings.length}</span>
@@ -285,9 +332,104 @@ function Contracts({
           // уходила далеко вниз.
           <AttemptList attempts={attempts} recent={recent} />
         ) : (
-          <p className="text-muted-foreground">
-            Ревью контрактов ещё не запускалось. Здесь будет видно каждую попытку и её находки.
+          !error &&
+          (count ? (
+            <p role="status" className="text-muted-foreground">
+              Загрузка попыток ревью…
+            </p>
+          ) : (
+            <p className="text-muted-foreground">
+              Ревью контрактов ещё не запускалось. Здесь будет видно каждую попытку и её находки.
+            </p>
+          ))
+        )}
+        {next !== null && (
+          <Button variant="outline" size="sm" onClick={() => void more()}>
+            Ранние попытки ревью ({count - recent.length})
+          </Button>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+// Очередь всех досок страницами: сводка несёт задачи выбранной доски и
+// текущей работы, а очередь отвечает на вопрос «что ещё не сделано» целиком.
+function Queue({ revision }: { revision?: string }) {
+  type Item = Pick<Task, 'id' | 'title' | 'status' | 'role' | 'repositoryId'>;
+  const [items, setItems] = useState<Item[]>([]);
+  const [total, setTotal] = useState(0);
+  const [next, setNext] = useState<number | null>(null);
+  const [error, setError] = useState('');
+  const [attempt, setAttempt] = useState(0);
+  const [shown, setShown] = useState(50);
+  useEffect(() => {
+    let valid = true;
+    getPage<Item>(`queue?limit=${Math.min(shown, 50)}`)
+      .then(async (page) => {
+        let all = page.items;
+        let cursor = page.next;
+        // Уже раскрытые страницы перезагружаются целиком: очередь меняется.
+        while (cursor !== null && all.length < shown) {
+          const more = await getPage<Item>(`queue?limit=50&cursor=${cursor}`);
+          all = [...all, ...more.items];
+          cursor = more.next;
+        }
+        if (!valid) return;
+        setError('');
+        setItems(all);
+        setTotal(page.total);
+        setNext(cursor);
+      })
+      .catch((e: Error) => valid && setError(e.message));
+    return () => {
+      valid = false;
+    };
+  }, [revision, attempt, shown]);
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle>Очередь ({total})</CardTitle>
+      </CardHeader>
+      <CardContent>
+        {error && (
+          <p role="alert" className="text-destructive text-sm">
+            Очередь не загрузилась: {error}{' '}
+            <Button variant="outline" size="sm" onClick={() => setAttempt((n) => n + 1)}>
+              Повторить
+            </Button>
           </p>
+        )}
+        {items.length ? (
+          <ul className="grid gap-2">
+            {items.map((t) => (
+              <li key={t.id} className="flex flex-wrap items-center gap-3 border-b pb-2">
+                {t.status === 'failed' ? (
+                  <XCircle className="text-destructive size-4 shrink-0" aria-hidden="true" />
+                ) : (
+                  <CircleDashed
+                    className="text-muted-foreground size-4 shrink-0"
+                    aria-hidden="true"
+                  />
+                )}
+                <span className="min-w-0 flex-1">{t.title}</span>
+                <code className="text-muted-foreground font-mono text-xs">{t.repositoryId}</code>
+                <span className="text-muted-foreground text-xs">{roleLabel(t.role)}</span>
+                <Badge variant={statusTone[t.status]}>{statusNames[t.status]}</Badge>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          !error && <p className="text-muted-foreground">Очередь пуста.</p>
+        )}
+        {next !== null && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="mt-3"
+            onClick={() => setShown((n) => n + 50)}
+          >
+            Показать ещё ({total - items.length})
+          </Button>
         )}
       </CardContent>
     </Card>
@@ -347,7 +489,7 @@ function AttemptList({
     </>
   );
 }
-function Journal({ events }: { events: AuditEvent[] }) {
+function Journal({ events }: { events: Pick<AuditEvent, 'id' | 'at' | 'type'>[] }) {
   const recent = [...events].sort((a, b) => b.id - a.id).slice(0, 40);
   return (
     <Card>
@@ -405,7 +547,7 @@ function Stage({
   paused,
   pauseReason,
   waits,
-  events,
+  stopped,
   workflows,
 }: {
   counts: PanelProgress;
@@ -413,13 +555,13 @@ function Stage({
   paused?: boolean;
   pauseReason?: DevContourState['pauseReason'];
   waits?: DevContourState['waits'];
-  events: AuditEvent[];
+  /** Причину остановки очереди сводка считает на сервере по полному журналу. */
+  stopped?: string;
   workflows?: WorkflowView[];
 }) {
   const { total, done, drafts } = counts;
   const failed = counts.statuses.failed ?? 0;
   const tasks = { length: total };
-  const stopped = queueStopReason({ paused, pauseReason }, events);
   // Остановленный цикл восстановления выглядел как обычное ожидание свободного
   // исполнителя: причина лежала в записи работы и доходила до агентского API,
   // но не до интерфейса. Человек не видел, что чинить уже никто не будет.
@@ -512,8 +654,11 @@ export function ProgressPanel({
     >[];
     contracts: { id: string; title: string; approvedAt: string }[];
     progress: PanelProgress;
-    events?: AuditEvent[];
-    contractAttempts?: ContractAttempt[];
+    events?: Pick<AuditEvent, 'id' | 'at' | 'type'>[];
+    stopReason?: string;
+    contractAttemptCount?: number;
+    /** Номер показанного состояния: очередь перезагружается при его смене. */
+    revision?: string;
     concurrency?: number;
     paused?: boolean;
     pauseReason?: DevContourState['pauseReason'];
@@ -540,7 +685,6 @@ export function ProgressPanel({
   const working = tasks
     .filter((t) => active.includes(t.status))
     .map((t) => ({ task: t, run: runs.find((r) => r.id === t.activeRunId) }));
-  const queue = tasks.filter((t) => !active.includes(t.status) && t.status !== 'done');
 
   return (
     <div className="grid gap-6">
@@ -550,7 +694,7 @@ export function ProgressPanel({
         paused={state.paused}
         pauseReason={state.pauseReason}
         waits={state.waits}
-        events={state.events ?? []}
+        stopped={state.stopReason}
         workflows={state.workflows}
       />
       <Setup
@@ -609,37 +753,7 @@ export function ProgressPanel({
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle>Очередь ({queue.length})</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {queue.length ? (
-            <ul className="grid gap-2">
-              {queue.map((t) => (
-                <li key={t.id} className="flex flex-wrap items-center gap-3 border-b pb-2">
-                  {t.status === 'done' ? (
-                    <CheckCircle2 className="text-primary size-4 shrink-0" aria-hidden="true" />
-                  ) : t.status === 'failed' ? (
-                    <XCircle className="text-destructive size-4 shrink-0" aria-hidden="true" />
-                  ) : (
-                    <CircleDashed
-                      className="text-muted-foreground size-4 shrink-0"
-                      aria-hidden="true"
-                    />
-                  )}
-                  <span className="min-w-0 flex-1">{t.title}</span>
-                  <code className="text-muted-foreground font-mono text-xs">{t.repositoryId}</code>
-                  <span className="text-muted-foreground text-xs">{roleLabel(t.role)}</span>
-                  <Badge variant={statusTone[t.status]}>{statusNames[t.status]}</Badge>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="text-muted-foreground">Очередь пуста.</p>
-          )}
-        </CardContent>
-      </Card>
+      <Queue revision={state.revision} />
 
       <Card>
         <CardHeader className="pb-3">
@@ -694,7 +808,7 @@ export function ProgressPanel({
         </CardContent>
       </Card>
 
-      <Contracts contracts={state.contracts} attempts={state.contractAttempts ?? []} />
+      <Contracts contracts={state.contracts} count={state.contractAttemptCount ?? 0} />
 
       <Journal events={state.events ?? []} />
     </div>

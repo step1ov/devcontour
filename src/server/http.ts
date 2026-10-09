@@ -11,7 +11,9 @@ import { checksSummary, taskChecks } from '../application/checks.ts';
 import {
   panelChangeSet,
   panelContract,
+  panelContractAttempts,
   panelEvents,
+  panelQueue,
   panelRun,
   panelRuns,
   panelSummary,
@@ -301,6 +303,10 @@ export async function serve(
           result = authorOverview(h);
         } else if (req.method === 'GET' && path === '/api/summary') {
           result = panelSummary(h, scheduler.root, Object.fromEntries(url.searchParams));
+        } else if (req.method === 'GET' && path === '/api/queue') {
+          result = panelQueue(h, Object.fromEntries(url.searchParams));
+        } else if (req.method === 'GET' && path === '/api/contract-attempts') {
+          result = panelContractAttempts(h, Object.fromEntries(url.searchParams));
         } else if (req.method === 'GET' && path === '/api/events') {
           result = panelEvents(h, Object.fromEntries(url.searchParams));
         } else if (req.method === 'GET' && path === '/api/tasks') {

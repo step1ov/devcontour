@@ -70,7 +70,7 @@ interface TaskDetail {
   revision: number;
   task: DetailTask;
   dependencies: { id: string; title?: string; status?: string }[];
-  runs: { total: number; items: Run[]; next: number | null };
+  runs: { total: number; items: Run[]; next: number | null; nextBefore: string | null };
 }
 import { roleLabel, currentRoles, setRoleSource } from './roles.ts';
 import { Phases, engine, elapsed } from './Workers.tsx';
@@ -300,6 +300,126 @@ function BoardLink({
     </Button>
   );
 }
+// История проверок ChangeSet и снимки задач любой проверки — по запросу:
+// в сводке только последняя проверка без снимка.
+function ChangeSetHistory({
+  id,
+  count,
+  revision,
+}: {
+  id: string;
+  count: number;
+  revision: string;
+}) {
+  type Verification = {
+    id: string;
+    status: string;
+    startedAt: string;
+    finishedAt?: string;
+    taskCount: number;
+    error?: string;
+    evidence: { gate: string; passed: boolean; summary: string }[];
+  };
+  type Page<T> = { total: number; items: T[]; next: number | null };
+  type SnapshotTask = { id: string; title: string; status: string; resultSha?: string };
+  const [open, setOpen] = useState(false);
+  const [history, setHistory] = useState<Page<Verification>>();
+  const [snapshot, setSnapshot] = useState<{ verificationId: string } & Page<SnapshotTask>>();
+  const [error, setError] = useState('');
+  const [attempt, setAttempt] = useState(0);
+  const base = `changesets/${encodeURIComponent(id)}`;
+  useEffect(() => {
+    if (!open) return;
+    let valid = true;
+    setError('');
+    api(`${base}?limit=10`)
+      .then((value: { history: Page<Verification> }) => valid && setHistory(value.history))
+      .catch((e: Error) => valid && setError(e.message));
+    return () => {
+      valid = false;
+    };
+  }, [open, base, revision, attempt]);
+  const more = () =>
+    api(`${base}?limit=10&cursor=${history?.next}`)
+      .then((value: { history: Page<Verification> }) =>
+        setHistory((prev) => ({
+          ...value.history,
+          items: [...(prev?.items ?? []), ...value.history.items],
+        })),
+      )
+      .catch((e: Error) => setError(e.message));
+  const showSnapshot = (verification: string, cursor = 0) =>
+    api(`${base}?limit=1&verification=${verification}&taskLimit=50&taskCursor=${cursor}`)
+      .then((value: { snapshot: { verificationId: string } & Page<SnapshotTask> }) =>
+        setSnapshot((prev) =>
+          cursor && prev?.verificationId === verification
+            ? { ...value.snapshot, items: [...prev.items, ...value.snapshot.items] }
+            : value.snapshot,
+        ),
+      )
+      .catch((e: Error) => setError(e.message));
+  return (
+    <details onToggle={(e) => setOpen(e.currentTarget.open)}>
+      <summary>История проверок ({count})</summary>
+      {error && (
+        <p role="alert" className="text-destructive text-sm">
+          История не загрузилась: {error}{' '}
+          <Button variant="outline" size="sm" onClick={() => setAttempt((n) => n + 1)}>
+            Повторить
+          </Button>
+        </p>
+      )}
+      {open && !history && !error && <p role="status">Загрузка истории…</p>}
+      {history && (
+        <ol className="grid gap-2">
+          {history.items.map((h) => (
+            <li key={h.id} className="text-sm">
+              <StatusBadge
+                value={
+                  h.status === 'passed' ? 'done' : h.status === 'active' ? 'running' : 'failed'
+                }
+              >
+                {h.status === 'passed' ? 'PASS' : h.status === 'active' ? 'идёт' : 'FAIL'}
+              </StatusBadge>{' '}
+              {stamp(h.startedAt)} ·{' '}
+              {h.evidence.map((e) => `${e.passed ? '✓' : '✗'} ${e.gate}`).join(', ')}
+              {h.error && <span className="text-destructive"> · {h.error}</span>}{' '}
+              <Button variant="outline" size="sm" onClick={() => void showSnapshot(h.id)}>
+                Снимок задач ({h.taskCount})
+              </Button>
+              {snapshot?.verificationId === h.id && (
+                <ul aria-label={`Снимок задач проверки ${h.id}`} className="mt-1 grid gap-1">
+                  {snapshot.items.map((t) => (
+                    <li key={t.id}>
+                      {t.id} · {t.title} · {statusNames[t.status] ?? t.status}
+                      {t.resultSha && <code> {t.resultSha.slice(0, 8)}</code>}
+                    </li>
+                  ))}
+                  {snapshot.next !== null && (
+                    <li>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void showSnapshot(h.id, snapshot.next!)}
+                      >
+                        Ещё задачи ({snapshot.total - snapshot.items.length})
+                      </Button>
+                    </li>
+                  )}
+                </ul>
+              )}
+            </li>
+          ))}
+        </ol>
+      )}
+      {history?.next != null && (
+        <Button variant="outline" size="sm" onClick={() => void more()}>
+          Ранние проверки ({history.total - history.items.length})
+        </Button>
+      )}
+    </details>
+  );
+}
 // Текст контракта не входит в периодическую сводку: загружается при раскрытии.
 function ContractText({ id, bytes }: { id: string; bytes: number }) {
   const [text, setText] = useState<string>();
@@ -426,24 +546,39 @@ export function App() {
     boards: { id: string; title: string }[];
   }>();
   const [log, setLog] = useState<{ title: string; content: string }>();
-  // Что показывает панель: от этого зависит состав сводки. Ревизия — та,
-  // что уже отрисована: без изменений сервер отвечает одним номером.
-  const view = useRef<{ boardId: string; selected: string; workspace: boolean; revision?: number }>(
-    { boardId: '', selected: '', workspace: false },
-  );
+  // Что показывает панель: от этого зависит состав сводки. Номер состояния
+  // привязан к области, для которой он получен: после смены области (или
+  // неудачной загрузки новой) запрос идёт без номера и возвращает полную
+  // сводку. Ответ, пришедший для прежней области, отбрасывается.
+  const view = useRef<{
+    boardId: string;
+    selected: string;
+    workspace: boolean;
+    accepted: boolean;
+    revision?: string;
+    revisionScope?: string;
+    expiresAt?: number;
+  }>({ boardId: '', selected: '', workspace: false, accepted: false });
   const [pollError, setPollError] = useState('');
   const refresh = useCallback(async (force = true) => {
     const v = view.current;
+    const scope = `${v.boardId}|${v.selected}|${v.workspace}|${v.accepted}`;
     const params = new URLSearchParams();
     if (v.boardId) params.set('board', v.boardId);
     if (v.selected) params.set('task', v.selected);
     if (v.workspace) params.set('view', 'workspace');
-    if (!force && v.revision !== undefined) params.set('revision', String(v.revision));
+    if (v.workspace && v.accepted) params.set('accepted', '1');
+    // Истёкший lease операции workspace меняет доступность задач без записи.
+    const expired = v.expiresAt !== undefined && Date.now() >= v.expiresAt;
+    if (!force && !expired && v.revision !== undefined && v.revisionScope === scope)
+      params.set('revision', v.revision);
     const next = (await api('summary?' + params.toString())) as
-      Snapshot | { unchanged: true; revision: number };
+      Snapshot | { unchanged: true; revision: string };
+    const now = view.current;
+    if (`${now.boardId}|${now.selected}|${now.workspace}|${now.accepted}` !== scope) return;
     setPollError('');
     if ('unchanged' in next) return;
-    v.revision = next.revision;
+    Object.assign(v, { revision: next.revision, revisionScope: scope, expiresAt: next.expiresAt });
     setData(next);
   }, []);
   useEffect(() => {
@@ -471,17 +606,16 @@ export function App() {
     if (!boardId) setBoardId(data.boardId ?? liveBoards(data)[0]?.id ?? '');
   }, [data, boardId]);
   // Смена доски, задачи или вида меняет состав сводки — запрос сразу.
+  const [showAccepted, setShowAccepted] = useState(false);
   useEffect(() => {
     const v = view.current;
     const workspace = tab === 'workspace';
     const missing = !!selected && !!data && !data.tasks.some((t) => t.id === selected);
-    if (v.boardId === boardId && v.workspace === workspace && !missing) {
-      v.selected = selected;
-      return;
-    }
-    Object.assign(v, { boardId, selected, workspace });
-    void refresh().catch((e: Error) => setPollError(e.message));
-  }, [boardId, selected, tab, data, refresh]);
+    const changed =
+      v.boardId !== boardId || v.workspace !== workspace || v.accepted !== showAccepted;
+    Object.assign(v, { boardId, selected, workspace, accepted: showAccepted });
+    if (changed || missing) void refresh().catch((e: Error) => setPollError(e.message));
+  }, [boardId, selected, tab, showAccepted, data, refresh]);
   const board = data?.board?.id === boardId ? data.board : undefined;
   const revision =
     board?.revisions.find((r) => r.number === revisionNumber) ?? board?.revisions.at(-1);
@@ -510,39 +644,65 @@ export function App() {
   );
   const task = graphTasks.find((t) => t.id === selected);
   // Детали выбранной задачи — по запросу: полная запись и попытки страницами.
+  // Ранние страницы берутся курсором по id попытки (он не сдвигается, когда
+  // появляются новые попытки); уже раскрытые страницы при обновлении задачи
+  // перезагружаются целиком, ответ для другой задачи отбрасывается.
   const [detail, setDetail] = useState<TaskDetail>();
   const [olderRuns, setOlderRuns] = useState<Run[]>([]);
   const [detailError, setDetailError] = useState('');
   const [detailAttempt, setDetailAttempt] = useState(0);
+  const olderCount = useRef(0);
+  const detailFor = useRef('');
   const detailKey = task ? `${task.id}@${data?.revision}#${detailAttempt}` : '';
   useEffect(() => {
     if (!detailKey) return;
     const id = detailKey.slice(0, detailKey.indexOf('@'));
+    if (detailFor.current !== id) {
+      detailFor.current = id;
+      olderCount.current = 0;
+      setOlderRuns([]);
+    }
     let valid = true;
     setDetailError('');
-    api(`tasks/${encodeURIComponent(id)}?limit=10`)
-      .then((next: TaskDetail) => {
-        if (!valid) return;
-        setDetail((previous) => {
-          if (previous?.task.id !== id) setOlderRuns([]);
-          return next;
-        });
-      })
-      .catch((e: Error) => valid && setDetailError(e.message));
+    const path = `tasks/${encodeURIComponent(id)}`;
+    (async () => {
+      const next = (await api(`${path}?limit=10`)) as TaskDetail;
+      let older: Run[] = [];
+      let before = next.runs.nextBefore;
+      while (before && older.length < olderCount.current) {
+        const page = (await api(
+          `${path}/runs?limit=50&before=${encodeURIComponent(before)}`,
+        )) as TaskDetail['runs'];
+        older = [...older, ...page.items];
+        before = page.nextBefore;
+      }
+      if (!valid || detailFor.current !== id) return;
+      setDetail(next);
+      setOlderRuns(older);
+    })().catch((e: Error) => valid && setDetailError(e.message));
     return () => {
       valid = false;
     };
   }, [detailKey]);
   const full = detail?.task.id === task?.id ? detail : undefined;
-  const taskRuns = full ? [...full.runs.items, ...olderRuns].reverse() : [];
+  const taskRuns = full
+    ? [...new Map([...full.runs.items, ...olderRuns].map((r) => [r.id, r])).values()].reverse()
+    : [];
   const loadOlderRuns = async () => {
     if (!full) return;
-    const cursor = full.runs.items.length + olderRuns.length;
+    const id = full.task.id;
+    const before = olderRuns.at(-1)?.id ?? full.runs.items.at(-1)?.id;
+    if (!before) return;
     try {
       const page = (await api(
-        `tasks/${encodeURIComponent(full.task.id)}/runs?limit=20&cursor=${cursor}`,
+        `tasks/${encodeURIComponent(id)}/runs?limit=20&before=${encodeURIComponent(before)}`,
       )) as TaskDetail['runs'];
-      setOlderRuns((runs) => [...runs, ...page.items]);
+      if (detailFor.current !== id) return;
+      setOlderRuns((runs) => {
+        const merged = [...runs, ...page.items];
+        olderCount.current = merged.length;
+        return merged;
+      });
     } catch (e) {
       setDetailError((e as Error).message);
     }
@@ -1077,6 +1237,18 @@ export function App() {
                     Показать отменённые ({cancelledCount})
                   </label>
                 )}
+                {tab === 'workspace' && data.acceptedBoards > 0 && (
+                  // Задачи принятых досок, от которых зависит текущая работа,
+                  // видны всегда; принятые доски целиком — по запросу.
+                  <label className="text-muted-foreground flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      checked={showAccepted}
+                      onChange={(e) => setShowAccepted(e.target.checked)}
+                    />
+                    Показать принятые доски ({data.acceptedBoards})
+                  </label>
+                )}
                 <label className="max-w-60 max-[760px]:w-full max-[760px]:max-w-none">
                   <span className="sr-only">Поиск задач</span>
                   <Input
@@ -1406,6 +1578,13 @@ export function App() {
                               </Button>
                             </p>
                           ))}
+                          {v && (
+                            <ChangeSetHistory
+                              id={c.id}
+                              count={c.verificationCount}
+                              revision={data.revision}
+                            />
+                          )}
                           {c.acceptance && (
                             <p>
                               Принят {stamp(c.acceptance.at)} · {c.acceptance.approval.actor} ·
@@ -2152,6 +2331,124 @@ export function App() {
     </div>
   );
 }
+// Зависимости выбираются из всех досок серверным поиском страницами: сводка
+// несёт только задачи выбранной доски и текущей работы. Задачи, у которых
+// есть замена, не предлагаются — это считается по всем задачам на сервере.
+function DependencyPicker({
+  own,
+  initial,
+  known,
+}: {
+  own?: string;
+  initial: string[];
+  known: { id: string; title: string }[];
+}) {
+  type Found = { id: string; title: string; superseded: boolean };
+  const [chosen, setChosen] = useState<string[]>(initial);
+  const [titles, setTitles] = useState<Record<string, string>>(() =>
+    Object.fromEntries(known.map((t) => [t.id, t.title])),
+  );
+  const [query, setQuery] = useState('');
+  const [found, setFound] = useState<{ items: Found[]; total: number; next: number | null }>();
+  const [error, setError] = useState('');
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    let valid = true;
+    const timer = setTimeout(() => {
+      setError('');
+      api(`tasks?limit=20&q=${encodeURIComponent(query)}`)
+        .then((page: { items: Found[]; total: number; next: number | null }) => {
+          if (!valid) return;
+          setFound(page);
+          setTitles((all) => ({
+            ...all,
+            ...Object.fromEntries(page.items.map((t) => [t.id, t.title])),
+          }));
+        })
+        .catch((e: Error) => valid && setError(e.message));
+    }, 200);
+    return () => {
+      valid = false;
+      clearTimeout(timer);
+    };
+  }, [query, attempt]);
+  const more = () =>
+    api(`tasks?limit=20&q=${encodeURIComponent(query)}&cursor=${found?.next}`)
+      .then((page: { items: Found[]; total: number; next: number | null }) => {
+        setFound((prev) => ({ ...page, items: [...(prev?.items ?? []), ...page.items] }));
+        setTitles((all) => ({
+          ...all,
+          ...Object.fromEntries(page.items.map((t) => [t.id, t.title])),
+        }));
+      })
+      .catch((e: Error) => setError(e.message));
+  const toggle = (id: string, on: boolean) =>
+    setChosen((ids) => (on ? [...new Set([...ids, id])] : ids.filter((x) => x !== id)));
+  const offered = (found?.items ?? []).filter((t) => t.id !== own && !t.superseded);
+  return (
+    <fieldset className="grid gap-2">
+      <legend>Зависит от задач</legend>
+      {chosen.map((id) => (
+        <input key={id} type="hidden" name="dependsOn" value={id} />
+      ))}
+      {chosen.length > 0 && (
+        <ul aria-label="Выбранные зависимости" className="grid gap-1 text-sm">
+          {chosen.map((id) => (
+            <li key={id} className="flex items-center gap-2">
+              <span className="min-w-0 flex-1">
+                {id} · {titles[id] ?? ''}
+              </span>
+              <Button type="button" variant="outline" size="sm" onClick={() => toggle(id, false)}>
+                Убрать
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <Input
+        type="search"
+        aria-label="Найти задачу для зависимости"
+        placeholder="Название или ID задачи на любой доске"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+      />
+      {error && (
+        <p role="alert" className="text-destructive text-sm">
+          Поиск задач не удался: {error}{' '}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setAttempt((n) => n + 1)}
+          >
+            Повторить
+          </Button>
+        </p>
+      )}
+      <div className="max-h-48 overflow-auto">
+        {offered.map((t) => (
+          <label className="flex cursor-pointer items-start gap-2 py-2 text-sm" key={t.id}>
+            <Input
+              type="checkbox"
+              checked={chosen.includes(t.id)}
+              onChange={(e) => toggle(t.id, e.target.checked)}
+            />
+            <span>
+              {t.id} · {t.title}
+            </span>
+          </label>
+        ))}
+        {found && offered.length === 0 && <p>Подходящих задач нет.</p>}
+        {!found && !error && <p role="status">Загрузка задач…</p>}
+      </div>
+      {found?.next != null && (
+        <Button type="button" variant="outline" size="sm" onClick={() => void more()}>
+          Показать ещё ({found.total - found.items.length})
+        </Button>
+      )}
+    </fieldset>
+  );
+}
 function TaskForm({
   data,
   task,
@@ -2224,25 +2521,7 @@ function TaskForm({
         Критерии приёмки, по одному на строку
         <Textarea name="acceptance" defaultValue={task?.acceptance.join('\n')} required rows={3} />
       </label>
-      <fieldset className="max-h-48 overflow-auto">
-        <legend>Зависит от задач</legend>
-        {data.tasks
-          .filter((t) => t.id !== task?.id && !data.tasks.some((x) => x.supersedes === t.id))
-          .map((t) => (
-            <label className="flex cursor-pointer items-start gap-2 py-2 text-sm" key={t.id}>
-              <Input
-                name="dependsOn"
-                type="checkbox"
-                value={t.id}
-                defaultChecked={task?.dependsOn.includes(t.id)}
-              />
-              <span>
-                {t.id} · {t.title}
-              </span>
-            </label>
-          ))}
-        {data.tasks.length === 0 && <p>Пока нет других задач.</p>}
-      </fieldset>
+      <DependencyPicker own={task?.id} initial={task?.dependsOn ?? []} known={data.tasks} />
       {data.contracts.length > 0 && (
         <fieldset className="max-h-48 overflow-auto">
           <legend>Контракты</legend>

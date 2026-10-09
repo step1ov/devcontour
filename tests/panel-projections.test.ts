@@ -7,10 +7,13 @@ import { largeHistory, type HistoryShape } from './large-history.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
 import { loadConfig } from '../src/runner/config.ts';
+import { input } from './helpers.ts';
 import {
   panelChangeSet,
   panelContract,
+  panelContractAttempts,
   panelEvents,
+  panelQueue,
   panelRun,
   panelRuns,
   panelSummary,
@@ -115,16 +118,16 @@ test('An unchanged revision answers with the number only; lease renewals do not 
   const d = await history({ ...small, copies: 1 });
   try {
     const first = d.summary();
-    const same = panelSummary(d.h, d.root, { revision: String(first.revision) });
+    const same = panelSummary(d.h, d.root, { revision: first.revision });
     assert.deepEqual(same, { revision: first.revision, unchanged: true });
     assert.ok(bytes(same) < 1024);
     // Продление lease не меняет видимых данных.
     d.h.leader('panel-probe');
-    assert.equal(d.store.revision(), first.revision);
+    assert.equal(String(d.store.revision()), first.revision);
     // Видимое изменение — новая ревизия и полный ответ.
     d.h.pause(false);
-    const next = panelSummary(d.h, d.root, { revision: String(first.revision) }) as PanelSummary;
-    assert.ok(next.revision > first.revision);
+    const next = panelSummary(d.h, d.root, { revision: first.revision }) as PanelSummary;
+    assert.notEqual(next.revision, first.revision);
     assert.equal(next.paused, false);
   } finally {
     d.close();
@@ -157,9 +160,12 @@ test('Details arrive on request: task with attempt pages, run with log tails, ch
     assert.equal(c.history.total, small.verifications);
     assert.equal(c.history.items.length, 2);
     assert.deepEqual(c.history.items[0].tasks, []);
-    const withTasks = panelChangeSet(d.h, change.id, { tasks: '1' });
-    assert.ok(withTasks.history.items[0].tasks.length > 0);
-    assert.deepEqual(withTasks.history.items[1].tasks, []);
+    // Снимок задач — только адресно, по проверке; в истории его нет.
+    assert.ok(c.history.items.every((v) => v.tasks.length === 0 && v.taskCount > 0));
+    const withTasks = panelChangeSet(d.h, change.id, {
+      verification: change.verifications.at(-1)!.id,
+    });
+    assert.ok(withTasks.snapshot!.items.length > 0);
     assert.equal(panelContract(d.h, state.contracts[0].id).content, state.contracts[0].content);
     const events = panelEvents(d.h, { limit: '30' });
     assert.equal(events.items.length, 30);
@@ -168,6 +174,234 @@ test('Details arrive on request: task with attempt pages, run with log tails, ch
     const found = panelTaskSearch(d.h, { q: 'копия 2', limit: '5' });
     assert.ok(found.items.length > 0 && found.items.every((t) => t.title.includes('копия 2')));
     assert.throws(() => panelTask(d.h, 'T-missing', {}), /не найдена/);
+  } finally {
+    d.close();
+  }
+});
+
+test('P-F01: recent events, change sets and their details carry no contract texts, tokens or snapshots', async () => {
+  const d = await history({ ...small, copies: 1, events: 0 });
+  try {
+    const secret = 'CONTRACT-BODY-'.repeat(4000);
+    d.h.contract('Large contract', secret);
+    d.h.pause(false);
+    d.store.change('fixture.verification', (s) => {
+      const v = s.changeSets[0].verifications.at(-1)!;
+      v.token = 'verification-token-7';
+      s.changeSets[0].deliveries = [
+        {
+          id: 'D-1',
+          token: 'delivery-token-7',
+          verificationId: v.id,
+          status: 'delivered',
+          startedAt: v.startedAt,
+          leaseUntil: 0,
+          components: {},
+        } as never,
+      ];
+      return { verification: v, contract: secret, token: 'event-token-7' };
+    });
+    const summary = d.summary();
+    const text = JSON.stringify(summary);
+    assert.ok(Buffer.byteLength(text) < 256 * 1024, String(Buffer.byteLength(text)));
+    for (const leaked of [
+      'CONTRACT-BODY-',
+      'verification-token-7',
+      'delivery-token-7',
+      'event-token-7',
+    ])
+      assert.equal(text.includes(leaked), false, leaked);
+    assert.ok(summary.events.every((e) => Object.keys(e).sort().join() === 'at,id,type'));
+    const change = panelChangeSet(d.h, summary.changeSets[0].id, {});
+    const details = JSON.stringify(change);
+    assert.equal(details.includes('verification-token-7'), false);
+    assert.equal(details.includes('delivery-token-7'), false);
+    const events = JSON.stringify(panelEvents(d.h, { limit: '10' }));
+    assert.equal(events.includes('CONTRACT-BODY-'), false);
+    assert.equal(events.includes('event-token-7'), false);
+    assert.ok(Buffer.byteLength(events) < 64 * 1024);
+  } finally {
+    d.close();
+  }
+});
+
+test('P-F03: a lease renewal of a workspace operation refreshes the cached state, changes the summary number and sets the expiry', async () => {
+  const d = await history({ ...small, copies: 1 });
+  try {
+    const now = Date.now();
+    d.store.change('fixture.operation', (s) => {
+      const v = s.changeSets[0].verifications.at(-1)!;
+      v.status = 'active';
+      v.leaseUntil = now + 1000;
+    });
+    const first = d.summary();
+    assert.equal(first.expiresAt, now + 1000);
+    d.store.change('heartbeat', (s) => {
+      s.changeSets[0].verifications.at(-1)!.leaseUntil = now + 60000;
+    });
+    // Кэш видит продлённый lease, номер сводки меняется, срок — новый.
+    assert.equal(
+      d.store.readShared().state.changeSets[0].verifications.at(-1)!.leaseUntil,
+      now + 60000,
+    );
+    const second = panelSummary(d.h, d.root, { revision: first.revision }) as PanelSummary;
+    assert.notEqual(second.revision, first.revision);
+    assert.equal(second.expiresAt, now + 60000);
+    // Без операций workspace продление lease попытки номер не меняет.
+    d.store.change('fixture.operation-done', (s) => {
+      s.changeSets[0].verifications.at(-1)!.status = 'passed';
+    });
+    const idle = d.summary();
+    d.h.leader('panel-probe');
+    assert.deepEqual(panelSummary(d.h, d.root, { revision: idle.revision }), {
+      revision: idle.revision,
+      unchanged: true,
+    });
+  } finally {
+    d.close();
+  }
+});
+
+test('P-F04/P-F05: task search spans boards and knows replacements; the queue pages all boards; the workspace graph keeps dependencies on accepted boards', async () => {
+  const d = await history(small);
+  try {
+    const state = d.store.read();
+    const accepted = state.boards.find((b) => b.revisions.at(-1)!.status === 'accepted')!;
+    const done = accepted.revisions.at(-1)!.taskIds[0];
+    const b = d.h.createBoard('Depends on accepted');
+    const draft = d.h.addTask(b.id, { ...input('Uses accepted result'), dependsOn: [done] });
+    const other = d.h.createBoard('Another draft board');
+    const remote = d.h.addTask(other.id, input('Remote draft'));
+    // Поиск находит задачу другой доски и отмечает заменённые.
+    const found = panelTaskSearch(d.h, { q: 'Remote draft' });
+    assert.equal(found.items[0].id, remote.id);
+    assert.equal(found.items[0].boardId, other.id);
+    // Очередь — по всем доскам, с черновиками.
+    const queue = panelQueue(d.h, { limit: '50' });
+    assert.ok(queue.items.some((t) => t.id === remote.id));
+    assert.ok(queue.items.some((t) => t.id === draft.id));
+    assert.equal(
+      queue.total,
+      d.store
+        .read()
+        .tasks.filter(
+          (t) =>
+            !['done', 'cancelled'].includes(t.status) &&
+            !['running', 'verifying', 'reviewing', 'integrating'].includes(t.status),
+        ).length,
+    );
+    // Общий граф: зависимость от принятой доски видна, принятые целиком — по запросу.
+    const graph = d.summary({ view: 'workspace' });
+    assert.ok(graph.workspaceTaskIds!.includes(draft.id));
+    assert.ok(graph.workspaceTaskIds!.includes(done));
+    assert.ok(graph.acceptedBoards > 0);
+    const all = d.summary({ view: 'workspace', accepted: '1' });
+    assert.ok(all.workspaceTaskIds!.length > graph.workspaceTaskIds!.length);
+  } finally {
+    d.close();
+  }
+});
+
+test('P-F06/P-F07/P-F08/P-F09: attempt pages use a stable cursor, any verification snapshot is addressable, event pages stay within 50 and review attempts are paged with a total', async () => {
+  const d = await history(small);
+  try {
+    const state = d.store.read();
+    const busy = state.tasks.find((t) => state.runs.filter((r) => r.taskId === t.id).length >= 5)!;
+    const head = panelRuns(d.h, busy.id, { limit: '2' });
+    // Новая попытка появляется после загрузки первой страницы.
+    d.store.change('fixture.new-run', (s) => {
+      const last = s.runs.findLast((r) => r.taskId === busy.id)!;
+      s.runs.push({ ...structuredClone(last), id: 'R-new', attempt: 6 });
+    });
+    const older = panelRuns(d.h, busy.id, { limit: '50', before: head.nextBefore! });
+    const seen = [...head.items, ...older.items].map((r) => r.attempt);
+    assert.deepEqual(seen, [5, 4, 3, 2, 1], 'без потерь и повторов');
+    // Снимок задач прежней проверки.
+    const change = state.changeSets[0];
+    const previous = change.verifications[0];
+    const c = panelChangeSet(d.h, change.id, { verification: previous.id, taskLimit: '2' });
+    assert.equal(c.snapshot!.verificationId, previous.id);
+    assert.equal(c.snapshot!.total, previous.tasks.length);
+    assert.ok(c.snapshot!.items.length > 0 && c.snapshot!.items.length <= 2);
+    assert.throws(() => panelEvents(d.h, { limit: '51' }));
+    // Попытки ревью: в сводке — счётчик и последние без находок, все — страницами.
+    d.store.change('fixture.attempts', (s) => {
+      s.contractAttempts = Array.from({ length: 25 }, (_, i) => ({
+        id: 'CA-' + i,
+        at: new Date(Date.UTC(2026, 0, 1, 0, i)).toISOString(),
+        subject: 'contract',
+        attempt: i + 1,
+        title: 'Review ' + i,
+        approved: i === 24,
+        summary: 'fixture',
+        findings: [{ severity: 'major', message: 'finding ' + i }],
+        artifact: 'a',
+        authorRuntime: 'codex',
+        reviewerRuntime: 'claude',
+      }));
+    });
+    const summary = d.summary();
+    assert.equal(summary.contractAttemptCount, 25);
+    assert.equal(summary.contractAttempts.length, 20);
+    assert.equal(JSON.stringify(summary.contractAttempts).includes('finding '), false);
+    const first = panelContractAttempts(d.h, { limit: '20' });
+    const rest = panelContractAttempts(d.h, { limit: '20', cursor: '20' });
+    assert.equal(first.total, 25);
+    assert.deepEqual(
+      [...first.items, ...rest.items].map((a) => a.id),
+      Array.from({ length: 25 }, (_, i) => 'CA-' + (24 - i)),
+    );
+  } finally {
+    d.close();
+  }
+});
+
+test('P-F10/P-F11: the shared state is frozen, a rolled back write does not stay cached, and the summary number belongs to its data', async () => {
+  const d = await history({ ...small, copies: 1 });
+  try {
+    const shared = d.store.readShared().state;
+    assert.throws(() => {
+      (shared.tasks[0] as { title: string }).title = 'MUTATED';
+    }, TypeError);
+    assert.notEqual(d.store.read().tasks[0].title, 'MUTATED');
+    const before = d.store.read().tasks[0].title;
+    assert.throws(() =>
+      d.store.atomic(() => {
+        d.store.change('fixture.rollback', (s) => {
+          s.tasks[0].title = 'ROLLED BACK';
+        });
+        assert.equal(d.store.readShared().state.tasks[0].title, 'ROLLED BACK');
+        throw new Error('rollback');
+      }),
+    );
+    d.store.change('fixture.commit', (s) => {
+      s.tasks[1].title = 'COMMITTED';
+    });
+    const after = d.store.readShared().state;
+    assert.equal(after.tasks[0].title, before);
+    assert.equal(after.tasks[1].title, 'COMMITTED');
+    // Запись другого соединения между запросом и чтением: номер и данные — из
+    // одного снимка.
+    const other = new Store(join(d.root, 'data', 'state.sqlite'));
+    try {
+      const original = d.store.readShared.bind(d.store);
+      let injected = false;
+      d.store.readShared = () => {
+        if (!injected) {
+          injected = true;
+          other.change('fixture.concurrent', (s) => {
+            s.boards[0].title = 'CONCURRENT';
+          });
+        }
+        return original();
+      };
+      const summary = d.summary();
+      const revision = Number(summary.revision.split('.')[0]);
+      assert.equal(revision, d.store.revision());
+      assert.ok(summary.boards.some((b) => b.title === 'CONCURRENT'));
+    } finally {
+      other.close();
+    }
   } finally {
     d.close();
   }

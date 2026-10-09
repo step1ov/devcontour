@@ -33,6 +33,38 @@ const SHORT = 300;
 const LOG_TAIL = 4000;
 const short = (text: string | undefined, n = SHORT) =>
   text && text.length > n ? text.slice(0, n) + '…' : text;
+const tail = (text: string) => (text.length > LOG_TAIL ? '…' + text.slice(-LOG_TAIL) : text);
+
+/** Без токенов владения на любой глубине: они не для панели. */
+function withoutTokens<T>(value: T): T {
+  if (Array.isArray(value)) return value.map(withoutTokens) as T;
+  if (value && typeof value === 'object')
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([k]) => k !== 'token')
+        .map(([k, v]) => [k, withoutTokens(v)]),
+    ) as T;
+  return value;
+}
+
+/**
+ * Данные события для деталей журнала: только верхнеуровневые скаляры с
+ * ограниченным текстом. Вложенные тела (контракт, evidence, снимки проверок)
+ * событий не покидают — у них свои детали.
+ */
+function eventData(data: unknown): Record<string, string | number | boolean | null> | null {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  const out: Record<string, string | number | boolean | null> = {};
+  for (const [key, value] of Object.entries(data as Record<string, unknown>).slice(0, 20)) {
+    if (key === 'token') continue;
+    // Длинная строка — тело (контракт, лог, вывод): вместо неё только длина.
+    if (typeof value === 'string')
+      out[key] = value.length <= 120 ? value : `[текст ${value.length} знаков]`;
+    else if (typeof value === 'number' || typeof value === 'boolean' || value === null)
+      out[key] = value;
+  }
+  return out;
+}
 
 export type PanelEvidence = Pick<Evidence, 'id' | 'gate' | 'phase' | 'kind' | 'passed'> & {
   summary: string;
@@ -155,40 +187,59 @@ function boardLine(state: DevContourState, board: Board, running: Set<string>) {
 }
 export type PanelBoard = ReturnType<typeof boardLine>;
 
-/** ChangeSet: последняя проверка без снимка задач и тел логов. */
+/** Проверка ChangeSet без снимка задач, токена и тел логов. */
+function verificationLine(v: ChangeSet['verifications'][number], logs: 'none' | 'tail') {
+  return {
+    ...withoutTokens(v),
+    tasks: [] as Task[],
+    taskCount: v.tasks.length,
+    evidence: v.evidence.map((e) => ({
+      ...e,
+      log: logs === 'none' ? '' : tail(e.log),
+      summary: short(e.summary) ?? '',
+    })),
+  };
+}
+/** ChangeSet: последняя проверка без снимка задач и тел логов, без токенов. */
 function changeSetLine(c: ChangeSet) {
   const last = c.verifications.at(-1);
   return {
-    ...c,
+    ...withoutTokens({ ...c, verifications: [], deliveries: [] }),
     verificationCount: c.verifications.length,
-    verifications: last
-      ? [
-          {
-            ...last,
-            tasks: [],
-            taskCount: last.tasks.length,
-            evidence: last.evidence.map((e) => ({
-              ...e,
-              log: '',
-              summary: short(e.summary) ?? '',
-            })),
-          },
-        ]
-      : [],
-    deliveries: c.deliveries?.filter((d) => d.verificationId === last?.id),
+    verifications: last ? [verificationLine(last, 'none')] : [],
+    deliveries: withoutTokens(c.deliveries?.filter((d) => d.verificationId === last?.id) ?? []),
   };
 }
 
 const summaryQuery = z.object({
   board: z.string().max(200).optional(),
-  revision: z.coerce.number().int().min(0).optional(),
+  revision: z
+    .string()
+    .regex(/^\d+(\.\d+)?$/)
+    .optional(),
   task: z.string().max(200).optional(),
   view: z.enum(['workspace']).optional(),
+  accepted: z.enum(['1']).optional(),
 });
 
 /**
- * Периодическая сводка. `revision` — ревизия, которую клиент уже показывает:
- * если данные не менялись, возвращается только номер.
+ * Номер показанного состояния. Сроки владения входят в него, только пока
+ * идёт операция workspace: от её lease зависит доступность задач.
+ */
+function token(version: { revision: number; lease: number }, leaseSensitive: boolean) {
+  return leaseSensitive ? `${version.revision}.${version.lease}` : String(version.revision);
+}
+function leaseOperations(state: DevContourState) {
+  return state.changeSets.flatMap((c) => [
+    ...c.verifications.filter((v) => v.status === 'active'),
+    ...(c.deliveries ?? []).filter((d) => d.status === 'active'),
+  ]);
+}
+
+/**
+ * Периодическая сводка. `revision` — номер состояния, которое клиент уже
+ * показывает для той же области (доска, задача, вид): если данные не
+ * менялись, возвращается только номер. Всё в ответе — из одного снимка БД.
  */
 export function panelSummary(
   h: DevContour,
@@ -196,10 +247,24 @@ export function panelSummary(
   query: Record<string, string | undefined>,
 ) {
   const q = summaryQuery.parse(query);
-  const revision = h.store.revision();
-  if (q.revision === revision) return { revision, unchanged: true as const };
-  const { state: shared } = h.store.readShared();
-  const state = shared as DevContourState;
+  return h.store.snapshot(() => {
+    const shared = h.store.readShared();
+    const state = shared.state as DevContourState;
+    const operations = leaseOperations(state);
+    const revision = token(shared, operations.length > 0);
+    if (q.revision === revision) return { revision, unchanged: true as const };
+    return buildSummary(h, root, q, state, revision, operations);
+  });
+}
+
+function buildSummary(
+  h: DevContour,
+  root: string,
+  q: z.infer<typeof summaryQuery>,
+  state: DevContourState,
+  revision: string,
+  operations: { leaseUntil: number }[],
+) {
   const running = new Set(state.runs.filter((r) => r.status === 'active').map((r) => r.taskId));
   const boards = state.boards.map((b) => boardLine(state, b, running));
   const ranked = boards
@@ -218,33 +283,40 @@ export function panelSummary(
   const boardOf = new Map<string, string>();
   for (const b of state.boards) for (const id of boardTasks(b)) boardOf.set(id, b.id);
   const ready = readyTasks(state).map((t) => t.id);
+  const byId = new Map(state.tasks.map((t) => [t.id, t]));
   // Задачи сводки: выбранная доска, их зависимости, выбранная задача, занятые,
   // готовые и ждущие решения. Остальные доски — компактными строками.
   const include = new Set<string>(board ? boardTasks(board) : []);
-  for (const id of [...include])
-    for (const dep of state.tasks.find((t) => t.id === id)?.dependsOn ?? []) include.add(dep);
-  if (q.task) include.add(q.task);
-  for (const id of running) include.add(id);
-  for (const id of ready) include.add(id);
-  // Текущая работа целиком: готовые (в том числе ждущие зависимостей),
-  // упавшие, занятые и ждущие решения — со своими зависимостями. Это
-  // ограничено объёмом действующих планов, а не историей.
+  const withDependencies = (id: string) => {
+    include.add(id);
+    for (const dep of byId.get(id)?.dependsOn ?? []) include.add(dep);
+  };
+  for (const id of [...include]) withDependencies(id);
+  if (q.task) withDependencies(q.task);
+  for (const id of running) withDependencies(id);
+  for (const id of ready) withDependencies(id);
+  // Текущая работа: готовые (в том числе ждущие зависимостей), упавшие,
+  // занятые и ждущие решения — со своими зависимостями. Это ограничено
+  // объёмом действующих планов, а не историей. Полная очередь с черновиками
+  // всех досок — страницами (`/api/queue`).
   for (const t of state.tasks)
     if (
       !['done', 'cancelled', 'draft'].includes(t.status) ||
       (t.recovery && t.recovery.status !== 'retry')
-    ) {
-      include.add(t.id);
-      for (const dep of t.dependsOn) include.add(dep);
-    }
-  // Вид всего workspace: задачи текущих ревизий незакрытых досок.
-  const workspaceTaskIds =
-    query.view === 'workspace'
-      ? state.boards
-          .filter((b) => b.revisions.at(-1)?.status === 'active')
-          .flatMap((b) => b.revisions.at(-1)!.taskIds)
-      : undefined;
-  for (const id of workspaceTaskIds ?? []) include.add(id);
+    )
+      withDependencies(t.id);
+  // Общий граф: текущие ревизии незакрытых досок и задачи, от которых они
+  // зависят, даже на принятых досках; принятые доски целиком — по запросу.
+  let workspaceTaskIds: string[] | undefined;
+  if (q.view === 'workspace') {
+    const shown = state.boards.filter(
+      (b) => q.accepted === '1' || b.revisions.at(-1)?.status === 'active',
+    );
+    const ids = new Set(shown.flatMap((b) => b.revisions.at(-1)!.taskIds));
+    for (const id of [...ids]) for (const dep of byId.get(id)?.dependsOn ?? []) ids.add(dep);
+    workspaceTaskIds = [...ids];
+    for (const id of ids) include.add(id);
+  }
   const tasks = state.tasks
     .filter((t) => include.has(t.id))
     .map((t) => ({ ...uiTask(h, state, t), boardId: boardOf.get(t.id) }));
@@ -258,9 +330,16 @@ export function panelSummary(
       ]),
     ).values(),
   ].map((r) => runLine(r, boardOf.get(r.taskId)));
-  const events = h.store.events().slice(0, 40);
+  const recent = h.store.events();
+  const attempts = state.contractAttempts ?? [];
   return {
     revision,
+    /**
+     * Когда истечёт ближайший lease операции workspace: после этого момента
+     * доступность задач меняется без записи, и клиент запрашивает сводку
+     * заново.
+     */
+    expiresAt: operations.length ? Math.min(...operations.map((o) => o.leaseUntil)) : undefined,
     boardId,
     board: board && {
       ...board,
@@ -270,16 +349,23 @@ export function panelSummary(
     boards,
     tasks,
     workspaceTaskIds,
+    acceptedBoards: boards.filter((b) => b.revisions.at(-1)?.status === 'accepted').length,
     runs,
     changeSets: state.changeSets.map(changeSetLine),
     contracts: state.contracts.map(({ content, ...c }) => ({ ...c, contentBytes: content.length })),
-    contractAttempts: (state.contractAttempts ?? []).slice(-20),
+    // Последние попытки ревью без находок; все — страницами с находками.
+    contractAttempts: attempts.slice(-20).map(({ findings, ...a }) => ({
+      ...a,
+      findingsCount: findings.length,
+    })),
+    contractAttemptCount: attempts.length,
     paused: state.paused,
     pauseReason: state.pauseReason,
     waits: state.waits,
     team: state.team,
-    events,
-    stopReason: queueStopReason(state, events),
+    // Журнал в сводке — только строки; данные событий — в деталях журнала.
+    events: recent.slice(0, 40).map((e) => ({ id: e.id, at: e.at, type: e.type })),
+    stopReason: queueStopReason(state, recent),
     journalError: h.store.projectionError,
     workflows: new LeadWorkflow(h)
       .view()
@@ -313,7 +399,7 @@ export function panelSummary(
     },
   };
 }
-export type PanelSummary = Exclude<ReturnType<typeof panelSummary>, { unchanged: true }>;
+export type PanelSummary = ReturnType<typeof buildSummary>;
 
 /**
  * Агрегаты прогресса по всей истории: готовность по компонентам, проверки и
@@ -377,52 +463,78 @@ const page = z.object({
   limit: z.coerce.number().int().min(1).max(50).default(20),
   cursor: z.coerce.number().int().min(0).default(0),
 });
+const paged = <T>(all: T[], query: Record<string, string | undefined>) => {
+  const { limit, cursor } = page.parse(query);
+  return {
+    total: all.length,
+    items: all.slice(cursor, cursor + limit),
+    next: cursor + limit < all.length ? cursor + limit : null,
+  };
+};
 
 function sharedState(h: DevContour) {
   return h.store.readShared().state as DevContourState;
 }
 
-/** Задача целиком и первая страница попыток (новые сначала). */
+/** Задача целиком и первая страница попыток (новые сначала) из одного снимка. */
 export function panelTask(h: DevContour, id: string, query: Record<string, string | undefined>) {
-  const state = sharedState(h);
-  const task = state.tasks.find((t) => t.id === id);
-  if (!task) throw new DomainError('Задача не найдена', 404);
-  return {
-    revision: h.store.revision(),
-    task: {
-      ...task,
-      specDigest: specDigest(task),
-      blockers: blockers(task, state),
-      progress: taskProgress(h, state, task),
-      checks: checksSummary(task),
-    },
-    dependencies: task.dependsOn.map((d) => {
-      const t = state.tasks.find((x) => x.id === d);
-      return { id: d, title: t?.title, status: t?.status };
-    }),
-    runs: panelRuns(h, id, query),
-  };
+  return h.store.snapshot(() => {
+    const shared = h.store.readShared();
+    const state = shared.state as DevContourState;
+    const task = state.tasks.find((t) => t.id === id);
+    if (!task) throw new DomainError('Задача не найдена', 404);
+    return {
+      revision: shared.revision,
+      task: {
+        ...withoutTokens(task),
+        specDigest: specDigest(task),
+        blockers: blockers(task, state),
+        progress: taskProgress(h, state, task),
+        checks: checksSummary(task),
+      },
+      dependencies: task.dependsOn.map((d) => {
+        const t = state.tasks.find((x) => x.id === d);
+        return { id: d, title: t?.title, status: t?.status };
+      }),
+      runs: runsPage(state, id, query),
+    };
+  });
 }
 
-/** Страница попыток задачи: полные попытки с хвостами логов, новые сначала. */
+/**
+ * Страница попыток задачи, новые сначала. `before` — id попытки: страница
+ * строго старше неё. Такой курсор не сдвигается, когда появляются новые
+ * попытки (в отличие от смещения).
+ */
+function runsPage(
+  state: DevContourState,
+  taskId: string,
+  query: Record<string, string | undefined>,
+) {
+  const all = state.runs.filter((r) => r.taskId === taskId).reverse();
+  const before = query.before;
+  const from = before ? all.findIndex((r) => r.id === before) + 1 : 0;
+  if (before && from === 0) throw new DomainError('Попытка курсора не найдена', 404);
+  const { limit, cursor } = page.parse(before ? { ...query, cursor: '0' } : query);
+  const start = before ? from : cursor;
+  const items = all.slice(start, start + limit);
+  return {
+    total: all.length,
+    items: items.map(runDetail),
+    next: start + limit < all.length ? start + limit : null,
+    nextBefore: start + limit < all.length ? items.at(-1)!.id : null,
+  };
+}
 export function panelRuns(
   h: DevContour,
   taskId: string,
   query: Record<string, string | undefined>,
 ) {
-  const { limit, cursor } = page.parse(query);
-  const all = sharedState(h)
-    .runs.filter((r) => r.taskId === taskId)
-    .reverse();
-  return {
-    total: all.length,
-    items: all.slice(cursor, cursor + limit).map(runDetail),
-    next: cursor + limit < all.length ? cursor + limit : null,
-  };
+  return runsPage(sharedState(h), taskId, query);
 }
 
 function runDetail(run: Run) {
-  const { partial, ...rest } = run;
+  const { partial, ...rest } = withoutTokens(run);
   return {
     ...rest,
     // Токен владения попыткой — не для панели.
@@ -430,7 +542,7 @@ function runDetail(run: Run) {
     ...(partial ? { partial: { ...partial, patch: undefined } } : {}),
     evidence: run.evidence.map((e) => ({
       ...e,
-      log: e.log.length > LOG_TAIL ? '…' + e.log.slice(-LOG_TAIL) : e.log,
+      log: tail(e.log),
       tests: e.tests?.slice(0, 200),
     })),
   };
@@ -442,7 +554,11 @@ export function panelRun(h: DevContour, id: string) {
   return runDetail(run);
 }
 
-/** ChangeSet: последняя проверка целиком и страницы прежних без снимков. */
+/**
+ * ChangeSet: прежние проверки страницами (без снимков и токенов), поставки —
+ * последними 20, снимок задач любой проверки — отдельной страницей по
+ * `verification`.
+ */
 export function panelChangeSet(
   h: DevContour,
   id: string,
@@ -450,24 +566,36 @@ export function panelChangeSet(
 ) {
   const c = sharedState(h).changeSets.find((x) => x.id === id);
   if (!c) throw new DomainError('ChangeSet не найден', 404);
-  const { limit, cursor } = page.parse(query);
-  const all = [...c.verifications].reverse();
-  const withTasks = query.tasks === '1';
+  const history = paged([...c.verifications].reverse(), query);
+  const chosen = query.verification
+    ? c.verifications.find((v) => v.id === query.verification)
+    : undefined;
+  if (query.verification && !chosen) throw new DomainError('Проверка не найдена', 404);
+  const deliveries = [...(c.deliveries ?? [])].reverse();
   return {
     ...changeSetLine(c),
-    deliveries: c.deliveries,
-    history: {
-      total: all.length,
-      items: all.slice(cursor, cursor + limit).map((v, i) => ({
-        ...v,
-        tasks: withTasks && cursor + i === 0 ? v.tasks : [],
-        taskCount: v.tasks.length,
-        evidence: v.evidence.map((e) => ({
-          ...e,
-          log: e.log.length > LOG_TAIL ? '…' + e.log.slice(-LOG_TAIL) : e.log,
-        })),
-      })),
-      next: cursor + limit < all.length ? cursor + limit : null,
+    deliveries: withoutTokens(deliveries.slice(0, 20)),
+    deliveryCount: deliveries.length,
+    history: { ...history, items: history.items.map((v) => verificationLine(v, 'tail')) },
+    snapshot: chosen && {
+      verificationId: chosen.id,
+      ...(() => {
+        const tasks = paged(chosen.tasks, {
+          limit: query.taskLimit,
+          cursor: query.taskCursor,
+        });
+        return {
+          ...tasks,
+          items: tasks.items.map((t) => ({
+            id: t.id,
+            title: t.title,
+            status: t.status,
+            repositoryId: t.repositoryId,
+            resultSha: t.resultSha,
+            dependsOn: t.dependsOn,
+          })),
+        };
+      })(),
     },
   };
 }
@@ -478,34 +606,69 @@ export function panelContract(h: DevContour, id: string) {
   return c;
 }
 
-/** Журнал событий страницами: новые сначала, `before` — id события. */
+/** Журнал событий страницами по ≤ 50: новые сначала, `before` — id события. */
 export function panelEvents(h: DevContour, query: Record<string, string | undefined>) {
   const q = z
     .object({
       before: z.coerce.number().int().min(1).optional(),
-      limit: z.coerce.number().int().min(1).max(100).default(40),
+      limit: z.coerce.number().int().min(1).max(50).default(40),
     })
     .parse(query);
-  const items = h.store.eventsPage(q.before, q.limit);
+  const items = h.store
+    .eventsPage(q.before, q.limit)
+    .map((e) => ({ id: e.id, at: e.at, type: e.type, data: eventData(e.data) }));
   return { items, next: items.length === q.limit ? items.at(-1)!.id : null };
 }
 
-/** Поиск задач для выбора зависимостей: компактные строки страницами. */
+/**
+ * Поиск задач по всем доскам для выбора зависимостей: компактные строки
+ * страницами; `superseded` — у задачи есть замена (считается по всем задачам).
+ */
 export function panelTaskSearch(h: DevContour, query: Record<string, string | undefined>) {
-  const { limit, cursor } = page.parse(query);
+  const state = sharedState(h);
   const text = (query.q ?? '').toLowerCase();
-  const all = sharedState(h).tasks.filter(
+  const replaced = new Set(state.tasks.flatMap((t) => (t.supersedes ? [t.supersedes] : [])));
+  const boardOf = new Map<string, string>();
+  for (const b of state.boards) for (const id of boardTasks(b)) boardOf.set(id, b.id);
+  const all = state.tasks.filter(
     (t) => !text || t.title.toLowerCase().includes(text) || t.id.toLowerCase().includes(text),
   );
+  const result = paged(all, query);
   return {
-    total: all.length,
-    items: all.slice(cursor, cursor + limit).map((t) => ({
+    ...result,
+    items: result.items.map((t) => ({
       id: t.id,
       title: t.title,
       status: t.status,
       supersedes: t.supersedes,
+      superseded: replaced.has(t.id),
+      repositoryId: t.repositoryId,
+      boardId: boardOf.get(t.id),
+    })),
+  };
+}
+
+/** Очередь всех досок: незавершённые и неотменённые задачи страницами. */
+export function panelQueue(h: DevContour, query: Record<string, string | undefined>) {
+  const state = sharedState(h);
+  const active = ['running', 'verifying', 'reviewing', 'integrating'];
+  const result = paged(
+    state.tasks.filter((t) => !['done', 'cancelled', ...active].includes(t.status)),
+    query,
+  );
+  return {
+    ...result,
+    items: result.items.map((t) => ({
+      id: t.id,
+      title: t.title,
+      status: t.status,
+      role: t.role,
       repositoryId: t.repositoryId,
     })),
-    next: cursor + limit < all.length ? cursor + limit : null,
   };
+}
+
+/** Попытки ревью контрактов и планов страницами, новые сначала, с находками. */
+export function panelContractAttempts(h: DevContour, query: Record<string, string | undefined>) {
+  return paged([...(sharedState(h).contractAttempts ?? [])].reverse(), query);
 }

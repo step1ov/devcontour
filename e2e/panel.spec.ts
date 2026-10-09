@@ -67,7 +67,7 @@ test('Polling asks only for the bounded summary; unchanged polls are tiny and th
   });
   await page.goto(base);
   await expect(page.getByRole('region', { name: 'Сейчас работают' })).toBeVisible();
-  await page.waitForTimeout(6000);
+  await page.waitForTimeout(9000);
   expect(polled.some((p) => p.path === '/api/state')).toBe(false);
   const summaries = polled.filter((p) => p.path === '/api/summary');
   expect(summaries.length).toBeGreaterThanOrEqual(3);
@@ -118,4 +118,72 @@ test('A polling failure is visible, keeps the shown state and clears after the n
   await expect(page.getByRole('region', { name: 'Ход попыток' })).toContainText('Попытка 5');
   await page.unroute('**/api/summary*');
   await expect(alert).toHaveCount(0);
+});
+
+test('A board switch that failed is loaded by the next successful poll instead of staying empty', async ({
+  page,
+}) => {
+  await page.goto(base);
+  const { board } = await target(page);
+  const summary = (await (await page.request.get(`${base}/api/summary`)).json()) as {
+    boards: { id: string; title: string; live: boolean; revisions: { status: string }[] }[];
+  };
+  const other = summary.boards.find(
+    (b) =>
+      b.title !== board &&
+      /· копия \d+$/.test(b.title) &&
+      b.live &&
+      b.revisions.at(-1)!.status === 'active',
+  )!;
+  await page.getByRole('tab', { name: 'Список', exact: true }).click();
+  await page
+    .getByRole('button', { name: new RegExp(board) })
+    .filter({ visible: true })
+    .first()
+    .click();
+  await page.route('**/api/summary*', (route) =>
+    route.fulfill({ status: 503, json: { error: 'стенд: сервер недоступен' } }),
+  );
+  await page
+    .getByRole('button', { name: new RegExp(other.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) })
+    .filter({ visible: true })
+    .first()
+    .click();
+  await expect(page.getByRole('alert').filter({ hasText: 'Нет связи с сервером' })).toBeVisible();
+  await page.unroute('**/api/summary*');
+  // Задачи новой доски появляются без повторного клика.
+  const own = (await (await page.request.get(`${base}/api/summary?board=${other.id}`)).json()) as {
+    board: { revisions: { taskIds: string[] }[] };
+    tasks: { id: string; title: string }[];
+  };
+  const first = own.tasks.find((t) => own.board.revisions.at(-1)!.taskIds.includes(t.id))!;
+  await expect(
+    page.locator('strong').filter({ hasText: first.title }).filter({ visible: true }).first(),
+  ).toBeVisible();
+  await expect(page.getByRole('alert').filter({ hasText: 'Нет связи с сервером' })).toHaveCount(0);
+});
+
+test('The dependency picker finds tasks on other boards through server search', async ({
+  page,
+}) => {
+  await page.goto(base);
+  const { title, board } = await target(page);
+  const summary = (await (await page.request.get(`${base}/api/summary`)).json()) as {
+    boards: { title: string; live: boolean; revisions: { status: string }[] }[];
+  };
+  const other = summary.boards.find(
+    (b) => b.title !== board && b.live && b.revisions.at(-1)!.status === 'active',
+  )!;
+  await page.getByRole('tab', { name: 'Список', exact: true }).click();
+  await page
+    .getByRole('button', { name: new RegExp(other.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) })
+    .filter({ visible: true })
+    .first()
+    .click();
+  await page.getByRole('button', { name: 'Задача', exact: true }).click();
+  const dialog = page.getByRole('dialog');
+  await dialog.getByLabel('Найти задачу для зависимости').fill(title);
+  await expect(
+    dialog.getByLabel(new RegExp(title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))),
+  ).toBeVisible();
 });

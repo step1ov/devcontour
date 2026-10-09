@@ -158,32 +158,34 @@ Setup не вызывает модель, не устанавливает зав
 
 Предпочтительный интерфейс ведущего агента — CLI. HTTP нужен UI и локальным интеграциям. Сервер слушает loopback; публикация в интернет не поддерживается без отдельного слоя аутентификации. Для mutating-запросов обязательны `Content-Type: application/json` и `X-DevContour-Request: 1`, Host/Origin проходят проверку.
 
-| Метод и путь                                               | Назначение                                                               |
-| ---------------------------------------------------------- | ------------------------------------------------------------------------ |
-| `GET /api/summary?board=ID&task=ID&revision=N`             | Ограниченная сводка для опроса панели; при той же ревизии — только номер |
-| `GET /api/tasks/:id?limit&cursor`, `/api/tasks/:id/runs`   | Задача целиком и страницы попыток (новые сначала, ≤ 50, хвосты логов)    |
-| `GET /api/tasks?q=&limit&cursor`                           | Поиск задач компактными строками                                         |
-| `GET /api/runs/:id`, `/api/contracts/:id`                  | Попытка с хвостами логов; текст контракта                                |
-| `GET /api/changesets/:id?limit&cursor&tasks=1`             | ChangeSet: прежние проверки страницами, снимок задач по запросу          |
-| `GET /api/events?before=ID&limit`                          | Журнал событий страницами                                                |
-| `GET /api/state`                                           | Всё состояние для доверенной консоли и CLI; панель его не опрашивает     |
-| `GET /api/boards/:id/impact?roots=T1,T2`                   | Влияние корректировки                                                    |
-| `GET /api/evidence/:id`                                    | Сохранённое доказательство и ограниченный по размеру текст лога          |
-| `GET /api/changesets/:id/journal`                          | Текст общего дневника                                                    |
-| `GET /api/changesets/:id/evidence?verification=ID&gate=ID` | Лог общей проверки                                                       |
-| `POST /api/boards`                                         | Создать доску: title, description, опциональный repositoryId             |
-| `POST /api/boards/:id/tasks`                               | Добавить TaskInput                                                       |
-| `PATCH /api/tasks/:id`                                     | Изменить черновик: поля постановки и expectedDigest                      |
-| `POST /api/contracts`                                      | Ручное утверждение title/content и опционального repositoryId            |
-| `POST /api/boards/:id/approve`                             | Ручное утверждение плана; опциональный taskIds                           |
-| `POST /api/boards/:id/accept`                              | Ручная приёмка ревизии                                                   |
-| `POST /api/boards/:id/correct`                             | Корректировка: roots и reason                                            |
-| `POST /api/tasks/:id/retry`, `/cancel`                     | Повтор или отмена                                                        |
-| `POST /api/scheduler`                                      | `{ "start": true }` либо false                                           |
-| `POST /api/changesets`                                     | Создание общего результата                                               |
-| `POST /api/changesets/:id/verify`                          | Запустить асинхронную Verification; started не означает PASS             |
-| `POST /api/changesets/:id/accept`                          | Ручная приёмка ChangeSet                                                 |
-| `POST /api/changesets/:id/handoff`, `/remote-check`        | Подготовка/наблюдение публикации                                         |
+| Метод и путь                                                | Назначение                                                                          |
+| ----------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `GET /api/summary?board=ID&task=ID&revision=N`              | Ограниченная сводка для опроса панели; при той же ревизии — только номер            |
+| `GET /api/tasks/:id?limit`, `/api/tasks/:id/runs?before=ID` | Задача целиком и страницы попыток (новые сначала, ≤ 50, курсор по id, хвосты логов) |
+| `GET /api/tasks?q=&limit&cursor`                            | Поиск задач компактными строками                                                    |
+| `GET /api/runs/:id`, `/api/contracts/:id`                   | Попытка с хвостами логов; текст контракта                                           |
+| `GET /api/changesets/:id?limit&cursor&verification=ID`      | ChangeSet: проверки страницами; снимок задач выбранной проверки страницами          |
+| `GET /api/queue?limit&cursor`                               | Очередь всех досок: незавершённые задачи страницами                                 |
+| `GET /api/contract-attempts?limit&cursor`                   | Попытки ревью контрактов и планов с находками страницами                            |
+| `GET /api/events?before=ID&limit`                           | Журнал событий страницами по ≤ 50; данные событий без тел                           |
+| `GET /api/state`                                            | Всё состояние для доверенной консоли и CLI; панель его не опрашивает                |
+| `GET /api/boards/:id/impact?roots=T1,T2`                    | Влияние корректировки                                                               |
+| `GET /api/evidence/:id`                                     | Сохранённое доказательство и ограниченный по размеру текст лога                     |
+| `GET /api/changesets/:id/journal`                           | Текст общего дневника                                                               |
+| `GET /api/changesets/:id/evidence?verification=ID&gate=ID`  | Лог общей проверки                                                                  |
+| `POST /api/boards`                                          | Создать доску: title, description, опциональный repositoryId                        |
+| `POST /api/boards/:id/tasks`                                | Добавить TaskInput                                                                  |
+| `PATCH /api/tasks/:id`                                      | Изменить черновик: поля постановки и expectedDigest                                 |
+| `POST /api/contracts`                                       | Ручное утверждение title/content и опционального repositoryId                       |
+| `POST /api/boards/:id/approve`                              | Ручное утверждение плана; опциональный taskIds                                      |
+| `POST /api/boards/:id/accept`                               | Ручная приёмка ревизии                                                              |
+| `POST /api/boards/:id/correct`                              | Корректировка: roots и reason                                                       |
+| `POST /api/tasks/:id/retry`, `/cancel`                      | Повтор или отмена                                                                   |
+| `POST /api/scheduler`                                       | `{ "start": true }` либо false                                                      |
+| `POST /api/changesets`                                      | Создание общего результата                                                          |
+| `POST /api/changesets/:id/verify`                           | Запустить асинхронную Verification; started не означает PASS                        |
+| `POST /api/changesets/:id/accept`                           | Ручная приёмка ChangeSet                                                            |
+| `POST /api/changesets/:id/handoff`, `/remote-check`         | Подготовка/наблюдение публикации                                                    |
 
 Операторские endpoints записывают ручное действие. Автоматический ведущий агент использует команды независимого review, а не выдаёт себя за оператора через HTTP для обхода процесса. В local single-user MVP это договор workflow; полноценной авторизации по ролям ещё нет.
 
