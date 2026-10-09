@@ -400,7 +400,7 @@ type WorkflowView = {
 // этапе разработка и чего она ждёт. Полосы показывают объём, карточки — кто
 // занят; между ними не было ответа на вопрос, с которого читатель начинает.
 function Stage({
-  tasks,
+  counts,
   running,
   paused,
   pauseReason,
@@ -408,7 +408,7 @@ function Stage({
   events,
   workflows,
 }: {
-  tasks: Task[];
+  counts: PanelProgress;
   running: number;
   paused?: boolean;
   pauseReason?: DevContourState['pauseReason'];
@@ -416,9 +416,9 @@ function Stage({
   events: AuditEvent[];
   workflows?: WorkflowView[];
 }) {
-  const done = tasks.filter((t) => t.status === 'done').length;
-  const failed = tasks.filter((t) => t.status === 'failed').length;
-  const drafts = tasks.filter((t) => t.status === 'draft').length;
+  const { total, done, drafts } = counts;
+  const failed = counts.statuses.failed ?? 0;
+  const tasks = { length: total };
   const stopped = queueStopReason({ paused, pauseReason }, events);
   // Остановленный цикл восстановления выглядел как обычное ожидание свободного
   // исполнителя: причина лежала в записи работы и доходила до агентского API,
@@ -481,11 +481,37 @@ function Stage({
     </Card>
   );
 }
+export type PanelProgress = {
+  total: number;
+  done: number;
+  drafts: number;
+  statuses: Record<string, number>;
+  blocks: { id: string; done: number; total: number }[];
+  gates: { gate: string; passed: number; failed: number; tasks: number; phases: string[] }[];
+  uncovered: { id: string; title: string }[];
+  uncoveredCount: number;
+};
 export function ProgressPanel({
   state,
   onSelect,
 }: {
-  state: Pick<DevContourState, 'tasks' | 'runs' | 'contracts'> & {
+  state: {
+    /** Задачи текущей работы; итоги по всей истории — в `progress`. */
+    tasks: Task[];
+    runs: Pick<
+      Run,
+      | 'id'
+      | 'taskId'
+      | 'status'
+      | 'phase'
+      | 'runtime'
+      | 'model'
+      | 'reviewer'
+      | 'reviewerModel'
+      | 'startedAt'
+    >[];
+    contracts: { id: string; title: string; approvedAt: string }[];
+    progress: PanelProgress;
     events?: AuditEvent[];
     contractAttempts?: ContractAttempt[];
     concurrency?: number;
@@ -506,64 +532,20 @@ export function ProgressPanel({
   };
   onSelect?: (taskId: string) => void;
 }) {
-  // Черновик — это запланированная работа, а не мусор: до утверждения плана
-  // все задачи именно черновики, и прятать их значит показывать пустую доску
-  // там, где объём уже собран. Скрывается только отменённое.
+  // Итоги — агрегаты сервера по всей истории: клиенту не нужны все попытки.
+  // Черновик — запланированная работа, а не мусор; скрывается только отменённое.
   const tasks = state.tasks.filter((t) => t.status !== 'cancelled');
   const runs = state.runs.filter((r) => r.status === 'active');
-
-  const blocks = useMemo(() => {
-    const ids = [
-      ...new Set([
-        ...(state.config.repositories ?? []).map((r) => r.id),
-        ...tasks.map((t) => t.repositoryId),
-      ]),
-    ].sort();
-    return ids.map((id) => {
-      const own = tasks.filter((t) => t.repositoryId === id);
-      return { id, done: own.filter((t) => t.status === 'done').length, total: own.length };
-    });
-  }, [state.config.repositories, tasks]);
-
+  const { blocks, gates, uncoveredCount } = state.progress;
   const working = tasks
     .filter((t) => active.includes(t.status))
     .map((t) => ({ task: t, run: runs.find((r) => r.id === t.activeRunId) }));
-
-  // Every gate that has ever reported, with what it last said and on which task.
-  const gates = useMemo(() => {
-    const byGate = new Map<
-      string,
-      { gate: string; passed: number; failed: number; tasks: Set<string>; phases: Set<string> }
-    >();
-    for (const run of state.runs)
-      for (const e of run.evidence ?? []) {
-        if (e.kind !== 'test') continue;
-        const row = byGate.get(e.gate) ?? {
-          gate: e.gate,
-          passed: 0,
-          failed: 0,
-          tasks: new Set<string>(),
-          phases: new Set<string>(),
-        };
-        row[e.passed ? 'passed' : 'failed'] += 1;
-        row.tasks.add(run.taskId);
-        row.phases.add(e.phase);
-        byGate.set(e.gate, row);
-      }
-    return [...byGate.values()].sort((a, b) => a.gate.localeCompare(b.gate));
-  }, [state.runs]);
-
-  const covered = new Set(
-    state.runs.flatMap((r) =>
-      (r.evidence ?? []).filter((e) => e.kind === 'test').map(() => r.taskId),
-    ),
-  );
-  const uncovered = tasks.filter((t) => t.status === 'done' && !covered.has(t.id));
+  const queue = tasks.filter((t) => !active.includes(t.status) && t.status !== 'done');
 
   return (
     <div className="grid gap-6">
       <Stage
-        tasks={tasks}
+        counts={state.progress}
         running={runs.length}
         paused={state.paused}
         pauseReason={state.pauseReason}
@@ -582,20 +564,16 @@ export function ProgressPanel({
           <CardTitle>Готовность</CardTitle>
         </CardHeader>
         <CardContent className="grid gap-5">
-          <Bar
-            label="Весь объём"
-            done={tasks.filter((t) => t.status === 'done').length}
-            total={tasks.length}
-          />
+          <Bar label="Весь объём" done={state.progress.done} total={state.progress.total} />
           {blocks.map((b) => (
             <Bar key={b.id} label={b.id} done={b.done} total={b.total} />
           ))}
-          {!tasks.length && (
+          {!state.progress.total && (
             <p className="text-muted-foreground">
               Задач ещё нет. Полосы заполнятся, когда агент соберёт доску.
             </p>
           )}
-          {tasks.length > 0 && tasks.every((t) => t.status === 'draft') && (
+          {state.progress.total > 0 && state.progress.drafts === state.progress.total && (
             <p className="text-muted-foreground text-sm">
               Все задачи в черновике: план ещё не прошёл независимое ревью, поэтому очередь их не
               выдаёт.
@@ -633,33 +611,29 @@ export function ProgressPanel({
 
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle>Очередь ({tasks.filter((t) => !active.includes(t.status)).length})</CardTitle>
+          <CardTitle>Очередь ({queue.length})</CardTitle>
         </CardHeader>
         <CardContent>
-          {tasks.length ? (
+          {queue.length ? (
             <ul className="grid gap-2">
-              {tasks
-                .filter((t) => !active.includes(t.status))
-                .map((t) => (
-                  <li key={t.id} className="flex flex-wrap items-center gap-3 border-b pb-2">
-                    {t.status === 'done' ? (
-                      <CheckCircle2 className="text-primary size-4 shrink-0" aria-hidden="true" />
-                    ) : t.status === 'failed' ? (
-                      <XCircle className="text-destructive size-4 shrink-0" aria-hidden="true" />
-                    ) : (
-                      <CircleDashed
-                        className="text-muted-foreground size-4 shrink-0"
-                        aria-hidden="true"
-                      />
-                    )}
-                    <span className="min-w-0 flex-1">{t.title}</span>
-                    <code className="text-muted-foreground font-mono text-xs">
-                      {t.repositoryId}
-                    </code>
-                    <span className="text-muted-foreground text-xs">{roleLabel(t.role)}</span>
-                    <Badge variant={statusTone[t.status]}>{statusNames[t.status]}</Badge>
-                  </li>
-                ))}
+              {queue.map((t) => (
+                <li key={t.id} className="flex flex-wrap items-center gap-3 border-b pb-2">
+                  {t.status === 'done' ? (
+                    <CheckCircle2 className="text-primary size-4 shrink-0" aria-hidden="true" />
+                  ) : t.status === 'failed' ? (
+                    <XCircle className="text-destructive size-4 shrink-0" aria-hidden="true" />
+                  ) : (
+                    <CircleDashed
+                      className="text-muted-foreground size-4 shrink-0"
+                      aria-hidden="true"
+                    />
+                  )}
+                  <span className="min-w-0 flex-1">{t.title}</span>
+                  <code className="text-muted-foreground font-mono text-xs">{t.repositoryId}</code>
+                  <span className="text-muted-foreground text-xs">{roleLabel(t.role)}</span>
+                  <Badge variant={statusTone[t.status]}>{statusNames[t.status]}</Badge>
+                </li>
+              ))}
             </ul>
           ) : (
             <p className="text-muted-foreground">Очередь пуста.</p>
@@ -692,11 +666,11 @@ export function ProgressPanel({
                     <tr key={g.gate}>
                       <td className="border-b p-2 align-top font-mono text-xs">{g.gate}</td>
                       <td className="border-b p-2 align-top text-xs">
-                        {[...g.phases]
+                        {g.phases
                           .map((p) => (p === 'candidate' ? 'кандидат' : 'интеграция'))
                           .join(' · ')}
                       </td>
-                      <td className="border-b p-2 align-top font-mono text-xs">{g.tasks.size}</td>
+                      <td className="border-b p-2 align-top font-mono text-xs">{g.tasks}</td>
                       <td className="border-b p-2 align-top font-mono text-xs">{g.passed}</td>
                       <td className="border-b p-2 align-top font-mono text-xs">
                         {g.failed ? <span className="text-destructive">{g.failed}</span> : g.failed}
@@ -711,10 +685,10 @@ export function ProgressPanel({
               Проверки ещё не запускались. Здесь будет видно, какая задача какой проверкой закрыта.
             </p>
           )}
-          {uncovered.length > 0 && (
+          {uncoveredCount > 0 && (
             <p className="text-destructive text-sm">
-              Задач завершено без доказательства проверки: {uncovered.length}. Это дыра в покрытии,
-              а не мелочь.
+              Задач завершено без доказательства проверки: {uncoveredCount}. Это дыра в покрытии, а
+              не мелочь.
             </p>
           )}
         </CardContent>

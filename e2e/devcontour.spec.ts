@@ -200,8 +200,12 @@ test('Local API rejects foreign origins and malformed changes', async ({ request
 
 test('Ревью плана видно как работа агента, а не «никто не работает»', async ({ page }) => {
   // Ревью плана идёт без прогона задачи: раньше полоса в это время молчала.
-  await page.route('**/api/state', async (route) => {
-    const response = await route.fetch();
+  // Панель опрашивает сводку; ревизия в запросе убирается, чтобы каждый ответ
+  // был полным и подмена применялась.
+  await page.route('**/api/summary*', async (route) => {
+    const url = new URL(route.request().url());
+    url.searchParams.delete('revision');
+    const response = await route.fetch({ url: url.toString() });
     const state = (await response.json()) as {
       boards: { id: string; title: string }[];
       workflows?: unknown[];

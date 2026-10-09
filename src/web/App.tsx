@@ -33,16 +33,7 @@ import {
   Loader2,
   SquareKanban,
 } from 'lucide-react';
-import type {
-  DevContourState,
-  Task,
-  Config,
-  AuditEvent,
-  Board,
-  Role,
-  Run,
-  Evidence,
-} from '../core/model.ts';
+import type { Task, Run } from '../core/model.ts';
 import { Alert, AlertDescription } from '@/ui/alert.tsx';
 import { Badge } from '@/ui/badge.tsx';
 import { Button } from '@/ui/button.tsx';
@@ -52,6 +43,7 @@ import { Textarea } from '@/ui/textarea.tsx';
 import { cn } from '@/lib/utils.ts';
 import { levels } from '../core/graph.ts';
 import type { taskProgress } from '../application/context.ts';
+import type { PanelEvidence, PanelRun, PanelSummary } from '../application/panel.ts';
 const GraphPanel = lazy(() => import('./GraphPanel.tsx'));
 const CheckPanel = lazy(() =>
   import('./CheckPanel.tsx').then((module) => ({ default: module.CheckPanel })),
@@ -65,38 +57,25 @@ const AuthorOverviewPanel = lazy(() =>
 const ProductPanel = lazy(() =>
   import('./ProductPanel.tsx').then((module) => ({ default: module.ProductPanel })),
 );
-type UITask = Task & {
+// Панель опрашивает ограниченную сводку (`/api/summary`), а тела истории —
+// попытки, evidence, логи, снимки проверок — загружает по запросу.
+type Snapshot = PanelSummary;
+type UITask = Snapshot['tasks'][number];
+type DetailTask = Task & {
   specDigest: string;
   blockers: string[];
   progress?: ReturnType<typeof taskProgress>;
 };
-type Snapshot = Omit<DevContourState, 'tasks'> & {
-  tasks: UITask[];
-  events: AuditEvent[];
-  ready: string[];
-  journalError?: string;
-  config: Pick<
-    Config,
-    | 'name'
-    | 'mode'
-    | 'approvalMode'
-    | 'completionMode'
-    | 'storage'
-    | 'concurrency'
-    | 'maxAttempts'
-    | 'roles'
-    | 'reviewer'
-    | 'gates'
-    | 'targetBranch'
-    | 'packs'
-    | 'repositories'
-    | 'workspaceGates'
-  >;
-};
+interface TaskDetail {
+  revision: number;
+  task: DetailTask;
+  dependencies: { id: string; title?: string; status?: string }[];
+  runs: { total: number; items: Run[]; next: number | null };
+}
 import { roleLabel, currentRoles, setRoleSource } from './roles.ts';
 import { Phases, engine, elapsed } from './Workers.tsx';
 import { AttemptTimeline, LiveWork } from './LiveWork.tsx';
-import { boardPhase, boardPhaseLabels, queueStopReason } from '../core/work-status.ts';
+import { boardPhaseLabels } from '../core/work-status.ts';
 
 const waitingReasons: Record<string, string> = {
   product_approval_required:
@@ -161,7 +140,7 @@ const phaseLabel: Record<string, string> = {
   reviewing: 'на ревью',
   integrating: 'интеграция',
 };
-function liveLabel(run?: Run) {
+function liveLabel(run?: PanelRun) {
   if (!run) return undefined;
   const who =
     run.phase === 'reviewing'
@@ -192,7 +171,7 @@ function TaskLive({
   maxAttempts,
 }: {
   task: UITask;
-  runs: Run[];
+  runs: PanelRun[];
   maxAttempts?: number;
 }) {
   const run = runs.filter((r) => r.taskId === task.id).at(-1);
@@ -250,8 +229,8 @@ function TaskLive({
 }
 // Какие проверки задача уже прошла на своём SHA: зелёный gate — это и есть
 // доказательство, а не отметка «тесты запускались».
-function GateChips({ run }: { run: Run }) {
-  const latest = new Map<string, Evidence>();
+function GateChips({ run }: { run: PanelRun }) {
+  const latest = new Map<string, PanelEvidence>();
   for (const e of run.evidence) latest.set(e.gate + e.phase, e);
   const gates = [...latest.values()];
   if (!gates.length) return null;
@@ -274,46 +253,28 @@ function GateChips({ run }: { run: Run }) {
 // сам, когда выдавать работу нельзя — база отстала, checkout команды разошёлся.
 // Причина лежит в журнале, и без неё панель показывает молчаливую паузу.
 function stopReason(data: Snapshot) {
-  return queueStopReason(data, data.events ?? []);
+  return data.stopReason;
 }
 // «Где сейчас разработка» — это соотношение принятого, идущего и оставшегося,
 // а не название ревизии. Одна строка под доской отвечает на это без открытия.
-function boardProgress(data: Snapshot, board: Board) {
-  const ids = new Set(board.revisions.flatMap((r) => r.taskIds));
-  const own = data.tasks.filter((t) => ids.has(t.id) && t.status !== 'cancelled');
-  if (!own.length) return '';
-  const done = own.filter((t) => t.status === 'done').length;
-  const running = own.filter((t) => t.activeRunId).length;
-  return `${done} из ${own.length}` + (running ? ` · ${running} в работе` : '');
-}
-// Доска, где вся работа отменена, — история, а не выбор. Один и тот же
-// список решает и что показать в навигации, и какую доску открыть первой:
-// раньше панель открывала отменённую доску, которой в навигации не было.
+// Строки досок с прогрессом и фазой считает сервер; порядок: где идёт
+// работа, затем активные, затем принятые. Доска, где вся работа отменена, —
+// история, а не выбор: раньше панель открывала её, хотя в навигации её не было.
 function liveBoards(data: Snapshot) {
-  const running = new Set(data.runs.filter((r) => r.status === 'active').map((r) => r.taskId));
-  const rank = (b: Board) => {
-    const ids = new Set(b.revisions.flatMap((r) => r.taskIds));
-    if (data.tasks.some((t) => ids.has(t.id) && running.has(t.id))) return 0;
-    return b.revisions.at(-1)!.status === 'active' ? 1 : 2;
-  };
+  const rank = (b: Snapshot['boards'][number]) =>
+    b.running ? 0 : b.revisions.at(-1)!.status === 'active' ? 1 : 2;
   return data.boards
-    .filter((b) => {
-      const ids = new Set(b.revisions.flatMap((r) => r.taskIds));
-      const own = data.tasks.filter((t) => ids.has(t.id));
-      return own.length === 0 || own.some((t) => t.status !== 'cancelled');
-    })
-    .map((b, i) => ({ b, i, rank: rank(b) }))
-    .sort((x, y) => x.rank - y.rank || x.i - y.i)
+    .map((b, i) => ({ b, i }))
+    .filter((x) => x.b.live)
+    .sort((x, y) => rank(x.b) - rank(y.b) || x.i - y.i)
     .map((x) => x.b);
 }
 function BoardLink({
   board: b,
-  data,
   current,
   onSelect,
 }: {
-  board: Board;
-  data: Snapshot;
+  board: Snapshot['boards'][number];
   current: boolean;
   onSelect: (id: string) => void;
 }) {
@@ -331,12 +292,40 @@ function BoardLink({
       <span>
         {b.title}
         <small>
-          {boardPhaseLabels[boardPhase(b, data.tasks)]} · ревизия {b.revisions.at(-1)!.number}
-          {boardProgress(data, b) && ' · ' + boardProgress(data, b)}
+          {boardPhaseLabels[b.phase]} · ревизия {b.revisions.at(-1)!.number}
+          {b.progress && ' · ' + b.progress}
         </small>
       </span>
       {b.revisions.at(-1)!.status === 'accepted' && <Check className="nav-check" />}
     </Button>
+  );
+}
+// Текст контракта не входит в периодическую сводку: загружается при раскрытии.
+function ContractText({ id, bytes }: { id: string; bytes: number }) {
+  const [text, setText] = useState<string>();
+  const [error, setError] = useState('');
+  const load = () => {
+    setError('');
+    api(`contracts/${encodeURIComponent(id)}`)
+      .then((c: { content: string }) => setText(c.content))
+      .catch((e: Error) => setError(e.message));
+  };
+  return (
+    <details onToggle={(e) => (e.currentTarget.open && text === undefined ? load() : undefined)}>
+      <summary>Текст контракта ({Math.ceil(bytes / 1024)} КБ)</summary>
+      {error ? (
+        <p role="alert" className="text-destructive text-sm">
+          {error}{' '}
+          <Button variant="outline" size="sm" onClick={load}>
+            Повторить
+          </Button>
+        </p>
+      ) : text === undefined ? (
+        <p role="status">Загрузка…</p>
+      ) : (
+        <pre>{text}</pre>
+      )}
+    </details>
   );
 }
 function StatusBadge({ value, children }: { value: string; children?: ReactNode }) {
@@ -437,16 +426,33 @@ export function App() {
     boards: { id: string; title: string }[];
   }>();
   const [log, setLog] = useState<{ title: string; content: string }>();
-  const refresh = useCallback(async () => {
-    const state = (await api('state')) as Snapshot;
-    setData(state);
-    return state;
+  // Что показывает панель: от этого зависит состав сводки. Ревизия — та,
+  // что уже отрисована: без изменений сервер отвечает одним номером.
+  const view = useRef<{ boardId: string; selected: string; workspace: boolean; revision?: number }>(
+    { boardId: '', selected: '', workspace: false },
+  );
+  const [pollError, setPollError] = useState('');
+  const refresh = useCallback(async (force = true) => {
+    const v = view.current;
+    const params = new URLSearchParams();
+    if (v.boardId) params.set('board', v.boardId);
+    if (v.selected) params.set('task', v.selected);
+    if (v.workspace) params.set('view', 'workspace');
+    if (!force && v.revision !== undefined) params.set('revision', String(v.revision));
+    const next = (await api('summary?' + params.toString())) as
+      Snapshot | { unchanged: true; revision: number };
+    setPollError('');
+    if ('unchanged' in next) return;
+    v.revision = next.revision;
+    setData(next);
   }, []);
   useEffect(() => {
     let alive = true;
+    // Сбой опроса виден строкой и не стирает показанное; следующий успешный
+    // опрос её снимает.
     const load = () =>
-      refresh().catch((e) => {
-        if (alive) setError(String(e.message));
+      refresh(false).catch((e: Error) => {
+        if (alive) setPollError(e.message);
       });
     void load();
     const id = setInterval(() => {
@@ -462,9 +468,21 @@ export function App() {
   // переходят вкладкой. Раньше при наличии задач панель сама открывала граф.
   useEffect(() => {
     if (!data) return;
-    if (!boardId) setBoardId(liveBoards(data)[0]?.id ?? data.boards[0]?.id ?? '');
+    if (!boardId) setBoardId(data.boardId ?? liveBoards(data)[0]?.id ?? '');
   }, [data, boardId]);
-  const board = data?.boards.find((b) => b.id === boardId);
+  // Смена доски, задачи или вида меняет состав сводки — запрос сразу.
+  useEffect(() => {
+    const v = view.current;
+    const workspace = tab === 'workspace';
+    const missing = !!selected && !!data && !data.tasks.some((t) => t.id === selected);
+    if (v.boardId === boardId && v.workspace === workspace && !missing) {
+      v.selected = selected;
+      return;
+    }
+    Object.assign(v, { boardId, selected, workspace });
+    void refresh().catch((e: Error) => setPollError(e.message));
+  }, [boardId, selected, tab, data, refresh]);
+  const board = data?.board?.id === boardId ? data.board : undefined;
   const revision =
     board?.revisions.find((r) => r.number === revisionNumber) ?? board?.revisions.at(-1);
   const current = revision?.number === board?.revisions.at(-1)?.number;
@@ -477,9 +495,7 @@ export function App() {
   const graphTasks = useMemo(
     () =>
       tab === 'workspace'
-        ? (data?.tasks.filter((t) =>
-            data.boards.some((b) => b.revisions.at(-1)?.taskIds.includes(t.id)),
-          ) ?? [])
+        ? (data?.tasks.filter((t) => data.workspaceTaskIds?.includes(t.id)) ?? [])
         : tasks,
     [tab, data, tasks],
   );
@@ -493,6 +509,44 @@ export function App() {
         .includes(query.toLowerCase()),
   );
   const task = graphTasks.find((t) => t.id === selected);
+  // Детали выбранной задачи — по запросу: полная запись и попытки страницами.
+  const [detail, setDetail] = useState<TaskDetail>();
+  const [olderRuns, setOlderRuns] = useState<Run[]>([]);
+  const [detailError, setDetailError] = useState('');
+  const [detailAttempt, setDetailAttempt] = useState(0);
+  const detailKey = task ? `${task.id}@${data?.revision}#${detailAttempt}` : '';
+  useEffect(() => {
+    if (!detailKey) return;
+    const id = detailKey.slice(0, detailKey.indexOf('@'));
+    let valid = true;
+    setDetailError('');
+    api(`tasks/${encodeURIComponent(id)}?limit=10`)
+      .then((next: TaskDetail) => {
+        if (!valid) return;
+        setDetail((previous) => {
+          if (previous?.task.id !== id) setOlderRuns([]);
+          return next;
+        });
+      })
+      .catch((e: Error) => valid && setDetailError(e.message));
+    return () => {
+      valid = false;
+    };
+  }, [detailKey]);
+  const full = detail?.task.id === task?.id ? detail : undefined;
+  const taskRuns = full ? [...full.runs.items, ...olderRuns].reverse() : [];
+  const loadOlderRuns = async () => {
+    if (!full) return;
+    const cursor = full.runs.items.length + olderRuns.length;
+    try {
+      const page = (await api(
+        `tasks/${encodeURIComponent(full.task.id)}/runs?limit=20&cursor=${cursor}`,
+      )) as TaskDetail['runs'];
+      setOlderRuns((runs) => [...runs, ...page.items]);
+    } catch (e) {
+      setDetailError((e as Error).message);
+    }
+  };
   useEffect(() => {
     const visible = graphTasks.filter((t) => showCancelled || t.status !== 'cancelled');
     if (visible.length && !visible.some((t) => t.id === selected)) setSelected(visible[0].id);
@@ -597,8 +651,8 @@ export function App() {
       <main className="grid min-h-dvh place-content-center justify-items-center gap-4">
         <Workflow />
         <h1>DevContour</h1>
-        <p role="status">{error || 'Загружаем рабочий граф…'}</p>
-        {error && (
+        <p role="status">{error || pollError || 'Загружаем рабочий граф…'}</p>
+        {(error || pollError) && (
           <Button variant="outline" onClick={() => location.reload()}>
             Повторить
           </Button>
@@ -614,7 +668,10 @@ export function App() {
   const failedCount = liveTasks.filter((t) => t.status === 'failed').length;
   const blocked = tasks.filter((t) => status(t) === 'blocked').length;
   const ready = tasks.filter((t) => data.ready.includes(t.id)).length;
-  const latestRun = task ? data.runs.filter((r) => r.taskId === task.id).at(-1) : undefined;
+  // Полная последняя попытка — из деталей; до их загрузки — компактная строка.
+  const latestRun: Run | PanelRun | undefined =
+    full?.runs.items[0] ??
+    (task ? data.runs.filter((r) => r.taskId === task.id).at(-1) : undefined);
   const taskRepository = data.config.repositories.find((r) => r.id === task?.repositoryId);
   const taskBinding = task
     ? (taskRepository?.roles?.[task.role] ?? data.config.roles[task.role])
@@ -665,13 +722,7 @@ export function App() {
           {liveBoards(data)
             .filter((b) => b.revisions.at(-1)!.status !== 'accepted')
             .map((b) => (
-              <BoardLink
-                key={b.id}
-                board={b}
-                data={data}
-                current={b.id === boardId}
-                onSelect={switchBoard}
-              />
+              <BoardLink key={b.id} board={b} current={b.id === boardId} onSelect={switchBoard} />
             ))}
           {/* Принятые доски — история, а не текущая работа. Вперемешку с
               активными они выглядели параллельными потоками того же релиза. */}
@@ -690,7 +741,6 @@ export function App() {
                   <BoardLink
                     key={b.id}
                     board={b}
-                    data={data}
                     current={b.id === boardId}
                     onSelect={switchBoard}
                   />
@@ -819,6 +869,15 @@ export function App() {
               )}
             </div>
           </header>
+          {pollError && (
+            <div className="alert error" role="alert">
+              <AlertCircle />
+              <span>
+                Нет связи с сервером: {pollError}. На экране последнее полученное состояние; опрос
+                повторяется.
+              </span>
+            </div>
+          )}
           {error && !modal && !log && (
             <div className="alert error" role="alert">
               <AlertCircle />
@@ -1508,7 +1567,7 @@ export function App() {
                           <strong>{c.title}</strong>
                           <StatusBadge value="done">{c.id}</StatusBadge>
                         </div>
-                        <pre>{c.content}</pre>
+                        <ContractText id={c.id} bytes={c.contentBytes} />
                         <small>
                           SHA-256 {c.digest.slice(0, 16)} · {stamp(c.approvedAt)}
                         </small>
@@ -1558,12 +1617,14 @@ export function App() {
                             <code>{task.sharedCompletion.sourceCommit.slice(0, 12)}</code>
                           </p>
                           <ul>
-                            {task.sharedCompletion.receipt.checks.map((check, index) => (
-                              <li key={index}>
-                                {check.phase} / {check.gate}: {check.passed ? 'PASS' : 'FAIL'} ·{' '}
-                                <code>{check.sha.slice(0, 12)}</code>
-                              </li>
-                            ))}
+                            {(full?.task.sharedCompletion?.receipt.checks ?? []).map(
+                              (check, index) => (
+                                <li key={index}>
+                                  {check.phase} / {check.gate}: {check.passed ? 'PASS' : 'FAIL'} ·{' '}
+                                  <code>{check.sha.slice(0, 12)}</code>
+                                </li>
+                              ),
+                            )}
                           </ul>
                         </details>
                       </div>
@@ -1613,7 +1674,29 @@ export function App() {
                         <dd>{task.attempt}</dd>
                       </div>
                     </dl>
-                    <AttemptTimeline runs={data.runs.filter((r) => r.taskId === task.id)} />
+                    {detailError && (
+                      <p role="alert" className="text-destructive text-sm">
+                        Детали задачи не загрузились: {detailError}{' '}
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setDetailAttempt((n) => n + 1)}
+                        >
+                          Повторить
+                        </Button>
+                      </p>
+                    )}
+                    {!full && !detailError && (
+                      <p role="status" className="text-muted-foreground text-sm">
+                        Загрузка попыток…
+                      </p>
+                    )}
+                    {full && <AttemptTimeline runs={taskRuns} />}
+                    {full && full.runs.total > taskRuns.length && (
+                      <Button variant="outline" size="sm" onClick={() => void loadOlderRuns()}>
+                        Ранние попытки ({full.runs.total - taskRuns.length})
+                      </Button>
+                    )}
                     {(task.properties?.length || task.recovery || task.checkVersion) && (
                       <Suspense fallback={null}>
                         <CheckPanel
@@ -1663,11 +1746,9 @@ export function App() {
                               onClick={() => {
                                 if (tasks.some((t) => t.id === id)) setSelected(id);
                                 else {
-                                  const b = data.boards.find((b) =>
-                                    b.revisions.at(-1)!.taskIds.includes(id),
-                                  );
+                                  const b = d?.boardId;
                                   if (b) {
-                                    switchBoard(b.id);
+                                    switchBoard(b);
                                     setSelected(id);
                                   }
                                 }
@@ -1702,9 +1783,9 @@ export function App() {
                       </>
                     )}
                     <h3>Проверки и доказательства</h3>
-                    {latestRun?.evidence.length ? (
+                    {full?.runs.items[0]?.evidence.length ? (
                       <div className="grid gap-2">
-                        {latestRun.evidence.map((e) => (
+                        {full.runs.items[0].evidence.map((e) => (
                           <Button
                             variant="outline"
                             key={e.id}

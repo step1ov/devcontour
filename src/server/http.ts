@@ -8,6 +8,16 @@ import { authorOverview } from '../application/overview.ts';
 import { DeliveryRunner } from '../runner/forge.ts';
 import { AgentService, capabilities } from '../application/agent.ts';
 import { checksSummary, taskChecks } from '../application/checks.ts';
+import {
+  panelChangeSet,
+  panelContract,
+  panelEvents,
+  panelRun,
+  panelRuns,
+  panelSummary,
+  panelTask,
+  panelTaskSearch,
+} from '../application/panel.ts';
 import { CheckCorpus } from '../core/check-store.ts';
 import { taskProgress } from '../application/context.ts';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -289,6 +299,26 @@ export async function serve(
           result = await new AgentService(h, scheduler.root).run(await body(req));
         } else if (req.method === 'GET' && path === '/api/overview') {
           result = authorOverview(h);
+        } else if (req.method === 'GET' && path === '/api/summary') {
+          result = panelSummary(h, scheduler.root, Object.fromEntries(url.searchParams));
+        } else if (req.method === 'GET' && path === '/api/events') {
+          result = panelEvents(h, Object.fromEntries(url.searchParams));
+        } else if (req.method === 'GET' && path === '/api/tasks') {
+          result = panelTaskSearch(h, Object.fromEntries(url.searchParams));
+        } else if (req.method === 'GET' && parts[1] === 'tasks' && parts[2] && !parts[3]) {
+          result = panelTask(h, decodeURIComponent(parts[2]), Object.fromEntries(url.searchParams));
+        } else if (req.method === 'GET' && parts[1] === 'tasks' && parts[3] === 'runs') {
+          result = panelRuns(h, decodeURIComponent(parts[2]), Object.fromEntries(url.searchParams));
+        } else if (req.method === 'GET' && parts[1] === 'runs' && parts[2] && !parts[3]) {
+          result = panelRun(h, decodeURIComponent(parts[2]));
+        } else if (req.method === 'GET' && parts[1] === 'changesets' && parts[2] && !parts[3]) {
+          result = panelChangeSet(
+            h,
+            decodeURIComponent(parts[2]),
+            Object.fromEntries(url.searchParams),
+          );
+        } else if (req.method === 'GET' && parts[1] === 'contracts' && parts[2] && !parts[3]) {
+          result = panelContract(h, decodeURIComponent(parts[2]));
         } else if (req.method === 'GET' && path === '/api/state') {
           const state = h.store.read();
           result = {

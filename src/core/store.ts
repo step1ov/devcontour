@@ -84,7 +84,7 @@ export class Store {
       `PRAGMA journal_mode=${journalMode ?? (locations?.length ? 'DELETE' : 'WAL')}; PRAGMA busy_timeout=20000; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;`,
     );
     this.db.exec(
-      'CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, type TEXT NOT NULL, data TEXT NOT NULL);',
+      'CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, type TEXT NOT NULL, data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS revision (id INTEGER PRIMARY KEY CHECK(id=1), n INTEGER NOT NULL); INSERT OR IGNORE INTO revision (id,n) VALUES(1,0);',
     );
     this.db
       .prepare('INSERT OR IGNORE INTO main.state (id,data) VALUES(1,?)')
@@ -130,6 +130,19 @@ export class Store {
       const state = this.readUnlocked();
       this.db.exec('COMMIT');
       return state;
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      throw e;
+    }
+  }
+  /** Согласованное чтение: ревизия и состояние из одного снимка БД. */
+  private atomicRead<T>(read: () => T): T {
+    if (this.transaction) return read();
+    this.db.exec('BEGIN');
+    try {
+      const value = read();
+      this.db.exec('COMMIT');
+      return value;
     } catch (e) {
       this.db.exec('ROLLBACK');
       throw e;
@@ -203,6 +216,10 @@ export class Store {
       if (before === after) return result;
       if (this.components) this.components.write(state);
       else this.db.prepare('UPDATE main.state SET data=? WHERE id=1').run(after);
+      // Heartbeat продлевает только сроки владения (lease), которых читатели
+      // проекций не показывают: ревизия от них не растёт, иначе каждый опрос
+      // панели видел бы «изменение».
+      if (type !== 'heartbeat') this.bump();
       if (type !== 'heartbeat') {
         const at = new Date().toISOString();
         const inserted = this.db
@@ -238,6 +255,33 @@ export class Store {
     this.db
       .prepare(`INSERT OR REPLACE INTO ${schema}.local_workflow VALUES(?,?,?,?)`)
       .run(namespace, owner ?? '@workspace', key, JSON.stringify(value));
+    this.bump();
+  }
+  private bump() {
+    this.db.prepare('UPDATE main.revision SET n=n+1 WHERE id=1').run();
+  }
+  /**
+   * Ревизия данных: растёт при каждой записи состояния, кроме продления
+   * lease, и при каждой локальной записи, в том числе из других процессов той
+   * же БД. Читатель,
+   * у которого ревизия не изменилась, может не читать состояние заново.
+   */
+  revision(): number {
+    return (this.db.prepare('SELECT n FROM main.revision WHERE id=1').get() as { n: number }).n;
+  }
+  private cached?: { revision: number; state: DevContourState };
+  /**
+   * Состояние только для чтения, разобранное один раз на ревизию. Для
+   * проекций, которые опрашиваются часто: большое состояние не разбирается
+   * на каждый запрос. Возвращаемый объект нельзя менять.
+   */
+  readShared(): { revision: number; state: Readonly<DevContourState> } {
+    return this.atomicRead(() => {
+      const revision = this.revision();
+      if (this.cached?.revision !== revision)
+        this.cached = { revision, state: this.readUnlocked() };
+      return this.cached;
+    });
   }
   refreshProjection() {
     try {
@@ -291,6 +335,20 @@ export class Store {
     return this.components
       ? this.components.events(rows)
       : rows.map((e) => ({ ...e, data: JSON.parse(e.data) }));
+  }
+  /** Страница журнала: новые сначала, строго раньше `before`. */
+  eventsPage(before: number | undefined, limit: number): AuditEvent[] {
+    const rows = this.db
+      .prepare('SELECT * FROM main.events WHERE id<? ORDER BY id DESC LIMIT ?')
+      .all(before ?? Number.MAX_SAFE_INTEGER, limit) as unknown as {
+      id: number;
+      at: string;
+      type: string;
+      data: string;
+    }[];
+    return this.components
+      ? this.components.events(rows)
+      : rows.map((e) => ({ ...e, data: JSON.parse(e.data) as unknown }));
   }
   events(after = 0): AuditEvent[] {
     const rows = this.db

@@ -1,5 +1,5 @@
 import { Bot, Eye, PauseCircle } from 'lucide-react';
-import type { Board, Run, Task } from '../core/model.ts';
+import type { Run, Task } from '../core/model.ts';
 import { Button } from '@/ui/button.tsx';
 import { cn } from '@/lib/utils.ts';
 import { roleLabel } from './roles.ts';
@@ -23,11 +23,26 @@ export type LiveWorkflow = {
   history?: { at: string; stage: number; event: string }[];
 };
 export type LiveState = {
-  runs: Run[];
+  runs: (Pick<
+    Run,
+    | 'id'
+    | 'taskId'
+    | 'status'
+    | 'phase'
+    | 'attempt'
+    | 'runtime'
+    | 'model'
+    | 'reviewer'
+    | 'reviewerModel'
+    | 'startedAt'
+    | 'reusedFrom'
+    | 'timings'
+  > & { boardId?: string })[];
   workflows?: LiveWorkflow[];
   changeSets?: { id: string; title: string }[];
-  tasks: (Task & { blockers?: string[] })[];
-  boards: Board[];
+  /** Задачи текущей работы; доска задачи — `boardId` из сводки. */
+  tasks: (Task & { blockers?: string[]; boardId?: string })[];
+  boards: { id: string; title: string }[];
   paused: boolean;
   ready: string[];
   config: { concurrency: number; maxAttempts?: number };
@@ -38,9 +53,7 @@ export function activeWork(state: LiveState) {
     .filter((r) => r.status === 'active')
     .map((run) => {
       const task = state.tasks.find((t) => t.id === run.taskId);
-      const board = state.boards.find((b) =>
-        b.revisions.some((r) => r.taskIds.includes(run.taskId)),
-      );
+      const board = state.boards.find((b) => b.id === (run.boardId ?? task?.boardId));
       // Фаза идёт с момента последней отметки времени стадии, а не с начала
       // попытки: «на ревью 2 мин» говорит больше, чем «попытка идёт 40 мин».
       const since = run.timings?.at(-1)?.startedAt ?? run.startedAt;
@@ -142,9 +155,8 @@ export function LiveWork({
       {stuck.length > 0 && (
         <ul className="m-0 grid list-none gap-2 p-0" aria-label="Чего ждёт цепочка">
           {stuck.map((b) => {
-            const board = state.boards.find((x) =>
-              x.revisions.some((r) => r.taskIds.includes(b.taskId)),
-            );
+            const owner = state.tasks.find((t) => t.id === b.taskId)?.boardId;
+            const board = state.boards.find((x) => x.id === owner);
             return (
               <li
                 key={b.taskId}
