@@ -207,7 +207,10 @@ test('The controller seeds the gate, keeps the property report on failure and ti
           id: 'properties',
           kind: 'test',
           command: ['node', 'check.mjs'],
-          timeoutMs: 5000,
+          // Под нагрузкой полного прогона запуск node с импортами занимает
+          // секунды: короткий предел обрывал проверку до первой записи
+          // отчёта. Короткий предел — только у варианта, который зависает.
+          timeoutMs: 60000,
           report: { type: 'junit', path: '.reports/properties.xml' },
           property: { path: '.reports/property.json' },
         },
@@ -261,7 +264,12 @@ test('The controller seeds the gate, keeps the property report on failure and ti
 
     const failed = await evidenceOf();
     assert.equal(failed.gate.passed, false);
-    const property = failed.gate.property!;
+    assert.equal(
+      failed.gate.property?.report?.properties[0]?.status,
+      'failed',
+      failed.gate.summary,
+    );
+    const property = failed.gate.property;
     assert.equal(property.seed, propertySeed(failed.run.id, 'candidate', 'properties'));
     assert.equal(property.reproduce, `DEVCONTOUR_SEED=${property.seed} node check.mjs`);
     assert.equal(property.report?.properties[0].status, 'failed');
@@ -280,9 +288,11 @@ test('The controller seeds the gate, keeps the property report on failure and ti
 
     // Таймаут гейта: отчёт свойств и seed сохранены, вход назван.
     variant = 'hang';
+    config.gates[0].timeoutMs = 5000;
     const hung = await evidenceOf();
+    config.gates[0].timeoutMs = 60000;
     assert.equal(hung.gate.passed, false);
-    assert.equal(hung.gate.property?.report?.properties[0].status, 'running');
+    assert.equal(hung.gate.property?.report?.properties[0].status, 'running', hung.gate.summary);
     assert.match(hung.gate.summary, /timeout.*не завершилось на входе/s);
 
     // Верная реализация проходит, и её evidence несёт тот же договор.
