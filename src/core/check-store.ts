@@ -225,7 +225,10 @@ const USER_PATH = new RegExp(
 );
 // URL целиком: file:// — локальный путь, остальные схемы не трогаются вовсе
 // (маршрут, query и profile:// остаются как есть).
-const URL_TOKEN = /(?<![\p{L}\p{N}_+.-])([a-z][a-z0-9+.-]*):\/\/[^\s"'\x60<>]*/giu;
+// Схема начинается после границы или JSON-экранированного \n, \r, \t: иначе
+// «\nfile://…» читалось бы как схема nfile, и путь оставался бы в тексте.
+const URL_TOKEN =
+  /(?:(?<=\\[nrt])|(?<![\p{L}\p{N}_+.\\-]))([a-z][a-z0-9+.-]*):\/\/[^\s"'\x60<>]*/giu;
 const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 function scrubPlain(text: string, known: string[]) {
   let out = text;

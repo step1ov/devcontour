@@ -890,3 +890,20 @@ test('F21: after a Git edit of only diagnostic text the local projection shows t
     d.close();
   }
 });
+
+test('F22: a file:// URL after a JSON-escaped newline, carriage return or tab is scrubbed, not read as another scheme', () => {
+  for (const escape of ['n', 'r', 't']) {
+    const actual = canonicalJson({ error: `Error:\\${escape}file:///srv/synthetic/private.json` });
+    const raw = JSON.stringify({
+      error: `Error:${escape === 'n' ? '\n' : escape === 'r' ? '\r' : '\t'}file:///srv/synthetic/private.json`,
+    });
+    for (const text of [actual, raw]) {
+      const out = scrubLocalPaths(text, []);
+      assert.equal(out.includes('synthetic'), false, out);
+      assert.equal(scrubLocalPaths(out, []), out);
+    }
+  }
+  // Обычный URL после перевода строки остаётся как есть.
+  const kept = JSON.stringify({ see: 'line\nhttps://example.com/a?b=1' });
+  assert.equal(scrubLocalPaths(kept, []), kept);
+});
