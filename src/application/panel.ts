@@ -36,6 +36,8 @@ const short = (text: string | undefined, n = SHORT) =>
   text && text.length > n ? text.slice(0, n) + '…' : text;
 const tail = (text: string) => (text.length > LOG_TAIL ? '…' + text.slice(-LOG_TAIL) : text);
 
+/** Сколько находок попытки ревью приходит сразу; остальные — страницами. */
+const FINDINGS = 20;
 /** Предел одной строки диагностики (ошибки, отчёты, история эпизода). */
 const DIAGNOSTIC = 2000;
 /**
@@ -285,6 +287,8 @@ function changeSetLine(c: ChangeSet) {
     id: c.id,
     title: c.title,
     description: short(c.description, DIAGNOSTIC)!,
+    /** Описание сокращено — целиком в деталях ChangeSet. */
+    descriptionTruncated: c.description.length > DIAGNOSTIC,
     releaseId: c.releaseId,
     boardIds: c.boardIds,
     createdAt: c.createdAt,
@@ -471,8 +475,8 @@ function buildSummary(
     team: state.team,
     // Журнал в сводке — только строки; данные событий — в деталях журнала.
     events: recent.slice(0, 40).map((e) => ({ id: e.id, at: e.at, type: e.type })),
-    stopReason: queueStopReason(state, recent),
-    journalError: h.store.projectionError,
+    stopReason: short(queueStopReason(state, recent), DIAGNOSTIC),
+    journalError: short(h.store.projectionError, DIAGNOSTIC),
     workflows: new LeadWorkflow(h)
       .view()
       .map((w) => clip({ ...w, history: (w.history ?? []).slice(-5) })),
@@ -596,6 +600,23 @@ export function panelTask(h: DevContour, id: string, query: Record<string, strin
       revision: shared.revision,
       task: {
         ...withoutTokens(rest),
+        // Квитанция завершения: проверки с первыми 200 testcases каждая.
+        ...(rest.sharedCompletion
+          ? {
+              sharedCompletion: {
+                ...rest.sharedCompletion,
+                receipt: {
+                  ...rest.sharedCompletion.receipt,
+                  checks: rest.sharedCompletion.receipt.checks.slice(0, 50).map((c) => ({
+                    ...c,
+                    tests: c.tests && clip(c.tests.slice(0, 200), SHORT),
+                    testsCount: c.tests?.length,
+                  })),
+                  checksCount: rest.sharedCompletion.receipt.checks.length,
+                },
+              },
+            }
+          : {}),
         ...(failure !== undefined ? { failure: short(failure, DIAGNOSTIC) } : {}),
         ...(hold ? { hold: clip(hold) } : {}),
         ...(recovery ? { recovery: clip(recovery) } : {}),
@@ -661,7 +682,9 @@ function runDetail(run: Run) {
       ...clip(e),
       log: tail(log),
       tests: tests && clip(tests.slice(0, 200), SHORT),
+      testsCount: tests?.length,
       findings: findings && clip(findings.slice(0, 50), SHORT),
+      findingsCount: findings?.length,
     })),
   };
 }
@@ -790,5 +813,24 @@ export function panelQueue(h: DevContour, query: Record<string, string | undefin
 /** Попытки ревью контрактов и планов страницами, новые сначала, с находками. */
 export function panelContractAttempts(h: DevContour, query: Record<string, string | undefined>) {
   const result = paged([...(sharedState(h).contractAttempts ?? [])].reverse(), query);
+  return {
+    ...result,
+    items: result.items.map(({ findings, ...a }) => ({
+      ...clip(a),
+      findings: clip(findings.slice(0, FINDINGS)),
+      findingsCount: findings.length,
+    })),
+  };
+}
+
+/** Находки одной попытки ревью страницами — продолжение первых `FINDINGS`. */
+export function panelContractAttemptFindings(
+  h: DevContour,
+  id: string,
+  query: Record<string, string | undefined>,
+) {
+  const attempt = (sharedState(h).contractAttempts ?? []).find((a) => a.id === id);
+  if (!attempt) throw new DomainError('Попытка ревью не найдена', 404);
+  const result = paged(attempt.findings, query);
   return { ...result, items: clip(result.items) };
 }

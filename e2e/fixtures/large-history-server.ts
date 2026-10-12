@@ -20,6 +20,30 @@ await largeHistory(data, {
   verifications: 3,
 });
 const store = new Store(join(data, 'state.sqlite'));
+// Длинное описание ChangeSet и попытка ревью с находками сверх первой
+// страницы: их панель раскрывает по запросу.
+store.change('fixture.panel-details', (s) => {
+  s.changeSets[0].description =
+    'Обезличенное длинное описание. ' + 'Текст описания изменения. '.repeat(120) + 'КОНЕЦ-ОПИСАНИЯ';
+  s.contractAttempts = [
+    {
+      id: 'CA-fixture',
+      at: '2026-01-01T00:00:00.000Z',
+      subject: 'contract',
+      attempt: 1,
+      title: 'Обезличенный контракт',
+      approved: false,
+      summary: 'Ревью с множеством находок.',
+      findings: Array.from({ length: 30 }, (_, k) => ({
+        severity: 'major',
+        message: `Находка стенда ${k + 1}`,
+      })),
+      artifact: 'review.json',
+      authorRuntime: 'codex',
+      reviewerRuntime: 'claude',
+    },
+  ];
+});
 const h = new DevContour(store, loadConfig(join(data, 'config.json')));
 const scheduler = new Scheduler(h, data);
 await scheduler.init();

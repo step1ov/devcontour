@@ -300,6 +300,43 @@ function BoardLink({
     </Button>
   );
 }
+// Длинное описание ChangeSet в сводке сокращено; целиком — из деталей.
+function ChangeSetDescription({
+  id,
+  text,
+  truncated,
+}: {
+  id: string;
+  text: string;
+  truncated: boolean;
+}) {
+  const [full, setFull] = useState('');
+  const [error, setError] = useState('');
+  const load = () => {
+    setError('');
+    api(`changesets/${encodeURIComponent(id)}?limit=1`)
+      .then((value: { description: string }) => setFull(value.description))
+      .catch((e: Error) => setError(e.message));
+  };
+  return (
+    <>
+      <p>{full || text}</p>
+      {!full && truncated && (
+        <Button variant="outline" size="sm" onClick={load}>
+          Показать описание полностью
+        </Button>
+      )}
+      {error && (
+        <p role="alert" className="text-destructive text-sm">
+          Описание не загрузилось: {error}{' '}
+          <Button variant="outline" size="sm" onClick={load}>
+            Повторить
+          </Button>
+        </p>
+      )}
+    </>
+  );
+}
 // История проверок ChangeSet и снимки задач любой проверки — по запросу:
 // в сводке только последняя проверка без снимка.
 function ChangeSetHistory({
@@ -1551,7 +1588,11 @@ export function App() {
                                       : 'Ожидает проверки'}
                             </StatusBadge>
                           </div>
-                          <p>{c.description}</p>
+                          <ChangeSetDescription
+                            id={c.id}
+                            text={c.description}
+                            truncated={c.descriptionTruncated}
+                          />
                           {c.releaseId && (
                             <p>
                               Продуктовый релиз: <strong>{c.releaseId}</strong>

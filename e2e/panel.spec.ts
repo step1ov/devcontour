@@ -273,3 +273,26 @@ test('A late summary response of the same view does not replace a newer one', as
   }
   expect(samples.every((n) => n > 0)).toBe(true);
 });
+
+test('A shortened change set description opens in full on request', async ({ page }) => {
+  await page.goto(base);
+  await page.getByRole('tab', { name: 'Изменения', exact: true }).click();
+  const card = page
+    .locator('article[id^="changeset-"]')
+    .filter({ hasText: 'Обезличенное длинное' });
+  await expect(card).not.toContainText('КОНЕЦ-ОПИСАНИЯ');
+  await card.getByRole('button', { name: 'Показать описание полностью' }).click();
+  await expect(card).toContainText('КОНЕЦ-ОПИСАНИЯ');
+});
+
+test('Review findings beyond the first page load on request', async ({ page }) => {
+  await page.goto(base);
+  await page.getByRole('tab', { name: 'Ход работ', exact: true }).click();
+  const review = page.locator('li').filter({ hasText: 'Обезличенный контракт' }).first();
+  await expect(review).toContainText('30 замечаний');
+  await expect(review).toContainText('Находка стенда 20');
+  await expect(review).not.toContainText('Находка стенда 21');
+  await review.getByRole('button', { name: 'Ещё замечания (10)' }).click();
+  await expect(review).toContainText('Находка стенда 30');
+  await expect(review.getByRole('button', { name: /Ещё замечания/ })).toHaveCount(0);
+});

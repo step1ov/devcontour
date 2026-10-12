@@ -166,7 +166,8 @@ Setup не вызывает модель, не устанавливает зав
 | `GET /api/runs/:id`, `/api/contracts/:id`                   | Попытка с хвостами логов; текст контракта                                           |
 | `GET /api/changesets/:id?limit&cursor&verification=ID`      | ChangeSet: проверки страницами; снимок задач выбранной проверки страницами          |
 | `GET /api/queue?limit&cursor`                               | Очередь всех досок: незавершённые задачи страницами                                 |
-| `GET /api/contract-attempts?limit&cursor`                   | Попытки ревью контрактов и планов с находками страницами                            |
+| `GET /api/contract-attempts?limit&cursor`                   | Попытки ревью контрактов и планов страницами: первые 20 находок и их число          |
+| `GET /api/contract-attempts/:id/findings?limit&cursor`      | Остальные находки одной попытки ревью страницами                                    |
 | `GET /api/events?before=ID&limit`                           | Журнал событий страницами по ≤ 50; данные событий без тел                           |
 | `GET /api/state`                                            | Всё состояние для доверенной консоли и CLI; панель его не опрашивает                |
 | `GET /api/boards/:id/impact?roots=T1,T2`                    | Влияние корректировки                                                               |

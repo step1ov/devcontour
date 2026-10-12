@@ -12,6 +12,7 @@ import {
   panelChangeSet,
   panelContract,
   panelContractAttempts,
+  panelContractAttemptFindings,
   panelEvents,
   panelQueue,
   panelRun,
@@ -307,6 +308,17 @@ export async function serve(
           result = panelQueue(h, Object.fromEntries(url.searchParams));
         } else if (req.method === 'GET' && path === '/api/contract-attempts') {
           result = panelContractAttempts(h, Object.fromEntries(url.searchParams));
+        } else if (
+          req.method === 'GET' &&
+          parts[1] === 'contract-attempts' &&
+          parts[2] &&
+          parts[3] === 'findings'
+        ) {
+          result = panelContractAttemptFindings(
+            h,
+            decodeURIComponent(parts[2]),
+            Object.fromEntries(url.searchParams),
+          );
         } else if (req.method === 'GET' && path === '/api/events') {
           result = panelEvents(h, Object.fromEntries(url.searchParams));
         } else if (req.method === 'GET' && path === '/api/tasks') {

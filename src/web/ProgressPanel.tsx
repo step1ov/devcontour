@@ -321,7 +321,7 @@ function Contracts({
             {attempts.map((a, i) => (
               <span key={a.id}>
                 {i > 0 && ' → '}
-                <span className={a.approved ? 'text-primary' : undefined}>{a.findings.length}</span>
+                <span className={a.approved ? 'text-primary' : undefined}>{findingsOf(a)}</span>
               </span>
             ))}
           </p>
@@ -435,21 +435,70 @@ function Queue({ revision }: { revision?: string }) {
     </Card>
   );
 }
-function AttemptList({
-  attempts,
-  recent,
-}: {
-  attempts: ContractAttempt[];
-  recent: ContractAttempt[];
-}) {
-  const item = (a: ContractAttempt, i: number) => (
+/** Попытка ревью из страницы: находки — первые, их общее число — отдельно. */
+type AttemptLine = ContractAttempt & { findingsCount?: number };
+const findingsOf = (a: AttemptLine) => a.findingsCount ?? a.findings.length;
+type Finding = ContractAttempt['findings'][number];
+// Находки попытки сверх первых — страницами по запросу; сбой загрузки виден
+// и повторяется той же страницей.
+function MoreFindings({ attempt, shown }: { attempt: AttemptLine; shown: number }) {
+  const [extra, setExtra] = useState<Finding[]>([]);
+  const [error, setError] = useState('');
+  const total = findingsOf(attempt);
+  const load = () => {
+    setError('');
+    getPage<Finding>(
+      `contract-attempts/${encodeURIComponent(attempt.id)}/findings?limit=50&cursor=${shown + extra.length}`,
+    )
+      .then((page) => setExtra((items) => [...items, ...page.items]))
+      .catch((e: Error) => setError(e.message));
+  };
+  if (total <= shown) return null;
+  return (
+    <>
+      {extra.length > 0 && <FindingList findings={extra} />}
+      {error && (
+        <p role="alert" className="text-destructive text-sm">
+          Замечания не загрузились: {error}{' '}
+          <Button variant="outline" size="sm" onClick={load}>
+            Повторить
+          </Button>
+        </p>
+      )}
+      {shown + extra.length < total && (
+        <Button variant="outline" size="sm" className="mt-2" onClick={load}>
+          Ещё замечания ({total - shown - extra.length})
+        </Button>
+      )}
+    </>
+  );
+}
+function FindingList({ findings }: { findings: Finding[] }) {
+  return (
+    <ul className="mt-2 grid gap-1">
+      {findings.map((f, at) => (
+        <li key={at} className="flex gap-2 text-sm">
+          <Badge
+            variant={f.severity === 'blocking' ? 'destructive' : 'secondary'}
+            className="shrink-0"
+          >
+            {f.severity === 'blocking' ? 'блокер' : f.severity}
+          </Badge>
+          <span className="max-w-[80ch]">{f.message}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+function AttemptList({ attempts, recent }: { attempts: AttemptLine[]; recent: AttemptLine[] }) {
+  const item = (a: AttemptLine, i: number) => (
     <li key={a.id} className="border-b pb-3 last:border-0">
       <div className="flex flex-wrap items-center gap-2">
         <Badge variant={a.approved ? 'success' : 'destructive'}>
           Попытка {a.attempt ?? attempts.length - i}
         </Badge>
         <span className="text-muted-foreground text-xs">
-          {a.subject === 'task plan' ? 'план задач' : 'контракт'} · {a.findings.length} замечаний
+          {a.subject === 'task plan' ? 'план задач' : 'контракт'} · {findingsOf(a)} замечаний
         </span>
         <strong className="min-w-0 flex-1">{a.title}</strong>
         <code className="text-muted-foreground font-mono text-xs">
@@ -458,21 +507,8 @@ function AttemptList({
         <span className="text-muted-foreground text-xs">{ago(a.at)}</span>
       </div>
       <p className="text-muted-foreground mt-1 max-w-[80ch] text-sm">{a.summary}</p>
-      {a.findings.length > 0 && (
-        <ul className="mt-2 grid gap-1">
-          {a.findings.map((f, at) => (
-            <li key={at} className="flex gap-2 text-sm">
-              <Badge
-                variant={f.severity === 'blocking' ? 'destructive' : 'secondary'}
-                className="shrink-0"
-              >
-                {f.severity === 'blocking' ? 'блокер' : f.severity}
-              </Badge>
-              <span className="max-w-[80ch]">{f.message}</span>
-            </li>
-          ))}
-        </ul>
-      )}
+      {a.findings.length > 0 && <FindingList findings={a.findings} />}
+      <MoreFindings attempt={a} shown={a.findings.length} />
     </li>
   );
   return (

@@ -12,6 +12,7 @@ import {
   panelChangeSet,
   panelContract,
   panelContractAttempts,
+  panelContractAttemptFindings,
   panelEvents,
   panelQueue,
   panelRun,
@@ -232,7 +233,8 @@ test('P-F01: long diagnostics written by runner and gates stay bounded in the su
     const long = (marker: string) => marker + 'x'.repeat(300000);
     const state = d.store.read();
     const busy = state.tasks.find((t) => state.runs.some((r) => r.taskId === t.id))!;
-    d.store.change('fixture.diagnostics', (s) => {
+    // Запись — отказ scheduler: его событие несёт текст ошибки для stopReason.
+    d.store.change('scheduler.error', (s) => {
       for (const c of s.changeSets) {
         const v = c.verifications.at(-1)!;
         v.error = long('VERIFICATION-ERROR');
@@ -269,15 +271,50 @@ test('P-F01: long diagnostics written by runner and gates stay bounded in the su
         }));
       }
       s.contractAttempts = [
-        { id: 'CA-1', at: run.startedAt, findings: [], summary: long('ATTEMPT') } as never,
+        {
+          id: 'CA-1',
+          at: run.startedAt,
+          summary: long('ATTEMPT'),
+          findings: Array.from({ length: 1000 }, (_, k) => ({
+            severity: 'major',
+            message: `FINDING-${k} ` + 'x'.repeat(400),
+          })),
+        } as never,
       ];
+      s.changeSets[0].description = 'CHANGESET-DESCRIPTION ' + 'd'.repeat(5000);
+      // Очередь остановлена отказом scheduler с длинным текстом ошибки.
+      s.paused = true;
+      s.pauseReason = 'runtime';
+      return { error: long('SCHEDULER-ERROR') };
     });
+    d.store.projectionError = long('PROJECTION-ERROR');
     const limit = 256 * 1024;
     const summary = d.summary({ task: busy.id });
     assert.ok(bytes(summary) < limit, `сводка ${bytes(summary)}`);
     const text = JSON.stringify(summary);
     assert.equal(text.includes('x'.repeat(DIAGNOSTIC_MAX + 2)), false);
     assert.equal(text.includes('IMPACT'), false);
+    assert.ok(summary.stopReason?.startsWith('SCHEDULER-ERROR'));
+    assert.ok(summary.journalError?.startsWith('PROJECTION-ERROR'));
+    // Описание ChangeSet сокращено с признаком, целиком — в деталях.
+    const changeSet = summary.changeSets.find((x) => x.descriptionTruncated)!;
+    assert.ok(changeSet.description.length <= DIAGNOSTIC_MAX + 1);
+    assert.equal(
+      panelChangeSet(d.h, changeSet.id, { limit: '1' }).description,
+      d.store.read().changeSets.find((x) => x.id === changeSet.id)!.description,
+    );
+    // Находки попытки ревью: первые со счётчиком, остальные — страницами.
+    const review = panelContractAttempts(d.h, { limit: '1' });
+    assert.ok(bytes(review) < 64 * 1024, `ревью ${bytes(review)}`);
+    assert.equal(review.items[0].findingsCount, 1000);
+    assert.equal(review.items[0].findings.length, 20);
+    const pageOf = panelContractAttemptFindings(d.h, 'CA-1', { limit: '50', cursor: '20' });
+    assert.equal(pageOf.total, 1000);
+    assert.equal(pageOf.items.length, 50);
+    assert.ok(pageOf.items[0].message.startsWith('FINDING-20 '));
+    assert.equal(pageOf.next, 70);
+    assert.ok(bytes(pageOf) < limit);
+    assert.throws(() => panelContractAttemptFindings(d.h, 'CA-missing', {}), /не найдена/);
     const c = d.store.read().changeSets[0];
     for (const [name, value] of [
       ['задача', panelTask(d.h, busy.id, { limit: '50' })],
@@ -343,6 +380,35 @@ test('P-F03/P-F12: lease renewals keep the summary number and the parsed cache; 
       now + 90000,
     );
   } finally {
+    d.close();
+  }
+});
+
+test('P-F17: a lease renewed by another process while the summary snapshot was open is not shown as released', async () => {
+  const d = await history({ ...small, copies: 1 });
+  const writer = new Store(join(d.root, 'data', 'state.sqlite'));
+  try {
+    const now = Date.now();
+    d.store.change('fixture.operation', (s) => {
+      const v = s.changeSets[0].verifications.at(-1)!;
+      v.status = 'active';
+      v.leaseUntil = now + 300;
+    });
+    // Снимок сводки открыт до продления; разбор идёт уже после старого срока.
+    const inside = d.store.snapshot(() => {
+      d.store.version();
+      writer.change('heartbeat', (s) => {
+        s.changeSets[0].verifications.at(-1)!.leaseUntil = now + 60000;
+      });
+      while (Date.now() <= now + 300);
+      return d.summary();
+    });
+    assert.equal(inside.expiresAt, undefined, 'старый снимок видит только старый срок');
+    // Следующая сводка видит продлённый lease, а не снятую блокировку.
+    const next = d.summary();
+    assert.equal(next.expiresAt, now + 60000);
+  } finally {
+    writer.close();
     d.close();
   }
 });

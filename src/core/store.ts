@@ -138,8 +138,14 @@ export class Store {
   }
   /** Согласованное чтение: ревизия и состояние из одного снимка БД. */
   private reading = false;
+  /**
+   * Когда началось текущее чтение: снимок БД не старше этого момента. Всё,
+   * что истекло позже, могло быть продлено записью, которой снимок не видит.
+   */
+  private readStartedAt = 0;
   private atomicRead<T>(read: () => T): T {
     if (this.transaction || this.reading) return read();
+    this.readStartedAt = Date.now();
     this.db.exec('BEGIN');
     this.reading = true;
     try {
@@ -311,8 +317,15 @@ export class Store {
         cached?.revision === version.revision &&
         (cached.lease === version.lease ||
           (leaseStale !== undefined && !leaseStale(cached.state, cached.readAt)));
+      // Время кэша — начало чтения, а не его конец: снимок мог открыться до
+      // продления lease другим процессом и разобраться уже после старого
+      // срока. Такой срок кэш считает истёкшим после чтения и перечитывает.
       if (!fresh)
-        this.cached = { ...version, readAt: Date.now(), state: deepFreeze(this.readUnlocked()) };
+        this.cached = {
+          ...version,
+          readAt: this.reading ? this.readStartedAt : Date.now(),
+          state: deepFreeze(this.readUnlocked()),
+        };
       const { revision, lease, state } = this.cached!;
       return { revision, lease, state };
     });
