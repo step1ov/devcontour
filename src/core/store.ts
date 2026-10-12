@@ -131,16 +131,10 @@ export class Store {
     }
   }
   read(): DevContourState {
-    if (this.transaction || !this.components) return this.readUnlocked();
-    this.db.exec('BEGIN');
-    try {
-      const state = this.readUnlocked();
-      this.db.exec('COMMIT');
-      return state;
-    } catch (e) {
-      this.db.exec('ROLLBACK');
-      throw e;
-    }
+    // Компонентное хранение читает несколько баз — одним снимком; внутри
+    // `snapshot()` или транзакции записи используется уже открытый.
+    if (!this.components) return this.readUnlocked();
+    return this.atomicRead(() => this.readUnlocked());
   }
   /** Согласованное чтение: ревизия и состояние из одного снимка БД. */
   private reading = false;
@@ -228,9 +222,9 @@ export class Store {
       if (before === after) return result;
       if (this.components) this.components.write(state);
       else this.db.prepare('UPDATE main.state SET data=? WHERE id=1').run(after);
-      // Heartbeat продлевает только сроки владения (lease), которых читатели
-      // проекций не показывают: ревизия от них не растёт, иначе каждый опрос
-      // панели видел бы «изменение».
+      // Heartbeat продлевает только сроки владения (lease): ревизия данных от
+      // них не растёт, иначе каждый опрос панели видел бы «изменение». Сроки
+      // ведёт отдельный счётчик — по нему кэш узнаёт, что они продлены.
       this.bump(type === 'heartbeat' ? 'lease' : 'data');
       if (type !== 'heartbeat') {
         const at = new Date().toISOString();
@@ -290,20 +284,37 @@ export class Store {
     };
     return { revision: row.n, lease: row.lease };
   }
-  private cached?: { revision: number; lease: number; state: DevContourState };
+  private cached?: { revision: number; lease: number; readAt: number; state: DevContourState };
   /**
-   * Состояние только для чтения, разобранное один раз на версию данных и
-   * сроков владения. Для проекций, которые опрашиваются часто. Объект
-   * заморожен целиком: изменение не может испортить кэш. Внутри транзакции
-   * записи кэш не используется — она может откатиться.
+   * Состояние только для чтения, разобранное один раз на версию данных. Для
+   * проекций, которые опрашиваются часто. Объект заморожен целиком: изменение
+   * не может испортить кэш. Внутри транзакции записи кэш не используется —
+   * она может откатиться.
+   *
+   * Продление lease (heartbeat лидера, попыток, операций) данных не меняет, а
+   * случается постоянно; перечитывать из-за него всё состояние незачем.
+   * Поэтому по умолчанию кэш перечитывается при любом изменении сроков, а
+   * вызывающий, которому важны только некоторые сроки, передаёт `leaseStale`:
+   * кэш со старыми сроками остаётся, пока эта проверка не скажет, что
+   * показанный по нему срок уже мог истечь.
    */
-  readShared(): { revision: number; lease: number; state: Readonly<DevContourState> } {
+  readShared(leaseStale?: (state: Readonly<DevContourState>, readAt: number) => boolean): {
+    revision: number;
+    lease: number;
+    state: Readonly<DevContourState>;
+  } {
     return this.atomicRead(() => {
       const version = this.version();
       if (this.transaction) return { ...version, state: deepFreeze(this.readUnlocked()) };
-      if (this.cached?.revision !== version.revision || this.cached.lease !== version.lease)
-        this.cached = { ...version, state: deepFreeze(this.readUnlocked()) };
-      return this.cached;
+      const cached = this.cached;
+      const fresh =
+        cached?.revision === version.revision &&
+        (cached.lease === version.lease ||
+          (leaseStale !== undefined && !leaseStale(cached.state, cached.readAt)));
+      if (!fresh)
+        this.cached = { ...version, readAt: Date.now(), state: deepFreeze(this.readUnlocked()) };
+      const { revision, lease, state } = this.cached!;
+      return { revision, lease, state };
     });
   }
   /** Согласованное чтение нескольких значений из одного снимка БД. */

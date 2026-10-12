@@ -11,6 +11,7 @@ import {
   type Run,
   type Task,
 } from '../core/model.ts';
+import type { Delivery } from '../core/integrations.ts';
 import { blockers, readyTasks } from '../core/graph.ts';
 import { repositories } from '../core/repositories.ts';
 import { boardPhase, queueStopReason } from '../core/work-status.ts';
@@ -34,6 +35,25 @@ const LOG_TAIL = 4000;
 const short = (text: string | undefined, n = SHORT) =>
   text && text.length > n ? text.slice(0, n) + '…' : text;
 const tail = (text: string) => (text.length > LOG_TAIL ? '…' + text.slice(-LOG_TAIL) : text);
+
+/** Предел одной строки диагностики (ошибки, отчёты, история эпизода). */
+const DIAGNOSTIC = 2000;
+/**
+ * Диагностика с ограниченными строками на любой глубине и без токенов. Для
+ * вложенных записей, которые пишут runner и гейты (ошибки, отказы, история
+ * эпизода восстановления): их длину не ограничивает ни одна схема.
+ */
+function clip<T>(value: T, n = DIAGNOSTIC): T {
+  if (typeof value === 'string') return short(value, n) as T;
+  if (Array.isArray(value)) return (value as unknown[]).map((v) => clip(v, n)) as T;
+  if (value && typeof value === 'object')
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([k]) => k !== 'token')
+        .map(([k, v]) => [k, clip(v, n)]),
+    ) as T;
+  return value;
+}
 
 /** Без токенов владения на любой глубине: они не для панели. */
 function withoutTokens<T>(value: T): T {
@@ -128,11 +148,20 @@ function runLine(run: Run, boardId: string | undefined): PanelRun {
   };
 }
 
-/** Задача для панели: без истории восстановлений и тела receipt. */
+/**
+ * Задача для панели: без истории восстановлений и тела receipt. Тексты плана
+ * (название, описание, приёмка) — целиком: по ним редактируют задачу, и их
+ * объём задаёт план, а не история. Диагностика отказа — ограничена.
+ */
 function uiTask(h: DevContour, state: DevContourState, t: Task) {
-  const { recoveryHistory: _history, sharedCompletion, ...rest } = t;
+  const { recoveryHistory: _history, sharedCompletion, failure, hold, recovery, ...rest } = t;
   return {
     ...rest,
+    ...(failure !== undefined ? { failure: short(failure, DIAGNOSTIC) } : {}),
+    ...(hold ? { hold: clip(hold) } : {}),
+    ...(recovery
+      ? { recovery: { ...clip(recovery), history: clip(recovery.history.slice(-5)) } }
+      : {}),
     ...(sharedCompletion
       ? {
           sharedCompletion: {
@@ -187,27 +216,92 @@ function boardLine(state: DevContourState, board: Board, running: Set<string>) {
 }
 export type PanelBoard = ReturnType<typeof boardLine>;
 
-/** Проверка ChangeSet без снимка задач, токена и тел логов. */
+/**
+ * Проверка ChangeSet — перечисленными полями: без снимка задач, токена,
+ * влияния и доказательства релиза; ошибка и отчёты гейтов ограничены, лог —
+ * пустой в сводке и хвостом в деталях (целиком — `/evidence`).
+ */
 function verificationLine(v: ChangeSet['verifications'][number], logs: 'none' | 'tail') {
   return {
-    ...withoutTokens(v),
-    tasks: [] as Task[],
+    id: v.id,
+    status: v.status,
+    startedAt: v.startedAt,
+    finishedAt: v.finishedAt,
+    policyDigest: v.policyDigest,
+    specDigest: v.specDigest,
+    manifestDigest: v.manifestDigest,
+    manifest: v.manifest && clip(v.manifest, 200),
+    boards: clip(v.boards, 200),
+    error: short(v.error, DIAGNOSTIC),
     taskCount: v.tasks.length,
-    evidence: v.evidence.map((e) => ({
-      ...e,
-      log: logs === 'none' ? '' : tail(e.log),
+    evidence: v.evidence.slice(0, 50).map((e) => ({
+      gate: short(e.gate, 200)!,
+      passed: e.passed,
+      exitCode: e.exitCode,
+      digest: e.digest,
+      command: clip(e.command, 200),
       summary: short(e.summary) ?? '',
+      log: logs === 'none' ? '' : tail(e.log),
+      artifactCount: e.artifacts.length,
     })),
   };
 }
-/** ChangeSet: последняя проверка без снимка задач и тел логов, без токенов. */
+/** Поставка — перечисленными полями, без токена и срока; ошибка ограничена. */
+function deliveryLine(d: Delivery) {
+  return {
+    id: d.id,
+    verificationId: d.verificationId,
+    manifestDigest: d.manifestDigest,
+    policyDigest: d.policyDigest,
+    status: d.status,
+    startedAt: d.startedAt,
+    finishedAt: d.finishedAt,
+    error: short(d.error, DIAGNOSTIC),
+    components: Object.fromEntries(
+      Object.entries(d.components)
+        .slice(0, 50)
+        .map(([id, c]) => [
+          id,
+          {
+            sha: c.sha,
+            state: c.state,
+            mr: c.mr,
+            url: short(c.url, 500),
+            mergedSha: c.mergedSha,
+            checks: c.checks?.slice(0, 20).map((k) => ({
+              name: short(k.name, 200)!,
+              sha: k.sha,
+              status: short(k.status, 100)!,
+            })),
+          },
+        ]),
+    ),
+  };
+}
+/** ChangeSet — перечисленными полями: последняя проверка и её поставки. */
 function changeSetLine(c: ChangeSet) {
   const last = c.verifications.at(-1);
   return {
-    ...withoutTokens({ ...c, verifications: [], deliveries: [] }),
+    id: c.id,
+    title: c.title,
+    description: short(c.description, DIAGNOSTIC)!,
+    releaseId: c.releaseId,
+    boardIds: c.boardIds,
+    createdAt: c.createdAt,
+    supersedes: c.supersedes,
+    acceptance: c.acceptance && {
+      at: c.acceptance.at,
+      verificationId: c.acceptance.verificationId,
+      digest: c.acceptance.digest,
+      deliveryId: c.acceptance.deliveryId,
+      approval: clip(c.acceptance.approval, 200),
+    },
     verificationCount: c.verifications.length,
     verifications: last ? [verificationLine(last, 'none')] : [],
-    deliveries: withoutTokens(c.deliveries?.filter((d) => d.verificationId === last?.id) ?? []),
+    deliveries: (c.deliveries ?? [])
+      .filter((d) => d.verificationId === last?.id)
+      .slice(-5)
+      .map(deliveryLine),
   };
 }
 
@@ -222,13 +316,6 @@ const summaryQuery = z.object({
   accepted: z.enum(['1']).optional(),
 });
 
-/**
- * Номер показанного состояния. Сроки владения входят в него, только пока
- * идёт операция workspace: от её lease зависит доступность задач.
- */
-function token(version: { revision: number; lease: number }, leaseSensitive: boolean) {
-  return leaseSensitive ? `${version.revision}.${version.lease}` : String(version.revision);
-}
 function leaseOperations(state: DevContourState) {
   return state.changeSets.flatMap((c) => [
     ...c.verifications.filter((v) => v.status === 'active'),
@@ -237,9 +324,25 @@ function leaseOperations(state: DevContourState) {
 }
 
 /**
- * Периодическая сводка. `revision` — номер состояния, которое клиент уже
+ * Из сроков владения панели важен только lease операции workspace: пока он
+ * не истёк, задачи недоступны. Кэш со старыми сроками годится, пока ни один
+ * показанный по нему срок не истёк после чтения кэша: продление срока
+ * (heartbeat) ничего не меняет на экране, а heartbeat лидера и попыток
+ * панели не касается вовсе. Истёкший срок, уже прочитанный истёкшим, не
+ * продлевается (heartbeat операции отклоняется) — перечитывать незачем.
+ */
+function leaseStale(state: Readonly<DevContourState>, readAt: number) {
+  const now = Date.now();
+  return leaseOperations(state).some((o) => o.leaseUntil <= now && o.leaseUntil > readAt);
+}
+
+/**
+ * Периодическая сводка. `revision` — номер данных, которые клиент уже
  * показывает для той же области (доска, задача, вид): если данные не
- * менялись, возвращается только номер. Всё в ответе — из одного снимка БД.
+ * менялись, возвращается только номер. Продление lease номер не меняет:
+ * сводка сообщает `expiresAt` — срок ближайшего lease операции workspace, —
+ * и после него клиент запрашивает сводку целиком, получая новый срок или
+ * снятую блокировку. Всё в ответе — из одного снимка БД.
  */
 export function panelSummary(
   h: DevContour,
@@ -248,12 +351,15 @@ export function panelSummary(
 ) {
   const q = summaryQuery.parse(query);
   return h.store.snapshot(() => {
-    const shared = h.store.readShared();
+    const shared = h.store.readShared(leaseStale);
     const state = shared.state as DevContourState;
-    const operations = leaseOperations(state);
-    const revision = token(shared, operations.length > 0);
+    const revision = String(shared.revision);
     if (q.revision === revision) return { revision, unchanged: true as const };
-    return buildSummary(h, root, q, state, revision, operations);
+    const now = Date.now();
+    const leases = leaseOperations(state)
+      .map((o) => o.leaseUntil)
+      .filter((at) => at > now);
+    return buildSummary(h, root, q, state, revision, leases);
   });
 }
 
@@ -263,7 +369,7 @@ function buildSummary(
   q: z.infer<typeof summaryQuery>,
   state: DevContourState,
   revision: string,
-  operations: { leaseUntil: number }[],
+  leases: number[],
 ) {
   const running = new Set(state.runs.filter((r) => r.status === 'active').map((r) => r.taskId));
   const boards = state.boards.map((b) => boardLine(state, b, running));
@@ -339,7 +445,7 @@ function buildSummary(
      * доступность задач меняется без записи, и клиент запрашивает сводку
      * заново.
      */
-    expiresAt: operations.length ? Math.min(...operations.map((o) => o.leaseUntil)) : undefined,
+    expiresAt: leases.length ? Math.min(...leases) : undefined,
     boardId,
     board: board && {
       ...board,
@@ -355,13 +461,13 @@ function buildSummary(
     contracts: state.contracts.map(({ content, ...c }) => ({ ...c, contentBytes: content.length })),
     // Последние попытки ревью без находок; все — страницами с находками.
     contractAttempts: attempts.slice(-20).map(({ findings, ...a }) => ({
-      ...a,
+      ...clip(a),
       findingsCount: findings.length,
     })),
     contractAttemptCount: attempts.length,
     paused: state.paused,
     pauseReason: state.pauseReason,
-    waits: state.waits,
+    waits: clip(state.waits),
     team: state.team,
     // Журнал в сводке — только строки; данные событий — в деталях журнала.
     events: recent.slice(0, 40).map((e) => ({ id: e.id, at: e.at, type: e.type })),
@@ -369,7 +475,7 @@ function buildSummary(
     journalError: h.store.projectionError,
     workflows: new LeadWorkflow(h)
       .view()
-      .map((w) => ({ ...w, history: (w.history ?? []).slice(-5) })),
+      .map((w) => clip({ ...w, history: (w.history ?? []).slice(-5) })),
     dataRoot: resolve(root),
     ready,
     progress: progressOf(state),
@@ -483,10 +589,17 @@ export function panelTask(h: DevContour, id: string, query: Record<string, strin
     const state = shared.state as DevContourState;
     const task = state.tasks.find((t) => t.id === id);
     if (!task) throw new DomainError('Задача не найдена', 404);
+    // Запись целиком; диагностика отказа и эпизоды восстановления — с
+    // ограниченными строками, последние 20 эпизодов.
+    const { failure, hold, recovery, recoveryHistory, ...rest } = task;
     return {
       revision: shared.revision,
       task: {
-        ...withoutTokens(task),
+        ...withoutTokens(rest),
+        ...(failure !== undefined ? { failure: short(failure, DIAGNOSTIC) } : {}),
+        ...(hold ? { hold: clip(hold) } : {}),
+        ...(recovery ? { recovery: clip(recovery) } : {}),
+        ...(recoveryHistory ? { recoveryHistory: clip(recoveryHistory.slice(-20)) } : {}),
         specDigest: specDigest(task),
         blockers: blockers(task, state),
         progress: taskProgress(h, state, task),
@@ -533,17 +646,22 @@ export function panelRuns(
   return runsPage(sharedState(h), taskId, query);
 }
 
+/**
+ * Попытка для деталей: строки диагностики ограничены, лог — хвостом, тесты и
+ * находки — первыми записями; patch черновика — только по своей команде.
+ */
 function runDetail(run: Run) {
-  const { partial, ...rest } = withoutTokens(run);
+  const { partial, evidence, ...rest } = run;
   return {
-    ...rest,
+    ...clip(rest),
     // Токен владения попыткой — не для панели.
     token: '',
-    ...(partial ? { partial: { ...partial, patch: undefined } } : {}),
-    evidence: run.evidence.map((e) => ({
-      ...e,
-      log: tail(e.log),
-      tests: e.tests?.slice(0, 200),
+    ...(partial ? { partial: clip({ ...partial, patch: undefined }) } : {}),
+    evidence: evidence.slice(0, 100).map(({ log, tests, findings, ...e }) => ({
+      ...clip(e),
+      log: tail(log),
+      tests: tests && clip(tests.slice(0, 200), SHORT),
+      findings: findings && clip(findings.slice(0, 50), SHORT),
     })),
   };
 }
@@ -574,7 +692,8 @@ export function panelChangeSet(
   const deliveries = [...(c.deliveries ?? [])].reverse();
   return {
     ...changeSetLine(c),
-    deliveries: withoutTokens(deliveries.slice(0, 20)),
+    description: c.description,
+    deliveries: deliveries.slice(0, 20).map(deliveryLine),
     deliveryCount: deliveries.length,
     history: { ...history, items: history.items.map((v) => verificationLine(v, 'tail')) },
     snapshot: chosen && {
@@ -670,5 +789,6 @@ export function panelQueue(h: DevContour, query: Record<string, string | undefin
 
 /** Попытки ревью контрактов и планов страницами, новые сначала, с находками. */
 export function panelContractAttempts(h: DevContour, query: Record<string, string | undefined>) {
-  return paged([...(sharedState(h).contractAttempts ?? [])].reverse(), query);
+  const result = paged([...(sharedState(h).contractAttempts ?? [])].reverse(), query);
+  return { ...result, items: clip(result.items) };
 }

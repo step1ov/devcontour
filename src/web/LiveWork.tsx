@@ -323,13 +323,15 @@ function Attempt({ run, number, reset }: { run: Run; number: number; reset: bool
     </li>
   );
 }
-export function AttemptTimeline({ runs }: { runs: Run[] }) {
+export function AttemptTimeline({ runs, total = runs.length }: { runs: Run[]; total?: number }) {
   if (!runs.length) return null;
   // Номер — сквозной порядок попыток: счётчик бюджета после сброса начинается
-  // заново, и «попытка 1» над «попыткой 3» читалась как ошибка.
+  // заново, и «попытка 1» над «попыткой 3» читалась как ошибка. Загружены
+  // последние попытки (ранние — страницами), поэтому номер считается от их
+  // общего числа: он не меняется, когда раскрываются ранние страницы.
   const numbered = runs.map((run, i) => ({
     run,
-    number: i + 1,
+    number: total - runs.length + i + 1,
     // Равный номер — возвращённая попытка (отказ окружения), не сброс.
     reset: i > 0 && run.attempt < runs[i - 1].attempt,
   }));

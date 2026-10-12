@@ -187,3 +187,89 @@ test('The dependency picker finds tasks on other boards through server search', 
     dialog.getByLabel(new RegExp(title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))),
   ).toBeVisible();
 });
+
+test('Attempt numbers count the whole history, so they do not change when earlier pages open', async ({
+  page,
+}) => {
+  // Первая страница — две последние из пяти попыток: номера 5 и 4, а не 2 и 1.
+  await page.route(`**/api/tasks/${busyTask}?*`, (route) =>
+    route.continue({ url: route.request().url().replace('limit=10', 'limit=2') }),
+  );
+  await page.goto(base);
+  await openBusyTask(page);
+  const attempts = page.getByRole('region', { name: 'Ход попыток' });
+  await expect(attempts.locator('strong').first()).toHaveText('Попытка 5');
+  await expect(attempts).not.toContainText('Попытка 1');
+  await page.getByRole('button', { name: /Ранние попытки \(3\)/ }).click();
+  await expect(attempts.locator('strong').first()).toHaveText('Попытка 5');
+  await attempts.locator('summary').click();
+  await expect(attempts).toContainText('Попытка 1');
+  await expect(attempts.locator('strong').filter({ hasText: 'Попытка 5' })).toHaveCount(1);
+});
+
+test('A failed verification snapshot is retried by its own retry, not by reloading the history', async ({
+  page,
+}) => {
+  let fail = true;
+  await page.route('**/api/changesets/*', async (route) => {
+    if (fail && route.request().url().includes('verification='))
+      await route.fulfill({ status: 500, json: { error: 'стенд: отказ снимка' } });
+    else await route.continue();
+  });
+  await page.goto(base);
+  await page.getByRole('tab', { name: 'Изменения', exact: true }).click();
+  const card = page.locator('article[id^="changeset-"]').first();
+  await card.locator('summary', { hasText: 'История проверок' }).click();
+  await card
+    .getByRole('button', { name: /Снимок задач/ })
+    .first()
+    .click();
+  const alert = card.getByRole('alert');
+  await expect(alert).toContainText('Снимок задач не загрузился: стенд: отказ снимка');
+  fail = false;
+  await alert.getByRole('button', { name: 'Повторить' }).click();
+  await expect(card.getByRole('list', { name: /Снимок задач проверки/ })).toBeVisible();
+  await expect(alert).toHaveCount(0);
+});
+
+test('A late summary response of the same view does not replace a newer one', async ({ page }) => {
+  await page.goto(base);
+  await page.getByRole('tab', { name: 'Список', exact: true }).click();
+  await expect(page.getByRole('region', { name: 'Сейчас работают' })).toBeVisible();
+  await page.waitForTimeout(2500);
+  const create = (title: string) =>
+    page.request.post(`${base}/api/boards`, {
+      headers: { 'X-DevContour-Request': '1' },
+      data: { title },
+    });
+  // Первая доска создана; опрос после неё (с прежним номером) получает полную
+  // сводку — этот ответ задерживается. Пока он в пути, создаётся вторая доска,
+  // и следующий опрос показывает обе.
+  let held: (() => Promise<void>) | undefined;
+  let armed = false;
+  const captured = new Promise<void>((resolve) => {
+    void page.route('**/api/summary*', async (route) => {
+      if (!armed) return route.continue();
+      armed = false;
+      const response = await route.fetch();
+      held = () => route.fulfill({ response });
+      resolve();
+    });
+  });
+  await create('Поздний ответ · первая');
+  armed = true;
+  await captured;
+  await create('Поздний ответ · вторая');
+  const second = page.getByRole('button', { name: /Поздний ответ · вторая/ }).filter({
+    visible: true,
+  });
+  await expect(second.first()).toBeVisible();
+  await held!();
+  // Опоздавший ответ не должен вернуть экран к состоянию без второй доски.
+  const samples: number[] = [];
+  for (let i = 0; i < 30; i++) {
+    samples.push(await second.count());
+    await page.waitForTimeout(50);
+  }
+  expect(samples.every((n) => n > 0)).toBe(true);
+});

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { largeHistory, type HistoryShape } from './large-history.ts';
@@ -45,6 +45,8 @@ async function history(shape: HistoryShape) {
   };
 }
 const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
+/** Предел строки диагностики в проекциях (вместе с маркером обрезки). */
+const DIAGNOSTIC_MAX = 2000;
 const small: HistoryShape = {
   copies: 4,
   failedAttempts: 4,
@@ -69,7 +71,7 @@ test('The polled summary is bounded, carries no history bodies and does not grow
     assert.equal(text.includes('Fixture finding'), false, 'findings не в сводке');
     for (const c of sb.changeSets)
       for (const v of c.verifications) {
-        assert.deepEqual(v.tasks, []);
+        assert.equal('tasks' in v, false);
         assert.ok(v.taskCount > 0);
         for (const e of v.evidence) assert.equal(e.log, '');
       }
@@ -159,9 +161,8 @@ test('Details arrive on request: task with attempt pages, run with log tails, ch
     const c = panelChangeSet(d.h, change.id, { limit: '2' });
     assert.equal(c.history.total, small.verifications);
     assert.equal(c.history.items.length, 2);
-    assert.deepEqual(c.history.items[0].tasks, []);
     // Снимок задач — только адресно, по проверке; в истории его нет.
-    assert.ok(c.history.items.every((v) => v.tasks.length === 0 && v.taskCount > 0));
+    assert.ok(c.history.items.every((v) => !('tasks' in v) && v.taskCount > 0));
     const withTasks = panelChangeSet(d.h, change.id, {
       verification: change.verifications.at(-1)!.id,
     });
@@ -225,40 +226,150 @@ test('P-F01: recent events, change sets and their details carry no contract text
   }
 });
 
-test('P-F03: a lease renewal of a workspace operation refreshes the cached state, changes the summary number and sets the expiry', async () => {
+test('P-F01: long diagnostics written by runner and gates stay bounded in the summary and in every detail', async () => {
+  const d = await history({ ...small, copies: 1, events: 0 });
+  try {
+    const long = (marker: string) => marker + 'x'.repeat(300000);
+    const state = d.store.read();
+    const busy = state.tasks.find((t) => state.runs.some((r) => r.taskId === t.id))!;
+    d.store.change('fixture.diagnostics', (s) => {
+      for (const c of s.changeSets) {
+        const v = c.verifications.at(-1)!;
+        v.error = long('VERIFICATION-ERROR');
+        v.impact = { note: long('IMPACT') } as never;
+        for (const e of v.evidence) e.summary = long('WORKSPACE-SUMMARY');
+        c.deliveries = [
+          {
+            id: 'D-' + c.id,
+            token: 't',
+            verificationId: v.id,
+            manifestDigest: 'm',
+            policyDigest: 'p',
+            status: 'failed',
+            startedAt: v.startedAt,
+            leaseUntil: 0,
+            error: long('DELIVERY-ERROR'),
+            components: {
+              main: { sha: 'a', sourceBranch: 'b', tree: 'c', state: 'pending', url: long('URL') },
+            },
+          },
+        ];
+      }
+      const task = s.tasks.find((t) => t.id === busy.id)!;
+      task.status = 'failed';
+      task.failure = long('TASK-FAILURE');
+      task.hold = { operation: 'probe', reason: long('HOLD-REASON') };
+      const run = s.runs.findLast((r) => r.taskId === busy.id)!;
+      run.error = long('RUN-ERROR');
+      for (const e of run.evidence) {
+        e.summary = long('EVIDENCE-SUMMARY');
+        e.findings = Array.from({ length: 100 }, () => ({
+          severity: 'major',
+          message: 'FINDING' + 'x'.repeat(5000),
+        }));
+      }
+      s.contractAttempts = [
+        { id: 'CA-1', at: run.startedAt, findings: [], summary: long('ATTEMPT') } as never,
+      ];
+    });
+    const limit = 256 * 1024;
+    const summary = d.summary({ task: busy.id });
+    assert.ok(bytes(summary) < limit, `сводка ${bytes(summary)}`);
+    const text = JSON.stringify(summary);
+    assert.equal(text.includes('x'.repeat(DIAGNOSTIC_MAX + 2)), false);
+    assert.equal(text.includes('IMPACT'), false);
+    const c = d.store.read().changeSets[0];
+    for (const [name, value] of [
+      ['задача', panelTask(d.h, busy.id, { limit: '50' })],
+      ['попытки', panelRuns(d.h, busy.id, { limit: '50' })],
+      ['попытка', panelRun(d.h, d.store.read().runs.findLast((r) => r.taskId === busy.id)!.id)],
+      [
+        'ChangeSet',
+        panelChangeSet(d.h, c.id, { limit: '50', verification: c.verifications[0].id }),
+      ],
+      ['ревью', panelContractAttempts(d.h, { limit: '50' })],
+    ] as const) {
+      assert.ok(bytes(value) < limit, `${name} ${bytes(value)}`);
+      assert.equal(JSON.stringify(value).includes('x'.repeat(DIAGNOSTIC_MAX + 2)), false, name);
+    }
+  } finally {
+    d.close();
+  }
+});
+
+test('P-F03/P-F12: lease renewals keep the summary number and the parsed cache; after the shown expiry the summary carries the renewed lease', async () => {
   const d = await history({ ...small, copies: 1 });
   try {
     const now = Date.now();
     d.store.change('fixture.operation', (s) => {
       const v = s.changeSets[0].verifications.at(-1)!;
       v.status = 'active';
-      v.leaseUntil = now + 1000;
+      v.leaseUntil = now + 400;
     });
     const first = d.summary();
-    assert.equal(first.expiresAt, now + 1000);
+    assert.equal(first.expiresAt, now + 400);
+    const cached = d.store.readShared(() => false).state;
+    // Продление lease операции, heartbeat лидера и попытки: номер тот же,
+    // ответ короткий, разобранное состояние не перечитывается.
     d.store.change('heartbeat', (s) => {
       s.changeSets[0].verifications.at(-1)!.leaseUntil = now + 60000;
     });
-    // Кэш видит продлённый lease, номер сводки меняется, срок — новый.
+    d.h.leader('panel-probe');
+    for (let i = 0; i < 3; i++) {
+      d.h.leader('panel-probe');
+      assert.deepEqual(panelSummary(d.h, d.root, { revision: first.revision }), {
+        revision: first.revision,
+        unchanged: true,
+      });
+    }
+    assert.equal(d.store.readShared(() => false).state, cached);
+    // После показанного срока клиент берёт сводку целиком: в ней продлённый
+    // lease, а не снятая блокировка.
+    while (Date.now() <= now + 400) await new Promise((r) => setTimeout(r, 20));
+    const renewed = d.summary();
+    assert.equal(renewed.revision, first.revision);
+    assert.equal(renewed.expiresAt, now + 60000);
+    // Истёкший lease срока не даёт: опрос не становится полным навсегда.
+    d.store.change('fixture.operation-expired', (s) => {
+      s.changeSets[0].verifications.at(-1)!.leaseUntil = Date.now() - 1;
+    });
+    assert.equal(d.summary().expiresAt, undefined);
+    // Без кэш-подсказки (обычное чтение) продление lease видно сразу.
+    d.store.change('heartbeat', (s) => {
+      s.changeSets[0].verifications.at(-1)!.leaseUntil = now + 90000;
+    });
     assert.equal(
       d.store.readShared().state.changeSets[0].verifications.at(-1)!.leaseUntil,
-      now + 60000,
+      now + 90000,
     );
-    const second = panelSummary(d.h, d.root, { revision: first.revision }) as PanelSummary;
-    assert.notEqual(second.revision, first.revision);
-    assert.equal(second.expiresAt, now + 60000);
-    // Без операций workspace продление lease попытки номер не меняет.
-    d.store.change('fixture.operation-done', (s) => {
-      s.changeSets[0].verifications.at(-1)!.status = 'passed';
-    });
-    const idle = d.summary();
-    d.h.leader('panel-probe');
-    assert.deepEqual(panelSummary(d.h, d.root, { revision: idle.revision }), {
-      revision: idle.revision,
-      unchanged: true,
-    });
   } finally {
     d.close();
+  }
+});
+
+test('P-F13: a nested read inside a snapshot works with component storage', () => {
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-panel-components-'));
+  try {
+    const locations = ['product', 'library'].map((id) => {
+      const path = join(root, id);
+      mkdirSync(path);
+      return { id, path };
+    });
+    const store = new Store(join(root, 'state.sqlite'), locations);
+    try {
+      const value = store.snapshot(() => ({
+        state: store.read(),
+        shared: store.readShared().state,
+        revision: store.revision(),
+      }));
+      assert.equal(value.state.version, 1);
+      assert.equal(value.shared.version, 1);
+      assert.equal(typeof value.revision, 'number');
+    } finally {
+      store.close();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

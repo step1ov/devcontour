@@ -325,31 +325,50 @@ function ChangeSetHistory({
   const [open, setOpen] = useState(false);
   const [history, setHistory] = useState<Page<Verification>>();
   const [snapshot, setSnapshot] = useState<{ verificationId: string } & Page<SnapshotTask>>();
-  const [error, setError] = useState('');
+  // Сбой хранит свой повтор: «Повторить» повторяет именно неудавшийся запрос
+  // (историю, её следующую страницу или снимок задач), а не первую страницу.
+  const [failure, setFailure] = useState<{ what: string; message: string; retry: () => void }>();
   const [attempt, setAttempt] = useState(0);
   const base = `changesets/${encodeURIComponent(id)}`;
   useEffect(() => {
     if (!open) return;
     let valid = true;
-    setError('');
+    setFailure(undefined);
     api(`${base}?limit=10`)
       .then((value: { history: Page<Verification> }) => valid && setHistory(value.history))
-      .catch((e: Error) => valid && setError(e.message));
+      .catch(
+        (e: Error) =>
+          valid &&
+          setFailure({
+            what: 'История не загрузилась',
+            message: e.message,
+            retry: () => setAttempt((n) => n + 1),
+          }),
+      );
     return () => {
       valid = false;
     };
   }, [open, base, revision, attempt]);
-  const more = () =>
-    api(`${base}?limit=10&cursor=${history?.next}`)
+  const more = (cursor: number) => {
+    setFailure(undefined);
+    return api(`${base}?limit=10&cursor=${cursor}`)
       .then((value: { history: Page<Verification> }) =>
         setHistory((prev) => ({
           ...value.history,
           items: [...(prev?.items ?? []), ...value.history.items],
         })),
       )
-      .catch((e: Error) => setError(e.message));
-  const showSnapshot = (verification: string, cursor = 0) =>
-    api(`${base}?limit=1&verification=${verification}&taskLimit=50&taskCursor=${cursor}`)
+      .catch((e: Error) =>
+        setFailure({
+          what: 'Ранние проверки не загрузились',
+          message: e.message,
+          retry: () => void more(cursor),
+        }),
+      );
+  };
+  const showSnapshot = (verification: string, cursor = 0): Promise<void> => {
+    setFailure(undefined);
+    return api(`${base}?limit=1&verification=${verification}&taskLimit=50&taskCursor=${cursor}`)
       .then((value: { snapshot: { verificationId: string } & Page<SnapshotTask> }) =>
         setSnapshot((prev) =>
           cursor && prev?.verificationId === verification
@@ -357,19 +376,26 @@ function ChangeSetHistory({
             : value.snapshot,
         ),
       )
-      .catch((e: Error) => setError(e.message));
+      .catch((e: Error) =>
+        setFailure({
+          what: 'Снимок задач не загрузился',
+          message: e.message,
+          retry: () => void showSnapshot(verification, cursor),
+        }),
+      );
+  };
   return (
     <details onToggle={(e) => setOpen(e.currentTarget.open)}>
       <summary>История проверок ({count})</summary>
-      {error && (
+      {failure && (
         <p role="alert" className="text-destructive text-sm">
-          История не загрузилась: {error}{' '}
-          <Button variant="outline" size="sm" onClick={() => setAttempt((n) => n + 1)}>
+          {failure.what}: {failure.message}{' '}
+          <Button variant="outline" size="sm" onClick={failure.retry}>
             Повторить
           </Button>
         </p>
       )}
-      {open && !history && !error && <p role="status">Загрузка истории…</p>}
+      {open && !history && !failure && <p role="status">Загрузка истории…</p>}
       {history && (
         <ol className="grid gap-2">
           {history.items.map((h) => (
@@ -413,7 +439,7 @@ function ChangeSetHistory({
         </ol>
       )}
       {history?.next != null && (
-        <Button variant="outline" size="sm" onClick={() => void more()}>
+        <Button variant="outline" size="sm" onClick={() => void more(history.next!)}>
           Ранние проверки ({history.total - history.items.length})
         </Button>
       )}
@@ -560,9 +586,16 @@ export function App() {
     expiresAt?: number;
   }>({ boardId: '', selected: '', workspace: false, accepted: false });
   const [pollError, setPollError] = useState('');
+  // Поколение запроса: ответ старше уже применённого (он опоздал, пока шёл
+  // более новый запрос той же области) отбрасывается, как и его ошибка.
+  const issued = useRef(0);
+  const applied = useRef(0);
   const refresh = useCallback(async (force = true) => {
+    const generation = ++issued.current;
     const v = view.current;
-    const scope = `${v.boardId}|${v.selected}|${v.workspace}|${v.accepted}`;
+    const key = (x: typeof v, board = x.boardId) =>
+      `${board}|${x.selected}|${x.workspace}|${x.accepted}`;
+    const scope = key(v);
     const params = new URLSearchParams();
     if (v.boardId) params.set('board', v.boardId);
     if (v.selected) params.set('task', v.selected);
@@ -572,13 +605,25 @@ export function App() {
     const expired = v.expiresAt !== undefined && Date.now() >= v.expiresAt;
     if (!force && !expired && v.revision !== undefined && v.revisionScope === scope)
       params.set('revision', v.revision);
-    const next = (await api('summary?' + params.toString())) as
-      Snapshot | { unchanged: true; revision: string };
-    const now = view.current;
-    if (`${now.boardId}|${now.selected}|${now.workspace}|${now.accepted}` !== scope) return;
+    let next: Snapshot | { unchanged: true; revision: string };
+    try {
+      next = (await api('summary?' + params.toString())) as typeof next;
+    } catch (e) {
+      if (generation < applied.current) return;
+      throw e;
+    }
+    if (key(view.current) !== scope) return;
+    if (generation < applied.current) return;
+    applied.current = generation;
     setPollError('');
     if ('unchanged' in next) return;
-    Object.assign(v, { revision: next.revision, revisionScope: scope, expiresAt: next.expiresAt });
+    // Без явной доски сервер выбирает её сам: номер относится к ней, и
+    // переход панели на эту же доску не требует новой полной сводки.
+    Object.assign(v, {
+      revision: next.revision,
+      revisionScope: key(v, v.boardId || (next.boardId ?? '')),
+      expiresAt: next.expiresAt,
+    });
     setData(next);
   }, []);
   useEffect(() => {
@@ -611,9 +656,18 @@ export function App() {
     const v = view.current;
     const workspace = tab === 'workspace';
     const missing = !!selected && !!data && !data.tasks.some((t) => t.id === selected);
+    // Пустая доска — та, что сервер выбрал по умолчанию.
+    const effective = (id: string) => id || data?.boardId || '';
     const changed =
-      v.boardId !== boardId || v.workspace !== workspace || v.accepted !== showAccepted;
-    Object.assign(v, { boardId, selected, workspace, accepted: showAccepted });
+      effective(v.boardId) !== effective(boardId) ||
+      v.workspace !== workspace ||
+      v.accepted !== showAccepted;
+    // Задача входит в область сводки, только если её нет в показанных данных
+    // (прямая ссылка, задача другой доски): выбор задачи, которая уже есть,
+    // не должен стоить полной сводки. Запрошенная так задача остаётся в
+    // области, пока выбрана, — иначе она снова выпала бы из сводки.
+    const wanted = missing || (!!selected && v.selected === selected) ? selected : '';
+    Object.assign(v, { boardId, selected: wanted, workspace, accepted: showAccepted });
     if (changed || missing) void refresh().catch((e: Error) => setPollError(e.message));
   }, [boardId, selected, tab, showAccepted, data, refresh]);
   const board = data?.board?.id === boardId ? data.board : undefined;
@@ -1870,7 +1924,7 @@ export function App() {
                         Загрузка попыток…
                       </p>
                     )}
-                    {full && <AttemptTimeline runs={taskRuns} />}
+                    {full && <AttemptTimeline runs={taskRuns} total={full.runs.total} />}
                     {full && full.runs.total > taskRuns.length && (
                       <Button variant="outline" size="sm" onClick={() => void loadOlderRuns()}>
                         Ранние попытки ({full.runs.total - taskRuns.length})
