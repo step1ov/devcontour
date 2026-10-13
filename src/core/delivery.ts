@@ -45,6 +45,11 @@ export class Deliveries {
       if (!c) throw new DomainError('ChangeSet не найден');
       if (c.acceptance) throw new DomainError('ChangeSet уже принят');
       const v = currentVerification(this.h, s, c);
+      if (s.reconfigure && !s.reconfigure.appliedAt)
+        throw new DomainError(
+          `Операция ${s.reconfigure.operation} применяет конфигурацию; дождитесь её`,
+          409,
+        );
       if (
         s.runs.some((r) => r.status === 'active') ||
         s.changeSets.some((x) => x.verifications.some((r) => r.status === 'active'))

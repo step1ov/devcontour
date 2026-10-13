@@ -126,6 +126,11 @@ export class Workspace {
     return this.h.store.change('workspace.verification.started', (s) => {
       const c = find(s, id);
       if (c.acceptance) throw new DomainError('ChangeSet уже принят; создайте следующий');
+      if (s.reconfigure && !s.reconfigure.appliedAt)
+        throw new DomainError(
+          `Операция ${s.reconfigure.operation} применяет конфигурацию; дождитесь её`,
+          409,
+        );
       if (
         s.changeSets.some((x) =>
           x.deliveries?.some((d) => d.status === 'active' && d.leaseUntil > Date.now()),

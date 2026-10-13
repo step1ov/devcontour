@@ -269,7 +269,9 @@ export function authorOverview(h: DevContour): AuthorOverview {
         : s.paused
           ? s.pauseReason === 'runtime'
             ? 'Выдача остановлена системой'
-            : 'Выдача задач на паузе'
+            : s.pauseReason === 'reconfigure'
+              ? 'Применяется новая конфигурация после изменения контракта'
+              : 'Выдача задач на паузе'
           : counts.tasks && counts.done === counts.tasks
             ? 'Все задачи выполнены'
             : 'Ждёт работы';

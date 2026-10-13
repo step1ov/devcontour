@@ -221,9 +221,85 @@ function assertNotAccepted(s: DevContourState, t: Task) {
 export class DevContour {
   constructor(
     readonly store: Store,
-    readonly config: Config,
+    /** Меняется только `reconfigure` — шагом операции, после drain. */
+    public config: Config,
   ) {
     validateWorkflow(config);
+  }
+  /**
+   * Применить новую конфигурацию в этом процессе. Только шаг операции
+   * изменения контракта: она сверила digest, дождалась окончания работ и
+   * держит паузу. Отличаться может только закрепление context packs — всё
+   * остальное требует перезапуска процесса.
+   */
+  reconfigure(next: Config) {
+    const rest = (c: Config) => digest({ ...c, contextPacks: [] });
+    if (rest(next) !== rest(this.config))
+      throw new DomainError(
+        'Новая конфигурация отличается не только закреплением context packs: примените её перезапуском сервера',
+        409,
+      );
+    validateWorkflow(next);
+    this.config = next;
+  }
+  /**
+   * Пауза операции: ставится, только если очередь не остановлена, и
+   * помечается операцией. Пауза человека не перезаписывается.
+   */
+  operationPause(operation: string) {
+    return this.store.change('scheduler.paused', (s) => {
+      if (s.paused) return;
+      s.paused = true;
+      s.pauseReason = 'reconfigure';
+      s.pauseOperation = operation;
+      s.pausedAt = now();
+      return { paused: true, reason: 'reconfigure', operation };
+    });
+  }
+  /** Снять паузу операции — только свою; паузу человека она не трогает. */
+  operationResume(operation: string) {
+    return this.store.change('scheduler.started', (s) => {
+      if (!s.paused || s.pauseReason !== 'reconfigure' || s.pauseOperation !== operation) return;
+      s.paused = false;
+      s.pauseReason = undefined;
+      s.pauseOperation = undefined;
+      s.pausedAt = undefined;
+      return { paused: false, operation };
+    });
+  }
+  /** Запросить применение конфигурации с ожидаемым digest (идемпотентно). */
+  requestReconfigure(operation: string, configDigest: string) {
+    return this.store.change('config.reconfigure-requested', (s) => {
+      const current = s.reconfigure;
+      if (current && current.operation === operation && current.digest === configDigest) return;
+      if (current && current.operation !== operation && !current.appliedAt)
+        throw new DomainError(
+          `Конфигурацию уже применяет операция ${current.operation}; дождитесь её`,
+          409,
+        );
+      s.reconfigure = { operation, digest: configDigest, requestedAt: now() };
+      return { operation, digest: configDigest };
+    });
+  }
+  /** Подтвердить применение или записать отказ с обоими digest. */
+  settleReconfigure(operation: string, configDigest: string, by: string, error?: string) {
+    return this.store.change('config.reconfigured', (s) => {
+      const current = s.reconfigure;
+      if (!current || current.operation !== operation || current.digest !== configDigest) return;
+      if (current.appliedAt && !error) return;
+      s.reconfigure = error
+        ? { ...current, error }
+        : { ...current, appliedAt: now(), appliedBy: by, error: undefined };
+      return { operation, digest: configDigest, ...(error ? { error } : { by }) };
+    });
+  }
+  /** Снять завершённый запрос операции. */
+  clearReconfigure(operation: string) {
+    return this.store.change('config.reconfigure-cleared', (s) => {
+      if (s.reconfigure?.operation !== operation) return;
+      s.reconfigure = undefined;
+      return { operation };
+    });
   }
   /**
    * Договор исполнения задачи. Изоляция входит в него: смена режима или
@@ -722,6 +798,9 @@ export class DevContour {
         return { paused: true, reason: s.pauseReason };
       s.paused = value;
       s.pauseReason = value ? reason : undefined;
+      // Решение человека заменяет паузу операции: снять её операция уже не
+      // сможет — пауза теперь человека.
+      s.pauseOperation = undefined;
       s.pausedAt = value ? now() : undefined;
       // Продолжение очереди — решение после проверки базы: её ожидание снято.
       // Ожидание перезакрепления контекста держит операция, а не очередь.
@@ -841,6 +920,9 @@ export class DevContour {
     return this.store.change('run.claimed', (s) => {
       if (
         s.paused ||
+        // Пока операция применяет конфигурацию, попытки не выдаются, даже если
+        // человек снял паузу: попытка под прежней конфигурацией не нужна.
+        (s.reconfigure && !s.reconfigure.appliedAt) ||
         s.changeSets.some((c) =>
           c.deliveries?.some((d) => d.status === 'active' && d.leaseUntil > Date.now()),
         ) ||

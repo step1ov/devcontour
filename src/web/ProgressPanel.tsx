@@ -628,11 +628,13 @@ function Stage({
             ? `Идёт выдача: занято исполнителей — ${running}, принято ${done} из ${tasks.length}.`
             : paused && pauseReason === 'base-check'
               ? `Выдача ждёт проверки перенесённой базы — это техническое ожидание, а не пауза человека; принято ${done} из ${tasks.length}.`
-              : paused && pauseReason === 'operator'
-                ? `Выдача остановлена человеком, принято ${done} из ${tasks.length}.`
-                : paused
-                  ? `Выдача остановлена, принято ${done} из ${tasks.length}.`
-                  : `Ожидание выдачи: принято ${done} из ${tasks.length}.`;
+              : paused && pauseReason === 'reconfigure'
+                ? `Выдача остановлена операцией изменения контракта на время применения конфигурации — это не пауза человека, операция снимет её сама; принято ${done} из ${tasks.length}.`
+                : paused && pauseReason === 'operator'
+                  ? `Выдача остановлена человеком, принято ${done} из ${tasks.length}.`
+                  : paused
+                    ? `Выдача остановлена, принято ${done} из ${tasks.length}.`
+                    : `Ожидание выдачи: принято ${done} из ${tasks.length}.`;
   return (
     <Card>
       <CardContent className="grid gap-2 p-4">

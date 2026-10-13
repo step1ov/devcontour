@@ -29,6 +29,7 @@ import { runGate } from './gates.ts';
 import { isolation } from './isolation.ts';
 import { continuableDraft, implementationBasis } from '../core/reuse.ts';
 import { assertArtifactsInBase, componentArtifacts } from './contract-artifacts.ts';
+import { serveReconfigure } from './reconfigure.ts';
 import { CheckCorpus } from '../core/check-store.ts';
 import { propertySeed } from '../core/property.ts';
 import { submitCase, writeSelfCheck } from './checks.ts';
@@ -247,6 +248,9 @@ export class Scheduler {
         return;
       }
       await this.recover();
+      // Запрошенное операцией применение конфигурации — до выдачи: попытки
+      // после него идут уже под новой конфигурацией.
+      serveReconfigure(this.h, join(this.root, 'config.json'), this.owner);
       // Отложенные принятия версии корпуса завершаются, когда задача
       // освободилась: до выдачи, чтобы новая попытка шла уже по новой версии.
       new CheckCorpus(this.h).resume();

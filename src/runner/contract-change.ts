@@ -1,5 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { z } from 'zod';
 import { DomainError, type Contract } from '../core/model.ts';
 import { contractDigest, digest, type DevContour } from '../core/service.ts';
@@ -15,7 +17,8 @@ import { adapters, type AgentAdapter } from './adapters.ts';
 import { pinArtifacts } from './contract-artifacts.ts';
 import { contractImpact } from './contract-impact.ts';
 import { updateBase } from './base-update.ts';
-import { stalePins } from './context.ts';
+import { configDigest, repinContext, stalePins } from './context.ts';
+import { applyConfig, drained } from './reconfigure.ts';
 import { git } from './process.ts';
 
 /**
@@ -37,12 +40,20 @@ import { git } from './process.ts';
  * них и справедливо отклонял план. Шаг хранится индексом, поэтому операция,
  * начатая при прежнем порядке (без order), продолжает по нему.
  */
+/**
+ * Третий порядок: после переноса базы операция сама перезакрепляет context
+ * packs, закрепляющие источник контракта (`context`), и применяет новую
+ * конфигурацию в работающем сервере (`reconfigure`) — с ожидаемым digest,
+ * после drain и под своей паузой. Прежде это делал человек командами
+ * context-lock и перезапуском сервера, вне владения операции.
+ */
 const orders = {
   1: ['hold', 'drain', 'review', 'rebind', 'plan', 'base', 'release'],
   2: ['hold', 'drain', 'review', 'rebind', 'base', 'plan', 'release'],
+  3: ['hold', 'drain', 'review', 'rebind', 'base', 'context', 'reconfigure', 'plan', 'release'],
 } as const;
-type Step = (typeof orders)[2][number];
-const stepsOf = (op: { order?: 2 }): readonly Step[] => orders[op.order ?? 1];
+type Step = (typeof orders)[3][number];
+const stepsOf = (op: { order?: 2 | 3 }): readonly Step[] => orders[op.order ?? 1];
 
 export type ContractChange = {
   id: string;
@@ -53,8 +64,13 @@ export type ContractChange = {
   authorRuntime: 'codex' | 'claude';
   expected: { head: string; proposedDigest: string; current: string | null };
   step: number;
-  /** Порядок шагов; отсутствует у операций, начатых при прежнем порядке. */
-  order?: 2;
+  /** Порядок шагов; отсутствует у операций, начатых при первом порядке. */
+  order?: 2 | 3;
+  /**
+   * Digest `config.json` до и после перезакрепления: на них сверяются запись
+   * файла и применение конфигурации; по ним повтор узнаёт сделанное.
+   */
+  config?: { before: string; after?: string };
   status:
     | 'queued'
     | 'running'
@@ -104,6 +120,8 @@ const active = (op: ContractChange) =>
 export class ContractChanges {
   /** Предел git update-ref внутри транзакции: зависший Git не держит базу контура. */
   static refMoveTimeoutMs = 15000;
+  /** Сколько шаг ждёт подтверждения применения работающим сервером. */
+  static reconfigureWaitMs = 30000;
   constructor(
     readonly h: DevContour,
     readonly root: string,
@@ -181,7 +199,7 @@ export class ContractChanges {
           current: impact.current?.id ?? null,
         },
         step: 0,
-        order: 2,
+        order: 3,
         status: 'queued',
         startedAt: new Date().toISOString(),
         held: [],
@@ -411,7 +429,7 @@ export class ContractChanges {
           current: impact.current?.id ?? null,
         },
         step: 0,
-        order: 2,
+        order: 3,
         status: 'queued',
         startedAt: at,
         held: [],
@@ -440,6 +458,10 @@ export class ContractChanges {
       );
       this.log(next, 'start', 'queued', `продолжает ${current.id}`);
       this.h.clearWait('context-lock', current.id);
+      // Пауза и запрос применения принадлежали заменённой операции: следующая
+      // проведёт перезакрепление и применение сама.
+      this.h.operationResume(current.id);
+      this.h.clearReconfigure(current.id);
       this.save(current);
       this.save(next);
       return {
@@ -459,6 +481,11 @@ export class ContractChanges {
       if (!active(op) && op.status !== 'stale') return this.view(op);
       this.h.release(op.id);
       this.h.clearWait('context-lock', op.id);
+      // Неприменённый запрос и пауза операции снимаются: выдача не должна
+      // ждать отменённую операцию. Уже записанный config.json остаётся и
+      // будет прочитан при следующем запуске сервера.
+      this.h.operationResume(op.id);
+      this.h.clearReconfigure(op.id);
       op.status = 'abandoned';
       op.token = undefined;
       op.leaseUntil = undefined;
@@ -677,6 +704,99 @@ export class ContractChanges {
               'moved',
               updated.updated.map((u) => `${u.repositoryId}:${u.to}`).join(', '),
             );
+        });
+        return {};
+      }
+      case 'context': {
+        const path = join(this.root, 'config.json');
+        const contract = this.h.store.read().contracts.find((c) => c.id === op.contractId);
+        const stale = contract ? await stalePins(this.h.config, contract) : [];
+        if (!stale.length) {
+          // Перезакреплять нечего — конфигурация не меняется. Если файл уже
+          // был записан этой операцией, а процесс перезапустился до
+          // сохранения шага, записанное узнаётся по digest: применение всё
+          // равно нужно работающему серверу.
+          const before = op.config?.before;
+          const after = before ? configDigest(await readFile(path, 'utf8')) : undefined;
+          this.advanceStep(op, (c) => {
+            if (before && after) c.config = { before, after };
+          });
+          return {};
+        }
+        const current = configDigest(await readFile(path, 'utf8'));
+        // Ожидаемое состояние файла записывается до записи: повтор после
+        // сбоя сверяет файл с ним, а не с тем, что окажется на диске.
+        let expected = op.config?.before;
+        if (!expected) {
+          expected = current;
+          this.h.store.atomic(() => {
+            const c = this.guard(op);
+            c.config = { before: current };
+            this.save(c);
+          });
+        }
+        const result = await repinContext(this.h.config, path, stale, op.expected.head, expected);
+        this.advanceStep(op, (c) => {
+          c.config = { before: expected, after: result.after };
+          this.log(
+            c,
+            'context',
+            result.written ? 'repinned' : 'already-repinned',
+            `${stale.join(', ')} @ ${op.expected.head.slice(0, 12)}; config ${expected.slice(0, 12)} → ${result.after.slice(0, 12)}`,
+          );
+        });
+        return {};
+      }
+      case 'reconfigure': {
+        const after = op.config?.after;
+        // Шаг context ничего не перезакреплял: применять нечего.
+        if (!after) {
+          this.advanceStep(op);
+          return {};
+        }
+        const path = join(this.root, 'config.json');
+        // Своя пауза — только если очередь не остановлена; пауза человека
+        // остаётся его. Запрос применения останавливает выдачу и без паузы.
+        this.h.operationPause(op.id);
+        this.h.requestReconfigure(op.id, after);
+        const s = this.h.store.read();
+        if (!drained(s)) {
+          const busy = [
+            ...s.runs.filter((r) => r.status === 'active').map((r) => r.id),
+            ...s.changeSets.flatMap((c) => [
+              ...c.verifications.filter((v) => v.status === 'active').map((v) => v.id),
+              ...(c.deliveries ?? []).filter((d) => d.status === 'active').map((d) => d.id),
+            ]),
+          ];
+          return {
+            wait: 'Ждёт окончания попыток, совместных проверок и поставок перед применением конфигурации',
+            waitingFor: busy,
+          };
+        }
+        // Свой процесс — сразу: следующие шаги (ревью планов) читают контекст.
+        applyConfig(this.h, path, after);
+        // Работающий сервер применяет сам и подтверждает; без живого сервера
+        // следующий запуск прочитает уже новый файл.
+        const leader = s.leader && s.leader.leaseUntil > Date.now();
+        if (leader) {
+          const deadline = Date.now() + ContractChanges.reconfigureWaitMs;
+          for (;;) {
+            const request = this.h.store.read().reconfigure;
+            if (request?.error)
+              throw new DomainError('Сервер не применил конфигурацию: ' + request.error);
+            if (request?.appliedAt && request.digest === after) break;
+            if (Date.now() > deadline)
+              return {
+                wait: 'Ждёт применения конфигурации работающим сервером',
+                waitingFor: ['reconfigure'],
+              };
+            await new Promise((r) => setTimeout(r, 200));
+          }
+        } else this.h.settleReconfigure(op.id, after, 'operation:' + op.id);
+        this.advanceStep(op, (c) => {
+          this.h.operationResume(op.id);
+          this.h.clearReconfigure(op.id);
+          this.log(c, 'reconfigure', 'applied', `config ${after.slice(0, 12)}`);
         });
         return {};
       }

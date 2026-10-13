@@ -58,6 +58,62 @@ export async function lockContextFile(config: Config, path: string, ref = 'HEAD'
   await rename(temp, path);
   return packs;
 }
+/** Digest конфигурации по содержимому `config.json`, а не по его форматированию. */
+export const configDigest = (text: string) => digest(JSON.parse(text) as unknown);
+
+/**
+ * Перезакрепить названные пакеты по ревизии `ref` — шаг операции изменения
+ * контракта. Пишет `config.json`, только если его digest равен ожидаемому
+ * операцией (`expected`); прочие пакеты и поля не меняются. Повтор после
+ * сбоя узнаёт уже записанный результат по digest и не пишет заново.
+ */
+export async function repinContext(
+  config: Config,
+  path: string,
+  ids: string[],
+  ref: string,
+  expected: string,
+) {
+  const text = await readFile(path, 'utf8');
+  const actual = configDigest(text);
+  const parsed = JSON.parse(text) as { contextPacks?: ContextPack[] };
+  const pinned = new Map<string, ContextPack>();
+  for (const pack of config.contextPacks.filter((p) => ids.includes(p.id))) {
+    const revision = await git(
+      repository(config, pack.repositoryId).path,
+      'rev-parse',
+      '--verify',
+      `${ref}^{commit}`,
+    );
+    const documents = await contents(config, pack, revision);
+    pinned.set(pack.id, {
+      ...pack,
+      revision,
+      digest: digest({ id: pack.id, version: pack.version, documents }),
+    });
+  }
+  const next = {
+    ...parsed,
+    contextPacks: (parsed.contextPacks ?? []).map((p) => {
+      const repinned = pinned.get(p.id);
+      return repinned ? { ...p, revision: repinned.revision, digest: repinned.digest } : p;
+    }),
+  };
+  const nextText = JSON.stringify(next, null, 2) + '\n';
+  const after = configDigest(nextText);
+  if (actual === after) return { before: expected, after, written: false };
+  if (actual !== expected)
+    throw new Error(
+      `config.json изменён вне операции: ожидался digest ${expected.slice(0, 16)}, в файле ${actual.slice(0, 16)}`,
+    );
+  if ((await readFile(path, 'utf8')) !== text)
+    throw new Error('Конфигурация изменилась во время перезакрепления');
+  const temp = path + '.context-' + process.pid;
+  await writeFile(temp, nextText, { flag: 'wx' });
+  await rename(temp, path);
+  return { before: expected, after, written: true };
+}
+
 /**
  * Пакеты, которые закрепляют источник контракта в другой редакции, чем
  * утверждённая. Задача с таким контрактом заблокируется на первом же запуске
