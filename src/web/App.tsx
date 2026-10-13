@@ -398,8 +398,13 @@ function ChangeSetHistory({
   type SnapshotTask = { id: string; title: string; status: string; resultSha?: string };
   const [open, setOpen] = useState(false);
   const [history, setHistory] = useState<History>();
-  // Снимок, который выбран последним: ответ для прежнего выбора отбрасывается.
+  // Снимок, который выбран последним: ответ и ошибка прежнего выбора
+  // отбрасываются.
   const wanted = useRef('');
+  // Поколение истории: перезагрузка первой страницы (новая сводка) начинает
+  // новый набор, и продолжение, запрошенное для прежнего, его не дополняет —
+  // иначе в непрерывной истории осталась бы дыра.
+  const generation = useRef(0);
   const [snapshot, setSnapshot] = useState<{ verificationId: string } & Page<SnapshotTask>>();
   // Сбой хранит свой повтор: «Повторить» повторяет именно неудавшийся запрос
   // (историю, её следующую страницу или снимок задач), а не первую страницу.
@@ -409,6 +414,7 @@ function ChangeSetHistory({
   useEffect(() => {
     if (!open) return;
     let valid = true;
+    generation.current += 1;
     setFailure(undefined);
     api(`${base}?limit=10`)
       .then((value: { history: History }) => valid && setHistory(value.history))
@@ -427,8 +433,10 @@ function ChangeSetHistory({
   }, [open, base, revision, attempt]);
   const more = (before: number) => {
     setFailure(undefined);
+    const mine = generation.current;
     return api(`${base}?limit=10&before=${before}`)
-      .then((value: { history: History }) =>
+      .then((value: { history: History }) => {
+        if (mine !== generation.current) return;
         // Страницы сливаются по id в порядке «новые сначала»: повторный или
         // опоздавший ответ не задвоит записи и не обрежет уже загруженные.
         setHistory((prev) => {
@@ -443,15 +451,16 @@ function ChangeSetHistory({
                 ? null
                 : Math.min(prev?.nextBefore ?? Infinity, value.history.nextBefore),
           };
-        }),
-      )
-      .catch((e: Error) =>
+        });
+      })
+      .catch((e: Error) => {
+        if (mine !== generation.current) return;
         setFailure({
           what: 'Ранние проверки не загрузились',
           message: e.message,
           retry: () => void more(before),
-        }),
-      );
+        });
+      });
   };
   const showSnapshot = (verification: string, cursor = 0): Promise<void> => {
     setFailure(undefined);
@@ -461,8 +470,9 @@ function ChangeSetHistory({
         if (verification !== wanted.current) return;
         // Снимок неизменен: страница встаёт на своё смещение, не обрезая
         // уже загруженное дальше неё.
+        // Повтор первой страницы того же снимка тоже встаёт на место.
         setSnapshot((prev) =>
-          cursor && prev?.verificationId === verification
+          prev?.verificationId === verification
             ? (() => {
                 const items = [
                   ...prev.items.slice(0, cursor),
@@ -478,13 +488,14 @@ function ChangeSetHistory({
             : value.snapshot,
         );
       })
-      .catch((e: Error) =>
+      .catch((e: Error) => {
+        if (verification !== wanted.current) return;
         setFailure({
           what: 'Снимок задач не загрузился',
           message: e.message,
           retry: () => void showSnapshot(verification, cursor),
-        }),
-      );
+        });
+      });
   };
   return (
     <details onToggle={(e) => setOpen(e.currentTarget.open)}>
@@ -680,6 +691,8 @@ export function App() {
   // сводку. Ответ, пришедший для прежней области, отбрасывается.
   const view = useRef<{
     boardId: string;
+    /** Прежняя ревизия доски, которую смотрят: её задачи входят в сводку. */
+    boardRevision?: number;
     selected: string;
     workspace: boolean;
     accepted: boolean;
@@ -696,10 +709,11 @@ export function App() {
     const generation = ++issued.current;
     const v = view.current;
     const key = (x: typeof v, board = x.boardId) =>
-      `${board}|${x.selected}|${x.workspace}|${x.accepted}`;
+      `${board}|${x.boardRevision ?? ''}|${x.selected}|${x.workspace}|${x.accepted}`;
     const scope = key(v);
     const params = new URLSearchParams();
     if (v.boardId) params.set('board', v.boardId);
+    if (v.boardRevision) params.set('boardRevision', String(v.boardRevision));
     if (v.selected) params.set('task', v.selected);
     if (v.workspace) params.set('view', 'workspace');
     if (v.workspace && v.accepted) params.set('accepted', '1');
@@ -760,8 +774,13 @@ export function App() {
     const missing = !!selected && !!data && !data.tasks.some((t) => t.id === selected);
     // Пустая доска — та, что сервер выбрал по умолчанию.
     const effective = (id: string) => id || data?.boardId || '';
+    // Прежняя ревизия: её задач нет в сводке текущей доски — запрос сразу.
+    const latest = data?.board?.revisions.at(-1)?.number;
+    const boardRevision =
+      revisionNumber !== null && revisionNumber !== latest ? revisionNumber : undefined;
     const changed =
       effective(v.boardId) !== effective(boardId) ||
+      v.boardRevision !== boardRevision ||
       v.workspace !== workspace ||
       v.accepted !== showAccepted;
     // Задача входит в область сводки, только если её нет в показанных данных
@@ -769,12 +788,53 @@ export function App() {
     // не должен стоить полной сводки. Запрошенная так задача остаётся в
     // области, пока выбрана, — иначе она снова выпала бы из сводки.
     const wanted = missing || (!!selected && v.selected === selected) ? selected : '';
-    Object.assign(v, { boardId, selected: wanted, workspace, accepted: showAccepted });
+    Object.assign(v, {
+      boardId,
+      boardRevision,
+      selected: wanted,
+      workspace,
+      accepted: showAccepted,
+    });
     if (changed || missing) void refresh().catch((e: Error) => setPollError(e.message));
-  }, [boardId, selected, tab, showAccepted, data, refresh]);
+  }, [boardId, revisionNumber, selected, tab, showAccepted, data, refresh]);
   const board = data?.board?.id === boardId ? data.board : undefined;
   const revision =
     board?.revisions.find((r) => r.number === revisionNumber) ?? board?.revisions.at(-1);
+  // История ревизий: в сводке — последние и выбранная; ранние — страницами
+  // по стабильному курсору, сливаются по номеру.
+  type RevisionLine = NonNullable<typeof board>['revisions'][number];
+  const [older, setOlder] = useState<{
+    boardId: string;
+    items: RevisionLine[];
+    nextBefore: number | null;
+  }>();
+  const olderOwn = older?.boardId === board?.id ? older : undefined;
+  const shownRevisions = [
+    ...new Map(
+      [...(board?.revisions ?? []), ...(olderOwn?.items ?? [])].map((r) => [r.number, r]),
+    ).values(),
+  ].sort((a, b) => b.number - a.number);
+  const revisionsBefore = olderOwn
+    ? (olderOwn.nextBefore ?? 0)
+    : Math.max(0, (board?.revisionCount ?? 0) - (board?.revisions.length ?? 0));
+  const loadOlderRevisions = async () => {
+    if (!board || !revisionsBefore) return;
+    const id = board.id;
+    setRevisionsError('');
+    try {
+      const page = (await api(
+        `boards/${encodeURIComponent(id)}/revisions?limit=20&before=${revisionsBefore}`,
+      )) as { items: RevisionLine[]; nextBefore: number | null };
+      setOlder((prev) => ({
+        boardId: id,
+        items: [...(prev?.boardId === id ? prev.items : []), ...page.items],
+        nextBefore: page.nextBefore,
+      }));
+    } catch (e) {
+      setRevisionsError((e as Error).message);
+    }
+  };
+  const [revisionsError, setRevisionsError] = useState('');
   const current = revision?.number === board?.revisions.at(-1)?.number;
   const editable =
     revision?.status === 'active' && current && tab !== 'workspace' && !workspaceView;
@@ -1855,7 +1915,7 @@ export function App() {
                       Принятые снимки неизменяемы. Каждая корректировка имеет свой план и
                       доказательства.
                     </p>
-                    {[...(board?.revisions ?? [])].reverse().map((r) => (
+                    {shownRevisions.map((r) => (
                       <article key={r.number}>
                         <div>
                           <span className="text-primary bg-accent rounded-sm p-2">r{r.number}</span>
@@ -1891,6 +1951,23 @@ export function App() {
                         </Button>
                       </article>
                     ))}
+                    {revisionsError && (
+                      <p role="alert" className="text-destructive text-sm">
+                        Ранние ревизии не загрузились: {revisionsError}{' '}
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => void loadOlderRevisions()}
+                        >
+                          Повторить
+                        </Button>
+                      </p>
+                    )}
+                    {!revisionsError && revisionsBefore > 0 && (
+                      <Button variant="outline" onClick={() => void loadOlderRevisions()}>
+                        Ранние ревизии ({revisionsBefore})
+                      </Button>
+                    )}
                   </div>
                 )}
                 {tab === 'contracts' && (

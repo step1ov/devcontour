@@ -25,6 +25,29 @@ const store = new Store(join(data, 'state.sqlite'));
 store.change('fixture.panel-details', (s) => {
   s.changeSets[0].description =
     'Обезличенное длинное описание. ' + 'Текст описания изменения. '.repeat(120) + 'КОНЕЦ-ОПИСАНИЯ';
+  // 25 проверок одного ChangeSet: история листается страницами.
+  const verification = s.changeSets[0].verifications.at(-1)!;
+  for (let k = 0; k < 22; k++)
+    s.changeSets[0].verifications.push({
+      ...structuredClone(verification),
+      id: `V-history-${String(k).padStart(2, '0')}`,
+      startedAt: new Date(Date.parse(verification.startedAt) + (k + 1) * 60000).toISOString(),
+    });
+  // Последняя доска пережила 24 корректировки: первая ревизия — с задачами,
+  // текущая — пустая. Ранние ревизии и их задачи — по запросу.
+  const history = s.boards.at(-1)!;
+  const original = history.revisions.at(-1)!;
+  history.title = 'Доска с длинной историей';
+  for (let k = 0; k < 24; k++)
+    history.revisions.push({
+      ...structuredClone(original),
+      number: original.number + k + 1,
+      status: 'active',
+      reason: `Корректировка стенда ${k + 1}`,
+      taskIds: [],
+      snapshot: undefined,
+    });
+  for (const r of history.revisions.slice(0, -1)) r.status = 'accepted';
   s.contractAttempts = [
     {
       id: 'CA-fixture',

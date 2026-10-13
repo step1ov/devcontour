@@ -136,7 +136,7 @@ function runLine(run: Run, boardId: string | undefined): PanelRun {
  * (название, описание, приёмка) — целиком: по ним редактируют задачу, и их
  * объём задаёт план, а не история. Диагностика отказа — ограничена.
  */
-function uiTask(h: DevContour, state: DevContourState, t: Task) {
+function uiTask(h: DevContour, state: DevContourState, t: Task, now: number) {
   const { recoveryHistory: _history, sharedCompletion, failure, hold, recovery, ...rest } = t;
   return {
     ...rest,
@@ -165,7 +165,7 @@ function uiTask(h: DevContour, state: DevContourState, t: Task) {
     recoveryCount: _history?.length ?? 0,
     specDigest: specDigest(t),
     blockers: blockers(t, state),
-    progress: taskProgress(h, state, t),
+    progress: taskProgress(h, state, t, now),
     checks: clip(checksSummary(t)),
   };
 }
@@ -183,7 +183,7 @@ function compactRevision(r: Board['revisions'][number], reason = DIAGNOSTIC) {
     ...(r.snapshot ? { snapshot: { ...r.snapshot, tasks: [] as Task[] } } : {}),
   };
 }
-/** Последние ревизии выбранной доски — с причинами до 2000 знаков, ранние — короче. */
+/** Сколько последних ревизий выбранной доски входит в сводку; ранние — страницами. */
 const RECENT_REVISIONS = 20;
 function boardTasks(board: Board) {
   return new Set(board.revisions.flatMap((r) => r.taskIds));
@@ -313,6 +313,7 @@ function changeSetLine(c: ChangeSet) {
 
 const summaryQuery = z.object({
   board: z.string().max(200).optional(),
+  boardRevision: z.coerce.number().int().min(1).optional(),
   revision: z
     .string()
     .regex(/^\d+(\.\d+)?$/)
@@ -375,8 +376,14 @@ function summaryOnce(
   return h.store.snapshot(() => {
     const shared = h.store.readShared(leaseStale);
     const state = shared.state as DevContourState;
+    // Один момент на весь ответ: номер, `expiresAt` и блокировка задач
+    // считаются по нему и не расходятся, если lease истекает во время сборки.
     const now = Date.now();
-    if (retryUncertain && leaseStale(state, shared.readAt)) return undefined;
+    if (
+      retryUncertain &&
+      leaseOperations(state).some((o) => o.leaseUntil <= now && o.leaseUntil > shared.snapshotAt)
+    )
+      return undefined;
     const leases = leaseOperations(state)
       .map((o) => o.leaseUntil)
       .filter((at) => at > now);
@@ -386,7 +393,7 @@ function summaryOnce(
     // ответами «без изменений».
     const revision = leases.length ? `${shared.revision}.1` : String(shared.revision);
     if (q.revision === revision) return { revision, unchanged: true as const };
-    return buildSummary(h, root, q, state, revision, leases);
+    return buildSummary(h, root, q, state, revision, leases, now);
   });
 }
 
@@ -397,6 +404,7 @@ function buildSummary(
   state: DevContourState,
   revision: string,
   leases: number[],
+  now: number,
 ) {
   const running = new Set(state.runs.filter((r) => r.status === 'active').map((r) => r.taskId));
   const boards = state.boards.map((b) => boardLine(state, b, running));
@@ -419,7 +427,13 @@ function buildSummary(
   const byId = new Map(state.tasks.map((t) => [t.id, t]));
   // Задачи сводки: выбранная доска, их зависимости, выбранная задача, занятые,
   // готовые и ждущие решения. Остальные доски — компактными строками.
-  const include = new Set<string>(board ? boardTasks(board) : []);
+  // Выбранная доска — задачи текущей ревизии и ревизии, которую смотрят
+  // (`boardRevision`); задачи прежних планов — только по такому запросу.
+  const shownRevision = board?.revisions.find((r) => r.number === q.boardRevision);
+  const include = new Set<string>([
+    ...(board?.revisions.at(-1)?.taskIds ?? []),
+    ...(shownRevision?.taskIds ?? []),
+  ]);
   const withDependencies = (id: string) => {
     include.add(id);
     for (const dep of byId.get(id)?.dependsOn ?? []) include.add(dep);
@@ -452,7 +466,7 @@ function buildSummary(
   }
   const tasks = state.tasks
     .filter((t) => include.has(t.id))
-    .map((t) => ({ ...uiTask(h, state, t), boardId: boardOf.get(t.id) }));
+    .map((t) => ({ ...uiTask(h, state, t, now), boardId: boardOf.get(t.id) }));
   const lastRun = new Map<string, Run>();
   for (const r of state.runs) if (include.has(r.taskId)) lastRun.set(r.taskId, r);
   const runs = [
@@ -476,9 +490,12 @@ function buildSummary(
     boardId,
     board: board && {
       ...board,
-      revisions: board.revisions.map((r, i) =>
-        compactRevision(r, i >= board.revisions.length - RECENT_REVISIONS ? DIAGNOSTIC : SHORT),
-      ),
+      // Последние ревизии и та, которую смотрят; ранние — страницами
+      // (`/api/boards/:id/revisions`).
+      revisions: board.revisions
+        .filter((r, i) => i >= board.revisions.length - RECENT_REVISIONS || r === shownRevision)
+        .map((r) => compactRevision(r)),
+      revisionCount: board.revisions.length,
       phase: boardPhase(board, state.tasks),
     },
     boards,
@@ -711,8 +728,12 @@ export function panelRecoveryHistory(
   const task = sharedState(h).tasks.find((t) => t.id === id);
   if (!task) throw new DomainError('Задача не найдена', 404);
   if (!task.recovery) throw new DomainError('У задачи нет эпизода восстановления', 404);
+  // Курсор относится к эпизоду: после смены эпизода прежний курсор не
+  // продолжает историю нового, а отклоняется.
+  if (query.episode && query.episode !== task.recovery.id)
+    throw new DomainError('Эпизод восстановления сменился: загрузите историю заново', 409);
   const result = newestFirst(task.recovery.history, query);
-  return { ...result, items: clip(result.items) };
+  return { episode: task.recovery.id, ...result, items: clip(result.items) };
 }
 
 /**
@@ -820,6 +841,18 @@ export function panelChangeSet(
       })(),
     },
   };
+}
+
+/** Ревизии доски страницами, новые сначала: причины сокращены, без задач снимка. */
+export function panelRevisions(
+  h: DevContour,
+  boardId: string,
+  query: Record<string, string | undefined>,
+) {
+  const board = sharedState(h).boards.find((b) => b.id === boardId);
+  if (!board) throw new DomainError('Доска не найдена', 404);
+  const result = newestFirst(board.revisions, query);
+  return { ...result, items: result.items.map((r) => compactRevision(r)) };
 }
 
 /** Ревизия доски целиком (причина без сокращения), без копий задач снимка. */

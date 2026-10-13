@@ -179,12 +179,14 @@ export function taskChecks(h: DevContour, raw: unknown) {
       lastRun: last?.checks?.effective ?? null,
       corpus: binding ?? null,
       suite: suite?.id ?? null,
-      versions: (suite?.versions ?? []).map((v) => ({
+      // Версии корпуса копятся с каждым принятием: последние 10 и их число.
+      versions: (suite?.versions ?? []).slice(-10).map((v) => ({
         number: v.number,
         digest: v.digest,
         cases: v.cases.length,
         createdAt: v.createdAt,
       })),
+      versionCount: suite?.versions.length ?? 0,
     },
     properties,
     coverage,

@@ -16,6 +16,7 @@ import {
   panelEvents,
   panelRecoveryHistory,
   panelRevision,
+  panelRevisions,
   panelQueue,
   panelRun,
   panelRuns,
@@ -381,6 +382,15 @@ test('P-F01: long diagnostics written by runner and gates stay bounded in the su
     assert.equal(second.total, 1001);
     assert.equal(second.items[0].event, 'decision-979');
     assert.ok(bytes(second) < limit);
+    // Курсор привязан к эпизоду: после смены эпизода он отклоняется.
+    assert.equal(second.episode, 'REC-1');
+    d.store.change('fixture.recovery-new', (s) => {
+      s.tasks.find((t) => t.id === busy.id)!.recovery!.id = 'REC-2';
+    });
+    assert.throws(
+      () => panelRecoveryHistory(d.h, busy.id, { before: '11', episode: 'REC-1' }),
+      /Эпизод восстановления сменился/,
+    );
     const checks = taskChecks(d.h, { taskId: busy.id, limit: 1, cursor: 0 });
     assert.ok(bytes(checks) < 64 * 1024, `checks ${bytes(checks)}`);
     assert.equal(checks.history.counts['p-0'], 650);
@@ -546,6 +556,102 @@ test('P-F17: a lease that expires while the summary parses and was renewed meanw
     assert.match(summary.revision, /\.1$/);
   } finally {
     writer.close();
+    d.close();
+  }
+});
+
+test('P-F30: the selected board carries its current plan and recent revisions; earlier plans load by revision', async () => {
+  const d = await history({ ...small, copies: 1, events: 0 });
+  try {
+    const state = d.store.read();
+    const board = state.boards[0];
+    const first = board.revisions.at(-1)!;
+    // 40 корректировок: каждая заменяет задачи плана новыми с длинным описанием.
+    d.store.change('fixture.corrections', (s) => {
+      const b = s.boards.find((x) => x.id === board.id)!;
+      const template = s.tasks.find((t) => first.taskIds.includes(t.id))!;
+      for (let k = 0; k < 40; k++) {
+        const task = {
+          ...structuredClone(template),
+          id: `T-correction-${k}`,
+          title: `Корректировка ${k}`,
+          description: `OLD-PLAN-${k} ` + 'p'.repeat(4900),
+          dependsOn: [],
+          status: k === 39 ? template.status : ('cancelled' as const),
+        };
+        s.tasks.push(task);
+        b.revisions.push({
+          ...structuredClone(first),
+          number: first.number + k + 1,
+          status: 'active',
+          reason: `Корректировка ${k}`,
+          taskIds: [task.id],
+        });
+      }
+    });
+    const summary = d.summary({ board: board.id });
+    assert.ok(bytes(summary) < 256 * 1024, `сводка ${bytes(summary)}`);
+    assert.equal(JSON.stringify(summary).includes('OLD-PLAN-0 '), false);
+    assert.ok(summary.tasks.some((t) => t.id === 'T-correction-39'));
+    assert.equal(summary.board!.revisions.length, 20);
+    assert.equal(summary.board!.revisionCount, board.revisions.length + 40);
+    // Прежняя ревизия — по запросу: её задачи и она сама входят в сводку.
+    const old = d.summary({ board: board.id, boardRevision: String(first.number + 1) });
+    assert.ok(old.tasks.some((t) => t.id === 'T-correction-0'));
+    assert.ok(old.board!.revisions.some((r) => r.number === first.number + 1));
+    // Ранние ревизии — страницами по стабильному курсору.
+    const page = panelRevisions(d.h, board.id, { limit: '20', before: '21' });
+    assert.equal(page.items[0].number, first.number + 20);
+    assert.ok(
+      page.items.every((r) => !('tasks' in (r.snapshot ?? {})) || r.snapshot!.tasks.length === 0),
+    );
+  } finally {
+    d.close();
+  }
+});
+
+test('P-F17/P-F32: one moment drives the summary number and task locks; a confirmed expiry is not re-read on every poll', async () => {
+  const d = await history({ ...small, copies: 1, events: 0 });
+  const realNow = Date.now;
+  try {
+    const lease = realNow() + 60000;
+    d.store.change('fixture.operation', (s) => {
+      const v = s.changeSets[0].verifications.at(-1)!;
+      v.status = 'active';
+      v.leaseUntil = lease;
+      s.tasks[0].status = 'ready';
+    });
+    // Срок истекает во время сборки: первые три обращения ко времени (начало
+    // чтения, время кэша, момент ответа) — до срока, дальше — после.
+    let calls = 0;
+    Date.now = () => (++calls <= 3 ? lease - 100 : lease + 100);
+    const summary = d.summary({ board: d.store.read().boards[0].id });
+    Date.now = realNow;
+    assert.match(summary.revision, /\.1$/);
+    const ready = summary.tasks.find((t) => t.id === d.store.read().tasks[0].id)!;
+    assert.ok(
+      ready.progress.reasons.includes('workspace_operation_active'),
+      'номер и блокировка задачи — по одному моменту',
+    );
+    // Истечение без продления подтверждено: дальше опрос открывает один снимок.
+    d.store.change('fixture.expired', (s) => {
+      s.changeSets[0].verifications.at(-1)!.leaseUntil = realNow() - 1000;
+    });
+    const settled = d.summary();
+    let snapshots = 0;
+    const snapshot = d.store.snapshot.bind(d.store);
+    d.store.snapshot = (read) => {
+      snapshots += 1;
+      return snapshot(read);
+    };
+    for (let i = 0; i < 3; i++)
+      assert.deepEqual(panelSummary(d.h, d.root, { revision: settled.revision }), {
+        revision: settled.revision,
+        unchanged: true,
+      });
+    assert.equal(snapshots, 3);
+  } finally {
+    Date.now = realNow;
     d.close();
   }
 });

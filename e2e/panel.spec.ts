@@ -369,3 +369,75 @@ test('A late snapshot response does not replace the snapshot chosen after it', a
   // Выбран второй: его список стоит во втором пункте истории.
   await expect(card.locator('ol > li').nth(1).getByRole('list')).toHaveCount(1);
 });
+
+test('A summary refresh while paging the verification history keeps the history continuous', async ({
+  page,
+}) => {
+  // Задерживается последняя страница (before=5): к ней уже загружены две.
+  let hold: (() => void) | undefined;
+  await page.route('**/api/changesets/*', async (route) => {
+    if (route.request().url().includes('before=5&') || route.request().url().endsWith('before=5')) {
+      const response = await route.fetch();
+      await new Promise<void>((r) => (hold = r));
+      await route.fulfill({ response });
+    } else await route.continue();
+  });
+  await page.goto(base);
+  await page.getByRole('tab', { name: 'Изменения', exact: true }).click();
+  const card = page
+    .locator('article[id^="changeset-"]')
+    .filter({ hasText: 'Обезличенное длинное' });
+  await card.locator('summary', { hasText: 'История проверок' }).click();
+  const more = card.getByRole('button', { name: /Ранние проверки/ });
+  await expect(more).toHaveText(/Ранние проверки \(15\)/);
+  await more.click();
+  await expect(more).toHaveText(/Ранние проверки \(5\)/);
+  await more.click();
+  await expect.poll(() => hold !== undefined).toBe(true);
+  // Пока страница в пути, сводка меняется: история перезагружается.
+  await page.request.post(`${base}/api/boards`, {
+    headers: { 'X-DevContour-Request': '1' },
+    data: { title: 'Смена сводки при листании' },
+  });
+  await page.waitForTimeout(4000);
+  hold!();
+  await page.waitForTimeout(1000);
+  // Видимые проверки и обещанное продолжение покрывают всю историю.
+  const shown = await card.locator('ol > li').count();
+  const label = (await more.count()) ? await more.textContent() : '';
+  const rest = Number(/\((\d+)\)/.exec(label ?? '')?.[1] ?? 0);
+  expect(shown + rest).toBe(25);
+});
+
+test('Earlier revisions page in the history tab, and an earlier plan opens with its tasks', async ({
+  page,
+}) => {
+  const summary = (await (await page.request.get(`${base}/api/summary`)).json()) as {
+    boards: { id: string; title: string }[];
+  };
+  const board = summary.boards.find((b) => b.title === 'Доска с длинной историей')!;
+  const own = (await (
+    await page.request.get(`${base}/api/summary?board=${board.id}&boardRevision=1`)
+  ).json()) as {
+    board: { revisions: { number: number; taskIds: string[] }[] };
+    tasks: { id: string; title: string }[];
+  };
+  const first = own.board.revisions.find((r) => r.number === 1)!;
+  const task = own.tasks.find((t) => first.taskIds.includes(t.id))!;
+  await page.goto(base);
+  await page.getByRole('tab', { name: 'Список', exact: true }).click();
+  await page
+    .getByRole('button', { name: /Доска с длинной историей/ })
+    .filter({ visible: true })
+    .first()
+    .click();
+  await page.getByRole('tab', { name: 'Ревизии', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Открыть ревизию 25' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Открыть ревизию 1', exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: /Ранние ревизии \(5\)/ }).click();
+  await page.getByRole('button', { name: 'Открыть ревизию 1', exact: true }).click();
+  await page.getByRole('tab', { name: 'Список', exact: true }).click();
+  await expect(
+    page.locator('strong').filter({ hasText: task.title }).filter({ visible: true }).first(),
+  ).toBeVisible();
+});

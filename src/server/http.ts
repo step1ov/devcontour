@@ -15,6 +15,7 @@ import {
   panelContractAttemptFindings,
   panelRecoveryHistory,
   panelRevision,
+  panelRevisions,
   panelEvents,
   panelQueue,
   panelRun,
@@ -425,6 +426,17 @@ export async function serve(
           !parts[5]
         )
           result = panelRevision(h, decodeURIComponent(parts[2]), Number(parts[4]));
+        else if (
+          req.method === 'GET' &&
+          parts[1] === 'boards' &&
+          parts[3] === 'revisions' &&
+          !parts[4]
+        )
+          result = panelRevisions(
+            h,
+            decodeURIComponent(parts[2]),
+            Object.fromEntries(url.searchParams),
+          );
         else if (req.method === 'GET' && parts[1] === 'boards' && parts[3] === 'impact')
           result = h.impact(
             parts[2],

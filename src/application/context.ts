@@ -48,7 +48,8 @@ export type ContextOperation = keyof typeof contextInputs;
 export const contextOperations = Object.keys(contextInputs) as ContextOperation[];
 
 // Keep runtime ownership tokens, commands, credentials and full component bodies out of summaries.
-export function taskProgress(h: DevContour, s: DevContourState, t: Task) {
+/** `now` — момент, на который считаются сроки lease; один на весь ответ. */
+export function taskProgress(h: DevContour, s: DevContourState, t: Task, now = Date.now()) {
   const dependencies = blockers(t, s);
   const active = s.boards.some(
     (b) => b.revisions.at(-1)?.status === 'active' && b.revisions.at(-1)!.taskIds.includes(t.id),
@@ -77,8 +78,8 @@ export function taskProgress(h: DevContour, s: DevContourState, t: Task) {
     if (
       s.changeSets.some(
         (c) =>
-          c.verifications.some((v) => v.status === 'active' && v.leaseUntil > Date.now()) ||
-          c.deliveries?.some((d) => d.status === 'active' && d.leaseUntil > Date.now()),
+          c.verifications.some((v) => v.status === 'active' && v.leaseUntil > now) ||
+          c.deliveries?.some((d) => d.status === 'active' && d.leaseUntil > now),
       )
     )
       reasons.push('workspace_operation_active');
