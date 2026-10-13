@@ -105,6 +105,15 @@ export function servingPreview(s: Pick<DevContourState, 'previews'>) {
   );
 }
 
+/** Пока операция применяет конфигурацию, выкладка и откат не начинаются. */
+function assertNotReconfiguring(s: DevContourState) {
+  if (s.reconfigure && !s.reconfigure.appliedAt)
+    throw new DomainError(
+      `Операция ${s.reconfigure.operation} применяет конфигурацию; дождитесь её`,
+      409,
+    );
+}
+
 export class Previews {
   constructor(readonly h: DevContour) {}
   private config() {
@@ -118,6 +127,7 @@ export class Previews {
    * незавершённая выкладка помечается проваленной.
    */
   private acquire(s: DevContourState, kind: PreviewLock['kind']) {
+    assertNotReconfiguring(s);
     if (s.previewLock && s.previewLock.leaseUntil > Date.now())
       throw new DomainError(
         s.previewLock.kind === 'deploy'
@@ -167,6 +177,7 @@ export class Previews {
    * проверяет на деле — историческое здоровье за текущее не выдаётся.
    */
   start(changeSetId: string) {
+    assertNotReconfiguring(this.h.store.read());
     this.config();
     return this.h.store.change('preview.started', (s) => {
       const c = s.changeSets.find((c) => c.id === changeSetId);

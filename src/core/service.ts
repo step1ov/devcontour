@@ -218,6 +218,26 @@ function assertNotAccepted(s: DevContourState, t: Task) {
           409,
         );
 }
+/**
+ * Digest фактически загруженной конфигурации: главный `config.json`,
+ * component config каждого компонента и разрешённые пути. Им сверяются
+ * перезакрепление, запрос применения и действующая конфигурация процесса —
+ * digest одного главного файла не закреплял бы gates компонентов.
+ */
+const loadedDigests = new WeakMap<Config, string>();
+export function loadedDigest(config: Config) {
+  let value = loadedDigests.get(config);
+  if (!value) {
+    value = digest(config);
+    loadedDigests.set(config, value);
+  }
+  return value;
+}
+/** Процесс работает не с той конфигурацией, которую применил контур. */
+function staleConfig(s: DevContourState, config: Config) {
+  return !!s.appliedConfig && s.appliedConfig.digest !== loadedDigest(config);
+}
+
 export class DevContour {
   constructor(
     readonly store: Store,
@@ -267,11 +287,18 @@ export class DevContour {
       return { paused: false, operation };
     });
   }
-  /** Запросить применение конфигурации с ожидаемым digest (идемпотентно). */
+  /**
+   * Запросить применение конфигурации с ожидаемым digest (идемпотентно).
+   * Повтор той же операцией сбрасывает прежний отказ: файл могли исправить.
+   */
   requestReconfigure(operation: string, configDigest: string) {
     return this.store.change('config.reconfigure-requested', (s) => {
       const current = s.reconfigure;
-      if (current && current.operation === operation && current.digest === configDigest) return;
+      if (current && current.operation === operation && current.digest === configDigest) {
+        if (!current.error) return;
+        s.reconfigure = { ...current, error: undefined };
+        return { operation, digest: configDigest, retried: true };
+      }
       if (current && current.operation !== operation && !current.appliedAt)
         throw new DomainError(
           `Конфигурацию уже применяет операция ${current.operation}; дождитесь её`,
@@ -290,7 +317,20 @@ export class DevContour {
       s.reconfigure = error
         ? { ...current, error }
         : { ...current, appliedAt: now(), appliedBy: by, error: undefined };
+      if (!error) s.appliedConfig = { digest: configDigest, at: now(), by };
       return { operation, digest: configDigest, ...(error ? { error } : { by }) };
+    });
+  }
+  /**
+   * Запуск процесса применяет его конфигурацию: перезапуск — штатный способ
+   * сменить любые поля. Неприменённый запрос операции остаётся.
+   */
+  recordConfig(by: string) {
+    return this.store.change('config.started', (s) => {
+      const configDigest = loadedDigest(this.config);
+      if (s.appliedConfig?.digest === configDigest) return;
+      s.appliedConfig = { digest: configDigest, at: now(), by };
+      return { digest: configDigest, by };
     });
   }
   /** Снять завершённый запрос операции. */
@@ -617,6 +657,8 @@ export class DevContour {
       dependencies?: Record<string, string>;
       /** Задачи ревизии, показанные ревьюеру как контекст и не утверждаемые им. */
       context?: Record<string, string>;
+      /** Политика исполнения по компонентам на момент ревью. */
+      policies?: Record<string, string>;
     },
   ) {
     return this.store.change('board.approved', (s) => {
@@ -635,6 +677,9 @@ export class DevContour {
           ) ||
           Object.entries(expected.context ?? {}).some(
             ([id, pinned]) => contextDigest(task(s, id)) !== pinned,
+          ) ||
+          Object.entries(expected.policies ?? {}).some(
+            ([id, pinned]) => this.policyDigest(id) !== pinned,
           ) ||
           digest(expected.taskIds) !== digest(r.taskIds) ||
           selected.some((id) => {
@@ -794,7 +839,9 @@ export class DevContour {
   pause(value: boolean, reason: 'operator' | 'shutdown' = 'operator') {
     return this.store.change(value ? 'scheduler.paused' : 'scheduler.started', (s) => {
       if (!value) developmentBinding(s);
-      if (s.paused && value && reason === 'shutdown')
+      // Штатная остановка поверх паузы человека её не подменяет; поверх паузы
+      // операции — забирает её: иначе операция сняла бы и остановку.
+      if (s.paused && value && reason === 'shutdown' && s.pauseReason !== 'reconfigure')
         return { paused: true, reason: s.pauseReason };
       s.paused = value;
       s.pauseReason = value ? reason : undefined;
@@ -923,6 +970,9 @@ export class DevContour {
         // Пока операция применяет конфигурацию, попытки не выдаются, даже если
         // человек снял паузу: попытка под прежней конфигурацией не нужна.
         (s.reconfigure && !s.reconfigure.appliedAt) ||
+        // Процесс со старой конфигурацией не выдаёт попыток: их условия
+        // разошлись бы с применённой контуром конфигурацией.
+        staleConfig(s, this.config) ||
         s.changeSets.some((c) =>
           c.deliveries?.some((d) => d.status === 'active' && d.leaseUntil > Date.now()),
         ) ||
@@ -1037,6 +1087,11 @@ export class DevContour {
       );
       const t = task(s, r.taskId);
       assertTaskPreparation(s, t);
+      if (staleConfig(s, this.config))
+        throw new DomainError(
+          'Процесс работает с устаревшей конфигурацией: она уже заменена; перезапустите процесс',
+          409,
+        );
       if (r.policyDigest !== this.policyDigest(t.repositoryId))
         throw new DomainError('Политика проверок изменилась; нужна новая попытка');
       if (

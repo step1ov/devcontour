@@ -582,6 +582,11 @@ export async function reviewPlan(
       proposal.tasks.filter((t) => !drafts.includes(t)).map((t) => [t.id, contextDigest(t)]),
     ),
     tasks: Object.fromEntries(drafts.map((t) => [t.id, specDigest(t)])),
+    // Политика исполнения, включая закреплённый контекст, при котором
+    // ревьюер читал план: её смена во время ревью делает одобрение устаревшим.
+    policies: Object.fromEntries(
+      [...new Set(drafts.map((t) => t.repositoryId))].map((id) => [id, h.policyDigest(id)]),
+    ),
   };
   const owner = boardOwner(board, state);
   const approval = await withIntegrationCheckout(h, root, owner, (checkout) =>

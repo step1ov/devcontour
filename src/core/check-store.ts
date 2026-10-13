@@ -411,6 +411,12 @@ export class CheckCorpus {
   /** Начать операцию подтверждения или вернуть её прежний исход по ключу. */
   begin(suiteRef: { suite: CheckSuite }, key: string) {
     return this.h.store.atomic(() => {
+      const pending = this.h.store.read().reconfigure;
+      if (pending && !pending.appliedAt)
+        throw new DomainError(
+          `Операция ${pending.operation} применяет конфигурацию; повторите после неё`,
+          409,
+        );
       const suite =
         this.all(suiteRef.suite.repositoryId).find((x) => x.id === suiteRef.suite.id) ??
         suiteRef.suite;

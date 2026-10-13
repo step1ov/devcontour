@@ -92,6 +92,10 @@ export class Workspace {
       // Совместные проверки исполняются в той же песочнице, что и проверки
       // задач: её смена делает прежнюю проверку другой по условиям.
       isolation: this.h.config.isolation,
+      // Закрепление контекста — часть договора исполнения задач, которые
+      // проверка подтверждает: после его смены прежняя проверка не принимает
+      // ChangeSet, а её поставка — тем более.
+      ...(this.h.config.contextPacks.length ? { contextPacks: this.h.config.contextPacks } : {}),
     });
   }
   create(input: unknown) {

@@ -156,6 +156,10 @@ export class LeadWorkflow {
   }
   claim(key: string, owner?: string) {
     return this.h.store.atomic(() => {
+      // Пока операция применяет конфигурацию, этапы ведущего не начинаются:
+      // они читали бы прежний контекст.
+      const pending = this.h.store.read().reconfigure;
+      if (pending && !pending.appliedAt) return;
       const job = this.get(key, owner);
       if (
         !['queued', 'running'].includes(job.status) ||

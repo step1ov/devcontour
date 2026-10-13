@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
+import { readFileSync, renameSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { DomainError, type Contract } from '../core/model.ts';
@@ -17,8 +18,10 @@ import { adapters, type AgentAdapter } from './adapters.ts';
 import { pinArtifacts } from './contract-artifacts.ts';
 import { contractImpact } from './contract-impact.ts';
 import { updateBase } from './base-update.ts';
-import { configDigest, repinContext, stalePins } from './context.ts';
-import { applyConfig, drained } from './reconfigure.ts';
+import { planRepin, stalePins } from './context.ts';
+import { applyConfig, busyWork } from './reconfigure.ts';
+import { loadConfig } from './config.ts';
+import { loadedDigest, withConfigLock } from './config-lock.ts';
 import { git } from './process.ts';
 
 /**
@@ -711,40 +714,64 @@ export class ContractChanges {
         const path = join(this.root, 'config.json');
         const contract = this.h.store.read().contracts.find((c) => c.id === op.contractId);
         const stale = contract ? await stalePins(this.h.config, contract) : [];
-        if (!stale.length) {
-          // Перезакреплять нечего — конфигурация не меняется. Если файл уже
-          // был записан этой операцией, а процесс перезапустился до
-          // сохранения шага, записанное узнаётся по digest: применение всё
-          // равно нужно работающему серверу.
-          const before = op.config?.before;
-          const after = before ? configDigest(await readFile(path, 'utf8')) : undefined;
-          this.advanceStep(op, (c) => {
-            if (before && after) c.config = { before, after };
-          });
+        if (!stale.length && !op.config) {
+          // Перезакреплять нечего: конфигурация не меняется.
+          this.advanceStep(op);
           return {};
         }
-        const current = configDigest(await readFile(path, 'utf8'));
-        // Ожидаемое состояние файла записывается до записи: повтор после
-        // сбоя сверяет файл с ним, а не с тем, что окажется на диске.
-        let expected = op.config?.before;
-        if (!expected) {
-          expected = current;
+        const text = await readFile(path, 'utf8');
+        const current = loadedDigest(loadConfig(path, text));
+        // Ожидаемые digest до и после вычисляются и сохраняются до записи:
+        // повтор принимает за сделанное только этот результат, а не любую
+        // правку файла, оказавшуюся на диске.
+        let planned = op.config;
+        if (!planned?.after) {
+          const nextText = await planRepin(this.h.config, text, stale, op.expected.head);
+          planned = { before: current, after: loadedDigest(loadConfig(path, nextText)) };
+          const fixed = planned;
           this.h.store.atomic(() => {
             const c = this.guard(op);
-            c.config = { before: current };
+            c.config = fixed;
             this.save(c);
           });
         }
-        const result = await repinContext(this.h.config, path, stale, op.expected.head, expected);
-        this.advanceStep(op, (c) => {
-          c.config = { before: expected, after: result.after };
-          this.log(
-            c,
-            'context',
-            result.written ? 'repinned' : 'already-repinned',
-            `${stale.join(', ')} @ ${op.expected.head.slice(0, 12)}; config ${expected.slice(0, 12)} → ${result.after.slice(0, 12)}`,
+        const { before, after } = planned as { before: string; after: string };
+        if (current === after) {
+          this.advanceStep(op, (c) => this.log(c, 'context', 'already-repinned'));
+          return {};
+        }
+        if (current !== before)
+          throw new DomainError(
+            `config.json изменён вне операции: ожидался digest ${before.slice(0, 16)}, загружен ${current.slice(0, 16)}`,
           );
-        });
+        const nextText = await planRepin(this.h.config, text, stale, op.expected.head);
+        if (loadedDigest(loadConfig(path, nextText)) !== after)
+          throw new DomainError('Перезакрепление дало не ту конфигурацию, что была рассчитана');
+        const temp = `${path}.${op.id}.${process.pid}`;
+        await writeFile(temp, nextText, { flag: 'w' });
+        // Запись — внешний эффект: под блокировкой файла (её же берёт
+        // context-lock) и под проверкой владения в той же транзакции, что и
+        // сохранение шага. Потерявший владение процесс файл не пишет.
+        try {
+          withConfigLock(path, () =>
+            this.h.store.atomic(() => {
+              const c = this.guard(op);
+              if (readFileSync(path, 'utf8') !== text)
+                throw new DomainError('config.json изменился во время перезакрепления');
+              renameSync(temp, path);
+              this.log(
+                c,
+                'context',
+                'repinned',
+                `${stale.join(', ')} @ ${op.expected.head.slice(0, 12)}; config ${before.slice(0, 12)} → ${after.slice(0, 12)}`,
+              );
+              this.save(c);
+            }),
+          );
+        } finally {
+          rmSync(temp, { force: true });
+        }
+        this.advanceStep(op);
         return {};
       }
       case 'reconfigure': {
@@ -757,26 +784,23 @@ export class ContractChanges {
         const path = join(this.root, 'config.json');
         // Своя пауза — только если очередь не остановлена; пауза человека
         // остаётся его. Запрос применения останавливает выдачу и без паузы.
-        this.h.operationPause(op.id);
-        this.h.requestReconfigure(op.id, after);
-        const s = this.h.store.read();
-        if (!drained(s)) {
-          const busy = [
-            ...s.runs.filter((r) => r.status === 'active').map((r) => r.id),
-            ...s.changeSets.flatMap((c) => [
-              ...c.verifications.filter((v) => v.status === 'active').map((v) => v.id),
-              ...(c.deliveries ?? []).filter((d) => d.status === 'active').map((d) => d.id),
-            ]),
-          ];
+        // Повтор запроса той же операцией сбрасывает прежний отказ.
+        this.h.store.atomic(() => {
+          this.guard(op);
+          this.h.operationPause(op.id);
+          this.h.requestReconfigure(op.id, after);
+        });
+        const busy = busyWork(this.h);
+        if (busy.length)
           return {
-            wait: 'Ждёт окончания попыток, совместных проверок и поставок перед применением конфигурации',
+            wait: 'Ждёт окончания работ перед применением конфигурации',
             waitingFor: busy,
           };
-        }
         // Свой процесс — сразу: следующие шаги (ревью планов) читают контекст.
         applyConfig(this.h, path, after);
         // Работающий сервер применяет сам и подтверждает; без живого сервера
         // следующий запуск прочитает уже новый файл.
+        const s = this.h.store.read();
         const leader = s.leader && s.leader.leaseUntil > Date.now();
         if (leader) {
           const deadline = Date.now() + ContractChanges.reconfigureWaitMs;
@@ -792,7 +816,11 @@ export class ContractChanges {
               };
             await new Promise((r) => setTimeout(r, 200));
           }
-        } else this.h.settleReconfigure(op.id, after, 'operation:' + op.id);
+        } else
+          this.h.store.atomic(() => {
+            this.guard(op);
+            this.h.settleReconfigure(op.id, after, 'operation:' + op.id);
+          });
         this.advanceStep(op, (c) => {
           this.h.operationResume(op.id);
           this.h.clearReconfigure(op.id);

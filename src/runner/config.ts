@@ -6,8 +6,13 @@ import { repositories } from '../core/repositories.ts';
 import { packKey, resolveProfile } from './packs.ts';
 import { configSchema, type Config } from '../core/model.ts';
 import { configuredSpellings } from '../core/check-store.ts';
-export function loadConfig(path: string): Config {
-  const raw = JSON.parse(readFileSync(path, 'utf8'));
+/**
+ * Загрузить конфигурацию. `text` — содержимое `config.json`, если его уже
+ * прочли (или только собираются записать): так digest считается по тому
+ * тексту, который проверили, а не по повторному чтению файла.
+ */
+export function loadConfig(path: string, text = readFileSync(path, 'utf8')): Config {
+  const raw = JSON.parse(text);
   if (raw.repositories?.length) {
     raw.repositories = raw.repositories.map((r: any) => readComponentConfig(r));
     raw.gates ??= raw.repositories[0].gates;

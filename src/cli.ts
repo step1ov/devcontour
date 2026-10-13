@@ -667,6 +667,12 @@ async function main() {
       } else if (operation === 'context-lock') {
         const s = store.read();
         if (!s.paused) throw new Error('Сначала приостановите очередь: queue --pause');
+        // Конфигурацию применяет операция изменения контракта: её запрос
+        // нельзя подменить ручным перезакреплением.
+        if (s.reconfigure && !s.reconfigure.appliedAt)
+          throw new Error(
+            `Операция ${s.reconfigure.operation} применяет конфигурацию; дождитесь её или отмените: contract-change --id ${s.reconfigure.operation} --abandon`,
+          );
         if (
           s.runs.some((r) => r.status === 'active') ||
           s.changeSets.some((c) => c.verifications.some((v) => v.status === 'active'))

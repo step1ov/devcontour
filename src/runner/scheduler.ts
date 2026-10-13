@@ -159,6 +159,9 @@ export class Scheduler {
   }
   async init() {
     validateWorkflow(this.h.config);
+    // Запуск применяет конфигурацию этого процесса: процесс со старой не
+    // выдаёт и не принимает попыток.
+    this.h.recordConfig(this.owner);
     await reserveRepositories(this.h.config, this.root);
     for (const repo of repositories(this.h.config)) {
       const target = this.targetFor(repo.id);

@@ -3,18 +3,24 @@ import assert from 'node:assert/strict';
 import cp, { execFileSync } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import fs, { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fixture, input } from './helpers.ts';
-import { reviewContract } from '../src/runner/agent-control.ts';
+import { config, fixture, input } from './helpers.ts';
+import { repositorySchema } from '../src/core/model.ts';
+import { reviewContract, reviewPlan } from '../src/runner/agent-control.ts';
 import { ContractChanges, type ContractChange } from '../src/runner/contract-change.ts';
 import { contractImpact } from '../src/runner/contract-impact.ts';
 import type { AgentAdapter, AgentRequest } from '../src/runner/adapters.ts';
 import { readyTasks } from '../src/core/graph.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
-import { configDigest, pinContext, repinContext } from '../src/runner/context.ts';
+import { lockContextFile, pinContext, planRepin } from '../src/runner/context.ts';
+import { loadedDigest } from '../src/runner/config-lock.ts';
+import { busyWork } from '../src/runner/reconfigure.ts';
+import { Workspace } from '../src/core/workspace.ts';
+import { Previews } from '../src/core/preview.ts';
+import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { serveReconfigure } from '../src/runner/reconfigure.ts';
 
@@ -413,7 +419,7 @@ async function withContextPack(s: Awaited<ReturnType<typeof stage>>) {
   await writeFile(join(s.repo, 'docs/contracts/catalog.md'), '# Catalog\n\nPrice is a number.\n');
   s.sh('commit', '-qam', 'contract text');
   const pinnedBefore = s.h.config.contextPacks[0].revision;
-  return { path, pinnedBefore, digest: () => configDigest(readFileSync(path, 'utf8')) };
+  return { path, pinnedBefore, digest: () => loadedDigest(loadConfig(path)) };
 }
 
 test('The operation repins a context pack that pins the previous contract text and applies the configuration itself', async () => {
@@ -514,6 +520,11 @@ test('Reconfigure waits for a running attempt and issues nothing new until the c
     const run = s.h.claim('worker')!;
     s.h.release('fixture');
     assert.equal(run.taskId, other.id);
+    // Исполнитель жив: его lease не истекает, пока идут шаги операции, даже
+    // если машина медленная (истёкшая попытка drain не держит).
+    s.store.change('fixture.live-run', (st) => {
+      st.runs.find((r) => r.id === run.id)!.leaseUntil = Date.now() + 3_600_000;
+    });
     const { operation } = (await s.changes().start(s.proposal, 'codex')) as {
       operation: ContractChange;
     };
@@ -563,11 +574,6 @@ test('A configuration changed outside the operation is refused with both digests
   const s = await stage();
   try {
     const ctx = await withContextPack(s);
-    // Перезакрепление сверяет ожидаемое состояние файла.
-    await assert.rejects(
-      repinContext(s.h.config, ctx.path, ['contracts'], 'HEAD', 'f'.repeat(64)),
-      /config\.json изменён вне операции: ожидался digest f{16}, в файле [0-9a-f]{16}/,
-    );
     const { operation } = (await s.changes().start(s.proposal, 'codex')) as {
       operation: ContractChange;
     };
@@ -576,13 +582,20 @@ test('A configuration changed outside the operation is refused with both digests
       .changes((step) => {
         if (step === 'context') {
           const raw = JSON.parse(readFileSync(ctx.path, 'utf8')) as Record<string, unknown>;
-          writeFileSync(ctx.path, JSON.stringify({ ...raw, concurrency: 7 }, null, 2) + '\n');
+          writeFileSync(
+            ctx.path,
+            JSON.stringify({ ...raw, runTimeoutMs: Number(raw.runTimeoutMs) + 1 }, null, 2) + '\n',
+          );
         }
       })
       .advance(operation.id);
     assert.equal(stopped.status, 'failed');
-    assert.match(stopped.error ?? '', /ожидался digest [0-9a-f]{16}, в файле [0-9a-f]{16}/);
-    assert.notEqual(s.h.config.concurrency, 7, 'чужая правка не применена');
+    assert.match(stopped.error ?? '', /ожидался digest [0-9a-f]{16}, загружен [0-9a-f]{16}/);
+    assert.equal(
+      s.h.config.runTimeoutMs,
+      loadConfig(ctx.path).runTimeoutMs - 1,
+      'чужая правка не применена',
+    );
   } finally {
     await s.remove();
   }
@@ -668,7 +681,10 @@ test('An attempt started under the previous configuration cannot be accepted und
     const run = s.h.claim('worker')!;
     const before = s.h.policyDigest('main');
     // Новое закрепление применено (минуя drain — моделирует опоздавшего исполнителя).
-    await repinContext(s.h.config, ctx.path, ['contracts'], 'HEAD', ctx.digest());
+    writeFileSync(
+      ctx.path,
+      await planRepin(s.h.config, readFileSync(ctx.path, 'utf8'), ['contracts'], 'HEAD'),
+    );
     s.h.reconfigure(loadConfig(ctx.path));
     assert.notEqual(s.h.policyDigest('main'), before);
     assert.throws(
@@ -677,6 +693,298 @@ test('An attempt started under the previous configuration cannot be accepted und
     );
   } finally {
     await s.remove();
+  }
+});
+
+test('C-F01: a repin retry accepts only the planned result; an edit in the crash window is refused', async () => {
+  for (const edit of [false, true]) {
+    const s = await stage();
+    const realRename = fs.renameSync;
+    try {
+      const ctx = await withContextPack(s);
+      const { operation } = (await s.changes().start(s.proposal, 'codex')) as {
+        operation: ContractChange;
+      };
+      // Процесс падает сразу после записи файла, до сохранения шага.
+      let crashed = false;
+      fs.renameSync = function (from, to) {
+        realRename(from, to);
+        if (String(to) === ctx.path && !crashed) {
+          crashed = true;
+          throw new Error('crash after rename');
+        }
+      };
+      syncBuiltinESMExports();
+      const failed = await s.changes().advance(operation.id);
+      fs.renameSync = realRename;
+      syncBuiltinESMExports();
+      assert.equal(failed.status, 'failed');
+      assert.equal(failed.next, 'context');
+      const planned = s.changes().get(operation.id).config!;
+      assert.equal(ctx.digest(), planned.after, 'файл записан до падения');
+      if (edit) {
+        // В окне сбоя кто-то правит файл: повтор не принимает это за результат.
+        const raw = JSON.parse(readFileSync(ctx.path, 'utf8')) as Record<string, unknown>;
+        writeFileSync(
+          ctx.path,
+          JSON.stringify({ ...raw, runTimeoutMs: Number(raw.runTimeoutMs) + 1 }, null, 2) + '\n',
+        );
+        const refused = await s.changes().advance(operation.id);
+        assert.equal(refused.status, 'failed');
+        assert.match(refused.error ?? '', /изменён вне операции: ожидался digest/);
+        continue;
+      }
+      s.h.config = loadConfig(ctx.path);
+      const done = await s.changes().advance(operation.id);
+      assert.equal(done.status, 'completed', done.error);
+      assert.ok(done.history.some((h) => h.event === 'already-repinned'));
+    } finally {
+      fs.renameSync = realRename;
+      syncBuiltinESMExports();
+      await s.remove();
+    }
+  }
+});
+
+test('C-F02: an owner that lost the operation writes nothing; context-lock waits for the config lock', async () => {
+  const s = await stage();
+  try {
+    const ctx = await withContextPack(s);
+    const before = readFileSync(ctx.path, 'utf8');
+    const { operation } = (await s.changes().start(s.proposal, 'codex')) as {
+      operation: ContractChange;
+    };
+    // После переноса базы операцию перехватывают: у исполнителя чужой token.
+    const stopped = await s
+      .changes((step) => {
+        if (step === 'base')
+          s.store.atomic(() => {
+            const op = s.changes().get(operation.id);
+            s.store.saveLocal('contract-change', op.owner, op.id, { ...op, token: 'other' });
+          });
+      })
+      .advance(operation.id);
+    assert.equal(stopped.next, 'context');
+    assert.equal(readFileSync(ctx.path, 'utf8'), before, 'потерявший владение не пишет');
+    // Пока файл держит другой процесс, context-lock не пишет поверх.
+    const lock = ctx.path + '.lock';
+    mkdirSync(lock);
+    writeFileSync(join(lock, 'pid'), String(process.pid));
+    await assert.rejects(
+      lockContextFile(s.h.config, ctx.path),
+      /config\.json записывает другой процесс/,
+    );
+    rmSync(lock, { recursive: true, force: true });
+  } finally {
+    await s.remove();
+  }
+});
+
+test('C-F03/C-F04: a fixed config file is applied on retry, and an expired verification does not hold the drain', async () => {
+  const s = await stage();
+  let server: DevContour | undefined;
+  try {
+    const ctx = await withContextPack(s);
+    server = new DevContour(new Store(join(s.root, 'state.sqlite')), loadConfig(ctx.path));
+    // Истёкшая совместная проверка осталась active.
+    s.store.change('fixture.expired-verification', (st) => {
+      st.changeSets.push({
+        id: 'CHG-expired',
+        title: 'expired',
+        description: '',
+        boardIds: [],
+        createdAt: new Date().toISOString(),
+        verifications: [
+          {
+            id: 'V-expired',
+            token: 't',
+            leaseUntil: Date.now() - 1000,
+            startedAt: new Date().toISOString(),
+            status: 'active',
+            policyDigest: 'p',
+            specDigest: 's',
+            tasks: [],
+            boards: [],
+            evidence: [],
+          },
+        ],
+      });
+    });
+    assert.deepEqual(busyWork(s.h), []);
+    const { operation } = (await s.changes().start(s.proposal, 'codex')) as {
+      operation: ContractChange;
+    };
+    ContractChanges.reconfigureWaitMs = 1000;
+    // Сервер жив, но запрос не обработал: операция ждёт его подтверждения.
+    // Лидерство не истекает, пока идут шаги операции на медленной машине.
+    server.leader('server');
+    s.store.change('fixture.live-leader', (st) => {
+      st.leader = { owner: 'server', leaseUntil: Date.now() + 3_600_000 };
+    });
+    const waiting = await s.changes().advance(operation.id);
+    assert.equal(waiting.status, 'waiting', waiting.error);
+    assert.deepEqual(waiting.waitingFor, ['reconfigure']);
+    // Сервер отказал (например, файл был испорчен) — отказ записан в запросе.
+    const request = s.store.read().reconfigure!;
+    server.settleReconfigure(request.operation, request.digest, 'server', 'файл испорчен');
+    // Повтор операции снимает прежний отказ, и исправный сервер применяет.
+    let finished = false;
+    const retry = s
+      .changes()
+      .advance(operation.id)
+      .finally(() => (finished = true));
+    while (!finished) {
+      server.leader('server');
+      serveReconfigure(server, ctx.path, 'server');
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const done = await retry;
+    assert.equal(done.status, 'completed', done.error);
+    assert.equal(s.store.read().reconfigure, undefined);
+  } finally {
+    ContractChanges.reconfigureWaitMs = 30000;
+    server?.store.close();
+    await s.remove();
+  }
+});
+
+test('C-F05/C-F07: a verification and a process from the previous configuration accept nothing after it changed', async () => {
+  const s = await stage();
+  let stale: DevContour | undefined;
+  try {
+    const ctx = await withContextPack(s);
+    const verificationPolicy = new Workspace(s.h).policyDigest();
+    s.h.recordConfig('server');
+    // Второй процесс с прежней конфигурацией.
+    stale = new DevContour(new Store(join(s.root, 'state.sqlite')), loadConfig(ctx.path));
+    s.h.pause(false);
+    const { operation } = (await s.changes().start(s.proposal, 'codex')) as {
+      operation: ContractChange;
+    };
+    const done = await s.changes().advance(operation.id);
+    assert.equal(done.status, 'completed', done.error);
+    assert.notEqual(new Workspace(s.h).policyDigest(), verificationPolicy, 'проверка устарела');
+    // Применённая конфигурация записана; прежний процесс попыток не выдаёт.
+    assert.equal(s.store.read().appliedConfig?.digest, loadedDigest(s.h.config));
+    assert.equal(stale.claim('stale-worker'), undefined);
+    const run = s.h.claim('worker');
+    assert.ok(run, 'актуальный процесс выдаёт');
+    assert.throws(
+      () => stale!.phase(run.id, run.token, 'integrating', { candidateSha: 'c' }),
+      /устаревшей конфигурацией/,
+    );
+  } finally {
+    stale?.store.close();
+    await s.remove();
+  }
+});
+
+test('C-F06/C-F09: nothing new starts while the configuration is applied, and a shutdown over the operation pause stays', async () => {
+  const s = await stage();
+  try {
+    s.h.requestReconfigure('CC-x', 'x'.repeat(64));
+    assert.throws(() => new Previews(s.h).start('CHG-none'), /применяет конфигурацию/);
+    s.store.atomic(() =>
+      s.store.saveLocal('lead', undefined, 'job-1', {
+        key: 'job-1',
+        kind: 'board',
+        id: 'B',
+        status: 'queued',
+        attempts: 0,
+        maxAttempts: 3,
+        history: [],
+      }),
+    );
+    assert.equal(new LeadWorkflow(s.h).claim('job-1'), undefined);
+    s.h.clearReconfigure('CC-x');
+    // Shutdown поверх паузы операции забирает её: операция её не снимает.
+    s.h.pause(false);
+    s.h.operationPause('CC-y');
+    s.h.pause(true, 'shutdown');
+    s.h.operationResume('CC-y');
+    assert.equal(s.store.read().paused, true);
+    assert.equal(s.store.read().pauseReason, 'shutdown');
+  } finally {
+    await s.remove();
+  }
+});
+
+test('C-F10: a plan review read under the previous context is not approved after the context changed', async () => {
+  const s = await stage();
+  try {
+    const ctx = await withContextPack(s);
+    const draft = s.h.addTask(s.board.id, {
+      ...input('Draft'),
+      role: 'backend',
+      contracts: [s.c1.id],
+    });
+    const next = loadConfig(
+      ctx.path,
+      await planRepin(s.h.config, readFileSync(ctx.path, 'utf8'), ['contracts'], 'HEAD'),
+    );
+    // Пока ревьюер читает план, контекст перезакрепляют.
+    const changing = (name: 'codex' | 'claude'): AgentAdapter => ({
+      name,
+      execute() {
+        s.h.reconfigure(next);
+        return Promise.resolve({
+          data: { approved: true, summary: 'Fixture', findings: [], discoveries: [] },
+          log: 'Fixture only; no provider called',
+          command: ['fixture'],
+        });
+      },
+    });
+    await assert.rejects(
+      reviewPlan(
+        s.h,
+        s.root,
+        s.board.id,
+        'codex',
+        { codex: changing('codex'), claude: changing('claude') },
+        () => {},
+        [draft.id],
+      ),
+      /План изменился во время ревью/,
+    );
+    assert.equal(s.task(draft.id).status, 'draft');
+  } finally {
+    await s.remove();
+  }
+});
+
+test('C-F08: the expected digest covers component config files, not only config.json', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'devcontour-component-digest-'));
+  try {
+    const repo = join(root, 'product');
+    await mkdir(repo);
+    const component = join(repo, 'devcontour.component.json');
+    await writeFile(component, JSON.stringify({ protectedPaths: ['a.txt'] }));
+    const base = config();
+    const path = join(root, 'config.json');
+    await writeFile(
+      path,
+      JSON.stringify({
+        ...base,
+        repository: repo,
+        repositories: [
+          repositorySchema.parse({
+            id: 'product',
+            name: 'Product',
+            path: repo,
+            configFile: 'devcontour.component.json',
+            gates: base.gates,
+          }),
+        ],
+      }),
+    );
+    const text = readFileSync(path, 'utf8');
+    const first = loadedDigest(loadConfig(path));
+    // Главный файл не менялся, component config — да: digest другой.
+    await writeFile(component, JSON.stringify({ protectedPaths: ['b.txt'] }));
+    assert.equal(readFileSync(path, 'utf8'), text);
+    assert.notEqual(loadedDigest(loadConfig(path)), first);
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 

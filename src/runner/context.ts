@@ -1,5 +1,7 @@
-import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { readFileSync, renameSync, rmSync } from 'node:fs';
+import { withConfigLock } from './config-lock.ts';
 import {
   BlockedError,
   type Config,
@@ -49,35 +51,29 @@ export async function pinContext(config: Config, ref = 'HEAD') {
 export async function lockContextFile(config: Config, path: string, ref = 'HEAD') {
   const previous = await readFile(path, 'utf8');
   const packs = await pinContext(config, ref);
-  if ((await readFile(path, 'utf8')) !== previous)
-    throw new Error('Конфигурация изменилась во время context-lock');
   const next = { ...JSON.parse(previous), contextPacks: packs };
   await mkdir(dirname(path), { recursive: true });
   const temp = path + '.context-' + process.pid;
   await writeFile(temp, JSON.stringify(next, null, 2) + '\n', { flag: 'wx' });
-  await rename(temp, path);
+  // Та же блокировка, что у шага context операции: запись не пересекается
+  // с её записью, а изменение после чтения — отказ, а не затирание.
+  withConfigLock(path, () => {
+    if (readFileSync(path, 'utf8') !== previous) {
+      rmSync(temp, { force: true });
+      throw new Error('Конфигурация изменилась во время context-lock');
+    }
+    renameSync(temp, path);
+  });
   return packs;
 }
-/** Digest конфигурации по содержимому `config.json`, а не по его форматированию. */
-export const configDigest = (text: string) => digest(JSON.parse(text) as unknown);
-
 /**
- * Перезакрепить названные пакеты по ревизии `ref` — шаг операции изменения
- * контракта. Пишет `config.json`, только если его digest равен ожидаемому
- * операцией (`expected`); прочие пакеты и поля не меняются. Повтор после
- * сбоя узнаёт уже записанный результат по digest и не пишет заново.
+ * Новый текст `config.json` с названными пакетами, перезакреплёнными по
+ * ревизии `ref`; прочие пакеты и поля не меняются. Только вычисляет: записывает
+ * шаг операции изменения контракта под блокировкой файла и проверкой владения.
  */
-export async function repinContext(
-  config: Config,
-  path: string,
-  ids: string[],
-  ref: string,
-  expected: string,
-) {
-  const text = await readFile(path, 'utf8');
-  const actual = configDigest(text);
+export async function planRepin(config: Config, text: string, ids: string[], ref: string) {
   const parsed = JSON.parse(text) as { contextPacks?: ContextPack[] };
-  const pinned = new Map<string, ContextPack>();
+  const pinned = new Map<string, { revision: string; digest: string }>();
   for (const pack of config.contextPacks.filter((p) => ids.includes(p.id))) {
     const revision = await git(
       repository(config, pack.repositoryId).path,
@@ -87,7 +83,6 @@ export async function repinContext(
     );
     const documents = await contents(config, pack, revision);
     pinned.set(pack.id, {
-      ...pack,
       revision,
       digest: digest({ id: pack.id, version: pack.version, documents }),
     });
@@ -96,22 +91,10 @@ export async function repinContext(
     ...parsed,
     contextPacks: (parsed.contextPacks ?? []).map((p) => {
       const repinned = pinned.get(p.id);
-      return repinned ? { ...p, revision: repinned.revision, digest: repinned.digest } : p;
+      return repinned ? { ...p, ...repinned } : p;
     }),
   };
-  const nextText = JSON.stringify(next, null, 2) + '\n';
-  const after = configDigest(nextText);
-  if (actual === after) return { before: expected, after, written: false };
-  if (actual !== expected)
-    throw new Error(
-      `config.json изменён вне операции: ожидался digest ${expected.slice(0, 16)}, в файле ${actual.slice(0, 16)}`,
-    );
-  if ((await readFile(path, 'utf8')) !== text)
-    throw new Error('Конфигурация изменилась во время перезакрепления');
-  const temp = path + '.context-' + process.pid;
-  await writeFile(temp, nextText, { flag: 'wx' });
-  await rename(temp, path);
-  return { before: expected, after, written: true };
+  return JSON.stringify(next, null, 2) + '\n';
 }
 
 /**
