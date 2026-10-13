@@ -277,15 +277,18 @@ export function CheckPanel({ taskId, revision }: { taskId: string; revision: str
           <ul className="m-0 grid gap-1 pl-4">
             {Object.entries(data.history.byProperty).map(([property, runs]) => (
               <li key={property}>
-                <code>{property}</code>: {runs.length} отказ(а) —{' '}
+                <code>{property}</code>: {data.history.counts[property] ?? runs.length} отказ(а) —{' '}
+                {(data.history.counts[property] ?? 0) > runs.length && 'последние: '}
                 {runs.map((r) => `попытка ${r.attempt} (${r.kind ?? '?'})`).join(', ')}
               </li>
             ))}
           </ul>
           {!!data.history.unbound.length && (
             <p className="text-muted-foreground m-0">
-              Названы ревьюером, но не объявлены: {data.history.unbound.join(', ')} — только для
-              разбора.
+              Названы ревьюером, но не объявлены: {data.history.unbound.join(', ')}
+              {data.history.unboundCount > data.history.unbound.length &&
+                ` и ещё ${data.history.unboundCount - data.history.unbound.length}`}{' '}
+              — только для разбора.
             </p>
           )}
         </div>

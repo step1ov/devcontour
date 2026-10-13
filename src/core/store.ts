@@ -307,11 +307,14 @@ export class Store {
   readShared(leaseStale?: (state: Readonly<DevContourState>, readAt: number) => boolean): {
     revision: number;
     lease: number;
+    /** С какого момента снимок, из которого собрано состояние, мог устареть. */
+    readAt: number;
     state: Readonly<DevContourState>;
   } {
     return this.atomicRead(() => {
       const version = this.version();
-      if (this.transaction) return { ...version, state: deepFreeze(this.readUnlocked()) };
+      if (this.transaction)
+        return { ...version, readAt: Date.now(), state: deepFreeze(this.readUnlocked()) };
       const cached = this.cached;
       const fresh =
         cached?.revision === version.revision &&
@@ -326,8 +329,8 @@ export class Store {
           readAt: this.reading ? this.readStartedAt : Date.now(),
           state: deepFreeze(this.readUnlocked()),
         };
-      const { revision, lease, state } = this.cached!;
-      return { revision, lease, state };
+      const { revision, lease, readAt, state } = this.cached!;
+      return { revision, lease, readAt, state };
     });
   }
   /** Согласованное чтение нескольких значений из одного снимка БД. */

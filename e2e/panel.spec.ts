@@ -316,3 +316,56 @@ test('A double click on "more findings" loads the page once and keeps every find
   expect(findings).toHaveLength(30);
   expect(new Set(findings).size).toBe(30);
 });
+
+test('A failed earlier attempts page is retried as that page, not by reloading the first one', async ({
+  page,
+}) => {
+  await page.route(`**/api/tasks/${busyTask}?*`, (route) =>
+    route.continue({ url: route.request().url().replace('limit=10', 'limit=2') }),
+  );
+  let fail = true;
+  await page.route(`**/api/tasks/${busyTask}/runs?*`, async (route) => {
+    if (fail) await route.fulfill({ status: 500, json: { error: 'стенд: отказ страницы' } });
+    else await route.continue();
+  });
+  await page.goto(base);
+  await openBusyTask(page);
+  const attempts = page.getByRole('region', { name: 'Ход попыток' });
+  await expect(attempts.locator('strong').first()).toHaveText('Попытка 5');
+  await page.getByRole('button', { name: /Ранние попытки \(3\)/ }).click();
+  const alert = page.getByRole('alert').filter({ hasText: 'Ранние попытки не загрузились' });
+  await expect(alert).toContainText('стенд: отказ страницы');
+  fail = false;
+  await alert.getByRole('button', { name: 'Повторить' }).click();
+  await attempts.locator('summary').click();
+  await expect(attempts).toContainText('Попытка 1');
+  await expect(alert).toHaveCount(0);
+});
+
+test('A late snapshot response does not replace the snapshot chosen after it', async ({ page }) => {
+  let first = true;
+  await page.route('**/api/changesets/*', async (route) => {
+    if (route.request().url().includes('verification=') && first) {
+      first = false;
+      const response = await route.fetch();
+      await new Promise((r) => setTimeout(r, 1500));
+      await route.fulfill({ response });
+    } else await route.continue();
+  });
+  await page.goto(base);
+  await page.getByRole('tab', { name: 'Изменения', exact: true }).click();
+  const card = page.locator('article[id^="changeset-"]').first();
+  await card.locator('summary', { hasText: 'История проверок' }).click();
+  const buttons = card.getByRole('button', { name: /Снимок задач/ });
+  await expect(buttons).toHaveCount(3);
+  await buttons.nth(0).click();
+  await buttons.nth(1).click();
+  const lists = card.getByRole('list', { name: /Снимок задач проверки/ });
+  await expect(lists).toHaveCount(1);
+  const chosen = await lists.getAttribute('aria-label');
+  await page.waitForTimeout(2000);
+  await expect(lists).toHaveCount(1);
+  expect(await lists.getAttribute('aria-label')).toBe(chosen);
+  // Выбран второй: его список стоит во втором пункте истории.
+  await expect(card.locator('ol > li').nth(1).getByRole('list')).toHaveCount(1);
+});

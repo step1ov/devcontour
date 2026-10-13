@@ -164,11 +164,12 @@ Setup не вызывает модель, не устанавливает зав
 | `GET /api/tasks/:id?limit`, `/api/tasks/:id/runs?before=ID` | Задача целиком и страницы попыток (новые сначала, ≤ 50, курсор по id, хвосты логов) |
 | `GET /api/tasks?q=&limit&cursor`                            | Поиск задач компактными строками                                                    |
 | `GET /api/runs/:id`, `/api/contracts/:id`                   | Попытка с хвостами логов; текст контракта                                           |
-| `GET /api/changesets/:id?limit&cursor&verification=ID`      | ChangeSet: проверки страницами; снимок задач выбранной проверки страницами          |
+| `GET /api/changesets/:id?limit&before&verification=ID`      | ChangeSet: проверки страницами (стабильный курсор `before`); снимок задач проверки  |
 | `GET /api/queue?limit&cursor`                               | Очередь всех досок: незавершённые задачи страницами                                 |
 | `GET /api/contract-attempts?limit&cursor`                   | Попытки ревью контрактов и планов страницами: первые 20 находок и их число          |
 | `GET /api/contract-attempts/:id/findings?limit&cursor`      | Остальные находки одной попытки ревью страницами                                    |
-| `GET /api/tasks/:id/recovery-history?limit&cursor`          | История текущего эпизода восстановления задачи страницами, новые сначала            |
+| `GET /api/tasks/:id/recovery-history?limit&before`          | История текущего эпизода восстановления задачи страницами, новые сначала            |
+| `GET /api/boards/:id/revisions/:number`                     | Ревизия доски с полной причиной, без копий задач снимка                             |
 | `GET /api/events?before=ID&limit`                           | Журнал событий страницами по ≤ 50; данные событий без тел                           |
 | `GET /api/state`                                            | Всё состояние для доверенной консоли и CLI; панель его не опрашивает                |
 | `GET /api/boards/:id/impact?roots=T1,T2`                    | Влияние корректировки                                                               |

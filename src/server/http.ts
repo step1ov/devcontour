@@ -14,6 +14,7 @@ import {
   panelContractAttempts,
   panelContractAttemptFindings,
   panelRecoveryHistory,
+  panelRevision,
   panelEvents,
   panelQueue,
   panelRun,
@@ -416,7 +417,15 @@ export async function serve(
           const run = h.store.read().runs.find((r) => r.id === parts[2]);
           if (!run) throw new DomainError('Прогон не найден', 404);
           result = { activity: await runActivity(scheduler, run) };
-        } else if (req.method === 'GET' && parts[1] === 'boards' && parts[3] === 'impact')
+        } else if (
+          req.method === 'GET' &&
+          parts[1] === 'boards' &&
+          parts[3] === 'revisions' &&
+          parts[4] &&
+          !parts[5]
+        )
+          result = panelRevision(h, decodeURIComponent(parts[2]), Number(parts[4]));
+        else if (req.method === 'GET' && parts[1] === 'boards' && parts[3] === 'impact')
           result = h.impact(
             parts[2],
             (url.searchParams.get('roots') ?? '').split(',').filter(Boolean),

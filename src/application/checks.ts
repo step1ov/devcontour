@@ -215,10 +215,19 @@ export function taskChecks(h: DevContour, raw: unknown) {
           at: d.at,
         })),
     },
-    history: {
-      byProperty: history,
-      unbound: [...new Set(runs.flatMap((r) => r.unboundProperties ?? []))],
-    },
+    // История отказов растёт с каждой попыткой: по свойству — последние
+    // 10 отказов и их общее число, необъявленные свойства — первые 50.
+    history: (() => {
+      const unbound = [...new Set(runs.flatMap((r) => r.unboundProperties ?? []))];
+      return {
+        byProperty: Object.fromEntries(
+          Object.entries(history).map(([p, list]) => [p, list.slice(-10)]),
+        ),
+        counts: Object.fromEntries(Object.entries(history).map(([p, list]) => [p, list.length])),
+        unbound: clip(unbound.slice(0, 50), 200),
+        unboundCount: unbound.length,
+      };
+    })(),
     // Причины и история пишутся ведущим и оператором: строки ограничены.
     recovery: task.recovery
       ? clip({

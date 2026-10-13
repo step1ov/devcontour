@@ -15,6 +15,7 @@ import {
   panelContractAttemptFindings,
   panelEvents,
   panelRecoveryHistory,
+  panelRevision,
   panelQueue,
   panelRun,
   panelRuns,
@@ -295,6 +296,25 @@ test('P-F01: long diagnostics written by runner and gates stay bounded in the su
           })),
         },
       } as never);
+      // 650 содержательных отказов по свойству: история карточки проверки.
+      for (let k = 0; k < 650; k++)
+        s.runs.push({
+          ...structuredClone(run),
+          id: `R-history-${k}`,
+          evidence: [],
+          properties: ['p-0'],
+          unboundProperties: [`unbound-${k}`],
+          error: 'PROPERTY-FAILURE ' + 'f'.repeat(300),
+        });
+      // 55 корректировок другой, принятой доски с длинными причинами.
+      const other = s.boards.find((b) => !b.revisions.some((r) => r.taskIds.includes(busy.id)))!;
+      const last = other.revisions.at(-1)!;
+      for (let k = 0; k < 55; k++)
+        other.revisions.push({
+          ...structuredClone(last),
+          number: last.number + k + 1,
+          reason: `REVISION-REASON-${k} ` + 'r'.repeat(5000),
+        });
       // Эпизод восстановления с длинной причиной и тысячей записей истории.
       task.recovery = {
         id: 'REC-1',
@@ -319,24 +339,53 @@ test('P-F01: long diagnostics written by runner and gates stay bounded in the su
     });
     d.store.projectionError = long('PROJECTION-ERROR');
     const limit = 256 * 1024;
-    const summary = d.summary({ task: busy.id });
+    // Выбрана доска задачи; доска с длинной историей ревизий — чужая.
+    const own = d.store
+      .read()
+      .boards.find((b) => b.revisions.some((r) => r.taskIds.includes(busy.id)))!;
+    const summary = d.summary({ task: busy.id, board: own.id });
     assert.ok(bytes(summary) < limit, `сводка ${bytes(summary)}`);
     const text = JSON.stringify(summary);
     assert.equal(text.includes('x'.repeat(DIAGNOSTIC_MAX + 2)), false);
     assert.equal(text.includes('IMPACT'), false);
     assert.ok(summary.stopReason?.startsWith('SCHEDULER-ERROR'));
     assert.equal(text.includes('OBLIGATION-BODY'), false);
+    // Строка чужой доски — только текущая ревизия; причина — целиком в деталях.
+    assert.equal(text.includes('REVISION-REASON-0 '), false);
+    const otherLine = summary.boards.find((b) => b.revisionCount > 50)!;
+    assert.equal(otherLine.revisions.length, 1);
+    assert.ok(otherLine.revisions[0].reasonTruncated);
+    const revision = panelRevision(d.h, otherLine.id, otherLine.revisions[0].number);
+    assert.ok(revision.reason.startsWith('REVISION-REASON-54 ') && revision.reason.length > 5000);
+    // Выбранная доска с той же историей: ранние причины короче, свежие — до 2000.
+    const selected = d.summary({ board: otherLine.id });
+    assert.ok(bytes(selected) < limit, `выбранная доска ${bytes(selected)}`);
     assert.equal(summary.contracts.find((x) => x.id === 'C-obligations')!.obligationCount, 30);
     // История эпизода: последние записи со счётчиком, остальные — страницами.
     const detail = panelTask(d.h, busy.id, { limit: '1' });
     assert.equal(detail.task.recovery!.historyCount, 1000);
     assert.equal(detail.task.recovery!.history.length, 20);
-    const historyPage = panelRecoveryHistory(d.h, busy.id, { limit: '50', cursor: '20' });
-    assert.equal(historyPage.total, 1000);
-    assert.equal(historyPage.items[0].event, 'decision-979');
-    assert.ok(bytes(historyPage) < limit);
-    const checks = taskChecks(d.h, { taskId: busy.id, limit: 10, cursor: 0 });
-    assert.ok(bytes(checks) < limit, `checks ${bytes(checks)}`);
+    // Страницы истории — по стабильному курсору: новая запись между
+    // страницами не даёт дублей.
+    const first = panelRecoveryHistory(d.h, busy.id, { limit: '20' });
+    assert.equal(first.items[0].event, 'decision-999');
+    d.store.change('fixture.recovery-append', (s) => {
+      s.tasks
+        .find((t) => t.id === busy.id)!
+        .recovery!.history.push({ at: '2026-01-01T00:00:00.000Z', event: 'decision-1000' });
+    });
+    const second = panelRecoveryHistory(d.h, busy.id, {
+      limit: '50',
+      before: String(first.nextBefore),
+    });
+    assert.equal(second.total, 1001);
+    assert.equal(second.items[0].event, 'decision-979');
+    assert.ok(bytes(second) < limit);
+    const checks = taskChecks(d.h, { taskId: busy.id, limit: 1, cursor: 0 });
+    assert.ok(bytes(checks) < 64 * 1024, `checks ${bytes(checks)}`);
+    assert.equal(checks.history.counts['p-0'], 650);
+    assert.equal(checks.history.byProperty['p-0'].length, 10);
+    assert.equal(checks.history.unboundCount, 650);
     assert.equal(JSON.stringify(checks).includes('x'.repeat(DIAGNOSTIC_MAX + 2)), false);
     assert.ok(summary.journalError?.startsWith('PROJECTION-ERROR'));
     // Описание ChangeSet сокращено с признаком, целиком — в деталях.
@@ -460,6 +509,41 @@ test('P-F17: a lease renewed by another process while the summary snapshot was o
       revision: next.revision,
       unchanged: true,
     });
+  } finally {
+    writer.close();
+    d.close();
+  }
+});
+
+test('P-F17: a lease that expires while the summary parses and was renewed meanwhile is never shown released', async () => {
+  const d = await history({ ...small, copies: 1 });
+  const writer = new Store(join(d.root, 'data', 'state.sqlite'));
+  try {
+    const now = Date.now();
+    d.store.change('fixture.operation', (s) => {
+      const v = s.changeSets[0].verifications.at(-1)!;
+      v.status = 'active';
+      v.leaseUntil = now + 300;
+    });
+    // Снимок сводки уже открыт; пока разбирается состояние, другой процесс
+    // продлевает lease, а старый срок истекает.
+    const store = d.store as unknown as { readUnlocked(): unknown };
+    const original = store.readUnlocked.bind(d.store);
+    let raced = false;
+    store.readUnlocked = () => {
+      if (!raced) {
+        raced = true;
+        writer.change('heartbeat', (s) => {
+          s.changeSets[0].verifications.at(-1)!.leaseUntil = now + 60000;
+        });
+        while (Date.now() <= now + 300);
+      }
+      return original();
+    };
+    const summary = d.summary();
+    assert.ok(raced);
+    assert.equal(summary.expiresAt, now + 60000, 'блокировка не мигает снятой');
+    assert.match(summary.revision, /\.1$/);
   } finally {
     writer.close();
     d.close();

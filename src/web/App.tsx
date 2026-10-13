@@ -300,6 +300,41 @@ function BoardLink({
     </Button>
   );
 }
+// Причина ревизии в сводке сокращена; целиком — из деталей ревизии.
+function RevisionReason({
+  boardId,
+  revision,
+}: {
+  boardId: string;
+  revision: { number: number; reason: string; reasonTruncated?: boolean };
+}) {
+  const [full, setFull] = useState('');
+  const [error, setError] = useState('');
+  const load = () => {
+    setError('');
+    api(`boards/${encodeURIComponent(boardId)}/revisions/${revision.number}`)
+      .then((value: { reason: string }) => setFull(value.reason))
+      .catch((e: Error) => setError(e.message));
+  };
+  return (
+    <>
+      <strong>{full || revision.reason}</strong>
+      {!full && revision.reasonTruncated && (
+        <Button variant="outline" size="sm" onClick={load}>
+          Показать причину полностью
+        </Button>
+      )}
+      {error && (
+        <span role="alert" className="text-destructive text-sm">
+          Причина не загрузилась: {error}{' '}
+          <Button variant="outline" size="sm" onClick={load}>
+            Повторить
+          </Button>
+        </span>
+      )}
+    </>
+  );
+}
 // Длинное описание ChangeSet в сводке сокращено; целиком — из деталей.
 function ChangeSetDescription({
   id,
@@ -358,9 +393,13 @@ function ChangeSetHistory({
     evidence: { gate: string; passed: boolean; summary: string }[];
   };
   type Page<T> = { total: number; items: T[]; next: number | null };
+  // История дописывается: страницы — по стабильному курсору `before`.
+  type History = { total: number; items: Verification[]; nextBefore: number | null };
   type SnapshotTask = { id: string; title: string; status: string; resultSha?: string };
   const [open, setOpen] = useState(false);
-  const [history, setHistory] = useState<Page<Verification>>();
+  const [history, setHistory] = useState<History>();
+  // Снимок, который выбран последним: ответ для прежнего выбора отбрасывается.
+  const wanted = useRef('');
   const [snapshot, setSnapshot] = useState<{ verificationId: string } & Page<SnapshotTask>>();
   // Сбой хранит свой повтор: «Повторить» повторяет именно неудавшийся запрос
   // (историю, её следующую страницу или снимок задач), а не первую страницу.
@@ -372,7 +411,7 @@ function ChangeSetHistory({
     let valid = true;
     setFailure(undefined);
     api(`${base}?limit=10`)
-      .then((value: { history: Page<Verification> }) => valid && setHistory(value.history))
+      .then((value: { history: History }) => valid && setHistory(value.history))
       .catch(
         (e: Error) =>
           valid &&
@@ -386,37 +425,59 @@ function ChangeSetHistory({
       valid = false;
     };
   }, [open, base, revision, attempt]);
-  const more = (cursor: number) => {
+  const more = (before: number) => {
     setFailure(undefined);
-    return api(`${base}?limit=10&cursor=${cursor}`)
-      .then((value: { history: Page<Verification> }) =>
-        // Страница встаёт на свой курсор: повторный клик её не задвоит.
-        setHistory((prev) => ({
-          ...value.history,
-          items: [...(prev?.items ?? []).slice(0, cursor), ...value.history.items],
-        })),
+    return api(`${base}?limit=10&before=${before}`)
+      .then((value: { history: History }) =>
+        // Страницы сливаются по id в порядке «новые сначала»: повторный или
+        // опоздавший ответ не задвоит записи и не обрежет уже загруженные.
+        setHistory((prev) => {
+          const byId = new Map(
+            [...(prev?.items ?? []), ...value.history.items].map((v) => [v.id, v]),
+          );
+          return {
+            total: value.history.total,
+            items: [...byId.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt)),
+            nextBefore:
+              prev?.nextBefore === null || value.history.nextBefore === null
+                ? null
+                : Math.min(prev?.nextBefore ?? Infinity, value.history.nextBefore),
+          };
+        }),
       )
       .catch((e: Error) =>
         setFailure({
           what: 'Ранние проверки не загрузились',
           message: e.message,
-          retry: () => void more(cursor),
+          retry: () => void more(before),
         }),
       );
   };
   const showSnapshot = (verification: string, cursor = 0): Promise<void> => {
     setFailure(undefined);
+    if (!cursor) wanted.current = verification;
     return api(`${base}?limit=1&verification=${verification}&taskLimit=50&taskCursor=${cursor}`)
-      .then((value: { snapshot: { verificationId: string } & Page<SnapshotTask> }) =>
+      .then((value: { snapshot: { verificationId: string } & Page<SnapshotTask> }) => {
+        if (verification !== wanted.current) return;
+        // Снимок неизменен: страница встаёт на своё смещение, не обрезая
+        // уже загруженное дальше неё.
         setSnapshot((prev) =>
           cursor && prev?.verificationId === verification
-            ? {
-                ...value.snapshot,
-                items: [...prev.items.slice(0, cursor), ...value.snapshot.items],
-              }
+            ? (() => {
+                const items = [
+                  ...prev.items.slice(0, cursor),
+                  ...value.snapshot.items,
+                  ...prev.items.slice(cursor + value.snapshot.items.length),
+                ];
+                return {
+                  ...value.snapshot,
+                  items,
+                  next: items.length < value.snapshot.total ? items.length : null,
+                };
+              })()
             : value.snapshot,
-        ),
-      )
+        );
+      })
       .catch((e: Error) =>
         setFailure({
           what: 'Снимок задач не загрузился',
@@ -479,8 +540,8 @@ function ChangeSetHistory({
           ))}
         </ol>
       )}
-      {history?.next != null && (
-        <Button variant="outline" size="sm" onClick={() => void more(history.next!)}>
+      {history?.nextBefore != null && (
+        <Button variant="outline" size="sm" onClick={() => void more(history.nextBefore!)}>
           Ранние проверки ({history.total - history.items.length})
         </Button>
       )}
@@ -756,6 +817,7 @@ export function App() {
       detailFor.current = id;
       olderCount.current = 0;
       setOlderRuns([]);
+      setOlderError('');
     }
     let valid = true;
     setDetailError('');
@@ -783,7 +845,9 @@ export function App() {
   const taskRuns = full
     ? [...new Map([...full.runs.items, ...olderRuns].map((r) => [r.id, r])).values()].reverse()
     : [];
+  const [olderError, setOlderError] = useState('');
   const loadOlderRuns = async () => {
+    setOlderError('');
     if (!full) return;
     const id = full.task.id;
     const before = olderRuns.at(-1)?.id ?? full.runs.items.at(-1)?.id;
@@ -800,7 +864,9 @@ export function App() {
         return merged;
       });
     } catch (e) {
-      setDetailError((e as Error).message);
+      // Сбой ранней страницы — свой: его повтор берёт ту же страницу, а не
+      // перезагружает первую.
+      setOlderError((e as Error).message);
     }
   };
   useEffect(() => {
@@ -1794,7 +1860,7 @@ export function App() {
                         <div>
                           <span className="text-primary bg-accent rounded-sm p-2">r{r.number}</span>
                           <div>
-                            <strong>{r.reason}</strong>
+                            <RevisionReason boardId={board!.id} revision={r} />
                             <small>
                               {stamp(r.createdAt)} · {r.taskIds.length} задач
                             </small>
@@ -1971,7 +2037,15 @@ export function App() {
                       </p>
                     )}
                     {full && <AttemptTimeline runs={taskRuns} total={full.runs.total} />}
-                    {full && full.runs.total > taskRuns.length && (
+                    {full && olderError && (
+                      <p role="alert" className="text-destructive text-sm">
+                        Ранние попытки не загрузились: {olderError}{' '}
+                        <Button variant="outline" size="sm" onClick={() => void loadOlderRuns()}>
+                          Повторить
+                        </Button>
+                      </p>
+                    )}
+                    {full && !olderError && full.runs.total > taskRuns.length && (
                       <Button variant="outline" size="sm" onClick={() => void loadOlderRuns()}>
                         Ранние попытки ({full.runs.total - taskRuns.length})
                       </Button>

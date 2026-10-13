@@ -170,10 +170,21 @@ function uiTask(h: DevContour, state: DevContourState, t: Task) {
   };
 }
 
-/** Ревизия без задач снимка: принятый снимок хранит полные копии задач. */
-function compactRevision(r: Board['revisions'][number]) {
-  return r.snapshot ? { ...r, snapshot: { ...r.snapshot, tasks: [] as Task[] } } : r;
+/**
+ * Ревизия без задач снимка (принятый снимок хранит полные копии задач) и с
+ * причиной не длиннее `reason` знаков; целиком — `/api/boards/:id/revisions/:n`.
+ */
+function compactRevision(r: Board['revisions'][number], reason = DIAGNOSTIC) {
+  return {
+    ...r,
+    reason: short(r.reason, reason)!,
+    reasonTruncated: r.reason.length > reason,
+    acceptance: r.acceptance && clip(r.acceptance, 200),
+    ...(r.snapshot ? { snapshot: { ...r.snapshot, tasks: [] as Task[] } } : {}),
+  };
 }
+/** Последние ревизии выбранной доски — с причинами до 2000 знаков, ранние — короче. */
+const RECENT_REVISIONS = 20;
 function boardTasks(board: Board) {
   return new Set(board.revisions.flatMap((r) => r.taskIds));
 }
@@ -191,8 +202,12 @@ function boardLine(state: DevContourState, board: Board, running: Set<string>) {
     description: board.description,
     scope: board.scope,
     repositoryId: board.repositoryId,
-    // Списки задач и снимки ревизий — только у выбранной доски.
-    revisions: board.revisions.map(compactRevision).map((r) => ({ ...r, taskIds: [] as string[] })),
+    // Строка доски — только текущая ревизия (номер и статус для навигации):
+    // история ревизий, списки задач и снимки — только у выбранной доски.
+    revisions: board.revisions
+      .slice(-1)
+      .map((r) => ({ ...compactRevision(r, SHORT), taskIds: [] as string[] })),
+    revisionCount: board.revisions.length,
     taskCount: ids.size,
     phase: boardPhase(board, state.tasks),
     progress: live.length
@@ -341,10 +356,27 @@ export function panelSummary(
   query: Record<string, string | undefined>,
 ) {
   const q = summaryQuery.parse(query);
+  // Если lease операции истёк, пока читался снимок, другой процесс мог успеть
+  // его продлить, а снимок этого не видит. Такой ответ не отдаётся: чтение
+  // повторяется один раз в новом снимке. Продление после истечения
+  // отклоняется, поэтому второй снимок уже точен.
+  for (let attempt = 0; ; attempt++) {
+    const result = summaryOnce(h, root, q, attempt === 0);
+    if (result) return result;
+  }
+}
+
+function summaryOnce(
+  h: DevContour,
+  root: string,
+  q: z.infer<typeof summaryQuery>,
+  retryUncertain: boolean,
+) {
   return h.store.snapshot(() => {
     const shared = h.store.readShared(leaseStale);
     const state = shared.state as DevContourState;
     const now = Date.now();
+    if (retryUncertain && leaseStale(state, shared.readAt)) return undefined;
     const leases = leaseOperations(state)
       .map((o) => o.leaseUntil)
       .filter((at) => at > now);
@@ -444,7 +476,9 @@ function buildSummary(
     boardId,
     board: board && {
       ...board,
-      revisions: board.revisions.map(compactRevision),
+      revisions: board.revisions.map((r, i) =>
+        compactRevision(r, i >= board.revisions.length - RECENT_REVISIONS ? DIAGNOSTIC : SHORT),
+      ),
       phase: boardPhase(board, state.tasks),
     },
     boards,
@@ -583,6 +617,27 @@ const paged = <T>(all: T[], query: Record<string, string | undefined>) => {
   };
 };
 
+/**
+ * Страница дописываемой истории, новые сначала. `before` — номер записи от
+ * начала истории (страница строго раньше неё): новые записи дописываются в
+ * конец и такой курсор не сдвигают — в отличие от смещения от нового конца.
+ */
+function newestFirst<T>(all: T[], query: Record<string, string | undefined>) {
+  const q = z
+    .object({
+      limit: z.coerce.number().int().min(1).max(50).default(20),
+      before: z.coerce.number().int().min(0).optional(),
+    })
+    .parse(query);
+  const end = Math.min(q.before ?? all.length, all.length);
+  const start = Math.max(0, end - q.limit);
+  return {
+    total: all.length,
+    items: all.slice(start, end).reverse(),
+    nextBefore: start > 0 ? start : null,
+  };
+}
+
 function sharedState(h: DevContour) {
   return h.store.readShared().state as DevContourState;
 }
@@ -656,7 +711,7 @@ export function panelRecoveryHistory(
   const task = sharedState(h).tasks.find((t) => t.id === id);
   if (!task) throw new DomainError('Задача не найдена', 404);
   if (!task.recovery) throw new DomainError('У задачи нет эпизода восстановления', 404);
-  const result = paged([...task.recovery.history].reverse(), query);
+  const result = newestFirst(task.recovery.history, query);
   return { ...result, items: clip(result.items) };
 }
 
@@ -732,7 +787,7 @@ export function panelChangeSet(
 ) {
   const c = sharedState(h).changeSets.find((x) => x.id === id);
   if (!c) throw new DomainError('ChangeSet не найден', 404);
-  const history = paged([...c.verifications].reverse(), query);
+  const history = newestFirst(c.verifications, query);
   const chosen = query.verification
     ? c.verifications.find((v) => v.id === query.verification)
     : undefined;
@@ -765,6 +820,15 @@ export function panelChangeSet(
       })(),
     },
   };
+}
+
+/** Ревизия доски целиком (причина без сокращения), без копий задач снимка. */
+export function panelRevision(h: DevContour, boardId: string, number: number) {
+  const board = sharedState(h).boards.find((b) => b.id === boardId);
+  if (!board) throw new DomainError('Доска не найдена', 404);
+  const revision = board.revisions.find((r) => r.number === number);
+  if (!revision) throw new DomainError('Ревизия не найдена', 404);
+  return { ...revision, snapshot: revision.snapshot && { ...revision.snapshot, tasks: [] } };
 }
 
 export function panelContract(h: DevContour, id: string) {
