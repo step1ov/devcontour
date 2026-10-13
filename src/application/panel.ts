@@ -12,12 +12,14 @@ import {
   type Task,
 } from '../core/model.ts';
 import type { Delivery } from '../core/integrations.ts';
+import type { PropertyRecovery } from '../core/property-recovery.ts';
 import { blockers, readyTasks } from '../core/graph.ts';
 import { repositories } from '../core/repositories.ts';
 import { boardPhase, queueStopReason } from '../core/work-status.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { taskProgress } from './context.ts';
 import { checksSummary } from './checks.ts';
+import { DIAGNOSTIC, SHORT, clip, short } from './bounded.ts';
 
 /**
  * Проекции панели. Периодический опрос получает ограниченную сводку: строки
@@ -28,34 +30,13 @@ import { checksSummary } from './checks.ts';
  * проверок и событий.
  */
 
-/** Сколько знаков текста диагностики остаётся в компактной строке. */
-const SHORT = 300;
-/** Хвост лога в деталях попытки. */
-const LOG_TAIL = 4000;
-const short = (text: string | undefined, n = SHORT) =>
-  text && text.length > n ? text.slice(0, n) + '…' : text;
-const tail = (text: string) => (text.length > LOG_TAIL ? '…' + text.slice(-LOG_TAIL) : text);
-
 /** Сколько находок попытки ревью приходит сразу; остальные — страницами. */
 const FINDINGS = 20;
-/** Предел одной строки диагностики (ошибки, отчёты, история эпизода). */
-const DIAGNOSTIC = 2000;
-/**
- * Диагностика с ограниченными строками на любой глубине и без токенов. Для
- * вложенных записей, которые пишут runner и гейты (ошибки, отказы, история
- * эпизода восстановления): их длину не ограничивает ни одна схема.
- */
-function clip<T>(value: T, n = DIAGNOSTIC): T {
-  if (typeof value === 'string') return short(value, n) as T;
-  if (Array.isArray(value)) return (value as unknown[]).map((v) => clip(v, n)) as T;
-  if (value && typeof value === 'object')
-    return Object.fromEntries(
-      Object.entries(value)
-        .filter(([k]) => k !== 'token')
-        .map(([k, v]) => [k, clip(v, n)]),
-    ) as T;
-  return value;
-}
+/** Сколько последних записей истории эпизода восстановления приходит сразу. */
+const RECOVERY_HISTORY = 20;
+/** Хвост лога в деталях попытки. */
+const LOG_TAIL = 4000;
+const tail = (text: string) => (text.length > LOG_TAIL ? '…' + text.slice(-LOG_TAIL) : text);
 
 /** Без токенов владения на любой глубине: они не для панели. */
 function withoutTokens<T>(value: T): T {
@@ -162,7 +143,13 @@ function uiTask(h: DevContour, state: DevContourState, t: Task) {
     ...(failure !== undefined ? { failure: short(failure, DIAGNOSTIC) } : {}),
     ...(hold ? { hold: clip(hold) } : {}),
     ...(recovery
-      ? { recovery: { ...clip(recovery), history: clip(recovery.history.slice(-5)) } }
+      ? {
+          recovery: {
+            ...clip(recovery),
+            history: clip(recovery.history.slice(-5)),
+            historyCount: recovery.history.length,
+          },
+        }
       : {}),
     ...(sharedCompletion
       ? {
@@ -179,7 +166,7 @@ function uiTask(h: DevContour, state: DevContourState, t: Task) {
     specDigest: specDigest(t),
     blockers: blockers(t, state),
     progress: taskProgress(h, state, t),
-    checks: checksSummary(t),
+    checks: clip(checksSummary(t)),
   };
 }
 
@@ -357,12 +344,16 @@ export function panelSummary(
   return h.store.snapshot(() => {
     const shared = h.store.readShared(leaseStale);
     const state = shared.state as DevContourState;
-    const revision = String(shared.revision);
-    if (q.revision === revision) return { revision, unchanged: true as const };
     const now = Date.now();
     const leases = leaseOperations(state)
       .map((o) => o.leaseUntil)
       .filter((at) => at > now);
+    // Номер — данные и то, действует ли сейчас блокировка операции. Продление
+    // lease его не меняет, а смена блокировки меняет: так ответ, собранный из
+    // снимка, который ещё не видел продления, не закрепится у клиента
+    // ответами «без изменений».
+    const revision = leases.length ? `${shared.revision}.1` : String(shared.revision);
+    if (q.revision === revision) return { revision, unchanged: true as const };
     return buildSummary(h, root, q, state, revision, leases);
   });
 }
@@ -462,7 +453,17 @@ function buildSummary(
     acceptedBoards: boards.filter((b) => b.revisions.at(-1)?.status === 'accepted').length,
     runs,
     changeSets: state.changeSets.map(changeSetLine),
-    contracts: state.contracts.map(({ content, ...c }) => ({ ...c, contentBytes: content.length })),
+    // Контракт — строкой: текст, артефакты и обязательства проверки — в деталях.
+    contracts: state.contracts.map((c) => ({
+      id: c.id,
+      title: c.title,
+      repositoryId: c.repositoryId,
+      digest: c.digest,
+      approvedAt: c.approvedAt,
+      contentBytes: c.content.length,
+      artifactCount: c.artifacts?.length ?? 0,
+      obligationCount: c.checks?.obligations.length ?? 0,
+    })),
     // Последние попытки ревью без находок; все — страницами с находками.
     contractAttempts: attempts.slice(-20).map(({ findings, ...a }) => ({
       ...clip(a),
@@ -619,12 +620,19 @@ export function panelTask(h: DevContour, id: string, query: Record<string, strin
           : {}),
         ...(failure !== undefined ? { failure: short(failure, DIAGNOSTIC) } : {}),
         ...(hold ? { hold: clip(hold) } : {}),
-        ...(recovery ? { recovery: clip(recovery) } : {}),
-        ...(recoveryHistory ? { recoveryHistory: clip(recoveryHistory.slice(-20)) } : {}),
+        // Эпизоды восстановления: последние записи истории со счётчиком,
+        // остальное — страницами (`/api/tasks/:id/recovery-history`).
+        ...(recovery ? { recovery: recoveryLine(recovery, RECOVERY_HISTORY) } : {}),
+        ...(recoveryHistory
+          ? {
+              recoveryHistory: recoveryHistory.slice(-20).map((r) => recoveryLine(r, 5)),
+              recoveryHistoryCount: recoveryHistory.length,
+            }
+          : {}),
         specDigest: specDigest(task),
         blockers: blockers(task, state),
         progress: taskProgress(h, state, task),
-        checks: checksSummary(task),
+        checks: clip(checksSummary(task)),
       },
       dependencies: task.dependsOn.map((d) => {
         const t = state.tasks.find((x) => x.id === d);
@@ -633,6 +641,23 @@ export function panelTask(h: DevContour, id: string, query: Record<string, strin
       runs: runsPage(state, id, query),
     };
   });
+}
+
+function recoveryLine(r: PropertyRecovery, history: number) {
+  return { ...clip(r), history: clip(r.history.slice(-history)), historyCount: r.history.length };
+}
+
+/** История текущего эпизода восстановления задачи страницами, новые сначала. */
+export function panelRecoveryHistory(
+  h: DevContour,
+  id: string,
+  query: Record<string, string | undefined>,
+) {
+  const task = sharedState(h).tasks.find((t) => t.id === id);
+  if (!task) throw new DomainError('Задача не найдена', 404);
+  if (!task.recovery) throw new DomainError('У задачи нет эпизода восстановления', 404);
+  const result = paged([...task.recovery.history].reverse(), query);
+  return { ...result, items: clip(result.items) };
 }
 
 /**

@@ -296,3 +296,23 @@ test('Review findings beyond the first page load on request', async ({ page }) =
   await expect(review).toContainText('Находка стенда 30');
   await expect(review.getByRole('button', { name: /Ещё замечания/ })).toHaveCount(0);
 });
+
+test('A double click on "more findings" loads the page once and keeps every finding reachable', async ({
+  page,
+}) => {
+  // Ответ задерживается: второй клик приходится на ещё идущую загрузку.
+  await page.route('**/api/contract-attempts/*/findings*', async (route) => {
+    await new Promise((r) => setTimeout(r, 600));
+    await route.continue();
+  });
+  await page.goto(base);
+  await page.getByRole('tab', { name: 'Ход работ', exact: true }).click();
+  const review = page.locator('li').filter({ hasText: 'Обезличенный контракт' }).first();
+  await review.getByRole('button', { name: 'Ещё замечания (10)' }).dblclick();
+  await expect(review).toContainText('Находка стенда 30');
+  await page.waitForTimeout(1500);
+  const texts = await review.locator('li').allTextContents();
+  const findings = texts.filter((t) => t.includes('Находка стенда'));
+  expect(findings).toHaveLength(30);
+  expect(new Set(findings).size).toBe(30);
+});

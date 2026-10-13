@@ -14,6 +14,7 @@ import {
   panelContractAttempts,
   panelContractAttemptFindings,
   panelEvents,
+  panelRecoveryHistory,
   panelQueue,
   panelRun,
   panelRuns,
@@ -22,6 +23,7 @@ import {
   panelTaskSearch,
   type PanelSummary,
 } from '../src/application/panel.ts';
+import { taskChecks } from '../src/application/checks.ts';
 
 /**
  * Проекции панели на настоящей большой истории (учебное демо, размноженное):
@@ -282,6 +284,34 @@ test('P-F01: long diagnostics written by runner and gates stay bounded in the su
         } as never,
       ];
       s.changeSets[0].description = 'CHANGESET-DESCRIPTION ' + 'd'.repeat(5000);
+      // Договор с 30 обязательствами проверки: тела — только в деталях.
+      s.contracts.push({
+        ...s.contracts[0],
+        id: 'C-obligations',
+        checks: {
+          obligations: Array.from({ length: 30 }, (_, k) => ({
+            property: `p-${k}`,
+            promise: 'OBLIGATION-BODY ' + 'o'.repeat(15000),
+          })),
+        },
+      } as never);
+      // Эпизод восстановления с длинной причиной и тысячей записей истории.
+      task.recovery = {
+        id: 'REC-1',
+        property: 'p-0',
+        basis: 'b',
+        runs: [],
+        openedAt: run.startedAt,
+        status: 'awaiting-user',
+        calls: 1,
+        reason: long('RECOVERY-REASON'),
+        history: Array.from({ length: 1000 }, (_, k) => ({
+          at: run.startedAt,
+          event: `decision-${k}`,
+          detail: 'HISTORY ' + 'h'.repeat(300),
+        })),
+        version: 1,
+      } as never;
       // Очередь остановлена отказом scheduler с длинным текстом ошибки.
       s.paused = true;
       s.pauseReason = 'runtime';
@@ -295,6 +325,19 @@ test('P-F01: long diagnostics written by runner and gates stay bounded in the su
     assert.equal(text.includes('x'.repeat(DIAGNOSTIC_MAX + 2)), false);
     assert.equal(text.includes('IMPACT'), false);
     assert.ok(summary.stopReason?.startsWith('SCHEDULER-ERROR'));
+    assert.equal(text.includes('OBLIGATION-BODY'), false);
+    assert.equal(summary.contracts.find((x) => x.id === 'C-obligations')!.obligationCount, 30);
+    // История эпизода: последние записи со счётчиком, остальные — страницами.
+    const detail = panelTask(d.h, busy.id, { limit: '1' });
+    assert.equal(detail.task.recovery!.historyCount, 1000);
+    assert.equal(detail.task.recovery!.history.length, 20);
+    const historyPage = panelRecoveryHistory(d.h, busy.id, { limit: '50', cursor: '20' });
+    assert.equal(historyPage.total, 1000);
+    assert.equal(historyPage.items[0].event, 'decision-979');
+    assert.ok(bytes(historyPage) < limit);
+    const checks = taskChecks(d.h, { taskId: busy.id, limit: 10, cursor: 0 });
+    assert.ok(bytes(checks) < limit, `checks ${bytes(checks)}`);
+    assert.equal(JSON.stringify(checks).includes('x'.repeat(DIAGNOSTIC_MAX + 2)), false);
     assert.ok(summary.journalError?.startsWith('PROJECTION-ERROR'));
     // Описание ChangeSet сокращено с признаком, целиком — в деталях.
     const changeSet = summary.changeSets.find((x) => x.descriptionTruncated)!;
@@ -404,9 +447,19 @@ test('P-F17: a lease renewed by another process while the summary snapshot was o
       return d.summary();
     });
     assert.equal(inside.expiresAt, undefined, 'старый снимок видит только старый срок');
-    // Следующая сводка видит продлённый lease, а не снятую блокировку.
-    const next = d.summary();
+    // Опрос с номером этого ответа не получает «без изменений»: блокировка
+    // действует, и номер другой. Полный ответ несёт продлённый lease.
+    const next = panelSummary(d.h, d.root, { revision: inside.revision }) as PanelSummary;
+    assert.notEqual(next.revision, inside.revision);
     assert.equal(next.expiresAt, now + 60000);
+    // Дальнейшие продления номер не меняют.
+    writer.change('heartbeat', (s) => {
+      s.changeSets[0].verifications.at(-1)!.leaseUntil = now + 90000;
+    });
+    assert.deepEqual(panelSummary(d.h, d.root, { revision: next.revision }), {
+      revision: next.revision,
+      unchanged: true,
+    });
   } finally {
     writer.close();
     d.close();

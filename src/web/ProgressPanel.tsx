@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Button } from '@/ui/button.tsx';
 import {
   Bot,
@@ -440,18 +440,30 @@ type AttemptLine = ContractAttempt & { findingsCount?: number };
 const findingsOf = (a: AttemptLine) => a.findingsCount ?? a.findings.length;
 type Finding = ContractAttempt['findings'][number];
 // Находки попытки сверх первых — страницами по запросу; сбой загрузки виден
-// и повторяется той же страницей.
+// и повторяется той же страницей. Пока страница грузится, следующая не
+// запрашивается, а пришедшая встаёт ровно на свой курсор: повторный клик не
+// задвоит страницу и не потеряет последние записи.
 function MoreFindings({ attempt, shown }: { attempt: AttemptLine; shown: number }) {
   const [extra, setExtra] = useState<Finding[]>([]);
   const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const loadingRef = useRef(false);
   const total = findingsOf(attempt);
   const load = () => {
+    if (loadingRef.current) return;
+    loadingRef.current = true;
+    setLoading(true);
     setError('');
+    const offset = extra.length;
     getPage<Finding>(
-      `contract-attempts/${encodeURIComponent(attempt.id)}/findings?limit=50&cursor=${shown + extra.length}`,
+      `contract-attempts/${encodeURIComponent(attempt.id)}/findings?limit=50&cursor=${shown + offset}`,
     )
-      .then((page) => setExtra((items) => [...items, ...page.items]))
-      .catch((e: Error) => setError(e.message));
+      .then((page) => setExtra((items) => [...items.slice(0, offset), ...page.items]))
+      .catch((e: Error) => setError(e.message))
+      .finally(() => {
+        loadingRef.current = false;
+        setLoading(false);
+      });
   };
   if (total <= shown) return null;
   return (
@@ -460,13 +472,13 @@ function MoreFindings({ attempt, shown }: { attempt: AttemptLine; shown: number 
       {error && (
         <p role="alert" className="text-destructive text-sm">
           Замечания не загрузились: {error}{' '}
-          <Button variant="outline" size="sm" onClick={load}>
+          <Button variant="outline" size="sm" disabled={loading} onClick={load}>
             Повторить
           </Button>
         </p>
       )}
       {shown + extra.length < total && (
-        <Button variant="outline" size="sm" className="mt-2" onClick={load}>
+        <Button variant="outline" size="sm" className="mt-2" disabled={loading} onClick={load}>
           Ещё замечания ({total - shown - extra.length})
         </Button>
       )}

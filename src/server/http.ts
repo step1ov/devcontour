@@ -13,6 +13,7 @@ import {
   panelContract,
   panelContractAttempts,
   panelContractAttemptFindings,
+  panelRecoveryHistory,
   panelEvents,
   panelQueue,
   panelRun,
@@ -325,6 +326,16 @@ export async function serve(
           result = panelTaskSearch(h, Object.fromEntries(url.searchParams));
         } else if (req.method === 'GET' && parts[1] === 'tasks' && parts[2] && !parts[3]) {
           result = panelTask(h, decodeURIComponent(parts[2]), Object.fromEntries(url.searchParams));
+        } else if (
+          req.method === 'GET' &&
+          parts[1] === 'tasks' &&
+          parts[3] === 'recovery-history'
+        ) {
+          result = panelRecoveryHistory(
+            h,
+            decodeURIComponent(parts[2]),
+            Object.fromEntries(url.searchParams),
+          );
         } else if (req.method === 'GET' && parts[1] === 'tasks' && parts[3] === 'runs') {
           result = panelRuns(h, decodeURIComponent(parts[2]), Object.fromEntries(url.searchParams));
         } else if (req.method === 'GET' && parts[1] === 'runs' && parts[2] && !parts[3]) {

@@ -390,9 +390,10 @@ function ChangeSetHistory({
     setFailure(undefined);
     return api(`${base}?limit=10&cursor=${cursor}`)
       .then((value: { history: Page<Verification> }) =>
+        // Страница встаёт на свой курсор: повторный клик её не задвоит.
         setHistory((prev) => ({
           ...value.history,
-          items: [...(prev?.items ?? []), ...value.history.items],
+          items: [...(prev?.items ?? []).slice(0, cursor), ...value.history.items],
         })),
       )
       .catch((e: Error) =>
@@ -409,7 +410,10 @@ function ChangeSetHistory({
       .then((value: { snapshot: { verificationId: string } & Page<SnapshotTask> }) =>
         setSnapshot((prev) =>
           cursor && prev?.verificationId === verification
-            ? { ...value.snapshot, items: [...prev.items, ...value.snapshot.items] }
+            ? {
+                ...value.snapshot,
+                items: [...prev.items.slice(0, cursor), ...value.snapshot.items],
+              }
             : value.snapshot,
         ),
       )
@@ -790,7 +794,8 @@ export function App() {
       )) as TaskDetail['runs'];
       if (detailFor.current !== id) return;
       setOlderRuns((runs) => {
-        const merged = [...runs, ...page.items];
+        // Повторный клик приносит ту же страницу: попытки — по id без повторов.
+        const merged = [...new Map([...runs, ...page.items].map((r) => [r.id, r])).values()];
         olderCount.current = merged.length;
         return merged;
       });

@@ -4,6 +4,7 @@ import type { DevContour } from '../core/service.ts';
 import { obligationOf, effectiveChecks } from '../core/checks.ts';
 import { CheckCorpus } from '../core/check-store.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
+import { clip } from './bounded.ts';
 
 /**
  * Чтение договора проверки задачи: действующая версия, свойства и
@@ -218,8 +219,9 @@ export function taskChecks(h: DevContour, raw: unknown) {
       byProperty: history,
       unbound: [...new Set(runs.flatMap((r) => r.unboundProperties ?? []))],
     },
+    // Причины и история пишутся ведущим и оператором: строки ограничены.
     recovery: task.recovery
-      ? {
+      ? clip({
           id: task.recovery.id,
           property: task.recovery.property,
           status: task.recovery.status,
@@ -235,15 +237,18 @@ export function taskChecks(h: DevContour, raw: unknown) {
               }
             : null,
           history: task.recovery.history.slice(-20),
-        }
+          historyCount: task.recovery.history.length,
+        })
       : null,
-    recoveries: (task.recoveryHistory ?? []).slice(-5).map((r) => ({
-      id: r.id,
-      property: r.property,
-      status: r.status,
-      action: r.decision?.action ?? null,
-      reason: r.reason ?? null,
-    })),
+    recoveries: clip(
+      (task.recoveryHistory ?? []).slice(-5).map((r) => ({
+        id: r.id,
+        property: r.property,
+        status: r.status,
+        action: r.decision?.action ?? null,
+        reason: r.reason ?? null,
+      })),
+    ),
     budget: {
       attemptsUsed: task.attempt,
       attemptsMax: h.config.maxAttempts,
@@ -255,7 +260,8 @@ export function taskChecks(h: DevContour, raw: unknown) {
           actor: 'user' as Actor,
           step: `Принятие версии корпуса ждёт подтверждения оператора: devcontour checks-approve --suite ${suite!.id} --pending ${awaitingOperator.id}`,
         }
-      : nextStep(h, task, waitingAdoption),
+      : // Шаг может цитировать причину эпизода — она ограничена.
+        clip(nextStep(h, task, waitingAdoption)),
   };
 }
 
