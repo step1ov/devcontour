@@ -466,6 +466,8 @@ export interface Run {
   }[];
   resources?: Resource[];
   dependencies?: DependencySnapshot[];
+  /** Свежесть снимка зависимостей на момент завершения: голова ветки и совпадение. */
+  dependencyFreshness?: { repositoryId: string; snapshot: string; head: string; fresh: boolean }[];
 }
 // Ревью контракта — работа с попытками: отклонение оставляет находки, которые
 // стоили вызова модели. Без записи в состоянии они живут только файлами на

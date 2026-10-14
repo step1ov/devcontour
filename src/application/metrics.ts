@@ -288,7 +288,18 @@ export function gateScopeMetrics(h: DevContour, runs: Run[], tasks: Task[]) {
       return { boardId: b.id, uncovered: uncoveredGates(h.config, s, own) };
     })
     .filter((b) => b.uncovered.length);
+  // Результаты, проверенные на снимке зависимости, который к завершению
+  // устарел: ветка зависимости сдвинулась параллельной работой.
+  const stale = runs.flatMap((r) =>
+    (r.dependencyFreshness ?? [])
+      .filter((f) => !f.fresh)
+      .map((f) => ({ runId: r.id, taskId: r.taskId, repositoryId: f.repositoryId })),
+  );
   return {
+    dependencyFreshness: {
+      checked: runs.filter((r) => r.dependencyFreshness?.length).length,
+      stale,
+    },
     attempts: {
       selectedMs,
       fullEstimateMs,

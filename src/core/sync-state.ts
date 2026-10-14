@@ -120,12 +120,18 @@ export function completion(h: DevContour, s: DevContourState, t: Task): Completi
     ...(run.consumers?.length ? { consumers: run.consumers } : {}),
     ...(run.dependencies?.length
       ? {
-          dependencies: run.dependencies.map((d) => ({
-            repositoryId: d.repositoryId,
-            sha: d.sha,
-            tree: d.tree,
-            artifacts: d.artifacts,
-          })),
+          dependencies: run.dependencies.map((d) => {
+            const head = run.dependencyFreshness?.find(
+              (f) => f.repositoryId === d.repositoryId,
+            )?.head;
+            return {
+              repositoryId: d.repositoryId,
+              sha: d.sha,
+              tree: d.tree,
+              ...(head ? { head } : {}),
+              artifacts: d.artifacts,
+            };
+          }),
         }
       : {}),
     ...(run.checks

@@ -10,6 +10,7 @@ import {
   assertDependencies,
   runEnvironment,
   artifactDigest,
+  dependencyFreshness,
 } from './dependencies.ts';
 import { executionEnvironment, runSteps, withEnvironment } from './environment.ts';
 import type { DependencySnapshot } from '../core/integrations.ts';
@@ -1435,9 +1436,16 @@ export class Scheduler {
       },
       (stage, action) => timed(this.h, run, 'integration-environment:' + stage, action),
     );
-    // Перед завершением — и свежесть: результат, проверенный на сдвинувшейся
-    // версии зависимости, не принимается.
-    await assertDependencies(run.dependencies ?? [], this.h.config);
+    await assertDependencies(run.dependencies ?? []);
+    // Свежесть снимка зависимостей — фиксируется, не отклоняет: параллельная
+    // работа законно двигает ветки зависимостей.
+    if (run.dependencies?.length) {
+      const freshness = await dependencyFreshness(run.dependencies, this.h.config);
+      this.h.withRun(run.id, run.token, 'run.dependency-freshness', (stored) => {
+        stored.dependencyFreshness = freshness;
+        return { runId: run.id, freshness };
+      });
+    }
     if (
       (await git(cwd, 'rev-parse', 'HEAD')) !== sha ||
       (await git(cwd, 'status', '--porcelain', '--untracked-files=no'))

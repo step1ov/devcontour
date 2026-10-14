@@ -7,8 +7,8 @@ import { join } from 'node:path';
 import { config, fixture, input } from './helpers.ts';
 import { workflowMetrics } from '../src/application/metrics.ts';
 import { repositorySchema } from '../src/core/model.ts';
-import { assertDependencies } from '../src/runner/dependencies.ts';
-import { Scheduler, classifyFailure } from '../src/runner/scheduler.ts';
+import { assertDependencies, dependencyFreshness } from '../src/runner/dependencies.ts';
+import { Scheduler } from '../src/runner/scheduler.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
 import { receiptSchema } from '../src/core/sync-model.ts';
@@ -17,7 +17,7 @@ import { receiptSchema } from '../src/core/sync-model.ts';
  * Композиция и выбор регрессионных gates: свежесть зависимостей (G03) и
  * снимок зависимостей в квитанции.
  */
-test('G03: a dependency branch that moved after the snapshot is an environment refusal, and the receipt carries the snapshot', async () => {
+test('G03: dependency freshness at finish is recorded against the branch head, and the receipt carries the snapshot and the head', async () => {
   const root = await mkdtemp(join(tmpdir(), 'devcontour-dependency-fresh-'));
   try {
     const lib = join(root, 'library');
@@ -51,19 +51,19 @@ test('G03: a dependency branch that moved after the snapshot is an environment r
       },
     ];
     // Ветка на месте — снимок свежий.
-    await assertDependencies(snapshots, c);
-    // Зависимость продвинулась: результат проверен на устаревшей версии.
+    await assertDependencies(snapshots);
+    assert.deepEqual(await dependencyFreshness(snapshots, c), [
+      { repositoryId: 'library', snapshot: snapshotSha, head: snapshotSha, fresh: true },
+    ]);
+    // Зависимость продвинулась параллельной работой: снимок устарел, и это
+    // зафиксировано, а не скрыто.
     await writeFile(join(lib, 'index.mjs'), 'export const v = 2;\n');
     sh(lib, 'commit', '-qam', 'v2');
     sh(lib, 'branch', '-f', 'devcontour/accepted', 'HEAD');
-    const refusal = await assertDependencies(snapshots, c).then(
-      () => undefined,
-      (error: unknown) => error,
-    );
-    assert.ok(refusal instanceof Error);
-    assert.match(refusal.message, /Версия зависимости library изменилась после снимка/);
-    // Отказ окружения: попытка повторяется на свежей зависимости, бюджет не тратится.
-    assert.equal(classifyFailure(refusal, refusal.message), 'environment');
+    const head = sh(lib, 'rev-parse', 'HEAD');
+    assert.deepEqual(await dependencyFreshness(snapshots, c), [
+      { repositoryId: 'library', snapshot: snapshotSha, head, fresh: false },
+    ]);
     // Квитанция переносит снимок зависимостей.
     const hash = 'a'.repeat(64);
     const receipt = receiptSchema.parse({
@@ -90,10 +90,11 @@ test('G03: a dependency branch that moved after the snapshot is an environment r
         })),
       ),
       dependencies: [
-        { repositoryId: 'library', sha: snapshotSha, tree: snapshots[0].tree, artifacts: [] },
+        { repositoryId: 'library', sha: snapshotSha, tree: snapshots[0].tree, head, artifacts: [] },
       ],
     });
     assert.equal(receipt.dependencies?.[0].sha, snapshotSha);
+    assert.equal(receipt.dependencies?.[0].head, head);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -152,6 +153,14 @@ test('G05: metrics measure the selected scope against the full profile, workspac
           id: 'R-narrow',
           taskId: narrow.id,
           requiredGates: ['unit'],
+          dependencyFreshness: [
+            {
+              repositoryId: 'library',
+              snapshot: 'a'.repeat(40),
+              head: 'b'.repeat(40),
+              fresh: false,
+            },
+          ],
           timings: [
             timing('candidate-test:unit', 0, 2_000),
             timing('integration-test:unit', 2_000, 2_000),
@@ -216,6 +225,11 @@ test('G05: metrics measure the selected scope against the full profile, workspac
     assert.deepEqual(scope.attempts.unestimatedGates, []);
     assert.deepEqual(scope.workspace.byGate, { e2e: { runs: 2, medianMs: 4_000 } });
     assert.equal(scope.workspace.totalMs, 8_000);
+    // Результат, проверенный на устаревшем снимке зависимости, назван.
+    assert.deepEqual(scope.dependencyFreshness, {
+      checked: 1,
+      stale: [{ runId: 'R-narrow', taskId: narrow.id, repositoryId: 'library' }],
+    });
     // Незакрытая доска: у выполненной узкой задачи нет integration-evidence.
     assert.deepEqual(scope.coverage, [
       { boardId: b.id, uncovered: [{ repositoryId: 'main', gates: ['unit', 'engine'] }] },

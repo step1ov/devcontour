@@ -4,7 +4,6 @@ import { createHash } from 'node:crypto';
 import type { Config, Run, Task } from '../core/model.ts';
 import type { DependencySnapshot } from '../core/integrations.ts';
 import { repository } from '../core/repositories.ts';
-import { TaskFailure } from '../core/failure.ts';
 import { git } from './process.ts';
 import { executionEnvironment, runSteps } from './environment.ts';
 
@@ -83,7 +82,7 @@ export async function snapshotDependencies(
   await writeFile(join(dir, 'manifest.json'), JSON.stringify(snapshots, null, 2));
   return snapshots;
 }
-export async function assertDependencies(snapshots: DependencySnapshot[], config?: Config) {
+export async function assertDependencies(snapshots: DependencySnapshot[]) {
   for (const snapshot of snapshots) {
     if (
       (await git(snapshot.path, 'rev-parse', 'HEAD')) !== snapshot.sha ||
@@ -95,19 +94,28 @@ export async function assertDependencies(snapshots: DependencySnapshot[], config
         throw new Error(
           'Изменён artifact зависимости: ' + snapshot.repositoryId + '/' + artifact.path,
         );
-    // Свежесть: голова целевой ветки зависимости не сдвинулась после снимка.
-    // Сдвиг — не дефект задачи, а устаревшее основание: отказ окружения, и
-    // попытка повторяется на свежей зависимости.
-    if (config) {
-      const repo = repository(config, snapshot.repositoryId);
-      const head = await git(repo.path, 'rev-parse', `refs/heads/${repo.targetBranch}`);
-      if (head !== snapshot.sha)
-        throw new TaskFailure(
-          'environment',
-          `Версия зависимости ${repo.id} изменилась после снимка (${snapshot.sha.slice(0, 12)} → ${head.slice(0, 12)}); попытка повторяется на свежей зависимости`,
-        );
-    }
   }
+}
+/**
+ * Свежесть снимка зависимостей на момент завершения: голова целевой ветки
+ * каждой зависимости и совпадает ли она со снимком. Параллельная работа
+ * законно двигает ветки зависимостей, поэтому сдвиг не отклоняет результат, а
+ * фиксируется в попытке и квитанции; сочетание версий проверяет совместная
+ * проверка workspace по закреплённому манифесту.
+ */
+export async function dependencyFreshness(snapshots: DependencySnapshot[], config: Config) {
+  const result: { repositoryId: string; snapshot: string; head: string; fresh: boolean }[] = [];
+  for (const snapshot of snapshots) {
+    const repo = repository(config, snapshot.repositoryId);
+    const head = await git(repo.path, 'rev-parse', `refs/heads/${repo.targetBranch}`);
+    result.push({
+      repositoryId: repo.id,
+      snapshot: snapshot.sha,
+      head,
+      fresh: head === snapshot.sha,
+    });
+  }
+  return result;
 }
 export function runEnvironment(config: Config, run: Run, phase: string, cwd: string) {
   const repo = repository(config, run.repositoryId ?? 'main');

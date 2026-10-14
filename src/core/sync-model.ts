@@ -85,6 +85,8 @@ export const receiptSchema = z.strictObject({
         repositoryId: syncId,
         sha,
         tree: sha,
+        /** Голова целевой ветки зависимости на момент завершения. */
+        head: sha.optional(),
         artifacts: z
           .array(z.strictObject({ path: z.string().min(1).max(500), digest: hash }))
           .max(100),
