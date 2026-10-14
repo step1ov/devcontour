@@ -14,6 +14,7 @@ import {
   roleBinding,
   reviewerBinding,
   declaredRoles,
+  expandGates,
 } from './repositories.ts';
 
 export function orderedGates<T extends Gate>(gates: T[]): T[] {
@@ -193,16 +194,16 @@ export function validateTaskContext(config: Config, task: TaskInput) {
       );
   }
   if (task.gates) {
-    const own = repository(config, task.repositoryId).gates;
-    for (const id of task.gates)
-      if (!own.some((g) => g.id === id))
-        throw new DomainError('Проверка вне профиля компонента: ' + id);
+    const repo = repository(config, task.repositoryId);
+    const own = repo.gates;
+    // Группы раскрываются в явный список; состав и циклы проверяет раскрытие.
+    const gates = expandGates(repo, task.gates);
     // Проверками без теста задача доказать себя не может: typecheck и lint
     // проходят и на нереализованном коде.
-    if (!task.gates.some((id) => own.some((g) => g.id === id && g.kind === 'test')))
+    if (!gates.some((id) => own.some((g) => g.id === id && g.kind === 'test')))
       throw new DomainError('Область доказательства задачи должна включать test gate');
     for (const link of task.requirements ?? [])
-      if (!task.gates.includes(link.gate))
+      if (!gates.includes(link.gate))
         throw new DomainError('Требование ссылается на проверку вне области задачи: ' + link.gate);
   }
   if (task.scope === 'workspace' && new Set(task.relatedRepositories ?? []).size < 2)

@@ -11,6 +11,7 @@ export function repositories(config: Config): Repository[] {
           path: config.repository,
           targetBranch: config.targetBranch,
           gates: config.gates,
+          ...(config.gateGroups ? { gateGroups: config.gateGroups } : {}),
           lifecycle: config.lifecycle,
           prepare: config.prepare,
           protectedPaths: config.protectedPaths,
@@ -22,6 +23,33 @@ export function repository(config: Config, id = 'main'): Repository {
   const found = repositories(config).find((r) => r.id === id);
   if (!found) throw new DomainError(`Неизвестный репозиторий: ${id}`);
   return found;
+}
+
+/**
+ * Раскрыть область задачи в явный список gates компонента: идентификаторы
+ * gates и ссылки на группы (`@имя`), рекурсивно, без циклов, в порядке первого
+ * появления. Член, которого нет в профиле, и неизвестная группа — отказ.
+ * Без области — весь профиль, как прежде.
+ */
+export function expandGates(repo: Repository, refs?: string[]): string[] {
+  if (!refs?.length) return repo.gates.map((g) => g.id);
+  const out: string[] = [];
+  const visit = (ref: string, path: string[]) => {
+    if (ref.startsWith('@')) {
+      const name = ref.slice(1);
+      if (path.includes(name))
+        throw new DomainError(`Цикл в группах gates: ${[...path, name].join(' → ')}`);
+      const members = repo.gateGroups?.[name];
+      if (!members) throw new DomainError(`Неизвестная группа gates компонента ${repo.id}: ${name}`);
+      for (const member of members) visit(member, [...path, name]);
+      return;
+    }
+    if (!repo.gates.some((g) => g.id === ref))
+      throw new DomainError('Проверка вне профиля компонента: ' + ref);
+    if (!out.includes(ref)) out.push(ref);
+  };
+  for (const ref of refs) visit(ref, []);
+  return out;
 }
 
 export function roleBinding(

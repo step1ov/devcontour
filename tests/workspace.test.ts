@@ -698,6 +698,118 @@ test('A task proves itself with its own gates; the rest of the profile stays req
   }
 });
 
+/** Завершить задачу с PASS ровно по её требуемым gates на обеих фазах. */
+function completeScoped(h: DevContour, id: string) {
+  h.pause(false);
+  const run = h.claim('test')!;
+  assert.equal(run.taskId, id);
+  h.phase(run.id, run.token, 'integrating', {
+    candidateSha: 'candidate',
+    integrationSha: 'merged',
+  });
+  for (const phase of ['candidate', 'integration'] as const) {
+    const sha = phase === 'candidate' ? 'candidate' : 'merged';
+    for (const gate of [...run.requiredGates!, 'independent-review'])
+      h.evidence(run.id, run.token, {
+        kind: gate === 'independent-review' ? 'review' : 'test',
+        phase,
+        sha,
+        gate,
+        passed: true,
+        command: ['fixture'],
+        exitCode: 0,
+        log: 'fixture',
+        digest: 'fixture',
+        summary: 'Scoped fixture',
+      });
+  }
+  h.finish(run.id, run.token, 'merged');
+}
+
+test('G04: board acceptance requires every profile gate to have passed integration in some task of the board', () => {
+  const f = fixture();
+  try {
+    const gate = (id: string) => ({
+      id,
+      kind: 'test' as const,
+      command: ['node', id + '.mjs'],
+      timeoutMs: 60_000,
+      report: { type: 'junit' as const, path: `.reports/${id}.xml` },
+    });
+    f.h.config.gates = [gate('unit'), gate('engine'), gate('nightly')];
+    const b = f.h.createBoard('Coverage');
+    const one = f.h.addTask(b.id, { ...input('Unit part'), gates: ['unit'] });
+    const two = f.h.addTask(b.id, { ...input('Engine part'), gates: ['engine'] });
+    f.h.approve(b.id);
+    completeScoped(f.h, one.id);
+    completeScoped(f.h, two.id);
+    // nightly не прошёл ни в одной задаче: приёмка называет его.
+    assert.throws(
+      () => f.h.accept(b.id, 'merged'),
+      /Полный набор проверок не пройден: main: nightly/,
+    );
+    // Задача, чья область включает непокрытый gate, закрывает пробел.
+    const three = f.h.addTask(b.id, { ...input('Nightly part'), gates: ['nightly'] });
+    f.h.approve(b.id, [three.id]);
+    completeScoped(f.h, three.id);
+    assert.doesNotThrow(() => f.h.accept(b.id, 'merged'));
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('G01: a named gate group is referenced once, expands into an explicit list, rejects cycles and foreign members, and inherits nothing', () => {
+  const f = fixture();
+  try {
+    const gate = (id: string, kind: 'check' | 'test' = 'test') => ({
+      id,
+      kind,
+      command: ['node', id + '.mjs'],
+      timeoutMs: 60_000,
+      ...(kind === 'test'
+        ? { report: { type: 'junit' as const, path: `.reports/${id}.xml` } }
+        : {}),
+    });
+    f.h.config.gates = [gate('typecheck', 'check'), gate('unit'), gate('engine'), gate('nightly')];
+    f.h.config.gateGroups = {
+      regression: ['typecheck', '@core'],
+      core: ['unit', 'engine'],
+      loop: ['@loop2'],
+      loop2: ['@loop'],
+      foreign: ['unit', 'absent'],
+    };
+    const b = f.h.createBoard('Grouped proof');
+    // Группа раскрывается в явный список, записанный в попытке.
+    const grouped = f.h.addTask(b.id, { ...input('Regression'), gates: ['@regression'] });
+    f.h.approve(b.id);
+    f.h.pause(false);
+    const run = f.h.claim('worker')!;
+    assert.equal(run.taskId, grouped.id);
+    assert.deepEqual(run.requiredGates, ['typecheck', 'unit', 'engine']);
+    // Ничего не подключается неявно: nightly не входит ни в одну группу задачи.
+    assert.ok(!run.requiredGates.includes('nightly'));
+    // Цикл, неизвестная группа и член вне профиля — отказ.
+    assert.throws(
+      () => f.h.addTask(b.id, { ...input('Loop'), gates: ['@loop'] }),
+      /Цикл в группах/,
+    );
+    assert.throws(
+      () => f.h.addTask(b.id, { ...input('Unknown'), gates: ['@missing'] }),
+      /Неизвестная группа/,
+    );
+    assert.throws(
+      () => f.h.addTask(b.id, { ...input('Foreign'), gates: ['@foreign'] }),
+      /вне профиля/,
+    );
+    // Определение группы входит в договор исполнения: его смена — другая policy.
+    const before = f.h.policyDigest('main');
+    f.h.config.gateGroups = { ...f.h.config.gateGroups, core: ['unit'] };
+    assert.notEqual(f.h.policyDigest('main'), before);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('Совместная проверка workspace исполняется в той же песочнице, что и проверки задач', async () => {
   // Проверки задач уже шли в песочнице, а общая приёмка — процессом хоста:
   // читала базу контура и писала рядом. Полезное должно работать — снимки

@@ -15,6 +15,7 @@ import {
   roleBinding,
   reviewerBinding,
   requiresContract,
+  expandGates,
 } from './repositories.ts';
 import { Store } from './store.ts';
 import { failureFingerprint, TaskFailure, type FailureKind } from './failure.ts';
@@ -277,6 +278,33 @@ function sourceUnchanged(
 const staleMessage =
   'Процесс работает с устаревшей конфигурацией: контур уже применил другую; перезапустите процесс';
 
+/**
+ * Gates профиля компонентов доски, не прошедшие integration ни в одной её
+ * задаче. Задача, доказывающая себя всем профилем, покрывает его целиком;
+ * пробел возникает, только когда задачи сузили область, — и тогда приёмка
+ * доски его называет. Совместная проверка workspace к этому не относится: её
+ * `workspaceGates` область задачи не сокращает.
+ */
+export function uncoveredGates(config: Config, s: DevContourState, tasks: Task[]) {
+  const result: { repositoryId: string; gates: string[] }[] = [];
+  for (const repositoryId of [...new Set(tasks.map((t) => t.repositoryId))]) {
+    const own = tasks.filter((t) => t.repositoryId === repositoryId);
+    if (!own.some((t) => t.gates?.length)) continue;
+    const covered = new Set(
+      own.flatMap((t) =>
+        taskEvidence(s, t)
+          .filter((e) => e.phase === 'integration' && e.passed && e.gate)
+          .map((e) => e.gate),
+      ),
+    );
+    const missing = repository(config, repositoryId)
+      .gates.map((g) => g.id)
+      .filter((id) => !covered.has(id));
+    if (missing.length) result.push({ repositoryId, gates: missing });
+  }
+  return result;
+}
+
 export class DevContour {
   constructor(
     readonly store: Store,
@@ -475,6 +503,9 @@ export class DevContour {
         ? { repositoryId, path: repo.path, targetBranch: repo.targetBranch }
         : {}),
       gates: repo.gates,
+      // Определение групп входит в договор: изменённая группа — другой набор
+      // проверок задачи, даже если её область не менялась.
+      ...(repo.gateGroups ? { gateGroups: repo.gateGroups } : {}),
       execution: {
         environment: this.config.environment,
         toolProfiles: this.config.toolProfiles,
@@ -745,7 +776,13 @@ export class DevContour {
     validateTaskContext(this.config, t);
     if (requiresContract(this.config, t.role, t.repositoryId) && !t.contracts.length)
       throw new DomainError(`${t.id}: для ${t.role} сначала привяжите утверждённый контракт`);
-    assertTaskProperties(t, s.contracts, repository(this.config, t.repositoryId).gates);
+    // Область задачи — раскрытый список: свойство может проверяться gate из группы.
+    const repo = repository(this.config, t.repositoryId);
+    assertTaskProperties(
+      { ...t, gates: t.gates && expandGates(repo, t.gates) },
+      s.contracts,
+      repo.gates,
+    );
     return Object.fromEntries(
       t.contracts.map((id) => {
         const c = requireValue(
@@ -945,6 +982,13 @@ export class DevContour {
         const unproven = unprovenReason(t.requirements, taskEvidence(s, t), t.resultSha);
         if (unproven) throw new DomainError(unproven);
       }
+      const uncovered = uncoveredGates(this.config, s, tasks);
+      if (uncovered.length)
+        throw new DomainError(
+          'Полный набор проверок не пройден: ' +
+            uncovered.map((u) => `${u.repositoryId}: ${u.gates.join(', ')}`).join('; ') +
+            ' — ни одна задача доски не прошла их на integration. Добавьте задачу, чья область их включает',
+        );
       r.status = 'accepted';
       r.acceptedAt = now();
       r.acceptance = approval;
@@ -1158,7 +1202,8 @@ export class DevContour {
         requiredGates: [
           // Задача доказывает себя своей областью, если она объявлена; иначе —
           // всем профилем, как раньше.
-          ...(t.gates ?? repository(this.config, t.repositoryId).gates.map((g) => g.id)),
+          // Группы раскрыты: в попытке записан явный список.
+          ...expandGates(repository(this.config, t.repositoryId), t.gates),
           ...(t.requirements?.length ? ['requirement-source'] : []),
         ],
         id: randomUUID(),

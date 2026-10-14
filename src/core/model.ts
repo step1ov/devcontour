@@ -39,6 +39,14 @@ export type Role = string;
 export type TaskStatus = (typeof taskStatuses)[number];
 export type RuntimeName = 'codex' | 'claude' | 'demo';
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
+/** Ссылка на gate или на именованную группу gates компонента (`@имя`). */
+const gateRef = z.string().regex(/^@?[A-Za-z0-9_-]{1,80}$/);
+/**
+ * Именованные группы gates компонента: набор объявляется один раз и
+ * подключается к задаче по имени. Члены — gates профиля или другие группы
+ * (`@имя`), без циклов. Ничего не подключается неявно.
+ */
+const gateGroups = z.record(id, z.array(gateRef).min(1).max(100));
 export const relativePath = z
   .string()
   .min(1)
@@ -147,7 +155,7 @@ export const taskInput = z.object({
   // доказательства параллельная декомпозиция упирается в общий набор, где
   // зелёный gate не различает, чьи ожидания закрыты. Полный набор остаётся
   // обязательным для приёмки доски и релиза.
-  gates: z.array(id).max(20).optional(),
+  gates: z.array(gateRef).max(20).optional(),
   /**
    * Область задачи в договоре проверки: свойства, которые эта задача обязана
    * подтвердить сейчас. Остальные свойства договора относятся к зависимостям
@@ -648,6 +656,7 @@ export const repositorySchema = z.object({
     .regex(/^devcontour\/[a-zA-Z0-9/_-]+$/)
     .default('devcontour/accepted'),
   gates: gateList,
+  gateGroups: gateGroups.optional(),
   protectedPaths: z
     .array(z.string().min(1))
     .default(['.github/', '.githooks/', 'package.json', 'package-lock.json']),
@@ -822,6 +831,7 @@ export const configSchema = z.object({
   roles: z.record(roleId, roleBindingSchema),
   reviewer: reviewerBindingSchema,
   gates: gateList,
+  gateGroups: gateGroups.optional(),
   protectedPaths: z
     .array(z.string().min(1))
     .default(['.github/', '.githooks/', 'devcontour.config.json']),

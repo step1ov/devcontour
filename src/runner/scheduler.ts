@@ -23,7 +23,8 @@ import { BlockedError, type Run, type Task, type Evidence, type Gate } from '../
 import { TaskFailure, repairPolicy, type FailureKind } from '../core/failure.ts';
 import { adapters, implementationResult, reviewResult, type AgentAdapter } from './adapters.ts';
 import { git } from './process.ts';
-import { repositories, repository, roleBinding } from '../core/repositories.ts';
+import { expandGates, repositories, repository, roleBinding } from '../core/repositories.ts';
+import type { Repository } from '../core/model.ts';
 import { reserveRepositories } from './ownership.ts';
 import { runGate } from './gates.ts';
 import { isolation } from './isolation.ts';
@@ -40,14 +41,16 @@ import { submitCase, writeSelfCheck } from './checks.ts';
 // соседние: у параллельной декомпозиции красный gate соседа ложится на того,
 // кто к нему не притрагивался. Зависимости по dependsOn покрывают порядок;
 // доказывает задача своё.
-const runGates = (repo: { gates: Gate[] }, task: Task) =>
+const runGates = (repo: Repository, task: Task) =>
   orderedGates(
-    task.gates?.length ? repo.gates.filter((g) => task.gates!.includes(g.id)) : repo.gates,
+    task.gates?.length
+      ? repo.gates.filter((g) => expandGates(repo, task.gates).includes(g.id))
+      : repo.gates,
   );
 
 // Исполнитель с shell проверяет себя сам, до гейтов: теми же командами, что
 // их доказательство, — иначе о провале он узнавал только после попытки.
-const checkYourself = (repo: { gates: Gate[] }, task: Task) =>
+const checkYourself = (repo: Repository, task: Task) =>
   'You have a shell in an OS sandbox limited to this worktree. Before returning, run the checks that prove this task and fix what fails; DevContour still runs the required gates and integration afterwards. Gate commands: ' +
   JSON.stringify(runGates(repo, task).map((g) => ({ id: g.id, command: g.command, cwd: g.cwd })));
 
