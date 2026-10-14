@@ -5,7 +5,12 @@ import { isAbsolute, resolve, dirname, join, sep } from 'node:path';
 import { repositories } from '../core/repositories.ts';
 import { packKey, resolveProfile } from './packs.ts';
 import { configSchema, type Config } from '../core/model.ts';
-import { bytesDigest, configSources } from '../core/service.ts';
+import {
+  bytesDigest,
+  configSources,
+  loadedDigest,
+  type ConfigSourceFile,
+} from '../core/service.ts';
 import { configuredSpellings } from '../core/check-store.ts';
 /**
  * Загрузить конфигурацию. `text` — содержимое `config.json`, если его уже
@@ -15,7 +20,9 @@ import { configuredSpellings } from '../core/check-store.ts';
 export function loadConfig(path: string, text = readFileSync(path, 'utf8')): Config {
   const raw = JSON.parse(text);
   // Хэш ровно тех байтов, что разобраны: главного файла и component config.
-  const sources = [{ path, sha: bytesDigest(text) }];
+  const sources: ConfigSourceFile[] = [
+    { path: resolve(path), real: realpathSync(path), sha: bytesDigest(text) },
+  ];
   if (raw.repositories?.length) {
     raw.repositories = raw.repositories.map((r: any) => readComponentConfig(r, sources));
     raw.gates ??= raw.repositories[0].gates;
@@ -119,18 +126,23 @@ export function loadConfig(path: string, text = readFileSync(path, 'utf8')): Con
   validateWorkflow(c);
   // Источник для проверки поколения: процесс, прочитавший эти байты, позже
   // узнаёт, лежат ли в файлах они же.
-  configSources.set(c, { files: sources });
+  configSources.set(c, { files: sources, digest: loadedDigest(c) });
   return c;
 }
 
-export function readComponentConfig(entry: any, sources?: { path: string; sha: string }[]) {
+export function readComponentConfig(entry: any, sources?: ConfigSourceFile[]) {
   if (!entry.configFile) return entry;
-  const root = realpathSync(resolve(entry.path));
-  const path = realpathSync(resolve(root, entry.configFile));
+  const declared = { path: String(entry.path), file: String(entry.configFile) };
+  const root = realpathSync(resolve(declared.path));
+  const path = realpathSync(resolve(root, declared.file));
   if (!path.startsWith(root + sep))
     throw new Error('Component config должен находиться в репозитории');
   const text = readFileSync(path, 'utf8');
-  sources?.push({ path, sha: bytesDigest(text) });
+  sources?.push({
+    path: resolve(declared.path, declared.file),
+    real: path,
+    sha: bytesDigest(text),
+  });
   const file = JSON.parse(text) as {
     roles?: Record<string, unknown>;
   };

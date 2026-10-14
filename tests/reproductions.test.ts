@@ -1,12 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setupDemo } from '../src/demo.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
 import { loadConfig } from '../src/runner/config.ts';
+
+/** Записать конфигурацию теста в config.json и загрузить её оттуда. */
+function persisted(root: string, config: ReturnType<typeof loadConfig>) {
+  const path = join(root, 'config.json');
+  writeFileSync(path, JSON.stringify(config, null, 2) + '\n');
+  return loadConfig(path);
+}
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { adapters, cliAdapter, type AgentRequest } from '../src/runner/adapters.ts';
 import { ReviewProbes, probeSpec } from '../src/runner/review-probe.ts';
@@ -17,7 +25,9 @@ test('Review reproductions form a deduplicated task registry, observed only thro
   await setupDemo(root);
   const config = loadConfig(join(root, 'config.json'));
   const store = new Store(join(root, 'state.sqlite'));
-  const h = new DevContour(store, config);
+  // Правки конфигурации теста — через файл, как у настоящего запуска: процесс
+  // с конфигурацией, изменённой в памяти, не вправе стать применённой.
+  const h = new DevContour(store, persisted(root, config));
   const requests: AgentRequest[] = [];
   const command = [process.execPath, '-e', 'process.exit(1)'];
   const exhausted = [process.execPath, '-e', 'process.exit(2)'];
@@ -156,7 +166,9 @@ test('Review findings, summary and review.json are masked in every secret form',
     secrets: { SECRET: 'DEVCONTOUR_TEST_REVIEW_SECRET' },
   };
   const store = new Store(join(root, 'state.sqlite'));
-  const h = new DevContour(store, config);
+  // Правки конфигурации теста — через файл, как у настоящего запуска: процесс
+  // с конфигурацией, изменённой в памяти, не вправе стать применённой.
+  const h = new DevContour(store, persisted(root, config));
   const runtimes = {
     ...adapters,
     demo: {
@@ -235,7 +247,9 @@ test('Commands that differ only by a secret are not confused when matching obser
     secrets: { A: 'DEVCONTOUR_TEST_SECRET_A', B: 'DEVCONTOUR_TEST_SECRET_B' },
   };
   const store = new Store(join(root, 'state.sqlite'));
-  const h = new DevContour(store, config);
+  // Правки конфигурации теста — через файл, как у настоящего запуска: процесс
+  // с конфигурацией, изменённой в памяти, не вправе стать применённой.
+  const h = new DevContour(store, persisted(root, config));
   const ran = [process.execPath, '-e', 'process.exit(1)', 'secret-alpha-1123'];
   const notRun = [process.execPath, '-e', 'process.exit(1)', 'secret-bravo-5813'];
   const literalArgv = [process.execPath, '-e', 'process.exit(1)', '[REDACTED]'];
@@ -345,7 +359,9 @@ test('Through the real Codex adapter a short secret neither breaks the run id no
     secrets: { DIGIT: 'DEVCONTOUR_TEST_DIGIT_SECRET' },
   };
   const store = new Store(join(root, 'state.sqlite'));
-  const h = new DevContour(store, config);
+  // Правки конфигурации теста — через файл, как у настоящего запуска: процесс
+  // с конфигурацией, изменённой в памяти, не вправе стать применённой.
+  const h = new DevContour(store, persisted(root, config));
   // Фиктивный codex: запускает проверку через сервер проверок по своей
   // MCP-конфигурации и пишет ответ ревьюера, как настоящий CLI.
   const bin = join(root, 'fake-bin');

@@ -6,12 +6,11 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import fsp from 'node:fs/promises';
 import fs, {
   existsSync,
-  mkdirSync,
   readFileSync,
   renameSync,
   rmSync,
   statSync,
-  utimesSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -21,10 +20,11 @@ import { repositorySchema } from '../src/core/model.ts';
 import { reviewContract, reviewPlan } from '../src/runner/agent-control.ts';
 import { ContractChanges, type ContractChange } from '../src/runner/contract-change.ts';
 import { contractImpact } from '../src/runner/contract-impact.ts';
-import type { AgentAdapter, AgentRequest } from '../src/runner/adapters.ts';
+import { adapters, type AgentAdapter, type AgentRequest } from '../src/runner/adapters.ts';
 import { readyTasks } from '../src/core/graph.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
+import { Scheduler } from '../src/runner/scheduler.ts';
 import { lockContextFile, pinContext, planRepin } from '../src/runner/context.ts';
 import { loadedDigest } from '../src/core/service.ts';
 import { busyWork } from '../src/runner/reconfigure.ts';
@@ -1000,15 +1000,20 @@ test('C-F20/C-F22/C-F23/C-F24: the applied configuration is the only truth; adop
       () => s.store.change('fixture.memory', (st) => memory.assertCurrentConfig(st)),
       /источника нет/,
     );
-    // C-F24: запись своей конфигурации внутри отменённой транзакции не
-    // оставляет ни следа в базе, ни ложной актуальности в процессе.
+    // C-F24: запись своей конфигурации при получении лидерства внутри
+    // отменённой транзакции не оставляет ни следа в базе, ни ложной
+    // актуальности в процессе: после применения B другим процессом он отстал.
+    assert.ok(cli.leader('cli'));
     assert.throws(() =>
       s.store.atomic(() => {
-        s.store.change('fixture.adopt', (st) => cli.assertCurrentConfig(st));
+        cli.recordConfig('cli');
         throw new Error('rollback');
       }),
     );
     assert.deepEqual(s.store.read().appliedConfig, applied);
+    s.store.change('fixture.no-leader-2', (st) => {
+      st.leader = undefined;
+    });
     // C-F23: временно недоступный файл — отказ с причиной; после восстановления
     // — тот же процесс без перезапуска записывает свою конфигурацию.
     renameSync(ctx.path, ctx.path + '.away');
@@ -1038,8 +1043,9 @@ test('C-F25/C-F26/C-F27: adoption checks the bytes that were parsed, not file me
     const ctx = await withContextPack(s);
     const textA = readFileSync(ctx.path, 'utf8');
     const statA = statSync(ctx.path);
-    // Процесс со снимком A, загруженным до применения.
+    // Процесс со снимком A, загруженным до применения; копия A с её mtime.
     const old = open(loadConfig(ctx.path));
+    execFileSync('cp', ['-p', ctx.path, ctx.path + '.a']);
     const { operation } = (await s.changes().start(s.proposal, 'codex')) as {
       operation: ContractChange;
     };
@@ -1047,7 +1053,10 @@ test('C-F25/C-F26/C-F27: adoption checks the bytes that were parsed, not file me
     const applied = s.store.read().appliedConfig!;
     assert.notEqual(readFileSync(ctx.path, 'utf8'), textA, 'в файле B');
     // C-F25: у файла B прежние mtime (как после cp -p) — содержимое всё равно B.
-    utimesSync(ctx.path, statA.atime, statA.mtime);
+    // touch -r переносит mtime с полной точностью; размер у A и B одинаков.
+    execFileSync('touch', ['-r', ctx.path + '.a', ctx.path]);
+    assert.equal(statSync(ctx.path).mtimeMs, statA.mtimeMs);
+    assert.equal(statSync(ctx.path).size, statA.size);
     assert.throws(
       () => s.store.change('fixture.old', (st) => old.assertCurrentConfig(st)),
       /изменился после загрузки/,
@@ -1066,17 +1075,145 @@ test('C-F25/C-F26/C-F27: adoption checks the bytes that were parsed, not file me
       ctx.path,
       JSON.stringify({ ...raw, runTimeoutMs: Number(raw.runTimeoutMs) + 1 }, null, 2) + '\n',
     );
+    // Настоящий scheduler: первый тик не может записать конфигурацию, следующий — записывает.
     const restarted = open(loadConfig(ctx.path));
-    assert.ok(restarted.leader('restarted'));
-    renameSync(ctx.path, ctx.path + '.away');
-    restarted.recordConfig('restarted');
-    assert.deepEqual(s.store.read().appliedConfig, applied);
-    renameSync(ctx.path + '.away', ctx.path);
-    assert.notEqual(s.store.read().appliedConfig?.digest, restarted.configDigest);
-    restarted.recordConfig('restarted');
-    assert.equal(s.store.read().appliedConfig?.digest, restarted.configDigest);
+    restarted.pause(true);
+    const scheduler = new Scheduler(restarted, s.root, { ...adapters, ...reviewers(s.calls) });
+    try {
+      await scheduler.init();
+      renameSync(ctx.path, ctx.path + '.away');
+      await scheduler.tick();
+      assert.deepEqual(s.store.read().appliedConfig, applied);
+      renameSync(ctx.path + '.away', ctx.path);
+      await scheduler.tick();
+      assert.equal(s.store.read().appliedConfig?.digest, loadedDigest(restarted.config));
+    } finally {
+      await scheduler.stop();
+    }
   } finally {
     for (const h of extra) h.store.close();
+    await s.remove();
+  }
+});
+
+test('C-F24: a start record rolled back with its transaction leaves the process stale once the file changes back', async () => {
+  const s = await stage();
+  let edited: DevContour | undefined;
+  try {
+    const ctx = await withContextPack(s);
+    const textB = readFileSync(ctx.path, 'utf8');
+    assert.ok(s.h.leader('server'));
+    s.h.recordConfig('server');
+    s.store.change('fixture.no-leader', (st) => {
+      st.leader = undefined;
+    });
+    const applied = s.store.read().appliedConfig!;
+    // Процесс загрузил правку A'; его запись при получении лидерства откатилась.
+    const raw = JSON.parse(textB) as Record<string, unknown>;
+    writeFileSync(
+      ctx.path,
+      JSON.stringify({ ...raw, runTimeoutMs: Number(raw.runTimeoutMs) + 1 }, null, 2) + '\n',
+    );
+    edited = new DevContour(new Store(join(s.root, 'state.sqlite')), loadConfig(ctx.path));
+    assert.ok(edited.leader('edited'));
+    assert.throws(() =>
+      s.store.atomic(() => {
+        edited!.recordConfig('edited');
+        throw new Error('rollback');
+      }),
+    );
+    assert.deepEqual(s.store.read().appliedConfig, applied);
+    // Файл вернули к применённой конфигурации: правка A' больше не намерение
+    // оператора, процесс с ней отстал и ничего не принимает.
+    writeFileSync(ctx.path, textB);
+    s.store.change('fixture.no-leader-2', (st) => {
+      st.leader = undefined;
+    });
+    assert.throws(
+      () => s.store.change('fixture.accept', (st) => edited!.assertCurrentConfig(st)),
+      /устаревшей конфигурацией/,
+    );
+  } finally {
+    edited?.store.close();
+    await s.remove();
+  }
+});
+
+test('C-F28: a component config reached through a switched symlink does not keep the right to adopt', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'devcontour-component-link-'));
+  const extra: DevContour[] = [];
+  try {
+    const repo = join(root, 'product');
+    await mkdir(repo);
+    // Component config — symlink на файл A внутри репозитория.
+    await writeFile(join(repo, 'component.a.json'), JSON.stringify({ protectedPaths: ['a.txt'] }));
+    await writeFile(join(repo, 'component.b.json'), JSON.stringify({ protectedPaths: ['b.txt'] }));
+    symlinkSync('component.a.json', join(repo, 'devcontour.component.json'));
+    const base = config();
+    const path = join(root, 'config.json');
+    await writeFile(
+      path,
+      JSON.stringify({
+        ...base,
+        repository: repo,
+        repositories: [
+          repositorySchema.parse({
+            id: 'product',
+            name: 'Product',
+            path: repo,
+            configFile: 'devcontour.component.json',
+            gates: base.gates,
+          }),
+        ],
+      }),
+    );
+    const store = () => new Store(join(root, 'state.sqlite'));
+    const viaLink = new DevContour(store(), loadConfig(path));
+    extra.push(viaLink);
+    // Ссылка переключена на B; файл A цел. Процесс, загрузивший B, применил её.
+    rmSync(join(repo, 'devcontour.component.json'));
+    symlinkSync('component.b.json', join(repo, 'devcontour.component.json'));
+    const b = new DevContour(store(), loadConfig(path));
+    extra.push(b);
+    assert.ok(b.leader('b'));
+    b.recordConfig('b');
+    b.store.change('fixture.no-leader', (st) => {
+      st.leader = undefined;
+    });
+    const applied = b.store.read().appliedConfig;
+    assert.throws(
+      () => viaLink.store.change('fixture.link', (st) => viaLink.assertCurrentConfig(st)),
+      /теперь ведёт к другому файлу/,
+    );
+    assert.deepEqual(b.store.read().appliedConfig, applied);
+  } finally {
+    for (const h of extra) h.store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('C-F30: a configuration edited in memory after loading does not keep the right to adopt', async () => {
+  const s = await stage();
+  let edited: DevContour | undefined;
+  try {
+    const ctx = await withContextPack(s);
+    assert.ok(s.h.leader('server'));
+    s.h.recordConfig('server');
+    s.store.change('fixture.no-leader', (st) => {
+      st.leader = undefined;
+    });
+    const applied = s.store.read().appliedConfig;
+    // Объект, загруженный из неизменного файла, изменили на месте.
+    const loaded = loadConfig(ctx.path);
+    loaded.runTimeoutMs += 2;
+    edited = new DevContour(new Store(join(s.root, 'state.sqlite')), loaded);
+    assert.throws(
+      () => s.store.change('fixture.memory', (st) => edited!.assertCurrentConfig(st)),
+      /изменена в памяти/,
+    );
+    assert.deepEqual(s.store.read().appliedConfig, applied);
+  } finally {
+    edited?.store.close();
     await s.remove();
   }
 });

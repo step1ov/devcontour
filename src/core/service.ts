@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import {
   developmentBinding,
   assertFeatureOf,
@@ -227,23 +227,45 @@ function assertNotAccepted(s: DevContourState, t: Task) {
  */
 export const loadedDigest = (config: Config) => digest(config);
 /**
- * Откуда конфигурация загружена: файлы (`config.json` и component config) и
- * хэш именно тех байтов, которые загрузчик разобрал. Ставит `loadConfig`;
- * конфигурации, собранные в памяти, источника не имеют.
+ * Откуда конфигурация загружена: файлы (`config.json` и component config) —
+ * путь в том виде, как его задали, разрешённая при загрузке цель и хэш именно
+ * тех байтов, которые загрузчик разобрал, — и digest самой конфигурации в
+ * момент загрузки. Ставит `loadConfig`; конфигурации, собранные в памяти,
+ * источника не имеют.
  */
-export const configSources = new WeakMap<Config, { files: { path: string; sha: string }[] }>();
+export type ConfigSourceFile = { path: string; real: string; sha: string };
+export const configSources = new WeakMap<Config, { files: ConfigSourceFile[]; digest: string }>();
 export const bytesDigest = (text: string) => createHash('sha256').update(text).digest('hex');
 /**
  * Файлы, из которых загружена конфигурация, сейчас содержат ровно те байты,
  * что разобрал загрузчик. Сверяется содержимое, а не mtime и размер: их
  * сохраняют копирование и перезапись тем же размером.
  */
-function sourceUnchanged(config: Config): { ok: true } | { ok: false; reason: string } {
+/**
+ * Происхождение конфигурации процесса: источник, если объект при создании
+ * процесса (или при `reconfigure`) совпадал со своим digest на момент
+ * загрузки; иначе — причина, почему его нет. Фиксируется один раз: процесс
+ * свою конфигурацию в памяти не меняет, а актуальность сверяется по digest,
+ * снятому тогда же.
+ */
+function provenanceOf(config: Config): ConfigSource | string {
   const source = configSources.get(config);
-  if (!source) return { ok: false, reason: 'конфигурация собрана в памяти, источника нет' };
-  for (const file of source.files) {
+  if (!source) return 'конфигурация собрана в памяти, источника нет';
+  if (loadedDigest(config) !== source.digest)
+    return 'конфигурация изменена в памяти после загрузки';
+  return source;
+}
+type ConfigSource = { files: ConfigSourceFile[]; digest: string };
+function sourceUnchanged(
+  provenance: ConfigSource | string,
+): { ok: true } | { ok: false; reason: string } {
+  if (typeof provenance === 'string') return { ok: false, reason: provenance };
+  for (const file of provenance.files) {
     try {
-      if (bytesDigest(readFileSync(file.path, 'utf8')) !== file.sha)
+      // Путь разрешается заново: переключённый symlink ведёт к другому файлу.
+      if (realpathSync(file.path) !== file.real)
+        return { ok: false, reason: `путь ${file.path} теперь ведёт к другому файлу` };
+      if (bytesDigest(readFileSync(file.real, 'utf8')) !== file.sha)
         return { ok: false, reason: `файл ${file.path} изменился после загрузки` };
     } catch (error) {
       return { ok: false, reason: `файл ${file.path} не читается: ${String(error)}` };
@@ -262,6 +284,7 @@ export class DevContour {
   ) {
     validateWorkflow(config);
     this.knownConfig = loadedDigest(config);
+    this.provenance = provenanceOf(config);
   }
   /**
    * Применённая конфигурация в базе — единственный источник правды; у
@@ -274,6 +297,7 @@ export class DevContour {
    * имеет. Ошибка чтения файла не запоминается: следующая проверка повторит её.
    */
   private knownConfig: string;
+  private provenance: ConfigSource | string;
   /** Digest конфигурации этого процесса. */
   get configDigest() {
     return this.knownConfig;
@@ -285,7 +309,7 @@ export class DevContour {
     const leader = s.leader && s.leader.leaseUntil > Date.now() ? s.leader.owner : undefined;
     if (leader && leader !== this.ownLeader)
       return { ok: false, reason: `работает controller ${leader} с другой конфигурацией` };
-    return sourceUnchanged(this.config);
+    return sourceUnchanged(this.provenance);
   }
   private adoptConfig(s: DevContourState, by: string) {
     s.appliedConfig = {
@@ -326,6 +350,7 @@ export class DevContour {
     validateWorkflow(next);
     this.config = next;
     this.knownConfig = loadedDigest(next);
+    this.provenance = provenanceOf(next);
   }
   /**
    * Пауза операции: ставится, только если очередь не остановлена, и
