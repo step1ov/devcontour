@@ -40,7 +40,8 @@ export function expandGates(repo: Repository, refs?: string[]): string[] {
       if (path.includes(name))
         throw new DomainError(`Цикл в группах gates: ${[...path, name].join(' → ')}`);
       const members = repo.gateGroups?.[name];
-      if (!members) throw new DomainError(`Неизвестная группа gates компонента ${repo.id}: ${name}`);
+      if (!members)
+        throw new DomainError(`Неизвестная группа gates компонента ${repo.id}: ${name}`);
       for (const member of members) visit(member, [...path, name]);
       return;
     }
@@ -50,6 +51,17 @@ export function expandGates(repo: Repository, refs?: string[]): string[] {
   };
   for (const ref of refs) visit(ref, []);
   return out;
+}
+
+/** Компонент `consumer` зависит от `provider` по `dependsOn`, прямо или транзитивно. */
+export function dependsOnRepository(config: Config, consumer: string, provider: string) {
+  const seen = new Set<string>();
+  const visit = (id: string): boolean => {
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return (repository(config, id).dependsOn ?? []).some((p) => p === provider || visit(p));
+  };
+  return visit(consumer);
 }
 
 export function roleBinding(

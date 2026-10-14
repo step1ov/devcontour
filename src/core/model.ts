@@ -157,6 +157,16 @@ export const taskInput = z.object({
   // обязательным для приёмки доски и релиза.
   gates: z.array(gateRef).max(20).optional(),
   /**
+   * Явная область проверок потребителей: компоненты, которые зависят от
+   * компонента задачи, и их gates или группы. Они выполняются на integration
+   * задачи против её интегрированного результата. Без объявления потребители
+   * не проверяются — ничего не подключается неявно.
+   */
+  consumers: z
+    .array(z.object({ repositoryId: id, gates: z.array(gateRef).min(1).max(20) }))
+    .max(10)
+    .optional(),
+  /**
    * Область задачи в договоре проверки: свойства, которые эта задача обязана
    * подтвердить сейчас. Остальные свойства договора относятся к зависимостям
    * или следующим задачам. Нет поля — прежний договор: механизм для задачи
@@ -284,6 +294,8 @@ export interface Contract {
   approval?: Approval;
 }
 export interface Evidence {
+  /** Проверка потребителя: компонент, в рабочем дереве которого она выполнена. */
+  consumer?: string;
   inspection?: ReviewInspection;
   id: string;
   runId: string;
@@ -376,6 +388,8 @@ export interface Run {
     outcome?: 'passed' | 'failed';
   }[];
   requiredGates?: string[];
+  /** Проверки потребителей попытки — раскрытые списки; требуются на integration. */
+  consumers?: { repositoryId: string; gates: string[] }[];
   /**
    * Версия проверок, под которой выдана попытка: закреплена при claim и не
    * меняется до её конца. Принятие новой версии корпуса ждёт окончания.
@@ -667,6 +681,8 @@ export const workspaceGateSchema = gateList.element.extend({
   artifacts: z.array(z.string().min(1)).default([]),
 });
 export interface WorkspaceEvidence {
+  /** Сколько выполнялся gate совместной проверки; нет у прежних записей. */
+  durationMs?: number;
   gate: string;
   passed: boolean;
   command: string[];

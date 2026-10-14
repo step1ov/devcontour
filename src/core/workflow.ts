@@ -15,6 +15,7 @@ import {
   reviewerBinding,
   declaredRoles,
   expandGates,
+  dependsOnRepository,
 } from './repositories.ts';
 
 export function orderedGates<T extends Gate>(gates: T[]): T[] {
@@ -205,6 +206,18 @@ export function validateTaskContext(config: Config, task: TaskInput) {
     for (const link of task.requirements ?? [])
       if (!gates.includes(link.gate))
         throw new DomainError('Требование ссылается на проверку вне области задачи: ' + link.gate);
+  }
+  for (const consumer of task.consumers ?? []) {
+    if (consumer.repositoryId === task.repositoryId)
+      throw new DomainError('Потребитель — другой компонент, а не компонент задачи');
+    const repo = repository(config, consumer.repositoryId);
+    if (!dependsOnRepository(config, consumer.repositoryId, task.repositoryId))
+      throw new DomainError(
+        `Компонент ${consumer.repositoryId} не зависит от ${task.repositoryId}: он не потребитель`,
+      );
+    const gates = expandGates(repo, consumer.gates);
+    if (!gates.some((id) => repo.gates.some((g) => g.id === id && g.kind === 'test')))
+      throw new DomainError(`Проверки потребителя ${repo.id} должны включать test gate`);
   }
   if (task.scope === 'workspace' && new Set(task.relatedRepositories ?? []).size < 2)
     throw new DomainError('Общая задача должна затрагивать минимум два компонента');

@@ -321,7 +321,12 @@ export async function runCheck(
 /** Проверка механизма песочницы; тест подменяет её, чтобы проверить отказ. */
 export const isolationBackend = { check: isolationSupport };
 export async function runGate(...args: Parameters<typeof executeGate>) {
-  return timed(args[0], args[1], `${args[4]}-test:${args[5].id}`, () => executeGate(...args));
+  // Проверки потребителя — отдельный этап: их время не смешивается с
+  // собственными gates задачи в метриках области.
+  const stage = args[9]
+    ? `${args[4]}-consumer:${args[9]}:${args[5].id}`
+    : `${args[4]}-test:${args[5].id}`;
+  return timed(args[0], args[1], stage, () => executeGate(...args));
 }
 /**
  * Хосты, в сети к которым проверке, по всей видимости, отказала песочница.
@@ -359,7 +364,13 @@ async function executeGate(
   signal: AbortSignal,
   /** Закрытое проверке (база, рабочие каталоги, исходные checkout) и открытое внутри. */
   boundary: { hidden: string[]; readable: string[] } = { hidden: [], readable: [] },
+  /** Проверка потребителя: компонент, в рабочем дереве которого она выполняется. */
+  consumer?: string,
 ) {
+  // Рабочее дерево собственного gate стоит на проверяемом SHA; у проверки
+  // потребителя дерево — его голова, а evidence относится к интегрированному
+  // результату задачи. HEAD не должен меняться в обоих случаях.
+  const expectedHead = consumer ? await git(cwd, 'rev-parse', 'HEAD') : sha;
   const gateCwd = gate.cwd ? await realpath(resolve(cwd, gate.cwd)) : await realpath(cwd);
   if (gateCwd !== (await realpath(cwd)) && !gateCwd.startsWith((await realpath(cwd)) + sep))
     throw new Error('Gate cwd выходит из worktree');
@@ -492,7 +503,8 @@ async function executeGate(
       );
     } else summary = 'Команда завершилась успешно';
     await assertDependencies(run.dependencies ?? []);
-    if ((await git(cwd, 'rev-parse', 'HEAD')) !== sha) throw new Error('Gate изменил HEAD');
+    if ((await git(cwd, 'rev-parse', 'HEAD')) !== expectedHead)
+      throw new Error('Gate изменил HEAD');
     if (await git(cwd, 'status', '--porcelain', '--untracked-files=no'))
       throw new Error('Gate изменил отслеживаемые файлы');
     passed = true;
@@ -617,6 +629,7 @@ async function executeGate(
     phase,
     sha,
     gate: gate.id,
+    ...(consumer ? { consumer } : {}),
     passed,
     command: gate.command.map(mask),
     exitCode,
@@ -648,9 +661,13 @@ async function executeGate(
       ...(report?.corpus?.failed.map((c) => c.property) ?? []),
     ];
     const declared = new Set(expected?.properties.map((p) => p.id) ?? []);
-    throw new TaskFailure(kind, `${phase}/${gate.id}: ${evidence.summary}`, {
-      bound: [...new Set(failing.filter((id) => declared.has(id)))],
-      unbound: [...new Set(failing.filter((id) => !declared.has(id)))],
-    });
+    throw new TaskFailure(
+      kind,
+      `${phase}/${consumer ? consumer + ':' : ''}${gate.id}: ${evidence.summary}`,
+      {
+        bound: [...new Set(failing.filter((id) => declared.has(id)))],
+        unbound: [...new Set(failing.filter((id) => !declared.has(id)))],
+      },
+    );
   }
 }

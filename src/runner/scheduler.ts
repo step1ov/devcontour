@@ -5,8 +5,14 @@ import { unobservedReview } from '../core/review.ts';
 import { composeRedactors, redactDeep } from './redaction.ts';
 import { timed } from './timing.ts';
 import { assertRequirements, recordRequirements } from './requirements.ts';
-import { snapshotDependencies, assertDependencies, runEnvironment } from './dependencies.ts';
-import { runSteps, withEnvironment } from './environment.ts';
+import {
+  snapshotDependencies,
+  assertDependencies,
+  runEnvironment,
+  artifactDigest,
+} from './dependencies.ts';
+import { executionEnvironment, runSteps, withEnvironment } from './environment.ts';
+import type { DependencySnapshot } from '../core/integrations.ts';
 import { toolProfileFor, agentEnvironment, reviewerRunsChecks, writerRunsChecks } from './tools.ts';
 import { probeCommand, probeLimits, type ProbeSpec } from './review-probe.ts';
 import { orderedGates, withinPaths, validateWorkflow } from '../core/workflow.ts';
@@ -139,6 +145,83 @@ export class Scheduler {
    * а не в чужом рабочем дереве. Открыт только `.git` репозиториев: linked
    * worktree читает из него объекты и refs.
    */
+  /**
+   * Проверки потребителей задачи — на integration, в рабочем дереве каждого
+   * объявленного потребителя на голове его целевой ветки. Компонент задачи
+   * подставлен рабочим деревом integration (её интегрированным результатом),
+   * его dependencyBuild выполнен там же; прочие зависимости потребителя — снимок
+   * их целевых веток. Evidence несёт компонент потребителя.
+   */
+  private async runConsumers(run: Run, task: Task, cwd: string, sha: string, signal: AbortSignal) {
+    const provider = repository(this.h.config, task.repositoryId);
+    const root = this.runRoot(task.repositoryId);
+    for (const consumer of run.consumers ?? []) {
+      signal.throwIfAborted();
+      const repo = repository(this.h.config, consumer.repositoryId);
+      const dir = join(root, 'consumers', run.id, repo.id);
+      await mkdir(join(root, 'consumers', run.id), { recursive: true });
+      await git(repo.path, 'worktree', 'add', '--detach', dir, `refs/heads/${repo.targetBranch}`);
+      let others: DependencySnapshot[] = [];
+      try {
+        // Снимок прочих зависимостей потребителя — в своём каталоге на каждый
+        // запуск; после проверки его рабочие деревья убираются.
+        others = await snapshotDependencies(
+          this.h.config,
+          root,
+          { ...run, id: `${run.id}-consumer-${repo.id}-${randomUUID().slice(0, 8)}` },
+          { ...task, repositoryId: repo.id, dependsOn: [] },
+          this.h.store.read().tasks,
+          signal,
+        );
+        const integrated: DependencySnapshot = {
+          repositoryId: provider.id,
+          sha,
+          tree: await git(cwd, 'rev-parse', 'HEAD^{tree}'),
+          path: cwd,
+          artifacts: [],
+        };
+        const dependencies = [...others.filter((d) => d.repositoryId !== provider.id), integrated];
+        await runSteps(
+          provider.dependencyBuild ?? [],
+          cwd,
+          join(root, 'artifacts', run.id, 'consumer-build', repo.id),
+          executionEnvironment([this.h.config.environment, provider.environment], {
+            DEVCONTOUR_RUN_ID: run.id,
+            DEVCONTOUR_COMPONENTS_JSON: JSON.stringify(
+              Object.fromEntries(dependencies.map((d) => [d.repositoryId, d.path])),
+            ),
+          }),
+          signal,
+        );
+        for (const path of provider.dependencyArtifacts ?? [])
+          integrated.artifacts.push({ path, digest: await artifactDigest(cwd, path) });
+        const view: Run = { ...run, repositoryId: repo.id, dependencies };
+        for (const gate of orderedGates(repo.gates.filter((g) => consumer.gates.includes(g.id))))
+          await runGate(
+            this.h,
+            view,
+            dir,
+            sha,
+            'integration',
+            gate,
+            join(root, 'artifacts', run.id, 'integration', 'consumer', repo.id),
+            signal,
+            this.boundary(repo.id),
+            repo.id,
+          );
+      } finally {
+        await git(repo.path, 'worktree', 'remove', '--force', dir).catch(() => undefined);
+        for (const snapshot of others)
+          await git(
+            repository(this.h.config, snapshot.repositoryId).path,
+            'worktree',
+            'remove',
+            '--force',
+            snapshot.path,
+          ).catch(() => undefined);
+      }
+    }
+  }
   boundary(repositoryId = 'main') {
     const repos = repositories(this.h.config);
     return {
@@ -1345,13 +1428,16 @@ export class Scheduler {
             signal,
             this.boundary(task.repositoryId),
           );
+        await this.runConsumers(run, task, cwd, sha, signal);
         recordRequirements(this.h, run, task, cwd, sha, 'integration');
         rearm();
         await this.review(this.runtimes[run.reviewer], run, task, cwd, sha, 'integration', signal);
       },
       (stage, action) => timed(this.h, run, 'integration-environment:' + stage, action),
     );
-    await assertDependencies(run.dependencies ?? []);
+    // Перед завершением — и свежесть: результат, проверенный на сдвинувшейся
+    // версии зависимости, не принимается.
+    await assertDependencies(run.dependencies ?? [], this.h.config);
     if (
       (await git(cwd, 'rev-parse', 'HEAD')) !== sha ||
       (await git(cwd, 'status', '--porcelain', '--untracked-files=no'))

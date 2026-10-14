@@ -27,6 +27,8 @@ export const receiptSchema = z.strictObject({
         phase: z.enum(['candidate', 'integration']),
         sha,
         gate: syncId,
+        /** Проверка потребителя: компонент, в рабочем дереве которого она выполнена. */
+        consumer: syncId.optional(),
         passed: z.boolean(),
         exitCode: z.number().int(),
         digest: hash,
@@ -67,6 +69,29 @@ export const receiptSchema = z.strictObject({
       }),
     )
     .min(4),
+  /** Проверки потребителей попытки: раскрытые списки gates по компонентам. */
+  consumers: z
+    .array(z.strictObject({ repositoryId: syncId, gates: z.array(syncId).min(1).max(100) }))
+    .max(10)
+    .optional(),
+  /**
+   * Снимок зависимостей, на котором проверен результат: компонент, SHA, tree
+   * и digest артефактов. Нет поля — receipt прежнего формата или задача без
+   * зависимостей.
+   */
+  dependencies: z
+    .array(
+      z.strictObject({
+        repositoryId: syncId,
+        sha,
+        tree: sha,
+        artifacts: z
+          .array(z.strictObject({ path: z.string().min(1).max(500), digest: hash }))
+          .max(100),
+      }),
+    )
+    .max(50)
+    .optional(),
   /**
    * Действующая версия проверок попытки и принятый ею корпус. Нет поля —
    * receipt прежнего формата: читается с прежней гарантией.

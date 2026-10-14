@@ -1206,6 +1206,14 @@ export class DevContour {
           ...expandGates(repository(this.config, t.repositoryId), t.gates),
           ...(t.requirements?.length ? ['requirement-source'] : []),
         ],
+        ...(t.consumers?.length
+          ? {
+              consumers: t.consumers.map((c) => ({
+                repositoryId: c.repositoryId,
+                gates: expandGates(repository(this.config, c.repositoryId), c.gates),
+              })),
+            }
+          : {}),
         id: randomUUID(),
         taskId: t.id,
         repositoryId: t.repositoryId,
@@ -1423,13 +1431,22 @@ export class DevContour {
       // попытка: новый корпус, принятый задачей, требует новой попытки.
       if (r.checks && effectiveChecks(t, this.policyDigest(t.repositoryId)) !== r.checks.effective)
         throw new DomainError('Версия проверок задачи изменилась; нужна новая попытка');
-      const last = (kind: Evidence['kind'], phase: Evidence['phase'], sha: string, gate: string) =>
+      // Evidence потребителя закрывает только проверку потребителя: его gate
+      // `unit` — не собственный `unit` задачи.
+      const last = (
+        kind: Evidence['kind'],
+        phase: Evidence['phase'],
+        sha: string,
+        gate: string,
+        consumer?: string,
+      ) =>
         r.evidence.findLast(
           (e) =>
             e.kind === kind &&
             e.phase === phase &&
             e.sha === sha &&
             e.gate === gate &&
+            e.consumer === consumer &&
             (!r.checks || e.checks === r.checks.effective),
         )?.passed === true;
       // Доказательства требуются по области доказательства прогона — той же,
@@ -1449,6 +1466,14 @@ export class DevContour {
           !last('review', phase, phase === 'candidate' ? r.candidateSha : sha, 'independent-review')
         )
           throw new DomainError(`Нет независимого ревью: ${phase}`);
+      // Проверки потребителей — на integration, против интегрированного
+      // результата задачи.
+      for (const consumer of r.consumers ?? [])
+        for (const gate of consumer.gates)
+          if (!last('test', 'integration', sha, gate, consumer.repositoryId))
+            throw new DomainError(
+              `Нет PASS проверки потребителя: ${consumer.repositoryId}/${gate}`,
+            );
       // Названный сценарий предъявляется до публикации: опубликованный
       // результат сразу становится входом зависимых задач, и отказ при
       // приёмке доски был бы уже поздним. Задачи без testId проходят на

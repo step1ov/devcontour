@@ -2789,7 +2789,7 @@
                       "type": "array",
                       "items": {
                         "type": "string",
-                        "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                        "pattern": "^@?[A-Za-z0-9_-]{1,80}$"
                       }
                     },
                     "properties": {
@@ -3103,7 +3103,33 @@
                 "type": "array",
                 "items": {
                   "type": "string",
-                  "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                  "pattern": "^@?[A-Za-z0-9_-]{1,80}$"
+                }
+              },
+              "consumers": {
+                "maxItems": 10,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "repositoryId": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                    },
+                    "gates": {
+                      "minItems": 1,
+                      "maxItems": 20,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "pattern": "^@?[A-Za-z0-9_-]{1,80}$"
+                      }
+                    }
+                  },
+                  "required": [
+                    "repositoryId",
+                    "gates"
+                  ]
                 }
               },
               "properties": {
@@ -3409,7 +3435,33 @@
                 "type": "array",
                 "items": {
                   "type": "string",
-                  "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                  "pattern": "^@?[A-Za-z0-9_-]{1,80}$"
+                }
+              },
+              "consumers": {
+                "maxItems": 10,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "repositoryId": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                    },
+                    "gates": {
+                      "minItems": 1,
+                      "maxItems": 20,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "pattern": "^@?[A-Za-z0-9_-]{1,80}$"
+                      }
+                    }
+                  },
+                  "required": [
+                    "repositoryId",
+                    "gates"
+                  ]
                 }
               },
               "properties": {

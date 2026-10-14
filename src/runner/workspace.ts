@@ -136,6 +136,8 @@ export class WorkspaceRunner {
                   exitCode = -1,
                   summary = '';
                 const artifacts: WorkspaceEvidence['artifacts'] = [];
+                // Расход совместной проверки — по каждому gate.
+                const startedAt = Date.now();
                 // Окружение и маска gate — одни на исполнение и на сохранение.
                 // Окружение строится внутри try: незаданный секрет — отказ gate
                 // с evidence, а не исключение до записи доказательства.
@@ -225,6 +227,7 @@ export class WorkspaceRunner {
                   digest: digest(log),
                   summary: redact(summary),
                   artifacts,
+                  durationMs: Date.now() - startedAt,
                 };
                 w.evidence(id, run.token, evidence);
                 if (!passed) throw new Error(evidence.summary);

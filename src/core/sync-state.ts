@@ -3,7 +3,7 @@ import { validatePreparation } from './preparation.ts';
 import { contractDigest, digest, specDigest, type DevContour } from './service.ts';
 import { effectiveChecks, obligationOf } from './checks.ts';
 import { CheckCorpus, localRoots, portableSuite, type PortableSuite } from './check-store.ts';
-import { repository, requiresContract } from './repositories.ts';
+import { expandGates, repository, requiresContract } from './repositories.ts';
 import { assertDag } from './graph.ts';
 import { validateTaskContext } from './workflow.ts';
 import {
@@ -84,6 +84,7 @@ export function completion(h: DevContour, s: DevContourState, t: Task): Completi
         phase,
         sha,
         gate,
+        consumer,
         passed,
         exitCode,
         digest,
@@ -96,6 +97,7 @@ export function completion(h: DevContour, s: DevContourState, t: Task): Completi
         phase,
         sha,
         gate,
+        ...(consumer ? { consumer } : {}),
         passed,
         exitCode,
         digest,
@@ -115,6 +117,17 @@ export function completion(h: DevContour, s: DevContourState, t: Task): Completi
           : {}),
       }),
     ),
+    ...(run.consumers?.length ? { consumers: run.consumers } : {}),
+    ...(run.dependencies?.length
+      ? {
+          dependencies: run.dependencies.map((d) => ({
+            repositoryId: d.repositoryId,
+            sha: d.sha,
+            tree: d.tree,
+            artifacts: d.artifacts,
+          })),
+        }
+      : {}),
     ...(run.checks
       ? {
           checkVersion: {
@@ -238,6 +251,8 @@ export function validateReceipt(
   suites: (id: string) => PortableSuite | undefined = () => undefined,
   /** Контракты состояния: по ним находятся гейты объявленных свойств задачи. */
   contracts: Contract[] = [],
+  /** Раскрытие области потребителя в этом клоне: какие gates обязательны. */
+  consumerGates: (repositoryId: string, refs: string[]) => string[] = (_r, refs) => refs,
 ) {
   if (
     receipt.taskId !== t.id ||
@@ -259,12 +274,19 @@ export function validateReceipt(
   if (receipt.checks.some((c) => (c.kind === 'review') !== (c.gate === 'independent-review')))
     throw new Error(`Receipt ${t.id}: вид проверки не соответствует гейту`);
   // Решающая запись проверки — одна и та же для PASS, версии и манифеста.
-  const decisive = (kind: 'test' | 'review', phase: 'candidate' | 'integration', gate: string) =>
+  // Запись потребителя закрывает только проверку потребителя.
+  const decisive = (
+    kind: 'test' | 'review',
+    phase: 'candidate' | 'integration',
+    gate: string,
+    consumer?: string,
+  ) =>
     receipt.checks.findLast(
       (c) =>
         c.kind === kind &&
         c.phase === phase &&
         c.gate === gate &&
+        c.consumer === consumer &&
         c.sha === (phase === 'candidate' ? receipt.candidateSha : receipt.resultSha),
     );
   // Гейты объявленных свойств задачи обязательны независимо от содержимого
@@ -288,6 +310,18 @@ export function validateReceipt(
       if (!check?.passed || check.exitCode !== 0)
         throw new Error(`Нет PASS в receipt ${t.id}: ${phase}/${gate}`);
     }
+  // Объявленные задачей потребители проверены на integration тем же
+  // составом, что даёт её постановка; receipt не может их опустить.
+  for (const consumer of t.consumers ?? []) {
+    const recorded = receipt.consumers?.find((c) => c.repositoryId === consumer.repositoryId);
+    if (!recorded)
+      throw new Error(`Receipt ${t.id}: нет проверок потребителя ${consumer.repositoryId}`);
+    for (const gate of consumerGates(consumer.repositoryId, consumer.gates)) {
+      const check = decisive('test', 'integration', gate, consumer.repositoryId);
+      if (!check?.passed || check.exitCode !== 0)
+        throw new Error(`Нет PASS в receipt ${t.id}: integration/${consumer.repositoryId}:${gate}`);
+    }
+  }
   // Названный сценарий подтверждается и в чужом receipt по тому же правилу,
   // что при локальном finish: иначе импортированная задача становилась done и
   // открывала зависимые, хотя её manifest прямо не содержит нужного теста.
@@ -499,6 +533,7 @@ export function stateFromRecords(
             return found?.record.kind === 'check' ? found.record.data : undefined;
           },
           s.contracts,
+          (repositoryId, refs) => expandGates(repository(h.config, repositoryId), refs),
         );
         // Принятая задача закреплена за той версией корпуса, под которой её
         // проверили: другая привязка в записи — подмена.

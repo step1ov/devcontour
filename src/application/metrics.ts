@@ -1,5 +1,5 @@
 import { usageTotals, type UsageRecord } from '../core/usage.ts';
-import type { DevContour } from '../core/service.ts';
+import { uncoveredGates, type DevContour } from '../core/service.ts';
 import type { AuditEvent, Run, Task } from '../core/model.ts';
 import { CheckCorpus } from '../core/check-store.ts';
 import { repository } from '../core/repositories.ts';
@@ -229,6 +229,85 @@ function feedbackMetrics(
   };
 }
 
+const median = (values: number[]) => {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+};
+
+/**
+ * Расход выбранной области gates и покрытие профиля. Время gate попытки — по
+ * её таймингам (`<фаза>-test:<gate>`); оценка полного набора добавляет к
+ * фактическому времени попытки медианы прошлых прогонов не выбранных gates
+ * профиля на обеих фазах. Gate без истории не оценивается и назван отдельно.
+ * Совместная проверка — по длительности её evidence. Покрытие — gates
+ * профиля, не прошедшие integration ни в одной задаче незакрытой доски.
+ */
+export function gateScopeMetrics(h: DevContour, runs: Run[], tasks: Task[]) {
+  const s = h.store.read();
+  const samples = new Map<string, number[]>();
+  const perRun = runs.map((r) => {
+    let selectedMs = 0;
+    for (const t of r.timings ?? []) {
+      const match = /^(candidate|integration)-test:(.+)$/.exec(t.stage);
+      if (!match || !t.finishedAt) continue;
+      const ms = Date.parse(t.finishedAt) - Date.parse(t.startedAt);
+      selectedMs += ms;
+      samples.set(match[2], [...(samples.get(match[2]) ?? []), ms]);
+    }
+    return { run: r, selectedMs };
+  });
+  let selectedMs = 0,
+    fullEstimateMs = 0;
+  const unestimated = new Set<string>();
+  for (const { run, selectedMs: ms } of perRun) {
+    if (!run.requiredGates) continue;
+    selectedMs += ms;
+    fullEstimateMs += ms;
+    const profile = repository(h.config, run.repositoryId ?? 'main').gates.map((g) => g.id);
+    for (const gate of profile.filter((g) => !run.requiredGates!.includes(g))) {
+      const m = median(samples.get(gate) ?? []);
+      if (m === null) unestimated.add(gate);
+      else fullEstimateMs += 2 * m;
+    }
+  }
+  const workspace = new Map<string, number[]>();
+  for (const c of s.changeSets)
+    for (const v of c.verifications)
+      for (const e of v.evidence)
+        if (typeof e.durationMs === 'number')
+          workspace.set(e.gate, [...(workspace.get(e.gate) ?? []), e.durationMs]);
+  const openBoards = s.boards.filter((b) => b.revisions.at(-1)?.status === 'active');
+  const coverage = openBoards
+    .map((b) => {
+      const own = b.revisions
+        .at(-1)!
+        .taskIds.map((id) => tasks.find((t) => t.id === id))
+        .filter((t): t is Task => !!t && t.status === 'done');
+      return { boardId: b.id, uncovered: uncoveredGates(h.config, s, own) };
+    })
+    .filter((b) => b.uncovered.length);
+  return {
+    attempts: {
+      selectedMs,
+      fullEstimateMs,
+      savedEstimateMs: fullEstimateMs - selectedMs,
+      unestimatedGates: [...unestimated].sort(),
+    },
+    workspace: {
+      totalMs: [...workspace.values()].flat().reduce((a, b) => a + b, 0),
+      byGate: Object.fromEntries(
+        [...workspace].map(([gate, values]) => [
+          gate,
+          { runs: values.length, medianMs: median(values) },
+        ]),
+      ),
+    },
+    coverage,
+  };
+}
+
 export function workflowMetrics(
   h: DevContour,
   repositoryId?: string,
@@ -264,6 +343,7 @@ export function workflowMetrics(
       corrections: tasks.filter((t) => t.supersedes).length,
       importedResults: tasks.filter((t) => t.sharedCompletion).length,
     },
+    gateScope: gateScopeMetrics(h, runs, tasks),
     firstAttemptAcceptanceRate: tasks.filter(
       (t) =>
         !t.sharedCompletion && ['done', 'failed', 'cancelled'].includes(t.status) && t.attempt > 0,

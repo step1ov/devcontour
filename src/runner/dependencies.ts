@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import type { Config, Run, Task } from '../core/model.ts';
 import type { DependencySnapshot } from '../core/integrations.ts';
 import { repository } from '../core/repositories.ts';
+import { TaskFailure } from '../core/failure.ts';
 import { git } from './process.ts';
 import { executionEnvironment, runSteps } from './environment.ts';
 
@@ -94,10 +95,17 @@ export async function assertDependencies(snapshots: DependencySnapshot[], config
         throw new Error(
           'Изменён artifact зависимости: ' + snapshot.repositoryId + '/' + artifact.path,
         );
+    // Свежесть: голова целевой ветки зависимости не сдвинулась после снимка.
+    // Сдвиг — не дефект задачи, а устаревшее основание: отказ окружения, и
+    // попытка повторяется на свежей зависимости.
     if (config) {
       const repo = repository(config, snapshot.repositoryId);
-      if ((await git(repo.path, 'rev-parse', `refs/heads/${repo.targetBranch}`)) !== snapshot.sha)
-        throw new Error('Версия зависимости изменилась; нужна новая попытка: ' + repo.id);
+      const head = await git(repo.path, 'rev-parse', `refs/heads/${repo.targetBranch}`);
+      if (head !== snapshot.sha)
+        throw new TaskFailure(
+          'environment',
+          `Версия зависимости ${repo.id} изменилась после снимка (${snapshot.sha.slice(0, 12)} → ${head.slice(0, 12)}); попытка повторяется на свежей зависимости`,
+        );
     }
   }
 }
