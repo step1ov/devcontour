@@ -1,7 +1,6 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { readFileSync, renameSync, rmSync } from 'node:fs';
-import { withConfigLock } from './config-lock.ts';
 import {
   BlockedError,
   type Config,
@@ -48,22 +47,32 @@ export async function pinContext(config: Config, ref = 'HEAD') {
   }
   return packs;
 }
-export async function lockContextFile(config: Config, path: string, ref = 'HEAD') {
+export async function lockContextFile(
+  config: Config,
+  path: string,
+  ref = 'HEAD',
+  /**
+   * Где выполнить запись. CLI передаёт транзакцию записи SQLite с проверкой,
+   * что операция изменения контракта не применяет конфигурацию: проверка и
+   * rename происходят вместе, а не в начале команды.
+   */
+  commit: (write: () => void) => void = (write) => write(),
+) {
   const previous = await readFile(path, 'utf8');
   const packs = await pinContext(config, ref);
   const next = { ...JSON.parse(previous), contextPacks: packs };
   await mkdir(dirname(path), { recursive: true });
   const temp = path + '.context-' + process.pid;
   await writeFile(temp, JSON.stringify(next, null, 2) + '\n', { flag: 'wx' });
-  // Та же блокировка, что у шага context операции: запись не пересекается
-  // с её записью, а изменение после чтения — отказ, а не затирание.
-  withConfigLock(path, () => {
-    if (readFileSync(path, 'utf8') !== previous) {
-      rmSync(temp, { force: true });
-      throw new Error('Конфигурация изменилась во время context-lock');
-    }
-    renameSync(temp, path);
-  });
+  try {
+    commit(() => {
+      if (readFileSync(path, 'utf8') !== previous)
+        throw new Error('Конфигурация изменилась во время context-lock');
+      renameSync(temp, path);
+    });
+  } finally {
+    rmSync(temp, { force: true });
+  }
   return packs;
 }
 /**

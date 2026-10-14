@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import cp, { execFileSync } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import fsp from 'node:fs/promises';
 import fs, { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,7 +17,7 @@ import { readyTasks } from '../src/core/graph.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
 import { lockContextFile, pinContext, planRepin } from '../src/runner/context.ts';
-import { loadedDigest } from '../src/runner/config-lock.ts';
+import { loadedDigest } from '../src/core/service.ts';
 import { busyWork } from '../src/runner/reconfigure.ts';
 import { Workspace } from '../src/core/workspace.ts';
 import { Previews } from '../src/core/preview.ts';
@@ -746,35 +747,125 @@ test('C-F01: a repin retry accepts only the planned result; an edit in the crash
   }
 });
 
-test('C-F02: an owner that lost the operation writes nothing; context-lock waits for the config lock', async () => {
+test('C-F02/C-F15: an owner that loses the operation mid-write writes nothing; a context-lock started before a request does not write after it', async () => {
   const s = await stage();
+  const realWriteFile = fsp.writeFile;
   try {
     const ctx = await withContextPack(s);
     const before = readFileSync(ctx.path, 'utf8');
     const { operation } = (await s.changes().start(s.proposal, 'codex')) as {
       operation: ContractChange;
     };
-    // После переноса базы операцию перехватывают: у исполнителя чужой token.
+    // Операцию перехватывают, пока её шаг готовит новый файл: запись уже
+    // подготовлена, а владения больше нет.
+    fsp.writeFile = async function (...args: Parameters<typeof fsp.writeFile>) {
+      await realWriteFile(...args);
+      if (typeof args[0] === 'string' && args[0].startsWith(ctx.path + '.'))
+        s.store.atomic(() => {
+          const op = s.changes().get(operation.id);
+          s.store.saveLocal('contract-change', op.owner, op.id, { ...op, token: 'other' });
+        });
+    } as typeof fsp.writeFile;
+    syncBuiltinESMExports();
+    const lost = await s.changes().advance(operation.id);
+    fsp.writeFile = realWriteFile;
+    syncBuiltinESMExports();
+    assert.equal(lost.next, 'context');
+    assert.equal(readFileSync(ctx.path, 'utf8'), before, 'потерявший владение не пишет');
+    // context-lock прочёл файл до запроса операции; запрос появился, пока он
+    // считал закрепление. Право на запись проверяется у самой записи.
+    await assert.rejects(
+      lockContextFile(s.h.config, ctx.path, 'HEAD', (write) => {
+        s.h.requestReconfigure('CC-late', 'l'.repeat(64));
+        s.store.atomic(() => {
+          const pending = s.store.read().reconfigure;
+          if (pending && !pending.appliedAt) throw new Error('применяет конфигурацию');
+          write();
+        });
+      }),
+      /применяет конфигурацию/,
+    );
+    assert.equal(readFileSync(ctx.path, 'utf8'), before, 'context-lock не записал');
+  } finally {
+    fsp.writeFile = realWriteFile;
+    syncBuiltinESMExports();
+    await s.remove();
+  }
+});
+
+test('C-F11/C-F12/C-F16: a stale process accepts nothing, a non-leader start changes nothing, and only pins change without a restart', async () => {
+  const s = await stage();
+  let stale: DevContour | undefined;
+  try {
+    const ctx = await withContextPack(s);
+    stale = new DevContour(new Store(join(s.root, 'state.sqlite')), loadConfig(ctx.path));
+    // Действующий controller записал свою конфигурацию; запуск не лидера —
+    // ничего не меняет.
+    assert.ok(s.h.leader('server'));
+    s.h.recordConfig('server');
+    const applied = s.store.read().appliedConfig;
+    stale.recordConfig('other-start');
+    assert.deepEqual(s.store.read().appliedConfig, applied);
+    // Операция применяет новое закрепление.
+    const { operation } = (await s.changes().start(s.proposal, 'codex')) as {
+      operation: ContractChange;
+    };
+    let finished = false;
+    const advancing = s
+      .changes()
+      .advance(operation.id)
+      .finally(() => (finished = true));
+    while (!finished) {
+      s.h.leader('server');
+      serveReconfigure(s.h, ctx.path, 'server');
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.equal((await advancing).status, 'completed');
+    s.store.change('fixture.live-leader', (st) => {
+      st.leader = { owner: 'server', leaseUntil: Date.now() + 3_600_000 };
+    });
+    // Отставший процесс не утверждает план и не принимает ChangeSet.
+    const draft = stale.addTask(s.board.id, {
+      ...input('Late draft'),
+      role: 'qa',
+    });
+    assert.throws(() => stale!.approve(s.board.id, [draft.id]), /устаревшей конфигурацией/);
+    assert.throws(() => new Workspace(stale!).accept('CHG-none'), /устаревшей конфигурацией/);
+    // Без перезапуска меняется только закрепление: роли пакета — нет.
+    const raw = JSON.parse(readFileSync(ctx.path, 'utf8')) as {
+      contextPacks: { roles: string[] }[];
+    };
+    raw.contextPacks[0].roles = ['qa'];
+    writeFileSync(ctx.path, JSON.stringify(raw, null, 2) + '\n');
+    assert.throws(() => s.h.reconfigure(loadConfig(ctx.path)), /revision и digest/);
+  } finally {
+    stale?.store.close();
+    await s.remove();
+  }
+});
+
+test('C-F16: a config edit made before the context step is not taken over by the operation', async () => {
+  const s = await stage();
+  try {
+    const ctx = await withContextPack(s);
+    const roles = s.h.config.contextPacks[0].roles;
+    const { operation } = (await s.changes().start(s.proposal, 'codex')) as {
+      operation: ContractChange;
+    };
     const stopped = await s
       .changes((step) => {
-        if (step === 'base')
-          s.store.atomic(() => {
-            const op = s.changes().get(operation.id);
-            s.store.saveLocal('contract-change', op.owner, op.id, { ...op, token: 'other' });
-          });
+        if (step === 'base') {
+          const raw = JSON.parse(readFileSync(ctx.path, 'utf8')) as {
+            contextPacks: { roles: string[] }[];
+          };
+          raw.contextPacks[0].roles = ['qa'];
+          writeFileSync(ctx.path, JSON.stringify(raw, null, 2) + '\n');
+        }
       })
       .advance(operation.id);
-    assert.equal(stopped.next, 'context');
-    assert.equal(readFileSync(ctx.path, 'utf8'), before, 'потерявший владение не пишет');
-    // Пока файл держит другой процесс, context-lock не пишет поверх.
-    const lock = ctx.path + '.lock';
-    mkdirSync(lock);
-    writeFileSync(join(lock, 'pid'), String(process.pid));
-    await assert.rejects(
-      lockContextFile(s.h.config, ctx.path),
-      /config\.json записывает другой процесс/,
-    );
-    rmSync(lock, { recursive: true, force: true });
+    assert.equal(stopped.status, 'failed');
+    assert.match(stopped.error ?? '', /отличается от действующей конфигурации процесса/);
+    assert.deepEqual(s.h.config.contextPacks[0].roles, roles, 'роли не подхвачены');
   } finally {
     await s.remove();
   }
@@ -854,7 +945,12 @@ test('C-F05/C-F07: a verification and a process from the previous configuration 
   try {
     const ctx = await withContextPack(s);
     const verificationPolicy = new Workspace(s.h).policyDigest();
+    s.h.leader('server');
     s.h.recordConfig('server');
+    // Сервер остановился: операция подтверждает применение сама.
+    s.store.change('fixture.no-leader', (st) => {
+      st.leader = undefined;
+    });
     // Второй процесс с прежней конфигурацией.
     stale = new DevContour(new Store(join(s.root, 'state.sqlite')), loadConfig(ctx.path));
     s.h.pause(false);
@@ -866,6 +962,10 @@ test('C-F05/C-F07: a verification and a process from the previous configuration 
     assert.notEqual(new Workspace(s.h).policyDigest(), verificationPolicy, 'проверка устарела');
     // Применённая конфигурация записана; прежний процесс попыток не выдаёт.
     assert.equal(s.store.read().appliedConfig?.digest, loadedDigest(s.h.config));
+    // Controller снова работает: прежний процесс попыток не выдаёт.
+    s.store.change('fixture.live-leader', (st) => {
+      st.leader = { owner: 'server', leaseUntil: Date.now() + 3_600_000 };
+    });
     assert.equal(stale.claim('stale-worker'), undefined);
     const run = s.h.claim('worker');
     assert.ok(run, 'актуальный процесс выдаёт');

@@ -21,7 +21,7 @@ import { updateBase } from './base-update.ts';
 import { planRepin, stalePins } from './context.ts';
 import { applyConfig, busyWork } from './reconfigure.ts';
 import { loadConfig } from './config.ts';
-import { loadedDigest, withConfigLock } from './config-lock.ts';
+import { loadedDigest } from '../core/service.ts';
 import { git } from './process.ts';
 
 /**
@@ -726,6 +726,13 @@ export class ContractChanges {
         // правку файла, оказавшуюся на диске.
         let planned = op.config;
         if (!planned?.after) {
+          // Исходное состояние — действующая конфигурация процесса, а не то,
+          // что лежит в файле: чужая правка (роли пакета, другие поля) не
+          // становится частью операции и не применяется без перезапуска.
+          if (current !== loadedDigest(this.h.config))
+            throw new DomainError(
+              'config.json отличается от действующей конфигурации процесса: примените правку перезапуском сервера и продолжите операцию',
+            );
           const nextText = await planRepin(this.h.config, text, stale, op.expected.head);
           planned = { before: current, after: loadedDigest(loadConfig(path, nextText)) };
           const fixed = planned;
@@ -749,25 +756,28 @@ export class ContractChanges {
           throw new DomainError('Перезакрепление дало не ту конфигурацию, что была рассчитана');
         const temp = `${path}.${op.id}.${process.pid}`;
         await writeFile(temp, nextText, { flag: 'w' });
-        // Запись — внешний эффект: под блокировкой файла (её же берёт
-        // context-lock) и под проверкой владения в той же транзакции, что и
-        // сохранение шага. Потерявший владение процесс файл не пишет.
+        // Запись — внешний эффект: rename выполняется синхронно внутри
+        // транзакции записи SQLite вместе с проверкой владения, чужого запроса
+        // и неизменности файла. Транзакция записи одна на базу, поэтому записи
+        // config.json из DevContour (эта и context-lock) сериализуются ею;
+        // потерявший владение процесс файл не пишет.
         try {
-          withConfigLock(path, () =>
-            this.h.store.atomic(() => {
-              const c = this.guard(op);
-              if (readFileSync(path, 'utf8') !== text)
-                throw new DomainError('config.json изменился во время перезакрепления');
-              renameSync(temp, path);
-              this.log(
-                c,
-                'context',
-                'repinned',
-                `${stale.join(', ')} @ ${op.expected.head.slice(0, 12)}; config ${before.slice(0, 12)} → ${after.slice(0, 12)}`,
-              );
-              this.save(c);
-            }),
-          );
+          this.h.store.atomic(() => {
+            const c = this.guard(op);
+            const pending = this.h.store.read().reconfigure;
+            if (pending && !pending.appliedAt && pending.operation !== op.id)
+              throw new DomainError(`Конфигурацию применяет операция ${pending.operation}`, 409);
+            if (readFileSync(path, 'utf8') !== text)
+              throw new DomainError('config.json изменился во время перезакрепления');
+            renameSync(temp, path);
+            this.log(
+              c,
+              'context',
+              'repinned',
+              `${stale.join(', ')} @ ${op.expected.head.slice(0, 12)}; config ${before.slice(0, 12)} → ${after.slice(0, 12)}`,
+            );
+            this.save(c);
+          });
         } finally {
           rmSync(temp, { force: true });
         }

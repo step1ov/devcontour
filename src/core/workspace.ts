@@ -128,6 +128,7 @@ export class Workspace {
       if (!gates.some((g) => g.repositoryId === repo.id && g.kind === 'test' && g.report))
         throw new DomainError(`Нужна интеграционная проверка продукта ${repo.id}`);
     return this.h.store.change('workspace.verification.started', (s) => {
+      this.h.assertCurrentConfig(s);
       const c = find(s, id);
       if (c.acceptance) throw new DomainError('ChangeSet уже принят; создайте следующий');
       if (s.reconfigure && !s.reconfigure.appliedAt)
@@ -177,6 +178,7 @@ export class Workspace {
   }
   private update<T>(id: string, token: string, event: string, action: (v: Verification) => T): T {
     return this.h.store.change(event, (s) => {
+      this.h.assertCurrentConfig(s);
       const c = find(s, id),
         v = c.verifications.at(-1);
       if (
@@ -266,6 +268,7 @@ export class Workspace {
   }
   accept(id: string, approval: Approval = { actor: 'agent' }) {
     return this.h.store.change('changeset.accepted', (s) => {
+      this.h.assertCurrentConfig(s);
       const c = find(s, id);
       if (c.acceptance) return { status: 'already-accepted', changeSetId: id };
       changeSnapshot(s, c).tasks.forEach((t) => assertTaskPreparation(s, t));

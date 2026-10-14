@@ -41,6 +41,7 @@ export class Deliveries {
     if (this.h.config.completionMode !== 'remote')
       throw new DomainError('Включите completionMode: remote');
     return this.h.store.change('delivery.started', (s) => {
+      this.h.assertCurrentConfig(s);
       const c = s.changeSets.find((c) => c.id === id);
       if (!c) throw new DomainError('ChangeSet не найден');
       if (c.acceptance) throw new DomainError('ChangeSet уже принят');
@@ -98,6 +99,7 @@ export class Deliveries {
   }
   update<T>(id: string, token: string, event: string, action: (d: Delivery) => T): T {
     return this.h.store.change(event, (s) => {
+      this.h.assertCurrentConfig(s);
       const c = s.changeSets.find((c) => c.id === id);
       const d = c?.deliveries?.find((d) => d.token === token);
       if (!c || !d || c.acceptance || d.status !== 'active' || d.leaseUntil <= Date.now())

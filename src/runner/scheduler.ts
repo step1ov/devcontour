@@ -159,9 +159,6 @@ export class Scheduler {
   }
   async init() {
     validateWorkflow(this.h.config);
-    // Запуск применяет конфигурацию этого процесса: процесс со старой не
-    // выдаёт и не принимает попыток.
-    this.h.recordConfig(this.owner);
     await reserveRepositories(this.h.config, this.root);
     for (const repo of repositories(this.h.config)) {
       const target = this.targetFor(repo.id);
@@ -242,6 +239,7 @@ export class Scheduler {
       return { owner: this.owner };
     });
   }
+  private configRecorded = false;
   async tick() {
     if (this.ticking) return;
     this.ticking = true;
@@ -249,6 +247,13 @@ export class Scheduler {
       if (!this.h.leader(this.owner)) {
         for (const j of this.jobs.values()) j.controller.abort();
         return;
+      }
+      // Запуск применяет конфигурацию этого процесса, но только когда он стал
+      // controller: конкурирующий запуск ничего не меняет и не останавливает
+      // действующего владельца.
+      if (!this.configRecorded) {
+        this.h.recordConfig(this.owner);
+        this.configRecorded = true;
       }
       await this.recover();
       // Запрошенное операцией применение конфигурации — до выдачи: попытки

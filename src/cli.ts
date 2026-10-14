@@ -679,7 +679,20 @@ async function main() {
         )
           throw new Error('Дождитесь завершения попыток перед обновлением контекста');
         result = {
-          packs: await lockContextFile(config, join(root, 'config.json'), option('--ref', 'HEAD')),
+          packs: await lockContextFile(
+            config,
+            join(root, 'config.json'),
+            option('--ref', 'HEAD'),
+            (write) =>
+              store.atomic(() => {
+                const pending = store.read().reconfigure;
+                if (pending && !pending.appliedAt)
+                  throw new Error(
+                    `Операция ${pending.operation} применяет конфигурацию; дождитесь её или отмените: contract-change --id ${pending.operation} --abandon`,
+                  );
+                write();
+              }),
+          ),
           next: 'Перезапустите сервер, чтобы загрузить закреплённый контекст.',
         };
       } else if (operation === 'base-update') {

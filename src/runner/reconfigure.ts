@@ -4,7 +4,7 @@ import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { CheckCorpus } from '../core/check-store.ts';
 import { repositories } from '../core/repositories.ts';
 import { loadConfig } from './config.ts';
-import { loadedDigest } from './config-lock.ts';
+import { loadedDigest } from '../core/service.ts';
 
 /**
  * Применение конфигурации — только по запросу операции изменения контракта

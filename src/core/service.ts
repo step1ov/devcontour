@@ -224,19 +224,9 @@ function assertNotAccepted(s: DevContourState, t: Task) {
  * перезакрепление, запрос применения и действующая конфигурация процесса —
  * digest одного главного файла не закреплял бы gates компонентов.
  */
-const loadedDigests = new WeakMap<Config, string>();
-export function loadedDigest(config: Config) {
-  let value = loadedDigests.get(config);
-  if (!value) {
-    value = digest(config);
-    loadedDigests.set(config, value);
-  }
-  return value;
-}
-/** Процесс работает не с той конфигурацией, которую применил контур. */
-function staleConfig(s: DevContourState, config: Config) {
-  return !!s.appliedConfig && s.appliedConfig.digest !== loadedDigest(config);
-}
+export const loadedDigest = (config: Config) => digest(config);
+const staleMessage =
+  'Процесс работает с устаревшей конфигурацией: контур уже применил другую; перезапустите процесс';
 
 export class DevContour {
   constructor(
@@ -247,20 +237,47 @@ export class DevContour {
     validateWorkflow(config);
   }
   /**
+   * Поколение конфигурации, известное процессу: digest той, с которой он
+   * начал, которую сам записал как применённую или применил по запросу.
+   * Процесс отстал, если в базе с тех пор применена другая — значит, её
+   * применил другой процесс. Сравнение поколений, а не содержимого: процесс
+   * не перечитывает конфигурацию и сам её не меняет.
+   */
+  private knownConfig?: string;
+  private staleConfig(s: DevContourState) {
+    this.knownConfig ??= loadedDigest(this.config);
+    // Защищать есть что, пока работает controller: без живого лидера никто
+    // не выдаёт попыток под применённой конфигурацией, а следующий лидер
+    // запишет свою. Так CLI-команда до запуска сервера не считается отставшей.
+    const live = !!s.leader && s.leader.leaseUntil > Date.now();
+    return live && !!s.appliedConfig && s.appliedConfig.digest !== this.knownConfig;
+  }
+  /**
    * Применить новую конфигурацию в этом процессе. Только шаг операции
    * изменения контракта: она сверила digest, дождалась окончания работ и
    * держит паузу. Отличаться может только закрепление context packs — всё
    * остальное требует перезапуска процесса.
    */
   reconfigure(next: Config) {
-    const rest = (c: Config) => digest({ ...c, contextPacks: [] });
+    // Без перезапуска меняется только закрепление пакетов — их revision и
+    // digest. Состав пакетов, их роли, файлы и версии — другая конфигурация.
+    const rest = (c: Config) =>
+      digest({
+        ...c,
+        contextPacks: c.contextPacks.map((pack) => ({
+          ...pack,
+          revision: undefined,
+          digest: undefined,
+        })),
+      });
     if (rest(next) !== rest(this.config))
       throw new DomainError(
-        'Новая конфигурация отличается не только закреплением context packs: примените её перезапуском сервера',
+        'Новая конфигурация отличается не только закреплением context packs (revision и digest): примените её перезапуском сервера',
         409,
       );
     validateWorkflow(next);
     this.config = next;
+    this.knownConfig = loadedDigest(next);
   }
   /**
    * Пауза операции: ставится, только если очередь не остановлена, и
@@ -275,6 +292,15 @@ export class DevContour {
       s.pausedAt = now();
       return { paused: true, reason: 'reconfigure', operation };
     });
+  }
+  /**
+   * Общий барьер принятия: в транзакции выдачи, завершения и приёмки
+   * процесс сверяет свою конфигурацию с применённой контуром. Отставший
+   * процесс не принимает ни попыток, ни совместных проверок, ни поставок, ни
+   * планов — сравнение двух его же старых digest актуальности не доказывает.
+   */
+  assertCurrentConfig(s: DevContourState) {
+    if (this.staleConfig(s)) throw new DomainError(staleMessage, 409);
   }
   /** Снять паузу операции — только свою; паузу человека она не трогает. */
   operationResume(operation: string) {
@@ -327,7 +353,11 @@ export class DevContour {
    */
   recordConfig(by: string) {
     return this.store.change('config.started', (s) => {
+      // Только действующий controller: конкурирующий или неудачный запуск
+      // не меняет применённую конфигурацию и не останавливает владельца.
+      if (s.leader?.owner !== by || s.leader.leaseUntil <= Date.now()) return;
       const configDigest = loadedDigest(this.config);
+      this.knownConfig = configDigest;
       if (s.appliedConfig?.digest === configDigest) return;
       s.appliedConfig = { digest: configDigest, at: now(), by };
       return { digest: configDigest, by };
@@ -662,6 +692,7 @@ export class DevContour {
     },
   ) {
     return this.store.change('board.approved', (s) => {
+      this.assertCurrentConfig(s);
       developmentBinding(s);
       const r = activeRevision(s, boardId);
       if (!r.taskIds.length) throw new DomainError('Добавьте задачи перед утверждением');
@@ -803,6 +834,7 @@ export class DevContour {
     repositories?: Record<string, string>,
   ) {
     return this.store.change('board.accepted', (s) => {
+      this.assertCurrentConfig(s);
       const r = activeRevision(s, boardId);
       if (expectedDigest && digest(r) !== expectedDigest)
         throw new DomainError('Ревизия изменилась во время приёмки');
@@ -972,7 +1004,7 @@ export class DevContour {
         (s.reconfigure && !s.reconfigure.appliedAt) ||
         // Процесс со старой конфигурацией не выдаёт попыток: их условия
         // разошлись бы с применённой контуром конфигурацией.
-        staleConfig(s, this.config) ||
+        this.staleConfig(s) ||
         s.changeSets.some((c) =>
           c.deliveries?.some((d) => d.status === 'active' && d.leaseUntil > Date.now()),
         ) ||
@@ -1087,11 +1119,7 @@ export class DevContour {
       );
       const t = task(s, r.taskId);
       assertTaskPreparation(s, t);
-      if (staleConfig(s, this.config))
-        throw new DomainError(
-          'Процесс работает с устаревшей конфигурацией: она уже заменена; перезапустите процесс',
-          409,
-        );
+      this.assertCurrentConfig(s);
       if (r.policyDigest !== this.policyDigest(t.repositoryId))
         throw new DomainError('Политика проверок изменилась; нужна новая попытка');
       if (
