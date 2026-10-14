@@ -1,11 +1,18 @@
 import { selectedWorkspaceMode, assertControllerCheckout } from './workspace-mode.ts';
 import { validateWorkflow } from '../core/workflow.ts';
-import { readFileSync, realpathSync, writeFileSync, existsSync, lstatSync } from 'node:fs';
+import {
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+  existsSync,
+  lstatSync,
+  statSync,
+} from 'node:fs';
 import { isAbsolute, resolve, dirname, join, sep } from 'node:path';
 import { repositories } from '../core/repositories.ts';
 import { packKey, resolveProfile } from './packs.ts';
 import { configSchema, type Config } from '../core/model.ts';
-import { configSources, loadedDigest } from '../core/service.ts';
+import { configSources } from '../core/service.ts';
 import { configuredSpellings } from '../core/check-store.ts';
 /**
  * Загрузить конфигурацию. `text` — содержимое `config.json`, если его уже
@@ -117,8 +124,20 @@ export function loadConfig(path: string, text = readFileSync(path, 'utf8')): Con
   validateWorkflow(c);
   // Источник для проверки поколения: процесс, прочитавший этот файл, позже
   // узнаёт, не изменился ли он с тех пор.
-  configSources.set(c, { loaded: loadedDigest(c), reload: () => loadedDigest(loadConfig(path)) });
+  configSources.set(c, {
+    files: [path, ...componentFiles(raw as Parameters<typeof componentFiles>[0])].map((file) => {
+      const stat = statSync(file);
+      return { path: file, mtimeMs: stat.mtimeMs, size: stat.size };
+    }),
+  });
   return c;
+}
+
+/** Файлы component config, из которых собрана конфигурация. */
+function componentFiles(raw: { repositories?: { path: string; configFile?: string }[] }) {
+  return (raw.repositories ?? [])
+    .filter((r) => r.configFile)
+    .map((r) => realpathSync(resolve(realpathSync(resolve(r.path)), r.configFile!)));
 }
 
 export function readComponentConfig(entry: any) {

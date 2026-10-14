@@ -4,7 +4,15 @@ import cp, { execFileSync } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import fsp from 'node:fs/promises';
-import fs, { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import fs, {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { config, fixture, input } from './helpers.ts';
@@ -939,6 +947,80 @@ test('C-F19/C-F20/C-F21: staleness follows generations, not clocks; a snapshot r
     early?.store.close();
     late?.store.close();
     restarted?.store.close();
+    await s.remove();
+  }
+});
+
+test('C-F20/C-F22/C-F23/C-F24: the applied configuration is the only truth; adoption needs no other controller and an unchanged source', async () => {
+  const s = await stage();
+  const extra: DevContour[] = [];
+  const open = (config: ReturnType<typeof loadConfig>) => {
+    const h = new DevContour(new Store(join(s.root, 'state.sqlite')), config);
+    extra.push(h);
+    return h;
+  };
+  try {
+    const ctx = await withContextPack(s);
+    const textA = readFileSync(ctx.path, 'utf8');
+    // Controller B работает: операция применила новое закрепление.
+    assert.ok(s.h.leader('server'));
+    s.h.recordConfig('server');
+    const { operation } = (await s.changes().start(s.proposal, 'codex')) as {
+      operation: ContractChange;
+    };
+    let finished = false;
+    const advancing = s
+      .changes()
+      .advance(operation.id)
+      .finally(() => (finished = true));
+    while (!finished) {
+      s.h.leader('server');
+      serveReconfigure(s.h, ctx.path, 'server');
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.equal((await advancing).status, 'completed');
+    s.store.change('fixture.live-leader', (st) => {
+      st.leader = { owner: 'server', leaseUntil: Date.now() + 3_600_000 };
+    });
+    const applied = s.store.read().appliedConfig!;
+    // C-F20: файл вернули к A, CLI прочитал его свежим — controller B жив.
+    writeFileSync(ctx.path, textA);
+    const cli = open(loadConfig(ctx.path));
+    assert.throws(
+      () => s.store.change('fixture.cli', (st) => cli.assertCurrentConfig(st)),
+      /работает controller server/,
+    );
+    // C-F22: конфигурация без источника не вправе стать применённой даже без лидера.
+    s.store.change('fixture.no-leader', (st) => {
+      st.leader = undefined;
+    });
+    const memory = open(structuredClone(loadConfig(ctx.path)));
+    assert.throws(
+      () => s.store.change('fixture.memory', (st) => memory.assertCurrentConfig(st)),
+      /источника нет/,
+    );
+    // C-F24: запись своей конфигурации внутри отменённой транзакции не
+    // оставляет ни следа в базе, ни ложной актуальности в процессе.
+    assert.throws(() =>
+      s.store.atomic(() => {
+        s.store.change('fixture.adopt', (st) => cli.assertCurrentConfig(st));
+        throw new Error('rollback');
+      }),
+    );
+    assert.deepEqual(s.store.read().appliedConfig, applied);
+    // C-F23: временно недоступный файл — отказ с причиной; после восстановления
+    // — тот же процесс без перезапуска записывает свою конфигурацию.
+    renameSync(ctx.path, ctx.path + '.away');
+    assert.throws(
+      () => s.store.change('fixture.eio', (st) => cli.assertCurrentConfig(st)),
+      /не читается/,
+    );
+    renameSync(ctx.path + '.away', ctx.path);
+    s.store.change('fixture.recovered', (st) => cli.assertCurrentConfig(st));
+    assert.equal(s.store.read().appliedConfig?.digest, loadedDigest(cli.config));
+    assert.equal(s.store.read().appliedConfig?.generation, (applied.generation ?? 0) + 1);
+  } finally {
+    for (const h of extra) h.store.close();
     await s.remove();
   }
 });

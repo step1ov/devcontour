@@ -1,3 +1,4 @@
+import { statSync } from 'node:fs';
 import {
   developmentBinding,
   assertFeatureOf,
@@ -226,11 +227,29 @@ function assertNotAccepted(s: DevContourState, t: Task) {
  */
 export const loadedDigest = (config: Config) => digest(config);
 /**
- * Откуда конфигурация загружена: digest файла в момент загрузки и функция,
- * которая перечитывает файл и возвращает digest того, что в нём сейчас. Их
- * ставит `loadConfig`; конфигурации, собранные в памяти, источника не имеют.
+ * Откуда конфигурация загружена: файлы (`config.json` и component config) с
+ * их mtime и размером в момент загрузки. Ставит `loadConfig`; конфигурации,
+ * собранные в памяти, источника не имеют.
  */
-export const configSources = new WeakMap<Config, { loaded: string; reload: () => string }>();
+export const configSources = new WeakMap<
+  Config,
+  { files: { path: string; mtimeMs: number; size: number }[] }
+>();
+/** Файлы, из которых загружена конфигурация, не менялись с загрузки. */
+function sourceUnchanged(config: Config): { ok: true } | { ok: false; reason: string } {
+  const source = configSources.get(config);
+  if (!source) return { ok: false, reason: 'конфигурация собрана в памяти, источника нет' };
+  for (const file of source.files) {
+    try {
+      const stat = statSync(file.path);
+      if (stat.mtimeMs !== file.mtimeMs || stat.size !== file.size)
+        return { ok: false, reason: `файл ${file.path} изменился после загрузки` };
+    } catch (error) {
+      return { ok: false, reason: `файл ${file.path} не читается: ${String(error)}` };
+    }
+  }
+  return { ok: true };
+}
 const staleMessage =
   'Процесс работает с устаревшей конфигурацией: контур уже применил другую; перезапустите процесс';
 
@@ -242,42 +261,39 @@ export class DevContour {
   ) {
     validateWorkflow(config);
     this.knownConfig = loadedDigest(config);
-    this.baseline = this.initialBaseline();
   }
   /**
-   * Поколение конфигурации процесса — без часов. `knownConfig` — digest его
-   * конфигурации; `baseline` — номер применённого поколения, до которого она
-   * актуальна. Процесс отстал, если применено другое содержимое с большим
-   * номером. Номер растёт на каждой записи применённой конфигурации.
+   * Применённая конфигурация в базе — единственный источник правды; у
+   * процесса нет своего «поколения», которое мог бы рассинхронизировать
+   * откат транзакции. Процесс текущий, только если его конфигурация совпадает
+   * с применённой. Записать свою вместо применённой (перезапуск, CLI после
+   * правки файла, когда сервера нет) он может, только если нет живого чужого
+   * лидера и его файлы не менялись с загрузки — возврат файла к прежнему
+   * содержимому тоже меняет mtime. Конфигурация без источника этого права не
+   * имеет. Ошибка чтения файла не запоминается: следующая проверка повторит её.
    */
   private knownConfig: string;
-  private baseline: number;
-  /**
-   * С какого поколения процесс начал. Применена та же конфигурация — текущее.
-   * Другая — решает файл, из которого процесс загрузился: если он не менялся
-   * с момента загрузки, снимок процесса новее применённого (перезапуск, CLI
-   * после правки файла); если изменился — процесс прочёл старый файл и
-   * отстал, даже если объект создан после применения.
-   */
-  private initialBaseline() {
-    const applied = this.store.read().appliedConfig;
-    if (!applied) return 0;
-    const generation = applied.generation ?? 0;
-    if (applied.digest === this.knownConfig) return generation;
-    const source = configSources.get(this.config);
-    if (!source) return generation;
-    try {
-      return source.reload() === source.loaded ? generation : -1;
-    } catch {
-      return -1;
-    }
+  /** Owner, под которым этот процесс получил лидерство. */
+  private ownLeader?: string;
+  /** Может ли процесс записать свою конфигурацию как применённую (в транзакции). */
+  private mayAdopt(s: DevContourState): { ok: true } | { ok: false; reason: string } {
+    const leader = s.leader && s.leader.leaseUntil > Date.now() ? s.leader.owner : undefined;
+    if (leader && leader !== this.ownLeader)
+      return { ok: false, reason: `работает controller ${leader} с другой конфигурацией` };
+    return sourceUnchanged(this.config);
   }
-  /** Процесс работает со снимком конфигурации старше применённого. */
+  private adoptConfig(s: DevContourState, by: string) {
+    s.appliedConfig = {
+      digest: this.knownConfig,
+      generation: (s.appliedConfig?.generation ?? 0) + 1,
+      at: now(),
+      by,
+    };
+  }
+  /** Процесс работает не с применённой конфигурацией и сменить её не вправе. */
   configStale(s: DevContourState) {
     const applied = s.appliedConfig;
-    return (
-      !!applied && applied.digest !== this.knownConfig && (applied.generation ?? 0) > this.baseline
-    );
+    return !!applied && applied.digest !== this.knownConfig && !this.mayAdopt(s).ok;
   }
   /**
    * Применить новую конфигурацию в этом процессе. Только шаг операции
@@ -305,7 +321,6 @@ export class DevContour {
     validateWorkflow(next);
     this.config = next;
     this.knownConfig = loadedDigest(next);
-    this.baseline = this.store.read().appliedConfig?.generation ?? 0;
   }
   /**
    * Пауза операции: ставится, только если очередь не остановлена, и
@@ -328,7 +343,14 @@ export class DevContour {
    * планов — сравнение двух его же старых digest актуальности не доказывает.
    */
   assertCurrentConfig(s: DevContourState) {
-    if (this.configStale(s)) throw new DomainError(staleMessage, 409);
+    const applied = s.appliedConfig;
+    if (!applied || applied.digest === this.knownConfig) return;
+    const adoption = this.mayAdopt(s);
+    if (!adoption.ok) throw new DomainError(`${staleMessage} (${adoption.reason})`, 409);
+    // Первый процесс, действующий после законной правки файла без живого
+    // controller: его конфигурация становится применённой в этой же
+    // транзакции — откат отменит и её.
+    this.adoptConfig(s, 'process');
   }
   /** Снять паузу операции — только свою; паузу человека она не трогает. */
   operationResume(operation: string) {
@@ -390,18 +412,13 @@ export class DevContour {
       // Только действующий controller: конкурирующий или неудачный запуск
       // не меняет применённую конфигурацию и не останавливает владельца.
       if (s.leader?.owner !== by || s.leader.leaseUntil <= Date.now()) return;
-      // Конфигурацию, применённую после загрузки этого процесса, получение
-      // лидерства не перезаписывает: процесс отстал и должен её догнать.
-      if (this.configStale(s)) return;
-      const configDigest = this.knownConfig;
-      const generation = s.appliedConfig?.generation ?? 0;
-      if (s.appliedConfig?.digest === configDigest) {
-        this.baseline = generation;
-        return;
-      }
-      s.appliedConfig = { digest: configDigest, generation: generation + 1, at: now(), by };
-      this.baseline = generation + 1;
-      return { digest: configDigest, by };
+      if (s.appliedConfig?.digest === this.knownConfig) return;
+      // Получение лидерства не узаконивает снимок, если файл менялся после
+      // загрузки (например, операция уже применила новую конфигурацию):
+      // такой процесс догоняет её, а не перезаписывает.
+      if (s.appliedConfig && !this.mayAdopt(s).ok) return;
+      this.adoptConfig(s, by);
+      return { digest: this.knownConfig, by };
     });
   }
   /** Снять завершённый запрос операции. */
@@ -1045,7 +1062,14 @@ export class DevContour {
         (s.reconfigure && !s.reconfigure.appliedAt) ||
         // Процесс со старой конфигурацией не выдаёт попыток: их условия
         // разошлись бы с применённой контуром конфигурацией.
-        this.configStale(s) ||
+        (() => {
+          try {
+            this.assertCurrentConfig(s);
+            return false;
+          } catch {
+            return true;
+          }
+        })() ||
         s.changeSets.some((c) =>
           c.deliveries?.some((d) => d.status === 'active' && d.leaseUntil > Date.now()),
         ) ||
@@ -1852,10 +1876,12 @@ export class DevContour {
     });
   }
   leader(owner: string) {
-    return this.store.change('heartbeat', (s) => {
+    const acquired = this.store.change('heartbeat', (s) => {
       if (s.leader && s.leader.owner !== owner && s.leader.leaseUntil > Date.now()) return false;
       s.leader = { owner, leaseUntil: Date.now() + this.config.leaseMs };
       return true;
     });
+    if (acquired) this.ownLeader = owner;
+    return acquired;
   }
 }
