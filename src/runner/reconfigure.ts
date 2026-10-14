@@ -55,7 +55,9 @@ export function applyConfig(h: DevContour, path: string, expected: string) {
     throw new Error(
       `Конфигурация не совпадает с ожидаемой операцией: ожидался digest ${expected.slice(0, 16)}, загружен ${actual.slice(0, 16)}`,
     );
-  if (loadedDigest(h.config) !== expected) h.reconfigure(next);
+  // Всегда через reconfigure, даже при совпадающем содержимом: так процесс
+  // фиксирует поколение применённой конфигурации и момент её получения.
+  h.reconfigure(next);
 }
 
 /**

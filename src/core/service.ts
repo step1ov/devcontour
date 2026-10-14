@@ -237,20 +237,21 @@ export class DevContour {
     validateWorkflow(config);
   }
   /**
-   * Поколение конфигурации, известное процессу: digest той, с которой он
-   * начал, которую сам записал как применённую или применил по запросу.
-   * Процесс отстал, если в базе с тех пор применена другая — значит, её
-   * применил другой процесс. Сравнение поколений, а не содержимого: процесс
-   * не перечитывает конфигурацию и сам её не меняет.
+   * Поколение конфигурации процесса: digest той, с которой он начал (или
+   * которую применил по запросу), и момент, когда он её получил. Процесс
+   * отстал, если в базе применена другая конфигурация и записана она позже
+   * этого момента — значит, её применили, пока он работал со своей. От живого
+   * лидера это не зависит. Применённая раньше — не новее: процесс, начавший
+   * после правки файла (CLI до запуска сервера), не отставший.
    */
   private knownConfig?: string;
+  private loadedAt = Date.now();
   private staleConfig(s: DevContourState) {
     this.knownConfig ??= loadedDigest(this.config);
-    // Защищать есть что, пока работает controller: без живого лидера никто
-    // не выдаёт попыток под применённой конфигурацией, а следующий лидер
-    // запишет свою. Так CLI-команда до запуска сервера не считается отставшей.
-    const live = !!s.leader && s.leader.leaseUntil > Date.now();
-    return live && !!s.appliedConfig && s.appliedConfig.digest !== this.knownConfig;
+    const applied = s.appliedConfig;
+    return (
+      !!applied && applied.digest !== this.knownConfig && Date.parse(applied.at) > this.loadedAt
+    );
   }
   /**
    * Применить новую конфигурацию в этом процессе. Только шаг операции
@@ -278,6 +279,7 @@ export class DevContour {
     validateWorkflow(next);
     this.config = next;
     this.knownConfig = loadedDigest(next);
+    this.loadedAt = Date.now();
   }
   /**
    * Пауза операции: ставится, только если очередь не остановлена, и
@@ -356,6 +358,9 @@ export class DevContour {
       // Только действующий controller: конкурирующий или неудачный запуск
       // не меняет применённую конфигурацию и не останавливает владельца.
       if (s.leader?.owner !== by || s.leader.leaseUntil <= Date.now()) return;
+      // Конфигурацию, применённую после загрузки этого процесса, получение
+      // лидерства не перезаписывает: процесс отстал и должен её догнать.
+      if (this.staleConfig(s)) return;
       const configDigest = loadedDigest(this.config);
       this.knownConfig = configDigest;
       if (s.appliedConfig?.digest === configDigest) return;

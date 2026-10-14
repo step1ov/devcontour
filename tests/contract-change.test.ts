@@ -793,19 +793,15 @@ test('C-F02/C-F15: an owner that loses the operation mid-write writes nothing; a
   }
 });
 
-test('C-F11/C-F12/C-F16: a stale process accepts nothing, a non-leader start changes nothing, and only pins change without a restart', async () => {
+test('C-F11/C-F12/C-F16/C-F17: a stale process accepts nothing even after the leader lease expires, a non-leader start changes nothing, and only pins change without a restart', async () => {
   const s = await stage();
   let stale: DevContour | undefined;
   try {
     const ctx = await withContextPack(s);
     stale = new DevContour(new Store(join(s.root, 'state.sqlite')), loadConfig(ctx.path));
-    // Действующий controller записал свою конфигурацию; запуск не лидера —
-    // ничего не меняет.
+    // Действующий controller записал свою конфигурацию.
     assert.ok(s.h.leader('server'));
     s.h.recordConfig('server');
-    const applied = s.store.read().appliedConfig;
-    stale.recordConfig('other-start');
-    assert.deepEqual(s.store.read().appliedConfig, applied);
     // Операция применяет новое закрепление.
     const { operation } = (await s.changes().start(s.proposal, 'codex')) as {
       operation: ContractChange;
@@ -821,16 +817,27 @@ test('C-F11/C-F12/C-F16: a stale process accepts nothing, a non-leader start cha
       await new Promise((r) => setTimeout(r, 50));
     }
     assert.equal((await advancing).status, 'completed');
-    s.store.change('fixture.live-leader', (st) => {
-      st.leader = { owner: 'server', leaseUntil: Date.now() + 3_600_000 };
+    const applied = s.store.read().appliedConfig;
+    // Запуск отставшего процесса с другой конфигурацией, не ставшего лидером,
+    // ничего не меняет.
+    stale.recordConfig('other-start');
+    assert.deepEqual(s.store.read().appliedConfig, applied);
+    // Лидер остановился, lease истёк: отставший процесс всё равно не
+    // утверждает план и не принимает ChangeSet, а став лидером — не
+    // перезаписывает применённую конфигурацию своей.
+    s.store.change('fixture.no-leader', (st) => {
+      st.leader = undefined;
     });
-    // Отставший процесс не утверждает план и не принимает ChangeSet.
     const draft = stale.addTask(s.board.id, {
       ...input('Late draft'),
       role: 'qa',
     });
     assert.throws(() => stale!.approve(s.board.id, [draft.id]), /устаревшей конфигурацией/);
     assert.throws(() => new Workspace(stale!).accept('CHG-none'), /устаревшей конфигурацией/);
+    assert.equal(stale.claim('stale-worker'), undefined);
+    assert.ok(stale.leader('other-start'));
+    stale.recordConfig('other-start');
+    assert.deepEqual(s.store.read().appliedConfig, applied);
     // Без перезапуска меняется только закрепление: роли пакета — нет.
     const raw = JSON.parse(readFileSync(ctx.path, 'utf8')) as {
       contextPacks: { roles: string[] }[];
@@ -840,6 +847,36 @@ test('C-F11/C-F12/C-F16: a stale process accepts nothing, a non-leader start cha
     assert.throws(() => s.h.reconfigure(loadConfig(ctx.path)), /revision и digest/);
   } finally {
     stale?.store.close();
+    await s.remove();
+  }
+});
+
+test('C-F18: a server that loaded the previous configuration does not write it back on its first leader tick and catches up', async () => {
+  const s = await stage();
+  let server: DevContour | undefined;
+  try {
+    const ctx = await withContextPack(s);
+    // Сервер загрузил конфигурацию A и ещё не сделал первый тик.
+    server = new DevContour(new Store(join(s.root, 'state.sqlite')), loadConfig(ctx.path));
+    await new Promise((r) => setTimeout(r, 5));
+    // Операция в это время применяет B (живого лидера нет — подтверждает сама).
+    const { operation } = (await s.changes().start(s.proposal, 'codex')) as {
+      operation: ContractChange;
+    };
+    assert.equal((await s.changes().advance(operation.id)).status, 'completed');
+    const applied = s.store.read().appliedConfig!;
+    assert.equal(applied.digest, loadedDigest(s.h.config));
+    // Первый тик сервера: лидерство получено, но A не записывается обратно.
+    assert.ok(server.leader('server'));
+    server.recordConfig('server');
+    assert.deepEqual(s.store.read().appliedConfig, applied);
+    assert.equal(server.claim('server'), undefined, 'отставший сервер не выдаёт');
+    // Сервер догоняет B из файла тем же правилом и снова работает.
+    serveReconfigure(server, ctx.path, 'server');
+    assert.equal(server.config.contextPacks[0].revision, s.sh('rev-parse', 'HEAD'));
+    assert.doesNotThrow(() => server!.assertCurrentConfig(s.store.read()));
+  } finally {
+    server?.store.close();
     await s.remove();
   }
 });
@@ -962,10 +999,7 @@ test('C-F05/C-F07: a verification and a process from the previous configuration 
     assert.notEqual(new Workspace(s.h).policyDigest(), verificationPolicy, 'проверка устарела');
     // Применённая конфигурация записана; прежний процесс попыток не выдаёт.
     assert.equal(s.store.read().appliedConfig?.digest, loadedDigest(s.h.config));
-    // Controller снова работает: прежний процесс попыток не выдаёт.
-    s.store.change('fixture.live-leader', (st) => {
-      st.leader = { owner: 'server', leaseUntil: Date.now() + 3_600_000 };
-    });
+    // Лидера нет — прежний процесс всё равно попыток не выдаёт.
     assert.equal(stale.claim('stale-worker'), undefined);
     const run = s.h.claim('worker');
     assert.ok(run, 'актуальный процесс выдаёт');
