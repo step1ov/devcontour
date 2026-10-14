@@ -881,6 +881,68 @@ test('C-F18: a server that loaded the previous configuration does not write it b
   }
 });
 
+test('C-F19/C-F20/C-F21: staleness follows generations, not clocks; a snapshot read before an apply stays stale; a real restart with new fields becomes current', async () => {
+  const s = await stage();
+  const realNow = Date.now;
+  let early: DevContour | undefined;
+  let late: DevContour | undefined;
+  let restarted: DevContour | undefined;
+  try {
+    const ctx = await withContextPack(s);
+    assert.ok(s.h.leader('server'));
+    s.h.recordConfig('server');
+    s.store.change('fixture.no-leader', (st) => {
+      st.leader = undefined;
+    });
+    // Часы процессов ушли на час вперёд, пока они загружали конфигурацию, а
+    // потом откатились: момент загрузки «позже» применения. Правило по времени
+    // на этом ошибается, поколения — нет.
+    const frozen = realNow() + 3_600_000;
+    Date.now = () => frozen;
+    early = new DevContour(new Store(join(s.root, 'state.sqlite')), loadConfig(ctx.path));
+    // CLI прочитал конфигурацию A до применения, а объект создаст после.
+    const snapshotA = loadConfig(ctx.path);
+    const { operation } = (await s.changes().start(s.proposal, 'codex')) as {
+      operation: ContractChange;
+    };
+    Date.now = realNow;
+    assert.equal((await s.changes().advance(operation.id)).status, 'completed');
+    Date.now = () => frozen;
+    late = new DevContour(new Store(join(s.root, 'state.sqlite')), snapshotA);
+    for (const stale of [early, late])
+      assert.throws(
+        () => stale.assertCurrentConfig(stale.store.read()),
+        /устаревшей конфигурацией/,
+      );
+    const applied = s.store.read().appliedConfig;
+    assert.ok(early.leader('early'));
+    early.recordConfig('early');
+    assert.deepEqual(s.store.read().appliedConfig, applied, 'отставший не вернул A');
+    Date.now = realNow;
+    s.store.change('fixture.no-leader', (st) => {
+      st.leader = undefined;
+    });
+    // Настоящий перезапуск с новым полем: файл прочитан после правки.
+    const raw = JSON.parse(readFileSync(ctx.path, 'utf8')) as Record<string, unknown>;
+    writeFileSync(
+      ctx.path,
+      JSON.stringify({ ...raw, runTimeoutMs: Number(raw.runTimeoutMs) + 1 }, null, 2) + '\n',
+    );
+    restarted = new DevContour(new Store(join(s.root, 'state.sqlite')), loadConfig(ctx.path));
+    assert.doesNotThrow(() => restarted!.assertCurrentConfig(restarted!.store.read()));
+    assert.ok(restarted.leader('restarted'));
+    restarted.recordConfig('restarted');
+    assert.equal(s.store.read().appliedConfig?.digest, loadedDigest(restarted.config));
+    assert.equal(s.store.read().appliedConfig?.generation, (applied?.generation ?? 0) + 1);
+  } finally {
+    Date.now = realNow;
+    early?.store.close();
+    late?.store.close();
+    restarted?.store.close();
+    await s.remove();
+  }
+});
+
 test('C-F16: a config edit made before the context step is not taken over by the operation', async () => {
   const s = await stage();
   try {

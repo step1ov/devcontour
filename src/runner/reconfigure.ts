@@ -87,7 +87,7 @@ export function serveReconfigure(h: DevContour, path: string, by: string) {
       }
       return;
     }
-    if (s.appliedConfig && s.appliedConfig.digest !== loadedDigest(h.config) && !request)
+    if (!request && s.appliedConfig && h.configStale(s))
       try {
         applyConfig(h, path, s.appliedConfig.digest);
       } catch {

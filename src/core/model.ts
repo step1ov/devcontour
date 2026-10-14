@@ -534,7 +534,7 @@ export interface DevContourState {
    * подтверждённый запрос операции): digest загруженной конфигурации.
    * Процесс с другой конфигурацией не выдаёт и не принимает попыток.
    */
-  appliedConfig?: { digest: string; at: string; by: string };
+  appliedConfig?: { digest: string; generation?: number; at: string; by: string };
   reconfigure?: {
     operation: string;
     digest: string;

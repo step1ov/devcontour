@@ -5,6 +5,7 @@ import { isAbsolute, resolve, dirname, join, sep } from 'node:path';
 import { repositories } from '../core/repositories.ts';
 import { packKey, resolveProfile } from './packs.ts';
 import { configSchema, type Config } from '../core/model.ts';
+import { configSources, loadedDigest } from '../core/service.ts';
 import { configuredSpellings } from '../core/check-store.ts';
 /**
  * Загрузить конфигурацию. `text` — содержимое `config.json`, если его уже
@@ -114,6 +115,9 @@ export function loadConfig(path: string, text = readFileSync(path, 'utf8')): Con
   if (c.resourceDatabase && !isAbsolute(c.resourceDatabase))
     throw new Error('resourceDatabase требует абсолютный путь');
   validateWorkflow(c);
+  // Источник для проверки поколения: процесс, прочитавший этот файл, позже
+  // узнаёт, не изменился ли он с тех пор.
+  configSources.set(c, { loaded: loadedDigest(c), reload: () => loadedDigest(loadConfig(path)) });
   return c;
 }
 

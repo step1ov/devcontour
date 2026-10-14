@@ -225,6 +225,12 @@ function assertNotAccepted(s: DevContourState, t: Task) {
  * digest одного главного файла не закреплял бы gates компонентов.
  */
 export const loadedDigest = (config: Config) => digest(config);
+/**
+ * Откуда конфигурация загружена: digest файла в момент загрузки и функция,
+ * которая перечитывает файл и возвращает digest того, что в нём сейчас. Их
+ * ставит `loadConfig`; конфигурации, собранные в памяти, источника не имеют.
+ */
+export const configSources = new WeakMap<Config, { loaded: string; reload: () => string }>();
 const staleMessage =
   'Процесс работает с устаревшей конфигурацией: контур уже применил другую; перезапустите процесс';
 
@@ -235,22 +241,42 @@ export class DevContour {
     public config: Config,
   ) {
     validateWorkflow(config);
+    this.knownConfig = loadedDigest(config);
+    this.baseline = this.initialBaseline();
   }
   /**
-   * Поколение конфигурации процесса: digest той, с которой он начал (или
-   * которую применил по запросу), и момент, когда он её получил. Процесс
-   * отстал, если в базе применена другая конфигурация и записана она позже
-   * этого момента — значит, её применили, пока он работал со своей. От живого
-   * лидера это не зависит. Применённая раньше — не новее: процесс, начавший
-   * после правки файла (CLI до запуска сервера), не отставший.
+   * Поколение конфигурации процесса — без часов. `knownConfig` — digest его
+   * конфигурации; `baseline` — номер применённого поколения, до которого она
+   * актуальна. Процесс отстал, если применено другое содержимое с большим
+   * номером. Номер растёт на каждой записи применённой конфигурации.
    */
-  private knownConfig?: string;
-  private loadedAt = Date.now();
-  private staleConfig(s: DevContourState) {
-    this.knownConfig ??= loadedDigest(this.config);
+  private knownConfig: string;
+  private baseline: number;
+  /**
+   * С какого поколения процесс начал. Применена та же конфигурация — текущее.
+   * Другая — решает файл, из которого процесс загрузился: если он не менялся
+   * с момента загрузки, снимок процесса новее применённого (перезапуск, CLI
+   * после правки файла); если изменился — процесс прочёл старый файл и
+   * отстал, даже если объект создан после применения.
+   */
+  private initialBaseline() {
+    const applied = this.store.read().appliedConfig;
+    if (!applied) return 0;
+    const generation = applied.generation ?? 0;
+    if (applied.digest === this.knownConfig) return generation;
+    const source = configSources.get(this.config);
+    if (!source) return generation;
+    try {
+      return source.reload() === source.loaded ? generation : -1;
+    } catch {
+      return -1;
+    }
+  }
+  /** Процесс работает со снимком конфигурации старше применённого. */
+  configStale(s: DevContourState) {
     const applied = s.appliedConfig;
     return (
-      !!applied && applied.digest !== this.knownConfig && Date.parse(applied.at) > this.loadedAt
+      !!applied && applied.digest !== this.knownConfig && (applied.generation ?? 0) > this.baseline
     );
   }
   /**
@@ -279,7 +305,7 @@ export class DevContour {
     validateWorkflow(next);
     this.config = next;
     this.knownConfig = loadedDigest(next);
-    this.loadedAt = Date.now();
+    this.baseline = this.store.read().appliedConfig?.generation ?? 0;
   }
   /**
    * Пауза операции: ставится, только если очередь не остановлена, и
@@ -302,7 +328,7 @@ export class DevContour {
    * планов — сравнение двух его же старых digest актуальности не доказывает.
    */
   assertCurrentConfig(s: DevContourState) {
-    if (this.staleConfig(s)) throw new DomainError(staleMessage, 409);
+    if (this.configStale(s)) throw new DomainError(staleMessage, 409);
   }
   /** Снять паузу операции — только свою; паузу человека она не трогает. */
   operationResume(operation: string) {
@@ -345,7 +371,13 @@ export class DevContour {
       s.reconfigure = error
         ? { ...current, error }
         : { ...current, appliedAt: now(), appliedBy: by, error: undefined };
-      if (!error) s.appliedConfig = { digest: configDigest, at: now(), by };
+      if (!error)
+        s.appliedConfig = {
+          digest: configDigest,
+          generation: (s.appliedConfig?.generation ?? 0) + 1,
+          at: now(),
+          by,
+        };
       return { operation, digest: configDigest, ...(error ? { error } : { by }) };
     });
   }
@@ -360,11 +392,15 @@ export class DevContour {
       if (s.leader?.owner !== by || s.leader.leaseUntil <= Date.now()) return;
       // Конфигурацию, применённую после загрузки этого процесса, получение
       // лидерства не перезаписывает: процесс отстал и должен её догнать.
-      if (this.staleConfig(s)) return;
-      const configDigest = loadedDigest(this.config);
-      this.knownConfig = configDigest;
-      if (s.appliedConfig?.digest === configDigest) return;
-      s.appliedConfig = { digest: configDigest, at: now(), by };
+      if (this.configStale(s)) return;
+      const configDigest = this.knownConfig;
+      const generation = s.appliedConfig?.generation ?? 0;
+      if (s.appliedConfig?.digest === configDigest) {
+        this.baseline = generation;
+        return;
+      }
+      s.appliedConfig = { digest: configDigest, generation: generation + 1, at: now(), by };
+      this.baseline = generation + 1;
       return { digest: configDigest, by };
     });
   }
@@ -1009,7 +1045,7 @@ export class DevContour {
         (s.reconfigure && !s.reconfigure.appliedAt) ||
         // Процесс со старой конфигурацией не выдаёт попыток: их условия
         // разошлись бы с применённой контуром конфигурацией.
-        this.staleConfig(s) ||
+        this.configStale(s) ||
         s.changeSets.some((c) =>
           c.deliveries?.some((d) => d.status === 'active' && d.leaseUntil > Date.now()),
         ) ||
