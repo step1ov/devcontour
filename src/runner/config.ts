@@ -1,18 +1,11 @@
 import { selectedWorkspaceMode, assertControllerCheckout } from './workspace-mode.ts';
 import { validateWorkflow } from '../core/workflow.ts';
-import {
-  readFileSync,
-  realpathSync,
-  writeFileSync,
-  existsSync,
-  lstatSync,
-  statSync,
-} from 'node:fs';
+import { readFileSync, realpathSync, writeFileSync, existsSync, lstatSync } from 'node:fs';
 import { isAbsolute, resolve, dirname, join, sep } from 'node:path';
 import { repositories } from '../core/repositories.ts';
 import { packKey, resolveProfile } from './packs.ts';
 import { configSchema, type Config } from '../core/model.ts';
-import { configSources } from '../core/service.ts';
+import { bytesDigest, configSources } from '../core/service.ts';
 import { configuredSpellings } from '../core/check-store.ts';
 /**
  * Загрузить конфигурацию. `text` — содержимое `config.json`, если его уже
@@ -21,8 +14,10 @@ import { configuredSpellings } from '../core/check-store.ts';
  */
 export function loadConfig(path: string, text = readFileSync(path, 'utf8')): Config {
   const raw = JSON.parse(text);
+  // Хэш ровно тех байтов, что разобраны: главного файла и component config.
+  const sources = [{ path, sha: bytesDigest(text) }];
   if (raw.repositories?.length) {
-    raw.repositories = raw.repositories.map((r: any) => readComponentConfig(r));
+    raw.repositories = raw.repositories.map((r: any) => readComponentConfig(r, sources));
     raw.gates ??= raw.repositories[0].gates;
     raw.protectedPaths ??= raw.repositories[0].protectedPaths;
   }
@@ -122,31 +117,21 @@ export function loadConfig(path: string, text = readFileSync(path, 'utf8')): Con
   if (c.resourceDatabase && !isAbsolute(c.resourceDatabase))
     throw new Error('resourceDatabase требует абсолютный путь');
   validateWorkflow(c);
-  // Источник для проверки поколения: процесс, прочитавший этот файл, позже
-  // узнаёт, не изменился ли он с тех пор.
-  configSources.set(c, {
-    files: [path, ...componentFiles(raw as Parameters<typeof componentFiles>[0])].map((file) => {
-      const stat = statSync(file);
-      return { path: file, mtimeMs: stat.mtimeMs, size: stat.size };
-    }),
-  });
+  // Источник для проверки поколения: процесс, прочитавший эти байты, позже
+  // узнаёт, лежат ли в файлах они же.
+  configSources.set(c, { files: sources });
   return c;
 }
 
-/** Файлы component config, из которых собрана конфигурация. */
-function componentFiles(raw: { repositories?: { path: string; configFile?: string }[] }) {
-  return (raw.repositories ?? [])
-    .filter((r) => r.configFile)
-    .map((r) => realpathSync(resolve(realpathSync(resolve(r.path)), r.configFile!)));
-}
-
-export function readComponentConfig(entry: any) {
+export function readComponentConfig(entry: any, sources?: { path: string; sha: string }[]) {
   if (!entry.configFile) return entry;
   const root = realpathSync(resolve(entry.path));
   const path = realpathSync(resolve(root, entry.configFile));
   if (!path.startsWith(root + sep))
     throw new Error('Component config должен находиться в репозитории');
-  const file = JSON.parse(readFileSync(path, 'utf8')) as {
+  const text = readFileSync(path, 'utf8');
+  sources?.push({ path, sha: bytesDigest(text) });
+  const file = JSON.parse(text) as {
     roles?: Record<string, unknown>;
   };
   // Роли складываются по ключам, а не заменяются целиком: компонент уточняет

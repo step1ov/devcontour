@@ -11,6 +11,7 @@ import fs, {
   renameSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1019,6 +1020,61 @@ test('C-F20/C-F22/C-F23/C-F24: the applied configuration is the only truth; adop
     s.store.change('fixture.recovered', (st) => cli.assertCurrentConfig(st));
     assert.equal(s.store.read().appliedConfig?.digest, loadedDigest(cli.config));
     assert.equal(s.store.read().appliedConfig?.generation, (applied.generation ?? 0) + 1);
+  } finally {
+    for (const h of extra) h.store.close();
+    await s.remove();
+  }
+});
+
+test('C-F25/C-F26/C-F27: adoption checks the bytes that were parsed, not file metadata, and a failed start record is retried', async () => {
+  const s = await stage();
+  const extra: DevContour[] = [];
+  const open = (config: ReturnType<typeof loadConfig>) => {
+    const h = new DevContour(new Store(join(s.root, 'state.sqlite')), config);
+    extra.push(h);
+    return h;
+  };
+  try {
+    const ctx = await withContextPack(s);
+    const textA = readFileSync(ctx.path, 'utf8');
+    const statA = statSync(ctx.path);
+    // Процесс со снимком A, загруженным до применения.
+    const old = open(loadConfig(ctx.path));
+    const { operation } = (await s.changes().start(s.proposal, 'codex')) as {
+      operation: ContractChange;
+    };
+    assert.equal((await s.changes().advance(operation.id)).status, 'completed');
+    const applied = s.store.read().appliedConfig!;
+    assert.notEqual(readFileSync(ctx.path, 'utf8'), textA, 'в файле B');
+    // C-F25: у файла B прежние mtime (как после cp -p) — содержимое всё равно B.
+    utimesSync(ctx.path, statA.atime, statA.mtime);
+    assert.throws(
+      () => s.store.change('fixture.old', (st) => old.assertCurrentConfig(st)),
+      /изменился после загрузки/,
+    );
+    // C-F26: загрузчик разобрал байты A, а на диске уже B.
+    const racing = open(loadConfig(ctx.path, textA));
+    assert.throws(
+      () => s.store.change('fixture.race', (st) => racing.assertCurrentConfig(st)),
+      /изменился после загрузки/,
+    );
+    assert.deepEqual(s.store.read().appliedConfig, applied, 'A не вернулась');
+    // C-F27: законный перезапуск с новым полем; первая запись при старте не
+    // удалась (файл временно недоступен), следующая — удалась.
+    const raw = JSON.parse(readFileSync(ctx.path, 'utf8')) as Record<string, unknown>;
+    writeFileSync(
+      ctx.path,
+      JSON.stringify({ ...raw, runTimeoutMs: Number(raw.runTimeoutMs) + 1 }, null, 2) + '\n',
+    );
+    const restarted = open(loadConfig(ctx.path));
+    assert.ok(restarted.leader('restarted'));
+    renameSync(ctx.path, ctx.path + '.away');
+    restarted.recordConfig('restarted');
+    assert.deepEqual(s.store.read().appliedConfig, applied);
+    renameSync(ctx.path + '.away', ctx.path);
+    assert.notEqual(s.store.read().appliedConfig?.digest, restarted.configDigest);
+    restarted.recordConfig('restarted');
+    assert.equal(s.store.read().appliedConfig?.digest, restarted.configDigest);
   } finally {
     for (const h of extra) h.store.close();
     await s.remove();

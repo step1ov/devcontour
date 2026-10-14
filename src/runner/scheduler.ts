@@ -239,7 +239,6 @@ export class Scheduler {
       return { owner: this.owner };
     });
   }
-  private configRecorded = false;
   async tick() {
     if (this.ticking) return;
     this.ticking = true;
@@ -251,10 +250,11 @@ export class Scheduler {
       // Запуск применяет конфигурацию этого процесса, но только когда он стал
       // controller: конкурирующий запуск ничего не меняет и не останавливает
       // действующего владельца.
-      if (!this.configRecorded) {
+      // Повторяется на каждом тике, пока конфигурация процесса не станет
+      // применённой: временная ошибка чтения файла не должна оставить её
+      // незаписанной навсегда. Отставший процесс не записывает — он догоняет.
+      if (this.h.store.read().appliedConfig?.digest !== this.h.configDigest)
         this.h.recordConfig(this.owner);
-        this.configRecorded = true;
-      }
       await this.recover();
       // Запрошенное операцией применение конфигурации — до выдачи: попытки
       // после него идут уже под новой конфигурацией.

@@ -1,4 +1,4 @@
-import { statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import {
   developmentBinding,
   assertFeatureOf,
@@ -227,22 +227,23 @@ function assertNotAccepted(s: DevContourState, t: Task) {
  */
 export const loadedDigest = (config: Config) => digest(config);
 /**
- * Откуда конфигурация загружена: файлы (`config.json` и component config) с
- * их mtime и размером в момент загрузки. Ставит `loadConfig`; конфигурации,
- * собранные в памяти, источника не имеют.
+ * Откуда конфигурация загружена: файлы (`config.json` и component config) и
+ * хэш именно тех байтов, которые загрузчик разобрал. Ставит `loadConfig`;
+ * конфигурации, собранные в памяти, источника не имеют.
  */
-export const configSources = new WeakMap<
-  Config,
-  { files: { path: string; mtimeMs: number; size: number }[] }
->();
-/** Файлы, из которых загружена конфигурация, не менялись с загрузки. */
+export const configSources = new WeakMap<Config, { files: { path: string; sha: string }[] }>();
+export const bytesDigest = (text: string) => createHash('sha256').update(text).digest('hex');
+/**
+ * Файлы, из которых загружена конфигурация, сейчас содержат ровно те байты,
+ * что разобрал загрузчик. Сверяется содержимое, а не mtime и размер: их
+ * сохраняют копирование и перезапись тем же размером.
+ */
 function sourceUnchanged(config: Config): { ok: true } | { ok: false; reason: string } {
   const source = configSources.get(config);
   if (!source) return { ok: false, reason: 'конфигурация собрана в памяти, источника нет' };
   for (const file of source.files) {
     try {
-      const stat = statSync(file.path);
-      if (stat.mtimeMs !== file.mtimeMs || stat.size !== file.size)
+      if (bytesDigest(readFileSync(file.path, 'utf8')) !== file.sha)
         return { ok: false, reason: `файл ${file.path} изменился после загрузки` };
     } catch (error) {
       return { ok: false, reason: `файл ${file.path} не читается: ${String(error)}` };
@@ -273,6 +274,10 @@ export class DevContour {
    * имеет. Ошибка чтения файла не запоминается: следующая проверка повторит её.
    */
   private knownConfig: string;
+  /** Digest конфигурации этого процесса. */
+  get configDigest() {
+    return this.knownConfig;
+  }
   /** Owner, под которым этот процесс получил лидерство. */
   private ownLeader?: string;
   /** Может ли процесс записать свою конфигурацию как применённую (в транзакции). */
