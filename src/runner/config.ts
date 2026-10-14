@@ -36,6 +36,10 @@ export function loadConfig(path: string, text = readFileSync(path, 'utf8')): Con
       .filter((x): x is string => !!x)
       .map((x) => resolve(x)),
   );
+  // Заданные каталоги (корень, workspace, компоненты) и куда они ведут: их
+  // переключённый symlink — другой источник, даже если config.json цел.
+  for (const dir of configuredSpellings.get(c) ?? [])
+    sources.push({ path: dir, real: realpathSync(dir), sha: '', dir: true });
   c.repository = realpathSync(resolve(c.repository));
   for (const repo of c.repositories) repo.path = realpathSync(resolve(repo.path));
   if (c.workspaceRoot) c.workspaceRoot = realpathSync(resolve(c.workspaceRoot));

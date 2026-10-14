@@ -233,7 +233,7 @@ export const loadedDigest = (config: Config) => digest(config);
  * момент загрузки. Ставит `loadConfig`; конфигурации, собранные в памяти,
  * источника не имеют.
  */
-export type ConfigSourceFile = { path: string; real: string; sha: string };
+export type ConfigSourceFile = { path: string; real: string; sha: string; dir?: true };
 export const configSources = new WeakMap<Config, { files: ConfigSourceFile[]; digest: string }>();
 export const bytesDigest = (text: string) => createHash('sha256').update(text).digest('hex');
 /**
@@ -265,6 +265,7 @@ function sourceUnchanged(
       // Путь разрешается заново: переключённый symlink ведёт к другому файлу.
       if (realpathSync(file.path) !== file.real)
         return { ok: false, reason: `путь ${file.path} теперь ведёт к другому файлу` };
+      if (file.dir) continue;
       if (bytesDigest(readFileSync(file.real, 'utf8')) !== file.sha)
         return { ok: false, reason: `файл ${file.path} изменился после загрузки` };
     } catch (error) {

@@ -11,6 +11,7 @@ import fs, {
   rmSync,
   statSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1183,6 +1184,58 @@ test('C-F28: a component config reached through a switched symlink does not keep
     const applied = b.store.read().appliedConfig;
     assert.throws(
       () => viaLink.store.change('fixture.link', (st) => viaLink.assertCurrentConfig(st)),
+      /теперь ведёт к другому файлу/,
+    );
+    assert.deepEqual(b.store.read().appliedConfig, applied);
+  } finally {
+    for (const h of extra) h.store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('C-F31: a repository directory reached through a switched symlink does not keep the right to adopt', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'devcontour-repo-link-'));
+  const extra: DevContour[] = [];
+  try {
+    await mkdir(join(root, 'repo-a'));
+    await mkdir(join(root, 'repo-b'));
+    // Компонент задан прямо в config.json, без component config; его каталог —
+    // symlink на repo-a.
+    symlinkSync('repo-a', join(root, 'repo'));
+    const base = config();
+    const path = join(root, 'config.json');
+    await writeFile(
+      path,
+      JSON.stringify({
+        ...base,
+        repository: join(root, 'repo'),
+        repositories: [
+          repositorySchema.parse({
+            id: 'product',
+            name: 'Product',
+            path: join(root, 'repo'),
+            gates: base.gates,
+          }),
+        ],
+      }),
+    );
+    const store = () => new Store(join(root, 'state.sqlite'));
+    const viaA = new DevContour(store(), loadConfig(path));
+    extra.push(viaA);
+    // Ссылка переключена на repo-b; config.json цел. Свежий процесс применил B.
+    unlinkSync(join(root, 'repo'));
+    symlinkSync('repo-b', join(root, 'repo'));
+    const b = new DevContour(store(), loadConfig(path));
+    extra.push(b);
+    assert.notEqual(loadedDigest(b.config), loadedDigest(viaA.config));
+    assert.ok(b.leader('b'));
+    b.recordConfig('b');
+    b.store.change('fixture.no-leader', (st) => {
+      st.leader = undefined;
+    });
+    const applied = b.store.read().appliedConfig;
+    assert.throws(
+      () => viaA.store.change('fixture.link', (st) => viaA.assertCurrentConfig(st)),
       /теперь ведёт к другому файлу/,
     );
     assert.deepEqual(b.store.read().appliedConfig, applied);
