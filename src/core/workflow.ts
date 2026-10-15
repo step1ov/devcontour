@@ -39,6 +39,20 @@ export function orderedGates<T extends Gate>(gates: T[]): T[] {
   return ordered;
 }
 
+/**
+ * Выбранная область gates замкнута по `dependsOn`: gate без своей
+ * предпосылки упал бы только на integration. Предпосылка добавляется в
+ * область явно — неявно ничего не подключается.
+ */
+function assertPrerequisites(repo: { gates: Gate[] }, selected: string[], label: string) {
+  for (const id of selected)
+    for (const parent of repo.gates.find((g) => g.id === id)?.dependsOn ?? [])
+      if (!selected.includes(parent))
+        throw new DomainError(
+          `Область ${label}: gate ${id} требует ${parent} — добавьте ${parent} в область явно`,
+        );
+}
+
 export function validateWorkflow(config: Config) {
   const repos = repositories(config);
   // Уровень рассуждения передаётся только codex: у claude поле молча ничего бы
@@ -199,6 +213,7 @@ export function validateTaskContext(config: Config, task: TaskInput) {
     const own = repo.gates;
     // Группы раскрываются в явный список; состав и циклы проверяет раскрытие.
     const gates = expandGates(repo, task.gates);
+    assertPrerequisites(repo, gates, 'задачи');
     // Проверками без теста задача доказать себя не может: typecheck и lint
     // проходят и на нереализованном коде.
     if (!gates.some((id) => own.some((g) => g.id === id && g.kind === 'test')))
@@ -221,6 +236,7 @@ export function validateTaskContext(config: Config, task: TaskInput) {
         `Компонент ${consumer.repositoryId} не зависит от ${task.repositoryId}: он не потребитель`,
       );
     const gates = expandGates(repo, consumer.gates);
+    assertPrerequisites(repo, gates, `потребителя ${repo.id}`);
     if (!gates.some((id) => repo.gates.some((g) => g.id === id && g.kind === 'test')))
       throw new DomainError(`Проверки потребителя ${repo.id} должны включать test gate`);
   }

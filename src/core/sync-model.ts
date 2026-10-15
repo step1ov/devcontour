@@ -8,6 +8,10 @@ const hash = z.string().regex(/^[a-f0-9]{64}$/);
 const sha = z.string().regex(/^[a-f0-9]{40,64}$/);
 const date = z.iso.datetime();
 const runtime = z.enum(['codex', 'claude', 'demo']);
+/** Предел файла переносимой записи: его проверяет чтение состояния из Git. */
+export const maxRecordBytes = 2 * 1024 * 1024;
+/** Предел receipt: запись завершения несёт его с небольшой обвязкой. */
+export const maxReceiptBytes = maxRecordBytes - 64 * 1024;
 export const receiptSchema = z.strictObject({
   id: syncId,
   taskId: syncId,

@@ -32,7 +32,8 @@ import {
   type RecoveryDecision,
 } from './property-recovery.ts';
 import { planResult } from './plan.ts';
-import { boardOwner } from './sync-state.ts';
+import { boardOwner, completion } from './sync-state.ts';
+import { canonical, maxReceiptBytes } from './sync-model.ts';
 import { carriedTaskIds } from './work-status.ts';
 import { blockingBudget, taskBudgets, usageRecords } from './budget.ts';
 import { assertDag, descendants, readyTasks, latestTaskId, impactGraph } from './graph.ts';
@@ -319,6 +320,18 @@ export function uncoveredGates(config: Config, s: DevContourState, tasks: Task[]
   return result;
 }
 
+/**
+ * Размер receipt принятого результата. Попытка, receipt которой не строится
+ * (прежняя без восстановимой policy), здесь не отклоняется: это ограничение
+ * переноса, а не приёмки.
+ */
+function receiptBytes(h: DevContour, s: DevContourState, t: Task) {
+  try {
+    return Buffer.byteLength(canonical(completion(h, s, t)));
+  } catch {
+    return 0;
+  }
+}
 export class DevContour {
   constructor(
     readonly store: Store,
@@ -1479,7 +1492,7 @@ export class DevContour {
     });
   }
   finish(id: string, token: string, sha: string, publish?: () => void) {
-    return this.withRun(id, token, 'task.done', (r, t) => {
+    return this.withRun(id, token, 'task.done', (r, t, s) => {
       if (r.phase !== 'integrating' || !r.candidateSha || r.integrationSha !== sha)
         throw new DomainError('Нет интеграционного коммита');
       // Принять можно только под той версией проверок, под которой шла
@@ -1545,13 +1558,21 @@ export class DevContour {
       // прежнем уровне.
       const unproven = unprovenReason(t.requirements, r.evidence, sha);
       if (unproven) throw new TaskFailure('gate', unproven);
-      publish?.();
       r.status = 'succeeded';
       r.finishedAt = now();
       afterSuccess(t);
       t.status = 'done';
       t.resultSha = sha;
       t.activeRunId = undefined;
+      // Принятый результат переносим: receipt, который чтение состояния из Git
+      // отвергло бы по размеру, отклоняется до публикации, а не после done.
+      const bytes = receiptBytes(this, s, t);
+      if (bytes > maxReceiptBytes)
+        throw new DomainError(
+          `Receipt задачи ${t.id} занимает ${bytes} байт при пределе ${maxReceiptBytes}: ` +
+            'сократите dependencyArtifacts или область проверок',
+        );
+      publish?.();
       return { taskId: t.id, runId: id, sha };
     });
   }

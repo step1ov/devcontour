@@ -1092,6 +1092,22 @@ test('G02: a consumer receipt is pinned to the attempt check version, a consumer
         }),
       /назван дважды/,
     );
+    // Область потребителя замкнута по dependsOn: предпосылка добавляется явно.
+    const productGates = f.h.config.repositories[1].gates;
+    f.h.config.repositories[1].gates = [
+      { ...productGates[0], id: 'build' },
+      { ...productGates[0], dependsOn: ['build'] },
+    ];
+    assert.throws(
+      () =>
+        f.h.addTask(board.id, {
+          ...input('Without build'),
+          repositoryId: 'library',
+          consumers: [{ repositoryId: 'product', gates: ['test'] }],
+        }),
+      /Область потребителя product: gate test требует build — добавьте build в область явно/,
+    );
+    f.h.config.repositories[1].gates = productGates;
     const task = f.h.addTask(board.id, {
       ...input('Change value'),
       repositoryId: 'library',
@@ -1148,6 +1164,20 @@ test('G02: a consumer receipt is pinned to the attempt check version, a consumer
         freshness: [{ repositoryId: 'product', snapshot: P, head: P, fresh: true }],
         observedAt: new Date().toISOString(),
       };
+    });
+    // Receipt, который чтение состояния из Git отвергло бы по размеру, не
+    // даёт завершить: результат не становится done.
+    const huge = Array.from({ length: 4_000 }, (_, i) => ({
+      path: `${i}-${'p'.repeat(490)}`,
+      digest: 'e'.repeat(64),
+    }));
+    f.store.change('fixture.huge', (s) => {
+      s.runs.find((r) => r.id === run.id)!.consumers![0].checked!.dependencies[0].artifacts = huge;
+    });
+    assert.throws(() => f.h.finish(run.id, run.token, M), /занимает \d+ байт при пределе/);
+    assert.notEqual(f.store.read().tasks.find((t) => t.id === task.id)!.status, 'done');
+    f.store.change('fixture.small', (s) => {
+      s.runs.find((r) => r.id === run.id)!.consumers![0].checked!.dependencies[0].artifacts = [];
     });
     f.h.finish(run.id, run.token, M);
     const done = f.store.read().tasks.find((t) => t.id === task.id)!;
@@ -1290,6 +1320,13 @@ test('G01/G02: the approved check scope is pinned: a scope edit during review vo
     f.h.config.gates = [profileGate('unit'), profileGate('engine')];
     f.h.config.gateGroups = { all: ['unit', 'engine'] };
     const b = f.h.createBoard('Pinned scope');
+    // Собственная область тоже замкнута по dependsOn.
+    f.h.config.gates = [profileGate('unit'), { ...profileGate('engine'), dependsOn: ['unit'] }];
+    assert.throws(
+      () => f.h.addTask(b.id, { ...input('Engine only'), gates: ['engine'] }),
+      /Область задачи: gate engine требует unit/,
+    );
+    f.h.config.gates = [profileGate('unit'), profileGate('engine')];
     const t = f.h.addTask(b.id, { ...input('Grouped task'), gates: ['@all'] });
     const reviewed = f.store.read().tasks.find((x) => x.id === t.id)!;
     const expected = {

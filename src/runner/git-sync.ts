@@ -23,6 +23,7 @@ import { repository, repositories } from '../core/repositories.ts';
 import {
   canonical,
   identitySchema,
+  maxRecordBytes,
   mergeValue,
   recordKey,
   recordSchema,
@@ -100,7 +101,7 @@ function readRecords(root: string, directory = '.devcontour'): Records {
       if (!/^[A-Za-z0-9_-]{1,80}\.json$/.test(file))
         throw new Error('Неизвестный файл состояния: ' + join(dir, file));
       const path = safePath(root, `${directory}/${category}/${file}`);
-      if (!lstatSync(path).isFile() || lstatSync(path).size > 2 * 1024 * 1024)
+      if (!lstatSync(path).isFile() || lstatSync(path).size > maxRecordBytes)
         throw new Error('Недопустимый файл состояния: ' + path);
       const value = recordSchema.parse(JSON.parse(readFileSync(path, 'utf8')));
       const key = category + '/' + file.slice(0, -5);
