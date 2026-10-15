@@ -1,28 +1,28 @@
-import { randomUUID } from 'node:crypto';
 import { activeStart, type UsageRecord } from './usage.ts';
 
 /**
- * Идущие вызовы моделей этого процесса. Отдельно от `usage.ts`: тот входит в
- * модель конфигурации и в бандл панели, а здесь — процесс и его часы.
+ * Идущие ли вызовы на самом деле. Процессы и ОС — дело runner: он
+ * регистрирует свой процесс и проверку чужого владельца. Без регистрации
+ * чужой владелец живым не считается (консервативно).
  */
-/** Этот процесс: по нему восстановление и бюджет отличают свои идущие вызовы. */
-export const CURRENT_PROCESS = { id: randomUUID(), pid: process.pid };
-const pidAlive = (pid: number) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
-  }
-};
+type Owner = { id: string; pid: number; startedAt?: number };
+let current: Owner | undefined;
+let foreignAlive: (owner: Owner) => boolean = () => false;
+export function registerProcess(owner: Owner, alive: (owner: Owner) => boolean) {
+  current = owner;
+  foreignAlive = alive;
+}
+
 /**
- * Вызов идёт на самом деле: его владелец жив (свой — ещё не завершил вызов,
- * чужой — процесс существует) и вызов не старше `maxMs`. Запись без процесса,
- * умершего процесса или слишком старая (pid мог достаться другому процессу)
- * идущей не считается.
+ * Вызов идёт на самом деле. Свой — ещё не завершён в этом процессе. Чужой —
+ * его процесс существует и это тот же процесс (pid этого процесса у чужой
+ * записи значит, что pid достался нам; момент старта сверяет runner), и вызов
+ * не старше `maxMs`. Владелец, которого подтвердить нельзя, живым не считается.
  */
 export function liveCall(r: UsageRecord, at: number, maxMs: number) {
   if (r.outcome !== 'active' || !r.process) return false;
-  if (at - Date.parse(r.startedAt) > maxMs && !activeStart(r.id) !== undefined) return false;
-  return r.process.id === CURRENT_PROCESS.id ? activeStart(r.id) !== undefined : pidAlive(r.process.pid);
+  if (current && r.process.id === current.id) return activeStart(r.id) !== undefined;
+  if (r.process.pid === process.pid || r.process.startedAt === undefined) return false;
+  if (at - Date.parse(r.startedAt) > maxMs) return false;
+  return foreignAlive(r.process);
 }

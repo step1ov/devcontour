@@ -381,6 +381,13 @@ export interface Evidence {
   checks?: string;
 }
 export interface Run {
+  /**
+   * Вызовы моделей этой попытки записываются учётом: попытка выдана версией с
+   * учётом вызовов. Попытка без отметки — до учёта: если модель в ней
+   * вызывалась, её стоимость неизвестна. У отмеченной отсутствие записи
+   * значит, что вызова не было (например, отказ бюджета до вызова).
+   */
+  callsRecorded?: true;
   memory?: { revision: string; ids: string[]; digest: string; bytes: number };
   dispatch?: {
     policy: 'fifo-ready-v1';

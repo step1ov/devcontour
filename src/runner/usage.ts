@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { DevContour, digest } from '../core/service.ts';
 import type { DevContourState } from '../core/model.ts';
-import { CURRENT_PROCESS } from '../core/live-calls.ts';
+import { CURRENT_PROCESS, ownerGone } from './live-calls.ts';
 import {
   endActive,
   startActive,
@@ -14,7 +14,6 @@ import {
 } from '../core/usage.ts';
 import type { AgentAdapter, AgentRequest } from './adapters.ts';
 import { assertBudget, callBudgets, usageRecords } from '../core/budget.ts';
-import { processAlive } from './resources.ts';
 import { command } from './process.ts';
 import { runtimeEvents } from './runtime-events.ts';
 import { z } from 'zod';
@@ -95,7 +94,7 @@ export function abandonCalls(h: DevContour, at = Date.now()) {
   const dead = (r: UsageRecord) =>
     r.outcome === 'active' &&
     (r.process
-      ? r.process.id !== PROCESS.id && !processAlive(r.process.pid)
+      ? ownerGone(r)
       : r.runId
         ? !activeRuns.has(r.runId)
         : at - Date.parse(r.startedAt) > 2 * h.config.runTimeoutMs);
@@ -120,6 +119,29 @@ export function abandonCalls(h: DevContour, at = Date.now()) {
     }
     return closed;
   });
+}
+
+/**
+ * Закрепляет задачи за записями вызовов о доске, сделанными до закрепления
+ * (без `taskIds`): все задачи доски по текущему графу. Выполняется до того,
+ * как синхронизация или планировщик изменят граф, — иначе перенос задачи
+ * снял бы с неё прежний расход доски.
+ */
+export function pinBoardCalls(h: DevContour) {
+  const s = h.store.read();
+  const legacy = usageRecords(h).filter(
+    (r) => !r.taskIds && !r.taskId && !r.runId && s.boards.some((b) => b.id === r.subjectId),
+  );
+  if (!legacy.length) return 0;
+  h.store.atomic(() => {
+    for (const r of legacy) {
+      const board = s.boards.find((b) => b.id === r.subjectId)!;
+      r.boardId ??= board.id;
+      r.taskIds = [...new Set(board.revisions.flatMap((x) => x.taskIds))];
+      h.store.saveLocal('usage', r.repositoryId, r.id, r);
+    }
+  });
+  return legacy.length;
 }
 
 /** Задача и доска вызова на момент вызова: за ними остаётся его расход. */
@@ -199,6 +221,13 @@ export async function measuredExecute(
     h.store.saveLocal('usage', meta.repositoryId, record.id, record);
   });
   startActive(record.id);
+  // Время идущего вызова сохраняется по ходу: другой процесс не увидит его
+  // ниже этого замера при откате часов.
+  const progress = setInterval(() => {
+    record.elapsedMs = Math.round(performance.now() - started);
+    save();
+  }, 15_000);
+  progress.unref();
   try {
     const result = await adapter.execute({
       ...request,
@@ -229,6 +258,7 @@ export async function measuredExecute(
     throw e;
   } finally {
     record.finishedAt = new Date().toISOString();
+    clearInterval(progress);
     record.durationMs = Math.round(performance.now() - started);
     save();
     endActive(record.id);

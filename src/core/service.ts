@@ -1312,6 +1312,7 @@ export class DevContour {
         startedAt: now(),
         leaseUntil: Date.now() + this.config.leaseMs,
         evidence: [],
+        callsRecorded: true,
       };
       run.episodeBasis = episodeBasis(t);
       if (t.recovery?.status === 'retry') {

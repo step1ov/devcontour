@@ -54,7 +54,7 @@ export interface UsageRecord {
    */
   outcome: 'active' | 'returned' | 'error' | 'abandoned';
   /** Процесс, который ведёт вызов: по нему восстановление узнаёт прерванные. */
-  process?: { id: string; pid: number };
+  process?: { id: string; pid: number; startedAt?: number };
   /** Когда восстановление признало вызов прерванным: верхняя граница его времени. */
   abandonedAt?: string;
   /**
@@ -62,6 +62,12 @@ export interface UsageRecord {
    * системных часов его не искажает. Нет поля — время по меткам начала и конца.
    */
   durationMs?: number;
+  /**
+   * Время идущего вызова по монотонным часам его процесса, сохраняемое по ходу
+   * вызова: другой процесс не видит его время ниже этого замера, даже если
+   * системные часы переведены назад.
+   */
+  elapsedMs?: number;
   /**
    * Задача и доска, о которых вызов, на момент вызова: расход остаётся за ними,
    * даже если граф потом изменится (перенос задачи между досками).
@@ -123,6 +129,9 @@ export const callDurationMs = (r: UsageRecord, at = Date.now()): number | null =
   const elapsed =
     Date.parse(r.finishedAt ?? r.abandonedAt ?? new Date(at).toISOString()) -
     Date.parse(r.startedAt);
+  // Сохранённый монотонный замер — нижняя граница: откат часов не опускает
+  // время ниже него.
+  if (r.elapsedMs !== undefined) return Math.max(r.elapsedMs, elapsed);
   return elapsed >= 0 ? elapsed : null;
 };
 /**

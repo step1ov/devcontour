@@ -85,13 +85,13 @@ function taskBoards(s: DevContourState, records: UsageRecord[], taskId: string) 
 }
 
 /**
- * Попытки области, вызовы которых не записаны: начаты до первой записи учёта
- * этой установки, модель вызывалась (есть кандидат или замер реализации), а
- * записи реализации этой попытки нет. Их стоимость и время неизвестны и не
- * выдумываются; более поздние вызовы той же попытки пробел не закрывают.
+ * Попытки области, вызовы которых не записаны: выданы до учёта вызовов (без
+ * отметки `callsRecorded`), модель в них вызывалась (есть кандидат или замер
+ * реализации), а записи реализации нет. Их стоимость и время неизвестны и не
+ * выдумываются; посторонние и более поздние вызовы пробел не закрывают, а у
+ * отмеченной попытки отсутствие записи значит, что вызова не было.
  */
 function uncoveredRuns(s: DevContourState, records: UsageRecord[], scope: BudgetScope) {
-  const epoch = Math.min(...records.map((r) => Date.parse(r.startedAt)));
   const implemented = new Set(
     records.filter((r) => r.stage === 'implementation' && r.runId).map((r) => r.runId),
   );
@@ -103,9 +103,9 @@ function uncoveredRuns(s: DevContourState, records: UsageRecord[], scope: Budget
         : boardTasks(s, scope.id!);
   return s.runs.filter(
     (r) =>
+      !r.callsRecorded &&
       (!tasks || tasks.has(r.taskId)) &&
       !implemented.has(r.id) &&
-      Date.parse(r.startedAt) < epoch &&
       (r.candidateSha || r.timings?.some((x) => x.stage.startsWith('implementation'))),
   ).length;
 }

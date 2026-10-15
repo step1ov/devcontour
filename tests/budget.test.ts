@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,7 +16,9 @@ import {
   type UsageRecord,
 } from '../src/core/usage.ts';
 import { budgetOverview, budgetStatus, taskBudgets, usageRecords } from '../src/core/budget.ts';
-import { abandonCalls, measuredExecute } from '../src/runner/usage.ts';
+import { abandonCalls, measuredExecute, pinBoardCalls } from '../src/runner/usage.ts';
+import { liveCall } from '../src/core/live-calls.ts';
+import { ownerGone, processStartedAt } from '../src/runner/live-calls.ts';
 import { workflowMetrics } from '../src/application/metrics.ts';
 import { chainBlockers } from '../src/core/work-status.ts';
 import type { AgentRequest } from '../src/runner/adapters.ts';
@@ -140,8 +142,11 @@ test('B02/B04: reported and estimated spend stay separate; partial counters of a
   }
 });
 
-test('B03: a call whose process died is closed as abandoned and counted; a live call stays unfinished', () => {
+test('B03: a call whose process died is closed as abandoned and counted; a live call stays unfinished', async () => {
   const f = contour({ budgets: { workspace: { usd: 100 }, onUnknown: 'stop' } });
+  // Живой владелец — настоящий другой процесс с известным моментом старта.
+  const owner = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)']);
+  await new Promise((done) => setTimeout(done, 200));
   try {
     const b = f.h.createBoard('Budget board', '', 'main');
     f.h.addTask(b.id, input());
@@ -173,7 +178,11 @@ test('B03: a call whose process died is closed as abandoned and counted; a live 
       f.store.saveLocal('usage', 'main', 'live', {
         ...base,
         id: 'live',
-        process: { id: 'other-live-process', pid: process.pid },
+        process: {
+          id: 'other-live-process',
+          pid: owner.pid!,
+          startedAt: processStartedAt(owner.pid!),
+        },
       });
     });
     assert.deepEqual(abandonCalls(f.h), ['crashed']);
@@ -191,6 +200,7 @@ test('B03: a call whose process died is closed as abandoned and counted; a live 
     assert.equal(status?.state, 'undetermined');
     assert.match(status.reason!, /у 1 вызовов неизвестна стоимость/);
   } finally {
+    owner.kill();
     f.cleanup();
   }
 });
@@ -353,9 +363,12 @@ test('review: unrecorded attempts, plan review calls, moves between boards and p
     f.h.approve(a.id);
     f.h.pause(false);
     const run = f.h.claim('w')!;
-    // Попытка с кандидатом без записей вызовов: стоимость неизвестна.
+    // Попытка до учёта (без отметки) с кандидатом и без записей вызовов:
+    // стоимость неизвестна.
     f.store.change('fixture.legacy', (s) => {
-      s.runs.find((r) => r.id === run.id)!.candidateSha = 'c'.repeat(40);
+      const r = s.runs.find((x) => x.id === run.id)!;
+      r.candidateSha = 'c'.repeat(40);
+      delete r.callsRecorded;
     });
     const legacy = budgetStatus(f.h, f.store.read(), { kind: 'task', id: t.id })!;
     assert.equal(legacy.state, 'undetermined');
@@ -546,6 +559,7 @@ test('review 2: history before accounting stays unknown after new calls of the s
     // Попытка до учёта: без кандидата, но с замером реализации.
     f.store.change('fixture.history', (s) => {
       const r = s.runs.find((x) => x.id === run.id)!;
+      delete r.callsRecorded;
       r.startedAt = new Date(Date.now() - 60_000).toISOString();
       r.timings = [
         { stage: 'implementation', startedAt: r.startedAt, durationMs: 1000, ok: false },
@@ -605,6 +619,127 @@ test('review 2: history before accounting stays unknown after new calls of the s
       ),
     );
   } finally {
+    f.cleanup();
+  }
+});
+
+test('review 3: history gaps follow the attempt flag, not timestamps; a long history is fine; a refused call leaves no gap', () => {
+  const f = contour({ budgets: { task: { usd: 5 }, onUnknown: 'stop' } });
+  try {
+    const b = f.h.createBoard('Budget board', '', 'main');
+    const t = f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    f.h.pause(false);
+    const run = f.h.claim('w')!;
+    // Выданная учётом попытка с замером реализации без записи — вызова не было
+    // (отказ бюджета до вызова): пробела нет.
+    f.store.change('fixture.refused', (s) => {
+      const r = s.runs.find((x) => x.id === run.id)!;
+      r.timings = [
+        { stage: 'implementation', startedAt: r.startedAt, durationMs: 1, ok: false },
+      ] as never;
+    });
+    const early: UsageRecord = {
+      id: 'early',
+      repositoryId: 'main',
+      stage: 'planning',
+      runtime: 'claude',
+      model: 'cheap',
+      runtimeVersion: null,
+      startedAt: '2020-01-01T00:00:00.000Z',
+      finishedAt: '2020-01-01T00:00:01.000Z',
+      outcome: 'returned',
+      promptBytes: 1,
+      promptDigest: 'd',
+      usage: usage(true, 0),
+      costUsd: 0,
+      costSource: 'provider-reported',
+    };
+    // Длинная история: расчёт не зависит от предела аргументов.
+    const many = Array.from({ length: 150_000 }, (_, i) => ({ ...early, id: `e${i}` }));
+    const s = f.store.read();
+    assert.equal(budgetStatus(f.h, s, { kind: 'task', id: t.id }, many)!.spent.uncoveredRuns, 0);
+    // Попытка до учёта: более ранний посторонний вызов пробел не закрывает.
+    f.store.change('fixture.legacy', (s) => {
+      delete s.runs.find((x) => x.id === run.id)!.callsRecorded;
+    });
+    assert.equal(
+      budgetStatus(f.h, f.store.read(), { kind: 'task', id: t.id }, [early])!.spent.uncoveredRuns,
+      1,
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('review 3: a reused pid is not a live owner; foreign in-flight time keeps its saved floor; legacy board calls stay with their tasks', async () => {
+  const f = contour({ budgets: { task: { usd: 5 }, board: { usd: 5 }, onUnknown: 'stop' } });
+  const owner = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)']);
+  await new Promise((done) => setTimeout(done, 200));
+  try {
+    const base: UsageRecord = {
+      id: 'x',
+      repositoryId: 'main',
+      stage: 'planning',
+      runtime: 'claude',
+      model: 'cheap',
+      runtimeVersion: null,
+      startedAt: new Date().toISOString(),
+      outcome: 'active',
+      promptBytes: 1,
+      promptDigest: 'd',
+      usage: usage(false),
+      costUsd: null,
+      costSource: 'unknown',
+    };
+    const at = Date.now();
+    const max = 2 * f.h.config.runTimeoutMs;
+    const started = processStartedAt(owner.pid!);
+    // Наш pid у чужой записи и чужой pid с другим моментом старта — не живые.
+    assert.equal(
+      liveCall({ ...base, process: { id: 'old', pid: process.pid, startedAt: started } }, at, max),
+      false,
+    );
+    const reused = { ...base, process: { id: 'old', pid: owner.pid!, startedAt: started! - 60_000 } };
+    assert.equal(liveCall(reused, at, max), false);
+    assert.equal(ownerGone(reused), true);
+    const real = { ...base, process: { id: 'old', pid: owner.pid!, startedAt: started } };
+    assert.equal(liveCall(real, at, max), true);
+    assert.equal(ownerGone(real), false);
+    // Чужой идущий вызов: откат часов не опускает время ниже сохранённого замера.
+    assert.equal(
+      callDurationMs({ ...base, elapsedMs: 300, startedAt: new Date(at + 60_000).toISOString() }, at),
+      300,
+    );
+    // Прежняя запись о доске без закреплённых задач закрепляется до изменения графа.
+    const b = f.h.createBoard('Board A', '', 'main');
+    const t = f.h.addTask(b.id, input());
+    f.store.atomic(() =>
+      f.store.saveLocal('usage', 'main', 'legacy-board', {
+        ...base,
+        id: 'legacy-board',
+        subjectId: b.id,
+        outcome: 'returned',
+        usage: usage(true, 6),
+        costUsd: 6,
+        costSource: 'provider-reported',
+      }),
+    );
+    assert.equal(pinBoardCalls(f.h), 1);
+    f.store.change('fixture.move', (s) => {
+      const from = s.boards.find((x) => x.id === b.id)!;
+      for (const r of from.revisions) r.taskIds = r.taskIds.filter((id) => id !== t.id);
+      s.boards.push({
+        ...structuredClone(from),
+        id: 'B-moved',
+        revisions: from.revisions.map((r) => ({ ...r, taskIds: [t.id] })),
+      });
+    });
+    const own = budgetStatus(f.h, f.store.read(), { kind: 'task', id: t.id })!;
+    assert.equal(own.spent.reportedUsd, 6);
+    assert.equal(own.state, 'exceeded');
+  } finally {
+    owner.kill();
     f.cleanup();
   }
 });
