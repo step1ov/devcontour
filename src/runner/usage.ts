@@ -135,8 +135,11 @@ export async function measuredExecute(
 ) {
   const startedAt = new Date().toISOString();
   const started = performance.now();
+  // Тарифы закрепляются на старте вызова: правка цен во время вызова или
+  // после него оценку не меняет.
+  const tariffs = h.config.prices.map((p) => ({ ...p }));
   const priceFor = (model: string | null | undefined) => {
-    const matched = h.config.prices
+    const matched = tariffs
       .filter(
         (p) =>
           p.runtime === adapter.name &&

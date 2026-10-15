@@ -241,7 +241,8 @@ test('Effective tariffs are snapshotted and cannot retroactively change call est
         version: 'fixture',
         execute: async (r) => {
           price.input = 50;
-          r.onUsage!(usage);
+          // Тариф применяется к модели, которую сообщил runtime.
+          r.onUsage!(usage, 'fixture', 'fixture-model');
           return { data: {}, log: '', command: [] };
         },
       },
