@@ -32,8 +32,8 @@ import {
   type RecoveryDecision,
 } from './property-recovery.ts';
 import { planResult } from './plan.ts';
-import { boardOwner, completion } from './sync-state.ts';
-import { canonical, maxReceiptBytes } from './sync-model.ts';
+import { boardOwner, completion, receiptRecordBytes } from './sync-state.ts';
+import { maxRecordBytes } from './sync-model.ts';
 import { carriedTaskIds } from './work-status.ts';
 import { blockingBudget, taskBudgets, usageRecords } from './budget.ts';
 import { assertDag, descendants, readyTasks, latestTaskId, impactGraph } from './graph.ts';
@@ -326,11 +326,13 @@ export function uncoveredGates(config: Config, s: DevContourState, tasks: Task[]
  * переноса, а не приёмки.
  */
 function receiptBytes(h: DevContour, s: DevContourState, t: Task) {
+  let receipt;
   try {
-    return Buffer.byteLength(canonical(completion(h, s, t)));
+    receipt = completion(h, s, t);
   } catch {
     return 0;
   }
+  return receiptRecordBytes(receipt);
 }
 export class DevContour {
   constructor(
@@ -1567,9 +1569,9 @@ export class DevContour {
       // Принятый результат переносим: receipt, который чтение состояния из Git
       // отвергло бы по размеру, отклоняется до публикации, а не после done.
       const bytes = receiptBytes(this, s, t);
-      if (bytes > maxReceiptBytes)
+      if (bytes > maxRecordBytes)
         throw new DomainError(
-          `Receipt задачи ${t.id} занимает ${bytes} байт при пределе ${maxReceiptBytes}: ` +
+          `Запись receipt задачи ${t.id} занимает ${bytes} байт при пределе ${maxRecordBytes}: ` +
             'сократите dependencyArtifacts или область проверок',
         );
       publish?.();

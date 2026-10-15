@@ -50,6 +50,13 @@ function approval(a?: Approval) {
       }
     : undefined;
 }
+/**
+ * Размер файла записи receipt — той самой сериализации, которую пишет экспорт
+ * и проверяет чтение состояния из Git, а не вложенного receipt: обвязка и
+ * отступы вложенности добавляют к нему заметную долю.
+ */
+export const receiptRecordBytes = (receipt: CompletionReceipt) =>
+  Buffer.byteLength(canonical(recordSchema.parse({ version: 1, kind: 'receipt', data: receipt })));
 export function completion(h: DevContour, s: DevContourState, t: Task): CompletionReceipt {
   if (t.sharedCompletion) return t.sharedCompletion.receipt;
   const run = s.runs.findLast(

@@ -10,8 +10,6 @@ const date = z.iso.datetime();
 const runtime = z.enum(['codex', 'claude', 'demo']);
 /** Предел файла переносимой записи: его проверяет чтение состояния из Git. */
 export const maxRecordBytes = 2 * 1024 * 1024;
-/** Предел receipt: запись завершения несёт его с небольшой обвязкой. */
-export const maxReceiptBytes = maxRecordBytes - 64 * 1024;
 export const receiptSchema = z.strictObject({
   id: syncId,
   taskId: syncId,

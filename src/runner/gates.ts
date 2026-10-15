@@ -353,6 +353,17 @@ export function sandboxBlockedHosts(output: string, allowed: string[]) {
       !allowed.some((d) => host === d.toLowerCase() || host.endsWith('.' + d.toLowerCase())),
   );
 }
+/**
+ * Задача, чей договор свойств задаёт область property gate. Проверка
+ * потребителя исполняет свою объявленную область целиком: договор свойств
+ * задачи библиотеки к одноимённому gate другого компонента не относится и
+ * не сужает его.
+ */
+export const propertyOwner = <T extends { id: string }>(
+  s: { tasks: T[] },
+  run: { taskId: string },
+  consumer?: string,
+) => (consumer ? undefined : s.tasks.find((t) => t.id === run.taskId));
 async function executeGate(
   h: DevContour,
   run: Run,
@@ -392,12 +403,12 @@ async function executeGate(
   // корпус. Селектор свойств передаётся проверке, чтобы общий файл тестов
   // проверял ровно область этой задачи, а не сценарии следующих.
   const owned = h.store.read();
-  const ownTask = owned.tasks.find((t) => t.id === run.taskId);
+  const ownTask = propertyOwner(owned, run, consumer);
   // Корпус закреплён за попыткой при выдаче: его случаи материализуются из
   // закреплённых байтов в каталоге контура вне worktree, только для чтения
   // проверкой. Принятую ветку ради нового JSON-входа двигать не нужно.
   const corpus =
-    gate.property && run.checks?.corpus
+    gate.property && run.checks?.corpus && !consumer
       ? new CheckCorpus(h).snapshot(run.checks.corpus)
       : undefined;
   const expected =

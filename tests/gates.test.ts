@@ -11,8 +11,9 @@ import { assertDependencies, dependencyFreshness } from '../src/runner/dependenc
 import { Scheduler, reservationIds } from '../src/runner/scheduler.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
-import { receiptSchema } from '../src/core/sync-model.ts';
-import { completion, validateReceipt } from '../src/core/sync-state.ts';
+import { canonical, maxRecordBytes, receiptSchema } from '../src/core/sync-model.ts';
+import { completion, receiptRecordBytes, validateReceipt } from '../src/core/sync-state.ts';
+import { propertyOwner } from '../src/runner/gates.ts';
 import { requirementProof } from '../src/core/proof.ts';
 import { scopeDigest, specDigest, uncoveredGates } from '../src/core/service.ts';
 import { dependencyOrder, expandGates, repository } from '../src/core/repositories.ts';
@@ -1259,6 +1260,27 @@ test('G02: a consumer receipt is pinned to the attempt check version, a consumer
     const widened = structuredClone(receipt);
     widened.consumers![0].gates = ['test', 'extra'];
     assert.throws(check(widened), /область потребителя product не совпадает с объявленной/);
+    // Предел — у файла записи, а не у вложенного receipt: обвязка и отступы
+    // вложенности добавляют к нему заметную долю.
+    const sized = (n: number) => {
+      const r = structuredClone(receipt);
+      r.consumers![0].dependencies[0].artifacts = Array.from({ length: n }, (_, i) => ({
+        path: `a${i}`,
+        digest: 'e'.repeat(64),
+      }));
+      return r;
+    };
+    let low = 1,
+      high = 40_000;
+    while (low < high) {
+      const mid = Math.floor((low + high + 1) / 2);
+      if (Buffer.byteLength(canonical(sized(mid))) <= maxRecordBytes) low = mid;
+      else high = mid - 1;
+    }
+    assert.ok(receiptRecordBytes(sized(low)) > maxRecordBytes);
+    // Договор свойств задачи библиотеки не сужает property gate потребителя.
+    assert.equal(propertyOwner(f.store.read(), run, 'product'), undefined);
+    assert.equal(propertyOwner(f.store.read(), run)?.id, task.id);
     // Область потребителя и снимки зависимостей переносятся целиком, без
     // предела сверх конфигурации.
     const artifacts = Array.from({ length: 101 }, (_, i) => ({
