@@ -122,26 +122,36 @@ export function abandonCalls(h: DevContour, at = Date.now()) {
 }
 
 /**
- * Закрепляет задачи за записями вызовов о доске, сделанными до закрепления
- * (без `taskIds`): все задачи доски по текущему графу. Выполняется до того,
- * как синхронизация или планировщик изменят граф, — иначе перенос задачи
- * снял бы с неё прежний расход доски.
+ * Закрепляет происхождение прежних записей вызовов (без `boardId`): задачу и
+ * доску вызова о задаче, задачи доски — у вызова о доске, по текущему графу.
+ * Выполняется до того, как синхронизация или планировщик изменят граф, —
+ * иначе перенос задачи снял бы или разделил уже учтённый расход доски.
+ * Запись перечитывается под блокировкой записи: вызов, завершившийся после
+ * чтения, не затирается устаревшим снимком.
  */
-export function pinBoardCalls(h: DevContour) {
+export function pinLegacyCalls(h: DevContour) {
   const s = h.store.read();
-  const legacy = usageRecords(h).filter(
-    (r) => !r.taskIds && !r.taskId && !r.runId && s.boards.some((b) => b.id === r.subjectId),
-  );
+  const legacy = usageRecords(h).filter((r) => !r.boardId && !r.taskIds);
   if (!legacy.length) return 0;
-  h.store.atomic(() => {
-    for (const r of legacy) {
-      const board = s.boards.find((b) => b.id === r.subjectId)!;
-      r.boardId ??= board.id;
-      r.taskIds = [...new Set(board.revisions.flatMap((x) => x.taskIds))];
+  return h.store.atomic(() => {
+    let pinned = 0;
+    const owners = new Map<string | undefined, Record<string, UsageRecord>>();
+    for (const seen of legacy) {
+      if (!owners.has(seen.repositoryId))
+        owners.set(seen.repositoryId, h.store.localRecords<UsageRecord>('usage', seen.repositoryId));
+      const r = owners.get(seen.repositoryId)![seen.id];
+      if (!r || r.boardId || r.taskIds) continue;
+      const subject = callSubject(s, r);
+      const board = s.boards.find((b) => b.id === subject.boardId);
+      if (!board) continue;
+      Object.assign(r, subject);
+      // У прежнего вызова о доске — все её задачи, а не только открытые.
+      if (!subject.taskId) r.taskIds = [...new Set(board.revisions.flatMap((x) => x.taskIds))];
       h.store.saveLocal('usage', r.repositoryId, r.id, r);
+      pinned++;
     }
+    return pinned;
   });
-  return legacy.length;
 }
 
 /** Задача и доска вызова на момент вызова: за ними остаётся его расход. */
@@ -177,6 +187,7 @@ export async function measuredExecute(
 ) {
   const startedAt = new Date().toISOString();
   const started = performance.now();
+  const startedHr = process.hrtime.bigint().toString();
   // Тарифы закрепляются на старте вызова: правка цен во время вызова или
   // после него оценку не меняет.
   const tariffs = h.config.prices.map((p) => ({ ...p }));
@@ -208,6 +219,7 @@ export async function measuredExecute(
     costUsd: null,
     costSource: 'unknown',
     process: PROCESS,
+    startedHr,
   };
   const save = () =>
     h.store.atomic(() => h.store.saveLocal('usage', meta.repositoryId, record.id, record));

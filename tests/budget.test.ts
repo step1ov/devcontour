@@ -16,8 +16,9 @@ import {
   type UsageRecord,
 } from '../src/core/usage.ts';
 import { budgetOverview, budgetStatus, taskBudgets, usageRecords } from '../src/core/budget.ts';
-import { abandonCalls, measuredExecute, pinBoardCalls } from '../src/runner/usage.ts';
+import { abandonCalls, measuredExecute, pinLegacyCalls } from '../src/runner/usage.ts';
 import { liveCall } from '../src/core/live-calls.ts';
+import { timed } from '../src/runner/timing.ts';
 import { ownerGone, processStartedAt } from '../src/runner/live-calls.ts';
 import { workflowMetrics } from '../src/application/metrics.ts';
 import { chainBlockers } from '../src/core/work-status.ts';
@@ -422,12 +423,13 @@ test('review: unrecorded attempts, plan review calls, moves between boards and p
       });
     });
     const s = lenient.store.read();
-    const moved = taskBudgets(lenient, s, s.tasks.find((x) => x.id === t.id)!);
-    assert.ok(moved.some((x) => x.scope.kind === 'board' && x.scope.id === a.id));
-    assert.equal(
-      budgetStatus(lenient, s, { kind: 'board', id: 'B-moved' })!.spent.estimatedUsd,
-      0,
+    const moved = taskBudgets(
+      lenient,
+      s,
+      s.tasks.find((x) => x.id === t.id)!,
     );
+    assert.ok(moved.some((x) => x.scope.kind === 'board' && x.scope.id === a.id));
+    assert.equal(budgetStatus(lenient, s, { kind: 'board', id: 'B-moved' })!.spent.estimatedUsd, 0);
     assert.equal(budgetStatus(lenient, s, { kind: 'board', id: a.id })!.state, 'exceeded');
   } finally {
     f.cleanup();
@@ -501,7 +503,8 @@ test('review 2: an abandoned estimate stays unknown; a call of a dead or stale o
     // Оценка прерванного вызова — нижняя граница, а не стоимость.
     assert.equal(usageTotals([base]).unknownCalls, 1);
     const dead = spawnSync(process.execPath, ['-e', '']).pid;
-    const save = (r: UsageRecord) => f.store.atomic(() => f.store.saveLocal('usage', 'main', r.id, r));
+    const save = (r: UsageRecord) =>
+      f.store.atomic(() => f.store.saveLocal('usage', 'main', r.id, r));
     save({ ...base, id: 'dead', outcome: 'active', process: { id: 'gone', pid: dead } });
     // Без восстановления: вызов умершего процесса уже неизвестен.
     const status = budgetStatus(f.h, f.store.read(), { kind: 'workspace' })!;
@@ -614,9 +617,11 @@ test('review 2: history before accounting stays unknown after new calls of the s
     assert.equal(own.spent.reportedUsd, 6);
     assert.equal(own.state, 'exceeded');
     assert.ok(
-      taskBudgets(lenient, s, s.tasks.find((x) => x.id === t.id)!).some(
-        (x) => x.scope.kind === 'board' && x.scope.id === a.id,
-      ),
+      taskBudgets(
+        lenient,
+        s,
+        s.tasks.find((x) => x.id === t.id)!,
+      ).some((x) => x.scope.kind === 'board' && x.scope.id === a.id),
     );
   } finally {
     f.cleanup();
@@ -700,7 +705,10 @@ test('review 3: a reused pid is not a live owner; foreign in-flight time keeps i
       liveCall({ ...base, process: { id: 'old', pid: process.pid, startedAt: started } }, at, max),
       false,
     );
-    const reused = { ...base, process: { id: 'old', pid: owner.pid!, startedAt: started! - 60_000 } };
+    const reused = {
+      ...base,
+      process: { id: 'old', pid: owner.pid!, startedAt: started! - 60_000 },
+    };
     assert.equal(liveCall(reused, at, max), false);
     assert.equal(ownerGone(reused), true);
     const real = { ...base, process: { id: 'old', pid: owner.pid!, startedAt: started } };
@@ -708,7 +716,10 @@ test('review 3: a reused pid is not a live owner; foreign in-flight time keeps i
     assert.equal(ownerGone(real), false);
     // Чужой идущий вызов: откат часов не опускает время ниже сохранённого замера.
     assert.equal(
-      callDurationMs({ ...base, elapsedMs: 300, startedAt: new Date(at + 60_000).toISOString() }, at),
+      callDurationMs(
+        { ...base, elapsedMs: 300, startedAt: new Date(at + 60_000).toISOString() },
+        at,
+      ),
       300,
     );
     // Прежняя запись о доске без закреплённых задач закрепляется до изменения графа.
@@ -725,7 +736,7 @@ test('review 3: a reused pid is not a live owner; foreign in-flight time keeps i
         costSource: 'provider-reported',
       }),
     );
-    assert.equal(pinBoardCalls(f.h), 1);
+    assert.equal(pinLegacyCalls(f.h), 1);
     f.store.change('fixture.move', (s) => {
       const from = s.boards.find((x) => x.id === b.id)!;
       for (const r of from.revisions) r.taskIds = r.taskIds.filter((id) => id !== t.id);
@@ -738,6 +749,103 @@ test('review 3: a reused pid is not a live owner; foreign in-flight time keeps i
     const own = budgetStatus(f.h, f.store.read(), { kind: 'task', id: t.id })!;
     assert.equal(own.spent.reportedUsd, 6);
     assert.equal(own.state, 'exceeded');
+  } finally {
+    owner.kill();
+    f.cleanup();
+  }
+});
+
+test('review 4: legacy task calls are pinned before a move, without overwriting a call that finished meanwhile; a start time off by a second is another process; foreign in-flight time uses the OS monotonic clock', async () => {
+  const f = contour({ budgets: { board: { usd: 1 }, onUnknown: 'stop' } });
+  const owner = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)']);
+  await new Promise((done) => setTimeout(done, 200));
+  try {
+    const a = f.h.createBoard('Board A', '', 'main');
+    const t = f.h.addTask(a.id, input());
+    f.h.approve(a.id);
+    f.h.pause(false);
+    const run = f.h.claim('w')!;
+    const base: UsageRecord = {
+      id: 'legacy-task',
+      repositoryId: 'main',
+      runId: run.id,
+      stage: 'implementation',
+      runtime: 'claude',
+      model: 'cheap',
+      runtimeVersion: null,
+      startedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+      outcome: 'returned',
+      promptBytes: 1,
+      promptDigest: 'd',
+      usage: usage(true, 1),
+      costUsd: 1,
+      costSource: 'provider-reported',
+    };
+    const save = (r: UsageRecord) =>
+      f.store.atomic(() => f.store.saveLocal('usage', 'main', r.id, r));
+    save(base);
+    save({ ...base, id: 'racing', outcome: 'active', costUsd: null, costSource: 'unknown' });
+    // Между чтением и транзакцией закрепления другой процесс завершил вызов.
+    const atomic = f.store.atomic.bind(f.store);
+    let raced = false;
+    f.store.atomic = <T>(action: () => T): T => {
+      if (!raced) {
+        raced = true;
+        atomic(() =>
+          f.store.saveLocal('usage', 'main', 'racing', {
+            ...base,
+            id: 'racing',
+            costUsd: 7,
+            usage: usage(true, 7),
+          }),
+        );
+      }
+      return atomic(action);
+    };
+    assert.equal(pinLegacyCalls(f.h), 2);
+    f.store.atomic = atomic;
+    const records = f.store.localRecords<UsageRecord>('usage', 'main');
+    assert.equal(records.racing.costUsd, 7);
+    assert.equal(records.racing.outcome, 'returned');
+    assert.equal(records['legacy-task'].taskId, t.id);
+    assert.equal(records['legacy-task'].boardId, a.id);
+    // Перенос задачи не уводит её расход с доски A.
+    f.store.change('fixture.move', (s) => {
+      const from = s.boards.find((x) => x.id === a.id)!;
+      for (const r of from.revisions) r.taskIds = r.taskIds.filter((id) => id !== t.id);
+      s.boards.push({
+        ...structuredClone(from),
+        id: 'B-moved',
+        revisions: from.revisions.map((r) => ({ ...r, taskIds: [t.id] })),
+      });
+    });
+    const s = f.store.read();
+    assert.equal(budgetStatus(f.h, s, { kind: 'board', id: a.id })!.state, 'exceeded');
+    assert.equal(budgetStatus(f.h, s, { kind: 'board', id: 'B-moved' })!.spent.reportedUsd, 0);
+    // Момент старта, отличающийся на секунду, — другой процесс.
+    const started = processStartedAt(owner.pid!)!;
+    const active = {
+      ...base,
+      outcome: 'active' as const,
+      costUsd: null,
+      costSource: 'unknown' as const,
+    };
+    const shifted = {
+      ...active,
+      process: { id: 'old', pid: owner.pid!, startedAt: started - 1000 },
+    };
+    assert.equal(liveCall(shifted, Date.now(), 2 * f.h.config.runTimeoutMs), false);
+    assert.equal(ownerGone(shifted), true);
+    // Чужой идущий вызов: время по монотонным часам ОС, а не по системным.
+    const startedHr = (process.hrtime.bigint() - 300_000_000n).toString();
+    const future = {
+      ...active,
+      finishedAt: undefined,
+      startedHr,
+      startedAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    assert.ok(callDurationMs(future)! >= 300);
   } finally {
     owner.kill();
     f.cleanup();

@@ -1,6 +1,6 @@
 import { taskOwner } from '../core/sync-state.ts';
 import { ProjectMemory } from '../application/memory.ts';
-import { abandonCalls, measuredExecute, pinBoardCalls } from './usage.ts';
+import { abandonCalls, measuredExecute, pinLegacyCalls } from './usage.ts';
 import { unobservedReview } from '../core/review.ts';
 import { composeRedactors, redactDeep } from './redaction.ts';
 import { timed } from './timing.ts';
@@ -462,7 +462,7 @@ export class Scheduler {
     if (Date.now() - this.abandonScanAt >= 60_000) {
       this.abandonScanAt = Date.now();
       abandonCalls(this.h);
-      pinBoardCalls(this.h);
+      pinLegacyCalls(this.h);
     }
     for (const r of this.h.store
       .read()

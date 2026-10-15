@@ -69,6 +69,12 @@ export interface UsageRecord {
    */
   elapsedMs?: number;
   /**
+   * Начало вызова по монотонным часам ОС (нс, общие для процессов одной
+   * машины до перезагрузки): по ним другой процесс считает время идущего
+   * вызова независимо от системных часов.
+   */
+  startedHr?: string;
+  /**
    * Задача и доска, о которых вызов, на момент вызова: расход остаётся за ними,
    * даже если граф потом изменится (перенос задачи между досками).
    */
@@ -112,6 +118,11 @@ export function priceUsage(usage: Usage, price?: Price) {
  * от Node: модуль входит и в бандл панели.
  */
 const activeStarts = new Map<string, number>();
+/** Монотонные часы ОС, нс; их регистрирует runner (в панели их нет). */
+let monotonicNow: (() => bigint) | undefined;
+export const registerMonotonic = (now: () => bigint) => {
+  monotonicNow = now;
+};
 export const activeStart = (id: string) => activeStarts.get(id);
 export const startActive = (id: string) => activeStarts.set(id, performance.now());
 export const endActive = (id: string) => activeStarts.delete(id);
@@ -126,6 +137,12 @@ export const callDurationMs = (r: UsageRecord, at = Date.now()): number | null =
   // часов не уменьшает уже потраченное время.
   const started = r.outcome === 'active' ? activeStart(r.id) : undefined;
   if (started !== undefined) return Math.round(performance.now() - started);
+  // Идущий вызов другого процесса той же машины — по монотонным часам ОС.
+  // Отрицательная разность — часы другой загрузки: тогда по меткам.
+  if (r.outcome === 'active' && r.startedHr && monotonicNow) {
+    const elapsed = Number((monotonicNow() - BigInt(r.startedHr)) / 1_000_000n);
+    if (elapsed >= 0) return Math.max(elapsed, r.elapsedMs ?? 0);
+  }
   const elapsed =
     Date.parse(r.finishedAt ?? r.abandonedAt ?? new Date(at).toISOString()) -
     Date.parse(r.startedAt);
