@@ -207,6 +207,11 @@ export function validateTaskContext(config: Config, task: TaskInput) {
       if (!gates.includes(link.gate))
         throw new DomainError('Требование ссылается на проверку вне области задачи: ' + link.gate);
   }
+  const consumerIds = (task.consumers ?? []).map((c) => c.repositoryId);
+  if (new Set(consumerIds).size !== consumerIds.length)
+    throw new DomainError(
+      'Потребитель назван дважды: объедините его проверки в одну запись (группа или список gates)',
+    );
   for (const consumer of task.consumers ?? []) {
     if (consumer.repositoryId === task.repositoryId)
       throw new DomainError('Потребитель — другой компонент, а не компонент задачи');

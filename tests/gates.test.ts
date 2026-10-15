@@ -5,17 +5,17 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { config, fixture, input } from './helpers.ts';
-import { workflowMetrics } from '../src/application/metrics.ts';
+import { gateScopeMetrics, workflowMetrics } from '../src/application/metrics.ts';
 import { repositorySchema } from '../src/core/model.ts';
 import { assertDependencies, dependencyFreshness } from '../src/runner/dependencies.ts';
-import { Scheduler } from '../src/runner/scheduler.ts';
+import { Scheduler, reservationIds } from '../src/runner/scheduler.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
 import { receiptSchema } from '../src/core/sync-model.ts';
 import { completion, validateReceipt } from '../src/core/sync-state.ts';
 import { requirementProof } from '../src/core/proof.ts';
-import { uncoveredGates } from '../src/core/service.ts';
-import { expandGates, repository } from '../src/core/repositories.ts';
+import { scopeDigest, specDigest, uncoveredGates } from '../src/core/service.ts';
+import { dependencyOrder, expandGates, repository } from '../src/core/repositories.ts';
 import type { Evidence } from '../src/core/model.ts';
 
 /**
@@ -297,6 +297,13 @@ test('G05: metrics measure the selected scope against the full profile, workspac
     assert.equal(scope.attempts.selectedMs, 12_000 + 200_000 + 100_000 + 4_000);
     assert.equal(scope.attempts.savedEstimateMs, 10_000);
     assert.deepEqual(scope.attempts.unestimatedGates, []);
+    // Порядок попыток в массиве не меняет оценку: история — строго по времени.
+    const runs = f.store.read().runs;
+    const tasks = f.store.read().tasks;
+    assert.deepEqual(
+      gateScopeMetrics(f.h, [...runs].reverse(), tasks).attempts,
+      gateScopeMetrics(f.h, runs, tasks).attempts,
+    );
     assert.deepEqual(scope.workspace.byGate, { e2e: { runs: 2, medianMs: 4_000 } });
     assert.equal(scope.workspace.totalMs, 8_000);
     // Результат, проверенный на устаревшем снимке зависимости, назван.
@@ -451,6 +458,20 @@ test('G02: consumer checks are declared explicitly, recorded at dispatch and req
     record('test', 'integration');
     const second = f.store.read().runs.find((r) => r.id === run.id)!;
     assert.ok(second.evidence.some((e) => e.consumer === 'product'));
+    // Без записи о том, что проверено, результат не переносим — завершения нет.
+    assert.throws(
+      () => f.h.finish(run.id, run.token, 'm'),
+      /не записала снимок с интегрированным результатом/,
+    );
+    f.store.change('fixture.checked', (s) => {
+      s.runs.find((r) => r.id === run.id)!.consumers![0].checked = {
+        sha: 'p',
+        tree: 'p',
+        dependencies: [{ repositoryId: 'library', sha: 'm', tree: 'm', artifacts: [] }],
+        freshness: [],
+        observedAt: new Date().toISOString(),
+      };
+    });
     f.h.finish(run.id, run.token, 'm');
     assert.equal(f.store.read().tasks.find((t) => t.id === task.id)!.status, 'done');
   } finally {
@@ -585,7 +606,7 @@ process.exit(ok ? 0 : 1);
     timeoutMs: 30_000,
     report: { type: 'junit' as const, path: '.reports/test.xml' },
   };
-  const repos = [];
+  const repos: ReturnType<typeof repositorySchema.parse>[] = [];
   for (const id of ['library', 'mid', 'product']) {
     const path = join(root, id);
     execFileSync('mkdir', ['-p', path]);
@@ -702,6 +723,15 @@ process.exit(ok ? 0 : 1);
       ],
     );
     assert.equal(checked.dependencies[1].artifacts[0].path, 'built.json');
+    // Свежесть названа для фактических входов: mid и сам потребитель; библиотека
+    // подставлена интегрированным результатом и в свежесть не входит.
+    assert.deepEqual(
+      checked.freshness.map((x) => [x.repositoryId, x.fresh]),
+      [
+        ['mid', true],
+        ['product', true],
+      ],
+    );
     assert.equal(worktrees('mid'), 1);
     assert.equal(worktrees('product'), 1);
     // Сборка mid падает (у «интегрированной» библиотеки нет value.json):
@@ -713,6 +743,43 @@ process.exit(ok ? 0 : 1);
     await assert.rejects(consume(broken, sh(broken, 'rev-parse', 'HEAD')));
     assert.equal(worktrees('mid'), 1);
     assert.equal(worktrees('product'), 1);
+    const product = h.config.repositories.find((r) => r.id === 'product')!;
+    const original = { prepare: product.prepare, lifecycle: product.lifecycle };
+    // Двойной отказ: prepare блокирует своё дерево и падает — обе причины видны.
+    product.prepare = [
+      { id: 'lock', command: ['git', 'worktree', 'lock', '.'], timeoutMs: 30_000 },
+      { id: 'fail', command: node('process.exit(7)'), timeoutMs: 30_000 },
+    ];
+    product.lifecycle = undefined;
+    const both = await consume(integrated, sha).then(
+      () => new Error('passed'),
+      (e: unknown) => e as Error,
+    );
+    assert.match(both.message, /fail/);
+    assert.match(both.message, /не удалось убрать рабочие деревья проверки потребителя/);
+    const locked = sh(repos[2].path, 'worktree', 'list', '--porcelain')
+      .split('\n')
+      .filter((l) => l.startsWith('worktree '))
+      .map((l) => l.slice('worktree '.length))
+      .find((p) => !p.endsWith('/product'))!;
+    sh(repos[2].path, 'worktree', 'unlock', locked);
+    sh(repos[2].path, 'worktree', 'remove', '--force', locked);
+    // Очистка окружения потребителя не завершилась: деревья — контекст её
+    // повторения, они сохранены, а отказ называет receipt окружения.
+    product.prepare = original.prepare;
+    product.lifecycle = {
+      setup: [],
+      ready: [],
+      teardown: [{ id: 'down', command: node('process.exit(9)'), timeoutMs: 30_000 }],
+    };
+    const teardown = await consume(integrated, sha).then(
+      () => new Error('passed'),
+      (e: unknown) => e as Error,
+    );
+    assert.match(teardown.message, /Очистка окружения не завершена/);
+    assert.match(teardown.message, /сохранены для повторной очистки .*environment\.json/);
+    assert.equal(worktrees('product'), 2);
+    assert.equal(worktrees('mid'), 2);
   } finally {
     store.close();
     await rm(root, { recursive: true, force: true });
@@ -847,6 +914,20 @@ test('G01: a receipt cannot shrink the expanded task scope or carry a dependency
       () => validateReceipt(receiptSchema.parse(cut), done, false, undefined, [], scope),
       /область задачи требует engine/,
     );
+    // Правка области задачи вместе с receipt не проходит: область закреплена
+    // утверждением.
+    assert.throws(
+      () =>
+        validateReceipt(
+          receiptSchema.parse(cut),
+          { ...done, gates: ['unit'] },
+          false,
+          undefined,
+          [],
+          scope,
+        ),
+      /область проверок не соответствует утверждённой/,
+    );
     const ghost = structuredClone(receipt);
     ghost.dependencies = [
       { repositoryId: 'ghost', sha: merged, tree: merged, head: merged, artifacts: [] },
@@ -898,4 +979,177 @@ test('G02: the consumer policy is part of the task contract; G01: shared subgrou
     ['unit'],
   );
   assert.ok(Date.now() - started < 1_000);
+});
+
+test('G05: attempts started at the same moment never serve as each other’s history, whatever the array order', () => {
+  const f = fixture();
+  try {
+    f.h.config.gates = [profileGate('unit'), profileGate('nightly')];
+    const at = (ms: number) => new Date(Date.parse('2026-01-01T00:00:00Z') + ms).toISOString();
+    const run = (id: string, requiredGates: string[], gates: string[]) =>
+      ({
+        id,
+        taskId: 'T',
+        status: 'succeeded',
+        repositoryId: 'main',
+        startedAt: at(0),
+        requiredGates,
+        evidence: gates.flatMap((gate) =>
+          ['candidate', 'integration'].map((phase) => ({
+            kind: 'test',
+            phase,
+            gate,
+            command: ['node', gate + '.mjs'],
+          })),
+        ),
+        timings: gates.flatMap((gate, i) =>
+          ['candidate', 'integration'].map((phase, j) => ({
+            id: `${gate}${phase}`,
+            stage: `${phase}-test:${gate}`,
+            startedAt: at(i * 100 + j * 50),
+            finishedAt: at(i * 100 + j * 50 + 40),
+          })),
+        ),
+      }) as never;
+    const history = run('R-history', ['unit', 'nightly'], ['unit', 'nightly']);
+    const narrow = run('R-narrow', ['unit'], ['unit']);
+    const forward = gateScopeMetrics(f.h, [history, narrow], []).attempts.perAttempt;
+    const backward = gateScopeMetrics(f.h, [narrow, history], []).attempts.perAttempt;
+    assert.deepEqual(forward, backward);
+    assert.equal(forward.find((a) => a.runId === 'R-narrow')!.fullEstimateMs, null);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('G02: a consumer receipt is pinned to the attempt check version, a consumer is named once, and consumer gate resources are reserved', async () => {
+  const f = await components();
+  try {
+    const board = f.h.createBoard('Library change', '', 'library');
+    assert.throws(
+      () =>
+        f.h.addTask(board.id, {
+          ...input('Twice'),
+          repositoryId: 'library',
+          consumers: [
+            { repositoryId: 'product', gates: ['test'] },
+            { repositoryId: 'product', gates: ['test'] },
+          ],
+        }),
+      /назван дважды/,
+    );
+    const task = f.h.addTask(board.id, {
+      ...input('Change value'),
+      repositoryId: 'library',
+      consumers: [{ repositoryId: 'product', gates: ['test'] }],
+    });
+    f.h.approve(board.id);
+    f.h.pause(false);
+    const run = f.h.claim('worker')!;
+    f.h.config.repositories[1].gates = [
+      { ...f.h.config.repositories[1].gates[0], resources: ['consumer-db'] },
+    ];
+    assert.ok(
+      reservationIds(
+        f.h.config,
+        run,
+        f.store.read().tasks.find((t) => t.id === task.id)!,
+      ).includes('consumer-db'),
+    );
+    f.h.config.repositories[1].gates = [
+      { ...f.h.config.repositories[1].gates[0], resources: undefined },
+    ];
+    const C = 'c'.repeat(40),
+      M = 'b'.repeat(40),
+      P = 'a'.repeat(40);
+    f.h.phase(run.id, run.token, 'integrating', { candidateSha: C, integrationSha: M });
+    const record = (
+      kind: 'test' | 'review',
+      phase: 'candidate' | 'integration',
+      consumer?: string,
+    ) =>
+      f.h.evidence(run.id, run.token, {
+        kind,
+        phase,
+        sha: phase === 'candidate' ? C : M,
+        gate: kind === 'review' ? 'independent-review' : 'test',
+        passed: true,
+        command: ['fixture'],
+        exitCode: 0,
+        log: '',
+        digest: 'd'.repeat(64),
+        summary: 'fixture',
+        ...(consumer ? { consumer } : {}),
+      });
+    for (const phase of ['candidate', 'integration'] as const) {
+      record('test', phase);
+      record('review', phase);
+    }
+    record('test', 'integration', 'product');
+    f.store.change('fixture.checked', (s) => {
+      s.runs.find((r) => r.id === run.id)!.consumers![0].checked = {
+        sha: P,
+        tree: P,
+        dependencies: [{ repositoryId: 'library', sha: M, tree: M, artifacts: [] }],
+        freshness: [{ repositoryId: 'product', snapshot: P, head: P, fresh: true }],
+        observedAt: new Date().toISOString(),
+      };
+    });
+    f.h.finish(run.id, run.token, M);
+    const done = f.store.read().tasks.find((t) => t.id === task.id)!;
+    const receipt = completion(f.h, f.store.read(), done);
+    receipt.runtime = 'codex';
+    receipt.reviewer = 'claude';
+    const scope = {
+      expand: (repositoryId: string, refs: string[]) =>
+        expandGates(repository(f.h.config, repositoryId), refs),
+      dependencyIds: (repositoryId: string) =>
+        dependencyOrder(f.h.config, repository(f.h.config, repositoryId).dependsOn ?? []),
+    };
+    validateReceipt(receiptSchema.parse(receipt), done, false, undefined, [], scope);
+    const foreign = structuredClone(receipt);
+    foreign.checks.find((c) => c.consumer === 'product')!.checks = '0'.repeat(64);
+    assert.throws(
+      () => validateReceipt(receiptSchema.parse(foreign), done, false, undefined, [], scope),
+      /integration\/product:test получен под другой версией проверок/,
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('G01/G02: the approved check scope is pinned: a scope edit during review voids the review, an edit after approval stops dispatch, and a receipt cannot carry a changed scope', () => {
+  const f = fixture();
+  try {
+    f.h.config.gates = [profileGate('unit'), profileGate('engine')];
+    f.h.config.gateGroups = { all: ['unit', 'engine'] };
+    const b = f.h.createBoard('Pinned scope');
+    const t = f.h.addTask(b.id, { ...input('Grouped task'), gates: ['@all'] });
+    const reviewed = f.store.read().tasks.find((x) => x.id === t.id)!;
+    const expected = {
+      revision: f.store
+        .read()
+        .boards.find((x) => x.id === b.id)!
+        .revisions.at(-1)!.number,
+      taskIds: [t.id],
+      tasks: { [t.id]: specDigest(reviewed) },
+      scopes: { [t.id]: scopeDigest(reviewed) },
+    };
+    f.h.editTask(t.id, { ...input('Grouped task'), gates: ['unit'] }, specDigest(reviewed));
+    assert.throws(
+      () => f.h.approve(b.id, undefined, { actor: 'operator' }, expected),
+      /План изменился во время ревью/,
+    );
+    f.h.approve(b.id);
+    const approved = f.store.read().tasks.find((x) => x.id === t.id)!;
+    assert.equal(approved.approvedScope, scopeDigest(approved));
+    // Правка области в обход утверждения: выдача отказывает.
+    f.store.change('fixture.scope', (s) => {
+      s.tasks.find((x) => x.id === t.id)!.gates = ['engine'];
+    });
+    f.h.pause(false);
+    assert.throws(() => f.h.claim('w'), /Область проверок задачи изменилась после утверждения/);
+  } finally {
+    f.cleanup();
+  }
 });

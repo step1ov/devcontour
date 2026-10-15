@@ -203,6 +203,12 @@ export interface Task extends TaskInput {
   createdAt: string;
   approvedAt?: string;
   approvedDigest?: string;
+  /**
+   * Утверждённая область проверок: gates и потребители. Отдельно от
+   * `approvedDigest`, чтобы утверждения до её появления оставались
+   * действительными; нет поля — утверждение прежнего формата.
+   */
+  approvedScope?: string;
   contractDigests: Record<string, string>;
   activeRunId?: string;
   attempt: number;
@@ -410,6 +416,13 @@ export interface Run {
         tree: string;
         artifacts: { path: string; digest: string }[];
       }[];
+      /**
+       * Свежесть фактических входов на момент окончания проверки: прочих
+       * зависимостей и самого потребителя. Компонент задачи подставлен её
+       * интегрированным результатом и в свежесть не входит.
+       */
+      freshness: { repositoryId: string; snapshot: string; head: string; fresh: boolean }[];
+      observedAt: string;
     };
   }[];
   /**

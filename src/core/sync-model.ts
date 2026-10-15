@@ -13,6 +13,8 @@ export const receiptSchema = z.strictObject({
   taskId: syncId,
   repositoryId: syncId,
   specDigest: hash,
+  /** Утверждённая область проверок; нет поля — утверждение прежнего формата. */
+  scopeDigest: hash.optional(),
   policyDigest: hash,
   candidateSha: sha,
   resultSha: sha,
@@ -90,6 +92,12 @@ export const receiptSchema = z.strictObject({
             }),
           )
           .max(50),
+        freshness: z
+          .array(
+            z.strictObject({ repositoryId: syncId, snapshot: sha, head: sha, fresh: z.boolean() }),
+          )
+          .max(51),
+        observedAt: z.iso.datetime(),
       }),
     )
     .max(10)
@@ -146,6 +154,7 @@ const progress = z.strictObject({
     .strictObject({ suite: syncId, number: z.number().int().min(1), digest: hash })
     .optional(),
   approvedDigest: hash.optional(),
+  approvedScope: hash.optional(),
   approval: sharedApprovalSchema.optional(),
 });
 const revision = z.strictObject({

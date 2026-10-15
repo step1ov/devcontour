@@ -253,10 +253,29 @@ export function gateScopeMetrics(h: DevContour, runs: Run[], tasks: Task[]) {
   const s = h.store.read();
   const key = (repositoryId: string, phase: string, gate: string, command: unknown) =>
     JSON.stringify([repositoryId, phase, gate, command]);
-  const samples = new Map<string, number[]>();
-  const finished = runs
-    .filter((r) => r.status !== 'active')
-    .sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
+  // История для попытки — замеры той же команды, закончившиеся строго до её
+  // начала: результат не зависит от порядка попыток в массиве.
+  const finished = runs.filter((r) => r.status !== 'active');
+  const measurements = new Map(
+    finished.map((run) => {
+      const repositoryId = run.repositoryId ?? 'main';
+      const measured: { k: string; ms: number; finishedAt: number }[] = [];
+      for (const t of run.timings ?? []) {
+        const match = /^(candidate|integration)-test:(.+)$/.exec(t.stage);
+        if (!match || !t.finishedAt) continue;
+        const command = run.evidence.find(
+          (e) => !e.consumer && e.phase === match[1] && e.gate === match[2],
+        )?.command;
+        measured.push({
+          k: key(repositoryId, match[1], match[2], command),
+          ms: Date.parse(t.finishedAt) - Date.parse(t.startedAt),
+          finishedAt: Date.parse(t.finishedAt),
+        });
+      }
+      return [run.id, measured] as const;
+    }),
+  );
+  const history = [...measurements.values()].flat();
   const perAttempt: {
     runId: string;
     taskId: string;
@@ -266,43 +285,39 @@ export function gateScopeMetrics(h: DevContour, runs: Run[], tasks: Task[]) {
     unestimatedGates: string[];
   }[] = [];
   for (const run of finished) {
+    if (!run.requiredGates) continue;
     const repositoryId = run.repositoryId ?? 'main';
     const repo = repository(h.config, repositoryId);
-    const measured: { k: string; ms: number }[] = [];
-    for (const t of run.timings ?? []) {
-      const match = /^(candidate|integration)-test:(.+)$/.exec(t.stage);
-      if (!match || !t.finishedAt) continue;
-      const command = run.evidence.find(
-        (e) => !e.consumer && e.phase === match[1] && e.gate === match[2],
-      )?.command;
-      measured.push({
-        k: key(repositoryId, match[1], match[2], command),
-        ms: Date.parse(t.finishedAt) - Date.parse(t.startedAt),
-      });
-    }
-    if (run.requiredGates) {
-      const selectedMs = measured.length ? measured.reduce((a, m) => a + m.ms, 0) : null;
-      const unestimatedGates: string[] = [];
-      let extra = 0;
-      for (const gate of repo.gates.filter((g) => !run.requiredGates!.includes(g.id)))
-        for (const phase of ['candidate', 'integration']) {
-          const m = median(samples.get(key(repositoryId, phase, gate.id, gate.command)) ?? []);
-          if (m === null) {
-            if (!unestimatedGates.includes(gate.id)) unestimatedGates.push(gate.id);
-          } else extra += m;
-        }
-      perAttempt.push({
-        runId: run.id,
-        taskId: run.taskId,
-        repositoryId,
-        selectedMs,
-        fullEstimateMs: selectedMs === null || unestimatedGates.length ? null : selectedMs + extra,
-        unestimatedGates,
-      });
-    }
-    // Замеры попытки становятся историей только для более поздних попыток.
-    for (const m of measured) samples.set(m.k, [...(samples.get(m.k) ?? []), m.ms]);
+    const measured = measurements.get(run.id)!;
+    const started = Date.parse(run.startedAt);
+    const selectedMs = measured.length ? measured.reduce((a, m) => a + m.ms, 0) : null;
+    const unestimatedGates: string[] = [];
+    let extra = 0;
+    for (const gate of repo.gates.filter((g) => !run.requiredGates!.includes(g.id)))
+      for (const phase of ['candidate', 'integration']) {
+        const k = key(repositoryId, phase, gate.id, gate.command);
+        const m = median(
+          history.filter((x) => x.k === k && x.finishedAt < started).map((x) => x.ms),
+        );
+        if (m === null) {
+          if (!unestimatedGates.includes(gate.id)) unestimatedGates.push(gate.id);
+        } else extra += m;
+      }
+    perAttempt.push({
+      runId: run.id,
+      taskId: run.taskId,
+      repositoryId,
+      selectedMs,
+      fullEstimateMs: selectedMs === null || unestimatedGates.length ? null : selectedMs + extra,
+      unestimatedGates,
+    });
   }
+  perAttempt.sort(
+    (a, b) =>
+      Date.parse(finished.find((r) => r.id === a.runId)!.startedAt) -
+        Date.parse(finished.find((r) => r.id === b.runId)!.startedAt) ||
+      a.runId.localeCompare(b.runId),
+  );
   const estimated = perAttempt.filter((a) => a.fullEstimateMs !== null);
   const selectedMs = estimated.reduce((a, x) => a + x.selectedMs!, 0);
   const fullEstimateMs = estimated.reduce((a, x) => a + x.fullEstimateMs!, 0);
@@ -325,11 +340,22 @@ export function gateScopeMetrics(h: DevContour, runs: Run[], tasks: Task[]) {
     .filter((b) => b.uncovered.length);
   // Результаты, проверенные на снимке зависимости, который к завершению
   // устарел: ветка зависимости сдвинулась параллельной работой.
-  const stale = runs.flatMap((r) =>
-    (r.dependencyFreshness ?? [])
+  const stale = runs.flatMap((r) => [
+    ...(r.dependencyFreshness ?? [])
       .filter((f) => !f.fresh)
       .map((f) => ({ runId: r.id, taskId: r.taskId, repositoryId: f.repositoryId })),
-  );
+    // Входы проверок потребителей, устаревшие к её окончанию.
+    ...(r.consumers ?? []).flatMap((c) =>
+      (c.checked?.freshness ?? [])
+        .filter((f) => !f.fresh)
+        .map((f) => ({
+          runId: r.id,
+          taskId: r.taskId,
+          repositoryId: f.repositoryId,
+          consumer: c.repositoryId,
+        })),
+    ),
+  ]);
   return {
     dependencyFreshness: {
       checked: runs.filter((r) => r.dependencyFreshness?.length).length,

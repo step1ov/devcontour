@@ -13,7 +13,7 @@ import {
   removeSnapshots,
 } from './dependencies.ts';
 import { runSteps, withEnvironment } from './environment.ts';
-import type { DependencySnapshot } from '../core/integrations.ts';
+import { CleanupFailure, type DependencySnapshot } from '../core/integrations.ts';
 import { toolProfileFor, agentEnvironment, reviewerRunsChecks, writerRunsChecks } from './tools.ts';
 import { probeCommand, probeLimits, type ProbeSpec } from './review-probe.ts';
 import { orderedGates, withinPaths, validateWorkflow } from '../core/workflow.ts';
@@ -31,7 +31,7 @@ import { TaskFailure, repairPolicy, type FailureKind } from '../core/failure.ts'
 import { adapters, implementationResult, reviewResult, type AgentAdapter } from './adapters.ts';
 import { git } from './process.ts';
 import { expandGates, repositories, repository, roleBinding } from '../core/repositories.ts';
-import type { Repository } from '../core/model.ts';
+import type { Config, Repository } from '../core/model.ts';
 import { reserveRepositories } from './ownership.ts';
 import { runGate } from './gates.ts';
 import { isolation } from './isolation.ts';
@@ -74,6 +74,22 @@ const providerRefusal = (message: string) =>
 // Класс отказа для тех случаев, где он не поставлен в точке обнаружения.
 // Отказ провайдера проверяется раньше окружения: «кончились кредиты» приходит
 // тем же BlockedError, но чинится деньгами, а не повтором.
+/**
+ * Ресурсы попытки: задачи, gates её компонента и выбранных проверок
+ * потребителей — одним резервированием на всю попытку; потребитель получает
+ * их в своём окружении.
+ */
+export function reservationIds(config: Config, run: Pick<Run, 'consumers'>, task: Task) {
+  return [
+    ...(task.resources ?? []),
+    ...repository(config, task.repositoryId).gates.flatMap((g) => g.resources ?? []),
+    ...(run.consumers ?? []).flatMap((c) =>
+      repository(config, c.repositoryId)
+        .gates.filter((g) => c.gates.includes(g.id))
+        .flatMap((g) => g.resources ?? []),
+    ),
+  ];
+}
 export function classifyFailure(error: unknown, message: string): FailureKind {
   if (error instanceof TaskFailure) return error.kind;
   if (providerRefusal(message)) return 'provider-auth';
@@ -211,7 +227,26 @@ export class Scheduler {
             timed(this.h, run, `integration-consumer-environment:${repo.id}:${stage}`, action),
         );
         await assertDependencies(dependencies);
+        // Свежесть фактических входов потребителя — прочих зависимостей и его
+        // самого — на момент окончания проверки.
+        const freshness = [
+          ...(await dependencyFreshness(
+            dependencies.filter((d) => d.repositoryId !== provider.id),
+            this.h.config,
+          )),
+          await (async () => {
+            const head = await git(repo.path, 'rev-parse', `refs/heads/${repo.targetBranch}`);
+            return {
+              repositoryId: repo.id,
+              snapshot: consumerSha,
+              head,
+              fresh: head === consumerSha,
+            };
+          })(),
+        ];
         const checked = {
+          freshness,
+          observedAt: new Date().toISOString(),
           sha: consumerSha,
           tree: await git(dir, 'rev-parse', 'HEAD^{tree}'),
           dependencies: dependencies.map((d) => ({
@@ -229,7 +264,15 @@ export class Scheduler {
       } catch (error) {
         failure = error instanceof Error ? error : new Error(String(error));
       }
-      // Очистка — обязательная часть проверки: её отказ не скрывается.
+      // Незавершённая очистка окружения потребителя: его рабочее дерево и
+      // снимки зависимостей — контекст повторной очистки по environment.json,
+      // их нельзя убирать до неё.
+      if (failure instanceof CleanupFailure)
+        throw new CleanupFailure(
+          `${failure.message}; рабочие деревья проверки потребителя ${repo.id} сохранены для повторной очистки (${join(root, 'artifacts', run.id, 'integration', 'consumer', repo.id, 'environment', 'environment.json')})`,
+        );
+      // Очистка — обязательная часть проверки: её отказ не скрывается и не
+      // заслоняется отказом самой проверки.
       const leftovers = await removeSnapshots(
         this.h.config,
         dependencies.filter((d) => d.repositoryId !== provider.id),
@@ -237,12 +280,16 @@ export class Scheduler {
       await git(repo.path, 'worktree', 'remove', '--force', dir).catch((e: unknown) =>
         leftovers.push(`${repo.id}: ${e instanceof Error ? e.message : String(e)}`),
       );
+      const cleanup = leftovers.length
+        ? `не удалось убрать рабочие деревья проверки потребителя: ${leftovers.join('; ')}`
+        : undefined;
+      if (failure && cleanup)
+        throw failure instanceof TaskFailure
+          ? new TaskFailure(failure.kind, `${failure.message}; ${cleanup}`)
+          : new Error(`${failure.message}; ${cleanup}`, { cause: failure });
       if (failure) throw failure;
-      if (leftovers.length)
-        throw new TaskFailure(
-          'environment',
-          `Не удалось убрать рабочие деревья проверки потребителя: ${leftovers.join('; ')}`,
-        );
+      if (cleanup)
+        throw new TaskFailure('environment', cleanup[0].toUpperCase() + cleanup.slice(1));
     }
   }
 
@@ -1014,7 +1061,7 @@ export class Scheduler {
       assertRequirements(this.h, task);
       await withResources(
         this.h.config,
-        [...(task.resources ?? []), ...repo.gates.flatMap((g) => g.resources ?? [])],
+        reservationIds(this.h.config, run, task),
         `${this.root}:${run.id}`,
         signal,
         async (signal, resources) => {

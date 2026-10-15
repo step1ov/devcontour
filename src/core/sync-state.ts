@@ -1,6 +1,6 @@
 import { portableTest, unprovenReason } from './proof.ts';
 import { validatePreparation } from './preparation.ts';
-import { contractDigest, digest, specDigest, type DevContour } from './service.ts';
+import { contractDigest, digest, scopeDigest, specDigest, type DevContour } from './service.ts';
 import { effectiveChecks, obligationOf } from './checks.ts';
 import { CheckCorpus, localRoots, portableSuite, type PortableSuite } from './check-store.ts';
 import { dependencyOrder, expandGates, repository, requiresContract } from './repositories.ts';
@@ -71,6 +71,7 @@ export function completion(h: DevContour, s: DevContourState, t: Task): Completi
     taskId: t.id,
     repositoryId: t.repositoryId,
     specDigest: t.approvedDigest,
+    ...(t.approvedScope ? { scopeDigest: t.approvedScope } : {}),
     policyDigest: run.policyDigest,
     candidateSha: run.candidateSha,
     resultSha: t.resultSha,
@@ -181,6 +182,7 @@ export function recordsFromState(h: DevContour, s: DevContourState) {
           ? (t.status as 'draft' | 'ready' | 'done' | 'failed' | 'cancelled')
           : 'ready',
         approvedDigest: t.approvedDigest,
+        ...(t.approvedScope ? { approvedScope: t.approvedScope } : {}),
         approval: approval(t.approval),
         receiptId,
         ...(t.checkVersion ? { checkVersion: t.checkVersion } : {}),
@@ -283,6 +285,13 @@ export function validateReceipt(
     receipt.specDigest !== specDigest(t)
   )
     throw new Error(`Receipt не соответствует постановке ${t.id}`);
+  // Утверждённая область проверок закреплена и в задаче, и в receipt: правка
+  // области вместе с receipt не проходит, пока утверждение не обновлено.
+  if (
+    t.approvedScope &&
+    (receipt.scopeDigest !== t.approvedScope || scopeDigest(t) !== t.approvedScope)
+  )
+    throw new Error(`Receipt ${t.id}: область проверок не соответствует утверждённой`);
   if (
     !demo &&
     (receipt.runtime === 'demo' ||
@@ -379,6 +388,17 @@ export function validateReceipt(
       throw new Error(
         `Receipt ${t.id}: снимок зависимостей потребителя ${consumer.repositoryId} не совпадает с его зависимостями`,
       );
+    // Свежесть названа для каждого фактического входа, кроме компонента задачи.
+    if (
+      ids &&
+      !sameSet(
+        recorded.freshness.map((x) => x.repositoryId),
+        [...ids.filter((id) => id !== t.repositoryId), consumer.repositoryId],
+      )
+    )
+      throw new Error(
+        `Receipt ${t.id}: свежесть входов потребителя ${consumer.repositoryId} названа не для всех`,
+      );
     const provider = recorded.dependencies.find((d) => d.repositoryId === t.repositoryId);
     if (provider?.sha !== receipt.resultSha)
       throw new Error(
@@ -419,6 +439,15 @@ export function validateReceipt(
     for (const [kind, gate] of required)
       if (decisive(kind, phase, gate)!.checks !== version.effective)
         throw new Error(`Receipt ${t.id}: ${phase}/${gate} получен под другой версией проверок`);
+  // Решающий PASS потребителя — под той же версией проверок, что и попытка.
+  for (const consumer of t.consumers ?? [])
+    for (const gate of expand(consumer.repositoryId, consumer.gates))
+      if (
+        decisive('test', 'integration', gate, consumer.repositoryId)!.checks !== version.effective
+      )
+        throw new Error(
+          `Receipt ${t.id}: integration/${consumer.repositoryId}:${gate} получен под другой версией проверок`,
+        );
   // Случаи принятой версии корпуса берутся из Git, а не из receipt.
   let corpusCases: { id: string; property: string }[] = [];
   if (version.corpus) {
@@ -555,6 +584,7 @@ export function stateFromRecords(
         attempt: previous?.attempt ?? 0,
         contractDigests: progress.approvedDigest ? contractDigests : {},
         approvedDigest: progress.approvedDigest,
+        approvedScope: progress.approvedDigest ? progress.approvedScope : undefined,
         ...(progress.checkVersion ? { checkVersion: progress.checkVersion } : {}),
         approval:
           previous?.approvedDigest === progress.approvedDigest &&
@@ -564,6 +594,8 @@ export function stateFromRecords(
       };
       if (progress.approvedDigest && progress.approvedDigest !== specDigest(t))
         throw new Error('Постановка изменилась после утверждения: ' + t.id);
+      if (progress.approvedScope && progress.approvedScope !== scopeDigest(t))
+        throw new Error('Область проверок изменилась после утверждения: ' + t.id);
       if (
         (t.status === 'ready' || t.status === 'done') &&
         (!t.approvedDigest ||

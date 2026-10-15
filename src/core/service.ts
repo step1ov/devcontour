@@ -55,6 +55,9 @@ export const digest = (value: unknown) =>
   createHash('sha256')
     .update(typeof value === 'string' ? value : JSON.stringify(value))
     .digest('hex');
+/** Область проверок задачи: её gates и потребители, как они записаны в постановке. */
+export const scopeDigest = (t: Pick<Task, 'gates' | 'consumers'>) =>
+  digest({ gates: t.gates ?? [], consumers: t.consumers ?? [] });
 export const specDigest = (t: Task) =>
   digest({
     ...(t.preparation ? { preparation: t.preparation } : {}),
@@ -844,6 +847,8 @@ export class DevContour {
       context?: Record<string, string>;
       /** Политика исполнения по компонентам на момент ревью. */
       policies?: Record<string, string>;
+      /** Область проверок утверждаемых задач (gates, потребители) на момент ревью. */
+      scopes?: Record<string, string>;
     },
   ) {
     return this.store.change('board.approved', (s) => {
@@ -867,6 +872,9 @@ export class DevContour {
           Object.entries(expected.policies ?? {}).some(
             ([id, pinned]) => this.policyDigest(id) !== pinned,
           ) ||
+          Object.entries(expected.scopes ?? {}).some(
+            ([id, pinned]) => scopeDigest(task(s, id)) !== pinned,
+          ) ||
           digest(expected.taskIds) !== digest(r.taskIds) ||
           selected.some((id) => {
             const current = task(s, id);
@@ -880,6 +888,7 @@ export class DevContour {
         t.contractDigests = this.approvable(s, t);
         t.approvedAt = now();
         t.approvedDigest = specDigest(t);
+        t.approvedScope = scopeDigest(t);
         t.approval = approval;
         t.status = 'ready';
         closeIfBasisChanged(t);
@@ -957,6 +966,7 @@ export class DevContour {
           attempt: 0,
           approvedAt: undefined,
           approvedDigest: undefined,
+          approvedScope: undefined,
           approval: undefined,
           activeRunId: undefined,
           resultSha: undefined,
@@ -1216,6 +1226,8 @@ export class DevContour {
       validateTaskContext(this.config, t);
       if (t.approvedDigest !== specDigest(t))
         throw new DomainError('Спецификация изменилась после утверждения');
+      if (t.approvedScope && t.approvedScope !== scopeDigest(t))
+        throw new DomainError('Область проверок задачи изменилась после утверждения');
       const dependencyDates = t.dependsOn.map((id) => {
         const dependency = s.tasks.find((x) => x.id === id)!;
         return (
@@ -1511,12 +1523,22 @@ export class DevContour {
           throw new DomainError(`Нет независимого ревью: ${phase}`);
       // Проверки потребителей — на integration, против интегрированного
       // результата задачи.
-      for (const consumer of r.consumers ?? [])
+      for (const consumer of r.consumers ?? []) {
         for (const gate of consumer.gates)
           if (!last('test', 'integration', sha, gate, consumer.repositoryId))
             throw new DomainError(
               `Нет PASS проверки потребителя: ${consumer.repositoryId}/${gate}`,
             );
+        // Что проверено, обязано быть записано: иначе результат нельзя
+        // перенести, и проверку потребителя не с чем сверить.
+        const provider = consumer.checked?.dependencies.find(
+          (d) => d.repositoryId === t.repositoryId,
+        );
+        if (provider?.sha !== sha)
+          throw new DomainError(
+            `Проверка потребителя ${consumer.repositoryId} не записала снимок с интегрированным результатом`,
+          );
+      }
       // Названный сценарий предъявляется до публикации: опубликованный
       // результат сразу становится входом зависимых задач, и отказ при
       // приёмке доски был бы уже поздним. Задачи без testId проходят на
@@ -1874,6 +1896,7 @@ export class DevContour {
       const approved = t.approvedDigest;
       t.status = 'draft';
       t.approvedDigest = undefined;
+      t.approvedScope = undefined;
       t.approval = undefined;
       // Digest контрактов принадлежит снятому утверждению. Оставить его значит
       // сказать, что задача закрепляет одну редакцию контракта, а ссылается на
@@ -1937,6 +1960,7 @@ export class DevContour {
           t.checkVersion = undefined;
         t.status = 'draft';
         t.approvedDigest = undefined;
+        t.approvedScope = undefined;
         t.approval = undefined;
         t.contractDigests = {};
         t.failure = undefined;

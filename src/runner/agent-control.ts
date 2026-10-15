@@ -16,6 +16,7 @@ import {
   digest,
   samePin,
   specDigest,
+  scopeDigest,
 } from '../core/service.ts';
 import { blobBytes, pinArtifacts } from './contract-artifacts.ts';
 import {
@@ -582,6 +583,8 @@ export async function reviewPlan(
       proposal.tasks.filter((t) => !drafts.includes(t)).map((t) => [t.id, contextDigest(t)]),
     ),
     tasks: Object.fromEntries(drafts.map((t) => [t.id, specDigest(t)])),
+    // Область проверок не входит в digest постановки: закрепляется отдельно.
+    scopes: Object.fromEntries(drafts.map((t) => [t.id, scopeDigest(t)])),
     // Политика исполнения, включая закреплённый контекст, при котором
     // ревьюер читал план: её смена во время ревью делает одобрение устаревшим.
     policies: Object.fromEntries(
