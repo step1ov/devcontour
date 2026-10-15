@@ -57,6 +57,17 @@ export interface UsageRecord {
   process?: { id: string; pid: number };
   /** Когда восстановление признало вызов прерванным: верхняя граница его времени. */
   abandonedAt?: string;
+  /**
+   * Время вызова по монотонным часам процесса, который его вёл: перевод
+   * системных часов его не искажает. Нет поля — время по меткам начала и конца.
+   */
+  durationMs?: number;
+  /**
+   * Задача и доска, о которых вызов, на момент вызова: расход остаётся за ними,
+   * даже если граф потом изменится (перенос задачи между досками).
+   */
+  taskId?: string;
+  boardId?: string;
   promptBytes: number;
   promptDigest: string;
   usage: Usage;
@@ -85,13 +96,24 @@ export function priceUsage(usage: Usage, price?: Price) {
     costSource: 'tariff-estimate' as const,
   };
 }
-/** Время вызова: до завершения, а у идущего — до `at`. */
-export const callDurationMs = (r: UsageRecord, at = Date.now()) =>
-  Math.max(
-    0,
+/**
+ * Время вызова: монотонное, если записано; иначе по меткам до завершения, а у
+ * идущего — до `at`. `null` — время неизвестно: метки противоречат друг другу
+ * (часы переведены назад), и ноль выдал бы потраченное время за непотраченное.
+ */
+export const callDurationMs = (r: UsageRecord, at = Date.now()): number | null => {
+  if (r.durationMs !== undefined) return r.durationMs;
+  const elapsed =
     Date.parse(r.finishedAt ?? r.abandonedAt ?? new Date(at).toISOString()) -
-      Date.parse(r.startedAt),
-  );
+    Date.parse(r.startedAt);
+  return elapsed >= 0 ? elapsed : null;
+};
+/**
+ * Стоимость вызова известна, когда она сообщена провайдером (в том числе 0 и
+ * при ошибке или прерывании) или оценена по полным счётчикам. Идущий вызов ещё
+ * может стоить больше записанного.
+ */
+export const knownCost = (r: UsageRecord) => r.costUsd !== null && r.outcome !== 'active';
 
 export function usageTotals(records: UsageRecord[], uncovered = false, at = Date.now()) {
   const complete =
@@ -118,19 +140,15 @@ export function usageTotals(records: UsageRecord[], uncovered = false, at = Date
     /** Оценено по тарифу. */
     estimatedUsd,
     complete,
-    unknownCalls: records.filter(
-      (r) =>
-        r.costUsd === null ||
-        !r.usage.complete ||
-        r.outcome === 'active' ||
-        r.outcome === 'abandoned',
-    ).length,
+    unknownCalls: records.filter((r) => !knownCost(r)).length,
     estimatedCalls: records.filter((r) => r.costSource === 'tariff-estimate').length,
     reportedCalls: records.filter((r) => r.costSource === 'provider-reported').length,
     /** Идущие вызовы и прерванные падением процесса. */
     unfinishedCalls: records.filter((r) => r.outcome === 'active').length,
     abandonedCalls: records.filter((r) => r.outcome === 'abandoned').length,
     errorCalls: records.filter((r) => r.outcome === 'error').length,
-    durationMs: records.reduce((s, r) => s + callDurationMs(r, at), 0),
+    durationMs: records.reduce((s, r) => s + (callDurationMs(r, at) ?? 0), 0),
+    /** Вызовы с неизвестным временем: их время в `durationMs` не вошло. */
+    unknownDurationCalls: records.filter((r) => callDurationMs(r, at) === null).length,
   };
 }

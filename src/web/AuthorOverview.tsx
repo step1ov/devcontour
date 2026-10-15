@@ -327,8 +327,10 @@ export function AuthorOverviewPanel({ onOpenChange }: { onOpenChange?: (id: stri
             Прервано падением процесса: {o.spend.abandonedCalls}.
           </p>
         )}
+        {/* Пределы и остатки видны и до исчерпания; сначала те, что держат работу. */}
         {o.spend.budgets?.budgets
-          .filter((b) => b.state !== 'within' || b.scope.kind === 'workspace')
+          .toSorted((a, b) => Number(a.state === 'within') - Number(b.state === 'within'))
+          .slice(0, 12)
           .map((b) => (
             <p
               key={`${b.scope.kind}:${b.scope.id ?? ''}`}
@@ -344,6 +346,11 @@ export function AuthorOverviewPanel({ onOpenChange }: { onOpenChange?: (id: stri
                     : '')}
             </p>
           ))}
+        {(o.spend.budgets?.budgets.length ?? 0) > 12 && (
+          <p className="text-muted-foreground m-0">
+            Ещё бюджетов: {o.spend.budgets!.budgets.length - 12} — полный список в метриках.
+          </p>
+        )}
         {o.spend.unknownCalls > 0 && (
           <p className="text-muted-foreground m-0">
             Для {o.spend.unknownCalls} вызовов стоимость неизвестна: сумма выше — нижняя граница, а

@@ -1221,7 +1221,10 @@ export class DevContour {
               ready.budgetBlock = { reason: blocking.reason!, at: now() };
           } else delete ready.budgetBlock;
         }
-      }
+      } else
+        // Бюджеты выключены: бюджетное удержание снимается, остальные
+        // условия выдачи (пауза, удержание операции) самостоятельны.
+        for (const ready of readyTasks(s)) delete ready.budgetBlock;
       const eligible = readyTasks(s).filter(
         (t) =>
           t.attempt < this.config.maxAttempts &&

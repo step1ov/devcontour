@@ -8,8 +8,14 @@ import { configSchema, type Config } from '../src/core/model.ts';
 import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { TaskFailure } from '../src/core/failure.ts';
-import { priceUsage, usageTotals, type Price, type UsageRecord } from '../src/core/usage.ts';
-import { budgetOverview, budgetStatus } from '../src/core/budget.ts';
+import {
+  callDurationMs,
+  priceUsage,
+  usageTotals,
+  type Price,
+  type UsageRecord,
+} from '../src/core/usage.ts';
+import { budgetOverview, budgetStatus, taskBudgets, usageRecords } from '../src/core/budget.ts';
 import { abandonCalls, measuredExecute } from '../src/runner/usage.ts';
 import { workflowMetrics } from '../src/application/metrics.ts';
 import { chainBlockers } from '../src/core/work-status.ts';
@@ -58,8 +64,14 @@ function contour(overrides: Partial<Config>) {
   };
 }
 
-/** Вызов модели, сообщающий usage: оценка по тарифу $3 за вызов. */
-const spend = (h: DevContour, runId: string, outcome: 'ok' | 'error' = 'ok', u = usage()) =>
+/** Вызов модели, сообщающий usage и модель: оценка по тарифу $3 за вызов. */
+const spend = (
+  h: DevContour,
+  runId: string,
+  outcome: 'ok' | 'error' = 'ok',
+  u = usage(),
+  model: string | null = 'cheap',
+) =>
   measuredExecute(
     h,
     {
@@ -67,7 +79,7 @@ const spend = (h: DevContour, runId: string, outcome: 'ok' | 'error' = 'ok', u =
       version: 'fixture',
       execute: async (r) => {
         await Promise.resolve();
-        r.onUsage!(u);
+        r.onUsage!(u, 'v', model ?? undefined);
         if (outcome === 'error') throw new Error('provider failed');
         return { data: {}, log: '', command: [] };
       },
@@ -177,7 +189,7 @@ test('B03: a call whose process died is closed as abandoned and counted; a live 
     assert.ok(totals.durationMs >= 120_000);
     const status = budgetStatus(f.h, f.store.read(), { kind: 'workspace' });
     assert.equal(status?.state, 'undetermined');
-    assert.match(status.reason!, /у 2 вызовов неизвестна стоимость/);
+    assert.match(status.reason!, /у 1 завершённых вызовов неизвестна стоимость/);
   } finally {
     f.cleanup();
   }
@@ -281,6 +293,175 @@ test('B05: unknown cost makes a money budget undetermined: stop by default, cont
     ).catch(() => undefined);
     const timed = f.reopen({ budgets: { task: { timeMs: 25 }, onUnknown: 'stop' } });
     await assert.rejects(spend(timed, run.id), /Бюджет времени task .* исчерпан/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('review: switching budgets off releases the block; no reported model means no tariff; a reported cost stays known; clock skew is not zero time', async () => {
+  const budgets = { task: { usd: 5 }, onUnknown: 'stop' as const };
+  const f = contour({ budgets });
+  try {
+    const b = f.h.createBoard('Budget board', '', 'main');
+    const t = f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    f.h.pause(false);
+    const run = f.h.claim('w')!;
+    await spend(f.h, run.id);
+    await spend(f.h, run.id);
+    f.h.fail(run.id, run.token, 'failed');
+    f.h.retry(t.id, { reason: 'again' });
+    assert.equal(f.h.claim('w'), undefined);
+    // Бюджеты выключены: бюджетное удержание снято, выдача — как без бюджетов.
+    const off = f.reopen({ budgets: undefined });
+    const next = off.claim('w')!;
+    assert.equal(next.taskId, t.id);
+    assert.equal(off.store.read().tasks.find((x) => x.id === t.id)!.budgetBlock, undefined);
+    // Runtime не сообщил модель: запрошенная модель тариф не подтверждает.
+    await spend(off, next.id, 'ok', usage(), null);
+    // Сообщённая стоимость известна и при ошибке и неполных счётчиках.
+    await spend(off, next.id, 'error', usage(false, 0)).catch(() => undefined);
+    const records = Object.values(f.store.localRecords<UsageRecord>('usage', 'main'));
+    // Порядок записей не хронологический: они ищутся по признакам.
+    const unpriced = records.find((r) => r.usage.complete && r.costSource !== 'tariff-estimate')!;
+    assert.equal(unpriced.costSource, 'unknown');
+    assert.equal(unpriced.price, undefined);
+    const reported = records.find((r) => r.usage.reportedUsd === 0)!;
+    assert.equal(reported.costSource, 'provider-reported');
+    assert.equal(usageTotals([reported]).unknownCalls, 0);
+    assert.equal(usageTotals([{ ...reported, outcome: 'abandoned' }]).unknownCalls, 0);
+    // Время — по монотонным часам; без них противоречивые метки не дают ноль.
+    assert.ok(records.every((r) => typeof r.durationMs === 'number'));
+    const skewed = {
+      ...reported,
+      durationMs: undefined,
+      startedAt: '2026-01-01T00:01:00.000Z',
+      finishedAt: '2026-01-01T00:00:00.000Z',
+    };
+    assert.equal(callDurationMs(skewed), null);
+    assert.equal(usageTotals([skewed]).unknownDurationCalls, 1);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('review: unrecorded attempts, plan review calls, moves between boards and parallel calls are accounted for', async () => {
+  const f = contour({ budgets: { task: { usd: 5 }, board: { usd: 5 }, onUnknown: 'stop' } });
+  try {
+    const a = f.h.createBoard('Board A', '', 'main');
+    const t = f.h.addTask(a.id, input());
+    f.h.approve(a.id);
+    f.h.pause(false);
+    const run = f.h.claim('w')!;
+    // Попытка с кандидатом без записей вызовов: стоимость неизвестна.
+    f.store.change('fixture.legacy', (s) => {
+      s.runs.find((r) => r.id === run.id)!.candidateSha = 'c'.repeat(40);
+    });
+    const legacy = budgetStatus(f.h, f.store.read(), { kind: 'task', id: t.id })!;
+    assert.equal(legacy.state, 'undetermined');
+    assert.match(legacy.reason!, /у 1 попыток вызовы не записаны/);
+    const lenient = f.reopen({
+      budgets: { task: { usd: 5 }, board: { usd: 5 }, onUnknown: 'continue' },
+    });
+    // Идущий вызов не останавливает параллельный вызов той же области.
+    let inner: unknown;
+    await measuredExecute(
+      lenient,
+      {
+        name: 'claude',
+        execute: async (r) => {
+          inner = await spend(lenient, run.id).catch((e: unknown) => e);
+          r.onUsage!(usage(), 'v', 'cheap');
+          return { data: {}, log: '', command: [] };
+        },
+      },
+      request,
+      { repositoryId: 'main', runId: run.id, stage: 'implementation' },
+    );
+    assert.ok(!(inner instanceof Error), String(inner));
+    // Вызов о доске (ревью плана) учитывается в бюджете каждой её задачи и
+    // не начинается, когда бюджет задачи исчерпан.
+    const records = usageRecords(lenient);
+    assert.ok(records.every((r) => r.taskId === t.id && r.boardId === a.id));
+    await assert.rejects(
+      measuredExecute(
+        lenient,
+        {
+          name: 'claude',
+          execute: async () => {
+            await Promise.resolve();
+            return { data: {}, log: '', command: [] };
+          },
+        },
+        request,
+        { repositoryId: 'main', subjectId: a.id, stage: 'plan-review' },
+      ),
+      (e: unknown) => e instanceof TaskFailure && e.kind === 'budget',
+    );
+    // Перенос задачи на другую доску не уводит её из-под исчерпанной доски A.
+    lenient.store.change('fixture.move', (s) => {
+      const from = s.boards.find((x) => x.id === a.id)!;
+      for (const r of from.revisions) r.taskIds = r.taskIds.filter((id) => id !== t.id);
+      s.boards.push({
+        ...structuredClone(from),
+        id: 'B-moved',
+        revisions: from.revisions.map((r) => ({ ...r, taskIds: [t.id] })),
+      });
+    });
+    const s = lenient.store.read();
+    const moved = taskBudgets(lenient, s, s.tasks.find((x) => x.id === t.id)!);
+    assert.ok(moved.some((x) => x.scope.kind === 'board' && x.scope.id === a.id));
+    assert.equal(
+      budgetStatus(lenient, s, { kind: 'board', id: 'B-moved' })!.spent.estimatedUsd,
+      0,
+    );
+    assert.equal(budgetStatus(lenient, s, { kind: 'board', id: a.id })!.state, 'exceeded');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('review: recovery does not overwrite a call that finished after the scan', () => {
+  const f = contour({});
+  try {
+    const record: UsageRecord = {
+      id: 'legacy',
+      repositoryId: 'main',
+      runId: 'R-gone',
+      stage: 'implementation',
+      runtime: 'claude',
+      model: 'cheap',
+      runtimeVersion: null,
+      startedAt: new Date().toISOString(),
+      outcome: 'active',
+      promptBytes: 1,
+      promptDigest: 'd',
+      usage: usage(false),
+      costUsd: null,
+      costSource: 'unknown',
+    };
+    f.store.atomic(() => f.store.saveLocal('usage', 'main', record.id, record));
+    // Между сканированием и транзакцией восстановления вызов завершился.
+    const atomic = f.store.atomic.bind(f.store);
+    let raced = false;
+    f.store.atomic = <T>(action: () => T): T => {
+      if (!raced) {
+        raced = true;
+        atomic(() =>
+          f.store.saveLocal('usage', 'main', record.id, {
+            ...record,
+            outcome: 'returned',
+            costUsd: 7,
+            costSource: 'provider-reported',
+          }),
+        );
+      }
+      return atomic(action);
+    };
+    assert.deepEqual(abandonCalls(f.h), []);
+    const stored = f.store.localRecords<UsageRecord>('usage', 'main')[record.id];
+    assert.equal(stored.outcome, 'returned');
+    assert.equal(stored.costUsd, 7);
   } finally {
     f.cleanup();
   }

@@ -454,8 +454,15 @@ export class Scheduler {
       await Promise.all([...this.jobs.values()].map((j) => j.promise));
     }
   }
+  /** Когда восстановление последний раз искало прерванные вызовы. */
+  private abandonScanAt = 0;
   private async recover() {
-    abandonCalls(this.h);
+    // Поиск прерванных вызовов читает всю историю вызовов: при старте и затем
+    // не чаще раза в минуту, а не на каждом такте.
+    if (Date.now() - this.abandonScanAt >= 60_000) {
+      this.abandonScanAt = Date.now();
+      abandonCalls(this.h);
+    }
     for (const r of this.h.store
       .read()
       .runs.filter((r) => r.status === 'active' && r.leaseUntil <= Date.now())) {

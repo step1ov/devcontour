@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { DevContour, digest } from '../core/service.ts';
+import type { DevContourState } from '../core/model.ts';
 import {
   unknownUsage,
   priceUsage,
@@ -89,24 +90,41 @@ const PROCESS = { id: randomUUID(), pid: process.pid };
 export function abandonCalls(h: DevContour, at = Date.now()) {
   const s = h.store.read();
   const activeRuns = new Set(s.runs.filter((r) => r.status === 'active').map((r) => r.id));
-  const dead = usageRecords(h).filter(
-    (r) =>
-      r.outcome === 'active' &&
-      (r.process
-        ? r.process.id !== PROCESS.id && !processAlive(r.process.pid)
-        : r.runId
-          ? !activeRuns.has(r.runId)
-          : at - Date.parse(r.startedAt) > 2 * h.config.runTimeoutMs),
-  );
-  if (!dead.length) return [];
-  h.store.atomic(() => {
-    for (const r of dead) {
+  const dead = (r: UsageRecord) =>
+    r.outcome === 'active' &&
+    (r.process
+      ? r.process.id !== PROCESS.id && !processAlive(r.process.pid)
+      : r.runId
+        ? !activeRuns.has(r.runId)
+        : at - Date.parse(r.startedAt) > 2 * h.config.runTimeoutMs);
+  const candidates = usageRecords(h).filter(dead);
+  if (!candidates.length) return [];
+  // Под блокировкой записи запись перечитывается: вызов мог завершиться между
+  // сканированием и транзакцией, и его исход и стоимость не затираются
+  // устаревшим снимком.
+  return h.store.atomic(() => {
+    const closed: string[] = [];
+    for (const seen of candidates) {
+      const r = h.store.localRecords<UsageRecord>('usage', seen.repositoryId)[seen.id];
+      if (!r || !dead(r)) continue;
       r.outcome = 'abandoned';
       r.abandonedAt = new Date(at).toISOString();
       h.store.saveLocal('usage', r.repositoryId, r.id, r);
+      closed.push(r.id);
     }
+    return closed;
   });
-  return dead.map((r) => r.id);
+}
+
+/** Задача и доска вызова на момент вызова: за ними остаётся его расход. */
+function callSubject(s: DevContourState, meta: { runId?: string; subjectId?: string }) {
+  const taskId =
+    s.runs.find((r) => r.id === meta.runId)?.taskId ??
+    s.tasks.find((t) => t.id === meta.subjectId)?.id;
+  const boardId = taskId
+    ? s.boards.find((b) => b.revisions.some((r) => r.taskIds.includes(taskId)))?.id
+    : s.boards.find((b) => b.id === meta.subjectId)?.id;
+  return { ...(taskId ? { taskId } : {}), ...(boardId ? { boardId } : {}) };
 }
 
 export async function measuredExecute(
@@ -115,9 +133,8 @@ export async function measuredExecute(
   request: AgentRequest,
   meta: { repositoryId?: string; runId?: string; subjectId?: string; stage: string },
 ) {
-  // До траты: превышенный или неопределённый бюджет не даёт начать вызов.
-  if (h.config.budgets) assertBudget(h, callBudgets(h, h.store.read(), meta, usageRecords(h)));
   const startedAt = new Date().toISOString();
+  const started = performance.now();
   const priceFor = (model: string | null | undefined) => {
     const matched = h.config.prices
       .filter(
@@ -129,7 +146,9 @@ export async function measuredExecute(
       .sort((a, b) => Date.parse(b.effectiveAt) - Date.parse(a.effectiveAt))[0];
     return matched ? { ...matched } : undefined;
   };
-  let price = priceFor(request.model);
+  // Тариф подбирается только по модели, которую сообщил runtime: запрошенная
+  // модель не подтверждает, что работала именно она.
+  let price: ReturnType<typeof priceFor>;
   const record: UsageRecord = {
     ...meta,
     id: randomUUID(),
@@ -143,12 +162,19 @@ export async function measuredExecute(
     usage: unknownUsage(),
     costUsd: null,
     costSource: 'unknown',
-    price,
     process: PROCESS,
   };
   const save = () =>
     h.store.atomic(() => h.store.saveLocal('usage', meta.repositoryId, record.id, record));
-  save();
+  // До траты, в одной транзакции записи с регистрацией идущего вызова:
+  // превышенный или неопределённый бюджет не даёт начать вызов, и два процесса
+  // не проходят проверку оба, не видя друг друга.
+  h.store.atomic(() => {
+    const s = h.store.read();
+    Object.assign(record, callSubject(s, meta));
+    if (h.config.budgets) assertBudget(h, callBudgets(h, s, meta, usageRecords(h)));
+    h.store.saveLocal('usage', meta.repositoryId, record.id, record);
+  });
   try {
     const result = await adapter.execute({
       ...request,
@@ -163,9 +189,9 @@ export async function measuredExecute(
         // Модель, которую runtime выбрал сам, а не только запрошенную: иначе
         // в учёте остаётся null, и переход на дорогой вариант не виден.
         record.model = model ?? record.model;
-        // Тариф — по модели, которую сообщил runtime: цена запрошенной модели
-        // к другой не относится, и без тарифа на неё стоимость неизвестна.
-        if (model && model !== request.model) price = priceFor(model);
+        // Тариф — по модели, которую сообщил runtime: без сообщённой модели или
+        // без тарифа на неё стоимость неизвестна.
+        price = model ? priceFor(model) : undefined;
         record.price = price;
         Object.assign(record, priceUsage(record.usage, price));
         save();
@@ -179,6 +205,7 @@ export async function measuredExecute(
     throw e;
   } finally {
     record.finishedAt = new Date().toISOString();
+    record.durationMs = Math.round(performance.now() - started);
     save();
   }
 }
