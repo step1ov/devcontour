@@ -3,6 +3,9 @@ import { tmpdir } from 'node:os';
 import { DevContour, digest } from '../core/service.ts';
 import type { DevContourState } from '../core/model.ts';
 import {
+  CURRENT_PROCESS,
+  endActive,
+  startActive,
   unknownUsage,
   priceUsage,
   usageSchema,
@@ -78,8 +81,7 @@ export function runtimeVersion(runtime: string, env?: NodeJS.ProcessEnv) {
     );
   return versions.get(key)!;
 }
-/** Этот процесс: по нему восстановление отличает свои идущие вызовы от прерванных. */
-const PROCESS = { id: randomUUID(), pid: process.pid };
+const PROCESS = CURRENT_PROCESS;
 
 /**
  * Закрывает записи вызовов, чей процесс умер, исходом `abandoned`. Запись
@@ -104,8 +106,12 @@ export function abandonCalls(h: DevContour, at = Date.now()) {
   // устаревшим снимком.
   return h.store.atomic(() => {
     const closed: string[] = [];
+    // Каждый владелец перечитывается один раз, а не на каждого кандидата.
+    const owners = new Map<string | undefined, Record<string, UsageRecord>>();
     for (const seen of candidates) {
-      const r = h.store.localRecords<UsageRecord>('usage', seen.repositoryId)[seen.id];
+      if (!owners.has(seen.repositoryId))
+        owners.set(seen.repositoryId, h.store.localRecords<UsageRecord>('usage', seen.repositoryId));
+      const r = owners.get(seen.repositoryId)![seen.id];
       if (!r || !dead(r)) continue;
       r.outcome = 'abandoned';
       r.abandonedAt = new Date(at).toISOString();
@@ -124,7 +130,21 @@ function callSubject(s: DevContourState, meta: { runId?: string; subjectId?: str
   const boardId = taskId
     ? s.boards.find((b) => b.revisions.some((r) => r.taskIds.includes(taskId)))?.id
     : s.boards.find((b) => b.id === meta.subjectId)?.id;
-  return { ...(taskId ? { taskId } : {}), ...(boardId ? { boardId } : {}) };
+  const board = !taskId && boardId ? s.boards.find((b) => b.id === boardId) : undefined;
+  const taskIds = board
+    ? s.tasks
+        .filter(
+          (t) =>
+            board.revisions.some((r) => r.taskIds.includes(t.id)) &&
+            !['done', 'cancelled'].includes(t.status),
+        )
+        .map((t) => t.id)
+    : undefined;
+  return {
+    ...(taskId ? { taskId } : {}),
+    ...(boardId ? { boardId } : {}),
+    ...(taskIds ? { taskIds } : {}),
+  };
 }
 
 export async function measuredExecute(
@@ -178,6 +198,7 @@ export async function measuredExecute(
     if (h.config.budgets) assertBudget(h, callBudgets(h, s, meta, usageRecords(h)));
     h.store.saveLocal('usage', meta.repositoryId, record.id, record);
   });
+  startActive(record.id);
   try {
     const result = await adapter.execute({
       ...request,
@@ -210,5 +231,6 @@ export async function measuredExecute(
     record.finishedAt = new Date().toISOString();
     record.durationMs = Math.round(performance.now() - started);
     save();
+    endActive(record.id);
   }
 }

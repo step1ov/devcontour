@@ -2,7 +2,7 @@ import type { DevContour } from './service.ts';
 import type { DevContourState, Task } from './model.ts';
 import { TaskFailure } from './failure.ts';
 import { repositories } from './repositories.ts';
-import { usageTotals, type UsageRecord } from './usage.ts';
+import { liveCall, usageTotals, type UsageRecord } from './usage.ts';
 
 /**
  * Бюджеты расходов и времени вызовов моделей.
@@ -64,6 +64,7 @@ export function scopeRecords(s: DevContourState, records: UsageRecord[], scope: 
   if (scope.kind === 'board') return records.filter((r) => recordBoard(s, r) === scope.id);
   const boards = taskBoards(s, records, scope.id!);
   return records.filter((r) => {
+    if (r.taskIds) return r.taskIds.includes(scope.id!);
     const task = recordTask(s, r);
     return task === scope.id || (!task && boards.has(recordBoard(s, r) ?? ''));
   });
@@ -78,17 +79,21 @@ function taskBoards(s: DevContourState, records: UsageRecord[], taskId: string) 
   const current = boardOf(s, taskId);
   if (current) boards.add(current.id);
   for (const r of records)
-    if (r.taskId === taskId && r.boardId) boards.add(r.boardId);
+    if ((r.taskId === taskId || r.taskIds?.includes(taskId)) && r.boardId) boards.add(r.boardId);
   return boards;
 }
 
 /**
- * Попытки области, вызовы которых не записаны: у попытки есть кандидат, значит
- * модель вызывалась, а записи нет (попытка до появления учёта). Их стоимость
- * и время неизвестны и не выдумываются.
+ * Попытки области, вызовы которых не записаны: начаты до первой записи учёта
+ * этой установки, модель вызывалась (есть кандидат или замер реализации), а
+ * записи реализации этой попытки нет. Их стоимость и время неизвестны и не
+ * выдумываются; более поздние вызовы той же попытки пробел не закрывают.
  */
 function uncoveredRuns(s: DevContourState, records: UsageRecord[], scope: BudgetScope) {
-  const covered = new Set(records.map((r) => r.runId).filter(Boolean));
+  const epoch = Math.min(...records.map((r) => Date.parse(r.startedAt)));
+  const implemented = new Set(
+    records.filter((r) => r.stage === 'implementation' && r.runId).map((r) => r.runId),
+  );
   const tasks =
     scope.kind === 'workspace'
       ? undefined
@@ -96,14 +101,18 @@ function uncoveredRuns(s: DevContourState, records: UsageRecord[], scope: Budget
         ? new Set([scope.id!])
         : boardTasks(s, scope.id!);
   return s.runs.filter(
-    (r) => r.candidateSha && !covered.has(r.id) && (!tasks || tasks.has(r.taskId)),
+    (r) =>
+      (!tasks || tasks.has(r.taskId)) &&
+      !implemented.has(r.id) &&
+      Date.parse(r.startedAt) < epoch &&
+      (r.candidateSha || r.timings?.some((x) => x.stage.startsWith('implementation'))),
   ).length;
 }
 
 export type BudgetStatus = {
   scope: BudgetScope;
   limit: { usd?: number; timeMs?: number };
-  spent: ReturnType<typeof usageTotals> & { uncoveredRuns: number };
+  spent: ReturnType<typeof usageTotals> & { uncoveredRuns: number; liveCalls: number };
   state: 'within' | 'exceeded' | 'undetermined';
   reason?: string;
 };
@@ -118,9 +127,14 @@ export function budgetStatus(
   const limit = h.config.budgets?.[scope.kind];
   if (!limit) return undefined;
   const all = records ?? usageRecords(h);
+  const own = scopeRecords(s, all, scope);
   const spent = {
-    ...usageTotals(scopeRecords(s, all, scope), false, at),
+    ...usageTotals(own, false, at),
     uncoveredRuns: uncoveredRuns(s, all, scope),
+    // Исключение из неизвестных — только для вызовов с подтверждённо живым
+    // владельцем: вызов умершего процесса неизвестен сразу, не дожидаясь
+    // восстановления.
+    liveCalls: own.filter((r) => liveCall(r, at, 2 * h.config.runTimeoutMs)).length,
   };
   const name = scope.kind === 'workspace' ? 'workspace' : `${scope.kind} ${scope.id}`;
   const usd = spent.reportedUsd + spent.estimatedUsd;
@@ -144,15 +158,15 @@ export function budgetStatus(
       state: 'exceeded',
       reason: `Бюджет времени ${name} исчерпан: предел ${Math.round(limit.timeMs / 1000)} с; ${detail}`,
     };
-  // Идущий вызов начат в пределах бюджета и не прерывается: его стоимость
-  // станет известна по окончании, а неопределённым бюджет делают только
-  // завершённые вызовы без стоимости. Иначе любой идущий вызов останавливал бы
+  // Идущий вызов живого процесса начат в пределах бюджета и не прерывается:
+  // его стоимость станет известна по окончании, а неопределённым бюджет
+  // делают остальные вызовы без стоимости. Иначе любой идущий вызов останавливал бы
   // параллельную работу той же области. Перерасход поэтому ограничен
   // вызовами, идущими одновременно.
-  const settledUnknown = spent.unknownCalls - spent.unfinishedCalls;
+  const settledUnknown = spent.unknownCalls - spent.liveCalls;
   const unknown = [
     ...(limit.usd !== undefined && settledUnknown
-      ? [`у ${settledUnknown} завершённых вызовов неизвестна стоимость`]
+      ? [`у ${settledUnknown} вызовов неизвестна стоимость`]
       : []),
     ...(limit.timeMs !== undefined && spent.unknownDurationCalls
       ? [`у ${spent.unknownDurationCalls} вызовов неизвестно время`]
@@ -253,7 +267,7 @@ export function budgetView(b: BudgetStatus) {
     // Остаток денег известен, только когда неизвестных вызовов и попыток нет.
     remainingUsd:
       b.limit.usd === undefined ||
-      b.spent.unknownCalls > b.spent.unfinishedCalls ||
+      b.spent.unknownCalls > b.spent.liveCalls ||
       b.spent.uncoveredRuns > 0
         ? null
         : Math.max(0, b.limit.usd - usd),

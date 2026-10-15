@@ -189,7 +189,7 @@ test('B03: a call whose process died is closed as abandoned and counted; a live 
     assert.ok(totals.durationMs >= 120_000);
     const status = budgetStatus(f.h, f.store.read(), { kind: 'workspace' });
     assert.equal(status?.state, 'undetermined');
-    assert.match(status.reason!, /у 1 завершённых вызовов неизвестна стоимость/);
+    assert.match(status.reason!, /у 1 вызовов неизвестна стоимость/);
   } finally {
     f.cleanup();
   }
@@ -462,6 +462,148 @@ test('review: recovery does not overwrite a call that finished after the scan', 
     const stored = f.store.localRecords<UsageRecord>('usage', 'main')[record.id];
     assert.equal(stored.outcome, 'returned');
     assert.equal(stored.costUsd, 7);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('review 2: an abandoned estimate stays unknown; a call of a dead or stale owner is unknown before recovery; live time does not shrink when the clock moves back', async () => {
+  const f = contour({ budgets: { workspace: { usd: 100, timeMs: 3_600_000 }, onUnknown: 'stop' } });
+  try {
+    const base: UsageRecord = {
+      id: 'x',
+      repositoryId: 'main',
+      stage: 'planning',
+      runtime: 'claude',
+      model: 'cheap',
+      runtimeVersion: null,
+      startedAt: new Date().toISOString(),
+      outcome: 'abandoned',
+      promptBytes: 1,
+      promptDigest: 'd',
+      usage: usage(),
+      costUsd: 3,
+      costSource: 'tariff-estimate',
+    };
+    // Оценка прерванного вызова — нижняя граница, а не стоимость.
+    assert.equal(usageTotals([base]).unknownCalls, 1);
+    const dead = spawnSync(process.execPath, ['-e', '']).pid;
+    const save = (r: UsageRecord) => f.store.atomic(() => f.store.saveLocal('usage', 'main', r.id, r));
+    save({ ...base, id: 'dead', outcome: 'active', process: { id: 'gone', pid: dead } });
+    // Без восстановления: вызов умершего процесса уже неизвестен.
+    const status = budgetStatus(f.h, f.store.read(), { kind: 'workspace' })!;
+    assert.equal(status.state, 'undetermined');
+    assert.equal(status.spent.liveCalls, 0);
+    // Живой pid, но вызов старше двух пределов времени: pid мог смениться.
+    save({ ...base, id: 'dead', outcome: 'returned', costSource: 'provider-reported' });
+    save({
+      ...base,
+      id: 'stale',
+      outcome: 'active',
+      startedAt: new Date(Date.now() - 3 * f.h.config.runTimeoutMs).toISOString(),
+      process: { id: 'other', pid: process.pid },
+    });
+    assert.equal(budgetStatus(f.h, f.store.read(), { kind: 'workspace' })!.spent.liveCalls, 0);
+  } finally {
+    f.cleanup();
+  }
+  const g = contour({ budgets: { workspace: { timeMs: 3_600_000 }, onUnknown: 'stop' } });
+  const realNow = Date.now;
+  try {
+    let measured: number | null = null;
+    await measuredExecute(
+      g.h,
+      {
+        name: 'claude',
+        execute: async (r) => {
+          await new Promise((done) => setTimeout(done, 30));
+          Date.now = () => realNow() - 60_000;
+          const active = usageRecords(g.h).find((x) => x.outcome === 'active')!;
+          measured = callDurationMs(active, Date.now());
+          Date.now = realNow;
+          r.onUsage!(usage(), 'v', 'cheap');
+          return { data: {}, log: '', command: [] };
+        },
+      },
+      request,
+      { repositoryId: 'main', stage: 'planning' },
+    );
+    assert.ok(measured !== null && measured >= 25, String(measured));
+  } finally {
+    Date.now = realNow;
+    g.cleanup();
+  }
+});
+
+test('review 2: history before accounting stays unknown after new calls of the same attempt; a board call stays with its tasks after a move', async () => {
+  const f = contour({ budgets: { task: { usd: 5 }, board: { usd: 5 }, onUnknown: 'stop' } });
+  try {
+    const a = f.h.createBoard('Board A', '', 'main');
+    const t = f.h.addTask(a.id, input());
+    f.h.approve(a.id);
+    f.h.pause(false);
+    const run = f.h.claim('w')!;
+    // Попытка до учёта: без кандидата, но с замером реализации.
+    f.store.change('fixture.history', (s) => {
+      const r = s.runs.find((x) => x.id === run.id)!;
+      r.startedAt = new Date(Date.now() - 60_000).toISOString();
+      r.timings = [
+        { stage: 'implementation', startedAt: r.startedAt, durationMs: 1000, ok: false },
+      ] as never;
+    });
+    const lenient = f.reopen({
+      budgets: { task: { usd: 5 }, board: { usd: 5 }, onUnknown: 'continue' },
+    });
+    // Новый вызов той же попытки (восстановление) пробел не закрывает.
+    await measuredExecute(
+      lenient,
+      {
+        name: 'claude',
+        execute: async (r) => {
+          await Promise.resolve();
+          r.onUsage!(usage(true, 0), 'v', 'cheap');
+          return { data: {}, log: '', command: [] };
+        },
+      },
+      request,
+      { repositoryId: 'main', runId: run.id, stage: 'property-recovery' },
+    );
+    const s0 = lenient.store.read();
+    assert.equal(budgetStatus(lenient, s0, { kind: 'task', id: t.id })!.spent.uncoveredRuns, 1);
+    // Вызов о доске закрепляет её открытые задачи.
+    await measuredExecute(
+      lenient,
+      {
+        name: 'claude',
+        execute: async (r) => {
+          await Promise.resolve();
+          r.onUsage!(usage(true, 6), 'v', 'cheap');
+          return { data: {}, log: '', command: [] };
+        },
+      },
+      request,
+      { repositoryId: 'main', subjectId: a.id, stage: 'plan-review' },
+    );
+    const boardCall = usageRecords(lenient).find((r) => r.stage === 'plan-review')!;
+    assert.deepEqual(boardCall.taskIds, [t.id]);
+    lenient.store.change('fixture.move', (s) => {
+      const from = s.boards.find((x) => x.id === a.id)!;
+      for (const r of from.revisions) r.taskIds = r.taskIds.filter((id) => id !== t.id);
+      s.boards.push({
+        ...structuredClone(from),
+        id: 'B-moved',
+        revisions: from.revisions.map((r) => ({ ...r, taskIds: [t.id] })),
+      });
+    });
+    const s = lenient.store.read();
+    const own = budgetStatus(lenient, s, { kind: 'task', id: t.id })!;
+    assert.equal(own.spent.reportedUsd, 6);
+    assert.equal(own.state, 'exceeded');
+    assert.ok(
+      taskBudgets(lenient, s, s.tasks.find((x) => x.id === t.id)!).some(
+        (x) => x.scope.kind === 'board' && x.scope.id === a.id,
+      ),
+    );
   } finally {
     f.cleanup();
   }

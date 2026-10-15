@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { RuntimeDiagnostics } from './runtime-diagnostics.ts';
 
@@ -68,6 +69,11 @@ export interface UsageRecord {
    */
   taskId?: string;
   boardId?: string;
+  /**
+   * Задачи, за которыми учтён вызов о доске (её открытые задачи на момент
+   * вызова): перенос задачи не снимает с неё этот расход.
+   */
+  taskIds?: string[];
   promptBytes: number;
   promptDigest: string;
   usage: Usage;
@@ -96,6 +102,31 @@ export function priceUsage(usage: Usage, price?: Price) {
     costSource: 'tariff-estimate' as const,
   };
 }
+/** Этот процесс: по нему восстановление и бюджет отличают свои идущие вызовы. */
+export const CURRENT_PROCESS = { id: randomUUID(), pid: process.pid };
+/** Начало идущих вызовов этого процесса по монотонным часам. */
+const activeStarts = new Map<string, number>();
+export const startActive = (id: string) => activeStarts.set(id, performance.now());
+export const endActive = (id: string) => activeStarts.delete(id);
+const pidAlive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+};
+/**
+ * Вызов идёт на самом деле: его владелец жив (свой — ещё не завершил вызов,
+ * чужой — процесс существует) и вызов не старше `maxMs`. Запись без процесса,
+ * умершего процесса или слишком старая (pid мог достаться другому процессу)
+ * идущей не считается.
+ */
+export function liveCall(r: UsageRecord, at: number, maxMs: number) {
+  if (r.outcome !== 'active' || !r.process) return false;
+  if (at - Date.parse(r.startedAt) > maxMs && !activeStarts.has(r.id)) return false;
+  return r.process.id === CURRENT_PROCESS.id ? activeStarts.has(r.id) : pidAlive(r.process.pid);
+}
 /**
  * Время вызова: монотонное, если записано; иначе по меткам до завершения, а у
  * идущего — до `at`. `null` — время неизвестно: метки противоречат друг другу
@@ -103,6 +134,10 @@ export function priceUsage(usage: Usage, price?: Price) {
  */
 export const callDurationMs = (r: UsageRecord, at = Date.now()): number | null => {
   if (r.durationMs !== undefined) return r.durationMs;
+  // Идущий вызов этого процесса — по монотонным часам: перевод системных
+  // часов не уменьшает уже потраченное время.
+  const started = r.outcome === 'active' ? activeStarts.get(r.id) : undefined;
+  if (started !== undefined) return Math.round(performance.now() - started);
   const elapsed =
     Date.parse(r.finishedAt ?? r.abandonedAt ?? new Date(at).toISOString()) -
     Date.parse(r.startedAt);
@@ -110,10 +145,14 @@ export const callDurationMs = (r: UsageRecord, at = Date.now()): number | null =
 };
 /**
  * Стоимость вызова известна, когда она сообщена провайдером (в том числе 0 и
- * при ошибке или прерывании) или оценена по полным счётчикам. Идущий вызов ещё
- * может стоить больше записанного.
+ * при ошибке или прерывании) или оценена по полным счётчикам завершённого
+ * вызова. Идущий вызов ещё может стоить больше записанного; у прерванного
+ * оценка — лишь нижняя граница: после неё он мог продолжать тратить.
  */
-export const knownCost = (r: UsageRecord) => r.costUsd !== null && r.outcome !== 'active';
+export const knownCost = (r: UsageRecord) =>
+  r.costUsd !== null &&
+  r.outcome !== 'active' &&
+  (r.outcome !== 'abandoned' || r.costSource === 'provider-reported');
 
 export function usageTotals(records: UsageRecord[], uncovered = false, at = Date.now()) {
   const complete =
