@@ -285,16 +285,16 @@ export function validateReceipt(
     receipt.specDigest !== specDigest(t)
   )
     throw new Error(`Receipt не соответствует постановке ${t.id}`);
-  // Receipt нового формата узнаётся по любому из его полей: тогда обязательны
-  // все. Иначе удаление одного закрепления выдавало бы новую запись за
-  // прежнюю и снимало бы проверку, которую запись по-прежнему несёт.
-  const consumersObserved = (receipt.consumers ?? []).map(
-    (c) => c.freshness !== undefined || c.observedAt !== undefined,
-  );
+  // Наблюдение свежести потребителей записывается всеми потребителями сразу
+  // или никем (receipt до наблюдения). Закрепление области появилось вместе
+  // с наблюдением: receipt с закреплением без наблюдения неполон. Наблюдение
+  // без закрепления допустимо: так завершается задача, утверждённая до
+  // появления закрепления.
+  const observed = (receipt.consumers ?? []).map((c) => !!c.freshness && !!c.observedAt);
   if (
-    (receipt.scopeDigest !== undefined || consumersObserved.some(Boolean)) &&
-    (receipt.scopeDigest === undefined ||
-      (receipt.consumers ?? []).some((c) => !c.freshness || !c.observedAt))
+    (receipt.consumers ?? []).some((c) => !c.freshness !== !c.observedAt) ||
+    new Set(observed).size > 1 ||
+    (receipt.scopeDigest !== undefined && observed.includes(false))
   )
     throw new Error(`Receipt ${t.id}: запись нового формата неполна`);
   // Утверждённая область проверок закреплена и в задаче, и в receipt: правка
@@ -369,6 +369,14 @@ export function validateReceipt(
     );
   // Снимок собственных зависимостей нового формата полон и согласован.
   const ownIds = scope.dependencyIds?.(t.repositoryId ?? 'main');
+  // Receipt нового формата (с закреплением области или проверками
+  // потребителей) несёт и собственный снимок: убрать его целиком нельзя.
+  if (
+    !receipt.dependencies &&
+    ownIds?.length &&
+    (receipt.scopeDigest !== undefined || receipt.consumers?.length)
+  )
+    throw new Error(`Receipt ${t.id}: нет снимка зависимостей компонента`);
   if (receipt.dependencies && ownIds) {
     if (
       !sameSet(
@@ -455,11 +463,13 @@ export function validateReceipt(
   if (t.properties?.length && !receipt.checkVersion)
     throw new Error(`Receipt ${t.id} задачи с договором проверки без версии проверок`);
   const version = receipt.checkVersion;
-  // Решающие записи integration одной попытки получены под одной версией
-  // проверок, и это видно без агрегатного поля: его удаление не делает
-  // PASS потребителя под чужой версией допустимым.
-  const integration = [
-    ...required.map(([kind, gate]) => decisive(kind, 'integration', gate)!),
+  // Решающие записи обеих фаз и потребителей одной попытки получены под одной
+  // версией проверок, и это видно без агрегатного поля: его удаление не
+  // делает допустимым PASS под чужой версией.
+  const decisiveAll = [
+    ...(['candidate', 'integration'] as const).flatMap((phase) =>
+      required.map(([kind, gate]) => decisive(kind, phase, gate)!),
+    ),
     ...(t.consumers ?? []).flatMap((consumer) =>
       expand(consumer.repositoryId, consumer.gates).map(
         (gate) => decisive('test', 'integration', gate, consumer.repositoryId)!,
@@ -467,10 +477,8 @@ export function validateReceipt(
     ),
   ];
   if (!version) {
-    if (new Set(integration.map((c) => c.checks)).size > 1)
-      throw new Error(
-        `Receipt ${t.id}: решающие проверки integration получены под разными версиями`,
-      );
+    if (new Set(decisiveAll.map((c) => c.checks)).size > 1)
+      throw new Error(`Receipt ${t.id}: решающие проверки получены под разными версиями`);
     return;
   }
   if (

@@ -204,6 +204,27 @@ test('G05: metrics measure the selected scope against the full profile, workspac
           taskId: narrow.id,
           startedAt: at(300_000),
           requiredGates: ['unit'],
+          // Наблюдение только у входа проверки потребителя: попытка тоже измерена.
+          consumers: [
+            {
+              repositoryId: 'app',
+              gates: ['test'],
+              checked: {
+                sha: 'c'.repeat(40),
+                tree: 'c'.repeat(40),
+                dependencies: [],
+                freshness: [
+                  {
+                    repositoryId: 'app',
+                    snapshot: 'c'.repeat(40),
+                    head: 'd'.repeat(40),
+                    fresh: false,
+                  },
+                ],
+                observedAt: at(300_000),
+              },
+            },
+          ],
         } as never,
         {
           ...base,
@@ -307,10 +328,19 @@ test('G05: metrics measure the selected scope against the full profile, workspac
     assert.deepEqual(scope.workspace.byGate, { e2e: { runs: 2, medianMs: 4_000 } });
     assert.equal(scope.workspace.totalMs, 8_000);
     // Результат, проверенный на устаревшем снимке зависимости, назван.
-    assert.deepEqual(scope.dependencyFreshness, {
-      checked: 1,
-      stale: [{ runId: 'R-narrow', taskId: narrow.id, repositoryId: 'library' }],
-    });
+    assert.equal(scope.dependencyFreshness.checked, 2);
+    assert.deepEqual(
+      new Set(scope.dependencyFreshness.stale.map((x) => JSON.stringify(x))),
+      new Set([
+        JSON.stringify({ runId: 'R-narrow', taskId: narrow.id, repositoryId: 'library' }),
+        JSON.stringify({
+          runId: 'R-unmeasured',
+          taskId: narrow.id,
+          repositoryId: 'app',
+          consumer: 'app',
+        }),
+      ]),
+    );
     // Незакрытая доска: у выполненной узкой задачи нет integration-evidence.
     assert.deepEqual(scope.coverage, [
       { boardId: b.id, uncovered: [{ repositoryId: 'main', gates: ['unit', 'engine'] }] },
@@ -1163,6 +1193,33 @@ test('G02: a consumer receipt is pinned to the attempt check version, a consumer
     const partial = structuredClone(receipt);
     delete partial.consumers![0].freshness;
     assert.throws(check(partial), /запись нового формата неполна/);
+    // Задача, утверждённая до закрепления области, завершается с наблюдением
+    // свежести: такой receipt экспортируем; закрепление без наблюдения — нет.
+    const unpinned = structuredClone(receipt);
+    delete unpinned.scopeDigest;
+    assert.doesNotThrow(check(unpinned, { ...done, approvedScope: undefined }));
+    assert.throws(check(legacy), /область проверок не соответствует утверждённой/);
+    const pinnedLegacy = structuredClone(legacy);
+    pinnedLegacy.scopeDigest = receipt.scopeDigest;
+    assert.throws(check(pinnedLegacy), /запись нового формата неполна/);
+    // Смешение версий фаз без агрегатной версии: в обе стороны.
+    for (const phase of ['candidate', 'integration'] as const) {
+      const mixed = structuredClone(receipt);
+      delete mixed.checkVersion;
+      for (const c of mixed.checks) if (c.phase === phase) c.checks = '0'.repeat(64);
+      assert.throws(check(mixed), /получены под разными версиями/);
+    }
+    // Собственный снимок receipt нового формата нельзя убрать целиком.
+    const withDependency = {
+      ...scope,
+      dependencyIds: (repositoryId: string) =>
+        repositoryId === 'library' ? ['aux'] : scope.dependencyIds(repositoryId),
+    };
+    assert.throws(
+      () =>
+        validateReceipt(receiptSchema.parse(receipt), done, false, undefined, [], withDependency),
+      /нет снимка зависимостей компонента/,
+    );
   } finally {
     await f.cleanup();
   }

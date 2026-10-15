@@ -358,7 +358,11 @@ export function gateScopeMetrics(h: DevContour, runs: Run[], tasks: Task[]) {
   ]);
   return {
     dependencyFreshness: {
-      checked: runs.filter((r) => r.dependencyFreshness?.length).length,
+      // Попытки с любым наблюдением: собственных зависимостей или входов потребителей.
+      checked: runs.filter(
+        (r) =>
+          r.dependencyFreshness?.length || r.consumers?.some((c) => c.checked?.freshness?.length),
+      ).length,
       stale,
     },
     attempts: {
