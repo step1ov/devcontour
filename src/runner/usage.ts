@@ -2,8 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { DevContour, digest } from '../core/service.ts';
 import type { DevContourState } from '../core/model.ts';
+import { CURRENT_PROCESS } from '../core/live-calls.ts';
 import {
-  CURRENT_PROCESS,
   endActive,
   startActive,
   unknownUsage,

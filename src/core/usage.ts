@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { RuntimeDiagnostics } from './runtime-diagnostics.ts';
 
@@ -102,31 +101,14 @@ export function priceUsage(usage: Usage, price?: Price) {
     costSource: 'tariff-estimate' as const,
   };
 }
-/** Этот процесс: по нему восстановление и бюджет отличают свои идущие вызовы. */
-export const CURRENT_PROCESS = { id: randomUUID(), pid: process.pid };
-/** Начало идущих вызовов этого процесса по монотонным часам. */
+/**
+ * Начало идущих вызовов этого процесса по монотонным часам. Без зависимостей
+ * от Node: модуль входит и в бандл панели.
+ */
 const activeStarts = new Map<string, number>();
+export const activeStart = (id: string) => activeStarts.get(id);
 export const startActive = (id: string) => activeStarts.set(id, performance.now());
 export const endActive = (id: string) => activeStarts.delete(id);
-const pidAlive = (pid: number) => {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
-  }
-};
-/**
- * Вызов идёт на самом деле: его владелец жив (свой — ещё не завершил вызов,
- * чужой — процесс существует) и вызов не старше `maxMs`. Запись без процесса,
- * умершего процесса или слишком старая (pid мог достаться другому процессу)
- * идущей не считается.
- */
-export function liveCall(r: UsageRecord, at: number, maxMs: number) {
-  if (r.outcome !== 'active' || !r.process) return false;
-  if (at - Date.parse(r.startedAt) > maxMs && !activeStarts.has(r.id)) return false;
-  return r.process.id === CURRENT_PROCESS.id ? activeStarts.has(r.id) : pidAlive(r.process.pid);
-}
 /**
  * Время вызова: монотонное, если записано; иначе по меткам до завершения, а у
  * идущего — до `at`. `null` — время неизвестно: метки противоречат друг другу
@@ -136,7 +118,7 @@ export const callDurationMs = (r: UsageRecord, at = Date.now()): number | null =
   if (r.durationMs !== undefined) return r.durationMs;
   // Идущий вызов этого процесса — по монотонным часам: перевод системных
   // часов не уменьшает уже потраченное время.
-  const started = r.outcome === 'active' ? activeStarts.get(r.id) : undefined;
+  const started = r.outcome === 'active' ? activeStart(r.id) : undefined;
   if (started !== undefined) return Math.round(performance.now() - started);
   const elapsed =
     Date.parse(r.finishedAt ?? r.abandonedAt ?? new Date(at).toISOString()) -
