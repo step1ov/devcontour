@@ -4,6 +4,7 @@ import { DevContour, digest } from '../core/service.ts';
 import type { DevContourState } from '../core/model.ts';
 import { CURRENT_PROCESS, ownerGone } from './live-calls.ts';
 import {
+  callDurationMs,
   endActive,
   startActive,
   unknownUsage,
@@ -112,6 +113,10 @@ export function abandonCalls(h: DevContour, at = Date.now()) {
         owners.set(seen.repositoryId, h.store.localRecords<UsageRecord>('usage', seen.repositoryId));
       const r = owners.get(seen.repositoryId)![seen.id];
       if (!r || !dead(r)) continue;
+      // Время прерванного вызова фиксируется монотонно (часы ОС, сохранённый
+      // замер), пока запись ещё идущая: откат системных часов его не уменьшает.
+      const elapsed = callDurationMs(r, at);
+      if (elapsed !== null) r.durationMs = elapsed;
       r.outcome = 'abandoned';
       r.abandonedAt = new Date(at).toISOString();
       h.store.saveLocal('usage', r.repositoryId, r.id, r);
@@ -131,7 +136,10 @@ export function abandonCalls(h: DevContour, at = Date.now()) {
  */
 export function pinLegacyCalls(h: DevContour) {
   const s = h.store.read();
-  const legacy = usageRecords(h).filter((r) => !r.boardId && !r.taskIds);
+  // Недостающая атрибуция дозаполняется: и у записей без доски, и у вызовов
+  // о доске, записанных с доской, но без задач.
+  const unpinned = (r: UsageRecord) => !r.taskIds && (!r.taskId || !r.boardId);
+  const legacy = usageRecords(h).filter(unpinned);
   if (!legacy.length) return 0;
   return h.store.atomic(() => {
     let pinned = 0;
@@ -140,13 +148,15 @@ export function pinLegacyCalls(h: DevContour) {
       if (!owners.has(seen.repositoryId))
         owners.set(seen.repositoryId, h.store.localRecords<UsageRecord>('usage', seen.repositoryId));
       const r = owners.get(seen.repositoryId)![seen.id];
-      if (!r || r.boardId || r.taskIds) continue;
-      const subject = callSubject(s, r);
-      const board = s.boards.find((b) => b.id === subject.boardId);
+      if (!r || !unpinned(r)) continue;
+      const subject = callSubject(s, { runId: r.runId, subjectId: r.subjectId ?? r.boardId });
+      const board = s.boards.find((b) => b.id === (r.boardId ?? subject.boardId));
       if (!board) continue;
-      Object.assign(r, subject);
+      // Уже закреплённое при вызове не меняется: дозаполняется только недостающее.
+      r.boardId ??= board.id;
+      if (subject.taskId) r.taskId ??= subject.taskId;
       // У прежнего вызова о доске — все её задачи, а не только открытые.
-      if (!subject.taskId) r.taskIds = [...new Set(board.revisions.flatMap((x) => x.taskIds))];
+      if (!r.taskId) r.taskIds = [...new Set(board.revisions.flatMap((x) => x.taskIds))];
       h.store.saveLocal('usage', r.repositoryId, r.id, r);
       pinned++;
     }

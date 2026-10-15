@@ -851,3 +851,69 @@ test('review 4: legacy task calls are pinned before a move, without overwriting 
     f.cleanup();
   }
 });
+
+test('review 5: a board call recorded with its board but without tasks is completed before a move; an abandoned call keeps its monotonic time', () => {
+  const f = contour({ budgets: { task: { usd: 5 }, onUnknown: 'stop' } });
+  try {
+    const a = f.h.createBoard('Board A', '', 'main');
+    const t = f.h.addTask(a.id, input());
+    const base: UsageRecord = {
+      id: 'board-call',
+      repositoryId: 'main',
+      subjectId: a.id,
+      boardId: a.id,
+      stage: 'plan-review',
+      runtime: 'claude',
+      model: 'cheap',
+      runtimeVersion: null,
+      startedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+      outcome: 'returned',
+      promptBytes: 1,
+      promptDigest: 'd',
+      usage: usage(true, 6),
+      costUsd: 6,
+      costSource: 'provider-reported',
+    };
+    const save = (r: UsageRecord) =>
+      f.store.atomic(() => f.store.saveLocal('usage', 'main', r.id, r));
+    save(base);
+    // Прерванный вызов: процесс умер, системные часы откатились.
+    const dead = spawnSync(process.execPath, ['-e', '']).pid;
+    save({
+      ...base,
+      id: 'crashed',
+      subjectId: undefined,
+      boardId: undefined,
+      outcome: 'active',
+      finishedAt: undefined,
+      costUsd: null,
+      costSource: 'unknown',
+      startedAt: new Date(Date.now() + 60_000).toISOString(),
+      startedHr: (process.hrtime.bigint() - 353_000_000n).toString(),
+      process: { id: 'gone', pid: dead },
+    });
+    assert.deepEqual(abandonCalls(f.h), ['crashed']);
+    const records = f.store.localRecords<UsageRecord>('usage', 'main');
+    assert.ok(records.crashed.durationMs! >= 350, String(records.crashed.durationMs));
+    assert.equal(callDurationMs(records.crashed), records.crashed.durationMs);
+    pinLegacyCalls(f.h);
+    assert.deepEqual(f.store.localRecords<UsageRecord>('usage', 'main')['board-call'].taskIds, [
+      t.id,
+    ]);
+    f.store.change('fixture.move', (s) => {
+      const from = s.boards.find((x) => x.id === a.id)!;
+      for (const r of from.revisions) r.taskIds = r.taskIds.filter((id) => id !== t.id);
+      s.boards.push({
+        ...structuredClone(from),
+        id: 'B-moved',
+        revisions: from.revisions.map((r) => ({ ...r, taskIds: [t.id] })),
+      });
+    });
+    const own = budgetStatus(f.h, f.store.read(), { kind: 'task', id: t.id })!;
+    assert.equal(own.spent.reportedUsd, 6);
+    assert.equal(own.state, 'exceeded');
+  } finally {
+    f.cleanup();
+  }
+});
