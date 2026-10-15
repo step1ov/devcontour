@@ -6,6 +6,7 @@ import { repositories } from '../core/repositories.ts';
 import { servingPreview, type Preview } from '../core/preview.ts';
 import { currentVerification } from '../core/delivery.ts';
 import { usageTotals, type UsageRecord } from '../core/usage.ts';
+import { budgetOverview } from '../core/budget.ts';
 
 /**
  * Сводка для автора продукта.
@@ -80,6 +81,13 @@ export interface AuthorOverview {
     /** Вызовы без известной стоимости: сумма выше — нижняя граница. */
     unknownCalls: number;
     complete: boolean;
+    /** Сообщено провайдером и оценено по тарифу — отдельно. */
+    reportedUsd: number;
+    estimatedUsd: number;
+    /** Вызовы, прерванные падением процесса. */
+    abandonedCalls: number;
+    /** Бюджеты, если настроены. */
+    budgets?: ReturnType<typeof budgetOverview>;
   };
   activity: {
     running: string[];
@@ -372,6 +380,10 @@ export function authorOverview(h: DevContour): AuthorOverview {
       knownCostUsd: totals.knownCostUsd,
       unknownCalls: totals.unknownCalls,
       complete: totals.complete,
+      reportedUsd: totals.reportedUsd,
+      estimatedUsd: totals.estimatedUsd,
+      abandonedCalls: totals.abandonedCalls,
+      budgets: budgetOverview(h, s),
     },
     activity: { running, paused: s.paused, doing },
     counts,

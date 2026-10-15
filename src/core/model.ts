@@ -197,6 +197,8 @@ export interface Task extends TaskInput {
    * пока задачи не перепривязаны к новой редакции и не утверждены заново.
    */
   hold?: { operation: string; reason: string };
+  /** Выдача остановлена бюджетом: превышен или не определён. Снимается сама, когда бюджет позволяет. */
+  budgetBlock?: { reason: string; at: string };
   supersedes?: string;
   createdAt: string;
   approvedAt?: string;
@@ -759,7 +761,29 @@ export interface ChangeSet {
   };
 }
 
+/** Предел расходов (USD) и времени вызовов моделей; хотя бы одно поле. */
+const budgetLimit = z
+  .object({
+    usd: z.number().positive().optional(),
+    timeMs: z.number().int().positive().optional(),
+  })
+  .strict()
+  .refine((l) => l.usd !== undefined || l.timeMs !== undefined, 'Задайте usd или timeMs');
+export const budgetsSchema = z
+  .object({
+    task: budgetLimit.optional(),
+    board: budgetLimit.optional(),
+    workspace: budgetLimit.optional(),
+    /**
+     * Что делать, когда в области бюджета есть вызов с неизвестной стоимостью:
+     * `stop` — бюджет не определён, выдача и вызовы в области останавливаются;
+     * `continue` — продолжать по нижней границе с предупреждением.
+     */
+    onUnknown: z.enum(['stop', 'continue']).default('stop'),
+  })
+  .strict();
 export const configSchema = z.object({
+  budgets: budgetsSchema.optional(),
   prices: z
     .array(priceSchema)
     .max(100)

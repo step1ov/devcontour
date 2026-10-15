@@ -109,7 +109,15 @@ export type ChainBlocker = {
 export function chainBlockers(
   tasks: Pick<
     Task,
-    'id' | 'title' | 'status' | 'dependsOn' | 'attempt' | 'hold' | 'activeRunId' | 'failure'
+    | 'id'
+    | 'title'
+    | 'status'
+    | 'dependsOn'
+    | 'attempt'
+    | 'hold'
+    | 'budgetBlock'
+    | 'activeRunId'
+    | 'failure'
   >[],
   maxAttempts = 3,
 ): ChainBlocker[] {
@@ -129,7 +137,7 @@ export function chainBlockers(
       const open = t.dependsOn.filter((d) => byId.get(d)?.status !== 'done');
       if (open.length && t.status === 'ready') return open.forEach(walk);
       if (active.includes(t.status) || t.activeRunId) return;
-      if (t.status === 'ready' && !t.hold && t.attempt < maxAttempts) return;
+      if (t.status === 'ready' && !t.hold && !t.budgetBlock && t.attempt < maxAttempts) return;
       roots.set(id, (roots.get(id) ?? new Set()).add(w.id));
     };
     w.dependsOn.forEach(walk);
@@ -151,7 +159,12 @@ export function chainBlockers(
             ? ['отменена', 'перепланировать зависимые задачи']
             : t.hold
               ? [`удержана: ${t.hold.reason}`, 'дождаться завершения операции']
-              : ['исчерпан бюджет попыток', 'повтор со сбросом бюджета'];
+              : t.budgetBlock && t.attempt < maxAttempts
+                ? [
+                    t.budgetBlock.reason,
+                    'осознанно поднять предел в budgets или задать политику onUnknown',
+                  ]
+                : ['исчерпан бюджет попыток', 'повтор со сбросом бюджета'];
     return { taskId: id, title: t.title, reason, next, waiting: dependents.size };
   });
 }

@@ -9,6 +9,8 @@ import {
   type UsageRecord,
 } from '../core/usage.ts';
 import type { AgentAdapter, AgentRequest } from './adapters.ts';
+import { assertBudget, callBudgets, usageRecords } from '../core/budget.ts';
+import { processAlive } from './resources.ts';
 import { command } from './process.ts';
 import { runtimeEvents } from './runtime-events.ts';
 import { z } from 'zod';
@@ -75,22 +77,59 @@ export function runtimeVersion(runtime: string, env?: NodeJS.ProcessEnv) {
     );
   return versions.get(key)!;
 }
+/** Этот процесс: по нему восстановление отличает свои идущие вызовы от прерванных. */
+const PROCESS = { id: randomUUID(), pid: process.pid };
+
+/**
+ * Закрывает записи вызовов, чей процесс умер, исходом `abandoned`. Запись
+ * без процесса (до появления учёта процесса) закрывается, когда её попытка
+ * уже не активна, а без попытки — спустя два предела времени вызова. Иначе
+ * она осталась бы «идущей» навсегда и неотличимой от настоящего вызова.
+ */
+export function abandonCalls(h: DevContour, at = Date.now()) {
+  const s = h.store.read();
+  const activeRuns = new Set(s.runs.filter((r) => r.status === 'active').map((r) => r.id));
+  const dead = usageRecords(h).filter(
+    (r) =>
+      r.outcome === 'active' &&
+      (r.process
+        ? r.process.id !== PROCESS.id && !processAlive(r.process.pid)
+        : r.runId
+          ? !activeRuns.has(r.runId)
+          : at - Date.parse(r.startedAt) > 2 * h.config.runTimeoutMs),
+  );
+  if (!dead.length) return [];
+  h.store.atomic(() => {
+    for (const r of dead) {
+      r.outcome = 'abandoned';
+      r.abandonedAt = new Date(at).toISOString();
+      h.store.saveLocal('usage', r.repositoryId, r.id, r);
+    }
+  });
+  return dead.map((r) => r.id);
+}
+
 export async function measuredExecute(
   h: DevContour,
   adapter: AgentAdapter,
   request: AgentRequest,
   meta: { repositoryId?: string; runId?: string; subjectId?: string; stage: string },
 ) {
+  // До траты: превышенный или неопределённый бюджет не даёт начать вызов.
+  if (h.config.budgets) assertBudget(h, callBudgets(h, h.store.read(), meta, usageRecords(h)));
   const startedAt = new Date().toISOString();
-  const matchedPrice = h.config.prices
-    .filter(
-      (p) =>
-        p.runtime === adapter.name &&
-        p.model === request.model &&
-        Date.parse(p.effectiveAt) <= Date.parse(startedAt),
-    )
-    .sort((a, b) => Date.parse(b.effectiveAt) - Date.parse(a.effectiveAt))[0];
-  const price = matchedPrice ? { ...matchedPrice } : undefined;
+  const priceFor = (model: string | null | undefined) => {
+    const matched = h.config.prices
+      .filter(
+        (p) =>
+          p.runtime === adapter.name &&
+          p.model === model &&
+          Date.parse(p.effectiveAt) <= Date.parse(startedAt),
+      )
+      .sort((a, b) => Date.parse(b.effectiveAt) - Date.parse(a.effectiveAt))[0];
+    return matched ? { ...matched } : undefined;
+  };
+  let price = priceFor(request.model);
   const record: UsageRecord = {
     ...meta,
     id: randomUUID(),
@@ -105,6 +144,7 @@ export async function measuredExecute(
     costUsd: null,
     costSource: 'unknown',
     price,
+    process: PROCESS,
   };
   const save = () =>
     h.store.atomic(() => h.store.saveLocal('usage', meta.repositoryId, record.id, record));
@@ -123,6 +163,10 @@ export async function measuredExecute(
         // Модель, которую runtime выбрал сам, а не только запрошенную: иначе
         // в учёте остаётся null, и переход на дорогой вариант не виден.
         record.model = model ?? record.model;
+        // Тариф — по модели, которую сообщил runtime: цена запрошенной модели
+        // к другой не относится, и без тарифа на неё стоимость неизвестна.
+        if (model && model !== request.model) price = priceFor(model);
+        record.price = price;
         Object.assign(record, priceUsage(record.usage, price));
         save();
         request.onUsage?.(usage, version, model);

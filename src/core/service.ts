@@ -34,6 +34,7 @@ import {
 import { planResult } from './plan.ts';
 import { boardOwner } from './sync-state.ts';
 import { carriedTaskIds } from './work-status.ts';
+import { blockingBudget, taskBudgets, usageRecords } from './budget.ts';
 import { assertDag, descendants, readyTasks, latestTaskId, impactGraph } from './graph.ts';
 import {
   DomainError,
@@ -1183,6 +1184,19 @@ export class DevContour {
         return;
       if (s.runs.filter((r) => r.status === 'active').length >= this.config.concurrency) return;
       for (const ready of readyTasks(s)) closeIfBasisChanged(ready);
+      // Бюджеты считаются по сохранённым записям вызовов: сброс попыток и
+      // перезапуск их не уменьшают. Остановленная бюджетом задача несёт
+      // причину, пока бюджет не позволит снова.
+      if (this.config.budgets) {
+        const records = usageRecords(this);
+        for (const ready of readyTasks(s)) {
+          const blocking = blockingBudget(this, taskBudgets(this, s, ready, records));
+          if (blocking) {
+            if (ready.budgetBlock?.reason !== blocking.reason)
+              ready.budgetBlock = { reason: blocking.reason!, at: now() };
+          } else delete ready.budgetBlock;
+        }
+      }
       const eligible = readyTasks(s).filter(
         (t) =>
           t.attempt < this.config.maxAttempts &&
@@ -1190,6 +1204,7 @@ export class DevContour {
           // Два содержательных отказа по одному свойству: третья выдача —
           // только после разбора. Независимые задачи выдаются как обычно.
           !blocksClaim(t) &&
+          !t.budgetBlock &&
           // Принятие корпуса, ждущее оператора, удерживает выдачу, даже если
           // его собственное удержание не было поставлено (задача была занята
           // другим) или снято принятием соседнего запроса.

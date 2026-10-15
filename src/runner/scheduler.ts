@@ -1,6 +1,6 @@
 import { taskOwner } from '../core/sync-state.ts';
 import { ProjectMemory } from '../application/memory.ts';
-import { measuredExecute } from './usage.ts';
+import { abandonCalls, measuredExecute } from './usage.ts';
 import { unobservedReview } from '../core/review.ts';
 import { composeRedactors, redactDeep } from './redaction.ts';
 import { timed } from './timing.ts';
@@ -398,6 +398,7 @@ export class Scheduler {
     }
   }
   private async recover() {
+    abandonCalls(this.h);
     for (const r of this.h.store
       .read()
       .runs.filter((r) => r.status === 'active' && r.leaseUntil <= Date.now())) {
