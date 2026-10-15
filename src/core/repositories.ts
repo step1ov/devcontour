@@ -34,15 +34,20 @@ export function repository(config: Config, id = 'main'): Repository {
 export function expandGates(repo: Repository, refs?: string[]): string[] {
   if (!refs?.length) return repo.gates.map((g) => g.id);
   const out: string[] = [];
+  // Раскрытая группа уже внесла все свои gates: повторный обход общего
+  // подграфа ничего не добавил бы, а стоил бы экспоненциально.
+  const done = new Set<string>();
   const visit = (ref: string, path: string[]) => {
     if (ref.startsWith('@')) {
       const name = ref.slice(1);
+      if (done.has(name)) return;
       if (path.includes(name))
         throw new DomainError(`Цикл в группах gates: ${[...path, name].join(' → ')}`);
       const members = repo.gateGroups?.[name];
       if (!members)
         throw new DomainError(`Неизвестная группа gates компонента ${repo.id}: ${name}`);
       for (const member of members) visit(member, [...path, name]);
+      done.add(name);
       return;
     }
     if (!repo.gates.some((g) => g.id === ref))
@@ -110,4 +115,19 @@ export function reviewerBinding(
     repository(config, repositoryId).reviewer ??
     config.reviewer
   );
+}
+/** Зависимости компонентов в топологическом порядке, транзитивно. */
+export function dependencyOrder(config: Config, ids: string[]) {
+  const ordered: string[] = [],
+    active = new Set<string>();
+  const visit = (id: string) => {
+    if (ordered.includes(id)) return;
+    if (active.has(id)) throw new Error('Цикл зависимостей компонентов');
+    active.add(id);
+    for (const parent of repository(config, id).dependsOn ?? []) visit(parent);
+    active.delete(id);
+    ordered.push(id);
+  };
+  ids.forEach(visit);
+  return ordered;
 }

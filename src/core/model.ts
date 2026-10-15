@@ -46,7 +46,10 @@ const gateRef = z.string().regex(/^@?[A-Za-z0-9_-]{1,80}$/);
  * подключается к задаче по имени. Члены — gates профиля или другие группы
  * (`@имя`), без циклов. Ничего не подключается неявно.
  */
-const gateGroups = z.record(id, z.array(gateRef).min(1).max(100));
+/** Группы gates компонента: не больше 100 групп по 100 ссылок. */
+const gateGroups = z
+  .record(id, z.array(gateRef).min(1).max(100))
+  .refine((g) => Object.keys(g).length <= 100, 'Не больше 100 групп gates');
 export const relativePath = z
   .string()
   .min(1)
@@ -389,7 +392,24 @@ export interface Run {
   }[];
   requiredGates?: string[];
   /** Проверки потребителей попытки — раскрытые списки; требуются на integration. */
-  consumers?: { repositoryId: string; gates: string[] }[];
+  consumers?: {
+    repositoryId: string;
+    gates: string[];
+    /**
+     * Что именно проверено: голова целевой ветки потребителя и снимок всех
+     * его зависимостей, включая интегрированный результат задачи.
+     */
+    checked?: {
+      sha: string;
+      tree: string;
+      dependencies: {
+        repositoryId: string;
+        sha: string;
+        tree: string;
+        artifacts: { path: string; digest: string }[];
+      }[];
+    };
+  }[];
   /**
    * Версия проверок, под которой выдана попытка: закреплена при claim и не
    * меняется до её конца. Принятие новой версии корпуса ждёт окончания.

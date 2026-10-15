@@ -71,13 +71,34 @@ export const receiptSchema = z.strictObject({
     .min(4),
   /** Проверки потребителей попытки: раскрытые списки gates по компонентам. */
   consumers: z
-    .array(z.strictObject({ repositoryId: syncId, gates: z.array(syncId).min(1).max(100) }))
+    .array(
+      z.strictObject({
+        repositoryId: syncId,
+        gates: z.array(syncId).min(1).max(100),
+        /** Проверенная голова потребителя и снимок всех его зависимостей. */
+        sha,
+        tree: sha,
+        dependencies: z
+          .array(
+            z.strictObject({
+              repositoryId: syncId,
+              sha,
+              tree: sha,
+              artifacts: z
+                .array(z.strictObject({ path: z.string().min(1).max(500), digest: hash }))
+                .max(100),
+            }),
+          )
+          .max(50),
+      }),
+    )
     .max(10)
     .optional(),
   /**
-   * Снимок зависимостей, на котором проверен результат: компонент, SHA, tree
-   * и digest артефактов. Нет поля — receipt прежнего формата или задача без
-   * зависимостей.
+   * Снимок зависимостей, на котором проверен результат: компонент, SHA, tree,
+   * голова ветки на момент завершения и digest артефактов. Пустой список —
+   * у компонента нет зависимостей. Нет поля — receipt прежнего формата: его
+   * снимок неизвестен и проверке не подлежит.
    */
   dependencies: z
     .array(

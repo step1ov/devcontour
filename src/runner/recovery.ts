@@ -68,7 +68,7 @@ export function recoveryBrief(h: DevContour, task: Task) {
       spec: task.approvedDigest,
       contracts: task.contractDigests,
       corpus: task.checkVersion ?? null,
-      policy: h.policyDigest(task.repositoryId),
+      policy: h.taskPolicyDigest(task),
     },
     examples: [
       ...runs.flatMap((x) =>

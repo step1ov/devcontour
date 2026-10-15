@@ -237,41 +237,75 @@ const median = (values: number[]) => {
 };
 
 /**
- * Расход выбранной области gates и покрытие профиля. Время gate попытки — по
- * её таймингам (`<фаза>-test:<gate>`); оценка полного набора добавляет к
- * фактическому времени попытки медианы прошлых прогонов не выбранных gates
- * профиля на обеих фазах. Gate без истории не оценивается и назван отдельно.
- * Совместная проверка — по длительности её evidence. Покрытие — gates
- * профиля, не прошедшие integration ни в одной задаче незакрытой доски.
+ * Расход выбранной области gates и покрытие профиля.
+ *
+ * По каждой завершённой попытке с записанной областью: фактическое время её
+ * gates (этапы `<фаза>-test:<gate>`) и оценка полного набора — то же плюс
+ * медиана прошлых прогонов каждого не выбранного gate профиля на каждой фазе.
+ * Сопоставимы только прогоны того же компонента, той же фазы и той же команды
+ * gate, начатые раньше оцениваемой попытки; без них gate не оценивается и
+ * назван. Попытка без таймингов — неизмеренная, а не нулевая. Совместная
+ * проверка — по длительности её evidence. Покрытие — gates профиля, не
+ * прошедшие integration ни в одной задаче незакрытой доски.
  */
 export function gateScopeMetrics(h: DevContour, runs: Run[], tasks: Task[]) {
   const s = h.store.read();
+  const key = (repositoryId: string, phase: string, gate: string, command: unknown) =>
+    JSON.stringify([repositoryId, phase, gate, command]);
   const samples = new Map<string, number[]>();
-  const perRun = runs.map((r) => {
-    let selectedMs = 0;
-    for (const t of r.timings ?? []) {
+  const finished = runs
+    .filter((r) => r.status !== 'active')
+    .sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
+  const perAttempt: {
+    runId: string;
+    taskId: string;
+    repositoryId: string;
+    selectedMs: number | null;
+    fullEstimateMs: number | null;
+    unestimatedGates: string[];
+  }[] = [];
+  for (const run of finished) {
+    const repositoryId = run.repositoryId ?? 'main';
+    const repo = repository(h.config, repositoryId);
+    const measured: { k: string; ms: number }[] = [];
+    for (const t of run.timings ?? []) {
       const match = /^(candidate|integration)-test:(.+)$/.exec(t.stage);
       if (!match || !t.finishedAt) continue;
-      const ms = Date.parse(t.finishedAt) - Date.parse(t.startedAt);
-      selectedMs += ms;
-      samples.set(match[2], [...(samples.get(match[2]) ?? []), ms]);
+      const command = run.evidence.find(
+        (e) => !e.consumer && e.phase === match[1] && e.gate === match[2],
+      )?.command;
+      measured.push({
+        k: key(repositoryId, match[1], match[2], command),
+        ms: Date.parse(t.finishedAt) - Date.parse(t.startedAt),
+      });
     }
-    return { run: r, selectedMs };
-  });
-  let selectedMs = 0,
-    fullEstimateMs = 0;
-  const unestimated = new Set<string>();
-  for (const { run, selectedMs: ms } of perRun) {
-    if (!run.requiredGates) continue;
-    selectedMs += ms;
-    fullEstimateMs += ms;
-    const profile = repository(h.config, run.repositoryId ?? 'main').gates.map((g) => g.id);
-    for (const gate of profile.filter((g) => !run.requiredGates!.includes(g))) {
-      const m = median(samples.get(gate) ?? []);
-      if (m === null) unestimated.add(gate);
-      else fullEstimateMs += 2 * m;
+    if (run.requiredGates) {
+      const selectedMs = measured.length ? measured.reduce((a, m) => a + m.ms, 0) : null;
+      const unestimatedGates: string[] = [];
+      let extra = 0;
+      for (const gate of repo.gates.filter((g) => !run.requiredGates!.includes(g.id)))
+        for (const phase of ['candidate', 'integration']) {
+          const m = median(samples.get(key(repositoryId, phase, gate.id, gate.command)) ?? []);
+          if (m === null) {
+            if (!unestimatedGates.includes(gate.id)) unestimatedGates.push(gate.id);
+          } else extra += m;
+        }
+      perAttempt.push({
+        runId: run.id,
+        taskId: run.taskId,
+        repositoryId,
+        selectedMs,
+        fullEstimateMs: selectedMs === null || unestimatedGates.length ? null : selectedMs + extra,
+        unestimatedGates,
+      });
     }
+    // Замеры попытки становятся историей только для более поздних попыток.
+    for (const m of measured) samples.set(m.k, [...(samples.get(m.k) ?? []), m.ms]);
   }
+  const estimated = perAttempt.filter((a) => a.fullEstimateMs !== null);
+  const selectedMs = estimated.reduce((a, x) => a + x.selectedMs!, 0);
+  const fullEstimateMs = estimated.reduce((a, x) => a + x.fullEstimateMs!, 0);
+  const unestimated = new Set(perAttempt.flatMap((a) => a.unestimatedGates));
   const workspace = new Map<string, number[]>();
   for (const c of s.changeSets)
     for (const v of c.verifications)
@@ -301,10 +335,19 @@ export function gateScopeMetrics(h: DevContour, runs: Run[], tasks: Task[]) {
       stale,
     },
     attempts: {
+      /** Суммы — только по попыткам, для которых оценка полного набора известна. */
+      estimatedAttempts: estimated.length,
       selectedMs,
       fullEstimateMs,
       savedEstimateMs: fullEstimateMs - selectedMs,
+      /** Попытки с областью, но без таймингов gates или без оценки части профиля. */
+      unmeasuredAttempts: perAttempt.filter((a) => a.selectedMs === null).length,
+      unestimatedAttempts: perAttempt.filter(
+        (a) => a.selectedMs !== null && a.fullEstimateMs === null,
+      ).length,
       unestimatedGates: [...unestimated].sort(),
+      /** Последние 200 попыток с областью. */
+      perAttempt: perAttempt.slice(-200),
     },
     workspace: {
       totalMs: [...workspace.values()].flat().reduce((a, b) => a + b, 0),

@@ -585,7 +585,15 @@ export async function reviewPlan(
     // Политика исполнения, включая закреплённый контекст, при котором
     // ревьюер читал план: её смена во время ревью делает одобрение устаревшим.
     policies: Object.fromEntries(
-      [...new Set(drafts.map((t) => t.repositoryId))].map((id) => [id, h.policyDigest(id)]),
+      // Потребители задач — тоже: их gates входят в договор задачи.
+      [
+        ...new Set(
+          drafts.flatMap((t) => [
+            t.repositoryId,
+            ...(t.consumers ?? []).map((c) => c.repositoryId),
+          ]),
+        ),
+      ].map((id) => [id, h.policyDigest(id)]),
     ),
   };
   const owner = boardOwner(board, state);

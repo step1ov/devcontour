@@ -9,10 +9,10 @@ import {
   snapshotDependencies,
   assertDependencies,
   runEnvironment,
-  artifactDigest,
   dependencyFreshness,
+  removeSnapshots,
 } from './dependencies.ts';
-import { executionEnvironment, runSteps, withEnvironment } from './environment.ts';
+import { runSteps, withEnvironment } from './environment.ts';
 import type { DependencySnapshot } from '../core/integrations.ts';
 import { toolProfileFor, agentEnvironment, reviewerRunsChecks, writerRunsChecks } from './tools.ts';
 import { probeCommand, probeLimits, type ProbeSpec } from './review-probe.ts';
@@ -159,70 +159,93 @@ export class Scheduler {
     for (const consumer of run.consumers ?? []) {
       signal.throwIfAborted();
       const repo = repository(this.h.config, consumer.repositoryId);
-      const dir = join(root, 'consumers', run.id, repo.id);
-      await mkdir(join(root, 'consumers', run.id), { recursive: true });
+      const id = `${run.id}-consumer-${repo.id}-${randomUUID().slice(0, 8)}`;
+      const dir = join(root, 'consumers', id);
+      await mkdir(join(root, 'consumers'), { recursive: true });
       await git(repo.path, 'worktree', 'add', '--detach', dir, `refs/heads/${repo.targetBranch}`);
-      let others: DependencySnapshot[] = [];
+      let dependencies: DependencySnapshot[] = [];
+      let failure: Error | undefined;
       try {
-        // Снимок прочих зависимостей потребителя — в своём каталоге на каждый
-        // запуск; после проверки его рабочие деревья убираются.
-        others = await snapshotDependencies(
+        const consumerSha = await git(dir, 'rev-parse', 'HEAD');
+        // Компонент задачи подставлен её интегрированным результатом до сборки
+        // зависимостей: промежуточные зависимости собираются уже против него.
+        dependencies = await snapshotDependencies(
           this.h.config,
           root,
-          { ...run, id: `${run.id}-consumer-${repo.id}-${randomUUID().slice(0, 8)}` },
+          { ...run, id },
           { ...task, repositoryId: repo.id, dependsOn: [] },
           this.h.store.read().tasks,
           signal,
+          new Map([[provider.id, { path: cwd, sha }]]),
         );
-        const integrated: DependencySnapshot = {
-          repositoryId: provider.id,
-          sha,
-          tree: await git(cwd, 'rev-parse', 'HEAD^{tree}'),
-          path: cwd,
-          artifacts: [],
-        };
-        const dependencies = [...others.filter((d) => d.repositoryId !== provider.id), integrated];
-        await runSteps(
-          provider.dependencyBuild ?? [],
-          cwd,
-          join(root, 'artifacts', run.id, 'consumer-build', repo.id),
-          executionEnvironment([this.h.config.environment, provider.environment], {
-            DEVCONTOUR_RUN_ID: run.id,
-            DEVCONTOUR_COMPONENTS_JSON: JSON.stringify(
-              Object.fromEntries(dependencies.map((d) => [d.repositoryId, d.path])),
-            ),
-          }),
-          signal,
-        );
-        for (const path of provider.dependencyArtifacts ?? [])
-          integrated.artifacts.push({ path, digest: await artifactDigest(cwd, path) });
         const view: Run = { ...run, repositoryId: repo.id, dependencies };
-        for (const gate of orderedGates(repo.gates.filter((g) => consumer.gates.includes(g.id))))
-          await runGate(
-            this.h,
-            view,
-            dir,
-            sha,
-            'integration',
-            gate,
-            join(root, 'artifacts', run.id, 'integration', 'consumer', repo.id),
-            signal,
-            this.boundary(repo.id),
-            repo.id,
-          );
-      } finally {
-        await git(repo.path, 'worktree', 'remove', '--force', dir).catch(() => undefined);
-        for (const snapshot of others)
-          await git(
-            repository(this.h.config, snapshot.repositoryId).path,
-            'worktree',
-            'remove',
-            '--force',
-            snapshot.path,
-          ).catch(() => undefined);
+        const artifacts = join(root, 'artifacts', run.id, 'integration', 'consumer', repo.id);
+        const execution = runEnvironment(this.h.config, view, 'integration', dir);
+        // Договор окружения потребителя — как у собственной integration:
+        // lifecycle, prepare, gates, cleanup.
+        await withEnvironment(
+          repo.lifecycle,
+          dir,
+          join(artifacts, 'environment'),
+          execution,
+          signal,
+          async () => {
+            await runSteps(repo.prepare ?? [], dir, join(artifacts, 'prepare'), execution, signal);
+            for (const gate of orderedGates(
+              repo.gates.filter((g) => consumer.gates.includes(g.id)),
+            ))
+              await runGate(
+                this.h,
+                view,
+                dir,
+                sha,
+                'integration',
+                gate,
+                artifacts,
+                signal,
+                this.boundary(repo.id),
+                repo.id,
+              );
+          },
+          (stage, action) =>
+            timed(this.h, run, `integration-consumer-environment:${repo.id}:${stage}`, action),
+        );
+        await assertDependencies(dependencies);
+        const checked = {
+          sha: consumerSha,
+          tree: await git(dir, 'rev-parse', 'HEAD^{tree}'),
+          dependencies: dependencies.map((d) => ({
+            repositoryId: d.repositoryId,
+            sha: d.sha,
+            tree: d.tree,
+            artifacts: d.artifacts,
+          })),
+        };
+        this.h.withRun(run.id, run.token, 'run.consumer-checked', (stored) => {
+          const entry = stored.consumers?.find((c) => c.repositoryId === repo.id);
+          if (entry) entry.checked = checked;
+          return { runId: run.id, consumer: repo.id, checked };
+        });
+      } catch (error) {
+        failure = error instanceof Error ? error : new Error(String(error));
       }
+      // Очистка — обязательная часть проверки: её отказ не скрывается.
+      const leftovers = await removeSnapshots(
+        this.h.config,
+        dependencies.filter((d) => d.repositoryId !== provider.id),
+      );
+      await git(repo.path, 'worktree', 'remove', '--force', dir).catch((e: unknown) =>
+        leftovers.push(`${repo.id}: ${e instanceof Error ? e.message : String(e)}`),
+      );
+      if (failure) throw failure;
+      if (leftovers.length)
+        throw new TaskFailure(
+          'environment',
+          `Не удалось убрать рабочие деревья проверки потребителя: ${leftovers.join('; ')}`,
+        );
     }
   }
+
   boundary(repositoryId = 'main') {
     const repos = repositories(this.h.config);
     return {
@@ -378,7 +401,8 @@ export class Scheduler {
     for (const r of this.h.store
       .read()
       .runs.filter((r) => r.status === 'active' && r.leaseUntil <= Date.now())) {
-      if (r.integrationSha && r.policyDigest === this.h.policyDigest(r.repositoryId ?? 'main')) {
+      const owner = this.h.store.read().tasks.find((t) => t.id === r.taskId);
+      if (r.integrationSha && owner && r.policyDigest === this.h.taskPolicyDigest(owner)) {
         try {
           await git(
             repository(this.h.config, r.repositoryId ?? 'main').path,

@@ -3,7 +3,7 @@ import { validatePreparation } from './preparation.ts';
 import { contractDigest, digest, specDigest, type DevContour } from './service.ts';
 import { effectiveChecks, obligationOf } from './checks.ts';
 import { CheckCorpus, localRoots, portableSuite, type PortableSuite } from './check-store.ts';
-import { expandGates, repository, requiresContract } from './repositories.ts';
+import { dependencyOrder, expandGates, repository, requiresContract } from './repositories.ts';
 import { assertDag } from './graph.ts';
 import { validateTaskContext } from './workflow.ts';
 import {
@@ -117,8 +117,16 @@ export function completion(h: DevContour, s: DevContourState, t: Task): Completi
           : {}),
       }),
     ),
-    ...(run.consumers?.length ? { consumers: run.consumers } : {}),
-    ...(run.dependencies?.length
+    ...(run.consumers?.length
+      ? {
+          consumers: run.consumers.map((c) => {
+            if (!c.checked)
+              throw new Error(`Проверка потребителя ${c.repositoryId} не записала, что проверено`);
+            return { repositoryId: c.repositoryId, gates: c.gates, ...c.checked };
+          }),
+        }
+      : {}),
+    ...(run.dependencies
       ? {
           dependencies: run.dependencies.map((d) => {
             const head = run.dependencyFreshness?.find(
@@ -249,6 +257,8 @@ export function recordsFromState(h: DevContour, s: DevContourState) {
   if (s.preparation) add(undefined, { version: 1, kind: 'preparation', data: s.preparation });
   return records;
 }
+const sameSet = (a: string[], b: string[]) =>
+  a.length === b.length && new Set(a).size === a.length && b.every((x) => a.includes(x));
 export function validateReceipt(
   receipt: CompletionReceipt,
   t: Task,
@@ -257,9 +267,16 @@ export function validateReceipt(
   suites: (id: string) => PortableSuite | undefined = () => undefined,
   /** Контракты состояния: по ним находятся гейты объявленных свойств задачи. */
   contracts: Contract[] = [],
-  /** Раскрытие области потребителя в этом клоне: какие gates обязательны. */
-  consumerGates: (repositoryId: string, refs: string[]) => string[] = (_r, refs) => refs,
+  /**
+   * Сверка с конфигурацией этого клона: раскрытие области компонента (gates
+   * задачи или потребителя) и состав зависимостей компонента.
+   */
+  scope: {
+    expand?: (repositoryId: string, refs: string[]) => string[];
+    dependencyIds?: (repositoryId: string) => string[];
+  } = {},
 ) {
+  const expand = scope.expand ?? ((_r: string, refs: string[]) => refs);
   if (
     receipt.taskId !== t.id ||
     receipt.repositoryId !== t.repositoryId ||
@@ -316,13 +333,58 @@ export function validateReceipt(
       if (!check?.passed || check.exitCode !== 0)
         throw new Error(`Нет PASS в receipt ${t.id}: ${phase}/${gate}`);
     }
+  // Область задачи раскрывается в этом клоне: receipt не может сократить
+  // обязательный набор, убрав gates группы из своих requiredGates. Если
+  // группы клонов разошлись, receipt отклоняется — совместимость конфигураций
+  // значит, что раскрытие получателя покрыто проверками отправителя.
+  const own = expand(t.repositoryId ?? 'main', t.gates ?? []);
+  const missingOwn = own.filter((g) => !receipt.requiredGates.includes(g));
+  if (missingOwn.length)
+    throw new Error(
+      `Receipt ${t.id}: область задачи требует ${missingOwn.join(', ')}, а receipt их не проверял`,
+    );
+  // Снимок собственных зависимостей нового формата полон и согласован.
+  const ownIds = scope.dependencyIds?.(t.repositoryId ?? 'main');
+  if (receipt.dependencies && ownIds) {
+    if (
+      !sameSet(
+        receipt.dependencies.map((d) => d.repositoryId),
+        ownIds,
+      )
+    )
+      throw new Error(
+        `Receipt ${t.id}: снимок зависимостей не совпадает с зависимостями компонента`,
+      );
+    if (receipt.dependencies.some((d) => !d.head))
+      throw new Error(
+        `Receipt ${t.id}: у снимка зависимостей нет головы ветки на момент завершения`,
+      );
+  }
   // Объявленные задачей потребители проверены на integration тем же
   // составом, что даёт её постановка; receipt не может их опустить.
   for (const consumer of t.consumers ?? []) {
     const recorded = receipt.consumers?.find((c) => c.repositoryId === consumer.repositoryId);
     if (!recorded)
       throw new Error(`Receipt ${t.id}: нет проверок потребителя ${consumer.repositoryId}`);
-    for (const gate of consumerGates(consumer.repositoryId, consumer.gates)) {
+    // Что проверено: снимок всех зависимостей потребителя, и компонент задачи
+    // в нём — именно принятый результат.
+    const ids = scope.dependencyIds?.(consumer.repositoryId);
+    if (
+      ids &&
+      !sameSet(
+        recorded.dependencies.map((d) => d.repositoryId),
+        ids,
+      )
+    )
+      throw new Error(
+        `Receipt ${t.id}: снимок зависимостей потребителя ${consumer.repositoryId} не совпадает с его зависимостями`,
+      );
+    const provider = recorded.dependencies.find((d) => d.repositoryId === t.repositoryId);
+    if (provider?.sha !== receipt.resultSha)
+      throw new Error(
+        `Receipt ${t.id}: потребитель ${consumer.repositoryId} проверен не на принятом результате`,
+      );
+    for (const gate of expand(consumer.repositoryId, consumer.gates)) {
       const check = decisive('test', 'integration', gate, consumer.repositoryId);
       if (!check?.passed || check.exitCode !== 0)
         throw new Error(`Нет PASS в receipt ${t.id}: integration/${consumer.repositoryId}:${gate}`);
@@ -539,7 +601,11 @@ export function stateFromRecords(
             return found?.record.kind === 'check' ? found.record.data : undefined;
           },
           s.contracts,
-          (repositoryId, refs) => expandGates(repository(h.config, repositoryId), refs),
+          {
+            expand: (repositoryId, refs) => expandGates(repository(h.config, repositoryId), refs),
+            dependencyIds: (repositoryId) =>
+              dependencyOrder(h.config, repository(h.config, repositoryId).dependsOn ?? []),
+          },
         );
         // Принятая задача закреплена за той версией корпуса, под которой её
         // проверили: другая привязка в записи — подмена.

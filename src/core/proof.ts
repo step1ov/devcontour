@@ -42,8 +42,10 @@ export function requirementProof(
 ): RequirementProof {
   const base = { id: link.id, testId: link.testId };
   if (!resultSha) return { ...base, level: 'none', reason: 'Результат ещё не принят' };
+  // Evidence потребителя — проверка другого компонента: одноимённые gate и
+  // testcase потребителя собственный критерий задачи не подтверждают.
   const relevant = evidence.filter(
-    (e) => e.gate === link.gate && e.phase === 'integration' && e.sha === resultSha,
+    (e) => !e.consumer && e.gate === link.gate && e.phase === 'integration' && e.sha === resultSha,
   );
   if (!relevant.length)
     return {

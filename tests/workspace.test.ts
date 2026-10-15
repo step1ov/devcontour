@@ -860,6 +860,21 @@ test('Этап локальной доски принимает только з�
       const x = s.tasks.find((x) => x.id === t.id)!;
       x.status = 'done';
       x.resultSha = 'merged';
+      // Приёмка доски требует собственного evidence каждого gate профиля.
+      s.runs.push({
+        id: 'R-library',
+        taskId: t.id,
+        status: 'succeeded',
+        evidence: [
+          {
+            kind: 'test',
+            phase: 'integration',
+            sha: 'merged',
+            gate: 'test-library',
+            passed: true,
+          },
+        ],
+      } as unknown as (typeof s.runs)[number]);
     });
     f.h.accept(b.id, 'merged');
     const before = f.store.read();

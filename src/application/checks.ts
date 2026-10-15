@@ -173,9 +173,7 @@ export function taskChecks(h: DevContour, raw: unknown) {
     taskId: task.id,
     level: task.properties?.length ? 'manifest' : 'legacy',
     versions: {
-      effective: task.approvedDigest
-        ? effectiveChecks(task, h.policyDigest(task.repositoryId))
-        : null,
+      effective: task.approvedDigest ? effectiveChecks(task, h.taskPolicyDigest(task)) : null,
       lastRun: last?.checks?.effective ?? null,
       corpus: binding ?? null,
       suite: suite?.id ?? null,

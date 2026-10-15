@@ -289,11 +289,21 @@ export function uncoveredGates(config: Config, s: DevContourState, tasks: Task[]
   const result: { repositoryId: string; gates: string[] }[] = [];
   for (const repositoryId of [...new Set(tasks.map((t) => t.repositoryId))]) {
     const own = tasks.filter((t) => t.repositoryId === repositoryId);
-    if (!own.some((t) => t.gates?.length)) continue;
+    // Покрытие — по фактическому собственному evidence на принятом SHA
+    // задачи, для любой области: задача без явной области выполнялась
+    // профилем своего времени, и gate, добавленный позже, ею не покрыт.
+    // Evidence потребителя — проверка другого компонента и не в счёт.
     const covered = new Set(
       own.flatMap((t) =>
         taskEvidence(s, t)
-          .filter((e) => e.phase === 'integration' && e.passed && e.gate)
+          .filter(
+            (e) =>
+              e.phase === 'integration' &&
+              e.passed &&
+              e.gate &&
+              !e.consumer &&
+              (!t.resultSha || e.sha === t.resultSha),
+          )
           .map((e) => e.gate),
       ),
     );
@@ -495,6 +505,24 @@ export class DevContour {
    * как его считала прежняя версия; он нужен только чтобы восстановить
    * receipt уже завершённой задачи, не выдавая её за исполненную в песочнице.
    */
+  /**
+   * Договор исполнения попытки задачи: политика её компонента и, если задача
+   * называет потребителей, политика каждого из них с раскрытым составом его
+   * проверок. Смена команды или группы потребителя делает прежнюю попытку
+   * устаревшей так же, как смена собственной.
+   */
+  taskPolicyDigest(t: Pick<Task, 'repositoryId' | 'consumers'>) {
+    const own = this.policyDigest(t.repositoryId);
+    if (!t.consumers?.length) return own;
+    return digest({
+      own,
+      consumers: t.consumers.map((c) => ({
+        repositoryId: c.repositoryId,
+        policy: this.policyDigest(c.repositoryId),
+        gates: expandGates(repository(this.config, c.repositoryId), c.gates),
+      })),
+    });
+  }
   policyDigest(repositoryId = 'main', legacy = false) {
     const repo = repository(this.config, repositoryId);
     return digest({
@@ -1226,12 +1254,12 @@ export class DevContour {
         reviewerModel: reviewerBinding(this.config, t.role, t.repositoryId).model,
         effort: roleBinding(this.config, t.role, t.repositoryId).effort,
         reviewerEffort: reviewerBinding(this.config, t.role, t.repositoryId).effort,
-        policyDigest: this.policyDigest(t.repositoryId),
+        policyDigest: this.taskPolicyDigest(t),
         // Версия проверок закрепляется при выдаче: принятие нового корпуса
         // посередине попытки ждёт её окончания, и evidence этой попытки
         // относится к этой версии.
         checks: {
-          effective: effectiveChecks(t, this.policyDigest(t.repositoryId)),
+          effective: effectiveChecks(t, this.taskPolicyDigest(t)),
           ...(t.checkVersion ? { corpus: t.checkVersion } : {}),
         },
         status: 'active',
@@ -1269,7 +1297,7 @@ export class DevContour {
       const t = task(s, r.taskId);
       assertTaskPreparation(s, t);
       this.assertCurrentConfig(s);
-      if (r.policyDigest !== this.policyDigest(t.repositoryId))
+      if (r.policyDigest !== this.taskPolicyDigest(t))
         throw new DomainError('Политика проверок изменилась; нужна новая попытка');
       if (
         r.status !== 'active' ||
@@ -1429,7 +1457,7 @@ export class DevContour {
         throw new DomainError('Нет интеграционного коммита');
       // Принять можно только под той версией проверок, под которой шла
       // попытка: новый корпус, принятый задачей, требует новой попытки.
-      if (r.checks && effectiveChecks(t, this.policyDigest(t.repositoryId)) !== r.checks.effective)
+      if (r.checks && effectiveChecks(t, this.taskPolicyDigest(t)) !== r.checks.effective)
         throw new DomainError('Версия проверок задачи изменилась; нужна новая попытка');
       // Evidence потребителя закрывает только проверку потребителя: его gate
       // `unit` — не собственный `unit` задачи.
