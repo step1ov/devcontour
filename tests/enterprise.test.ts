@@ -729,6 +729,10 @@ test('Explicit storage migration relocates historical local task bodies and pres
       repositoryId: 'library',
       description: 'LEGACY_LOCAL_SPECIFICATION',
     });
+    // Локальная запись компонента (вызов модели) до миграции.
+    f.store.atomic(() =>
+      f.store.saveLocal('usage', 'library', 'U-legacy', { id: 'U-legacy', note: 'LEGACY_USAGE' }),
+    );
     const before = f.store.read(),
       events = f.store.allEvents();
     await f.scheduler.stop();
@@ -736,9 +740,14 @@ test('Explicit storage migration relocates historical local task bodies and pres
     reopened = new Store(join(f.data, 'state.sqlite'), f.c.repositories, true);
     assert.deepEqual(reopened.read(), before);
     assert.deepEqual(reopened.allEvents(), events);
+    // Она переезжает в базу компонента и читается после миграции.
+    assert.deepEqual(reopened.localRecords('usage', 'library'), {
+      'U-legacy': { id: 'U-legacy', note: 'LEGACY_USAGE' },
+    });
     const bytes = await readFile(join(f.data, 'state.sqlite'));
     assert.equal(bytes.includes(Buffer.from('LEGACY_LOCAL_SPECIFICATION')), false);
     assert.equal(bytes.includes(Buffer.from('LEGACY_LOCAL_BOARD')), false);
+    assert.equal(bytes.includes(Buffer.from('LEGACY_USAGE')), false);
   } finally {
     reopened?.close();
     await rm(f.root, { recursive: true, force: true });

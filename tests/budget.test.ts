@@ -19,7 +19,7 @@ import { budgetOverview, budgetStatus, taskBudgets, usageRecords } from '../src/
 import { abandonCalls, measuredExecute, pinLegacyCalls } from '../src/runner/usage.ts';
 import { liveCall } from '../src/core/live-calls.ts';
 import { timed } from '../src/runner/timing.ts';
-import { ownerGone, processStartedAt } from '../src/runner/live-calls.ts';
+import { BOOT_ID, ownerGone, processStartedAt } from '../src/runner/live-calls.ts';
 import { workflowMetrics } from '../src/application/metrics.ts';
 import { chainBlockers } from '../src/core/work-status.ts';
 import type { AgentRequest } from '../src/runner/adapters.ts';
@@ -843,9 +843,15 @@ test('review 4: legacy task calls are pinned before a move, without overwriting 
       ...active,
       finishedAt: undefined,
       startedHr,
+      bootId: BOOT_ID,
       startedAt: new Date(Date.now() + 60_000).toISOString(),
     };
-    assert.ok(callDurationMs(future)! >= 300);
+    // Без идентификатора загрузки (ОС его не сообщает) часы ОС не сравниваются.
+    const measured = callDurationMs(future);
+    if (BOOT_ID) assert.ok(measured !== null && measured >= 300, String(measured));
+    else assert.equal(measured, null);
+    // Часы другой загрузки ОС несравнимы: время по ним не считается.
+    assert.equal(callDurationMs({ ...future, bootId: 'other-boot' }), null);
   } finally {
     owner.kill();
     f.cleanup();
@@ -891,11 +897,14 @@ test('review 5: a board call recorded with its board but without tasks is comple
       costSource: 'unknown',
       startedAt: new Date(Date.now() + 60_000).toISOString(),
       startedHr: (process.hrtime.bigint() - 353_000_000n).toString(),
+      bootId: BOOT_ID,
       process: { id: 'gone', pid: dead },
     });
     assert.deepEqual(abandonCalls(f.h), ['crashed']);
     const records = f.store.localRecords<UsageRecord>('usage', 'main');
-    assert.ok(records.crashed.durationMs! >= 350, String(records.crashed.durationMs));
+    // Без идентификатора загрузки время по меткам противоречиво и неизвестно.
+    if (BOOT_ID) assert.ok(records.crashed.durationMs! >= 350, String(records.crashed.durationMs));
+    else assert.equal(records.crashed.durationMs, undefined);
     assert.equal(callDurationMs(records.crashed), records.crashed.durationMs);
     pinLegacyCalls(f.h);
     assert.deepEqual(f.store.localRecords<UsageRecord>('usage', 'main')['board-call'].taskIds, [

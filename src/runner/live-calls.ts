@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { registerProcess } from '../core/live-calls.ts';
 import { registerMonotonic, type UsageRecord } from '../core/usage.ts';
 import { processAlive } from './resources.ts';
@@ -38,7 +39,28 @@ const sameProcess = (owner: { pid: number; startedAt?: number }) => {
   return processStartedAt(owner.pid) === owner.startedAt;
 };
 registerProcess(CURRENT_PROCESS, sameProcess);
-registerMonotonic(() => process.hrtime.bigint());
+/**
+ * Идентификатор текущей загрузки ОС: Linux сообщает его прямо, macOS — момент
+ * загрузки. `undefined` — узнать нельзя, и монотонные часы ОС между
+ * процессами не сравниваются.
+ */
+export const BOOT_ID = ((): string | undefined => {
+  try {
+    return readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+  } catch {
+    try {
+      const out = execFileSync('sysctl', ['-n', 'kern.boottime'], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 2000,
+      });
+      return /sec = \d+, usec = \d+/.exec(out)?.[0];
+    } catch {
+      return undefined;
+    }
+  }
+})();
+registerMonotonic(() => process.hrtime.bigint(), BOOT_ID);
 
 /**
  * Владелец записи точно не ведёт вызов: процесса нет, или pid достался

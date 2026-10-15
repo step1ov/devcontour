@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { DevContour, digest } from '../core/service.ts';
 import type { DevContourState } from '../core/model.ts';
-import { CURRENT_PROCESS, ownerGone } from './live-calls.ts';
+import { BOOT_ID, CURRENT_PROCESS, ownerGone } from './live-calls.ts';
 import {
   callDurationMs,
   endActive,
@@ -230,6 +230,7 @@ export async function measuredExecute(
     costSource: 'unknown',
     process: PROCESS,
     startedHr,
+    ...(BOOT_ID ? { bootId: BOOT_ID } : {}),
   };
   const save = () =>
     h.store.atomic(() => h.store.saveLocal('usage', meta.repositoryId, record.id, record));

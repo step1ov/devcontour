@@ -115,6 +115,38 @@ export class Store {
                 .all() as unknown as { id: number; at: string; type: string; data: string }[];
               for (const event of events)
                 this.components.event(event.id, event.at, event.type, JSON.parse(event.data), raw);
+              // Локальные записи компонентов (вызовы моделей, решения ведущего)
+              // переезжают в их базы вместе с состоянием: иначе после миграции
+              // они не читались бы, и расход компонента обнулился бы.
+              if (
+                this.db
+                  .prepare(
+                    "SELECT name FROM main.sqlite_master WHERE type='table' AND name='local_workflow'",
+                  )
+                  .get()
+              ) {
+                const rows = this.db
+                  .prepare(
+                    "SELECT namespace,owner,key,data FROM main.local_workflow WHERE owner != '@workspace'",
+                  )
+                  .all() as { namespace: string; owner: string; key: string; data: string }[];
+                for (const row of rows) {
+                  // Записи владельца, которого нет среди компонентов, остаются.
+                  if (!locations.some((l) => l.id === row.owner)) continue;
+                  const schema = this.components.schema(row.owner);
+                  this.db.exec(
+                    `CREATE TABLE IF NOT EXISTS ${schema}.local_workflow (namespace TEXT NOT NULL, owner TEXT NOT NULL, key TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(namespace,owner,key))`,
+                  );
+                  this.db
+                    .prepare(`INSERT OR REPLACE INTO ${schema}.local_workflow VALUES(?,?,?,?)`)
+                    .run(row.namespace, row.owner, row.key, row.data);
+                  this.db
+                    .prepare(
+                      'DELETE FROM main.local_workflow WHERE namespace=? AND owner=? AND key=?',
+                    )
+                    .run(row.namespace, row.owner, row.key);
+                }
+              }
             }
             this.db.exec('COMMIT');
           } catch (e) {
