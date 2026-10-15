@@ -195,8 +195,10 @@ test('B03: a call whose process died is closed as abandoned and counted; a live 
     assert.equal(totals.unfinishedCalls, 1);
     assert.equal(totals.unknownCalls, 2);
     assert.equal(totals.complete, false);
-    // Время прерванного вызова ограничено моментом обнаружения, а не растёт вечно.
-    assert.ok(totals.durationMs >= 120_000);
+    // Время прерванного вызова ограничено моментом обнаружения, а не растёт вечно;
+    // у идущего чужого вызова без сравнимых монотонных часов время неизвестно.
+    assert.ok(totals.durationMs >= 60_000, String(totals.durationMs));
+    assert.equal(totals.unknownDurationCalls, 1);
     const status = budgetStatus(f.h, f.store.read(), { kind: 'workspace' });
     assert.equal(status?.state, 'undetermined');
     assert.match(status.reason!, /у 1 вызовов неизвестна стоимость/);
@@ -677,7 +679,7 @@ test('review 3: history gaps follow the attempt flag, not timestamps; a long his
   }
 });
 
-test('review 3: a reused pid is not a live owner; foreign in-flight time keeps its saved floor; legacy board calls stay with their tasks', async () => {
+test('review 3: a reused pid is not a live owner; foreign in-flight time without comparable clocks is unknown; legacy board calls stay with their tasks', async () => {
   const f = contour({ budgets: { task: { usd: 5 }, board: { usd: 5 }, onUnknown: 'stop' } });
   const owner = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)']);
   await new Promise((done) => setTimeout(done, 200));
@@ -715,12 +717,14 @@ test('review 3: a reused pid is not a live owner; foreign in-flight time keeps i
     assert.equal(liveCall(real, at, max), true);
     assert.equal(ownerGone(real), false);
     // Чужой идущий вызов: откат часов не опускает время ниже сохранённого замера.
+    // Без сравнимых монотонных часов время чужого идущего вызова неизвестно:
+    // по системным часам оно могло бы уменьшиться при их откате.
     assert.equal(
       callDurationMs(
         { ...base, elapsedMs: 300, startedAt: new Date(at + 60_000).toISOString() },
         at,
       ),
-      300,
+      null,
     );
     // Прежняя запись о доске без закреплённых задач закрепляется до изменения графа.
     const b = f.h.createBoard('Board A', '', 'main');
@@ -903,9 +907,15 @@ test('review 5: a board call recorded with its board but without tasks is comple
     assert.deepEqual(abandonCalls(f.h), ['crashed']);
     const records = f.store.localRecords<UsageRecord>('usage', 'main');
     // Без идентификатора загрузки время по меткам противоречиво и неизвестно.
-    if (BOOT_ID) assert.ok(records.crashed.durationMs! >= 350, String(records.crashed.durationMs));
-    else assert.equal(records.crashed.durationMs, undefined);
-    assert.equal(callDurationMs(records.crashed), records.crashed.durationMs);
+    if (BOOT_ID) {
+      assert.ok(records.crashed.durationMs! >= 350, String(records.crashed.durationMs));
+      assert.equal(callDurationMs(records.crashed), records.crashed.durationMs);
+    } else {
+      // Без идентификатора загрузки время прерванного вызова неизвестно, а не
+      // уменьшено откатом часов.
+      assert.equal(records.crashed.durationMs, undefined);
+      assert.equal(callDurationMs(records.crashed), null);
+    }
     pinLegacyCalls(f.h);
     assert.deepEqual(f.store.localRecords<UsageRecord>('usage', 'main')['board-call'].taskIds, [
       t.id,

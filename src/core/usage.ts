@@ -156,6 +156,9 @@ export const callDurationMs = (r: UsageRecord, at = Date.now()): number | null =
     const elapsed = Number((monotonicNow() - BigInt(r.startedHr)) / 1_000_000n);
     if (elapsed >= 0) return Math.max(elapsed, r.elapsedMs ?? 0);
   }
+  // Идущий вызов без сравнимых монотонных часов: время по системным часам
+  // может уменьшиться при их откате, поэтому оно неизвестно.
+  if (r.outcome === 'active') return null;
   const elapsed =
     Date.parse(r.finishedAt ?? r.abandonedAt ?? new Date(at).toISOString()) -
     Date.parse(r.startedAt);
