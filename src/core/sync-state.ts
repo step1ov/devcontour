@@ -392,6 +392,26 @@ export function validateReceipt(
         `Receipt ${t.id}: у снимка зависимостей нет головы ветки на момент завершения`,
       );
   }
+  // Записанные проверки потребителей совпадают с объявленными задачей: receipt
+  // не заявляет потребителя или gate, которых постановка не требует, и каждый
+  // заявленный gate потребителя имеет решающий PASS.
+  if (
+    !sameSet(
+      (receipt.consumers ?? []).map((c) => c.repositoryId),
+      (t.consumers ?? []).map((c) => c.repositoryId),
+    ) ||
+    receipt.checks.some(
+      (c) => c.consumer && !(t.consumers ?? []).some((x) => x.repositoryId === c.consumer),
+    )
+  )
+    throw new Error(`Receipt ${t.id}: потребители receipt не совпадают с объявленными задачей`);
+  for (const recorded of receipt.consumers ?? []) {
+    const declared = t.consumers!.find((c) => c.repositoryId === recorded.repositoryId)!;
+    if (!sameSet(recorded.gates, expand(declared.repositoryId, declared.gates)))
+      throw new Error(
+        `Receipt ${t.id}: область потребителя ${recorded.repositoryId} не совпадает с объявленной`,
+      );
+  }
   // Объявленные задачей потребители проверены на integration тем же
   // составом, что даёт её постановка; receipt не может их опустить.
   for (const consumer of t.consumers ?? []) {

@@ -183,6 +183,14 @@ export class Scheduler {
       let failure: Error | undefined;
       try {
         const consumerSha = await git(dir, 'rev-parse', 'HEAD');
+        // Проверяется закреплённая голова потребителя: подготовка, lifecycle
+        // и gates не могут подменить её коммитом или правкой отслеживаемых файлов.
+        const pinned = async (step: string) => {
+          if ((await git(dir, 'rev-parse', 'HEAD')) !== consumerSha)
+            throw new Error(`Потребитель ${repo.id}: ${step} изменила HEAD`);
+          if (await git(dir, 'status', '--porcelain', '--untracked-files=no'))
+            throw new Error(`Потребитель ${repo.id}: ${step} изменила отслеживаемые файлы`);
+        };
         // Компонент задачи подставлен её интегрированным результатом до сборки
         // зависимостей: промежуточные зависимости собираются уже против него.
         dependencies = await snapshotDependencies(
@@ -207,6 +215,7 @@ export class Scheduler {
           signal,
           async () => {
             await runSteps(repo.prepare ?? [], dir, join(artifacts, 'prepare'), execution, signal);
+            await pinned('подготовка');
             for (const gate of orderedGates(
               repo.gates.filter((g) => consumer.gates.includes(g.id)),
             ))
@@ -227,6 +236,7 @@ export class Scheduler {
             timed(this.h, run, `integration-consumer-environment:${repo.id}:${stage}`, action),
         );
         await assertDependencies(dependencies);
+        await pinned('проверка');
         // Свежесть фактических входов потребителя — прочих зависимостей и его
         // самого — на момент окончания проверки.
         const freshness = [
@@ -248,7 +258,7 @@ export class Scheduler {
           freshness,
           observedAt: new Date().toISOString(),
           sha: consumerSha,
-          tree: await git(dir, 'rev-parse', 'HEAD^{tree}'),
+          tree: await git(dir, 'rev-parse', `${consumerSha}^{tree}`),
           dependencies: dependencies.map((d) => ({
             repositoryId: d.repositoryId,
             sha: d.sha,

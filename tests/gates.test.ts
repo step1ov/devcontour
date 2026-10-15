@@ -794,6 +794,30 @@ process.exit(ok ? 0 : 1);
       .find((p) => !p.endsWith('/product'))!;
     sh(repos[2].path, 'worktree', 'unlock', locked);
     sh(repos[2].path, 'worktree', 'remove', '--force', locked);
+    // Подготовка не подменяет проверяемую голову потребителя своим коммитом
+    // или правкой отслеживаемых файлов.
+    for (const command of [
+      [
+        'git',
+        '-c',
+        'user.email=fixture@example.com',
+        '-c',
+        'user.name=fixture',
+        'commit',
+        '-q',
+        '--allow-empty',
+        '-m',
+        'patched consumer',
+      ],
+      node(`require('fs').appendFileSync('.gitignore','patched\\n')`),
+    ]) {
+      product.prepare = [{ id: 'patch', command, timeoutMs: 30_000 }];
+      await assert.rejects(
+        consume(integrated, sha),
+        /Потребитель product: подготовка изменила (HEAD|отслеживаемые файлы)/,
+      );
+      assert.equal(worktrees('product'), 1);
+    }
     // Очистка окружения потребителя не завершилась: деревья — контекст её
     // повторения, они сохранены, а отказ называет receipt окружения.
     product.prepare = original.prepare;
@@ -1143,6 +1167,11 @@ test('G02: a consumer receipt is pinned to the attempt check version, a consumer
       () => validateReceipt(receiptSchema.parse(foreign), done, false, undefined, [], scope),
       /integration\/product:test получен под другой версией проверок/,
     );
+    const unpinnedBase = () => {
+      const r = structuredClone(receipt);
+      delete r.scopeDigest;
+      return r;
+    };
     const check = (r: typeof receipt, t = done) => () =>
       validateReceipt(receiptSchema.parse(r), t, false, undefined, [], scope);
     // Без агрегатной версии разные версии решающих записей всё равно видны.
@@ -1190,6 +1219,25 @@ test('G02: a consumer receipt is pinned to the attempt check version, a consumer
     delete legacy.consumers![0].freshness;
     delete legacy.consumers![0].observedAt;
     assert.doesNotThrow(check(legacy, { ...done, approvedScope: undefined }));
+    // Записанные потребители и их область совпадают с объявленными задачей.
+    const undeclared = structuredClone(unpinnedBase());
+    undeclared.checks = undeclared.checks.filter((c) => !c.consumer);
+    assert.throws(
+      check(undeclared, { ...done, approvedScope: undefined, consumers: [] }),
+      /потребители receipt не совпадают с объявленными задачей/,
+    );
+    const widened = structuredClone(receipt);
+    widened.consumers![0].gates = ['test', 'extra'];
+    assert.throws(check(widened), /область потребителя product не совпадает с объявленной/);
+    // Область потребителя переносится целиком, без предела сверх профиля.
+    assert.doesNotThrow(() =>
+      receiptSchema.parse({
+        ...receipt,
+        consumers: [
+          { ...receipt.consumers![0], gates: Array.from({ length: 101 }, (_, i) => `g${i}`) },
+        ],
+      }),
+    );
     const partial = structuredClone(receipt);
     delete partial.consumers![0].freshness;
     assert.throws(check(partial), /запись нового формата неполна/);

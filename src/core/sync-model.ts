@@ -76,7 +76,9 @@ export const receiptSchema = z.strictObject({
     .array(
       z.strictObject({
         repositoryId: syncId,
-        gates: z.array(syncId).min(1).max(100),
+        // Без предела сверх профиля: как и собственные requiredGates, область
+        // потребителя переносится целиком.
+        gates: z.array(syncId).min(1),
         /** Проверенная голова потребителя и снимок всех его зависимостей. */
         sha,
         tree: sha,
