@@ -419,10 +419,11 @@ export interface Run {
       /**
        * Свежесть фактических входов на момент окончания проверки: прочих
        * зависимостей и самого потребителя. Компонент задачи подставлен её
-       * интегрированным результатом и в свежесть не входит.
+       * интегрированным результатом и в свежесть не входит. Нет полей —
+       * попытка прежней версии: свежесть тогда не наблюдалась.
        */
-      freshness: { repositoryId: string; snapshot: string; head: string; fresh: boolean }[];
-      observedAt: string;
+      freshness?: { repositoryId: string; snapshot: string; head: string; fresh: boolean }[];
+      observedAt?: string;
     };
   }[];
   /**

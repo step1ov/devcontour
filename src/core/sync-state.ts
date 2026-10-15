@@ -285,8 +285,23 @@ export function validateReceipt(
     receipt.specDigest !== specDigest(t)
   )
     throw new Error(`Receipt не соответствует постановке ${t.id}`);
+  // Receipt нового формата узнаётся по любому из его полей: тогда обязательны
+  // все. Иначе удаление одного закрепления выдавало бы новую запись за
+  // прежнюю и снимало бы проверку, которую запись по-прежнему несёт.
+  const consumersObserved = (receipt.consumers ?? []).map(
+    (c) => c.freshness !== undefined || c.observedAt !== undefined,
+  );
+  if (
+    (receipt.scopeDigest !== undefined || consumersObserved.some(Boolean)) &&
+    (receipt.scopeDigest === undefined ||
+      (receipt.consumers ?? []).some((c) => !c.freshness || !c.observedAt))
+  )
+    throw new Error(`Receipt ${t.id}: запись нового формата неполна`);
   // Утверждённая область проверок закреплена и в задаче, и в receipt: правка
-  // области вместе с receipt не проходит, пока утверждение не обновлено.
+  // области вместе с receipt не проходит, пока утверждение не обновлено, а
+  // закрепление receipt сверяется с постановкой и без закрепления в задаче.
+  if (receipt.scopeDigest !== undefined && receipt.scopeDigest !== scopeDigest(t))
+    throw new Error(`Receipt ${t.id}: область проверок не соответствует утверждённой`);
   if (
     t.approvedScope &&
     (receipt.scopeDigest !== t.approvedScope || scopeDigest(t) !== t.approvedScope)
@@ -388,17 +403,35 @@ export function validateReceipt(
       throw new Error(
         `Receipt ${t.id}: снимок зависимостей потребителя ${consumer.repositoryId} не совпадает с его зависимостями`,
       );
-    // Свежесть названа для каждого фактического входа, кроме компонента задачи.
-    if (
-      ids &&
-      !sameSet(
-        recorded.freshness.map((x) => x.repositoryId),
-        [...ids.filter((id) => id !== t.repositoryId), consumer.repositoryId],
+    // Свежесть названа для каждого фактического входа, кроме компонента задачи,
+    // и согласована сама с собой: снимок — тот, что проверен, а «свеж» значит,
+    // что голова ветки совпала со снимком.
+    if (recorded.freshness) {
+      if (
+        ids &&
+        !sameSet(
+          recorded.freshness.map((x) => x.repositoryId),
+          [...ids.filter((id) => id !== t.repositoryId), consumer.repositoryId],
+        )
       )
-    )
-      throw new Error(
-        `Receipt ${t.id}: свежесть входов потребителя ${consumer.repositoryId} названа не для всех`,
-      );
+        throw new Error(
+          `Receipt ${t.id}: свежесть входов потребителя ${consumer.repositoryId} названа не для всех`,
+        );
+      for (const x of recorded.freshness) {
+        const checked =
+          x.repositoryId === consumer.repositoryId
+            ? recorded.sha
+            : recorded.dependencies.find((d) => d.repositoryId === x.repositoryId)?.sha;
+        if (
+          x.repositoryId === t.repositoryId ||
+          x.snapshot !== checked ||
+          x.fresh !== (x.snapshot === x.head)
+        )
+          throw new Error(
+            `Receipt ${t.id}: свежесть входа ${x.repositoryId} потребителя ${consumer.repositoryId} противоречит проверенному снимку`,
+          );
+      }
+    }
     const provider = recorded.dependencies.find((d) => d.repositoryId === t.repositoryId);
     if (provider?.sha !== receipt.resultSha)
       throw new Error(
@@ -422,7 +455,24 @@ export function validateReceipt(
   if (t.properties?.length && !receipt.checkVersion)
     throw new Error(`Receipt ${t.id} задачи с договором проверки без версии проверок`);
   const version = receipt.checkVersion;
-  if (!version) return;
+  // Решающие записи integration одной попытки получены под одной версией
+  // проверок, и это видно без агрегатного поля: его удаление не делает
+  // PASS потребителя под чужой версией допустимым.
+  const integration = [
+    ...required.map(([kind, gate]) => decisive(kind, 'integration', gate)!),
+    ...(t.consumers ?? []).flatMap((consumer) =>
+      expand(consumer.repositoryId, consumer.gates).map(
+        (gate) => decisive('test', 'integration', gate, consumer.repositoryId)!,
+      ),
+    ),
+  ];
+  if (!version) {
+    if (new Set(integration.map((c) => c.checks)).size > 1)
+      throw new Error(
+        `Receipt ${t.id}: решающие проверки integration получены под разными версиями`,
+      );
+    return;
+  }
   if (
     version.effective !==
     effectiveChecks(

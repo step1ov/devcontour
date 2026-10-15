@@ -726,7 +726,7 @@ process.exit(ok ? 0 : 1);
     // Свежесть названа для фактических входов: mid и сам потребитель; библиотека
     // подставлена интегрированным результатом и в свежесть не входит.
     assert.deepEqual(
-      checked.freshness.map((x) => [x.repositoryId, x.fresh]),
+      checked.freshness!.map((x) => [x.repositoryId, x.fresh]),
       [
         ['mid', true],
         ['product', true],
@@ -1113,6 +1113,56 @@ test('G02: a consumer receipt is pinned to the attempt check version, a consumer
       () => validateReceipt(receiptSchema.parse(foreign), done, false, undefined, [], scope),
       /integration\/product:test получен под другой версией проверок/,
     );
+    const check = (r: typeof receipt, t = done) => () =>
+      validateReceipt(receiptSchema.parse(r), t, false, undefined, [], scope);
+    // Без агрегатной версии разные версии решающих записей всё равно видны.
+    delete foreign.checkVersion;
+    assert.throws(check(foreign), /получены под разными версиями/);
+    // Закрепление receipt сверяется с постановкой и без закрепления в задаче:
+    // убрать потребителя вместе с его проверками и закреплением задачи нельзя.
+    const dropped = structuredClone(receipt);
+    delete dropped.consumers;
+    dropped.checks = dropped.checks.filter((c) => !c.consumer);
+    assert.throws(
+      check(dropped, { ...done, approvedScope: undefined, consumers: [] }),
+      /область проверок не соответствует утверждённой/,
+    );
+    assert.throws(
+      check(receipt, { ...done, approvedScope: undefined, gates: ['test'] }),
+      /область проверок не соответствует утверждённой/,
+    );
+    // Свежесть согласована сама с собой и с проверенным снимком.
+    const observed = (edit: (x: { snapshot: string; head: string; fresh: boolean }) => void) => {
+      const r = structuredClone(receipt);
+      edit(r.consumers![0].freshness![0]);
+      return r;
+    };
+    for (const r of [
+      observed((x) => (x.snapshot = x.head = M)),
+      observed((x) => (x.head = M)),
+      observed((x) => {
+        x.fresh = false;
+      }),
+    ])
+      assert.throws(check(r), /противоречит проверенному снимку/);
+    assert.doesNotThrow(
+      check(
+        observed((x) => {
+          x.head = M;
+          x.fresh = false;
+        }),
+      ),
+    );
+    // Запись прежнего формата — без наблюдения свежести и закрепления области —
+    // читается с прежней гарантией; новая запись без одного из полей — нет.
+    const legacy = structuredClone(receipt);
+    delete legacy.scopeDigest;
+    delete legacy.consumers![0].freshness;
+    delete legacy.consumers![0].observedAt;
+    assert.doesNotThrow(check(legacy, { ...done, approvedScope: undefined }));
+    const partial = structuredClone(receipt);
+    delete partial.consumers![0].freshness;
+    assert.throws(check(partial), /запись нового формата неполна/);
   } finally {
     await f.cleanup();
   }

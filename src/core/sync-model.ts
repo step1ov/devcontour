@@ -92,12 +92,17 @@ export const receiptSchema = z.strictObject({
             }),
           )
           .max(50),
+        /**
+         * Свежесть фактических входов и момент наблюдения. Нет полей — receipt
+         * прежнего формата: наблюдение тогда не делалось и неизвестно.
+         */
         freshness: z
           .array(
             z.strictObject({ repositoryId: syncId, snapshot: sha, head: sha, fresh: z.boolean() }),
           )
-          .max(51),
-        observedAt: z.iso.datetime(),
+          .max(51)
+          .optional(),
+        observedAt: z.iso.datetime().optional(),
       }),
     )
     .max(10)
