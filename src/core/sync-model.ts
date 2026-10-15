@@ -88,12 +88,13 @@ export const receiptSchema = z.strictObject({
               repositoryId: syncId,
               sha,
               tree: sha,
-              artifacts: z
-                .array(z.strictObject({ path: z.string().min(1).max(500), digest: hash }))
-                .max(100),
+              // Снимок переносится целиком: конфигурация не ограничивает число
+              // артефактов и зависимостей, а обрезка скрыла бы входы проверки.
+              artifacts: z.array(
+                z.strictObject({ path: z.string().min(1).max(500), digest: hash }),
+              ),
             }),
-          )
-          .max(50),
+          ),
         /**
          * Свежесть фактических входов и момент наблюдения. Нет полей — receipt
          * прежнего формата: наблюдение тогда не делалось и неизвестно.
@@ -102,7 +103,6 @@ export const receiptSchema = z.strictObject({
           .array(
             z.strictObject({ repositoryId: syncId, snapshot: sha, head: sha, fresh: z.boolean() }),
           )
-          .max(51)
           .optional(),
         observedAt: z.iso.datetime().optional(),
       }),
@@ -123,12 +123,10 @@ export const receiptSchema = z.strictObject({
         tree: sha,
         /** Голова целевой ветки зависимости на момент завершения. */
         head: sha.optional(),
-        artifacts: z
-          .array(z.strictObject({ path: z.string().min(1).max(500), digest: hash }))
-          .max(100),
+        // Целиком, как и снимок потребителя.
+        artifacts: z.array(z.strictObject({ path: z.string().min(1).max(500), digest: hash })),
       }),
     )
-    .max(50)
     .optional(),
   /**
    * Действующая версия проверок попытки и принятый ею корпус. Нет поля —

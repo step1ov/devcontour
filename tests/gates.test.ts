@@ -1229,12 +1229,23 @@ test('G02: a consumer receipt is pinned to the attempt check version, a consumer
     const widened = structuredClone(receipt);
     widened.consumers![0].gates = ['test', 'extra'];
     assert.throws(check(widened), /область потребителя product не совпадает с объявленной/);
-    // Область потребителя переносится целиком, без предела сверх профиля.
+    // Область потребителя и снимки зависимостей переносятся целиком, без
+    // предела сверх конфигурации.
+    const artifacts = Array.from({ length: 101 }, (_, i) => ({
+      path: `a${i}.json`,
+      digest: 'e'.repeat(64),
+    }));
+    const snapshot = { repositoryId: 'aux', sha: M, tree: M, artifacts };
     assert.doesNotThrow(() =>
       receiptSchema.parse({
         ...receipt,
+        dependencies: Array.from({ length: 51 }, () => ({ ...snapshot, head: M })),
         consumers: [
-          { ...receipt.consumers![0], gates: Array.from({ length: 101 }, (_, i) => `g${i}`) },
+          {
+            ...receipt.consumers![0],
+            gates: Array.from({ length: 101 }, (_, i) => `g${i}`),
+            dependencies: Array.from({ length: 51 }, () => snapshot),
+          },
         ],
       }),
     );
