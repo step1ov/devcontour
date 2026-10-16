@@ -303,6 +303,9 @@ export function uncoveredGates(config: Config, s: DevContourState, tasks: Task[]
         taskEvidence(s, t)
           .filter(
             (e) =>
+              // Gate профиля закрывает только исполнение его команды: запись
+              // ревью не доказывает одноимённый test gate.
+              e.kind === 'test' &&
               e.phase === 'integration' &&
               e.passed &&
               e.gate &&

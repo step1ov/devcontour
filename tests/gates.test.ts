@@ -916,6 +916,18 @@ test('G02: consumer evidence proves neither an own requirement nor own profile c
     assert.deepEqual(uncoveredGates(f.h.config, s, [s.tasks.find((t) => t.id === whole.id)!]), [
       { repositoryId: 'main', gates: ['nightly'] },
     ]);
+    // Запись независимого ревью не закрывает одноимённый test gate профиля.
+    f.h.config.gates = [profileGate('unit'), profileGate('independent-review')];
+    f.store.change('fixture.review', (s) => {
+      s.runs
+        .find((r) => r.id === 'R-whole')!
+        .evidence.push(integrationPass('independent-review', sha, { kind: 'review' }));
+    });
+    const reviewed = f.store.read();
+    assert.deepEqual(
+      uncoveredGates(f.h.config, reviewed, [reviewed.tasks.find((t) => t.id === whole.id)!]),
+      [{ repositoryId: 'main', gates: ['independent-review'] }],
+    );
   } finally {
     f.cleanup();
   }
@@ -1177,6 +1189,45 @@ test('G02: a consumer receipt is pinned to the attempt check version, a consumer
     });
     assert.throws(() => f.h.finish(run.id, run.token, M), /занимает \d+ байт при пределе/);
     assert.notEqual(f.store.read().tasks.find((t) => t.id === task.id)!.status, 'done');
+    // Переполнение только за счёт обвязки записи: сам receipt в пределе, файл
+    // записи — нет. Размер подбирается по receipt, который построил бы finish.
+    const sizedArtifacts = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({ path: `a${i}`, digest: 'e'.repeat(64) }));
+    const draftReceipt = (n: number) => {
+      const draft = structuredClone(f.store.read());
+      const r = draft.runs.find((x) => x.id === run.id)!;
+      r.consumers![0].checked!.dependencies[0].artifacts = sizedArtifacts(n);
+      r.status = 'succeeded';
+      r.finishedAt = new Date().toISOString();
+      const t = draft.tasks.find((x) => x.id === task.id)!;
+      t.status = 'done';
+      t.resultSha = M;
+      return completion(f.h, draft, t);
+    };
+    let lo = 1,
+      hi = 40_000;
+    while (lo < hi) {
+      const mid = Math.floor((lo + hi + 1) / 2);
+      // Ниже прежнего предела вложенного receipt (минус 64 KiB): прежняя
+      // проверка его пропустила бы, а файл записи всё равно больше предела.
+      if (Buffer.byteLength(canonical(draftReceipt(mid))) <= maxRecordBytes - 64 * 1024) lo = mid;
+      else hi = mid - 1;
+    }
+    assert.ok(receiptRecordBytes(draftReceipt(lo)) > maxRecordBytes);
+    f.store.change('fixture.envelope', (s) => {
+      s.runs.find((r) => r.id === run.id)!.consumers![0].checked!.dependencies[0].artifacts =
+        sizedArtifacts(lo);
+    });
+    let published = false;
+    assert.throws(
+      () =>
+        f.h.finish(run.id, run.token, M, () => {
+          published = true;
+        }),
+      /занимает \d+ байт при пределе/,
+    );
+    assert.equal(published, false);
+    assert.notEqual(f.store.read().tasks.find((t) => t.id === task.id)!.status, 'done');
     f.store.change('fixture.small', (s) => {
       s.runs.find((r) => r.id === run.id)!.consumers![0].checked!.dependencies[0].artifacts = [];
     });
@@ -1203,8 +1254,10 @@ test('G02: a consumer receipt is pinned to the attempt check version, a consumer
       delete r.scopeDigest;
       return r;
     };
-    const check = (r: typeof receipt, t = done) => () =>
-      validateReceipt(receiptSchema.parse(r), t, false, undefined, [], scope);
+    const check =
+      (r: typeof receipt, t = done) =>
+      () =>
+        validateReceipt(receiptSchema.parse(r), t, false, undefined, [], scope);
     // Без агрегатной версии разные версии решающих записей всё равно видны.
     delete foreign.checkVersion;
     assert.throws(check(foreign), /получены под разными версиями/);
