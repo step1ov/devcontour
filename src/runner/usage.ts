@@ -117,6 +117,9 @@ export function abandonCalls(h: DevContour, at = Date.now()) {
       // замер), пока запись ещё идущая: откат системных часов его не уменьшает.
       const elapsed = callDurationMs(r, at);
       if (elapsed !== null) r.durationMs = elapsed;
+      // Измерить нельзя — время остаётся неизвестным, а не берётся по
+      // системным часам, которые могли откатиться.
+      else r.durationUnknown = true;
       r.outcome = 'abandoned';
       r.abandonedAt = new Date(at).toISOString();
       h.store.saveLocal('usage', r.repositoryId, r.id, r);

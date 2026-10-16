@@ -74,6 +74,11 @@ export interface UsageRecord {
    * вызова независимо от системных часов.
    */
   startedHr?: string;
+  /**
+   * Время прерванного вызова неизвестно: на момент восстановления его нельзя
+   * было измерить монотонно, а метки системных часов недостоверны.
+   */
+  durationUnknown?: true;
   /** Загрузка ОС, к которой относится `startedHr`: часы другой загрузки несравнимы. */
   bootId?: string;
   /**
@@ -140,6 +145,7 @@ export const endActive = (id: string) => activeStarts.delete(id);
  */
 export const callDurationMs = (r: UsageRecord, at = Date.now()): number | null => {
   if (r.durationMs !== undefined) return r.durationMs;
+  if (r.durationUnknown) return null;
   // Идущий вызов этого процесса — по монотонным часам: перевод системных
   // часов не уменьшает уже потраченное время.
   const started = r.outcome === 'active' ? activeStart(r.id) : undefined;
@@ -210,7 +216,10 @@ export function usageTotals(records: UsageRecord[], uncovered = false, at = Date
     unfinishedCalls: records.filter((r) => r.outcome === 'active').length,
     abandonedCalls: records.filter((r) => r.outcome === 'abandoned').length,
     errorCalls: records.filter((r) => r.outcome === 'error').length,
-    durationMs: records.reduce((s, r) => s + (callDurationMs(r, at) ?? 0), 0),
+    // Неизвестное время входит своей достоверной нижней границей (сохранённым
+    // монотонным замером): исчерпание по известной части видно и при
+    // `onUnknown: continue`.
+    durationMs: records.reduce((s, r) => s + (callDurationMs(r, at) ?? r.elapsedMs ?? 0), 0),
     /** Вызовы с неизвестным временем: их время в `durationMs` не вошло. */
     unknownDurationCalls: records.filter((r) => callDurationMs(r, at) === null).length,
   };

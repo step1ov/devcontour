@@ -195,10 +195,10 @@ test('B03: a call whose process died is closed as abandoned and counted; a live 
     assert.equal(totals.unfinishedCalls, 1);
     assert.equal(totals.unknownCalls, 2);
     assert.equal(totals.complete, false);
-    // Время прерванного вызова ограничено моментом обнаружения, а не растёт вечно;
-    // у идущего чужого вызова без сравнимых монотонных часов время неизвестно.
-    assert.ok(totals.durationMs >= 60_000, String(totals.durationMs));
-    assert.equal(totals.unknownDurationCalls, 1);
+    // Без сравнимых монотонных часов время не берётся по системным часам: у
+    // прерванного и у идущего чужого вызова оно неизвестно, а не растёт вечно.
+    assert.equal(totals.unknownDurationCalls, 2);
+    assert.equal(records.find((r) => r.id === 'crashed')!.durationUnknown, true);
     const status = budgetStatus(f.h, f.store.read(), { kind: 'workspace' });
     assert.equal(status?.state, 'undetermined');
     assert.match(status.reason!, /у 1 вызовов неизвестна стоимость/);
@@ -932,6 +932,46 @@ test('review 5: a board call recorded with its board but without tasks is comple
     const own = budgetStatus(f.h, f.store.read(), { kind: 'task', id: t.id })!;
     assert.equal(own.spent.reportedUsd, 6);
     assert.equal(own.state, 'exceeded');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('review 8: an unknown in-flight time still counts its saved floor, and an abandoned call that cannot be measured keeps an unknown time', () => {
+  const f = contour({ budgets: { workspace: { timeMs: 10_000 }, onUnknown: 'continue' } });
+  try {
+    const base: UsageRecord = {
+      id: 'foreign',
+      repositoryId: 'main',
+      stage: 'planning',
+      runtime: 'claude',
+      model: 'cheap',
+      runtimeVersion: null,
+      // Метки системных часов противоречат замеру: часы откатились.
+      startedAt: new Date(Date.now() - 50).toISOString(),
+      outcome: 'active',
+      promptBytes: 1,
+      promptDigest: 'd',
+      usage: usage(false),
+      costUsd: null,
+      costSource: 'unknown',
+      elapsedMs: 15_002,
+      process: { id: 'other', pid: spawnSync(process.execPath, ['-e', '']).pid },
+    };
+    f.store.atomic(() => f.store.saveLocal('usage', 'main', base.id, base));
+    // Время неизвестно, но сохранённый монотонный замер уже исчерпал предел:
+    // `continue` не разрешает трату по нулю.
+    const status = budgetStatus(f.h, f.store.read(), { kind: 'workspace' })!;
+    assert.equal(status.spent.unknownDurationCalls, 1);
+    assert.ok(status.spent.durationMs >= 15_002, String(status.spent.durationMs));
+    assert.equal(status.state, 'exceeded');
+    // Процесс умер: время прерванного вызова остаётся неизвестным, а не
+    // берётся по откатившимся часам.
+    assert.deepEqual(abandonCalls(f.h), ['foreign']);
+    const closed = f.store.localRecords<UsageRecord>('usage', 'main').foreign;
+    assert.equal(closed.durationUnknown, true);
+    assert.equal(callDurationMs(closed), null);
+    assert.equal(budgetStatus(f.h, f.store.read(), { kind: 'workspace' })!.state, 'exceeded');
   } finally {
     f.cleanup();
   }
