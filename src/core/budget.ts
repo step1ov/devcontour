@@ -273,9 +273,7 @@ export function budgetView(b: BudgetStatus) {
         ? null
         : Math.max(0, b.limit.usd - usd),
     remainingMs:
-      b.limit.timeMs === undefined ||
-      b.spent.unknownDurationCalls > 0 ||
-      b.spent.uncoveredRuns > 0
+      b.limit.timeMs === undefined || b.spent.unknownDurationCalls > 0 || b.spent.uncoveredRuns > 0
         ? null
         : Math.max(0, b.limit.timeMs - b.spent.durationMs),
     ...(b.reason ? { reason: b.reason } : {}),

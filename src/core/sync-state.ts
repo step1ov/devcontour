@@ -498,8 +498,8 @@ export function validateReceipt(
       required.map(([kind, gate]) => decisive(kind, phase, gate)!),
     ),
     ...(t.consumers ?? []).flatMap((consumer) =>
-      expand(consumer.repositoryId, consumer.gates).map(
-        (gate) => decisive('test', 'integration', gate, consumer.repositoryId)!,
+      expand(consumer.repositoryId, consumer.gates).map((gate) =>
+        decisive('test', 'integration', gate, consumer.repositoryId)!,
       ),
     ),
   ];

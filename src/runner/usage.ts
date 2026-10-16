@@ -110,7 +110,10 @@ export function abandonCalls(h: DevContour, at = Date.now()) {
     const owners = new Map<string | undefined, Record<string, UsageRecord>>();
     for (const seen of candidates) {
       if (!owners.has(seen.repositoryId))
-        owners.set(seen.repositoryId, h.store.localRecords<UsageRecord>('usage', seen.repositoryId));
+        owners.set(
+          seen.repositoryId,
+          h.store.localRecords<UsageRecord>('usage', seen.repositoryId),
+        );
       const r = owners.get(seen.repositoryId)![seen.id];
       if (!r || !dead(r)) continue;
       // Время прерванного вызова фиксируется монотонно (часы ОС, сохранённый
@@ -149,7 +152,10 @@ export function pinLegacyCalls(h: DevContour) {
     const owners = new Map<string | undefined, Record<string, UsageRecord>>();
     for (const seen of legacy) {
       if (!owners.has(seen.repositoryId))
-        owners.set(seen.repositoryId, h.store.localRecords<UsageRecord>('usage', seen.repositoryId));
+        owners.set(
+          seen.repositoryId,
+          h.store.localRecords<UsageRecord>('usage', seen.repositoryId),
+        );
       const r = owners.get(seen.repositoryId)![seen.id];
       if (!r || !unpinned(r)) continue;
       const subject = callSubject(s, { runId: r.runId, subjectId: r.subjectId ?? r.boardId });

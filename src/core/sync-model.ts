@@ -84,19 +84,16 @@ export const receiptSchema = z.strictObject({
         /** Проверенная голова потребителя и снимок всех его зависимостей. */
         sha,
         tree: sha,
-        dependencies: z
-          .array(
-            z.strictObject({
-              repositoryId: syncId,
-              sha,
-              tree: sha,
-              // Снимок переносится целиком: конфигурация не ограничивает число
-              // артефактов и зависимостей, а обрезка скрыла бы входы проверки.
-              artifacts: z.array(
-                z.strictObject({ path: z.string().min(1).max(500), digest: hash }),
-              ),
-            }),
-          ),
+        dependencies: z.array(
+          z.strictObject({
+            repositoryId: syncId,
+            sha,
+            tree: sha,
+            // Снимок переносится целиком: конфигурация не ограничивает число
+            // артефактов и зависимостей, а обрезка скрыла бы входы проверки.
+            artifacts: z.array(z.strictObject({ path: z.string().min(1).max(500), digest: hash })),
+          }),
+        ),
         /**
          * Свежесть фактических входов и момент наблюдения. Нет полей — receipt
          * прежнего формата: наблюдение тогда не делалось и неизвестно.
