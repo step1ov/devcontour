@@ -95,6 +95,8 @@ const hostOwner = (owner: string) => (owner === WORKSPACE_OWNER ? undefined : ow
 export class DevContourExecutionStore implements ExecutionStore {
   readonly stateVersion = STATE_VERSION;
   private frame?: Frame;
+  /** Документ DevContour каждого выданного вида: порты хоста читают продуктовые поля. */
+  private readonly states = new WeakMap<ExecutionView, DevContourState>();
   constructor(
     readonly store: Store,
     readonly options: ProjectionOptions,
@@ -234,6 +236,17 @@ export class DevContourExecutionStore implements ExecutionStore {
     this.store.close();
   }
 
+  /**
+   * Документ DevContour, из которого построен вид `view` (той же транзакции
+   * или того же снимка). Порты хоста читают через него продуктовые поля;
+   * менять его вне транзакции хоста нельзя.
+   */
+  stateOf(view: ExecutionView): DevContourState {
+    const state = this.states.get(view);
+    if (!state) throw new Error('Вид получен не от этого хранилища');
+    return state;
+  }
+
   private view(frame: Frame, writable = true): ExecutionTransaction {
     const { options, store } = this;
     const state = () => frame.state;
@@ -254,7 +267,7 @@ export class DevContourExecutionStore implements ExecutionStore {
         namespace === 'usage' ? callOf(raw as UsageRecord) : raw,
       ) as never;
     };
-    return {
+    const view: ExecutionTransaction = {
       control: () => controlOf(state()),
       controller: () => controllerOf(state()),
       graph: (id) => {
@@ -368,5 +381,7 @@ export class DevContourExecutionStore implements ExecutionStore {
         frame.drafts.push(structuredClone(event));
       },
     };
+    this.states.set(view, frame.state);
+    return view;
   }
 }

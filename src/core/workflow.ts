@@ -9,6 +9,7 @@ import {
 } from './model.ts';
 import { createHash } from 'node:crypto';
 import {
+  codeReviewVendor,
   repositories,
   repository,
   roleBinding,
@@ -115,8 +116,14 @@ export function validateWorkflow(config: Config) {
           reviewer = reviewerBinding(config, role, repo.id);
         if (writer.runtime === 'demo' || reviewer.runtime === 'demo')
           throw new DomainError('Demo adapter разрешён только в demo mode');
-        if (writer.runtime === reviewer.runtime)
-          throw new DomainError('Для каждого исполнителя выберите другой runtime ревьюера');
+        // Тот же runtime у ревьюера — только явным разрешением правила вендора.
+        if (
+          writer.runtime === reviewer.runtime &&
+          codeReviewVendor(config, role, repo.id) !== 'same-vendor-allowed'
+        )
+          throw new DomainError(
+            'Для каждого исполнителя выберите другой runtime ревьюера или явно разрешите review.code.vendor: same-vendor-allowed',
+          );
       }
     for (const steps of [
       repo.prepare,

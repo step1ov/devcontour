@@ -681,9 +681,18 @@ export const reviewerBindingSchema = z.object({
   effort: z.enum(['low', 'medium', 'high', 'xhigh']).optional(),
   toolProfile: z.string().optional(),
 });
+/**
+ * Правило вендора ревью: `different-vendor` (умолчание, прежнее поведение)
+ * отклоняет reviewer того же вендора, что исполнитель; `same-vendor-allowed`
+ * явно разрешает его — с отдельной ролью, свежей сессией и прежними
+ * условиями приёмки.
+ */
+export const reviewVendorSchema = z.enum(['different-vendor', 'same-vendor-allowed']);
 export const roleBindingSchema = reviewerBindingSchema.extend({
   writePaths: z.array(relativePath).min(1).optional(),
   reviewer: reviewerBindingSchema.optional(),
+  /** Правило вендора ревью кода роли; нет — `review.code.vendor` конфигурации. */
+  reviewVendor: reviewVendorSchema.optional(),
   /** Как роль называется в панели: «Мобильный разработчик», а не `mobile`. */
   title: z.string().trim().min(2).max(40).optional(),
   /**
@@ -803,7 +812,26 @@ export const budgetsSchema = z
     onUnknown: z.enum(['stop', 'continue']).default('stop'),
   })
   .strict();
+const reviewRuleConfig = z
+  .object({
+    /** Reviewer этого вида ревью; нет — общий `reviewer` (у плана и контракта — прежний выбор). */
+    reviewer: reviewerBindingSchema.optional(),
+    vendor: reviewVendorSchema.optional(),
+  })
+  .strict();
 export const configSchema = z.object({
+  /**
+   * Правила ревью кода, плана и контракта. Нет поля — прежнее поведение:
+   * reviewer другого вендора.
+   */
+  review: z
+    .object({
+      code: reviewRuleConfig.optional(),
+      plan: reviewRuleConfig.optional(),
+      contract: reviewRuleConfig.optional(),
+    })
+    .strict()
+    .optional(),
   budgets: budgetsSchema.optional(),
   prices: z
     .array(priceSchema)

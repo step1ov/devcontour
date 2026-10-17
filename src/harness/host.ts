@@ -1,0 +1,381 @@
+// Хост DevContour для движка harness: основания, продуктовые условия,
+// области бюджетов, согласование контрактов и коннекторы.
+//
+// Формулы оснований — прежние формулы DevContour (`specDigest`,
+// `scopeDigest`, `taskPolicyDigest`): они записаны в принятой истории и
+// receipts, и движок их только сравнивает. Продуктовые условия могут лишь
+// запретить действие: снять отказ движка или поставить PASS хост не может.
+import {
+  API_VERSION,
+  HarnessError,
+  contextDigest,
+  executionDigest,
+  resultProblems,
+  sha256,
+  sourceDigest,
+  type ContextSnapshot,
+  type ContextSource,
+  type ExecutionHost,
+  type ExecutionView,
+  type HostRefusal,
+  type Prerequisite,
+  type ReceiverContext,
+  type ResultSink,
+  type RunResult,
+  type WorkSource,
+  type WorkState,
+} from 'devcontour-harness';
+import type { DevContour } from '../core/service.ts';
+import { digest, receiptBytes, scopeDigest, specDigest } from '../core/service.ts';
+import type { ContextPack, DevContourState, Task } from '../core/model.ts';
+import { assertTaskPreparation } from '../core/preparation.ts';
+import { validateTaskContext } from '../core/workflow.ts';
+import { maxRecordBytes } from '../core/sync-model.ts';
+import { completion, validateReceipt } from '../core/sync-state.ts';
+import { contents, taskContext } from '../runner/context.ts';
+import type { UsageRecord } from '../core/usage.ts';
+import {
+  activeRevision,
+  contractDocumentOf,
+  orderOf,
+  type ProjectionOptions,
+} from './projection.ts';
+import { policyFromConfig } from './policy.ts';
+import type { DevContourExecutionStore } from './store.ts';
+
+const refusal = (code: NonNullable<HostRefusal>['code'], message: string): HostRefusal => ({
+  code,
+  message,
+});
+/** Отказ продуктовой проверки как причина хоста, а не исключение движка. */
+function guarded(code: NonNullable<HostRefusal>['code'], check: () => void): HostRefusal {
+  try {
+    check();
+    return null;
+  } catch (error) {
+    return refusal(code, error instanceof Error ? error.message : String(error));
+  }
+}
+
+/** Пакеты контекста задачи — тот же выбор, что у `taskContext`: названные и пакеты роли. */
+export function taskPacks(h: DevContour, task: Task): ContextPack[] {
+  return h.config.contextPacks.filter(
+    (pack) =>
+      task.contextPacks?.includes(pack.id) ||
+      (pack.repositoryId === task.repositoryId && pack.roles.includes(task.role)),
+  );
+}
+
+/** Сведения хоста для проекции записей: digest политики и выбор области и контекста. */
+export function projectionOptions(h: DevContour): ProjectionOptions {
+  return {
+    policyDigest: () => executionDigest(policyFromConfig(h.config)),
+    roleScope: (task) => h.config.roles[task.role]?.writePaths,
+    contextPacks: (task) => taskPacks(h, task).map((p) => p.id),
+  };
+}
+
+const taskOf = (state: DevContourState, work: WorkState) => {
+  const task = state.tasks.find((t) => t.id === work.id);
+  if (!task) throw new HarnessError('NOT_FOUND', 'Задача не найдена: ' + work.id);
+  return task;
+};
+
+/** Доска задачи для учёта: первая, в любой ревизии которой задача есть (прежнее правило). */
+const budgetBoard = (state: DevContourState, taskId: string) =>
+  state.boards.find((b) => b.revisions.some((r) => r.taskIds.includes(taskId)));
+const boardMembers = (state: DevContourState, boardId: string) => [
+  ...new Set(state.boards.find((b) => b.id === boardId)?.revisions.flatMap((r) => r.taskIds) ?? []),
+];
+
+/**
+ * Хост движка над хранилищем `store`. `h` — прикладной слой DevContour:
+ * конфигурация и прежние формулы политики задачи.
+ */
+export function devcontourHost(h: DevContour, store: DevContourExecutionStore): ExecutionHost {
+  const state = (view: ExecutionView) => store.stateOf(view);
+  return {
+    store,
+    consumerVersion: 'devcontour',
+    basis: {
+      orderDigest: (work, view) => specDigest(taskOf(state(view), work)),
+      scopeDigest: (work, view) => scopeDigest(taskOf(state(view), work)),
+      policyDigest: (work, view) => h.taskPolicyDigest(taskOf(state(view), work)),
+    },
+    guards: {
+      // Активная поставка ChangeSet закрепила комбинацию: новые попытки сдвинули бы её.
+      claimBarrier: (view) => {
+        const delivery = state(view)
+          .changeSets.flatMap((c) => (c.deliveries ?? []).map((d) => ({ c, d })))
+          .find(({ d }) => d.status === 'active' && d.leaseUntil > Date.now());
+        return delivery
+          ? refusal('PAUSED', `Идёт поставка ${delivery.d.id} набора ${delivery.c.id}`)
+          : null;
+      },
+      claimable: (work, view) => {
+        const s = state(view);
+        const task = taskOf(s, work);
+        const visible = s.boards.some((b) =>
+          b.revisions.some((r) => r.status === 'active' && r.taskIds.includes(task.id)),
+        );
+        if (!visible)
+          return refusal('NOT_READY', `${task.id}: задачи нет в активной ревизии доски`);
+        if (s.team && task.assignee !== s.team.member)
+          return refusal('NOT_READY', `${task.id}: задача назначена другому участнику`);
+        return (
+          guarded('NOT_READY', () => assertTaskPreparation(s, task)) ??
+          guarded('NOT_READY', () => validateTaskContext(h.config, task))
+        );
+      },
+      current: (work, _attempt, view) =>
+        guarded('APPROVAL_STALE', () =>
+          assertTaskPreparation(state(view), taskOf(state(view), work)),
+        ),
+      // Принятый результат переносим: receipt, который чтение состояния из Git
+      // отвергло бы по размеру, отклоняется до публикации.
+      beforeAccept: (work, attempt, view) => {
+        const s = structuredClone(state(view));
+        const task = taskOf(s, work);
+        const run = s.runs.find((r) => r.id === attempt.id);
+        if (run) run.status = 'succeeded';
+        task.status = 'done';
+        task.resultSha = attempt.integrationSha;
+        const bytes = receiptBytes(h, s, task);
+        return bytes > maxRecordBytes
+          ? refusal(
+              'NOT_READY',
+              `Запись receipt задачи ${task.id} занимает ${bytes} байт при пределе ${maxRecordBytes}: ` +
+                'сократите dependencyArtifacts или область проверок',
+            )
+          : null;
+      },
+    },
+    budgets: {
+      groupOf: (workId, view) => budgetBoard(state(view), workId)?.id,
+      members: (groupId, view) => boardMembers(state(view), groupId),
+      // Прежнее правило атрибуции: задача — по попытке или предмету вызова;
+      // доска — по текущему графу; вызов о доске — все задачи всех её ревизий.
+      legacy: (record, view) => {
+        const s = state(view);
+        const r = record as unknown as UsageRecord & { subjectKind?: string };
+        const taskId =
+          (r.runId ? s.runs.find((x) => x.id === r.runId)?.taskId : undefined) ??
+          (r.subjectId &&
+          (!r.subjectKind || r.subjectKind === 'work') &&
+          s.tasks.some((t) => t.id === r.subjectId)
+            ? r.subjectId
+            : undefined);
+        if (taskId) {
+          const board = budgetBoard(s, taskId);
+          return { workId: taskId, ...(board ? { groupId: board.id } : {}) };
+        }
+        const boardId =
+          record.groupId ?? (r.subjectKind === 'other' ? undefined : (r.subjectId ?? undefined));
+        if (!boardId || !s.boards.some((b) => b.id === boardId)) return {};
+        return { groupId: boardId, workIds: boardMembers(s, boardId) };
+      },
+    },
+    // Согласование контракта DevContour — утверждённая редакция контракта:
+    // запись `contracts[]` с её digest. Задача закрепляет digest при
+    // утверждении; раунды ревью в форме harness из неё не выдумываются.
+    contracts: {
+      approved: (ref, view) => {
+        const contract = state(view).contracts.find((c) => c.id === ref.id);
+        if (!contract || !contract.approvedAt)
+          return refusal('NOT_READY', `Контракт ${ref.id} не утверждён`);
+        if (contract.digest !== ref.digest)
+          return refusal(
+            'APPROVAL_STALE',
+            `Контракт ${ref.id}: задача закрепила другую редакцию (digest не совпадает)`,
+          );
+        return null;
+      },
+    },
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* Коннекторы                                                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Источник поручений. В DevContour поручения не загружаются: граф строится
+ * из состояния доски. Доверие к внешней предпосылке — receipt задачи
+ * другого клона, импортированный Git-синхронизацией и прошедший её проверку.
+ */
+export function devcontourWorkSource(h: DevContour, store: DevContourExecutionStore): WorkSource {
+  return {
+    id: 'devcontour',
+    fetch: (ref) =>
+      Promise.resolve(
+        store.read((v) => {
+          const graph = v.graph(ref);
+          if (!graph) throw new HarnessError('NOT_FOUND', 'Доска не найдена: ' + ref);
+          return { graph: graph.graph, source: graph.graph.source };
+        }),
+      ),
+    revision: (ref) =>
+      Promise.resolve(
+        store.read((v) => {
+          const task = store.stateOf(v).tasks.find((t) => t.id === ref);
+          return task ? specDigest(task) : undefined;
+        }),
+      ),
+    trusts: (prerequisite: Prerequisite) =>
+      Promise.resolve(
+        store.read((v) => {
+          const s = store.stateOf(v);
+          const task = s.tasks.find((t) => t.id === prerequisite.id);
+          const shared = task?.sharedCompletion;
+          if (!task || !shared || shared.receipt.resultSha !== prerequisite.resultSha) return false;
+          try {
+            validateReceipt(shared.receipt, task, h.config.mode === 'demo', undefined, s.contracts);
+            return true;
+          } catch {
+            return false;
+          }
+        }),
+      ),
+  };
+}
+
+/** Источник снимка из закреплённого пакета: документы на его ревизии, прежний digest пакета. */
+async function packEntry(h: DevContour, pack: ContextPack) {
+  if (!pack.revision || !pack.digest)
+    throw new HarnessError(
+      'NOT_READY',
+      `Context pack ${pack.id} не закреплён; выполните context-lock после bootstrap-коммита`,
+    );
+  const documents = await contents(h.config, pack, pack.revision);
+  if (digest({ id: pack.id, version: pack.version, documents }) !== pack.digest)
+    throw new HarnessError('NOT_READY', 'Context digest не совпадает: ' + pack.id);
+  const pin = (file: string) => {
+    const content = documents.find((d) => d.file === file)!.content;
+    return {
+      path: file,
+      digest: sha256(content),
+      bytes: Buffer.byteLength(content),
+      content: { encoding: 'utf8' as const, data: content },
+    };
+  };
+  const entry = {
+    id: pack.id,
+    kind: 'context-pack',
+    version: pack.version,
+    repositoryId: pack.repositoryId,
+    ...(/^[a-f0-9]{40}([a-f0-9]{24})?$/.test(pack.revision) ? { revision: pack.revision } : {}),
+    required: true,
+    files: pack.files.map(pin),
+    references: pack.references.filter((f) => documents.some((d) => d.file === f)).map(pin),
+    hostDigest: pack.digest,
+  };
+  return { ...entry, digest: sourceDigest(entry) };
+}
+
+/**
+ * Источник контекста: закреплённые context packs задачи (`ids` — поручения,
+ * чей контекст закрепляется). Снимок — те же байты, что видит исполнитель
+ * DevContour, с прежним digest пакета (`hostDigest`).
+ */
+export function devcontourContextSource(
+  h: DevContour,
+  store: DevContourExecutionStore,
+): ContextSource & { forTask(taskId: string): Promise<ContextSnapshot> } {
+  const forTask = async (taskId: string): Promise<ContextSnapshot> => {
+    const s = store.read((v) => structuredClone(store.stateOf(v)));
+    const task = s.tasks.find((t) => t.id === taskId);
+    if (!task) throw new HarnessError('NOT_FOUND', 'Задача не найдена: ' + taskId);
+    // Прежние условия контекста задачи: пакеты закреплены, digest совпадает,
+    // закреплённая редакция файла контракта — утверждённая, предел объёма.
+    try {
+      await taskContext(
+        h.config,
+        task,
+        s.contracts.filter((c) => task.contracts.includes(c.id)),
+      );
+    } catch (error) {
+      throw new HarnessError('NOT_READY', error instanceof Error ? error.message : String(error));
+    }
+    const sources = [];
+    for (const pack of taskPacks(h, task)) sources.push(await packEntry(h, pack));
+    return { apiVersion: API_VERSION, sources, missing: [] };
+  };
+  return {
+    id: 'devcontour-packs',
+    forTask,
+    snapshot: async (ids) => {
+      const packs = h.config.contextPacks.filter((p) => ids.includes(p.id));
+      const missing = ids.filter((id) => !packs.some((p) => p.id === id));
+      if (missing.length)
+        throw new HarnessError('NOT_READY', 'Неизвестный context pack: ' + missing.join(', '));
+      const sources = [];
+      for (const pack of packs) sources.push(await packEntry(h, pack));
+      return { apiVersion: API_VERSION, sources, missing: [] };
+    },
+  };
+}
+
+/**
+ * Что получатель знает сам о задаче: её постановка, доска, контракты,
+ * политика этого клона и ожидаемый снимок контекста по его закреплённым
+ * пакетам. Им проверяется переносимый результат (Git-синхронизация, доставка).
+ */
+export async function receiverContext(
+  h: DevContour,
+  store: DevContourExecutionStore,
+  taskId: string,
+): Promise<ReceiverContext> {
+  const s = store.read((v) => structuredClone(store.stateOf(v)));
+  const task = s.tasks.find((t) => t.id === taskId);
+  if (!task) throw new HarnessError('NOT_FOUND', 'Задача не найдена: ' + taskId);
+  const options = projectionOptions(h);
+  const board = s.boards.find((b) => activeRevision(b)?.taskIds.includes(task.id));
+  const packs = taskPacks(h, task);
+  const snapshot = packs.length
+    ? await devcontourContextSource(h, store).forTask(task.id)
+    : undefined;
+  return {
+    order: orderOf(task, options),
+    graphId: board?.id ?? 'devcontour-unassigned',
+    contracts: task.contracts
+      .map((id) => s.contracts.find((c) => c.id === id))
+      .filter((c): c is NonNullable<typeof c> => !!c)
+      .map(contractDocumentOf),
+    policy: policyFromConfig(h.config),
+    contextDigest: snapshot ? contextDigest(snapshot) : null,
+    specDigest: specDigest(task),
+    checkVersion: task.checkVersion ?? null,
+  };
+}
+
+/**
+ * Получатель результата. Принятый результат DevContour уже записан в
+ * задачу; доставка подтверждает его переносимость проверкой получателя и
+ * отвечает receipt задачи. Изменённая постановка — конфликт с её текущей
+ * редакцией. Повтор с тем же ключом даёт тот же ответ и ничего не пишет.
+ */
+export function devcontourResultSink(h: DevContour, store: DevContourExecutionStore): ResultSink {
+  return {
+    id: 'devcontour-delivery',
+    deliver: async ({ result }: { key: string; result: RunResult }) => {
+      const s = store.read((v) => structuredClone(store.stateOf(v)));
+      const task = s.tasks.find((t) => t.id === result.workOrderId);
+      if (!task) throw new HarnessError('NOT_FOUND', 'Задача не найдена: ' + result.workOrderId);
+      const current = specDigest(task);
+      if (result.source.revision !== current)
+        return { status: 'conflict', currentRevision: current };
+      if (result.outcome !== 'accepted' || task.status !== 'done')
+        throw new HarnessError(
+          'NOT_READY',
+          `Результат ${result.runId} не принят задачей ${task.id}`,
+        );
+      const problems = resultProblems(result, await receiverContext(h, store, task.id));
+      if (problems.length)
+        throw new HarnessError(
+          'INVALID_INPUT',
+          `Результат ${result.runId}: ${problems.join('; ')}`,
+        );
+      return { status: 'delivered', receipt: sha256(JSON.stringify(completion(h, s, task))) };
+    },
+  };
+}

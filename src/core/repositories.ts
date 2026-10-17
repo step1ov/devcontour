@@ -131,3 +131,16 @@ export function dependencyOrder(config: Config, ids: string[]) {
   ids.forEach(visit);
   return ordered;
 }
+
+/** Правило вендора ревью кода роли компонента: своё у роли, иначе конфигурации, иначе прежнее. */
+export function codeReviewVendor(
+  config: Config,
+  role: import('./model.ts').Role,
+  repositoryId = 'main',
+) {
+  return (
+    roleBinding(config, role, repositoryId)?.reviewVendor ??
+    config.review?.code?.vendor ??
+    'different-vendor'
+  );
+}

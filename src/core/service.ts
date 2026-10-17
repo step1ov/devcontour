@@ -328,7 +328,7 @@ export function uncoveredGates(config: Config, s: DevContourState, tasks: Task[]
  * (прежняя без восстановимой policy), здесь не отклоняется: это ограничение
  * переноса, а не приёмки.
  */
-function receiptBytes(h: DevContour, s: DevContourState, t: Task) {
+export function receiptBytes(h: DevContour, s: DevContourState, t: Task) {
   let receipt;
   try {
     receipt = completion(h, s, t);

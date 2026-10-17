@@ -96,4 +96,9 @@ execFileSync('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund'], 
   cwd: root,
   stdio: 'inherit',
 });
+// Таблица README в форме, которую принимает format:check репозитория.
+execFileSync('npx', ['prettier', '--write', join(vendor, 'README.md')], {
+  cwd: root,
+  stdio: 'ignore',
+});
 console.log(`vendor-harness: ${version} (${sha256})`);

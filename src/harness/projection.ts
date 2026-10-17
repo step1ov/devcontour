@@ -51,6 +51,11 @@ export interface ProjectionOptions {
   policyDigest(): string;
   /** Область записи задачи без своей: область её роли из конфигурации. */
   roleScope?(task: Task): string[] | undefined;
+  /**
+   * Пакеты контекста задачи — названные ею и пакеты её роли в её компоненте
+   * (выбор конфигурации); нет — только названные.
+   */
+  contextPacks?(task: Task): string[];
 }
 
 /** Граф задачи, не входящей ни в одну доску (возможно только у созданных движком). */
@@ -112,12 +117,13 @@ export function boardOf(state: DevContourState, taskId: string): Board | undefin
 
 /** Поручение задачи: поля постановки DevContour в форме `WorkOrder`. */
 export function orderOf(task: Task, options?: ProjectionOptions): WorkOrder {
-  const writeScope = task.writePaths?.length ? task.writePaths : options?.roleScope?.(task);
-  if (!writeScope?.length)
-    throw invalid(
-      'Задача ' + task.id,
-      'нет области записи ни у задачи, ни у роли; поручению harness нужна writeScope',
-    );
+  // Без области у задачи и роли — весь репозиторий, как прежде; защищённые
+  // и генерируемые пути по-прежнему ограничивают запись.
+  const writeScope = task.writePaths?.length
+    ? task.writePaths
+    : options?.roleScope?.(task)?.length
+      ? options.roleScope(task)!
+      : ['.'];
   const contracts = task.contracts.map((id) => {
     const digest = task.contractDigests?.[id];
     if (!digest) throw invalid('Задача ' + task.id, `нет закреплённого digest контракта ${id}`);
@@ -145,7 +151,7 @@ export function orderOf(task: Task, options?: ProjectionOptions): WorkOrder {
     resources: task.resources,
     requirements: task.requirements ?? [],
     contracts,
-    context: task.contextPacks ?? [],
+    context: options?.contextPacks?.(task) ?? task.contextPacks ?? [],
   });
 }
 
@@ -248,7 +254,9 @@ export function graphOf(
     prerequisites: [],
   };
   const digest = workGraphDigest(graph);
-  const approved = tasks.every((t) => t.approval && t.approvedDigest && t.approvedAt);
+  // Утверждение задачи — её утверждённая постановка; запись `approval` (кто
+  // утвердил) есть не у всех прежних задач и признаком не служит.
+  const approved = tasks.every((t) => t.approvedDigest && t.approvedAt);
   const at = tasks
     .map((t) => t.approvedAt ?? '')
     .sort()
@@ -263,7 +271,7 @@ export function graphOf(
       approval:
         approved && at
           ? {
-              actor: tasks.every((t) => t.approval!.actor === 'agent') ? 'agent' : 'operator',
+              actor: tasks.every((t) => t.approval?.actor === 'agent') ? 'agent' : 'operator',
               digest,
               at,
             }

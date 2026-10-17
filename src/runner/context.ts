@@ -13,7 +13,8 @@ import { digest } from '../core/service.ts';
 import { repository } from '../core/repositories.ts';
 import { git } from './process.ts';
 
-async function contents(config: Config, pack: ContextPack, revision: string) {
+/** Документы пакета на закреплённой ревизии: правила и справка, по имени файла. */
+export async function contents(config: Config, pack: ContextPack, revision: string) {
   const repo = repository(config, pack.repositoryId);
   const documents = [];
   // Справочные файлы входят в digest наравне с правилами: изменилась справка —
