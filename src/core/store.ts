@@ -275,6 +275,74 @@ export class Store {
       return result;
     });
   }
+  /**
+   * Событие журнала в открытой транзакции, когда документ не изменился:
+   * `change` такое событие не пишет. Нужно транзакциям исполнения, у которых
+   * есть только событие или локальная запись с событием. Путь записи — тот же,
+   * что у `change`: central — `main.events`, component — событие компонента.
+   */
+  appendEvent(type: string, data: unknown) {
+    if (!this.transaction) throw new Error('Store.appendEvent требует открытой транзакции');
+    if (type === 'heartbeat') throw new Error('heartbeat не пишет событие журнала');
+    const at = new Date().toISOString();
+    const inserted = this.db
+      .prepare('INSERT INTO main.events(at,type,data) VALUES(?,?,?)')
+      .run(at, type, this.components ? 'null' : JSON.stringify(data ?? null));
+    if (this.components)
+      this.components.event(
+        Number(inserted.lastInsertRowid),
+        at,
+        type,
+        data ?? null,
+        this.load().state,
+      );
+    this.bump('data');
+    this.projectionPending = true;
+    return Number(inserted.lastInsertRowid);
+  }
+  /** Номер последнего события журнала (0 — журнал пуст). */
+  lastEventId(): number {
+    const row = this.db.prepare('SELECT max(id) AS n FROM main.events').get() as {
+      n: number | null;
+    };
+    return row.n ?? 0;
+  }
+  /** События журнала с номером больше `after`, по возрастанию, не больше `limit`. */
+  eventsAfter(after: number, limit: number): AuditEvent[] {
+    const rows = this.db
+      .prepare('SELECT * FROM main.events WHERE id>? ORDER BY id LIMIT ?')
+      .all(after, limit) as unknown as { id: number; at: string; type: string; data: string }[];
+    return this.components
+      ? this.components.events(rows)
+      : rows.map((e) => ({ ...e, data: JSON.parse(e.data) as unknown }));
+  }
+  /**
+   * Все локальные записи пространства у всех владельцев: coordinator и базы
+   * компонентов. Владелец `@workspace` возвращается как `undefined`.
+   */
+  localEntries<T>(namespace: string): { owner: string | undefined; key: string; value: T }[] {
+    const schemas = ['main', ...(this.components?.locations.map((l) => l.schema) ?? [])];
+    return schemas.flatMap((schema) => {
+      if (
+        !this.db
+          .prepare(
+            `SELECT name FROM ${schema}.sqlite_master WHERE type='table' AND name='local_workflow'`,
+          )
+          .get()
+      )
+        return [];
+      const rows = this.db
+        .prepare(
+          `SELECT owner,key,data FROM ${schema}.local_workflow WHERE namespace=? ORDER BY owner,key`,
+        )
+        .all(namespace) as { owner: string; key: string; data: string }[];
+      return rows.map((r) => ({
+        owner: r.owner === '@workspace' ? undefined : r.owner,
+        key: r.key,
+        value: JSON.parse(r.data) as T,
+      }));
+    });
+  }
   localRecords<T>(namespace: string, owner?: string): Record<string, T> {
     const schema = this.syncSchema(owner);
     if (

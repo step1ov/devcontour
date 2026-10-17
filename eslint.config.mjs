@@ -69,8 +69,28 @@ export default tseslint.config(
   // Пакет harness: запрет общий для всех файлов (слоям ниже он добавлен к их
   // собственным правилам — в flat config одно правило не складывается).
   {
-    files: ['src/**/*.{ts,tsx}', 'tests/**/*.ts'],
+    files: ['src/**/*.{ts,tsx}'],
     rules: { 'no-restricted-imports': ['error', { patterns: harnessImports }] },
+  },
+  // Тесты дополнительно получают общий набор проверок адаптеров хранилища
+  // (`devcontour-harness/testing`); рабочий код его не импортирует.
+  {
+    files: ['tests/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              regex: '^devcontour-harness/(?!contracts$|testing$).+',
+              message:
+                'harness импортируется только из корня пакета, devcontour-harness/contracts или /testing в тестах.',
+            },
+            harnessImports[1],
+          ],
+        },
+      ],
+    },
   },
   // Границы слоёв. Домен не знает ни процессов, ни сервера, ни интерфейса;
   // интерфейс исполняется в браузере и не тянет код runner/server и модули

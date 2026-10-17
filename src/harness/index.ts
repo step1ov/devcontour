@@ -8,3 +8,7 @@ import { HARNESS_VERSION } from 'devcontour-harness';
 
 /** Версия установленного пакета harness, с которой работает DevContour. */
 export const harnessVersion: string = HARNESS_VERSION;
+
+export { DevContourExecutionStore, MAX_EVENTS_PER_TRANSACTION, withoutTokens } from './store.ts';
+export type { HostTransaction } from './store.ts';
+export { UNASSIGNED_GRAPH, type ProjectionOptions } from './projection.ts';

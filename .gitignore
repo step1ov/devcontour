@@ -23,3 +23,6 @@ test-results/
 /docs/verification*.md
 /todo/roadmap/evidence/
 /todo/roadmap/*-review.md
+# Базы прежней версии для проверки совместимости: база компонента лежит в
+# своём .devcontour-local, как у настоящего компонента.
+!/tests/fixtures/legacy/component/app/.devcontour-local/
