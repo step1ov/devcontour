@@ -46,9 +46,50 @@ try {
   assert.ok(
     !archive.files.some((f) => /^todo\/roadmap\/(?:evidence\/|[^/]*-review\.md$)/.test(f.path)),
   );
-  assert.ok(
-    !archive.files.some((f) => /^(src|tests|node_modules|\.devcontour-local)\//.test(f.path)),
+  assert.ok(!archive.files.some((f) => /^(src|tests|\.devcontour-local)\//.test(f.path)));
+  // node_modules в архиве — только намеренно вложенный пакет harness и
+  // замыкание его runtime-зависимостей по lock; ничего больше.
+  const lock = JSON.parse(await readFile(join(source, 'package-lock.json'), 'utf8'));
+  const bundled = new Set();
+  const visit = (name) => {
+    if (bundled.has(name)) return;
+    const entry = lock.packages['node_modules/' + name];
+    assert.ok(entry, 'нет в lock: ' + name);
+    bundled.add(name);
+    for (const dep of Object.keys({ ...entry.dependencies, ...entry.optionalDependencies }))
+      if (lock.packages['node_modules/' + dep]) visit(dep);
+  };
+  visit('devcontour-harness');
+  const packedModules = new Set(
+    archive.files
+      .map((f) => /^node_modules\/((?:@[^/]+\/)?[^/]+)\//.exec(f.path)?.[1])
+      .filter(Boolean),
   );
+  assert.deepEqual([...packedModules].sort(), [...bundled].sort(), 'состав вложенных модулей');
+  // Состав вложенного harness — его собственный whitelist, без исходников и тестов.
+  const harnessFiles = archive.files
+    .map((f) => f.path)
+    .filter((p) => p.startsWith('node_modules/devcontour-harness/'))
+    .map((p) => p.slice('node_modules/devcontour-harness/'.length));
+  const harnessTop = new Set(harnessFiles.map((p) => p.split('/')[0]));
+  for (const entry of harnessTop)
+    assert.ok(
+      [
+        'lib',
+        'schemas',
+        'docs',
+        'examples',
+        'profiles',
+        'skills',
+        'templates',
+        'LICENSE',
+        'README.md',
+        'package.json',
+      ].includes(entry),
+      'лишнее во вложенном harness: ' + entry,
+    );
+  for (const required of ['lib/index.js', 'lib/cli.js', 'package.json'])
+    assert.ok(harnessFiles.includes(required), 'нет во вложенном harness: ' + required);
   await writeFile(join(installation, 'package.json'), '{"private":true}');
   await exec(
     'npm',
@@ -68,6 +109,22 @@ try {
   const bin = join(installation, 'node_modules/.bin/devcontour');
   await assert.rejects(access(join(installed, 'src')));
   await assert.rejects(access(join(installation, 'node_modules/tsx')));
+  // Исполнение DevContour загружает вложенный пакет закреплённой версии.
+  const pinned = JSON.parse(await readFile(join(source, 'package.json'), 'utf8'));
+  const harnessVersion = /devcontour-harness-(.+)\.tgz$/.exec(
+    pinned.dependencies['devcontour-harness'],
+  )[1];
+  const nested = JSON.parse(
+    await readFile(join(installed, 'node_modules/devcontour-harness/package.json'), 'utf8'),
+  );
+  assert.equal(nested.version, harnessVersion);
+  const { harnessVersion: loaded } = await import(
+    new URL('file://' + join(installed, 'lib/harness/index.js'))
+  );
+  assert.equal(loaded, harnessVersion, 'DevContour загружает вложенный harness');
+  for (const [name, range] of Object.entries(nested.dependencies ?? {}))
+    if (pinned.dependencies[name] !== undefined)
+      assert.equal(pinned.dependencies[name], range, 'общая зависимость ' + name);
   // The engineering corpus runs three real Git pipelines, not a single CLI query.
   // Keep it bounded without applying the 30s command-response budget to all nine stages.
   const cli = (...args) =>

@@ -5,6 +5,8 @@ dist/
 # в репозитории, и чистый клон не собирался.
 /lib/
 *.tgz
+# Поставленный пакет harness — относительный versioned archive зависимости.
+!/vendor/harness/devcontour-harness-*.tgz
 .devcontour-local/
 playwright-report/
 test-results/

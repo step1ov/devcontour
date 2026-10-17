@@ -1,6 +1,20 @@
 import tseslint from 'typescript-eslint';
 import reactHooks from 'eslint-plugin-react-hooks';
 
+// Пакет harness — только через публичный корень и `/contracts`: глубокий
+// импорт внутреннего модуля обходил бы его договор и ломался бы при
+// обновлении, а путь к соседнему checkout привязывал бы сборку к машине.
+const harnessImports = [
+  {
+    regex: '^devcontour-harness/(?!contracts$).+',
+    message: 'harness импортируется только из корня пакета или devcontour-harness/contracts.',
+  },
+  {
+    regex: '^(?:\\.{1,2}/|/).*devcontour-harness',
+    message: 'harness — установленный пакет, не соседний checkout.',
+  },
+];
+
 export default tseslint.config(
   {
     ignores: [
@@ -52,6 +66,12 @@ export default tseslint.config(
       ],
     },
   },
+  // Пакет harness: запрет общий для всех файлов (слоям ниже он добавлен к их
+  // собственным правилам — в flat config одно правило не складывается).
+  {
+    files: ['src/**/*.{ts,tsx}', 'tests/**/*.ts'],
+    rules: { 'no-restricted-imports': ['error', { patterns: harnessImports }] },
+  },
   // Границы слоёв. Домен не знает ни процессов, ни сервера, ни интерфейса;
   // интерфейс исполняется в браузере и не тянет код runner/server и модули
   // Node. Нарушение — ошибка, а не предупреждение: граница, которую можно
@@ -63,6 +83,7 @@ export default tseslint.config(
         'error',
         {
           patterns: [
+            ...harnessImports,
             {
               group: ['../application/*', '../runner/*', '../server/*', '../web/*', '../cli*'],
               message: 'core — домен: он не зависит от application, runner, server и web.',
@@ -83,6 +104,7 @@ export default tseslint.config(
         'error',
         {
           patterns: [
+            ...harnessImports,
             {
               group: ['../server/*', '../web/*', '../cli*'],
               message: 'application не зависит от транспорта и интерфейса.',
@@ -99,6 +121,7 @@ export default tseslint.config(
         'error',
         {
           patterns: [
+            ...harnessImports,
             {
               group: ['../runner/*', '../server/*', '../cli*', 'node:*'],
               message: 'Интерфейс исполняется в браузере: только core, application и типы.',

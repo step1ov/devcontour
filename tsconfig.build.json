@@ -7,6 +7,6 @@
     "outDir": "lib",
     "types": ["node"]
   },
-  "include": ["src/cli.ts"],
+  "include": ["src/cli.ts", "src/harness/index.ts"],
   "exclude": ["src/web", "tests", "e2e"]
 }
