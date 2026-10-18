@@ -105,7 +105,8 @@ test('Backup снимается на ходу и восстанавливает�
       s.tasks.find((t) => t.id === lost.id)!.resultSha = 'd'.repeat(40);
       return {};
     });
-    const active = f.h.claim('owner')!;
+    // Тот же controller, что выдавал предыдущие попытки.
+    const active = f.h.claim('test')!;
     assert.equal(active.taskId, running.id);
 
     const out = join(f.root, 'backup.sqlite');

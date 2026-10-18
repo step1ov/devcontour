@@ -1,4 +1,5 @@
 import { syncPreparation } from '../src/runner/git-sync.ts';
+import { executionOf } from '../src/harness/execution.ts';
 import { WorkspaceAgent } from '../src/application/preparation-agent.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -18,7 +19,7 @@ import { execFileSync } from 'node:child_process';
 import { Preparation, developmentBinding } from '../src/core/preparation.ts';
 import { PreparationAgent } from '../src/application/preparation-agent.ts';
 import { startWorkspace, preparationStore, requirePreparation } from '../src/runner/start.ts';
-import { complete, fixture, input, config } from './helpers.ts';
+import { complete, fixture, input, config, MERGED } from './helpers.ts';
 import {
   architecture,
   concept,
@@ -247,7 +248,16 @@ test('Revisions invalidate architecture and stale decisions, plans and task atte
     assert.throws(() => f.h.addTask(b.id, input()), /референсы/);
     approveDesignTrack(p, f, id);
     f.h.pause(false);
-    assert.throws(() => f.h.claim('worker'), /не связана/);
+    // Продуктовое условие хоста: задача не выдаётся, причина видна блокером.
+    assert.equal(f.h.claim('worker'), undefined);
+    const { engine } = executionOf(f.h);
+    assert.match(
+      engine
+        .read((v) => engine.blockers(v.work(f.store.read().tasks[0].id)!, v))
+        .map((b) => b.message)
+        .join('; '),
+      /не связана/,
+    );
     assert.equal(specDigest(f.store.read().tasks[0]), original);
     assert.equal(f.store.read().preparation!.changes[0].product[0].status, 'approved');
   } finally {
@@ -993,7 +1003,7 @@ test('Перенесённая задача с прежней подготовк
     const one = f.store.read().tasks[0];
     f.h.approve(boardId);
     complete(f.h, one.id);
-    f.h.accept(boardId, 'merged');
+    f.h.accept(boardId, MERGED);
     // Подготовка сменилась после приёмки: привязка принятой задачи устарела.
     const stale = (id: string) =>
       f.store.change('test.stale-preparation', (s) => {
@@ -1009,13 +1019,13 @@ test('Перенесённая задача с прежней подготовк
     // Своя задача этапа с устаревшей привязкой по-прежнему не принимается.
     stale(two.id);
     assert.throws(
-      () => f.h.accept(boardId, 'merged'),
+      () => f.h.accept(boardId, MERGED),
       (e: Error) => e.message.startsWith(two.id + ':') && /не связана с текущими/.test(e.message),
     );
     f.store.change('test.fresh-preparation', (s) => {
       s.tasks.find((t) => t.id === two.id)!.preparation = developmentBinding(s);
     });
-    f.h.accept(boardId, 'merged');
+    f.h.accept(boardId, MERGED);
     assert.equal(f.store.read().boards[0].revisions[1].status, 'accepted');
   } finally {
     f.cleanup();
@@ -1046,7 +1056,7 @@ test('Workflow ChangeSet не проверяет привязку отменён
       t.preparation = { ...t.preparation!, productDigest: '0'.repeat(64) };
     });
     complete(f.h, kept.id);
-    f.h.accept(boardId, 'merged');
+    f.h.accept(boardId, MERGED);
     const change = new Workspace(f.h).create({
       title: 'Релиз',
       description: 'Совместная проверка',

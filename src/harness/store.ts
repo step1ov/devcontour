@@ -170,7 +170,12 @@ export class DevContourExecutionStore implements ExecutionStore {
       // Store.change не пишет событие, если документ не изменился: событие
       // транзакции с нейтральными событиями записывается явно, в ней же.
       if (kind !== 'heartbeat' && drafts.length && this.store.lastEventId() === before)
-        this.store.appendEvent(kind, data);
+        this.store.appendEvent(
+          kind,
+          data,
+          // Получение и освобождение роли controller — сроки владения, не данные.
+          drafts.every((d) => d.type.startsWith('controller.')) ? 'lease' : 'data',
+        );
     });
     return out;
   }

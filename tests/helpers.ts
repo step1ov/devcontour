@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { configSchema, type Config, type Task } from '../src/core/model.ts';
+import { configSchema, type Config } from '../src/core/model.ts';
 import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 export const config = (overrides: Partial<Config> = {}): Config =>
@@ -56,20 +56,28 @@ export function fixture() {
  * сообщает только «прошла», и критерий с названным тестом подтвердить
  * нечем — это и есть разница уровней доказательства.
  */
+/** SHA кандидата и интеграции в тестовых записях: движок принимает только полные SHA. */
+export const CANDIDATE = 'c'.repeat(40);
+export const MERGED = 'b'.repeat(40);
+const FIXTURE_DIGEST = 'e'.repeat(64);
+
 export function complete(
   h: DevContour,
   id: string,
   tests?: { id: string; status: 'passed' | 'failed' | 'skipped' }[],
 ) {
   h.pause(false);
-  const run = h.claim('test')!;
-  if (run.taskId !== id) throw new Error('Wrong claim');
+  // Выдаёт действующий controller: тест, уже выдававший попытки своим
+  // владельцем, продолжает под ним.
+  const leader = h.store.read().leader;
+  const run = h.claim(leader && leader.leaseUntil > Date.now() ? leader.owner : 'test')!;
+  if (run?.taskId !== id) throw new Error('Wrong claim');
   h.phase(run.id, run.token, 'integrating', {
-    candidateSha: 'candidate',
-    integrationSha: 'merged',
+    candidateSha: CANDIDATE,
+    integrationSha: MERGED,
   });
   for (const phase of ['candidate', 'integration'] as const) {
-    const sha = phase === 'candidate' ? 'candidate' : 'merged';
+    const sha = phase === 'candidate' ? CANDIDATE : MERGED;
     for (const kind of ['test', 'review'] as const)
       h.evidence(run.id, run.token, {
         kind,
@@ -80,7 +88,7 @@ export function complete(
         command: ['fixture'],
         exitCode: 0,
         log: 'fixture',
-        digest: 'fixture',
+        digest: FIXTURE_DIGEST,
         summary: 'Unit-test fixture',
         tests: kind === 'test' ? tests : undefined,
       });
@@ -92,15 +100,15 @@ export function complete(
       h.evidence(run.id, run.token, {
         kind: 'test',
         phase,
-        sha: phase === 'candidate' ? 'candidate' : 'merged',
+        sha: phase === 'candidate' ? CANDIDATE : MERGED,
         gate: 'requirement-source',
         passed: true,
         command: ['fixture'],
         exitCode: 0,
         log: '',
-        digest: 'fixture',
+        digest: FIXTURE_DIGEST,
         summary: 'Pinned requirement sections match',
       });
-  h.finish(run.id, run.token, 'merged');
+  h.finish(run.id, run.token, MERGED);
   return run;
 }

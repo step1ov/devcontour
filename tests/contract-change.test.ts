@@ -700,7 +700,7 @@ test('An attempt started under the previous configuration cannot be accepted und
     assert.notEqual(s.h.policyDigest('main'), before);
     assert.throws(
       () => s.h.phase(run.id, run.token, 'integrating', { candidateSha: 'c' }),
-      /Политика проверок изменилась/,
+      /Политика (проверок )?изменилась/,
     );
   } finally {
     await s.remove();
@@ -1395,7 +1395,7 @@ test('C-F05/C-F07: a verification and a process from the previous configuration 
     assert.ok(run, 'актуальный процесс выдаёт');
     assert.throws(
       () => stale!.phase(run.id, run.token, 'integrating', { candidateSha: 'c' }),
-      /устаревшей конфигурацией/,
+      /устаревшей конфигурацией|Политика изменилась/,
     );
   } finally {
     stale?.store.close();

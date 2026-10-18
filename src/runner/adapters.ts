@@ -240,7 +240,7 @@ export interface AgentRequest {
   toolProfile?: ToolProfile;
   execution?: { env: NodeJS.ProcessEnv; redact: Redactor };
   mcpConfigPath?: string;
-  /** Сервер проверок ревьюера с пределами контура (review-probe.ts). */
+  /** Сервер проверок ревьюера с пределами контура (сервер проверок harness). */
   probe?: ProbeServer;
   cwd: string;
   artifactDir: string;

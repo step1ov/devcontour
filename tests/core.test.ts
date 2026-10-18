@@ -1,13 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fixture, input, complete, config } from './helpers.ts';
+import { fixture, input, complete, config, CANDIDATE, MERGED } from './helpers.ts';
 import { specDigest, supersededBy } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
 import { join } from 'node:path';
 import { readyTasks } from '../src/core/graph.ts';
-import { continuableDraft } from '../src/core/reuse.ts';
-import type { DevContourState, Run, Task } from '../src/core/model.ts';
 
 test('DAG rejects cycles and missing dependencies atomically', () => {
   const f = fixture();
@@ -110,11 +108,12 @@ test('Expired attempts are fenced, retries get fresh run IDs and tokens', () => 
     assert.throws(() => f.h.phase(old.id, old.token, 'verifying'), /владение/);
     assert.equal(f.store.read().tasks[0].status, 'failed');
     f.h.retry(t.id);
-    const newer = f.h.claim('two')!;
+    // Выдаёт тот же controller: новая попытка — новый id и токен.
+    const newer = f.h.claim('one')!;
     assert.notEqual(old.token, newer.token);
     assert.notEqual(old.id, newer.id);
     assert.equal(newer.attempt, 2);
-    assert.throws(() => f.h.finish(old.id, old.token, 'merged'), /владение/);
+    assert.throws(() => f.h.finish(old.id, old.token, MERGED), /владение/);
   } finally {
     f.cleanup();
   }
@@ -127,11 +126,11 @@ test('Done requires exact SHA test evidence and independent review for BOTH phas
     f.h.approve(b.id);
     f.h.pause(false);
     const r = f.h.claim('worker')!;
-    f.h.phase(r.id, r.token, 'integrating', { candidateSha: 'new', integrationSha: 'merged' });
+    f.h.phase(r.id, r.token, 'integrating', { candidateSha: CANDIDATE, integrationSha: MERGED });
     let published = false;
     assert.throws(
       () =>
-        f.h.finish(r.id, r.token, 'merged', () => {
+        f.h.finish(r.id, r.token, MERGED, () => {
           published = true;
         }),
       /Нет PASS/,
@@ -142,16 +141,16 @@ test('Done requires exact SHA test evidence and independent review for BOTH phas
         f.h.evidence(r.id, r.token, {
           kind,
           phase,
-          sha: 'stale',
+          sha: 'a'.repeat(40),
           gate: kind === 'test' ? 'test' : 'independent-review',
           passed: true,
           command: ['test'],
           exitCode: 0,
           log: 'x',
-          digest: 'x',
+          digest: 'e'.repeat(64),
           summary: 'x',
         });
-    assert.throws(() => f.h.finish(r.id, r.token, 'merged'), /Нет PASS/);
+    assert.throws(() => f.h.finish(r.id, r.token, MERGED), /Нет PASS/);
   } finally {
     f.cleanup();
   }
@@ -165,7 +164,7 @@ test('Correction makes a new transitive chain and preserves immutable accepted s
     const d = f.h.addTask(b.id, input('Leaf task', [c.id]));
     f.h.approve(b.id);
     [a, c, d].forEach((t) => complete(f.h, t.id));
-    f.h.accept(b.id, 'merged');
+    f.h.accept(b.id, MERGED);
     const original = structuredClone(f.store.read().boards[0].revisions[0]);
     assert.deepEqual(f.h.impact(b.id, [a.id]).taskIds, [a.id, c.id, d.id]);
     const result = f.h.correct(b.id, [a.id], 'Include archived results in the query');
@@ -177,7 +176,7 @@ test('Correction makes a new transitive chain and preserves immutable accepted s
     assert.deepEqual(next.dependsOn, [result.replacements[a.id]]);
     assert.equal(next.status, 'draft');
     assert.equal(next.approvedDigest, undefined);
-    assert.throws(() => f.h.accept(b.id, 'merged'), /все задачи/);
+    assert.throws(() => f.h.accept(b.id, MERGED), /все задачи/);
     assert.throws(() => f.h.correct(b.id, [a.id], 'Another change request'), /Сначала/);
   } finally {
     f.cleanup();
@@ -194,8 +193,8 @@ test('Cross-board impact is included in correction, unrelated tasks keep their r
     f.h.approve(b.id);
     f.h.approve(c.id);
     [a, u, d].forEach((t) => complete(f.h, t.id));
-    f.h.accept(b.id, 'merged');
-    f.h.accept(c.id, 'merged');
+    f.h.accept(b.id, MERGED);
+    f.h.accept(c.id, MERGED);
     const impact = f.h.impact(b.id, [a.id]);
     assert.equal(impact.boards.length, 2);
     const result = f.h.correct(b.id, [a.id], 'Change the API pagination semantics');
@@ -246,24 +245,24 @@ test('Optimistic draft editing rejects stale client and atomic publish failure c
     f.h.approve(b.id);
     f.h.pause(false);
     const r = f.h.claim('worker')!;
-    f.h.phase(r.id, r.token, 'integrating', { candidateSha: 'c', integrationSha: 'm' });
+    f.h.phase(r.id, r.token, 'integrating', { candidateSha: CANDIDATE, integrationSha: MERGED });
     for (const phase of ['candidate', 'integration'] as const)
       for (const kind of ['test', 'review'] as const)
         f.h.evidence(r.id, r.token, {
           kind,
           phase,
-          sha: phase === 'candidate' ? 'c' : 'm',
+          sha: phase === 'candidate' ? CANDIDATE : MERGED,
           gate: kind === 'test' ? 'test' : 'independent-review',
           passed: true,
           command: [],
           exitCode: 0,
           log: '',
-          digest: '',
+          digest: 'e'.repeat(64),
           summary: '',
         });
     assert.throws(
       () =>
-        f.h.finish(r.id, r.token, 'm', () => {
+        f.h.finish(r.id, r.token, MERGED, () => {
           throw new Error('CAS conflict');
         }),
       /CAS/,
@@ -323,7 +322,7 @@ test('Следующий этап — ревизия той же доски, а 
     );
     f.h.approve(first.boardId);
     complete(f.h, one.id);
-    f.h.accept(first.boardId, 'merged');
+    f.h.accept(first.boardId, MERGED);
     const accepted = structuredClone(f.store.read().boards[0].revisions[0]);
     const before = f.store.read();
     assert.throws(() => f.h.importPlan(plan('Stage', 'x'), 'B-missing'), /не найдена/);
@@ -359,9 +358,9 @@ test('Следующий этап — ревизия той же доски, а 
 
     f.h.approve(first.boardId);
     assert.equal(f.store.read().tasks.find((t) => t.id === one.id)!.status, 'done');
-    assert.throws(() => f.h.accept(first.boardId, 'merged'), /все задачи/);
+    assert.throws(() => f.h.accept(first.boardId, MERGED), /все задачи/);
     complete(f.h, two.id);
-    f.h.accept(first.boardId, 'merged');
+    f.h.accept(first.boardId, MERGED);
     const done = f.store.read().boards[0].revisions[1];
     assert.equal(done.status, 'accepted');
     assert.deepEqual(
@@ -406,11 +405,11 @@ test('Repeated partial correction follows current replacements, never clones sup
     f.h.approve(b.id);
     complete(f.h, a.id);
     complete(f.h, leaf.id);
-    f.h.accept(b.id, 'merged');
+    f.h.accept(b.id, MERGED);
     const second = f.h.correct(b.id, [leaf.id], 'Correct only the downstream result');
     f.h.approve(b.id);
     complete(f.h, second.replacements[leaf.id]);
-    f.h.accept(b.id, 'merged');
+    f.h.accept(b.id, MERGED);
     const impacted = f.h.impact(b.id, [a.id]);
     assert.deepEqual(impacted.taskIds, [a.id, second.replacements[leaf.id]]);
     const third = f.h.correct(b.id, [a.id], 'Change upstream after the downstream correction');
@@ -619,7 +618,7 @@ test('Цель доски правится до утверждения план�
       /до утверждения плана или после приёмки/,
     );
     complete(f.h, kept.id);
-    f.h.accept(b.id, 'merged');
+    f.h.accept(b.id, MERGED);
     const accepted = structuredClone(f.store.read().boards[0].revisions[0]);
     // Принятая доска ведёт релиз дальше: название становится названием релиза.
     f.h.editBoard(b.id, { title: 'Релиз 0.1', description: 'Весь релиз' });
@@ -693,7 +692,7 @@ test('Отменённая задача не делает ревизию неп�
     f.h.approve(b.id);
     f.h.cancel(dropped.id, 'Решено в контракте');
     complete(f.h, kept.id);
-    f.h.accept(b.id, 'merged');
+    f.h.accept(b.id, MERGED);
     const r = f.store.read().boards[0].revisions[0];
     assert.equal(r.status, 'accepted');
     assert.deepEqual(
@@ -705,51 +704,14 @@ test('Отменённая задача не делает ревизию неп�
     const only = f.h.addTask(empty.id, input('Only'));
     f.h.approve(empty.id);
     f.h.cancel(only.id, 'Не нужна');
-    assert.throws(() => f.h.accept(empty.id, 'merged'), /все задачи/);
+    assert.throws(() => f.h.accept(empty.id, MERGED), /все задачи/);
   } finally {
     f.cleanup();
   }
 });
 
-test('Черновик берётся у последней содержательной попытки, прерванная окружением пропускается', () => {
-  const task = {
-    id: 'T1',
-    approvedDigest: 'spec',
-    approvedAt: '2026-01-01T00:00:00.000Z',
-    contractDigests: {},
-  } as unknown as Task;
-  const run = (id: string, over: Partial<Run>) =>
-    ({ id, taskId: 'T1', status: 'failed', startedAt: '2026-01-02T00:00:00.000Z', ...over }) as Run;
-  const rejected = run('R1', {
-    failureKind: 'review',
-    candidateSha: 'c'.repeat(40),
-    baseSha: 'b'.repeat(40),
-    implementationBasis: 'x',
-  });
-  const interrupted = run('R2', { failureKind: 'environment' });
-  const state = { runs: [rejected, interrupted] } as unknown as DevContourState;
-  assert.equal(continuableDraft(state, task, 'R3')?.runId, 'R1');
-  assert.equal(continuableDraft(state, task, 'R3')?.respecified, false);
-  // Задачу переутвердили после попытки (новая редакция контракта): кандидат
-  // остаётся черновиком, но помечен — его сверяют с новой постановкой.
-  const reapproved = { ...task, approvedAt: '2026-01-03T00:00:00.000Z' } as Task;
-  assert.equal(continuableDraft(state, reapproved, 'R3')?.respecified, true);
-  // Попытка, не оставившая ничего (ни кандидата, ни черновика), пропускается
-  // при любом отказе: «не закончил» без правок не должен терять кандидата до неё.
-  const empty = run('R2b', { failureKind: 'unknown' });
-  const later = { runs: [rejected, empty] } as unknown as DevContourState;
-  assert.equal(continuableDraft(later, task, 'R3')?.runId, 'R1');
-  // Попытка с черновиком после отклонения — продолжаем её черновик, а не старого кандидата.
-  const drafted = run('R2c', {
-    failureKind: 'unknown',
-    partial: { patch: '/p', digest: 'd', files: ['a.ts'], spec: 'spec', contracts: {} },
-  });
-  const newest = { runs: [rejected, drafted] } as unknown as DevContourState;
-  const draft = continuableDraft(newest, task, 'R3');
-  assert.equal(draft?.runId, 'R2c');
-  assert.equal(draft?.kind, 'unfinished');
-  assert.equal(draft?.reason, 'unknown');
-});
+// «Черновик берётся у последней содержательной попытки» — правило reuse
+// harness: tests/reuse.test.ts пакета (перенос из этого файла).
 
 test('Причина неудавшегося продления владения сохраняется и не затирается истечением', () => {
   const f = fixture();
@@ -782,7 +744,7 @@ test('Отменённый потребитель не мешает коррек
     f.h.approve(b.id);
     f.h.cancel(dropped.id, 'Решено иначе');
     complete(f.h, a.id);
-    f.h.accept(b.id, 'merged');
+    f.h.accept(b.id, MERGED);
     assert.deepEqual(f.h.impact(b.id, [a.id]).taskIds, [a.id]);
     const result = f.h.correct(b.id, [a.id], 'Change the root behaviour');
     assert.deepEqual(Object.keys(result.replacements), [a.id]);

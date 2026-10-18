@@ -4,6 +4,13 @@ import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSy
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import {
+  CorpusStore,
+  contractDocuments,
+  manifestDigest,
+  orderCheckManifest,
+} from 'devcontour-harness';
+import { executionOf } from '../src/harness/execution.ts';
 import { config, input } from './helpers.ts';
 import { declaration, propertyGate } from './check-fixture.ts';
 import { Store } from '../src/core/store.ts';
@@ -33,6 +40,24 @@ import { receiptSchema } from '../src/core/sync-model.ts';
  * Регрессии по находкам независимой приёмки: каждый тест воспроизводит
  * обход через настоящие Store и доменные операции и требует отказа.
  */
+/**
+ * Манифест генеративного gate задачи — тот, что запишет настоящая проверка:
+ * по договору проверки задачи и её закреплённому корпусу.
+ */
+function manifestOf(h: DevContour, taskId: string) {
+  const { engine } = executionOf(h);
+  return engine.read((v) => {
+    const w = v.work(taskId)!;
+    const corpus = w.checkVersion ? new CorpusStore(engine).snapshot(v, w.checkVersion) : undefined;
+    const m = orderCheckManifest(w.order, contractDocuments(w.order, v), 'properties', corpus)!;
+    return {
+      digest: manifestDigest(m),
+      properties: m.properties.map((p) => p.id),
+      ...(m.corpus ? { corpus: { digest: m.corpus.digest, cases: m.corpus.cases.length } } : {}),
+    };
+  });
+}
+
 function domain() {
   const root = mkdtempSync(join(tmpdir(), 'devcontour-findings-'));
   const store = new Store(join(root, 'state.sqlite'));
@@ -195,7 +220,7 @@ test('F02: a receipt with mixed check versions or without property manifests is 
                   reproduce: '',
                   contracts: {},
                   artifacts: [],
-                  manifest: { digest: 'd'.repeat(64), properties: ['knapsack-optimal'] },
+                  manifest: manifestOf(d.h, rt.id),
                 },
               }
             : {}),
@@ -410,6 +435,8 @@ test('F06: an infrastructure failure that kept a passing report as negative evid
         i === 1 ? undefined : { bound: ['knapsack-optimal'], unbound: [] },
       );
       if (i < 2) d.h.retry(infra.id);
+      // Отказ окружения остановил выдачу (повторится на любой задаче): снимает человек.
+      if (i === 1) d.h.pause(false);
     }
     const recovery = d.get(infra.id).recovery;
     assert.equal(recovery?.status, 'awaiting-lead');
@@ -612,7 +639,6 @@ test('F11: a rebind of another contract keeps the corpus of the unchanged check 
 function receiptWithCorpus(d: ReturnType<typeof domain>) {
   const rt = d.add('Receipt corpus');
   const seeded = d.seed(rt.id, 5, [rt.id]);
-  const corpusDigest = seeded.suite.versions[0].digest;
   d.h.pause(false);
   const run = d.h.claim('probe')!;
   d.h.phase(run.id, run.token, 'integrating', {
@@ -640,11 +666,7 @@ function receiptWithCorpus(d: ReturnType<typeof domain>) {
                 reproduce: '',
                 contracts: {},
                 artifacts: [],
-                manifest: {
-                  digest: 'd'.repeat(64),
-                  properties: ['knapsack-optimal'],
-                  corpus: { digest: corpusDigest, cases: 1 },
-                },
+                manifest: manifestOf(d.h, rt.id),
               },
             }
           : {}),

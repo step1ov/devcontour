@@ -33,6 +33,7 @@ import { validateTaskContext } from '../core/workflow.ts';
 import { maxRecordBytes } from '../core/sync-model.ts';
 import { completion, validateReceipt } from '../core/sync-state.ts';
 import { contents, taskContext } from '../runner/context.ts';
+import { effectiveChecks } from '../core/checks.ts';
 import type { UsageRecord } from '../core/usage.ts';
 import {
   activeRevision,
@@ -72,6 +73,7 @@ export function projectionOptions(h: DevContour): ProjectionOptions {
     policyDigest: () => executionDigest(policyFromConfig(h.config)),
     roleScope: (task) => h.config.roles[task.role]?.writePaths,
     contextPacks: (task) => taskPacks(h, task).map((p) => p.id),
+    contractDigest: (id) => h.store.read().contracts.find((c) => c.id === id)?.digest,
   };
 }
 
@@ -101,6 +103,9 @@ export function devcontourHost(h: DevContour, store: DevContourExecutionStore): 
       orderDigest: (work, view) => specDigest(taskOf(state(view), work)),
       scopeDigest: (work, view) => scopeDigest(taskOf(state(view), work)),
       policyDigest: (work, view) => h.taskPolicyDigest(taskOf(state(view), work)),
+      // Версия проверок — прежняя формула DevContour: ею подписаны записи и receipts.
+      checksDigest: (work, policyDigest, view) =>
+        effectiveChecks(taskOf(state(view), work), policyDigest),
     },
     guards: {
       // Активная поставка ChangeSet закрепила комбинацию: новые попытки сдвинули бы её.
@@ -345,6 +350,15 @@ export async function receiverContext(
     contextDigest: snapshot ? contextDigest(snapshot) : null,
     specDigest: specDigest(task),
     checkVersion: task.checkVersion ?? null,
+    checksDigest: ({ specDigest: spec, policyDigest, corpus }) =>
+      effectiveChecks(
+        {
+          approvedDigest: spec,
+          contractDigests: task.contractDigests,
+          ...(corpus ? { checkVersion: { ...task.checkVersion!, ...corpus } } : {}),
+        },
+        policyDigest,
+      ),
   };
 }
 

@@ -1,3 +1,4 @@
+import { domain, executionOf } from '../harness/execution.ts';
 import { readFileSync, realpathSync } from 'node:fs';
 import {
   developmentBinding,
@@ -7,36 +8,22 @@ import {
 } from './preparation.ts';
 import { validateTaskContext, validateWorkflow } from './workflow.ts';
 import { entityId } from './ids.ts';
-import { createHash, randomUUID } from 'node:crypto';
-import { reusableImplementation } from './reuse.ts';
-import {
-  repository,
-  repositories,
-  roleBinding,
-  reviewerBinding,
-  requiresContract,
-  expandGates,
-} from './repositories.ts';
+import { createHash } from 'node:crypto';
+import { repository, repositories, requiresContract, expandGates } from './repositories.ts';
 import { Store } from './store.ts';
-import { failureFingerprint, TaskFailure, type FailureKind } from './failure.ts';
+import { type FailureKind } from './failure.ts';
 import { taskEvidence, unprovenReason } from './proof.ts';
-import { assertTaskProperties, effectiveChecks, type CheckDeclaration } from './checks.ts';
+import { assertTaskProperties, type CheckDeclaration } from './checks.ts';
 import {
-  afterFailure,
-  afterSuccess,
-  blocksClaim,
   closeIfBasisChanged,
-  episodeBasis,
   recoveryActions,
   type PropertyRecovery,
   type RecoveryDecision,
 } from './property-recovery.ts';
 import { planResult } from './plan.ts';
 import { boardOwner, completion, receiptRecordBytes } from './sync-state.ts';
-import { maxRecordBytes } from './sync-model.ts';
 import { carriedTaskIds } from './work-status.ts';
-import { blockingBudget, taskBudgets, usageRecords } from './budget.ts';
-import { assertDag, descendants, readyTasks, latestTaskId, impactGraph } from './graph.ts';
+import { assertDag, descendants, latestTaskId, impactGraph } from './graph.ts';
 import {
   DomainError,
   requireValue,
@@ -44,7 +31,6 @@ import {
   discoveryInput,
   type Contract,
   type ContractArtifact,
-  type Reproduction,
   type Task,
   type DevContourState,
   type Config,
@@ -193,7 +179,6 @@ function activeRevision(s: DevContourState, id: string) {
   if (r.status !== 'active') throw new DomainError('Доска принята. Создайте корректировку.');
   return r;
 }
-const HEARTBEAT_FAILED = 'Продление владения не удалось';
 /**
  * То, что ревьюер видел о зависимости вне предложения: постановка, статус,
  * гейты и принятый SHA. Гейты в specDigest не входят — они часть политики, —
@@ -362,6 +347,11 @@ export class DevContour {
   /** Digest конфигурации этого процесса. */
   get configDigest() {
     return this.knownConfig;
+  }
+  /** Источник конфигурации не менялся с загрузки: `undefined` — да, иначе причина. */
+  configProvenance(): string | undefined {
+    const unchanged = sourceUnchanged(this.provenance);
+    return unchanged.ok ? undefined : unchanged.reason;
   }
   /** Owner, под которым этот процесс получил лидерство. */
   private ownLeader?: string;
@@ -1185,239 +1175,90 @@ export class DevContour {
         ),
       );
   }
+  /**
+   * Выдача попытки — решение движка harness (пауза, барьеры, бюджеты,
+   * предел попыток, продуктовые условия хоста). Продуктовые сведения попытки
+   * (ожидание задачи до выдачи) пишутся в той же транзакции.
+   */
   claim(owner: string): Run | undefined {
-    return this.store.change('run.claimed', (s) => {
-      if (
-        s.paused ||
-        // Пока операция применяет конфигурацию, попытки не выдаются, даже если
-        // человек снял паузу: попытка под прежней конфигурацией не нужна.
-        (s.reconfigure && !s.reconfigure.appliedAt) ||
-        // Процесс со старой конфигурацией не выдаёт попыток: их условия
-        // разошлись бы с применённой контуром конфигурацией.
-        (() => {
-          try {
-            this.assertCurrentConfig(s);
-            return false;
-          } catch {
-            return true;
-          }
-        })() ||
-        s.changeSets.some((c) =>
-          c.deliveries?.some((d) => d.status === 'active' && d.leaseUntil > Date.now()),
-        ) ||
-        s.changeSets.some((c) =>
-          c.verifications.some((v) => v.status === 'active' && v.leaseUntil > Date.now()),
-        )
-      )
-        return;
-      if (s.runs.filter((r) => r.status === 'active').length >= this.config.concurrency) return;
-      for (const ready of readyTasks(s)) closeIfBasisChanged(ready);
-      // Бюджеты считаются по сохранённым записям вызовов: сброс попыток и
-      // перезапуск их не уменьшают. Остановленная бюджетом задача несёт
-      // причину, пока бюджет не позволит снова.
-      if (this.config.budgets) {
-        const records = usageRecords(this);
-        for (const ready of readyTasks(s)) {
-          const blocking = blockingBudget(this, taskBudgets(this, s, ready, records));
-          if (blocking) {
-            if (ready.budgetBlock?.reason !== blocking.reason)
-              ready.budgetBlock = { reason: blocking.reason!, at: now() };
-          } else delete ready.budgetBlock;
-        }
-      } else
-        // Бюджеты выключены: бюджетное удержание снимается, остальные
-        // условия выдачи (пауза, удержание операции) самостоятельны.
-        for (const ready of readyTasks(s)) delete ready.budgetBlock;
-      const eligible = readyTasks(s).filter(
-        (t) =>
-          t.attempt < this.config.maxAttempts &&
-          (!s.team || t.assignee === s.team.member) &&
-          // Два содержательных отказа по одному свойству: третья выдача —
-          // только после разбора. Независимые задачи выдаются как обычно.
-          !blocksClaim(t) &&
-          !t.budgetBlock &&
-          // Принятие корпуса, ждущее оператора, удерживает выдачу, даже если
-          // его собственное удержание не было поставлено (задача была занята
-          // другим) или снято принятием соседнего запроса.
-          !this.awaitsOperator(t),
-      );
-      const t = eligible[0];
-      if (!t) return;
-      assertTaskPreparation(s, t);
-      validateTaskContext(this.config, t);
-      if (t.approvedDigest !== specDigest(t))
-        throw new DomainError('Спецификация изменилась после утверждения');
-      if (t.approvedScope && t.approvedScope !== scopeDigest(t))
-        throw new DomainError('Область проверок задачи изменилась после утверждения');
-      const dependencyDates = t.dependsOn.map((id) => {
-        const dependency = s.tasks.find((x) => x.id === id)!;
-        return (
-          s.runs.findLast((r) => r.taskId === id && r.status === 'succeeded')?.finishedAt ??
-          dependency.sharedCompletion?.receipt.finishedAt
-        );
-      });
-      const readyAt =
-        t.approvedAt && dependencyDates.every(Boolean)
-          ? [t.approvedAt, ...(dependencyDates as string[])].sort().at(-1)
-          : undefined;
-      const candidates = eligible.map((t) => ({
-        taskId: t.id,
-        repositoryId: t.repositoryId,
-        attempt: t.attempt,
-      }));
-      const run: Run = {
-        dispatch: {
-          policy: 'fifo-ready-v1',
-          at: now(),
-          eligible: candidates,
-          activeCount: s.runs.filter((r) => r.status === 'active').length,
-          concurrency: this.config.concurrency,
-          inputDigest: digest(candidates),
-        },
-        wait: { approvedAt: t.approvedAt, readyAt },
-        requiredGates: [
-          // Задача доказывает себя своей областью, если она объявлена; иначе —
-          // всем профилем, как раньше.
-          // Группы раскрыты: в попытке записан явный список.
-          ...expandGates(repository(this.config, t.repositoryId), t.gates),
-          ...(t.requirements?.length ? ['requirement-source'] : []),
-        ],
-        ...(t.consumers?.length
-          ? {
-              consumers: t.consumers.map((c) => ({
-                repositoryId: c.repositoryId,
-                gates: expandGates(repository(this.config, c.repositoryId), c.gates),
-              })),
-            }
-          : {}),
-        id: randomUUID(),
-        taskId: t.id,
-        repositoryId: t.repositoryId,
-        attempt: ++t.attempt,
-        token: randomUUID(),
-        owner,
-        runtime: roleBinding(this.config, t.role, t.repositoryId).runtime,
-        reviewer: reviewerBinding(this.config, t.role, t.repositoryId).runtime,
-        model: roleBinding(this.config, t.role, t.repositoryId).model,
-        reviewerModel: reviewerBinding(this.config, t.role, t.repositoryId).model,
-        effort: roleBinding(this.config, t.role, t.repositoryId).effort,
-        reviewerEffort: reviewerBinding(this.config, t.role, t.repositoryId).effort,
-        policyDigest: this.taskPolicyDigest(t),
-        // Версия проверок закрепляется при выдаче: принятие нового корпуса
-        // посередине попытки ждёт её окончания, и evidence этой попытки
-        // относится к этой версии.
-        checks: {
-          effective: effectiveChecks(t, this.taskPolicyDigest(t)),
-          ...(t.checkVersion ? { corpus: t.checkVersion } : {}),
-        },
-        status: 'active',
-        phase: 'running',
-        startedAt: now(),
-        leaseUntil: Date.now() + this.config.leaseMs,
-        evidence: [],
-        callsRecorded: true,
-      };
-      run.episodeBasis = episodeBasis(t);
-      if (t.recovery?.status === 'retry') {
-        // Разрешённый разбором повтор выдан: второй раз он не выдаётся.
-        t.recovery.status = 'retrying';
-        t.recovery.retryRun = run.id;
-        t.recovery.version++;
-        t.recovery.history.push({ at: now(), event: 'retry-claimed', detail: run.id });
-      }
-      t.status = 'running';
-      t.activeRunId = run.id;
-      t.failure = undefined;
-      s.runs.push(run);
-      return run;
-    });
+    const { store, engine } = executionOf(this);
+    return domain(() =>
+      store.host('run.claimed', (ht) => {
+        const before = ht.state.leader;
+        const leading = before?.owner === owner && before.leaseUntil > Date.now();
+        if (!engine.lead(owner)) return undefined;
+        const attempt = engine.claim(owner);
+        // Выдаёт только controller; прямая выдача (не из очереди) роль за
+        // вызвавшим не оставляет — как и прежде, она не запуск очереди.
+        if (!leading) engine.release(owner);
+        if (!attempt) return undefined;
+        const s = ht.state;
+        const run = s.runs.find((r) => r.id === attempt.id)!;
+        const t = task(s, run.taskId);
+        const dependencyDates = t.dependsOn.map((id) => {
+          const dependency = s.tasks.find((x) => x.id === id)!;
+          return (
+            s.runs.findLast((r) => r.taskId === id && r.status === 'succeeded')?.finishedAt ??
+            dependency.sharedCompletion?.receipt.finishedAt
+          );
+        });
+        run.wait = {
+          approvedAt: t.approvedAt,
+          readyAt:
+            t.approvedAt && dependencyDates.every(Boolean)
+              ? [t.approvedAt, ...(dependencyDates as string[])].sort().at(-1)
+              : undefined,
+        };
+        run.callsRecorded = true;
+        ht.journal({ taskId: run.taskId, runId: run.id });
+        return structuredClone(run);
+      }),
+    );
   }
+  /**
+   * Продуктовая запись в попытку под её владением: владение и актуальность
+   * проверяет движок в той же транзакции. Правил исполнения здесь нет.
+   */
   withRun<T>(
     id: string,
     token: string,
     type: string,
     fn: (run: Run, t: Task, s: DevContourState) => T,
   ): T {
-    return this.store.change(type, (s) => {
-      const r = requireValue(
-        s.runs.find((r) => r.id === id),
-        'Попытка не найдена',
-      );
-      const t = task(s, r.taskId);
-      assertTaskPreparation(s, t);
-      this.assertCurrentConfig(s);
-      if (r.policyDigest !== this.taskPolicyDigest(t))
-        throw new DomainError('Политика проверок изменилась; нужна новая попытка');
-      if (
-        r.status !== 'active' ||
-        r.token !== token ||
-        r.leaseUntil <= Date.now() ||
-        t.activeRunId !== r.id
-      )
-        throw new DomainError('Устаревшая попытка: владение утрачено');
-      return fn(r, t, s);
-    });
-  }
-  /**
-   * Записывает основания реализации и решает, брать ли кандидата предыдущей
-   * попытки. Решение принимается в той же транзакции, что и запись: между
-   * чтением и записью предыдущую попытку никто не подменит.
-   */
-  implementationBasis(id: string, token: string, basis: string, reuse: boolean) {
-    return this.withRun(id, token, 'run.implementation-basis', (r, t, s) => {
-      r.implementationBasis = basis;
-      const decision = reuse
-        ? reusableImplementation(s, t, r.id, basis)
-        : ({ reuse: false, reason: 'переиспользование выключено' } as const);
-      if (decision.reuse)
-        r.reusedFrom = { runId: decision.from.id, candidateSha: decision.candidateSha };
-      return decision.reuse
-        ? { runId: id, basis, reusedFrom: r.reusedFrom }
-        : { runId: id, basis, reuse: decision.reason };
-    });
-  }
-  /** Черновик реализации, оборванной по времени (см. Run.partial). */
-  recordPartial(id: string, token: string, partial: NonNullable<Run['partial']>) {
-    return this.withRun(id, token, 'run.partial', (r) => {
-      r.partial = partial;
-      return { runId: id, files: partial.files, digest: partial.digest };
-    });
-  }
-  /** Попытка начала с черновика предыдущей (см. Run.continuedFrom). */
-  continuation(id: string, token: string, from: NonNullable<Run['continuedFrom']>) {
-    return this.withRun(id, token, 'run.continuation', (r) => {
-      r.continuedFrom = from;
-      return {
-        runId: id,
-        draftOf: from.runId,
-        kind: from.kind,
-        applied: from.applied,
-        files: from.files,
-      };
-    });
+    const { store, engine } = executionOf(this);
+    return domain(() =>
+      store.host(
+        type,
+        (ht) =>
+          engine.withAttempt(id, token, 'run.context', () => {
+            const s = ht.state;
+            const r = requireValue(
+              s.runs.find((r) => r.id === id),
+              'Попытка не найдена',
+            );
+            const out = fn(r, task(s, r.taskId), s);
+            // Возвращённое продуктовой записью — данные её события журнала, как прежде.
+            if (out && typeof out === 'object' && !Array.isArray(out))
+              ht.journal(out as Record<string, unknown>);
+            return out as never;
+          }) as T,
+      ),
+    );
   }
   heartbeat(id: string, token: string) {
-    this.withRun(id, token, 'heartbeat', (r) => {
-      r.leaseUntil = Date.now() + this.config.leaseMs;
-    });
+    const { engine } = executionOf(this);
+    domain(() => engine.heartbeat(id, token));
   }
   /**
+   * Продление владения не удалось.  /**
    * Продление владения не удалось. Планировщик прерывал попытку молча, и
    * снаружи оставалось только «истёк срок владения» — причину (сменившаяся
    * политика, привязка к подготовке, сбой хранилища) узнать было неоткуда.
    * Причина записывается в попытку; истечение её не затирает.
    */
   heartbeatFailed(id: string, token: string, reason: string) {
-    return this.store.change('run.heartbeat-failed', (s) => {
-      const r = s.runs.find((r) => r.id === id);
-      // Истёкший срок допустим — ради него запись и делается, — но смена
-      // токена означает нового владельца: прежний не пишет в его попытку.
-      // Записывается первая причина: следующие — её следствия.
-      if (r?.status !== 'active' || r.token !== token || r.error?.startsWith(HEARTBEAT_FAILED))
-        return;
-      r.error = `${HEARTBEAT_FAILED}: ${reason.slice(0, 500)}`;
-      return { runId: id, error: r.error };
-    });
+    const { engine } = executionOf(this);
+    return domain(() => engine.heartbeatFailed(id, token, reason));
   }
   phase(
     id: string,
@@ -1425,164 +1266,21 @@ export class DevContour {
     phase: 'running' | 'verifying' | 'reviewing' | 'integrating',
     data: Partial<Pick<Run, 'baseSha' | 'candidateSha' | 'integrationSha' | 'worktree'>> = {},
   ) {
-    this.withRun(id, token, 'run.phase', (r, t) => {
-      if (!['running', 'verifying', 'reviewing', 'integrating'].includes(phase))
-        throw new DomainError('Недопустимая фаза');
-      r.phase = phase;
-      t.status = phase;
-      Object.assign(r, data);
-      return { runId: id, taskId: t.id, phase, ...data };
-    });
-  }
-  /**
-   * Записать воспроизведения из находок ревью прогона. Одно свойство на одном
-   * входе — одна запись: повтор добавляет прогон, а не новую запись.
-   */
-  reproductions(
-    id: string,
-    token: string,
-    sha: string,
-    items: Omit<Reproduction, 'id' | 'key' | 'taskId' | 'inputHash' | 'runs' | 'status'>[],
-  ) {
-    return this.withRun(id, token, 'reproduction.recorded', (r, t, s) => {
-      s.reproductions ??= [];
-      const at = now();
-      const touched = items.map((item) => {
-        const inputHash = digest(item.input);
-        const key = digest({ taskId: t.id, property: item.property, inputHash });
-        const run = { runId: r.id, sha, contracts: t.contractDigests, at };
-        const existing = s.reproductions!.find((x) => x.key === key);
-        if (existing) {
-          if (!existing.runs.some((x) => x.runId === r.id)) existing.runs.push(run);
-          // Подтверждение контура не отменяется последующим неподтверждённым.
-          // Гипотеза, подтверждённая запуском, получает команду и id этого
-          // запуска вместе: иначе запись связывала бы действительный запуск с
-          // командой, которая не запускалась.
-          if (item.observed && !existing.observed) {
-            existing.observed = true;
-            existing.run = item.run;
-            existing.command = item.command;
-          }
-          existing.claimed ||= item.claimed;
-          return existing;
-        }
-        const created: Reproduction = {
-          ...item,
-          id: randomUUID(),
-          key,
-          taskId: t.id,
-          inputHash,
-          runs: [run],
-          status: 'proposed',
-        };
-        s.reproductions!.push(created);
-        return created;
-      });
-      // Реестр ограничен: старые записи вытесняются, а не копятся без предела.
-      s.reproductions = s.reproductions.slice(-500);
-      return touched;
-    });
+    const { engine } = executionOf(this);
+    domain(() => engine.phase(id, token, phase, data));
   }
   evidence(id: string, token: string, evidence: Omit<Evidence, 'id' | 'runId' | 'createdAt'>) {
-    return this.withRun(id, token, 'evidence.recorded', (r) => {
-      // Evidence относится к версии проверок попытки. Чужая версия не
-      // записывается: старое evidence не выдаётся за проверку новой.
-      if (evidence.checks !== undefined && evidence.checks !== r.checks?.effective)
-        throw new DomainError('Evidence другой версии проверок, чем у попытки');
-      const e = {
-        ...evidence,
-        ...(r.checks ? { checks: r.checks.effective } : {}),
-        id: randomUUID(),
-        runId: id,
-        createdAt: now(),
-      };
-      r.evidence.push(e);
-      return e;
-    });
+    const { engine } = executionOf(this);
+    return domain(() =>
+      engine.evidence(id, token, evidence as Parameters<typeof engine.evidence>[2]),
+    );
   }
+  /** Приёмка — решение движка: gates, ревью, потребители, требования, CAS в `publish`. */
   finish(id: string, token: string, sha: string, publish?: () => void) {
-    return this.withRun(id, token, 'task.done', (r, t, s) => {
-      if (r.phase !== 'integrating' || !r.candidateSha || r.integrationSha !== sha)
-        throw new DomainError('Нет интеграционного коммита');
-      // Принять можно только под той версией проверок, под которой шла
-      // попытка: новый корпус, принятый задачей, требует новой попытки.
-      if (r.checks && effectiveChecks(t, this.taskPolicyDigest(t)) !== r.checks.effective)
-        throw new DomainError('Версия проверок задачи изменилась; нужна новая попытка');
-      // Evidence потребителя закрывает только проверку потребителя: его gate
-      // `unit` — не собственный `unit` задачи.
-      const last = (
-        kind: Evidence['kind'],
-        phase: Evidence['phase'],
-        sha: string,
-        gate: string,
-        consumer?: string,
-      ) =>
-        r.evidence.findLast(
-          (e) =>
-            e.kind === kind &&
-            e.phase === phase &&
-            e.sha === sha &&
-            e.gate === gate &&
-            e.consumer === consumer &&
-            (!r.checks || e.checks === r.checks.effective),
-        )?.passed === true;
-      // Доказательства требуются по области доказательства прогона — той же,
-      // по которой гейты и запускались. Требовать весь набор профиля значит
-      // требовать от задачи зелени по проверкам соседних, ещё не сделанных
-      // задач; полный набор остаётся обязательным при приёмке доски и релиза.
-      const required = r.requiredGates ?? [
-        ...repository(this.config, t.repositoryId).gates.map((g) => g.id),
-        ...(t.requirements?.length ? ['requirement-source'] : []),
-      ];
-      for (const gate of required)
-        for (const phase of ['candidate', 'integration'] as const)
-          if (!last('test', phase, phase === 'candidate' ? r.candidateSha : sha, gate))
-            throw new DomainError(`Нет PASS: ${phase}/${gate}`);
-      for (const phase of ['candidate', 'integration'] as const)
-        if (
-          !last('review', phase, phase === 'candidate' ? r.candidateSha : sha, 'independent-review')
-        )
-          throw new DomainError(`Нет независимого ревью: ${phase}`);
-      // Проверки потребителей — на integration, против интегрированного
-      // результата задачи.
-      for (const consumer of r.consumers ?? []) {
-        for (const gate of consumer.gates)
-          if (!last('test', 'integration', sha, gate, consumer.repositoryId))
-            throw new DomainError(
-              `Нет PASS проверки потребителя: ${consumer.repositoryId}/${gate}`,
-            );
-        // Что проверено, обязано быть записано: иначе результат нельзя
-        // перенести, и проверку потребителя не с чем сверить.
-        const provider = consumer.checked?.dependencies.find(
-          (d) => d.repositoryId === t.repositoryId,
-        );
-        if (provider?.sha !== sha)
-          throw new DomainError(
-            `Проверка потребителя ${consumer.repositoryId} не записала снимок с интегрированным результатом`,
-          );
-      }
-      // Названный сценарий предъявляется до публикации: опубликованный
-      // результат сразу становится входом зависимых задач, и отказ при
-      // приёмке доски был бы уже поздним. Задачи без testId проходят на
-      // прежнем уровне.
-      const unproven = unprovenReason(t.requirements, r.evidence, sha);
-      if (unproven) throw new TaskFailure('gate', unproven);
-      r.status = 'succeeded';
-      r.finishedAt = now();
-      afterSuccess(t);
-      t.status = 'done';
-      t.resultSha = sha;
-      t.activeRunId = undefined;
-      // Принятый результат переносим: receipt, который чтение состояния из Git
-      // отвергло бы по размеру, отклоняется до публикации, а не после done.
-      const bytes = receiptBytes(this, s, t);
-      if (bytes > maxRecordBytes)
-        throw new DomainError(
-          `Запись receipt задачи ${t.id} занимает ${bytes} байт при пределе ${maxRecordBytes}: ` +
-            'сократите dependencyArtifacts или область проверок',
-        );
-      publish?.();
-      return { taskId: t.id, runId: id, sha };
+    const { engine } = executionOf(this);
+    return domain(() => {
+      const accepted = engine.finish(id, token, sha, publish);
+      return { taskId: accepted.workId, runId: id, sha };
     });
   }
   fail(
@@ -1596,50 +1294,15 @@ export class DevContour {
     /** Свойства, с которыми связан отказ: объявленные и только названные. */
     properties?: { bound: string[]; unbound: string[] },
   ) {
-    return this.withRun(id, token, 'run.failed', (r, t, s) => {
-      // Класс и отпечаток записываются вместе с отказом: решение о починке
-      // принимается позже, возможно после перезапуска, и восстанавливать
-      // причину из текста сообщения тогда уже нечем.
-      const fingerprint = failureFingerprint(kind, error);
-      // Отказ после неудавшегося продления — его следствие («попытка
-      // прервана»); причина продления остаётся впереди, иначе снова видно
-      // только следствие.
-      const prefix = r.error?.startsWith(HEARTBEAT_FAILED)
-        ? r.error
-        : heartbeatCause
-          ? `${HEARTBEAT_FAILED}: ${heartbeatCause.slice(0, 500)}`
-          : undefined;
-      const shown = prefix ? `${prefix}. ${error}` : error;
-      r.status = 'failed';
-      r.error = shown;
-      r.blocked = blocked || undefined;
-      r.failureKind = kind;
-      r.failureFingerprint = fingerprint;
-      r.finishedAt = now();
-      t.status = 'failed';
-      t.failure = shown;
-      t.failureKind = kind;
-      t.failureFingerprint = fingerprint;
-      t.activeRunId = undefined;
-      // Свойство отказа — только объявленное задачей: неизвестное сохраняется
-      // для разбора, но счётчик эпизода не выбирает.
-      if (properties?.bound.length) r.properties = [...new Set(properties.bound)];
-      if (properties?.unbound.length) r.unboundProperties = [...new Set(properties.unbound)];
-      // Отказ окружения задачу не пробовал: попытка возвращается, иначе бюджет
-      // сгорает на неполадках контура и задача блокируется, ни разу не дойдя
-      // до исполнителя.
-      if (blocked && t.attempt > 0) t.attempt--;
-      const recovery = afterFailure(s, t, r);
-      return {
-        taskId: t.id,
-        runId: id,
-        error,
+    const { engine } = executionOf(this);
+    return domain(() =>
+      engine.fail(id, token, error, {
         blocked,
         kind,
-        ...(r.properties ? { properties: r.properties } : {}),
-        ...(recovery ? { recovery: { id: recovery.id, status: recovery.status } } : {}),
-      };
-    });
+        ...(heartbeatCause ? { heartbeatCause } : {}),
+        ...(properties ? { properties } : {}),
+      }),
+    );
   }
   discoveries(id: string, token: string, sha: string, input: unknown) {
     const findings = discoveryInput.array().max(20).parse(input);
@@ -1732,37 +1395,15 @@ export class DevContour {
    * вызова не получают. Исчерпанные попытки задачи — решение пользователя.
    */
   recoveryReserve(taskId: string, recoveryId: string) {
-    return this.store.change('recovery.reserved', (s) => {
-      const t = task(s, taskId);
-      const r = t.recovery;
-      if (!r || r.id !== recoveryId) throw new DomainError('Эпизод восстановления не найден', 404);
-      if (r.status !== 'awaiting-lead')
-        throw new DomainError(`Эпизод ${r.id} не ждёт разбора: ${r.status}`, 409);
-      const at = now();
-      if (r.calls >= 1) {
-        r.status = 'awaiting-user';
-        r.reason = 'Автоматический разбор эпизода уже использован; повторный вызов не выполняется.';
-      } else if (t.attempt >= this.config.maxAttempts) {
-        r.status = 'awaiting-user';
-        r.reason =
-          'Попытки задачи исчерпаны: разрешённого повтора не осталось, сброс — решение человека.';
-      } else {
-        r.calls++;
-        r.status = 'analyzing';
-      }
-      r.version++;
-      r.history.push({
-        at,
-        event: r.status === 'analyzing' ? 'analysis-reserved' : 'refused',
-        detail: r.reason,
-      });
+    const { engine } = executionOf(this);
+    return domain(() => {
+      const r = engine.recoveryReserve(taskId, recoveryId);
       return { taskId, recovery: r.id, status: r.status, reason: r.reason };
     });
   }
   /**
    * Записать решение разбора — ведущего (автоматического) или ручное через
-   * API — и перевести эпизод в состояние разрешённого действия. Ручное
-   * решение сверяет версию записи: устаревшее не применяется.
+   * API. Правила эпизода — движка harness.
    */
   recoveryDecide(
     taskId: string,
@@ -1772,59 +1413,8 @@ export class DevContour {
   ): PropertyRecovery {
     if (!recoveryActions.includes(decision.action))
       throw new DomainError('Неизвестное действие восстановления', 400);
-    if (decision.reason.trim().length < 10)
-      throw new DomainError('Решение требует причины не короче 10 символов', 400);
-    this.store.change('recovery.decided', (s) => {
-      const t = task(s, taskId);
-      const r = t.recovery;
-      if (!r || r.id !== recoveryId) throw new DomainError('Эпизод восстановления не найден', 404);
-      if (expectedVersion !== undefined && r.version !== expectedVersion)
-        throw new DomainError('Эпизод изменился; прочитайте его заново', 409);
-      const manual = decision.source.kind === 'operator';
-      if (!manual && r.status !== 'analyzing')
-        throw new DomainError(`Эпизод ${r.id} не в разборе: ${r.status}`, 409);
-      if (manual && !['awaiting-lead', 'awaiting-user', 'stopped', 'analyzing'].includes(r.status))
-        throw new DomainError(`Эпизод ${r.id} уже исполняет решение: ${r.status}`, 409);
-      if (t.status === 'cancelled') throw new DomainError('Задача отменена', 409);
-      const at = now();
-      r.decision = decision;
-      const retryable = t.attempt < this.config.maxAttempts;
-      switch (decision.action) {
-        case 'add-cases':
-          if (!decision.cases?.length) throw new DomainError('add-cases без случаев', 400);
-          r.status = 'applying';
-          break;
-        case 'new-approach':
-          if (!decision.hypothesis?.trim() || !decision.plan?.trim())
-            throw new DomainError('Новый подход требует гипотезы и плана проверки', 400);
-          r.status = retryable ? 'retry' : 'awaiting-user';
-          if (!retryable)
-            r.reason = 'Попытки задачи исчерпаны: повтор с новой гипотезой невозможен.';
-          break;
-        case 'strengthen-checker':
-        case 'split-task':
-          if (!decision.proposal?.trim())
-            throw new DomainError('Предложение для обычного ревью обязательно', 400);
-          r.status = 'stopped';
-          r.reason = `Подготовлено предложение (${decision.action}); оно проходит обычное ревью или перепланирование и автоматически не применяется.`;
-          break;
-        case 'clarify-obligation':
-          r.status = 'awaiting-user';
-          r.reason = `Нужно решение пользователя: ${decision.conflict ?? decision.reason}`;
-          break;
-        case 'environment':
-          r.status = 'stopped';
-          r.reason = `Причина в среде или не установлена: ${decision.reason}`;
-          break;
-      }
-      r.version++;
-      r.history.push({
-        at,
-        event: 'decided',
-        detail: `${decision.action}: ${decision.reason.slice(0, 300)}`,
-      });
-      return { taskId, recovery: r.id, status: r.status, action: decision.action };
-    });
+    const { engine } = executionOf(this);
+    domain(() => engine.recoveryDecide(taskId, recoveryId, decision, expectedVersion));
     return structuredClone(task(this.store.read(), taskId).recovery!);
   }
   /** Итог добавления случаев: подтверждённый случай разрешает один повтор. */
@@ -1833,62 +1423,36 @@ export class DevContour {
     recoveryId: string,
     outcomes: { outcome: string; reason: string }[],
   ) {
-    this.store.change('recovery.applied', (s) => {
-      const t = task(s, taskId);
-      const r = t.recovery;
-      if (!r || r.id !== recoveryId || r.status !== 'applying')
-        throw new DomainError('Эпизод не исполняет добавление случаев', 409);
-      const confirmed = outcomes.filter((o) => o.outcome === 'confirmed').length;
-      if (confirmed && t.attempt < this.config.maxAttempts) r.status = 'retry';
-      else {
-        r.status = 'stopped';
-        r.reason = confirmed
-          ? 'Случаи подтверждены, но попытки задачи исчерпаны.'
-          : 'Ни один предложенный случай не подтверждён эталоном: ' +
-            outcomes
-              .map((o) => o.reason)
-              .join('; ')
-              .slice(0, 800);
-      }
-      r.version++;
-      r.history.push({
-        at: now(),
-        event: 'applied',
-        detail: `${confirmed} из ${outcomes.length} подтверждено`,
-      });
-      return { taskId, recovery: r.id, status: r.status };
-    });
+    const { engine } = executionOf(this);
+    domain(() =>
+      engine.recoveryApplied(
+        taskId,
+        recoveryId,
+        outcomes as Parameters<typeof engine.recoveryApplied>[2],
+      ),
+    );
     return structuredClone(task(this.store.read(), taskId).recovery!);
   }
   /** Разбор прервался без решения: вызов учтён, повтор не бесплатен. */
   recoveryInterrupted(taskId: string, recoveryId: string, reason: string) {
-    return this.store.change('recovery.interrupted', (s) => {
-      const t = task(s, taskId);
-      const r = t.recovery;
-      if (!r || r.id !== recoveryId || !['analyzing', 'applying'].includes(r.status)) return;
-      r.status = 'awaiting-user';
-      r.reason = reason.slice(0, 1000);
-      r.version++;
-      r.history.push({ at: now(), event: 'interrupted', detail: r.reason });
-      return { taskId, recovery: r.id };
-    });
+    const { engine } = executionOf(this);
+    return domain(() => engine.recoveryInterrupted(taskId, recoveryId, reason));
   }
   // Причина отмены остаётся в журнале: отменённая находка без неё неотличима
   // от забытой. Панель отменяет без причины, ведущий агент — с ней.
   cancel(id: string, reason?: string) {
-    return this.store.change('task.cancelled', (s) => {
-      const t = task(s, id);
-      if (t.status === 'done')
-        throw new DomainError('Принятый результат нельзя отменить; создайте корректировку');
-      const r = s.runs.find((r) => r.id === t.activeRunId);
-      if (r) {
-        r.status = 'cancelled';
-        r.finishedAt = now();
-      }
-      t.status = 'cancelled';
-      t.activeRunId = undefined;
-      return reason ? { taskId: id, reason } : { taskId: id };
-    });
+    const { store, engine } = executionOf(this);
+    return domain(() =>
+      store.host('task.cancelled', (ht) => {
+        const t = task(ht.state, id);
+        if (t.status === 'done')
+          throw new DomainError('Принятый результат нельзя отменить; создайте корректировку');
+        engine.cancel(id, reason);
+        const data = reason ? { taskId: id, reason } : { taskId: id };
+        ht.journal(data);
+        return data;
+      }),
+    );
   }
   /**
    * Повтор после сбоя. Бюджет попыток защищает от задачи, которая крутится
@@ -2000,85 +1564,40 @@ export class DevContour {
     });
   }
   retry(id: string, reset?: { reason: string }) {
-    return this.store.change('task.retry', (s) => {
-      const t = task(s, id);
-      // Задача на потолке попыток стоит в ready и молча не выдаётся: диспетчер
-      // её не берёт, а повтор отказывал, потому что она не «сбой». Сброс
-      // доступен из любого состояния, кроме идущей попытки: тупик одинаков.
-      const exhaustedReady = t.attempt >= this.config.maxAttempts && !t.activeRunId;
-      if (!['failed', 'cancelled'].includes(t.status) && !exhaustedReady)
-        throw new DomainError('Повтор доступен после сбоя или отмены');
-      assertNotAccepted(s, t);
-      const spent = t.attempt;
-      // Сбрасывать нечего, пока бюджет не исчерпан: сообщать о сбросе, которого
-      // не было, значит записать в журнал неправду.
-      const exhausted = t.attempt >= this.config.maxAttempts;
-      if (exhausted) {
-        if (!reset?.reason.trim())
-          throw new DomainError(
-            'Исчерпан лимит попыток. Устраните причину и повторите со сбросом, указав его причину',
-          );
-        t.attempt = 0;
-      }
-      t.status = t.approvedDigest ? 'ready' : 'draft';
-      // Вместе с текстом отказа снимаются класс и отпечаток: пережив повтор,
-      // они решали бы судьбу следующего отказа по причине предыдущего.
-      t.failure = undefined;
-      t.failureKind = undefined;
-      t.failureFingerprint = undefined;
-      return exhausted && reset
-        ? { taskId: id, reset: { spent, reason: reset.reason.trim() } }
-        : { taskId: id };
-    });
+    const { store, engine } = executionOf(this);
+    return domain(() =>
+      store.host('task.retry', (ht) => {
+        const t = task(ht.state, id);
+        // Продуктовое условие: принятую ревизией задачу повтор не трогает.
+        assertNotAccepted(ht.state, t);
+        const exhaustedReady = t.attempt >= this.config.maxAttempts && !t.activeRunId;
+        if (!['failed', 'cancelled'].includes(t.status) && !exhaustedReady)
+          throw new DomainError('Повтор доступен после сбоя или отмены');
+        const spent = t.attempt;
+        const exhausted = t.attempt >= this.config.maxAttempts;
+        engine.retry(id, reset);
+        const data =
+          exhausted && reset
+            ? { taskId: id, reset: { spent, reason: reset.reason.trim() } }
+            : { taskId: id };
+        ht.journal(data);
+        return data;
+      }),
+    );
   }
-  expire(at = Date.now()) {
-    return this.store.change('runs.expired', (s) => {
-      const ids: string[] = [];
-      for (const r of s.runs)
-        if (r.status === 'active' && r.leaseUntil <= at) {
-          r.status = 'expired';
-          r.finishedAt = now();
-          r.error =
-            (r.error?.startsWith(HEARTBEAT_FAILED) ? r.error + '. ' : '') +
-            'Истёк срок владения. Проверьте worktree и повторите явно.';
-          // Потерянное владение — отказ окружения: исполнитель не довёл работу
-          // не потому, что не справился. Класс ставится здесь, иначе решение о
-          // починке прочитает класс прошлой попытки и починит не то.
-          r.failureKind = 'environment';
-          r.failureFingerprint = failureFingerprint('environment', r.error);
-          const t = task(s, r.taskId);
-          if (t.activeRunId === r.id) {
-            t.status = 'failed';
-            t.failure = r.error;
-            t.failureKind = r.failureKind;
-            t.failureFingerprint = r.failureFingerprint;
-            t.activeRunId = undefined;
-          }
-          ids.push(r.id);
-        }
-      return ids;
-    });
+  /** Истечение владения к моменту `at` — решение движка. */
+  expire(at?: number) {
+    const { engine } = executionOf(this);
+    return domain(() => engine.expire(at));
   }
-  adopt(id: string, owner: string) {
-    return this.store.change('run.recovered', (s) => {
-      const r = requireValue(
-        s.runs.find((r) => r.id === id),
-        'Попытка не найдена',
-      );
-      if (r.status !== 'active' || r.leaseUntil > Date.now())
-        throw new DomainError('Попытка ещё принадлежит worker');
-      r.token = randomUUID();
-      r.owner = owner;
-      r.leaseUntil = Date.now() + this.config.leaseMs;
-      return r;
-    });
+  adopt(id: string, owner: string): Run {
+    const { engine } = executionOf(this);
+    domain(() => engine.adopt(id, owner));
+    return structuredClone(this.store.read().runs.find((r) => r.id === id)!);
   }
   leader(owner: string) {
-    const acquired = this.store.change('heartbeat', (s) => {
-      if (s.leader && s.leader.owner !== owner && s.leader.leaseUntil > Date.now()) return false;
-      s.leader = { owner, leaseUntil: Date.now() + this.config.leaseMs };
-      return true;
-    });
+    const { engine } = executionOf(this);
+    const acquired = domain(() => engine.lead(owner));
     if (acquired) this.ownLeader = owner;
     return acquired;
   }

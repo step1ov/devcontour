@@ -18,7 +18,6 @@ import {
 import { budgetOverview, budgetStatus, taskBudgets, usageRecords } from '../src/core/budget.ts';
 import { abandonCalls, measuredExecute, pinLegacyCalls } from '../src/runner/usage.ts';
 import { liveCall } from '../src/core/live-calls.ts';
-import { timed } from '../src/runner/timing.ts';
 import { BOOT_ID, ownerGone, processStartedAt } from '../src/runner/live-calls.ts';
 import { workflowMetrics } from '../src/application/metrics.ts';
 import { chainBlockers } from '../src/core/work-status.ts';

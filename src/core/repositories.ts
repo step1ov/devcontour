@@ -1,3 +1,4 @@
+import { expandGateRefs } from 'devcontour-harness/contracts';
 import { type Config, type Repository, DomainError } from './model.ts';
 
 export function repositories(config: Config): Repository[] {
@@ -31,31 +32,19 @@ export function repository(config: Config, id = 'main'): Repository {
  * появления. Член, которого нет в профиле, и неизвестная группа — отказ.
  * Без области — весь профиль, как прежде.
  */
+/**
+ * Раскрытие групп gates — правило harness (`expandGateRefs`): одно на всех,
+ * без копии. Отказ — ошибка прикладного слоя с тем же текстом.
+ */
 export function expandGates(repo: Repository, refs?: string[]): string[] {
-  if (!refs?.length) return repo.gates.map((g) => g.id);
-  const out: string[] = [];
-  // Раскрытая группа уже внесла все свои gates: повторный обход общего
-  // подграфа ничего не добавил бы, а стоил бы экспоненциально.
-  const done = new Set<string>();
-  const visit = (ref: string, path: string[]) => {
-    if (ref.startsWith('@')) {
-      const name = ref.slice(1);
-      if (done.has(name)) return;
-      if (path.includes(name))
-        throw new DomainError(`Цикл в группах gates: ${[...path, name].join(' → ')}`);
-      const members = repo.gateGroups?.[name];
-      if (!members)
-        throw new DomainError(`Неизвестная группа gates компонента ${repo.id}: ${name}`);
-      for (const member of members) visit(member, [...path, name]);
-      done.add(name);
-      return;
-    }
-    if (!repo.gates.some((g) => g.id === ref))
-      throw new DomainError('Проверка вне профиля компонента: ' + ref);
-    if (!out.includes(ref)) out.push(ref);
-  };
-  for (const ref of refs) visit(ref, []);
-  return out;
+  try {
+    return expandGateRefs(
+      { id: repo.id, gates: repo.gates as never, gateGroups: repo.gateGroups },
+      refs,
+    );
+  } catch (error) {
+    throw new DomainError(error instanceof Error ? error.message : String(error));
+  }
 }
 
 /** Компонент `consumer` зависит от `provider` по `dependsOn`, прямо или транзитивно. */

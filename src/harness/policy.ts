@@ -56,6 +56,28 @@ function gate(g: Gate) {
 }
 
 /**
+ * Режим управляемых runtime. Конфигурацию с demo вне demo mode отклоняет
+ * проверка DevContour при загрузке; политика следует назначениям, которые
+ * действительно используются: управляемый runtime никогда не идёт под
+ * режимом live, и результат не выдаётся за проверку живой модели.
+ */
+function fixtureMode(config: Config) {
+  if (config.mode === 'demo') return true;
+  const bindings: { runtime: string; reviewer?: { runtime: string } }[] = [
+    config.reviewer,
+    ...Object.values(config.roles),
+    ...repositories(config).flatMap((r) => [
+      ...(r.reviewer ? [r.reviewer] : []),
+      ...Object.values(r.roles ?? {}),
+    ]),
+    ...(['code', 'plan', 'contract'] as const).flatMap((k) =>
+      config.review?.[k]?.reviewer ? [config.review[k].reviewer] : [],
+    ),
+  ];
+  return bindings.some((b) => b.runtime === 'demo' || b.reviewer?.runtime === 'demo');
+}
+
+/**
  * Правило вендора ревью: явное из конфигурации, иначе прежнее поведение —
  * другой вендор. В demo mode исполнитель и ревьюер `demo` (оба — управляемый
  * runtime) допускались и раньше: правило сохраняет это явно.
@@ -67,7 +89,7 @@ function ruleVendor(
 ) {
   return (
     explicit ??
-    (config.mode === 'demo' && reviewer.runtime === 'demo'
+    (fixtureMode(config) && reviewer.runtime === 'demo'
       ? 'same-vendor-allowed'
       : 'different-vendor')
   );
@@ -111,7 +133,7 @@ export function policyFromConfig(config: Config): ExecutionPolicy {
   };
   const raw = {
     policyVersion: 1,
-    mode: config.mode === 'demo' ? 'fixture' : 'live',
+    mode: fixtureMode(config) ? 'fixture' : 'live',
     repositories: repositories(config).map((r) => ({
       id: r.id,
       path: r.path,

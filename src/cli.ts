@@ -60,7 +60,6 @@ import { commandScope } from './runner/scope.ts';
 import { syncGit, syncPreparation } from './runner/git-sync.ts';
 import { setupDemo, exists } from './demo.ts';
 import { restoreBackup } from './runner/backup.ts';
-import { serveReviewProbes } from './runner/review-probe.ts';
 import { contractEvals } from './runner/contract-evals.ts';
 import { contractImpact } from './runner/contract-impact.ts';
 import { ContractChanges } from './runner/contract-change.ts';
@@ -80,12 +79,6 @@ const authorRuntime = () => {
   return value;
 };
 async function main() {
-  // Сервер проверок ревьюера: его запускает CLI модели на время одного ревью.
-  if (operation === 'review-probe') {
-    if (!args.includes('--spec')) throw new Error('Укажите --spec probe.json');
-    await serveReviewProbes(resolve(option('--spec', '')));
-    return;
-  }
   if (operation === 'eval-compare') {
     if (!args.includes('--baseline') || !args.includes('--candidate'))
       throw new Error('Укажите --baseline и --candidate JSON reports');

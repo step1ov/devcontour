@@ -88,7 +88,7 @@ const toml = (value: unknown): string => {
 export const probeServer = 'devcontour_probe';
 export const probeTool = 'run_check';
 /**
- * Сервер проверок ревьюера (см. review-probe.ts): команда запуска и имена
+ * Сервер проверок ревьюера (сервер проверок пакета harness): команда запуска и имена
  * переменных окружения, которые CLI передаст ему по имени.
  */
 export type ProbeServer = {

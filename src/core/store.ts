@@ -281,7 +281,7 @@ export class Store {
    * есть только событие или локальная запись с событием. Путь записи — тот же,
    * что у `change`: central — `main.events`, component — событие компонента.
    */
-  appendEvent(type: string, data: unknown) {
+  appendEvent(type: string, data: unknown, revision: 'data' | 'lease' = 'data') {
     if (!this.transaction) throw new Error('Store.appendEvent требует открытой транзакции');
     if (type === 'heartbeat') throw new Error('heartbeat не пишет событие журнала');
     const at = new Date().toISOString();
@@ -296,7 +296,9 @@ export class Store {
         data ?? null,
         this.load().state,
       );
-    this.bump('data');
+    // Событие о сроках владения (роль controller) — как heartbeat: видимые
+    // данные не меняются, растёт только счётчик сроков.
+    this.bump(revision);
     this.projectionPending = true;
     return Number(inserted.lastInsertRowid);
   }

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import type { Evidence } from '../src/core/model.ts';
 import { CheckCorpus } from '../src/core/check-store.ts';
 import { Store } from '../src/core/store.ts';
-import { DevContour } from '../src/core/service.ts';
+import { DevContour, digest } from '../src/core/service.ts';
 import { caseHooks, submitCase } from '../src/runner/checks.ts';
 import { command, git } from '../src/runner/process.ts';
 import {
@@ -260,9 +260,9 @@ test('AC13, AC19: a confirmed defect stops the next candidate at the gate before
         s.reproductions!.push({
           ...s.reproductions![0],
           id: 'r' + i,
-          key: 'k' + i,
+          key: digest('k' + i),
           input: `{"i":${i}}`,
-          inputHash: 'h' + i,
+          inputHash: digest('h' + i),
         });
       s.reproductions = s.reproductions!.slice(-500);
     });
@@ -459,7 +459,8 @@ test('AC16: an attempt cannot edit the checker or pass evidence of another check
     assert.match(edited.error ?? '', /check\.mjs/);
     // Evidence чужой версии проверок не записывается.
     f.h.retry(t.id);
-    const run = f.h.claim('test-owner')!;
+    // Выдаёт тот же controller, что вёл очередь.
+    const run = f.h.claim(f.scheduler.owner)!;
     assert.throws(
       () =>
         f.h.evidence(run.id, run.token, {
@@ -598,7 +599,7 @@ test('AC17: adoption waits for an active run, a stale owner cannot finish or rel
     assert.equal(done.hold, undefined);
     const pending = corpus.get(late.suite).pending.find((x) => x.id === late.adoption[0].id)!;
     assert.equal(pending.status, 'completed');
-    assert.match(pending.results[t.id], /уже принята/);
+    assert.match(pending.results[t.id], /уже принят/);
     const run = lastRun(f, t.id);
     for (const e of run.evidence) assert.equal(e.checks, run.checks?.effective);
 

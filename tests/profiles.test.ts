@@ -11,7 +11,7 @@ import {
   access,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { profile, resolveProfile, profilePin } from '../src/runner/packs.ts';
 import { setupProject } from '../src/runner/setup.ts';

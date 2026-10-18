@@ -13,17 +13,11 @@ import { Store } from '../src/core/store.ts';
 import { adapters, cliArguments, type AgentRequest } from '../src/runner/adapters.ts';
 import { git, command } from '../src/runner/process.ts';
 import { sandboxBlockedHosts } from '../src/runner/gates.ts';
-import {
-  junitSummary,
-  runCheck,
-  isolationBackend,
-  prepareReportPath,
-} from '../src/runner/gates.ts';
+import { junitSummary, runCheck, prepareReportPath } from '../src/runner/gates.ts';
 import { input, fixture } from './helpers.ts';
 import { acceptBoard } from '../src/runner/agent-control.ts';
 import { ProjectMemory } from '../src/application/memory.ts';
 import { repositories } from '../src/core/repositories.ts';
-import { continuableDraft } from '../src/core/reuse.ts';
 import { updateBase } from '../src/runner/base-update.ts';
 import { workflowMetrics } from '../src/application/metrics.ts';
 import { taskOwner } from '../src/core/sync-state.ts';
@@ -1078,38 +1072,9 @@ const s=net.createServer(c=>c.end('pong')).listen(0,'127.0.0.1',()=>{
     await f.cleanup();
   }
 });
-test('Без механизма песочницы проверка не запускается; снять изоляцию можно только явно', async () => {
-  const f = await runtimeFixture();
-  const marker = join(f.root, 'host-write.txt');
-  const original = isolationBackend.check;
-  try {
-    assert.equal(f.h.config.isolation.mode, 'os', 'по умолчанию изоляция включена');
-    f.h.config.gates[0].command = [
-      process.execPath,
-      '-e',
-      `require('fs').writeFileSync(${JSON.stringify(marker)},'x')`,
-    ];
-    // Механизма нет: проверка отказывает, не запуская команду на хосте.
-    isolationBackend.check = () => ({ ok: false, detail: 'bubblewrap не найден' });
-    const scheduler = new Scheduler(f.h, f.root);
-    f.h.pause(false);
-    await scheduler.drain();
-    const failed = f.store.read().tasks.find((t) => t.status === 'failed')!;
-    assert.match(failed.failure!, /Изоляция проверок недоступна: bubblewrap не найден/);
-    assert.equal(existsSync(marker), false, 'команда не запускалась');
-
-    // Явный выбор none — обычный процесс хоста, без скрытого ограничения.
-    isolationBackend.check = original;
-    f.h.config.isolation.mode = 'none';
-    f.h.retry(failed.id);
-    f.h.pause(false);
-    await scheduler.drain();
-    assert.equal(existsSync(marker), true);
-  } finally {
-    isolationBackend.check = original;
-    await f.cleanup();
-  }
-});
+// «Без механизма песочницы проверка не запускается; снять изоляцию можно
+// только явно» — гарантия runner harness: tests/isolation.test.ts пакета (T29),
+// отказ без запуска команды и явный режим none.
 test('Путь отчёта через symlink отвергается до любой записи снаружи', async () => {
   // Каталоги отчёта создавались рекурсивно, а граница проверялась после:
   // symlink внутри worktree уводил создание каталога наружу до отказа.
@@ -1501,12 +1466,19 @@ test('Отказ сети песочницы узнаётся по выводу 
 test('Проверка, которой песочница закрыла сеть, — отказ окружения, а не провал кода', async () => {
   const f = await runtimeFixture();
   try {
-    f.h.config.gates[0].command = [
+    const networkCommand = [
       'sh',
       '-c',
       'echo "GET https://registry.npmjs.org/-/ping"; curl -sS -o /dev/null https://registry.npmjs.org/-/ping',
     ];
-    f.h.config.gates[0].report = undefined;
+    // Проверка с сетью — отдельная проверка вида check рядом с test gate профиля.
+    f.h.config.gates.push({
+      ...f.h.config.gates[0],
+      id: 'network-check',
+      kind: 'check',
+      report: undefined,
+      command: networkCommand,
+    });
     f.h.pause(false);
     await new Scheduler(f.h, f.root).drain();
     const run = f.store.read().runs.at(-1)!;
@@ -1575,11 +1547,8 @@ test('Попытка, оборванная по времени, оставляе
       applied: true,
       files: [draftFile],
     });
-    // Черновик под прежнюю постановку не выбрасывается, но помечается: его
-    // сверяют с новой.
-    const changed = { ...f.current(), approvedDigest: 'другая постановка' };
-    const state = f.store.read();
-    assert.equal(continuableDraft(state, changed, second.id)?.respecified, true);
+    // Черновик под прежнюю постановку не выбрасывается, но помечается — правило
+    // reuse harness (tests/reuse.test.ts пакета: «переутверждение помечает»).
   } finally {
     await f.cleanup();
   }

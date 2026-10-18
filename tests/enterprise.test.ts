@@ -7,7 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { config, input } from './helpers.ts';
-import { configSchema, repositorySchema, type Config, type Run } from '../src/core/model.ts';
+import { repositorySchema, type Run } from '../src/core/model.ts';
 import { environmentSchema, lifecycleSchema, toolProfileSchema } from '../src/core/integrations.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour, specDigest } from '../src/core/service.ts';
@@ -24,7 +24,7 @@ import { adapters, cliArguments, type AgentRequest } from '../src/runner/adapter
 import { claudeMcp, codexTools } from '../src/runner/tools.ts';
 import { ResourcePool, resourceDatabase, withResources } from '../src/runner/resources.ts';
 import { snapshotDependencies, assertDependencies } from '../src/runner/dependencies.ts';
-import { DeliveryRunner, GitLabAdapter, GitHubAdapter } from '../src/runner/forge.ts';
+import { DeliveryRunner } from '../src/runner/forge.ts';
 import { attachJournal } from '../src/runner/journal.ts';
 import { doctor } from '../src/runner/doctor.ts';
 import { importKnowledge } from '../src/runner/knowledge.ts';

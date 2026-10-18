@@ -56,6 +56,12 @@ export interface ProjectionOptions {
    * (выбор конфигурации); нет — только названные.
    */
   contextPacks?(task: Task): string[];
+  /**
+   * Текущий digest контракта. Неутверждённая задача ещё не закрепила
+   * редакцию контракта: её поручение ссылается на текущую — ту, что закрепит
+   * утверждение. Утверждённая задача без закреплённого digest — нарушение.
+   */
+  contractDigest?(id: string): string | undefined;
 }
 
 /** Граф задачи, не входящей ни в одну доску (возможно только у созданных движком). */
@@ -125,7 +131,9 @@ export function orderOf(task: Task, options?: ProjectionOptions): WorkOrder {
       ? options.roleScope(task)!
       : ['.'];
   const contracts = task.contracts.map((id) => {
-    const digest = task.contractDigests?.[id];
+    const digest =
+      task.contractDigests?.[id] ??
+      (task.approvedDigest ? undefined : options?.contractDigest?.(id));
     if (!digest) throw invalid('Задача ' + task.id, `нет закреплённого digest контракта ${id}`);
     return { id, digest };
   });
@@ -244,7 +252,13 @@ export function graphOf(
   if (!revision) return undefined;
   const tasks = revision.taskIds
     .map((id) => state.tasks.find((t) => t.id === id))
-    .filter((t): t is Task => !!t && t.status !== 'draft');
+    // Черновик ещё не выпущен; отменённая до утверждения задача не выпускалась
+    // вовсе. Утверждение DevContour — у задач: граф согласован, когда
+    // утверждены все выпущенные.
+    .filter(
+      (t): t is Task =>
+        !!t && t.status !== 'draft' && !(t.status === 'cancelled' && !t.approvedDigest),
+    );
   if (!tasks.length) return undefined;
   const graph = {
     apiVersion: API_VERSION,
@@ -256,11 +270,17 @@ export function graphOf(
   const digest = workGraphDigest(graph);
   // Утверждение задачи — её утверждённая постановка; запись `approval` (кто
   // утвердил) есть не у всех прежних задач и признаком не служит.
-  const approved = tasks.every((t) => t.approvedDigest && t.approvedAt);
-  const at = tasks
-    .map((t) => t.approvedAt ?? '')
-    .sort()
-    .at(-1);
+  // Завершённые задачи (в том числе принятые другим клоном и полученные
+  // синхронизацией) уже не выдаются: согласование нужно тем, что ещё в работе.
+  const open = tasks.filter((t) => t.status !== 'done' && t.status !== 'cancelled');
+  // Признак утверждения — утверждённая постановка; время записано не у всех
+  // (задачи, полученные синхронизацией), тогда — время ревизии.
+  const approved = open.every((t) => t.approvedDigest);
+  const at =
+    (open.length ? open : tasks)
+      .map((t) => t.approvedAt ?? '')
+      .sort()
+      .at(-1) || revision.createdAt;
   return parsed(
     graphStateSchema,
     defined({
@@ -271,7 +291,9 @@ export function graphOf(
       approval:
         approved && at
           ? {
-              actor: tasks.every((t) => t.approval?.actor === 'agent') ? 'agent' : 'operator',
+              actor: (open.length ? open : tasks).every((t) => t.approval?.actor === 'agent')
+                ? 'agent'
+                : 'operator',
               digest,
               at,
             }

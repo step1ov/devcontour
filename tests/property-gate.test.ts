@@ -100,6 +100,33 @@ const variants = {
 `,
 } as const;
 
+/**
+ * Конфигурация с генеративной проверкой без JUnit: такая проверка — вида
+ * check (test gate без отчёта политика harness не принимает), а профилю
+ * нужен test gate с JUnit — простой отчёт об одном случае.
+ */
+function withUnit(raw: Record<string, unknown>) {
+  const config = configSchema.parse(raw);
+  if (config.gates.some((g) => g.kind === 'test' && g.report)) return config;
+  config.gates = [
+    ...config.gates.map((g) =>
+      g.kind === 'test' && !g.report ? { ...g, kind: 'check' as const } : g,
+    ),
+    {
+      id: 'unit',
+      kind: 'test',
+      command: [
+        process.execPath,
+        '-e',
+        "require('fs').mkdirSync('.reports',{recursive:true});require('fs').writeFileSync('.reports/unit.xml','<testsuite tests=\"1\" failures=\"0\"><testcase name=\"unit\"/></testsuite>')",
+      ],
+      timeoutMs: 20000,
+      report: { type: 'junit', path: '.reports/unit.xml' },
+    },
+  ];
+  return config;
+}
+
 async function project() {
   const root = await mkdtemp(join(tmpdir(), 'devcontour-property-'));
   const repo = join(root, 'repo');
@@ -192,7 +219,7 @@ test('The controller seeds the gate, keeps the property report on failure and ti
     await git(p.repo, 'init', '-q', '-b', 'main');
     await git(p.repo, 'add', '.');
     await git(p.repo, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'project');
-    const config = configSchema.parse({
+    const config = withUnit({
       version: 1,
       name: 'Property gate',
       repository: p.repo,
@@ -370,7 +397,7 @@ writeFileSync(process.env.DEVCONTOUR_PROPERTY_REPORT, JSON.stringify({ version: 
       timeoutMs: 60000,
       property: { path: '.reports/property.json' },
     });
-    const config = configSchema.parse({
+    const config = withUnit({
       version: 1,
       name: 'Lying gate',
       repository: p.repo,
@@ -414,7 +441,10 @@ writeFileSync(process.env.DEVCONTOUR_PROPERTY_REPORT, JSON.stringify({ version: 
     assert.equal(violated.exitCode, 0);
     assert.equal(violated.passed, false);
     assert.match(violated.summary, /свойство knapsack-optimal нарушено/);
-    h.config.gates = [gate('silent.mjs')];
+    h.config.gates = [
+      { ...gate('silent.mjs'), kind: 'check' as const },
+      ...h.config.gates.filter((g) => g.id === 'unit'),
+    ];
     const silent = await evidence('Silent');
     assert.equal(silent.exitCode, 0);
     assert.equal(silent.passed, false);
@@ -456,7 +486,7 @@ console.log('REPORT=' + process.env.DEVCONTOUR_PROPERTY_REPORT + ' SWAPPED=' + s
     await git(p.repo, 'init', '-q', '-b', 'main');
     await git(p.repo, 'add', '.');
     await git(p.repo, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'project');
-    const config = configSchema.parse({
+    const config = withUnit({
       version: 1,
       name: 'Swap gate',
       repository: p.repo,
@@ -579,7 +609,7 @@ for (const [name, script, problem] of [
       await git(p.repo, 'init', '-q', '-b', 'main');
       await git(p.repo, 'add', '.');
       await git(p.repo, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'project');
-      const config = configSchema.parse({
+      const config = withUnit({
         version: 1,
         name: 'Vanishing report',
         repository: p.repo,
@@ -650,7 +680,7 @@ for (const [name, script, problem] of [
     } finally {
       delete process.env.DEVCONTOUR_TEST_PROPERTY_SECRET;
       // Оставленный проверкой каталог убирается вручную: права вернуть.
-      if (leftover) await removeControllerDir(dirname(leftover), 'dc-property-', SECRET);
+      if (leftover) await removeControllerDir(dirname(leftover), 'harness-property-', SECRET);
       await scheduler?.stop();
       store?.close();
       await rm(p.root, { recursive: true, force: true });
@@ -704,7 +734,7 @@ for (const [name, script, mode] of [
         await git(p.repo, 'init', '-q', '-b', 'main');
         await git(p.repo, 'add', '.');
         await git(p.repo, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'project');
-        const config = configSchema.parse({
+        const config = withUnit({
           version: 1,
           name: 'Leaking failure',
           repository: p.repo,
@@ -823,7 +853,7 @@ async function runWith(
   await git(p.repo, 'init', '-q', '-b', 'main');
   await git(p.repo, 'add', '.');
   await git(p.repo, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'project');
-  const config = configSchema.parse({
+  const config = withUnit({
     version: 1,
     name: 'Masked fields',
     repository: p.repo,
@@ -951,7 +981,7 @@ test('A missing secret does not unmask the secrets that are set', async () => {
       command: ['node', 'check.mjs', known],
       timeoutMs: 20000,
     };
-    const config = configSchema.parse({
+    const config = withUnit({
       version: 1,
       name: 'Missing secret',
       repository: p.repo,

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { complete, fixture, input } from './helpers.ts';
+import { complete, fixture, input, MERGED } from './helpers.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
 import { Store } from '../src/core/store.ts';
@@ -236,7 +236,7 @@ test('Отмена из принятой ревизии не останавли�
     f.h.approve(boardId);
     f.h.cancel(dropped.id, 'Решено в контракте');
     complete(f.h, kept.id);
-    f.h.accept(boardId, 'merged');
+    f.h.accept(boardId, MERGED);
     f.h.importPlan(plan('Stage two', ['next']), boardId);
     const flow = new LeadWorkflow(f.h);
     const job = flow.start({ kind: 'board', id: boardId, authorRuntime: 'codex' });
@@ -269,7 +269,7 @@ test('ChangeSet не требует done от отменённой задачи 
     f.h.approve(b.id);
     f.h.cancel(dropped.id, 'Решено в контракте');
     complete(f.h, kept.id);
-    f.h.accept(b.id, 'merged');
+    f.h.accept(b.id, MERGED);
     const snapshot = changeSnapshot(f.store.read(), {
       boardIds: [b.id],
     } as Parameters<typeof changeSnapshot>[1]);

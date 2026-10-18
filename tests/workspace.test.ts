@@ -5,7 +5,7 @@ import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { config, input, fixture, complete } from './helpers.ts';
+import { config, input, fixture, complete, MERGED, CANDIDATE } from './helpers.ts';
 import { repositorySchema } from '../src/core/model.ts';
 import { DevContour, specDigest } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
@@ -651,7 +651,8 @@ test('A task proves itself with its own gates; the rest of the profile stays req
     f.h.pause(false);
     const claimed: NonNullable<ReturnType<typeof f.h.claim>>[] = [];
     for (let i = 0; i < 4; i++) {
-      const run = f.h.claim('worker-' + i);
+      // Один controller выдаёт обе задачи.
+      const run = f.h.claim('worker');
       if (!run) break;
       claimed.push(run);
     }
@@ -704,11 +705,11 @@ function completeScoped(h: DevContour, id: string) {
   const run = h.claim('test')!;
   assert.equal(run.taskId, id);
   h.phase(run.id, run.token, 'integrating', {
-    candidateSha: 'candidate',
-    integrationSha: 'merged',
+    candidateSha: CANDIDATE,
+    integrationSha: MERGED,
   });
   for (const phase of ['candidate', 'integration'] as const) {
-    const sha = phase === 'candidate' ? 'candidate' : 'merged';
+    const sha = phase === 'candidate' ? CANDIDATE : MERGED;
     for (const gate of [...run.requiredGates!, 'independent-review'])
       h.evidence(run.id, run.token, {
         kind: gate === 'independent-review' ? 'review' : 'test',
@@ -719,11 +720,11 @@ function completeScoped(h: DevContour, id: string) {
         command: ['fixture'],
         exitCode: 0,
         log: 'fixture',
-        digest: 'fixture',
+        digest: 'e'.repeat(64),
         summary: 'Scoped fixture',
       });
   }
-  h.finish(run.id, run.token, 'merged');
+  h.finish(run.id, run.token, MERGED);
 }
 
 test('G04: board acceptance requires every profile gate to have passed integration in some task of the board', () => {
@@ -745,14 +746,14 @@ test('G04: board acceptance requires every profile gate to have passed integrati
     completeScoped(f.h, two.id);
     // nightly не прошёл ни в одной задаче: приёмка называет его.
     assert.throws(
-      () => f.h.accept(b.id, 'merged'),
+      () => f.h.accept(b.id, MERGED),
       /Полный набор проверок не пройден: main: nightly/,
     );
     // Задача, чья область включает непокрытый gate, закрывает пробел.
     const three = f.h.addTask(b.id, { ...input('Nightly part'), gates: ['nightly'] });
     f.h.approve(b.id, [three.id]);
     completeScoped(f.h, three.id);
-    assert.doesNotThrow(() => f.h.accept(b.id, 'merged'));
+    assert.doesNotThrow(() => f.h.accept(b.id, MERGED));
   } finally {
     f.cleanup();
   }
@@ -774,9 +775,6 @@ test('G01: a named gate group is referenced once, expands into an explicit list,
     f.h.config.gateGroups = {
       regression: ['typecheck', '@core'],
       core: ['unit', 'engine'],
-      loop: ['@loop2'],
-      loop2: ['@loop'],
-      foreign: ['unit', 'absent'],
     };
     const b = f.h.createBoard('Grouped proof');
     // Группа раскрывается в явный список, записанный в попытке.
@@ -788,7 +786,14 @@ test('G01: a named gate group is referenced once, expands into an explicit list,
     assert.deepEqual(run.requiredGates, ['typecheck', 'unit', 'engine']);
     // Ничего не подключается неявно: nightly не входит ни в одну группу задачи.
     assert.ok(!run.requiredGates.includes('nightly'));
-    // Цикл, неизвестная группа и член вне профиля — отказ.
+    // Цикл, неизвестная группа и член вне профиля — отказ. Политика исполнения
+    // такие определения не принимает вовсе; задача на них не создаётся.
+    f.h.config.gateGroups = {
+      ...f.h.config.gateGroups,
+      loop: ['@loop2'],
+      loop2: ['@loop'],
+      foreign: ['unit', 'absent'],
+    };
     assert.throws(
       () => f.h.addTask(b.id, { ...input('Loop'), gates: ['@loop'] }),
       /Цикл в группах/,
@@ -859,7 +864,7 @@ test('Этап локальной доски принимает только з�
     f.store.change('test.done', (s) => {
       const x = s.tasks.find((x) => x.id === t.id)!;
       x.status = 'done';
-      x.resultSha = 'merged';
+      x.resultSha = MERGED;
       // Приёмка доски требует собственного evidence каждого gate профиля.
       s.runs.push({
         id: 'R-library',
@@ -869,14 +874,14 @@ test('Этап локальной доски принимает только з�
           {
             kind: 'test',
             phase: 'integration',
-            sha: 'merged',
+            sha: MERGED,
             gate: 'test-library',
             passed: true,
           },
         ],
       } as unknown as (typeof s.runs)[number]);
     });
-    f.h.accept(b.id, 'merged');
+    f.h.accept(b.id, MERGED);
     const before = f.store.read();
     assert.throws(
       () =>

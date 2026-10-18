@@ -16,11 +16,11 @@ const lint = async (file: string, extra: string) => {
 };
 
 test('Домен не импортирует runner, а интерфейс — модули Node', async () => {
-  const core = await lint('src/core/reuse.ts', "import { git } from '../runner/process.ts';\n");
+  const core = await lint('src/core/graph.ts', "import { git } from '../runner/process.ts';\n");
   assert.equal(core.length, 1);
   assert.equal(core[0].severity, 2);
   assert.match(core[0].message, /домен/);
-  const child = await lint('src/core/reuse.ts', "import { spawn } from 'node:child_process';\n");
+  const child = await lint('src/core/graph.ts', "import { spawn } from 'node:child_process';\n");
   assert.equal(child.length, 1);
   const web = await lint('src/web/AuthorOverview.tsx', "import { readFileSync } from 'node:fs';\n");
   assert.equal(web.length, 1);
@@ -51,7 +51,7 @@ test('harness — только из корня пакета или /contracts, �
   assert.match(sibling[0].message, /соседний checkout/);
   // Тот же запрет действует и в слоях со своими правилами импорта.
   const core = await lint(
-    'src/core/reuse.ts',
+    'src/core/graph.ts',
     "import { Engine } from 'devcontour-harness/lib/index.js';\n",
   );
   assert.equal(core.length, 1);
@@ -128,4 +128,27 @@ test('S3.1: в исходниках нет глубоких импортов har
   };
   walk('src');
   assert.deepEqual(offending, []);
+});
+
+test('Код панели не загружает исполнение harness: из браузерного кода доступен только devcontour-harness/contracts', () => {
+  // Корень пакета при загрузке читает файлы (версию пакета) — в браузере это
+  // падение всей панели. Договоры пакета чистые.
+  const seen = new Set<string>();
+  const visit = (file: string) => {
+    if (seen.has(file)) return;
+    seen.add(file);
+    const text = readFileSync(file, 'utf8');
+    for (const m of text.matchAll(/^(?!import type)[^\n]*from '((?:\.{1,2}|@)\/[^']+)'/gm)) {
+      const ref = m[1];
+      const path = ref.startsWith('@/') ? join('src/web', ref.slice(2)) : join(dirname(file), ref);
+      if (/\.(ts|tsx)$/.test(path)) visit(path);
+    }
+  };
+  for (const entry of readdirSync('src/web', { recursive: true }) as string[])
+    if (/\.(ts|tsx)$/.test(entry)) visit(join('src/web', entry));
+  const root = [...seen].filter((f) =>
+    /^(?!import type)[^\n]*from 'devcontour-harness'/m.test(readFileSync(f, 'utf8')),
+  );
+  assert.deepEqual(root, []);
+  assert.ok(seen.has('src/core/model.ts'), 'обход дошёл до модели предметной области');
 });

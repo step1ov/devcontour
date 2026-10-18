@@ -1,6 +1,7 @@
+import { caseHooks } from 'devcontour-harness';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { arch, cpus, homedir, platform, tmpdir } from 'node:os';
+import { arch, cpus, platform, tmpdir } from 'node:os';
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { z } from 'zod';
@@ -237,8 +238,11 @@ export const caseInput = z.strictObject({
 });
 export type CaseRequest = z.input<typeof caseInput>;
 
-/** Точка после записи версии и до принятия: тест моделирует в ней сбой. */
-export const caseHooks = { afterRecord: (): void => undefined };
+/**
+ * Точка после записи версии и до принятия: тест моделирует в ней сбой. Она
+ * общая с подтверждением пакета harness — одна подмена обрывает любой путь.
+ */
+export { caseHooks };
 
 const caseResult = z.object({
   property: z.string(),

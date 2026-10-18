@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { config, fixture, input } from './helpers.ts';
 import { orderedGates, validateWorkflow } from '../src/core/workflow.ts';
-import { BlockedError, taskInput, type Contract, type Task } from '../src/core/model.ts';
+import { BlockedError, taskInput, type Contract } from '../src/core/model.ts';
 import { specDigest, DevContour } from '../src/core/service.ts';
 import { ResourcePool, resourceKey, withResources } from '../src/runner/resources.ts';
 import { pinContext, taskContext } from '../src/runner/context.ts';
@@ -210,7 +210,8 @@ test('Pinned role/library documents are selected reproducibly, delivered to writ
         'utf8',
       ),
     );
-    assert.match(snapshot.text, /approved domain/);
+    // Снимок контекста попытки (форма harness): закреплённые файлы пакета с содержимым.
+    assert.match(JSON.stringify(snapshot), /approved domain/);
   } finally {
     await f.cleanup();
   }
@@ -311,11 +312,11 @@ test('Ordered codegen runs from its cwd before a real test in candidate and inte
     await mkdir(join(f.c.repository, 'tools'));
     await writeFile(
       join(f.c.repository, 'tools/generate.mjs'),
-      "import {writeFileSync} from 'node:fs'; writeFileSync('../generated-marker', 'ready');",
+      "import { writeFileSync } from 'node:fs'; writeFileSync('../generated-marker', 'ready');",
     );
     await writeFile(
       join(f.c.repository, 'check-marker.mjs'),
-      "import {readFileSync,writeFileSync} from 'node:fs'; if(JSON.parse(process.env.DEVCONTOUR_RESOURCES_JSON)[0].value!=='SIMULATOR-A') process.exit(2); if(readFileSync('generated-marker','utf8')!=='ready') process.exit(1); writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase name=\"generated\"/></testsuite>');",
+      "import { readFileSync, writeFileSync } from 'node:fs'; if(JSON.parse(process.env.DEVCONTOUR_RESOURCES_JSON)[0].value!=='SIMULATOR-A') process.exit(2); if(readFileSync('generated-marker','utf8')!=='ready') process.exit(1); writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase name=\"generated\"/></testsuite>');",
     );
     await git(f.c.repository, 'add', 'tools', 'check-marker.mjs');
     await git(f.c.repository, 'commit', '-m', 'codegen fixture');

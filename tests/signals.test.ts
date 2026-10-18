@@ -6,7 +6,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { SignalInbox } from '../src/core/signals.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
-import { fixture, config, input, complete } from './helpers.ts';
+import { fixture, config, input, complete, MERGED } from './helpers.ts';
 
 const observation = (changes = {}) => ({
   source: 'corporate-ci',
@@ -64,7 +64,7 @@ test('An incident on an accepted board creates a correction and retains its snap
       task = f.h.addTask(b.id, input());
     f.h.approve(b.id);
     complete(f.h, task.id);
-    f.h.accept(b.id, 'merged');
+    f.h.accept(b.id, MERGED);
     const snapshot = f.store.read().boards[0].revisions[0].snapshot!.digest;
     const inbox = new SignalInbox(f.h);
     const result = inbox.ingest(observation({ boardId: b.id, roots: [task.id] }));

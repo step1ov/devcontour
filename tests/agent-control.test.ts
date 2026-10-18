@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile, mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { complete, fixture, input } from './helpers.ts';
+import { complete, fixture, input, MERGED } from './helpers.ts';
 import cp, { execFileSync } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -236,7 +236,7 @@ test('Ревью этапа видит его цель и новые задач�
     assert.match(firstPrompts[0], /reviewed before/);
     const one = f.store.read().tasks[0];
     complete(f.h, one.id);
-    f.h.accept(boardId, 'merged');
+    f.h.accept(boardId, MERGED);
     f.h.importPlan(plan('Stage two', 'two', 'Second stage body text', [one.id]), boardId);
     const prompts: string[] = [];
     const proposals: Record<string, unknown>[] = [];
@@ -264,7 +264,7 @@ test('Ревью этапа видит его цель и новые задач�
       ['Task two'],
     );
     assert.deepEqual(proposal.acceptedEarlier, [
-      { id: one.id, title: 'Task one', status: 'done', resultSha: 'merged' },
+      { id: one.id, title: 'Task one', status: 'done', resultSha: MERGED },
     ]);
     assert.doesNotMatch(prompts[0], /First stage body text/);
     assert.doesNotMatch(prompts[0], /reviewed before/, 'находки плана ревизии 1 не переносятся');
@@ -292,7 +292,7 @@ test('Задача принятой ревизии не возвращается
     f.h.approve(boardId);
     f.h.cancel(dropped.id, 'Отложено');
     complete(f.h, kept.id);
-    f.h.accept(boardId, 'merged');
+    f.h.accept(boardId, MERGED);
     f.h.importPlan(
       {
         title: 'Stage two',
@@ -509,7 +509,7 @@ test('Смена цели этапа во время ревью отменяет
     const { boardId } = f.h.importPlan(plan('Release', 'one'));
     f.h.approve(boardId);
     complete(f.h, f.store.read().tasks[0].id);
-    f.h.accept(boardId, 'merged');
+    f.h.accept(boardId, MERGED);
     f.h.importPlan(plan('Stage two', 'two'), boardId);
     await assert.rejects(
       reviewPlan(

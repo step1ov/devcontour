@@ -983,7 +983,8 @@ export class DomainError extends Error {
  * попыток сгорает на неполадках контура, и задача блокируется, ни разу не
  * дойдя до исполнителя.
  */
-export class BlockedError extends Error {}
+/** Отказ окружения до начала работы: класс отказа harness, попытка не засчитывается. */
+export { BlockedError } from 'devcontour-harness/contracts';
 
 export function requireValue<T>(value: T | undefined, message: string): T {
   if (value === undefined) throw new DomainError(message, 404);
