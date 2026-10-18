@@ -1,12 +1,11 @@
-import { measuredExecute } from './usage.ts';
+import { technicalReview } from 'devcontour-harness';
+import { reviewExecutionOf, toDomain } from '../harness/execution.ts';
+import { runtimeAdapters } from '../harness/adapters.ts';
 import { carriedTaskIds } from '../core/work-status.ts';
-import { unobservedReview } from '../core/review.ts';
 import { boardOwner } from '../core/sync-state.ts';
-import { toolProfileFor, agentEnvironment } from './tools.ts';
 import { mkdir, writeFile, readFile, realpath } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
-import { isolation } from './isolation.ts';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
   DevContour,
@@ -19,15 +18,9 @@ import {
   scopeDigest,
 } from '../core/service.ts';
 import { blobBytes, pinArtifacts } from './contract-artifacts.ts';
-import {
-  type Approval,
-  type ContractAttempt,
-  type Task,
-  DomainError,
-  relativePath,
-} from '../core/model.ts';
-import { adapters, reviewResult, type AgentAdapter } from './adapters.ts';
-import { repositories, repository, declaredRoles } from '../core/repositories.ts';
+import { type Approval, type ContractAttempt, DomainError, relativePath } from '../core/model.ts';
+import { adapters, type AgentAdapter } from './adapters.ts';
+import { repositories, repository } from '../core/repositories.ts';
 import { git } from './process.ts';
 import { assertRequirementProof } from './requirements.ts';
 import { checkDeclaration, declarationProblems, type CheckDeclaration } from '../core/checks.ts';
@@ -71,23 +64,6 @@ function recordContractAttempt(h: DevContour, attempt: ContractAttempt) {
     s.contractAttempts = [...(s.contractAttempts ?? []), attempt].slice(-MAX_CONTRACT_ATTEMPTS);
   });
 }
-// Ревью каждой попытки читало предложение с нуля: прошлые находки ему не
-// показывали. Поэтому автор не видел, что закрыто, а что вернулось, а рецензент
-// мог заново поднять то, что уже поправлено, или противоречить прежнему совету.
-// Передаём предыдущие находки и просим отметить их состояние.
-function previousFindings(h: DevContour, subject: string, title: string) {
-  const attempts = (h.store.read().contractAttempts ?? []).filter(
-    (a) => a.subject === subject && a.title === title,
-  );
-  const last = attempts.at(-1);
-  if (!last) return undefined;
-  return {
-    attempt: attempts.length,
-    summary: last.summary,
-    findings: last.findings.map((f) => (f.rule ? `[${f.rule}] ${f.message}` : f.message)),
-  };
-}
-
 /** Класс находки ревью контракта: обязательство невыполнимо или неизмеримо. */
 export const FEASIBILITY = 'feasibility';
 /** Класс находки: обязательство нечем независимо проверить. */
@@ -121,6 +97,32 @@ const feasibilityReview = [
 const acceptabilityReview = [
   'Only the tasks listed in "approving" are approved by this review; the other tasks of the revision are shown as context, do not count them as missing and do not approve them. Assess independent acceptability of every task. A task must be acceptable without the result of a not-yet-accepted downstream task of the graph. Each task lists "properties": the check-contract obligations it must satisfy now, selected from a shared check file by property id; a shared test file is fine when the selection is exact, and a new function may legitimately have a red test on the current base. Reject, with rule "acceptability", a task whose properties, gates or requirement test ids need behaviour that a later task delivers, or that references properties no contract declares.',
 ];
+/**
+ * Предмет ревью в истории harness. План — доска; контракт до регистрации ID
+ * не имеет — предмет определяют его заголовок и владелец, как и прежде.
+ */
+function reviewSubject(
+  kind: 'plan' | 'contract',
+  title: string,
+  repositoryId?: string,
+  subjectId?: string,
+) {
+  if (kind === 'plan' && subjectId) return subjectId;
+  return (
+    'contract-' +
+    createHash('sha256')
+      .update(JSON.stringify([title, repositoryId ?? null]))
+      .digest('hex')
+      .slice(0, 24)
+  );
+}
+
+/**
+ * Раунд технического ревью плана или контракта — `technicalReview` harness:
+ * выбор reviewer по правилу вендора политики, вызов под бюджетом, история
+ * находок с состоянием каждой прежней. Здесь — только продуктовая часть:
+ * разделы запроса, рабочая копия и продуктовая запись согласования.
+ */
 async function review(
   h: DevContour,
   root: string,
@@ -134,28 +136,20 @@ async function review(
 ): Promise<Approval> {
   if (h.config.mode !== 'local')
     throw new DomainError('AI-согласование доступно только для local mode');
-  const reviewer = author === 'codex' ? 'claude' : 'codex';
-  if (runtimes[reviewer].name !== reviewer)
-    throw new DomainError('Неверный runtime независимого reviewer');
+  const kind = subject === 'task plan' ? 'plan' : 'contract';
+  const title = (proposal as { title?: string }).title ?? subject;
   const artifact = join(root, 'decisions', randomUUID());
   await mkdir(artifact, { recursive: true });
-  const previous = previousFindings(h, subject, (proposal as { title?: string }).title ?? subject);
-  const prompt = [
-    `Independently review this ${subject}. The author runtime is ${author}; you are ${reviewer}.`,
+  const instructions = [
+    `Independently review this ${subject}. The author runtime is ${author}.`,
     'Read repo AGENTS.md and docs/spec.md (or the specification referenced in the proposal). Do not edit files, approve work yourself, or run implementation agents.',
     'Reject contradictions with requirements, unclear public interfaces, missing error/UI states, weak acceptance criteria, changes to scope or test policy that conceal failures. A proposal is not proof of implemented functionality.',
     'For a plan, check dependencies, the first complete user scenario, requirement references, required real tests, and agreed API/design contracts. For architecture, assess the chosen stack and bootstrap verification evidence.',
     'For plans, check writePaths, selected library contextPacks, device resources, consumer verification and separation of proposed discoveries from validated knowledge. Findings should include rule, consequence and evidence; do not invent violations to fill the report.',
     'Declared context packs: ' + JSON.stringify(h.config.contextPacks),
-    ...(subject.startsWith('contract') ? [...feasibilityReview, ...verifiabilityReview] : []),
-    ...(subject === 'task plan' ? acceptabilityReview : []),
+    ...(kind === 'contract' ? [...feasibilityReview, ...verifiabilityReview] : []),
+    ...(kind === 'plan' ? acceptabilityReview : []),
     'Return approved=false and concrete blocking findings when revision is needed. Routine technical choices within the specification do not need human approval.',
-    ...(previous
-      ? [
-          'This proposal has been reviewed before. Previous findings follow. For each, state in your summary whether it is now resolved, still open, or superseded, before raising anything new. Do not re-raise a finding that the current proposal addresses, and do not contradict earlier guidance without saying why.',
-          JSON.stringify(previous, null, 2),
-        ]
-      : []),
     ...(checkout
       ? [
           `Your working directory is a read-only checkout of the integration branch ${checkout.ref} at ${checkout.sha}. Tasks of this plan branch from it; the operator's own checkout may lag behind and is not the base.`,
@@ -166,78 +160,72 @@ async function review(
         repositories(h.config).map(({ id, name, kind, path }) => ({ id, name, kind, path })),
       ),
     JSON.stringify(proposal, null, 2),
-  ].join('\n\n');
+  ];
   await writeFile(join(artifact, 'proposal.json'), JSON.stringify(proposal, null, 2) + '\n');
-  await writeFile(join(artifact, 'prompt.txt'), prompt);
-  // Ревью читает архитектуру, но роль architect не обязана существовать:
-  // конфигурация вправе объявить только свои. Берётся объявленная.
-  const declared = declaredRoles(h.config, repositoryId ?? defaultOwner(h));
-  const reviewRole = declared.includes('architect') ? 'architect' : declared[0];
-  const toolProfile = toolProfileFor(h.config, reviewer, reviewRole, true);
-  const result = await measuredExecute(
-    h,
-    runtimes[reviewer],
+  const { engine } = reviewExecutionOf(h);
+  const plan = kind === 'plan' ? (proposal as { tasks?: { id?: string }[] }) : undefined;
+  const record = await technicalReview(
+    engine,
+    engine.policy,
+    runtimeAdapters(h, engine.policy, runtimes),
     {
-      toolProfile,
-      execution: agentEnvironment(h.config, toolProfile),
+      kind,
+      subject: reviewSubject(kind, title, repositoryId, subjectId),
+      digest: digest(proposal),
+      author,
+      instructions,
+      ...(repositoryId ? { repositoryId } : {}),
       cwd: checkout?.path ?? h.config.repository,
       artifactDir: artifact,
-      prompt,
-      review: true,
-      // Ревью идёт прямо в основном checkout: shell ревьюера пишет никуда,
-      // а база и журналы контура закрыты даже тогда, когда лежат внутри
+      // База и журналы контура закрыты reviewer, даже когда лежат внутри
       // checkout (embedded): более конкретный путь побеждает.
-      isolation:
-        h.config.isolation.mode === 'os'
-          ? isolation({
-              write: [],
-              controller: [root],
-              readable: [checkout?.path ?? h.config.repository],
-              domains: h.config.isolation.domains,
-            })
-          : undefined,
-      task: {} as Task,
-      model: h.config.reviewer.runtime === reviewer ? h.config.reviewer.model : undefined,
-      effort: h.config.reviewer.runtime === reviewer ? h.config.reviewer.effort : undefined,
+      denied: [root],
+      meta: {
+        ...(repositoryId ? { repositoryId } : {}),
+        ...(subjectId ? { subjectId } : {}),
+        subjectKind: kind === 'plan' ? 'group' : 'other',
+        stage: kind === 'plan' ? 'plan-review' : 'contract-review',
+        ...(kind === 'plan' && subjectId
+          ? {
+              group: {
+                id: subjectId,
+                workIds: (plan?.tasks ?? []).flatMap((t) => (t.id ? [t.id] : [])),
+              },
+            }
+          : {}),
+      },
       signal: AbortSignal.timeout(h.config.runTimeoutMs),
-      timeoutMs: h.config.runTimeoutMs,
     },
-    { repositoryId, subjectId, stage: subject === 'task plan' ? 'plan-review' : 'contract-review' },
-  );
-  const parsed = reviewResult.parse(result.data);
-  await writeFile(
-    join(artifact, 'review.json'),
-    JSON.stringify({ ...parsed, inspection: result.inspection ?? unobservedReview() }, null, 2) +
-      '\n',
-  );
-  await writeFile(join(artifact, 'runtime.log'), result.log);
-  const rejected = !parsed.approved || parsed.findings.some((f) => f.severity === 'blocking');
+  ).catch((error: unknown) => {
+    throw toDomain(error);
+  });
+  const opened = record.findings.filter((f) => f.status === 'open' && f.openedIn === record.round);
   recordContractAttempt(h, {
     id: artifact.split('/').at(-1) ?? artifact,
-    at: new Date().toISOString(),
+    at: record.at,
     subject,
-    title: (proposal as { title?: string }).title ?? subject,
+    title,
     repositoryId,
-    attempt: (previous?.attempt ?? 0) + 1,
-    approved: !rejected,
-    summary: parsed.summary,
-    findings: parsed.findings.map((f) => ({
+    attempt: record.round,
+    approved: record.approved,
+    summary: record.summary,
+    findings: opened.map((f) => ({
       severity: f.severity,
       message: f.message,
       ...(f.rule ? { rule: f.rule } : {}),
     })),
     artifact,
     authorRuntime: author,
-    reviewerRuntime: reviewer,
+    reviewerRuntime: record.reviewerRuntime,
   });
-  if (rejected) {
+  if (!record.approved) {
     // Невыполнимое обязательство чинится не правкой текста, а ограничениями
     // или изменением требования: автор должен увидеть это отдельно.
-    const feasibility = parsed.findings.filter(
-      (f) => f.severity === 'blocking' && f.rule === FEASIBILITY,
+    const feasibility = record.findings.filter(
+      (f) => f.status === 'open' && f.severity === 'blocking' && f.rule === FEASIBILITY,
     );
     throw new DomainError(
-      `Независимое ревью отклонено: ${parsed.summary}.` +
+      `Независимое ревью отклонено: ${record.summary}.` +
         (feasibility.length
           ? ` Обязательства невыполнимы или неизмеримы в заявленном виде: ${feasibility.map((f) => f.message).join('; ')}. Добавьте ограничения области входов и ресурсов, допущения или измените требование.`
           : '') +
@@ -247,7 +235,7 @@ async function review(
   return {
     actor: 'agent',
     authorRuntime: author,
-    reviewerRuntime: reviewer,
+    reviewerRuntime: record.reviewerRuntime as Author,
     artifact,
     digest: digest(proposal),
   };

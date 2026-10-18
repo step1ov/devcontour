@@ -1,4 +1,4 @@
-import { measuredExecute } from './usage.ts';
+import { measuredAgentCall } from '../harness/measured.ts';
 import { toolProfileFor, agentEnvironment } from './tools.ts';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -93,7 +93,7 @@ export async function plan(
       'User brief:\n' + brief,
     ].join('\n\n'),
   };
-  const result = await measuredExecute(h, runtimes[runtime], request, { stage: 'planning' });
+  const result = await measuredAgentCall(h, runtimes[runtime], request, { stage: 'planning' });
   const parsed = planResult.parse(result.data);
   const output = join(artifactDir, 'plan.json');
   await writeFile(output, JSON.stringify(parsed, null, 2) + '\n');

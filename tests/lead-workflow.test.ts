@@ -27,7 +27,7 @@ test('Workflow enqueue is idempotent, expired owners are fenced and changed inpu
     f.store.atomic(() => f.store.saveLocal('lead', 'main', job.key, { ...first, leaseUntil: 0 }));
     const replacement = flow.claim(job.key, 'main')!;
     assert.notEqual(first.token, replacement.token);
-    assert.throws(() => flow.finish(first), /lease/);
+    assert.throws(() => flow.finish(first), /Владение заданием утрачено/);
     flow.finish(replacement);
     assert.equal(flow.get(job.key, 'main').stage, 1);
     f.h.editTask(

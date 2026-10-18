@@ -44,6 +44,31 @@ export function executionOf(h: DevContour): Execution {
   return execution;
 }
 
+const reviews = new WeakMap<DevContour, Execution>();
+
+/**
+ * Движок технического ревью плана и контракта: та же база, хост, учёт вызовов
+ * и бюджеты, но политика без gates репозиториев — ревью их не исполняет, и
+ * workspace без test gate ревьюит план и контракт, как и прежде. Исполнение
+ * задач идёт только через `executionOf` с полной политикой.
+ */
+export function reviewExecutionOf(h: DevContour): Execution {
+  const config = loadedDigest(h.config);
+  const cached = reviews.get(h);
+  if (cached && cached.config === config) return cached;
+  const store = new DevContourExecutionStore(h.store, projectionOptions(h));
+  const engine = new Engine({
+    host: devcontourHost(h, store),
+    policy: policyFromConfig(h.config, { purpose: 'review' }),
+    policyIdentity: h.configDigest,
+    provenance: () => h.configProvenance(),
+    recordPolicyOnLead: false,
+  });
+  const execution = { config, store, engine };
+  reviews.set(h, execution);
+  return execution;
+}
+
 const statusOf: Partial<Record<ErrorCode, number>> = {
   NOT_FOUND: 404,
   INVALID_INPUT: 400,

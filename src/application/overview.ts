@@ -6,7 +6,7 @@ import { repositories } from '../core/repositories.ts';
 import { servingPreview, type Preview } from '../core/preview.ts';
 import { currentVerification } from '../core/delivery.ts';
 import { usageTotals, type UsageRecord } from '../core/usage.ts';
-import { budgetOverview } from '../core/budget.ts';
+import { budgetOverview } from '../harness/budget.ts';
 
 /**
  * Сводка для автора продукта.
@@ -383,7 +383,7 @@ export function authorOverview(h: DevContour): AuthorOverview {
       reportedUsd: totals.reportedUsd,
       estimatedUsd: totals.estimatedUsd,
       abandonedCalls: totals.abandonedCalls,
-      budgets: budgetOverview(h, s),
+      budgets: budgetOverview(h),
     },
     activity: { running, paused: s.paused, doing },
     counts,

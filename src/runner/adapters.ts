@@ -7,12 +7,8 @@ import {
   codexTools,
   claudeMcp,
   claudeRules,
-  probeCallMs,
-  probeServer,
-  probeTool,
   writerRunsChecks,
   writerTools,
-  type ProbeServer,
 } from './tools.ts';
 import {
   isolation,
@@ -240,8 +236,6 @@ export interface AgentRequest {
   toolProfile?: ToolProfile;
   execution?: { env: NodeJS.ProcessEnv; redact: Redactor };
   mcpConfigPath?: string;
-  /** Сервер проверок ревьюера с пределами контура (сервер проверок harness). */
-  probe?: ProbeServer;
   cwd: string;
   artifactDir: string;
   prompt: string;
@@ -334,9 +328,9 @@ export function cliArguments(
       // работа была сделана и проверена, а результат терялся из-за сервера,
       // к контуру отношения не имеющего. Прогон начинается с пустого набора.
       ...(r.toolProfile
-        ? codexTools(r.toolProfile, r.probe)
+        ? codexTools(r.toolProfile)
         : [
-            ...codexServers(r.probe),
+            ...codexServers(),
             // Ревьюер без профиля только читает — так же, как claude и как
             // это описывает doctor. Но у codex нет инструмента чтения, кроме
             // shell: выключенный shell оставлял ревьюера только с текстом
@@ -376,13 +370,10 @@ export function cliArguments(
           ].join(','),
         ]
       : []),
-    ...(r.toolProfile || r.probe
+    ...(r.toolProfile
       ? [
           '--allowedTools',
-          [
-            ...(r.toolProfile ? claudeRules(r.toolProfile) : []),
-            ...(r.probe ? [`mcp__${probeServer}__${probeTool}`] : []),
-          ]
+          [...claudeRules(r.toolProfile)]
             .filter(
               (rule) => !r.review || reviewRunsChecks(r.toolProfile) || !rule.startsWith('Bash'),
             )
@@ -406,18 +397,6 @@ export function cliArguments(
       ...((r.review ? reviewRunsChecks(r.toolProfile) : writerRunsChecks('claude', r.toolProfile))
         ? claudeSandbox(policy, r.review, r.cwd)
         : { permissions: { deny: claudeFileDenies(policy, r.cwd) } }),
-      // Сроки CLI для проверок ревьюера: вызов инструмента проверок не
-      // обрывается раньше контура, а собственный Bash ревьюера ограничен тем
-      // же пределом команды.
-      ...(r.probe
-        ? {
-            env: {
-              MCP_TOOL_TIMEOUT: String(probeCallMs(r.probe)),
-              BASH_DEFAULT_TIMEOUT_MS: String(r.probe.commandTimeoutMs),
-              BASH_MAX_TIMEOUT_MS: String(r.probe.commandTimeoutMs),
-            },
-          }
-        : {}),
     }),
     ...(r.mcpConfigPath ? ['--mcp-config', r.mcpConfigPath] : []),
     '--setting-sources',
@@ -448,12 +427,9 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
                   : implementationSchema,
         ),
       );
-      if (name === 'claude' && (r.toolProfile || r.probe)) {
+      if (name === 'claude' && r.toolProfile) {
         r.mcpConfigPath = join(r.artifactDir, 'mcp.json');
-        await writeFile(
-          r.mcpConfigPath,
-          JSON.stringify(claudeMcp(r.toolProfile, r.probe), null, 2),
-        );
+        await writeFile(r.mcpConfigPath, JSON.stringify(claudeMcp(r.toolProfile), null, 2));
       }
       const argv = cliArguments(name, r, schemaPath, resultPath);
       // Отсутствующий или незапускаемый исполняемый файл — тоже отказ

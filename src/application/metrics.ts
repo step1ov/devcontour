@@ -1,5 +1,5 @@
 import { usageTotals, type UsageRecord } from '../core/usage.ts';
-import { budgetOverview } from '../core/budget.ts';
+import { budgetOverview } from '../harness/budget.ts';
 import { uncoveredGates, type DevContour } from '../core/service.ts';
 import type { AuditEvent, Run, Task } from '../core/model.ts';
 import { CheckCorpus } from '../core/check-store.ts';
@@ -429,7 +429,7 @@ export function workflowMetrics(
       importedResults: tasks.filter((t) => t.sharedCompletion).length,
     },
     gateScope: gateScopeMetrics(h, runs, tasks),
-    budgets: budgetOverview(h, s),
+    budgets: budgetOverview(h),
     firstAttemptAcceptanceRate: tasks.filter(
       (t) =>
         !t.sharedCompletion && ['done', 'failed', 'cancelled'].includes(t.status) && t.attempt > 0,

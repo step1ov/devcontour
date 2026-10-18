@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fixture as base, input } from './helpers.ts';
+import { fixture as base, input, statePrevious } from './helpers.ts';
 import { reviewContract } from '../src/runner/agent-control.ts';
 import { ContractChanges, type ContractChange } from '../src/runner/contract-change.ts';
 import type { AgentAdapter, AgentRequest } from '../src/runner/adapters.ts';
@@ -43,6 +43,7 @@ function reviewers(calls: string[], proposals: unknown[], decide: Decide = () =>
             ? []
             : [{ severity: 'blocking', message: 'Схема противоречит требованию' }],
           discoveries: [],
+          previous: statePrevious(r.prompt, verdict.approved),
         },
         log: 'Fixture only; no provider called',
         command: ['fixture'],

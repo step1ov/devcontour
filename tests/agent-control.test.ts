@@ -4,7 +4,8 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile, mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { complete, fixture, input, MERGED } from './helpers.ts';
+import { closePrevious, complete, fixture, input, MERGED } from './helpers.ts';
+import { executionOf } from '../src/harness/execution.ts';
 import cp, { execFileSync } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -23,6 +24,7 @@ function runtimes(action?: (r: AgentRequest) => void, blocking = false) {
           approved: true,
           summary: 'Explicit test fixture',
           findings: blocking ? [{ severity: 'blocking', message: 'Missing behavior' }] : [],
+          previous: blocking ? [] : closePrevious(r.prompt),
         },
         log: 'Fixture only; no provider called',
         command: ['fixture'],
@@ -125,6 +127,7 @@ test('A workspace whose repositories are not named main still reviews contracts'
         kind: 'product',
         path: repo.path,
         targetBranch: 'devcontour/accepted',
+        // Без gates: техническое ревью их не исполняет и работает, как прежде.
         gates: [],
         protectedPaths: [],
       },
@@ -141,6 +144,12 @@ test('A workspace whose repositories are not named main still reviews contracts'
       runtimes(),
     );
     assert.equal(byFile.status, 'approved');
+    // Исполнение задач такой конфигурацией по-прежнему невозможно: у ревью своя
+    // политика без gates, у исполнения — полная.
+    assert.throws(
+      () => executionOf(f.h),
+      /не выражается политикой harness: repositories\.0\.gates/,
+    );
     const inline = await reviewContract(
       f.h,
       f.root,
@@ -233,7 +242,8 @@ test('Ревью этапа видит его цель и новые задач�
       'codex',
       runtimes((r) => firstPrompts.push(r.prompt)),
     );
-    assert.match(firstPrompts[0], /reviewed before/);
+    // Прежние открытые находки — по протоколу harness: reviewer называет состояние каждой.
+    assert.match(firstPrompts[0], /Previous open findings/);
     const one = f.store.read().tasks[0];
     complete(f.h, one.id);
     f.h.accept(boardId, MERGED);
@@ -267,7 +277,11 @@ test('Ревью этапа видит его цель и новые задач�
       { id: one.id, title: 'Task one', status: 'done', resultSha: MERGED },
     ]);
     assert.doesNotMatch(prompts[0], /First stage body text/);
-    assert.doesNotMatch(prompts[0], /reviewed before/, 'находки плана ревизии 1 не переносятся');
+    assert.doesNotMatch(
+      prompts[0],
+      /Previous open findings/,
+      'находки плана ревизии 1 не переносятся',
+    );
     assert.equal(f.store.read().tasks.find((t) => t.title === 'Task two')!.status, 'ready');
   } finally {
     f.cleanup();
@@ -939,7 +953,12 @@ test('A blocking feasibility finding returns the contract with its own reason an
                     },
                   ],
                 }
-              : { approved: true, summary: 'Bounded', findings: [] },
+              : {
+                  approved: true,
+                  summary: 'Bounded',
+                  findings: [],
+                  previous: closePrevious(r.prompt, 'области входов ограничены'),
+                },
           log: 'Fixture only; no provider called',
           command: ['fixture'],
         });
@@ -964,7 +983,7 @@ test('A blocking feasibility finding returns the contract with its own reason an
       content: 'O-2: optimal packing for n ≤ 20; beyond that, refuse.',
     };
     assert.equal((await reviewContract(f.h, f.root, bounded, 'codex', both)).status, 'approved');
-    assert.match(prompts[1], /\[feasibility\] O-2/);
+    assert.match(prompts[1], /Previous open findings.*O-2: exact optimum/);
   } finally {
     f.cleanup();
   }

@@ -137,10 +137,13 @@ test('Остановленное восстановление — техниче
     f.h.addTask(b.id, input());
     f.h.approve(b.id);
     f.store.atomic(() =>
-      f.store.saveLocal('lead', undefined, 'k'.repeat(64), {
-        key: 'k'.repeat(64),
+      f.store.saveLocal('lead', undefined, 'a'.repeat(64), {
+        key: 'a'.repeat(64),
         kind: 'board',
         id: b.id,
+        authorRuntime: 'codex',
+        inputDigest: 'b'.repeat(64),
+        startedAt: new Date().toISOString(),
         stage: 1,
         status: 'failed',
         error: 'исчерпан бюджет автоматических восстановлений доски',
@@ -269,6 +272,8 @@ test('Упавший workflow, чья работа ушла дальше, не �
           key: key.repeat(64),
           kind: 'board',
           id,
+          authorRuntime: 'codex',
+          inputDigest: 'b'.repeat(64),
           stage: 0,
           status,
           error:

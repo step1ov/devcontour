@@ -152,3 +152,43 @@ test('Код панели не загружает исполнение harness: 
   assert.deepEqual(root, []);
   assert.ok(seen.has('src/core/model.ts'), 'обход дошёл до модели предметной области');
 });
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+
+test('S3.6: учёт вызовов, бюджеты, ревью плана и контракта, очередь ведущего и решение о восстановлении — только harness', () => {
+  // Удалённые вторые реализации не возвращаются.
+  for (const removed of ['core/budget.ts', 'core/live-calls.ts', 'runner/live-calls.ts'])
+    assert.throws(() => lstatSync(join(root, 'src', removed)), removed);
+  const sources = (dir: string): string[] =>
+    readdirSync(join(root, dir), { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory()
+        ? sources(join(dir, e.name))
+        : e.name.endsWith('.ts')
+          ? [join(dir, e.name)]
+          : [],
+    );
+  const code = (path: string) => readFileSync(join(root, path), 'utf8');
+  for (const path of [
+    ...sources('src/core'),
+    ...sources('src/harness'),
+    'src/runner/agent-control.ts',
+    'src/runner/lead-workflow.ts',
+  ]) {
+    const text = code(path);
+    assert.doesNotMatch(
+      text,
+      /=== '(codex|claude)' \? '(claude|codex)' : '(codex|claude)'/,
+      `${path}: безусловный «противоположный runtime» вместо правила вендора политики`,
+    );
+    assert.doesNotMatch(
+      text,
+      /measuredExecute|assertBudget|callBudgets/,
+      `${path}: свой учёт вызовов`,
+    );
+  }
+  // Техническое ревью, очередь и восстановление вызывают harness.
+  assert.match(code('src/runner/agent-control.ts'), /technicalReview\(/);
+  assert.match(code('src/core/lead-workflow.ts'), /new WorkflowQueue\(/);
+  assert.match(code('src/core/repair.ts'), /from 'devcontour-harness'/);
+  assert.match(code('src/harness/measured.ts'), /measuredInvoke\(/);
+});

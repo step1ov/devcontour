@@ -112,3 +112,24 @@ export function complete(
   h.finish(run.id, run.token, MERGED);
   return run;
 }
+
+/**
+ * Прежние открытые находки из запроса технического ревью (протокол harness:
+ * reviewer называет состояние каждой). Fixture, одобряющий исправленный
+ * предмет, закрывает их с основанием.
+ */
+export function closePrevious(prompt: string, basis = 'исправлено в этой редакции') {
+  const line = prompt.split('\n\n').find((p) => p.startsWith('Previous open findings.'));
+  const ids = [...(line ?? '').matchAll(/"id":"([a-f0-9]{64})"/g)].map((m) => m[1]);
+  return ids.map((id) => ({ id, status: 'closed' as const, basis }));
+}
+
+/**
+ * Состояние прежних открытых находок для fixture, который решает раунд целиком:
+ * одобряя — закрывает их с основанием, отклоняя — оставляет открытыми.
+ */
+export function statePrevious(prompt: string, approved: boolean) {
+  return closePrevious(prompt).map((t) =>
+    approved ? t : { ...t, status: 'open' as const, basis: 'не исправлено в этой редакции' },
+  );
+}

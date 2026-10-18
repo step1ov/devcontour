@@ -10,6 +10,7 @@ import { adapters } from './adapters.ts';
 import { assertRequirements } from './requirements.ts';
 import { IntentService } from './intent.ts';
 import { repairDecision } from '../core/repair.ts';
+import { executionOf } from '../harness/execution.ts';
 import type { AgentAdapter } from './adapters.ts';
 import { analyzeRecovery, applyCases } from './recovery.ts';
 
@@ -104,7 +105,7 @@ export class LeadRunner {
     const decision = this.h.store.atomic(() => {
       const state = this.h.store.read();
       const tasks = state.tasks.filter((t) => taskIds.includes(t.id));
-      const decided = repairDecision(state, tasks, {
+      const decided = repairDecision(this.h, tasks, {
         budgetLeft: this.h.config.repairBudget - (job.repairs ?? 0),
         maxAttempts: this.h.config.maxAttempts,
       });
@@ -121,20 +122,10 @@ export class LeadRunner {
         // когда не осталось ни одной. Пауза человека не снимается вовсе.
         // Причина, которой нет в списке, ничего не снимает: пустой или чужой
         // список — не разрешение продолжать.
-        if (
-          decided.blocksQueue &&
-          state.paused &&
-          state.pauseReason === 'runtime' &&
-          state.pauseFailures?.includes(decided.kind)
-        ) {
-          const left = (state.pauseFailures ?? []).filter((k) => k !== decided.kind);
-          if (left.length)
-            this.h.store.change('scheduler.blockers', (s) => {
-              s.pauseFailures = left;
-              return { left };
-            });
-          else this.h.pause(false);
-        }
+        // Правило движка (`clearFailure`): снимается только этот класс,
+        // выдача возвращается, когда причин не осталось; пауза человека
+        // не трогается.
+        if (decided.blocksQueue) executionOf(this.h).engine.clearFailure([decided.kind]);
       });
       return decided;
     });

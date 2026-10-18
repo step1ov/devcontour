@@ -20,7 +20,7 @@ import type { DevContour } from '../core/service.ts';
 import type { DevContourState } from '../core/model.ts';
 import { taskInput } from '../core/model.ts';
 import { repository, repositories } from '../core/repositories.ts';
-import { pinLegacyCalls } from './usage.ts';
+import { executionOf } from '../harness/execution.ts';
 import {
   canonical,
   identitySchema,
@@ -327,7 +327,7 @@ export function syncGit(h: DevContour, options: SyncOptions = {}) {
     z.record(z.string(), z.enum(['local', 'git'])).parse(options.resolutions);
   // До изменения графа импортом: расход прежних вызовов о доске остаётся за
   // её задачами.
-  pinLegacyCalls(h);
+  executionOf(h).engine.pinLegacyCalls();
   let output: {
     status: string;
     member?: string;

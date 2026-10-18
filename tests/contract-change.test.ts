@@ -1406,20 +1406,25 @@ test('C-F05/C-F07: a verification and a process from the previous configuration 
 test('C-F06/C-F09: nothing new starts while the configuration is applied, and a shutdown over the operation pause stays', async () => {
   const s = await stage();
   try {
-    s.h.requestReconfigure('CC-x', 'x'.repeat(64));
+    s.h.requestReconfigure('CC-x', 'e'.repeat(64));
     assert.throws(() => new Previews(s.h).start('CHG-none'), /применяет конфигурацию/);
+    const job = 'f'.repeat(64);
     s.store.atomic(() =>
-      s.store.saveLocal('lead', undefined, 'job-1', {
-        key: 'job-1',
+      s.store.saveLocal('lead', undefined, job, {
+        key: job,
         kind: 'board',
         id: 'B',
+        authorRuntime: 'codex',
+        inputDigest: 'b'.repeat(64),
+        startedAt: new Date().toISOString(),
+        stage: 0,
         status: 'queued',
         attempts: 0,
         maxAttempts: 3,
         history: [],
       }),
     );
-    assert.equal(new LeadWorkflow(s.h).claim('job-1'), undefined);
+    assert.equal(new LeadWorkflow(s.h).claim(job), undefined);
     s.h.clearReconfigure('CC-x');
     // Shutdown поверх паузы операции забирает её: операция её не снимает.
     s.h.pause(false);

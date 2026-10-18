@@ -1,7 +1,9 @@
 import { developmentBinding, assertTaskPreparation } from './preparation.ts';
 import { carriedTaskIds } from './work-status.ts';
-import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
+import { HarnessError, WorkflowQueue, type WorkflowJob as HarnessJob } from 'devcontour-harness';
+import { domain, executionOf } from '../harness/execution.ts';
+import type { DevContourState } from './model.ts';
 import { DevContour, digest } from './service.ts';
 import { taskInput, DomainError } from './model.ts';
 import { boardOwner } from './sync-state.ts';
@@ -32,8 +34,7 @@ export type WorkflowJob = z.infer<typeof workflowInput> & {
 };
 export class LeadWorkflow {
   constructor(readonly h: DevContour) {}
-  input(kind: WorkflowJob['kind'], id: string) {
-    const s = this.h.store.read();
+  input(kind: WorkflowJob['kind'], id: string, s: DevContourState = this.h.store.read()) {
     developmentBinding(s);
     const changeSet = kind === 'changeset' ? s.changeSets.find((c) => c.id === id) : undefined;
     if (kind === 'changeset' && !changeSet) throw new DomainError('ChangeSet не найден');
@@ -82,8 +83,29 @@ export class LeadWorkflow {
       }),
     };
   }
+  /**
+   * Очередь технических заданий harness над хранилищем DevContour: fencing
+   * владельца, устаревание входа, попытки стадии и учёт восстановлений — её
+   * правила. Здесь — только продуктовый вход задания (доска или ChangeSet) и
+   * его владелец-компонент.
+   */
+  private queue() {
+    const { engine, store } = executionOf(this.h);
+    return new WorkflowQueue(engine.host.store, engine.policy, Date.now, {
+      input: (kind, id, view) => {
+        try {
+          const bound = this.input(kind as WorkflowJob['kind'], id, store.stateOf(view));
+          return { digest: bound.digest, ...(bound.owner ? { owner: bound.owner } : {}) };
+        } catch (error) {
+          // Удалённый или недопустимый предмет — изменившийся вход.
+          if (error instanceof DomainError) throw new HarnessError('INVALID_INPUT', error.message);
+          throw error;
+        }
+      },
+    });
+  }
   list(owner?: string) {
-    return Object.values(this.h.store.localRecords<WorkflowJob>('lead', owner));
+    return this.queue().list(owner) as WorkflowJob[];
   }
   /**
    * Безопасное представление работ для панели.
@@ -114,163 +136,37 @@ export class LeadWorkflow {
     );
   }
   get(key: string, owner?: string) {
-    const job = this.h.store.localRecords<WorkflowJob>('lead', owner)[key];
-    if (!job) throw new DomainError('Workflow не найден');
-    return job;
-  }
-  private currentInput(job: WorkflowJob) {
-    try {
-      const current = this.input(job.kind, job.id);
-      return current.digest === job.inputDigest && current.owner === job.owner;
-    } catch (error) {
-      // A removed subject is stale work, not a reason to block every later job.
-      if (error instanceof DomainError) return false;
-      throw error;
-    }
+    return domain(() => this.queue().get(key, owner)) as WorkflowJob;
   }
   start(raw: unknown) {
     const input = workflowInput.parse(raw);
-    return this.h.store.atomic(() => {
-      const bound = this.input(input.kind, input.id),
-        key = digest({ kind: input.kind, id: input.id, input: bound.digest });
-      const old = this.h.store.localRecords<WorkflowJob>('lead', bound.owner)[key];
-      if (old) {
-        if (old.authorRuntime !== input.authorRuntime)
-          throw new DomainError('Runtime автора уже закреплён для этого входа');
-        return old;
-      }
-      const job: WorkflowJob = {
-        ...input,
-        key,
-        owner: bound.owner,
-        inputDigest: bound.digest,
-        stage: 0,
-        attempts: 0,
-        status: 'queued',
-        startedAt: new Date().toISOString(),
-        history: [],
-      };
-      this.h.store.saveLocal('lead', job.owner, key, job);
-      return job;
-    });
+    return domain(() => this.queue().start(input)) as WorkflowJob;
   }
   claim(key: string, owner?: string) {
-    return this.h.store.atomic(() => {
-      // Пока операция применяет конфигурацию, этапы ведущего не начинаются:
-      // они читали бы прежний контекст.
-      const pending = this.h.store.read().reconfigure;
-      if (pending && !pending.appliedAt) return;
-      const job = this.get(key, owner);
-      if (
-        !['queued', 'running'].includes(job.status) ||
-        (job.status === 'running' && job.leaseUntil! > Date.now())
-      )
-        return;
-      if (!this.currentInput(job)) {
-        job.status = 'stale';
-        job.error = 'Input changed or removed';
-      } else if (job.attempts >= job.maxAttempts) {
-        job.status = 'failed';
-        job.error = 'Stage attempt budget exhausted';
-      } else {
-        job.status = 'running';
-        job.token = randomUUID();
-        job.leaseUntil = Date.now() + this.h.config.leaseMs;
-        job.attempts++;
-      }
-      job.history.push({ at: new Date().toISOString(), stage: job.stage, event: job.status });
-      this.h.store.saveLocal('lead', owner, key, job);
-      return job.status === 'running' ? job : undefined;
-    });
+    return domain(() => this.queue().claim(key, owner)) as WorkflowJob | undefined;
   }
   guard(job: WorkflowJob) {
-    const current = this.get(job.key, job.owner);
-    if (
-      current.status !== 'running' ||
-      current.token !== job.token ||
-      current.leaseUntil! <= Date.now()
-    )
-      throw new DomainError('Workflow lease утрачен');
-    if (!this.currentInput(job)) throw new DomainError('Workflow input изменился');
-    return current;
+    return domain(() => this.queue().guard(job as HarnessJob)) as WorkflowJob;
   }
   heartbeat(job: WorkflowJob) {
-    this.h.store.atomic(() => {
-      const current = this.guard(job);
-      current.leaseUntil = Date.now() + this.h.config.leaseMs;
-      this.h.store.saveLocal('lead', job.owner, job.key, current);
-    });
+    domain(() => this.queue().heartbeat(job as HarnessJob));
   }
+  /** Три стадии DevContour: согласование, исполнение, приёмка. */
   finish(job: WorkflowJob, wait = false) {
-    return this.h.store.atomic(() => {
-      const current = this.guard(job);
-      if (!wait) {
-        current.stage++;
-        current.attempts = 0;
-      } else {
-        // Ожидание доменного состояния не выполняет внешнего действия, поэтому
-        // попытка стадии возвращается, а её запись о захвате снимается. Именно
-        // запись о захвате: последней в истории теперь может стоять решение о
-        // восстановлении, и оно должно остаться — по нему человек видит, что
-        // цикл делал сам.
-        current.attempts--;
-        const claimed = current.history.map((h) => h.event).lastIndexOf('running');
-        if (claimed >= 0) current.history.splice(claimed, 1);
-      }
-      current.status = current.stage >= 3 ? 'completed' : 'queued';
-      if (current.status === 'completed') current.finishedAt = new Date().toISOString();
-      current.token = undefined;
-      current.leaseUntil = undefined;
-      if (!wait)
-        current.history.push({
-          at: new Date().toISOString(),
-          stage: job.stage,
-          event: 'completed',
-        });
-      this.h.store.saveLocal('lead', job.owner, job.key, current);
-      return current;
-    });
+    return domain(() => this.queue().finish(job as HarnessJob, wait, 3)) as WorkflowJob;
   }
   fail(job: WorkflowJob, message: string, interrupted = false) {
-    this.h.store.atomic(() => {
-      const current = this.get(job.key, job.owner);
-      if (current.token !== job.token || current.status !== 'running') return;
-      current.status = !this.currentInput(job) ? 'stale' : interrupted ? 'queued' : 'failed';
-      current.error = message.slice(0, 1000);
-      current.token = undefined;
-      current.leaseUntil = undefined;
-      this.h.store.saveLocal('lead', job.owner, job.key, current);
-    });
+    domain(() => this.queue().fail(job as HarnessJob, message, interrupted));
   }
   /**
-   * Записать восстановление и выполнить его одной транзакцией.
-   *
-   * Счётчик и само действие неразделимы намеренно: прерывание между записью
-   * решения и его исполнением иначе дало бы либо повтор без учёта — и цикл
-   * крутился бы мимо бюджета, — либо учёт без повтора, и работа встала бы,
-   * считая потраченным то, чего не было.
+   * Записать восстановление и выполнить его одной транзакцией (правило
+   * очереди harness): прерывание между учётом и повтором не даёт ни повтора
+   * мимо бюджета, ни учёта без повтора.
    */
   repair(job: WorkflowJob, event: string, apply: () => void) {
-    return this.h.store.atomic(() => {
-      const current = this.guard(job);
-      current.repairs = (current.repairs ?? 0) + 1;
-      current.history.push({ at: new Date().toISOString(), stage: job.stage, event });
-      this.h.store.saveLocal('lead', job.owner, job.key, current);
-      apply();
-      return current;
-    });
+    return domain(() => this.queue().repair(job as HarnessJob, event, apply));
   }
   retry(key: string, owner?: string) {
-    return this.h.store.atomic(() => {
-      const job = this.get(key, owner);
-      if (job.status !== 'failed' || job.attempts >= job.maxAttempts)
-        throw new DomainError('Retry недоступен; проверьте статус и бюджет');
-      if (!this.currentInput(job))
-        throw new DomainError('Нужен новый workflow для изменившегося входа');
-      job.status = 'queued';
-      job.error = undefined;
-      this.h.store.saveLocal('lead', owner, key, job);
-      return job;
-    });
+    return domain(() => this.queue().retry(key, owner)) as WorkflowJob;
   }
 }

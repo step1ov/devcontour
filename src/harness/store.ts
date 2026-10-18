@@ -108,27 +108,34 @@ export class DevContourExecutionStore implements ExecutionStore {
    * `Store.change`: тот перечитал бы документ поверх изменений транзакции.
    */
   host<T>(kind: string, fn: (h: HostTransaction) => T): T {
-    if (this.frame) throw new Error('Транзакция хоста открывается только снаружи');
-    return this.outer(kind, (frame) =>
+    const run = (frame: Frame) =>
       fn({
         state: frame.state,
         journal: (data) => (frame.legacy = data),
         tx: this.view(frame),
-      }),
-    );
+      });
+    // Внутри уже открытой транзакции (например, повтор, который очередь
+    // заданий выполняет в одной транзакции с учётом восстановления) —
+    // вложенная часть той же записи.
+    const frame = this.frame;
+    return frame ? this.nested(frame, () => run(frame)) : this.outer(kind, run);
   }
 
   transact<T>(kind: TransactionKind, fn: (tx: ExecutionTransaction) => T): T {
     const frame = this.frame;
     if (!frame) return this.outer(kind, (f) => fn(this.view(f)));
-    // Вложенная: тот же документ; при отказе возвращается её часть документа и журнала.
+    return this.nested(frame, () => fn(this.view(frame)));
+  }
+
+  /** Вложенная часть: тот же документ; при отказе возвращается её часть документа и журнала. */
+  private nested<T>(frame: Frame, run: () => T): T {
     const saved = structuredClone(frame.state);
     const drafts = frame.drafts.length;
     const legacy = frame.legacy;
     const works = new Set(frame.works);
     const attempts = new Set(frame.attempts);
     try {
-      return this.store.atomic(() => this.settled(fn(this.view(frame))));
+      return this.store.atomic(() => this.settled(run()));
     } catch (error) {
       const state = frame.state as unknown as Record<string, unknown>;
       for (const key of Object.keys(state)) delete state[key];

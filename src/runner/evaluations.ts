@@ -1,4 +1,4 @@
-import { measuredExecute } from './usage.ts';
+import { measuredAgentCall } from '../harness/measured.ts';
 import { priceSchema, usageTotals, type UsageRecord, type Price } from '../core/usage.ts';
 import { mkdir, mkdtemp, rm, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -207,7 +207,7 @@ export async function evaluateAgents(
           response = await options.driver({ caseId: scenario.id, prompt, baseline });
         else if (options.runtime)
           response = (
-            await measuredExecute(
+            await measuredAgentCall(
               h,
               adapters[options.runtime],
               {

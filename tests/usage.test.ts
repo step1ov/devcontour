@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseUsage, measuredExecute } from '../src/runner/usage.ts';
+import { parseUsage } from '../src/runner/usage.ts';
+import { measuredAgentCall as measuredExecute } from '../src/harness/measured.ts';
 import { priceUsage, usageTotals, type UsageRecord } from '../src/core/usage.ts';
 import { workflowMetrics } from '../src/application/metrics.ts';
 import { Observability } from '../src/application/observability.ts';

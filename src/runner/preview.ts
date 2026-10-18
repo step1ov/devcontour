@@ -9,7 +9,7 @@ import { Previews, type Preview, type PreviewFailure } from '../core/preview.ts'
 import { repository } from '../core/repositories.ts';
 import { command } from './process.ts';
 import { executionEnvironment } from './environment.ts';
-import { runCheck } from './gates.ts';
+import { runCheck } from 'devcontour-harness';
 import { parse } from 'yaml';
 
 /** Свободный порт на loopback для пробного запуска выкладки. */

@@ -84,46 +84,10 @@ const toml = (value: unknown): string => {
     );
   return JSON.stringify(value);
 };
-/** Имена сервера и инструмента проверок ревьюера в конфигурации CLI. */
-export const probeServer = 'devcontour_probe';
-export const probeTool = 'run_check';
-/**
- * Сервер проверок ревьюера (сервер проверок пакета harness): команда запуска и имена
- * переменных окружения, которые CLI передаст ему по имени.
- */
-export type ProbeServer = {
-  command: string;
-  args: string[];
-  env: string[];
-  commandTimeoutMs: number;
-};
-/** Срок вызова инструмента в CLI — с запасом сверх предела команды контура. */
-export const probeCallMs = (probe: ProbeServer) => probe.commandTimeoutMs + 30000;
-function codexProbe(probe?: ProbeServer) {
-  return probe
-    ? {
-        [probeServer]: {
-          enabled: true,
-          required: true,
-          enabled_tools: [probeTool],
-          command: probe.command,
-          args: probe.args,
-          env_vars: probe.env,
-          // По умолчанию codex обрывает вызов инструмента через минуту —
-          // раньше, чем контур остановил бы команду сам.
-          tool_timeout_sec: Math.ceil(probeCallMs(probe) / 1000),
-        },
-      }
-    : {};
+export function codexServers() {
+  return ['--ignore-user-config', '-c', 'mcp_servers={}'];
 }
-export function codexServers(probe?: ProbeServer) {
-  return [
-    '--ignore-user-config',
-    '-c',
-    probe ? `mcp_servers=${toml(codexProbe(probe))}` : 'mcp_servers={}',
-  ];
-}
-export function codexTools(profile: ToolProfile, probe?: ProbeServer) {
+export function codexTools(profile: ToolProfile) {
   const servers = Object.fromEntries(
     Object.entries(profile.mcp).map(([id, s]) => [
       id,
@@ -140,14 +104,14 @@ export function codexTools(profile: ToolProfile, probe?: ProbeServer) {
   return [
     '--ignore-user-config',
     '-c',
-    `mcp_servers=${toml({ ...servers, ...codexProbe(probe) })}`,
+    `mcp_servers=${toml(servers)}`,
     '-c',
     `features.shell_tool=${profile.codexShell}`,
     '-c',
     `sandbox_workspace_write.network_access=${profile.codexNetwork}`,
   ];
 }
-export function claudeMcp(profile: ToolProfile | undefined, probe?: ProbeServer) {
+export function claudeMcp(profile: ToolProfile | undefined) {
   return {
     mcpServers: {
       ...Object.fromEntries(
@@ -169,16 +133,6 @@ export function claudeMcp(profile: ToolProfile | undefined, probe?: ProbeServer)
               },
         ]),
       ),
-      ...(probe
-        ? {
-            [probeServer]: {
-              type: 'stdio',
-              command: probe.command,
-              args: probe.args,
-              env: Object.fromEntries(probe.env.map((key) => [key, '${' + key + '}'])),
-            },
-          }
-        : {}),
     },
   };
 }

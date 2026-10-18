@@ -18,6 +18,7 @@ import { adapters, type AgentAdapter } from '../runner/adapters.ts';
 import { redactor } from '../runner/redaction.ts';
 import { unknownUsage, type Usage } from '../core/usage.ts';
 import type { DevContour } from '../core/service.ts';
+import type { Task } from '../core/model.ts';
 
 /** Runtime DevContour (`demo`) — fixture harness. */
 const hostName = (runtime: RuntimeName) => (runtime === 'fixture' ? 'demo' : runtime);
@@ -46,7 +47,10 @@ export function fromAgentAdapter(
     async invoke(request: RuntimeRequest, signal: AbortSignal): Promise<RuntimeResponse> {
       const workId = request.subject?.workId;
       const task = h.store.read().tasks.find((t) => t.id === workId);
-      if (!task) throw new HarnessError('NOT_FOUND', `Задача вызова ${request.callId} не найдена`);
+      // Ревью плана и контракта идёт не о задаче — как и прежде, с пустой задачей.
+      const subjectless = request.task === 'review-plan' || request.task === 'review-contract';
+      if (!task && !subjectless)
+        throw new HarnessError('NOT_FOUND', `Задача вызова ${request.callId} не найдена`);
       let usage: Usage = unknownUsage();
       let model: string | null = null;
       let runtimeVersion: string | null = agent.version ?? null;
@@ -55,13 +59,12 @@ export function fromAgentAdapter(
         artifactDir: request.artifactDir ?? request.cwd,
         prompt: request.prompt,
         review: request.task !== 'implement',
-        task,
+        task: task ?? ({} as Task),
         ...(request.binding.model ? { model: request.binding.model } : {}),
         ...(request.binding.effort ? { effort: request.binding.effort } : {}),
         signal,
         timeoutMs: request.timeoutMs,
         execution: { env: request.env, redact: redactor(request.secrets ?? []) },
-        ...(request.probe ? { probe: request.probe } : {}),
         ...(request.env.DEVCONTOUR_RESOURCES_JSON
           ? { resourcesJson: request.env.DEVCONTOUR_RESOURCES_JSON }
           : {}),

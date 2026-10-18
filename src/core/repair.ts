@@ -1,5 +1,12 @@
-import type { DevContourState, Task } from './model.ts';
-import { repairPolicy, type FailureKind } from './failure.ts';
+// Решение о восстановлении упавшей задачи доски — правило harness
+// (`repairDecision`): класс отказа, одинаковые отпечатки среди прошлых
+// попыток, бюджет попыток задачи и общий бюджет восстановлений. Здесь только
+// перевод поручения harness в задачу DevContour.
+import { repairDecision as decide } from 'devcontour-harness';
+import type { Task } from './model.ts';
+import type { FailureKind } from './failure.ts';
+import type { DevContour } from './service.ts';
+import { executionOf } from '../harness/execution.ts';
 
 export type RepairDecision =
   | {
@@ -13,96 +20,20 @@ export type RepairDecision =
     }
   | { action: 'stop'; taskId?: string; kind?: FailureKind; reason: string };
 
-/**
- * Что делать с упавшей задачей доски.
- *
- * Решение принимается доменом и только по записанному состоянию: класс отказа,
- * сохранённый в момент падения, число одинаковых отпечатков среди прошлых
- * попыток, бюджет попыток задачи и бюджет восстановлений доски. Ни одного
- * обращения к сети, git или рантайму — поэтому вся таблица решений проверяется
- * тестами, а перезапуск процесса ничего не меняет: те же данные дают тот же
- * ответ.
- *
- * Повтор здесь — обычный повтор в пределах бюджета попыток задачи. Сброс
- * бюджета остаётся действием человека: он означает «причина устранена
- * снаружи», и утверждать это за человека контур не вправе.
- */
+/** Что делать с упавшими задачами доски; нечего чинить — `undefined`. */
 export function repairDecision(
-  s: DevContourState,
-  tasks: Task[],
+  h: DevContour,
+  tasks: Pick<Task, 'id'>[],
   options: { budgetLeft: number; maxAttempts: number },
 ): RepairDecision | undefined {
-  // Задача с эпизодом по свойству восстанавливается своим разбором, а не
-  // обычным повтором: третья слепая попытка как раз и запрещена.
-  const broken = tasks.filter(
-    (t) => ['failed', 'cancelled'].includes(t.status) && (t.status === 'cancelled' || !t.recovery),
-  );
-  if (!broken.length) return undefined;
-
-  // Отмена человеком не восстанавливается — ни первой, ни после других.
-  // Проверяется раньше выбора задачи: иначе отменённая задача ждала бы своей
-  // очереди за чинимыми и цикл успел бы потратить на них бюджет.
-  const cancelled = broken.find((t) => t.status === 'cancelled');
-  if (cancelled)
-    return {
-      action: 'stop',
-      taskId: cancelled.id,
-      kind: 'cancelled',
-      reason: `${cancelled.id}: ${repairPolicy.cancelled.explain}`,
-    };
-
-  const task = broken[0];
-  const kind: FailureKind = task.failureKind ?? 'unknown';
-  const rule = repairPolicy[kind];
-  const detail = task.failure ? ` Отказ: ${task.failure.slice(0, 300)}` : '';
-
-  if (rule.action === 'stop')
-    return {
-      action: 'stop',
-      taskId: task.id,
-      kind,
-      reason: `${task.id}: ${rule.explain}${detail}`,
-    };
-
-  if (options.budgetLeft <= 0)
-    return {
-      action: 'stop',
-      taskId: task.id,
-      kind,
-      reason: `${task.id}: исчерпан бюджет автоматических восстановлений доски. Продолжение требует решения человека.${detail}`,
-    };
-
-  // Сброс бюджета попыток означает «причина устранена снаружи». Цикл такого
-  // знания не имеет, поэтому на потолке попыток он останавливается, а не
-  // обнуляет счётчик за человека.
-  if (task.attempt >= options.maxAttempts)
-    return {
-      action: 'stop',
-      taskId: task.id,
-      kind,
-      reason: `${task.id}: исчерпан бюджет попыток задачи. Устраните причину и повторите со сбросом, указав его.${detail}`,
-    };
-
-  const fingerprint = task.failureFingerprint;
-  const identical = fingerprint
-    ? s.runs.filter((r) => r.taskId === task.id && r.failureFingerprint === fingerprint).length
-    : 0;
-  if (!fingerprint || identical > rule.repeats)
-    return {
-      action: 'stop',
-      taskId: task.id,
-      kind,
-      reason: fingerprint
-        ? `${task.id}: одна и та же причина ${identical} раз подряд, новой гипотезы нет. ${rule.explain}${detail}`
-        : `${task.id}: отказ записан без отпечатка, повторы считать нечем.${detail}`,
-    };
-
-  return {
-    action: 'retry',
-    taskId: task.id,
-    kind,
-    fingerprint,
-    blocksQueue: rule.blocksQueue ?? false,
-    reason: `${task.id}: ${kind}, повтор ${identical} из ${rule.repeats}.${detail}`,
-  };
+  return executionOf(h).engine.read((view) => {
+    const works = tasks.flatMap((t) => {
+      const work = view.work(t.id);
+      return work ? [work] : [];
+    });
+    const decided = decide(view, works, options);
+    if (!decided) return undefined;
+    const { workId, ...rest } = decided;
+    return { ...rest, ...(workId ? { taskId: workId } : {}) } as RepairDecision;
+  });
 }

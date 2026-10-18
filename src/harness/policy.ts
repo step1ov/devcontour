@@ -123,12 +123,46 @@ function role(config: Config, id: string, r: RoleConfig, fallback: Binding) {
  * кода по умолчанию. Ревью плана и контракта — `review.plan/contract`
  * конфигурации, без них — общий ревьюер.
  */
-export function policyFromConfig(config: Config): ExecutionPolicy {
+/**
+ * Gate-заглушка политики технического ревью. Ревью плана и контракта не
+ * исполняет gates репозиториев, а договор политики требует хотя бы один test
+ * gate с JUnit:
+ * workspace без test gate (как и прежде) остаётся пригодным для ревью.
+ * Заглушка никогда не запускается и в исполнение задач не попадает.
+ */
+const reviewOnlyGate = {
+  id: 'technical-review-only',
+  kind: 'test' as const,
+  command: ['true'],
+  timeoutMs: 1000,
+  report: { type: 'junit' as const, path: '.technical-review-only.xml' },
+};
+
+export function policyFromConfig(
+  config: Config,
+  options: { purpose?: 'execution' | 'review' } = {},
+): ExecutionPolicy {
+  const forReview = options.purpose === 'review';
   const reviewRule = (kind: 'code' | 'plan' | 'contract', reviewer?: Binding) => {
+    const vendor = config.review?.[kind]?.vendor;
+    // Ревью плана и контракта без своего ревьюера — прежнее правило DevContour:
+    // живой runtime другого вендора, чем автор (модель общего ревьюера — если
+    // это он). Выражено явным упорядоченным списком [codex, claude], а не
+    // неявным «противоположным runtime»: при авторе claude берётся codex,
+    // при авторе codex — claude.
+    if (kind !== 'code' && !reviewer && !config.review?.[kind]?.reviewer) {
+      const live = (runtime: 'codex' | 'claude') =>
+        binding(config, config.reviewer.runtime === runtime ? config.reviewer : { runtime }, true);
+      return {
+        reviewer: live('codex'),
+        alternates: [live('claude')],
+        vendor: vendor ?? 'different-vendor',
+      };
+    }
     const selected = reviewer ?? config.review?.[kind]?.reviewer ?? config.reviewer;
     return {
       reviewer: binding(config, selected, true),
-      vendor: ruleVendor(config, config.review?.[kind]?.vendor, selected),
+      vendor: ruleVendor(config, vendor, selected),
     };
   };
   const raw = {
@@ -140,8 +174,8 @@ export function policyFromConfig(config: Config): ExecutionPolicy {
       kind: r.kind,
       targetRef: 'refs/heads/' + r.targetBranch,
       dependsOn: r.dependsOn ?? [],
-      gates: r.gates.map(gate),
-      ...(r.gateGroups ? { gateGroups: r.gateGroups } : {}),
+      gates: forReview ? [reviewOnlyGate] : r.gates.map(gate),
+      ...(r.gateGroups && !forReview ? { gateGroups: r.gateGroups } : {}),
       protectedPaths: r.protectedPaths,
       generatedPaths: r.generatedPaths ?? [],
       ...(r.environment ? { environment: r.environment } : {}),
@@ -170,7 +204,7 @@ export function policyFromConfig(config: Config): ExecutionPolicy {
       plan: reviewRule('plan'),
       contract: reviewRule('contract'),
     },
-    workspaceGates: config.workspaceGates.map((g) => ({
+    workspaceGates: (forReview ? [] : config.workspaceGates).map((g) => ({
       ...gate(g),
       repositoryId: g.repositoryId,
       artifacts: g.artifacts,

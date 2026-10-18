@@ -5,7 +5,7 @@ import { join, delimiter } from 'node:path';
 import { command } from '../src/runner/process.ts';
 import { redactor, outputRedactor, composeRedactors } from '../src/runner/redaction.ts';
 import { cliAdapter, type AgentRequest } from '../src/runner/adapters.ts';
-import { measuredExecute } from '../src/runner/usage.ts';
+import { measuredAgentCall as measuredExecute } from '../src/harness/measured.ts';
 import { fixture, input } from './helpers.ts';
 import type { UsageRecord } from '../src/core/usage.ts';
 

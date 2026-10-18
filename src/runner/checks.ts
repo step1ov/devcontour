@@ -20,7 +20,7 @@ import {
 } from '../core/check-store.ts';
 import { obligationOf } from '../core/checks.ts';
 import { assertArtifactsInBase, componentArtifacts } from './contract-artifacts.ts';
-import { runCheck } from './gates.ts';
+import { runCheck } from 'devcontour-harness';
 import { git } from './process.ts';
 
 /**

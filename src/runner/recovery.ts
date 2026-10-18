@@ -9,7 +9,7 @@ import { obligationOf } from '../core/checks.ts';
 import { recoveryActions, type RecoveryDecision } from '../core/property-recovery.ts';
 import { taskOwner } from '../core/sync-state.ts';
 import { adapters, type AgentAdapter } from './adapters.ts';
-import { measuredExecute } from './usage.ts';
+import { measuredAgentCall } from '../harness/measured.ts';
 import { toolProfileFor, agentEnvironment } from './tools.ts';
 import { isolation } from './isolation.ts';
 import { submitCase } from './checks.ts';
@@ -156,7 +156,7 @@ export async function analyzeRecovery(
   ].join('\n\n');
   await writeFile(join(dir, 'prompt.txt'), prompt);
   const toolProfile = toolProfileFor(h.config, author, task.role, true, task.repositoryId);
-  const result = await measuredExecute(
+  const result = await measuredAgentCall(
     h,
     runtimes[author],
     {

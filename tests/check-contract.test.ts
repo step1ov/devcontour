@@ -8,6 +8,7 @@ import type { Spike } from '../src/runner/checks.ts';
 import { specDigest } from '../src/core/service.ts';
 import { git } from '../src/runner/process.ts';
 import { checkProject, declaration, fixture, knap, reach, removeRoot } from './check-fixture.ts';
+import { statePrevious } from './helpers.ts';
 
 type Verdict = {
   approved: boolean;
@@ -21,7 +22,11 @@ function runtimes(decide: (r: AgentRequest) => Verdict = () => ({ approved: true
       prompts.push(r.prompt);
       const verdict = decide(r);
       return Promise.resolve({
-        data: { summary: 'Fixture reviewer', ...verdict },
+        data: {
+          summary: 'Fixture reviewer',
+          ...verdict,
+          previous: statePrevious(r.prompt, verdict.approved),
+        },
         log: 'Fixture only; no provider called',
         command: ['fixture'],
       });
@@ -248,9 +253,7 @@ test('AC07: a plan whose first task needs a future node is not approved after re
     // Детерминированный ревьюер: задача не должна требовать свойство, которое
     // поставляет зависящая от неё задача.
     const r = runtimes((request) => {
-      const proposal = JSON.parse(
-        request.prompt.slice(request.prompt.lastIndexOf('\n{\n') + 1),
-      ) as {
+      const proposal = JSON.parse(proposalText(request.prompt)) as {
         tasks: { id: string; dependsOn: string[]; properties?: string[] }[];
         propertyScope?: Record<string, string[]>;
       };
@@ -349,3 +352,9 @@ test('AC07: a plan whose first task needs a future node is not approved after re
     await removeRoot(p.root);
   }
 });
+
+/** JSON предложения в запросе ревью: от последнего объекта верхнего уровня до его закрывающей скобки. */
+function proposalText(prompt: string) {
+  const start = prompt.lastIndexOf('\n{\n') + 1;
+  return prompt.slice(start, prompt.indexOf('\n}', start) + 2);
+}
