@@ -3,7 +3,7 @@ import { carriedTaskIds } from '../core/work-status.ts';
 import { LeadWorkflow, type WorkflowJob } from '../core/lead-workflow.ts';
 import type { DevContour } from '../core/service.ts';
 import { repositories, repository } from '../core/repositories.ts';
-import { Workspace, changeSnapshot, snapshotDigest } from '../core/workspace.ts';
+import { Workspace, changeSnapshot, currentJoint } from '../core/workspace.ts';
 import { reviewPlan, acceptBoard } from './agent-control.ts';
 import { WorkspaceRunner } from './workspace.ts';
 import { adapters } from './adapters.ts';
@@ -370,13 +370,8 @@ export class LeadRunner {
           productFresh = false;
         }
       }
-      if (
-        last?.status === 'passed' &&
-        productFresh &&
-        last.specDigest === snapshotDigest(changeSnapshot(s, c)) &&
-        last.policyDigest === workspace.policyDigest()
-      )
-        return false;
+      // Актуальность проверки — правило движка; продуктовый релиз — выше.
+      if (productFresh && currentJoint(this.h, c).current) return false;
       if (
         s.runs.some((r) => r.status === 'active') ||
         s.changeSets.some((c) =>

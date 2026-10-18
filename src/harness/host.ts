@@ -42,6 +42,16 @@ import {
   type ProjectionOptions,
 } from './projection.ts';
 import { policyFromConfig } from './policy.ts';
+import {
+  changeSnapshot,
+  snapshotDigest,
+  workspacePolicyDigest,
+  type ProductReleaseGuard,
+} from '../core/workspace.ts';
+import { IntentService } from '../runner/intent.ts';
+
+/** Проверка продуктового релиза (INTENT) — продуктовая служба DevContour. */
+const releaseGuard = (h: DevContour): ProductReleaseGuard => new IntentService(h);
 import type { DevContourExecutionStore } from './store.ts';
 
 const refusal = (code: NonNullable<HostRefusal>['code'], message: string): HostRefusal => ({
@@ -106,8 +116,61 @@ export function devcontourHost(h: DevContour, store: DevContourExecutionStore): 
       // Версия проверок — прежняя формула DevContour: ею подписаны записи и receipts.
       checksDigest: (work, policyDigest, view) =>
         effectiveChecks(taskOf(state(view), work), policyDigest),
+      // Совместная проверка — прежние формулы DevContour: ими подписаны принятые ChangeSet.
+      jointPolicyDigest: () => workspacePolicyDigest(h.config),
+      jointSpecDigest: (workIds, view, verificationId) => {
+        const s = state(view);
+        const changeSet = verificationId
+          ? s.changeSets.find((c) => c.verifications.some((v) => v.id === verificationId))
+          : s.changeSets.find((c) => c.id === store.startingChangeSet);
+        // Проверка вне ChangeSet не принадлежит ни одному набору: основание не совпадёт.
+        return changeSet
+          ? snapshotDigest(changeSnapshot(s, changeSet))
+          : sha256('no-changeset:' + JSON.stringify(workIds));
+      },
     },
     guards: {
+      // Поставка и preview идут под действующей конфигурацией: её применение их дожидается.
+      busy: (view) => {
+        const s = state(view);
+        const now = Date.now();
+        return [
+          ...s.changeSets.flatMap((c) =>
+            (c.deliveries ?? [])
+              .filter((d) => d.status === 'active' && d.leaseUntil > now)
+              .map((d) => d.id),
+          ),
+          ...(s.previewLock && s.previewLock.leaseUntil > now ? ['preview'] : []),
+        ];
+      },
+      // Продуктовые условия записи совместной проверки: ChangeSet не принят,
+      // релиз тот же, закреплённая проверка продуктового релиза актуальна.
+      joint: (verification, view, kind) => {
+        const s = state(view);
+        const changeSet = s.changeSets.find((c) =>
+          c.verifications.some((v) => v.id === verification.id),
+        );
+        const v = changeSet?.verifications.find((x) => x.id === verification.id);
+        if (!changeSet || !v || changeSet.acceptance)
+          return refusal('APPROVAL_STALE', 'Устаревшая попытка проверки workspace');
+        if (changeSet.releaseId !== v.productRelease?.releaseId)
+          return refusal(
+            'APPROVAL_STALE',
+            'Состав ChangeSet или политика изменились; нужна новая проверка',
+          );
+        if (changeSet.releaseId && v.productRelease) {
+          const release = v.productRelease;
+          if (kind === 'workspace.manifest' && v.manifest)
+            return guarded('APPROVAL_STALE', () =>
+              releaseGuard(h).validate(release, v, v.manifest),
+            );
+          if (kind === 'workspace.verified')
+            return guarded('APPROVAL_STALE', () =>
+              releaseGuard(h).validate(release, changeSnapshot(s, changeSet), v.manifest),
+            );
+        }
+        return null;
+      },
       // Активная поставка ChangeSet закрепила комбинацию: новые попытки сдвинули бы её.
       claimBarrier: (view) => {
         const delivery = state(view)

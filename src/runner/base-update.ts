@@ -1,13 +1,13 @@
-import { join } from 'node:path';
-import { git } from './process.ts';
+import { moveBase, type RefMove } from 'devcontour-harness';
 import { repositories } from '../core/repositories.ts';
 import type { Config } from '../core/model.ts';
+import { policyFromConfig } from '../harness/policy.ts';
 
 // Прогон ответвляется от ветки интеграции, а контракты, схемы и каркас
-// готовятся на рабочей ветке репозитория. Раньше эти линии ничто не сводило:
-// ветка интеграции оставалась там, где её создали, и исполнитель получал дерево
-// без работы, ради которой его запустили. Здесь перенос базы делается явно и
+// готовятся на рабочей ветке репозитория. Перенос базы сводит эти линии явно и
 // целиком: очередь стоит, попыток нет, результат — один SHA на репозиторий.
+// Сам перенос (fast-forward или слияние без hooks, CAS ref) — `moveBase`
+// пакета harness; здесь — ветки DevContour и подсказки оператору.
 export async function updateBase(
   config: Config,
   dataRoot: string,
@@ -20,91 +20,38 @@ export async function updateBase(
   /**
    * Сдвиг ref — единственный внешний эффект переноса. По умолчанию он идёт
    * обычной командой; владелец операции передаёт сюда синхронный сдвиг внутри
-   * своей транзакции, чтобы проверка владения и сдвиг не разделялись окном.
+   * своей транзакции (`fencedRefMove`), чтобы проверка владения и сдвиг не
+   * разделялись окном.
    */
-  move: (repoPath: string, target: string, to: string, from: string) => void | Promise<void> = (
-    repoPath,
-    target,
-    to,
-    from,
-  ) => git(repoPath, 'update-ref', target, to, from).then(() => undefined),
+  move?: RefMove,
 ) {
-  const updated: {
-    repositoryId: string;
-    branch: string;
-    from: string;
-    to: string;
-    commits: number;
-    kind: 'fast-forward' | 'merge';
-  }[] = [];
-  for (const repo of repositories(config).filter((r) => !only || r.id in only)) {
-    const target = `refs/heads/${repo.targetBranch}`;
-    const head = only?.[repo.id] ?? (await git(repo.path, 'rev-parse', 'HEAD'));
-    const tip = await git(repo.path, 'rev-parse', target);
-    if (head === tip) continue;
-    const behind = Number(await git(repo.path, 'rev-list', '--count', `${target}..${head}`));
-    if (!behind) continue;
-    const ahead = Number(await git(repo.path, 'rev-list', '--count', `${head}..${target}`));
-    if (!ahead) {
-      // Цель — предок рабочей ветки: история не теряется и не переписывается.
-      await move(repo.path, target, head, tip);
-      updated.push({
-        repositoryId: repo.id,
-        branch: repo.targetBranch,
-        from: tip,
-        to: head,
-        commits: behind,
-        kind: 'fast-forward',
-      });
-      continue;
-    }
-    // Обе линии несут работу: принятые прогоны в ветке интеграции и подготовка
-    // в рабочей. Сводятся слиянием в отдельном worktree — ветка интеграции
-    // checkout-веткой быть не может, и продвигается она только через ref.
-    const cwd = join(dataRoot, 'worktrees', `base-${repo.id}-${Date.now()}`);
-    await git(repo.path, 'worktree', 'add', '--detach', cwd, tip);
-    try {
-      await git(
-        cwd,
-        '-c',
-        'core.hooksPath=/dev/null',
-        'merge',
-        '--no-ff',
-        '--no-edit',
-        '--no-gpg-sign',
-        head,
-      );
-      const merged = await git(cwd, 'rev-parse', 'HEAD');
-      await move(repo.path, target, merged, tip);
-      updated.push({
-        repositoryId: repo.id,
-        branch: repo.targetBranch,
-        from: tip,
-        to: merged,
-        commits: behind,
-        kind: 'merge',
-      });
-    } finally {
-      await git(repo.path, 'worktree', 'remove', '--force', cwd).catch(() => undefined);
-    }
-  }
+  // Перенос не исполняет gates: достаточно репозиториев политики.
+  const policy = policyFromConfig(config, { purpose: 'review' });
+  const moved = await moveBase({
+    policy,
+    baseDir: dataRoot,
+    stateDir: dataRoot,
+    ...(only ? { only } : {}),
+    ...(move ? { move } : {}),
+  });
+  const branch = (repositoryId: string) =>
+    repositories(config).find((r) => r.id === repositoryId)!.targetBranch;
+  const updated = moved.updated.map((u) => ({
+    repositoryId: u.repositoryId,
+    branch: branch(u.repositoryId),
+    from: u.from,
+    to: u.to,
+    commits: u.commits,
+    kind: u.kind,
+  }));
   // Обратное направление: принятая работа, которой нет в рабочей ветке. Правки
   // контракта, подготовленные на такой ветке, ложатся на старые файлы приёмки
-  // и схемы и расходятся с принятыми при следующем переносе. Слияния не
-  // считаются: сам перенос оставляет в базе коммит слияния без новой работы.
-  const workingBehind: { repositoryId: string; branch: string; commits: number }[] = [];
-  for (const repo of repositories(config)) {
-    const commits = Number(
-      await git(
-        repo.path,
-        'rev-list',
-        '--no-merges',
-        '--count',
-        `HEAD..refs/heads/${repo.targetBranch}`,
-      ),
-    );
-    if (commits) workingBehind.push({ repositoryId: repo.id, branch: repo.targetBranch, commits });
-  }
+  // и схемы и расходятся с принятыми при следующем переносе.
+  const workingBehind = (moved.workingBehind ?? []).map((w) => ({
+    repositoryId: w.repositoryId,
+    branch: branch(w.repositoryId),
+    commits: w.commits,
+  }));
   return {
     updated,
     ...(workingBehind.length

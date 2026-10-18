@@ -13,6 +13,7 @@ import { requirementProof, taskEvidence } from '../core/proof.ts';
 import {
   Workspace,
   changeSnapshot,
+  currentJoint,
   snapshotDigest,
   type ProductReleaseGuard,
 } from '../core/workspace.ts';
@@ -489,34 +490,24 @@ export class IntentService implements ProductReleaseGuard {
     releaseId: string,
     coverage: ReturnType<IntentService['workspaceCoverage']>,
   ) {
-    const state = this.h.store.read(),
-      workspace = new Workspace(this.h);
+    const state = this.h.store.read();
     let verification: { changeSetId: string; verificationId: string } | undefined;
     let releaseAccepted = false;
     for (const changeSet of [...state.changeSets].reverse()) {
       if (changeSet.releaseId !== releaseId) continue;
-      const run = changeSet.verifications.at(-1);
+      // Актуальность проверки — правило движка; здесь только продуктовый релиз.
+      const { verification: run, current } = currentJoint(this.h, changeSet);
       if (
         !run ||
-        run.status !== 'passed' ||
-        !run.manifest ||
+        !current ||
         !run.productRelease ||
         run.productRelease.releaseId !== releaseId ||
-        run.productRelease.intentDigest !== intentDigest ||
-        run.manifestDigest !== digest(run.manifest) ||
-        run.policyDigest !== workspace.policyDigest()
+        run.productRelease.intentDigest !== intentDigest
       )
         continue;
       try {
         const selected = changeSnapshot(state, changeSet);
-        if (run.specDigest !== snapshotDigest(selected)) continue;
         this.validate(run.productRelease, selected, run.manifest);
-        if (
-          this.h.config.workspaceGates.some(
-            (g) => !run.evidence.findLast((e) => e.gate === g.id)?.passed,
-          )
-        )
-          continue;
         verification = { changeSetId: changeSet.id, verificationId: run.id };
         releaseAccepted =
           changeSet.acceptance?.verificationId === run.id &&

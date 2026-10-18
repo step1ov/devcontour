@@ -170,12 +170,13 @@ test('G05: metrics measure the selected scope against the full profile, workspac
         verifications: [
           {
             id: 'V-1',
-            token: 't',
+            token: 'fixture-verification-token-0001',
             leaseUntil: 0,
             startedAt: at(0),
+            finishedAt: at(0),
             status: 'passed',
-            policyDigest: 'p',
-            specDigest: 's',
+            policyDigest: 'a'.repeat(64),
+            specDigest: 'b'.repeat(64),
             tasks: [],
             boards: [],
             evidence: [

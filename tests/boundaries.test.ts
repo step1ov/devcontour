@@ -192,3 +192,30 @@ test('S3.6: учёт вызовов, бюджеты, ревью плана и к
   assert.match(code('src/core/repair.ts'), /from 'devcontour-harness'/);
   assert.match(code('src/harness/measured.ts'), /measuredInvoke\(/);
 });
+
+test('S3.6: применение конфигурации, удержания, перенос базы и совместная проверка — механизмы harness', () => {
+  const code = (path: string) => readFileSync(join(root, path), 'utf8');
+  // Своих записей состояния операции, удержаний и применённой конфигурации нет:
+  // их пишет только движок через адаптер хранилища.
+  for (const path of ['src/core/service.ts', 'src/core/workspace.ts', 'src/runner/reconfigure.ts'])
+    assert.doesNotMatch(
+      code(path),
+      /\.appliedConfig = |\.reconfigure = |\.hold = /,
+      `${path}: своя запись применения конфигурации или удержания`,
+    );
+  // Совместная проверка и перенос базы — исполнение harness, без своих копий.
+  for (const path of [
+    'src/core/workspace.ts',
+    'src/runner/workspace.ts',
+    'src/runner/base-update.ts',
+    'src/runner/contract-change.ts',
+  ])
+    assert.doesNotMatch(
+      code(path),
+      /'update-ref'|'worktree', 'add'|junitSummary|componentImpact|merge-base/,
+      `${path}: своя реализация переноса базы или совместной проверки`,
+    );
+  assert.match(code('src/runner/workspace.ts'), /new JointRunner\(/);
+  assert.match(code('src/runner/base-update.ts'), /moveBase\(/);
+  assert.match(code('src/runner/contract-change.ts'), /fencedRefMove\(/);
+});

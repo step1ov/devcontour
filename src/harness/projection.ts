@@ -445,18 +445,41 @@ export const verificationsOf = (state: DevContourState) =>
  * хост (операция ChangeSet знает, к какому набору она относится), здесь —
  * только изменение существующей. Снимок задач и доски остаются полями хоста.
  */
-export function putVerification(state: DevContourState, verification: JointVerificationState) {
+export function putVerification(
+  state: DevContourState,
+  verification: JointVerificationState,
+  /** ChangeSet, операция которого начинает новую проверку (`withJointTarget`). */
+  target?: string,
+) {
   const next = parsed(
     jointVerificationStateSchema,
     verification,
     'Совместная проверка ' + verification.id,
   );
   const v = state.changeSets.flatMap((c) => c.verifications).find((x) => x.id === next.id);
-  if (!v)
-    throw new HarnessError(
-      'INVALID_INPUT',
-      'Совместную проверку DevContour начинает операция ChangeSet: ' + next.id,
-    );
+  if (!v) {
+    const changeSet = target ? state.changeSets.find((c) => c.id === target) : undefined;
+    if (!changeSet)
+      throw new HarnessError(
+        'INVALID_INPUT',
+        'Совместную проверку DevContour начинает операция ChangeSet: ' + next.id,
+      );
+    // Снимок задач и доски дописывает операция ChangeSet в той же записи.
+    const created = {
+      tasks: next.workIds.map((id) =>
+        structuredClone(
+          state.tasks.find((t) => t.id === id) ??
+            (() => {
+              throw new HarnessError('NOT_FOUND', 'Задача не найдена: ' + id);
+            })(),
+        ),
+      ),
+      boards: [],
+    } as unknown as Verification;
+    assign(created as unknown as Record<string, unknown>, verificationKeys, next);
+    changeSet.verifications.push(created);
+    return;
+  }
   if (JSON.stringify(v.tasks.map((t) => t.id)) !== JSON.stringify(next.workIds))
     throw new HarnessError(
       'INVALID_INPUT',

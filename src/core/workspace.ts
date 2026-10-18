@@ -1,10 +1,9 @@
 import { assertTaskPreparation } from './preparation.ts';
 import { delivered } from './delivery.ts';
-import { componentImpact } from './workflow.ts';
-import { randomUUID } from 'node:crypto';
 import { entityId } from './ids.ts';
 import { z } from 'zod';
 import { DevContour, digest, specDigest } from './service.ts';
+import { domain, executionOf } from '../harness/execution.ts';
 import { repositories } from './repositories.ts';
 import type { ProductReleaseProof } from './product-map.ts';
 import {
@@ -15,6 +14,7 @@ import {
   type Verification,
   type WorkspaceEvidence,
   type Approval,
+  type Config,
 } from './model.ts';
 
 export const changeSetInput = z.object({
@@ -69,6 +69,45 @@ export interface ProductReleaseGuard {
   ): void;
 }
 
+/**
+ * Digest политики совместной проверки — прежняя формула DevContour: ею
+ * подписаны принятые проверки ChangeSet. Движок сравнивает её как формулу хоста.
+ */
+export function workspacePolicyDigest(config: Config) {
+  return digest({
+    repositories: repositories(config),
+    environment: config.environment,
+    workspaceLifecycle: config.workspaceLifecycle,
+    gates: config.workspaceGates,
+    verificationMode: config.verificationMode,
+    resources: config.resources,
+    resourceDatabase: config.resourceDatabase,
+    // Совместные проверки исполняются в той же песочнице, что и проверки
+    // задач: её смена делает прежнюю проверку другой по условиям.
+    isolation: config.isolation,
+    // Закрепление контекста — часть договора исполнения задач, которые
+    // проверка подтверждает: после его смены прежняя проверка не принимает
+    // ChangeSet, а её поставка — тем более.
+    ...(config.contextPacks.length ? { contextPacks: config.contextPacks } : {}),
+  });
+}
+
+/**
+ * Актуальность последней проверки ChangeSet — правило движка (`jointResult`):
+ * успешная, целый manifest, текущая политика, неизменное основание, PASS
+ * каждого gate своей области. Продуктовые условия (релиз) проверяет вызывающий.
+ */
+export function currentJoint(h: DevContour, c: ChangeSet) {
+  const v = c.verifications.at(-1);
+  if (!v) return { verification: undefined, current: false, reason: 'Проверки ChangeSet нет' };
+  const { engine } = executionOf(h);
+  const { current, reason } = engine.jointResult(
+    v.tasks.map((t) => t.id),
+    v.id,
+  );
+  return { verification: v, current, ...(reason ? { reason } : {}) };
+}
+
 export class Workspace {
   constructor(
     readonly h: DevContour,
@@ -81,22 +120,7 @@ export class Workspace {
     );
   }
   policyDigest() {
-    return digest({
-      repositories: repositories(this.h.config),
-      environment: this.h.config.environment,
-      workspaceLifecycle: this.h.config.workspaceLifecycle,
-      gates: this.h.config.workspaceGates,
-      verificationMode: this.h.config.verificationMode,
-      resources: this.h.config.resources,
-      resourceDatabase: this.h.config.resourceDatabase,
-      // Совместные проверки исполняются в той же песочнице, что и проверки
-      // задач: её смена делает прежнюю проверку другой по условиям.
-      isolation: this.h.config.isolation,
-      // Закрепление контекста — часть договора исполнения задач, которые
-      // проверка подтверждает: после его смены прежняя проверка не принимает
-      // ChangeSet, а её поставка — тем более.
-      ...(this.h.config.contextPacks.length ? { contextPacks: this.h.config.contextPacks } : {}),
-    });
+    return workspacePolicyDigest(this.h.config);
   }
   create(input: unknown) {
     const parsed = changeSetInput.parse(input);
@@ -120,179 +144,126 @@ export class Workspace {
       return c;
     });
   }
-  start(id: string) {
-    const gates = this.h.config.workspaceGates;
-    if (!gates.some((g) => g.kind === 'test' && g.report))
-      throw new DomainError('Настройте обязательные интеграционные workspaceGates с JUnit');
-    for (const repo of repositories(this.h.config).filter((r) => r.kind === 'product'))
-      if (!gates.some((g) => g.repositoryId === repo.id && g.kind === 'test' && g.report))
-        throw new DomainError(`Нужна интеграционная проверка продукта ${repo.id}`);
-    return this.h.store.change('workspace.verification.started', (s) => {
-      this.h.assertCurrentConfig(s);
-      const c = find(s, id);
-      if (c.acceptance) throw new DomainError('ChangeSet уже принят; создайте следующий');
-      if (s.reconfigure && !s.reconfigure.appliedAt)
-        throw new DomainError(
-          `Операция ${s.reconfigure.operation} применяет конфигурацию; дождитесь её`,
-          409,
-        );
-      if (
-        s.changeSets.some((x) =>
-          x.deliveries?.some((d) => d.status === 'active' && d.leaseUntil > Date.now()),
-        )
-      )
-        throw new DomainError('Доставка ещё выполняется');
-      if (s.runs.some((r) => r.status === 'active' && r.leaseUntil > Date.now()))
-        throw new DomainError('Дождитесь текущих задач перед проверкой workspace');
-      for (const other of s.changeSets)
-        for (const v of other.verifications) {
-          if (v.status !== 'active') continue;
-          if (v.leaseUntil > Date.now())
-            throw new DomainError('Проверка workspace уже выполняется');
-          v.status = 'failed';
-          v.error = 'Истёк срок владения проверкой';
-          v.finishedAt = new Date().toISOString();
-        }
-      if (c.verifications.length >= this.h.config.maxAttempts)
-        throw new DomainError('Исчерпан лимит попыток ChangeSet');
-      const snapshot = changeSnapshot(s, c);
-      snapshot.tasks.forEach((t) => assertTaskPreparation(s, t));
-      if (!snapshot.tasks.length || snapshot.tasks.some((t) => t.status !== 'done' || !t.resultSha))
-        throw new DomainError('Сначала завершите все задачи ChangeSet');
-      const productRelease = c.releaseId ? this.guard().capture(c.releaseId, snapshot) : undefined;
-      const v: Verification = {
-        ...(productRelease ? { productRelease } : {}),
-        id: randomUUID(),
-        token: randomUUID(),
-        startedAt: new Date().toISOString(),
-        leaseUntil: Date.now() + this.h.config.leaseMs,
-        status: 'active',
-        policyDigest: this.policyDigest(),
-        specDigest: snapshotDigest(snapshot),
-        ...snapshot,
-        evidence: [],
-      };
-      c.verifications.push(v);
-      return { changeSetId: id, verification: v };
-    }).verification;
+  /**
+   * База для области `affected` — последняя принятая проверка ChangeSet под
+   * текущей политикой (продуктовый выбор). Продуктовый релиз и неполный граф
+   * компонентов проверяются целиком: база не передаётся.
+   */
+  private baseline(s: DevContourState, release: boolean) {
+    if (release || this.h.config.verificationMode !== 'affected') return undefined;
+    if (repositories(this.h.config).some((r) => r.dependsOn === undefined)) return undefined;
+    const policy = this.policyDigest();
+    return s.changeSets
+      .filter((c) => c.acceptance)
+      .sort((a, b) => b.acceptance!.at.localeCompare(a.acceptance!.at))
+      .map((c) => c.verifications.find((v) => v.id === c.acceptance!.verificationId))
+      .find((v) => v?.manifest && v.policyDigest === policy)?.id;
   }
-  private update<T>(id: string, token: string, event: string, action: (v: Verification) => T): T {
-    return this.h.store.change(event, (s) => {
-      this.h.assertCurrentConfig(s);
-      const c = find(s, id),
-        v = c.verifications.at(-1);
-      if (
-        !v ||
-        c.acceptance ||
-        v.status !== 'active' ||
-        v.token !== token ||
-        v.leaseUntil <= Date.now()
-      )
-        throw new DomainError('Устаревшая попытка проверки workspace');
-      if (
-        c.releaseId !== v.productRelease?.releaseId ||
-        v.policyDigest !== this.policyDigest() ||
-        v.specDigest !== snapshotDigest(changeSnapshot(s, c))
-      )
-        throw new DomainError('Состав ChangeSet или политика изменились; нужна новая проверка');
-      if (c.releaseId) {
-        if (v.productRelease?.releaseId !== c.releaseId)
-          throw new DomainError('Нет закреплённой проверки продуктового релиза');
-        // Full coverage is captured before the lease starts. Compare its pinned inputs at
-        // manifest/finish/accept; per-gate recording and heartbeats need no Git I/O.
-        if (event === 'workspace.verified')
-          this.guard().validate(v.productRelease, changeSnapshot(s, c), v.manifest);
-      }
-      return action(v);
-    });
+  /**
+   * Начать проверку ChangeSet: продуктовые условия (ChangeSet не принят, нет
+   * идущей поставки, предел попыток ChangeSet, подготовка задач, снимок
+   * продуктового релиза) и правила движка (`jointStart`: gates с JUnit,
+   * применённая политика, нет попыток и другой живой проверки, поручения
+   * приняты) — одна запись.
+   */
+  start(id: string) {
+    const { store, engine } = executionOf(this.h);
+    return domain(() =>
+      store.host('workspace.verification.started', (ht) => {
+        const s = ht.state;
+        const c = find(s, id);
+        if (c.acceptance) throw new DomainError('ChangeSet уже принят; создайте следующий');
+        if (
+          s.changeSets.some((x) =>
+            x.deliveries?.some((d) => d.status === 'active' && d.leaseUntil > Date.now()),
+          )
+        )
+          throw new DomainError('Доставка ещё выполняется');
+        if (c.verifications.length >= this.h.config.maxAttempts)
+          throw new DomainError('Исчерпан лимит попыток ChangeSet');
+        const snapshot = changeSnapshot(s, c);
+        snapshot.tasks.forEach((t) => assertTaskPreparation(s, t));
+        if (!snapshot.tasks.length) throw new DomainError('Сначала завершите все задачи ChangeSet');
+        const baseline = this.baseline(s, !!c.releaseId);
+        const started = store.withJointTarget(id, () =>
+          engine.jointStart({
+            workIds: snapshot.tasks.map((t) => t.id),
+            ...(baseline ? { baseline } : {}),
+          }),
+        );
+        const productRelease = c.releaseId
+          ? this.guard().capture(c.releaseId, snapshot)
+          : undefined;
+        const v = c.verifications.find((x) => x.id === started.id)!;
+        v.boards = snapshot.boards;
+        v.tasks = structuredClone(snapshot.tasks);
+        if (productRelease) v.productRelease = productRelease;
+        ht.journal({ changeSetId: id, verification: v });
+        return structuredClone(v);
+      }),
+    );
+  }
+  /** Текущая проверка ChangeSet: записи — только её владельцем (fencing движка). */
+  private latest(id: string) {
+    const v = this.h.store
+      .read()
+      .changeSets.find((c) => c.id === id)
+      ?.verifications.at(-1);
+    if (!v) throw new DomainError('Устаревшая попытка проверки workspace');
+    return v;
   }
   heartbeat(id: string, token: string) {
-    this.update(id, token, 'heartbeat', (v) => {
-      v.leaseUntil = Date.now() + this.h.config.leaseMs;
-    });
+    const { engine } = executionOf(this.h);
+    const v = this.latest(id);
+    domain(() => engine.jointHeartbeat(v.id, token));
   }
   manifest(id: string, token: string, manifest: NonNullable<Verification['manifest']>) {
-    return this.update(id, token, 'workspace.manifest', (v) => {
-      if (v.manifest) throw new DomainError('Manifest уже закреплён');
-      const ids = repositories(this.h.config)
-        .map((r) => r.id)
-        .sort();
-      if (
-        JSON.stringify(Object.keys(manifest).sort()) !== JSON.stringify(ids) ||
-        Object.values(manifest).some(
-          (m) => !/^[a-f0-9]{40,64}$/.test(m.sha) || !/^[a-f0-9]{40,64}$/.test(m.tree),
-        )
-      )
-        throw new DomainError('Manifest должен фиксировать SHA и tree каждого репозитория');
-      v.manifest = manifest;
-      v.manifestDigest = digest(manifest);
-      if (v.productRelease) this.guard().validate(v.productRelease, v, manifest);
-      v.impact = componentImpact(
-        v.productRelease ? { ...this.h.config, verificationMode: 'all' } : this.h.config,
-        this.h.store.read(),
-        v,
-      );
-      return { changeSetId: id, verificationId: v.id, manifest, digest: v.manifestDigest };
-    });
+    const { engine } = executionOf(this.h);
+    const v = this.latest(id);
+    const pinned = domain(() => engine.jointManifest(v.id, token, manifest));
+    return {
+      changeSetId: id,
+      verificationId: v.id,
+      manifest,
+      digest: pinned.manifestDigest,
+    };
   }
   evidence(id: string, token: string, evidence: WorkspaceEvidence) {
-    return this.update(id, token, 'workspace.evidence', (v) => {
-      v.evidence.push(evidence);
-      return { changeSetId: id, verificationId: v.id, ...evidence };
-    });
+    const { engine } = executionOf(this.h);
+    const v = this.latest(id);
+    domain(() => engine.jointEvidence(v.id, token, evidence));
+    return { changeSetId: id, verificationId: v.id, ...evidence };
   }
   finish(id: string, token: string) {
-    return this.update(id, token, 'workspace.verified', (v) => {
-      if (!v.manifest || digest(v.manifest) !== v.manifestDigest)
-        throw new DomainError('Нет закреплённого manifest');
-      for (const gate of this.h.config.workspaceGates.filter(
-        (g) => !v.impact || v.impact.gateIds.includes(g.id),
-      ))
-        if (!v.evidence.findLast((e) => e.gate === gate.id)?.passed)
-          throw new DomainError(`Нет PASS: ${gate.id}`);
-      v.status = 'passed';
-      v.finishedAt = new Date().toISOString();
-      return { changeSetId: id, verificationId: v.id, manifest: v.manifest };
-    });
+    const { engine } = executionOf(this.h);
+    const v = this.latest(id);
+    const done = domain(() => engine.jointFinish(v.id, token));
+    return { changeSetId: id, verificationId: v.id, manifest: done.manifest! };
   }
   fail(id: string, token: string, error: string) {
-    return this.h.store.change('workspace.failed', (s) => {
-      const c = find(s, id),
-        v = c.verifications.at(-1);
-      if (c.acceptance || !v || v.token !== token || v.status !== 'active') return;
-      v.status = 'failed';
-      v.error = error;
-      v.finishedAt = new Date().toISOString();
-      return { changeSetId: id, verificationId: v.id, error };
-    });
+    const { engine } = executionOf(this.h);
+    const v = this.h.store
+      .read()
+      .changeSets.find((c) => c.id === id)
+      ?.verifications.at(-1);
+    if (!v) return undefined;
+    return domain(() => engine.jointFail(v.id, token, error))
+      ? { changeSetId: id, verificationId: v.id, error }
+      : undefined;
   }
   accept(id: string, approval: Approval = { actor: 'agent' }) {
-    return this.h.store.change('changeset.accepted', (s) => {
-      this.h.assertCurrentConfig(s);
+    return this.h.currentChange('changeset.accepted', (s) => {
       const c = find(s, id);
       if (c.acceptance) return { status: 'already-accepted', changeSetId: id };
       changeSnapshot(s, c).tasks.forEach((t) => assertTaskPreparation(s, t));
-      const v = c.verifications.at(-1);
-      if (
-        !v ||
-        v.status !== 'passed' ||
-        !v.manifest ||
-        c.releaseId !== v.productRelease?.releaseId ||
-        digest(v.manifest) !== v.manifestDigest ||
-        v.policyDigest !== this.policyDigest() ||
-        v.specDigest !== snapshotDigest(changeSnapshot(s, c))
-      )
+      const { verification: v, current } = currentJoint(this.h, c);
+      if (!v || !current || c.releaseId !== v.productRelease?.releaseId)
         throw new DomainError('Нет актуальной успешной проверки всего ChangeSet');
       if (c.releaseId) {
         if (v.productRelease?.releaseId !== c.releaseId)
           throw new DomainError('Нет закреплённой проверки продуктового релиза');
         this.guard().validate(v.productRelease, changeSnapshot(s, c), v.manifest);
       }
-      for (const gate of this.h.config.workspaceGates.filter(
-        (g) => !v.impact || v.impact.gateIds.includes(g.id),
-      ))
-        if (!v.evidence.findLast((e) => e.gate === gate.id)?.passed)
-          throw new DomainError('Отсутствует интеграционное evidence');
       const delivery = delivered(this.h, c);
       if (this.h.config.completionMode === 'remote' && !delivery)
         throw new DomainError(

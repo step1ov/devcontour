@@ -107,6 +107,27 @@ export class DevContourExecutionStore implements ExecutionStore {
    * Транзакции движка внутри неё — вложенные. Хост не вызывает внутри
    * `Store.change`: тот перечитал бы документ поверх изменений транзакции.
    */
+  /** ChangeSet, операция которого сейчас начинает совместную проверку. */
+  private jointTarget?: string;
+  /**
+   * Начать совместную проверку набора ChangeSet `changeSetId`: движок создаёт
+   * запись проверки, адаптер помещает её в этот ChangeSet. Вне этого вызова
+   * новая проверка не создаётся.
+   */
+  withJointTarget<T>(changeSetId: string, fn: () => T): T {
+    const previous = this.jointTarget;
+    this.jointTarget = changeSetId;
+    try {
+      return fn();
+    } finally {
+      this.jointTarget = previous;
+    }
+  }
+  /** ChangeSet начинаемой проверки — формула основания хоста читает его до появления id. */
+  get startingChangeSet() {
+    return this.jointTarget;
+  }
+
   host<T>(kind: string, fn: (h: HostTransaction) => T): T {
     const run = (frame: Frame) =>
       fn({
@@ -352,7 +373,7 @@ export class DevContourExecutionStore implements ExecutionStore {
       },
       putVerification: (verification: JointVerificationState) => {
         inTx();
-        putVerification(state(), verification);
+        putVerification(state(), verification, this.jointTarget);
       },
       setControl: (control) => {
         inTx();

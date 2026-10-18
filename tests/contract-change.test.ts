@@ -29,6 +29,7 @@ import { Scheduler } from '../src/runner/scheduler.ts';
 import { lockContextFile, pinContext, planRepin } from '../src/runner/context.ts';
 import { loadedDigest } from '../src/core/service.ts';
 import { busyWork } from '../src/runner/reconfigure.ts';
+import { updateBase } from '../src/runner/base-update.ts';
 import { Workspace } from '../src/core/workspace.ts';
 import { Previews } from '../src/core/preview.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
@@ -566,14 +567,15 @@ test('Reconfigure waits for a running attempt and issues nothing new until the c
 test('Only one operation applies a configuration at a time', () => {
   const f = fixture();
   try {
-    f.h.requestReconfigure('CC-a', 'a'.repeat(64));
+    f.h.requestReconfigure('CC-a', f.h.configDigest);
     // Повтор того же запроса — не конфликт.
-    f.h.requestReconfigure('CC-a', 'a'.repeat(64));
+    f.h.requestReconfigure('CC-a', f.h.configDigest);
     assert.throws(
       () => f.h.requestReconfigure('CC-b', 'b'.repeat(64)),
-      /Конфигурацию уже применяет операция CC-a/,
+      /уже применяет операция CC-a/,
     );
-    f.h.settleReconfigure('CC-a', 'a'.repeat(64), 'server');
+    // Применение — процессом с ожидаемой конфигурацией.
+    f.h.settleReconfigure('CC-a', f.h.configDigest, 'server');
     f.h.requestReconfigure('CC-b', 'b'.repeat(64));
     assert.equal(f.store.read().reconfigure?.operation, 'CC-b');
   } finally {
@@ -786,7 +788,7 @@ test('C-F02/C-F15: an owner that loses the operation mid-write writes nothing; a
     // считал закрепление. Право на запись проверяется у самой записи.
     await assert.rejects(
       lockContextFile(s.h.config, ctx.path, 'HEAD', (write) => {
-        s.h.requestReconfigure('CC-late', 'l'.repeat(64));
+        s.h.requestReconfigure('CC-late', 'd'.repeat(64));
         s.store.atomic(() => {
           const pending = s.store.read().reconfigure;
           if (pending && !pending.appliedAt) throw new Error('применяет конфигурацию');
@@ -842,8 +844,8 @@ test('C-F11/C-F12/C-F16/C-F17: a stale process accepts nothing even after the le
       ...input('Late draft'),
       role: 'qa',
     });
-    assert.throws(() => stale!.approve(s.board.id, [draft.id]), /устаревшей конфигурацией/);
-    assert.throws(() => new Workspace(stale!).accept('CHG-none'), /устаревшей конфигурацией/);
+    assert.throws(() => stale!.approve(s.board.id, [draft.id]), /не с применённой политикой/);
+    assert.throws(() => new Workspace(stale!).accept('CHG-none'), /не с применённой политикой/);
     assert.equal(stale.claim('stale-worker'), undefined);
     assert.ok(stale.leader('other-start'));
     stale.recordConfig('other-start');
@@ -884,7 +886,7 @@ test('C-F18: a server that loaded the previous configuration does not write it b
     // Сервер догоняет B из файла тем же правилом и снова работает.
     serveReconfigure(server, ctx.path, 'server');
     assert.equal(server.config.contextPacks[0].revision, s.sh('rev-parse', 'HEAD'));
-    assert.doesNotThrow(() => server!.assertCurrentConfig(s.store.read()));
+    assert.doesNotThrow(() => server!.assertCurrentConfig());
   } finally {
     server?.store.close();
     await s.remove();
@@ -920,10 +922,7 @@ test('C-F19/C-F20/C-F21: staleness follows generations, not clocks; a snapshot r
     Date.now = () => frozen;
     late = new DevContour(new Store(join(s.root, 'state.sqlite')), snapshotA);
     for (const stale of [early, late])
-      assert.throws(
-        () => stale.assertCurrentConfig(stale.store.read()),
-        /устаревшей конфигурацией/,
-      );
+      assert.throws(() => stale.assertCurrentConfig(), /не с применённой политикой/);
     const applied = s.store.read().appliedConfig;
     assert.ok(early.leader('early'));
     early.recordConfig('early');
@@ -939,7 +938,7 @@ test('C-F19/C-F20/C-F21: staleness follows generations, not clocks; a snapshot r
       JSON.stringify({ ...raw, runTimeoutMs: Number(raw.runTimeoutMs) + 1 }, null, 2) + '\n',
     );
     restarted = new DevContour(new Store(join(s.root, 'state.sqlite')), loadConfig(ctx.path));
-    assert.doesNotThrow(() => restarted!.assertCurrentConfig(restarted!.store.read()));
+    assert.doesNotThrow(() => restarted!.assertCurrentConfig());
     assert.ok(restarted.leader('restarted'));
     restarted.recordConfig('restarted');
     assert.equal(s.store.read().appliedConfig?.digest, loadedDigest(restarted.config));
@@ -988,19 +987,13 @@ test('C-F20/C-F22/C-F23/C-F24: the applied configuration is the only truth; adop
     // C-F20: файл вернули к A, CLI прочитал его свежим — controller B жив.
     writeFileSync(ctx.path, textA);
     const cli = open(loadConfig(ctx.path));
-    assert.throws(
-      () => s.store.change('fixture.cli', (st) => cli.assertCurrentConfig(st)),
-      /работает controller server/,
-    );
+    assert.throws(() => cli.assertCurrentConfig(), /работает controller server/);
     // C-F22: конфигурация без источника не вправе стать применённой даже без лидера.
     s.store.change('fixture.no-leader', (st) => {
       st.leader = undefined;
     });
     const memory = open(structuredClone(loadConfig(ctx.path)));
-    assert.throws(
-      () => s.store.change('fixture.memory', (st) => memory.assertCurrentConfig(st)),
-      /источника нет/,
-    );
+    assert.throws(() => memory.assertCurrentConfig(), /источника нет/);
     // C-F24: запись своей конфигурации при получении лидерства внутри
     // отменённой транзакции не оставляет ни следа в базе, ни ложной
     // актуальности в процессе: после применения B другим процессом он отстал.
@@ -1018,12 +1011,9 @@ test('C-F20/C-F22/C-F23/C-F24: the applied configuration is the only truth; adop
     // C-F23: временно недоступный файл — отказ с причиной; после восстановления
     // — тот же процесс без перезапуска записывает свою конфигурацию.
     renameSync(ctx.path, ctx.path + '.away');
-    assert.throws(
-      () => s.store.change('fixture.eio', (st) => cli.assertCurrentConfig(st)),
-      /не читается/,
-    );
+    assert.throws(() => cli.assertCurrentConfig(), /не читается/);
     renameSync(ctx.path + '.away', ctx.path);
-    s.store.change('fixture.recovered', (st) => cli.assertCurrentConfig(st));
+    cli.assertCurrentConfig();
     assert.equal(s.store.read().appliedConfig?.digest, loadedDigest(cli.config));
     assert.equal(s.store.read().appliedConfig?.generation, (applied.generation ?? 0) + 1);
   } finally {
@@ -1058,16 +1048,10 @@ test('C-F25/C-F26/C-F27: adoption checks the bytes that were parsed, not file me
     execFileSync('touch', ['-r', ctx.path + '.a', ctx.path]);
     assert.equal(statSync(ctx.path).mtimeMs, statA.mtimeMs);
     assert.equal(statSync(ctx.path).size, statA.size);
-    assert.throws(
-      () => s.store.change('fixture.old', (st) => old.assertCurrentConfig(st)),
-      /изменился после загрузки/,
-    );
+    assert.throws(() => old.assertCurrentConfig(), /изменился после загрузки/);
     // C-F26: загрузчик разобрал байты A, а на диске уже B.
     const racing = open(loadConfig(ctx.path, textA));
-    assert.throws(
-      () => s.store.change('fixture.race', (st) => racing.assertCurrentConfig(st)),
-      /изменился после загрузки/,
-    );
+    assert.throws(() => racing.assertCurrentConfig(), /изменился после загрузки/);
     assert.deepEqual(s.store.read().appliedConfig, applied, 'A не вернулась');
     // C-F27: законный перезапуск с новым полем; первая запись при старте не
     // удалась (файл временно недоступен), следующая — удалась.
@@ -1130,10 +1114,7 @@ test('C-F24: a start record rolled back with its transaction leaves the process 
     s.store.change('fixture.no-leader-2', (st) => {
       st.leader = undefined;
     });
-    assert.throws(
-      () => s.store.change('fixture.accept', (st) => edited!.assertCurrentConfig(st)),
-      /устаревшей конфигурацией/,
-    );
+    assert.throws(() => edited!.assertCurrentConfig(), /не с применённой политикой/);
   } finally {
     edited?.store.close();
     await s.remove();
@@ -1182,10 +1163,7 @@ test('C-F28: a component config reached through a switched symlink does not keep
       st.leader = undefined;
     });
     const applied = b.store.read().appliedConfig;
-    assert.throws(
-      () => viaLink.store.change('fixture.link', (st) => viaLink.assertCurrentConfig(st)),
-      /теперь ведёт к другому файлу/,
-    );
+    assert.throws(() => viaLink.assertCurrentConfig(), /теперь ведёт к другому файлу/);
     assert.deepEqual(b.store.read().appliedConfig, applied);
   } finally {
     for (const h of extra) h.store.close();
@@ -1234,10 +1212,7 @@ test('C-F31: a repository directory reached through a switched symlink does not 
       st.leader = undefined;
     });
     const applied = b.store.read().appliedConfig;
-    assert.throws(
-      () => viaA.store.change('fixture.link', (st) => viaA.assertCurrentConfig(st)),
-      /теперь ведёт к другому файлу/,
-    );
+    assert.throws(() => viaA.assertCurrentConfig(), /теперь ведёт к другому файлу/);
     assert.deepEqual(b.store.read().appliedConfig, applied);
   } finally {
     for (const h of extra) h.store.close();
@@ -1260,10 +1235,7 @@ test('C-F30: a configuration edited in memory after loading does not keep the ri
     const loaded = loadConfig(ctx.path);
     loaded.runTimeoutMs += 2;
     edited = new DevContour(new Store(join(s.root, 'state.sqlite')), loaded);
-    assert.throws(
-      () => s.store.change('fixture.memory', (st) => edited!.assertCurrentConfig(st)),
-      /изменена в памяти/,
-    );
+    assert.throws(() => edited!.assertCurrentConfig(), /изменена в памяти/);
     assert.deepEqual(s.store.read().appliedConfig, applied);
   } finally {
     edited?.store.close();
@@ -1315,12 +1287,12 @@ test('C-F03/C-F04: a fixed config file is applied on retry, and an expired verif
         verifications: [
           {
             id: 'V-expired',
-            token: 't',
+            token: 'expired-verification-token-0001',
             leaseUntil: Date.now() - 1000,
             startedAt: new Date().toISOString(),
             status: 'active',
-            policyDigest: 'p',
-            specDigest: 's',
+            policyDigest: 'a'.repeat(64),
+            specDigest: 'b'.repeat(64),
             tasks: [],
             boards: [],
             evidence: [],
@@ -1395,7 +1367,7 @@ test('C-F05/C-F07: a verification and a process from the previous configuration 
     assert.ok(run, 'актуальный процесс выдаёт');
     assert.throws(
       () => stale!.phase(run.id, run.token, 'integrating', { candidateSha: 'c' }),
-      /устаревшей конфигурацией|Политика изменилась/,
+      /не с применённой политикой|Политика изменилась/,
     );
   } finally {
     stale?.store.close();
@@ -1762,6 +1734,129 @@ test('A contract file registered under another component is named, not treated a
     await assert.rejects(s.changes().start(other, 'codex'), /уже зарегистрирован/);
     assert.equal(s.store.read().contracts.length, 1, 'параллельный контракт не заведён');
   } finally {
+    await s.remove();
+  }
+});
+
+test('C-F05b: идущая поставка и preview держат применение конфигурации так же, как попытки', async () => {
+  const s = await stage();
+  try {
+    const live = Date.now() + 60_000;
+    s.store.change('fixture.busy', (st) => {
+      st.changeSets.push({
+        id: 'CHG-busy',
+        title: 'Busy change',
+        description: 'Идёт поставка набора',
+        boardIds: [],
+        createdAt: new Date().toISOString(),
+        verifications: [],
+        deliveries: [
+          {
+            id: 'D-live',
+            verificationId: 'V-none',
+            manifestDigest: 'a'.repeat(64),
+            policyDigest: 'b'.repeat(64),
+            token: 'delivery-token-00000000000000001',
+            leaseUntil: live,
+            status: 'active',
+            startedAt: new Date().toISOString(),
+            components: {},
+          },
+        ],
+      });
+      st.previewLock = { token: 'preview-token-0001', kind: 'deploy', leaseUntil: live };
+    });
+    assert.deepEqual(busyWork(s.h).sort(), ['D-live', 'preview']);
+    s.h.requestReconfigure('CC-busy', s.h.configDigest);
+    assert.equal(
+      s.h.settleReconfigure('CC-busy', s.h.configDigest, 'server'),
+      undefined,
+      'поставка и preview держат применение',
+    );
+    assert.equal(s.store.read().reconfigure?.appliedAt, undefined);
+    s.store.change('fixture.idle', (st) => {
+      st.changeSets.find((c) => c.id === 'CHG-busy')!.deliveries![0].status = 'delivered';
+      st.previewLock = undefined;
+    });
+    assert.deepEqual(busyWork(s.h), []);
+    assert.ok(s.h.settleReconfigure('CC-busy', s.h.configDigest, 'server'));
+    assert.ok(s.store.read().reconfigure?.appliedAt, 'после окончания работ — применено');
+  } finally {
+    await s.remove();
+  }
+});
+
+test('Перенос базы операцией — ровно проверенный SHA, а не HEAD рабочей ветки; ветки и подсказки DevContour', async () => {
+  const s = await stage();
+  try {
+    const reviewed = s.sh('rev-parse', 'HEAD');
+    await writeFile(join(s.repo, 'later.txt'), 'появилось после проверки\n');
+    s.sh('add', '.');
+    s.sh('commit', '-qm', 'later');
+    const branch = s.h.config.targetBranch;
+    const moved = await updateBase(s.h.config, s.root, { main: reviewed });
+    assert.equal(s.sh('rev-parse', `refs/heads/${branch}`), reviewed, 'перенесён проверенный SHA');
+    assert.equal(moved.updated[0]?.to, reviewed);
+    assert.equal(moved.updated[0]?.branch, branch);
+    assert.equal(moved.updated[0]?.kind, 'fast-forward');
+    // Без ограничения — до HEAD рабочей ветки.
+    const all = await updateBase(s.h.config, s.root);
+    assert.equal(all.updated[0]?.to, s.sh('rev-parse', 'HEAD'));
+    assert.match(all.next, /База обновлена/);
+  } finally {
+    await s.remove();
+  }
+});
+
+test('Утрата владения операцией перед самым сдвигом ref — сдвига нет: проверка владения и update-ref в одной транзакции', async () => {
+  const s = await stage();
+  const other = new Store(join(s.root, 'state.sqlite'));
+  const second = new ContractChanges(
+    new DevContour(other, { ...s.h.config, mode: 'demo' }),
+    s.root,
+  );
+  const realSpawn = cp.spawn;
+  try {
+    const before = s.sh('rev-parse', 'devcontour/accepted');
+    let armed = false;
+    let expired = false;
+    const held: { operation?: ContractChange } = {};
+    // Окно — после всех чтений переноса базы, непосредственно перед сдвигом:
+    // последний `rev-list` перед update-ref. Срок владения истекает.
+    cp.spawn = function (this: unknown, command: string, args: string[], options: unknown) {
+      if (
+        armed &&
+        command === 'git' &&
+        args[0] === 'rev-list' &&
+        String(args[2] ?? '').endsWith('..refs/heads/devcontour/accepted')
+      ) {
+        armed = false;
+        other.atomic(() =>
+          other.saveLocal('contract-change', held.operation!.owner, held.operation!.id, {
+            ...second.get(held.operation!.id),
+            leaseUntil: Date.now() - 1,
+          }),
+        );
+        expired = true;
+      }
+      return realSpawn.call(this, command, args, options as never);
+    } as typeof cp.spawn;
+    syncBuiltinESMExports();
+    const changes = s.changes((step) => {
+      if (step === 'rebind') armed = true;
+    });
+    const { operation } = (await changes.start(s.proposal, 'codex')) as {
+      operation: ContractChange;
+    };
+    held.operation = operation;
+    const result = await changes.advance(operation.id);
+    assert.ok(expired, 'владение истекло внутри переноса базы');
+    assert.match(result.error ?? '', /Владение операцией изменения контракта утрачено/);
+    assert.equal(s.sh('rev-parse', 'devcontour/accepted'), before, 'база не сдвинута');
+  } finally {
+    cp.spawn = realSpawn;
+    syncBuiltinESMExports();
+    other.close();
     await s.remove();
   }
 });

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { DevContour, digest } from './service.ts';
-import { Workspace, changeSnapshot, snapshotDigest } from './workspace.ts';
+import { currentJoint } from './workspace.ts';
 import { DomainError, type ChangeSet, type DevContourState } from './model.ts';
 import type { Delivery, DeliveryComponent } from './integrations.ts';
 import { repositories } from './repositories.ts';
@@ -12,16 +12,10 @@ export const deliveryPolicy = (h: DevContour) =>
     repositories: repositories(h.config),
     environment: h.config.environment,
   });
-export function currentVerification(h: DevContour, s: DevContourState, c: ChangeSet) {
-  const v = c.verifications.at(-1);
-  if (
-    !v ||
-    v.status !== 'passed' ||
-    !v.manifest ||
-    digest(v.manifest) !== v.manifestDigest ||
-    v.policyDigest !== new Workspace(h).policyDigest() ||
-    v.specDigest !== snapshotDigest(changeSnapshot(s, c))
-  )
+export function currentVerification(h: DevContour, _s: DevContourState, c: ChangeSet) {
+  // Актуальность проверки — правило движка (jointResult), без своей копии.
+  const { verification: v, current } = currentJoint(h, c);
+  if (!v || !current)
     throw new DomainError('Доставка требует актуальной успешной проверки ChangeSet');
   return v;
 }
@@ -40,8 +34,7 @@ export class Deliveries {
   start(id: string, namespace: string) {
     if (this.h.config.completionMode !== 'remote')
       throw new DomainError('Включите completionMode: remote');
-    return this.h.store.change('delivery.started', (s) => {
-      this.h.assertCurrentConfig(s);
+    return this.h.currentChange('delivery.started', (s) => {
       const c = s.changeSets.find((c) => c.id === id);
       if (!c) throw new DomainError('ChangeSet не найден');
       if (c.acceptance) throw new DomainError('ChangeSet уже принят');
@@ -98,8 +91,7 @@ export class Deliveries {
     });
   }
   update<T>(id: string, token: string, event: string, action: (d: Delivery) => T): T {
-    return this.h.store.change(event, (s) => {
-      this.h.assertCurrentConfig(s);
+    return this.h.currentChange(event, (s) => {
       const c = s.changeSets.find((c) => c.id === id);
       const d = c?.deliveries?.find((d) => d.token === token);
       if (!c || !d || c.acceptance || d.status !== 'active' || d.leaseUntil <= Date.now())

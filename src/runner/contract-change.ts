@@ -1,9 +1,10 @@
-import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { readFileSync, renameSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { fencedRefMove } from 'devcontour-harness';
+import { executionOf } from '../harness/execution.ts';
 import { DomainError, type Contract } from '../core/model.ts';
 import { contractDigest, digest, type DevContour } from '../core/service.ts';
 import { repositories, repository } from '../core/repositories.ts';
@@ -684,20 +685,13 @@ export class ContractChanges {
           this.h.config,
           this.root,
           { [repo.id]: reviewed },
-          (repoPath, target, to, from) =>
-            this.h.store.atomic(() => {
-              this.guard(op);
-              // Внутри транзакции не исполняется чужой код: hook
-              // reference-transaction, пишущий в ту же базу, ждал бы её, а
-              // она — его. Ветка интеграции принадлежит контуру, и её
-              // слияние уже идёт без hooks; срок ограничен на случай
-              // зависшего Git.
-              execFileSync(
-                'git',
-                ['-c', 'core.hooksPath=/dev/null', 'update-ref', target, to, from],
-                { cwd: repoPath, timeout: ContractChanges.refMoveTimeoutMs },
-              );
-            }),
+          // Сдвиг ref внутри транзакции проверки владения операцией, без hooks
+          // и с пределом времени Git (`fencedRefMove` пакета harness).
+          fencedRefMove(
+            executionOf(this.h).store,
+            () => this.guard(op),
+            ContractChanges.refMoveTimeoutMs,
+          ),
         );
         this.advanceStep(op, (current) => {
           if (updated.updated.length)

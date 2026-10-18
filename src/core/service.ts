@@ -265,8 +265,6 @@ function sourceUnchanged(
   }
   return { ok: true };
 }
-const staleMessage =
-  'Процесс работает с устаревшей конфигурацией: контур уже применил другую; перезапустите процесс';
 
 /**
  * Gates профиля компонентов доски, не прошедшие integration ни в одной её
@@ -353,27 +351,43 @@ export class DevContour {
     const unchanged = sourceUnchanged(this.provenance);
     return unchanged.ok ? undefined : unchanged.reason;
   }
-  /** Owner, под которым этот процесс получил лидерство. */
-  private ownLeader?: string;
-  /** Может ли процесс записать свою конфигурацию как применённую (в транзакции). */
-  private mayAdopt(s: DevContourState): { ok: true } | { ok: false; reason: string } {
-    const leader = s.leader && s.leader.leaseUntil > Date.now() ? s.leader.owner : undefined;
-    if (leader && leader !== this.ownLeader)
-      return { ok: false, reason: `работает controller ${leader} с другой конфигурацией` };
-    return sourceUnchanged(this.provenance);
+  /**
+   * Процесс работает не с применённой конфигурацией и сменить её не вправе.
+   * Правило — движка harness (`policyState().stale`): живой чужой controller,
+   * изменённый источник или применённое после запуска поколение.
+   */
+  configStale() {
+    const { engine } = executionOf(this);
+    return !!engine.policyState().stale;
   }
-  private adoptConfig(s: DevContourState, by: string) {
-    s.appliedConfig = {
-      digest: this.knownConfig,
-      generation: (s.appliedConfig?.generation ?? 0) + 1,
-      at: now(),
-      by,
-    };
+  /**
+   * Транзакция прикладного слоя под барьером применённой конфигурации: процесс
+   * сверяет свою конфигурацию с применённой в той же записи (правило движка);
+   * первый законный после правки файла процесс делает свою применённой — откат
+   * отменит и это. Продуктовые поля меняются в документе транзакции.
+   */
+  /**
+   * Барьер применённой конфигурации отдельной записью: отставший процесс
+   * получает отказ; законный после правки файла — делает свою применённой.
+   */
+  assertCurrentConfig() {
+    this.currentChange('config.checked', () => undefined);
   }
-  /** Процесс работает не с применённой конфигурацией и сменить её не вправе. */
-  configStale(s: DevContourState) {
-    const applied = s.appliedConfig;
-    return !!applied && applied.digest !== this.knownConfig && !this.mayAdopt(s).ok;
+  currentChange<T>(kind: string, action: (state: DevContourState) => T): T {
+    const { store, engine } = executionOf(this);
+    return domain(() =>
+      store.host(kind, (ht) => {
+        engine.assertCurrentPolicy(ht.tx);
+        const result = action(ht.state);
+        if (result !== undefined)
+          ht.journal(
+            result && typeof result === 'object' && !Array.isArray(result)
+              ? (result as Record<string, unknown>)
+              : { result },
+          );
+        return result;
+      }),
+    );
   }
   /**
    * Применить новую конфигурацию в этом процессе. Только шаг операции
@@ -403,112 +417,60 @@ export class DevContour {
     this.knownConfig = loadedDigest(next);
     this.provenance = provenanceOf(next);
   }
-  /**
-   * Пауза операции: ставится, только если очередь не остановлена, и
-   * помечается операцией. Пауза человека не перезаписывается.
-   */
+  /** Пауза операции (правило движка): только если очередь не остановлена; пауза человека не перезаписывается. */
   operationPause(operation: string) {
-    return this.store.change('scheduler.paused', (s) => {
-      if (s.paused) return;
-      s.paused = true;
-      s.pauseReason = 'reconfigure';
-      s.pauseOperation = operation;
-      s.pausedAt = now();
-      return { paused: true, reason: 'reconfigure', operation };
-    });
-  }
-  /**
-   * Общий барьер принятия: в транзакции выдачи, завершения и приёмки
-   * процесс сверяет свою конфигурацию с применённой контуром. Отставший
-   * процесс не принимает ни попыток, ни совместных проверок, ни поставок, ни
-   * планов — сравнение двух его же старых digest актуальности не доказывает.
-   */
-  assertCurrentConfig(s: DevContourState) {
-    const applied = s.appliedConfig;
-    if (!applied || applied.digest === this.knownConfig) return;
-    const adoption = this.mayAdopt(s);
-    if (!adoption.ok) throw new DomainError(`${staleMessage} (${adoption.reason})`, 409);
-    // Первый процесс, действующий после законной правки файла без живого
-    // controller: его конфигурация становится применённой в этой же
-    // транзакции — откат отменит и её.
-    this.adoptConfig(s, 'process');
+    const { engine } = executionOf(this);
+    return domain(() => engine.operationPause(operation))
+      ? { paused: true, reason: 'reconfigure', operation }
+      : undefined;
   }
   /** Снять паузу операции — только свою; паузу человека она не трогает. */
   operationResume(operation: string) {
-    return this.store.change('scheduler.started', (s) => {
-      if (!s.paused || s.pauseReason !== 'reconfigure' || s.pauseOperation !== operation) return;
-      s.paused = false;
-      s.pauseReason = undefined;
-      s.pauseOperation = undefined;
-      s.pausedAt = undefined;
-      return { paused: false, operation };
-    });
+    const { engine } = executionOf(this);
+    return domain(() => engine.operationResume(operation))
+      ? { paused: false, operation }
+      : undefined;
   }
   /**
    * Запросить применение конфигурации с ожидаемым digest (идемпотентно).
    * Повтор той же операцией сбрасывает прежний отказ: файл могли исправить.
    */
   requestReconfigure(operation: string, configDigest: string) {
-    return this.store.change('config.reconfigure-requested', (s) => {
-      const current = s.reconfigure;
-      if (current && current.operation === operation && current.digest === configDigest) {
-        if (!current.error) return;
-        s.reconfigure = { ...current, error: undefined };
-        return { operation, digest: configDigest, retried: true };
-      }
-      if (current && current.operation !== operation && !current.appliedAt)
-        throw new DomainError(
-          `Конфигурацию уже применяет операция ${current.operation}; дождитесь её`,
-          409,
-        );
-      s.reconfigure = { operation, digest: configDigest, requestedAt: now() };
-      return { operation, digest: configDigest };
-    });
+    const { engine } = executionOf(this);
+    const r = domain(() => engine.requestReconfigure(operation, configDigest));
+    if (!r.changed) return undefined;
+    return { operation, digest: configDigest, ...(r.retried ? { retried: true } : {}) };
   }
-  /** Подтвердить применение или записать отказ с обоими digest. */
+  /**
+   * Подтвердить применение (процесс уже работает с ожидаемой конфигурацией)
+   * или записать отказ с причиной. Применение — правило движка: только при
+   * совпадающем digest и без работ под прежней конфигурацией.
+   */
   settleReconfigure(operation: string, configDigest: string, by: string, error?: string) {
-    return this.store.change('config.reconfigured', (s) => {
-      const current = s.reconfigure;
-      if (!current || current.operation !== operation || current.digest !== configDigest) return;
-      if (current.appliedAt && !error) return;
-      s.reconfigure = error
-        ? { ...current, error }
-        : { ...current, appliedAt: now(), appliedBy: by, error: undefined };
-      if (!error)
-        s.appliedConfig = {
-          digest: configDigest,
-          generation: (s.appliedConfig?.generation ?? 0) + 1,
-          at: now(),
-          by,
-        };
-      return { operation, digest: configDigest, ...(error ? { error } : { by }) };
-    });
+    const { engine } = executionOf(this);
+    if (error) {
+      const rejected = domain(() => engine.rejectReconfigure(operation, configDigest, error));
+      return rejected ? { operation, digest: configDigest, error } : undefined;
+    }
+    const request = engine.policyState().reconfigure;
+    if (!request || request.operation !== operation || request.digest !== configDigest)
+      return undefined;
+    const applied = domain(() => engine.applyReconfigure(by));
+    return applied.status === 'applied' ? { operation, digest: configDigest, by } : undefined;
   }
   /**
    * Запуск процесса применяет его конфигурацию: перезапуск — штатный способ
-   * сменить любые поля. Неприменённый запрос операции остаётся.
+   * сменить любые поля. Только действующий controller; неприменённый запрос
+   * операции остаётся (правило движка).
    */
   recordConfig(by: string) {
-    return this.store.change('config.started', (s) => {
-      // Только действующий controller: конкурирующий или неудачный запуск
-      // не меняет применённую конфигурацию и не останавливает владельца.
-      if (s.leader?.owner !== by || s.leader.leaseUntil <= Date.now()) return;
-      if (s.appliedConfig?.digest === this.knownConfig) return;
-      // Получение лидерства не узаконивает снимок, если файл менялся после
-      // загрузки (например, операция уже применила новую конфигурацию):
-      // такой процесс догоняет её, а не перезаписывает.
-      if (s.appliedConfig && !this.mayAdopt(s).ok) return;
-      this.adoptConfig(s, by);
-      return { digest: this.knownConfig, by };
-    });
+    const { engine } = executionOf(this);
+    domain(() => engine.recordPolicy(by));
   }
   /** Снять завершённый запрос операции. */
   clearReconfigure(operation: string) {
-    return this.store.change('config.reconfigure-cleared', (s) => {
-      if (s.reconfigure?.operation !== operation) return;
-      s.reconfigure = undefined;
-      return { operation };
-    });
+    const { engine } = executionOf(this);
+    return domain(() => engine.clearReconfigure(operation)) ? { operation } : undefined;
   }
   /**
    * Договор исполнения задачи. Изоляция входит в него: смена режима или
@@ -859,8 +821,7 @@ export class DevContour {
       scopes?: Record<string, string>;
     },
   ) {
-    return this.store.change('board.approved', (s) => {
-      this.assertCurrentConfig(s);
+    return this.currentChange('board.approved', (s) => {
       developmentBinding(s);
       const r = activeRevision(s, boardId);
       if (!r.taskIds.length) throw new DomainError('Добавьте задачи перед утверждением');
@@ -1006,8 +967,7 @@ export class DevContour {
     expectedDigest?: string,
     repositories?: Record<string, string>,
   ) {
-    return this.store.change('board.accepted', (s) => {
-      this.assertCurrentConfig(s);
+    return this.currentChange('board.accepted', (s) => {
       const r = activeRevision(s, boardId);
       if (expectedDigest && digest(r) !== expectedDigest)
         throw new DomainError('Ревизия изменилась во время приёмки');
@@ -1130,21 +1090,15 @@ export class DevContour {
       return { kind, operation };
     });
   }
-  /** Передать удержание задач от одной операции другой без окна выдачи. */
+  /** Передать удержание задач от одной операции другой без окна выдачи (правило движка). */
   transferHold(from: string, to: string, reason: string) {
-    return this.store.change('task.hold-transferred', (s) => {
-      const moved = s.tasks.filter((t) => t.hold?.operation === from);
-      for (const t of moved) t.hold = { operation: to, reason };
-      return moved.map((t) => t.id);
-    });
+    const { engine } = executionOf(this);
+    return domain(() => engine.transferHold(from, to, reason));
   }
   /** Снять удержание операции с перечисленных задач; чужие не трогаются. */
   releaseTasks(operation: string, ids: string[]) {
-    return this.store.change('task.released', (s) => {
-      const released = s.tasks.filter((t) => ids.includes(t.id) && t.hold?.operation === operation);
-      for (const t of released) t.hold = undefined;
-      return released.map((t) => t.id);
-    });
+    const { engine } = executionOf(this);
+    return domain(() => engine.releaseHold(operation, ids));
   }
   assign(id: string, member: string) {
     const assignee = taskInput.shape.assignee.unwrap().parse(member);
@@ -1502,30 +1456,16 @@ export class DevContour {
   }
   /**
    * Удержать задачи от выдачи на время изменения их контракта. Задача,
-   * удерживаемая другой операцией, — конфликт: две операции не меняют одну
-   * задачу одновременно. Повтор той же операции ничего не меняет.
+   * удерживаемая другой операцией, — конфликт (правило движка).
    */
   hold(ids: string[], operation: string, reason: string) {
-    return this.store.change('task.held', (s) => {
-      const tasks = ids.map((id) => task(s, id));
-      const busy = tasks.filter((t) => t.hold && t.hold.operation !== operation);
-      if (busy.length)
-        throw new DomainError(
-          'Задачи удерживает другая операция: ' +
-            busy.map((t) => `${t.id} (${t.hold!.operation})`).join(', '),
-          409,
-        );
-      for (const t of tasks) t.hold = { operation, reason };
-      return tasks.map((t) => t.id);
-    });
+    const { engine } = executionOf(this);
+    return domain(() => engine.hold(ids, operation, reason));
   }
   /** Снять удержание операции. Чужие удержания не трогаются. */
   release(operation: string) {
-    return this.store.change('task.released', (s) => {
-      const released = s.tasks.filter((t) => t.hold?.operation === operation);
-      for (const t of released) t.hold = undefined;
-      return released.map((t) => t.id);
-    });
+    const { engine } = executionOf(this);
+    return domain(() => engine.releaseHold(operation));
   }
   /**
    * Перепривязать задачи с прежних редакций контракта на новую. Задача
@@ -1597,8 +1537,6 @@ export class DevContour {
   }
   leader(owner: string) {
     const { engine } = executionOf(this);
-    const acquired = domain(() => engine.lead(owner));
-    if (acquired) this.ownLeader = owner;
-    return acquired;
+    return domain(() => engine.lead(owner));
   }
 }

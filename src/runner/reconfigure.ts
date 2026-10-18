@@ -1,8 +1,6 @@
 import { readFileSync } from 'node:fs';
 import type { DevContour } from '../core/service.ts';
-import { LeadWorkflow } from '../core/lead-workflow.ts';
-import { CheckCorpus } from '../core/check-store.ts';
-import { repositories } from '../core/repositories.ts';
+import { executionOf } from '../harness/execution.ts';
 import { loadConfig } from './config.ts';
 import { loadedDigest } from '../core/service.ts';
 
@@ -15,32 +13,13 @@ import { loadedDigest } from '../core/service.ts';
  */
 
 /**
- * Работы, идущие под действующей конфигурацией. Запись с истёкшим lease не
- * держит drain: её результат и так не будет принят (владение проверяется при
- * каждой записи), а держать применение из-за неё значило бы ждать вечно.
+ * Работы, идущие под действующей конфигурацией — правило движка
+ * (`busyWork`): попытки, совместные проверки, задания ведущего и операции
+ * корпуса с живым сроком, а также работы хоста (поставка, preview).
  */
 export function busyWork(h: DevContour) {
-  const s = h.store.read();
-  const now = Date.now();
-  const live = (x: { status: string; leaseUntil?: number }, status = 'active') =>
-    x.status === status && (x.leaseUntil ?? 0) > now;
-  return [
-    ...s.runs.filter((r) => live(r)).map((r) => r.id),
-    ...s.changeSets.flatMap((c) => [
-      ...c.verifications.filter((v) => live(v)).map((v) => v.id),
-      ...(c.deliveries ?? []).filter((d) => live(d)).map((d) => d.id),
-    ]),
-    ...(s.previewLock && s.previewLock.leaseUntil > now ? ['preview'] : []),
-    ...[undefined, ...repositories(h.config).map((r) => r.id)]
-      .flatMap((owner) => new LeadWorkflow(h).list(owner))
-      .filter((j) => live(j, 'running'))
-      .map((j) => j.key),
-    ...new CheckCorpus(h).all().flatMap((suite) =>
-      Object.values(suite.operations)
-        .filter((op) => live(op, 'running'))
-        .map((op) => `${suite.id}:${op.key}`),
-    ),
-  ];
+  const { engine } = executionOf(h);
+  return engine.read((view) => engine.busyWork(view));
 }
 
 /**
@@ -70,13 +49,15 @@ export function applyConfig(h: DevContour, path: string, expected: string) {
  */
 export function serveReconfigure(h: DevContour, path: string, by: string) {
   h.store.atomic(() => {
-    const s = h.store.read();
-    const request = s.reconfigure;
+    const { engine } = executionOf(h);
+    const state = engine.policyState();
+    const request = state.reconfigure;
     if (request && !request.appliedAt && !request.error) {
       if (busyWork(h).length) return;
       try {
+        // Применяется ровно ожидаемая: после загрузки движок процесса — с ней,
+        // и подтверждение применения — правило движка.
         applyConfig(h, path, request.digest);
-        h.settleReconfigure(request.operation, request.digest, by);
       } catch (error) {
         h.settleReconfigure(
           request.operation,
@@ -84,12 +65,14 @@ export function serveReconfigure(h: DevContour, path: string, by: string) {
           by,
           error instanceof Error ? error.message : String(error),
         );
+        return;
       }
+      h.settleReconfigure(request.operation, request.digest, by);
       return;
     }
-    if (!request && s.appliedConfig && h.configStale(s))
+    if (!request && state.applied && state.stale)
       try {
-        applyConfig(h, path, s.appliedConfig.digest);
+        applyConfig(h, path, state.applied.digest);
       } catch {
         /* Догнать нельзя: процесс остаётся остановленным до перезапуска. */
       }

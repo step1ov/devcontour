@@ -181,7 +181,13 @@ test('Восстановление снимает всё оперативное 
         leaseUntil: Date.now() + 60_000,
         status: 'active',
       });
-      cs.verifications.push({ ...base, id: randomUUID(), leaseUntil: 0, status: 'passed' });
+      cs.verifications.push({
+        ...base,
+        id: randomUUID(),
+        leaseUntil: 0,
+        status: 'passed',
+        finishedAt: new Date().toISOString(),
+      });
     });
     const previews = new Previews(f.h);
     const started = previews.start(change.id);

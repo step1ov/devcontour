@@ -5,7 +5,6 @@ import {
   type TaskInput,
   type DevContourState,
   type Verification,
-  type ComponentImpact,
 } from './model.ts';
 import { createHash } from 'node:crypto';
 import {
@@ -258,62 +257,3 @@ export const withinPaths = (path: string, prefixes: string[]) =>
   prefixes.some(
     (prefix) => path === prefix || path.startsWith(prefix.endsWith('/') ? prefix : prefix + '/'),
   );
-
-// Compare complete repository SHAs: manifests, lockfiles and configuration changes are included.
-export function componentImpact(
-  config: Config,
-  state: DevContourState,
-  run: Verification,
-): ComponentImpact {
-  const repos = repositories(config),
-    all = repos.map((r) => r.id);
-  const gates = orderedGates(config.workspaceGates);
-  const baseline = state.changeSets
-    .filter((c) => c.acceptance)
-    .sort((a, b) => b.acceptance!.at.localeCompare(a.acceptance!.at))
-    .map((c) => c.verifications.find((v) => v.id === c.acceptance!.verificationId))
-    .find((v) => v?.manifest && v.policyDigest === run.policyDigest);
-  const changed = all.filter(
-    (id) => !baseline?.manifest?.[id] || baseline.manifest[id].sha !== run.manifest?.[id]?.sha,
-  );
-  const full = (reason: string): ComponentImpact => ({
-    changed,
-    affected: all,
-    gateIds: gates.map((g) => g.id),
-    mode: 'all',
-    reason,
-    baseline: baseline?.id,
-  });
-  if (config.verificationMode !== 'affected') return full('Полная проверка по умолчанию');
-  if (!baseline) return full('Нет принятой комбинации SHA с текущей политикой');
-  if (repos.some((r) => r.dependsOn === undefined))
-    return full('Граф компонентов описан не полностью');
-  if (!changed.length) return full('SHA не изменились: повторная полная проверка');
-  const affected = new Set(changed);
-  let grew = true;
-  while (grew) {
-    grew = false;
-    for (const repo of repos)
-      if (!affected.has(repo.id) && repo.dependsOn!.some((id) => affected.has(id))) {
-        affected.add(repo.id);
-        grew = true;
-      }
-  }
-  const selected = new Set(gates.filter((g) => affected.has(g.repositoryId)).map((g) => g.id));
-  const include = (id: string) => {
-    selected.add(id);
-    for (const dep of gates.find((g) => g.id === id)!.dependsOn ?? [])
-      if (!selected.has(dep)) include(dep);
-  };
-  [...selected].forEach(include);
-  if (!gates.some((g) => selected.has(g.id) && g.kind === 'test' && g.report))
-    return full('Нет достаточных тестов для затронутой области');
-  return {
-    changed,
-    affected: [...affected],
-    gateIds: gates.filter((g) => selected.has(g.id)).map((g) => g.id),
-    mode: 'affected',
-    reason: 'Изменённые компоненты, транзитивные потребители и prerequisites проверок',
-    baseline: baseline.id,
-  };
-}

@@ -925,3 +925,59 @@ test('Этап локальной доски принимает только з�
     await f.cleanup();
   }
 });
+
+test('Продуктовые условия записи проверки: принятый ChangeSet и сменённый релиз отклоняют её записи; продление срока — нет', () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('A complete board');
+    const t = f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    complete(f.h, t.id);
+    f.h.config.workspaceGates = [{ ...f.h.config.gates[0], repositoryId: 'main', artifacts: [] }];
+    const w = new Workspace(f.h);
+    const c = w.create({
+      title: 'Feature test',
+      description: 'Verify a complete feature',
+      boardIds: [b.id],
+    });
+    const v = w.start(c.id);
+    const manifest = { main: { sha: 'a'.repeat(40), tree: 'b'.repeat(40) } };
+    // Набору назначили продуктовый релиз после начала проверки — состав другой.
+    f.store.change('test.release', (s) => {
+      s.changeSets[0].releaseId = 'r-1';
+    });
+    assert.throws(() => w.manifest(c.id, v.token, manifest), /Состав ChangeSet/);
+    assert.equal(f.store.read().changeSets[0].verifications[0].manifest, undefined);
+    f.store.change('test.release-back', (s) => {
+      s.changeSets[0].releaseId = undefined;
+    });
+    w.manifest(c.id, v.token, manifest);
+    // ChangeSet уже принят: записи проверки отклоняются, продление срока — нет.
+    f.store.change('test.accepted', (s) => {
+      s.changeSets[0].acceptance = {
+        at: new Date().toISOString(),
+        verificationId: 'other',
+        digest: 'c'.repeat(64),
+        approval: { actor: 'operator' },
+      };
+    });
+    assert.throws(
+      () =>
+        w.evidence(c.id, v.token, {
+          gate: f.h.config.workspaceGates[0].id,
+          command: ['x'],
+          passed: true,
+          exitCode: 0,
+          log: 'x.log',
+          digest: 'd'.repeat(64),
+          summary: 'ok',
+          artifacts: [],
+          durationMs: 1,
+        }),
+      /Устаревшая попытка проверки workspace/,
+    );
+    assert.doesNotThrow(() => w.heartbeat(c.id, v.token));
+  } finally {
+    f.cleanup();
+  }
+});
