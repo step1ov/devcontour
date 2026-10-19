@@ -14,12 +14,8 @@ import { Store } from './store.ts';
 import { type FailureKind } from './failure.ts';
 import { taskEvidence, unprovenReason } from './proof.ts';
 import { assertTaskProperties, type CheckDeclaration } from './checks.ts';
-import {
-  closeIfBasisChanged,
-  recoveryActions,
-  type PropertyRecovery,
-  type RecoveryDecision,
-} from './property-recovery.ts';
+import { recoveryActions, type PropertyRecovery } from 'devcontour-harness';
+import { closeEpisodeIfBasisChanged } from '../harness/host.ts';
 import { planResult } from './plan.ts';
 import { boardOwner, completion, receiptRecordBytes } from './sync-state.ts';
 import { carriedTaskIds } from './work-status.ts';
@@ -860,7 +856,7 @@ export class DevContour {
         t.approvedScope = scopeDigest(t);
         t.approval = approval;
         t.status = 'ready';
-        closeIfBasisChanged(t);
+        closeEpisodeIfBasisChanged(t, now());
       }
       return { boardId, revision: r.number, approval };
     });
@@ -1362,7 +1358,7 @@ export class DevContour {
   recoveryDecide(
     taskId: string,
     recoveryId: string,
-    decision: RecoveryDecision,
+    decision: NonNullable<PropertyRecovery['decision']>,
     expectedVersion?: number,
   ): PropertyRecovery {
     if (!recoveryActions.includes(decision.action))

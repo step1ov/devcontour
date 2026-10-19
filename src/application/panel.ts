@@ -12,7 +12,7 @@ import {
   type Task,
 } from '../core/model.ts';
 import type { Delivery } from '../core/integrations.ts';
-import type { PropertyRecovery } from '../core/property-recovery.ts';
+import type { PropertyRecovery } from 'devcontour-harness';
 import { blockers, readyTasks } from '../core/graph.ts';
 import { repositories } from '../core/repositories.ts';
 import { boardPhase, queueStopReason } from '../core/work-status.ts';

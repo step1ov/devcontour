@@ -14,18 +14,16 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { configSchema, type Evidence } from '../src/core/model.ts';
 import { DevContour, digest } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
-import { propertySeed, type PropertyReport } from '../src/core/property.ts';
+import { propertySeed, readPropertyReport, type PropertyReport } from 'devcontour-harness';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { adapters, type AgentAdapter } from '../src/runner/adapters.ts';
 import { pinArtifacts } from '../src/runner/contract-artifacts.ts';
-import { runGate } from '../src/runner/gates.ts';
 import { command, git } from '../src/runner/process.ts';
-import { readPropertyReport } from '../src/runner/property.ts';
 import { isolationSupport } from '../src/runner/isolation.ts';
 
 // Проект-фикстура: рюкзак на малых входах. Эталон — полный перебор, он
@@ -356,7 +354,9 @@ test('A property report is read only as a regular file inside the worktree', asy
     await symlink(outside, join(tree, '.reports'));
     await rename(join(outside, 'state.json'), join(outside, 'property.json'));
     const viaDir = await readPropertyReport(join(tree, '.reports/property.json'), tree);
-    assert.equal(viaDir.problem, 'отчёт свойств вне worktree');
+    // Тот же отказ правилом harness: отчёт вне каталога, которым ограничено чтение.
+    assert.equal(viaDir.problem, 'отчёт свойств вне каталога отчёта');
+    assert.equal(JSON.stringify(viaDir).includes('private-marker'), false);
     // Обычный файл внутри worktree читается.
     await rm(join(tree, '.reports'));
     await mkdir(join(tree, '.reports'));
@@ -906,6 +906,7 @@ async function runWith(
   return {
     run,
     task: store.read().tasks.find((t) => t.id === task.id)!,
+    root: p.root,
     async close() {
       await scheduler.stop();
       store.close();
@@ -964,77 +965,41 @@ test('A short secret masks diagnostics but never the service fields of evidence'
 });
 
 test('A missing secret does not unmask the secrets that are set', async () => {
-  // Gate вызывается напрямую: незаданный секрет ломает и окружение
-  // исполнителя, и до gate обычная попытка не дошла бы.
+  // Незаданный секрет — отказ окружения до запуска проверки (правило harness);
+  // заданный секрет при этом не раскрывается ни в отказе, ни в записанных
+  // данных контура: базе, логах и артефактах попытки.
   const known = 'known-secret-5512';
   process.env.DEVCONTOUR_TEST_KNOWN_SECRET = known;
   delete process.env.DEVCONTOUR_TEST_ABSENT_SECRET;
-  const p = await project();
-  const store = new Store(join(p.root, 'state.sqlite'));
-  try {
-    await git(p.repo, 'init', '-q', '-b', 'main');
-    await git(p.repo, 'add', '.');
-    await git(p.repo, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'project');
-    const gate = {
-      id: 'test',
-      kind: 'test' as const,
-      command: ['node', 'check.mjs', known],
-      timeoutMs: 20000,
-    };
-    const config = withUnit({
-      version: 1,
-      name: 'Missing secret',
-      repository: p.repo,
-      mode: 'demo',
-      resourceDatabase: join(p.root, 'resources.sqlite'),
-      isolation: { mode: 'none' },
-      environment: {
-        inherit: ['PATH', 'HOME'],
-        values: {},
-        secrets: {
-          KNOWN: 'DEVCONTOUR_TEST_KNOWN_SECRET',
-          ABSENT: 'DEVCONTOUR_TEST_ABSENT_SECRET',
-        },
+  const r = await runWith(
+    {
+      inherit: ['PATH', 'HOME'],
+      values: {},
+      secrets: {
+        KNOWN: 'DEVCONTOUR_TEST_KNOWN_SECRET',
+        ABSENT: 'DEVCONTOUR_TEST_ABSENT_SECRET',
       },
-      roles: { qa: { runtime: 'demo' } },
-      reviewer: { runtime: 'demo' },
-      gates: [gate],
-    });
-    const h = new DevContour(store, config);
-    const board = h.createBoard('Missing secret');
-    h.addTask(board.id, {
-      title: 'Missing secret',
-      description: 'Один секрет окружения не задан.',
-      role: 'qa',
-      acceptance: ['a test'],
-    });
-    h.approve(board.id);
-    h.pause(false);
-    const run = h.claim('missing-secret')!;
-    const sha = await git(p.repo, 'rev-parse', 'HEAD');
-    await assert.rejects(
-      runGate(
-        h,
-        run,
-        p.repo,
-        sha,
-        'candidate',
-        configSchema.parse(config).gates[0],
-        join(p.root, 'logs'),
-        new AbortController().signal,
-      ),
-      /Не задан секрет окружения/,
+    },
+    ['node', 'ok.mjs'],
+  );
+  try {
+    assert.notEqual(r.task.status, 'done');
+    assert.ok(r.run, 'попытка выдана');
+    assert.equal(r.run.failureKind, 'environment', r.run.error);
+    assert.match(r.run.error ?? '', /Не задан секрет окружения: DEVCONTOUR_TEST_ABSENT_SECRET/);
+    assert.equal(
+      r.run.evidence.some((e) => e.gate === 'test'),
+      false,
+      'проверка без окружения не запускалась',
     );
-    const e = store
-      .read()
-      .runs.find((x) => x.id === run.id)!
-      .evidence.at(-1)!;
-    assert.ok(e, 'evidence записано');
-    assert.equal(e.passed, false);
-    assert.equal(JSON.stringify(e).includes(known), false, 'известный секрет замаскирован');
+    const files = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((d) =>
+        d.isDirectory() ? (d.name === '.git' ? [] : files(join(dir, d.name))) : [join(dir, d.name)],
+      );
+    for (const file of files(r.root))
+      assert.equal(readFileSync(file).includes(known), false, 'секрет в ' + file);
   } finally {
     delete process.env.DEVCONTOUR_TEST_KNOWN_SECRET;
-    store.close();
-    await rm(p.root, { recursive: true, force: true });
+    await r.close();
   }
 });

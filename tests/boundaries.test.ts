@@ -219,3 +219,31 @@ test('S3.6: применение конфигурации, удержания, �
   assert.match(code('src/runner/base-update.ts'), /moveBase\(/);
   assert.match(code('src/runner/contract-change.ts'), /fencedRefMove\(/);
 });
+
+test('S3.6: корпус, подтверждение случая, разбор по свойству и исполнение gate — только harness', () => {
+  for (const removed of [
+    'runner/gates.ts',
+    'runner/property.ts',
+    'core/property.ts',
+    'core/property-recovery.ts',
+  ])
+    assert.throws(() => lstatSync(join(root, 'src', removed)), removed);
+  const code = (path: string) => readFileSync(join(root, path), 'utf8');
+  // Своих правил подтверждения, записи версии корпуса и эпизода разбора нет.
+  for (const path of [
+    'src/core/check-store.ts',
+    'src/runner/checks.ts',
+    'src/runner/recovery.ts',
+    'src/core/service.ts',
+  ])
+    assert.doesNotMatch(
+      code(path),
+      /hash-object|function decide\(|function afterFailure|function propertyStreak|recovery\.status = |\.versions\.push\(/,
+      `${path}: своя реализация корпуса, подтверждения или эпизода разбора`,
+    );
+  assert.match(code('src/core/check-store.ts'), /new CorpusStore\(/);
+  assert.match(code('src/runner/checks.ts'), /submitCase as confirmCase/);
+  assert.match(code('src/runner/recovery.ts'), /analyzeRecovery as analyze/);
+  // Основание эпизода — формула DevContour через порт хоста.
+  assert.match(code('src/harness/host.ts'), /episodeBasis: \(work, view\)/);
+});

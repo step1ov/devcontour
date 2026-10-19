@@ -12,8 +12,10 @@ import {
   executionDigest,
   resultProblems,
   sha256,
+  closeIfBasisChanged,
   sourceDigest,
   type ContextSnapshot,
+  type ContractDocument,
   type ContextSource,
   type ExecutionHost,
   type ExecutionView,
@@ -116,6 +118,17 @@ export function devcontourHost(h: DevContour, store: DevContourExecutionStore): 
       // Версия проверок — прежняя формула DevContour: ею подписаны записи и receipts.
       checksDigest: (work, policyDigest, view) =>
         effectiveChecks(taskOf(state(view), work), policyDigest),
+      // Основание эпизода разбора — прежняя формула DevContour: ею подписаны
+      // эпизоды и попытки прежних версий. Постановка — согласованная редакция
+      // поручения той же транзакции, контракты — закреплённые задачей.
+      // Основание корпуса — прежняя формула DevContour: им записаны корпуса
+      // прежних версий и ID их случаев.
+      suiteBasis: (contract) => suiteBasisOf(contract),
+      episodeBasis: (work, view) =>
+        episodeBasisOf({
+          approvedDigest: work.approvedDigest,
+          contractDigests: taskOf(state(view), work).contractDigests,
+        }),
       // Совместная проверка — прежние формулы DevContour: ими подписаны принятые ChangeSet.
       jointPolicyDigest: () => workspacePolicyDigest(h.config),
       jointSpecDigest: (workIds, view, verificationId) => {
@@ -413,6 +426,17 @@ export async function receiverContext(
     contextDigest: snapshot ? contextDigest(snapshot) : null,
     specDigest: specDigest(task),
     checkVersion: task.checkVersion ?? null,
+    // Корпус получателя — копия этой установки (общий Store).
+    suite: (id) =>
+      store.read((v) =>
+        structuredClone(
+          v
+            .locals('check-suites')
+            .map((x) => x.value)
+            .find((x) => x.id === id),
+        ),
+      ),
+    suiteBasis: (contract) => suiteBasisOf(contract),
     checksDigest: ({ specDigest: spec, policyDigest, corpus }) =>
       effectiveChecks(
         {
@@ -455,4 +479,47 @@ export function devcontourResultSink(h: DevContour, store: DevContourExecutionSt
       return { status: 'delivered', receipt: sha256(JSON.stringify(completion(h, s, task))) };
     },
   };
+}
+
+/**
+ * Основание эпизода разбора по свойству — прежняя формула DevContour: ею
+ * подписаны эпизоды и попытки прежних версий.
+ */
+export function episodeBasisOf(t: Pick<Task, 'approvedDigest' | 'contractDigests'>) {
+  return sha256(JSON.stringify({ spec: t.approvedDigest ?? null, contracts: t.contractDigests }));
+}
+
+/**
+ * Продуктовое согласование задачи (утверждение ревизии доски) меняет её
+ * основание: эпизод прежнего основания закрывается правилом harness с
+ * формулой основания DevContour, в той же записи.
+ */
+export function closeEpisodeIfBasisChanged(t: Task, at: string) {
+  const work = {
+    approvedDigest: t.approvedDigest,
+    recovery: t.recovery,
+    recoveryHistory: t.recoveryHistory,
+  };
+  if (closeIfBasisChanged(work as unknown as WorkState, at, episodeBasisOf(t))) {
+    t.recovery = work.recovery;
+    t.recoveryHistory = work.recoveryHistory;
+  }
+}
+
+/**
+ * Нормативное основание корпуса договора проверки — прежняя формула DevContour
+ * (`digest` по тексту JSON): закреплённые файлы, gate и обязательства.
+ */
+export function suiteBasisOf(contract: Pick<ContractDocument, 'artifacts' | 'checks'>) {
+  const declaration = contract.checks!;
+  return digest({
+    artifacts: (contract.artifacts ?? []).map((a) => ({ path: a.path, blob: a.blob })),
+    gate: declaration.gate,
+    obligations: declaration.obligations.map((o) => ({
+      property: o.property,
+      domain: o.domain,
+      answer: o.answer,
+      method: o.method,
+    })),
+  });
 }

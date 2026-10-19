@@ -24,7 +24,7 @@ import { attachJournal } from '../runner/journal.ts';
 import { caseInput, runSpike, spikeInput, spikesOf, submitCase } from '../runner/checks.ts';
 import { checksQuery, taskChecks } from './checks.ts';
 import { CheckCorpus } from '../core/check-store.ts';
-import { recoveryActions } from '../core/property-recovery.ts';
+import { recoveryActions } from 'devcontour-harness';
 import { applyCases } from '../runner/recovery.ts';
 import { ContractChanges } from '../runner/contract-change.ts';
 

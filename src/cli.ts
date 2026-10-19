@@ -65,7 +65,7 @@ import { contractImpact } from './runner/contract-impact.ts';
 import { ContractChanges } from './runner/contract-change.ts';
 import { writeSelfCheck } from './runner/checks.ts';
 import { CheckCorpus } from './core/check-store.ts';
-import { propertySeed } from './core/property.ts';
+import { propertySeed } from 'devcontour-harness';
 const args = process.argv.slice(2),
   operation = args[0] ?? 'serve';
 const option = (name: string, fallback: string) =>

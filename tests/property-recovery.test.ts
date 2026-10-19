@@ -3,10 +3,15 @@ import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
+import { leadBinding } from '../src/runner/recovery.ts';
+import { config } from './helpers.ts';
 import type { AgentAdapter, AgentRequest } from '../src/runner/adapters.ts';
 import { CheckCorpus } from '../src/core/check-store.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
+import { episodeBasisOf, receiverContext } from '../src/harness/host.ts';
+import { executionOf } from '../src/harness/execution.ts';
+import { resultProblems, runResult } from 'devcontour-harness';
 import {
   check,
   checkProject,
@@ -108,10 +113,16 @@ test('AC24: two substantive failures on one property with different messages and
       r.runs,
       runs(f, t.id).map((x) => x.id),
     );
+    // Основание эпизода и попыток — прежняя формула DevContour: эпизоды и
+    // попытки, записанные прежней версией, сравниваются с теми же значениями
+    // и не закрываются выдачей как «новое основание».
+    assert.equal(r.basis, episodeBasisOf(task(f, t.id)));
+    assert.ok(runs(f, t.id).every((x) => x.episodeBasis === r.basis));
     // Попытки остались, но третья выдача запрещена до решения.
     assert.ok(task(f, t.id).attempt < f.h.config.maxAttempts);
     f.h.retry(t.id);
     assert.equal(f.h.claim('probe'), undefined);
+    assert.equal(task(f, t.id).recovery?.id, r.id, 'эпизод прежнего основания не закрыт выдачей');
     assert.equal(runs(f, t.id).length, 2);
     // Текст ревью упоминал reach-complete, но свойство отказа — из входа находки.
     assert.ok(runs(f, t.id).every((x) => !x.properties?.includes('reach-complete')));
@@ -293,6 +304,15 @@ test('AC26: in agent mode the server finishes the narrow route without a chat or
             `случай ${v} подтверждён`,
           );
         assert.equal(done.checkVersion?.number, suite.versions.at(-1)!.number);
+        // Принятый результат с корпусом переносим: получатель этой установки
+        // подтверждает его, включая привязку корпуса к договору по основанию.
+        const { engine, store } = executionOf(f.h);
+        const accepted = engine.read((v) =>
+          v.attempts(t.id).find((a) => a.status === 'succeeded'),
+        )!;
+        const result = runResult(accepted, engine.version);
+        assert.ok(result.inputs.corpus, 'результат несёт корпус');
+        assert.deepEqual(resultProblems(result, await receiverContext(f.h, store, t.id)), []);
       } else assert.match(f.calls.prompts.at(-1)!, /Hypothesis: Предметы нулевого веса/);
       // Вызов ведущего учтён в телеметрии.
       const usage = f.h.store.localRecords('usage', 'main');
@@ -513,4 +533,28 @@ test('AC28: a human pause, a cancellation, operator mode and a product conflict 
     await f.close();
     await removeRoot(p.root);
   }
+});
+
+test('Назначение ведущего для разбора: модель ревьюера того же runtime и профиль ревьюера роли; другой runtime — без них', () => {
+  const h = new DevContour(
+    new Store(':memory:'),
+    config({
+      reviewer: { runtime: 'codex', model: 'lead-model' },
+      toolProfiles: {
+        'codex-review': {
+          runtime: 'codex',
+          mcp: {},
+          claudeAllowedTools: [],
+          codexShell: true,
+          codexNetwork: false,
+        },
+      },
+    }),
+  );
+  const t = { role: 'qa', repositoryId: 'main' } as Parameters<typeof leadBinding>[1];
+  assert.deepEqual(leadBinding(h, t, 'codex'), {
+    model: 'lead-model',
+    toolProfile: 'codex-review',
+  });
+  assert.deepEqual(leadBinding(h, t, 'claude'), {});
 });

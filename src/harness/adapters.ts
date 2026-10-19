@@ -59,6 +59,8 @@ export function fromAgentAdapter(
         artifactDir: request.artifactDir ?? request.cwd,
         prompt: request.prompt,
         review: request.task !== 'implement',
+        // Разбор ведущего по свойству — свой вид вызова продукта.
+        ...(request.subject?.phase === 'property-recovery' ? { purpose: 'recovery' as const } : {}),
         task: task ?? ({} as Task),
         ...(request.binding.model ? { model: request.binding.model } : {}),
         ...(request.binding.effort ? { effort: request.binding.effort } : {}),

@@ -14,10 +14,11 @@ import { executionOf } from '../src/harness/execution.ts';
 import { config, input } from './helpers.ts';
 import { declaration, propertyGate } from './check-fixture.ts';
 import { Store } from '../src/core/store.ts';
-import { DevContour, specDigest } from '../src/core/service.ts';
+import { DevContour, digest, specDigest } from '../src/core/service.ts';
 import {
   CheckCorpus,
   canonicalJson,
+  caseId,
   localSuite,
   mergeSuites,
   configuredSpellings,
@@ -30,8 +31,8 @@ import {
   corpusWitness,
   propertyCoverage,
   propertyFailure,
-  propertyReport,
-} from '../src/core/property.ts';
+  propertyReportSchema as propertyReport,
+} from 'devcontour-harness';
 import { AgentService } from '../src/application/agent.ts';
 import { completion, validateReceipt } from '../src/core/sync-state.ts';
 import { receiptSchema } from '../src/core/sync-model.ts';
@@ -475,7 +476,8 @@ test('F07: an approved change of the task basis closes the old episode and lets 
     d.h.approve(rec.board);
     const after = d.get(rec.id);
     assert.equal(after.recovery, undefined);
-    assert.equal(after.recoveryHistory?.at(-1)?.reason, 'утверждено новое основание задачи');
+    // Эпизод закрыт правилом harness: причина — согласованное новое основание.
+    assert.match(after.recoveryHistory?.at(-1)?.reason ?? '', /новое основание/);
     const run = d.h.claim('probe');
     assert.equal(run?.taskId, rec.id, 'задача снова выдаётся');
   } finally {
@@ -928,4 +930,39 @@ test('F22: a file:// URL after a JSON-escaped newline, carriage return or tab is
   // Обычный URL после перевода строки остаётся как есть.
   const kept = JSON.stringify({ see: 'line\nhttps://example.com/a?b=1' });
   assert.equal(scrubLocalPaths(kept, []), kept);
+});
+
+test('T35: основание корпуса и ID его случаев — прежняя формула DevContour; корпус прежней версии KS-<id> остаётся корпусом договора и привязкой задачи', () => {
+  const d = domain();
+  try {
+    const t = d.add('Legacy corpus basis');
+    d.seed(t.id, 5, [t.id]);
+    const suite = d.corpus.get('KS-' + d.c.id);
+    // Формула прежней версии: digest по тексту JSON закреплённых файлов, gate и обязательств.
+    const declarationOf = d.c.checks!;
+    const legacyBasis = digest({
+      artifacts: (d.c.artifacts ?? []).map((a) => ({ path: a.path, blob: a.blob })),
+      gate: declarationOf.gate,
+      obligations: declarationOf.obligations.map((o) => ({
+        property: o.property,
+        domain: o.domain,
+        answer: o.answer,
+        method: o.method,
+      })),
+    });
+    assert.equal(suite.basis, legacyBasis, 'основание записано прежней формулой');
+    for (const c of Object.values(suite.cases))
+      assert.equal(
+        c.id,
+        caseId(c.property, c.input, legacyBasis),
+        'ID случая — от прежнего основания',
+      );
+    // Повторное обращение находит тот же корпус, а не заводит новый.
+    const again = d.corpus.suiteFor(d.get(t.id), 'knapsack-optimal');
+    assert.equal(again.suite.id, suite.id);
+    assert.equal(again.suite.revision, suite.revision);
+    assert.equal(d.get(t.id).checkVersion?.suite, suite.id);
+  } finally {
+    d.close();
+  }
 });

@@ -8,7 +8,7 @@ import {
   type Contract,
   type Task,
 } from './model.ts';
-import type { CheckManifest } from './property.ts';
+import type { CheckManifest } from 'devcontour-harness';
 import { repository } from './repositories.ts';
 
 /**

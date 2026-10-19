@@ -4,7 +4,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Evidence } from '../src/core/model.ts';
 import { git } from '../src/runner/process.ts';
-import { corpusWitness, propertyCoverage, type PropertyReport } from '../src/core/property.ts';
+import { corpusWitness, propertyCoverage, type PropertyReport } from 'devcontour-harness';
 import {
   check,
   checkProject,

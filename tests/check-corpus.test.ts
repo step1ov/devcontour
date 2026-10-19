@@ -206,7 +206,7 @@ test('AC10–AC12, AC18: the pinned oracle decides a reviewer example; wrong exp
       {
         property: 'knapsack-optimal',
         input: zero,
-        inputHash: 'x',
+        inputHash: digest(zero),
         outcome: 'confirmed',
         reason: 'подделка',
         source: { sha: run.candidateSha! },

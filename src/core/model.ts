@@ -221,11 +221,11 @@ export interface Task extends TaskInput {
    */
   checkVersion?: { suite: string; number: number; digest: string };
   /**
-   * Эпизод повторяющихся отказов по свойству (core/property-recovery.ts).
+   * Эпизод повторяющихся отказов по свойству (правила — harness).
    * Локальная операция установки: в Git не переносится.
    */
-  recovery?: import('./property-recovery.ts').PropertyRecovery;
-  recoveryHistory?: import('./property-recovery.ts').PropertyRecovery[];
+  recovery?: import('devcontour-harness').PropertyRecovery;
+  recoveryHistory?: import('devcontour-harness').PropertyRecovery[];
   /** Класс последнего отказа, поставленный в точке его обнаружения. */
   failureKind?: FailureKind;
   /** Отпечаток последнего отказа: по нему считаются одинаковые повторы. */
@@ -353,7 +353,7 @@ export interface Evidence {
   property?: {
     seed: number;
     reproduce: string;
-    report?: import('./property.ts').PropertyReport;
+    report?: import('devcontour-harness').PropertyReport;
     problem?: string;
     contracts: Record<string, string>;
     artifacts: { path: string; blob: string }[];

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { requirementProof, unprovenRequirements } from '../src/core/proof.ts';
-import { junitSummary } from '../src/runner/gates.ts';
+import { junitSummary } from 'devcontour-harness';
 import { redactor } from '../src/runner/redaction.ts';
 import type { Evidence } from '../src/core/model.ts';
 import { mkdtemp, writeFile, mkdir, rm } from 'node:fs/promises';
