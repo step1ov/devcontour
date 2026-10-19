@@ -1,8 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { requirementProof, unprovenRequirements } from '../src/core/proof.ts';
+import { requirementProof } from 'devcontour-harness';
 import { junitSummary } from 'devcontour-harness';
-import { redactor } from '../src/runner/redaction.ts';
 import type { Evidence } from '../src/core/model.ts';
 import { mkdtemp, writeFile, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -44,109 +43,6 @@ function evidence(over: Partial<Evidence> = {}): Evidence {
     ...over,
   };
 }
-const link = { id: 'REQ-1', gate: 'unit', testId: 'cart.total.applies discount' };
-
-test('Подтверждён только тот критерий, чей названный тест выполнился на принятом SHA', () => {
-  const proof = requirementProof(
-    link,
-    [evidence({ tests: [{ id: link.testId, status: 'passed' }] })],
-    SHA,
-  );
-  assert.equal(proof.level, 'testcase');
-});
-
-test('Зелёная проверка без связанного теста остаётся прежним, более слабым уровнем', () => {
-  // История не переписывается: прежние задачи читаются на своём уровне, и он
-  // называется прямо, а не выдаётся за подтверждённый сценарий.
-  const proof = requirementProof({ id: 'REQ-1', gate: 'unit' }, [evidence()], SHA);
-  assert.equal(proof.level, 'gate');
-  assert.match(proof.reason, /не связан с конкретным тестом/);
-});
-
-test('Ни посторонний зелёный тест, ни пропуск, ни повтор, ни чужой SHA не подтверждают критерий', () => {
-  const cases: [string, Evidence[], string | undefined, RegExp][] = [
-    // Зелёная проверка есть, но заявленного теста в ней не было.
-    [
-      'посторонний тест',
-      [evidence({ tests: [{ id: 'cart.total.other', status: 'passed' }] })],
-      SHA,
-      /не выполнялся/,
-    ],
-    [
-      'пропущенный',
-      [evidence({ tests: [{ id: link.testId, status: 'skipped' }] })],
-      SHA,
-      /skipped/,
-    ],
-    ['упавший', [evidence({ tests: [{ id: link.testId, status: 'failed' }] })], SHA, /failed/],
-    [
-      'повтор id',
-      [
-        evidence({
-          tests: [
-            { id: link.testId, status: 'passed' },
-            { id: link.testId, status: 'passed' },
-          ],
-        }),
-      ],
-      SHA,
-      /встречается/,
-    ],
-    [
-      'обрезанный манифест',
-      [evidence({ tests: [{ id: link.testId, status: 'passed' }], testsTruncated: true })],
-      SHA,
-      /обрезан/,
-    ],
-    [
-      'другой SHA',
-      [evidence({ sha: OTHER, tests: [{ id: link.testId, status: 'passed' }] })],
-      SHA,
-      /не выполнялась/,
-    ],
-    [
-      'фаза кандидата',
-      [evidence({ phase: 'candidate', tests: [{ id: link.testId, status: 'passed' }] })],
-      SHA,
-      /не выполнялась/,
-    ],
-    [
-      'проверка не прошла',
-      [evidence({ passed: false, tests: [{ id: link.testId, status: 'failed' }] })],
-      SHA,
-      /не прошла/,
-    ],
-    ['без манифеста', [evidence()], SHA, /не сообщила/],
-    ['результат не принят', [evidence()], undefined, /не принят/],
-  ];
-  for (const [name, given, sha, reason] of cases) {
-    const proof = requirementProof(link, given, sha);
-    assert.equal(proof.level, 'none', name);
-    assert.match(proof.reason, reason, name);
-  }
-});
-
-test('Приёмка спрашивает только те критерии, которые сами назвали свой тест', () => {
-  const evidences = [evidence({ tests: [{ id: link.testId, status: 'passed' }] })];
-  const full = {
-    id: 'REQ-1',
-    source: 'docs/spec.md',
-    digest: 'f'.repeat(64),
-    text: 'Скидка применяется к сумме корзины',
-    gate: 'unit',
-    scenario: 'Корзина со скидкой',
-  };
-  assert.deepEqual(unprovenRequirements([{ ...full, testId: link.testId }], evidences, SHA), []);
-  assert.deepEqual(
-    unprovenRequirements([full], evidences, SHA),
-    [],
-    'прежний уровень не спрашивается',
-  );
-  assert.equal(
-    unprovenRequirements([{ ...full, testId: 'cart.total.missing' }], evidences, SHA).length,
-    1,
-  );
-});
 
 test('Манифест собирается из отчёта проверки с исходами каждого testcase', () => {
   const xml = `<?xml version="1.0"?>
@@ -641,57 +537,6 @@ test('Исполнитель получает ту же границу: свой
   assert.ok(codex.includes('"/var/devcontour-data"="none"'), codex);
   assert.ok(codex.includes(JSON.stringify(realpathSync('/tmp')) + '="write"'), codex);
   assert.match(codex, /network=\{enabled=true\}/, 'сеть исполнителя — по профилю');
-});
-
-test('Имя, изменённое redaction или хешем, не подтверждает критерий', () => {
-  // Redacted-имя `case-[REDACTED]` совпало бы с таким же testId постановки,
-  // хотя теста с этим именем никто не запускал. Длинное имя заменяется
-  // хешем: обрезка дала бы коллизии и ложные совпадения.
-  const redact = redactor([
-    'SYNTHETIC_PRIVATE_442211',
-    'SYNTHETIC_MULTILINE_PRIVATE\nSECOND_LINE_1234',
-  ]);
-  const long = (tail: string) => 'p'.repeat(1001) + tail;
-  const summary = junitSummary(
-    '<testsuite>' +
-      '<testcase name="case-SYNTHETIC_PRIVATE_442211"/>' +
-      `<testcase name="${long('a')}"/><testcase name="${long('b')}"/>` +
-      '<testcase classname="auth" name="multi"><failure><![CDATA[SYNTHETIC_MULTILINE_PRIVATE\nSECOND_LINE_1234]]></failure></testcase>' +
-      '<testcase name="plain"/>' +
-      '</testsuite>',
-    redact,
-  );
-  const byId = new Map(summary.cases.map((c) => [c.id, c]));
-  assert.equal(byId.get('case-[REDACTED]')?.opaque, true);
-  assert.equal(byId.get('plain')?.opaque, undefined, 'обычное имя остаётся сопоставимым');
-  const hashed = summary.cases.filter((c) => c.id.startsWith('sha256:'));
-  assert.equal(hashed.length, 2);
-  assert.notEqual(hashed[0].id, hashed[1].id, 'разные длинные имена не сливаются');
-  assert.ok(hashed.every((c) => c.opaque && c.id.length <= 1000));
-  // Многострочный секрет не остаётся ни целиком, ни частями.
-  const text = JSON.stringify(summary);
-  for (const piece of [
-    'SYNTHETIC_MULTILINE_PRIVATE',
-    'SECOND_LINE_1234',
-    'SYNTHETIC_PRIVATE_442211',
-  ])
-    assert.equal(text.includes(piece), false, piece);
-
-  const proof = requirementProof(
-    { id: 'REQ-1', gate: 'unit', testId: 'case-[REDACTED]' },
-    [evidence({ tests: summary.cases })],
-    SHA,
-  );
-  assert.equal(proof.level, 'none');
-  assert.match(proof.reason, /redaction/);
-  assert.equal(
-    requirementProof(
-      { id: 'REQ-2', gate: 'unit', testId: 'plain' },
-      [evidence({ tests: summary.cases })],
-      SHA,
-    ).level,
-    'testcase',
-  );
 });
 
 test('Смена изоляции — другой договор исполнения: активный прогон отвергается, история читается', () => {

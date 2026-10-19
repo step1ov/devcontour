@@ -5,10 +5,9 @@ import {
   relativePath,
   type Task,
   type Run,
-  type Evidence,
   type DevContourState,
 } from '../core/model.ts';
-import { requirementProof, taskEvidence, unprovenReason } from '../core/proof.ts';
+import { requirementProof, taskChecks, taskEvidence, unprovenReason } from '../core/proof.ts';
 import { repository } from '../core/repositories.ts';
 
 // A requirement ends at the next level-1/2 heading. Ignore fenced code examples.
@@ -95,7 +94,12 @@ export function assertRequirementProof(
   task: Task,
   state: DevContourState = h.store.read(),
 ) {
-  const unproven = unprovenReason(task.requirements, taskEvidence(state, task), task.resultSha);
+  const unproven = unprovenReason(
+    task.requirements,
+    taskEvidence(state, task),
+    task.resultSha,
+    taskChecks(state, task),
+  );
   if (unproven) throw new DomainError(unproven);
 }
 export function recordRequirements(
@@ -132,7 +136,6 @@ export function requirementReport(h: DevContour, repositoryId: string) {
     tasks: s.tasks
       .filter((t) => t.repositoryId === repositoryId && !replaced.has(t.id))
       .map((t) => {
-        const run = s.runs.findLast((r) => r.taskId === t.id && r.status === 'succeeded');
         return {
           taskId: t.id,
           contracts: t.contractDigests,
@@ -140,12 +143,9 @@ export function requirementReport(h: DevContour, repositoryId: string) {
           resultSha: t.resultSha,
           requirements: currentRequirements(h, t).map(
             ({ currentText: _text, text: _old, ...r }) => {
-              const evidence = (run?.evidence ??
-                t.sharedCompletion?.receipt.checks ??
-                []) as Evidence[];
               const proof =
                 r.fresh && t.status === 'done'
-                  ? requirementProof(r, evidence, t.resultSha)
+                  ? requirementProof(r, taskEvidence(s, t), t.resultSha, taskChecks(s, t))
                   : {
                       level: 'none' as const,
                       reason: r.fresh

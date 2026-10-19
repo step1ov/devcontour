@@ -9,7 +9,7 @@ import {
   type RequirementLink,
   type Verification,
 } from '../core/model.ts';
-import { requirementProof, taskEvidence } from '../core/proof.ts';
+import { requirementProof, taskChecks, taskEvidence } from '../core/proof.ts';
 import {
   Workspace,
   changeSnapshot,
@@ -726,7 +726,8 @@ export class IntentService implements ProductReleaseGuard {
     const proven = (task: Task, link: RequirementLink) =>
       checked(task, link.gate) &&
       (!link.testId ||
-        requirementProof(link, taskEvidence(state, task), task.resultSha).level === 'testcase');
+        requirementProof(link, taskEvidence(state, task), task.resultSha, taskChecks(state, task))
+          .level === 'testcase');
     const stories = doc.stories
       .filter((s) => s.releaseId === releaseId)
       .map((story) => {

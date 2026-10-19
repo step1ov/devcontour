@@ -12,7 +12,6 @@ import {
   type Task,
   type Approval,
   type Board,
-  type Evidence,
   type Contract,
 } from './model.ts';
 import {
@@ -483,7 +482,12 @@ export function validateReceipt(
   // открывала зависимые, хотя её manifest прямо не содержит нужного теста.
   // Receipt без manifest у задачи с testId тоже не подтверждает — такой
   // задачи не существовало до появления testId.
-  const unproven = unprovenReason(t.requirements, receipt.checks as Evidence[], receipt.resultSha);
+  const unproven = unprovenReason(
+    t.requirements,
+    receipt.checks,
+    receipt.resultSha,
+    receipt.checkVersion?.effective,
+  );
   if (unproven) throw new Error(`Receipt ${t.id}: ${unproven}`);
   // Задача с договором проверки принимается только с версией проверок:
   // receipt без неё — неполный новый формат, а не прежний уровень.

@@ -247,3 +247,32 @@ test('S3.6: корпус, подтверждение случая, разбор 
   // Основание эпизода — формула DevContour через порт хоста.
   assert.match(code('src/harness/host.ts'), /episodeBasis: \(work, view\)/);
 });
+
+test('S3.6: доказательство сценария, договор проверки, эксперимент, самопроверка, добавление случаев и маскирование — правила harness', () => {
+  const code = (path: string) => readFileSync(join(root, path), 'utf8');
+  // Правила — вызовы harness; в DevContour остаются продуктовые входы.
+  assert.match(
+    code('src/core/proof.ts'),
+    /export \{ requirementProof, unprovenReason \} from 'devcontour-harness'/,
+  );
+  assert.match(code('src/core/checks.ts'), /harnessDeclarationProblems\(/);
+  assert.match(code('src/core/checks.ts'), /orderPropertyProblems\(/);
+  assert.match(code('src/core/checks.ts'), /checkDeclaration = checkDeclarationSchema/);
+  assert.match(code('src/runner/checks.ts'), /harnessRunSpike\(/);
+  assert.match(code('src/runner/checks.ts'), /harnessWriteSelfCheck\(/);
+  assert.match(code('src/runner/recovery.ts'), /harnessApplyCases\(/);
+  assert.match(code('src/runner/redaction.ts'), /from 'devcontour-harness'/);
+  // Вторых реализаций нет: ни сверки манифеста testcase, ни структурных
+  // правил договора, ни своего запуска эксперимента или плана самопроверки.
+  for (const [path, pattern] of [
+    ['src/core/proof.ts', /withManifest|\.tests!\.filter|встречается .* раза/],
+    ['src/core/checks.ts', /strongPromises\.has|не генеративный|minCases|function declared\(/],
+    [
+      'src/runner/checks.ts',
+      /'worktree', 'add'|DEVCONTOUR_SPIKE_SIZE|selfcheck\.mjs|spawnSync|runCheck\(/,
+    ],
+    ['src/runner/recovery.ts', /-case-\$\{i\}/],
+    ['src/runner/redaction.ts', /\[REDACTED\]|encodeURIComponent|replaceAll/],
+  ] as const)
+    assert.doesNotMatch(code(path), pattern, `${path}: вторая реализация правила harness`);
+});

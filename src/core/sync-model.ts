@@ -1,7 +1,7 @@
 import { preparationState } from './preparation-model.ts';
 import { z } from 'zod';
 import { taskInput, relativePath } from './model.ts';
-import { checkDeclaration } from './checks.ts';
+import { checkDeclarationSchema as checkDeclaration } from 'devcontour-harness';
 
 export const syncId = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 const hash = z.string().regex(/^[a-f0-9]{64}$/);

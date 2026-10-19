@@ -12,7 +12,7 @@ import { createHash } from 'node:crypto';
 import { repository, repositories, requiresContract, expandGates } from './repositories.ts';
 import { Store } from './store.ts';
 import { type FailureKind } from './failure.ts';
-import { taskEvidence, unprovenReason } from './proof.ts';
+import { taskChecks, taskEvidence, unprovenReason } from './proof.ts';
 import { assertTaskProperties, type CheckDeclaration } from './checks.ts';
 import { recoveryActions, type PropertyRecovery } from 'devcontour-harness';
 import { closeEpisodeIfBasisChanged } from '../harness/host.ts';
@@ -982,7 +982,12 @@ export class DevContour {
       const work = tasks.filter((t) => !carried.has(t.id));
       work.forEach((t) => assertTaskPreparation(s, t));
       for (const t of work) {
-        const unproven = unprovenReason(t.requirements, taskEvidence(s, t), t.resultSha);
+        const unproven = unprovenReason(
+          t.requirements,
+          taskEvidence(s, t),
+          t.resultSha,
+          taskChecks(s, t),
+        );
         if (unproven) throw new DomainError(unproven);
       }
       const uncovered = uncoveredGates(this.config, s, tasks);

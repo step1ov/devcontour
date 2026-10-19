@@ -77,7 +77,7 @@ test('AC04: an exact obligation without domain, independent method or coverage i
     unpinned.obligations[0].method.artifacts = ['src/knap.mjs'];
     await assert.rejects(
       reviewContract(f.h, p.root, proposal(unpinned), 'codex', r.adapters),
-      /не объявлен артефактом договора/,
+      /не объявлен артефактом контракта/,
     );
     // Тяжёлое обязательство без эксперимента.
     const hard = declaration();
@@ -346,7 +346,7 @@ test('AC07: a plan whose first task needs a future node is not approved after re
       writePaths: ['src/'],
       properties: ['knapsack-optimal'],
     });
-    assert.throws(() => f.h.approve(lb.id), /не объявлено в договорах задачи/);
+    assert.throws(() => f.h.approve(lb.id), /не объявлено в договорах поручения/);
   } finally {
     await f.close();
     await removeRoot(p.root);
