@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { BlockedError, type Task } from '../src/core/model.ts';
 import { mkdtemp, readFile, writeFile, rm, mkdir, symlink } from 'node:fs/promises';
@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { setupDemo } from '../src/demo.ts';
+import { demoPool } from './demo-pool.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { DevContour } from '../src/core/service.ts';
@@ -20,9 +21,11 @@ import { repositories } from '../src/core/repositories.ts';
 import { updateBase } from '../src/runner/base-update.ts';
 import { workflowMetrics } from '../src/application/metrics.ts';
 import { taskOwner } from '../src/core/sync-state.ts';
+const demos = demoPool(setupDemo);
+after(() => demos.close());
 async function runtimeFixture() {
-  const root = await mkdtemp(join(tmpdir(), 'devcontour-runner-'));
-  await setupDemo(root);
+  const seed = await demos.acquire();
+  const root = seed.root;
   const config = loadConfig(join(root, 'config.json'));
   const store = new Store(join(root, 'state.sqlite'));
   const h = new DevContour(store, config);
@@ -37,7 +40,7 @@ async function runtimeFixture() {
     cleanup: async () => {
       await scheduler.stop();
       store.close();
-      await rm(root, { recursive: true, force: true });
+      seed.release();
     },
   };
 }
@@ -1615,20 +1618,50 @@ test('Кандидат, отклонённый ревью, — отправна�
   }
 });
 
-test('Предел времени — на фазу: долгая реализация не отнимает время у ревью', async () => {
-  // Каждая фаза укладывается в предел, их сумма — нет. С общим таймером на
-  // попытку ревьюер получал остаток и кандидат падал «по времени».
+test('Предел времени — на фазу: долгая реализация не отнимает время у ревью', async (t) => {
+  // Двигаем только таймер бюджета фазы: Git, gates, heartbeat и их таймеры
+  // остаются настоящими. Каждая фаза тратит 4 с из 6, сумма — больше 6 с.
+  // Реальные sleep оставляли лишь 2 с на Git/изоляцию и падали под нагрузкой.
   const f = await reuseFixture();
+  const budget = 6_000;
+  const nativeSetTimeout = globalThis.setTimeout;
+  const nativeClearTimeout = globalThis.clearTimeout;
+  let clock = 0;
+  const timers = new Map<NodeJS.Timeout, { at: number; fire: () => void }>();
   try {
-    f.h.config.runTimeoutMs = 6_000;
-    const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    f.h.config.runTimeoutMs = budget;
+    t.mock.method(
+      globalThis,
+      'setTimeout',
+      (callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+        if (ms !== budget) return nativeSetTimeout(callback, ms, ...args);
+        const timer = nativeSetTimeout(() => {}, 2 ** 31 - 1);
+        timer.unref();
+        timers.set(timer, { at: clock + budget, fire: () => callback(...args) });
+        return timer;
+      },
+    );
+    t.mock.method(globalThis, 'clearTimeout', (timer: Parameters<typeof clearTimeout>[0]) => {
+      if (timer && typeof timer === 'object') timers.delete(timer);
+      nativeClearTimeout(timer);
+    });
+    const spend = () => {
+      assert.ok(timers.size > 0, 'таймер бюджета действительно установлен');
+      clock += 4_000;
+      for (const [timer, pending] of timers) {
+        if (pending.at > clock) continue;
+        timers.delete(timer);
+        nativeClearTimeout(timer);
+        pending.fire();
+      }
+    };
     const scheduler = new Scheduler(f.h, f.root, {
       ...adapters,
       demo: {
         ...adapters.demo,
         name: 'demo' as const,
         execute: async (request: AgentRequest) => {
-          if (request.task?.id === f.task.id) await pause(4_000);
+          if (request.task?.id === f.task.id) spend();
           return adapters.demo.execute(request);
         },
       },
@@ -1636,7 +1669,11 @@ test('Предел времени — на фазу: долгая реализа
     await scheduler.drain();
     await scheduler.stop();
     assert.equal(f.current().status, 'done', f.runs()[0]?.error);
+    assert.ok(clock > budget, 'сумма фаз превысила один бюджет');
+    assert.equal(timers.size, 0, 'таймер завершённой попытки снят');
   } finally {
+    for (const timer of timers.keys()) nativeClearTimeout(timer);
+    t.mock.restoreAll();
     await f.cleanup();
   }
 });

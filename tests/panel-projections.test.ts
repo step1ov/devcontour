@@ -1,9 +1,10 @@
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { largeHistory, type HistoryShape } from './large-history.ts';
+import { dirname, join } from 'node:path';
+import { amplifyHistory, completedDemo, type HistoryShape } from './large-history.ts';
+import { demoPool } from './demo-pool.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
 import { loadConfig } from '../src/runner/config.ts';
@@ -32,9 +33,12 @@ import { taskChecks } from '../src/application/checks.ts';
  * периодическая сводка ограничена и не несёт тел истории, а детали приходят
  * по запросу страницами.
  */
+const histories = demoPool(completedDemo);
+after(() => histories.close());
 async function history(shape: HistoryShape) {
-  const root = mkdtempSync(join(tmpdir(), 'devcontour-panel-'));
-  await largeHistory(join(root, 'data'), shape);
+  const seed = await histories.acquire();
+  const root = dirname(seed.root);
+  amplifyHistory(seed.root, shape);
   const store = new Store(join(root, 'data', 'state.sqlite'));
   const h = new DevContour(store, loadConfig(join(root, 'data', 'config.json')));
   return {
@@ -45,7 +49,7 @@ async function history(shape: HistoryShape) {
       panelSummary(h, join(root, 'data'), query) as PanelSummary,
     close() {
       store.close();
-      rmSync(root, { recursive: true, force: true });
+      seed.release();
     },
   };
 }

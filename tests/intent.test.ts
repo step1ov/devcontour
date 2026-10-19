@@ -1,9 +1,9 @@
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, writeFile, rm, symlink } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, writeFile, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setupDemo } from '../src/demo.ts';
+import { demoPool } from './demo-pool.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
@@ -72,9 +72,11 @@ const definition = () => ({
     },
   ],
 });
+const demos = demoPool(setupDemo);
+after(() => demos.close());
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'devcontour-intent-'));
-  await setupDemo(root);
+  const seed = await demos.acquire();
+  const root = seed.root;
   const config = loadConfig(join(root, 'config.json'));
   const store = new Store(join(root, 'state.sqlite')),
     h = new DevContour(store, config),
@@ -107,9 +109,10 @@ async function fixture() {
     intent,
     save,
     report: () => intent.report({ repositoryId: 'main', releaseId: 'mvp' }) as any,
-    close: async () => {
+    close: () => {
       store.close();
-      await rm(root, { recursive: true, force: true });
+      seed.release();
+      return Promise.resolve();
     },
   };
 }

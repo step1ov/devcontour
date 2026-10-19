@@ -18,19 +18,12 @@ let child;
 let closed;
 let output = '';
 try {
+  console.error('smoke-package: start');
   await mkdir(installation);
   await mkdir(outside);
   const { stdout } = await exec(
     'npm',
-    [
-      'pack',
-      '--json',
-      '--ignore-scripts',
-      '--cache',
-      join(root, 'cache'),
-      '--pack-destination',
-      root,
-    ],
+    ['pack', '--json', '--ignore-scripts', '--pack-destination', root],
     { cwd: source, timeout: 60000 },
   );
   const [archive] = JSON.parse(stdout);
@@ -91,12 +84,14 @@ try {
   for (const required of ['lib/index.js', 'lib/cli.js', 'package.json'])
     assert.ok(harnessFiles.includes(required), 'нет во вложенном harness: ' + required);
   await writeFile(join(installation, 'package.json'), '{"private":true}');
+  console.error('smoke-package: installing archive into a fresh directory');
   await exec(
     'npm',
     [
       'install',
-      '--cache',
-      join(root, 'cache'),
+      // Reuse npm's download cache, never a previous installation. An explicit
+      // npm_config_cache still works, including for a cold-cache release check.
+      '--prefer-offline',
       '--omit=dev',
       '--ignore-scripts',
       '--no-audit',
@@ -105,6 +100,7 @@ try {
     ],
     { cwd: installation, timeout: 120000 },
   );
+  console.error('smoke-package: archive installed; checking the packaged runtime');
   const installed = join(installation, 'node_modules/devcontour');
   const bin = join(installation, 'node_modules/.bin/devcontour');
   await assert.rejects(access(join(installed, 'src')));
@@ -517,6 +513,7 @@ try {
       2,
     ),
   );
+  console.error('smoke-package: checks complete');
 } finally {
   if (child && child.exitCode === null) {
     child.kill('SIGTERM');

@@ -21,7 +21,8 @@ import type { PreviewConfig } from '../src/core/integrations.ts';
 
 // Локальное имя базового образа: сборка не ходит в реестр за метаданными,
 // и тест не зависит от сети в момент сборки.
-const BASE = 'devcontour-preview-test-base:1';
+const SOURCE = 'docker.io/library/busybox:1.36';
+const BASE = 'docker.io/library/devcontour-preview-test-base:1';
 // Приложение отдаёт свой релиз, содержимое проверенного файла и вариант
 // сборки: по ним видно, что именно обслуживает URL.
 const dockerfile = (health = true) => `FROM ${BASE}
@@ -56,13 +57,12 @@ async function dockerReady(t: TestContext) {
     return false;
   }
   // Образ уже есть локально — сеть не нужна; иначе несколько попыток загрузки.
-  let pulled = (await command(['docker', 'image', 'inspect', 'busybox:1.36'], tmpdir())).code === 0;
+  let pulled = (await command(['docker', 'image', 'inspect', SOURCE], tmpdir())).code === 0;
   for (let attempt = 0; attempt < 3 && !pulled; attempt++)
     pulled =
-      (await command(['docker', 'pull', '-q', 'busybox:1.36'], tmpdir(), { timeoutMs: 120000 }))
-        .code === 0;
+      (await command(['docker', 'pull', '-q', SOURCE], tmpdir(), { timeoutMs: 120000 })).code === 0;
   assert.ok(pulled, 'базовый образ busybox недоступен');
-  await command(['docker', 'tag', 'busybox:1.36', BASE], tmpdir());
+  await command(['docker', 'tag', SOURCE, BASE], tmpdir());
   return true;
 }
 

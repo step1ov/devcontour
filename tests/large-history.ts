@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { setupDemo } from '../src/demo.ts';
@@ -41,6 +42,12 @@ const LOG = Array.from(
 ).join('\n');
 
 export async function largeHistory(root: string, shape: HistoryShape = LARGE) {
+  await completedDemo(root);
+  amplifyHistory(root, shape);
+}
+
+/** A real completed demo; all processes and SQLite handles are closed on return. */
+export async function completedDemo(root: string) {
   await setupDemo(root);
   const config = loadConfig(join(root, 'config.json'));
   const store = new Store(join(root, 'state.sqlite'));
@@ -51,10 +58,20 @@ export async function largeHistory(root: string, shape: HistoryShape = LARGE) {
     // Второй, ещё не выполненный демо-board — настоящим прогоном.
     h.pause(false);
     await scheduler.drain();
+    assert.ok(
+      store.read().tasks.every((task) => task.status === 'done'),
+      'demo history completed',
+    );
     h.pause(true);
   } finally {
     await scheduler.stop();
+    store.close();
   }
+}
+
+/** Add projection volume to an independent copy of the completed demo. */
+export function amplifyHistory(root: string, shape: HistoryShape) {
+  const store = new Store(join(root, 'state.sqlite'));
   store.change('fixture.large-history', (s) => amplify(s, shape));
   store.close();
   const db = new DatabaseSync(join(root, 'state.sqlite'));

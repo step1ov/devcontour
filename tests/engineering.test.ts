@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -14,6 +14,7 @@ import { ResourcePool, resourceKey, withResources } from '../src/runner/resource
 import { pinContext, taskContext } from '../src/runner/context.ts';
 import { git, command } from '../src/runner/process.ts';
 import { setupDemo } from '../src/demo.ts';
+import { demoPool } from './demo-pool.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Store } from '../src/core/store.ts';
 import { updateBase } from '../src/runner/base-update.ts';
@@ -100,9 +101,11 @@ test('Discovered debt becomes a deduplicated draft with provenance; scope and co
   }
 });
 
+const demos = demoPool(setupDemo);
+after(() => demos.close());
 async function runnerFixture() {
-  const root = await mkdtemp(join(tmpdir(), 'devcontour-context-'));
-  await setupDemo(root);
+  const seed = await demos.acquire();
+  const root = seed.root;
   const c = loadConfig(join(root, 'config.json')),
     store = new Store(join(root, 'state.sqlite'));
   const h = new DevContour(store, c);
@@ -117,7 +120,7 @@ async function runnerFixture() {
     async cleanup() {
       await scheduler.stop();
       store.close();
-      await rm(root, { recursive: true, force: true });
+      seed.release();
     },
   };
 }
