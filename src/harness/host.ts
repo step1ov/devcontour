@@ -310,7 +310,7 @@ export function devcontourWorkSource(h: DevContour, store: DevContourExecutionSt
           const shared = task?.sharedCompletion;
           if (!task || !shared || shared.receipt.resultSha !== prerequisite.resultSha) return false;
           try {
-            validateReceipt(shared.receipt, task, h.config.mode === 'demo', undefined, s.contracts);
+            validateReceipt(h, shared.receipt, task, s.contracts);
             return true;
           } catch {
             return false;

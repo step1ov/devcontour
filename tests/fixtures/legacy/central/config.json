@@ -1,0 +1,136 @@
+{
+  "prices": [
+    {
+      "runtime": "codex",
+      "model": "codex-model",
+      "effectiveAt": "2026-01-01T00:00:00.000Z",
+      "input": 1,
+      "output": 4,
+      "cacheRead": 0.1,
+      "cacheWrite": 1
+    }
+  ],
+  "memoryPolicy": {
+    "maxBytes": 8000
+  },
+  "signalPolicy": {
+    "maxActionsPerHour": 10
+  },
+  "version": 1,
+  "name": "Legacy fixture v2",
+  "toolProfiles": {},
+  "completionMode": "local",
+  "forgeConnections": {},
+  "storage": "central",
+  "contextPacks": [],
+  "resources": [],
+  "verificationMode": "all",
+  "generatedPaths": [],
+  "repositories": [
+    {
+      "id": "app",
+      "name": "App",
+      "kind": "product",
+      "path": "/tmp/devcontour-legacy-fixture/central/app",
+      "targetBranch": "devcontour/accepted",
+      "gates": [
+        {
+          "id": "test",
+          "kind": "test",
+          "command": ["node", "verify.mjs"],
+          "timeoutMs": 120000,
+          "report": {
+            "type": "junit",
+            "path": ".reports/junit.xml"
+          }
+        },
+        {
+          "id": "properties",
+          "kind": "test",
+          "command": ["node", "check.mjs"],
+          "timeoutMs": 30000,
+          "report": {
+            "type": "junit",
+            "path": ".reports/properties.xml"
+          },
+          "property": {}
+        }
+      ],
+      "protectedPaths": [".github/", ".githooks/", "package.json", "package-lock.json"]
+    }
+  ],
+  "workspaceGates": [
+    {
+      "id": "e2e",
+      "kind": "test",
+      "command": ["node", "e2e.mjs"],
+      "timeoutMs": 120000,
+      "report": {
+        "type": "junit",
+        "path": ".reports/e2e.xml"
+      },
+      "repositoryId": "app",
+      "artifacts": []
+    }
+  ],
+  "repository": "/tmp/devcontour-legacy-fixture/central/app",
+  "targetBranch": "devcontour/accepted",
+  "mode": "demo",
+  "approvalMode": "agent",
+  "concurrency": 4,
+  "leaseMs": 30000,
+  "runTimeoutMs": 900000,
+  "reviewProbes": {
+    "commandTimeoutMs": 120000,
+    "budgetMs": 600000,
+    "reserveMs": 120000
+  },
+  "contractArtifacts": {
+    "maxFileBytes": 16777216,
+    "maxTotalBytes": 67108864,
+    "reviewTextBytes": 400000
+  },
+  "maxAttempts": 3,
+  "reuseImplementation": true,
+  "repairBudget": 6,
+  "isolation": {
+    "mode": "none",
+    "domains": []
+  },
+  "roles": {
+    "qa": {
+      "runtime": "demo"
+    },
+    "backend": {
+      "runtime": "demo"
+    }
+  },
+  "reviewer": {
+    "runtime": "demo"
+  },
+  "gates": [
+    {
+      "id": "test",
+      "kind": "test",
+      "command": ["node", "verify.mjs"],
+      "timeoutMs": 120000,
+      "report": {
+        "type": "junit",
+        "path": ".reports/junit.xml"
+      }
+    },
+    {
+      "id": "properties",
+      "kind": "test",
+      "command": ["node", "check.mjs"],
+      "timeoutMs": 30000,
+      "report": {
+        "type": "junit",
+        "path": ".reports/properties.xml"
+      },
+      "property": {}
+    }
+  ],
+  "protectedPaths": [".github/", ".githooks/", "devcontour.config.json"],
+  "packs": []
+}

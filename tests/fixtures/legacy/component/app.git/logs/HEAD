@@ -1,0 +1,6 @@
+0000000000000000000000000000000000000000 5edca6cccbb1fcbd214ae99c901f795142ebcb65 t <t@e> 1792435927 +0300	commit (initial): project
+5edca6cccbb1fcbd214ae99c901f795142ebcb65 5edca6cccbb1fcbd214ae99c901f795142ebcb65 t <t@e> 1792435928 +0300	checkout: moving from main to devcontour/run-window
+5edca6cccbb1fcbd214ae99c901f795142ebcb65 2ee9a711b248cf04fe50d576286f6a40257bf0fd t <t@e> 1792435928 +0300	commit: window: candidate
+2ee9a711b248cf04fe50d576286f6a40257bf0fd 5edca6cccbb1fcbd214ae99c901f795142ebcb65 t <t@e> 1792435929 +0300	checkout: moving from devcontour/run-window to devcontour/accepted
+5edca6cccbb1fcbd214ae99c901f795142ebcb65 c4a4efecafbf17126c126d01550f9ea2f2d5304f t <t@e> 1792435929 +0300	merge devcontour/run-window: Merge made by the 'recursive' strategy.
+c4a4efecafbf17126c126d01550f9ea2f2d5304f 5edca6cccbb1fcbd214ae99c901f795142ebcb65 t <t@e> 1792435929 +0300	checkout: moving from devcontour/accepted to main

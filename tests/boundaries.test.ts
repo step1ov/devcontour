@@ -276,3 +276,16 @@ test('S3.6: доказательство сценария, договор про
   ] as const)
     assert.doesNotMatch(code(path), pattern, `${path}: вторая реализация правила harness`);
 });
+
+test('S3.6: приёмка по receipt Git-синхронизации — получатель harness; в DevContour только формат receipt', () => {
+  const code = (path: string) => readFileSync(join(root, path), 'utf8');
+  const sync = code('src/core/sync-state.ts');
+  assert.match(sync, /receiptProblems\(/);
+  // Своих решающих записей, раскрытия области, версии проверок и доказательств нет.
+  assert.doesNotMatch(
+    sync,
+    /const decisive|unprovenReason|effectiveChecks|obligationOf|expandGates|propertyProofProblem|Нет PASS в receipt/,
+    'src/core/sync-state.ts: вторая реализация приёмки по receipt',
+  );
+  assert.match(code('src/harness/receipt.ts'), /resultProblems\(/);
+});

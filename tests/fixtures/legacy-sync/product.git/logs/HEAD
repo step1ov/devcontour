@@ -1,0 +1,3 @@
+0000000000000000000000000000000000000000 45e88ba3ea318b1c9c93020d1eeeebf93cdf4125 Sync Fixture <sync@example.test> 1767225600 +0000	commit (initial): baseline
+45e88ba3ea318b1c9c93020d1eeeebf93cdf4125 09bf01e67f0f25aa40f2ceeb494546bc817fc911 Sync Fixture <sync@example.test> 1767225600 +0000	commit: Requirement
+09bf01e67f0f25aa40f2ceeb494546bc817fc911 0f2610e6ba336a05c7217a61c09cfa580ba9d82c Sync Fixture <sync@example.test> 1767225600 +0000	commit: Sync development state

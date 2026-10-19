@@ -229,16 +229,14 @@ test('F02: a receipt with mixed check versions or without property manifests is 
     d.h.finish(run.id, run.token, 'b'.repeat(40));
     const done = d.get(rt.id);
     const receipt = completion(d.h, d.store.read(), done);
-    receipt.runtime = 'codex';
-    receipt.reviewer = 'claude';
     const contracts = d.store.read().contracts;
-    validateReceipt(receiptSchema.parse(receipt), done, false, undefined, contracts);
+    validateReceipt(d.h, receiptSchema.parse(receipt), done, contracts);
     // Манифесты свойств удалены при сохранённой версии.
     const stripped = structuredClone(receipt);
     for (const check of stripped.checks) delete check.property;
     assert.throws(
-      () => validateReceipt(receiptSchema.parse(stripped), done, false, undefined, contracts),
-      /без манифеста свойств задачи/,
+      () => validateReceipt(d.h, receiptSchema.parse(stripped), done, contracts),
+      /без манифеста свойств поручения/,
     );
     // Тесты под чужой версией, рядом — записи ревью с нужной версией.
     const mixed = structuredClone(receipt);
@@ -248,13 +246,13 @@ test('F02: a receipt with mixed check versions or without property manifests is 
         mixed.checks.push({ ...e, kind: 'review', checks: mixed.checkVersion!.effective });
       }
     assert.throws(
-      () => validateReceipt(receiptSchema.parse(mixed), done, false, undefined, contracts),
+      () => validateReceipt(d.h, receiptSchema.parse(mixed), done, contracts),
       /вид проверки не соответствует гейту|другой версией проверок/,
     );
     const versionOnly = structuredClone(receipt);
     for (const e of versionOnly.checks) if (e.kind === 'test') e.checks = 'f'.repeat(64);
     assert.throws(
-      () => validateReceipt(receiptSchema.parse(versionOnly), done, false, undefined, contracts),
+      () => validateReceipt(d.h, receiptSchema.parse(versionOnly), done, contracts),
       /другой версией проверок/,
     );
   } finally {
@@ -676,12 +674,10 @@ function receiptWithCorpus(d: ReturnType<typeof domain>) {
   d.h.finish(run.id, run.token, 'b'.repeat(40));
   const done = d.get(rt.id);
   const receipt = completion(d.h, d.store.read(), done);
-  receipt.runtime = 'codex';
-  receipt.reviewer = 'claude';
   const contracts = d.store.read().contracts;
   const suites = (id: string) => portableSuite(d.corpus.get(id));
   const validate = (r: typeof receipt) =>
-    validateReceipt(receiptSchema.parse(r), done, false, suites, contracts);
+    validateReceipt(d.h, receiptSchema.parse(r), done, contracts, suites);
   return { receipt, validate };
 }
 
@@ -690,16 +686,20 @@ test('F12: a declared property gate cannot be excluded from required gates and r
   try {
     const { receipt, validate } = receiptWithCorpus(d);
     validate(receipt);
-    const swapped = structuredClone(receipt);
-    swapped.requiredGates = ['lint'];
-    for (const e of [...swapped.checks])
-      if (e.gate === 'properties') {
-        swapped.checks.push({ ...e, gate: 'lint', property: undefined });
-        e.passed = false;
-        e.exitCode = 1;
-        e.checks = 'f'.repeat(64);
-      }
-    assert.throws(() => validate(swapped), /Нет PASS в receipt .*: candidate\/properties/);
+    const swap = (otherVersion: boolean) => {
+      const swapped = structuredClone(receipt);
+      swapped.requiredGates = ['lint'];
+      for (const e of [...swapped.checks])
+        if (e.gate === 'properties') {
+          swapped.checks.push({ ...e, gate: 'lint', property: undefined });
+          e.passed = false;
+          e.exitCode = 1;
+          if (otherVersion) e.checks = 'f'.repeat(64);
+        }
+      return swapped;
+    };
+    assert.throws(() => validate(swap(false)), /Нет PASS: candidate\/properties/);
+    assert.throws(() => validate(swap(true)), /другой версией проверок/);
   } finally {
     d.close();
   }

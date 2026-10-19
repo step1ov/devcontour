@@ -511,7 +511,8 @@ test('AC23: an old receipt keeps its level, an incomplete new one is refused, an
     };
     const c = await f.create('carol', a);
     strip(c, (r) => delete r.data.checkVersion);
-    assert.throws(() => syncGit(c.h, { member: 'carol' }), /без версии проверок/);
+    // Записи receipt подписаны версией проверок, которой у него больше нет.
+    assert.throws(() => syncGit(c.h, { member: 'carol' }), /получена под другой версией проверок/);
     assert.equal(c.store.read().tasks.length, 0, 'ничего не импортировано');
     // Ссылка на версию корпуса, которой нет в Git.
     const d = await f.create('dave', a);
@@ -544,7 +545,7 @@ test('AC23: an old receipt keeps its level, an incomplete new one is refused, an
     taskRecord2.progress.checkVersion.digest = missing;
     writeFileSync(taskFile2, canonical(taskRecord2));
     git(d.repo, 'commit', '-qam', 'binding to a missing corpus version');
-    assert.throws(() => syncGit(d.h, { member: 'dave' }), /которой нет в Git/);
+    assert.throws(() => syncGit(d.h, { member: 'dave' }), /которой нет у получателя/);
     assert.equal(d.store.read().tasks.length, 0, 'ничего не импортировано');
     // Старый receipt задачи без договора проверки читается на прежнем уровне.
     const contract = a.store.read().contracts[0];
