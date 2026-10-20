@@ -8,14 +8,60 @@ import type { DevContourState, Evidence, Task } from './model.ts';
  */
 export { requirementProof, unprovenReason } from 'devcontour-harness';
 
+/** То, по чему задача узнаёт действующий договор исполнения. */
+export interface PolicyOf {
+  taskPolicyDigest(t: Pick<Task, 'repositoryId' | 'consumers'>): string;
+  policyDigest(repositoryId?: string, legacy?: boolean): string;
+  /** Подтверждает ли receipt задачи её результат при текущей конфигурации. */
+  receiptHolds(s: DevContourState, t: Task): boolean;
+}
+
 /**
- * Evidence, которым задача подтверждает результат: последний успешный
- * прогон, а для задачи, завершённой в другом клоне, — её receipt. Одно
- * определение для всех потребителей: приёмки, INTENT и отчёта требований.
+ * Договоры, под которыми попытка этого clone доказывает задачу сейчас:
+ * текущий и — для задачи без потребителей — тот же договор без изоляции в
+ * форме прежней версии. Тот же ID gate с другой командой, группой или
+ * окружением — другой договор: его записи задачу уже не подтверждают, как и в
+ * `Engine.uncoveredGates` harness.
  */
-export function taskEvidence(s: Pick<DevContourState, 'runs'>, task: Task): readonly Evidence[] {
-  const run = s.runs.findLast((r) => r.taskId === task.id && r.status === 'succeeded');
-  return (run?.evidence ?? task.sharedCompletion?.receipt.checks ?? []) as Evidence[];
+function currentPolicies(h: PolicyOf, task: Task) {
+  const own = h.taskPolicyDigest(task);
+  return task.consumers?.length ? [own] : [own, h.policyDigest(task.repositoryId, true)];
+}
+
+/**
+ * Решающая запись задачи. Без `current` — принятая история: последняя
+ * успешная попытка этого clone, иначе receipt другого (отчёты, INTENT:
+ * принятое не переписывается сменой конфигурации). С `current` — то, что
+ * подтверждает задачу для нового решения о приёмке: попытка под действующим
+ * договором, иначе receipt, который получатель harness принимает при текущей
+ * конфигурации (digest в receipt — договор отправителя с его путями, с
+ * локальным он не сравнивается).
+ */
+function decisive(s: DevContourState, task: Task, current?: PolicyOf) {
+  const policies = current ? currentPolicies(current, task) : undefined;
+  const run = s.runs.findLast(
+    (r) =>
+      r.taskId === task.id &&
+      r.status === 'succeeded' &&
+      (!policies || policies.includes(r.policyDigest)),
+  );
+  if (run) return { run };
+  const receipt = task.sharedCompletion?.receipt;
+  return receipt && (!current || current.receiptHolds(s, task)) ? { receipt } : {};
+}
+
+/**
+ * Evidence, которым задача подтверждает результат (`decisive`). Одно
+ * определение для всех потребителей: приёмки доски (с `current`), INTENT и
+ * отчёта требований.
+ */
+export function taskEvidence(
+  s: DevContourState,
+  task: Task,
+  current?: PolicyOf,
+): readonly Evidence[] {
+  const { run, receipt } = decisive(s, task, current);
+  return (run?.evidence ?? receipt?.checks ?? []) as Evidence[];
 }
 
 /**
@@ -23,9 +69,9 @@ export function taskEvidence(s: Pick<DevContourState, 'runs'>, task: Task): read
  * запись доказательства — записанная под ней. Попытка прежней версии её не
  * закрепляла — тогда undefined, и запись выбирается без неё, как раньше.
  */
-export function taskChecks(s: Pick<DevContourState, 'runs'>, task: Task): string | undefined {
-  const run = s.runs.findLast((r) => r.taskId === task.id && r.status === 'succeeded');
-  return run ? run.checks?.effective : task.sharedCompletion?.receipt.checkVersion?.effective;
+export function taskChecks(s: DevContourState, task: Task, current?: PolicyOf): string | undefined {
+  const { run, receipt } = decisive(s, task, current);
+  return run ? run.checks?.effective : receipt?.checkVersion?.effective;
 }
 
 /** Предел имени testcase: столько переносит receipt между клонами. */

@@ -1,0 +1,78 @@
+{
+  "tasks": {
+    "Задача accepted": {
+      "policy": "617ea95e5694c25c1f0e5005f945c81978da10ffa6a22c978aebe56557febe43",
+      "legacyPolicy": "4e1955c2402e405ab59af664c1ded526b90d84543918ffe04e96dcbd0228f4a0",
+      "checks": "dc70283887e4dfcf11e7bcd67b8b7bd1be2e5fc5f4ef6a00c29ed065faad91c2",
+      "spec": "ee51bb1b4f9e7f8bd761ff8e3d577d57c86d956518da5749a9de8c65afe34b40",
+      "scope": "b3c90d1ffaeb4abfb3faa55af5ce177d56abdec5ce9e658c5f04d3fef09f7d35",
+      "dependency": "8dbae14bbc232e02e50e41f8cd75a9a9fef9493a25de306ad995b3d36ba40d41",
+      "context": "eeeffb5fbf831af75d2a887385d79b4f55c0de8c2f00f0be7ff98982c94d061e"
+    },
+    "Задача failed": {
+      "policy": "617ea95e5694c25c1f0e5005f945c81978da10ffa6a22c978aebe56557febe43",
+      "legacyPolicy": "4e1955c2402e405ab59af664c1ded526b90d84543918ffe04e96dcbd0228f4a0",
+      "checks": "897cb87e994acee369d0aed9d2f1e5800cb3cbdb9fe069f820996b4a475fec1c",
+      "spec": "652b795aeb1ac2ac9c1f0ac38fe493fed3451791370398e48b8562652daca9d7",
+      "scope": "b3c90d1ffaeb4abfb3faa55af5ce177d56abdec5ce9e658c5f04d3fef09f7d35",
+      "dependency": "1473fe180512c982968c81f2236e1e52712e8e3400e40fb6200a637f7bb88583",
+      "context": "31f3a0f04a49104a9d592d3c477dbe852e397adf0dc1b67bea8d712284fce541"
+    },
+    "Задача pending": {
+      "policy": "617ea95e5694c25c1f0e5005f945c81978da10ffa6a22c978aebe56557febe43",
+      "legacyPolicy": "4e1955c2402e405ab59af664c1ded526b90d84543918ffe04e96dcbd0228f4a0",
+      "checks": "4c537daabbe071da17b233479d1b0217785908e609803ba68b33488613c0cd58",
+      "spec": "93ee9c17a7da81dd6e961ff8b11c3c63cc492d48a67aa563ebe04406d8d2a8e6",
+      "scope": "b3c90d1ffaeb4abfb3faa55af5ce177d56abdec5ce9e658c5f04d3fef09f7d35",
+      "dependency": "0592da56dc28ffc6db9b0aefc0a2d4c98b8fc878366398504bba696d2188ff57",
+      "context": "7a6f4f38a9e17f0c096eecf71b7dad1f742c43ab659790c89da0630b0d223c46"
+    },
+    "Задача active": {
+      "policy": "617ea95e5694c25c1f0e5005f945c81978da10ffa6a22c978aebe56557febe43",
+      "legacyPolicy": "4e1955c2402e405ab59af664c1ded526b90d84543918ffe04e96dcbd0228f4a0",
+      "checks": "8e23040e177a0d156f42277235f5598ee78c6986d23234181cd11dbd71ceacc1",
+      "spec": "10764ebe157aae12a98e76067f60320203debf76fc743b67d33e850ddde7fa7a",
+      "scope": "b3c90d1ffaeb4abfb3faa55af5ce177d56abdec5ce9e658c5f04d3fef09f7d35",
+      "dependency": "7e50036aab21e9c68361c8f0e731499130a0d738541d96ec4a3b3bff252292fd",
+      "context": "82f1d3c4eedbc2057f9c48bfd2c36bf0e473cae45903b6347902a8fa78b1d854"
+    },
+    "Задача window": {
+      "policy": "617ea95e5694c25c1f0e5005f945c81978da10ffa6a22c978aebe56557febe43",
+      "legacyPolicy": "4e1955c2402e405ab59af664c1ded526b90d84543918ffe04e96dcbd0228f4a0",
+      "checks": "706f8abdf3ecc75b063ffd068d9a91b114710af0dbed4d58b7407c382ac90254",
+      "spec": "ef4fa782b22c17e3e6c7b8fbd44056220c3236ee6e4b2b8048a558bfc2ef4c4a",
+      "scope": "b3c90d1ffaeb4abfb3faa55af5ce177d56abdec5ce9e658c5f04d3fef09f7d35",
+      "dependency": "abca4b54095349ba647df1d5dc1cfeeb9306bc31237b7ced2f04dfe6010fb130",
+      "context": "064d8adfa16b177cac2c664bada9a122bffb20d92a0273311c0bda9b336df0cb"
+    },
+    "Задача release": {
+      "policy": "617ea95e5694c25c1f0e5005f945c81978da10ffa6a22c978aebe56557febe43",
+      "legacyPolicy": "4e1955c2402e405ab59af664c1ded526b90d84543918ffe04e96dcbd0228f4a0",
+      "checks": "8914e1355b4ab0067832cf20a175f42fbbfbfcf711cf7c859f989f0cc244440c",
+      "spec": "4005284a9c72108f7555140330cbc13b6833943e4109b689d26234c51ea1c311",
+      "scope": "b3c90d1ffaeb4abfb3faa55af5ce177d56abdec5ce9e658c5f04d3fef09f7d35",
+      "dependency": "723c3b849cd49b15542238b9aaf48aa46d50d1420b147b8757d00bc7803fe742",
+      "context": "5cebcfd3968adf3fb7d9ce4491568f8c506a6231916c3fdeea5e9e4818cfae17"
+    },
+    "Задача property": {
+      "policy": "617ea95e5694c25c1f0e5005f945c81978da10ffa6a22c978aebe56557febe43",
+      "legacyPolicy": "4e1955c2402e405ab59af664c1ded526b90d84543918ffe04e96dcbd0228f4a0",
+      "checks": "2292144a282ea82a03111cb1477fc82e557ac7e1c0dd558cca64f74051025355",
+      "spec": "3c5f7db91df647bd6a63c060d57a1c99f51a876b9e5277a6c5aa9c5a49f8a854",
+      "scope": "82ee61ff5d541f6cb961f6d2a8f53c6a5c22dea217fdd9f2e044a03f0dfc6c78",
+      "dependency": "996fe01659831f0e88ec6a0f1cabc6b1c804a60d65f84042f86705b66de9e29f",
+      "context": "8d684407460e5a47f5f9d98103eac0993e8409b85726f6f2428db38c8c589950"
+    }
+  },
+  "workspacePolicy": "02d7fe6ea20d72e3c6377fb69e024401ee223ba314dcf41cdc4b823d2ba67f8d",
+  "lead": {
+    "9daffb2bfacd83e14cebd575bf2cc8d88208da4dc4207568224a38e0f6975f21": "3a235598204092731bc0c1ded635e04c77403ac458c82403be623ef58e0b3478",
+    "bff1a896fec687aa881e2bb1d4914055d2ba1b028b29872140308021bf54a540": "f402e5d592c771fea6292bd14d4a1bef10fd5965ea4a814258799da76ade1605"
+  },
+  "corpus": {
+    "Задача property": {
+      "suite": "KS-C-9ec65d6b-4304-4b7a-a662-eb0c3b566dde",
+      "basis": "a03bde32e527b32301902c507ca48c9936f93cecfd013d6a7922b9ec54647751"
+    }
+  }
+}

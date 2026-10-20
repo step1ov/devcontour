@@ -335,7 +335,7 @@ export function gateScopeMetrics(h: DevContour, runs: Run[], tasks: Task[]) {
         .at(-1)!
         .taskIds.map((id) => tasks.find((t) => t.id === id))
         .filter((t): t is Task => !!t && t.status === 'done');
-      return { boardId: b.id, uncovered: uncoveredGates(h.config, s, own) };
+      return { boardId: b.id, uncovered: uncoveredGates(h, s, own) };
     })
     .filter((b) => b.uncovered.length);
   // Результаты, проверенные на снимке зависимости, который к завершению

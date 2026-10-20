@@ -64,6 +64,29 @@ function recordContractAttempt(h: DevContour, attempt: ContractAttempt) {
     s.contractAttempts = [...(s.contractAttempts ?? []), attempt].slice(-MAX_CONTRACT_ATTEMPTS);
   });
 }
+/**
+ * Раунды предмета, которые прежняя версия провела сама (`contractAttempts`,
+ * тот же предмет и заголовок, что и прежде), — история для harness: пока у
+ * предмета нет раундов в движке, следующий раунд продолжает их нумерацию, а
+ * находки последнего reviewer обязан разобрать. Одобрений и digest прежним
+ * раундам не приписывается.
+ */
+function legacyHistory(h: DevContour, subject: string, title: string) {
+  const attempts = (h.store.read().contractAttempts ?? []).filter(
+    (a) => a.subject === subject && a.title === title,
+  );
+  const last = attempts.at(-1);
+  if (!last) return undefined;
+  return {
+    rounds: attempts.length,
+    findings: last.findings.map((f) => ({
+      severity: f.severity === 'note' ? ('note' as const) : ('blocking' as const),
+      message: f.message,
+      ...(f.rule ? { rule: f.rule } : {}),
+    })),
+  };
+}
+
 /** Класс находки ревью контракта: обязательство невыполнимо или неизмеримо. */
 export const FEASIBILITY = 'feasibility';
 /** Класс находки: обязательство нечем независимо проверить. */
@@ -164,6 +187,7 @@ async function review(
   await writeFile(join(artifact, 'proposal.json'), JSON.stringify(proposal, null, 2) + '\n');
   const { engine } = reviewExecutionOf(h);
   const plan = kind === 'plan' ? (proposal as { tasks?: { id?: string }[] }) : undefined;
+  const history = legacyHistory(h, subject, title);
   const record = await technicalReview(
     engine,
     engine.policy,
@@ -194,6 +218,7 @@ async function review(
             }
           : {}),
       },
+      ...(history ? { history } : {}),
       signal: AbortSignal.timeout(h.config.runTimeoutMs),
     },
   ).catch((error: unknown) => {

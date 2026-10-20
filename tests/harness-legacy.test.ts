@@ -8,12 +8,13 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { WORKSPACE_OWNER, digestOf } from 'devcontour-harness';
@@ -39,17 +40,34 @@ import { loadConfig } from '../src/runner/config.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { syncGit } from '../src/runner/git-sync.ts';
 import { requirementReport } from '../src/runner/requirements.ts';
-import { complete } from './helpers.ts';
+import { closePrevious, complete, config as testConfig } from './helpers.ts';
+import { reviewContract, reviewPlan } from '../src/runner/agent-control.ts';
+import type { AgentAdapter, AgentRequest } from '../src/runner/adapters.ts';
 
 // Базы, записанные кодом прежней версии (tests/fixtures/legacy/generate.ts).
 // Новый код открывает их копии без setup, миграции и правки базы.
-const fixtures = fileURLToPath(new URL('./fixtures/legacy/', import.meta.url));
 /**
- * Путь, по которому прежняя версия писала базы. Абсолютные пути компонента
- * входят в digest политики её попыток, поэтому копия открывается по тому же
- * пути: так новая версия видит workspace, который не переезжал.
+ * Абсолютные пути компонента входят в digest политики попыток прежней версии,
+ * поэтому копия открывается по тому же пути, по которому её записала прежняя
+ * версия, и тем же загрузчиком, что у `serve` (`loadConfig` разрешает ссылки).
+ * Путь канонический для своей платформы: на macOS `/tmp` — ссылка, поэтому
+ * вариант `legacy-darwin` записан по `/private/tmp/…`, а `legacy` (Linux) —
+ * по `/tmp/…`. Берётся вариант, чей путь на этой машине канонический.
  */
-const ROOT = readFileSync(join(fixtures, 'ROOT'), 'utf8').trim();
+const canonicalPath = (path: string) => {
+  try {
+    return realpathSync(dirname(path)) === dirname(path);
+  } catch {
+    return false;
+  }
+};
+const variant = ['legacy', 'legacy-darwin']
+  .map((name) => fileURLToPath(new URL(`./fixtures/${name}/`, import.meta.url)))
+  .map((dir) => ({ dir, root: readFileSync(join(dir, 'ROOT'), 'utf8').trim() }))
+  .find((v) => canonicalPath(v.root));
+if (!variant) throw new Error('Нет варианта legacy fixtures с каноническим путём на этой машине');
+const fixtures = variant.dir;
+const ROOT = variant.root;
 const MARK = join(ROOT, '.devcontour-legacy-test');
 const options = { policyDigest: () => digestOf('policy') };
 
@@ -129,21 +147,9 @@ function copy(kind: Kind) {
   return { kind, root, data, app: join(root, 'app'), files };
 }
 
-/**
- * Конфигурация workspace прежней версии. Пути — как записаны: прежняя версия
- * считала по ним digest политики; на macOS `/tmp` — ссылка, и realpath дал бы
- * другой путь, чем на Linux, где fixtures тоже открываются.
- */
+/** Конфигурация workspace прежней версии — обычным загрузчиком, как у `serve`. */
 function configOf(c: Copy): Config {
-  const file = join(c.data, 'config.json');
-  const config = loadConfig(file);
-  const raw = JSON.parse(readFileSync(file, 'utf8')) as {
-    repository: string;
-    repositories: { path: string }[];
-  };
-  config.repository = raw.repository;
-  config.repositories.forEach((r, i) => (r.path = raw.repositories[i].path));
-  return config;
+  return loadConfig(join(c.data, 'config.json'));
 }
 
 function openStore(c: Copy) {
@@ -711,6 +717,89 @@ test('T36: receipts Git-синхронизации прежней версии �
     }
   } finally {
     for (const store of opened) store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// Ревью прежней версии (tests/fixtures/legacy-review/generate.ts): контракт и
+// план отклонены блокирующей находкой. Новая версия продолжает их историю.
+const reviewFixture = fileURLToPath(new URL('./fixtures/legacy-review/', import.meta.url));
+
+test('S3-R1-03/T35: первое ревью новой версии получает находки отклонённого ревью прежней и продолжает нумерацию; контракт и план', async () => {
+  const meta = JSON.parse(readFileSync(join(reviewFixture, 'meta.json'), 'utf8')) as {
+    boardId: string;
+    finding: string;
+  };
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-legacy-review-'));
+  try {
+    cpSync(join(reviewFixture, 'state.sqlite'), join(root, 'state.sqlite'));
+    const store = new Store(join(root, 'state.sqlite'));
+    const before = structuredClone(store.read().contractAttempts!);
+    const cfg = testConfig();
+    cfg.mode = 'local';
+    cfg.roles = { qa: { runtime: 'codex' } } as never;
+    cfg.reviewer = { runtime: 'claude' };
+    const h = new DevContour(store, cfg);
+    const prompts: string[] = [];
+    // Отвечает, не разобрав прежние находки (silent), либо закрывая их.
+    const runtimes = (silent: boolean) => {
+      const make = (name: 'codex' | 'claude'): AgentAdapter => ({
+        name,
+        execute(r: AgentRequest) {
+          prompts.push(r.prompt);
+          return Promise.resolve({
+            data: {
+              approved: true,
+              summary: 'Reviewed',
+              findings: [],
+              previous: silent ? [] : closePrevious(r.prompt),
+              execution: { commands: [], noCommandsReason: 'Read-only analysis' },
+            },
+            log: 'Controlled adapter',
+            command: ['fixture'],
+          });
+        },
+      });
+      return { codex: make('codex'), claude: make('claude') };
+    };
+    const proposal = { title: 'Legacy contract', content: 'Documented API returns the value.' };
+    // Ответ без состояния прежней находки — не одобрение.
+    await assert.rejects(
+      reviewContract(h, root, proposal, 'codex', runtimes(true)),
+      /Независимое ревью отклонено/,
+    );
+    assert.match(prompts.at(-1)!, new RegExp(meta.finding));
+    const contract = await reviewContract(h, root, proposal, 'codex', runtimes(false));
+    assert.equal((contract as { status: string }).status, 'approved');
+    await reviewPlan(h, root, meta.boardId, 'codex', runtimes(false));
+    assert.match(prompts.at(-1)!, new RegExp(meta.finding));
+    const attempts = store.read().contractAttempts!;
+    // Прежние записи не переписаны; номера продолжаются после них.
+    assert.deepEqual(attempts.slice(0, before.length), before);
+    const numbers = (subject: string) =>
+      attempts.filter((a) => a.subject === subject).map((a) => [a.attempt, a.approved]);
+    assert.deepEqual(numbers(before[0].subject), [
+      [1, false],
+      [2, false],
+      [3, true],
+    ]);
+    assert.deepEqual(numbers(before[1].subject), [
+      [1, false],
+      [2, true],
+    ]);
+    // Раунды движка начинаются со второго: прежнему раунду ничего не приписано.
+    const { engine } = executionOf(h);
+    assert.deepEqual(
+      engine.reviews('plan', meta.boardId).map((r) => r.round),
+      [2],
+    );
+    assert.equal(
+      engine.reviews('plan', meta.boardId)[0].findings.find((f) => f.message === meta.finding)
+        ?.status,
+      'closed',
+    );
+    store.close();
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });

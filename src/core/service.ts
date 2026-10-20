@@ -21,7 +21,7 @@ import {
 } from 'devcontour-harness';
 import { closeEpisodeIfBasisChanged } from '../harness/host.ts';
 import { planResult } from './plan.ts';
-import { boardOwner, completion, receiptRecordBytes } from './sync-state.ts';
+import { boardOwner, completion, receiptHolds, receiptRecordBytes } from './sync-state.ts';
 import { carriedTaskIds } from './work-status.ts';
 import { assertDag, descendants, latestTaskId, impactGraph } from './graph.ts';
 import {
@@ -274,18 +274,19 @@ function sourceUnchanged(
  * `workspaceGates` область задачи не сокращает.
  *
  * Wrapper без правил: правило покрытия — harness. DevContour выбирает только
- * evidence задачи: успешной попытки этого clone или receipt другого (для
- * любой области: задача без явной области выполнялась профилем своего
- * времени, и gate, добавленный позже, ею не покрыт).
+ * evidence задачи под действующим договором (`taskEvidence`): успешной
+ * попытки этого clone или receipt другого (для любой области: задача без
+ * явной области выполнялась профилем своего времени, и gate, добавленный или
+ * изменённый позже, ею не покрыт).
  */
-export function uncoveredGates(config: Config, s: DevContourState, tasks: Task[]) {
+export function uncoveredGates(h: DevContour, s: DevContourState, tasks: Task[]) {
   const ids = [...new Set(tasks.map((t) => t.repositoryId))];
   return harnessUncoveredGates(
-    ids.map((id) => ({ id, gates: repository(config, id).gates })),
+    ids.map((id) => ({ id, gates: repository(h.config, id).gates })),
     tasks.map((t) => ({
       repositoryId: t.repositoryId,
       resultSha: t.resultSha,
-      evidence: taskEvidence(s, t),
+      evidence: taskEvidence(s, t, h),
     })),
   );
 }
@@ -480,6 +481,10 @@ export class DevContour {
         gates: expandGates(repository(this.config, c.repositoryId), c.gates),
       })),
     });
+  }
+  /** Receipt задачи из другого clone подтверждает её при текущей конфигурации. */
+  receiptHolds(s: DevContourState, t: Task) {
+    return receiptHolds(this, s, t);
   }
   policyDigest(repositoryId = 'main', legacy = false) {
     const repo = repository(this.config, repositoryId);
@@ -972,13 +977,13 @@ export class DevContour {
       for (const t of work) {
         const unproven = unprovenReason(
           t.requirements,
-          taskEvidence(s, t),
+          taskEvidence(s, t, this),
           t.resultSha,
-          taskChecks(s, t),
+          taskChecks(s, t, this),
         );
         if (unproven) throw new DomainError(unproven);
       }
-      const uncovered = uncoveredGates(this.config, s, tasks);
+      const uncovered = uncoveredGates(this, s, tasks);
       if (uncovered.length)
         throw new DomainError(
           'Полный набор проверок не пройден: ' +
@@ -1119,8 +1124,9 @@ export class DevContour {
   }
   /**
    * Выдача попытки — решение движка harness (пауза, барьеры, бюджеты,
-   * предел попыток, продуктовые условия хоста). Продуктовые сведения попытки
-   * (ожидание задачи до выдачи) пишутся в той же транзакции.
+   * предел попыток, продуктовые условия хоста); ожидание задачи до выдачи
+   * движок пишет по сведениям хоста в той же транзакции, как и при выдаче
+   * очередью.
    */
   claim(owner: string): Run | undefined {
     const { store, engine } = executionOf(this);
@@ -1134,23 +1140,10 @@ export class DevContour {
         // вызвавшим не оставляет — как и прежде, она не запуск очереди.
         if (!leading) engine.release(owner);
         if (!attempt) return undefined;
+        // Ожидание задачи (`wait`) записал движок в той же транзакции: время
+        // готовности — от хоста (`devcontourHost.readyAt`).
         const s = ht.state;
         const run = s.runs.find((r) => r.id === attempt.id)!;
-        const t = task(s, run.taskId);
-        const dependencyDates = t.dependsOn.map((id) => {
-          const dependency = s.tasks.find((x) => x.id === id)!;
-          return (
-            s.runs.findLast((r) => r.taskId === id && r.status === 'succeeded')?.finishedAt ??
-            dependency.sharedCompletion?.receipt.finishedAt
-          );
-        });
-        run.wait = {
-          approvedAt: t.approvedAt,
-          readyAt:
-            t.approvedAt && dependencyDates.every(Boolean)
-              ? [t.approvedAt, ...(dependencyDates as string[])].sort().at(-1)
-              : undefined,
-        };
         run.callsRecorded = true;
         ht.journal({ taskId: run.taskId, runId: run.id });
         return structuredClone(run);

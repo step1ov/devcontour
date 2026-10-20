@@ -337,6 +337,32 @@ export function validateReceipt(
   if (problems.length) throw new Error(`Receipt ${t.id}: ${problems.join('; ')}`);
 }
 
+/**
+ * Подтверждает ли receipt задачи её результат сейчас: та же проверка
+ * получателя, что при синхронизации, против текущей конфигурации и состояния
+ * этого clone (корпус — локальный). Digest политики в receipt — договор
+ * отправителя с его путями, и сравнивать его с локальным нельзя; действующий
+ * договор проверяет получатель harness по самому receipt.
+ */
+export function receiptHolds(h: DevContour, s: DevContourState, t: Task) {
+  const receipt = t.sharedCompletion?.receipt;
+  if (!receipt) return false;
+  const roots = localRoots(h);
+  const corpus = new CheckCorpus(h);
+  try {
+    validateReceipt(h, receipt, t, s.contracts, (id) => {
+      try {
+        return portableSuite(corpus.get(id), roots);
+      } catch {
+        return undefined;
+      }
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // Shared records are peer attestations from a reviewed Git repository. They never
 // recreate worker credentials, leases, processes, local reports or workspace acceptance.
 export function stateFromRecords(

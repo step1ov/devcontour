@@ -461,6 +461,18 @@ test('Движок harness ведёт задачу DevContour от выдачи 
       ),
     );
     assert.equal(result.outcome, 'accepted');
+    // Версия хоста — имя и версия установленного пакета DevContour (S3-R1-04).
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+      name: string;
+      version: string;
+    };
+    assert.equal(a.consumerVersion, `${pkg.name}@${pkg.version}`);
+    assert.equal(result.inputs.consumerVersion, `${pkg.name}@${pkg.version}`);
+    assert.equal(
+      (f.store.read().runs.find((r) => r.id === a.id) as { consumerVersion?: string } | undefined)
+        ?.consumerVersion,
+      `${pkg.name}@${pkg.version}`,
+    );
     const sink = devcontourResultSink(f.h, store);
     const first = await sink.deliver({ key: 'k1', result });
     assert.equal(first.status, 'delivered');
@@ -584,6 +596,151 @@ test('Пауза и продолжение — путь harness: останов�
     assert.equal(at().pauseOperation, undefined);
     assert.equal(f.h.operationResume('op-2'), undefined);
     assert.equal(at().paused, false);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('S3-R1-02: the write scope of a task is the effective role binding of its component, checked on a real staged diff', async () => {
+  const { Scheduler } = await import('../src/runner/scheduler.ts');
+  // writePaths роли компонента, роль компонента без области и явная область
+  // задачи; глобальная qa с областью `global` заменена ролью компонента.
+  const cases: {
+    name: string;
+    role: { runtime: 'demo'; writePaths?: string[] };
+    task?: string[];
+    allowed: string[];
+    refused: string[];
+  }[] = [
+    {
+      name: 'component role scope',
+      role: { runtime: 'demo', writePaths: ['component'] },
+      allowed: ['component/result'],
+      refused: ['global/result'],
+    },
+    {
+      name: 'override without scope',
+      role: { runtime: 'demo' },
+      allowed: ['component/result', 'elsewhere/result'],
+      refused: [],
+    },
+    {
+      name: 'explicit task scope',
+      role: { runtime: 'demo', writePaths: ['component'] },
+      task: ['component/own'],
+      allowed: ['component/own/result'],
+      refused: ['component/result'],
+    },
+  ];
+  for (const c of cases)
+    for (const [file, expected] of [
+      ...c.allowed.map((p) => [p, 'allowed'] as const),
+      ...c.refused.map((p) => [p, 'refused'] as const),
+    ]) {
+      const f = fixture();
+      try {
+        const path = join(f.root, 'app');
+        mkdirSync(path, { recursive: true });
+        const git = (...args: string[]) =>
+          execFileSync(
+            'git',
+            ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', ...args],
+            { cwd: path, encoding: 'utf8' },
+          ).trim();
+        git('init', '-q');
+        writeFileSync(join(path, 'initial'), 'initial');
+        git('add', '.');
+        git('commit', '-qm', 'initial');
+        mkdirSync(join(path, file, '..'), { recursive: true });
+        writeFileSync(join(path, file), 'change');
+        git('add', '.');
+        f.h.config.roles.qa.writePaths = ['global'];
+        f.h.config.repositories = [
+          {
+            id: 'app',
+            name: 'App',
+            kind: 'product',
+            path,
+            targetBranch: 'devcontour/accepted',
+            gates: f.h.config.gates,
+            protectedPaths: [],
+            roles: { qa: c.role },
+          },
+        ] as never;
+        const b = f.h.createBoard('Scope');
+        const t = f.h.addTask(b.id, {
+          ...input(),
+          repositoryId: 'app',
+          ...(c.task ? { writePaths: c.task } : {}),
+        });
+        f.h.approve(b.id);
+        const runner = (new Scheduler(f.h, f.root) as never as { runner: never }).runner as {
+          engine: { read<T>(f: (v: { work(id: string): unknown }) => T): T; policy: never };
+          assertScope(work: unknown, repo: unknown, cwd: string): Promise<void>;
+        };
+        const work = runner.engine.read((v) => v.work(t.id));
+        const repo = (runner.engine.policy as { repositories: unknown[] }).repositories[0];
+        let outcome = 'allowed';
+        try {
+          await runner.assertScope(work, repo, path);
+        } catch (e) {
+          assert.match(String(e), /област/i, `${c.name}: ${file}`);
+          outcome = 'refused';
+        }
+        assert.equal(outcome, expected, `${c.name}: ${file}`);
+      } finally {
+        f.cleanup();
+      }
+    }
+});
+
+test('S3-R1-05: очередь записывает время готовности задачи при выдаче — после согласования и зависимости, завершённой в другом clone', async () => {
+  const { Scheduler } = await import('../src/runner/scheduler.ts');
+  const { complete, CANDIDATE, MERGED } = await import('./helpers.ts');
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Waiting times');
+    const first = f.h.addTask(b.id, input('First'));
+    const second = f.h.addTask(b.id, input('Second', [first.id]));
+    f.h.approve(b.id);
+    complete(f.h, first.id);
+    // Зависимость завершена в другом clone: её попыток здесь нет, есть receipt.
+    const finishedAt = new Date(Date.now() + 60_000).toISOString();
+    f.store.change('test.received', (s) => {
+      const t = s.tasks.find((x) => x.id === first.id)!;
+      const run = s.runs.find((r) => r.taskId === first.id)!;
+      t.sharedCompletion = {
+        receipt: {
+          id: run.id,
+          taskId: t.id,
+          repositoryId: t.repositoryId,
+          specDigest: t.approvedDigest!,
+          policyDigest: run.policyDigest,
+          candidateSha: CANDIDATE,
+          resultSha: MERGED,
+          finishedAt,
+          runtime: run.runtime,
+          reviewer: run.reviewer,
+          requiredGates: ['test'],
+          checks: [],
+        },
+        sourceCommit: 'a'.repeat(40),
+      };
+      s.runs = s.runs.filter((r) => r.taskId !== first.id);
+    });
+    f.h.pause(false);
+    const scheduler = new Scheduler(f.h, f.root) as never as {
+      runner: { execute: () => Promise<void>; tick(): Promise<void>; settled(): Promise<void> };
+      stop(): Promise<void>;
+    };
+    // Граница выдачи: исполнения нет — ни моделей, ни gates, ни ref.
+    scheduler.runner.execute = () => Promise.resolve();
+    await scheduler.runner.tick();
+    await scheduler.runner.settled();
+    const run = f.store.read().runs.find((r) => r.taskId === second.id)!;
+    const approvedAt = f.store.read().tasks.find((t) => t.id === second.id)!.approvedAt!;
+    assert.deepEqual(run.wait, { approvedAt, readyAt: finishedAt });
+    await scheduler.stop();
   } finally {
     f.cleanup();
   }

@@ -5,6 +5,7 @@
 // `scopeDigest`, `taskPolicyDigest`): они записаны в принятой истории и
 // receipts, и движок их только сравнивает. Продуктовые условия могут лишь
 // запретить действие: снять отказ движка или поставить PASS хост не может.
+import { readFileSync } from 'node:fs';
 import {
   API_VERSION,
   HarnessError,
@@ -36,6 +37,7 @@ import { maxRecordBytes } from '../core/sync-model.ts';
 import { completion, validateReceipt } from '../core/sync-state.ts';
 import { contents, taskContext } from '../runner/context.ts';
 import { effectiveChecks } from '../core/checks.ts';
+import { roleBinding } from '../core/repositories.ts';
 import type { UsageRecord } from '../core/usage.ts';
 import {
   activeRevision,
@@ -79,11 +81,28 @@ export function taskPacks(h: DevContour, task: Task): ContextPack[] {
   );
 }
 
+/**
+ * Версия хоста, которую движок записывает в новой попытке и её результате:
+ * `<имя>@<версия>` установленного пакета DevContour. Читается из его
+ * `package.json` относительно этого модуля (`src/` и собранный `lib/` лежат
+ * на одном уровне), а не из каталога запуска. Прежним попыткам её не
+ * приписывают: поле записывается только новыми.
+ */
+export const CONSUMER_VERSION = (() => {
+  const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as {
+    name: string;
+    version: string;
+  };
+  return `${pkg.name}@${pkg.version}`;
+})();
+
 /** Сведения хоста для проекции записей: digest политики и выбор области и контекста. */
 export function projectionOptions(h: DevContour): ProjectionOptions {
   return {
     policyDigest: () => executionDigest(policyFromConfig(h.config)),
-    roleScope: (task) => h.config.roles[task.role]?.writePaths,
+    // Действующая роль задачи: роль компонента заменяет одноимённую роль
+    // workspace целиком, как в политике исполнения.
+    roleScope: (task) => roleBinding(h.config, task.role, task.repositoryId)?.writePaths,
     contextPacks: (task) => taskPacks(h, task).map((p) => p.id),
     contractDigest: (id) => h.store.read().contracts.find((c) => c.id === id)?.digest,
   };
@@ -110,7 +129,23 @@ export function devcontourHost(h: DevContour, store: DevContourExecutionStore): 
   const state = (view: ExecutionView) => store.stateOf(view);
   return {
     store,
-    consumerVersion: 'devcontour',
+    consumerVersion: CONSUMER_VERSION,
+    // Готовность задачи: согласована и дождалась зависимостей — успешной
+    // попытки этого clone или receipt другого (прежнее правило выдачи).
+    readyAt: (work, view) => {
+      const s = state(view);
+      const t = taskOf(s, work);
+      const dependencyDates = t.dependsOn.map((id) => {
+        const dependency = s.tasks.find((x) => x.id === id);
+        return (
+          s.runs.findLast((r) => r.taskId === id && r.status === 'succeeded')?.finishedAt ??
+          dependency?.sharedCompletion?.receipt.finishedAt
+        );
+      });
+      return t.approvedAt && dependencyDates.every(Boolean)
+        ? [t.approvedAt, ...(dependencyDates as string[])].sort().at(-1)
+        : undefined;
+    },
     basis: {
       orderDigest: (work, view) => specDigest(taskOf(state(view), work)),
       scopeDigest: (work, view) => scopeDigest(taskOf(state(view), work)),

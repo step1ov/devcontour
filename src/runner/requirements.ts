@@ -96,9 +96,10 @@ export function assertRequirementProof(
 ) {
   const unproven = unprovenReason(
     task.requirements,
-    taskEvidence(state, task),
+    // Решение о приёмке — по записям под действующим договором (см. `taskEvidence`).
+    taskEvidence(state, task, h),
     task.resultSha,
-    taskChecks(state, task),
+    taskChecks(state, task, h),
   );
   if (unproven) throw new DomainError(unproven);
 }

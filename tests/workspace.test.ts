@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { config, input, fixture, complete, MERGED, CANDIDATE } from './helpers.ts';
 import { repositorySchema } from '../src/core/model.ts';
 import { DevContour, specDigest } from '../src/core/service.ts';
+import { completion } from '../src/core/sync-state.ts';
 import { Store } from '../src/core/store.ts';
 import { Workspace } from '../src/core/workspace.ts';
 import { WorkspaceRunner } from '../src/runner/workspace.ts';
@@ -759,6 +760,52 @@ test('G04: board acceptance requires every profile gate to have passed integrati
   }
 });
 
+test('T23: board acceptance counts only evidence recorded under the current policy, local or received', () => {
+  // Тот же ID gate с другой командой — другая проверка: прежние записи её не
+  // подтверждают, и доска не принимается, а снимок ревизии не появляется.
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Changed command');
+    const t = f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    complete(f.h, t.id);
+    const before = f.h.taskPolicyDigest(t);
+    f.h.config.gates[0].command = ['node', 'changed-test.mjs'];
+    assert.notEqual(f.h.taskPolicyDigest(t), before);
+    assert.throws(() => f.h.accept(b.id, MERGED), /Полный набор проверок не пройден: main: test/);
+    const revision = f.store.read().boards[0].revisions.at(-1)!;
+    assert.equal(revision.status, 'active');
+    assert.equal(revision.snapshot, undefined);
+  } finally {
+    f.cleanup();
+  }
+  // Receipt другого clone: принимается, только если получатель подтверждает
+  // его при текущей конфигурации. Receipt договора с другим составом gates
+  // (отправитель требовал ещё и `extra`) не в счёт, хотя его запись `test`
+  // совпала бы по ID; тот же receipt в форме экспорта — в счёт.
+  const g = fixture();
+  try {
+    const b = g.h.createBoard('Received');
+    const t = g.h.addTask(b.id, input());
+    g.h.approve(b.id);
+    complete(g.h, t.id);
+    const state = g.store.read();
+    const exported = completion(g.h, state, state.tasks[0]);
+    const receive = (receipt: typeof exported) =>
+      g.store.change('test.received', (s) => {
+        s.tasks[0].sharedCompletion = { receipt, sourceCommit: 'a'.repeat(40) };
+        s.runs = s.runs.filter((r) => r.taskId !== t.id);
+      });
+    receive({ ...exported, requiredGates: ['test', 'extra'] });
+    assert.throws(() => g.h.accept(b.id, MERGED), /Полный набор проверок не пройден: main: test/);
+    assert.equal(g.store.read().boards[0].revisions.at(-1)!.snapshot, undefined);
+    receive(exported);
+    assert.doesNotThrow(() => g.h.accept(b.id, MERGED));
+  } finally {
+    g.cleanup();
+  }
+});
+
 test('G01: a named gate group is referenced once, expands into an explicit list, rejects cycles and foreign members, and inherits nothing', () => {
   const f = fixture();
   try {
@@ -865,11 +912,13 @@ test('Этап локальной доски принимает только з�
       const x = s.tasks.find((x) => x.id === t.id)!;
       x.status = 'done';
       x.resultSha = MERGED;
-      // Приёмка доски требует собственного evidence каждого gate профиля.
+      // Приёмка доски требует собственного evidence каждого gate профиля под
+      // действующим договором задачи.
       s.runs.push({
         id: 'R-library',
         taskId: t.id,
         status: 'succeeded',
+        policyDigest: f.h.taskPolicyDigest(x),
         evidence: [
           {
             kind: 'test',

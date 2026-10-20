@@ -434,6 +434,8 @@ test('Доменная приёмка требует названный testcase
         id: 'R-fixture',
         taskId: t.id,
         status: 'succeeded',
+        // Попытка под действующим договором задачи, как настоящая.
+        policyDigest: f.h.taskPolicyDigest(task),
         evidence: [evidence({ tests: [{ id: 'unrelated', status: 'passed' }] })],
       } as never);
     });

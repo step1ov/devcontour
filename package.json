@@ -64,7 +64,7 @@
     "@xyflow/react": "12.11.6",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "devcontour-harness": "file:vendor/harness/devcontour-harness-0.1.0-alpha.0.s3.13.tgz",
+    "devcontour-harness": "file:vendor/harness/devcontour-harness-0.1.0-alpha.0.s3.14.tgz",
     "fast-xml-parser": "5.11.1",
     "lucide-react": "1.46.0",
     "react": "19.3.0",

@@ -10,18 +10,25 @@
  * `pinArtifacts`):
  *
  *   cd <checkout прежней версии>
- *   node --import tsx <этот файл> <checkout прежней версии> /tmp/devcontour-legacy-fixture
- *   cp -R /tmp/devcontour-legacy-fixture/. tests/fixtures/legacy/
- *   npx prettier --write tests/fixtures/legacy/{central,component/coordinator}/config.json
+ *   node --import tsx <этот файл> <checkout прежней версии> <ROOT>
+ *   cp -R <ROOT>/. tests/fixtures/<вариант>/
+ *   npx prettier --write tests/fixtures/<вариант>/{central,component/coordinator}/config.json
+ *
+ * `<ROOT>` — канонический путь (без символических ссылок) на платформе, где
+ * открывается вариант: `tests/fixtures/legacy` — `/tmp/devcontour-legacy-fixture`
+ * (Linux), `tests/fixtures/legacy-darwin` — `/private/tmp/devcontour-legacy-fixture`
+ * (macOS, где `/tmp` — ссылка). На каноническом пути пути конфигурации — те
+ * же, что дал бы загрузчик (`loadConfig` разрешает ссылки): digest политики
+ * попыток совпадает с тем, что увидит загрузчик новой версии на этом месте.
  *
  * Выход повторяет tests/fixtures/legacy: central (`central/state.sqlite`,
  * `central/config.json`) и component (`component/coordinator/…` и база
  * компонента `component/app/.devcontour-local/state.sqlite`). Git-репозиторий
  * компонента лежит рядом как `app.git` (каталог `.git` нельзя хранить в
  * репозитории): тест возвращает его на место и восстанавливает рабочее дерево.
- * Каталог вывода фиксирован (`ROOT`): абсолютные пути компонента входят в
- * digest политики попыток прежней версии, поэтому тест открывает копию по
- * тому же пути, а не переписывает пути и digest.
+ * Абсолютные пути компонента входят в digest политики попыток прежней
+ * версии, поэтому тест открывает копию по тому же пути тем же загрузчиком, а
+ * не переписывает пути и digest.
  *
  * Где у прежней версии нет операции без живого исполнения (версия корпуса,
  * раунды ревью контракта), запись строится из её же типов и сохраняется её
@@ -33,6 +40,7 @@
 import { execFileSync } from 'node:child_process';
 import {
   copyFileSync,
+  realpathSync,
   mkdirSync,
   readdirSync,
   renameSync,
@@ -40,7 +48,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 type Any = any;
@@ -208,7 +216,8 @@ const noUsage = {
 async function populate(store: Any, root: string, kind: 'central' | 'component') {
   const app = join(root, 'app');
   project(app);
-  const h = new DevContour(store, config(root));
+  const loaded = config(root);
+  const h = new DevContour(store, loaded);
   const approval = { actor: 'agent', authorRuntime: 'claude', reviewerRuntime: 'codex' };
   const taskId = (title: string) => store.read().tasks.find((t: Any) => t.title === title).id;
   const claimOf = (board: string, title: string) => {
@@ -487,7 +496,7 @@ async function populate(store: Any, root: string, kind: 'central' | 'component')
         usage: { ...fullUsage(null), source: 'codex-turn-events' },
         costUsd: (1000 * 1 + 200 * 4) / 1e6,
         costSource: 'tariff-estimate',
-        price: config(root).prices[0],
+        price: loaded.prices[0],
       }),
     );
     save(
@@ -605,9 +614,10 @@ function legacyRuntimePause(file: string) {
   db.close();
 }
 
-/** Каталог вывода: тот же путь, по которому тест открывает копию. */
-const ROOT = '/tmp/devcontour-legacy-fixture';
-if (out !== ROOT) throw new Error('Каталог вывода — ' + ROOT);
+/** Каталог вывода: тот же канонический путь, по которому тест открывает копию. */
+const ROOT = out;
+if (realpathSync(dirname(ROOT)) !== dirname(ROOT))
+  throw new Error('Каталог вывода — канонический путь: ' + realpathSync(dirname(ROOT)));
 
 /**
  * Репозиторий компонента — рядом как `app.git`, рабочее дерево не хранится
@@ -628,11 +638,11 @@ const centralRoot = join(out, 'central');
 mkdirSync(join(centralRoot, 'app'), { recursive: true });
 const croot = centralRoot;
 const central = new Store(join(croot, 'state.sqlite'), undefined, false, 'DELETE');
+// Конфигурация прежней версии рядом с базой: `devcontour serve --data <копия>`.
+writeFileSync(join(croot, 'config.json'), JSON.stringify(config(croot), null, 2) + '\n');
 await populate(central, croot, 'central');
 central.close();
 legacyRuntimePause(join(croot, 'state.sqlite'));
-// Конфигурация прежней версии рядом с базой: `devcontour serve --data <копия>`.
-writeFileSync(join(croot, 'config.json'), JSON.stringify(config(croot), null, 2) + '\n');
 packRepository(croot);
 
 const componentRoot = join(out, 'component');
@@ -642,12 +652,12 @@ const root = componentRoot;
 const component = new Store(join(root, 'coordinator', 'state.sqlite'), [
   { id: 'app', path: join(root, 'app') },
 ]);
-await populate(component, root, 'component');
-component.close();
 writeFileSync(
   join(root, 'coordinator', 'config.json'),
   JSON.stringify({ ...config(root), storage: 'component' }, null, 2) + '\n',
 );
+await populate(component, root, 'component');
+component.close();
 packRepository(root);
 writeFileSync(join(out, 'ROOT'), ROOT + '\n');
 console.log('legacy fixtures written to', out);
