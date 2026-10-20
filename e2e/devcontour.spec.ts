@@ -42,6 +42,11 @@ test('Plan → parallel execution → acceptance → correction → acceptance p
   await expect(attempts).toContainText('Попытка 1');
   await expect(attempts).toContainText('принята');
   await expect(attempts).toContainText(/код .*проверки .*ревью/);
+  // Demo reviews with the writer's own runtime; the card names that rule
+  // instead of implying a different vendor.
+  await expect(
+    page.locator('dl > div').filter({ has: page.locator('dt', { hasText: /^Ревью$/ }) }),
+  ).toContainText('demo · тот же вендор');
   await page.getByRole('button', { name: 'Принять доску' }).click();
   await expect(page.getByRole('button', { name: 'Создать корректировку' })).toBeVisible();
   const before = await (await request.get('/api/state')).json();
