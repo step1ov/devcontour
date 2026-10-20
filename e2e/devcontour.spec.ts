@@ -219,6 +219,7 @@ test('Ревью плана видно как работа агента, а не
         stage: 0,
         status: 'running',
         authorRuntime: 'claude',
+        reviewer: { runtime: 'codex', sameVendor: false },
         history: [{ at: new Date().toISOString(), stage: 0, event: 'running' }],
       },
     ];

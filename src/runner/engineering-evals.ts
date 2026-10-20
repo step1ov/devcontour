@@ -1,3 +1,4 @@
+import { evalReviewer } from './contract-evals.ts';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -55,6 +56,8 @@ const optionsSchema = z.strictObject({
   prices: z.array(priceSchema).max(100).default([]),
   runtime: z.enum(['codex', 'claude']).optional(),
   model: z.string().min(1).optional(),
+  /** Runtime ревьюера; по умолчанию — другого вендора, тот же — только явно. */
+  reviewerRuntime: z.enum(['codex', 'claude']).optional(),
   reviewerModel: z.string().min(1).optional(),
   repetitions: z.number().int().min(1).max(5).default(1),
   maxCalls: z.number().int().min(1).max(45).default(9),
@@ -64,7 +67,7 @@ export async function engineeringEvals(raw: unknown = {}, fixtureAdapter?: Agent
   const options = optionsSchema.parse(raw);
   if (options.runtime && (!options.model || !options.reviewerModel))
     throw new Error('Live corpus requires explicit author and reviewer models');
-  if (!options.runtime && (options.model || options.reviewerModel))
+  if (!options.runtime && (options.model || options.reviewerModel || options.reviewerRuntime))
     throw new Error('Models require explicit live runtime');
   if (options.runtime && fixtureAdapter)
     throw new Error('Injected fixture cannot be combined with live mode');
@@ -110,7 +113,9 @@ export async function engineeringEvals(raw: unknown = {}, fixtureAdapter?: Agent
         );
         await git(repo, 'add', '.');
         await git(repo, 'commit', '-m', 'Isolated evaluation input');
-        const reviewer = options.runtime === 'codex' ? 'claude' : 'codex';
+        const reviewer = options.runtime
+          ? evalReviewer(options.runtime, options.reviewerRuntime)
+          : undefined;
         const config = configSchema.parse({
           version: 1,
           prices: options.prices,
@@ -127,7 +132,10 @@ export async function engineeringEvals(raw: unknown = {}, fixtureAdapter?: Agent
               { runtime: options.runtime ?? 'demo', model: options.model },
             ]),
           ),
-          reviewer: { runtime: options.runtime ? reviewer : 'demo', model: options.reviewerModel },
+          reviewer: { runtime: reviewer ?? 'demo', model: options.reviewerModel },
+          ...(reviewer && reviewer === options.runtime
+            ? { review: { code: { vendor: 'same-vendor-allowed' } } }
+            : {}),
           gates: [
             {
               id: 'behavior',

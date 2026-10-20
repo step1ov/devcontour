@@ -3,7 +3,14 @@ import { constants } from 'node:fs';
 import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Config, Role } from '../core/model.ts';
-import { repositories, roleBinding, reviewerBinding, declaredRoles } from '../core/repositories.ts';
+import {
+  codeReviewVendor,
+  declaredRoles,
+  repositories,
+  reviewerBinding,
+  roleBinding,
+} from '../core/repositories.ts';
+import { technicalReviewer } from '../harness/policy.ts';
 import { isolationSupport } from './isolation.ts';
 import { validateWorkflow } from '../core/workflow.ts';
 import { command, git } from './process.ts';
@@ -18,6 +25,8 @@ import { Store } from '../core/store.ts';
 import { z } from 'zod';
 
 type Check = { id: string; status: 'passed' | 'blocked' | 'not-checked'; detail: string };
+const bindingLabel = (b: { runtime: string; model?: string }) =>
+  b.model ? `${b.runtime} (${b.model})` : b.runtime;
 export async function executable(file: string) {
   const candidates = file.includes('/')
     ? [file]
@@ -59,6 +68,35 @@ export async function doctor(config: Config, root: string, probe = false) {
       })),
     ),
   );
+  // Назначение ролей: кто пишет, кто проверяет и по какому правилу вендора.
+  // Ревьюер того же вендора возможен только явным разрешением — doctor
+  // называет его прямо, а не подразумевает «другой вендор».
+  for (const repo of repositories(config))
+    for (const role of declaredRoles(config, repo.id)) {
+      const writer = roleBinding(config, role, repo.id),
+        reviewer = reviewerBinding(config, role, repo.id);
+      const rule = codeReviewVendor(config, role, repo.id);
+      const same = writer.runtime === reviewer.runtime;
+      checks.push({
+        id: `role:${repo.id}:${role}`,
+        status:
+          same && rule !== 'same-vendor-allowed' && config.mode !== 'demo' ? 'blocked' : 'passed',
+        detail:
+          `writer ${bindingLabel(writer)} → reviewer ${bindingLabel(reviewer)}; правило вендора: ${rule}` +
+          (same ? ' (ревью тем же вендором)' : ''),
+      });
+    }
+  for (const kind of ['plan', 'contract'] as const)
+    checks.push({
+      id: `review:${kind}`,
+      status: 'passed',
+      detail: (['codex', 'claude'] as const)
+        .map((author) => {
+          const chosen = technicalReviewer(config, kind, author);
+          return `автор ${author} → ${chosen ? chosen.runtime + (chosen.sameVendor ? ' (тот же вендор)' : '') : 'отказ правила вендора'}`;
+        })
+        .join('; '),
+    });
   // Независимое ревью, которое может только читать diff, слабее ревью,
   // которое может запустить проверки. Право даётся профилем инструментов, и
   // разойтись оно может незаметно: раньше codex-ревьюер получал shell по

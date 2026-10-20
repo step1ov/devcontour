@@ -20,6 +20,8 @@ export type LiveWorkflow = {
   stage: number;
   status: string;
   authorRuntime?: string;
+  /** Ревьюер плана по правилу вендора; `sameVendor` — разрешённое ревью тем же вендором. */
+  reviewer?: { runtime: string; sameVendor: boolean };
   history?: { at: string; stage: number; event: string }[];
 };
 export type LiveState = {
@@ -80,7 +82,9 @@ export function workflowWork(state: LiveState) {
         ? {
             key: w.key,
             label: 'Ревью плана',
-            who: w.authorRuntime === 'codex' ? 'claude' : 'codex',
+            who: w.reviewer
+              ? w.reviewer.runtime + (w.reviewer.sameVendor ? ' (тот же вендор)' : '')
+              : 'ревьюер',
             subject: board?.title ?? w.id,
             since,
           }

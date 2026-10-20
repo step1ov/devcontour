@@ -97,7 +97,10 @@ async function main() {
   if (operation === 'engineering-evals') {
     if (
       !args.includes('--live') &&
-      (args.includes('--runtime') || args.includes('--model') || args.includes('--reviewer-model'))
+      (args.includes('--runtime') ||
+        args.includes('--model') ||
+        args.includes('--reviewer-model') ||
+        args.includes('--reviewer-runtime'))
     )
       throw new Error('Для моделей требуется --live');
     if (args.includes('--live') && !args.includes('--runtime'))
@@ -105,6 +108,9 @@ async function main() {
     const result = await engineeringEvals({
       runtime: args.includes('--live') ? option('--runtime', '') : undefined,
       model: args.includes('--model') ? option('--model', '') : undefined,
+      reviewerRuntime: args.includes('--reviewer-runtime')
+        ? option('--reviewer-runtime', '')
+        : undefined,
       reviewerModel: args.includes('--reviewer-model') ? option('--reviewer-model', '') : undefined,
       prices: args.includes('--prices')
         ? JSON.parse(await readFile(resolve(option('--prices', '')), 'utf8'))
@@ -120,7 +126,9 @@ async function main() {
   if (operation === 'contract-evals') {
     if (
       !args.includes('--live') &&
-      (args.includes('--runtime') || args.includes('--reviewer-model'))
+      (args.includes('--runtime') ||
+        args.includes('--reviewer-model') ||
+        args.includes('--reviewer-runtime'))
     )
       throw new Error('Для моделей требуется --live');
     if (
@@ -130,6 +138,9 @@ async function main() {
       throw new Error('Укажите --runtime codex|claude (автор) и --reviewer-model');
     const result = await contractEvals({
       runtime: args.includes('--live') ? option('--runtime', '') : undefined,
+      reviewerRuntime: args.includes('--reviewer-runtime')
+        ? option('--reviewer-runtime', '')
+        : undefined,
       reviewerModel: args.includes('--reviewer-model') ? option('--reviewer-model', '') : undefined,
       maxCalls: Number(option('--max-calls', '6')),
       timeoutMs: Number(option('--timeout-ms', '300000')),

@@ -156,8 +156,12 @@ const tomlString = (value: string) => JSON.stringify(value);
  * появившийся в нём после построения политики, не закрыт — это граница
  * подхода; seatbelt sandbox-runtime и claude закрывают каталог целиком.
  */
-/** Элементы каталога контура, известные заранее. */
-const controllerEntries = [
+/**
+ * Элементы каталога контура DevContour, известные заранее: база, конфигурация,
+ * журналы и решения появляются по ходу работы. Тот же перечень получают
+ * адаптеры runtime harness (`controllerEntries`).
+ */
+export const controllerEntries = [
   'state.sqlite',
   'state.sqlite-wal',
   'state.sqlite-shm',

@@ -9,6 +9,7 @@ import { taskInput, DomainError } from './model.ts';
 import { boardOwner } from './sync-state.ts';
 import { Workspace } from './workspace.ts';
 import { repositories } from './repositories.ts';
+import { technicalReviewer } from '../harness/policy.ts';
 
 export const workflowInput = z.strictObject({
   kind: z.enum(['board', 'changeset']),
@@ -128,6 +129,10 @@ export class LeadWorkflow {
         attempts: job.attempts,
         startedAt: job.startedAt,
         authorRuntime: job.authorRuntime,
+        // Ревью плана доски: кто его проводит по правилу вендора конфигурации.
+        ...(job.kind === 'board'
+          ? { reviewer: technicalReviewer(this.h.config, 'plan', job.authorRuntime) }
+          : {}),
         maxAttempts: job.maxAttempts,
         repairs: job.repairs ?? 0,
         repairBudget: this.h.config.repairBudget,

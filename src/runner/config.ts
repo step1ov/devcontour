@@ -81,11 +81,19 @@ export function loadConfig(path: string, text = readFileSync(path, 'utf8')): Con
       c.reviewer.runtime === 'demo')
   )
     throw new Error('Demo adapter разрешён только в demo mode');
+  // Ревьюер того же вендора (runtime DevContour — вендор), что исполнитель, —
+  // только явным правилом вендора роли или review.code.vendor.
   if (
     c.mode !== 'demo' &&
-    Object.values(c.roles).some((r) => r.runtime === (r.reviewer ?? c.reviewer).runtime)
+    Object.values(c.roles).some(
+      (r) =>
+        r.runtime === (r.reviewer ?? c.reviewer).runtime &&
+        (r.reviewVendor ?? c.review?.code?.vendor) !== 'same-vendor-allowed',
+    )
   )
-    throw new Error('Для каждого исполнителя выберите другой runtime ревьюера');
+    throw new Error(
+      'Для каждого исполнителя выберите ревьюера другого вендора или явно разрешите review.code.vendor: same-vendor-allowed',
+    );
   if (new Set(c.gates.map((g) => g.id)).size !== c.gates.length)
     throw new Error('Gate ids должны быть уникальны');
   if (!c.gates.some((g) => g.kind === 'test' && g.report))

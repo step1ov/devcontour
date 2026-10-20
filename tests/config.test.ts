@@ -27,7 +27,7 @@ test('Every pinned profile has an executable test gate and mobile limits concurr
   }
   await assert.rejects(profile('../secret'));
 });
-test('Local config rejects same-runtime self-review, demo adapters and escaping reports', () => {
+test('Local config rejects same-vendor review unless the vendor rule allows it, demo adapters and escaping reports', () => {
   const root = mkdtempSync(join(tmpdir(), 'devcontour-config-'));
   try {
     const file = join(root, 'config.json');
@@ -50,7 +50,34 @@ test('Local config rejects same-runtime self-review, demo adapters and escaping 
       reviewer: { runtime: 'codex' },
     });
     writeFileSync(file, JSON.stringify(c));
-    assert.throws(() => loadConfig(file), /другой runtime/);
+    assert.throws(() => loadConfig(file), /другого вендора/);
+    // Тот же вендор — только явным правилом: общим review.code.vendor…
+    writeFileSync(
+      file,
+      JSON.stringify({ ...c, review: { code: { vendor: 'same-vendor-allowed' } } }),
+    );
+    assert.equal(loadConfig(file).review?.code?.vendor, 'same-vendor-allowed');
+    // …или правилом роли: роль без него по-прежнему отклоняется.
+    const roles = (vendor: string | undefined) =>
+      Object.fromEntries(
+        ['architect', 'backend', 'frontend', 'qa'].map((r) => [
+          r,
+          { runtime: 'codex', ...(vendor && r !== 'qa' ? { reviewVendor: vendor } : {}) },
+        ]),
+      );
+    writeFileSync(file, JSON.stringify({ ...c, roles: roles('same-vendor-allowed') }));
+    assert.throws(() => loadConfig(file), /другого вендора/, 'qa без разрешения');
+    writeFileSync(
+      file,
+      JSON.stringify({
+        ...c,
+        roles: {
+          ...roles('same-vendor-allowed'),
+          qa: { runtime: 'codex', reviewVendor: 'same-vendor-allowed' },
+        },
+      }),
+    );
+    assert.doesNotThrow(() => loadConfig(file));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

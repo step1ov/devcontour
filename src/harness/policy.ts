@@ -9,6 +9,7 @@ import {
   HarnessError,
   executionPolicySchema,
   policyIssues,
+  selectReviewer,
   type ExecutionPolicy,
 } from 'devcontour-harness';
 import type { Config, Repository } from '../core/model.ts';
@@ -253,4 +254,31 @@ export function policyFromConfig(
         .join('; ')}`,
     );
   return parsed.data;
+}
+
+/**
+ * Кто проведёт ревью плана или контракта автора по текущей конфигурации — по
+ * тому же правилу harness, по которому движок выбирает reviewer (`demo` —
+ * своим именем). Без допущения «противоположного runtime»: ревьюер может быть
+ * назван явно или быть того же вендора, если это разрешено. Отказ правила —
+ * `undefined`: показывать нечего, вызов откажет до модели.
+ */
+export function technicalReviewer(
+  config: Config,
+  kind: 'plan' | 'contract',
+  author: 'codex' | 'claude',
+): { runtime: string; sameVendor: boolean } | undefined {
+  try {
+    const choice = selectReviewer(policyFromConfig(config, { purpose: 'review' }), kind, {
+      runtime: author,
+    });
+    return choice.ok
+      ? {
+          runtime: choice.reviewer.runtime === 'fixture' ? 'demo' : choice.reviewer.runtime,
+          sameVendor: choice.sameVendor,
+        }
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }

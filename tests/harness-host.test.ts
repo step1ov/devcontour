@@ -5,8 +5,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { delimiter, join } from 'node:path';
+import { runtimeAdapters } from '../src/harness/adapters.ts';
 import {
   Engine,
   HarnessError,
@@ -472,6 +474,116 @@ test('Движок harness ведёт задачу DevContour от выдачи 
     });
     const conflict = await sink.deliver({ key: 'k3', result });
     assert.equal(conflict.status, 'conflict');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Живой runtime harness закрывает файлы контура DevContour и тогда, когда они появляются после старта вызова', async () => {
+  // Каталог контура над worktree codex закрывает поэлементно: элемент, которого
+  // нет в снимке, закрывается только по имени из перечня хоста.
+  const f = fixture();
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'devcontour-late-entries-')));
+  try {
+    const controller = join(root, 'controller'),
+      worktree = join(controller, 'worktrees', 'R1'),
+      bin = join(root, 'bin');
+    mkdirSync(worktree, { recursive: true });
+    mkdirSync(bin);
+    const argsFile = join(root, 'args.json');
+    writeFileSync(
+      join(bin, 'codex'),
+      `#!/usr/bin/env node
+const fs=require('fs');const a=process.argv.slice(2);
+if(a.includes('--version')){console.log('codex 0.0.0');process.exit(0)}
+fs.writeFileSync(process.env.ARGS_FILE,JSON.stringify(a));
+const out=a.indexOf('--output-last-message');if(out>=0)fs.writeFileSync(a[out+1],'{}');
+`,
+      { mode: 0o755 },
+    );
+    const live = runtimeAdapters(f.h, policyFromConfig(f.h.config)).codex!;
+    await live.invoke(
+      {
+        callId: 'c1',
+        task: 'implement',
+        binding: { runtime: 'codex' },
+        cwd: worktree,
+        prompt: 'p',
+        session: { kind: 'fresh' },
+        sandbox: {
+          mode: 'os',
+          writable: [worktree],
+          denied: [controller],
+          network: { domains: [] },
+        },
+        timeoutMs: 20_000,
+        env: { PATH: bin + delimiter + (process.env.PATH ?? ''), ARGS_FILE: argsFile },
+        artifactDir: join(root, 'call'),
+      },
+      new AbortController().signal,
+    );
+    const permissions = (JSON.parse(readFileSync(argsFile, 'utf8')) as string[]).find((a) =>
+      a.startsWith('permissions.harness='),
+    )!;
+    for (const late of [
+      'config.json',
+      'journal',
+      'decisions',
+      'profiles',
+      'doctor.json',
+      'packs.lock.json',
+      'workspace-selection.json',
+    ])
+      assert.ok(
+        permissions.includes(`${JSON.stringify(join(controller, late))}="none"`),
+        `${late} закрыт до появления`,
+      );
+    assert.ok(
+      !permissions.includes(`${JSON.stringify(controller)}="none"`),
+      'предок worktree открыт',
+    );
+  } finally {
+    f.cleanup();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Пауза и продолжение — путь harness: остановка не подменяет паузу человека, продолжение снимает классы отказов, ожидание базы и паузу операции, забрав её у операции', () => {
+  const f = fixture();
+  try {
+    const at = () => f.store.read();
+    f.h.pause(true);
+    assert.deepEqual(f.h.pause(true, 'shutdown'), { paused: true, reason: 'operator' });
+    assert.equal(at().pauseReason, 'operator', 'остановка поверх паузы человека её не подменяет');
+    // Перенос базы: ожидание проверки базы; продолжение человека его снимает.
+    f.h.pause(true, 'shutdown');
+    f.h.baseUpdated([{ repositoryId: 'main', from: 'a'.repeat(40), to: 'b'.repeat(40) }]);
+    assert.equal(at().waits?.[0]?.kind, 'base-check');
+    const before = f.store.lastEventId();
+    assert.deepEqual(f.h.pause(false), { paused: false, reason: undefined });
+    assert.equal(at().paused, false);
+    assert.equal(at().waits, undefined, 'ожидание проверки базы снято');
+    assert.equal(at().pauseFailures, undefined);
+    const started = f.store.events(before);
+    assert.deepEqual(
+      started.map((e) => [e.type, (e.data as { paused?: boolean }).paused]),
+      [['scheduler.started', false]],
+      'одно событие прежнего типа',
+    );
+    // Пауза человека поверх паузы операции забирает её у операции.
+    assert.ok(f.h.operationPause('op-1'));
+    assert.equal(at().pauseReason, 'reconfigure');
+    f.h.pause(true);
+    assert.equal(at().pauseOperation, undefined);
+    assert.equal(f.h.operationResume('op-1'), undefined, 'операция чужую паузу не снимает');
+    assert.equal(at().paused, true);
+    // Продолжение человека снимает и паузу операции: она переходит к нему.
+    f.h.pause(false);
+    assert.ok(f.h.operationPause('op-2'));
+    assert.deepEqual(f.h.pause(false), { paused: false, reason: undefined });
+    assert.equal(at().pauseOperation, undefined);
+    assert.equal(f.h.operationResume('op-2'), undefined);
+    assert.equal(at().paused, false);
   } finally {
     f.cleanup();
   }

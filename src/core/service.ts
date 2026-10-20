@@ -14,7 +14,11 @@ import { Store } from './store.ts';
 import { type FailureKind } from './failure.ts';
 import { taskChecks, taskEvidence, unprovenReason } from './proof.ts';
 import { assertTaskProperties, type CheckDeclaration } from './checks.ts';
-import { recoveryActions, type PropertyRecovery } from 'devcontour-harness';
+import {
+  recoveryActions,
+  uncoveredGates as harnessUncoveredGates,
+  type PropertyRecovery,
+} from 'devcontour-harness';
 import { closeEpisodeIfBasisChanged } from '../harness/host.ts';
 import { planResult } from './plan.ts';
 import { boardOwner, completion, receiptRecordBytes } from './sync-state.ts';
@@ -268,38 +272,22 @@ function sourceUnchanged(
  * пробел возникает, только когда задачи сузили область, — и тогда приёмка
  * доски его называет. Совместная проверка workspace к этому не относится: её
  * `workspaceGates` область задачи не сокращает.
+ *
+ * Wrapper без правил: правило покрытия — harness. DevContour выбирает только
+ * evidence задачи: успешной попытки этого clone или receipt другого (для
+ * любой области: задача без явной области выполнялась профилем своего
+ * времени, и gate, добавленный позже, ею не покрыт).
  */
 export function uncoveredGates(config: Config, s: DevContourState, tasks: Task[]) {
-  const result: { repositoryId: string; gates: string[] }[] = [];
-  for (const repositoryId of [...new Set(tasks.map((t) => t.repositoryId))]) {
-    const own = tasks.filter((t) => t.repositoryId === repositoryId);
-    // Покрытие — по фактическому собственному evidence на принятом SHA
-    // задачи, для любой области: задача без явной области выполнялась
-    // профилем своего времени, и gate, добавленный позже, ею не покрыт.
-    // Evidence потребителя — проверка другого компонента и не в счёт.
-    const covered = new Set(
-      own.flatMap((t) =>
-        taskEvidence(s, t)
-          .filter(
-            (e) =>
-              // Gate профиля закрывает только исполнение его команды: запись
-              // ревью не доказывает одноимённый test gate.
-              e.kind === 'test' &&
-              e.phase === 'integration' &&
-              e.passed &&
-              e.gate &&
-              !e.consumer &&
-              (!t.resultSha || e.sha === t.resultSha),
-          )
-          .map((e) => e.gate),
-      ),
-    );
-    const missing = repository(config, repositoryId)
-      .gates.map((g) => g.id)
-      .filter((id) => !covered.has(id));
-    if (missing.length) result.push({ repositoryId, gates: missing });
-  }
-  return result;
+  const ids = [...new Set(tasks.map((t) => t.repositoryId))];
+  return harnessUncoveredGates(
+    ids.map((id) => ({ id, gates: repository(config, id).gates })),
+    tasks.map((t) => ({
+      repositoryId: t.repositoryId,
+      resultSha: t.resultSha,
+      evidence: taskEvidence(s, t),
+    })),
+  );
 }
 
 /**
@@ -1009,31 +997,30 @@ export class DevContour {
       return { boardId, revision: r.number, snapshot: r.snapshot.digest, approval };
     });
   }
+  /**
+   * Пауза и продолжение очереди — wrapper без правил над паузой harness
+   * (`pause`/`resume`): штатная остановка не подменяет паузу человека, решение
+   * человека снимает паузу вместе с классами отказов и ожиданием проверки
+   * базы. Паузу операции применения политики человек сначала забирает себе
+   * (`pause('operator')` harness) — операция её уже не снимет, — затем снимает.
+   * DevContour добавляет продуктовое условие продолжения: привязку разработки.
+   */
   pause(value: boolean, reason: 'operator' | 'shutdown' = 'operator') {
-    return this.store.change(value ? 'scheduler.paused' : 'scheduler.started', (s) => {
-      if (!value) developmentBinding(s);
-      // Штатная остановка поверх паузы человека её не подменяет; поверх паузы
-      // операции — забирает её: иначе операция сняла бы и остановку.
-      if (s.paused && value && reason === 'shutdown' && s.pauseReason !== 'reconfigure')
-        return { paused: true, reason: s.pauseReason };
-      s.paused = value;
-      s.pauseReason = value ? reason : undefined;
-      // Решение человека заменяет паузу операции: снять её операция уже не
-      // сможет — пауза теперь человека.
-      s.pauseOperation = undefined;
-      s.pausedAt = value ? now() : undefined;
-      // Продолжение очереди — решение после проверки базы: её ожидание снято.
-      // Ожидание перезакрепления контекста держит операция, а не очередь.
-      if (!value && s.waits?.length) {
-        s.waits = s.waits.filter((w) => w.kind !== 'base-check');
-        if (!s.waits.length) s.waits = undefined;
-      }
-      // Класс отказа принадлежит конкретной паузе: пережив её, он разрешил бы
-      // снять следующую паузу, к которой не имеет отношения. Эта операция —
-      // решение человека или штатная остановка, и класса у неё нет.
-      s.pauseFailures = undefined;
-      return { paused: value, reason: s.pauseReason };
-    });
+    const { store, engine } = executionOf(this);
+    return domain(() =>
+      store.host(value ? 'scheduler.paused' : 'scheduler.started', (ht) => {
+        if (!value) developmentBinding(ht.state);
+        // Решение человека заменяет паузу операции применения политики (как
+        // и прежде): пауза переходит к человеку и снимается им. Выдачу до
+        // применения конфигурации по-прежнему держит запрос операции.
+        if (!value && engine.read((v) => v.control().pauseReason) === 'reconfigure')
+          engine.pause('operator');
+        const { control } = value ? engine.pause(reason) : engine.resume();
+        const result = { paused: control.paused, reason: control.pauseReason };
+        ht.journal(result);
+        return result;
+      }),
+    );
   }
   // Карта продукта считает готовность по связи задачи с фичей. Задачи,
   // выпущенные без неё, исправляются здесь — в том числе принятые: связь не

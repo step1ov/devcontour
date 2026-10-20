@@ -2089,6 +2089,12 @@ export function App() {
                         <dd>
                           {displayedReviewer.runtime}
                           {displayedReviewer.model && ` / ${displayedReviewer.model}`}
+                          {/* Ревью тем же вендором бывает только по явному правилу
+                              вендора; оно названо, а не подразумевается «другой». */}
+                          {displayedReviewer.runtime &&
+                            displayedReviewer.runtime === displayedWriter?.runtime && (
+                              <span className="text-muted-foreground"> · тот же вендор</span>
+                            )}
                         </dd>
                       </div>
                       <div>

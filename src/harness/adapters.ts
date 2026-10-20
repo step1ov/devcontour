@@ -16,6 +16,7 @@ import {
 } from 'devcontour-harness';
 import { adapters, type AgentAdapter } from '../runner/adapters.ts';
 import { redactor } from '../runner/redaction.ts';
+import { controllerEntries } from '../runner/isolation.ts';
 import { unknownUsage, type Usage } from '../core/usage.ts';
 import type { DevContour } from '../core/service.ts';
 import type { Task } from '../core/model.ts';
@@ -105,7 +106,7 @@ export function runtimeAdapters(
     if (!agent) continue;
     out[runtime] =
       agent === adapters[hostName(runtime)] && runtime !== 'fixture'
-        ? cliAdapter(runtime, { toolProfiles: policy.toolProfiles })
+        ? cliAdapter(runtime, { toolProfiles: policy.toolProfiles, controllerEntries })
         : fromAgentAdapter(h, agent, runtime);
   }
   return out;

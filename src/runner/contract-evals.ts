@@ -73,12 +73,30 @@ const corpus = [
 
 const optionsSchema = z.strictObject({
   runtime: z.enum(['codex', 'claude']).optional(),
+  /**
+   * Runtime ревьюера. По умолчанию — первый живой runtime другого вендора;
+   * тот же вендор, что автор, — только явно, и тогда правило вендора ревью
+   * контракта разрешает его в конфигурации прогона.
+   */
+  reviewerRuntime: z.enum(['codex', 'claude']).optional(),
   reviewerModel: z.string().min(1).optional(),
   maxCalls: z.number().int().min(1).max(30).default(corpus.length),
   timeoutMs: z.number().int().min(1000).max(900000).default(300000),
 });
 
 type Verdict = 'approved' | 'rejected' | 'unverified';
+
+/**
+ * Ревьюер прогона оценки: явно названный или первый живой runtime другого
+ * вендора, чем автор (правило вендора по умолчанию). Перечень runtime — не
+ * «противоположный runtime»: тот же вендор выбирается только явно.
+ */
+export function evalReviewer(
+  author: 'codex' | 'claude',
+  explicit?: 'codex' | 'claude',
+): 'codex' | 'claude' {
+  return explicit ?? (['codex', 'claude'] as const).find((r) => r !== author)!;
+}
 
 export async function contractEvals(
   raw: unknown = {},
@@ -90,8 +108,10 @@ export async function contractEvals(
   if (!options.runtime && options.reviewerModel)
     throw new Error('Models require explicit live runtime');
   if (options.runtime && fixture) throw new Error('Injected fixture cannot be combined with live');
+  if (options.reviewerRuntime && !options.runtime)
+    throw new Error('Reviewer runtime requires explicit live runtime');
   const author = options.runtime ?? 'codex';
-  const reviewer = author === 'codex' ? 'claude' : 'codex';
+  const reviewer = evalReviewer(author, options.reviewerRuntime);
   // Без live модель не вызывается: фикстура по умолчанию отвечает ожидаемым
   // вердиктом и проверяет только подсчёт и протокол, не качество суждения.
   const answer =
@@ -172,6 +192,18 @@ export async function contractEvals(
         resourceDatabase: join(root, 'resources.sqlite'),
         roles: { architect: { runtime: author } },
         reviewer: { runtime: reviewer, model: options.reviewerModel },
+        // Явно названный ревьюер — ревьюер контракта прогона; тот же вендор,
+        // что автор, разрешается правилом только тогда.
+        ...(options.reviewerRuntime
+          ? {
+              review: {
+                contract: {
+                  reviewer: { runtime: reviewer, model: options.reviewerModel },
+                  ...(reviewer === author ? { vendor: 'same-vendor-allowed' } : {}),
+                },
+              },
+            }
+          : {}),
         // Ревью контракта гейтов не запускает; конфигурация требует хотя бы один.
         gates: [{ id: 'none', kind: 'test', command: ['node', '--version'] }],
         protectedPaths: [],
