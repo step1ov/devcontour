@@ -470,25 +470,43 @@ export class DevContour {
    * проверок. Смена команды или группы потребителя делает прежнюю попытку
    * устаревшей так же, как смена собственной.
    */
-  taskPolicyDigest(t: Pick<Task, 'repositoryId' | 'consumers'>) {
-    const own = this.policyDigest(t.repositoryId);
+  taskPolicyDigest(t: Pick<Task, 'repositoryId' | 'consumers'>): string {
+    // Без потребителей договор задачи — сама политика компонента.
+    const input = this.taskPolicyInput(t, digest);
+    return t.consumers?.length ? digest(input) : (input as string);
+  }
+  /**
+   * Содержимое договора задачи, из которого считается taskPolicyDigest.
+   * `policy` задаёт, чем представлена политика компонента: digest (формула
+   * договора) или сама запись (тождество проверок receipt — тот же договор
+   * без потери полей).
+   */
+  taskPolicyInput(
+    t: Pick<Task, 'repositoryId' | 'consumers'>,
+    policy: (input: Record<string, unknown>) => unknown = (x) => x,
+  ): unknown {
+    const own = policy(this.policyInput(t.repositoryId));
     if (!t.consumers?.length) return own;
-    return digest({
+    return {
       own,
       consumers: t.consumers.map((c) => ({
         repositoryId: c.repositoryId,
-        policy: this.policyDigest(c.repositoryId),
+        policy: policy(this.policyInput(c.repositoryId)),
         gates: expandGates(repository(this.config, c.repositoryId), c.gates),
       })),
-    });
+    };
   }
   /** Receipt задачи из другого clone подтверждает её при текущей конфигурации. */
   receiptHolds(s: DevContourState, t: Task) {
     return receiptHolds(this, s, t);
   }
   policyDigest(repositoryId = 'main', legacy = false) {
+    return digest(this.policyInput(repositoryId, legacy));
+  }
+  /** Запись политики компонента, digest которой — policyDigest. */
+  policyInput(repositoryId = 'main', legacy = false): Record<string, unknown> {
     const repo = repository(this.config, repositoryId);
-    return digest({
+    return {
       ...(legacy ? {} : { isolation: this.config.isolation }),
       ...(this.config.repositories.length
         ? { repositoryId, path: repo.path, targetBranch: repo.targetBranch }
@@ -534,7 +552,7 @@ export class DevContour {
         ? { resources: this.config.resources, resourceDatabase: this.config.resourceDatabase }
         : {}),
       ...(repo.generatedPaths?.length ? { generatedPaths: repo.generatedPaths } : {}),
-    });
+    };
   }
   /**
    * План без доски открывает новую доску. План с доской — следующий этап её

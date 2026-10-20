@@ -342,7 +342,14 @@ export function syncGit(h: DevContour, options: SyncOptions = {}) {
       throw new Error('При первом sync укажите --member <устойчивый-id-разработчика>');
     if (member) taskInput.shape.assignee.unwrap().parse(member);
     const locations = scopes(h),
-      local = recordsFromState(h, state),
+      // Receipt, уже выпущенный этим clone (прежний sync или Git), повторяется
+      // как есть: опубликованная запись неизменяема.
+      local = recordsFromState(h, state, (owner, id) => {
+        const scope = locations.find((l) => l.owner === owner);
+        const record =
+          scope?.baseline?.records[`receipts/${id}`] ?? scope?.remote[`receipts/${id}`];
+        return record?.kind === 'receipt' ? record.data : undefined;
+      }),
       merged = new Map<string | undefined, Records>();
     const conflicts: { key: string; reason: string }[] = [],
       changes: { scope: string; key: string; direction: string }[] = [];

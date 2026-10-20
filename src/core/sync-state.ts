@@ -1,4 +1,5 @@
-import { isAbsolute } from 'node:path';
+import { dirname, isAbsolute, relative, sep } from 'node:path';
+import { realpathSync } from 'node:fs';
 import { canonicalJson } from 'devcontour-harness';
 import { createHash } from 'node:crypto';
 import { portableTest } from './proof.ts';
@@ -11,7 +12,6 @@ import { assertDag } from './graph.ts';
 import { validateTaskContext } from './workflow.ts';
 import {
   taskInput,
-  type Config,
   type DevContourState,
   type Task,
   type Approval,
@@ -61,74 +61,105 @@ function approval(a?: Approval) {
 export const receiptRecordBytes = (receipt: CompletionReceipt) =>
   Buffer.byteLength(canonical(recordSchema.parse({ version: 1, kind: 'receipt', data: receipt })));
 /**
- * Тождество проверок receipt, версия 1: SHA-256 канонического JSON
- * `{ version: 1, repositories: [{ repositoryId, gates }], environment }`, где
- * `repositories` — компонент задачи, затем потребители по repositoryId, а
- * `gates` — полные декларации названных gates компонента (id, kind, command,
- * timeoutMs, cwd, report, property, dependsOn, resources) в порядке id.
- * `environment` — окружение конфигурации и компонентов: имена inherit и
- * secrets, значения values; абсолютный путь в значении заменяется отметкой —
- * пути clone различаются, а проверка от этого не другая. Абсолютных путей
- * workspace и репозиториев в формуле нет, поэтому одна и та же проверка в
- * разных clone даёт одно тождество. Gate без декларации в профиле
- * (псевдо-gate источника требований) входит только своим ID: его содержание
- * закреплено постановкой задачи. Неизвестный компонент — тождества нет.
+ * Тождество проверок receipt, версия 2: SHA-256 канонического JSON
+ * `{ version: 2, policy }`, где `policy` — та самая запись договора попытки,
+ * из которой считается её policyDigest (`taskPolicyInput`/`policyInput`:
+ * gates, группы, окружение конфигурации и компонентов вместе с источниками
+ * секретов, подготовка, lifecycle, ресурсы, роли и прочее). Полнота — по
+ * построению: изменение любого поля договора меняет тождество. Единственное
+ * преобразование — абсолютный путь внутри известного корня этого clone
+ * (workspace, репозиторий, компонент, каталог контроллера) заменяется на
+ * `{ $root: <имя корня>, path: <путь от корня> }`: разные clone одной
+ * проверки дают одно тождество, а `<root>/smoke.json` и `<root>/full.json` —
+ * разные. Прочие абсолютные строки остаются как есть. Значения секретов в
+ * договор не входят — только их имена и источники.
  */
-export function gateIdentity(
-  config: Config,
-  repositoryId: string,
-  requiredGates: readonly string[],
-  consumers: readonly { repositoryId: string; gates: readonly string[] }[] = [],
-): string | undefined {
-  const env = (e?: {
-    inherit?: string[];
-    values?: Record<string, string>;
-    secrets?: Record<string, string>;
-  }) =>
-    e
-      ? {
-          inherit: [...(e.inherit ?? [])].sort(),
-          values: Object.fromEntries(
-            Object.entries(e.values ?? {}).map(([k, v]) => [
-              k,
-              isAbsolute(v) ? { absolute: true } : v,
-            ]),
-          ),
-          secrets: Object.keys(e.secrets ?? {}).sort(),
-        }
-      : undefined;
-  const scopes = [
-    { repositoryId, gates: requiredGates },
-    ...[...consumers].sort((a, b) => a.repositoryId.localeCompare(b.repositoryId)),
-  ];
-  const repositories = [];
-  const environment: Record<string, unknown> = { config: env(config.environment) };
-  for (const scope of scopes) {
-    let repo;
-    try {
-      repo = repository(config, scope.repositoryId);
-    } catch {
-      return undefined;
-    }
-    // Gate без декларации в профиле (псевдо-gate источника требований) —
-    // только по ID: его содержание — постановка задачи (specDigest).
-    const gates = [...new Set(scope.gates)]
-      .sort()
-      .map((id) => repo.gates.find((g) => g.id === id) ?? { id });
-    repositories.push({ repositoryId: scope.repositoryId, gates });
-    environment[scope.repositoryId] = env(repo.environment);
+export type PolicyRoot = { name: string; path: string };
+function spellings(path: string) {
+  const out = new Set([path]);
+  try {
+    out.add(realpathSync(path));
+  } catch {
+    /* корня может ещё не быть */
   }
-  return createHash('sha256')
-    .update(canonicalJson({ version: 1, repositories, environment }))
+  for (const p of [...out])
+    if (p.startsWith('/private/')) out.add(p.slice('/private'.length));
+    else if (/^\/(?:tmp|var|etc)(?:\/|$)/.test(p)) out.add('/private' + p);
+  return [...out].map((p) => (p.length > 1 && p.endsWith(sep) ? p.slice(0, -1) : p));
+}
+export function policyRoots(h: DevContour): PolicyRoot[] {
+  const named: [string, string | undefined][] = [
+    ['workspace', h.config.workspaceRoot],
+    ['repository', h.config.repository],
+    ...h.config.repositories.map((r): [string, string] => [`repository:${r.id}`, r.path]),
+    ['controller', h.store.file === ':memory:' ? undefined : dirname(h.store.file)],
+  ];
+  return named
+    .filter((x): x is [string, string] => !!x[1] && isAbsolute(x[1]))
+    .flatMap(([name, path]) => spellings(path).map((p) => ({ name, path: p })))
+    .sort((a, b) => b.path.length - a.path.length || a.name.localeCompare(b.name));
+}
+export function portablePolicy(value: unknown, roots: readonly PolicyRoot[]): unknown {
+  if (typeof value === 'string') {
+    if (!isAbsolute(value)) return value;
+    const root = roots.find((r) => value === r.path || value.startsWith(r.path + sep));
+    return root
+      ? { $root: root.name, path: relative(root.path, value).split(sep).join('/') }
+      : value;
+  }
+  if (Array.isArray(value)) return value.map((v) => portablePolicy(v, roots));
+  if (value && typeof value === 'object')
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, portablePolicy(v, roots)]));
+  return value;
+}
+export const policyIdentity = (policy: unknown, roots: readonly PolicyRoot[]) =>
+  createHash('sha256')
+    .update(canonicalJson({ version: 2, policy: portablePolicy(policy, roots) }))
     .digest('hex');
+/**
+ * Договоры, под которыми попытка задачи считается текущей (те же три, что
+ * принимает экспорт: договор задачи, политика компонента, её прежняя форма
+ * без isolation), — digest и тождество каждого. Неизвестный компонент — пусто.
+ */
+export function policyVariants(h: DevContour, t: Pick<Task, 'repositoryId' | 'consumers'>) {
+  let inputs: unknown[];
+  try {
+    inputs = [
+      h.taskPolicyInput(t),
+      h.policyInput(t.repositoryId),
+      h.policyInput(t.repositoryId, true),
+    ];
+  } catch {
+    return [];
+  }
+  const roots = policyRoots(h);
+  return [
+    { digest: h.taskPolicyDigest(t), identity: policyIdentity(inputs[0], roots) },
+    { digest: digest(inputs[1]), identity: policyIdentity(inputs[1], roots) },
+    { digest: digest(inputs[2]), identity: policyIdentity(inputs[2], roots) },
+  ];
 }
 
-export function completion(h: DevContour, s: DevContourState, t: Task): CompletionReceipt {
+/**
+ * Receipt результата задачи. Опубликованный receipt неизменяем: если этот
+ * clone уже выпустил receipt той же попытки (`published` — запись прежнего
+ * sync или Git), он возвращается байт в байт, а не собирается заново по
+ * текущей конфигурации или версии — иначе смена политики или обновление
+ * дописали бы или убрали поля уже выпущенной записи.
+ */
+export function completion(
+  h: DevContour,
+  s: DevContourState,
+  t: Task,
+  published?: (receiptId: string) => CompletionReceipt | undefined,
+): CompletionReceipt {
   if (t.sharedCompletion) return t.sharedCompletion.receipt;
   const run = s.runs.findLast(
     (r) => r.taskId === t.id && r.status === 'succeeded' && r.integrationSha === t.resultSha,
   );
   if (!run) throw new Error(`Нет завершённой попытки для ${t.id}`);
+  const prior = published?.(run.id);
+  if (prior && prior.taskId === t.id && prior.resultSha === t.resultSha) return prior;
   const requiredGates =
     run.requiredGates ??
     (run.policyDigest === h.policyDigest(t.repositoryId) ||
@@ -139,22 +170,11 @@ export function completion(h: DevContour, s: DevContourState, t: Task): Completi
     throw new Error(
       `Для старой попытки ${t.id} нельзя восстановить policy: нужна исходная конфигурация`,
     );
-  // Тождество проверок — только пока договор попытки совпадает с текущим:
-  // тогда её проверки — те, что объявлены сейчас. Иначе их уже не восстановить,
-  // и receipt пишется без тождества (новую приёмку он не подтвердит).
-  const current = [
-    h.taskPolicyDigest(t),
-    h.policyDigest(t.repositoryId),
-    h.policyDigest(t.repositoryId, true),
-  ].includes(run.policyDigest);
-  const identity = current
-    ? gateIdentity(
-        h.config,
-        t.repositoryId,
-        requiredGates,
-        (run.consumers ?? []).map((c) => ({ repositoryId: c.repositoryId, gates: c.gates })),
-      )
-    : undefined;
+  // Тождество — договора, под которым попытка действительно проверена: он
+  // известен, пока её policyDigest совпадает с одним из текущих договоров.
+  // Иначе договор уже не восстановить, и receipt пишется без тождества
+  // (новую приёмку он не подтвердит).
+  const identity = policyVariants(h, t).find((v) => v.digest === run.policyDigest)?.identity;
   return receiptSchema.parse({
     id: run.id,
     taskId: t.id,
@@ -243,7 +263,11 @@ export function completion(h: DevContour, s: DevContourState, t: Task): Completi
       : {}),
   });
 }
-export function recordsFromState(h: DevContour, s: DevContourState) {
+export function recordsFromState(
+  h: DevContour,
+  s: DevContourState,
+  published?: (owner: string | undefined, receiptId: string) => CompletionReceipt | undefined,
+) {
   const records = new Map<string | undefined, Records>();
   const add = (owner: string | undefined, record: SyncRecord) => {
     if (!records.has(owner)) records.set(owner, {});
@@ -254,7 +278,7 @@ export function recordsFromState(h: DevContour, s: DevContourState) {
     const owner = taskOwner(t);
     let receiptId: string | undefined;
     if (t.status === 'done') {
-      const receipt = completion(h, s, t);
+      const receipt = completion(h, s, t, published && ((id) => published(owner, id)));
       add(owner, { version: 1, kind: 'receipt', data: receipt });
       receiptId = receipt.id;
     }
@@ -431,14 +455,13 @@ export function validateReceipt(
 export function receiptHolds(h: DevContour, s: DevContourState, t: Task) {
   const receipt = t.sharedCompletion?.receipt;
   if (!receipt) return false;
-  // Те же проверки, что действуют здесь: тождество receipt совпадает с
-  // тождеством текущих деклараций его gates. Receipt без тождества (прежний
-  // формат) не говорит, какой командой проверено, — новую приёмку он не
+  // Тот же договор проверок, что действует здесь: тождество receipt равно
+  // тождеству одного из текущих договоров задачи. Receipt без тождества
+  // (прежний формат) не говорит, чем проверено, — новую приёмку он не
   // подтверждает.
   if (
     !receipt.gateIdentity ||
-    receipt.gateIdentity !==
-      gateIdentity(h.config, t.repositoryId, receipt.requiredGates, receipt.consumers ?? [])
+    !policyVariants(h, t).some((v) => v.identity === receipt.gateIdentity)
   )
     return false;
   const roots = localRoots(h);
