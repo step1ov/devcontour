@@ -1006,8 +1006,21 @@ test(
             i++
           )
             await new Promise((r) => setTimeout(r, 100));
-          await new Promise((r) => setTimeout(r, 1500));
+          // Фиксированной паузы под нагрузкой не хватало: отмена приходила до
+          // старта потомка. Ждём его PID в логе проверки (до 30 с).
           const active = f.store.read().runs.find((r) => r.status === 'active')!;
+          const liveLog = join(
+            f.root,
+            'artifacts',
+            active.id,
+            'candidate',
+            f.h.config.gates[0].id + '.log',
+          );
+          for (let i = 0; i < 300; i++) {
+            const text = await readFile(liveLog, 'utf8').catch(() => '');
+            if (/ORPHAN-PID:\d+/.test(text)) break;
+            await new Promise((r) => setTimeout(r, 100));
+          }
           f.h.cancel(active.taskId);
         }
         await draining;
