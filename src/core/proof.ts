@@ -51,6 +51,18 @@ function decisive(s: DevContourState, task: Task, current?: PolicyOf) {
 }
 
 /**
+ * Задача подтверждена только receipt, который при текущей конфигурации её не
+ * подтверждает (другие проверки или прежний формат без их тождества): для
+ * нового решения о приёмке её нужно перепроверить. Принятая история и
+ * импорт при этом не меняются.
+ */
+export function needsRecheck(s: DevContourState, task: Task, current: PolicyOf) {
+  if (!task.sharedCompletion?.receipt) return false;
+  const { run, receipt } = decisive(s, task, current);
+  return !run && !receipt;
+}
+
+/**
  * Evidence, которым задача подтверждает результат (`decisive`). Одно
  * определение для всех потребителей: приёмки доски (с `current`), INTENT и
  * отчёта требований.

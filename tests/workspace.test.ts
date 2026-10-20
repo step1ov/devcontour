@@ -799,6 +799,18 @@ test('T23: board acceptance counts only evidence recorded under the current poli
     receive({ ...exported, requiredGates: ['test', 'extra'] });
     assert.throws(() => g.h.accept(b.id, MERGED), /Полный набор проверок не пройден: main: test/);
     assert.equal(g.store.read().boards[0].revisions.at(-1)!.snapshot, undefined);
+    // Receipt прежнего формата не называет, какими проверками подтверждён:
+    // импорт и история сохраняются, а новая приёмка требует перепроверки.
+    assert.ok(exported.gateIdentity, 'экспорт называет тождество проверок');
+    const legacy = { ...exported };
+    delete legacy.gateIdentity;
+    receive(legacy);
+    assert.throws(
+      () => g.h.accept(b.id, MERGED),
+      /Полный набор проверок не пройден: main: test.*нужна перепроверка/,
+    );
+    assert.equal(g.store.read().boards[0].revisions.at(-1)!.snapshot, undefined);
+    assert.equal(g.store.read().tasks[0].status, 'done');
     receive(exported);
     assert.doesNotThrow(() => g.h.accept(b.id, MERGED));
   } finally {

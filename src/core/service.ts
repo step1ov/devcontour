@@ -12,7 +12,7 @@ import { createHash } from 'node:crypto';
 import { repository, repositories, requiresContract, expandGates } from './repositories.ts';
 import { Store } from './store.ts';
 import { type FailureKind } from './failure.ts';
-import { taskChecks, taskEvidence, unprovenReason } from './proof.ts';
+import { needsRecheck, taskChecks, taskEvidence, unprovenReason } from './proof.ts';
 import { assertTaskProperties, type CheckDeclaration } from './checks.ts';
 import {
   recoveryActions,
@@ -981,15 +981,27 @@ export class DevContour {
           t.resultSha,
           taskChecks(s, t, this),
         );
-        if (unproven) throw new DomainError(unproven);
+        if (unproven)
+          throw new DomainError(
+            needsRecheck(s, t, this)
+              ? `${unproven}. Receipt задачи ${t.id} подтверждает другие проверки или не называет их (прежний формат) — нужна перепроверка задачи под текущей конфигурацией`
+              : unproven,
+          );
       }
       const uncovered = uncoveredGates(this, s, tasks);
-      if (uncovered.length)
+      if (uncovered.length) {
+        // Receipt другого clone с другими проверками или без их тождества
+        // покрытия не даёт — причина названа: задачу нужно перепроверить.
+        const recheck = tasks.filter((t) => needsRecheck(s, t, this)).map((t) => t.id);
         throw new DomainError(
           'Полный набор проверок не пройден: ' +
             uncovered.map((u) => `${u.repositoryId}: ${u.gates.join(', ')}`).join('; ') +
-            ' — ни одна задача доски не прошла их на integration. Добавьте задачу, чья область их включает',
+            ' — ни одна задача доски не прошла их на integration. ' +
+            (recheck.length
+              ? `Receipt задач ${recheck.join(', ')} подтверждает другие проверки или не называет их (прежний формат) — нужна перепроверка задач под текущей конфигурацией`
+              : 'Добавьте задачу, чья область их включает'),
         );
+      }
       r.status = 'accepted';
       r.acceptedAt = now();
       r.acceptance = approval;
