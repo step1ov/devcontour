@@ -1,4 +1,4 @@
-import { dirname, isAbsolute, relative, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { realpathSync } from 'node:fs';
 import { canonicalJson } from 'devcontour-harness';
 import { createHash } from 'node:crypto';
@@ -71,22 +71,45 @@ export const receiptRecordBytes = (receipt: CompletionReceipt) =>
  * (workspace, репозиторий, компонент, каталог контроллера) заменяется на
  * `{ $root: <имя корня>, path: <путь от корня> }`: разные clone одной
  * проверки дают одно тождество, а `<root>/smoke.json` и `<root>/full.json` —
- * разные. Прочие абсолютные строки остаются как есть. Значения секретов в
- * договор не входят — только их имена и источники.
+ * разные. «Внутри» — по физическому адресу: `..` и символические ссылки
+ * разбираются, и путь, который через них выходит за корень
+ * (`<repo>/../cases.json`), остаётся исходной строкой — его смысл у другого
+ * clone не установить, и receipt потребует перепроверки. Прочие абсолютные
+ * строки тоже остаются как есть. Значения секретов в договор не входят —
+ * только их имена и источники.
  */
 export type PolicyRoot = { name: string; path: string };
-function spellings(path: string) {
-  const out = new Set([path]);
-  try {
-    out.add(realpathSync(path));
-  } catch {
-    /* корня может ещё не быть */
+/**
+ * Физический адрес: сегменты разбираются по очереди, существующий префикс —
+ * через realpath (символическая ссылка, `/tmp` → `/private/tmp`), `..` —
+ * после него. Несуществующий хвост разбирается лексически: в нём ссылок нет.
+ */
+function physical(path: string) {
+  const parts = resolve(path).split(sep).filter(Boolean);
+  let current: string = sep;
+  for (let i = 0; i < parts.length; i++) {
+    const next = join(current, parts[i]);
+    try {
+      current = realpathSync(next);
+    } catch {
+      return resolve(next, ...parts.slice(i + 1));
+    }
   }
+  return current;
+}
+function spellings(path: string) {
+  const out = new Set([resolve(path), physical(path)]);
   for (const p of [...out])
     if (p.startsWith('/private/')) out.add(p.slice('/private'.length));
     else if (/^\/(?:tmp|var|etc)(?:\/|$)/.test(p)) out.add('/private' + p);
-  return [...out].map((p) => (p.length > 1 && p.endsWith(sep) ? p.slice(0, -1) : p));
+  return [...out];
 }
+const within = (root: string, path: string) => {
+  const rel = relative(root, path);
+  return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith('..' + sep))
+    ? rel
+    : undefined;
+};
 export function policyRoots(h: DevContour): PolicyRoot[] {
   const named: [string, string | undefined][] = [
     ['workspace', h.config.workspaceRoot],
@@ -102,10 +125,14 @@ export function policyRoots(h: DevContour): PolicyRoot[] {
 export function portablePolicy(value: unknown, roots: readonly PolicyRoot[]): unknown {
   if (typeof value === 'string') {
     if (!isAbsolute(value)) return value;
-    const root = roots.find((r) => value === r.path || value.startsWith(r.path + sep));
-    return root
-      ? { $root: root.name, path: relative(root.path, value).split(sep).join('/') }
-      : value;
+    // Лексический префикс не годится: `<repo>/../x` начинается с корня, но
+    // лежит вне его. Сверяется физический адрес — и сам путь, и корень.
+    const real = physical(value);
+    for (const root of roots) {
+      const rel = within(root.path, real);
+      if (rel !== undefined) return { $root: root.name, path: rel.split(sep).join('/') };
+    }
+    return value;
   }
   if (Array.isArray(value)) return value.map((v) => portablePolicy(v, roots));
   if (value && typeof value === 'object')
@@ -117,9 +144,10 @@ export const policyIdentity = (policy: unknown, roots: readonly PolicyRoot[]) =>
     .update(canonicalJson({ version: 2, policy: portablePolicy(policy, roots) }))
     .digest('hex');
 /**
- * Договоры, под которыми попытка задачи считается текущей (те же три, что
- * принимает экспорт: договор задачи, политика компонента, её прежняя форма
- * без isolation), — digest и тождество каждого. Неизвестный компонент — пусто.
+ * Договоры, под которыми попытка задачи считается текущей, — digest и
+ * тождество каждого. Для задачи без потребителей их три (договор задачи,
+ * политика компонента, её прежняя форма без isolation), для задачи с
+ * потребителями — только договор задачи. Неизвестный компонент — пусто.
  */
 export function policyVariants(h: DevContour, t: Pick<Task, 'repositoryId' | 'consumers'>) {
   let inputs: unknown[];
@@ -133,8 +161,13 @@ export function policyVariants(h: DevContour, t: Pick<Task, 'repositoryId' | 'co
     return [];
   }
   const roots = policyRoots(h);
+  const own = { digest: h.taskPolicyDigest(t), identity: policyIdentity(inputs[0], roots) };
+  // Политика компонента не закрепляет gates, подготовку и lifecycle
+  // потребителей — для задачи с потребителями договор только её собственный,
+  // как у локальной попытки (`currentPolicies` в proof.ts).
+  if (t.consumers?.length) return [own];
   return [
-    { digest: h.taskPolicyDigest(t), identity: policyIdentity(inputs[0], roots) },
+    own,
     { digest: digest(inputs[1]), identity: policyIdentity(inputs[1], roots) },
     { digest: digest(inputs[2]), identity: policyIdentity(inputs[2], roots) },
   ];

@@ -1,9 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { Store } from '../src/core/store.ts';
 import { DevContour, digest } from '../src/core/service.ts';
 import { repositories } from '../src/core/repositories.ts';
@@ -80,7 +88,10 @@ function peers() {
 }
 
 /** Отправитель завершает задачу управляемыми evidence и публикует её штатным sync. */
-function finishFixture(a: { h: DevContour; repo: string; workspace: string }) {
+function finishFixture(
+  a: { h: DevContour; repo: string; workspace: string },
+  beforeExport?: () => void,
+) {
   a.h.approve(a.h.store.read().boards[0].id);
   a.h.pause(false);
   const run = a.h.claim('fixture')!;
@@ -102,6 +113,7 @@ function finishFixture(a: { h: DevContour; repo: string; workspace: string }) {
       });
   a.h.finish(run.id, run.token, sha);
   a.h.pause(true);
+  beforeExport?.();
   syncGit(a.h, { member: 'sender' });
   for (const path of [a.repo, a.workspace]) {
     git(path, 'add', '.devcontour');
@@ -371,3 +383,110 @@ for (const storage of ['component', 'central'] as const)
         p.cleanup();
       }
     });
+
+// S3-R4-01: «внутри корня» — по физическому адресу. Путь, который через `..`
+// или символическую ссылку выходит за корень, у другого clone может значить
+// другой файл: он остаётся исходной строкой, и receipt требует перепроверки.
+test('S3-R4-01: путь, выходящий за корень через `..` или ссылку, не переносится — receipt с ним требует перепроверки до и после импорта; путь внутри корня переносится', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'devcontour-escaped-root-')));
+  try {
+    const repo = join(root, 'ws', 'app');
+    mkdirSync(join(repo, 'sub'), { recursive: true });
+    symlinkSync(root, join(repo, 'outside'));
+    const h = new DevContour(
+      new Store(':memory:'),
+      config({ repository: repo, workspaceRoot: join(root, 'ws') }),
+    );
+    const roots = policyRoots(h);
+    // Лексический префикс корня, но физически вне его — как есть.
+    for (const escaped of [
+      // Строки собраны без join: join сам разобрал бы `..`.
+      `${repo}/../../cases.json`,
+      `${repo}/outside/cases.json`,
+      `${repo}/outside/ws/../cases.json`,
+    ])
+      assert.equal(portablePolicy(escaped, roots), escaped, escaped);
+    // `..`, который остаётся внутри корня, разбирается до пути от корня.
+    assert.deepEqual(portablePolicy(`${repo}/sub/../smoke.json`, roots), {
+      $root: 'repository',
+      path: 'smoke.json',
+    });
+    assert.deepEqual(portablePolicy(`${repo}/../shared.json`, roots), {
+      $root: 'workspace',
+      path: 'shared.json',
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  const p = peers();
+  try {
+    const external = (c: Cfg) => {
+      c.environment = {
+        inherit: [],
+        values: { DATA_FILE: `${c.repository}/../cases.json` },
+        secrets: {},
+      };
+    };
+    const a = p.peer('sender', undefined, external);
+    const board = a.h.createBoard('Received board', '', 'main');
+    const task = a.h.addTask(board.id, input());
+    finishFixture(a);
+    assert.equal(
+      typeof portablePolicy(a.h.config.environment!.values.DATA_FILE, policyRoots(a.h)),
+      'string',
+      'внешний путь отправителя не стал путём от корня',
+    );
+    const cases: [string, 'before' | 'after', (c: Cfg) => void][] = [
+      ['same spelling', 'before', external],
+      ['same spelling', 'after', external],
+      [
+        'absolute outside',
+        'before',
+        (c) => (c.environment!.values.DATA_FILE = resolve(c.repository, '..', 'cases.json')),
+      ],
+    ];
+    for (const [name, when, change] of cases) {
+      const b = p.peer(`${name.replace(/\W+/g, '-')}-${when}`, a, external);
+      if (when === 'before') change(b.h.config);
+      syncGit(b.h, { member: 'receiver' });
+      if (when === 'after') change(b.h.config);
+      const imported = b.store.read().tasks.find((t) => t.id === task.id)!;
+      assert.equal(imported.status, 'done', name);
+      assert.equal(b.store.read().runs.length, 0, name);
+      const head = git(b.repo, 'rev-parse', 'HEAD');
+      assert.throws(() => b.h.accept(board.id, head), /нужна перепроверка/, `${name} ${when}`);
+      assert.equal(b.store.read().boards[0].revisions[0].snapshot, undefined, `${name} ${when}`);
+    }
+  } finally {
+    p.cleanup();
+  }
+});
+
+// Экспорт после смены политики: попытка проверена прежним договором, а он
+// уже не восстанавливается из текущей конфигурации — receipt выпускается без
+// тождества (а не с тождеством текущего договора), и новая приёмка у
+// получателя требует перепроверки.
+test('Receipt, впервые выпущенный после смены политики, не берёт тождество текущего договора: получатель требует перепроверки', () => {
+  const p = peers();
+  try {
+    const a = p.peer('sender');
+    const board = a.h.createBoard('Received board', '', 'main');
+    const task = a.h.addTask(board.id, input());
+    finishFixture(a, () => (a.h.config.gates[0].command = ['node', 'new-check-never-run.mjs']));
+    const b = p.peer(
+      'receiver',
+      a,
+      (c) => (c.gates[0].command = ['node', 'new-check-never-run.mjs']),
+    );
+    syncGit(b.h, { member: 'receiver' });
+    const imported = b.store.read().tasks.find((t) => t.id === task.id)!;
+    assert.equal(imported.status, 'done');
+    assert.equal(imported.sharedCompletion!.receipt.gateIdentity, undefined);
+    const head = git(b.repo, 'rev-parse', 'HEAD');
+    assert.throws(() => b.h.accept(board.id, head), /нужна перепроверка/);
+    assert.equal(b.store.read().boards[0].revisions[0].snapshot, undefined);
+  } finally {
+    p.cleanup();
+  }
+});

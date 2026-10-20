@@ -8,7 +8,12 @@ import { Store } from '../src/core/store.ts';
 import { DevContour, digest } from '../src/core/service.ts';
 import { effectiveChecks } from '../src/core/checks.ts';
 import { receiptSchema, type CompletionReceipt } from '../src/core/sync-model.ts';
-import { validateReceipt } from '../src/core/sync-state.ts';
+import {
+  policyIdentity,
+  policyRoots,
+  policyVariants,
+  validateReceipt,
+} from '../src/core/sync-state.ts';
 import { receiptFields } from '../src/harness/receipt.ts';
 
 // Правила формата receipt Git-синхронизации — продукт; приёмка по receipt —
@@ -286,5 +291,61 @@ test('Таблица полей receipt называет источник каж
   for (const [field, [source, basis]] of Object.entries(receiptFields)) {
     assert.ok(['receipt', 'receiver', 'fixed'].includes(source), field);
     assert.ok(basis.length > 0, field);
+  }
+});
+
+// S3-R4-02: политика компонента не закрепляет gates потребителей. Для задачи с
+// потребителями receipt подтверждает приёмку только договором задачи — как и
+// локальная попытка; receipt под договором компонента или его прежней формой
+// после смены команды gate потребителя приёмку не подтверждает.
+test('S3-R4-02: receipt задачи с потребителями подтверждает приёмку только договором задачи, не политикой компонента', () => {
+  for (const variant of ['task', 'component', 'legacy-component'] as const) {
+    const d = domain();
+    try {
+      const task = approvedTask(d);
+      assert.equal(
+        policyVariants(d.h, task).length,
+        1,
+        'для задачи с потребителями — один договор',
+      );
+      const input = {
+        task: d.h.taskPolicyInput(task),
+        component: d.h.policyInput('app'),
+        'legacy-component': d.h.policyInput('app', true),
+      }[variant];
+      const receipt = receiptOf(task);
+      receipt.policyDigest = digest(input);
+      receipt.gateIdentity = policyIdentity(input, policyRoots(d.h));
+      const checks = effectiveChecks(task, receipt.policyDigest);
+      receipt.checkVersion = { effective: checks };
+      for (const e of receipt.checks) e.checks = checks;
+      const received = {
+        ...task,
+        status: 'done' as const,
+        resultSha: receipt.resultSha,
+        sharedCompletion: { receipt },
+      } as Task;
+      assert.equal(d.h.receiptHolds(d.store.read(), received), variant === 'task', variant);
+      // Команда gate потребителя меняется: ни один договор receipt её не закрепил.
+      d.h.config.repositories.find((r) => r.id === 'web')!.gates[0].command = [
+        'node',
+        'e2e-v2.mjs',
+      ];
+      assert.equal(d.h.receiptHolds(d.store.read(), received), false, variant);
+      d.store.change('fixture.received', (s) => {
+        Object.assign(
+          s.tasks.find((t) => t.id === task.id)!,
+          received,
+        );
+      });
+      assert.throws(
+        () => d.h.accept(d.store.read().boards[0].id, receipt.resultSha),
+        /нужна перепроверка/,
+        variant,
+      );
+      assert.equal(d.store.read().boards[0].revisions[0].snapshot, undefined, variant);
+    } finally {
+      d.close();
+    }
   }
 });
