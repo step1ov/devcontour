@@ -26,3 +26,4 @@ test-results/
 # Базы прежней версии для проверки совместимости: база компонента лежит в
 # своём .devcontour-local, как у настоящего компонента.
 !/tests/fixtures/legacy/component/app/.devcontour-local/
+!/tests/fixtures/legacy-darwin/component/app/.devcontour-local/
