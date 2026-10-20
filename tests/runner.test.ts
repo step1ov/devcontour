@@ -1,7 +1,7 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { BlockedError, type Task } from '../src/core/model.ts';
-import { mkdtemp, readFile, writeFile, rm, mkdir, symlink } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -13,7 +13,7 @@ import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { adapters, cliArguments, type AgentRequest } from '../src/runner/adapters.ts';
 import { git, command } from '../src/runner/process.ts';
-import { junitSummary, prepareReportPath, runCheck, sandboxBlockedHosts } from 'devcontour-harness';
+import { runCheck } from 'devcontour-harness';
 import { input, fixture } from './helpers.ts';
 import { acceptBoard } from '../src/runner/agent-control.ts';
 import { ProjectMemory } from '../src/application/memory.ts';
@@ -325,32 +325,6 @@ test('Crash after Git publication is reconciled from persisted evidence without 
   } finally {
     await f.cleanup();
   }
-});
-test('JUnit rejects empty/malformed reports and distinguishes skipped tests from pass', () => {
-  assert.throws(() => junitSummary('<testsuite tests="999"/>'), /testcases/);
-  assert.throws(() => junitSummary('not xml'));
-  assert.throws(() => junitSummary('<!DOCTYPE xml><testsuite/>'));
-  assert.deepEqual(
-    junitSummary(
-      '<testsuites><testsuite><testcase name="a"/><testcase name="b"><skipped/></testcase><testcase name="c"><failure/></testcase></testsuite></testsuites>',
-    ),
-    {
-      tests: 3,
-      failures: 1,
-      skipped: 1,
-      failed: ['c'],
-      // Без сообщения о провале остаётся одно имя testcase.
-      failedDetails: ['c'],
-      // Манифест называет каждый testcase и его исход: по нему критерий
-      // связывается с конкретным выполненным тестом, а не с зелёным гейтом.
-      cases: [
-        { id: 'a', status: 'passed' },
-        { id: 'b', status: 'skipped' },
-        { id: 'c', status: 'failed' },
-      ],
-      truncated: false,
-    },
-  );
 });
 test('CLI adapters use structured outputs, stdin prompts and restricted review permissions', () => {
   const r = { review: true, model: 'configured-model' } as AgentRequest;
@@ -867,93 +841,6 @@ test('Провал проверки несёт свою причину: разн
   }
   assert.notEqual(fingerprints[0], fingerprints[1], 'разные причины — разные отпечатки');
 });
-test('Провал проверки называет упавший testcase и ошибку из любого потока', async () => {
-  // Раннеры, записывающие упавшие testcases только в отчёт и выходящие с
-  // кодом 1, давали «Код выхода 1» без причины: отчёт при ненулевом коде не
-  // читался. А одинаковое предупреждение в stderr закрывало ошибку в stdout.
-  // В обоих случаях разные провалы получали один отпечаток.
-  const junit = (name: string) =>
-    `<testsuite><testcase classname="total" name="ok"/><testcase classname="total" name="${name}"><failure message="${name} broke"/></testcase></testsuite>`;
-  const scenarios: [string, (marker: string) => string][] = [
-    [
-      'отчёт и код 1 без вывода',
-      (m) =>
-        `require('fs').mkdirSync('.reports',{recursive:true});require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,${JSON.stringify(junit(m))});process.exit(1)`,
-    ],
-    [
-      'ошибка в stdout, предупреждение в stderr',
-      (m) =>
-        `console.log('error: ${m}');console.error('Warning: experimental runtime feature');process.exit(1)`,
-    ],
-  ];
-  for (const [label, script] of scenarios) {
-    const fingerprints: string[] = [];
-    for (const marker of ['EXPECTED_TOTAL_WRONG', 'MISSING_REQUIRED_FIELD']) {
-      const f = await runtimeFixture();
-      try {
-        f.h.config.gates[0].command = [process.execPath, '-e', script(marker)];
-        f.h.config.gates[0].report = { type: 'junit', path: '.reports/unit.xml' };
-        f.h.pause(false);
-        await new Scheduler(f.h, f.root).drain();
-
-        const failed = f.store.read().tasks.find((t) => t.status === 'failed')!;
-        assert.match(failed.failure!, new RegExp(marker), `${label}: причина названа`);
-        const run = f.store.read().runs.findLast((r) => r.taskId === failed.id)!;
-        const evidence = run.evidence.find((e) => !e.passed)!;
-        assert.match(evidence.summary, new RegExp(marker), `${label}: причина в evidence`);
-        assert.match(evidence.summary, /Код выхода 1/, `${label}: код выхода остаётся провалом`);
-        fingerprints.push(failed.failureFingerprint!);
-      } finally {
-        await f.cleanup();
-      }
-    }
-    assert.notEqual(
-      fingerprints[0],
-      fingerprints[1],
-      `${label}: разные причины — разные отпечатки`,
-    );
-  }
-});
-test('Повреждённый отчёт не затирает ошибку команды, секреты и объём ограничены', async () => {
-  const f = await runtimeFixture();
-  const secret = 'gate-secret-value-5821';
-  process.env.DEVCONTOUR_TEST_GATE_SECRET = secret;
-  try {
-    f.h.config.environment = {
-      inherit: [],
-      values: {},
-      secrets: { GATE_TOKEN: 'DEVCONTOUR_TEST_GATE_SECRET' },
-    };
-    f.h.config.gates[0].command = [
-      process.execPath,
-      '-e',
-      `require('fs').mkdirSync('.reports',{recursive:true});require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase');` +
-        `console.log('x'.repeat(5000));console.log('stdout-cause: schema mismatch');console.error('fatal: token '+process.env.GATE_TOKEN+' rejected');process.exit(2)`,
-    ];
-    f.h.config.gates[0].report = { type: 'junit', path: '.reports/unit.xml' };
-    f.h.pause(false);
-    await new Scheduler(f.h, f.root).drain();
-
-    const failed = f.store.read().tasks.find((t) => t.status === 'failed')!;
-    const summary = f.store
-      .read()
-      .runs.findLast((r) => r.taskId === failed.id)!
-      .evidence.find((e) => !e.passed)!.summary;
-    assert.match(summary, /Код выхода 2/, 'исходный код выхода сохранён');
-    assert.match(summary, /fatal: token .* rejected/, 'ошибка команды не затёрта отчётом');
-    assert.match(
-      summary,
-      /stdout-cause: schema mismatch/,
-      'stdout входит в причину вместе с stderr',
-    );
-    assert.doesNotMatch(summary, /Некорректный JUnit/, 'повреждённый отчёт не подменяет причину');
-    assert.ok(!summary.includes(secret) && !failed.failure!.includes(secret), 'секрет снят');
-    assert.ok(summary.length < 1000, `объём ограничен: ${summary.length}`);
-  } finally {
-    delete process.env.DEVCONTOUR_TEST_GATE_SECRET;
-    await f.cleanup();
-  }
-});
 test('Текст провала из отчёта проходит тот же redact, что и вывод команды', async () => {
   // Отчёт пишет раннер, и секрет попадает туда так же легко, как в вывод:
   // в сообщение провала, в том числе на границе обрезки, и в имя testcase.
@@ -987,30 +874,6 @@ test('Текст провала из отчёта проходит тот же r
     delete process.env.DEVCONTOUR_TEST_GATE_SECRET;
     await f.cleanup();
   }
-});
-test('Длинный вывод одного потока не вытесняет различающуюся ошибку другого', async () => {
-  // Четыре длинные строки stdout, три длинных предупреждения в stderr и одна
-  // ошибка, которая меняется. Общий лимит, заполняемый stdout первым,
-  // оставлял обоим провалам один и тот же текст и один отпечаток.
-  const fingerprints: string[] = [];
-  for (const marker of ['EXPECTED_TOTAL_WRONG', 'MISSING_REQUIRED_FIELD']) {
-    const f = await runtimeFixture();
-    try {
-      f.h.config.gates[0].command = [
-        process.execPath,
-        '-e',
-        `for(let i=0;i<4;i++)console.log('progress '+'o'.repeat(300));for(let i=0;i<3;i++)console.error('warning '+'w'.repeat(300));console.error('error: ${marker}');process.exit(1)`,
-      ];
-      f.h.pause(false);
-      await new Scheduler(f.h, f.root).drain();
-      const failed = f.store.read().tasks.find((t) => t.status === 'failed')!;
-      assert.match(failed.failure!, new RegExp(marker));
-      fingerprints.push(failed.failureFingerprint!);
-    } finally {
-      await f.cleanup();
-    }
-  }
-  assert.notEqual(fingerprints[0], fingerprints[1]);
 });
 test('Проверка исполняется в песочнице: полезное работает, запрещённое отклоняется', async () => {
   // Прежде проверка шла обычным процессом хоста: читала базу контура,
@@ -1076,34 +939,9 @@ const s=net.createServer(c=>c.end('pong')).listen(0,'127.0.0.1',()=>{
 });
 // «Без механизма песочницы проверка не запускается; снять изоляцию можно
 // только явно» — гарантия runner harness: tests/isolation.test.ts пакета (T29),
-// отказ без запуска команды и явный режим none.
-test('Путь отчёта через symlink отвергается до любой записи снаружи', async () => {
-  // Каталоги отчёта создавались рекурсивно, а граница проверялась после:
-  // symlink внутри worktree уводил создание каталога наружу до отказа.
-  const root = await mkdtemp(join(tmpdir(), 'devcontour-report-'));
-  try {
-    const worktree = join(root, 'worktree'),
-      outside = join(root, 'outside');
-    await mkdir(worktree);
-    await mkdir(outside);
-    await symlink(outside, join(worktree, '.reports'));
-    await assert.rejects(
-      () => prepareReportPath(worktree, '.reports/new/report.xml', 'Report выходит из worktree'),
-      /Report выходит из worktree/,
-    );
-    assert.equal(existsSync(join(outside, 'new')), false, 'снаружи ничего не создано');
-    await assert.rejects(
-      () => prepareReportPath(worktree, '../escape.xml', 'Report выходит из worktree'),
-      /Report выходит/,
-    );
-    // Обычный путь создаётся внутри worktree.
-    const path = await prepareReportPath(worktree, 'reports/unit/report.xml', 'x');
-    assert.ok(existsSync(join(worktree, 'reports', 'unit')));
-    assert.ok(path.endsWith(join('reports', 'unit', 'report.xml')));
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
+// отказ без запуска команды и явный режим none. Путь отчёта через symlink,
+// разбор JUnit, распознавание отказа сети и причины провала gate —
+// tests/gates.test.ts пакета.
 // Предел времени: возврат к очистке по close повесил бы тест на унаследованном
 // pipe — регресс должен быть провалом, а не зависанием. Шесть исходов идут
 // около двух минут; предел с запасом на нагрузку полного прогона.
@@ -1439,30 +1277,6 @@ test('Взятый кандидат проходит ту же проверку 
   } finally {
     await f.cleanup();
   }
-});
-
-test('Отказ сети песочницы узнаётся по выводу и называет домен', () => {
-  // Настоящий вывод pnpm из пилота: прокси песочницы ответил 403, клиент
-  // показал только код и URL.
-  const pnpm =
-    'candidate/install: Код выхода 1: ERR_PNPM_FETCH_403  GET https://registry.npmjs.org/@types/node/-/node-24.3.0.tgz: Forbidden - 403 | No authorization header was set for the request.';
-  assert.deepEqual(sandboxBlockedHosts(pnpm, []), ['registry.npmjs.org']);
-  assert.deepEqual(
-    sandboxBlockedHosts(pnpm, ['npmjs.org']),
-    [],
-    'поддомен разрешённого домена открыт',
-  );
-  assert.deepEqual(
-    sandboxBlockedHosts('connect EPERM 104.16.0.1:443 https://api.example.test/v1', []),
-    ['api.example.test'],
-  );
-  // Провал теста, который просто упоминает URL, — не отказ сети.
-  assert.deepEqual(
-    sandboxBlockedHosts('expected link https://example.com/docs to be rendered', []),
-    [],
-  );
-  // Отказ локального сервиса — не песочница.
-  assert.deepEqual(sandboxBlockedHosts('GET http://127.0.0.1:4000/x 403 Forbidden', []), []);
 });
 
 test('Проверка, которой песочница закрыла сеть, — отказ окружения, а не провал кода', async () => {

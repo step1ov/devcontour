@@ -223,6 +223,31 @@ test('Waiting cycles resume shutdown pauses but preserve explicit user pauses', 
   }
 });
 
+test('Повторная пауза человека после старта workflow — его новое решение: цикл её не снимает', async () => {
+  // Пауза, поставленная до старта workflow, — «очередь ещё не запускали», и
+  // цикл её снимает. Повторное нажатие паузы после старта — новое решение
+  // человека: время паузы обновляется, и цикл её не снимает.
+  const f = fixture();
+  const later = () => new Promise((r) => setTimeout(r, 5));
+  try {
+    const b = f.h.createBoard('Paused again', '', 'main');
+    f.h.addTask(b.id, input());
+    f.h.pause(true);
+    await later();
+    const flow = new LeadWorkflow(f.h);
+    flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    await later();
+    f.h.pause(true);
+    const runner = new LeadRunner(f.h, f.root);
+    for (let i = 0; i < 3; i++) await runner.tick();
+    await runner.stop();
+    assert.equal(f.store.read().paused, true, 'пауза человека не снята циклом');
+    assert.equal(f.store.read().pauseReason, 'operator');
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('Отмена из принятой ревизии не останавливает workflow следующего этапа', async () => {
   const f = fixture();
   try {

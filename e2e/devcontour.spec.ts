@@ -198,37 +198,45 @@ test('Local API rejects foreign origins and malformed changes', async ({ request
   expect(arbitrary.status()).toBe(404);
 });
 
-test('Ревью плана видно как работа агента, а не «никто не работает»', async ({ page }) => {
-  // Ревью плана идёт без прогона задачи: раньше полоса в это время молчала.
-  // Панель опрашивает сводку; ревизия в запросе убирается, чтобы каждый ответ
-  // был полным и подмена применялась.
-  await page.route('**/api/summary*', async (route) => {
-    const url = new URL(route.request().url());
-    url.searchParams.delete('revision');
-    const response = await route.fetch({ url: url.toString() });
-    const state = (await response.json()) as {
-      boards: { id: string; title: string }[];
-      workflows?: unknown[];
-    };
-    const board = state.boards.find((b) => b.title === 'Каталог продуктов')!;
-    state.workflows = [
-      {
-        key: 'k'.repeat(64),
-        kind: 'board',
-        id: board.id,
-        stage: 0,
-        status: 'running',
-        authorRuntime: 'claude',
-        reviewer: { runtime: 'codex', sameVendor: false },
-        history: [{ at: new Date().toISOString(), stage: 0, event: 'running' }],
-      },
-    ];
-    await route.fulfill({ response, json: state });
+for (const [label, author, reviewer, shown] of [
+  ['другим вендором', 'claude', { runtime: 'codex', sameVendor: false }, 'codex'],
+  // Тот же вендор бывает только по явному правилу и назван прямо.
+  ['тем же вендором', 'claude', { runtime: 'claude', sameVendor: true }, 'claude (тот же вендор)'],
+] as const)
+  test(`Ревью плана ${label} видно как работа агента, а не «никто не работает»`, async ({
+    page,
+  }) => {
+    // Ревью плана идёт без прогона задачи: раньше полоса в это время молчала.
+    // Панель опрашивает сводку; ревизия в запросе убирается, чтобы каждый ответ
+    // был полным и подмена применялась.
+    await page.route('**/api/summary*', async (route) => {
+      const url = new URL(route.request().url());
+      url.searchParams.delete('revision');
+      const response = await route.fetch({ url: url.toString() });
+      const state = (await response.json()) as {
+        boards: { id: string; title: string }[];
+        workflows?: unknown[];
+      };
+      const board = state.boards.find((b) => b.title === 'Каталог продуктов')!;
+      state.workflows = [
+        {
+          key: 'k'.repeat(64),
+          kind: 'board',
+          id: board.id,
+          stage: 0,
+          status: 'running',
+          authorRuntime: author,
+          reviewer,
+          history: [{ at: new Date().toISOString(), stage: 0, event: 'running' }],
+        },
+      ];
+      await route.fulfill({ response, json: state });
+    });
+    await page.goto('/');
+    const live = page.getByRole('region', { name: 'Сейчас работают' });
+    await expect(live).toContainText('Ревью плана');
+    const row = live.getByRole('list', { name: 'Работа ведущего цикла' }).getByRole('listitem');
+    await expect(row).toContainText(shown);
+    if (!reviewer.sameVendor) await expect(row).not.toContainText('тот же вендор');
+    await expect(row).toContainText('Каталог продуктов');
   });
-  await page.goto('/');
-  const live = page.getByRole('region', { name: 'Сейчас работают' });
-  await expect(live).toContainText('Ревью плана');
-  const row = live.getByRole('list', { name: 'Работа ведущего цикла' }).getByRole('listitem');
-  await expect(row).toContainText('codex');
-  await expect(row).toContainText('Каталог продуктов');
-});

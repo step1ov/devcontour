@@ -1,7 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { requirementProof } from 'devcontour-harness';
-import { junitSummary } from 'devcontour-harness';
 import type { Evidence } from '../src/core/model.ts';
 import { mkdtemp, writeFile, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -43,47 +41,6 @@ function evidence(over: Partial<Evidence> = {}): Evidence {
     ...over,
   };
 }
-
-test('Манифест собирается из отчёта проверки с исходами каждого testcase', () => {
-  const xml = `<?xml version="1.0"?>
-<testsuite tests="3" failures="1" skipped="1">
-  <testcase classname="cart.total" name="applies discount"/>
-  <testcase classname="cart.total" name="rejects negative"><failure message="boom"/></testcase>
-  <testcase classname="cart.total" name="pending"><skipped/></testcase>
-</testsuite>`;
-  const summary = junitSummary(xml);
-  assert.deepEqual(summary.cases, [
-    { id: 'cart.total.applies discount', status: 'passed' },
-    { id: 'cart.total.rejects negative', status: 'failed' },
-    { id: 'cart.total.pending', status: 'skipped' },
-  ]);
-  assert.equal(summary.truncated, false);
-  // Повреждённый отчёт не даёт манифеста вовсе.
-  assert.throws(() => junitSummary('<testsuite'), /Некорректный JUnit/);
-});
-
-test('Манифест на пределе размера помечается обрезанным и не подтверждает отсутствующий тест', () => {
-  // Предел — 2000 testcases. На пределе список полон; за ним обрезан, и
-  // отсутствие теста по такому списку не доказать.
-  const report = (count: number) =>
-    '<testsuite>' +
-    Array.from({ length: count }, (_, i) => `<testcase name="case-${i}"/>`).join('') +
-    '</testsuite>';
-  const full = junitSummary(report(2000));
-  assert.equal(full.cases.length, 2000);
-  assert.equal(full.truncated, false);
-  const over = junitSummary(report(2001));
-  assert.equal(over.cases.length, 2000);
-  assert.equal(over.truncated, true);
-  assert.equal(over.tests, 2001, 'счётчик считает все выполненные testcases');
-  const proof = requirementProof(
-    { id: 'REQ-1', gate: 'unit', testId: 'case-2000' },
-    [evidence({ tests: over.cases, testsTruncated: true })],
-    SHA,
-  );
-  assert.equal(proof.level, 'none');
-  assert.match(proof.reason, /обрезан/);
-});
 
 test('На настоящем прогоне приёмка требует именно названный тест', async () => {
   // Проверка идёт через реальный gate с отчётом JUnit: манифест собирается из

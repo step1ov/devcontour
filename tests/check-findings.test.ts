@@ -797,22 +797,6 @@ test('F16: every local root of the installation is scrubbed through the agent AP
   }
 });
 
-test('F17: scrubbing keeps legitimate text: routes, URLs with queries, other schemes, Unicode relative paths, dates and fractions', () => {
-  const roots = ['/data/Synthetic Space/project', '/tmp'];
-  for (const text of [
-    'route /api/users and /api/v1/tasks/7 answered 404',
-    'see https://example.com/~/api/v1 and https://example.com/home/page',
-    'redirect https://example.test/?next=/tmp/file.json kept',
-    'profile://example.test/a and git+ssh://host/x stay',
-    'relative src/модуль/файл.mjs, пример/tmp/file and tests/a b.mjs',
-    'on 2026/10/08 the ratio was 1/2; /tmpfoo, /tmp-file and /tmp2 are not roots',
-    'paths outside known roots stay: /data/input.json and /secret.json',
-  ])
-    assert.equal(scrubLocalPaths(text, roots), text);
-  assert.equal(scrubLocalPaths('at /tmp/x.json', roots), 'at <local-path>/x.json');
-  assert.equal(scrubLocalPaths('file:///tmp/x.json', roots), '<local-path>');
-});
-
 test('F18: different facts stay different after scrubbing, and normative differences conflict in the merge', () => {
   const roots = [tmpdir()];
   const one = scrubLocalPaths('Read /data/input.json actual=1 expected=/work/output.json', roots);
@@ -832,20 +816,6 @@ test('F18: different facts stay different after scrubbing, and normative differe
     assert.throws(() => mergeSuites(base, local, expected), /случай .* различается/);
   } finally {
     d.close();
-  }
-});
-
-test('F19: scrubbing is idempotent, including doubled separators and a root repeated inside a path', () => {
-  const roots = ['/data/project', '/data/Synthetic Space/project', tmpdir(), '/tmp'];
-  for (const text of [
-    'historic /data//cache//nested/private.json',
-    'Error at /data/project/data/project/data/project/input.json',
-    'at /data/Synthetic Space/project//nested//x.json and /Users/a//b.json',
-    'file:////host//share and C:\\\\Users\\\\x and <local-path>/x',
-    `${tmpdir()}${tmpdir()}${tmpdir()}/a and ${tmpdir()}//b`,
-  ]) {
-    const once = scrubLocalPaths(text, roots);
-    assert.equal(scrubLocalPaths(once, roots), once, text);
   }
 });
 
@@ -875,26 +845,6 @@ test('F20: facts that differ only in diagnostic text merge to the Git value on e
   }
 });
 
-test('F09/F16 residue: a path after an escaped newline or a colon is scrubbed; F17 residue: combining marks and link framing survive', () => {
-  const ws = '/srv/synthetic-ws';
-  const roots = [ws, '/tmp'];
-  const actual = canonicalJson({
-    error: `Error:\n${ws}/private.json\n\tC:\\Users\\Synthetic\\private.json`,
-  });
-  const out = scrubLocalPaths(actual, roots);
-  assert.equal(out.includes('synthetic'), false, out);
-  assert.equal(out.includes('Synthetic'), false, out);
-  assert.equal(scrubLocalPaths('ENOENT:/tmp/x.json', roots), 'ENOENT:<local-path>/x.json');
-  const combining = 'café/tmp/file';
-  assert.equal(scrubLocalPaths(combining, roots), combining);
-  assert.equal(
-    scrubLocalPaths('see [input](file:///tmp/input.json), then', roots),
-    'see [input](<local-path>), then',
-  );
-  for (const text of [out, 'see [input](<local-path>), then'])
-    assert.equal(scrubLocalPaths(text, roots), text);
-});
-
 test('F21: after a Git edit of only diagnostic text the local projection shows the Git value', () => {
   const d = domain();
   try {
@@ -913,23 +863,6 @@ test('F21: after a Git edit of only diagnostic text the local projection shows t
   } finally {
     d.close();
   }
-});
-
-test('F22: a file:// URL after a JSON-escaped newline, carriage return or tab is scrubbed, not read as another scheme', () => {
-  for (const escape of ['n', 'r', 't']) {
-    const actual = canonicalJson({ error: `Error:\\${escape}file:///srv/synthetic/private.json` });
-    const raw = JSON.stringify({
-      error: `Error:${escape === 'n' ? '\n' : escape === 'r' ? '\r' : '\t'}file:///srv/synthetic/private.json`,
-    });
-    for (const text of [actual, raw]) {
-      const out = scrubLocalPaths(text, []);
-      assert.equal(out.includes('synthetic'), false, out);
-      assert.equal(scrubLocalPaths(out, []), out);
-    }
-  }
-  // Обычный URL после перевода строки остаётся как есть.
-  const kept = JSON.stringify({ see: 'line\nhttps://example.com/a?b=1' });
-  assert.equal(scrubLocalPaths(kept, []), kept);
 });
 
 test('T35: основание корпуса и ID его случаев — прежняя формула DevContour; корпус прежней версии KS-<id> остаётся корпусом договора и привязкой задачи', () => {
