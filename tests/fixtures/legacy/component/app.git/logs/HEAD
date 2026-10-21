@@ -1,6 +1,6 @@
-0000000000000000000000000000000000000000 5edca6cccbb1fcbd214ae99c901f795142ebcb65 t <t@e> 1792435927 +0300	commit (initial): project
-5edca6cccbb1fcbd214ae99c901f795142ebcb65 5edca6cccbb1fcbd214ae99c901f795142ebcb65 t <t@e> 1792435928 +0300	checkout: moving from main to devcontour/run-window
-5edca6cccbb1fcbd214ae99c901f795142ebcb65 2ee9a711b248cf04fe50d576286f6a40257bf0fd t <t@e> 1792435928 +0300	commit: window: candidate
-2ee9a711b248cf04fe50d576286f6a40257bf0fd 5edca6cccbb1fcbd214ae99c901f795142ebcb65 t <t@e> 1792435929 +0300	checkout: moving from devcontour/run-window to devcontour/accepted
-5edca6cccbb1fcbd214ae99c901f795142ebcb65 c4a4efecafbf17126c126d01550f9ea2f2d5304f t <t@e> 1792435929 +0300	merge devcontour/run-window: Merge made by the 'recursive' strategy.
-c4a4efecafbf17126c126d01550f9ea2f2d5304f 5edca6cccbb1fcbd214ae99c901f795142ebcb65 t <t@e> 1792435929 +0300	checkout: moving from devcontour/accepted to main
+0000000000000000000000000000000000000000 0663cc4674e905dda66c5dab2931feef51354f6b t <t@e> 1792558284 +0000	commit (initial): project
+0663cc4674e905dda66c5dab2931feef51354f6b 0663cc4674e905dda66c5dab2931feef51354f6b t <t@e> 1792558284 +0000	checkout: moving from main to devcontour/run-window
+0663cc4674e905dda66c5dab2931feef51354f6b 86b329de42eaeb61ff66de07daae23490a23d4ee t <t@e> 1792558284 +0000	commit: window: candidate
+86b329de42eaeb61ff66de07daae23490a23d4ee 0663cc4674e905dda66c5dab2931feef51354f6b t <t@e> 1792558284 +0000	checkout: moving from devcontour/run-window to devcontour/accepted
+0663cc4674e905dda66c5dab2931feef51354f6b ada6ea744d53a001e5fb90227c8d250e9e844dee t <t@e> 1792558284 +0000	merge devcontour/run-window: Merge made by the 'ort' strategy.
+ada6ea744d53a001e5fb90227c8d250e9e844dee 0663cc4674e905dda66c5dab2931feef51354f6b t <t@e> 1792558284 +0000	checkout: moving from devcontour/accepted to main

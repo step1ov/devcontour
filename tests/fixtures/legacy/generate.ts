@@ -451,13 +451,17 @@ async function populate(store: Any, root: string, kind: 'central' | 'component')
   });
   h.approve(boardId, [taskId('Задача pending')], approval);
 
-  // Задания ведущего: доска A на стадии 1 с живым (позже истёкшим) lease,
-  // доска релиза — упавшая стадия.
+  // Задания ведущего: доска A на стадии 1 с истёкшим lease, доска релиза —
+  // упавшая стадия. Lease записан истёкшим, а не живым: иначе свежая копия
+  // зависела бы от того, сколько прошло с генерации.
   const lead = new LeadWorkflow(h);
   let job = lead.start({ kind: 'board', id: boardId, authorRuntime: 'claude' });
   job = lead.claim(job.key, job.owner);
   lead.finish(job);
-  lead.claim(job.key, job.owner);
+  const held = lead.claim(job.key, job.owner);
+  store.atomic(() =>
+    store.saveLocal('lead', held.owner, held.key, { ...held, leaseUntil: Date.parse(at(30)) }),
+  );
   const second = lead.start({ kind: 'board', id: release.id, authorRuntime: 'codex' });
   lead.fail(lead.claim(second.key, second.owner), 'Стадия согласования упала: ревью недоступно');
 

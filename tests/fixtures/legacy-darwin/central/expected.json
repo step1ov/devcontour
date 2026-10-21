@@ -21,11 +21,11 @@
     "Задача pending": {
       "policy": "617ea95e5694c25c1f0e5005f945c81978da10ffa6a22c978aebe56557febe43",
       "legacyPolicy": "4e1955c2402e405ab59af664c1ded526b90d84543918ffe04e96dcbd0228f4a0",
-      "checks": "4c537daabbe071da17b233479d1b0217785908e609803ba68b33488613c0cd58",
-      "spec": "93ee9c17a7da81dd6e961ff8b11c3c63cc492d48a67aa563ebe04406d8d2a8e6",
+      "checks": "78e6dd47c45c420bb9d60c25c783243444ac3d159587a7df49cb04f89b6a617a",
+      "spec": "cb00d610e6c6d9e07e1d4f99e5287c9cc417165cf354809555940e0de0d25d05",
       "scope": "b3c90d1ffaeb4abfb3faa55af5ce177d56abdec5ce9e658c5f04d3fef09f7d35",
-      "dependency": "0592da56dc28ffc6db9b0aefc0a2d4c98b8fc878366398504bba696d2188ff57",
-      "context": "7a6f4f38a9e17f0c096eecf71b7dad1f742c43ab659790c89da0630b0d223c46"
+      "dependency": "4187fe439891a83706c969886b4d0aa0aa59855fdfadb184d6423abffdd92ab5",
+      "context": "33c0cd691f54e09b816bfe5ca21cad7c98df6b10dff7c9ba5dbeb68a95fb8fbf"
     },
     "Задача active": {
       "policy": "617ea95e5694c25c1f0e5005f945c81978da10ffa6a22c978aebe56557febe43",
@@ -57,21 +57,21 @@
     "Задача property": {
       "policy": "617ea95e5694c25c1f0e5005f945c81978da10ffa6a22c978aebe56557febe43",
       "legacyPolicy": "4e1955c2402e405ab59af664c1ded526b90d84543918ffe04e96dcbd0228f4a0",
-      "checks": "2292144a282ea82a03111cb1477fc82e557ac7e1c0dd558cca64f74051025355",
-      "spec": "3c5f7db91df647bd6a63c060d57a1c99f51a876b9e5277a6c5aa9c5a49f8a854",
+      "checks": "67cf238a3709e9f61adfc9192616bbd516e990549319e65c216d2b17db2ea5ca",
+      "spec": "fcafc964761840e338c8a6e93ce877eb462e9491cddecad0e4e509fe4bf65cb2",
       "scope": "82ee61ff5d541f6cb961f6d2a8f53c6a5c22dea217fdd9f2e044a03f0dfc6c78",
-      "dependency": "996fe01659831f0e88ec6a0f1cabc6b1c804a60d65f84042f86705b66de9e29f",
-      "context": "8d684407460e5a47f5f9d98103eac0993e8409b85726f6f2428db38c8c589950"
+      "dependency": "ab1be9d7f05fe782f087d800b40441aeeb44167f1fc9f7ec8a1bd03f9b38a1e5",
+      "context": "3ad9b2c581c82cfceff5b72907b849721a96c5541bf8ae4fed795f43aafbd07a"
     }
   },
   "workspacePolicy": "02d7fe6ea20d72e3c6377fb69e024401ee223ba314dcf41cdc4b823d2ba67f8d",
   "lead": {
-    "9daffb2bfacd83e14cebd575bf2cc8d88208da4dc4207568224a38e0f6975f21": "3a235598204092731bc0c1ded635e04c77403ac458c82403be623ef58e0b3478",
-    "bff1a896fec687aa881e2bb1d4914055d2ba1b028b29872140308021bf54a540": "f402e5d592c771fea6292bd14d4a1bef10fd5965ea4a814258799da76ade1605"
+    "b20e5ceae7a5baa533a4dd2c258aeaa13d84a152050499c847ee464db322c47e": "01ad1538611b1c96c808ebc57e29a80032257908c3a9a9ab0bb3747eeb34bd67",
+    "cfbdb13a806163e28722cd8a487215fb535c1e976236be5b917651277d4db57b": "5fe6216ff66a107b17a660f42767aa9107b013033dbd9fa2063171efaf5bdd24"
   },
   "corpus": {
     "Задача property": {
-      "suite": "KS-C-9ec65d6b-4304-4b7a-a662-eb0c3b566dde",
+      "suite": "KS-C-6245939f-2522-4d27-8b6b-b0ac37cac889",
       "basis": "a03bde32e527b32301902c507ca48c9936f93cecfd013d6a7922b9ec54647751"
     }
   }

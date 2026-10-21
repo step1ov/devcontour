@@ -68,6 +68,28 @@ const variant = ['legacy', 'legacy-darwin']
 if (!variant) throw new Error('Нет варианта legacy fixtures с каноническим путём на этой машине');
 const fixtures = variant.dir;
 const ROOT = variant.root;
+/**
+ * Вариант согласован со своим ROOT: пути конфигураций и владелец базы
+ * компонента записаны под ним. Вариант, записанный по чужому пути, иначе
+ * падал бы отказом владельца глубоко внутри сценариев.
+ */
+function recordedPaths() {
+  const db = new DatabaseSync(join(fixtures, 'component/app/.devcontour-local/state.sqlite'), {
+    readOnly: true,
+  });
+  const owner = db.prepare('SELECT coordinator FROM owner').get() as { coordinator: string };
+  db.close();
+  return [
+    ...['central/config.json', 'component/coordinator/config.json'].map((f) => [
+      f,
+      (JSON.parse(readFileSync(join(fixtures, f), 'utf8')) as Config).repository,
+    ]),
+    ['component/app/.devcontour-local/state.sqlite', owner.coordinator],
+  ];
+}
+for (const [file, recorded] of recordedPaths())
+  if (!recorded.startsWith(ROOT + '/'))
+    throw new Error(`Вариант ${fixtures}: ${file} записан не под ${ROOT}: ${recorded}`);
 const MARK = join(ROOT, '.devcontour-legacy-test');
 const options = { policyDigest: () => digestOf('policy') };
 
