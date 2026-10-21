@@ -1,5 +1,5 @@
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { realpathSync } from 'node:fs';
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { lstatSync, realpathSync } from 'node:fs';
 import { canonicalJson } from 'devcontour-harness';
 import { createHash } from 'node:crypto';
 import { portableTest } from './proof.ts';
@@ -61,8 +61,8 @@ function approval(a?: Approval) {
 export const receiptRecordBytes = (receipt: CompletionReceipt) =>
   Buffer.byteLength(canonical(recordSchema.parse({ version: 1, kind: 'receipt', data: receipt })));
 /**
- * Тождество проверок receipt, версия 2: SHA-256 канонического JSON
- * `{ version: 2, policy }`, где `policy` — та самая запись договора попытки,
+ * Тождество проверок receipt, версия 3: SHA-256 канонического JSON
+ * `{ version: 3, policy }`, где `policy` — та самая запись договора попытки,
  * из которой считается её policyDigest (`taskPolicyInput`/`policyInput`:
  * gates, группы, окружение конфигурации и компонентов вместе с источниками
  * секретов, подготовка, lifecycle, ресурсы, роли и прочее). Полнота — по
@@ -71,45 +71,25 @@ export const receiptRecordBytes = (receipt: CompletionReceipt) =>
  * (workspace, репозиторий, компонент, каталог контроллера) заменяется на
  * `{ $root: <имя корня>, path: <путь от корня> }`: разные clone одной
  * проверки дают одно тождество, а `<root>/smoke.json` и `<root>/full.json` —
- * разные. «Внутри» — по физическому адресу: `..` и символические ссылки
- * разбираются, и путь, который через них выходит за корень
- * (`<repo>/../cases.json`), остаётся исходной строкой — его смысл у другого
- * clone не установить, и receipt потребует перепроверки. Прочие абсолютные
- * строки тоже остаются как есть. Значения секретов в договор не входят —
- * только их имена и источники.
+ * разные. Правило консервативно — ошибиться можно только в сторону «путь не
+ * переносится, receipt требует перепроверки», но не в сторону ложного
+ * совпадения (см. `portablePath`). Прочие строки остаются как есть. Значения
+ * секретов в договор не входят — только их имена и источники.
  */
 export type PolicyRoot = { name: string; path: string };
-/**
- * Физический адрес: сегменты разбираются по очереди, существующий префикс —
- * через realpath (символическая ссылка, `/tmp` → `/private/tmp`), `..` —
- * после него. Несуществующий хвост разбирается лексически: в нём ссылок нет.
- */
-function physical(path: string) {
-  const parts = resolve(path).split(sep).filter(Boolean);
-  let current: string = sep;
-  for (let i = 0; i < parts.length; i++) {
-    const next = join(current, parts[i]);
-    try {
-      current = realpathSync(next);
-    } catch {
-      return resolve(next, ...parts.slice(i + 1));
-    }
-  }
-  return current;
-}
+/** Написания корня: как в конфигурации, его realpath и пара `/tmp` ↔ `/private/tmp`. */
 function spellings(path: string) {
-  const out = new Set([resolve(path), physical(path)]);
+  const out = new Set([resolve(path)]);
+  try {
+    out.add(realpathSync(path));
+  } catch {
+    // Корня ещё нет — остаётся написание из конфигурации.
+  }
   for (const p of [...out])
     if (p.startsWith('/private/')) out.add(p.slice('/private'.length));
     else if (/^\/(?:tmp|var|etc)(?:\/|$)/.test(p)) out.add('/private' + p);
   return [...out];
 }
-const within = (root: string, path: string) => {
-  const rel = relative(root, path);
-  return rel === '' || (!isAbsolute(rel) && rel !== '..' && !rel.startsWith('..' + sep))
-    ? rel
-    : undefined;
-};
 export function policyRoots(h: DevContour): PolicyRoot[] {
   const named: [string, string | undefined][] = [
     ['workspace', h.config.workspaceRoot],
@@ -122,18 +102,36 @@ export function policyRoots(h: DevContour): PolicyRoot[] {
     .flatMap(([name, path]) => spellings(path).map((p) => ({ name, path: p })))
     .sort((a, b) => b.path.length - a.path.length || a.name.localeCompare(b.name));
 }
-export function portablePolicy(value: unknown, roots: readonly PolicyRoot[]): unknown {
-  if (typeof value === 'string') {
-    if (!isAbsolute(value)) return value;
-    // Лексический префикс не годится: `<repo>/../x` начинается с корня, но
-    // лежит вне его. Сверяется физический адрес — и сам путь, и корень.
-    const real = physical(value);
-    for (const root of roots) {
-      const rel = within(root.path, real);
-      if (rel !== undefined) return { $root: root.name, path: rel.split(sep).join('/') };
+/**
+ * Путь от корня — только для строки вида `<корень>/<имя>/…/<имя>`, написанной
+ * буквально: корень — одно из написаний `spellings`, сегменты — непустые
+ * обычные имена (без `.`, `..`, `//` и завершающего `/`), ни один уже
+ * существующий сегмент не символическая ссылка; отсутствующий хвост
+ * допустим. Ничего не разбирается и не нормализуется: `..`, ссылка, `/` после
+ * файла и другой регистр у другого clone могут значить другой файл, поэтому
+ * такая строка остаётся как есть. Корень — самый длинный совпавший, при
+ * равной длине — по имени: выбор одинаков у обеих сторон.
+ */
+export function portablePath(value: string, roots: readonly PolicyRoot[]) {
+  const root = roots.find((r) => value === r.path || value.startsWith(r.path + sep));
+  if (!root) return undefined;
+  if (value === root.path) return { $root: root.name, path: '' };
+  const segments = value.slice(root.path.length + 1).split(sep);
+  if (segments.some((s) => s === '' || s === '.' || s === '..')) return undefined;
+  let current = root.path;
+  for (const segment of segments) {
+    current = join(current, segment);
+    try {
+      if (lstatSync(current).isSymbolicLink()) return undefined;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') break;
+      return undefined;
     }
-    return value;
   }
+  return { $root: root.name, path: segments.join('/') };
+}
+export function portablePolicy(value: unknown, roots: readonly PolicyRoot[]): unknown {
+  if (typeof value === 'string') return portablePath(value, roots) ?? value;
   if (Array.isArray(value)) return value.map((v) => portablePolicy(v, roots));
   if (value && typeof value === 'object')
     return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, portablePolicy(v, roots)]));
@@ -141,7 +139,7 @@ export function portablePolicy(value: unknown, roots: readonly PolicyRoot[]): un
 }
 export const policyIdentity = (policy: unknown, roots: readonly PolicyRoot[]) =>
   createHash('sha256')
-    .update(canonicalJson({ version: 2, policy: portablePolicy(policy, roots) }))
+    .update(canonicalJson({ version: 3, policy: portablePolicy(policy, roots) }))
     .digest('hex');
 /**
  * Договоры, под которыми попытка задачи считается текущей, — digest и

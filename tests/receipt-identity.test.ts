@@ -398,20 +398,22 @@ test('S3-R4-01: путь, выходящий за корень через `..` �
       config({ repository: repo, workspaceRoot: join(root, 'ws') }),
     );
     const roots = policyRoots(h);
-    // Лексический префикс корня, но физически вне его — как есть.
-    for (const escaped of [
+    // Путь с `..` или ссылкой не переносится, даже если физически он внутри
+    // корня (S3-R5-01): у другого clone та же запись может значить другой файл.
+    for (const raw of [
       // Строки собраны без join: join сам разобрал бы `..`.
       `${repo}/../../cases.json`,
       `${repo}/outside/cases.json`,
       `${repo}/outside/ws/../cases.json`,
+      `${repo}/sub/../smoke.json`,
+      `${repo}/../shared.json`,
     ])
-      assert.equal(portablePolicy(escaped, roots), escaped, escaped);
-    // `..`, который остаётся внутри корня, разбирается до пути от корня.
-    assert.deepEqual(portablePolicy(`${repo}/sub/../smoke.json`, roots), {
+      assert.equal(portablePolicy(raw, roots), raw, raw);
+    assert.deepEqual(portablePolicy(`${repo}/sub/smoke.json`, roots), {
       $root: 'repository',
-      path: 'smoke.json',
+      path: 'sub/smoke.json',
     });
-    assert.deepEqual(portablePolicy(`${repo}/../shared.json`, roots), {
+    assert.deepEqual(portablePolicy(`${root}/ws/shared.json`, roots), {
       $root: 'workspace',
       path: 'shared.json',
     });
@@ -458,6 +460,133 @@ test('S3-R4-01: путь, выходящий за корень через `..` �
       assert.throws(() => b.h.accept(board.id, head), /нужна перепроверка/, `${name} ${when}`);
       assert.equal(b.store.read().boards[0].revisions[0].snapshot, undefined, `${name} ${when}`);
     }
+  } finally {
+    p.cleanup();
+  }
+});
+
+// S3-R5: переносится только буквальная запись `<корень>/<имя>/…`, без `.`,
+// `..`, `//`, завершающего `/` и без символических ссылок среди существующих
+// сегментов. Ошибиться правило может только в сторону перепроверки: ни одна
+// пара физически разных входов не получает одну запись.
+test('S3-R5: переносимость пути — только буквальная запись внутри корня; `..`, ссылки, `.`, `//` и `/` после файла остаются строкой, физически разные входы не совпадают', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'devcontour-path-rule-')));
+  try {
+    const ws = join(root, 'ws');
+    const repo = join(ws, 'app');
+    mkdirSync(join(repo, 'sub'), { recursive: true });
+    writeFileSync(join(repo, 'cases.json'), '[]');
+    writeFileSync(join(root, 'cases.json'), '[1]');
+    symlinkSync(root, join(repo, 'link-out'));
+    symlinkSync(join(repo, 'sub'), join(repo, 'link-in'));
+    const h = new DevContour(
+      new Store(':memory:'),
+      config({ repository: repo, workspaceRoot: ws }),
+    );
+    const roots = policyRoots(h);
+    const portable: [string, string, string][] = [
+      [`${repo}/cases.json`, 'repository', 'cases.json'],
+      [`${repo}/sub/missing/tail.json`, 'repository', 'sub/missing/tail.json'],
+      [`${repo}`, 'repository', ''],
+      [`${ws}/shared.json`, 'workspace', 'shared.json'],
+      // Регистр не разбирается: другое написание — другая запись.
+      [`${repo}/Cases.json`, 'repository', 'Cases.json'],
+    ];
+    // `/tmp` ↔ `/private/tmp`: оба написания корня дают одну запись.
+    const alias = repo.startsWith('/private/') ? repo.slice('/private'.length) : undefined;
+    if (alias) portable.push([`${alias}/cases.json`, 'repository', 'cases.json']);
+    const raw = [
+      `${repo}/../cases.json`,
+      `${repo}/link-out/../cases.json`,
+      `${repo}/link-in/../cases.json`,
+      `${repo}/link-out/cases.json`,
+      `${repo}/link-in/x.json`,
+      `${repo}/./cases.json`,
+      `${repo}//cases.json`,
+      `${repo}/cases.json/`,
+      `${repo}/sub/`,
+      `${repo}/`,
+      `${root}/cases.json`,
+    ];
+    for (const [value, name, path] of portable)
+      assert.deepEqual(portablePolicy(value, roots), { $root: name, path }, value);
+    for (const value of raw) assert.equal(portablePolicy(value, roots), value, value);
+    // Совпадают только написания одного и того же входа.
+    const out = [...portable.map(([v]) => v), ...raw].map((v) =>
+      JSON.stringify(portablePolicy(v, roots)),
+    );
+    const same = alias ? [[0, portable.length - 1]] : [];
+    for (let i = 0; i < out.length; i++)
+      for (let j = i + 1; j < out.length; j++)
+        assert.equal(
+          out[i] === out[j],
+          same.some(([a, b]) => a === i && b === j),
+          `${i}:${out[i]} / ${j}:${out[j]}`,
+        );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // Независимые clone: ссылка перед `..` (S3-R5-01) и `/` после файла
+  // (S3-R5-03) у отправителя — receipt не подтверждает приёмку ни до, ни после
+  // импорта; обычный внутренний путь — подтверждает.
+  const p = peers();
+  try {
+    const local = (c: Cfg) => join(c.repository, '.devcontour-local');
+    const variants: [string, (c: Cfg) => string][] = [
+      [
+        'link before dotdot',
+        (c) => {
+          mkdirSync(local(c), { recursive: true });
+          symlinkSync(resolve(c.repository, '..', '..'), join(local(c), 'link'));
+          return `${local(c)}/link/../cases.json`;
+        },
+      ],
+      ['trailing separator', (c) => `${c.repository}/cases.json/`],
+    ];
+    for (const [name, value] of variants) {
+      const env = (c: Cfg) => {
+        c.environment = { inherit: [], values: { DATA_FILE: value(c) }, secrets: {} };
+      };
+      const slug = name.replace(/\W+/g, '-');
+      const a = p.peer(`${slug}-sender`, undefined, env);
+      assert.equal(
+        typeof portablePolicy(a.h.config.environment!.values.DATA_FILE, policyRoots(a.h)),
+        'string',
+        name,
+      );
+      const board = a.h.createBoard('Received board', '', 'main');
+      const task = a.h.addTask(board.id, input());
+      finishFixture(a);
+      for (const when of ['before', 'after'] as const) {
+        const b = p.peer(`${slug}-${when}`, a, when === 'before' ? env : undefined);
+        syncGit(b.h, { member: 'receiver' });
+        if (when === 'after') env(b.h.config);
+        assert.equal(b.store.read().tasks.find((t) => t.id === task.id)!.status, 'done', name);
+        assert.equal(b.store.read().runs.length, 0, name);
+        const head = git(b.repo, 'rev-parse', 'HEAD');
+        assert.throws(() => b.h.accept(board.id, head), /нужна перепроверка/, `${name} ${when}`);
+        assert.equal(b.store.read().boards[0].revisions[0].snapshot, undefined, `${name} ${when}`);
+      }
+    }
+    const plain = (c: Cfg) => {
+      c.environment = {
+        inherit: [],
+        values: { DATA_FILE: `${c.repository}/cases.json` },
+        secrets: {},
+      };
+    };
+    const a = p.peer('plain-sender', undefined, plain);
+    const board = a.h.createBoard('Received board', '', 'main');
+    a.h.addTask(board.id, input());
+    finishFixture(a);
+    const b = p.peer('plain-receiver', a, plain);
+    syncGit(b.h, { member: 'receiver' });
+    b.h.accept(board.id, git(b.repo, 'rev-parse', 'HEAD'));
+    assert.ok(
+      b.store.read().boards[0].revisions[0].snapshot,
+      'обычный внутренний путь переносится',
+    );
   } finally {
     p.cleanup();
   }
