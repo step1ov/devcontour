@@ -358,3 +358,74 @@ test('S4-R3-01/02: doctor --scope data открывает базы только 
     /нет владельца: product/,
   );
 });
+
+test('S4-R4-01: пустая база компонента без реестра не скрывает неизвестную версию ни от проверки данных, ни от обычного чтения и записи', () => {
+  // Начальное состояние штатного конструктора: базы и владелец созданы, доски
+  // ещё нет, у coordinator нет реестра компонентов.
+  const fresh = () => {
+    const root = mkdtempSync(join(tmpdir(), 'devcontour-empty-component-'));
+    const workspace = join(root, 'workspace');
+    mkdirSync(workspace);
+    const repos = ['product', 'library'].map((id) => {
+      const path = join(root, id);
+      mkdirSync(path);
+      return repositorySchema.parse({ id, name: id, path, gates: config().gates });
+    });
+    const c = config({ storage: 'component', workspaceRoot: workspace, repositories: repos });
+    new Store(join(workspace, 'state.sqlite'), repos).close();
+    const local = join(root, 'product', '.devcontour-local', 'state.sqlite');
+    return { root, workspace, repos, config: c, local };
+  };
+  const cases: [string, (s: Record<string, unknown>) => void][] = [
+    ['версия 999', (s) => (s.version = 999)],
+    ['версии нет', (s) => delete s.version],
+  ];
+  for (const [name, edit] of cases) {
+    const w = fresh();
+    try {
+      editDocument(w.local, edit);
+      const roots = [w.workspace, ...w.repos.map((r) => r.path)];
+      const before = snapshot(...roots);
+      const result = dataDoctor(w.config, w.workspace);
+      assert.equal(result.compatible, false, name + ': ' + JSON.stringify(result.checks));
+      assert.match(
+        result.checks.find((x) => x.id === 'state')?.detail ?? '',
+        /component database: product/,
+      );
+      // Обычное открытие читает состояние и отказывает до первой операции.
+      assert.throws(
+        () => new Store(join(w.workspace, 'state.sqlite'), w.repos),
+        /component database: product/,
+        name + ': обычное открытие',
+      );
+      assert.equal(snapshot(...roots), before, name + ': отказ ничего не изменил');
+      const after = new DatabaseSync(w.local, { readOnly: true });
+      const document = JSON.parse(
+        (after.prepare('SELECT data FROM main.state WHERE id=1').get() as { data: string }).data,
+      ) as Record<string, unknown>;
+      after.close();
+      assert.equal(document.version, name === 'версия 999' ? 999 : undefined, name);
+      const db = new DatabaseSync(join(w.workspace, 'state.sqlite'), { readOnly: true });
+      const main = JSON.parse(
+        (db.prepare('SELECT data FROM main.state WHERE id=1').get() as { data: string }).data,
+      ) as { boards: unknown[] };
+      db.close();
+      assert.equal(main.boards.length, 0, name + ': доска не создана');
+    } finally {
+      rmSync(w.root, { recursive: true, force: true });
+    }
+  }
+  // Положительный контроль: поддерживаемая версия.
+  const w = fresh();
+  try {
+    assert.equal(dataDoctor(w.config, w.workspace).compatible, true);
+    const store = new Store(join(w.workspace, 'state.sqlite'), w.repos);
+    try {
+      new DevContour(store, w.config).createBoard('First board', '', 'product');
+    } finally {
+      store.close();
+    }
+  } finally {
+    rmSync(w.root, { recursive: true, force: true });
+  }
+});

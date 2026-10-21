@@ -156,7 +156,24 @@ export class ComponentStorage {
       return JSON.parse(row.data);
     });
   }
+  /**
+   * Исходные документы баз компонентов. Версию проверяет каждый документ до
+   * любой ветки чтения и до записи: проекция в общий документ или перезапись
+   * пустым состоянием скрыли бы неизвестную версию базы компонента.
+   */
+  private localDocuments(): Record<string, unknown>[] {
+    return this.locations.map((l) => {
+      const document = JSON.parse(
+        (this.db.prepare(`SELECT data FROM ${l.schema}.state WHERE id=1`).get() as { data: string })
+          .data,
+      ) as Record<string, unknown>;
+      if (document.version !== 1)
+        throw new Error('Unsupported state version of component database: ' + l.id);
+      return document;
+    });
+  }
   read(main: any): DevContourState {
+    const local = this.localDocuments();
     if (!main.componentLayout) {
       if (
         main.tasks.length ||
@@ -167,16 +184,9 @@ export class ComponentStorage {
       )
         throw new Error('Нужна команда storage-migrate для прежней общей базы');
       if (
-        this.locations.some((l) => {
-          const s = JSON.parse(
-            (
-              this.db.prepare(`SELECT data FROM ${l.schema}.state WHERE id=1`).get() as {
-                data: string;
-              }
-            ).data,
-          );
-          return s.tasks.length || s.runs.length || s.boards.length || s.contracts.length;
-        })
+        local.some((s) =>
+          ['tasks', 'runs', 'boards', 'contracts'].some((key) => (s[key] as unknown[]).length),
+        )
       )
         throw new Error('Отсутствует реестр существующих локальных баз');
       return main;
@@ -188,17 +198,6 @@ export class ComponentStorage {
     )
       throw new Error('Реестр компонентов не совпадает с БД; нужна явная миграция состава');
     const merged = this.decode(JSON.stringify(main));
-    const local = this.locations.map((l) => {
-      const document = JSON.parse(
-        (this.db.prepare(`SELECT data FROM ${l.schema}.state WHERE id=1`).get() as { data: string })
-          .data,
-      ) as Record<string, unknown>;
-      // Версию проверяет каждый исходный документ: проекция в общий документ
-      // скрыла бы неизвестную версию базы компонента.
-      if (document.version !== 1)
-        throw new Error('Unsupported state version of component database: ' + l.id);
-      return document;
-    });
     for (const key of ['tasks', 'runs', 'boards', 'contracts']) {
       const entries = [...merged[key], ...local.flatMap((s) => s[key])];
       const map = new Map(entries.map((item: any) => [item.id, item]));
@@ -213,6 +212,7 @@ export class ComponentStorage {
     return merged;
   }
   write(state: DevContourState) {
+    this.localDocuments();
     const main: any = structuredClone(state),
       local = new Map(this.locations.map((l) => [l.id, emptyState()]));
     const layout: any = { locations: this.locations.map(({ id, path }) => ({ id, path })) };
