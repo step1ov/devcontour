@@ -1,19 +1,48 @@
+/**
+ * Проверка настоящего архива DevContour: состав, вложенный harness,
+ * установка без dev-зависимостей и скриптов в отдельный каталог, CLI, MCP,
+ * сервер и настоящий Git-цикл из чужого cwd. Каждый процесс установленного
+ * пакета пишет журнал загруженных модулей и открытых файлов; ни один путь
+ * журнала не может вести в checkout.
+ *
+ * `--archive F` проверяет уже выпущенный архив вместо свежей упаковки,
+ * `--offline` ставит его без сети (из кэша npm).
+ */
 import assert from 'node:assert/strict';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
-import { execFile, spawn } from 'node:child_process';
-import { promisify } from 'node:util';
-import { mkdtemp, mkdir, realpath, readFile, writeFile, rm, access } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { execFile, execFileSync, spawn } from 'node:child_process';
+import { parseArgs, promisify } from 'node:util';
+import {
+  mkdtemp,
+  mkdir,
+  realpath,
+  readFile,
+  readdir,
+  stat,
+  writeFile,
+  rm,
+  access,
+  copyFile,
+} from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { basename, join, resolve, sep } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const exec = promisify(execFile);
+const { values: options } = parseArgs({
+  options: { archive: { type: 'string' }, offline: { type: 'boolean', default: false } },
+});
 const source = fileURLToPath(new URL('../', import.meta.url));
+const checkout = await realpath(source);
 const root = await realpath(await mkdtemp(join(tmpdir(), 'devcontour-package-')));
 const installation = join(root, 'installation'),
   outside = join(root, 'outside');
+const trace = join(root, 'trace.mjs'),
+  traceLog = join(root, 'reads.log');
 let child;
 let closed;
 let output = '';
@@ -21,12 +50,47 @@ try {
   console.error('smoke-package: start');
   await mkdir(installation);
   await mkdir(outside);
-  const { stdout } = await exec(
-    'npm',
-    ['pack', '--json', '--ignore-scripts', '--pack-destination', root],
-    { cwd: source, timeout: 60000 },
+  // Архив: свежая упаковка checkout либо указанный выпуск (его байты не меняются).
+  let archive;
+  if (options.archive) {
+    const copy = join(root, basename(options.archive));
+    await copyFile(resolve(options.archive), copy);
+    const bytes = await readFile(copy);
+    archive = {
+      filename: basename(copy),
+      size: bytes.length,
+      integrity: 'sha512-' + createHash('sha512').update(bytes).digest('base64'),
+      files: execFileSync('tar', ['-tzf', copy], { encoding: 'utf8', maxBuffer: 1 << 26 })
+        .split('\n')
+        .filter((p) => p && !p.endsWith('/'))
+        .map((p) => ({ path: p.replace(/^package\//, '') })),
+    };
+  } else {
+    const { stdout } = await exec(
+      'npm',
+      ['pack', '--json', '--ignore-scripts', '--pack-destination', root],
+      { cwd: source, timeout: 60000 },
+    );
+    [archive] = JSON.parse(stdout);
+  }
+  // Файлы DevContour и вложенного harness без путей машины автора, приватных
+  // каталогов и ключей (сторонние модули не проверяются этим правилом).
+  const unpacked = join(root, 'unpacked');
+  await mkdir(unpacked);
+  execFileSync('tar', ['-xzf', join(root, archive.filename), '-C', unpacked]);
+  const forbidden = [checkout, process.env.HOME, '/.private/', 'PRIVATE KEY-----'].filter(
+    (v) => v && v.length > 6,
   );
-  const [archive] = JSON.parse(stdout);
+  for (const entry of await readdir(unpacked, { recursive: true })) {
+    const own = entry.replace(/^package\//, '');
+    if (own.startsWith('node_modules/') && !own.startsWith('node_modules/devcontour-harness/'))
+      continue;
+    const file = join(unpacked, entry);
+    if (!(await stat(file)).isFile()) continue;
+    const text = await readFile(file, 'utf8');
+    const hit = forbidden.find((v) => text.includes(v));
+    assert.ok(!hit, `архив содержит «${hit}»: ${own}`);
+  }
   assert.ok(archive.files.some((f) => f.path === 'lib/cli.js'));
   assert.ok(archive.files.some((f) => f.path === 'dist/index.html'));
   assert.ok(archive.files.some((f) => f.path === 'templates/project/.agents/roles/backend.md'));
@@ -91,7 +155,7 @@ try {
       'install',
       // Reuse npm's download cache, never a previous installation. An explicit
       // npm_config_cache still works, including for a cold-cache release check.
-      '--prefer-offline',
+      options.offline ? '--offline' : '--prefer-offline',
       '--omit=dev',
       '--ignore-scripts',
       '--no-audit',
@@ -101,6 +165,31 @@ try {
     { cwd: installation, timeout: 120000 },
   );
   console.error('smoke-package: archive installed; checking the packaged runtime');
+  // Журнал чтения: каждый node-процесс установленного пакета (CLI, MCP,
+  // сервер, gates) загружает модуль, который записывает пути загруженных
+  // модулей и открытых файлов. Модуль лежит во временном каталоге.
+  await writeFile(
+    trace,
+    `import fs from 'node:fs';
+import { registerHooks, syncBuiltinESMExports } from 'node:module';
+const log = ${JSON.stringify(traceLog)};
+const append = fs.appendFileSync.bind(fs);
+const note = (p) => { try { append(log, String(p instanceof URL ? p.pathname : p) + '\\n'); } catch {} };
+registerHooks({ resolve(specifier, context, next) { const r = next(specifier, context); if (r.url.startsWith('file:')) note(new URL(r.url)); return r; } });
+for (const name of ['readFileSync', 'openSync', 'readdirSync', 'existsSync', 'statSync', 'readFile', 'open', 'readdir', 'cpSync', 'copyFileSync']) {
+  const original = fs[name];
+  fs[name] = function (p, ...rest) { if (typeof p === 'string' || p instanceof URL) note(p); return original.call(this, p, ...rest); };
+}
+for (const name of ['readFile', 'open', 'readdir', 'stat']) {
+  const original = fs.promises[name];
+  fs.promises[name] = function (p, ...rest) { if (typeof p === 'string' || p instanceof URL) note(p); return original.call(this, p, ...rest); };
+}
+syncBuiltinESMExports();
+`,
+  );
+  process.env.NODE_OPTIONS = [process.env.NODE_OPTIONS, '--import ' + pathToFileURL(trace).href]
+    .filter(Boolean)
+    .join(' ');
   const installed = join(installation, 'node_modules/devcontour');
   const bin = join(installation, 'node_modules/.bin/devcontour');
   await assert.rejects(access(join(installed, 'src')));
@@ -268,6 +357,7 @@ try {
         command: bin,
         args: ['mcp', '--workspace', workspace],
         cwd: outside,
+        env: { ...process.env },
         stderr: 'pipe',
       }),
     );
@@ -483,10 +573,24 @@ try {
     0,
   );
 
+  // Ни один процесс пакета не читал checkout: журнал есть и не ведёт в него.
+  assert.ok(existsSync(traceLog), 'журнал чтения пуст: модуль трассировки не загружался');
+  const reads = (await readFile(traceLog, 'utf8')).split('\n').filter(Boolean);
+  const leaked = [...new Set(reads.map((p) => resolve(outside, p)))].filter(
+    (p) => p === checkout || p.startsWith(checkout + sep),
+  );
+  assert.deepEqual(leaked.slice(0, 5), [], 'пакет читал файлы checkout');
+  assert.ok(
+    reads.some((p) => p.includes(join('node_modules', 'devcontour-harness', 'lib'))),
+    'журнал чтения не содержит модулей вложенного harness',
+  );
+
   console.log(
     JSON.stringify(
       {
         package: archive.filename,
+        integrity: archive.integrity,
+        reads: reads.length,
         size: archive.size,
         checks: [
           'isolated production install',
@@ -507,6 +611,7 @@ try {
           'installed protocol evals',
           'installed intent render, snapshot and missing-work report',
           'CLI coverage gate rejects an undecomposed release',
+          'no read inside the checkout; no author path, private directory or key in the archive',
         ],
       },
       null,

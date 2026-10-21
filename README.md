@@ -62,6 +62,19 @@ npm run demo
 
 Установку DevContour можно использовать для нескольких независимых workspace. Подготовленный этап продолжает выполняться сервером и после закрытия чата; для нового планирования и разбора сбоев нужен ведущий агент. [Подробный порядок работы](docs/workflow.md).
 
+## Установка из архива
+
+DevContour поставляется архивом `devcontour-<version>.tgz`; движок исполнения `devcontour-harness` вложен в него и закреплён по версии и integrity, отдельный checkout harness не нужен:
+
+```sh
+mkdir devcontour-install && cd devcontour-install
+npm init -y >/dev/null
+npm install --omit=dev --ignore-scripts ./devcontour-<version>.tgz
+npx devcontour help
+```
+
+Проверка выпущенного архива целиком — `npm run check:install -- <архив>` из checkout DevContour: установка в отдельный каталог без сети, CLI, MCP, сервер и настоящий Git-цикл на fixture runtime, без чтения файлов checkout. Закреплённая версия harness и её архив — в [vendor/harness](vendor/harness/README.md).
+
 ## Где находятся данные
 
 Для одного репозитория или монорепозитория можно выбрать `embedded`: сам корень проекта становится workspace, вся память находится внутри его `.devcontour/` и `.devcontour-local/`. Продуктовые данные не требуют отдельного Git. Для нескольких самостоятельных репозиториев используется `separate`:

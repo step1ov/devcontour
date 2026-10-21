@@ -14,7 +14,7 @@ npm pack
 `prepack` проверяет типы, компилирует Node-код в `lib/` и собирает UI в `dist/`. Полученный `devcontour-<version>.tgz` можно передать коллеге или установить из доверенного внутреннего хранилища:
 
 ```bash
-npm install --global /absolute/devcontour-0.3.0.tgz
+npm install --global /absolute/devcontour-<version>.tgz
 devcontour help
 # Для уже подготовленного workspace:
 devcontour start --workspace /absolute/product-workspace --port 0
@@ -37,6 +37,10 @@ devcontour start --workspace /absolute/product-workspace --port 0
 5. Проверяет завершение учебной задачи через настоящий Git workflow из установленного пакета.
 6. Регистрирует board workflow через HTTP и ждёт автоматической приёмки сервером; проверяет метрики, отсутствие lease token в ответе и дедупликацию внешнего сигнала, остающегося draft.
 7. Запускает установленный evaluator с детерминированным driver без моделей.
+
+Каждый процесс установленного пакета (CLI, MCP, сервер, gates) пишет журнал загруженных модулей и открытых файлов; путь внутри исходного checkout — провал проверки. Файлы DevContour и вложенного `devcontour-harness` в архиве не содержат путей машины автора, приватных каталогов и ключей. Движок исполнения вложен в архив (`bundledDependencies`) и закреплён по версии и integrity в `package-lock.json`.
+
+Выпущенный архив проверяется той же процедурой без сети: `npm run check:install -- ./devcontour-<version>.tgz` (нужен прогретый npm cache с runtime dependencies).
 
 Тест требует доступа к npm registry для обычных runtime dependencies. Он не вызывает модели, не публикует архив и не использует корпоративные сервисы. Временные процессы и каталоги удаляются после проверки. Это проверка установленного продукта, отдельная от unit-тестов исходников.
 
