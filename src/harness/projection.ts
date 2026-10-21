@@ -413,6 +413,7 @@ const verificationKeys = [
   'id',
   'token',
   'leaseUntil',
+  'engineVersion',
   'startedAt',
   'finishedAt',
   'status',

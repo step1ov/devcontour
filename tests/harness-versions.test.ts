@@ -133,3 +133,33 @@ test('doctor называет версию движка и версии, зап�
   const own = { owner: 'c1', leaseUntil: now + 60_000, engineVersion: harnessVersion };
   assert.equal(engineCheck({ runs, leader: own }, now).status, 'passed');
 });
+
+test('S4-R1-02: активную попытку прежней версии движка новый процесс не продолжает её token до истечения срока', () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    f.h.pause(false);
+    const run = f.h.claim('older-process')!;
+    assert.ok(run, 'попытка выдана');
+    f.h.heartbeat(run.id, run.token); // своя версия ведёт попытку
+    // Попытку выдал движок прежней версии; срок не истёк.
+    f.store.change('test.older-engine', (state) => {
+      const r = state.runs.find((x) => x.id === run.id)!;
+      (r as { engineVersion?: string }).engineVersion = '0.0.1-older';
+      if (state.leader) (state.leader as { engineVersion?: string }).engineVersion = '0.0.1-older';
+    });
+    const before = JSON.stringify(f.store.read().runs.find((x) => x.id === run.id));
+    assert.throws(() => f.h.heartbeat(run.id, run.token), /выдал движок 0\.0\.1-older/);
+    assert.throws(() => f.h.phase(run.id, run.token, 'verifying'), /выдал движок 0\.0\.1-older/);
+    assert.equal(
+      JSON.stringify(f.store.read().runs.find((x) => x.id === run.id)),
+      before,
+      'попытка прежней версии изменена',
+    );
+  } finally {
+    f.store.close();
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});

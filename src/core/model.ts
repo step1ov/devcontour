@@ -759,6 +759,8 @@ export interface Verification {
   id: string;
   token: string;
   leaseUntil: number;
+  /** Версия движка, начавшего проверку; у проверок прежних версий нет. */
+  engineVersion?: string;
   startedAt: string;
   finishedAt?: string;
   status: 'active' | 'passed' | 'failed';
