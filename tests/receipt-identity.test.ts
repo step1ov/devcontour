@@ -8,6 +8,7 @@ import {
   realpathSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -20,8 +21,11 @@ import {
   policyRoots,
   policyVariants,
   portablePolicy,
+  rootSpellings,
 } from '../src/core/sync-state.ts';
 import { syncGit } from '../src/runner/git-sync.ts';
+import { loadConfig } from '../src/runner/config.ts';
+import { configuredSpellings } from '../src/core/check-store.ts';
 import { config, input } from './helpers.ts';
 
 // Receipt называет проверки, которыми подтверждён результат (тождество gates
@@ -589,6 +593,132 @@ test('S3-R5: переносимость пути — только букваль
     );
   } finally {
     p.cleanup();
+  }
+});
+
+// S3-R6: написание корня — только подтверждённое ФС. Догадка о написании
+// (`/private/x` ↔ `/x`) и исходные написания конфигурации принимаются, лишь
+// если ведут в тот же каталог; иначе путь под ними остаётся строкой.
+test('S3-R6: корень-алиас переносит путь, только если ФС подтверждает, что это тот же каталог; исходное написание из config.json после loadConfig — тоже', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'devcontour-root-alias-')));
+  try {
+    const repo = join(root, 'Product');
+    const other = join(root, 'Other');
+    for (const d of [repo, other]) {
+      mkdirSync(d);
+      writeFileSync(join(d, 'cases.json'), d === repo ? '[1]' : '[1,2]');
+    }
+    symlinkSync(repo, join(root, 'repo-alias'));
+    const alias = join(root, 'repo-alias');
+    // Догадка указывает на другой существующий каталог, на отсутствующий и на
+    // настоящий алиас: принимается только последний.
+    const guessed = (to: string) => () => to;
+    for (const [to, accepted] of [
+      [other, false],
+      [join(root, 'missing'), false],
+      [alias, true],
+    ] as const)
+      assert.equal(rootSpellings(repo, [], guessed(to)).includes(to), accepted, to);
+    // Исходные написания конфигурации — те же правила.
+    const spelled = rootSpellings(repo, [other, alias, join(root, 'missing')]);
+    assert.ok(spelled.includes(alias));
+    assert.ok(!spelled.includes(other));
+    assert.ok(!spelled.includes(join(root, 'missing')));
+    // Штатная догадка `/private`: каждое принятое написание — тот же каталог.
+    const tmpRoot = mkdtempSync('/tmp/devcontour-private-alias-');
+    try {
+      for (const s of rootSpellings(tmpRoot))
+        assert.equal(realpathSync(s), realpathSync(tmpRoot), s);
+      if (!rootSpellings(tmpRoot).some((s) => s.startsWith('/private/')))
+        assert.notEqual(
+          (() => {
+            try {
+              return realpathSync('/private' + tmpRoot);
+            } catch {
+              return undefined;
+            }
+          })(),
+          realpathSync(tmpRoot),
+        );
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+
+    // loadConfig заменяет корень на физический; исходное написание из
+    // config.json остаётся написанием корня (S3-R6-02).
+    const file = join(root, 'config.json');
+    writeFileSync(file, JSON.stringify(config({ repository: alias })));
+    const loaded = loadConfig(file);
+    assert.equal(loaded.repository, repo);
+    const h = new DevContour(new Store(':memory:'), loaded);
+    const roots = policyRoots(h);
+    const expected = { $root: 'repository', path: 'cases.json' };
+    assert.deepEqual(portablePolicy(`${alias}/cases.json`, roots), expected);
+    assert.deepEqual(portablePolicy(`${repo}/cases.json`, roots), expected);
+    assert.equal(portablePolicy(`${other}/cases.json`, roots), `${other}/cases.json`);
+    // Неподтверждённое написание в config.json: корень перенаправлен — исходное
+    // написание ведёт в другой каталог и корнем больше не считается.
+    unlinkSync(alias);
+    symlinkSync(other, alias);
+    assert.equal(portablePolicy(`${alias}/cases.json`, policyRoots(h)), `${alias}/cases.json`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// S3-R6-01 на независимых clone: у обеих сторон есть неподтверждённое
+// написание корня (другой каталог вне clone с разным содержимым). Путь под
+// ним не переносится — receipt требует перепроверки до и после импорта в
+// обеих топологиях; без такого написания обычный путь переносится.
+test('S3-R6-01: неподтверждённое написание корня не делает переносимым внешний вход — отказ без snapshot до и после импорта, component и central', () => {
+  for (const storage of ['component', 'central'] as const) {
+    const p = peers();
+    try {
+      const outside = (c: Cfg) => resolve(c.repository, '..', 'outside');
+      const env = (c: Cfg) => {
+        c.storage = storage;
+        mkdirSync(outside(c), { recursive: true });
+        writeFileSync(
+          join(outside(c), 'cases.json'),
+          c.repository.includes('sender') ? '[1]' : '[1,2]',
+        );
+        configuredSpellings.set(c, [outside(c)]);
+        c.environment = {
+          inherit: [],
+          values: { DATA_FILE: `${outside(c)}/cases.json` },
+          secrets: {},
+        };
+      };
+      const a = p.peer('sender', undefined, env);
+      assert.equal(
+        typeof portablePolicy(a.h.config.environment!.values.DATA_FILE, policyRoots(a.h)),
+        'string',
+        storage,
+      );
+      const board = a.h.createBoard('Received board', '', 'main');
+      const task = a.h.addTask(board.id, input());
+      finishFixture(a);
+      for (const when of ['before', 'after'] as const) {
+        const b = p.peer(
+          `receiver-${when}`,
+          a,
+          when === 'before' ? env : (c) => (c.storage = storage),
+        );
+        syncGit(b.h, { member: 'receiver' });
+        if (when === 'after') env(b.h.config);
+        assert.equal(b.store.read().tasks.find((t) => t.id === task.id)!.status, 'done');
+        assert.equal(b.store.read().runs.length, 0);
+        const head = git(b.repo, 'rev-parse', 'HEAD');
+        assert.throws(() => b.h.accept(board.id, head), /нужна перепроверка/, `${storage} ${when}`);
+        assert.equal(
+          b.store.read().boards[0].revisions[0].snapshot,
+          undefined,
+          `${storage} ${when}`,
+        );
+      }
+    } finally {
+      p.cleanup();
+    }
   }
 });
 

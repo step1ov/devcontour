@@ -8,10 +8,13 @@ import { Store } from '../src/core/store.ts';
 import { DevContour, digest } from '../src/core/service.ts';
 import { effectiveChecks } from '../src/core/checks.ts';
 import { receiptSchema, type CompletionReceipt } from '../src/core/sync-model.ts';
+import { createHash } from 'node:crypto';
+import { canonicalJson } from 'devcontour-harness';
 import {
   policyIdentity,
   policyRoots,
   policyVariants,
+  portablePolicy,
   validateReceipt,
 } from '../src/core/sync-state.ts';
 import { receiptFields } from '../src/harness/receipt.ts';
@@ -344,6 +347,62 @@ test('S3-R4-02: receipt задачи с потребителями подтве�
         variant,
       );
       assert.equal(d.store.read().boards[0].revisions[0].snapshot, undefined, variant);
+    } finally {
+      d.close();
+    }
+  }
+});
+
+// S3-R6-01: тождества версий 2–3 строились с текстовыми `/private`-алиасами
+// корней и могли совпасть при разных входах. Receipt с таким тождеством
+// импортируется как прежде, но новую приёмку подтверждает только тождество
+// текущей версии того же договора.
+test('S3-R6-01: receipt с тождеством прежней версии не подтверждает новую приёмку; тождество текущей версии того же договора — подтверждает', () => {
+  for (const version of [2, 3, 'current'] as const) {
+    const d = domain();
+    try {
+      const task = approvedTask(d);
+      const input = d.h.taskPolicyInput(task);
+      const roots = policyRoots(d.h);
+      const receipt = receiptOf(task);
+      receipt.policyDigest = digest(input);
+      receipt.gateIdentity =
+        version === 'current'
+          ? policyIdentity(input, roots)
+          : createHash('sha256')
+              .update(canonicalJson({ version, policy: portablePolicy(input, roots) }))
+              .digest('hex');
+      const checks = effectiveChecks(task, receipt.policyDigest);
+      receipt.checkVersion = { effective: checks };
+      for (const e of receipt.checks) e.checks = checks;
+      const received = {
+        ...task,
+        status: 'done' as const,
+        resultSha: receipt.resultSha,
+        sharedCompletion: { receipt },
+      } as Task;
+      assert.equal(
+        d.h.receiptHolds(d.store.read(), received),
+        version === 'current',
+        String(version),
+      );
+      d.store.change('fixture.received', (s) => {
+        Object.assign(
+          s.tasks.find((t) => t.id === task.id)!,
+          received,
+        );
+      });
+      if (version === 'current') {
+        d.h.accept(d.store.read().boards[0].id, receipt.resultSha);
+        assert.ok(d.store.read().boards[0].revisions[0].snapshot);
+      } else {
+        assert.throws(
+          () => d.h.accept(d.store.read().boards[0].id, receipt.resultSha),
+          /нужна перепроверка/,
+          String(version),
+        );
+        assert.equal(d.store.read().boards[0].revisions[0].snapshot, undefined, String(version));
+      }
     } finally {
       d.close();
     }

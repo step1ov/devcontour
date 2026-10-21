@@ -6,7 +6,13 @@ import { portableTest } from './proof.ts';
 import { validatePreparation } from './preparation.ts';
 import { contractDigest, digest, scopeDigest, specDigest, type DevContour } from './service.ts';
 import { receiptProblems } from '../harness/receipt.ts';
-import { CheckCorpus, localRoots, portableSuite, type PortableSuite } from './check-store.ts';
+import {
+  CheckCorpus,
+  configuredSpellings,
+  localRoots,
+  portableSuite,
+  type PortableSuite,
+} from './check-store.ts';
 import { dependencyOrder, repository, requiresContract } from './repositories.ts';
 import { assertDag } from './graph.ts';
 import { validateTaskContext } from './workflow.ts';
@@ -61,8 +67,8 @@ function approval(a?: Approval) {
 export const receiptRecordBytes = (receipt: CompletionReceipt) =>
   Buffer.byteLength(canonical(recordSchema.parse({ version: 1, kind: 'receipt', data: receipt })));
 /**
- * Тождество проверок receipt, версия 3: SHA-256 канонического JSON
- * `{ version: 3, policy }`, где `policy` — та самая запись договора попытки,
+ * Тождество проверок receipt, версия 4: SHA-256 канонического JSON
+ * `{ version: 4, policy }`, где `policy` — та самая запись договора попытки,
  * из которой считается её policyDigest (`taskPolicyInput`/`policyInput`:
  * gates, группы, окружение конфигурации и компонентов вместе с источниками
  * секретов, подготовка, lifecycle, ресурсы, роли и прочее). Полнота — по
@@ -77,20 +83,39 @@ export const receiptRecordBytes = (receipt: CompletionReceipt) =>
  * секретов в договор не входят — только их имена и источники.
  */
 export type PolicyRoot = { name: string; path: string };
-/** Написания корня: как в конфигурации, его realpath и пара `/tmp` ↔ `/private/tmp`. */
-function spellings(path: string) {
-  const out = new Set([resolve(path)]);
+function realpathOf(path: string) {
   try {
-    out.add(realpathSync(path));
+    return realpathSync(path);
   } catch {
-    // Корня ещё нет — остаётся написание из конфигурации.
+    return undefined;
   }
-  for (const p of [...out])
-    if (p.startsWith('/private/')) out.add(p.slice('/private'.length));
-    else if (/^\/(?:tmp|var|etc)(?:\/|$)/.test(p)) out.add('/private' + p);
+}
+/** Догадка о написании: `/private/x` ↔ `/x` (macOS). Только кандидат — без проверки ФС не используется. */
+const privateAlias = (p: string) =>
+  p.startsWith('/private/') ? p.slice('/private'.length) : '/private' + p;
+/**
+ * Написания корня: само написание из конфигурации, его realpath и только те
+ * кандидаты (исходные написания конфигурации до загрузки, вариант с `/private`
+ * и без него), realpath которых совпадает с realpath корня. Совпадение по
+ * тексту не принимается: на Linux `/private/tmp/x` — другой каталог или его
+ * нет вовсе, и выдуманный алиас скрыл бы другой вход проверки.
+ */
+export function rootSpellings(
+  path: string,
+  candidates: readonly string[] = [],
+  guess: (p: string) => string = privateAlias,
+) {
+  const out = new Set([resolve(path)]);
+  const physical = realpathOf(path);
+  if (!physical) return [...out];
+  out.add(physical);
+  const known = [...out, ...candidates.filter(isAbsolute).map((c) => resolve(c))];
+  for (const c of known.flatMap((p) => [p, guess(p)]))
+    if (!out.has(c) && realpathOf(c) === physical) out.add(c);
   return [...out];
 }
 export function policyRoots(h: DevContour): PolicyRoot[] {
+  const configured = configuredSpellings.get(h.config) ?? [];
   const named: [string, string | undefined][] = [
     ['workspace', h.config.workspaceRoot],
     ['repository', h.config.repository],
@@ -99,12 +124,12 @@ export function policyRoots(h: DevContour): PolicyRoot[] {
   ];
   return named
     .filter((x): x is [string, string] => !!x[1] && isAbsolute(x[1]))
-    .flatMap(([name, path]) => spellings(path).map((p) => ({ name, path: p })))
+    .flatMap(([name, path]) => rootSpellings(path, configured).map((p) => ({ name, path: p })))
     .sort((a, b) => b.path.length - a.path.length || a.name.localeCompare(b.name));
 }
 /**
  * Путь от корня — только для строки вида `<корень>/<имя>/…/<имя>`, написанной
- * буквально: корень — одно из написаний `spellings`, сегменты — непустые
+ * буквально: корень — одно из написаний `rootSpellings`, сегменты — непустые
  * обычные имена (без `.`, `..`, `//` и завершающего `/`), ни один уже
  * существующий сегмент не символическая ссылка; отсутствующий хвост
  * допустим. Ничего не разбирается и не нормализуется: `..`, ссылка, `/` после
@@ -137,9 +162,15 @@ export function portablePolicy(value: unknown, roots: readonly PolicyRoot[]): un
     return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, portablePolicy(v, roots)]));
   return value;
 }
+/**
+ * Версия 4: корни-алиасы только подтверждённые ФС. Тождества версий 2–3 могли
+ * совпасть при разных входах (текстовый `/private`-алиас), поэтому они больше
+ * не подтверждают новую приёмку: они не пересчитываются, а не совпадают.
+ */
+export const IDENTITY_VERSION = 4;
 export const policyIdentity = (policy: unknown, roots: readonly PolicyRoot[]) =>
   createHash('sha256')
-    .update(canonicalJson({ version: 3, policy: portablePolicy(policy, roots) }))
+    .update(canonicalJson({ version: IDENTITY_VERSION, policy: portablePolicy(policy, roots) }))
     .digest('hex');
 /**
  * Договоры, под которыми попытка задачи считается текущей, — digest и
