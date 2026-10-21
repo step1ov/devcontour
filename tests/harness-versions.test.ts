@@ -1,8 +1,8 @@
 /**
  * T41: состояние, которого эта версия не знает, отклоняется до записи и до
  * выдачи — и неизвестная версия документа, и роль controller, записанная
- * более новым пакетом harness (поле, которого строгая схема этой версии не
- * принимает). Сценарии обновления и отката между двумя архивами —
+ * более новым пакетом harness: живую роль другой версии этот движок не
+ * перенимает, а поле роли, которого строгая схема не принимает, — отказ. Сценарии обновления и отката между двумя архивами —
  * `scripts/upgrade-check.mjs` (`--rollback` — T42). doctor называет версии
  * движка, записавшие состояние.
  */
@@ -38,12 +38,40 @@ function stateWith(edit: (state: Record<string, unknown>) => void) {
   return { ...f, file };
 }
 
-test('T41: роль controller более новой версии harness — отказ до записи и выдачи', () => {
+test('T41: живая роль controller более новой версии harness — ни выдачи, ни перехвата, база не меняется', () => {
   const f = stateWith((state) => {
     state.leader = {
       owner: 'newer-controller',
       leaseUntil: Date.now() + 60_000,
       engineVersion: '9.9.9-newer',
+    };
+  });
+  try {
+    const before = hash(f.file);
+    const store = new Store(f.file);
+    try {
+      const h = new DevContour(store, config());
+      assert.equal(h.claim('this-process'), undefined, 'выдачи нет');
+      assert.equal(h.leader('this-process'), false, 'роль другой версии не перенята');
+      assert.equal(store.read().runs.length, 0, 'выдачи нет');
+    } finally {
+      store.close();
+    }
+    assert.equal(hash(f.file), before, 'база не изменилась');
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('T41: роль controller с полем, которого движок не знает, — отказ до записи и выдачи', () => {
+  // Более новый движок может записать в роль поле, которого строгая схема этой
+  // версии не принимает: такое состояние не читается, а не переписывается.
+  const f = stateWith((state) => {
+    state.leader = {
+      owner: 'newer-controller',
+      leaseUntil: Date.now() + 60_000,
+      engineVersion: '9.9.9-newer',
+      futureField: true,
     };
   });
   try {

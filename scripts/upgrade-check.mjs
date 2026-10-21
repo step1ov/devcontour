@@ -4,7 +4,12 @@
  * каталоге; рабочее дерево и любые реальные workspace не затрагиваются.
  *
  *   node scripts/upgrade-check.mjs <devcontour-harness-<from>.tgz> \
- *     <devcontour-harness-<to>.tgz> --to-commit <SHA исходников to> [--keep]
+ *     <devcontour-harness-<to>.tgz> --to-commit <SHA исходников to> \
+ *     [--from-commit <SHA исходников from>] [--keep]
+ *
+ * Если HEAD закреплён не на <from> (например, проверяется обновление на
+ * версию, которую поставляет HEAD), обе копии сначала закрепляются на <from>
+ * тем же `vendor-harness.mjs` локальным коммитом копии; нужен `--from-commit`.
  *
  * Шаги (каждый — PASS или исключение с ненулевым exit):
  *  1. копия checkout (`git clone --no-local`, HEAD) закреплена на <from>:
@@ -58,6 +63,7 @@ const { values: options, positionals } = parseArgs({
   allowPositionals: true,
   options: {
     'to-commit': { type: 'string' },
+    'from-commit': { type: 'string' },
     keep: { type: 'boolean', default: false },
     rollback: { type: 'boolean', default: false },
     'baseline-commit': { type: 'string' },
@@ -378,6 +384,38 @@ try {
   for (const consumer of [before_, after_]) {
     execFileSync('git', ['clone', '-q', '--no-local', source, consumer]);
     run(consumer, 'git', ['checkout', '-q', '--detach', head]);
+    const dependency = JSON.parse(readFileSync(join(consumer, 'package.json'), 'utf8'))
+      .dependencies['devcontour-harness'];
+    if (dependency !== `file:vendor/harness/${basename(from.path)}`) {
+      if (!/^[0-9a-f]{40}$/.test(options['from-commit'] ?? ''))
+        fail(
+          'HEAD закреплён не на ' + basename(from.path) + ': укажите --from-commit <полный SHA>',
+        );
+      run(
+        consumer,
+        process.execPath,
+        ['scripts/vendor-harness.mjs', from.path, '--commit', options['from-commit']],
+        { stdio: 'pipe' },
+      );
+      run(consumer, 'git', [
+        'add',
+        '-A',
+        '--',
+        'package.json',
+        'package-lock.json',
+        'vendor/harness',
+      ]);
+      run(consumer, 'git', [
+        '-c',
+        'user.name=upgrade-check',
+        '-c',
+        'user.email=upgrade-check@localhost',
+        'commit',
+        '-q',
+        '-m',
+        'pin ' + basename(from.path),
+      ]);
+    }
   }
   install(before_);
   pass('1-pinned-from', { head, ...pinned(before_, from) });
