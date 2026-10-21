@@ -13,7 +13,8 @@
  *                 повтор — новая попытка с новым владением; A не меняется.
  * crash         — версия «после» оставляет живую роль (аварийная остановка).
  * old-refuses   — версия «до» над состоянием с ролью новой версии: отказ до
- *                 записи и выдачи.
+ *                 записи или (движок, знающий версию роли) роль не перенята и
+ *                 ничего не выдано; база не меняется.
  *
  * Итог шага — JSON в stdout; несоответствие — исключение и ненулевой exit.
  */
@@ -191,21 +192,32 @@ if (step === 'before') {
   out({ leader: s.leader });
 } else if (step === 'old-refuses') {
   const hash = sha256(database);
+  // Версия «до» над живой ролью новой версии: либо отказ до записи (движок,
+  // не знающий поля версии в роли), либо роль не перенята и ничего не выдано
+  // (движок, знающий его). В обоих случаях база не меняется.
   let refusal: string | undefined;
+  let lead: boolean | undefined;
+  let issued: boolean | undefined;
   try {
     const { store, h } = open();
     try {
-      h.leader('controller-old');
-      h.claim('controller-old');
+      lead = h.leader('controller-old');
+      issued = Boolean(h.claim('controller-old'));
     } finally {
       store.close();
     }
   } catch (error) {
     refusal = String((error as Error).message ?? error);
   }
-  assert.ok(refusal, 'версия «до» открыла состояние с ролью новой версии');
-  assert.equal(sha256(database), hash, 'отказ после записи: база изменилась');
-  out({ refusal: refusal.slice(0, 300), unchanged: true });
+  assert.ok(
+    refusal || (lead === false && issued === false),
+    'версия «до» перенята роль новой версии или выдала работу',
+  );
+  assert.equal(sha256(database), hash, 'база изменилась');
+  out({
+    ...(refusal ? { refusal: refusal.slice(0, 300) } : { lead, issued }),
+    unchanged: true,
+  });
 } else {
   console.error('upgrade-scenario: неизвестный шаг ' + step);
   process.exit(2);
