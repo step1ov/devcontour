@@ -8,8 +8,9 @@
  * before        — версия «до»: задача A принята, задача B выдана и активна,
  *                 роль controller жива (процесс остановлен аварийно).
  * after         — версия «после»: живую роль прежнего процесса не перенимает,
- *                 попытку B прежней версии не продолжает; после истечения —
- *                 recovery и новая попытка с новым владением; A не меняется.
+ *                 попытку B прежней версии не продолжает; после истечения
+ *                 попытка завершается явно (задача ждёт повтора), явный
+ *                 повтор — новая попытка с новым владением; A не меняется.
  * crash         — версия «после» оставляет живую роль (аварийная остановка).
  * old-refuses   — версия «до» над состоянием с ролью новой версии: отказ до
  *                 записи и выдачи.
@@ -151,6 +152,11 @@ if (step === 'before') {
   assert.notEqual(old.status, 'active', 'попытка прежней версии продолжается');
   assert.notEqual(old.status, 'succeeded', 'ложный успех попытки прежней версии');
   assert.throws(() => h.heartbeat(old.id, before.b.token), 'старый token принят');
+  // Истёкшая попытка завершена явно: задача ждёт явного повтора человека, а
+  // не продолжается под новой версией сама.
+  const stopped = store.read().tasks.find((t) => t.id === before.b.id)!;
+  assert.equal(stopped.status, 'failed', 'задача прежней попытки не завершена явно');
+  h.retry(before.b.id);
   assert.equal(h.leader('controller-2'), true);
   const next = h.claim('controller-2');
   assert.equal(next?.taskId, before.b.id, 'B не выдана новой попыткой');
@@ -171,13 +177,14 @@ if (step === 'before') {
   store.close();
   out({
     liveRefused: live,
-    previousAttempt: { id: old.id, status: old.status },
+    previousAttempt: { id: old.id, status: old.status, task: stopped.status },
     newAttempt: { id: fresh.id, engineVersion: engineOf(fresh) },
     leader: s.leader,
   });
 } else if (step === 'crash') {
   const { store, h } = open();
-  assert.equal(h.leader('controller-3'), true);
+  // Тот же процесс новой версии продлевает роль и останавливается аварийно.
+  assert.equal(h.leader('controller-2'), true);
   const s = store.read();
   assert.equal(engineOf(s.leader), harnessVersion);
   store.close();
