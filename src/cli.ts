@@ -436,6 +436,14 @@ async function main() {
     throw new Error(
       'Конфигурация не принадлежит выбранному workspace; для прежней конфигурации используйте --data',
     );
+  // Проверка совместимости данных идёт до любого открытия на запись: базы
+  // открываются только для чтения, проекции и журнал не запускаются.
+  if (operation === 'doctor' && option('--scope', '') === 'data') {
+    const result = dataDoctor(config, root);
+    console.log(JSON.stringify(result, null, 2));
+    if (!result.compatible) process.exitCode = 1;
+    return;
+  }
   if (operation === 'storage-migrate') {
     if (config.workspaceMode === 'embedded')
       throw new Error(
@@ -889,16 +897,6 @@ async function main() {
       if (store.projectionError) console.error('Journal: ' + store.projectionError);
     } finally {
       await workspaceRunner.stop();
-      store.close();
-    }
-    return;
-  }
-  if (operation === 'doctor' && option('--scope', '') === 'data') {
-    try {
-      const result = dataDoctor(h);
-      console.log(JSON.stringify(result, null, 2));
-      if (!result.compatible) process.exitCode = 1;
-    } finally {
       store.close();
     }
     return;

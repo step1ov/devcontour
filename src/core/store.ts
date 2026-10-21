@@ -1,6 +1,6 @@
 import { ComponentStorage, type ComponentLocation } from './component-storage.ts';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { emptyState, type DevContourState, type AuditEvent } from './model.ts';
 /**
@@ -52,10 +52,22 @@ export class Store {
     locations?: ComponentLocation[],
     migrate = false,
     journalMode?: 'DELETE',
+    /**
+     * Только чтение: существующая база открывается соединением только для
+     * чтения — без каталогов, PRAGMA режима журнала, DDL, начальных строк и
+     * присвоения владельца базам компонентов. Отсутствующая база — отказ.
+     */
+    readonly readOnly = false,
   ) {
     this.file = path;
-    if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
-    this.db = new DatabaseSync(path);
+    if (readOnly) {
+      if (path === ':memory:' || !existsSync(path))
+        throw new Error('База состояния не найдена: ' + path);
+      this.db = new DatabaseSync(path, { readOnly: true });
+    } else {
+      if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
+      this.db = new DatabaseSync(path);
+    }
     if (
       !locations?.length &&
       this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='owner'").get()
@@ -79,6 +91,27 @@ export class Store {
         this.db.close();
         throw new Error('Для этой БД требуется component storage');
       }
+    }
+    if (readOnly) {
+      this.db.exec('PRAGMA busy_timeout=20000;');
+      if (
+        !this.db
+          .prepare("SELECT name FROM main.sqlite_master WHERE type='table' AND name='state'")
+          .get() ||
+        !this.db.prepare('SELECT 1 FROM main.state WHERE id=1').get()
+      ) {
+        this.db.close();
+        throw new Error('В базе нет состояния: ' + path);
+      }
+      if (locations?.length) {
+        try {
+          this.components = new ComponentStorage(this.db, locations, path, true);
+        } catch (e) {
+          this.db.close();
+          throw e;
+        }
+      }
+      return;
     }
     this.db.exec(
       `PRAGMA journal_mode=${journalMode ?? (locations?.length ? 'DELETE' : 'WAL')}; PRAGMA busy_timeout=20000; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;`,

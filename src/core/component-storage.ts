@@ -15,6 +15,8 @@ export class ComponentStorage {
     readonly db: DatabaseSync,
     components: ComponentLocation[],
     readonly coordinator: string,
+    /** Только чтение: базы и владелец должны уже существовать и совпадать. */
+    readOnly = false,
   ) {
     if (coordinator === ':memory:')
       throw new Error('Component storage требует файловую coordinator DB');
@@ -30,8 +32,29 @@ export class ComponentStorage {
           throw new Error('Component storage не пишет через symlink');
       if (resolve(path) === realpathSync(coordinator))
         throw new Error('Coordinator DB должна находиться вне компонентов');
-      mkdirSync(dirname(path), { recursive: true });
       const schema = 'component' + index;
+      if (readOnly) {
+        if (!existsSync(path)) throw new Error('База компонента не найдена: ' + repo.id);
+        // ATTACH наследует флаги основного соединения: база открывается только для чтения.
+        db.prepare(`ATTACH DATABASE ? AS ${schema}`).run(path);
+        for (const table of ['state', 'owner'])
+          if (
+            !db
+              .prepare(`SELECT name FROM ${schema}.sqlite_master WHERE type='table' AND name=?`)
+              .get(table)
+          )
+            throw new Error(`В базе компонента нет таблицы ${table}: ${repo.id}`);
+        const owner = db.prepare(`SELECT * FROM ${schema}.owner WHERE id=1`).get() as
+          { coordinator: string; repositoryId: string } | undefined;
+        if (!owner) throw new Error('У базы компонента нет владельца: ' + repo.id);
+        if (owner.coordinator !== realpathSync(coordinator) || owner.repositoryId !== repo.id)
+          throw new Error('База компонента принадлежит другому coordinator: ' + repo.id);
+        const row = db.prepare(`SELECT data FROM ${schema}.state WHERE id=1`).get() as
+          { data: string } | undefined;
+        if (!row) throw new Error('В базе компонента нет состояния: ' + repo.id);
+        return { id: repo.id, path, schema };
+      }
+      mkdirSync(dirname(path), { recursive: true });
       db.prepare(`ATTACH DATABASE ? AS ${schema}`).run(path);
       db.exec(`PRAGMA ${schema}.journal_mode=DELETE; PRAGMA ${schema}.synchronous=FULL; PRAGMA ${schema}.secure_delete=ON;
         CREATE TABLE IF NOT EXISTS ${schema}.state (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL);
@@ -165,12 +188,17 @@ export class ComponentStorage {
     )
       throw new Error('Реестр компонентов не совпадает с БД; нужна явная миграция состава');
     const merged = this.decode(JSON.stringify(main));
-    const local = this.locations.map((l) =>
-      JSON.parse(
+    const local = this.locations.map((l) => {
+      const document = JSON.parse(
         (this.db.prepare(`SELECT data FROM ${l.schema}.state WHERE id=1`).get() as { data: string })
           .data,
-      ),
-    );
+      ) as Record<string, unknown>;
+      // Версию проверяет каждый исходный документ: проекция в общий документ
+      // скрыла бы неизвестную версию базы компонента.
+      if (document.version !== 1)
+        throw new Error('Unsupported state version of component database: ' + l.id);
+      return document;
+    });
     for (const key of ['tasks', 'runs', 'boards', 'contracts']) {
       const entries = [...merged[key], ...local.flatMap((s) => s[key])];
       const map = new Map(entries.map((item: any) => [item.id, item]));

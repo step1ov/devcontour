@@ -9,7 +9,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync, rmSync } from 'node:fs';
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 import { DevContour } from '../src/core/service.ts';
@@ -17,6 +18,7 @@ import { Store } from '../src/core/store.ts';
 import { harnessVersion } from '../src/harness/index.ts';
 import { dataDoctor, engineCheck } from '../src/runner/doctor.ts';
 import { config, fixture, input } from './helpers.ts';
+import { repositorySchema } from '../src/core/model.ts';
 
 const hash = (file: string) => createHash('sha256').update(readFileSync(file)).digest('hex');
 
@@ -164,48 +166,195 @@ test('S4-R1-02: активную попытку прежней версии дв
   }
 });
 
-test('S4-R2-01: doctor --scope data проверяет только совместимость данных и отклоняет роль неизвестной формы', () => {
-  const good = stateWith(() => {});
-  try {
-    const store = new Store(good.file);
-    try {
-      const result = dataDoctor(new DevContour(store, config()));
-      assert.equal(result.scope, 'data-compatibility');
-      assert.equal(result.compatible, true, JSON.stringify(result.checks));
-      assert.equal('ready' in result, false, 'проверка данных не выдаёт себя за готовность среды');
-      assert.deepEqual(
-        result.checks.map((c) => c.id),
-        ['engine', 'config', 'storage', 'execution-state'],
-      );
-      assert.match(result.note, /полный devcontour doctor на хосте/);
-    } finally {
-      store.close();
+// Снимок всего, что проверка данных могла бы изменить: схемы и строки всех
+// таблиц каждой базы и отпечатки остальных файлов под корнями.
+function snapshot(...roots: string[]) {
+  const out: Record<string, unknown> = {};
+  const walk = (dir: string) => {
+    for (const name of readdirSync(dir).sort()) {
+      const path = join(dir, name);
+      if (lstatSync(path).isDirectory()) walk(path);
+      else if (name.endsWith('.sqlite')) {
+        const db = new DatabaseSync(path, { readOnly: true });
+        try {
+          const tables = db.prepare('SELECT name, sql FROM sqlite_master ORDER BY name').all() as {
+            name: string;
+            sql: string | null;
+          }[];
+          out[path] = {
+            journal: (db.prepare('PRAGMA journal_mode').get() as { journal_mode: string })
+              .journal_mode,
+            tables: tables.map((t) => ({
+              ...t,
+              rows: t.sql?.startsWith('CREATE TABLE')
+                ? db.prepare(`SELECT * FROM "${t.name}"`).all()
+                : undefined,
+            })),
+          };
+        } finally {
+          db.close();
+        }
+      } else if (!/-(wal|shm|journal)$/.test(name)) out[path] = hash(path);
     }
-  } finally {
-    rmSync(good.root, { recursive: true, force: true });
-  }
-  // Роль controller формы, которую строгая схема этой версии не знает
-  // (истёкшая — engineCheck её пропускает), — несовместимые данные.
-  const future = stateWith((state) => {
-    state.leader = {
-      owner: 'newer-controller',
-      leaseUntil: Date.now() - 1,
-      engineVersion: harnessVersion,
-      futureField: 1,
-    };
+  };
+  for (const root of roots) walk(root);
+  return JSON.stringify(out);
+}
+
+function componentWorkspace() {
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-data-doctor-'));
+  const workspace = join(root, 'workspace');
+  mkdirSync(workspace);
+  const repos = ['product', 'library'].map((id) => {
+    const path = join(root, id);
+    mkdirSync(path);
+    return repositorySchema.parse({ id, name: id, path, gates: config().gates });
   });
-  try {
-    const store = new Store(future.file);
-    try {
-      const result = dataDoctor(new DevContour(store, config()));
-      assert.equal(result.compatible, false);
-      const state = result.checks.find((c) => c.id === 'execution-state')!;
-      assert.equal(state.status, 'blocked');
-      assert.match(state.detail, /futureField/);
-    } finally {
-      store.close();
-    }
-  } finally {
-    rmSync(future.root, { recursive: true, force: true });
+  const c = config({ storage: 'component', workspaceRoot: workspace, repositories: repos });
+  const store = new Store(join(workspace, 'state.sqlite'), repos);
+  const h = new DevContour(store, c);
+  for (const id of ['product', 'library']) {
+    const b = h.createBoard('Board ' + id, '', id);
+    h.addTask(b.id, { ...input('Task ' + id), repositoryId: id });
   }
+  store.close();
+  return { root, workspace, repos, config: c };
+}
+
+const editDocument = (file: string, edit: (state: Record<string, unknown>) => void) => {
+  const db = new DatabaseSync(file);
+  const row = db.prepare('SELECT data FROM main.state WHERE id=1').get() as { data: string };
+  const state = JSON.parse(row.data) as Record<string, unknown>;
+  edit(state);
+  db.prepare('UPDATE main.state SET data=? WHERE id=1').run(JSON.stringify(state));
+  db.close();
+};
+
+test('S4-R3-01/02: doctor --scope data открывает базы только для чтения, проверяет версию каждого документа и ничего не создаёт', () => {
+  const blocked = (result: ReturnType<typeof dataDoctor>, id: string, pattern: RegExp) => {
+    assert.equal(result.compatible, false, JSON.stringify(result.checks));
+    const c = result.checks.find((x) => x.id === id);
+    assert.equal(c?.status, 'blocked', JSON.stringify(result.checks));
+    assert.match(c.detail, pattern);
+  };
+  // Центральная база.
+  const central = (edit: (state: Record<string, unknown>) => void) => {
+    const f = stateWith(edit);
+    return { ...f, run: () => dataDoctor(config(), f.root) };
+  };
+  const cases: [string, (state: Record<string, unknown>) => void, string?, RegExp?][] = [
+    ['совместимая', () => {}],
+    [
+      'роль неизвестной формы',
+      (state) => {
+        state.leader = {
+          owner: 'x',
+          leaseUntil: Date.now() - 1,
+          engineVersion: harnessVersion,
+          futureField: 1,
+        };
+      },
+      'execution-state',
+      /futureField/,
+    ],
+    [
+      'живая роль другой версии',
+      (state) => {
+        state.leader = {
+          owner: 'x',
+          leaseUntil: Date.now() + 60_000,
+          engineVersion: '9.9.9-newer',
+        };
+      },
+      'engine',
+      /9\.9\.9-newer/,
+    ],
+    [
+      'неизвестная версия документа',
+      (state) => (state.version = 999),
+      'state',
+      /Unsupported state version/,
+    ],
+  ];
+  for (const [name, edit, id, pattern] of cases) {
+    const f = central(edit);
+    try {
+      const before = snapshot(f.root);
+      const result = f.run();
+      assert.equal(result.scope, 'data-compatibility');
+      assert.equal('ready' in result, false, 'проверка данных не выдаёт себя за готовность среды');
+      if (id) blocked(result, id, pattern!);
+      else assert.equal(result.compatible, true, name + ': ' + JSON.stringify(result.checks));
+      assert.equal(
+        snapshot(f.root),
+        before,
+        name + ': ни одна таблица и ни один файл не изменились',
+      );
+    } finally {
+      rmSync(f.root, { recursive: true, force: true });
+    }
+  }
+  const empty = mkdtempSync(join(tmpdir(), 'devcontour-data-doctor-'));
+  try {
+    blocked(dataDoctor(config(), empty), 'storage', /не найдена/);
+    assert.deepEqual(readdirSync(empty), [], 'отсутствующая база не создаётся');
+  } finally {
+    rmSync(empty, { recursive: true, force: true });
+  }
+  // Coordinator и базы компонентов.
+  const component = (
+    name: string,
+    edit: (w: ReturnType<typeof componentWorkspace>) => void,
+    id?: string,
+    pattern?: RegExp,
+  ) => {
+    const w = componentWorkspace();
+    try {
+      edit(w);
+      const roots = [w.workspace, ...w.repos.map((r) => r.path)];
+      const before = snapshot(...roots);
+      const result = dataDoctor(w.config, w.workspace);
+      if (id) blocked(result, id, pattern!);
+      else assert.equal(result.compatible, true, name + ': ' + JSON.stringify(result.checks));
+      assert.equal(
+        snapshot(...roots),
+        before,
+        name + ': ни одна таблица и ни один файл не изменились',
+      );
+    } finally {
+      rmSync(w.root, { recursive: true, force: true });
+    }
+  };
+  const local = (w: ReturnType<typeof componentWorkspace>, id: string) =>
+    join(w.repos.find((r) => r.id === id)!.path, '.devcontour-local', 'state.sqlite');
+  component('совместимые базы компонентов', () => {});
+  component(
+    'неизвестная версия coordinator',
+    (w) => editDocument(join(w.workspace, 'state.sqlite'), (s) => (s.version = 999)),
+    'state',
+    /Unsupported state version/,
+  );
+  for (const id of ['product', 'library'])
+    component(
+      'неизвестная версия базы компонента ' + id,
+      (w) => editDocument(local(w, id), (s) => (s.version = 999)),
+      'state',
+      new RegExp('component database: ' + id),
+    );
+  component(
+    'отсутствующая база компонента',
+    (w) => rmSync(local(w, 'library')),
+    'storage',
+    /База компонента не найдена: library/,
+  );
+  component(
+    'база компонента без владельца',
+    (w) => {
+      const db = new DatabaseSync(local(w, 'product'));
+      db.exec('DELETE FROM owner');
+      db.close();
+    },
+    'storage',
+    /нет владельца: product/,
+  );
 });

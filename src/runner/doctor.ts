@@ -77,55 +77,84 @@ export function engineCheck(
 }
 
 /**
- * Проверка совместимости данных: только хранение и формат — конфигурация
- * штатного загрузчика, версия движка и роль controller, документ исполнения
- * строгими схемами harness (граф, работы, попытки, совместные проверки,
- * управление). Владение баз компонентов проверяет открытие Store до этого
- * вызова. Модели, CLI, песочница и live-проверки не проверяются: результат не
- * означает готовность среды — её подтверждает полный `doctor` на хосте.
+ * Проверка совместимости данных: только хранение и формат. Каждая база
+ * (центральная или coordinator и базы компонентов) открывается соединением
+ * только для чтения до любого доступа на запись: без проекций, журнала,
+ * начальных строк и присвоения владельца. Проверяются версия каждого
+ * исходного документа, владение баз компонентов, версия движка и роль
+ * controller, документ исполнения строгими схемами harness и конфигурация
+ * штатного загрузчика. Модели, CLI, песочница и live-проверки не проверяются:
+ * результат не означает готовность среды — её подтверждает полный `doctor`
+ * на хосте.
  */
-export function dataDoctor(h: DevContour) {
+export function dataDoctor(config: Config, root: string) {
   const checks: Check[] = [];
-  const state = h.store.read();
-  checks.push(engineCheck(state));
   const check = (id: string, action: () => string) => {
     try {
       checks.push({ id, status: 'passed', detail: action() });
+      return true;
     } catch (e) {
       checks.push({ id, status: 'blocked', detail: e instanceof Error ? e.message : String(e) });
+      return false;
     }
   };
-  check('config', () => {
-    validateWorkflow(h.config);
-    return 'Конфигурация загружена штатным загрузчиком, принадлежит workspace и согласована';
-  });
-  check('storage', () =>
-    h.config.storage === 'component'
-      ? `Базы компонентов открыты и принадлежат этому coordinator: ${repositories(h.config)
-          .map((r) => r.id)
-          .join(', ')}`
-      : 'Центральная база открыта',
-  );
-  check('execution-state', () => {
-    const store = new DevContourExecutionStore(h.store, projectionOptions(h));
-    const counts = store.read((v) => {
-      v.control();
-      v.controller();
-      return {
-        graphs: v.graphs().length,
-        works: v.works().length,
-        attempts: v.attempts().length,
-        verifications: v.verifications().length,
-      };
-    });
-    return `Документ исполнения читается строгими схемами devcontour-harness ${harnessVersion} (stateVersion ${store.stateVersion}): графов ${counts.graphs}, работ ${counts.works}, попыток ${counts.attempts}, совместных проверок ${counts.verifications}`;
-  });
-  return {
+  const result = () => ({
     scope: 'data-compatibility',
     compatible: !checks.some((c) => c.status === 'blocked'),
     checks,
     note: 'Проверка совместимости данных: модели, CLI, песочница и live-проверки не проверялись. Готовность среды подтверждает полный devcontour doctor на хосте после установки, до возобновления writers.',
-  };
+  });
+  check('config', () => {
+    validateWorkflow(config);
+    return 'Конфигурация загружена штатным загрузчиком, принадлежит workspace и согласована';
+  });
+  let store: Store | undefined;
+  if (
+    !check('storage', () => {
+      store = new Store(
+        join(root, 'state.sqlite'),
+        config.storage === 'component' ? repositories(config) : undefined,
+        false,
+        undefined,
+        true,
+      );
+      return config.storage === 'component'
+        ? `Базы компонентов существуют и принадлежат этому coordinator: ${repositories(config)
+            .map((r) => r.id)
+            .join(', ')}; открыты только для чтения`
+        : 'Центральная база существует; открыта только для чтения';
+    })
+  )
+    return result();
+  try {
+    let state: DevContourState | undefined;
+    if (
+      !check('state', () => {
+        state = store!.read();
+        return 'Версии исходных документов поддерживаются (stateVersion 1)';
+      })
+    )
+      return result();
+    checks.push(engineCheck(state!));
+    check('execution-state', () => {
+      const h = new DevContour(store!, config);
+      const execution = new DevContourExecutionStore(h.store, projectionOptions(h));
+      const counts = execution.read((v) => {
+        v.control();
+        v.controller();
+        return {
+          graphs: v.graphs().length,
+          works: v.works().length,
+          attempts: v.attempts().length,
+          verifications: v.verifications().length,
+        };
+      });
+      return `Документ исполнения читается строгими схемами devcontour-harness ${harnessVersion} (stateVersion ${execution.stateVersion}): графов ${counts.graphs}, работ ${counts.works}, попыток ${counts.attempts}, совместных проверок ${counts.verifications}`;
+    });
+  } finally {
+    store!.close();
+  }
+  return result();
 }
 
 export async function doctor(
