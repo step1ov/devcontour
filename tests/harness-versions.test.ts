@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { harnessVersion } from '../src/harness/index.ts';
-import { engineCheck } from '../src/runner/doctor.ts';
+import { dataDoctor, engineCheck } from '../src/runner/doctor.ts';
 import { config, fixture, input } from './helpers.ts';
 
 const hash = (file: string) => createHash('sha256').update(readFileSync(file)).digest('hex');
@@ -161,5 +161,51 @@ test('S4-R1-02: активную попытку прежней версии дв
   } finally {
     f.store.close();
     rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('S4-R2-01: doctor --scope data проверяет только совместимость данных и отклоняет роль неизвестной формы', () => {
+  const good = stateWith(() => {});
+  try {
+    const store = new Store(good.file);
+    try {
+      const result = dataDoctor(new DevContour(store, config()));
+      assert.equal(result.scope, 'data-compatibility');
+      assert.equal(result.compatible, true, JSON.stringify(result.checks));
+      assert.equal('ready' in result, false, 'проверка данных не выдаёт себя за готовность среды');
+      assert.deepEqual(
+        result.checks.map((c) => c.id),
+        ['engine', 'config', 'storage', 'execution-state'],
+      );
+      assert.match(result.note, /полный devcontour doctor на хосте/);
+    } finally {
+      store.close();
+    }
+  } finally {
+    rmSync(good.root, { recursive: true, force: true });
+  }
+  // Роль controller формы, которую строгая схема этой версии не знает
+  // (истёкшая — engineCheck её пропускает), — несовместимые данные.
+  const future = stateWith((state) => {
+    state.leader = {
+      owner: 'newer-controller',
+      leaseUntil: Date.now() - 1,
+      engineVersion: harnessVersion,
+      futureField: 1,
+    };
+  });
+  try {
+    const store = new Store(future.file);
+    try {
+      const result = dataDoctor(new DevContour(store, config()));
+      assert.equal(result.compatible, false);
+      const state = result.checks.find((c) => c.id === 'execution-state')!;
+      assert.equal(state.status, 'blocked');
+      assert.match(state.detail, /futureField/);
+    } finally {
+      store.close();
+    }
+  } finally {
+    rmSync(future.root, { recursive: true, force: true });
   }
 });

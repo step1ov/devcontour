@@ -10,7 +10,8 @@ import {
   reviewerBinding,
   roleBinding,
 } from '../core/repositories.ts';
-import { harnessVersion } from '../harness/index.ts';
+import { DevContourExecutionStore, harnessVersion } from '../harness/index.ts';
+import { projectionOptions } from '../harness/host.ts';
 import { technicalReviewer } from '../harness/policy.ts';
 import { isolationSupport } from './isolation.ts';
 import { validateWorkflow } from '../core/workflow.ts';
@@ -73,6 +74,58 @@ export function engineCheck(
       detail: `${detail}. Состояние держит процесс другой версии движка: остановите его штатно или дождитесь истечения роли`,
     };
   return { id: 'engine', status: 'passed', detail };
+}
+
+/**
+ * Проверка совместимости данных: только хранение и формат — конфигурация
+ * штатного загрузчика, версия движка и роль controller, документ исполнения
+ * строгими схемами harness (граф, работы, попытки, совместные проверки,
+ * управление). Владение баз компонентов проверяет открытие Store до этого
+ * вызова. Модели, CLI, песочница и live-проверки не проверяются: результат не
+ * означает готовность среды — её подтверждает полный `doctor` на хосте.
+ */
+export function dataDoctor(h: DevContour) {
+  const checks: Check[] = [];
+  const state = h.store.read();
+  checks.push(engineCheck(state));
+  const check = (id: string, action: () => string) => {
+    try {
+      checks.push({ id, status: 'passed', detail: action() });
+    } catch (e) {
+      checks.push({ id, status: 'blocked', detail: e instanceof Error ? e.message : String(e) });
+    }
+  };
+  check('config', () => {
+    validateWorkflow(h.config);
+    return 'Конфигурация загружена штатным загрузчиком, принадлежит workspace и согласована';
+  });
+  check('storage', () =>
+    h.config.storage === 'component'
+      ? `Базы компонентов открыты и принадлежат этому coordinator: ${repositories(h.config)
+          .map((r) => r.id)
+          .join(', ')}`
+      : 'Центральная база открыта',
+  );
+  check('execution-state', () => {
+    const store = new DevContourExecutionStore(h.store, projectionOptions(h));
+    const counts = store.read((v) => {
+      v.control();
+      v.controller();
+      return {
+        graphs: v.graphs().length,
+        works: v.works().length,
+        attempts: v.attempts().length,
+        verifications: v.verifications().length,
+      };
+    });
+    return `Документ исполнения читается строгими схемами devcontour-harness ${harnessVersion} (stateVersion ${store.stateVersion}): графов ${counts.graphs}, работ ${counts.works}, попыток ${counts.attempts}, совместных проверок ${counts.verifications}`;
+  });
+  return {
+    scope: 'data-compatibility',
+    compatible: !checks.some((c) => c.status === 'blocked'),
+    checks,
+    note: 'Проверка совместимости данных: модели, CLI, песочница и live-проверки не проверялись. Готовность среды подтверждает полный devcontour doctor на хосте после установки, до возобновления writers.',
+  };
 }
 
 export async function doctor(

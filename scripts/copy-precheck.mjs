@@ -1,4 +1,9 @@
-// Предпроверка новой версии на копии workspace, не трогая оригинал.
+// Проверка совместимости данных новой версии на копии workspace, не трогая
+// оригинал. Проверяется только хранение и формат (`doctor --scope data`):
+// конфигурация штатного загрузчика, владение баз компонентов, версия движка и
+// роль controller, документ исполнения строгими схемами. Модели, CLI и
+// песочница в контейнере не проверяются — готовность среды подтверждает полный
+// `devcontour doctor` на хосте после установки, до возобновления writers.
 //
 // Конфигурация и базы хранят абсолютные пути (workspace, репозитории, владелец
 // базы компонента), поэтому копия в другом каталоге — это уже другой
@@ -10,7 +15,8 @@
 //
 // R — общий каталог, внутри которого лежат workspace и все репозитории из его
 // конфигурации; W — каталог workspace (внутри R) или каталог данных с
-// config.json прежней раскладки (тогда doctor получает --data W). Нужен Docker. Перед
+// config.json прежней раскладки (тогда doctor получает --data W). Запускается из
+// checkout той версии DevContour, архив которой проверяется. Нужен Docker. Перед
 // запуском остановите writers исходного workspace (docs/upgrade.md).
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -134,7 +140,7 @@ const script = [
     basename(archive) +
     ' >/dev/null',
   'cd /',
-  `/opt/dc/node_modules/.bin/devcontour doctor ${target.map((a) => JSON.stringify(a)).join(' ')}`,
+  `/opt/dc/node_modules/.bin/devcontour doctor --scope data ${target.map((a) => JSON.stringify(a)).join(' ')}`,
 ].join('\n');
 let output = '';
 let status = 0;
@@ -168,7 +174,8 @@ const report = {
   workspace,
   archive: basename(archive),
   image,
-  doctorExit: status,
+  scope: 'data-compatibility',
+  dataCheckExit: status,
   originalUnchanged: originalChanged.length === 0,
   copyChanged,
   copyDataChanged,
