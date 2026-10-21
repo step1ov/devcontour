@@ -279,7 +279,7 @@ if (step === 'init') {
   out({ accepted, ...result });
 } else if (step === 'sync') {
   const { store, h } = open();
-  h.pause(true);
+  if (!h.store.read().paused) h.pause(true);
   const result = syncGit(h, { member: owner });
   const committed: string[] = [];
   for (const repo of [product, workspace]) {
@@ -340,7 +340,8 @@ if (step === 'init') {
   try {
     const { store, h } = open();
     try {
-      h.pause(true);
+      // Пауза — запись; очередь уже остановлена штатно.
+      if (!h.store.read().paused) h.pause(true);
       result = syncGit(h, { member: owner });
     } finally {
       store.close();
