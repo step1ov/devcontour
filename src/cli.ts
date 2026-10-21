@@ -907,7 +907,7 @@ async function main() {
           ))
       )
         throw new Error('doctor --probe требует остановленную очередь');
-      const result = await doctor(config, root, args.includes('--probe'));
+      const result = await doctor(config, root, args.includes('--probe'), s);
       console.log(JSON.stringify(result, null, 2));
       if (!result.ready) process.exitCode = 1;
     } finally {

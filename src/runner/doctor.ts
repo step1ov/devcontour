@@ -2,7 +2,7 @@ import { access, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:
 import { constants } from 'node:fs';
 import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { Config, Role } from '../core/model.ts';
+import type { Config, DevContourState, Role } from '../core/model.ts';
 import {
   codeReviewVendor,
   declaredRoles,
@@ -10,6 +10,7 @@ import {
   reviewerBinding,
   roleBinding,
 } from '../core/repositories.ts';
+import { harnessVersion } from '../harness/index.ts';
 import { technicalReviewer } from '../harness/policy.ts';
 import { isolationSupport } from './isolation.ts';
 import { validateWorkflow } from '../core/workflow.ts';
@@ -41,8 +42,47 @@ export async function executable(file: string) {
   }
   throw new Error('Команда не найдена: ' + file);
 }
-export async function doctor(config: Config, root: string, probe = false) {
+/**
+ * Версия движка исполнения и версии, записавшие состояние: перед обновлением
+ * и откатом видно, какая версия последней писала базу. Живая роль controller
+ * другой версии движка — блокировка: её процесс ещё работает.
+ */
+export function engineCheck(
+  state: Pick<DevContourState, 'leader' | 'runs'>,
+  now = Date.now(),
+): Check {
+  const leader: { owner: string; leaseUntil: number; engineVersion?: string } | undefined =
+    state.leader;
+  const attempts = [
+    ...new Set(
+      state.runs.flatMap((r) => {
+        const v = (r as { engineVersion?: string }).engineVersion;
+        return v ? [v] : [];
+      }),
+    ),
+  ].sort();
+  const live = !!leader && leader.leaseUntil > now;
+  const controller = leader
+    ? `роль controller ${leader.owner} (${leader.engineVersion ?? 'версия не записана'}${live ? ', живая' : ', истекла'})`
+    : 'роли controller нет';
+  const detail = `devcontour-harness ${harnessVersion}; ${controller}; попытки записаны версиями: ${attempts.join(', ') || 'нет попыток'}`;
+  if (live && leader.engineVersion !== harnessVersion)
+    return {
+      id: 'engine',
+      status: 'blocked',
+      detail: `${detail}. Состояние держит процесс другой версии движка: остановите его штатно или дождитесь истечения роли`,
+    };
+  return { id: 'engine', status: 'passed', detail };
+}
+
+export async function doctor(
+  config: Config,
+  root: string,
+  probe = false,
+  state?: Pick<DevContourState, 'leader' | 'runs'>,
+) {
   const checks: Check[] = [];
+  if (state) checks.push(engineCheck(state));
   const check = async (id: string, action: () => Promise<string>) => {
     try {
       checks.push({ id, status: 'passed', detail: await action() });
