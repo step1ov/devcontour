@@ -11,7 +11,12 @@ import { loadConfig } from '../src/runner/config.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
-import { adapters, cliArguments, type AgentRequest } from '../src/runner/adapters.ts';
+import {
+  adapters,
+  cliArguments,
+  reviewTransitions,
+  type AgentRequest,
+} from '../src/runner/adapters.ts';
 import { git, command } from '../src/runner/process.ts';
 import { runCheck } from 'devcontour-harness';
 import { input, fixture } from './helpers.ts';
@@ -739,6 +744,12 @@ test('A retry is told where the previous review objected, not only that it did',
                         line: 296,
                       },
                     ],
+                // Повтор с исправлением закрывает выданную находку по её ID.
+                previous: reviewTransitions(
+                  request.findings,
+                  approve,
+                  approve ? 'Канонизация списков на месте' : 'Порядок обхода не канонизирован',
+                ),
               },
               log: '',
               command: ['fixture'],
@@ -767,7 +778,136 @@ test('A retry is told where the previous review objected, not only that it did',
     assert.match(implementation, /нужна канонизация/);
     assert.match(implementation, /src\/assembly\.ts/);
     assert.match(implementation, /296/);
+    // Находка получила ID controller и закрыта повторным ревью по этому ID с
+    // основанием, а не забыта одобрением.
+    const reviews = f.store
+      .read()
+      .runs.filter((r) => r.taskId === task.id)
+      .flatMap((r) => r.evidence)
+      .filter((e) => e.kind === 'review');
+    const issued = reviews.flatMap((e) => e.findings ?? []).find((x) => x.id);
+    assert.ok(issued?.id, 'находке выдан ID');
+    assert.equal(issued.status, 'open');
+    const closing = reviews.find((e) => e.passed)!;
+    assert.equal(closing.reviewRound?.protocol, 'valid');
+    assert.deepEqual(
+      closing.reviewRound?.transitions?.map((t) => [t.id, t.from, t.to, t.basis]),
+      [[issued.id, 'open', 'closed', 'Канонизация списков на месте']],
+    );
+    assert.equal(f.store.read().tasks.find((t) => t.id === task.id)!.status, 'done');
     await retrying.stop();
+  } finally {
+    await f.cleanup();
+  }
+});
+test('Ответ ревьюера вне протокола находок — не замечание к коду; адаптер без протокола сохраняет прежнюю приёмку', async () => {
+  const f = await runtimeFixture();
+  try {
+    const repo = repositories(f.config)[0];
+    await git(
+      repo.path,
+      'update-ref',
+      `refs/heads/${repo.targetBranch}`,
+      await git(repo.path, 'rev-parse', 'HEAD'),
+    );
+    const board = f.h.createBoard('Доска');
+    const task = f.h.addTask(board.id, input('Задача с находкой ревью'));
+    f.h.approve(board.id);
+    f.h.pause(false);
+    let writes = 0;
+    let reviews = 0;
+    const runtimes = (
+      verdict: (request: AgentRequest) => Record<string, unknown>,
+      protocol: boolean,
+    ) => ({
+      ...adapters,
+      demo: {
+        name: 'demo' as const,
+        ...(protocol ? { reviewProtocol: 1 as const } : {}),
+        execute: async (request: AgentRequest) => {
+          if (request.task?.id !== task.id) return adapters.demo.execute(request);
+          if (!request.review) {
+            writes++;
+            return adapters.demo.execute(request);
+          }
+          reviews++;
+          return {
+            data: { summary: 'fixture', discoveries: [], ...verdict(request) },
+            log: '',
+            command: ['fixture'],
+          };
+        },
+      },
+    });
+    const drain = async (runtime: ReturnType<typeof runtimes>) => {
+      const scheduler = new Scheduler(f.h, f.root, runtime);
+      await scheduler.drain();
+      await scheduler.stop();
+    };
+    const current = () => f.store.read().tasks.find((t) => t.id === task.id)!;
+    const evidenceOf = (attempt: number) =>
+      f.store
+        .read()
+        .runs.filter((r) => r.taskId === task.id && r.attempt === attempt)
+        .flatMap((r) => r.evidence)
+        .filter((e) => e.kind === 'review');
+
+    // Отказ по существу выдаёт находку с ID controller.
+    await drain(
+      runtimes(
+        () => ({
+          approved: false,
+          findings: [{ severity: 'blocking', message: 'Нет обработки пустого ввода' }],
+        }),
+        true,
+      ),
+    );
+    assert.equal(current().failureKind, 'review');
+    const [issued] = evidenceOf(1).flatMap((e) => e.findings ?? []);
+    assert.ok(issued?.id);
+
+    // Одобрение, забывшее выданную находку, — ошибка протокола: ограниченный
+    // повтор reviewer без нового writer, затем остановка без автоповтора.
+    f.h.retry(task.id);
+    f.h.pause(false);
+    reviews = 0;
+    writes = 0;
+    await drain(runtimes(() => ({ approved: true, findings: [], previous: [] }), true));
+    assert.equal(current().status, 'failed');
+    assert.equal(current().failureKind, 'review-protocol');
+    assert.match(current().failure ?? '', /REVIEW_PROTOCOL_INVALID/);
+    assert.equal(reviews, 2, 'один дополнительный вызов reviewer');
+    assert.equal(writes, 1, 'writer не вызывается ради повтора reviewer');
+    const invalid = evidenceOf(2);
+    assert.deepEqual(
+      invalid.map((e) => [e.passed, e.reviewRound?.protocol, e.reviewRound?.call]),
+      [
+        [false, 'invalid', 1],
+        [false, 'invalid', 2],
+      ],
+    );
+    assert.ok(
+      invalid.every((e) =>
+        e.reviewRound?.issues?.some((i) => i.reason === 'missing' && i.path === 'previous'),
+      ),
+    );
+    // Выдачу останавливает только остановка scheduler теста, не отказ.
+    assert.equal(f.store.read().pauseReason, 'shutdown');
+    assert.deepEqual(f.store.read().pauseFailures ?? [], [], 'выдача не останавливается отказом');
+
+    // Адаптер без протокола (runtime хоста прежней версии): переходы не
+    // требуются, одобрение принимается как в alpha.5, раунд помечен legacy.
+    f.h.retry(task.id);
+    f.h.pause(false);
+    await drain(runtimes(() => ({ approved: true, findings: [] }), false));
+    assert.equal(current().status, 'done', current().failure);
+    const accepted = f.store
+      .read()
+      .runs.filter((r) => r.taskId === task.id)
+      .flatMap((r) => r.evidence)
+      .filter((e) => e.kind === 'review' && e.passed);
+    assert.ok(accepted.length);
+    assert.ok(accepted.every((e) => e.reviewRound?.mode === 'legacy'));
   } finally {
     await f.cleanup();
   }
@@ -1153,6 +1293,11 @@ async function reuseFixture() {
             discoveries: [],
             findings:
               review === 'approve' ? [] : [{ severity: 'blocking', message: 'Нет поведения' }],
+            previous: reviewTransitions(
+              request.findings,
+              review === 'approve',
+              review === 'approve' ? 'Поведение есть' : 'Поведения по-прежнему нет',
+            ),
           },
           log: '',
           command: ['fixture'],
@@ -1412,6 +1557,11 @@ test('Кандидат, отклонённый ревью, — отправна�
               discoveries: [],
               findings:
                 review === 'approve' ? [] : [{ severity: 'blocking', message: 'Нет поведения' }],
+              previous: reviewTransitions(
+                request.findings,
+                review === 'approve',
+                review === 'approve' ? 'Поведение есть' : 'Поведения по-прежнему нет',
+              ),
             },
             log: '',
             command: ['fixture'],

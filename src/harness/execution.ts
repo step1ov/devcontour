@@ -72,6 +72,9 @@ export function reviewExecutionOf(h: DevContour): Execution {
 const statusOf: Partial<Record<ErrorCode, number>> = {
   NOT_FOUND: 404,
   INVALID_INPUT: 400,
+  // Ответ reviewer вне протокола — сбой вышестоящего runtime, а не конфликт
+  // состояния: перечитывание и повтор того же запроса его не устранят.
+  REVIEW_PROTOCOL_INVALID: 502,
 };
 
 /** Отказ движка — ошибка прикладного слоя с тем же текстом; прочие ошибки — как есть. */

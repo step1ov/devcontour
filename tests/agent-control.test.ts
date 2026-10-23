@@ -14,14 +14,22 @@ import { contractImpact } from '../src/runner/contract-impact.ts';
 import { digest, specDigest, supersededBy } from '../src/core/service.ts';
 import type { AgentAdapter, AgentRequest } from '../src/runner/adapters.ts';
 
-function runtimes(action?: (r: AgentRequest) => void, blocking = false) {
+/**
+ * Fixture-ревьюер. С blocking отклоняет план находкой; contradictory — ответ
+ * approved=true при blocking-находке, который протокол harness не применяет.
+ */
+function runtimes(
+  action?: (r: AgentRequest) => void,
+  blocking = false,
+  contradictory = false,
+) {
   const make = (name: 'codex' | 'claude'): AgentAdapter => ({
     name,
     async execute(r) {
       action?.(r);
       return {
         data: {
-          approved: true,
+          approved: !blocking || contradictory,
           summary: 'Explicit test fixture',
           findings: blocking ? [{ severity: 'blocking', message: 'Missing behavior' }] : [],
           previous: blocking ? [] : closePrevious(r.prompt),
@@ -551,6 +559,13 @@ test('Blocking findings reject even approved=true and do not enable execution', 
     f.h.config.mode = 'local';
     const b = f.h.createBoard('Blocked plan');
     f.h.addTask(b.id, input());
+    // Противоречивый ответ (approved=true при blocking) не одобряет план; его
+    // находки не применяются — протокол harness, docs/review-protocol.md §8.
+    await assert.rejects(
+      reviewPlan(f.h, f.root, b.id, 'codex', runtimes(undefined, true, true)),
+      /отклонено/,
+    );
+    assert.equal(f.store.read().tasks[0].status, 'draft');
     await assert.rejects(
       reviewPlan(f.h, f.root, b.id, 'codex', runtimes(undefined, true)),
       /отклонено/,
@@ -570,7 +585,7 @@ test('Blocking findings reject even approved=true and do not enable execution', 
     // Отклонённая попытка стоила вызова модели и остаётся в состоянии с
     // находками: иначе процесс виден только файлами на диске.
     const attempts = f.store.read().contractAttempts ?? [];
-    assert.equal(attempts.length, 2, 'план и контракт считаются оба');
+    assert.equal(attempts.length, 3, 'оба ревью плана и контракт считаются');
     const contract = attempts.find((a) => a.title === 'API')!;
     assert.equal(contract.approved, false);
     assert.equal(contract.attempt, 1);

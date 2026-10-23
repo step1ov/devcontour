@@ -286,7 +286,10 @@ function rollback() {
       continuedByOld: resumed.accepted,
     });
 
-    // в. Аварийная остановка новой версии: формат изменён.
+    // в. Аварийная остановка новой версии. Если формат изменён — прежняя
+    // версия отказывает до записи; если формат совместим — она не перенимает
+    // живую роль новой версии и ничего не записывает (fencing). Оба исхода
+    // доводятся до восстановления копии, сверки Git и повтора.
     const copy = backup(dir, 'backup-before-crash');
     const beforeCrash = step(after_, 'read', dir, topology);
     pin(after_, to);
@@ -294,8 +297,17 @@ function rollback() {
     check(crash.leader?.engineVersion === to.version, 'роль без версии новой версии');
     pin(after_, from);
     const refused = step(after_, 'write', dir, topology);
-    check(refused.refusal, 'прежняя версия записала поверх состояния новой');
-    same(refused.databases, crash.databases, 'отказ прежней версии после записи');
+    same(
+      refused.databases,
+      crash.databases,
+      refused.refusal
+        ? 'отказ прежней версии после записи'
+        : 'прежняя версия записала поверх состояния новой',
+    );
+    if (!refused.refusal) {
+      const kept = step(after_, 'read', dir, topology);
+      same(kept.leader, crash.leader, 'прежняя версия перехватила живую роль новой');
+    }
     restore(dir, copy);
     const restored = step(after_, 'read', dir, topology);
     same(restored.databases, beforeCrash.databases, 'восстановленная копия отличается');
@@ -312,8 +324,8 @@ function rollback() {
     check(reconciled.consistent, 'расхождение Git не закрыто повтором');
     for (const t of ['Task A', 'Task B', 'Task C'])
       same(redo.tasks[t], beforeCrash.tasks[t], `история ${t} изменена`);
-    pass(id('c-format-changed-restore'), {
-      refusal: refused.refusal.slice(0, 160),
+    pass(id(refused.refusal ? 'c-format-changed-restore' : 'c-compatible-crash-restore'), {
+      refusal: refused.refusal?.slice(0, 160) ?? null,
       unrecorded: drift.unrecorded,
       redo: redo.accepted,
     });

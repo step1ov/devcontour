@@ -6,7 +6,12 @@ import type { CheckDeclaration } from '../src/core/checks.ts';
 import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
-import { adapters, type AgentAdapter, type AgentRequest } from '../src/runner/adapters.ts';
+import {
+  adapters,
+  reviewTransitions,
+  type AgentAdapter,
+  type AgentRequest,
+} from '../src/runner/adapters.ts';
 import { pinArtifacts } from '../src/runner/contract-artifacts.ts';
 import { command, git } from '../src/runner/process.ts';
 
@@ -280,6 +285,7 @@ export async function fixture(
   const files: Record<string, string> = {};
   const writer: AgentAdapter = {
     name: 'demo',
+    reviewProtocol: 1,
     async execute(r) {
       if (r.review) {
         calls.review++;
@@ -287,12 +293,27 @@ export async function fixture(
           phase: r.artifactDir.includes('integration') ? 'integration' : 'candidate',
           prompt: r.prompt,
         });
-        if (options.reviewer) {
-          const data = await options.reviewer(r, calls);
-          if (data) return { data, log: '', command: ['reviewer'] };
-        }
+        const data = ((options.reviewer && (await options.reviewer(r, calls))) || {
+          approved: true,
+          summary: 'Fixture review approves',
+          findings: [],
+        }) as { approved: boolean; previous?: unknown };
+        // Ревьюер fixture называет состояние выданных находок сам, если тест
+        // не задал переходы: одобрение закрывает их, отказ оставляет открытыми.
         return {
-          data: { approved: true, summary: 'Fixture review approves', findings: [] },
+          data:
+            r.findings && !data.previous
+              ? {
+                  ...data,
+                  previous: reviewTransitions(
+                    r.findings,
+                    data.approved,
+                    data.approved
+                      ? 'Fixture review: исправление подтверждено на этом SHA'
+                      : 'Fixture review: дефект остаётся',
+                  ),
+                }
+              : data,
           log: '',
           command: ['reviewer'],
         };

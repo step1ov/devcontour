@@ -326,7 +326,21 @@ export interface Evidence {
    * Без них следующая попытка знает, что «что-то не так», но не знает где и
    * что делать, — и круг повторяется с тем же замечанием.
    */
-  findings?: { severity: string; message: string; path?: string | null; line?: number | null }[];
+  findings?: {
+    severity: string;
+    message: string;
+    path?: string | null;
+    line?: number | null;
+    /** ID, выданный controller, и статус находки на момент раунда; нет у прежних записей. */
+    id?: string;
+    status?: 'open' | 'closed' | 'withdrawn';
+  }[];
+  /**
+   * Раунд ревью кода: номер, вызов reviewer и переходы прежних находок.
+   * Невалидный ответ reviewer — отдельная запись `protocol: invalid`, а не отказ
+   * по существу. Нет поля — запись прежней версии.
+   */
+  reviewRound?: NonNullable<import('devcontour-harness').EvidenceRecord['reviewRound']>;
   /**
    * Что именно выполнилось: идентификаторы testcases и их исход. Итоговый код
    * возврата не говорит, проверялось ли заявленное поведение; манифест говорит.

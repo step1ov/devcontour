@@ -44,6 +44,10 @@ export function fromAgentAdapter(
         cancellation: true,
         usage: true,
         fixture: runtime === 'fixture',
+        // Протокол переходов находок — только если его ведёт сам адаптер:
+        // объявить его за адаптер прежней версии значило бы требовать
+        // переходы, которых он не умеет называть.
+        ...(agent.reviewProtocol === 1 ? { reviewProtocol: 1 as const } : {}),
       }),
     async invoke(request: RuntimeRequest, signal: AbortSignal): Promise<RuntimeResponse> {
       const workId = request.subject?.workId;
@@ -67,6 +71,7 @@ export function fromAgentAdapter(
         ...(request.binding.effort ? { effort: request.binding.effort } : {}),
         signal,
         timeoutMs: request.timeoutMs,
+        ...(request.findings ? { findings: request.findings } : {}),
         execution: { env: request.env, redact: redactor(request.secrets ?? []) },
         ...(request.env.DEVCONTOUR_RESOURCES_JSON
           ? { resourcesJson: request.env.DEVCONTOUR_RESOURCES_JSON }

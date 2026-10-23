@@ -30,6 +30,7 @@ import type { RuntimeDiagnostics } from '../core/runtime-diagnostics.ts';
 import { planResult, planSchema } from '../core/plan.ts';
 import { command } from './process.ts';
 import { BlockedError, discoveryInput, type RuntimeName, type Task } from '../core/model.ts';
+import type { ReviewRequestFindings } from 'devcontour-harness';
 export const implementationResult = z.object({
   completed: z.boolean(),
   summary: z.string(),
@@ -253,6 +254,12 @@ export interface AgentRequest {
    * данные закрыты. Контур передаёт сюда свои каталоги, чтобы закрыть и их.
    */
   isolation?: Isolation;
+  /**
+   * Находки ревью кода, выданные controller (протокол переходов harness).
+   * Приходят только адаптеру с `reviewProtocol: 1`: ответ называет в
+   * `previous` состояние каждой открытой находки по её ID.
+   */
+  findings?: ReviewRequestFindings;
 }
 export interface AgentResult {
   inspection?: ReviewInspection;
@@ -263,6 +270,12 @@ export interface AgentResult {
 export interface AgentAdapter {
   version?: string;
   name: RuntimeName;
+  /**
+   * Адаптер ведёт протокол переходов находок ревью кода: получает
+   * `findings` и отвечает переходом каждой открытой. Нет поля — прежняя
+   * семантика: переходы не требуются, находки остаются в истории открытыми.
+   */
+  reviewProtocol?: 1;
   execute(request: AgentRequest): Promise<AgentResult>;
 }
 /**
@@ -562,20 +575,61 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
     },
   };
 }
+/**
+ * Переходы открытых находок для детерминированного reviewer без модели:
+ * одобрение подтверждает исправление на проверяемом SHA — находки закрыты;
+ * отказ оставляет их открытыми. Основание — объяснение reviewer, а не формальность.
+ */
+export function reviewTransitions(
+  findings: ReviewRequestFindings | undefined,
+  approved: boolean,
+  basis: string,
+) {
+  return (findings?.open ?? []).map((f) => ({
+    id: f.id,
+    status: approved ? ('closed' as const) : ('open' as const),
+    basis,
+  }));
+}
 // Deterministic fixture only. Never claim these outputs were produced by a model.
 export const demoAdapter: AgentAdapter = {
   name: 'demo',
+  reviewProtocol: 1,
   async execute(r) {
     if (r.signal.aborted) throw new Error('Отменено');
     if (r.review) {
       const value = JSON.parse(
         await readFile(join(r.cwd, 'deliverables', `${r.task.id}.json`), 'utf8'),
       );
+      const approved = value.id === r.task.id;
+      const path = `deliverables/${r.task.id}.json`;
       return {
         data: {
-          approved: value.id === r.task.id,
+          approved,
           summary: 'Детерминированная проверка demo-артефакта; это не AI-review.',
-          findings: [],
+          // Прежнее замечание остаётся открытым, пока артефакт не исправлен:
+          // новая находка о том же дефекте появляется, только если открытой нет.
+          findings:
+            approved || r.findings?.open.length
+              ? []
+              : [
+                  {
+                    severity: 'blocking',
+                    message: `Demo-артефакт относится к задаче ${String(value.id)}, а не к ${r.task.id}`,
+                    path,
+                  },
+                ],
+          ...(r.findings
+            ? {
+                previous: reviewTransitions(
+                  r.findings,
+                  approved,
+                  approved
+                    ? `${path} соответствует задаче на проверяемом SHA`
+                    : `${path} по-прежнему не соответствует задаче`,
+                ),
+              }
+            : {}),
         },
         log: 'Demo fixture review',
         command: ['internal:demo-review'],

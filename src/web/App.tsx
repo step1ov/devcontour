@@ -212,6 +212,11 @@ function TaskLive({
     return (
       <small className="text-destructive mt-1 block w-full min-w-0 break-words [overflow-wrap:anywhere]">
         {run?.blocked ? 'Отказ окружения, попытка не засчитана: ' : ''}
+        {/* Ответ ревьюера вне протокола — не замечание к коду: повтор writer
+            ничего не исправит, продолжение назначает человек. */}
+        {run?.failureKind === 'review-protocol'
+          ? 'Ответ ревьюера нарушил протокол ревью, код не оценён: '
+          : ''}
         {task.failure}
         {/* Исчерпанный бюджет — тупик, пока о сбросе никто не знает: без этой
             строки остаётся только править базу руками. */}
@@ -248,6 +253,34 @@ function GateChips({ run }: { run: PanelRun }) {
       ))}
     </span>
   );
+}
+// Раунд ревью кода: какие прежние находки reviewer закрыл, снял или оставил.
+// Невалидный ответ — не замечание к коду: причина в пути поля ответа, а
+// одобрения или отказа по существу у такого вызова нет.
+function reviewRoundLine(r: NonNullable<Run['evidence'][number]['reviewRound']>) {
+  // Номер вызова виден, только когда был повтор reviewer или сам вызов невалиден.
+  const call = `вызов ${r.call} из ${r.calls}`;
+  if (r.protocol !== 'valid')
+    return [call, (r.issues ?? []).map((i) => `${i.reason} ${i.path}`).join(', ') || r.protocol]
+      .filter(Boolean)
+      .join(': ');
+  const moved = (to: string) => (r.transitions ?? []).filter((t) => t.to === to).length;
+  return [
+    `раунд ${r.round}`,
+    r.call > 1 ? call : '',
+    ...(
+      [
+        ['закрыто', moved('closed')],
+        ['снято', moved('withdrawn')],
+        ['открыто', moved('open')],
+      ] as const
+    )
+      .filter(([, n]) => n > 0)
+      .map(([label, n]) => `${label} ${n}`),
+    r.mode === 'legacy' ? 'без переходов находок' : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
 }
 // Очередь встаёт не только по команде оператора: диспетчер останавливает её
 // сам, когда выдавать работу нельзя — база отстала, checkout команды разошёлся.
@@ -2243,12 +2276,17 @@ export function App() {
                               {e.passed ? <Check /> : <X />}
                             </span>
                             <span>
-                              {e.kind === 'review' ? 'Независимое ревью' : e.gate}
+                              {e.kind !== 'review'
+                                ? e.gate
+                                : e.reviewRound && e.reviewRound.protocol !== 'valid'
+                                  ? 'Ответ ревьюера вне протокола'
+                                  : 'Независимое ревью'}
                               <small>
                                 {e.phase === 'integration' ? 'После интеграции' : 'Кандидат'} ·{' '}
                                 {e.sha.slice(0, 7)}
                                 {e.kind === 'review' &&
                                   ` · ${e.inspection?.mode ?? 'команды не зафиксированы'}`}
+                                {e.reviewRound && ` · ${reviewRoundLine(e.reviewRound)}`}
                               </small>
                             </span>
                           </Button>
