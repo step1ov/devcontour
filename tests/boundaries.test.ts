@@ -65,6 +65,38 @@ test('harness — только из корня пакета или /contracts, �
   );
 });
 
+test('devcontour-harness/projections разрешён ровно домену и только этим точным subpath', async () => {
+  const projections = "import { chainRoots } from 'devcontour-harness/projections';\n";
+  // Домен вызывает чистые проекции, которые исполняются и в браузере.
+  assert.equal((await lint('src/core/graph.ts', projections)).length, 0);
+  // Остальные слои — прежний запрет: корень или /contracts.
+  for (const file of [
+    'src/runner/backup.ts',
+    'src/application/overview.ts',
+    'src/web/AuthorOverview.tsx',
+    'src/server/http.ts',
+    'src/harness/index.ts',
+  ]) {
+    const found = await lint(file, projections);
+    assert.equal(found.length, 1, file);
+    assert.equal(found[0].severity, 2, file);
+  }
+  // Исключение точечное: ни вложенный путь, ни другой subpath домену недоступны.
+  for (const spec of [
+    'devcontour-harness/projections/chain',
+    'devcontour-harness/lib/projections/index.js',
+    'devcontour-harness/toolchains',
+    'devcontour-harness/testing',
+  ])
+    assert.equal(
+      (await lint('src/core/graph.ts', `import { x } from '${spec}';\n`)).length,
+      1,
+      spec,
+    );
+  // В тестах — дополнительно к /testing.
+  assert.equal((await lint('tests/boundaries.test.ts', projections)).length, 0);
+});
+
 test('S3.1: harness — закреплённый versioned archive из vendor/harness, установленный в node_modules', async () => {
   const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as {
     dependencies: Record<string, string>;
@@ -118,7 +150,7 @@ test('S3.1: в исходниках нет глубоких импортов har
       else if (/\.(ts|tsx|mjs)$/.test(entry.name)) {
         const text = readFileSync(path, 'utf8');
         if (
-          /devcontour-harness\/(?!contracts['"]|package\.json['"])|\.\.\/devcontour-harness/.test(
+          /devcontour-harness\/(?!contracts['"]|projections['"]|package\.json['"])|\.\.\/devcontour-harness/.test(
             text,
           )
         )
@@ -130,7 +162,7 @@ test('S3.1: в исходниках нет глубоких импортов har
   assert.deepEqual(offending, []);
 });
 
-test('Код панели не загружает исполнение harness: из браузерного кода доступен только devcontour-harness/contracts', () => {
+test('Код панели не загружает исполнение harness: из браузерного кода доступны только /contracts и /projections', () => {
   // Корень пакета при загрузке читает файлы (версию пакета) — в браузере это
   // падение всей панели. Договоры пакета чистые.
   const seen = new Set<string>();

@@ -1,7 +1,17 @@
 import { selectedWorkspaceMode, assertControllerCheckout } from './workspace-mode.ts';
-import { lstat, mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises';
+import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  HarnessError,
+  applyFileWrites,
+  checkDestination,
+  inspectPath,
+  listRegularFiles,
+  planFileWrites,
+  type FileIntent,
+  type FilePlanEntry,
+} from 'devcontour-harness';
 import { configSchema, roles } from '../core/model.ts';
 const builtinTitles: Record<string, string> = {
   architect: 'Архитектор',
@@ -144,38 +154,21 @@ export function componentProfileConfig(
   };
 }
 
-async function inspect(path: string) {
-  try {
-    return await lstat(path);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-    throw error;
+// Файловая часть подготовки — общая операция harness: план назначений
+// (symlink и не-каталог на пути, не обычный файл, сверка сохранённого
+// профиля) и create-only применение с продолжением после прерывания. Хост
+// задаёт состав файлов, порядок (config последним) и прежние тексты отказов.
+const conflictText = (entry: FilePlanEntry) => {
+  const at = entry.conflictPath ?? entry.path;
+  switch (entry.conflict) {
+    case 'symlink':
+      return `Setup не пишет через symlink: ${at}`;
+    case 'ancestor-not-directory':
+      return `Родитель не является каталогом: ${at}`;
+    default:
+      return `Ожидался обычный файл: ${entry.path}`;
   }
-}
-
-async function checkDestination(path: string) {
-  let cursor = resolve(path);
-  while (true) {
-    const stat = await inspect(cursor);
-    if (stat?.isSymbolicLink()) throw new Error(`Setup не пишет через symlink: ${cursor}`);
-    if (stat && cursor !== resolve(path) && !stat.isDirectory())
-      throw new Error(`Родитель не является каталогом: ${cursor}`);
-    const parent = dirname(cursor);
-    if (parent === cursor) break;
-    cursor = parent;
-  }
-}
-
-async function templateFiles(dir = templateRoot, prefix = ''): Promise<string[]> {
-  const result: string[] = [];
-  for (const entry of await readdir(dir, { withFileTypes: true })) {
-    const name = join(prefix, entry.name);
-    if (entry.isDirectory()) result.push(...(await templateFiles(join(dir, entry.name), name)));
-    else if (entry.isFile()) result.push(name);
-    else throw new Error(`Неподдерживаемый файл шаблона: ${name}`);
-  }
-  return result;
-}
+};
 
 export async function setupProject(options: {
   repository: string;
@@ -215,7 +208,7 @@ export async function setupProject(options: {
   if (options.workspace) {
     if (!isAbsolute(options.workspace)) throw new Error('workspace требует абсолютный путь');
     await checkDestination(options.workspace);
-    workspaceRoot = (await inspect(options.workspace))
+    workspaceRoot = (await inspectPath(options.workspace))
       ? await realpath(options.workspace)
       : resolve(options.workspace);
     const toolRoot = await realpath(devcontourRoot);
@@ -232,7 +225,7 @@ export async function setupProject(options: {
           ? 'Embedded workspace должен совпадать с корнем репозитория'
           : 'Separate workspace должен находиться вне репозитория продукта',
       );
-    if (await inspect(workspaceRoot)) assertControllerCheckout(workspaceRoot);
+    if (await inspectPath(workspaceRoot)) assertControllerCheckout(workspaceRoot);
   }
   const data = workspaceRoot
     ? join(workspaceRoot, '.devcontour-local')
@@ -253,7 +246,7 @@ export async function setupProject(options: {
         /* Пакет вправе ссылаться на файл, который пишет сам продукт. */
       }
     }
-  for (const name of await templateFiles())
+  for (const name of await listRegularFiles(templateRoot))
     files.set(join(repository, name), await readFile(join(templateRoot, name), 'utf8'));
   files.set(
     join(repository, '.gitignore'),
@@ -339,14 +332,21 @@ export async function setupProject(options: {
     ) + '\n',
   );
 
-  // Complete preflight before writes; existing files are preserved, including user policy.
-  for (const path of files.keys()) {
-    await checkDestination(path);
-    const stat = await inspect(path);
-    if (stat && !stat.isFile()) throw new Error(`Ожидался обычный файл: ${path}`);
-  }
+  // План до любой записи; существующие файлы, включая политику пользователя,
+  // сохраняются. Сохранённый снимок профиля обязан совпадать байтово.
+  const intents: FileIntent[] = [...files].map(([path, content]) =>
+    path === profilePath ? { path, content, onExisting: 'require-identical' } : { path, content },
+  );
+  const plan = await planFileWrites({ files: intents });
+  const unsafe = plan.entries.find(
+    (e) => e.action === 'conflict' && e.conflict !== 'content-differs',
+  );
+  if (unsafe)
+    throw new HarnessError('PATH_CONFLICT', conflictText(unsafe), [
+      { path: [unsafe.conflictPath ?? unsafe.path], message: unsafe.conflict! },
+    ]);
   let approvalMode = options.approvalMode ?? 'agent';
-  if (await inspect(join(data, 'config.json'))) {
+  if (await inspectPath(join(data, 'config.json'))) {
     const existing = loadConfig(join(data, 'config.json'));
     if (
       (workspaceRoot && existing.workspaceRoot !== workspaceRoot) ||
@@ -358,26 +358,14 @@ export async function setupProject(options: {
     if (options.approvalMode && existing.approvalMode !== options.approvalMode)
       throw new Error('Setup не меняет установленный режим согласования; измените его явно');
     approvalMode = existing.approvalMode;
-  } else if (await inspect(join(data, 'packs.lock.json'))) {
+  } else if (await inspectPath(join(data, 'packs.lock.json'))) {
     const existing = JSON.parse(await readFile(join(data, 'packs.lock.json'), 'utf8'));
     if (JSON.stringify(existing) !== JSON.stringify(profileLock(selected)))
       throw new Error('Существующий packs.lock.json не соответствует выбранному профилю');
   }
-  if ((await inspect(profilePath)) && (await readFile(profilePath, 'utf8')) !== profileContent)
-    throw new Error('Сохранённый профиль изменён; требуется явная сверка версии');
+  if (plan.conflicts) throw new Error('Сохранённый профиль изменён; требуется явная сверка версии');
 
-  const created: string[] = [],
-    preserved: string[] = [];
-  for (const [path, content] of files) {
-    await mkdir(dirname(path), { recursive: true });
-    try {
-      await writeFile(path, content, { flag: 'wx' });
-      created.push(path);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      preserved.push(path);
-    }
-  }
+  const { created, preserved } = await applyFileWrites(plan, intents);
   if (workspaceRoot) {
     const configPath = join(data, 'config.json');
     const config = loadConfig(configPath);

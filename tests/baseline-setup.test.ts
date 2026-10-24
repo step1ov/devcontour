@@ -189,46 +189,51 @@ test('Baseline setup: each unsafe destination or input is refused before any pla
     arrange: (root: string) => Promise<void>;
     options?: (root: string) => Partial<Parameters<typeof setupProject>[0]>;
     error: RegExp;
+    /** Отказ файловой части подготовки: код общей операции harness. */
+    code?: 'PATH_CONFLICT';
   }[] = [
     {
       name: 'symlink ancestor of a destination',
+      code: 'PATH_CONFLICT',
       arrange: (root) => symlink(outside, join(root, '.agents')),
-      error: /^Error: Setup не пишет через symlink: .*\.agents$/,
+      error: /^Setup не пишет через symlink: .*\.agents$/,
     },
     {
       name: 'symlink as the destination file',
+      code: 'PATH_CONFLICT',
       arrange: (root) => symlink(outsideFile, join(root, 'AGENTS.md')),
-      error: /^Error: Setup не пишет через symlink: .*AGENTS\.md$/,
+      error: /^Setup не пишет через symlink: .*AGENTS\.md$/,
     },
     {
       name: 'regular file as a destination ancestor',
+      code: 'PATH_CONFLICT',
       arrange: (root) => writeFile(join(root, 'contracts'), 'not a directory'),
-      // Сейчас отказ приходит из lstat (ENOTDIR) до проверки предков; важно,
-      // что он происходит до записи и называет путь.
-      error:
-        /^Error: (ENOTDIR: not a directory, lstat '.*contracts\/README\.md'|Родитель не является каталогом: .*contracts)$/,
+      // До D1 наружу выходил сырой ENOTDIR из lstat. Общая проверка назначения
+      // называет сам предок-файл — намеренное отличие (PATH_CONFLICT).
+      error: /^Родитель не является каталогом: .*contracts$/,
     },
     {
       name: 'directory at a file destination',
+      code: 'PATH_CONFLICT',
       arrange: (root) => mkdir(join(root, 'AGENTS.md')),
-      error: /^Error: Ожидался обычный файл: .*AGENTS\.md$/,
+      error: /^Ожидался обычный файл: .*AGENTS\.md$/,
     },
     {
       name: 'brief outside docs',
       arrange: async () => {},
       options: () => ({ brief: join(outside, 'docs/spec.md') }),
-      error: /^Error: ТЗ должно быть Markdown-файлом внутри docs продукта$/,
+      error: /^ТЗ должно быть Markdown-файлом внутри docs продукта$/,
     },
     {
       name: 'brief that is not Markdown',
       arrange: (root) => writeFile(join(root, 'docs/spec.txt'), 'text'),
       options: () => ({ brief: 'docs/spec.txt' }),
-      error: /^Error: ТЗ должно быть Markdown-файлом внутри docs продукта$/,
+      error: /^ТЗ должно быть Markdown-файлом внутри docs продукта$/,
     },
     {
       name: 'empty brief',
       arrange: (root) => writeFile(join(root, 'docs/spec.md'), '  \n'),
-      error: /^Error: ТЗ пустое$/,
+      error: /^ТЗ пустое$/,
     },
     {
       name: 'docs is a symlink out of the product',
@@ -236,19 +241,19 @@ test('Baseline setup: each unsafe destination or input is refused before any pla
         await rm(join(root, 'docs'), { recursive: true });
         await symlink(join(outside, 'docs'), join(root, 'docs'));
       },
-      error: /^Error: docs должен быть внутри продукта$/,
+      error: /^docs должен быть внутри продукта$/,
     },
     {
       name: 'workspace and data together',
       arrange: async () => {},
       options: (root) => ({ workspace: join(root, '..', 'ws'), data: join(root, 'd') }),
-      error: /^Error: Используйте workspace или data, не оба$/,
+      error: /^Используйте workspace или data, не оба$/,
     },
     {
       name: 'relative workspace',
       arrange: async () => {},
       options: () => ({ workspace: 'relative-ws' }),
-      error: /^Error: workspace требует абсолютный путь$/,
+      error: /^workspace требует абсолютный путь$/,
     },
     {
       name: 'changed packs.lock.json without config',
@@ -259,7 +264,7 @@ test('Baseline setup: each unsafe destination or input is refused before any pla
           '{"version":1,"packs":[]}',
         );
       },
-      error: /^Error: Существующий packs\.lock\.json не соответствует выбранному профилю$/,
+      error: /^Существующий packs\.lock\.json не соответствует выбранному профилю$/,
     },
     {
       name: 'changed stored profile',
@@ -267,7 +272,7 @@ test('Baseline setup: each unsafe destination or input is refused before any pla
         await mkdir(join(root, '.devcontour-local/profiles'), { recursive: true });
         await writeFile(join(root, '.devcontour-local/profiles/go-api.json'), '{}');
       },
-      error: /^Error: Сохранённый профиль изменён; требуется явная сверка версии$/,
+      error: /^Сохранённый профиль изменён; требуется явная сверка версии$/,
     },
   ];
   try {
@@ -279,8 +284,10 @@ test('Baseline setup: each unsafe destination or input is refused before any pla
         const outsideBefore = await tree(outside);
         await assert.rejects(
           setupProject({ repository: root, profile: 'go-api', ...c.options?.(root) }),
-          (error: Error) => {
-            assert.match(String(error), c.error, c.name);
+          (error: Error & { code?: string }) => {
+            // Якорь — текст сообщения (его выводит CLI), а не имя класса ошибки.
+            assert.match(error.message, c.error, c.name);
+            assert.equal(error.code, c.code, c.name + ': код отказа');
             return true;
           },
         );

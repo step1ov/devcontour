@@ -1,22 +1,23 @@
+import { chainRoots, queueStop, type ChainRootCode } from 'devcontour-harness/projections';
 import type { AuditEvent, Board, DevContourState, Task } from './model.ts';
 
 /**
- * Почему диспетчер сам остановил выдачу работы. Пауза оператора или
- * остановка сервера причины не требуют; прежние записи паузы рантайма не
- * называли её вовсе, поэтому пустая причина означает то же, что runtime.
- * Журнал приходит от новых событий к старым: берётся самая свежая ошибка,
- * иначе при нескольких сбоях экран называл давно устранённую.
+ * Почему диспетчер сам остановил выдачу работы — общая проекция harness
+ * (`queueStop`). Хост переводит журнал в её вход: каждое `scheduler.error`
+ * — ошибка с номером события; правило выбора (пауза оператора не называет
+ * сбой, пустая причина — runtime, самая свежая ошибка) — в harness.
  */
 export function queueStopReason(
   state: { paused?: boolean; pauseReason?: DevContourState['pauseReason'] },
   events: Pick<AuditEvent, 'id' | 'type' | 'data'>[],
 ) {
-  if (!state.paused || (state.pauseReason && state.pauseReason !== 'runtime')) return undefined;
-  const latest = events
-    .filter((e) => e.type === 'scheduler.error')
-    .reduce<(typeof events)[number] | undefined>((a, e) => (!a || e.id > a.id ? e : a), undefined);
-  const detail = (latest?.data as { error?: string } | undefined)?.error;
-  return detail ? detail.replace(/^(Error|TaskFailure):\s*/, '') : undefined;
+  return queueStop({
+    paused: state.paused === true,
+    ...(state.pauseReason ? { pauseReason: state.pauseReason } : {}),
+    errors: events
+      .filter((e) => e.type === 'scheduler.error')
+      .map((e) => ({ seq: e.id, message: (e.data as { error?: string } | undefined)?.error })),
+  }).detail;
 }
 
 export type BoardPhase =
@@ -99,72 +100,55 @@ export type ChainBlocker = {
   waiting: number;
 };
 
+/** Тексты панели для кодов корня цепочки; `detail` — причина удержания или бюджета. */
+const chainTexts: Record<ChainRootCode, (detail?: string) => [string, string]> = {
+  'failed-exhausted': () => [
+    'сбой, бюджет попыток исчерпан',
+    'ведущий устраняет причину и повторяет со сбросом бюджета',
+  ],
+  failed: () => ['сбой', 'повтор назначит восстановление или ведущий'],
+  draft: () => ['план не утверждён', 'ревью и утверждение плана'],
+  cancelled: () => ['отменена', 'перепланировать зависимые задачи'],
+  held: (detail) => [`удержана: ${detail}`, 'дождаться завершения операции'],
+  'budget-blocked': (detail = '') => [
+    detail,
+    'осознанно поднять предел в budgets или задать политику onUnknown',
+  ],
+  'attempts-exhausted': () => ['исчерпан бюджет попыток', 'повтор со сбросом бюджета'],
+};
+
 /**
  * Чего ждёт цепочка, когда исполнители свободны. Счётчик «ждут зависимостей»
  * говорил, что работа стоит, но не почему: на пилоте четыре задачи этапа
  * ждали одну упавшую с исчерпанным бюджетом, а панель писала «никто не
- * работает». Корень — незавершённая предшественница, которая сама не
- * выполняется: упала, не утверждена, удержана операцией или отменена.
+ * работает». Обход к корням — общая проекция harness (`chainRoots`); хост
+ * передаёт задачи как работы и называет код корня прежними словами панели.
  */
 export function chainBlockers(
   tasks: Pick<
     Task,
-    | 'id'
-    | 'title'
-    | 'status'
-    | 'dependsOn'
-    | 'attempt'
-    | 'hold'
-    | 'budgetBlock'
-    | 'activeRunId'
-    | 'failure'
+    'id' | 'title' | 'status' | 'dependsOn' | 'attempt' | 'hold' | 'budgetBlock' | 'activeRunId'
   >[],
   maxAttempts = 3,
 ): ChainBlocker[] {
-  const byId = new Map(tasks.map((t) => [t.id, t]));
-  const active = ['running', 'verifying', 'reviewing', 'integrating'];
-  const waiting = tasks.filter(
-    (t) => t.status === 'ready' && t.dependsOn.some((d) => byId.get(d)?.status !== 'done'),
-  );
-  const roots = new Map<string, Set<string>>();
-  for (const w of waiting) {
-    const seen = new Set<string>();
-    const walk = (id: string) => {
-      if (seen.has(id)) return;
-      seen.add(id);
-      const t = byId.get(id);
-      if (!t || t.status === 'done') return;
-      const open = t.dependsOn.filter((d) => byId.get(d)?.status !== 'done');
-      if (open.length && t.status === 'ready') return open.forEach(walk);
-      if (active.includes(t.status) || t.activeRunId) return;
-      if (t.status === 'ready' && !t.hold && !t.budgetBlock && t.attempt < maxAttempts) return;
-      roots.set(id, (roots.get(id) ?? new Set()).add(w.id));
+  const titles = new Map(tasks.map((t) => [t.id, t.title]));
+  const works = tasks.map((t) => ({
+    id: t.id,
+    status: t.status,
+    dependsOn: t.dependsOn,
+    attempt: t.attempt,
+    ...(t.activeRunId ? { activeRunId: t.activeRunId } : {}),
+    ...(t.hold ? { hold: t.hold } : {}),
+    ...(t.budgetBlock ? { budgetBlock: { reason: t.budgetBlock.reason } } : {}),
+  }));
+  return chainRoots(works, maxAttempts).map((root) => {
+    const [reason, next] = chainTexts[root.code](root.detail);
+    return {
+      taskId: root.workId,
+      title: titles.get(root.workId)!,
+      reason,
+      next,
+      waiting: root.waiting,
     };
-    w.dependsOn.forEach(walk);
-  }
-  return [...roots].map(([id, dependents]) => {
-    const t = byId.get(id)!;
-    const exhausted = t.attempt >= maxAttempts;
-    const [reason, next] =
-      t.status === 'failed'
-        ? exhausted
-          ? [
-              'сбой, бюджет попыток исчерпан',
-              'ведущий устраняет причину и повторяет со сбросом бюджета',
-            ]
-          : ['сбой', 'повтор назначит восстановление или ведущий']
-        : t.status === 'draft'
-          ? ['план не утверждён', 'ревью и утверждение плана']
-          : t.status === 'cancelled'
-            ? ['отменена', 'перепланировать зависимые задачи']
-            : t.hold
-              ? [`удержана: ${t.hold.reason}`, 'дождаться завершения операции']
-              : t.budgetBlock && t.attempt < maxAttempts
-                ? [
-                    t.budgetBlock.reason,
-                    'осознанно поднять предел в budgets или задать политику onUnknown',
-                  ]
-                : ['исчерпан бюджет попыток', 'повтор со сбросом бюджета'];
-    return { taskId: id, title: t.title, reason, next, waiting: dependents.size };
   });
 }

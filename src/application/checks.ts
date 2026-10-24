@@ -5,6 +5,7 @@ import { obligationOf, effectiveChecks } from '../core/checks.ts';
 import { CheckCorpus } from '../core/check-store.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { clip } from './bounded.ts';
+import { nextAction, type Actor, type NextStep, type NextView } from 'devcontour-harness';
 
 /**
  * Чтение договора проверки задачи: действующая версия, свойства и
@@ -19,61 +20,46 @@ export const checksQuery = z.strictObject({
   limit: z.number().int().min(1).max(50).default(20),
   cursor: z.number().int().min(0).default(0),
 });
-export type Actor = 'controller' | 'lead' | 'user' | null;
+export type { Actor } from 'devcontour-harness';
 
+/** Прежние формулировки шага для кодов `nextAction`; текст разбора зависит от approvalMode. */
+const stepTexts: Record<NextStep, (v: NextView, mode: 'agent' | 'operator') => string> = {
+  accepted: () => 'Задача принята.',
+  cancelled: () => 'Задача отменена.',
+  'recovery-awaiting-lead': (v, mode) =>
+    mode === 'agent'
+      ? `Ограниченный разбор ведущего по свойству ${v.property}: сервер вызовет его сам в пределах бюджета.`
+      : `Разбор свойства ${v.property}: решение ведущего через recovery_decide (operator mode автоматически не вызывает модель).`,
+  'recovery-analyzing': (v) => `Ведущий разбирает отказы по свойству ${v.property}.`,
+  'recovery-applying': () => 'Контур подтверждает предложенные случаи эталоном.',
+  'recovery-retry-allowed': () => 'Разрешён один повтор по решению разбора; задача ждёт выдачи.',
+  'recovery-retrying': () => 'Идёт разрешённый повтор.',
+  'recovery-awaiting-user': (v) => v.detail ?? 'Нужно решение пользователя.',
+  'recovery-stopped': (v) => v.detail ?? 'Автоматических действий больше нет.',
+  'corpus-adoption': () => 'Новая версия корпуса будет принята после окончания попытки.',
+  held: (v) => `Выдачу удерживает операция ${v.detail}.`,
+  'plan-review': () => 'Черновик ждёт ревью плана.',
+  'attempt-running': () => 'Идёт попытка: реализация, гейты, ревью и интеграция.',
+  'retry-within-budget': () => 'Повтор в пределах бюджета попыток.',
+  'attempts-exhausted': () => 'Попытки исчерпаны: сброс — решение человека с причиной.',
+  'awaiting-claim': () => 'Задача ждёт выдачи.',
+};
+
+/** Следующий шаг и кто действует: ветви — проекция harness `nextAction`, слова — хоста. */
 function nextStep(
   h: DevContour,
   task: Task,
   waitingAdoption: boolean,
 ): { actor: Actor; step: string } {
-  const r = task.recovery;
-  const attemptsLeft = h.config.maxAttempts - task.attempt;
-  if (task.status === 'done') return { actor: null, step: 'Задача принята.' };
-  if (task.status === 'cancelled') return { actor: null, step: 'Задача отменена.' };
-  if (r)
-    switch (r.status) {
-      case 'awaiting-lead':
-        return {
-          actor: 'lead',
-          step:
-            h.config.approvalMode === 'agent'
-              ? `Ограниченный разбор ведущего по свойству ${r.property}: сервер вызовет его сам в пределах бюджета.`
-              : `Разбор свойства ${r.property}: решение ведущего через recovery_decide (operator mode автоматически не вызывает модель).`,
-        };
-      case 'analyzing':
-        return { actor: 'lead', step: `Ведущий разбирает отказы по свойству ${r.property}.` };
-      case 'applying':
-        return { actor: 'controller', step: 'Контур подтверждает предложенные случаи эталоном.' };
-      case 'retry':
-        return {
-          actor: 'controller',
-          step: 'Разрешён один повтор по решению разбора; задача ждёт выдачи.',
-        };
-      case 'retrying':
-        return { actor: 'controller', step: 'Идёт разрешённый повтор.' };
-      case 'awaiting-user':
-        return { actor: 'user', step: r.reason ?? 'Нужно решение пользователя.' };
-      case 'stopped':
-        return {
-          actor: r.decision?.proposal ? 'lead' : 'user',
-          step: r.reason ?? 'Автоматических действий больше нет.',
-        };
-    }
-  if (waitingAdoption)
-    return {
-      actor: 'controller',
-      step: 'Новая версия корпуса будет принята после окончания попытки.',
-    };
-  if (task.hold)
-    return { actor: 'controller', step: `Выдачу удерживает операция ${task.hold.operation}.` };
-  if (task.status === 'draft') return { actor: 'lead', step: 'Черновик ждёт ревью плана.' };
-  if (['running', 'verifying', 'reviewing', 'integrating'].includes(task.status))
-    return { actor: 'controller', step: 'Идёт попытка: реализация, гейты, ревью и интеграция.' };
-  if (task.status === 'failed')
-    return attemptsLeft > 0
-      ? { actor: 'controller', step: 'Повтор в пределах бюджета попыток.' }
-      : { actor: 'user', step: 'Попытки исчерпаны: сброс — решение человека с причиной.' };
-  return { actor: 'controller', step: 'Задача ждёт выдачи.' };
+  const view = nextAction({
+    status: task.status,
+    attempt: task.attempt,
+    maxAttempts: h.config.maxAttempts,
+    ...(task.hold ? { hold: task.hold } : {}),
+    ...(task.recovery ? { recovery: task.recovery } : {}),
+    waitingAdoption,
+  });
+  return { actor: view.actor, step: stepTexts[view.step](view, h.config.approvalMode) };
 }
 
 export function taskChecks(h: DevContour, raw: unknown) {

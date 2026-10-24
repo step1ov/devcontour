@@ -68,7 +68,7 @@ Checkpoint — подсказка для продолжения. Он не ра�
 
 ## Почему задача ждёт
 
-`progress.reasons` разделяет причины: `plan_review_required`, `dependencies_incomplete`, `queue_paused`, `assigned_to_another_member`, `workers_busy`, `workspace_operation_active`, `inactive_revision`, `failure_requires_diagnosis`, `attempts_exhausted`. `eligible` — наблюдение о возможности выдачи задачи сейчас. Получить право записи можно только через scheduler и его lease; обзор не бронирует задачу.
+`progress.reasons` разделяет причины: `plan_review_required`, `dependencies_incomplete`, `queue_paused`, `assigned_to_another_member`, `workers_busy`, `workspace_operation_active`, `inactive_revision`, `failure_requires_diagnosis`, `attempts_exhausted`, а также `product_approval_required`. Порядок фиксирован: сначала продуктовые `product_approval_required` и `inactive_revision`, затем общие причины исполнения (у черновика — `plan_review_required`, у сбоя — `failure_requires_diagnosis` или `attempts_exhausted`, у готовой задачи — `dependencies_incomplete`, `attempts_exhausted`, `queue_paused`, `workers_busy`), затем `assigned_to_another_member` и `workspace_operation_active`. Общие причины вычисляет движок исполнения, продуктовые добавляет DevContour. `eligible` — наблюдение о возможности выдачи задачи сейчас. Получить право записи можно только через scheduler и его lease; обзор не бронирует задачу.
 
 Heartbeat сам по себе не меняет ревизию контекста. Новая попытка, фаза, результат, правка задания, член команды, настройки и состояние общей проверки меняют соответствующие отпечатки. Это уменьшает шум при чтении и сохраняет видимость содержательных изменений.
 

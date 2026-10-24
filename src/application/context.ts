@@ -21,7 +21,7 @@ import {
   type Task,
 } from '../core/model.ts';
 import { repositories, repository, roleBinding, reviewerBinding } from '../core/repositories.ts';
-import { blockers } from '../core/graph.ts';
+import { workProgress, type ProgressReason } from 'devcontour-harness';
 import { identitySchema } from '../core/sync-model.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
@@ -47,34 +47,40 @@ export const contextInputs = {
 export type ContextOperation = keyof typeof contextInputs;
 export const contextOperations = Object.keys(contextInputs) as ContextOperation[];
 
+/** Машинные причины ответа (`progress.reasons`) для общих кодов harness. */
+const sharedReasons: Record<ProgressReason, string> = {
+  'plan-review-required': 'plan_review_required',
+  'attempts-exhausted': 'attempts_exhausted',
+  'failure-requires-diagnosis': 'failure_requires_diagnosis',
+  'dependencies-incomplete': 'dependencies_incomplete',
+  'queue-paused': 'queue_paused',
+  'workers-busy': 'workers_busy',
+};
+
 // Keep runtime ownership tokens, commands, credentials and full component bodies out of summaries.
-/** `now` — момент, на который считаются сроки lease; один на весь ответ. */
+/**
+ * Почему задача не выдаётся. Общие ветви (план, сбой, зависимости, попытки,
+ * пауза, занятые исполнители) — проекция harness `workProgress`; хост
+ * добавляет продуктовые причины: до общих — согласование продукта и
+ * неактивную ревизию, после — чужое назначение и идущую общую операцию
+ * workspace. `now` — момент, на который считаются сроки lease; один на весь ответ.
+ */
 export function taskProgress(h: DevContour, s: DevContourState, t: Task, now = Date.now()) {
-  const dependencies = blockers(t, s);
-  const active = s.boards.some(
-    (b) => b.revisions.at(-1)?.status === 'active' && b.revisions.at(-1)!.taskIds.includes(t.id),
-  );
-  const reasons: string[] = [];
+  const before: string[] = [];
+  const after: string[] = [];
   if (s.preparation && t.status !== 'done') {
     try {
       assertTaskPreparation(s, t);
     } catch {
-      reasons.push('product_approval_required');
+      before.push('product_approval_required');
     }
   }
-  if (t.status === 'draft') reasons.push('plan_review_required');
-  if (t.status === 'failed')
-    reasons.push(
-      t.attempt >= h.config.maxAttempts ? 'attempts_exhausted' : 'failure_requires_diagnosis',
-    );
   if (t.status === 'ready') {
-    if (!active) reasons.push('inactive_revision');
-    if (dependencies.length) reasons.push('dependencies_incomplete');
-    if (s.team && t.assignee !== s.team.member) reasons.push('assigned_to_another_member');
-    if (t.attempt >= h.config.maxAttempts) reasons.push('attempts_exhausted');
-    if (s.paused) reasons.push('queue_paused');
-    if (s.runs.filter((r) => r.status === 'active').length >= h.config.concurrency)
-      reasons.push('workers_busy');
+    const active = s.boards.some(
+      (b) => b.revisions.at(-1)?.status === 'active' && b.revisions.at(-1)!.taskIds.includes(t.id),
+    );
+    if (!active) before.push('inactive_revision');
+    if (s.team && t.assignee !== s.team.member) after.push('assigned_to_another_member');
     if (
       s.changeSets.some(
         (c) =>
@@ -82,16 +88,25 @@ export function taskProgress(h: DevContour, s: DevContourState, t: Task, now = D
           c.deliveries?.some((d) => d.status === 'active' && d.leaseUntil > now),
       )
     )
-      reasons.push('workspace_operation_active');
+      after.push('workspace_operation_active');
   }
+  const shared = workProgress({
+    work: t,
+    statusOf: (id) => s.tasks.find((x) => x.id === id)?.status,
+    maxAttempts: h.config.maxAttempts,
+    paused: s.paused,
+    activeRuns: s.runs.filter((r) => r.status === 'active').length,
+    concurrency: h.config.concurrency,
+    hostReasons: [...before, ...after],
+  });
   return {
     taskId: t.id,
     repositoryId: t.repositoryId,
     status: t.status,
     attempt: t.attempt,
-    dependencies,
-    reasons,
-    eligible: t.status === 'ready' && !reasons.length,
+    dependencies: shared.dependencies,
+    reasons: [...before, ...shared.reasons.map((r) => sharedReasons[r]), ...after],
+    eligible: shared.eligible,
   };
 }
 function boardOwner(b: Board, s: DevContourState) {

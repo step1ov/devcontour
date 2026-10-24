@@ -14,6 +14,17 @@ const harnessImports = [
     message: 'harness — установленный пакет, не соседний checkout.',
   },
 ];
+// Домен вызывает чистые проекции диагностики, которые исполняются и в
+// браузере (панель): корень и `/contracts` тянут `node:*`, поэтому домену
+// разрешён ещё ровно один публичный subpath без модулей Node.
+const coreHarnessImports = [
+  {
+    regex: '^devcontour-harness/(?!contracts$|projections$).+',
+    message:
+      'core импортирует harness только из корня, devcontour-harness/contracts или devcontour-harness/projections.',
+  },
+  harnessImports[1],
+];
 
 export default tseslint.config(
   {
@@ -54,7 +65,9 @@ export default tseslint.config(
     ),
   },
   {
-    files: ['tests/**/*.test.ts'],
+    // Шпионы границы с module mocks — те же файлы node:test, их запускает
+    // отдельным процессом tests/harness-shared-*.test.ts.
+    files: ['tests/**/*.test.ts', 'tests/fixtures/shared-boundary/*.spy.ts'],
     rules: {
       // node:test owns failures and completion of top-level registered tests.
       // Only this known registration function is exempt; other promises are errors.
@@ -82,9 +95,9 @@ export default tseslint.config(
         {
           patterns: [
             {
-              regex: '^devcontour-harness/(?!contracts$|testing$).+',
+              regex: '^devcontour-harness/(?!contracts$|projections$|testing$).+',
               message:
-                'harness импортируется только из корня пакета, devcontour-harness/contracts или /testing в тестах.',
+                'harness импортируется только из корня пакета, devcontour-harness/contracts, /projections или /testing в тестах.',
             },
             harnessImports[1],
           ],
@@ -103,7 +116,7 @@ export default tseslint.config(
         'error',
         {
           patterns: [
-            ...harnessImports,
+            ...coreHarnessImports,
             {
               group: ['../application/*', '../runner/*', '../server/*', '../web/*', '../cli*'],
               message: 'core — домен: он не зависит от application, runner, server и web.',
