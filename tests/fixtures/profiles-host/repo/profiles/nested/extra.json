@@ -1,0 +1,25 @@
+{
+  "id": "host-extra",
+  "version": "0.3.1-beta.1",
+  "extends": ["../base.json"],
+  "capabilities": ["shared", "extra"],
+  "concurrency": 2,
+  "runTimeoutMs": 1800000,
+  "lifecycle": {
+    "setup": [{ "id": "up", "command": ["docker", "compose", "up", "-d"], "timeoutMs": 60000 }],
+    "teardown": [{ "id": "down", "command": ["docker", "compose", "down"] }]
+  },
+  "roles": { "qa": { "runtime": "codex", "title": "Проверка" } },
+  "contextPacks": [
+    { "id": "shared", "version": "2", "repositoryId": "main", "files": ["docs/shared-v2.md"] }
+  ],
+  "gates": [
+    {
+      "id": "property",
+      "kind": "check",
+      "command": ["python3", "prop.py"],
+      "dependsOn": ["tests"],
+      "property": {}
+    }
+  ]
+}

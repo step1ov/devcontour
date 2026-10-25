@@ -9,13 +9,13 @@ import { preparationStore } from '../runner/preparation-store.ts';
 import { loadConfig } from '../runner/config.ts';
 import { DevContour } from '../core/service.ts';
 import { AgentService } from './agent.ts';
+import { checkJsonBytes } from 'devcontour-harness';
 
 // The early workspace has no repository, stack, fake gates or model configuration.
 export class PreparationAgent {
   constructor(readonly store: Store) {}
   execute(raw: unknown): Record<string, unknown> {
-    if (Buffer.byteLength(JSON.stringify(raw)) > 100000)
-      throw new DomainError('Слишком большой запрос', 413);
+    if (!checkJsonBytes(raw, 100000).within) throw new DomainError('Слишком большой запрос', 413);
     const { operation, input } = agentRequest.parse(raw);
     if (!(operation in preparationInputs))
       throw new DomainError(
@@ -26,8 +26,7 @@ export class PreparationAgent {
       operation as PreparationOperation,
       input ?? {},
     );
-    if (Buffer.byteLength(JSON.stringify(result)) > 65536)
-      throw new DomainError('Ответ превышает 64 KiB', 413);
+    if (!checkJsonBytes(result, 65536).within) throw new DomainError('Ответ превышает 64 KiB', 413);
     return result;
   }
 }

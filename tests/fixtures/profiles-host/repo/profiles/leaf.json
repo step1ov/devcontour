@@ -1,0 +1,6 @@
+{
+  "id": "host-leaf",
+  "version": "2.0.0",
+  "extends": ["./nested/extra.json", "./base.json"],
+  "protectedPaths": ["verify.py", "Makefile"]
+}

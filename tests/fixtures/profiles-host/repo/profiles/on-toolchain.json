@@ -1,0 +1,5 @@
+{
+  "id": "host-on-toolchain",
+  "version": "1.0.0",
+  "extends": ["./toolchain.json"]
+}

@@ -32,6 +32,7 @@ import { readFile, realpath } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { resolve, join, extname, sep } from 'node:path';
 import { ZodError, z } from 'zod';
+import { utf8Bytes } from 'devcontour-harness';
 import { DevContour, specDigest } from '../core/service.ts';
 import { DomainError } from '../core/model.ts';
 import { blockers, readyTasks } from '../core/graph.ts';
@@ -56,7 +57,7 @@ async function body(req: IncomingMessage) {
   let text = '';
   for await (const chunk of req) {
     text += chunk;
-    if (Buffer.byteLength(text) > 100_000) throw new DomainError('Слишком большой запрос', 413);
+    if (utf8Bytes(text) > 100_000) throw new DomainError('Слишком большой запрос', 413);
   }
   try {
     return JSON.parse(text || '{}');

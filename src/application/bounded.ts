@@ -1,26 +1,19 @@
 /**
  * Ограничители проекций панели. Диагностику пишут runner, гейты, scheduler и
  * ведущий (ошибки, отчёты, причины решений), и её длину не ограничивает ни
- * одна схема: в сводку и детали она попадает сокращённой.
+ * одна схема: в сводку и детали она попадает сокращённой. Усечение — общая
+ * операция harness (`clipText`/`clipDeep`): длина в code units JS, «…» после
+ * усечения, ключ `token` удаляется на любой глубине; общего предела размера
+ * объекта нет. Здесь — пределы хоста.
  */
+import { CLIP_DIAGNOSTIC, CLIP_SHORT, clipDeep, clipText } from 'devcontour-harness';
 
 /** Сколько знаков текста остаётся в компактной строке. */
-export const SHORT = 300;
+export const SHORT = CLIP_SHORT;
 /** Предел одной строки диагностики (ошибки, отчёты, история эпизода). */
-export const DIAGNOSTIC = 2000;
+export const DIAGNOSTIC = CLIP_DIAGNOSTIC;
 
-export const short = (text: string | undefined, n = SHORT) =>
-  text && text.length > n ? text.slice(0, n) + '…' : text;
+export const short = clipText;
 
 /** Строки не длиннее `n` на любой глубине, без токенов владения. */
-export function clip<T>(value: T, n = DIAGNOSTIC): T {
-  if (typeof value === 'string') return short(value, n) as T;
-  if (Array.isArray(value)) return (value as unknown[]).map((v) => clip(v, n)) as T;
-  if (value && typeof value === 'object')
-    return Object.fromEntries(
-      Object.entries(value)
-        .filter(([k]) => k !== 'token')
-        .map(([k, v]) => [k, clip(v, n)]),
-    ) as T;
-  return value;
-}
+export const clip = <T>(value: T, n = DIAGNOSTIC): T => clipDeep(value, n);

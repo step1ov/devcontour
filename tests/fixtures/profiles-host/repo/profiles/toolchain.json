@@ -1,0 +1,6 @@
+{
+  "id": "host-toolchain",
+  "version": "1.0.0",
+  "extends": ["./single.json"],
+  "toolchain": { "tools": { "node": "22" } }
+}

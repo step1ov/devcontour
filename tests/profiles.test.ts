@@ -134,7 +134,7 @@ test('Profile resolution rejects escaping paths, symlinks, cycles, ambiguous com
       /Invalid|path|input/i,
     );
     await invalid({ gates: [{ ...testGate, dependsOn: ['unknown'] }] }, /Неизвестная/);
-    await invalid({ extends: ['./tests.json'], gates: [testGate] }, /уникальны/);
+    await invalid({ extends: ['./tests.json'], gates: [testGate] }, /Повтор gate tests/);
     await invalid(
       { extends: ['./main.json'], environment: { values: { PROJECT_MARKER: 'override' } } },
       /Конфликт/,

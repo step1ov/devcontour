@@ -21,8 +21,14 @@ import {
   type Task,
 } from '../core/model.ts';
 import { repositories, repository, roleBinding, reviewerBinding } from '../core/repositories.ts';
-import { workProgress, type ProgressReason } from 'devcontour-harness';
 import { identitySchema } from '../core/sync-model.ts';
+import {
+  HarnessError,
+  checkJsonBytes,
+  pageItems,
+  workProgress,
+  type ProgressReason,
+} from 'devcontour-harness';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 const scope = { repositoryId: id.optional() };
@@ -206,6 +212,12 @@ function snapshot(h: DevContour, s: DevContourState, now: number, repositoryId?:
   return { revision: digest({ repositoryId, records, control }), records, control };
 }
 const MAX_RESPONSE = 64 * 1024;
+/**
+ * Страница контекста — общая операция harness (`pageItems`): cursor
+ * base64url `{revision, binding, offset}`, бюджет страницы 64 KiB с запасом
+ * 2048 байт под конверт. Хост задаёт revision и binding запроса и называет
+ * отказы прежними словами и статусами.
+ */
 function page<T>(
   items: T[],
   header: Record<string, unknown>,
@@ -213,50 +225,28 @@ function page<T>(
   binding: string,
   input: { cursor?: string; limit: number },
 ) {
-  let offset = 0;
-  if (input.cursor) {
-    let cursor;
-    try {
-      cursor = z
-        .object({
-          revision: z.string(),
-          binding: z.string(),
-          offset: z.number().int().nonnegative(),
-        })
-        .strict()
-        .parse(JSON.parse(Buffer.from(input.cursor, 'base64url').toString()));
-    } catch {
+  try {
+    return pageItems(items, header, {
+      revision,
+      binding,
+      cursor: input.cursor,
+      limit: input.limit,
+    });
+  } catch (error) {
+    if (!(error instanceof HarnessError)) throw error;
+    const at = JSON.stringify(error.issues[0]?.path ?? []);
+    if (error.code === 'INVALID_INPUT' && at === '["cursor"]')
       throw new DomainError('Некорректный cursor', 400);
-    }
-    if (cursor.revision !== revision || cursor.binding !== binding)
+    if (error.code === 'INVALID_INPUT' && at === '["cursor","offset"]')
+      throw new DomainError('Некорректный cursor offset', 400);
+    if (error.code === 'REVISION_CONFLICT')
       throw new DomainError(
         'Контекст изменился или cursor принадлежит другому запросу. Начните с первой страницы.',
       );
-    if (!Number.isSafeInteger(cursor.offset) || cursor.offset < 0 || cursor.offset > items.length)
-      throw new DomainError('Некорректный cursor offset', 400);
-    offset = cursor.offset;
+    if (error.code === 'RESPONSE_TOO_LARGE')
+      throw new DomainError('Элемент контекста превышает лимит ответа', 413);
+    throw error;
   }
-  const selected: T[] = [];
-  while (offset + selected.length < items.length && selected.length < input.limit) {
-    const candidate = [...selected, items[offset + selected.length]];
-    if (Buffer.byteLength(JSON.stringify({ ...header, items: candidate })) > MAX_RESPONSE - 2048)
-      break;
-    selected.push(items[offset + selected.length]);
-  }
-  if (!selected.length && offset < items.length)
-    throw new DomainError('Элемент контекста превышает лимит ответа', 413);
-  const next = offset + selected.length;
-  return {
-    ...header,
-    revision,
-    items: selected,
-    total: items.length,
-    hasMore: next < items.length,
-    nextCursor:
-      next < items.length
-        ? Buffer.from(JSON.stringify({ revision, binding, offset: next })).toString('base64url')
-        : null,
-  };
 }
 const checkpointSchema = z.object({
   version: z.literal(1),
@@ -291,7 +281,7 @@ export class AgentContext {
   constructor(readonly h: DevContour) {}
   execute(operation: ContextOperation, raw: unknown): unknown {
     const result = this.evaluate(operation, raw);
-    if (Buffer.byteLength(JSON.stringify(result)) > MAX_RESPONSE)
+    if (!checkJsonBytes(result, MAX_RESPONSE).within)
       throw new DomainError('Ответ превышает 64 KiB; сузьте контекст', 413);
     return result;
   }

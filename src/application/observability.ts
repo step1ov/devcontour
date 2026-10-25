@@ -4,6 +4,7 @@ import { DomainError } from '../core/model.ts';
 import { repository } from '../core/repositories.ts';
 import { taskOwner } from '../core/sync-state.ts';
 import type { UsageRecord } from '../core/usage.ts';
+import { HarnessError, pageItems } from 'devcontour-harness';
 
 const scope = {
   repositoryId: z
@@ -23,29 +24,41 @@ export const observabilityInputs = {
     policy: z.enum(['fifo-ready-v1', 'fewest-attempts-v1']),
   }),
 };
+/**
+ * Страница отчёта — общая операция harness (`pageItems`, cursor
+ * `<digest>:<offset>`): бюджет 48000 байт по сумме записей, без запаса под
+ * конверт. Хост задаёт revision (digest записей) и прежние отказы: чужой или
+ * нечитаемый cursor и offset вне диапазона — 409, запись больше страницы — 413.
+ */
 function page<T>(records: T[], input: { cursor?: string; limit: number }) {
-  const revision = digest(records);
-  const match = input.cursor?.match(/^([a-f0-9]{64}):(\d+)$/);
-  if (input.cursor && (!match || match[1] !== revision))
-    throw new DomainError('Отчёт изменился; начните чтение заново');
-  const offset = Number(match?.[2] ?? 0);
-  if (!Number.isSafeInteger(offset) || offset > records.length)
-    throw new DomainError('Некорректный cursor');
-  let end = offset,
-    bytes = 0;
-  while (end < records.length && end - offset < input.limit) {
-    const size = Buffer.byteLength(JSON.stringify(records[end]));
-    if (bytes + size > 48000) break;
-    bytes += size;
-    end++;
+  try {
+    const p = pageItems(
+      records,
+      {},
+      {
+        cursorFormat: 'digest-offset',
+        measure: 'items',
+        revision: digest(records),
+        cursor: input.cursor,
+        limit: input.limit,
+        maxBytes: 48000,
+        reserveBytes: 0,
+      },
+    );
+    return { revision: p.revision, records: p.items, nextCursor: p.nextCursor };
+  } catch (error) {
+    if (!(error instanceof HarnessError)) throw error;
+    if (
+      error.code === 'INVALID_INPUT' &&
+      JSON.stringify(error.issues[0]?.path) === '["cursor","offset"]'
+    )
+      throw new DomainError('Некорректный cursor');
+    if (error.code === 'REVISION_CONFLICT')
+      throw new DomainError('Отчёт изменился; начните чтение заново');
+    if (error.code === 'RESPONSE_TOO_LARGE')
+      throw new DomainError('Запись превышает размер страницы', 413);
+    throw error;
   }
-  if (end === offset && offset < records.length)
-    throw new DomainError('Запись превышает размер страницы', 413);
-  return {
-    revision,
-    records: records.slice(offset, end),
-    nextCursor: end < records.length ? revision + ':' + end : null,
-  };
 }
 export class Observability {
   constructor(readonly h: DevContour) {}

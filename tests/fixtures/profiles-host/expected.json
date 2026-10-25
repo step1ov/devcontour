@@ -1,0 +1,2864 @@
+[
+  {
+    "ref": "expo-mobile",
+    "repositoryId": "main",
+    "keys": [
+      "id",
+      "version",
+      "capabilities",
+      "gates",
+      "prepare",
+      "environment",
+      "lifecycle",
+      "protectedPaths",
+      "generatedPaths",
+      "concurrency",
+      "runTimeoutMs",
+      "roles",
+      "contextPacks",
+      "digest",
+      "closure",
+      "raw"
+    ],
+    "profile": {
+      "id": "expo-mobile",
+      "version": "0.2.0",
+      "capabilities": [
+        "node",
+        "typescript",
+        "unit-tests",
+        "mobile",
+        "maestro",
+        "device-lease-required",
+        "react-native",
+        "expo"
+      ],
+      "gates": [
+        { "id": "install", "kind": "check", "command": ["npm", "ci"], "timeoutMs": 240000 },
+        {
+          "id": "typecheck",
+          "dependsOn": ["install"],
+          "kind": "check",
+          "command": ["npm", "run", "typecheck"],
+          "timeoutMs": 240000
+        },
+        {
+          "id": "unit-tests",
+          "dependsOn": ["typecheck"],
+          "kind": "test",
+          "command": ["npm", "run", "test:devcontour"],
+          "timeoutMs": 240000,
+          "report": { "type": "junit", "path": ".reports/junit.xml" }
+        },
+        {
+          "id": "build-and-install",
+          "kind": "check",
+          "command": ["npm", "run", "mobile:devcontour:prepare"],
+          "timeoutMs": 600000
+        },
+        {
+          "id": "mobile-acceptance",
+          "kind": "test",
+          "command": [
+            "maestro",
+            "test",
+            ".maestro/",
+            "--format",
+            "junit",
+            "--output",
+            ".reports/junit.xml"
+          ],
+          "timeoutMs": 600000,
+          "report": { "type": "junit", "path": ".reports/junit.xml" }
+        }
+      ],
+      "prepare": [],
+      "protectedPaths": [
+        "package.json",
+        "package-lock.json",
+        "app.json",
+        "babel.config.js",
+        "metro.config.js",
+        "app.config.js",
+        "app.config.ts",
+        "eas.json"
+      ],
+      "generatedPaths": [],
+      "concurrency": 1,
+      "roles": {
+        "mobile": {
+          "runtime": "claude",
+          "reviewer": { "runtime": "codex" },
+          "title": "Мобильный разработчик",
+          "requiresContract": true
+        },
+        "qa-mobile": {
+          "runtime": "codex",
+          "reviewer": { "runtime": "claude" },
+          "title": "Тестировщик приложения"
+        }
+      },
+      "contextPacks": [
+        {
+          "id": "technique-testing",
+          "version": "1.0.0",
+          "repositoryId": "main",
+          "roles": ["backend", "engine", "qa", "qa-web", "qa-admin", "qa-mobile", "qa-api"],
+          "files": [".agents/context/technique-testing.md"],
+          "references": [
+            ".agents/context/vendor/matt-pocock/skills--engineering--tdd--SKILL.md",
+            ".agents/context/vendor/matt-pocock/skills--engineering--tdd--tests.md",
+            ".agents/context/vendor/matt-pocock/skills--engineering--tdd--mocking.md"
+          ]
+        },
+        {
+          "id": "design-system",
+          "version": "1.0.0",
+          "repositoryId": "main",
+          "roles": ["frontend", "mobile", "ui-tokens", "ui-web", "ui-mobile"],
+          "files": [".agents/context/design-system.md", ".agents/context/design.md"],
+          "references": []
+        }
+      ],
+      "digest": "ae3794dfeeca31741dd63a733b79c54bb5c3c764dd98fc49c5cb28a1c4ff4c70",
+      "closure": [
+        {
+          "ref": "builtin:node-checks",
+          "digest": "1d6a4838d99907b322ede91cce4598dc2628c79cdae3389a45b8bfb3adf38cdf"
+        },
+        {
+          "ref": "builtin:mobile-maestro",
+          "digest": "063daa6f8bc7180dfdbf47efb87a827de63614744e2a3c3b26849a1d94d23fd7"
+        },
+        {
+          "ref": "builtin:react-native",
+          "digest": "e5c2b262051d0b83493d1945db091803046c5a044d43e659c052d973a0ec8f4c"
+        },
+        {
+          "ref": "builtin:expo-mobile",
+          "digest": "d7b0ccc451999ef385caa240c74f45f76923b62f2ecb3bd483927e9121c3e58c"
+        }
+      ],
+      "raw": "{\n  \"id\": \"expo-mobile\",\n  \"version\": \"0.2.0\",\n  \"extends\": [\n    \"react-native\"\n  ],\n  \"capabilities\": [\n    \"expo\"\n  ],\n  \"protectedPaths\": [\n    \"app.config.js\",\n    \"app.config.ts\",\n    \"eas.json\"\n  ]\n}\n"
+    },
+    "config": {
+      "prices": [],
+      "memoryPolicy": { "maxBytes": 8000 },
+      "signalPolicy": { "maxActionsPerHour": 10 },
+      "version": 1,
+      "name": "product",
+      "prepare": [],
+      "toolProfiles": {},
+      "completionMode": "local",
+      "forgeConnections": {},
+      "storage": "central",
+      "contextPacks": [],
+      "resources": [],
+      "verificationMode": "all",
+      "generatedPaths": [],
+      "repositories": [],
+      "workspaceGates": [],
+      "repository": "/fixture/product",
+      "targetBranch": "devcontour/accepted",
+      "mode": "local",
+      "approvalMode": "agent",
+      "concurrency": 1,
+      "leaseMs": 30000,
+      "runTimeoutMs": 900000,
+      "reviewProbes": { "commandTimeoutMs": 120000, "budgetMs": 600000, "reserveMs": 120000 },
+      "contractArtifacts": {
+        "maxFileBytes": 16777216,
+        "maxTotalBytes": 67108864,
+        "reviewTextBytes": 400000
+      },
+      "maxAttempts": 3,
+      "reuseImplementation": true,
+      "repairBudget": 6,
+      "isolation": { "mode": "os", "domains": [] },
+      "roles": {
+        "mobile": {
+          "runtime": "claude",
+          "reviewer": { "runtime": "codex" },
+          "title": "Мобильный разработчик",
+          "requiresContract": true
+        },
+        "qa-mobile": {
+          "runtime": "codex",
+          "reviewer": { "runtime": "claude" },
+          "title": "Тестировщик приложения"
+        }
+      },
+      "reviewer": { "runtime": "codex" },
+      "gates": [
+        { "id": "install", "kind": "check", "command": ["npm", "ci"], "timeoutMs": 240000 },
+        {
+          "id": "typecheck",
+          "dependsOn": ["install"],
+          "kind": "check",
+          "command": ["npm", "run", "typecheck"],
+          "timeoutMs": 240000
+        },
+        {
+          "id": "unit-tests",
+          "dependsOn": ["typecheck"],
+          "kind": "test",
+          "command": ["npm", "run", "test:devcontour"],
+          "timeoutMs": 240000,
+          "report": { "type": "junit", "path": ".reports/junit.xml" }
+        },
+        {
+          "id": "build-and-install",
+          "kind": "check",
+          "command": ["npm", "run", "mobile:devcontour:prepare"],
+          "timeoutMs": 600000
+        },
+        {
+          "id": "mobile-acceptance",
+          "kind": "test",
+          "command": [
+            "maestro",
+            "test",
+            ".maestro/",
+            "--format",
+            "junit",
+            "--output",
+            ".reports/junit.xml"
+          ],
+          "timeoutMs": 600000,
+          "report": { "type": "junit", "path": ".reports/junit.xml" }
+        }
+      ],
+      "protectedPaths": [
+        "package.json",
+        "package-lock.json",
+        "app.json",
+        "babel.config.js",
+        "metro.config.js",
+        "app.config.js",
+        "app.config.ts",
+        "eas.json",
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".agents/",
+        ".github/",
+        ".githooks/",
+        "devcontour.config.json",
+        "devcontour.component.json",
+        "devcontour.workspace.json",
+        "docs/journal/",
+        ".devcontour-local/",
+        ".devcontour/",
+        "package.json",
+        "package-lock.json"
+      ],
+      "packs": [
+        {
+          "id": "expo-mobile",
+          "version": "0.2.0",
+          "capabilities": [
+            "node",
+            "typescript",
+            "unit-tests",
+            "mobile",
+            "maestro",
+            "device-lease-required",
+            "react-native",
+            "expo"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "ref": "go-api",
+    "repositoryId": "main",
+    "keys": [
+      "id",
+      "version",
+      "capabilities",
+      "gates",
+      "prepare",
+      "environment",
+      "lifecycle",
+      "protectedPaths",
+      "generatedPaths",
+      "concurrency",
+      "runTimeoutMs",
+      "roles",
+      "contextPacks",
+      "digest",
+      "closure",
+      "raw"
+    ],
+    "profile": {
+      "id": "go-api",
+      "version": "0.1.0",
+      "capabilities": ["go", "openapi", "integration-tests"],
+      "gates": [
+        { "id": "vet", "kind": "check", "command": ["go", "vet", "./..."], "timeoutMs": 120000 },
+        {
+          "id": "acceptance",
+          "kind": "test",
+          "command": ["gotestsum", "--junitfile", ".reports/junit.xml", "--", "-race", "./..."],
+          "timeoutMs": 240000,
+          "report": { "type": "junit", "path": ".reports/junit.xml" }
+        }
+      ],
+      "prepare": [],
+      "protectedPaths": [],
+      "generatedPaths": [],
+      "roles": {},
+      "contextPacks": [],
+      "digest": "cdd8c2155365ac60294515974dea8116dd53bce38b6b79ffa846c73f2422dfaf",
+      "closure": [
+        {
+          "ref": "builtin:go-api",
+          "digest": "cdd8c2155365ac60294515974dea8116dd53bce38b6b79ffa846c73f2422dfaf"
+        }
+      ],
+      "raw": "{\n  \"id\": \"go-api\",\n  \"version\": \"0.1.0\",\n  \"capabilities\": [\"go\", \"openapi\", \"integration-tests\"],\n  \"gates\": [\n    { \"id\": \"vet\", \"kind\": \"check\", \"command\": [\"go\", \"vet\", \"./...\"], \"timeoutMs\": 120000 },\n    {\n      \"id\": \"acceptance\",\n      \"kind\": \"test\",\n      \"command\": [\"gotestsum\", \"--junitfile\", \".reports/junit.xml\", \"--\", \"-race\", \"./...\"],\n      \"timeoutMs\": 240000,\n      \"report\": { \"type\": \"junit\", \"path\": \".reports/junit.xml\" }\n    }\n  ]\n}\n"
+    },
+    "config": {
+      "prices": [],
+      "memoryPolicy": { "maxBytes": 8000 },
+      "signalPolicy": { "maxActionsPerHour": 10 },
+      "version": 1,
+      "name": "product",
+      "prepare": [],
+      "toolProfiles": {},
+      "completionMode": "local",
+      "forgeConnections": {},
+      "storage": "central",
+      "contextPacks": [],
+      "resources": [],
+      "verificationMode": "all",
+      "generatedPaths": [],
+      "repositories": [],
+      "workspaceGates": [],
+      "repository": "/fixture/product",
+      "targetBranch": "devcontour/accepted",
+      "mode": "local",
+      "approvalMode": "agent",
+      "concurrency": 2,
+      "leaseMs": 30000,
+      "runTimeoutMs": 900000,
+      "reviewProbes": { "commandTimeoutMs": 120000, "budgetMs": 600000, "reserveMs": 120000 },
+      "contractArtifacts": {
+        "maxFileBytes": 16777216,
+        "maxTotalBytes": 67108864,
+        "reviewTextBytes": 400000
+      },
+      "maxAttempts": 3,
+      "reuseImplementation": true,
+      "repairBudget": 6,
+      "isolation": { "mode": "os", "domains": [] },
+      "roles": {
+        "architect": { "runtime": "claude", "title": "Архитектор" },
+        "backend": {
+          "runtime": "claude",
+          "title": "Разработчик бэкенда",
+          "requiresContract": true
+        },
+        "frontend": {
+          "runtime": "claude",
+          "title": "Разработчик интерфейса",
+          "requiresContract": true
+        },
+        "qa": { "runtime": "claude", "title": "Тестировщик" }
+      },
+      "reviewer": { "runtime": "codex" },
+      "gates": [
+        { "id": "vet", "kind": "check", "command": ["go", "vet", "./..."], "timeoutMs": 120000 },
+        {
+          "id": "acceptance",
+          "kind": "test",
+          "command": ["gotestsum", "--junitfile", ".reports/junit.xml", "--", "-race", "./..."],
+          "timeoutMs": 240000,
+          "report": { "type": "junit", "path": ".reports/junit.xml" }
+        }
+      ],
+      "protectedPaths": [
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".agents/",
+        ".github/",
+        ".githooks/",
+        "devcontour.config.json",
+        "devcontour.component.json",
+        "devcontour.workspace.json",
+        "docs/journal/",
+        ".devcontour-local/",
+        ".devcontour/",
+        "package.json",
+        "package-lock.json"
+      ],
+      "packs": [
+        {
+          "id": "go-api",
+          "version": "0.1.0",
+          "capabilities": ["go", "openapi", "integration-tests"]
+        }
+      ]
+    }
+  },
+  {
+    "ref": "mobile-maestro",
+    "repositoryId": "main",
+    "keys": [
+      "id",
+      "version",
+      "capabilities",
+      "gates",
+      "prepare",
+      "environment",
+      "lifecycle",
+      "protectedPaths",
+      "generatedPaths",
+      "concurrency",
+      "runTimeoutMs",
+      "roles",
+      "contextPacks",
+      "digest",
+      "closure",
+      "raw"
+    ],
+    "profile": {
+      "id": "mobile-maestro",
+      "version": "0.1.0",
+      "capabilities": ["mobile", "maestro", "device-lease-required"],
+      "gates": [
+        {
+          "id": "build-and-install",
+          "kind": "check",
+          "command": ["npm", "run", "mobile:devcontour:prepare"],
+          "timeoutMs": 600000
+        },
+        {
+          "id": "mobile-acceptance",
+          "kind": "test",
+          "command": [
+            "maestro",
+            "test",
+            ".maestro/",
+            "--format",
+            "junit",
+            "--output",
+            ".reports/junit.xml"
+          ],
+          "timeoutMs": 600000,
+          "report": { "type": "junit", "path": ".reports/junit.xml" }
+        }
+      ],
+      "prepare": [],
+      "protectedPaths": [],
+      "generatedPaths": [],
+      "concurrency": 1,
+      "roles": {},
+      "contextPacks": [],
+      "digest": "063daa6f8bc7180dfdbf47efb87a827de63614744e2a3c3b26849a1d94d23fd7",
+      "closure": [
+        {
+          "ref": "builtin:mobile-maestro",
+          "digest": "063daa6f8bc7180dfdbf47efb87a827de63614744e2a3c3b26849a1d94d23fd7"
+        }
+      ],
+      "raw": "{\n  \"id\": \"mobile-maestro\",\n  \"version\": \"0.1.0\",\n  \"capabilities\": [\"mobile\", \"maestro\", \"device-lease-required\"],\n  \"concurrency\": 1,\n  \"gates\": [\n    {\n      \"id\": \"build-and-install\",\n      \"kind\": \"check\",\n      \"command\": [\"npm\", \"run\", \"mobile:devcontour:prepare\"],\n      \"timeoutMs\": 600000\n    },\n    {\n      \"id\": \"mobile-acceptance\",\n      \"kind\": \"test\",\n      \"command\": [\n        \"maestro\",\n        \"test\",\n        \".maestro/\",\n        \"--format\",\n        \"junit\",\n        \"--output\",\n        \".reports/junit.xml\"\n      ],\n      \"timeoutMs\": 600000,\n      \"report\": { \"type\": \"junit\", \"path\": \".reports/junit.xml\" }\n    }\n  ]\n}\n"
+    },
+    "config": {
+      "prices": [],
+      "memoryPolicy": { "maxBytes": 8000 },
+      "signalPolicy": { "maxActionsPerHour": 10 },
+      "version": 1,
+      "name": "product",
+      "prepare": [],
+      "toolProfiles": {},
+      "completionMode": "local",
+      "forgeConnections": {},
+      "storage": "central",
+      "contextPacks": [],
+      "resources": [],
+      "verificationMode": "all",
+      "generatedPaths": [],
+      "repositories": [],
+      "workspaceGates": [],
+      "repository": "/fixture/product",
+      "targetBranch": "devcontour/accepted",
+      "mode": "local",
+      "approvalMode": "agent",
+      "concurrency": 1,
+      "leaseMs": 30000,
+      "runTimeoutMs": 900000,
+      "reviewProbes": { "commandTimeoutMs": 120000, "budgetMs": 600000, "reserveMs": 120000 },
+      "contractArtifacts": {
+        "maxFileBytes": 16777216,
+        "maxTotalBytes": 67108864,
+        "reviewTextBytes": 400000
+      },
+      "maxAttempts": 3,
+      "reuseImplementation": true,
+      "repairBudget": 6,
+      "isolation": { "mode": "os", "domains": [] },
+      "roles": {
+        "architect": { "runtime": "claude", "title": "Архитектор" },
+        "backend": {
+          "runtime": "claude",
+          "title": "Разработчик бэкенда",
+          "requiresContract": true
+        },
+        "frontend": {
+          "runtime": "claude",
+          "title": "Разработчик интерфейса",
+          "requiresContract": true
+        },
+        "qa": { "runtime": "claude", "title": "Тестировщик" }
+      },
+      "reviewer": { "runtime": "codex" },
+      "gates": [
+        {
+          "id": "build-and-install",
+          "kind": "check",
+          "command": ["npm", "run", "mobile:devcontour:prepare"],
+          "timeoutMs": 600000
+        },
+        {
+          "id": "mobile-acceptance",
+          "kind": "test",
+          "command": [
+            "maestro",
+            "test",
+            ".maestro/",
+            "--format",
+            "junit",
+            "--output",
+            ".reports/junit.xml"
+          ],
+          "timeoutMs": 600000,
+          "report": { "type": "junit", "path": ".reports/junit.xml" }
+        }
+      ],
+      "protectedPaths": [
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".agents/",
+        ".github/",
+        ".githooks/",
+        "devcontour.config.json",
+        "devcontour.component.json",
+        "devcontour.workspace.json",
+        "docs/journal/",
+        ".devcontour-local/",
+        ".devcontour/",
+        "package.json",
+        "package-lock.json"
+      ],
+      "packs": [
+        {
+          "id": "mobile-maestro",
+          "version": "0.1.0",
+          "capabilities": ["mobile", "maestro", "device-lease-required"]
+        }
+      ]
+    }
+  },
+  {
+    "ref": "nest-api",
+    "repositoryId": "main",
+    "keys": [
+      "id",
+      "version",
+      "capabilities",
+      "gates",
+      "prepare",
+      "environment",
+      "lifecycle",
+      "protectedPaths",
+      "generatedPaths",
+      "concurrency",
+      "runTimeoutMs",
+      "roles",
+      "contextPacks",
+      "digest",
+      "closure",
+      "raw"
+    ],
+    "profile": {
+      "id": "nest-api",
+      "version": "0.1.0",
+      "capabilities": ["node", "typescript", "unit-tests", "nestjs", "api", "integration-tests"],
+      "gates": [
+        { "id": "install", "kind": "check", "command": ["npm", "ci"], "timeoutMs": 240000 },
+        {
+          "id": "typecheck",
+          "dependsOn": ["install"],
+          "kind": "check",
+          "command": ["npm", "run", "typecheck"],
+          "timeoutMs": 240000
+        },
+        {
+          "id": "unit-tests",
+          "dependsOn": ["typecheck"],
+          "kind": "test",
+          "command": ["npm", "run", "test:devcontour"],
+          "timeoutMs": 240000,
+          "report": { "type": "junit", "path": ".reports/junit.xml" }
+        },
+        {
+          "id": "build",
+          "dependsOn": ["typecheck"],
+          "kind": "check",
+          "command": ["npm", "run", "build"],
+          "timeoutMs": 240000
+        },
+        {
+          "id": "api-acceptance",
+          "dependsOn": ["build"],
+          "kind": "test",
+          "command": ["npm", "run", "test:devcontour:integration"],
+          "timeoutMs": 240000,
+          "report": { "type": "junit", "path": ".reports/integration.xml" }
+        }
+      ],
+      "prepare": [],
+      "protectedPaths": ["package.json", "package-lock.json"],
+      "generatedPaths": [],
+      "roles": {},
+      "contextPacks": [
+        {
+          "id": "technique-testing",
+          "version": "1.0.0",
+          "repositoryId": "main",
+          "roles": ["backend", "engine", "qa", "qa-web", "qa-admin", "qa-mobile", "qa-api"],
+          "files": [".agents/context/technique-testing.md"],
+          "references": [
+            ".agents/context/vendor/matt-pocock/skills--engineering--tdd--SKILL.md",
+            ".agents/context/vendor/matt-pocock/skills--engineering--tdd--tests.md",
+            ".agents/context/vendor/matt-pocock/skills--engineering--tdd--mocking.md"
+          ]
+        }
+      ],
+      "digest": "a72eee6195a1a1b0e5b579fe1f7369c2fa237602baa8563f31e3ab954526aecc",
+      "closure": [
+        {
+          "ref": "builtin:node-checks",
+          "digest": "1d6a4838d99907b322ede91cce4598dc2628c79cdae3389a45b8bfb3adf38cdf"
+        },
+        {
+          "ref": "builtin:nest-api",
+          "digest": "678737020a9beeb5cf10573ad1939ed6fe2031502cb04898024dd439ae1a859e"
+        }
+      ],
+      "raw": "{\n  \"id\": \"nest-api\",\n  \"version\": \"0.1.0\",\n  \"extends\": [\"node-checks\"],\n  \"capabilities\": [\"nestjs\", \"api\", \"integration-tests\"],\n  \"gates\": [\n    {\n      \"id\": \"build\",\n      \"kind\": \"check\",\n      \"command\": [\"npm\", \"run\", \"build\"],\n      \"timeoutMs\": 240000,\n      \"dependsOn\": [\"typecheck\"]\n    },\n    {\n      \"id\": \"api-acceptance\",\n      \"kind\": \"test\",\n      \"command\": [\"npm\", \"run\", \"test:devcontour:integration\"],\n      \"timeoutMs\": 240000,\n      \"dependsOn\": [\"build\"],\n      \"report\": {\n        \"type\": \"junit\",\n        \"path\": \".reports/integration.xml\"\n      }\n    }\n  ]\n}\n"
+    },
+    "config": {
+      "prices": [],
+      "memoryPolicy": { "maxBytes": 8000 },
+      "signalPolicy": { "maxActionsPerHour": 10 },
+      "version": 1,
+      "name": "product",
+      "prepare": [],
+      "toolProfiles": {},
+      "completionMode": "local",
+      "forgeConnections": {},
+      "storage": "central",
+      "contextPacks": [],
+      "resources": [],
+      "verificationMode": "all",
+      "generatedPaths": [],
+      "repositories": [],
+      "workspaceGates": [],
+      "repository": "/fixture/product",
+      "targetBranch": "devcontour/accepted",
+      "mode": "local",
+      "approvalMode": "agent",
+      "concurrency": 2,
+      "leaseMs": 30000,
+      "runTimeoutMs": 900000,
+      "reviewProbes": { "commandTimeoutMs": 120000, "budgetMs": 600000, "reserveMs": 120000 },
+      "contractArtifacts": {
+        "maxFileBytes": 16777216,
+        "maxTotalBytes": 67108864,
+        "reviewTextBytes": 400000
+      },
+      "maxAttempts": 3,
+      "reuseImplementation": true,
+      "repairBudget": 6,
+      "isolation": { "mode": "os", "domains": [] },
+      "roles": {
+        "architect": { "runtime": "claude", "title": "Архитектор" },
+        "backend": {
+          "runtime": "claude",
+          "title": "Разработчик бэкенда",
+          "requiresContract": true
+        },
+        "frontend": {
+          "runtime": "claude",
+          "title": "Разработчик интерфейса",
+          "requiresContract": true
+        },
+        "qa": { "runtime": "claude", "title": "Тестировщик" }
+      },
+      "reviewer": { "runtime": "codex" },
+      "gates": [
+        { "id": "install", "kind": "check", "command": ["npm", "ci"], "timeoutMs": 240000 },
+        {
+          "id": "typecheck",
+          "dependsOn": ["install"],
+          "kind": "check",
+          "command": ["npm", "run", "typecheck"],
+          "timeoutMs": 240000
+        },
+        {
+          "id": "unit-tests",
+          "dependsOn": ["typecheck"],
+          "kind": "test",
+          "command": ["npm", "run", "test:devcontour"],
+          "timeoutMs": 240000,
+          "report": { "type": "junit", "path": ".reports/junit.xml" }
+        },
+        {
+          "id": "build",
+          "dependsOn": ["typecheck"],
+          "kind": "check",
+          "command": ["npm", "run", "build"],
+          "timeoutMs": 240000
+        },
+        {
+          "id": "api-acceptance",
+          "dependsOn": ["build"],
+          "kind": "test",
+          "command": ["npm", "run", "test:devcontour:integration"],
+          "timeoutMs": 240000,
+          "report": { "type": "junit", "path": ".reports/integration.xml" }
+        }
+      ],
+      "protectedPaths": [
+        "package.json",
+        "package-lock.json",
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".agents/",
+        ".github/",
+        ".githooks/",
+        "devcontour.config.json",
+        "devcontour.component.json",
+        "devcontour.workspace.json",
+        "docs/journal/",
+        ".devcontour-local/",
+        ".devcontour/",
+        "package.json",
+        "package-lock.json"
+      ],
+      "packs": [
+        {
+          "id": "nest-api",
+          "version": "0.1.0",
+          "capabilities": ["node", "typescript", "unit-tests", "nestjs", "api", "integration-tests"]
+        }
+      ]
+    }
+  },
+  {
+    "ref": "next-product",
+    "repositoryId": "main",
+    "keys": [
+      "id",
+      "version",
+      "capabilities",
+      "gates",
+      "prepare",
+      "environment",
+      "lifecycle",
+      "protectedPaths",
+      "generatedPaths",
+      "concurrency",
+      "runTimeoutMs",
+      "roles",
+      "contextPacks",
+      "digest",
+      "closure",
+      "raw"
+    ],
+    "profile": {
+      "id": "next-product",
+      "version": "0.2.0",
+      "capabilities": ["react-ssr", "seo", "design-tokens", "playwright"],
+      "gates": [
+        { "id": "install", "kind": "check", "command": ["npm", "ci"], "timeoutMs": 240000 },
+        {
+          "id": "typecheck",
+          "kind": "check",
+          "command": ["npm", "run", "typecheck"],
+          "timeoutMs": 120000
+        },
+        {
+          "id": "production-build",
+          "kind": "check",
+          "command": ["npm", "run", "build"],
+          "timeoutMs": 240000
+        },
+        {
+          "id": "acceptance",
+          "kind": "test",
+          "command": ["npm", "run", "test:devcontour"],
+          "timeoutMs": 240000,
+          "report": { "type": "junit", "path": ".reports/junit.xml" }
+        }
+      ],
+      "prepare": [],
+      "protectedPaths": [],
+      "generatedPaths": [],
+      "roles": {},
+      "contextPacks": [
+        {
+          "id": "design-system",
+          "version": "1.0.0",
+          "repositoryId": "main",
+          "roles": ["frontend", "mobile", "ui-tokens", "ui-web", "ui-mobile"],
+          "files": [".agents/context/design-system.md", ".agents/context/design.md"],
+          "references": []
+        }
+      ],
+      "digest": "385213844ba38d5339eae909f4d8547ebaaf8c21cbb18c9a5cbfdd0a0a417fa7",
+      "closure": [
+        {
+          "ref": "builtin:next-product",
+          "digest": "385213844ba38d5339eae909f4d8547ebaaf8c21cbb18c9a5cbfdd0a0a417fa7"
+        }
+      ],
+      "raw": "{\n  \"id\": \"next-product\",\n  \"version\": \"0.2.0\",\n  \"capabilities\": [\n    \"react-ssr\",\n    \"seo\",\n    \"design-tokens\",\n    \"playwright\"\n  ],\n  \"gates\": [\n    {\n      \"id\": \"install\",\n      \"kind\": \"check\",\n      \"command\": [\n        \"npm\",\n        \"ci\"\n      ],\n      \"timeoutMs\": 240000\n    },\n    {\n      \"id\": \"typecheck\",\n      \"kind\": \"check\",\n      \"command\": [\n        \"npm\",\n        \"run\",\n        \"typecheck\"\n      ],\n      \"timeoutMs\": 120000\n    },\n    {\n      \"id\": \"production-build\",\n      \"kind\": \"check\",\n      \"command\": [\n        \"npm\",\n        \"run\",\n        \"build\"\n      ],\n      \"timeoutMs\": 240000\n    },\n    {\n      \"id\": \"acceptance\",\n      \"kind\": \"test\",\n      \"command\": [\n        \"npm\",\n        \"run\",\n        \"test:devcontour\"\n      ],\n      \"timeoutMs\": 240000,\n      \"report\": {\n        \"type\": \"junit\",\n        \"path\": \".reports/junit.xml\"\n      }\n    }\n  ],\n  \"contextPacks\": [\n    {\n      \"id\": \"design-system\",\n      \"version\": \"1.0.0\",\n      \"roles\": [\n        \"frontend\",\n        \"mobile\",\n        \"ui-tokens\",\n        \"ui-web\",\n        \"ui-mobile\"\n      ],\n      \"files\": [\n        \".agents/context/design-system.md\",\n        \".agents/context/design.md\"\n      ]\n    }\n  ]\n}\n"
+    },
+    "config": {
+      "prices": [],
+      "memoryPolicy": { "maxBytes": 8000 },
+      "signalPolicy": { "maxActionsPerHour": 10 },
+      "version": 1,
+      "name": "product",
+      "prepare": [],
+      "toolProfiles": {},
+      "completionMode": "local",
+      "forgeConnections": {},
+      "storage": "central",
+      "contextPacks": [],
+      "resources": [],
+      "verificationMode": "all",
+      "generatedPaths": [],
+      "repositories": [],
+      "workspaceGates": [],
+      "repository": "/fixture/product",
+      "targetBranch": "devcontour/accepted",
+      "mode": "local",
+      "approvalMode": "agent",
+      "concurrency": 2,
+      "leaseMs": 30000,
+      "runTimeoutMs": 900000,
+      "reviewProbes": { "commandTimeoutMs": 120000, "budgetMs": 600000, "reserveMs": 120000 },
+      "contractArtifacts": {
+        "maxFileBytes": 16777216,
+        "maxTotalBytes": 67108864,
+        "reviewTextBytes": 400000
+      },
+      "maxAttempts": 3,
+      "reuseImplementation": true,
+      "repairBudget": 6,
+      "isolation": { "mode": "os", "domains": [] },
+      "roles": {
+        "architect": { "runtime": "claude", "title": "Архитектор" },
+        "backend": {
+          "runtime": "claude",
+          "title": "Разработчик бэкенда",
+          "requiresContract": true
+        },
+        "frontend": {
+          "runtime": "claude",
+          "title": "Разработчик интерфейса",
+          "requiresContract": true
+        },
+        "qa": { "runtime": "claude", "title": "Тестировщик" }
+      },
+      "reviewer": { "runtime": "codex" },
+      "gates": [
+        { "id": "install", "kind": "check", "command": ["npm", "ci"], "timeoutMs": 240000 },
+        {
+          "id": "typecheck",
+          "kind": "check",
+          "command": ["npm", "run", "typecheck"],
+          "timeoutMs": 120000
+        },
+        {
+          "id": "production-build",
+          "kind": "check",
+          "command": ["npm", "run", "build"],
+          "timeoutMs": 240000
+        },
+        {
+          "id": "acceptance",
+          "kind": "test",
+          "command": ["npm", "run", "test:devcontour"],
+          "timeoutMs": 240000,
+          "report": { "type": "junit", "path": ".reports/junit.xml" }
+        }
+      ],
+      "protectedPaths": [
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".agents/",
+        ".github/",
+        ".githooks/",
+        "devcontour.config.json",
+        "devcontour.component.json",
+        "devcontour.workspace.json",
+        "docs/journal/",
+        ".devcontour-local/",
+        ".devcontour/",
+        "package.json",
+        "package-lock.json"
+      ],
+      "packs": [
+        {
+          "id": "next-product",
+          "version": "0.2.0",
+          "capabilities": ["react-ssr", "seo", "design-tokens", "playwright"]
+        }
+      ]
+    }
+  },
+  {
+    "ref": "node-checks",
+    "repositoryId": "main",
+    "keys": [
+      "id",
+      "version",
+      "capabilities",
+      "gates",
+      "prepare",
+      "environment",
+      "lifecycle",
+      "protectedPaths",
+      "generatedPaths",
+      "concurrency",
+      "runTimeoutMs",
+      "roles",
+      "contextPacks",
+      "digest",
+      "closure",
+      "raw"
+    ],
+    "profile": {
+      "id": "node-checks",
+      "version": "0.2.0",
+      "capabilities": ["node", "typescript", "unit-tests"],
+      "gates": [
+        { "id": "install", "kind": "check", "command": ["npm", "ci"], "timeoutMs": 240000 },
+        {
+          "id": "typecheck",
+          "dependsOn": ["install"],
+          "kind": "check",
+          "command": ["npm", "run", "typecheck"],
+          "timeoutMs": 240000
+        },
+        {
+          "id": "unit-tests",
+          "dependsOn": ["typecheck"],
+          "kind": "test",
+          "command": ["npm", "run", "test:devcontour"],
+          "timeoutMs": 240000,
+          "report": { "type": "junit", "path": ".reports/junit.xml" }
+        }
+      ],
+      "prepare": [],
+      "protectedPaths": ["package.json", "package-lock.json"],
+      "generatedPaths": [],
+      "roles": {},
+      "contextPacks": [
+        {
+          "id": "technique-testing",
+          "version": "1.0.0",
+          "repositoryId": "main",
+          "roles": ["backend", "engine", "qa", "qa-web", "qa-admin", "qa-mobile", "qa-api"],
+          "files": [".agents/context/technique-testing.md"],
+          "references": [
+            ".agents/context/vendor/matt-pocock/skills--engineering--tdd--SKILL.md",
+            ".agents/context/vendor/matt-pocock/skills--engineering--tdd--tests.md",
+            ".agents/context/vendor/matt-pocock/skills--engineering--tdd--mocking.md"
+          ]
+        }
+      ],
+      "digest": "1d6a4838d99907b322ede91cce4598dc2628c79cdae3389a45b8bfb3adf38cdf",
+      "closure": [
+        {
+          "ref": "builtin:node-checks",
+          "digest": "1d6a4838d99907b322ede91cce4598dc2628c79cdae3389a45b8bfb3adf38cdf"
+        }
+      ],
+      "raw": "{\n  \"id\": \"node-checks\",\n  \"version\": \"0.2.0\",\n  \"capabilities\": [\n    \"node\",\n    \"typescript\",\n    \"unit-tests\"\n  ],\n  \"protectedPaths\": [\n    \"package.json\",\n    \"package-lock.json\"\n  ],\n  \"gates\": [\n    {\n      \"id\": \"install\",\n      \"kind\": \"check\",\n      \"command\": [\n        \"npm\",\n        \"ci\"\n      ],\n      \"timeoutMs\": 240000\n    },\n    {\n      \"id\": \"typecheck\",\n      \"kind\": \"check\",\n      \"command\": [\n        \"npm\",\n        \"run\",\n        \"typecheck\"\n      ],\n      \"timeoutMs\": 240000,\n      \"dependsOn\": [\n        \"install\"\n      ]\n    },\n    {\n      \"id\": \"unit-tests\",\n      \"kind\": \"test\",\n      \"command\": [\n        \"npm\",\n        \"run\",\n        \"test:devcontour\"\n      ],\n      \"timeoutMs\": 240000,\n      \"dependsOn\": [\n        \"typecheck\"\n      ],\n      \"report\": {\n        \"type\": \"junit\",\n        \"path\": \".reports/junit.xml\"\n      }\n    }\n  ],\n  \"contextPacks\": [\n    {\n      \"id\": \"technique-testing\",\n      \"version\": \"1.0.0\",\n      \"roles\": [\n        \"backend\",\n        \"engine\",\n        \"qa\",\n        \"qa-web\",\n        \"qa-admin\",\n        \"qa-mobile\",\n        \"qa-api\"\n      ],\n      \"files\": [\n        \".agents/context/technique-testing.md\"\n      ],\n      \"references\": [\n        \".agents/context/vendor/matt-pocock/skills--engineering--tdd--SKILL.md\",\n        \".agents/context/vendor/matt-pocock/skills--engineering--tdd--tests.md\",\n        \".agents/context/vendor/matt-pocock/skills--engineering--tdd--mocking.md\"\n      ]\n    }\n  ]\n}\n"
+    },
+    "config": {
+      "prices": [],
+      "memoryPolicy": { "maxBytes": 8000 },
+      "signalPolicy": { "maxActionsPerHour": 10 },
+      "version": 1,
+      "name": "product",
+      "prepare": [],
+      "toolProfiles": {},
+      "completionMode": "local",
+      "forgeConnections": {},
+      "storage": "central",
+      "contextPacks": [],
+      "resources": [],
+      "verificationMode": "all",
+      "generatedPaths": [],
+      "repositories": [],
+      "workspaceGates": [],
+      "repository": "/fixture/product",
+      "targetBranch": "devcontour/accepted",
+      "mode": "local",
+      "approvalMode": "agent",
+      "concurrency": 2,
+      "leaseMs": 30000,
+      "runTimeoutMs": 900000,
+      "reviewProbes": { "commandTimeoutMs": 120000, "budgetMs": 600000, "reserveMs": 120000 },
+      "contractArtifacts": {
+        "maxFileBytes": 16777216,
+        "maxTotalBytes": 67108864,
+        "reviewTextBytes": 400000
+      },
+      "maxAttempts": 3,
+      "reuseImplementation": true,
+      "repairBudget": 6,
+      "isolation": { "mode": "os", "domains": [] },
+      "roles": {
+        "architect": { "runtime": "claude", "title": "Архитектор" },
+        "backend": {
+          "runtime": "claude",
+          "title": "Разработчик бэкенда",
+          "requiresContract": true
+        },
+        "frontend": {
+          "runtime": "claude",
+          "title": "Разработчик интерфейса",
+          "requiresContract": true
+        },
+        "qa": { "runtime": "claude", "title": "Тестировщик" }
+      },
+      "reviewer": { "runtime": "codex" },
+      "gates": [
+        { "id": "install", "kind": "check", "command": ["npm", "ci"], "timeoutMs": 240000 },
+        {
+          "id": "typecheck",
+          "dependsOn": ["install"],
+          "kind": "check",
+          "command": ["npm", "run", "typecheck"],
+          "timeoutMs": 240000
+        },
+        {
+          "id": "unit-tests",
+          "dependsOn": ["typecheck"],
+          "kind": "test",
+          "command": ["npm", "run", "test:devcontour"],
+          "timeoutMs": 240000,
+          "report": { "type": "junit", "path": ".reports/junit.xml" }
+        }
+      ],
+      "protectedPaths": [
+        "package.json",
+        "package-lock.json",
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".agents/",
+        ".github/",
+        ".githooks/",
+        "devcontour.config.json",
+        "devcontour.component.json",
+        "devcontour.workspace.json",
+        "docs/journal/",
+        ".devcontour-local/",
+        ".devcontour/",
+        "package.json",
+        "package-lock.json"
+      ],
+      "packs": [
+        {
+          "id": "node-checks",
+          "version": "0.2.0",
+          "capabilities": ["node", "typescript", "unit-tests"]
+        }
+      ]
+    }
+  },
+  {
+    "ref": "python-api",
+    "repositoryId": "main",
+    "keys": [
+      "id",
+      "version",
+      "capabilities",
+      "gates",
+      "prepare",
+      "environment",
+      "lifecycle",
+      "protectedPaths",
+      "generatedPaths",
+      "concurrency",
+      "runTimeoutMs",
+      "roles",
+      "contextPacks",
+      "digest",
+      "closure",
+      "raw"
+    ],
+    "profile": {
+      "id": "python-api",
+      "version": "0.1.0",
+      "capabilities": ["python", "api", "pytest"],
+      "gates": [
+        {
+          "id": "install",
+          "kind": "check",
+          "command": ["uv", "sync", "--locked"],
+          "timeoutMs": 240000
+        },
+        {
+          "id": "lint",
+          "dependsOn": ["install"],
+          "kind": "check",
+          "command": ["uv", "run", "--no-sync", "ruff", "check", "."],
+          "timeoutMs": 240000
+        },
+        {
+          "id": "acceptance",
+          "dependsOn": ["lint"],
+          "kind": "test",
+          "command": ["uv", "run", "--no-sync", "pytest", "--junitxml=.reports/junit.xml"],
+          "timeoutMs": 240000,
+          "report": { "type": "junit", "path": ".reports/junit.xml" }
+        }
+      ],
+      "prepare": [],
+      "protectedPaths": ["pyproject.toml", "uv.lock", ".python-version"],
+      "generatedPaths": [],
+      "roles": {},
+      "contextPacks": [],
+      "digest": "f24cea4f71b6757dcd89746d996c6695bf2a0058c62dc881eebfbd931d02d777",
+      "closure": [
+        {
+          "ref": "builtin:python-api",
+          "digest": "f24cea4f71b6757dcd89746d996c6695bf2a0058c62dc881eebfbd931d02d777"
+        }
+      ],
+      "raw": "{\n  \"id\": \"python-api\",\n  \"version\": \"0.1.0\",\n  \"capabilities\": [\"python\", \"api\", \"pytest\"],\n  \"protectedPaths\": [\"pyproject.toml\", \"uv.lock\", \".python-version\"],\n  \"gates\": [\n    {\n      \"id\": \"install\",\n      \"kind\": \"check\",\n      \"command\": [\"uv\", \"sync\", \"--locked\"],\n      \"timeoutMs\": 240000\n    },\n    {\n      \"id\": \"lint\",\n      \"kind\": \"check\",\n      \"command\": [\"uv\", \"run\", \"--no-sync\", \"ruff\", \"check\", \".\"],\n      \"timeoutMs\": 240000,\n      \"dependsOn\": [\"install\"]\n    },\n    {\n      \"id\": \"acceptance\",\n      \"kind\": \"test\",\n      \"command\": [\"uv\", \"run\", \"--no-sync\", \"pytest\", \"--junitxml=.reports/junit.xml\"],\n      \"timeoutMs\": 240000,\n      \"dependsOn\": [\"lint\"],\n      \"report\": {\n        \"type\": \"junit\",\n        \"path\": \".reports/junit.xml\"\n      }\n    }\n  ]\n}\n"
+    },
+    "config": {
+      "prices": [],
+      "memoryPolicy": { "maxBytes": 8000 },
+      "signalPolicy": { "maxActionsPerHour": 10 },
+      "version": 1,
+      "name": "product",
+      "prepare": [],
+      "toolProfiles": {},
+      "completionMode": "local",
+      "forgeConnections": {},
+      "storage": "central",
+      "contextPacks": [],
+      "resources": [],
+      "verificationMode": "all",
+      "generatedPaths": [],
+      "repositories": [],
+      "workspaceGates": [],
+      "repository": "/fixture/product",
+      "targetBranch": "devcontour/accepted",
+      "mode": "local",
+      "approvalMode": "agent",
+      "concurrency": 2,
+      "leaseMs": 30000,
+      "runTimeoutMs": 900000,
+      "reviewProbes": { "commandTimeoutMs": 120000, "budgetMs": 600000, "reserveMs": 120000 },
+      "contractArtifacts": {
+        "maxFileBytes": 16777216,
+        "maxTotalBytes": 67108864,
+        "reviewTextBytes": 400000
+      },
+      "maxAttempts": 3,
+      "reuseImplementation": true,
+      "repairBudget": 6,
+      "isolation": { "mode": "os", "domains": [] },
+      "roles": {
+        "architect": { "runtime": "claude", "title": "Архитектор" },
+        "backend": {
+          "runtime": "claude",
+          "title": "Разработчик бэкенда",
+          "requiresContract": true
+        },
+        "frontend": {
+          "runtime": "claude",
+          "title": "Разработчик интерфейса",
+          "requiresContract": true
+        },
+        "qa": { "runtime": "claude", "title": "Тестировщик" }
+      },
+      "reviewer": { "runtime": "codex" },
+      "gates": [
+        {
+          "id": "install",
+          "kind": "check",
+          "command": ["uv", "sync", "--locked"],
+          "timeoutMs": 240000
+        },
+        {
+          "id": "lint",
+          "dependsOn": ["install"],
+          "kind": "check",
+          "command": ["uv", "run", "--no-sync", "ruff", "check", "."],
+          "timeoutMs": 240000
+        },
+        {
+          "id": "acceptance",
+          "dependsOn": ["lint"],
+          "kind": "test",
+          "command": ["uv", "run", "--no-sync", "pytest", "--junitxml=.reports/junit.xml"],
+          "timeoutMs": 240000,
+          "report": { "type": "junit", "path": ".reports/junit.xml" }
+        }
+      ],
+      "protectedPaths": [
+        "pyproject.toml",
+        "uv.lock",
+        ".python-version",
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".agents/",
+        ".github/",
+        ".githooks/",
+        "devcontour.config.json",
+        "devcontour.component.json",
+        "devcontour.workspace.json",
+        "docs/journal/",
+        ".devcontour-local/",
+        ".devcontour/",
+        "package.json",
+        "package-lock.json"
+      ],
+      "packs": [
+        { "id": "python-api", "version": "0.1.0", "capabilities": ["python", "api", "pytest"] }
+      ]
+    }
+  },
+  {
+    "ref": "react-native",
+    "repositoryId": "main",
+    "keys": [
+      "id",
+      "version",
+      "capabilities",
+      "gates",
+      "prepare",
+      "environment",
+      "lifecycle",
+      "protectedPaths",
+      "generatedPaths",
+      "concurrency",
+      "runTimeoutMs",
+      "roles",
+      "contextPacks",
+      "digest",
+      "closure",
+      "raw"
+    ],
+    "profile": {
+      "id": "react-native",
+      "version": "0.4.0",
+      "capabilities": [
+        "node",
+        "typescript",
+        "unit-tests",
+        "mobile",
+        "maestro",
+        "device-lease-required",
+        "react-native"
+      ],
+      "gates": [
+        { "id": "install", "kind": "check", "command": ["npm", "ci"], "timeoutMs": 240000 },
+        {
+          "id": "typecheck",
+          "dependsOn": ["install"],
+          "kind": "check",
+          "command": ["npm", "run", "typecheck"],
+          "timeoutMs": 240000
+        },
+        {
+          "id": "unit-tests",
+          "dependsOn": ["typecheck"],
+          "kind": "test",
+          "command": ["npm", "run", "test:devcontour"],
+          "timeoutMs": 240000,
+          "report": { "type": "junit", "path": ".reports/junit.xml" }
+        },
+        {
+          "id": "build-and-install",
+          "kind": "check",
+          "command": ["npm", "run", "mobile:devcontour:prepare"],
+          "timeoutMs": 600000
+        },
+        {
+          "id": "mobile-acceptance",
+          "kind": "test",
+          "command": [
+            "maestro",
+            "test",
+            ".maestro/",
+            "--format",
+            "junit",
+            "--output",
+            ".reports/junit.xml"
+          ],
+          "timeoutMs": 600000,
+          "report": { "type": "junit", "path": ".reports/junit.xml" }
+        }
+      ],
+      "prepare": [],
+      "protectedPaths": [
+        "package.json",
+        "package-lock.json",
+        "app.json",
+        "babel.config.js",
+        "metro.config.js"
+      ],
+      "generatedPaths": [],
+      "concurrency": 1,
+      "roles": {
+        "mobile": {
+          "runtime": "claude",
+          "reviewer": { "runtime": "codex" },
+          "title": "Мобильный разработчик",
+          "requiresContract": true
+        },
+        "qa-mobile": {
+          "runtime": "codex",
+          "reviewer": { "runtime": "claude" },
+          "title": "Тестировщик приложения"
+        }
+      },
+      "contextPacks": [
+        {
+          "id": "technique-testing",
+          "version": "1.0.0",
+          "repositoryId": "main",
+          "roles": ["backend", "engine", "qa", "qa-web", "qa-admin", "qa-mobile", "qa-api"],
+          "files": [".agents/context/technique-testing.md"],
+          "references": [
+            ".agents/context/vendor/matt-pocock/skills--engineering--tdd--SKILL.md",
+            ".agents/context/vendor/matt-pocock/skills--engineering--tdd--tests.md",
+            ".agents/context/vendor/matt-pocock/skills--engineering--tdd--mocking.md"
+          ]
+        },
+        {
+          "id": "design-system",
+          "version": "1.0.0",
+          "repositoryId": "main",
+          "roles": ["frontend", "mobile", "ui-tokens", "ui-web", "ui-mobile"],
+          "files": [".agents/context/design-system.md", ".agents/context/design.md"],
+          "references": []
+        }
+      ],
+      "digest": "1cd7cc3969deed0c80cf40cfecaf4df02352ee567637bbd167c5545355431eaf",
+      "closure": [
+        {
+          "ref": "builtin:node-checks",
+          "digest": "1d6a4838d99907b322ede91cce4598dc2628c79cdae3389a45b8bfb3adf38cdf"
+        },
+        {
+          "ref": "builtin:mobile-maestro",
+          "digest": "063daa6f8bc7180dfdbf47efb87a827de63614744e2a3c3b26849a1d94d23fd7"
+        },
+        {
+          "ref": "builtin:react-native",
+          "digest": "e5c2b262051d0b83493d1945db091803046c5a044d43e659c052d973a0ec8f4c"
+        }
+      ],
+      "raw": "{\n  \"id\": \"react-native\",\n  \"version\": \"0.4.0\",\n  \"extends\": [\n    \"node-checks\",\n    \"mobile-maestro\"\n  ],\n  \"capabilities\": [\n    \"react-native\"\n  ],\n  \"protectedPaths\": [\n    \"app.json\",\n    \"babel.config.js\",\n    \"metro.config.js\"\n  ],\n  \"roles\": {\n    \"mobile\": {\n      \"runtime\": \"claude\",\n      \"title\": \"Мобильный разработчик\",\n      \"requiresContract\": true,\n      \"reviewer\": {\n        \"runtime\": \"codex\"\n      }\n    },\n    \"qa-mobile\": {\n      \"runtime\": \"codex\",\n      \"title\": \"Тестировщик приложения\",\n      \"reviewer\": {\n        \"runtime\": \"claude\"\n      }\n    }\n  },\n  \"contextPacks\": [\n    {\n      \"id\": \"design-system\",\n      \"version\": \"1.0.0\",\n      \"roles\": [\n        \"frontend\",\n        \"mobile\",\n        \"ui-tokens\",\n        \"ui-web\",\n        \"ui-mobile\"\n      ],\n      \"files\": [\n        \".agents/context/design-system.md\",\n        \".agents/context/design.md\"\n      ]\n    }\n  ]\n}\n"
+    },
+    "config": {
+      "prices": [],
+      "memoryPolicy": { "maxBytes": 8000 },
+      "signalPolicy": { "maxActionsPerHour": 10 },
+      "version": 1,
+      "name": "product",
+      "prepare": [],
+      "toolProfiles": {},
+      "completionMode": "local",
+      "forgeConnections": {},
+      "storage": "central",
+      "contextPacks": [],
+      "resources": [],
+      "verificationMode": "all",
+      "generatedPaths": [],
+      "repositories": [],
+      "workspaceGates": [],
+      "repository": "/fixture/product",
+      "targetBranch": "devcontour/accepted",
+      "mode": "local",
+      "approvalMode": "agent",
+      "concurrency": 1,
+      "leaseMs": 30000,
+      "runTimeoutMs": 900000,
+      "reviewProbes": { "commandTimeoutMs": 120000, "budgetMs": 600000, "reserveMs": 120000 },
+      "contractArtifacts": {
+        "maxFileBytes": 16777216,
+        "maxTotalBytes": 67108864,
+        "reviewTextBytes": 400000
+      },
+      "maxAttempts": 3,
+      "reuseImplementation": true,
+      "repairBudget": 6,
+      "isolation": { "mode": "os", "domains": [] },
+      "roles": {
+        "mobile": {
+          "runtime": "claude",
+          "reviewer": { "runtime": "codex" },
+          "title": "Мобильный разработчик",
+          "requiresContract": true
+        },
+        "qa-mobile": {
+          "runtime": "codex",
+          "reviewer": { "runtime": "claude" },
+          "title": "Тестировщик приложения"
+        }
+      },
+      "reviewer": { "runtime": "codex" },
+      "gates": [
+        { "id": "install", "kind": "check", "command": ["npm", "ci"], "timeoutMs": 240000 },
+        {
+          "id": "typecheck",
+          "dependsOn": ["install"],
+          "kind": "check",
+          "command": ["npm", "run", "typecheck"],
+          "timeoutMs": 240000
+        },
+        {
+          "id": "unit-tests",
+          "dependsOn": ["typecheck"],
+          "kind": "test",
+          "command": ["npm", "run", "test:devcontour"],
+          "timeoutMs": 240000,
+          "report": { "type": "junit", "path": ".reports/junit.xml" }
+        },
+        {
+          "id": "build-and-install",
+          "kind": "check",
+          "command": ["npm", "run", "mobile:devcontour:prepare"],
+          "timeoutMs": 600000
+        },
+        {
+          "id": "mobile-acceptance",
+          "kind": "test",
+          "command": [
+            "maestro",
+            "test",
+            ".maestro/",
+            "--format",
+            "junit",
+            "--output",
+            ".reports/junit.xml"
+          ],
+          "timeoutMs": 600000,
+          "report": { "type": "junit", "path": ".reports/junit.xml" }
+        }
+      ],
+      "protectedPaths": [
+        "package.json",
+        "package-lock.json",
+        "app.json",
+        "babel.config.js",
+        "metro.config.js",
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".agents/",
+        ".github/",
+        ".githooks/",
+        "devcontour.config.json",
+        "devcontour.component.json",
+        "devcontour.workspace.json",
+        "docs/journal/",
+        ".devcontour-local/",
+        ".devcontour/",
+        "package.json",
+        "package-lock.json"
+      ],
+      "packs": [
+        {
+          "id": "react-native",
+          "version": "0.4.0",
+          "capabilities": [
+            "node",
+            "typescript",
+            "unit-tests",
+            "mobile",
+            "maestro",
+            "device-lease-required",
+            "react-native"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "ref": "react-vite-admin",
+    "repositoryId": "main",
+    "keys": [
+      "id",
+      "version",
+      "capabilities",
+      "gates",
+      "prepare",
+      "environment",
+      "lifecycle",
+      "protectedPaths",
+      "generatedPaths",
+      "concurrency",
+      "runTimeoutMs",
+      "roles",
+      "contextPacks",
+      "digest",
+      "closure",
+      "raw"
+    ],
+    "profile": {
+      "id": "react-vite-admin",
+      "version": "0.2.0",
+      "capabilities": ["react-spa", "design-tokens", "playwright"],
+      "gates": [
+        { "id": "install", "kind": "check", "command": ["npm", "ci"], "timeoutMs": 240000 },
+        {
+          "id": "typecheck",
+          "kind": "check",
+          "command": ["npm", "run", "typecheck"],
+          "timeoutMs": 120000
+        },
+        { "id": "build", "kind": "check", "command": ["npm", "run", "build"], "timeoutMs": 120000 },
+        {
+          "id": "acceptance",
+          "kind": "test",
+          "command": ["npm", "run", "test:devcontour"],
+          "timeoutMs": 240000,
+          "report": { "type": "junit", "path": ".reports/junit.xml" }
+        }
+      ],
+      "prepare": [],
+      "protectedPaths": [],
+      "generatedPaths": [],
+      "roles": {},
+      "contextPacks": [
+        {
+          "id": "design-system",
+          "version": "1.0.0",
+          "repositoryId": "main",
+          "roles": ["frontend", "mobile", "ui-tokens", "ui-web", "ui-mobile"],
+          "files": [".agents/context/design-system.md", ".agents/context/design.md"],
+          "references": []
+        }
+      ],
+      "digest": "c38cfdb83adaee6fd14bb6494a580729150ad98dcc0c2158939b923630d83ce9",
+      "closure": [
+        {
+          "ref": "builtin:react-vite-admin",
+          "digest": "c38cfdb83adaee6fd14bb6494a580729150ad98dcc0c2158939b923630d83ce9"
+        }
+      ],
+      "raw": "{\n  \"id\": \"react-vite-admin\",\n  \"version\": \"0.2.0\",\n  \"capabilities\": [\n    \"react-spa\",\n    \"design-tokens\",\n    \"playwright\"\n  ],\n  \"gates\": [\n    {\n      \"id\": \"install\",\n      \"kind\": \"check\",\n      \"command\": [\n        \"npm\",\n        \"ci\"\n      ],\n      \"timeoutMs\": 240000\n    },\n    {\n      \"id\": \"typecheck\",\n      \"kind\": \"check\",\n      \"command\": [\n        \"npm\",\n        \"run\",\n        \"typecheck\"\n      ],\n      \"timeoutMs\": 120000\n    },\n    {\n      \"id\": \"build\",\n      \"kind\": \"check\",\n      \"command\": [\n        \"npm\",\n        \"run\",\n        \"build\"\n      ],\n      \"timeoutMs\": 120000\n    },\n    {\n      \"id\": \"acceptance\",\n      \"kind\": \"test\",\n      \"command\": [\n        \"npm\",\n        \"run\",\n        \"test:devcontour\"\n      ],\n      \"timeoutMs\": 240000,\n      \"report\": {\n        \"type\": \"junit\",\n        \"path\": \".reports/junit.xml\"\n      }\n    }\n  ],\n  \"contextPacks\": [\n    {\n      \"id\": \"design-system\",\n      \"version\": \"1.0.0\",\n      \"roles\": [\n        \"frontend\",\n        \"mobile\",\n        \"ui-tokens\",\n        \"ui-web\",\n        \"ui-mobile\"\n      ],\n      \"files\": [\n        \".agents/context/design-system.md\",\n        \".agents/context/design.md\"\n      ]\n    }\n  ]\n}\n"
+    },
+    "config": {
+      "prices": [],
+      "memoryPolicy": { "maxBytes": 8000 },
+      "signalPolicy": { "maxActionsPerHour": 10 },
+      "version": 1,
+      "name": "product",
+      "prepare": [],
+      "toolProfiles": {},
+      "completionMode": "local",
+      "forgeConnections": {},
+      "storage": "central",
+      "contextPacks": [],
+      "resources": [],
+      "verificationMode": "all",
+      "generatedPaths": [],
+      "repositories": [],
+      "workspaceGates": [],
+      "repository": "/fixture/product",
+      "targetBranch": "devcontour/accepted",
+      "mode": "local",
+      "approvalMode": "agent",
+      "concurrency": 2,
+      "leaseMs": 30000,
+      "runTimeoutMs": 900000,
+      "reviewProbes": { "commandTimeoutMs": 120000, "budgetMs": 600000, "reserveMs": 120000 },
+      "contractArtifacts": {
+        "maxFileBytes": 16777216,
+        "maxTotalBytes": 67108864,
+        "reviewTextBytes": 400000
+      },
+      "maxAttempts": 3,
+      "reuseImplementation": true,
+      "repairBudget": 6,
+      "isolation": { "mode": "os", "domains": [] },
+      "roles": {
+        "architect": { "runtime": "claude", "title": "Архитектор" },
+        "backend": {
+          "runtime": "claude",
+          "title": "Разработчик бэкенда",
+          "requiresContract": true
+        },
+        "frontend": {
+          "runtime": "claude",
+          "title": "Разработчик интерфейса",
+          "requiresContract": true
+        },
+        "qa": { "runtime": "claude", "title": "Тестировщик" }
+      },
+      "reviewer": { "runtime": "codex" },
+      "gates": [
+        { "id": "install", "kind": "check", "command": ["npm", "ci"], "timeoutMs": 240000 },
+        {
+          "id": "typecheck",
+          "kind": "check",
+          "command": ["npm", "run", "typecheck"],
+          "timeoutMs": 120000
+        },
+        { "id": "build", "kind": "check", "command": ["npm", "run", "build"], "timeoutMs": 120000 },
+        {
+          "id": "acceptance",
+          "kind": "test",
+          "command": ["npm", "run", "test:devcontour"],
+          "timeoutMs": 240000,
+          "report": { "type": "junit", "path": ".reports/junit.xml" }
+        }
+      ],
+      "protectedPaths": [
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".agents/",
+        ".github/",
+        ".githooks/",
+        "devcontour.config.json",
+        "devcontour.component.json",
+        "devcontour.workspace.json",
+        "docs/journal/",
+        ".devcontour-local/",
+        ".devcontour/",
+        "package.json",
+        "package-lock.json"
+      ],
+      "packs": [
+        {
+          "id": "react-vite-admin",
+          "version": "0.2.0",
+          "capabilities": ["react-spa", "design-tokens", "playwright"]
+        }
+      ]
+    }
+  },
+  {
+    "ref": "./profiles/single.json",
+    "repositoryId": "main",
+    "keys": [
+      "id",
+      "version",
+      "capabilities",
+      "gates",
+      "prepare",
+      "environment",
+      "lifecycle",
+      "protectedPaths",
+      "generatedPaths",
+      "concurrency",
+      "runTimeoutMs",
+      "roles",
+      "contextPacks",
+      "source",
+      "digest",
+      "closure",
+      "raw"
+    ],
+    "profile": {
+      "id": "host-single",
+      "version": "1.0.0",
+      "capabilities": [],
+      "gates": [
+        {
+          "id": "tests",
+          "kind": "test",
+          "command": ["make", "test"],
+          "timeoutMs": 120000,
+          "report": { "type": "junit", "path": "out/junit.xml" }
+        }
+      ],
+      "prepare": [],
+      "protectedPaths": ["profiles/single.json"],
+      "generatedPaths": [],
+      "roles": {},
+      "contextPacks": [],
+      "source": { "repositoryId": "main", "path": "profiles/single.json" },
+      "digest": "ab6123fd219f97d74ca59aaa06f9051b43166d72f2e58e29c3b5c925f9eddfda",
+      "closure": [
+        {
+          "ref": "local:profiles/single.json",
+          "digest": "54525e67e4f57b3367ef85d92433d492ed3fc118a2537cc8232a8bb6d0faffd6"
+        }
+      ],
+      "raw": "{\n  \"id\": \"host-single\",\n  \"version\": \"1.0.0\",\n  \"gates\": [\n    {\n      \"id\": \"tests\",\n      \"kind\": \"test\",\n      \"command\": [\"make\", \"test\"],\n      \"report\": { \"type\": \"junit\", \"path\": \"out/junit.xml\" }\n    }\n  ]\n}\n"
+    },
+    "config": {
+      "prices": [],
+      "memoryPolicy": { "maxBytes": 8000 },
+      "signalPolicy": { "maxActionsPerHour": 10 },
+      "version": 1,
+      "name": "product",
+      "prepare": [],
+      "toolProfiles": {},
+      "completionMode": "local",
+      "forgeConnections": {},
+      "storage": "central",
+      "contextPacks": [],
+      "resources": [],
+      "verificationMode": "all",
+      "generatedPaths": [],
+      "repositories": [],
+      "workspaceGates": [],
+      "repository": "/fixture/product",
+      "targetBranch": "devcontour/accepted",
+      "mode": "local",
+      "approvalMode": "agent",
+      "concurrency": 2,
+      "leaseMs": 30000,
+      "runTimeoutMs": 900000,
+      "reviewProbes": { "commandTimeoutMs": 120000, "budgetMs": 600000, "reserveMs": 120000 },
+      "contractArtifacts": {
+        "maxFileBytes": 16777216,
+        "maxTotalBytes": 67108864,
+        "reviewTextBytes": 400000
+      },
+      "maxAttempts": 3,
+      "reuseImplementation": true,
+      "repairBudget": 6,
+      "isolation": { "mode": "os", "domains": [] },
+      "roles": {
+        "architect": { "runtime": "claude", "title": "Архитектор" },
+        "backend": {
+          "runtime": "claude",
+          "title": "Разработчик бэкенда",
+          "requiresContract": true
+        },
+        "frontend": {
+          "runtime": "claude",
+          "title": "Разработчик интерфейса",
+          "requiresContract": true
+        },
+        "qa": { "runtime": "claude", "title": "Тестировщик" }
+      },
+      "reviewer": { "runtime": "codex" },
+      "gates": [
+        {
+          "id": "tests",
+          "kind": "test",
+          "command": ["make", "test"],
+          "timeoutMs": 120000,
+          "report": { "type": "junit", "path": "out/junit.xml" }
+        }
+      ],
+      "protectedPaths": [
+        "profiles/single.json",
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".agents/",
+        ".github/",
+        ".githooks/",
+        "devcontour.config.json",
+        "devcontour.component.json",
+        "devcontour.workspace.json",
+        "docs/journal/",
+        ".devcontour-local/",
+        ".devcontour/",
+        "package.json",
+        "package-lock.json"
+      ],
+      "packs": [
+        {
+          "id": "host-single",
+          "version": "1.0.0",
+          "capabilities": [],
+          "source": { "repositoryId": "main", "path": "profiles/single.json" }
+        }
+      ]
+    }
+  },
+  {
+    "ref": "./profiles/base.json",
+    "repositoryId": "main",
+    "keys": [
+      "id",
+      "version",
+      "capabilities",
+      "gates",
+      "prepare",
+      "environment",
+      "lifecycle",
+      "protectedPaths",
+      "generatedPaths",
+      "concurrency",
+      "runTimeoutMs",
+      "roles",
+      "contextPacks",
+      "source",
+      "digest",
+      "closure",
+      "raw"
+    ],
+    "profile": {
+      "id": "host-base",
+      "version": "1.0.0",
+      "capabilities": ["python", "shared"],
+      "gates": [
+        {
+          "id": "lint",
+          "cwd": "api",
+          "resources": ["db"],
+          "kind": "check",
+          "command": ["python3", "-m", "ruff", "check"],
+          "timeoutMs": 120000
+        },
+        {
+          "id": "tests",
+          "dependsOn": ["lint"],
+          "kind": "test",
+          "command": ["python3", "verify.py"],
+          "timeoutMs": 300000,
+          "report": { "type": "junit", "path": ".reports/tests.xml" }
+        }
+      ],
+      "prepare": [
+        {
+          "id": "deps",
+          "command": ["python3", "-m", "pip", "install", "-r", "requirements.txt"],
+          "timeoutMs": 120000
+        }
+      ],
+      "environment": { "inherit": ["PATH"], "values": { "PROJECT_MARKER": "base" }, "secrets": {} },
+      "protectedPaths": ["verify.py", "profiles/base.json"],
+      "generatedPaths": ["build"],
+      "concurrency": 3,
+      "runTimeoutMs": 900000,
+      "roles": {
+        "backend": {
+          "runtime": "codex",
+          "model": "gpt-x",
+          "writePaths": ["api"],
+          "requiresContract": true
+        },
+        "qa": {
+          "runtime": "claude",
+          "reviewer": { "runtime": "codex", "effort": "high" },
+          "title": "Тестировщик"
+        }
+      },
+      "contextPacks": [
+        {
+          "id": "py-rules",
+          "version": "1",
+          "repositoryId": "main",
+          "roles": [],
+          "files": ["docs/rules.md"],
+          "references": []
+        },
+        {
+          "id": "shared",
+          "version": "1",
+          "repositoryId": "main",
+          "roles": ["qa"],
+          "files": ["docs/shared.md"],
+          "references": ["docs/ref.md"]
+        }
+      ],
+      "source": { "repositoryId": "main", "path": "profiles/base.json" },
+      "digest": "da852b8996691641bf6423dc11e85b622b35da1d715350d028ed5036ccd20d42",
+      "closure": [
+        {
+          "ref": "local:profiles/base.json",
+          "digest": "d18fead66c561d9d583fb74b8c1bd844dab9fb27b8d90168176b59a8363bb22e"
+        }
+      ],
+      "raw": "{\n  \"id\": \"host-base\",\n  \"version\": \"1.0.0\",\n  \"capabilities\": [\"python\", \"shared\"],\n  \"protectedPaths\": [\"verify.py\"],\n  \"generatedPaths\": [\"build\"],\n  \"concurrency\": 3,\n  \"runTimeoutMs\": 900000,\n  \"prepare\": [\n    { \"id\": \"deps\", \"command\": [\"python3\", \"-m\", \"pip\", \"install\", \"-r\", \"requirements.txt\"] }\n  ],\n  \"environment\": { \"values\": { \"PROJECT_MARKER\": \"base\" }, \"inherit\": [\"PATH\"] },\n  \"roles\": {\n    \"backend\": {\n      \"runtime\": \"codex\",\n      \"model\": \"gpt-x\",\n      \"writePaths\": [\"api\"],\n      \"requiresContract\": true\n    },\n    \"qa\": {\n      \"runtime\": \"claude\",\n      \"title\": \"Тестировщик\",\n      \"reviewer\": { \"runtime\": \"codex\", \"effort\": \"high\" }\n    }\n  },\n  \"contextPacks\": [\n    { \"id\": \"py-rules\", \"version\": \"1\", \"files\": [\"docs/rules.md\"] },\n    {\n      \"id\": \"shared\",\n      \"version\": \"1\",\n      \"roles\": [\"qa\"],\n      \"files\": [\"docs/shared.md\"],\n      \"references\": [\"docs/ref.md\"]\n    }\n  ],\n  \"gates\": [\n    {\n      \"id\": \"lint\",\n      \"kind\": \"check\",\n      \"command\": [\"python3\", \"-m\", \"ruff\", \"check\"],\n      \"cwd\": \"api\",\n      \"resources\": [\"db\"]\n    },\n    {\n      \"id\": \"tests\",\n      \"kind\": \"test\",\n      \"command\": [\"python3\", \"verify.py\"],\n      \"dependsOn\": [\"lint\"],\n      \"report\": { \"type\": \"junit\", \"path\": \".reports/tests.xml\" },\n      \"timeoutMs\": 300000\n    }\n  ]\n}\n"
+    },
+    "config": {
+      "prices": [],
+      "memoryPolicy": { "maxBytes": 8000 },
+      "signalPolicy": { "maxActionsPerHour": 10 },
+      "version": 1,
+      "name": "product",
+      "environment": { "inherit": ["PATH"], "values": { "PROJECT_MARKER": "base" }, "secrets": {} },
+      "prepare": [
+        {
+          "id": "deps",
+          "command": ["python3", "-m", "pip", "install", "-r", "requirements.txt"],
+          "timeoutMs": 120000
+        }
+      ],
+      "toolProfiles": {},
+      "completionMode": "local",
+      "forgeConnections": {},
+      "storage": "central",
+      "contextPacks": [],
+      "resources": [],
+      "verificationMode": "all",
+      "generatedPaths": ["build"],
+      "repositories": [],
+      "workspaceGates": [],
+      "repository": "/fixture/product",
+      "targetBranch": "devcontour/accepted",
+      "mode": "local",
+      "approvalMode": "agent",
+      "concurrency": 3,
+      "leaseMs": 30000,
+      "runTimeoutMs": 900000,
+      "reviewProbes": { "commandTimeoutMs": 120000, "budgetMs": 600000, "reserveMs": 120000 },
+      "contractArtifacts": {
+        "maxFileBytes": 16777216,
+        "maxTotalBytes": 67108864,
+        "reviewTextBytes": 400000
+      },
+      "maxAttempts": 3,
+      "reuseImplementation": true,
+      "repairBudget": 6,
+      "isolation": { "mode": "os", "domains": [] },
+      "roles": {
+        "backend": {
+          "runtime": "codex",
+          "model": "gpt-x",
+          "writePaths": ["api"],
+          "requiresContract": true
+        },
+        "qa": {
+          "runtime": "claude",
+          "reviewer": { "runtime": "codex", "effort": "high" },
+          "title": "Тестировщик"
+        }
+      },
+      "reviewer": { "runtime": "codex" },
+      "gates": [
+        {
+          "id": "lint",
+          "cwd": "api",
+          "resources": ["db"],
+          "kind": "check",
+          "command": ["python3", "-m", "ruff", "check"],
+          "timeoutMs": 120000
+        },
+        {
+          "id": "tests",
+          "dependsOn": ["lint"],
+          "kind": "test",
+          "command": ["python3", "verify.py"],
+          "timeoutMs": 300000,
+          "report": { "type": "junit", "path": ".reports/tests.xml" }
+        }
+      ],
+      "protectedPaths": [
+        "verify.py",
+        "profiles/base.json",
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".agents/",
+        ".github/",
+        ".githooks/",
+        "devcontour.config.json",
+        "devcontour.component.json",
+        "devcontour.workspace.json",
+        "docs/journal/",
+        ".devcontour-local/",
+        ".devcontour/",
+        "package.json",
+        "package-lock.json"
+      ],
+      "packs": [
+        {
+          "id": "host-base",
+          "version": "1.0.0",
+          "capabilities": ["python", "shared"],
+          "source": { "repositoryId": "main", "path": "profiles/base.json" }
+        }
+      ]
+    }
+  },
+  {
+    "ref": "./profiles/nested/extra.json",
+    "repositoryId": "main",
+    "keys": [
+      "id",
+      "version",
+      "capabilities",
+      "gates",
+      "prepare",
+      "environment",
+      "lifecycle",
+      "protectedPaths",
+      "generatedPaths",
+      "concurrency",
+      "runTimeoutMs",
+      "roles",
+      "contextPacks",
+      "source",
+      "digest",
+      "closure",
+      "raw"
+    ],
+    "profile": {
+      "id": "host-extra",
+      "version": "0.3.1-beta.1",
+      "capabilities": ["python", "shared", "extra"],
+      "gates": [
+        {
+          "id": "lint",
+          "cwd": "api",
+          "resources": ["db"],
+          "kind": "check",
+          "command": ["python3", "-m", "ruff", "check"],
+          "timeoutMs": 120000
+        },
+        {
+          "id": "tests",
+          "dependsOn": ["lint"],
+          "kind": "test",
+          "command": ["python3", "verify.py"],
+          "timeoutMs": 300000,
+          "report": { "type": "junit", "path": ".reports/tests.xml" }
+        },
+        {
+          "id": "property",
+          "dependsOn": ["tests"],
+          "kind": "check",
+          "command": ["python3", "prop.py"],
+          "timeoutMs": 120000,
+          "property": {}
+        }
+      ],
+      "prepare": [
+        {
+          "id": "deps",
+          "command": ["python3", "-m", "pip", "install", "-r", "requirements.txt"],
+          "timeoutMs": 120000
+        }
+      ],
+      "environment": { "inherit": ["PATH"], "values": { "PROJECT_MARKER": "base" }, "secrets": {} },
+      "lifecycle": {
+        "setup": [{ "id": "up", "command": ["docker", "compose", "up", "-d"], "timeoutMs": 60000 }],
+        "ready": [],
+        "teardown": [
+          { "id": "down", "command": ["docker", "compose", "down"], "timeoutMs": 120000 }
+        ]
+      },
+      "protectedPaths": ["verify.py", "profiles/base.json", "profiles/nested/extra.json"],
+      "generatedPaths": ["build"],
+      "concurrency": 2,
+      "runTimeoutMs": 1800000,
+      "roles": {
+        "backend": {
+          "runtime": "codex",
+          "model": "gpt-x",
+          "writePaths": ["api"],
+          "requiresContract": true
+        },
+        "qa": { "runtime": "codex", "title": "Проверка" }
+      },
+      "contextPacks": [
+        {
+          "id": "py-rules",
+          "version": "1",
+          "repositoryId": "main",
+          "roles": [],
+          "files": ["docs/rules.md"],
+          "references": []
+        },
+        {
+          "id": "shared",
+          "version": "2",
+          "repositoryId": "main",
+          "roles": [],
+          "files": ["docs/shared-v2.md"],
+          "references": []
+        }
+      ],
+      "source": { "repositoryId": "main", "path": "profiles/nested/extra.json" },
+      "digest": "9157dbee3f5e4e2763b887fed93de1ee3781b1caaa82b4096c3449e77b43e39d",
+      "closure": [
+        {
+          "ref": "local:profiles/base.json",
+          "digest": "d18fead66c561d9d583fb74b8c1bd844dab9fb27b8d90168176b59a8363bb22e"
+        },
+        {
+          "ref": "local:profiles/nested/extra.json",
+          "digest": "cb8e9e539717d3ae0a37c745eb79ee775d636340e2a78b459bb666a57f0f5300"
+        }
+      ],
+      "raw": "{\n  \"id\": \"host-extra\",\n  \"version\": \"0.3.1-beta.1\",\n  \"extends\": [\"../base.json\"],\n  \"capabilities\": [\"shared\", \"extra\"],\n  \"concurrency\": 2,\n  \"runTimeoutMs\": 1800000,\n  \"lifecycle\": {\n    \"setup\": [{ \"id\": \"up\", \"command\": [\"docker\", \"compose\", \"up\", \"-d\"], \"timeoutMs\": 60000 }],\n    \"teardown\": [{ \"id\": \"down\", \"command\": [\"docker\", \"compose\", \"down\"] }]\n  },\n  \"roles\": { \"qa\": { \"runtime\": \"codex\", \"title\": \"Проверка\" } },\n  \"contextPacks\": [\n    { \"id\": \"shared\", \"version\": \"2\", \"repositoryId\": \"main\", \"files\": [\"docs/shared-v2.md\"] }\n  ],\n  \"gates\": [\n    {\n      \"id\": \"property\",\n      \"kind\": \"check\",\n      \"command\": [\"python3\", \"prop.py\"],\n      \"dependsOn\": [\"tests\"],\n      \"property\": {}\n    }\n  ]\n}\n"
+    },
+    "config": {
+      "prices": [],
+      "memoryPolicy": { "maxBytes": 8000 },
+      "signalPolicy": { "maxActionsPerHour": 10 },
+      "version": 1,
+      "name": "product",
+      "environment": { "inherit": ["PATH"], "values": { "PROJECT_MARKER": "base" }, "secrets": {} },
+      "lifecycle": {
+        "setup": [{ "id": "up", "command": ["docker", "compose", "up", "-d"], "timeoutMs": 60000 }],
+        "ready": [],
+        "teardown": [
+          { "id": "down", "command": ["docker", "compose", "down"], "timeoutMs": 120000 }
+        ]
+      },
+      "prepare": [
+        {
+          "id": "deps",
+          "command": ["python3", "-m", "pip", "install", "-r", "requirements.txt"],
+          "timeoutMs": 120000
+        }
+      ],
+      "toolProfiles": {},
+      "completionMode": "local",
+      "forgeConnections": {},
+      "storage": "central",
+      "contextPacks": [],
+      "resources": [],
+      "verificationMode": "all",
+      "generatedPaths": ["build"],
+      "repositories": [],
+      "workspaceGates": [],
+      "repository": "/fixture/product",
+      "targetBranch": "devcontour/accepted",
+      "mode": "local",
+      "approvalMode": "agent",
+      "concurrency": 2,
+      "leaseMs": 30000,
+      "runTimeoutMs": 1800000,
+      "reviewProbes": { "commandTimeoutMs": 120000, "budgetMs": 600000, "reserveMs": 120000 },
+      "contractArtifacts": {
+        "maxFileBytes": 16777216,
+        "maxTotalBytes": 67108864,
+        "reviewTextBytes": 400000
+      },
+      "maxAttempts": 3,
+      "reuseImplementation": true,
+      "repairBudget": 6,
+      "isolation": { "mode": "os", "domains": [] },
+      "roles": {
+        "backend": {
+          "runtime": "codex",
+          "model": "gpt-x",
+          "writePaths": ["api"],
+          "requiresContract": true
+        },
+        "qa": { "runtime": "codex", "title": "Проверка" }
+      },
+      "reviewer": { "runtime": "codex" },
+      "gates": [
+        {
+          "id": "lint",
+          "cwd": "api",
+          "resources": ["db"],
+          "kind": "check",
+          "command": ["python3", "-m", "ruff", "check"],
+          "timeoutMs": 120000
+        },
+        {
+          "id": "tests",
+          "dependsOn": ["lint"],
+          "kind": "test",
+          "command": ["python3", "verify.py"],
+          "timeoutMs": 300000,
+          "report": { "type": "junit", "path": ".reports/tests.xml" }
+        },
+        {
+          "id": "property",
+          "dependsOn": ["tests"],
+          "kind": "check",
+          "command": ["python3", "prop.py"],
+          "timeoutMs": 120000,
+          "property": {}
+        }
+      ],
+      "protectedPaths": [
+        "verify.py",
+        "profiles/base.json",
+        "profiles/nested/extra.json",
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".agents/",
+        ".github/",
+        ".githooks/",
+        "devcontour.config.json",
+        "devcontour.component.json",
+        "devcontour.workspace.json",
+        "docs/journal/",
+        ".devcontour-local/",
+        ".devcontour/",
+        "package.json",
+        "package-lock.json"
+      ],
+      "packs": [
+        {
+          "id": "host-extra",
+          "version": "0.3.1-beta.1",
+          "capabilities": ["python", "shared", "extra"],
+          "source": { "repositoryId": "main", "path": "profiles/nested/extra.json" }
+        }
+      ]
+    }
+  },
+  {
+    "ref": "./profiles/leaf.json",
+    "repositoryId": "main",
+    "keys": [
+      "id",
+      "version",
+      "capabilities",
+      "gates",
+      "prepare",
+      "environment",
+      "lifecycle",
+      "protectedPaths",
+      "generatedPaths",
+      "concurrency",
+      "runTimeoutMs",
+      "roles",
+      "contextPacks",
+      "source",
+      "digest",
+      "closure",
+      "raw"
+    ],
+    "profile": {
+      "id": "host-leaf",
+      "version": "2.0.0",
+      "capabilities": ["python", "shared", "extra"],
+      "gates": [
+        {
+          "id": "lint",
+          "cwd": "api",
+          "resources": ["db"],
+          "kind": "check",
+          "command": ["python3", "-m", "ruff", "check"],
+          "timeoutMs": 120000
+        },
+        {
+          "id": "tests",
+          "dependsOn": ["lint"],
+          "kind": "test",
+          "command": ["python3", "verify.py"],
+          "timeoutMs": 300000,
+          "report": { "type": "junit", "path": ".reports/tests.xml" }
+        },
+        {
+          "id": "property",
+          "dependsOn": ["tests"],
+          "kind": "check",
+          "command": ["python3", "prop.py"],
+          "timeoutMs": 120000,
+          "property": {}
+        }
+      ],
+      "prepare": [
+        {
+          "id": "deps",
+          "command": ["python3", "-m", "pip", "install", "-r", "requirements.txt"],
+          "timeoutMs": 120000
+        }
+      ],
+      "environment": { "inherit": ["PATH"], "values": { "PROJECT_MARKER": "base" }, "secrets": {} },
+      "lifecycle": {
+        "setup": [{ "id": "up", "command": ["docker", "compose", "up", "-d"], "timeoutMs": 60000 }],
+        "ready": [],
+        "teardown": [
+          { "id": "down", "command": ["docker", "compose", "down"], "timeoutMs": 120000 }
+        ]
+      },
+      "protectedPaths": [
+        "verify.py",
+        "Makefile",
+        "profiles/base.json",
+        "profiles/nested/extra.json",
+        "profiles/leaf.json"
+      ],
+      "generatedPaths": ["build"],
+      "concurrency": 2,
+      "runTimeoutMs": 1800000,
+      "roles": {
+        "backend": {
+          "runtime": "codex",
+          "model": "gpt-x",
+          "writePaths": ["api"],
+          "requiresContract": true
+        },
+        "qa": { "runtime": "codex", "title": "Проверка" }
+      },
+      "contextPacks": [
+        {
+          "id": "py-rules",
+          "version": "1",
+          "repositoryId": "main",
+          "roles": [],
+          "files": ["docs/rules.md"],
+          "references": []
+        },
+        {
+          "id": "shared",
+          "version": "2",
+          "repositoryId": "main",
+          "roles": [],
+          "files": ["docs/shared-v2.md"],
+          "references": []
+        }
+      ],
+      "source": { "repositoryId": "main", "path": "profiles/leaf.json" },
+      "digest": "23bd1c5fb303dfde3fcc1ffa5281b4e707e7c44f856dfd543729f50c26c1df04",
+      "closure": [
+        {
+          "ref": "local:profiles/base.json",
+          "digest": "d18fead66c561d9d583fb74b8c1bd844dab9fb27b8d90168176b59a8363bb22e"
+        },
+        {
+          "ref": "local:profiles/nested/extra.json",
+          "digest": "cb8e9e539717d3ae0a37c745eb79ee775d636340e2a78b459bb666a57f0f5300"
+        },
+        {
+          "ref": "local:profiles/leaf.json",
+          "digest": "9e5d5cc16f9a163fa3d36385b21062facc9dc7dee8b251a67cd9e18a307e31e5"
+        }
+      ],
+      "raw": "{\n  \"id\": \"host-leaf\",\n  \"version\": \"2.0.0\",\n  \"extends\": [\"./nested/extra.json\", \"./base.json\"],\n  \"protectedPaths\": [\"verify.py\", \"Makefile\"]\n}\n"
+    },
+    "config": {
+      "prices": [],
+      "memoryPolicy": { "maxBytes": 8000 },
+      "signalPolicy": { "maxActionsPerHour": 10 },
+      "version": 1,
+      "name": "product",
+      "environment": { "inherit": ["PATH"], "values": { "PROJECT_MARKER": "base" }, "secrets": {} },
+      "lifecycle": {
+        "setup": [{ "id": "up", "command": ["docker", "compose", "up", "-d"], "timeoutMs": 60000 }],
+        "ready": [],
+        "teardown": [
+          { "id": "down", "command": ["docker", "compose", "down"], "timeoutMs": 120000 }
+        ]
+      },
+      "prepare": [
+        {
+          "id": "deps",
+          "command": ["python3", "-m", "pip", "install", "-r", "requirements.txt"],
+          "timeoutMs": 120000
+        }
+      ],
+      "toolProfiles": {},
+      "completionMode": "local",
+      "forgeConnections": {},
+      "storage": "central",
+      "contextPacks": [],
+      "resources": [],
+      "verificationMode": "all",
+      "generatedPaths": ["build"],
+      "repositories": [],
+      "workspaceGates": [],
+      "repository": "/fixture/product",
+      "targetBranch": "devcontour/accepted",
+      "mode": "local",
+      "approvalMode": "agent",
+      "concurrency": 2,
+      "leaseMs": 30000,
+      "runTimeoutMs": 1800000,
+      "reviewProbes": { "commandTimeoutMs": 120000, "budgetMs": 600000, "reserveMs": 120000 },
+      "contractArtifacts": {
+        "maxFileBytes": 16777216,
+        "maxTotalBytes": 67108864,
+        "reviewTextBytes": 400000
+      },
+      "maxAttempts": 3,
+      "reuseImplementation": true,
+      "repairBudget": 6,
+      "isolation": { "mode": "os", "domains": [] },
+      "roles": {
+        "backend": {
+          "runtime": "codex",
+          "model": "gpt-x",
+          "writePaths": ["api"],
+          "requiresContract": true
+        },
+        "qa": { "runtime": "codex", "title": "Проверка" }
+      },
+      "reviewer": { "runtime": "codex" },
+      "gates": [
+        {
+          "id": "lint",
+          "cwd": "api",
+          "resources": ["db"],
+          "kind": "check",
+          "command": ["python3", "-m", "ruff", "check"],
+          "timeoutMs": 120000
+        },
+        {
+          "id": "tests",
+          "dependsOn": ["lint"],
+          "kind": "test",
+          "command": ["python3", "verify.py"],
+          "timeoutMs": 300000,
+          "report": { "type": "junit", "path": ".reports/tests.xml" }
+        },
+        {
+          "id": "property",
+          "dependsOn": ["tests"],
+          "kind": "check",
+          "command": ["python3", "prop.py"],
+          "timeoutMs": 120000,
+          "property": {}
+        }
+      ],
+      "protectedPaths": [
+        "verify.py",
+        "Makefile",
+        "profiles/base.json",
+        "profiles/nested/extra.json",
+        "profiles/leaf.json",
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".agents/",
+        ".github/",
+        ".githooks/",
+        "devcontour.config.json",
+        "devcontour.component.json",
+        "devcontour.workspace.json",
+        "docs/journal/",
+        ".devcontour-local/",
+        ".devcontour/",
+        "package.json",
+        "package-lock.json"
+      ],
+      "packs": [
+        {
+          "id": "host-leaf",
+          "version": "2.0.0",
+          "capabilities": ["python", "shared", "extra"],
+          "source": { "repositoryId": "main", "path": "profiles/leaf.json" }
+        }
+      ]
+    }
+  },
+  {
+    "ref": "./profiles/on-builtin.json",
+    "repositoryId": "main",
+    "keys": [
+      "id",
+      "version",
+      "capabilities",
+      "gates",
+      "prepare",
+      "environment",
+      "lifecycle",
+      "protectedPaths",
+      "generatedPaths",
+      "concurrency",
+      "runTimeoutMs",
+      "roles",
+      "contextPacks",
+      "source",
+      "digest",
+      "closure",
+      "raw"
+    ],
+    "profile": {
+      "id": "host-on-builtin",
+      "version": "1.1.0",
+      "capabilities": ["node", "typescript", "unit-tests", "web"],
+      "gates": [
+        { "id": "install", "kind": "check", "command": ["npm", "ci"], "timeoutMs": 240000 },
+        {
+          "id": "typecheck",
+          "dependsOn": ["install"],
+          "kind": "check",
+          "command": ["npm", "run", "typecheck"],
+          "timeoutMs": 240000
+        },
+        {
+          "id": "unit-tests",
+          "dependsOn": ["typecheck"],
+          "kind": "test",
+          "command": ["npm", "run", "test:devcontour"],
+          "timeoutMs": 240000,
+          "report": { "type": "junit", "path": ".reports/junit.xml" }
+        }
+      ],
+      "prepare": [],
+      "protectedPaths": ["package.json", "package-lock.json", "profiles/on-builtin.json"],
+      "generatedPaths": ["dist"],
+      "roles": {},
+      "contextPacks": [
+        {
+          "id": "technique-testing",
+          "version": "1.0.0",
+          "repositoryId": "main",
+          "roles": ["backend", "engine", "qa", "qa-web", "qa-admin", "qa-mobile", "qa-api"],
+          "files": [".agents/context/technique-testing.md"],
+          "references": [
+            ".agents/context/vendor/matt-pocock/skills--engineering--tdd--SKILL.md",
+            ".agents/context/vendor/matt-pocock/skills--engineering--tdd--tests.md",
+            ".agents/context/vendor/matt-pocock/skills--engineering--tdd--mocking.md"
+          ]
+        },
+        {
+          "id": "web-rules",
+          "version": "3",
+          "repositoryId": "main",
+          "roles": [],
+          "files": ["docs/web.md"],
+          "references": []
+        }
+      ],
+      "source": { "repositoryId": "main", "path": "profiles/on-builtin.json" },
+      "digest": "ba0751b1ddc4ef7706a68034ca9a46015b36dc50eea2c001e15255202b12d4c9",
+      "closure": [
+        {
+          "ref": "builtin:node-checks",
+          "digest": "1d6a4838d99907b322ede91cce4598dc2628c79cdae3389a45b8bfb3adf38cdf"
+        },
+        {
+          "ref": "local:profiles/on-builtin.json",
+          "digest": "3b513b65fd417257e856b2f54c5e6c34800114d267e0ed0544c671d60c12b91f"
+        }
+      ],
+      "raw": "{\n  \"id\": \"host-on-builtin\",\n  \"version\": \"1.1.0\",\n  \"extends\": [\"node-checks\"],\n  \"capabilities\": [\"web\"],\n  \"generatedPaths\": [\"dist\"],\n  \"contextPacks\": [{ \"id\": \"web-rules\", \"version\": \"3\", \"files\": [\"docs/web.md\"] }]\n}\n"
+    },
+    "config": {
+      "prices": [],
+      "memoryPolicy": { "maxBytes": 8000 },
+      "signalPolicy": { "maxActionsPerHour": 10 },
+      "version": 1,
+      "name": "product",
+      "prepare": [],
+      "toolProfiles": {},
+      "completionMode": "local",
+      "forgeConnections": {},
+      "storage": "central",
+      "contextPacks": [],
+      "resources": [],
+      "verificationMode": "all",
+      "generatedPaths": ["dist"],
+      "repositories": [],
+      "workspaceGates": [],
+      "repository": "/fixture/product",
+      "targetBranch": "devcontour/accepted",
+      "mode": "local",
+      "approvalMode": "agent",
+      "concurrency": 2,
+      "leaseMs": 30000,
+      "runTimeoutMs": 900000,
+      "reviewProbes": { "commandTimeoutMs": 120000, "budgetMs": 600000, "reserveMs": 120000 },
+      "contractArtifacts": {
+        "maxFileBytes": 16777216,
+        "maxTotalBytes": 67108864,
+        "reviewTextBytes": 400000
+      },
+      "maxAttempts": 3,
+      "reuseImplementation": true,
+      "repairBudget": 6,
+      "isolation": { "mode": "os", "domains": [] },
+      "roles": {
+        "architect": { "runtime": "claude", "title": "Архитектор" },
+        "backend": {
+          "runtime": "claude",
+          "title": "Разработчик бэкенда",
+          "requiresContract": true
+        },
+        "frontend": {
+          "runtime": "claude",
+          "title": "Разработчик интерфейса",
+          "requiresContract": true
+        },
+        "qa": { "runtime": "claude", "title": "Тестировщик" }
+      },
+      "reviewer": { "runtime": "codex" },
+      "gates": [
+        { "id": "install", "kind": "check", "command": ["npm", "ci"], "timeoutMs": 240000 },
+        {
+          "id": "typecheck",
+          "dependsOn": ["install"],
+          "kind": "check",
+          "command": ["npm", "run", "typecheck"],
+          "timeoutMs": 240000
+        },
+        {
+          "id": "unit-tests",
+          "dependsOn": ["typecheck"],
+          "kind": "test",
+          "command": ["npm", "run", "test:devcontour"],
+          "timeoutMs": 240000,
+          "report": { "type": "junit", "path": ".reports/junit.xml" }
+        }
+      ],
+      "protectedPaths": [
+        "package.json",
+        "package-lock.json",
+        "profiles/on-builtin.json",
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".agents/",
+        ".github/",
+        ".githooks/",
+        "devcontour.config.json",
+        "devcontour.component.json",
+        "devcontour.workspace.json",
+        "docs/journal/",
+        ".devcontour-local/",
+        ".devcontour/",
+        "package.json",
+        "package-lock.json"
+      ],
+      "packs": [
+        {
+          "id": "host-on-builtin",
+          "version": "1.1.0",
+          "capabilities": ["node", "typescript", "unit-tests", "web"],
+          "source": { "repositoryId": "main", "path": "profiles/on-builtin.json" }
+        }
+      ]
+    }
+  },
+  {
+    "ref": "./profiles/leaf.json",
+    "repositoryId": "api",
+    "keys": [
+      "id",
+      "version",
+      "capabilities",
+      "gates",
+      "prepare",
+      "environment",
+      "lifecycle",
+      "protectedPaths",
+      "generatedPaths",
+      "concurrency",
+      "runTimeoutMs",
+      "roles",
+      "contextPacks",
+      "source",
+      "digest",
+      "closure",
+      "raw"
+    ],
+    "profile": {
+      "id": "host-leaf",
+      "version": "2.0.0",
+      "capabilities": ["python", "shared", "extra"],
+      "gates": [
+        {
+          "id": "lint",
+          "cwd": "api",
+          "resources": ["db"],
+          "kind": "check",
+          "command": ["python3", "-m", "ruff", "check"],
+          "timeoutMs": 120000
+        },
+        {
+          "id": "tests",
+          "dependsOn": ["lint"],
+          "kind": "test",
+          "command": ["python3", "verify.py"],
+          "timeoutMs": 300000,
+          "report": { "type": "junit", "path": ".reports/tests.xml" }
+        },
+        {
+          "id": "property",
+          "dependsOn": ["tests"],
+          "kind": "check",
+          "command": ["python3", "prop.py"],
+          "timeoutMs": 120000,
+          "property": {}
+        }
+      ],
+      "prepare": [
+        {
+          "id": "deps",
+          "command": ["python3", "-m", "pip", "install", "-r", "requirements.txt"],
+          "timeoutMs": 120000
+        }
+      ],
+      "environment": { "inherit": ["PATH"], "values": { "PROJECT_MARKER": "base" }, "secrets": {} },
+      "lifecycle": {
+        "setup": [{ "id": "up", "command": ["docker", "compose", "up", "-d"], "timeoutMs": 60000 }],
+        "ready": [],
+        "teardown": [
+          { "id": "down", "command": ["docker", "compose", "down"], "timeoutMs": 120000 }
+        ]
+      },
+      "protectedPaths": [
+        "verify.py",
+        "Makefile",
+        "profiles/base.json",
+        "profiles/nested/extra.json",
+        "profiles/leaf.json"
+      ],
+      "generatedPaths": ["build"],
+      "concurrency": 2,
+      "runTimeoutMs": 1800000,
+      "roles": {
+        "backend": {
+          "runtime": "codex",
+          "model": "gpt-x",
+          "writePaths": ["api"],
+          "requiresContract": true
+        },
+        "qa": { "runtime": "codex", "title": "Проверка" }
+      },
+      "contextPacks": [
+        {
+          "id": "py-rules",
+          "version": "1",
+          "repositoryId": "main",
+          "roles": [],
+          "files": ["docs/rules.md"],
+          "references": []
+        },
+        {
+          "id": "shared",
+          "version": "2",
+          "repositoryId": "main",
+          "roles": [],
+          "files": ["docs/shared-v2.md"],
+          "references": []
+        }
+      ],
+      "source": { "repositoryId": "api", "path": "profiles/leaf.json" },
+      "digest": "23bd1c5fb303dfde3fcc1ffa5281b4e707e7c44f856dfd543729f50c26c1df04",
+      "closure": [
+        {
+          "ref": "local:profiles/base.json",
+          "digest": "d18fead66c561d9d583fb74b8c1bd844dab9fb27b8d90168176b59a8363bb22e"
+        },
+        {
+          "ref": "local:profiles/nested/extra.json",
+          "digest": "cb8e9e539717d3ae0a37c745eb79ee775d636340e2a78b459bb666a57f0f5300"
+        },
+        {
+          "ref": "local:profiles/leaf.json",
+          "digest": "9e5d5cc16f9a163fa3d36385b21062facc9dc7dee8b251a67cd9e18a307e31e5"
+        }
+      ],
+      "raw": "{\n  \"id\": \"host-leaf\",\n  \"version\": \"2.0.0\",\n  \"extends\": [\"./nested/extra.json\", \"./base.json\"],\n  \"protectedPaths\": [\"verify.py\", \"Makefile\"]\n}\n"
+    },
+    "config": {
+      "prices": [],
+      "memoryPolicy": { "maxBytes": 8000 },
+      "signalPolicy": { "maxActionsPerHour": 10 },
+      "version": 1,
+      "name": "product",
+      "environment": { "inherit": ["PATH"], "values": { "PROJECT_MARKER": "base" }, "secrets": {} },
+      "lifecycle": {
+        "setup": [{ "id": "up", "command": ["docker", "compose", "up", "-d"], "timeoutMs": 60000 }],
+        "ready": [],
+        "teardown": [
+          { "id": "down", "command": ["docker", "compose", "down"], "timeoutMs": 120000 }
+        ]
+      },
+      "prepare": [
+        {
+          "id": "deps",
+          "command": ["python3", "-m", "pip", "install", "-r", "requirements.txt"],
+          "timeoutMs": 120000
+        }
+      ],
+      "toolProfiles": {},
+      "completionMode": "local",
+      "forgeConnections": {},
+      "storage": "central",
+      "contextPacks": [],
+      "resources": [],
+      "verificationMode": "all",
+      "generatedPaths": ["build"],
+      "repositories": [],
+      "workspaceGates": [],
+      "repository": "/fixture/product",
+      "targetBranch": "devcontour/accepted",
+      "mode": "local",
+      "approvalMode": "agent",
+      "concurrency": 2,
+      "leaseMs": 30000,
+      "runTimeoutMs": 1800000,
+      "reviewProbes": { "commandTimeoutMs": 120000, "budgetMs": 600000, "reserveMs": 120000 },
+      "contractArtifacts": {
+        "maxFileBytes": 16777216,
+        "maxTotalBytes": 67108864,
+        "reviewTextBytes": 400000
+      },
+      "maxAttempts": 3,
+      "reuseImplementation": true,
+      "repairBudget": 6,
+      "isolation": { "mode": "os", "domains": [] },
+      "roles": {
+        "backend": {
+          "runtime": "codex",
+          "model": "gpt-x",
+          "writePaths": ["api"],
+          "requiresContract": true
+        },
+        "qa": { "runtime": "codex", "title": "Проверка" }
+      },
+      "reviewer": { "runtime": "codex" },
+      "gates": [
+        {
+          "id": "lint",
+          "cwd": "api",
+          "resources": ["db"],
+          "kind": "check",
+          "command": ["python3", "-m", "ruff", "check"],
+          "timeoutMs": 120000
+        },
+        {
+          "id": "tests",
+          "dependsOn": ["lint"],
+          "kind": "test",
+          "command": ["python3", "verify.py"],
+          "timeoutMs": 300000,
+          "report": { "type": "junit", "path": ".reports/tests.xml" }
+        },
+        {
+          "id": "property",
+          "dependsOn": ["tests"],
+          "kind": "check",
+          "command": ["python3", "prop.py"],
+          "timeoutMs": 120000,
+          "property": {}
+        }
+      ],
+      "protectedPaths": [
+        "verify.py",
+        "Makefile",
+        "profiles/base.json",
+        "profiles/nested/extra.json",
+        "profiles/leaf.json",
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".agents/",
+        ".github/",
+        ".githooks/",
+        "devcontour.config.json",
+        "devcontour.component.json",
+        "devcontour.workspace.json",
+        "docs/journal/",
+        ".devcontour-local/",
+        ".devcontour/",
+        "package.json",
+        "package-lock.json"
+      ],
+      "packs": [
+        {
+          "id": "host-leaf",
+          "version": "2.0.0",
+          "capabilities": ["python", "shared", "extra"],
+          "source": { "repositoryId": "api", "path": "profiles/leaf.json" }
+        }
+      ]
+    }
+  }
+]

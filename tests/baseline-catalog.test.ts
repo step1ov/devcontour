@@ -125,7 +125,8 @@ test('Baseline catalog: host capabilities keep protocolVersion 1, limits, names 
     );
     assert.equal(typeof tool.description, 'string');
     assert.ok(tool.description.length > 0, tool.name);
-    assert.equal(tool.readOnly, readOnly(tool.name));
+    // D3: имя записи каталога — string (общий построитель); принадлежность каталогу — ниже.
+    assert.equal(tool.readOnly, readOnly(tool.name as Parameters<typeof readOnly>[0]));
     assert.equal(typeof tool.inputSchema, 'object');
     assert.ok(tool.name in agentInputs, tool.name);
   }

@@ -1,0 +1,53 @@
+{
+  "id": "host-base",
+  "version": "1.0.0",
+  "capabilities": ["python", "shared"],
+  "protectedPaths": ["verify.py"],
+  "generatedPaths": ["build"],
+  "concurrency": 3,
+  "runTimeoutMs": 900000,
+  "prepare": [
+    { "id": "deps", "command": ["python3", "-m", "pip", "install", "-r", "requirements.txt"] }
+  ],
+  "environment": { "values": { "PROJECT_MARKER": "base" }, "inherit": ["PATH"] },
+  "roles": {
+    "backend": {
+      "runtime": "codex",
+      "model": "gpt-x",
+      "writePaths": ["api"],
+      "requiresContract": true
+    },
+    "qa": {
+      "runtime": "claude",
+      "title": "Тестировщик",
+      "reviewer": { "runtime": "codex", "effort": "high" }
+    }
+  },
+  "contextPacks": [
+    { "id": "py-rules", "version": "1", "files": ["docs/rules.md"] },
+    {
+      "id": "shared",
+      "version": "1",
+      "roles": ["qa"],
+      "files": ["docs/shared.md"],
+      "references": ["docs/ref.md"]
+    }
+  ],
+  "gates": [
+    {
+      "id": "lint",
+      "kind": "check",
+      "command": ["python3", "-m", "ruff", "check"],
+      "cwd": "api",
+      "resources": ["db"]
+    },
+    {
+      "id": "tests",
+      "kind": "test",
+      "command": ["python3", "verify.py"],
+      "dependsOn": ["lint"],
+      "report": { "type": "junit", "path": ".reports/tests.xml" },
+      "timeoutMs": 300000
+    }
+  ]
+}

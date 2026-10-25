@@ -16,6 +16,7 @@ import {
   HarnessError,
   STATE_VERSION,
   WORKSPACE_OWNER,
+  clipDeep,
   localSchemas,
   runEventSchema,
   type AttemptState,
@@ -78,17 +79,11 @@ interface Frame {
   attempts: Set<string>;
 }
 
-/** Копия без полей `token` на любой глубине: токен владения не попадает в журнал. */
-export function withoutTokens(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(withoutTokens);
-  if (value && typeof value === 'object')
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .filter(([k]) => k !== 'token')
-        .map(([k, v]) => [k, withoutTokens(v)]),
-    );
-  return value;
-}
+/**
+ * Копия без полей `token` на любой глубине: токен владения не попадает в
+ * журнал. Общая операция harness без усечения строк.
+ */
+export const withoutTokens = (value: unknown): unknown => clipDeep(value, Infinity);
 
 const hostOwner = (owner: string) => (owner === WORKSPACE_OWNER ? undefined : owner);
 

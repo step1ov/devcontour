@@ -12,7 +12,7 @@ import {
   type Task,
 } from '../core/model.ts';
 import type { Delivery } from '../core/integrations.ts';
-import type { PropertyRecovery } from 'devcontour-harness';
+import { clipDeep, type PropertyRecovery } from 'devcontour-harness';
 import { blockers, readyTasks } from '../core/graph.ts';
 import { repositories } from '../core/repositories.ts';
 import { boardPhase, queueStopReason } from '../core/work-status.ts';
@@ -38,17 +38,11 @@ const RECOVERY_HISTORY = 20;
 const LOG_TAIL = 4000;
 const tail = (text: string) => (text.length > LOG_TAIL ? '…' + text.slice(-LOG_TAIL) : text);
 
-/** Без токенов владения на любой глубине: они не для панели. */
-function withoutTokens<T>(value: T): T {
-  if (Array.isArray(value)) return value.map(withoutTokens) as T;
-  if (value && typeof value === 'object')
-    return Object.fromEntries(
-      Object.entries(value)
-        .filter(([k]) => k !== 'token')
-        .map(([k, v]) => [k, withoutTokens(v)]),
-    ) as T;
-  return value;
-}
+/**
+ * Без токенов владения на любой глубине: они не для панели. Общая операция
+ * harness без усечения строк (`clipDeep` с бесконечным пределом).
+ */
+const withoutTokens = <T>(value: T): T => clipDeep(value, Infinity);
 
 /**
  * Данные события для деталей журнала: только верхнеуровневые скаляры с

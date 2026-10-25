@@ -24,7 +24,7 @@ import { attachJournal } from '../runner/journal.ts';
 import { caseInput, runSpike, spikeInput, spikesOf, submitCase } from '../runner/checks.ts';
 import { checksQuery, taskChecks } from './checks.ts';
 import { CheckCorpus } from '../core/check-store.ts';
-import { recoveryActions } from 'devcontour-harness';
+import { checkJsonBytes, operationCatalog, recoveryActions } from 'devcontour-harness';
 import { applyCases } from '../runner/recovery.ts';
 import { ContractChanges } from '../runner/contract-change.ts';
 
@@ -270,21 +270,30 @@ export const readOnly = (name: AgentOperation) =>
     'checks_view',
     'contract_change_status',
   ].includes(name);
+/**
+ * Каталог операций DevContour — общий построитель harness (`operationCatalog`)
+ * над каталогом хоста: имена, описания, readOnly и схемы входа в прежнем
+ * порядке, protocolVersion 1 и прежние пределы. Общие операции harness в
+ * каталог DevContour не входят — это разные каталоги.
+ */
 export function capabilities() {
-  const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
-  return {
+  const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as {
+    name: string;
+    version: string;
+  };
+  return operationCatalog({
     name: pkg.name,
     version: pkg.version,
     protocolVersion: 1,
     maxInputBytes: 100000,
     maxResultBytes: 65536,
-    tools: agentOperations.map((name) => ({
-      name,
-      description: descriptions[name],
-      readOnly: readOnly(name),
-      inputSchema: z.toJSONSchema(agentInputs[name], { io: 'input' }),
-    })),
-  };
+    operations: Object.fromEntries(
+      agentOperations.map((name) => [
+        name,
+        { description: descriptions[name], readOnly: readOnly(name), input: agentInputs[name] },
+      ]),
+    ),
+  });
 }
 
 // CLI, HTTP and MCP use this layer. Review/evidence remain owned by existing runners.
@@ -299,13 +308,13 @@ export class AgentService {
     return this.bounded(result);
   }
   private bounded(result: Record<string, unknown>) {
-    if (Buffer.byteLength(JSON.stringify(result)) > 65536)
+    if (!checkJsonBytes(result, 65536).within)
       throw new DomainError('Ответ превышает 64 KiB; сузьте запрос или используйте CLI-отчёт', 413);
     return result;
   }
   /** Общий вход транспортов: синхронные операции и операции с внешними процессами. */
   async run(raw: unknown): Promise<Record<string, unknown>> {
-    if (Buffer.byteLength(JSON.stringify(raw)) > 100000)
+    if (!checkJsonBytes(raw, 100000).within)
       throw new DomainError('Запрос превышает 100000 байт', 413);
     const request = agentRequest.parse(raw);
     if (!asyncOperations.has(request.operation)) return this.execute(raw);
@@ -375,7 +384,7 @@ export class AgentService {
     return publicJob;
   }
   private dispatch(raw: unknown): Record<string, unknown> {
-    if (Buffer.byteLength(JSON.stringify(raw)) > 100000)
+    if (!checkJsonBytes(raw, 100000).within)
       throw new DomainError('Запрос превышает 100000 байт', 413);
     const request = agentRequest.parse(raw),
       { operation } = request;

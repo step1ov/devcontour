@@ -1,0 +1,8 @@
+{
+  "id": "host-on-builtin",
+  "version": "1.1.0",
+  "extends": ["node-checks"],
+  "capabilities": ["web"],
+  "generatedPaths": ["dist"],
+  "contextPacks": [{ "id": "web-rules", "version": "3", "files": ["docs/web.md"] }]
+}
