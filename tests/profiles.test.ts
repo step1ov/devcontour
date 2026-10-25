@@ -131,7 +131,8 @@ test('Profile resolution rejects escaping paths, symlinks, cycles, ambiguous com
     await invalid({ gates: [{ ...testGate, report: undefined }] }, /JUnit/);
     await invalid(
       { gates: [{ ...testGate, report: { type: 'junit', path: '../out.xml' } }] },
-      /Invalid|path|input/i,
+      // Текст отказа — resolver harness (K10); прежде — ZodError relativePath.
+      /Путь JUnit gate tests/,
     );
     await invalid({ gates: [{ ...testGate, dependsOn: ['unknown'] }] }, /Неизвестная/);
     await invalid({ extends: ['./tests.json'], gates: [testGate] }, /Повтор gate tests/);
