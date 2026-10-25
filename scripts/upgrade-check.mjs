@@ -40,6 +40,49 @@
  *  г. откат DevContour к прежней версии после Git sync новой (receipt с
  *     `gateIdentity`): прежняя версия не продолжает без мутаций; копия баз
  *     и `git revert` коммитов общих записей, сверка и повтор.
+ *
+ * Две версии DevContour (AC25): каждая сторона — свой source snapshot со
+ * своим закреплённым пакетом; режим выше годится только для обновления
+ * одной зависимости.
+ *
+ *   node scripts/upgrade-check.mjs <devcontour-harness-<from>.tgz> \
+ *     <devcontour-harness-<to>.tgz> --from-commit <SHA исходников from> \
+ *     --to-commit <SHA исходников to> \
+ *     --from-devcontour-commit <полный SHA DevContour «до»> \
+ *     --to-devcontour-commit <полный SHA DevContour «после»> \
+ *     [--to-worktree] [--out <manifest.json>] [--keep]
+ *
+ * Snapshot — `git clone --no-local` этого репозитория во временный каталог,
+ * detached на указанном SHA; ветка, HEAD и index checkout не меняются.
+ * Закрепление не перепаковывается: snapshot «до» обязан сам поставлять
+ * <from>, snapshot «после» — <to>; старый пакет под новые исходники (и
+ * наоборот) не ставится. `--to-worktree` (только если
+ * --to-devcontour-commit — HEAD этого checkout) переносит в snapshot
+ * «после» незакоммиченные изменения checkout (`git diff HEAD` и
+ * неигнорируемые untracked) и сверяет их байты.
+ *
+ * Шаги (каждый — PASS или исключение с ненулевым exit; каждый сценарный
+ * шаг — `node --import tsx <snapshot>/scripts/…` с cwd в snapshot той
+ * версии, которую он представляет, production modules — только её):
+ *  P1/P2. snapshot «до»/«после»: HEAD равен SHA, digest `git ls-tree -r`,
+ *     зависимость, lock, integrity, байты vendored archive и строка
+ *     `vendor/harness/README.md` (SHA-256 архива, commit исходников harness)
+ *     соответствуют аргументам; `npm ci` своей стороны;
+ *  P3. `upgrade-scenario.ts`: «до» — принятая задача и активная попытка с
+ *     живой ролью; «после» — живую роль не перенимает, после истечения
+ *     recovery, явный повтор — новая попытка с новым владением; принятая
+ *     задача не меняется;
+ *  P4. `rollback-scenario.ts` в топологиях central и component на настоящих
+ *     Git-репозиториях: «до» принимает A и B и выполняет Git sync
+ *     (receipts); «после» открывает без перезаписи баз, история, SHA,
+ *     попытки и receipts прежние, сверка Git сходится, продолжение — C под
+ *     новой версией, её Git sync не меняет прежние receipts;
+ *  P5. «после» оставляет живую роль; «до» над этим состоянием отказывает до
+ *     записи или не перенимает роль (дополнительная проверка старого
+ *     читателя; формат состояния D1–D3 не менялся);
+ *  P6. smoke архива DevContour snapshot «после».
+ * Итог и fingerprints обеих сторон — `upgrade-check.json` во временном
+ * каталоге и в `--out`.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -67,6 +110,10 @@ const { values: options, positionals } = parseArgs({
     keep: { type: 'boolean', default: false },
     rollback: { type: 'boolean', default: false },
     'baseline-commit': { type: 'string' },
+    'from-devcontour-commit': { type: 'string' },
+    'to-devcontour-commit': { type: 'string' },
+    'to-worktree': { type: 'boolean', default: false },
+    out: { type: 'string' },
   },
 });
 const [fromArg, toArg] = positionals;
@@ -81,6 +128,17 @@ if (!/^[0-9a-f]{40}$/.test(options['to-commit'] ?? ''))
   fail('укажите --to-commit <полный SHA исходников нового архива>');
 if (options.rollback && !/^[0-9a-f]{7,40}$/.test(options['baseline-commit'] ?? ''))
   fail('для --rollback укажите --baseline-commit <SHA прежней версии DevContour>');
+const fullSha = /^[0-9a-f]{40}$/;
+const pairMode =
+  options['from-devcontour-commit'] !== undefined || options['to-devcontour-commit'] !== undefined;
+if (pairMode) {
+  for (const flag of ['from-devcontour-commit', 'to-devcontour-commit', 'from-commit'])
+    if (!fullSha.test(options[flag] ?? '')) fail(`укажите --${flag} <полный SHA>`);
+  if (options['from-devcontour-commit'] === options['to-devcontour-commit'])
+    fail('--from-devcontour-commit и --to-devcontour-commit совпадают');
+  if (options.rollback || options['baseline-commit'])
+    fail('--rollback/--baseline-commit не сочетаются с двумя snapshots DevContour');
+} else if (options['to-worktree']) fail('--to-worktree — только с --to-devcontour-commit');
 const from = { path: resolve(fromArg), version: archiveName.exec(basename(fromArg))?.[1] };
 const to = { path: resolve(toArg), version: archiveName.exec(basename(toArg))?.[1] };
 if (!from.version || !to.version || from.version === to.version)
@@ -108,10 +166,10 @@ const pass = (id, detail) => {
 const check = (condition, message) => {
   if (!condition) throw new Error(message);
 };
-const scenario = (consumer, step) => {
+const scenario = (consumer, step, dir = state) => {
   const r = spawnSync(
     process.execPath,
-    ['--import', 'tsx', join(consumer, 'scripts', 'upgrade-scenario.ts'), step, state],
+    ['--import', 'tsx', join(consumer, 'scripts', 'upgrade-scenario.ts'), step, dir],
     { cwd: consumer, encoding: 'utf8', maxBuffer: 1 << 24 },
   );
   if (r.status !== 0) throw new Error(`шаг ${step}: ${r.stderr || r.stdout}`);
@@ -391,120 +449,396 @@ function rollback() {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* AC25: две версии DevContour, каждая со своим закреплённым пакетом    */
+/* ------------------------------------------------------------------ */
+
+const digest = (data) => createHash('sha256').update(data).digest('hex');
+const git = (cwd, args, opts = {}) =>
+  execFileSync('git', args, { cwd, maxBuffer: 1 << 28, ...opts });
+
+/**
+ * Незакоммиченные изменения checkout (`git diff HEAD` и неигнорируемые
+ * untracked) переносятся в snapshot «после»; байты сверяются.
+ */
+function overlay(dir) {
+  const diffArgs = ['-c', 'diff.noprefix=false', 'diff', '--binary', '--no-ext-diff', 'HEAD'];
+  const diff = git(source, diffArgs);
+  const changed = git(source, ['diff', '--name-only', '-z', 'HEAD'], { encoding: 'utf8' })
+    .split('\0')
+    .filter(Boolean);
+  const untracked = git(source, ['ls-files', '--others', '--exclude-standard', '-z'], {
+    encoding: 'utf8',
+  })
+    .split('\0')
+    .filter(Boolean);
+  if (diff.length) git(dir, ['apply', '--whitespace=nowarn', '-'], { input: diff });
+  for (const file of untracked) {
+    mkdirSync(dirname(join(dir, file)), { recursive: true });
+    copyFileSync(join(source, file), join(dir, file));
+  }
+  check(digest(git(dir, diffArgs)) === digest(diff), 'snapshot: diff checkout перенесён не точно');
+  const files = {};
+  for (const file of [...changed, ...untracked].sort()) {
+    const here = existsSync(join(source, file)) ? sha256(join(source, file)) : null;
+    const there = existsSync(join(dir, file)) ? sha256(join(dir, file)) : null;
+    check(here === there, 'snapshot: байты отличаются от checkout: ' + file);
+    files[file] = here;
+  }
+  return { diffSha256: digest(diff), files };
+}
+
+/**
+ * Source snapshot одной стороны: клон на SHA, проверка fingerprint и
+ * закрепления пакета этой стороны, установка только её lock.
+ */
+function snapshot(name, commit, archive, harnessCommit, withWorktree) {
+  const dir = join(work, name);
+  execFileSync('git', ['clone', '-q', '--no-local', '--no-checkout', source, dir]);
+  run(dir, 'git', ['checkout', '-q', '--detach', commit]);
+  const resolved = run(dir, 'git', ['rev-parse', 'HEAD']).trim();
+  check(resolved === commit, `snapshot ${name}: HEAD ${resolved}, ожидался ${commit}`);
+  const tree = run(dir, 'git', ['ls-tree', '-r', '--full-tree', 'HEAD']);
+  const fingerprint = {
+    commit: resolved,
+    tree: run(dir, 'git', ['rev-parse', 'HEAD^{tree}']).trim(),
+    lsTreeSha256: digest(tree),
+    trackedFiles: tree.split('\n').filter(Boolean).length,
+  };
+  if (withWorktree) fingerprint.worktree = overlay(dir);
+  else {
+    const dirty = git(source, ['status', '--porcelain', '--untracked-files=all'], {
+      encoding: 'utf8',
+    });
+    if (commit === head && dirty.trim())
+      console.log(`upgrade-check: незакоммиченные изменения checkout не входят в ${name}`);
+  }
+  // Пакет этой стороны — тот, что поставляет её commit; не перепаковывается.
+  const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+  const vendored = join(dir, 'vendor', 'harness', basename(archive.path));
+  check(
+    pkg.dependencies['devcontour-harness'] === `file:vendor/harness/${basename(archive.path)}`,
+    `snapshot ${name} закреплён не на ${basename(archive.path)}: ` +
+      pkg.dependencies['devcontour-harness'],
+  );
+  check(existsSync(vendored), `snapshot ${name}: нет ${vendored}`);
+  const archiveSha256 = sha256(archive.path);
+  check(sha256(vendored) === archiveSha256, `snapshot ${name}: байты vendored archive отличаются`);
+  const readme = readFileSync(join(dir, 'vendor', 'harness', 'README.md'), 'utf8');
+  const row = readme.split('\n').find((line) => line.includes(`\`${archiveSha256}\``));
+  check(
+    row?.includes(`\`${harnessCommit}\``) && row.includes(archive.version),
+    `snapshot ${name}: vendor/harness/README.md не называет ${archive.version} ` +
+      `${archiveSha256} @ ${harnessCommit}`,
+  );
+  install(dir);
+  const pin = pinned(dir, archive);
+  return {
+    dir,
+    devcontourVersion: pkg.version,
+    harnessVersion: pin.version,
+    fingerprint: {
+      ...fingerprint,
+      devcontourVersion: pkg.version,
+      harness: {
+        version: pin.version,
+        archive: basename(archive.path),
+        archiveSha256,
+        integrity: pin.integrity,
+        sourceCommit: harnessCommit,
+      },
+    },
+  };
+}
+
+/** Байты общих записей `.devcontour` обоих репозиториев fixture. */
+const sharedRecords = (dir) =>
+  Object.fromEntries(
+    ['product', 'workspace'].flatMap((repo) => {
+      const root = join(dir, repo, '.devcontour');
+      if (!existsSync(root)) return [];
+      return readdirSync(root, { recursive: true, withFileTypes: true })
+        .filter((e) => e.isFile())
+        .map((e) => {
+          const file = join(e.parentPath, e.name);
+          return [file.slice(dir.length + 1), sha256(file)];
+        });
+    }),
+  );
+/** Шаг выполнен именно версией этого snapshot. */
+const ran = (result, side, label) => {
+  check(
+    result.harnessVersion === side.harnessVersion &&
+      (result.devcontourVersion ?? side.devcontourVersion) === side.devcontourVersion,
+    `${label}: выполнен не версией ${side.harnessVersion}: ${result.harnessVersion}`,
+  );
+  return result;
+};
+
+function pairCheck() {
+  const a = snapshot(
+    'devcontour-from',
+    options['from-devcontour-commit'],
+    from,
+    options['from-commit'],
+    false,
+  );
+  pass('P1-snapshot-from', a.fingerprint);
+  const b = snapshot(
+    'devcontour-to',
+    options['to-devcontour-commit'],
+    to,
+    options['to-commit'],
+    options['to-worktree'],
+  );
+  pass('P2-snapshot-to', b.fingerprint);
+  snapshots = { from: a.fingerprint, to: b.fingerprint };
+
+  // P3. Живая роль и активная попытка «до»; «после» — fencing, recovery, повтор.
+  mkdirSync(state, { recursive: true });
+  const before = ran(scenario(a.dir, 'before'), a, 'before');
+  const after = ran(scenario(b.dir, 'after'), b, 'after');
+  check(after.liveRefused === true, 'роль прежнего процесса истекла до шага after');
+  check(after.newAttempt.engineVersion === b.harnessVersion, 'новая попытка не под новой версией');
+  pass('P3-lease-fencing-resume', {
+    before: { accepted: before.accepted, active: before.active, leader: before.leader },
+    liveRefused: after.liveRefused,
+    previousAttempt: after.previousAttempt,
+    newAttempt: after.newAttempt,
+    leader: after.leader,
+  });
+
+  // P4. Настоящие Git-репозитории, обе топологии: история и receipts «до»
+  // открываются и продолжаются «после».
+  for (const topology of ['central', 'component']) {
+    const dir = join(work, 'pair-' + topology, 'workspace-dir');
+    mkdirSync(dir, { recursive: true });
+    const label = (s) => `${topology} ${s}`;
+    ran(step(a.dir, 'init', dir, topology), a, label('init'));
+    ran(step(a.dir, 'work', dir, topology, 'B'), a, label('work B'));
+    const syncA = ran(step(a.dir, 'sync', dir, topology), a, label('sync'));
+    check(syncA.status === 'synchronized' && syncA.receipts > 0, 'Git sync прежней версии');
+    const old = ran(step(a.dir, 'read', dir, topology), a, label('read'));
+    check(!old.refusal, 'прежняя версия не читает своё состояние');
+    const oldRuns = old.runs.map((r) => r.engineVersion);
+    check(
+      oldRuns.length > 0 && oldRuns.every((v) => v === a.harnessVersion),
+      'fixture создан не прежним движком: ' + JSON.stringify(oldRuns),
+    );
+    const oldGit = ran(step(a.dir, 'reconcile', dir, topology), a, label('reconcile'));
+    check(oldGit.consistent, 'Git расходится с базой прежней версии');
+    const refs0 = refs(dir);
+    const records0 = sharedRecords(dir);
+    check(Object.keys(records0).length > 0, 'нет общих записей .devcontour');
+
+    const opened = ran(step(b.dir, 'read', dir, topology), b, label('read'));
+    check(!opened.refusal, 'новая версия не открыла состояние: ' + opened.refusal);
+    same(opened.databases, old.databases, 'первое открытие новой версией переписало базы');
+    same(
+      { tasks: opened.tasks, runs: opened.runs, leader: opened.leader },
+      { tasks: old.tasks, runs: old.runs, leader: old.leader },
+      'история читается иначе',
+    );
+    const openedGit = ran(step(b.dir, 'reconcile', dir, topology), b, label('reconcile'));
+    check(openedGit.consistent && openedGit.main === oldGit.main, 'сверка Git новой версией');
+    same(sharedRecords(dir), records0, 'открытие изменило общие записи');
+
+    const resumed = ran(step(b.dir, 'work', dir, topology, 'C'), b, label('work C'));
+    check(resumed.tasks['Task C'].status === 'done', 'новая версия не продолжила цепочку');
+    const fresh = resumed.runs.filter((r) => r.task === 'Task C');
+    check(
+      fresh.length === 1 && fresh[0].engineVersion === b.harnessVersion,
+      'попытка C не под новой версией: ' + JSON.stringify(fresh),
+    );
+    for (const t of ['Task A', 'Task B'])
+      same(resumed.tasks[t], old.tasks[t], `история ${t} изменена`);
+    same(
+      resumed.runs.filter((r) => r.task !== 'Task C'),
+      old.runs,
+      'попытки прежней версии изменены',
+    );
+    const syncB = ran(step(b.dir, 'sync', dir, topology), b, label('sync'));
+    check(
+      syncB.status === 'synchronized' && !syncB.conflicts?.length,
+      'Git sync новой версии: ' + JSON.stringify(syncB.conflicts),
+    );
+    const records1 = sharedRecords(dir);
+    // Прежние receipts и записи прежних задач — байтово те же; меняется
+    // только запись продолженной задачи C.
+    const rewritten = Object.keys(records0).filter(
+      (p) =>
+        records1[p] !== records0[p] &&
+        JSON.parse(readFileSync(join(dir, p), 'utf8')).data?.title !== 'Task C',
+    );
+    check(rewritten.length === 0, 'Git sync новой версии изменил прежние записи: ' + rewritten);
+    const newReceipts = Object.keys(records1).filter(
+      (p) => !records0[p] && p.includes('/receipts/'),
+    );
+    check(
+      newReceipts.length > 0 && Object.keys(records0).some((p) => p.includes('/receipts/')),
+      'receipts прежней и новой версии не найдены',
+    );
+    const newGit = ran(step(b.dir, 'reconcile', dir, topology), b, label('reconcile'));
+    check(newGit.consistent, 'Git расходится с базой после продолжения');
+    for (const repo of ['product', 'workspace'])
+      git(join(dir, repo), ['merge-base', '--is-ancestor', refs0[repo], 'main']);
+    pass(`P4-${topology}-history-resume`, {
+      accepted: Object.fromEntries(
+        Object.entries(old.tasks)
+          .filter(([, v]) => v.status === 'done')
+          .map(([t, v]) => [t, v.resultSha]),
+      ),
+      databasesUnchangedOnOpen: old.databases,
+      receiptsKept: Object.keys(records0).filter((p) => p.includes('/receipts/')),
+      receiptsAdded: newReceipts,
+      continued: resumed.accepted,
+      engineVersions: { before: a.harnessVersion, continued: fresh[0].engineVersion },
+    });
+  }
+
+  // P5. Старый читатель — действительно старый DevContour над живой ролью новой.
+  const crash = ran(scenario(b.dir, 'crash'), b, 'crash');
+  check(crash.leader?.engineVersion === b.harnessVersion, 'роль без версии новой версии');
+  const refused = ran(scenario(a.dir, 'old-refuses'), a, 'old-refuses');
+  pass('P5-old-reader-new-state', {
+    refusal: refused.refusal ?? null,
+    lead: refused.lead,
+    issued: refused.issued,
+    unchanged: refused.unchanged,
+  });
+
+  // P6. Smoke архива DevContour snapshot «после».
+  run(b.dir, 'npm', ['run', 'build:lib'], { stdio: 'pipe' });
+  run(b.dir, 'npm', ['run', 'build:assets'], { stdio: 'pipe' });
+  run(b.dir, process.execPath, ['scripts/smoke-package.mjs'], { stdio: 'pipe' });
+  pass('P6-smoke-to');
+}
+let snapshots;
+
 try {
-  // 1. Копия checkout на прежнем пакете.
-  for (const consumer of [before_, after_]) {
-    execFileSync('git', ['clone', '-q', '--no-local', source, consumer]);
-    run(consumer, 'git', ['checkout', '-q', '--detach', head]);
-    const dependency = JSON.parse(readFileSync(join(consumer, 'package.json'), 'utf8'))
-      .dependencies['devcontour-harness'];
-    if (dependency !== `file:vendor/harness/${basename(from.path)}`) {
-      if (!/^[0-9a-f]{40}$/.test(options['from-commit'] ?? ''))
-        fail(
-          'HEAD закреплён не на ' + basename(from.path) + ': укажите --from-commit <полный SHA>',
+  if (pairMode) {
+    pairCheck();
+    const manifest = { from: from.version, to: to.version, snapshots, results };
+    writeFileSync(join(work, 'upgrade-check.json'), JSON.stringify(manifest, null, 2));
+    if (options.out) writeFileSync(resolve(options.out), JSON.stringify(manifest, null, 2));
+    console.log(JSON.stringify(manifest, null, 2));
+  } else {
+    // 1. Копия checkout на прежнем пакете.
+    for (const consumer of [before_, after_]) {
+      execFileSync('git', ['clone', '-q', '--no-local', source, consumer]);
+      run(consumer, 'git', ['checkout', '-q', '--detach', head]);
+      const dependency = JSON.parse(readFileSync(join(consumer, 'package.json'), 'utf8'))
+        .dependencies['devcontour-harness'];
+      if (dependency !== `file:vendor/harness/${basename(from.path)}`) {
+        if (!/^[0-9a-f]{40}$/.test(options['from-commit'] ?? ''))
+          fail(
+            'HEAD закреплён не на ' + basename(from.path) + ': укажите --from-commit <полный SHA>',
+          );
+        run(
+          consumer,
+          process.execPath,
+          ['scripts/vendor-harness.mjs', from.path, '--commit', options['from-commit']],
+          { stdio: 'pipe' },
         );
-      run(
-        consumer,
-        process.execPath,
-        ['scripts/vendor-harness.mjs', from.path, '--commit', options['from-commit']],
-        { stdio: 'pipe' },
-      );
-      run(consumer, 'git', [
-        'add',
-        '-A',
+        run(consumer, 'git', [
+          'add',
+          '-A',
+          '--',
+          'package.json',
+          'package-lock.json',
+          'vendor/harness',
+        ]);
+        run(consumer, 'git', [
+          '-c',
+          'user.name=upgrade-check',
+          '-c',
+          'user.email=upgrade-check@localhost',
+          'commit',
+          '-q',
+          '-m',
+          'pin ' + basename(from.path),
+        ]);
+      }
+    }
+    install(before_);
+    pass('1-pinned-from', { head, ...pinned(before_, from) });
+
+    // 2. Смена зависимости во второй копии: меняются только зависимость, lock и
+    // vendor/harness; версия, lock и integrity согласованы.
+    run(
+      after_,
+      process.execPath,
+      ['scripts/vendor-harness.mjs', to.path, '--commit', options['to-commit']],
+      {
+        stdio: 'pipe',
+      },
+    );
+    install(after_);
+    const changed = run(after_, 'git', ['status', '--porcelain', '--untracked-files=all'])
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => line.slice(3));
+    const outside = changed.filter(
+      (p) => !['package.json', 'package-lock.json'].includes(p) && !p.startsWith('vendor/harness/'),
+    );
+    check(outside.length === 0, 'смена зависимости изменила лишнее: ' + outside.join(', '));
+    pass('2-pinned-to', { changed, ...pinned(after_, to) });
+
+    if (options.rollback) {
+      rollback();
+      writeFileSync(join(work, 'upgrade-check.json'), JSON.stringify(results, null, 2));
+      console.log(JSON.stringify({ from: from.version, to: to.version, results }, null, 2));
+    } else {
+      // 3. Состояние прежней версии: принятая задача, активная попытка, живая роль.
+      execFileSync('mkdir', ['-p', state]);
+      const before = scenario(before_, 'before');
+      check(before.harnessVersion === from.version, 'шаг before не под прежней версией');
+      pass('3-state-before', { active: before.active, leader: before.leader });
+
+      // 4. Новая версия над тем же состоянием, пока роль прежнего процесса жива.
+      const after = scenario(after_, 'after');
+      check(after.harnessVersion === to.version, 'шаг after не под новой версией');
+      check(after.liveRefused === true, 'роль прежнего процесса истекла до шага after');
+      pass('4-state-after', {
+        liveRefused: after.liveRefused,
+        previousAttempt: after.previousAttempt,
+        newAttempt: after.newAttempt,
+      });
+
+      // 5. Smoke архива DevContour с новой зависимостью (временный архив копии).
+      run(after_, 'npm', ['run', 'build:lib'], { stdio: 'pipe' });
+      run(after_, 'npm', ['run', 'build:assets'], { stdio: 'pipe' });
+      run(after_, process.execPath, ['scripts/smoke-package.mjs'], { stdio: 'pipe' });
+      pass('5-smoke-to');
+
+      // 6. Аварийная остановка новой версии; возврат прежнего lock ставит прежний
+      // пакет (пакет сам не обновляется); прежняя версия отказывает до записи.
+      const crash = scenario(after_, 'crash');
+      check(crash.leader?.engineVersion === to.version, 'роль без версии новой версии');
+      run(after_, 'git', [
+        'checkout',
+        '-q',
         '--',
         'package.json',
         'package-lock.json',
         'vendor/harness',
       ]);
-      run(consumer, 'git', [
-        '-c',
-        'user.name=upgrade-check',
-        '-c',
-        'user.email=upgrade-check@localhost',
-        'commit',
-        '-q',
-        '-m',
-        'pin ' + basename(from.path),
-      ]);
+      rmSync(join(after_, 'vendor', 'harness', basename(to.path)), { force: true });
+      install(after_);
+      pass('6a-lock-pins-from', pinned(after_, from));
+      const refused = scenario(after_, 'old-refuses');
+      check(refused.harnessVersion === from.version, 'отказ не прежней версии');
+      pass('6b-old-refuses-new-state', { refusal: refused.refusal });
+
+      writeFileSync(join(work, 'upgrade-check.json'), JSON.stringify(results, null, 2));
+      console.log(JSON.stringify({ from: from.version, to: to.version, results }, null, 2));
     }
-  }
-  install(before_);
-  pass('1-pinned-from', { head, ...pinned(before_, from) });
-
-  // 2. Смена зависимости во второй копии: меняются только зависимость, lock и
-  // vendor/harness; версия, lock и integrity согласованы.
-  run(
-    after_,
-    process.execPath,
-    ['scripts/vendor-harness.mjs', to.path, '--commit', options['to-commit']],
-    {
-      stdio: 'pipe',
-    },
-  );
-  install(after_);
-  const changed = run(after_, 'git', ['status', '--porcelain', '--untracked-files=all'])
-    .split('\n')
-    .filter(Boolean)
-    .map((line) => line.slice(3));
-  const outside = changed.filter(
-    (p) => !['package.json', 'package-lock.json'].includes(p) && !p.startsWith('vendor/harness/'),
-  );
-  check(outside.length === 0, 'смена зависимости изменила лишнее: ' + outside.join(', '));
-  pass('2-pinned-to', { changed, ...pinned(after_, to) });
-
-  if (options.rollback) {
-    rollback();
-    writeFileSync(join(work, 'upgrade-check.json'), JSON.stringify(results, null, 2));
-    console.log(JSON.stringify({ from: from.version, to: to.version, results }, null, 2));
-  } else {
-    // 3. Состояние прежней версии: принятая задача, активная попытка, живая роль.
-    execFileSync('mkdir', ['-p', state]);
-    const before = scenario(before_, 'before');
-    check(before.harnessVersion === from.version, 'шаг before не под прежней версией');
-    pass('3-state-before', { active: before.active, leader: before.leader });
-
-    // 4. Новая версия над тем же состоянием, пока роль прежнего процесса жива.
-    const after = scenario(after_, 'after');
-    check(after.harnessVersion === to.version, 'шаг after не под новой версией');
-    check(after.liveRefused === true, 'роль прежнего процесса истекла до шага after');
-    pass('4-state-after', {
-      liveRefused: after.liveRefused,
-      previousAttempt: after.previousAttempt,
-      newAttempt: after.newAttempt,
-    });
-
-    // 5. Smoke архива DevContour с новой зависимостью (временный архив копии).
-    run(after_, 'npm', ['run', 'build:lib'], { stdio: 'pipe' });
-    run(after_, 'npm', ['run', 'build:assets'], { stdio: 'pipe' });
-    run(after_, process.execPath, ['scripts/smoke-package.mjs'], { stdio: 'pipe' });
-    pass('5-smoke-to');
-
-    // 6. Аварийная остановка новой версии; возврат прежнего lock ставит прежний
-    // пакет (пакет сам не обновляется); прежняя версия отказывает до записи.
-    const crash = scenario(after_, 'crash');
-    check(crash.leader?.engineVersion === to.version, 'роль без версии новой версии');
-    run(after_, 'git', [
-      'checkout',
-      '-q',
-      '--',
-      'package.json',
-      'package-lock.json',
-      'vendor/harness',
-    ]);
-    rmSync(join(after_, 'vendor', 'harness', basename(to.path)), { force: true });
-    install(after_);
-    pass('6a-lock-pins-from', pinned(after_, from));
-    const refused = scenario(after_, 'old-refuses');
-    check(refused.harnessVersion === from.version, 'отказ не прежней версии');
-    pass('6b-old-refuses-new-state', { refusal: refused.refusal });
-
-    writeFileSync(join(work, 'upgrade-check.json'), JSON.stringify(results, null, 2));
-    console.log(JSON.stringify({ from: from.version, to: to.version, results }, null, 2));
   }
 } catch (error) {
   results.push({ status: 'FAIL', error: String(error?.stack ?? error) });
   console.error(JSON.stringify(results, null, 2));
+  if (pairMode && options.out)
+    writeFileSync(resolve(options.out), JSON.stringify({ snapshots, results }, null, 2));
   process.exitCode = 1;
 } finally {
   // Удаляется только созданный здесь временный каталог.
