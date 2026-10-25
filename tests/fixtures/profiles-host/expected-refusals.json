@@ -1,0 +1,27 @@
+[
+  {
+    "ref": "./profiles/junit-outside.json",
+    "refused": true,
+    "message": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [],\n    \"message\": \"Ожидается относительный путь без glob, . или ..\"\n  }\n]"
+  },
+  {
+    "ref": "./profiles/junit-absolute.json",
+    "refused": true,
+    "message": "[\n  {\n    \"code\": \"custom\",\n    \"path\": [],\n    \"message\": \"Ожидается относительный путь без glob, . или ..\"\n  }\n]"
+  },
+  {
+    "ref": "./profiles/devcontour-env.json",
+    "refused": true,
+    "message": "[\n  {\n    \"code\": \"invalid_key\",\n    \"origin\": \"record\",\n    \"issues\": [\n      {\n        \"code\": \"custom\",\n        \"path\": [],\n        \"message\": \"DEVCONTOUR_* задаёт runner\"\n      }\n    ],\n    \"path\": [\n      \"environment\",\n      \"values\",\n      \"DEVCONTOUR_DATA\"\n    ],\n    \"message\": \"Invalid key "
+  },
+  {
+    "ref": "./profiles/toolchain.json",
+    "refused": true,
+    "message": "[\n  {\n    \"code\": \"unrecognized_keys\",\n    \"keys\": [\n      \"toolchain\"\n    ],\n    \"path\": [],\n    \"message\": \"Unrecognized key: \\\"toolchain\\\"\"\n  }\n]"
+  },
+  {
+    "ref": "./profiles/on-toolchain.json",
+    "refused": true,
+    "message": "[\n  {\n    \"code\": \"unrecognized_keys\",\n    \"keys\": [\n      \"toolchain\"\n    ],\n    \"path\": [],\n    \"message\": \"Unrecognized key: \\\"toolchain\\\"\"\n  }\n]"
+  }
+]

@@ -1,0 +1,12 @@
+{
+  "id": "junit-absolute",
+  "version": "1.0.0",
+  "gates": [
+    {
+      "id": "tests",
+      "kind": "test",
+      "command": ["make", "test"],
+      "report": { "type": "junit", "path": "/tmp/junit.xml" }
+    }
+  ]
+}

@@ -22,6 +22,18 @@ const local = [
   './profiles/nested/extra.json',
   './profiles/leaf.json',
   './profiles/on-builtin.json',
+  // Форма продукта: роли с runtime demo и reviewVendor, нестрогие вложенные
+  // объекты, contextPacks с revision/digest, env HARNESS_*, длинный ID шага.
+  './profiles/host-form.json',
+  './profiles/on-host-form.json',
+];
+// Профили, которые прежний резолвер отклонял (текст отказа — K10, сверяется факт отказа).
+const refused = [
+  './profiles/junit-outside.json',
+  './profiles/junit-absolute.json',
+  './profiles/devcontour-env.json',
+  './profiles/toolchain.json',
+  './profiles/on-toolchain.json',
 ];
 const cases = [
   ...builtin.map((ref) => ({ ref, repositoryId: 'main' })),
@@ -38,7 +50,23 @@ const expected = cases.map(({ ref, repositoryId }) => {
     config: projectConfig('/fixture/product', p),
   };
 });
+const refusals = refused.map((ref) => {
+  try {
+    resolveProfile(ref, repo, 'main');
+    return { ref, refused: false };
+  } catch (error) {
+    return { ref, refused: true, message: String((error as Error).message).slice(0, 300) };
+  }
+});
 const out = here + 'expected.json';
+const refusalsOut = here + 'expected-refusals.json';
+writeFileSync(
+  refusalsOut,
+  await format(JSON.stringify(refusals), {
+    ...(await resolveConfig(refusalsOut)),
+    filepath: refusalsOut,
+  }),
+);
 const options = { ...(await resolveConfig(out)), filepath: out };
 writeFileSync(out, await format(JSON.stringify(expected), options));
-console.log('captured', expected.length, 'profiles');
+console.log('captured', expected.length, 'profiles,', refusals.length, 'refusals');

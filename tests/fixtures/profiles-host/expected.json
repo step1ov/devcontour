@@ -2626,6 +2626,335 @@
     }
   },
   {
+    "ref": "./profiles/host-form.json",
+    "repositoryId": "main",
+    "keys": [
+      "id",
+      "version",
+      "capabilities",
+      "gates",
+      "prepare",
+      "environment",
+      "lifecycle",
+      "protectedPaths",
+      "generatedPaths",
+      "concurrency",
+      "runTimeoutMs",
+      "roles",
+      "contextPacks",
+      "source",
+      "digest",
+      "closure",
+      "raw"
+    ],
+    "profile": {
+      "id": "host-form",
+      "version": "1.2.0",
+      "capabilities": [],
+      "gates": [
+        {
+          "id": "tests",
+          "kind": "test",
+          "command": ["make", "test"],
+          "timeoutMs": 120000,
+          "report": { "type": "junit", "path": "out/junit.xml" }
+        }
+      ],
+      "prepare": [
+        {
+          "id": "prepare-step-with-an-identifier-that-is-much-longer-than-eighty-characters-for-the-host-schema",
+          "command": ["npm", "ci"],
+          "timeoutMs": 120000
+        }
+      ],
+      "environment": {
+        "inherit": ["HARNESS_HOME"],
+        "values": { "HARNESS_MODE": "fixture" },
+        "secrets": {}
+      },
+      "protectedPaths": ["profiles/host-form.json"],
+      "generatedPaths": [],
+      "roles": {
+        "mobile": {
+          "runtime": "demo",
+          "writePaths": ["app"],
+          "reviewer": { "runtime": "demo" },
+          "reviewVendor": "same-vendor-allowed",
+          "title": "Мобильный"
+        }
+      },
+      "contextPacks": [
+        {
+          "id": "mobile-pack",
+          "version": "1.0.0",
+          "repositoryId": "main",
+          "roles": [],
+          "files": ["docs/mobile.md"],
+          "references": [],
+          "revision": "0123456789abcdef0123456789abcdef01234567",
+          "digest": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "source": { "repositoryId": "main", "path": "profiles/host-form.json" },
+      "digest": "db2403137627041e6091503fc21a28ebacece853ba5c9b5b76823c405d9c51f3",
+      "closure": [
+        {
+          "ref": "local:profiles/host-form.json",
+          "digest": "a410a49b4b8c052910d03efb2c9fca97e2ba905e5eb10a8a101d9db6a9f8feb7"
+        }
+      ],
+      "raw": "{\n  \"id\": \"host-form\",\n  \"version\": \"1.2.0\",\n  \"gates\": [\n    {\n      \"id\": \"tests\",\n      \"kind\": \"test\",\n      \"command\": [\"make\", \"test\"],\n      \"report\": { \"type\": \"junit\", \"path\": \"out/junit.xml\" },\n      \"hostOnlyGateNote\": \"nested extra key\"\n    }\n  ],\n  \"prepare\": [\n    {\n      \"id\": \"prepare-step-with-an-identifier-that-is-much-longer-than-eighty-characters-for-the-host-schema\",\n      \"command\": [\"npm\", \"ci\"],\n      \"extra\": true\n    }\n  ],\n  \"environment\": {\n    \"inherit\": [\"HARNESS_HOME\"],\n    \"values\": { \"HARNESS_MODE\": \"fixture\" },\n    \"secrets\": {},\n    \"note\": \"nested extra key\"\n  },\n  \"roles\": {\n    \"mobile\": {\n      \"runtime\": \"demo\",\n      \"reviewVendor\": \"same-vendor-allowed\",\n      \"reviewer\": { \"runtime\": \"demo\" },\n      \"writePaths\": [\"app\"],\n      \"title\": \"Мобильный\"\n    }\n  },\n  \"contextPacks\": [\n    {\n      \"id\": \"mobile-pack\",\n      \"version\": \"1.0.0\",\n      \"files\": [\"docs/mobile.md\"],\n      \"revision\": \"0123456789abcdef0123456789abcdef01234567\",\n      \"digest\": \"0000000000000000000000000000000000000000000000000000000000000000\"\n    }\n  ]\n}\n"
+    },
+    "config": {
+      "prices": [],
+      "memoryPolicy": { "maxBytes": 8000 },
+      "signalPolicy": { "maxActionsPerHour": 10 },
+      "version": 1,
+      "name": "product",
+      "environment": {
+        "inherit": ["HARNESS_HOME"],
+        "values": { "HARNESS_MODE": "fixture" },
+        "secrets": {}
+      },
+      "prepare": [
+        {
+          "id": "prepare-step-with-an-identifier-that-is-much-longer-than-eighty-characters-for-the-host-schema",
+          "command": ["npm", "ci"],
+          "timeoutMs": 120000
+        }
+      ],
+      "toolProfiles": {},
+      "completionMode": "local",
+      "forgeConnections": {},
+      "storage": "central",
+      "contextPacks": [],
+      "resources": [],
+      "verificationMode": "all",
+      "generatedPaths": [],
+      "repositories": [],
+      "workspaceGates": [],
+      "repository": "/fixture/product",
+      "targetBranch": "devcontour/accepted",
+      "mode": "local",
+      "approvalMode": "agent",
+      "concurrency": 2,
+      "leaseMs": 30000,
+      "runTimeoutMs": 900000,
+      "reviewProbes": { "commandTimeoutMs": 120000, "budgetMs": 600000, "reserveMs": 120000 },
+      "contractArtifacts": {
+        "maxFileBytes": 16777216,
+        "maxTotalBytes": 67108864,
+        "reviewTextBytes": 400000
+      },
+      "maxAttempts": 3,
+      "reuseImplementation": true,
+      "repairBudget": 6,
+      "isolation": { "mode": "os", "domains": [] },
+      "roles": {
+        "mobile": {
+          "runtime": "demo",
+          "writePaths": ["app"],
+          "reviewer": { "runtime": "demo" },
+          "reviewVendor": "same-vendor-allowed",
+          "title": "Мобильный"
+        }
+      },
+      "reviewer": { "runtime": "codex" },
+      "gates": [
+        {
+          "id": "tests",
+          "kind": "test",
+          "command": ["make", "test"],
+          "timeoutMs": 120000,
+          "report": { "type": "junit", "path": "out/junit.xml" }
+        }
+      ],
+      "protectedPaths": [
+        "profiles/host-form.json",
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".agents/",
+        ".github/",
+        ".githooks/",
+        "devcontour.config.json",
+        "devcontour.component.json",
+        "devcontour.workspace.json",
+        "docs/journal/",
+        ".devcontour-local/",
+        ".devcontour/",
+        "package.json",
+        "package-lock.json"
+      ],
+      "packs": [
+        {
+          "id": "host-form",
+          "version": "1.2.0",
+          "capabilities": [],
+          "source": { "repositoryId": "main", "path": "profiles/host-form.json" }
+        }
+      ]
+    }
+  },
+  {
+    "ref": "./profiles/on-host-form.json",
+    "repositoryId": "main",
+    "keys": [
+      "id",
+      "version",
+      "capabilities",
+      "gates",
+      "prepare",
+      "environment",
+      "lifecycle",
+      "protectedPaths",
+      "generatedPaths",
+      "concurrency",
+      "runTimeoutMs",
+      "roles",
+      "contextPacks",
+      "source",
+      "digest",
+      "closure",
+      "raw"
+    ],
+    "profile": {
+      "id": "on-host-form",
+      "version": "1.0.0",
+      "capabilities": [],
+      "gates": [
+        {
+          "id": "tests",
+          "kind": "test",
+          "command": ["make", "test"],
+          "timeoutMs": 120000,
+          "report": { "type": "junit", "path": "out/junit.xml" }
+        }
+      ],
+      "prepare": [
+        {
+          "id": "prepare-step-with-an-identifier-that-is-much-longer-than-eighty-characters-for-the-host-schema",
+          "command": ["npm", "ci"],
+          "timeoutMs": 120000
+        }
+      ],
+      "environment": {
+        "inherit": ["HARNESS_HOME"],
+        "values": { "HARNESS_MODE": "fixture" },
+        "secrets": {}
+      },
+      "protectedPaths": ["profiles/host-form.json", "profiles/on-host-form.json"],
+      "generatedPaths": [],
+      "roles": { "mobile": { "runtime": "codex", "reviewVendor": "different-vendor" } },
+      "contextPacks": [
+        {
+          "id": "mobile-pack",
+          "version": "1.0.0",
+          "repositoryId": "main",
+          "roles": [],
+          "files": ["docs/mobile.md"],
+          "references": [],
+          "revision": "0123456789abcdef0123456789abcdef01234567",
+          "digest": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "source": { "repositoryId": "main", "path": "profiles/on-host-form.json" },
+      "digest": "7b8ffeb4335dc926d91152333182d56a62cb36f61876e667a99909e992600af1",
+      "closure": [
+        {
+          "ref": "local:profiles/host-form.json",
+          "digest": "a410a49b4b8c052910d03efb2c9fca97e2ba905e5eb10a8a101d9db6a9f8feb7"
+        },
+        {
+          "ref": "local:profiles/on-host-form.json",
+          "digest": "a474a27d7d951d42bb48ce70760687b0cd18437974d22e156df76648b0670119"
+        }
+      ],
+      "raw": "{\n  \"id\": \"on-host-form\",\n  \"version\": \"1.0.0\",\n  \"extends\": [\"./host-form.json\"],\n  \"roles\": {\n    \"mobile\": { \"runtime\": \"codex\", \"reviewVendor\": \"different-vendor\" }\n  }\n}\n"
+    },
+    "config": {
+      "prices": [],
+      "memoryPolicy": { "maxBytes": 8000 },
+      "signalPolicy": { "maxActionsPerHour": 10 },
+      "version": 1,
+      "name": "product",
+      "environment": {
+        "inherit": ["HARNESS_HOME"],
+        "values": { "HARNESS_MODE": "fixture" },
+        "secrets": {}
+      },
+      "prepare": [
+        {
+          "id": "prepare-step-with-an-identifier-that-is-much-longer-than-eighty-characters-for-the-host-schema",
+          "command": ["npm", "ci"],
+          "timeoutMs": 120000
+        }
+      ],
+      "toolProfiles": {},
+      "completionMode": "local",
+      "forgeConnections": {},
+      "storage": "central",
+      "contextPacks": [],
+      "resources": [],
+      "verificationMode": "all",
+      "generatedPaths": [],
+      "repositories": [],
+      "workspaceGates": [],
+      "repository": "/fixture/product",
+      "targetBranch": "devcontour/accepted",
+      "mode": "local",
+      "approvalMode": "agent",
+      "concurrency": 2,
+      "leaseMs": 30000,
+      "runTimeoutMs": 900000,
+      "reviewProbes": { "commandTimeoutMs": 120000, "budgetMs": 600000, "reserveMs": 120000 },
+      "contractArtifacts": {
+        "maxFileBytes": 16777216,
+        "maxTotalBytes": 67108864,
+        "reviewTextBytes": 400000
+      },
+      "maxAttempts": 3,
+      "reuseImplementation": true,
+      "repairBudget": 6,
+      "isolation": { "mode": "os", "domains": [] },
+      "roles": { "mobile": { "runtime": "codex", "reviewVendor": "different-vendor" } },
+      "reviewer": { "runtime": "codex" },
+      "gates": [
+        {
+          "id": "tests",
+          "kind": "test",
+          "command": ["make", "test"],
+          "timeoutMs": 120000,
+          "report": { "type": "junit", "path": "out/junit.xml" }
+        }
+      ],
+      "protectedPaths": [
+        "profiles/host-form.json",
+        "profiles/on-host-form.json",
+        "AGENTS.md",
+        "CLAUDE.md",
+        ".agents/",
+        ".github/",
+        ".githooks/",
+        "devcontour.config.json",
+        "devcontour.component.json",
+        "devcontour.workspace.json",
+        "docs/journal/",
+        ".devcontour-local/",
+        ".devcontour/",
+        "package.json",
+        "package-lock.json"
+      ],
+      "packs": [
+        {
+          "id": "on-host-form",
+          "version": "1.0.0",
+          "capabilities": [],
+          "source": { "repositoryId": "main", "path": "profiles/on-host-form.json" }
+        }
+      ]
+    }
+  },
+  {
     "ref": "./profiles/leaf.json",
     "repositoryId": "api",
     "keys": [

@@ -1,0 +1,6 @@
+{
+  "id": "devcontour-env",
+  "version": "1.0.0",
+  "extends": ["./single.json"],
+  "environment": { "values": { "DEVCONTOUR_DATA": "x" } }
+}

@@ -99,12 +99,54 @@ test('Adapter delegates to the installed harness resolver', () => {
   );
 });
 
-test('Profiles with toolchain stay refused by the DevContour host rule', () => {
+type Refusal = { ref: string; refused: boolean; message?: string };
+const refusals = JSON.parse(readFileSync(fixtures + 'expected-refusals.json', 'utf8')) as Refusal[];
+
+test('Form of DevContour profiles is kept: what the previous resolver refused is refused, what it accepted is accepted', () => {
+  // Отказы прежнего резолвера (снято на 59e5000): JUnit вне репозитория и по
+  // абсолютному пути, env DEVCONTOUR_*, toolchain (строгий верхний уровень
+  // схемы продукта). Тексты отказов — тексты harness (K10).
+  assert.deepEqual(
+    refusals.map((r) => [r.ref, r.refused]),
+    [
+      ['./profiles/junit-outside.json', true],
+      ['./profiles/junit-absolute.json', true],
+      ['./profiles/devcontour-env.json', true],
+      ['./profiles/toolchain.json', true],
+      ['./profiles/on-toolchain.json', true],
+    ],
+  );
+  for (const { ref } of refusals) assert.throws(() => resolveProfile(ref, repo), ref);
+  assert.throws(
+    () => resolveProfile('./profiles/devcontour-env.json', repo),
+    /environment\.values\.DEVCONTOUR_DATA/,
+  );
   for (const ref of ['./profiles/toolchain.json', './profiles/on-toolchain.json']) {
-    // Harness такой профиль принимает — отказ даёт именно host-правило.
+    // Без схемы продукта harness такой профиль принимает — отказ даёт форма DevContour.
     assert.ok(harnessResolveProfile(ref, { repository: repo, builtinRoot: builtinDir }).toolchain);
-    assert.throws(() => resolveProfile(ref, repo), /toolchain не поддерживается DevContour/);
+    assert.throws(() => resolveProfile(ref, repo), /Unrecognized key: "toolchain"/);
   }
+  // Форма продукта, которую строгая схема harness отвергла бы: runtime demo и
+  // reviewVendor у ролей, лишние ключи вложенных объектов, contextPacks с
+  // revision/digest, env HARNESS_*, ID шага длиннее 80 знаков.
+  for (const ref of ['./profiles/host-form.json', './profiles/on-host-form.json']) {
+    assert.throws(
+      () => harnessResolveProfile(ref, { repository: repo, builtinRoot: builtinDir }),
+      ref,
+    );
+    const p = resolveProfile(ref, repo);
+    const before = expected.find((e) => e.ref === ref)!;
+    assert.equal(JSON.stringify(p), JSON.stringify(before.profile), ref);
+  }
+  const form = resolveProfile('./profiles/on-host-form.json', repo);
+  assert.deepEqual(form.roles.mobile, {
+    runtime: 'codex',
+    reviewVendor: 'different-vendor',
+  });
+  assert.equal(form.contextPacks[0].repositoryId, 'main');
+  assert.equal(form.contextPacks[0].revision, '0123456789abcdef0123456789abcdef01234567');
+  assert.deepEqual(form.environment?.inherit, ['HARNESS_HOME']);
+  assert.ok(form.prepare[0].id.length > 80);
 });
 
 test('packs.ts keeps no copy of the resolver algorithm', () => {
@@ -112,6 +154,8 @@ test('packs.ts keeps no copy of the resolver algorithm', () => {
   assert.match(source, /from 'devcontour-harness'/);
   assert.match(source, /resolveHarnessProfile\(ref, \{/);
   assert.match(source, /includeLeafContent: true/);
+  // Схема файла — форма продукта, её разбирает resolver harness.
+  assert.match(source, /layerSchema: profileSchema/);
   for (const marker of [
     'lstatSync',
     'readFileSync',
@@ -125,7 +169,7 @@ test('packs.ts keeps no copy of the resolver algorithm', () => {
     'Цикл наследования',
     'Итоговый профиль требует',
     'Конфликт частей профиля',
-    'profileSchema',
+    'toolchain не поддерживается',
   ])
     assert.ok(!source.includes(marker), 'packs.ts всё ещё содержит ' + marker);
 });

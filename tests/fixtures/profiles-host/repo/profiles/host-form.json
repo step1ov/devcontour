@@ -1,0 +1,44 @@
+{
+  "id": "host-form",
+  "version": "1.2.0",
+  "gates": [
+    {
+      "id": "tests",
+      "kind": "test",
+      "command": ["make", "test"],
+      "report": { "type": "junit", "path": "out/junit.xml" },
+      "hostOnlyGateNote": "nested extra key"
+    }
+  ],
+  "prepare": [
+    {
+      "id": "prepare-step-with-an-identifier-that-is-much-longer-than-eighty-characters-for-the-host-schema",
+      "command": ["npm", "ci"],
+      "extra": true
+    }
+  ],
+  "environment": {
+    "inherit": ["HARNESS_HOME"],
+    "values": { "HARNESS_MODE": "fixture" },
+    "secrets": {},
+    "note": "nested extra key"
+  },
+  "roles": {
+    "mobile": {
+      "runtime": "demo",
+      "reviewVendor": "same-vendor-allowed",
+      "reviewer": { "runtime": "demo" },
+      "writePaths": ["app"],
+      "title": "Мобильный"
+    }
+  },
+  "contextPacks": [
+    {
+      "id": "mobile-pack",
+      "version": "1.0.0",
+      "files": ["docs/mobile.md"],
+      "revision": "0123456789abcdef0123456789abcdef01234567",
+      "digest": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ]
+}

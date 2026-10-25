@@ -1,0 +1,8 @@
+{
+  "id": "on-host-form",
+  "version": "1.0.0",
+  "extends": ["./host-form.json"],
+  "roles": {
+    "mobile": { "runtime": "codex", "reviewVendor": "different-vendor" }
+  }
+}
