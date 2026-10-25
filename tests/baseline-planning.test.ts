@@ -93,7 +93,13 @@ test('Baseline planner: request is read-only planning with declared roles, gates
     assert.equal(r.model, 'model-x');
     assert.equal(r.timeoutMs, f.h.config.runTimeoutMs);
     const prompt = r.prompt;
-    assert.match(prompt, /^You are a product planner\. Inspect the repository read-only\./);
+    // D2: общий запрос — harness; роль «product planner» и прочие продуктовые
+    // строки хоста идут отдельным блоком прямо перед постановкой.
+    assert.match(prompt, /^Inspect the repository read-only\./);
+    assert.match(
+      prompt,
+      /\n\nHost instructions:\nYou are a product planner\.\n\n[^]*\n\nUser brief:\n/,
+    );
     assert.match(prompt, /at most 15 tasks/);
     assert.match(
       prompt,

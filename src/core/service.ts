@@ -15,8 +15,10 @@ import { type FailureKind } from './failure.ts';
 import { needsRecheck, taskChecks, taskEvidence, unprovenReason } from './proof.ts';
 import { assertTaskProperties, type CheckDeclaration } from './checks.ts';
 import {
+  draftIssues,
   recoveryActions,
   uncoveredGates as harnessUncoveredGates,
+  type CodedIssue,
   type PropertyRecovery,
 } from 'devcontour-harness';
 import { closeEpisodeIfBasisChanged } from '../harness/host.ts';
@@ -575,20 +577,23 @@ export class DevContour {
           'Следующий этап открывается после приёмки текущей ревизии; до неё добавляйте задачи в неё',
           409,
         );
+      // Структура плана — общая проверка harness (`draftIssues`): повтор ключа,
+      // неизвестная зависимость, цикл внутри плана. Хост сохраняет прежний
+      // порядок и статусы отказов: повтор ключа — раньше всего (400),
+      // неизвестная зависимость — у своей задачи до её проверок (404), цикл —
+      // после проверок всех задач, тем же отказом, что у графа состояния.
+      const issues = draftIssues(plan, { known: s.tasks.map((t) => t.id) });
+      const at = (code: CodedIssue['code'], task?: number) =>
+        issues.find((i) => i.code === code && (task === undefined || i.path[1] === task));
+      if (at('GRAPH_DUPLICATE_ID')) throw new DomainError('Ключи задач должны быть уникальны', 400);
       const ids = new Map<string, string>();
-      for (const t of plan.tasks) {
-        if (ids.has(t.key)) throw new DomainError('Ключи задач должны быть уникальны', 400);
-        ids.set(t.key, entityId(s, 'T'));
-      }
-      const tasks = plan.tasks.map((item) => {
+      for (const t of plan.tasks) ids.set(t.key, entityId(s, 'T'));
+      const tasks = plan.tasks.map((item, i) => {
+        const unknown = at('GRAPH_UNKNOWN_DEPENDENCY', i);
+        if (unknown) throw new DomainError(unknown.message, 404);
         const parsed = taskInput.parse({
           ...item,
-          dependsOn: item.dependsOn.map((key) =>
-            requireValue(
-              ids.get(key) ?? s.tasks.find((t) => t.id === key)?.id,
-              `Неизвестная зависимость плана ${key}`,
-            ),
-          ),
+          dependsOn: item.dependsOn.map((key) => ids.get(key) ?? key),
         });
         repository(this.config, parsed.repositoryId);
         validateTaskContext(this.config, parsed);
@@ -607,6 +612,12 @@ export class DevContour {
         };
       });
       s.tasks.push(...tasks);
+      // Цикл плана называется задачами состояния, как у любого цикла графа.
+      const cycle = at('GRAPH_CYCLE');
+      if (cycle) {
+        assertDag(s.tasks);
+        throw new DomainError(cycle.message);
+      }
       assertDag(s.tasks);
       if (target && previous) {
         const revision = {
