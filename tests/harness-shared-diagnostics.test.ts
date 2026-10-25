@@ -218,6 +218,7 @@ test('AC10: упавшая задача не выдаётся; принятой 
         f.h,
         s,
         s.tasks.find((x) => x.id === t.id)!,
+        Date.now(),
       );
     };
     set(1);
@@ -464,6 +465,7 @@ test('AC12: продуктовые ограничители выдачи не о
         f.h,
         s,
         s.tasks.find((x) => x.id === t.id)!,
+        Date.now(),
       );
     };
     const refused = (label: string) => {

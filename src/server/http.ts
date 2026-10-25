@@ -352,13 +352,15 @@ export async function serve(
           result = panelContract(h, decodeURIComponent(parts[2]));
         } else if (req.method === 'GET' && path === '/api/state') {
           const state = h.store.read();
+          // Один момент на весь ответ: lease-причины задач не расходятся.
+          const now = Date.now();
           result = {
             ...state,
             tasks: state.tasks.map((t) => ({
               ...t,
               specDigest: specDigest(t),
               blockers: blockers(t, state),
-              progress: taskProgress(h!, state, t),
+              progress: taskProgress(h!, state, t, now),
               checks: checksSummary(t),
             })),
             events: h.store.events(),

@@ -63,9 +63,11 @@ const sharedReasons: Record<ProgressReason, string> = {
  * пауза, занятые исполнители) — проекция harness `workProgress`; хост
  * добавляет продуктовые причины: до общих — согласование продукта и
  * неактивную ревизию, после — чужое назначение и идущую общую операцию
- * workspace. `now` — момент, на который считаются сроки lease; один на весь ответ.
+ * workspace. `now` — момент, на который считаются сроки lease; вызывающий
+ * передаёт один момент на весь ответ (обязательный параметр: своё чтение часов
+ * у каждой задачи давало в одном ответе разные lease-решения).
  */
-export function taskProgress(h: DevContour, s: DevContourState, t: Task, now = Date.now()) {
+export function taskProgress(h: DevContour, s: DevContourState, t: Task, now: number) {
   const before: string[] = [];
   const after: string[] = [];
   if (s.preparation && t.status !== 'done') {
@@ -125,7 +127,8 @@ type RecordSummary = {
   status?: string;
   repositoryId?: string;
 };
-function snapshot(h: DevContour, s: DevContourState, repositoryId?: string) {
+/** `now` — тот же момент, что у причин задач этого ответа. */
+function snapshot(h: DevContour, s: DevContourState, now: number, repositoryId?: string) {
   if (repositoryId) repository(h.config, repositoryId);
   const records: RecordSummary[] = [];
   const add = (
@@ -195,8 +198,8 @@ function snapshot(h: DevContour, s: DevContourState, repositoryId?: string) {
       activeRuns: s.runs.filter((r) => r.status === 'active').map((r) => [r.id, r.phase]),
       workspaceBusy: s.changeSets.some(
         (c) =>
-          c.verifications.some((v) => v.status === 'active' && v.leaseUntil > Date.now()) ||
-          c.deliveries?.some((d) => d.status === 'active' && d.leaseUntil > Date.now()),
+          c.verifications.some((v) => v.status === 'active' && v.leaseUntil > now) ||
+          c.deliveries?.some((d) => d.status === 'active' && d.leaseUntil > now),
       ),
     }),
   };
@@ -295,6 +298,9 @@ export class AgentContext {
   private evaluate(operation: ContextOperation, raw: unknown): unknown {
     const h = this.h,
       s = h.store.read();
+    // Один момент на весь ответ: revision, scheduling и причины каждой задачи
+    // считают lease по нему и не расходятся на границе срока.
+    const now = Date.now();
     if (operation === 'project_context') {
       contextInputs.project_context.parse(raw);
       return {
@@ -328,10 +334,10 @@ export class AgentContext {
     }
     if (operation === 'project_overview') {
       const input = contextInputs.project_overview.parse(raw),
-        snap = snapshot(h, s, input.repositoryId);
+        snap = snapshot(h, s, now, input.repositoryId);
       const items = snap.records.map((record) => {
         const task = record.kind === 'task' ? s.tasks.find((t) => t.id === record.id) : undefined;
-        return { ...record, ...(task ? { progress: taskProgress(h, s, task) } : {}) };
+        return { ...record, ...(task ? { progress: taskProgress(h, s, task, now) } : {}) };
       });
       return page(
         items,
@@ -381,7 +387,7 @@ export class AgentContext {
           assignee: t.assignee,
           supersedes: t.supersedes,
         },
-        progress: taskProgress(h, s, t),
+        progress: taskProgress(h, s, t, now),
         execution: {
           runtime: roleBinding(h.config, t.role, t.repositoryId).runtime,
           reviewer: reviewerBinding(h.config, t.role, t.repositoryId).runtime,
@@ -409,7 +415,7 @@ export class AgentContext {
     const root = input.repositoryId
       ? repository(h.config, input.repositoryId).path
       : requireValue(h.config.workspaceRoot, 'Для общего checkpoint требуется workspaceRoot');
-    const snap = snapshot(h, s, input.repositoryId);
+    const snap = snapshot(h, s, now, input.repositoryId);
     const prefix = memoryDirectory(h.config, input.repositoryId);
     const identityPath = safePath(root, prefix + '/context-identity.json');
     const directory = safePath(root, prefix + '/checkpoints');

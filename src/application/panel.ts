@@ -666,6 +666,8 @@ export function panelTask(h: DevContour, id: string, query: Record<string, strin
     const state = shared.state as DevContourState;
     const task = state.tasks.find((t) => t.id === id);
     if (!task) throw new DomainError('Задача не найдена', 404);
+    // Один момент на весь ответ: lease-причины считаются по нему.
+    const now = Date.now();
     // Запись целиком; диагностика отказа и эпизоды восстановления — с
     // ограниченными строками, последние 20 эпизодов.
     const { failure, hold, recovery, recoveryHistory, ...rest } = task;
@@ -703,7 +705,7 @@ export function panelTask(h: DevContour, id: string, query: Record<string, strin
           : {}),
         specDigest: specDigest(task),
         blockers: blockers(task, state),
-        progress: taskProgress(h, state, task),
+        progress: taskProgress(h, state, task, now),
         checks: clip(checksSummary(task)),
       },
       dependencies: task.dependsOn.map((d) => {

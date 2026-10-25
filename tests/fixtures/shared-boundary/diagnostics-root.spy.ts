@@ -70,7 +70,7 @@ void test('taskProgress передаёт работу, пределы и про�
       s.boards.find((y) => y.id === b.id)!.revisions.at(-1)!.status = 'accepted';
     });
     const { s, t } = read();
-    const out = taskProgress(f.h, s, t);
+    const out = taskProgress(f.h, s, t, Date.now());
     assert.equal(calls.progress.length, 1);
     const call = calls.progress[0];
     assert.equal(call.work, t, 'работа — задача хоста');
@@ -96,11 +96,15 @@ void test('taskProgress выдаёт подменённый ответ, а не 
   const { f, read } = board();
   try {
     const { s, t } = read();
-    assert.equal(taskProgress(f.h, s, t).eligible, true, 'по настоящему состоянию задача выдаётся');
+    assert.equal(
+      taskProgress(f.h, s, t, Date.now()).eligible,
+      true,
+      'по настоящему состоянию задача выдаётся',
+    );
     progressMode = {
       answer: { dependencies: ['SPY-DEP'], reasons: ['workers-busy'], eligible: false },
     };
-    const out = taskProgress(f.h, s, t);
+    const out = taskProgress(f.h, s, t, Date.now());
     assert.deepEqual(out.reasons, ['workers_busy']);
     assert.deepEqual(out.dependencies, ['SPY-DEP']);
     assert.equal(out.eligible, false);
@@ -110,7 +114,7 @@ void test('taskProgress выдаёт подменённый ответ, а не 
     });
     const failed = read();
     assert.deepEqual(
-      taskProgress(f.h, failed.s, failed.t).reasons,
+      taskProgress(f.h, failed.s, failed.t, Date.now()).reasons,
       [],
       'сбой назвала бы только проекция',
     );
@@ -127,7 +131,7 @@ void test('taskProgress не подменяет отказ общей проек
     progressMode = { error };
     const { s, t } = read();
     assert.throws(
-      () => taskProgress(f.h, s, t),
+      () => taskProgress(f.h, s, t, Date.now()),
       (e) => e === error,
     );
   } finally {
