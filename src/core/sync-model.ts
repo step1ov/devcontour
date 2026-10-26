@@ -343,6 +343,7 @@ export const recordSchema = z.discriminatedUnion('kind', [
         .optional(),
       pinVersion: z.literal(2).optional(),
       checks: checkDeclaration.optional(),
+      underTest: z.array(relativePath).min(1).max(50).optional(),
       approvedAt: date,
     }),
   }),

@@ -413,6 +413,7 @@ export function recordsFromState(
         ...(c.artifacts ? { artifacts: c.artifacts } : {}),
         ...(c.pinVersion ? { pinVersion: c.pinVersion } : {}),
         ...(c.checks ? { checks: c.checks } : {}),
+        ...(c.underTest?.length ? { underTest: c.underTest } : {}),
         approvedAt: c.approvedAt,
       },
     });
@@ -578,6 +579,7 @@ export function stateFromRecords(
         record.data.artifacts,
         record.data.pinVersion,
         record.data.checks,
+        record.data.underTest,
       ) !== record.data.digest
     )
       throw new Error('Неверный владелец или digest контракта: ' + record.data.id);
@@ -594,6 +596,7 @@ export function stateFromRecords(
       artifacts?: unknown;
       pinVersion?: number;
       checks?: unknown;
+      underTest?: string[];
       approvedAt: string;
     }) =>
       JSON.stringify({
@@ -603,6 +606,8 @@ export function stateFromRecords(
         artifacts: c.artifacts ?? null,
         pinVersion: c.pinVersion ?? null,
         checks: c.checks ?? null,
+        // Новое поле — только если объявлено: прежние записи сравниваются как раньше.
+        ...(c.underTest?.length ? { underTest: c.underTest } : {}),
         approvedAt: c.approvedAt,
       });
     if (

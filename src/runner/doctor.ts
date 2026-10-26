@@ -22,7 +22,10 @@ import { withResources } from './resources.ts';
 import { agentEnvironment, reviewerRunsChecks, toolProfileFor, writerRunsChecks } from './tools.ts';
 import { taskContext } from './context.ts';
 import { forgeAdapter } from './forge.ts';
-import { DevContour } from '../core/service.ts';
+import { DevContour, supersededBy } from '../core/service.ts';
+import { repository } from '../core/repositories.ts';
+import { artifactGuard } from './agent-control.ts';
+import { unguardedMessage } from './artifact-closure.ts';
 import { Store, journalFiles } from '../core/store.ts';
 import { z } from 'zod';
 
@@ -187,7 +190,7 @@ export async function doctor(
   config: Config,
   root: string,
   probe = false,
-  state?: Pick<DevContourState, 'leader' | 'runs'>,
+  state?: Pick<DevContourState, 'leader' | 'runs'> & Partial<Pick<DevContourState, 'contracts'>>,
 ) {
   const checks: Check[] = [];
   if (state) checks.push(engineCheck(state));
@@ -494,6 +497,10 @@ export async function doctor(
         }
       });
   }
+  // Утверждённые контракты не отзываются задним числом: незащищённый helper
+  // закреплённой приёмки — предупреждение, а не блокировка. Новая редакция
+  // с ним отклоняется до ревью (review-contract, contract-change).
+  checks.push(...(await contractClosureChecks(config, state?.contracts ?? [])));
   if (config.contextPacks.length)
     await check('context', async () => {
       for (const role of declaredRoles(config))
@@ -548,4 +555,51 @@ export async function doctor(
   await mkdir(root, { recursive: true });
   await writeFile(join(root, 'doctor.json'), JSON.stringify(result, null, 2));
   return result;
+}
+
+/**
+ * Локальные зависимости закреплённых артефактов действующих контрактов,
+ * которые не закреплены и не защищены: правкой их исполнитель ослабил бы
+ * приёмку без нового ревью. Проверяется ревизия закрепления; защита —
+ * текущие protectedPaths компонента.
+ */
+export async function contractClosureChecks(
+  config: Config,
+  contracts: DevContourState['contracts'],
+): Promise<Check[]> {
+  const out: Check[] = [];
+  let checked = 0;
+  for (const c of contracts) {
+    if (!c.artifacts?.length || supersededBy(contracts, c.id)) continue;
+    const byRepo = new Map<string, typeof c.artifacts>();
+    for (const a of c.artifacts)
+      byRepo.set(a.repositoryId, [...(byRepo.get(a.repositoryId) ?? []), a]);
+    for (const [repositoryId, artifacts] of byRepo) {
+      let detail: string | undefined;
+      try {
+        const deps = await artifactGuard(
+          repository(config, repositoryId),
+          artifacts,
+          c.underTest ?? [],
+        );
+        if (deps.length) detail = unguardedMessage(deps);
+      } catch (e) {
+        detail = e instanceof Error ? e.message : String(e);
+      }
+      checked++;
+      if (detail)
+        out.push({
+          id: `contract-closure:${c.id}:${repositoryId}`,
+          status: 'not-checked',
+          detail: `Контракт ${c.id} (${c.title}) утверждён, но закрепление неполно. ${detail}. Исправление — новая редакция через contract-change.`,
+        });
+    }
+  }
+  if (checked && !out.length)
+    out.push({
+      id: 'contract-closure',
+      status: 'passed',
+      detail: `Локальные зависимости закреплённых артефактов закреплены или защищены (${checked})`,
+    });
+  return out;
 }

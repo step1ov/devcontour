@@ -90,7 +90,13 @@ export function contractDigest(
    * прежняя, и утверждённые раньше контракты остаются действительными.
    */
   checks?: CheckDeclaration,
+  /**
+   * Реализация под тестом входит в digest, только если объявлена: формулы
+   * прежних контрактов не меняются.
+   */
+  underTest?: string[],
 ) {
+  const subject = underTest?.length ? { underTest } : {};
   if (checks)
     return digest({
       content,
@@ -102,6 +108,7 @@ export function contractDigest(
         digest: a.digest,
       })),
       checks,
+      ...subject,
     });
   return artifacts?.length
     ? digest({
@@ -116,6 +123,7 @@ export function contractDigest(
           ...(pinVersion === 2 ? { blob: a.blob } : {}),
           digest: a.digest,
         })),
+        ...subject,
       })
     : digest(content);
 }
@@ -129,11 +137,14 @@ export function samePin(
   content: string,
   artifacts: ContractArtifact[],
   checks?: CheckDeclaration,
+  underTest?: string[],
 ) {
   const pinned = c.artifacts ?? [];
   return (
     c.content === content &&
     JSON.stringify(c.checks ?? null) === JSON.stringify(checks ?? null) &&
+    JSON.stringify(c.underTest?.length ? c.underTest : null) ===
+      JSON.stringify(underTest?.length ? underTest : null) &&
     pinned.length === artifacts.length &&
     pinned.every((a) =>
       artifacts.some(
@@ -763,8 +774,14 @@ export class DevContour {
     source?: string,
     artifacts?: ContractArtifact[],
     checks?: CheckDeclaration,
+    underTest?: string[],
   ) {
     if (repositoryId) repository(this.config, repositoryId);
+    if (underTest?.length && !artifacts?.length)
+      throw new DomainError(
+        'underTest без artifacts: реализацию под тестом объявляют для закреплённой приёмки',
+        400,
+      );
     if (!title.trim() || !content.trim() || content.length > 60000)
       throw new DomainError('Укажите название и содержимое контракта (до 60 000 символов)', 400);
     return this.store.change('contract.approved', (s) => {
@@ -776,7 +793,14 @@ export class DevContour {
         source,
         ...(artifacts?.length ? { artifacts, pinVersion: 2 as const } : {}),
         ...(checks ? { checks } : {}),
-        digest: contractDigest(content, artifacts, artifacts?.length ? 2 : undefined, checks),
+        ...(underTest?.length ? { underTest } : {}),
+        digest: contractDigest(
+          content,
+          artifacts,
+          artifacts?.length ? 2 : undefined,
+          checks,
+          underTest,
+        ),
         approvedAt: now(),
         approval,
       };

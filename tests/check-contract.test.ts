@@ -38,6 +38,8 @@ const artifacts = [
   { path: 'oracle.mjs', purpose: 'Эталоны: полный перебор' },
   { path: 'check.mjs', purpose: 'Генераторы и свойства' },
 ];
+// check.mjs импортирует реализацию рюкзака — её и пишет исполнитель.
+const underTest = ['src/'];
 
 test('AC04: an exact obligation without domain, independent method or coverage is refused before any model call; a complete one is reviewed', async () => {
   const p = await checkProject();
@@ -49,6 +51,7 @@ test('AC04: an exact obligation without domain, independent method or coverage i
       title: 'Knapsack',
       content: 'Оптимум рюкзака и полнота достижимых сумм.',
       artifacts,
+      underTest,
       checks,
     });
     // Пропущена область входов: схема отказывает до модели.
@@ -175,7 +178,7 @@ console.log('size', n, x);
       const d = declaration();
       d.obligations[0].hard = true;
       d.obligations[0].feasibility = { spike: spike.id, digest: digestOverride ?? spike.digest };
-      return { title: 'Knapsack', content: 'Оптимум рюкзака.', artifacts, checks: d };
+      return { title: 'Knapsack', content: 'Оптимум рюкзака.', artifacts, underTest, checks: d };
     };
     await assert.rejects(
       reviewContract(f.h, p.root, withSpike(bounded, 'f'.repeat(64)), 'codex', r.adapters),

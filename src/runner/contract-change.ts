@@ -174,6 +174,9 @@ export class ContractChanges {
     const proposal = contractProposal.parse(input);
     const impact = await contractImpact(this.h, proposal);
     if (impact.status === 'unchanged') return { status: 'unchanged' as const, impact };
+    // Отказ до удержания задач и ревью: новая редакция с незащищённым
+    // helper приёмки не была бы одобрена всё равно.
+    if (impact.closure.refusal) throw new DomainError(impact.closure.refusal, 400);
     // Операция не заводит параллельный контракт для файла, который уже
     // зарегистрирован под другим компонентом: задачи прежнего остались бы
     // привязаны к нему.
@@ -863,7 +866,7 @@ export class ContractChanges {
       this.h.config.contractArtifacts,
     );
     if (
-      contractDigest(content, pinned.artifacts, 2, op.proposal.checks) !==
+      contractDigest(content, pinned.artifacts, 2, op.proposal.checks, op.proposal.underTest) !==
       op.expected.proposedDigest
     )
       throw new StaleChange('Предложение изменилось после начала операции');

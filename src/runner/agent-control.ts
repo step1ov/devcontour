@@ -18,6 +18,7 @@ import {
   scopeDigest,
 } from '../core/service.ts';
 import { blobBytes, pinArtifacts } from './contract-artifacts.ts';
+import { assertUnderTest, unguardedDependencies, unguardedMessage } from './artifact-closure.ts';
 import { type Approval, type ContractAttempt, DomainError, relativePath } from '../core/model.ts';
 import { adapters, type AgentAdapter } from './adapters.ts';
 import { repositories, repository } from '../core/repositories.ts';
@@ -43,6 +44,17 @@ export const contractProposal = z
     artifacts: z
       .array(z.object({ path: relativePath, purpose: z.string().trim().min(1).max(200) }))
       .max(50)
+      .optional(),
+    /**
+     * Реализация, которую закреплённая приёмка проверяет и импортирует
+     * намеренно: файлы или каталоги, которые пишет исполнитель. Замыкание
+     * зависимостей артефактов в них не заходит; прочие локальные импорты
+     * артефактов должны быть закреплены или защищены (artifact-closure.ts).
+     */
+    underTest: z
+      .array(relativePath)
+      .max(50)
+      .transform((paths) => [...new Set(paths)].sort())
       .optional(),
     /**
      * Договор проверки: обязательства, независимый способ проверки, покрытие
@@ -335,6 +347,29 @@ export async function contractContent(
   return content;
 }
 
+/**
+ * Незакреплённые и незащищённые локальные зависимости закреплённых
+ * артефактов на их ревизии. Через них исполнитель ослабил бы приёмку, не
+ * тронув ни одного закреплённого файла.
+ */
+export async function artifactGuard(
+  owner: { path: string; protectedPaths: string[]; generatedPaths?: string[] },
+  artifacts: { path: string; revision: string }[],
+  underTest: string[] = [],
+) {
+  if (!artifacts.length) {
+    if (underTest.length)
+      throw new DomainError(
+        'underTest без artifacts: реализацию под тестом объявляют для закреплённой приёмки',
+        400,
+      );
+    return [];
+  }
+  const paths = artifacts.map((a) => a.path);
+  assertUnderTest(paths, underTest);
+  return unguardedDependencies(owner, artifacts[0].revision, paths, underTest);
+}
+
 export async function reviewContract(
   h: DevContour,
   root: string,
@@ -362,7 +397,13 @@ export async function reviewContract(
   // способ проверки без закреплённого эталона или эксперимент, на который
   // никто не ссылается, стоили бы вызова и были бы отклонены всё равно.
   if (parsed.checks) assertDeclaration(h, owner.id, parsed.checks, pinned.artifacts);
-  const contractId = contractDigest(content, pinned.artifacts, 2, parsed.checks);
+  // Отказ обхода (symlink, выход из репозитория, предел) тоже сохраняется:
+  // для утверждённого договора он предупреждение, для нового — отказ.
+  const guard = await artifactGuard(owner, pinned.artifacts, parsed.underTest).then(
+    (deps) => (deps.length ? new DomainError(unguardedMessage(deps), 400) : undefined),
+    (error: unknown) => (error instanceof Error ? error : new Error(String(error))),
+  );
+  const contractId = contractDigest(content, pinned.artifacts, 2, parsed.checks, parsed.underTest);
   // Повтор совпадает с утверждённым контрактом, только если совпали и
   // артефакты: изменённая схема при прежнем тексте — новый договор.
   const existing = h.store.read().contracts.find(
@@ -371,14 +412,25 @@ export async function reviewContract(
       c.repositoryId === parsed.repositoryId &&
       // По тексту и blob, а не по digest: запись прежней формулы с тем же
       // содержимым — тот же договор, а не повод для нового ревью.
-      samePin(c, content, pinned.artifacts, parsed.checks),
+      samePin(c, content, pinned.artifacts, parsed.checks, parsed.underTest),
   );
   // Контракт без manifest по-прежнему работает, но закреплён только текст.
   const warning = pinned.artifacts.length
     ? undefined
     : 'Контракт без artifacts: закреплён только документ; схемы и файлы приёмки, на которые он ссылается, могут измениться без ревью';
+  // Утверждённый договор не отзывается задним числом: повтор называет
+  // незащищённые зависимости предупреждением. Новый — отказ до ревью.
   if (existing)
-    return { status: 'already-approved', contract: existing, ...(warning ? { warning } : {}) };
+    return {
+      status: 'already-approved',
+      contract: existing,
+      ...(warning || guard
+        ? {
+            warning: [warning, guard?.message].filter(Boolean).join('. '),
+          }
+        : {}),
+    };
+  if (guard) throw guard;
   // Ревьюер читает неизменный снимок: закреплённое содержимое артефактов, а
   // не рабочие файлы, которые могут измениться во время ревью.
   const proposal = {
@@ -413,6 +465,7 @@ export async function reviewContract(
       after.artifacts,
       2,
       parsed.checks,
+      parsed.underTest,
     ) !== contractId
   )
     throw new DomainError(
@@ -433,6 +486,7 @@ export async function reviewContract(
         proposal.file,
         pinned.artifacts,
         parsed.checks,
+        parsed.underTest,
       );
     }),
     ...(warning ? { warning } : {}),

@@ -7,7 +7,8 @@ import {
 } from '../core/model.ts';
 import { contractDigest, samePin, type DevContour } from '../core/service.ts';
 import { repository } from '../core/repositories.ts';
-import { contractContent, contractProposal, defaultOwner } from './agent-control.ts';
+import { artifactGuard, contractContent, contractProposal, defaultOwner } from './agent-control.ts';
+import { unguardedMessage, type Dependency } from './artifact-closure.ts';
 import { pinArtifacts } from './contract-artifacts.ts';
 import { git } from './process.ts';
 
@@ -53,7 +54,20 @@ export async function contractImpact(h: DevContour, input: unknown) {
     head,
     h.config.contractArtifacts,
   );
-  const digest = contractDigest(content, pinned.artifacts, 2, parsed.checks);
+  const digest = contractDigest(content, pinned.artifacts, 2, parsed.checks, parsed.underTest);
+  // Незащищённые локальные зависимости артефактов: отчёт называет их, а
+  // операция изменения контракта по ним отказывает до ревью.
+  const closure: { unguarded: Dependency[]; refusal?: string } = await artifactGuard(
+    owner,
+    pinned.artifacts,
+    parsed.underTest,
+  ).then(
+    (unguarded) => ({
+      unguarded,
+      ...(unguarded.length ? { refusal: unguardedMessage(unguarded) } : {}),
+    }),
+    (e: unknown) => ({ unguarded: [], refusal: e instanceof Error ? e.message : String(e) }),
+  );
   const s = h.store.read();
   // Редакции одного контракта — один источник в одном компоненте; у inline
   // предложения источника нет, и его редакции узнаются по названию.
@@ -76,7 +90,7 @@ export async function contractImpact(h: DevContour, input: unknown) {
     : [];
   const status = !current
     ? 'new'
-    : samePin(current, content, pinned.artifacts, parsed.checks)
+    : samePin(current, content, pinned.artifacts, parsed.checks, parsed.underTest)
       ? 'unchanged'
       : 'changed';
 
@@ -174,6 +188,7 @@ export async function contractImpact(h: DevContour, input: unknown) {
     },
     tasks: { direct: direct.map(describe), transitive: transitive.map(describe) },
     base,
+    closure,
     requiredReviews,
     // Отчёт ничего не меняет: применение — отдельный шаг после ревью.
     applied: false as const,
