@@ -116,7 +116,7 @@ test('a pinned acceptance file with an unpinned local helper is refused before r
     title,
     content: 'Поиск каталога проходит закреплённую приёмку.',
     artifacts: [{ path: 'acceptance/catalog.test.mjs', purpose: 'Приёмка' }, ...extra],
-    underTest: ['src/'],
+    underTest: ['src/catalog.mjs'],
   });
   const pinnedHelpers = [
     { path: 'acceptance/acceptance-helpers.mjs', purpose: 'Сравнение приёмки' },
@@ -152,9 +152,36 @@ test('a pinned acceptance file with an unpinned local helper is refused before r
         /в artifacts контракта или в protectedPaths/.test(e.message),
     );
     assert.equal(r1.prompts.length, 0, 'ревьюер не вызван');
+    // underTest: каталог, накрытый артефакт и объявление без artifacts —
+    // отказы до ревью.
+    for (const [bad, reason] of [
+      [{ ...proposal('Catalog', pinnedHelpers), underTest: ['src/'] }, /не каталоги: src\//],
+      [
+        {
+          ...proposal('Catalog', pinnedHelpers),
+          underTest: ['src/catalog.mjs', 'acceptance/acceptance-helpers.mjs'],
+        },
+        /underTest накрывает закреплённые артефакты.*acceptance-helpers\.mjs/,
+      ],
+      [
+        { title: 'Bare', content: 'Без приёмки.', underTest: ['src/catalog.mjs'] },
+        /underTest без artifacts/,
+      ],
+    ] as const)
+      await assert.rejects(review(h, root, bad, 'codex', r1.adapters), reason);
+    const impactDir = await contractImpact(h, { ...proposal('Catalog'), underTest: ['src'] });
+    assert.match(impactDir.closure.refusal ?? '', /не каталоги: src/);
+    assert.equal(r1.prompts.length, 0, 'ревьюер не вызван');
     // Операция изменения контракта отказывает до удержания задач и ревью.
     const impact = await contractImpact(h, proposal('Catalog'));
     assert.match(impact.closure.refusal ?? '', /acceptance-helpers\.mjs/);
+    assert.deepEqual(impact.closure.exempted, [
+      {
+        path: 'src/catalog.mjs',
+        from: 'acceptance/catalog.test.mjs',
+        specifier: '../src/catalog.mjs',
+      },
+    ]);
     await assert.rejects(
       new ContractChanges(h, root, r1.adapters).start(proposal('Catalog'), 'codex'),
       /acceptance-helpers\.mjs/,
@@ -166,13 +193,17 @@ test('a pinned acceptance file with an unpinned local helper is refused before r
     const pinned = await review(h, root, proposal('Catalog', pinnedHelpers), 'codex', r2.adapters);
     assert.equal(pinned.status, 'approved', JSON.stringify(pinned));
     assert.ok(r2.prompts.length > 0);
+    // Ревьюер видит, какие файлы underTest достигнуты и кем, и правило для них.
+    assert.match(r2.prompts[0], /"underTestImports"/);
+    assert.match(r2.prompts[0], /"from": ?"acceptance\/catalog\.test\.mjs"/);
+    assert.match(r2.prompts[0], /must be implementation under test, not acceptance logic/);
     const contract = contractOf(pinned);
-    assert.deepEqual(contract.underTest, ['src/']);
+    assert.deepEqual(contract.underTest, ['src/catalog.mjs']);
     // Реализацию под тестом исполнитель пишет; заявить её иначе — другой договор.
     const widened = await review(
       h,
       root,
-      { ...proposal('Catalog', pinnedHelpers), underTest: ['src/', 'lib/'] },
+      { ...proposal('Catalog', pinnedHelpers), underTest: ['src/catalog.mjs', 'src/format.mjs'] },
       'codex',
       reviewers().adapters,
     );

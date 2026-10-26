@@ -120,6 +120,12 @@ const verifiabilityReview = [
  * входа, точность, допустимость приближения, время и память. Поэтому ревьюер
  * проверяет, названы ли они, а не ищет в тексте слово «NP».
  */
+/**
+ * Файл, объявленный реализацией под тестом, исполнитель правит свободно:
+ * если в нём логика приёмки (сравнение, эталон, допуск), договор ослаблялся
+ * бы без ревью. Отличить это по синтаксису нельзя — решает ревьюер.
+ */
+const underTestReview = `The proposal declares underTest files: implementation the pinned acceptance imports on purpose and the implementer may change freely. "underTestImports" lists each such file the pinned files reach and its importer. Read each one: it must be implementation under test, not acceptance logic (comparison helpers, expected values, tolerances, fixtures or checks). If any listed file holds acceptance logic, return approved=false with a blocking finding naming the file and asking to pin it in artifacts or protect it instead.`;
 const feasibilityReview = [
   `Assess every obligation of the contract for feasibility. For each, check that the contract states: the input domain and size limits; exactness or optimality (or the allowed approximation); the worst case; allowed refusals or failures; the resource model (time, memory, environment); and how the obligation is measured. An obligation that cannot be met in general under the stated limits, or cannot be measured as written, is a blocking finding with rule "${FEASIBILITY}" — name the obligation, the missing or contradictory bound and a concrete input that shows it. Hardness alone is not infeasibility: an exact answer for a hard problem is acceptable when the contract bounds the input, justifies the assumptions or allows a documented fallback. Do not block an obligation only for its wording.`,
 ];
@@ -183,6 +189,10 @@ async function review(
     'For plans, check writePaths, selected library contextPacks, device resources, consumer verification and separation of proposed discoveries from validated knowledge. Findings should include rule, consequence and evidence; do not invent violations to fill the report.',
     'Declared context packs: ' + JSON.stringify(h.config.contextPacks),
     ...(kind === 'contract' ? [...feasibilityReview, ...verifiabilityReview] : []),
+    ...(kind === 'contract' &&
+    (proposal as { underTestImports?: unknown[] }).underTestImports?.length
+      ? [underTestReview]
+      : []),
     ...(kind === 'plan' ? acceptabilityReview : []),
     'Return approved=false and concrete blocking findings when revision is needed. Routine technical choices within the specification do not need human approval.',
     ...(checkout
@@ -363,7 +373,7 @@ export async function artifactGuard(
         'underTest без artifacts: реализацию под тестом объявляют для закреплённой приёмки',
         400,
       );
-    return [];
+    return { unguarded: [], exempted: [] };
   }
   const paths = artifacts.map((a) => a.path);
   assertUnderTest(paths, underTest);
@@ -399,10 +409,18 @@ export async function reviewContract(
   if (parsed.checks) assertDeclaration(h, owner.id, parsed.checks, pinned.artifacts);
   // Отказ обхода (symlink, выход из репозитория, предел) тоже сохраняется:
   // для утверждённого договора он предупреждение, для нового — отказ.
-  const guard = await artifactGuard(owner, pinned.artifacts, parsed.underTest).then(
-    (deps) => (deps.length ? new DomainError(unguardedMessage(deps), 400) : undefined),
+  const closure = await artifactGuard(owner, pinned.artifacts, parsed.underTest).then(
+    (c) => c,
     (error: unknown) => (error instanceof Error ? error : new Error(String(error))),
   );
+  const guard =
+    closure instanceof Error
+      ? closure
+      : closure.unguarded.length
+        ? new DomainError(unguardedMessage(closure.unguarded), 400)
+        : undefined;
+  const exempted = closure instanceof Error ? [] : closure.exempted;
+
   const contractId = contractDigest(content, pinned.artifacts, 2, parsed.checks, parsed.underTest);
   // Повтор совпадает с утверждённым контрактом, только если совпали и
   // артефакты: изменённая схема при прежнем тексте — новый договор.
@@ -437,6 +455,9 @@ export async function reviewContract(
     ...parsed,
     content,
     ...(pinned.contents.length ? { artifacts: pinned.contents } : {}),
+    // Файлы underTest, до которых дошла приёмка, и кто их импортирует:
+    // ревьюер подтверждает, что это реализация, а не логика приёмки.
+    ...(exempted.length ? { underTestImports: exempted } : {}),
     // Эксперименты выполнимости, на которые ссылаются обязательства: их
     // результат и пределы вывода ревьюер читает сам, а не со слов автора.
     ...(parsed.checks ? { spikes: referencedSpikes(h, owner.id, parsed.checks) } : {}),

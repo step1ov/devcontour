@@ -577,12 +577,12 @@ export async function contractClosureChecks(
     for (const [repositoryId, artifacts] of byRepo) {
       let detail: string | undefined;
       try {
-        const deps = await artifactGuard(
+        const { unguarded } = await artifactGuard(
           repository(config, repositoryId),
           artifacts,
           c.underTest ?? [],
         );
-        if (deps.length) detail = unguardedMessage(deps);
+        if (unguarded.length) detail = unguardedMessage(unguarded);
       } catch (e) {
         detail = e instanceof Error ? e.message : String(e);
       }

@@ -39,7 +39,7 @@ const artifacts = [
   { path: 'check.mjs', purpose: 'Генераторы и свойства' },
 ];
 // check.mjs импортирует реализацию рюкзака — её и пишет исполнитель.
-const underTest = ['src/'];
+const underTest = ['src/knap.mjs', 'src/reach.mjs'];
 
 test('AC04: an exact obligation without domain, independent method or coverage is refused before any model call; a complete one is reviewed', async () => {
   const p = await checkProject();

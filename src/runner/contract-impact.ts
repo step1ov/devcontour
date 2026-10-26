@@ -8,7 +8,7 @@ import {
 import { contractDigest, samePin, type DevContour } from '../core/service.ts';
 import { repository } from '../core/repositories.ts';
 import { artifactGuard, contractContent, contractProposal, defaultOwner } from './agent-control.ts';
-import { unguardedMessage, type Dependency } from './artifact-closure.ts';
+import { unguardedMessage, type Dependency, type Exempted } from './artifact-closure.ts';
 import { pinArtifacts } from './contract-artifacts.ts';
 import { git } from './process.ts';
 
@@ -57,17 +57,19 @@ export async function contractImpact(h: DevContour, input: unknown) {
   const digest = contractDigest(content, pinned.artifacts, 2, parsed.checks, parsed.underTest);
   // Незащищённые локальные зависимости артефактов: отчёт называет их, а
   // операция изменения контракта по ним отказывает до ревью.
-  const closure: { unguarded: Dependency[]; refusal?: string } = await artifactGuard(
-    owner,
-    pinned.artifacts,
-    parsed.underTest,
-  ).then(
-    (unguarded) => ({
-      unguarded,
-      ...(unguarded.length ? { refusal: unguardedMessage(unguarded) } : {}),
-    }),
-    (e: unknown) => ({ unguarded: [], refusal: e instanceof Error ? e.message : String(e) }),
-  );
+  const closure: { unguarded: Dependency[]; exempted: Exempted[]; refusal?: string } =
+    await artifactGuard(owner, pinned.artifacts, parsed.underTest).then(
+      ({ unguarded, exempted }) => ({
+        unguarded,
+        exempted,
+        ...(unguarded.length ? { refusal: unguardedMessage(unguarded) } : {}),
+      }),
+      (e: unknown) => ({
+        unguarded: [],
+        exempted: [],
+        refusal: e instanceof Error ? e.message : String(e),
+      }),
+    );
   const s = h.store.read();
   // Редакции одного контракта — один источник в одном компоненте; у inline
   // предложения источника нет, и его редакции узнаются по названию.

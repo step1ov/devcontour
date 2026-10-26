@@ -101,7 +101,7 @@ test('the closure follows local imports transitively through cycles, index files
   try {
     const head = await commit(root);
     const all = await artifactClosure(root, head, ['tests/accept.test.ts']);
-    assert.deepEqual(paths(all), [
+    assert.deepEqual(paths(all.dependencies), [
       'data/cases.json',
       'data/golden.json',
       'lib/index.ts',
@@ -116,14 +116,20 @@ test('the closure follows local imports transitively through cycles, index files
       'tests/shared.json',
     ]);
     // Реализация под тестом не обходится: её импорты — работа исполнителя.
-    const scoped = await artifactClosure(root, head, ['tests/accept.test.ts'], ['src/']);
-    assert.ok(!paths(scoped).some((p) => p.startsWith('src/')));
+    // Достигнутые файлы underTest и их импортёры возвращаются ревьюеру.
+    const underTest = ['src/engine.ts', 'src/planned.ts'];
+    const scoped = await artifactClosure(root, head, ['tests/accept.test.ts'], underTest);
+    assert.ok(!paths(scoped.dependencies).some((p) => p.startsWith('src/')));
+    assert.deepEqual(scoped.exempted, [
+      { path: 'src/planned.ts', from: 'tests/accept.test.ts', specifier: '../src/planned.ts' },
+      { path: 'src/engine.ts', from: 'tests/more.mjs', specifier: '../src/engine.ts' },
+    ]);
     // Закреплённые и защищённые не называются; прочие — да.
-    const unguarded = await unguardedDependencies(
+    const { unguarded } = await unguardedDependencies(
       { path: root, protectedPaths: ['data/'] },
       head,
       ['tests/accept.test.ts', 'tests/helpers.ts'],
-      ['src/'],
+      underTest,
     );
     assert.deepEqual(paths(unguarded), [
       'lib/index.ts',
@@ -147,8 +153,8 @@ test('the closure reads the committed revision: a missing dependency is reported
     // Рабочее дерево — не ревизия закрепления.
     await writeFile(join(root, 'helper.mjs'), "import './later.mjs';\n");
     await writeFile(join(root, 'later.mjs'), '');
-    const deps = await artifactClosure(root, head, ['accept.mjs']);
-    assert.deepEqual(deps, [
+    const { dependencies } = await artifactClosure(root, head, ['accept.mjs']);
+    assert.deepEqual(dependencies, [
       { path: 'helper.mjs', from: 'accept.mjs', specifier: './helper.mjs' },
       { path: 'absent.mjs', from: 'accept.mjs', specifier: './absent.mjs', missing: true },
     ]);
@@ -186,6 +192,76 @@ test('a dependency outside the repository, a symlinked one and an overflow are r
     await assert.rejects(
       artifactClosure(root, head, ['many.mjs'], [], { maxFiles: 10, maxBytes: 4 }),
       /больше предела 4 байт/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('underTest names files only: a directory would exempt a helper next to the implementation', async () => {
+  const root = await repo({
+    'packages/engine/tests/acc.test.ts':
+      "import { solve } from '../src/solver.js';\nimport { near } from '../src/acceptance-helpers.js';\n",
+    'packages/engine/src/solver.ts': 'export const solve = () => 0;\n',
+    'packages/engine/src/acceptance-helpers.ts': 'export const near = () => true;\n',
+  });
+  try {
+    const head = await commit(root);
+    const roots = ['packages/engine/tests/acc.test.ts'];
+    for (const dir of ['packages/engine/src/', 'packages/engine/src'])
+      await assert.rejects(
+        artifactClosure(root, head, roots, [dir]),
+        /underTest перечисляет только файлы реализации, не каталоги/,
+      );
+    // Названа только реализация — helper рядом с ней остаётся зависимостью.
+    const closure = await artifactClosure(root, head, roots, ['packages/engine/src/solver.ts']);
+    assert.deepEqual(paths(closure.dependencies), ['packages/engine/src/acceptance-helpers.ts']);
+    assert.deepEqual(paths(closure.exempted), ['packages/engine/src/solver.ts']);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('both h.js and h.ts next to each other are dependencies; require.resolve and createRequire are followed', async () => {
+  const root = await repo({
+    'accept.mjs': [
+      "import { h } from './h.js';",
+      "import { createRequire } from 'node:module';",
+      "const data = require.resolve('./resolved.json');",
+      "const cjs = createRequire(import.meta.url)('./created.cjs');",
+    ].join('\n'),
+    'h.js': '',
+    'h.ts': '',
+    'resolved.json': '{}',
+    'created.cjs': '',
+  });
+  try {
+    const head = await commit(root);
+    const { dependencies } = await artifactClosure(root, head, ['accept.mjs']);
+    assert.deepEqual(paths(dependencies), ['created.cjs', 'h.js', 'h.ts', 'resolved.json']);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a source the lexer cannot finish is refused with its file name, not read as having no imports', async () => {
+  // После `)` `/` читается делением: шаблон из regex поглотил бы импорт ниже.
+  const swallowed = "if (ok) /`/.test(s);\nimport './after.mjs';\n";
+  for (const [source, reason] of [
+    [swallowed, /незакрытый шаблонный литерал/],
+    ["const s = 'open;\nimport './x.mjs';\n", /незакрытая строка/],
+    ['/* open\nimport "./x.mjs";\n', /незакрытый комментарий/],
+    ['const r = /open\n', /незакрытый regex-литерал/],
+    ['function f() {\n', /незакрытая фигурная скобка/],
+    ['}\n', /лишняя закрывающая скобка/],
+  ] as const)
+    assert.throws(() => moduleSpecifiers(source), reason);
+  const root = await repo({ 'accept.mjs': swallowed, 'after.mjs': '' });
+  try {
+    const head = await commit(root);
+    await assert.rejects(
+      artifactClosure(root, head, ['accept.mjs']),
+      /Не удалось разобрать зависимости accept\.mjs: незакрытый шаблонный литерал/,
     );
   } finally {
     await rm(root, { recursive: true, force: true });

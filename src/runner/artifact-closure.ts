@@ -74,6 +74,9 @@ const idPart = (c: string) => /[\w$\u0080-￿]/.test(c);
  * Токены исходника. Шаблон без подстановок — строка; шаблон с подстановками
  * разбирается внутри `${...}`, а его литеральные части пропускаются.
  */
+/** Исходник не разобран до конца: замыкание по нему было бы неполным. */
+export class LexError extends Error {}
+
 export function tokenize(source: string): Token[] {
   const tokens: Token[] = [];
   // Стек фигурных скобок: true — скобка открывает подстановку шаблона.
@@ -106,7 +109,7 @@ export function tokenize(source: string): Token[] {
         i++;
       }
     }
-    return { text, open: false };
+    throw new LexError('незакрытый шаблонный литерал');
   };
   while (i < n) {
     const c = source[i];
@@ -116,7 +119,8 @@ export function tokenize(source: string): Token[] {
       while (i < n && source[i] !== '\n') i++;
     } else if (c === '/' && source[i + 1] === '*') {
       const end = source.indexOf('*/', i + 2);
-      i = end < 0 ? n : end + 2;
+      if (end < 0) throw new LexError('незакрытый комментарий');
+      i = end + 2;
     } else if (c === '"' || c === "'") {
       let value = '';
       i++;
@@ -126,6 +130,7 @@ export function tokenize(source: string): Token[] {
           i += 2;
         } else value += source[i++];
       }
+      if (source[i] !== c) throw new LexError('незакрытая строка');
       i++;
       tokens.push({ type: 'str', value });
     } else if (c === '`') {
@@ -141,6 +146,7 @@ export function tokenize(source: string): Token[] {
       i++;
     } else if (c === '}') {
       i++;
+      if (!braces.length) throw new LexError('лишняя закрывающая скобка }');
       if (braces.pop()) {
         // Конец подстановки: продолжается литеральная часть шаблона.
         const part = templatePart();
@@ -149,7 +155,8 @@ export function tokenize(source: string): Token[] {
       } else tokens.push({ type: 'punct', value: '}' });
     } else if (c === '/' && regexAllowed()) {
       // Regex-литерал: до закрывающего `/` вне класса символов.
-      let inClass = false;
+      let inClass = false,
+        closed = false;
       i++;
       while (i < n && source[i] !== '\n') {
         const d = source[i];
@@ -158,9 +165,13 @@ export function tokenize(source: string): Token[] {
           i++;
           if (d === '[') inClass = true;
           else if (d === ']') inClass = false;
-          else if (d === '/' && !inClass) break;
+          else if (d === '/' && !inClass) {
+            closed = true;
+            break;
+          }
         }
       }
+      if (!closed) throw new LexError('незакрытый regex-литерал');
       while (i < n && idPart(source[i])) i++;
       tokens.push({ type: 'regex', value: '' });
     } else if (idStart(c)) {
@@ -175,12 +186,14 @@ export function tokenize(source: string): Token[] {
       i++;
     }
   }
+  if (braces.length) throw new LexError('незакрытая фигурная скобка {');
   return tokens;
 }
 
 /**
  * Литеральные спецификаторы модулей и файлов: `import … from`, `export … from`,
- * `import 'x'`, `import('x')`, `require('x')`, `import.meta.resolve('x')` и
+ * `import 'x'`, `import('x')`, `require('x')`, `require.resolve('x')`,
+ * `createRequire(…)('x')`, `import.meta.resolve('x')` и
  * `new URL('x', import.meta.url)`. Вычисляемый спецификатор статически не
  * известен и не возвращается.
  */
@@ -217,6 +230,24 @@ export function moduleSpecifiers(source: string): Specifier[] {
       is(k + 3, ')')
     ) {
       out.push({ specifier: str(k + 2)!, kind: 'require' });
+    } else if (
+      tok.value === 'require' &&
+      is(k + 1, '.') &&
+      is(k + 2, 'resolve') &&
+      is(k + 3, '(') &&
+      str(k + 4) !== undefined
+    ) {
+      out.push({ specifier: str(k + 4)!, kind: 'require' });
+    } else if (tok.value === 'createRequire' && is(k + 1, '(')) {
+      // createRequire(import.meta.url)('./x'): вызов сразу за закрывающей скобкой.
+      let depth = 0,
+        end = k + 1;
+      for (; end < t.length; end++) {
+        if (is(end, '(')) depth++;
+        else if (is(end, ')') && --depth === 0) break;
+      }
+      if (is(end + 1, '(') && str(end + 2) !== undefined && is(end + 3, ')'))
+        out.push({ specifier: str(end + 2)!, kind: 'require' });
     } else if (
       tok.value === 'URL' &&
       is(k - 1, 'new') &&
@@ -264,12 +295,21 @@ export interface Dependency {
   /** Файла нет в ревизии: исполнитель мог бы его создать. */
   missing?: true;
 }
+/** Файл underTest, до которого дошёл обход: его импортирует `from`. */
+export interface Exempted {
+  path: string;
+  from: string;
+  specifier: string;
+}
 
 /**
  * Статическое замыкание локальных зависимостей артефактов на ревизии.
  * Обход идёт транзитивно по JS/TS-файлам, включая закреплённые и защищённые
  * (их собственные импорты тоже часть приёмки), и не заходит в `stop` —
- * объявленную реализацию под тестом. Пакетные спецификаторы (`zod`,
+ * объявленные файлы реализации под тестом (точные пути, не каталоги: каталог
+ * освобождал бы и helper рядом с реализацией). Достигнутые файлы `stop`
+ * возвращаются в `exempted` вместе с тем, кто их импортирует, — это видит
+ * ревьюер. Пакетные спецификаторы (`zod`,
  * `node:fs`) не учитываются. Выход из репозитория, symlink и submodule —
  * отказ, как у самих артефактов; превышение пределов — отказ, а не
  * молчаливо неполное замыкание.
@@ -282,6 +322,17 @@ export async function artifactClosure(
   limits: ClosureLimits = defaultClosureLimits,
 ) {
   const tree = await treeOf(repoPath, revision);
+  // underTest — только файлы: каталог освобождал бы любой файл под ним.
+  const dirs = stop.filter(
+    (s) => s.endsWith('/') || [...tree.keys()].some((p) => p.startsWith(s + '/')),
+  );
+  if (dirs.length)
+    throw new DomainError(
+      `underTest перечисляет только файлы реализации, не каталоги: ${dirs.join(', ')}. Каталог освобождал бы и helper приёмки рядом с реализацией; назовите каждый файл (ещё не созданный тоже можно)`,
+      400,
+    );
+  const exempt = new Set(stop);
+  const exempted = new Map<string, Exempted>();
   const found = new Map<string, Dependency>();
   const queue = roots.filter(isSource);
   const parsed = new Set<string>(queue);
@@ -306,7 +357,11 @@ export async function artifactClosure(
       );
     return e;
   };
-  /** Разрешение как у Node и TypeScript: точный путь, .js→.ts, расширения, index. */
+  /**
+   * Разрешение как у Node и TypeScript: точный путь, .js→.ts, расширения,
+   * index. Возвращаются все существующие кандидаты: при `h.js` и `h.ts`
+   * рядом загрузчик может взять любой, и оба — часть приёмки.
+   */
   const resolveIn = (target: string, from: string, specifier: string, exact: boolean) => {
     const candidates = [target];
     if (!exact) {
@@ -315,8 +370,7 @@ export async function artifactClosure(
       for (const ext of RESOLVE) candidates.push(target + ext);
       for (const ext of RESOLVE) candidates.push(posix.join(target, 'index' + ext));
     }
-    for (const c of candidates) if (fileAt(c, from, specifier)) return c;
-    return undefined;
+    return [...new Set(candidates)].filter((c) => fileAt(c, from, specifier));
   };
   while (queue.length) {
     const file = queue.shift()!;
@@ -325,7 +379,18 @@ export async function artifactClosure(
     bytes += entry.size;
     if (bytes > limits.maxBytes) throw overflow(`${limits.maxBytes} байт`);
     const read = await streamBlob(repoPath, entry.blob, entry.size);
-    for (const { specifier, kind } of moduleSpecifiers(read.head.toString('utf8'))) {
+    let specifiers: Specifier[];
+    try {
+      specifiers = moduleSpecifiers(read.head.toString('utf8'));
+    } catch (e) {
+      if (!(e instanceof LexError)) throw e;
+      // Неразобранный остаток мог содержать импорты: отказ, а не пропуск.
+      throw new DomainError(
+        `Не удалось разобрать зависимости ${file}: ${e.message}. Замыкание артефактов не вычислено`,
+        400,
+      );
+    }
+    for (const { specifier, kind } of specifiers) {
       const clean = specifier.replace(/[?#].*$/, '');
       // `new URL('x', import.meta.url)` — относительный URL файла без схемы.
       const relative =
@@ -346,20 +411,25 @@ export async function artifactClosure(
           `Зависимость артефакта вне репозитория: ${specifier} (из ${file})`,
           400,
         );
-      if (withinPaths(target, stop)) continue;
-      const path = resolveIn(target, file, specifier, kind === 'url');
-      if (path && withinPaths(path, stop)) continue;
-      const key = path ?? target;
-      if (!found.has(key))
-        found.set(key, { path: key, from: file, specifier, ...(path ? {} : { missing: true }) });
-      if (found.size > limits.maxFiles) throw overflow(`${limits.maxFiles} файлов`);
-      if (path && isSource(path) && !parsed.has(path)) {
-        parsed.add(path);
-        queue.push(path);
-      }
+      const paths = resolveIn(target, file, specifier, kind === 'url');
+      const record = (path: string, missing: boolean) => {
+        if (exempt.has(path)) {
+          if (!exempted.has(path)) exempted.set(path, { path, from: file, specifier });
+          return;
+        }
+        if (!found.has(path))
+          found.set(path, { path, from: file, specifier, ...(missing ? { missing: true } : {}) });
+        if (found.size > limits.maxFiles) throw overflow(`${limits.maxFiles} файлов`);
+        if (!missing && isSource(path) && !parsed.has(path)) {
+          parsed.add(path);
+          queue.push(path);
+        }
+      };
+      if (paths.length) for (const path of paths) record(path, false);
+      else record(target, true);
     }
   }
-  return [...found.values()];
+  return { dependencies: [...found.values()], exempted: [...exempted.values()] };
 }
 
 /**
@@ -376,12 +446,17 @@ export async function unguardedDependencies(
 ) {
   const covered = [...repo.protectedPaths, ...(repo.generatedPaths ?? [])];
   const closure = await artifactClosure(repo.path, revision, pinned, underTest, limits);
-  return closure.filter((d) => !pinned.includes(d.path) && !withinPaths(d.path, covered));
+  return {
+    unguarded: closure.dependencies.filter(
+      (d) => !pinned.includes(d.path) && !withinPaths(d.path, covered),
+    ),
+    exempted: closure.exempted,
+  };
 }
 
 /** Объявленная реализация под тестом не накрывает закреплённый артефакт. */
 export function assertUnderTest(pinned: string[], underTest: string[]) {
-  const overlap = pinned.filter((p) => withinPaths(p, underTest));
+  const overlap = pinned.filter((p) => underTest.includes(p));
   if (overlap.length)
     throw new DomainError(
       'underTest накрывает закреплённые артефакты — норматив не может быть реализацией под тестом: ' +
@@ -395,4 +470,4 @@ export const describeUnguarded = (deps: Dependency[]) =>
 
 /** Текст отказа и предупреждения: какие файлы и два способа это исправить. */
 export const unguardedMessage = (deps: Dependency[]) =>
-  `Закреплённые артефакты импортируют файлы, которые не закреплены и не защищены: ${describeUnguarded(deps)}. Исполнитель мог бы ослабить приёмку правкой этих файлов без нового ревью. Добавьте их в artifacts контракта или в protectedPaths компонента; реализацию, которую приёмка проверяет, объявите в underTest`;
+  `Закреплённые артефакты импортируют файлы, которые не закреплены и не защищены: ${describeUnguarded(deps)}. Исполнитель мог бы ослабить приёмку правкой этих файлов без нового ревью. Добавьте их в artifacts контракта или в protectedPaths компонента; файлы реализации, которые приёмка проверяет, перечислите в underTest`;

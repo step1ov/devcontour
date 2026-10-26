@@ -805,6 +805,56 @@ test('Pinned contract artifacts travel through Git sync between clones and a sub
   }
 });
 
+test('A contract with underTest round-trips between clones, and a changed underTest list is refused', async () => {
+  const f = fixture();
+  try {
+    const a = f.create('under-test-a');
+    syncGit(a.h, { member: 'alice' });
+    mkdirSync(join(a.repo, 'tests'));
+    writeFileSync(join(a.repo, 'tests/accept.mjs'), "import { run } from '../src/run.mjs';\n");
+    git(a.repo, 'add', '.');
+    git(a.repo, 'commit', '-m', 'Acceptance');
+    const pinned = await pinArtifacts({ id: 'main', path: a.repo }, [
+      { path: 'tests/accept.mjs', purpose: 'Приёмка' },
+    ]);
+    const contract = a.h.contract(
+      'Запуск',
+      'Приёмка запуска.',
+      { actor: 'operator' },
+      'main',
+      undefined,
+      pinned.artifacts,
+      undefined,
+      ['src/run.mjs'],
+    );
+    assert.notEqual(
+      contract.digest,
+      contractDigest('Приёмка запуска.', pinned.artifacts, 2),
+      'underTest входит в digest',
+    );
+    syncGit(a.h);
+    a.commit();
+    const b = f.create('under-test-b', a);
+    syncGit(b.h, { member: 'bob' });
+    const received = b.store.read().contracts.find((c) => c.id === contract.id);
+    assert.deepEqual(received?.underTest, ['src/run.mjs']);
+    assert.equal(received?.digest, contract.digest);
+    // Другой список underTest при прежнем digest — подмена договора.
+    const c = f.create('under-test-c', a);
+    const file = readdirSync(join(c.repo, '.devcontour'), { recursive: true })
+      .map((x) => join(c.repo, '.devcontour', String(x)))
+      .find((x) => x.endsWith('.json') && readFileSync(x, 'utf8').includes(contract.id))!;
+    rewrite(file, (value: { data: { underTest: string[] } }) => {
+      value.data.underTest = ['src/run.mjs', 'tests/accept-helpers.mjs'];
+    });
+    git(c.repo, 'commit', '-am', 'Widen underTest');
+    assert.throws(() => syncGit(c.h, { member: 'carol' }), /digest контракта/);
+    assert.equal(c.store.read().contracts.length, 0, 'импорт не применён');
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('Contracts pinned by the first formula keep syncing, stay approved and are still checked against Git', async () => {
   const f = fixture();
   try {
