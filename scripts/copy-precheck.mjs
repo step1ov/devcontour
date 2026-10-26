@@ -20,16 +20,20 @@
 // запуском остановите writers исходного workspace (docs/upgrade.md).
 //
 // Копируется R целиком, а сравниваются (оригинал с копией до проверки,
-// оригинал и копия до и после неё) только каталоги данных: каталог данных
-// workspace и `.devcontour-local` каждого репозитория конфигурации. Только их
-// читает `doctor --scope data`. Git (worktrees, index, refs) проверка данных не
-// читает, и его изменения во время копирования на её итог не влияют.
+// оригинал и копия до и после неё) только входы `doctor --scope data`:
+// каталог данных workspace, `.devcontour-local` каждого репозитория
+// конфигурации, файлы конфигурации компонентов (`configFile`), профили из
+// репозиториев (`packs[].source`), `devcontour.workspace.json` workspace и
+// HEAD (ветка и коммит) workspace и каждого репозитория. Прочее в Git
+// (worktrees, index, рабочие файлы) проверка данных не читает, и его изменения
+// во время копирования на её итог не влияют.
 //
 // Перед копированием скрипт сверяет свободное место во временном каталоге с
-// размером R. Свою временную копию он удаляет при любом исходе, кроме
-// завершённой проверки с `--keep`. Удаляется только каталог, созданный этим
-// запуском: `$TMPDIR/dc-copy-precheck-*` с меткой, в которой токен запуска.
-import { execFileSync } from 'node:child_process';
+// размером R. Свою временную копию он удаляет при любом исходе, в том числе
+// при SIGINT/SIGTERM, кроме завершённой проверки с `--keep`. Удаляется только
+// каталог, созданный этим запуском: `$TMPDIR/dc-copy-precheck-*` с меткой, в
+// которой токен запуска.
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   cpSync,
@@ -45,6 +49,7 @@ import {
   statfsSync,
   writeFileSync,
 } from 'node:fs';
+import { cp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -57,6 +62,7 @@ const markerName = '.dc-copy-precheck-owner';
 const token = randomUUID();
 let scratch;
 let keepScratch = false;
+let container;
 const removeOwnScratch = () => {
   const dir = scratch;
   scratch = undefined;
@@ -70,11 +76,19 @@ const removeOwnScratch = () => {
   }
   if (mark !== token) {
     console.error(
-      'copy-precheck: временный каталог не удалён — в нём нет метки этого запуска: ' + dir,
+      'copy-precheck: временный каталог не удалён — это не каталог этого запуска: ' + dir,
     );
     return;
   }
-  rmSync(dir, { recursive: true, force: true });
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch (error) {
+    console.error(
+      `copy-precheck: временную копию не удалось удалить (${error.code ?? error.message}): ${dir}. ` +
+        'Если файлы в ней создал контейнер от другого пользователя, удалите её вручную ' +
+        '(например, sudo rm -rf) — это каталог этого запуска.',
+    );
+  }
 };
 process.on('exit', removeOwnScratch);
 for (const [signal, code] of [
@@ -84,6 +98,7 @@ for (const [signal, code] of [
 ])
   process.on(signal, () => {
     console.error('copy-precheck: прервано (' + signal + ')');
+    container?.kill('SIGTERM');
     process.exit(code);
   });
 
@@ -107,6 +122,13 @@ const image = arg('--image') ?? 'node:24.3.0-bookworm';
 if (!root || !workspace || !archive)
   fail('нужны --root R, --workspace W и --archive devcontour-<version>.tgz');
 if (!existsSync(archive)) fail('архив не найден: ' + archive);
+// `docker run -v SRC:DST` делит значение по двоеточию.
+for (const [name, path] of [
+  ['--root', root],
+  ['каталог архива', dirname(archive)],
+  ['временный каталог (TMPDIR)', tmpdir()],
+])
+  if (path.includes(':')) fail(`${name} содержит «:» — Docker не смонтирует такой путь: ${path}`);
 const inside = (path, base) => {
   const r = relative(base, path);
   return r === '' || (!r.startsWith('..') && !isAbsolute(r));
@@ -138,26 +160,74 @@ for (const key of ['repository', 'workspaceRoot', 'repositories', 'components'])
 if (outside.length)
   fail('пути конфигурации вне --root (копия ссылалась бы на оригинал):\n  ' + outside.join('\n  '));
 
-// Каталоги данных относительно R: каталог данных workspace (с config.json) и
-// `.devcontour-local` каждого репозитория конфигурации (базы компонентов).
+// Входы проверки данных относительно R.
 const realOrResolved = (path) => (existsSync(path) ? realpathSync(path) : resolve(path));
+const entries = [...(config.repositories ?? []), ...(config.components ?? [])].filter(
+  (r) => typeof r?.path === 'string' && isAbsolute(r.path),
+);
+const repositoryPath = (id) =>
+  entries.find((r) => r.id === id)?.path ??
+  (id === 'main' && typeof config.repository === 'string' ? config.repository : undefined);
 const repositoryPaths = [
   ...(typeof config.repository === 'string' ? [config.repository] : []),
-  ...[...(config.repositories ?? []), ...(config.components ?? [])]
-    .map((r) => r?.path)
-    .filter((p) => typeof p === 'string' && isAbsolute(p)),
+  ...entries.map((r) => r.path),
 ];
-const dataDirs = [
+const workspaceRoot =
+  typeof config.workspaceRoot === 'string' && isAbsolute(config.workspaceRoot)
+    ? config.workspaceRoot
+    : configFile === localConfig
+      ? workspace
+      : undefined;
+const toRoot = (path) => relative(root, realOrResolved(path));
+const watched = [
   ...new Set([
     relative(root, dirname(configFile)),
-    ...repositoryPaths.map((p) => relative(root, join(realOrResolved(p), '.devcontour-local'))),
+    ...repositoryPaths.map((p) => toRoot(join(p, '.devcontour-local'))),
+    // Конфигурация компонента лежит в его репозитории (в Git).
+    ...entries
+      .filter((r) => typeof r.configFile === 'string')
+      .map((r) => toRoot(resolve(r.path, r.configFile))),
+    // Профили, установленные из репозитория: загрузчик сверяет их digest с lock.
+    ...(config.packs ?? [])
+      .filter((p) => p?.source && repositoryPath(p.source.repositoryId))
+      .map((p) => toRoot(resolve(repositoryPath(p.source.repositoryId), p.source.path))),
+    ...(workspaceRoot ? [toRoot(join(workspaceRoot, 'devcontour.workspace.json'))] : []),
   ]),
+]
+  .filter((p) => inside(join(root, p), root))
+  .sort();
+// Репозитории, чей HEAD (ветка и коммит) читает проверка: workspace
+// (основной checkout controller) и каждый репозиторий конфигурации.
+const heads = [
+  ...new Set([...(workspaceRoot ? [workspaceRoot] : []), ...repositoryPaths].map(toRoot)),
 ].sort();
 
-// Отпечаток каталогов данных: путь относительно base → содержимое файла
-// (ссылка — её цель). Отсутствующий каталог даёт пустой отпечаток.
+// Поиск репозитория не поднимается выше base: иначе оригинал внутри чужого
+// репозитория и копия во временном каталоге называли бы разные HEAD.
+const head = (dir, base) => {
+  const git = (...a) => {
+    try {
+      return execFileSync('git', ['-C', dir, ...a], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        env: {
+          ...process.env,
+          LC_ALL: 'C',
+          GIT_OPTIONAL_LOCKS: '0',
+          GIT_CEILING_DIRECTORIES: dirname(base),
+        },
+      }).trim();
+    } catch {
+      return '-';
+    }
+  };
+  return git('symbolic-ref', '-q', 'HEAD') + '@' + git('rev-parse', '-q', '--verify', 'HEAD');
+};
+// Отпечаток входов: путь относительно base → содержимое файла (ссылка — её
+// цель), `<репозиторий>@HEAD` → ветка и коммит. Отсутствующий путь пропускается.
 function tree(base) {
   const out = {};
+  const hash = (full) => createHash('sha256').update(readFileSync(full)).digest('hex');
   const visit = (dir) => {
     for (const name of readdirSync(dir).sort()) {
       const full = join(dir, name);
@@ -165,16 +235,18 @@ function tree(base) {
       const st = lstatSync(full);
       if (st.isSymbolicLink()) out[rel] = 'link:' + readlinkSync(full);
       else if (st.isDirectory()) visit(full);
-      else out[rel] = createHash('sha256').update(readFileSync(full)).digest('hex');
+      else out[rel] = hash(full);
     }
   };
-  for (const dir of dataDirs) {
-    const full = join(base, dir);
+  for (const path of watched) {
+    const full = join(base, path);
     if (!existsSync(full)) continue;
     const st = lstatSync(full);
-    if (st.isDirectory()) visit(full);
-    else out[dir] = st.isSymbolicLink() ? 'link:' + readlinkSync(full) : 'not-a-directory';
+    if (st.isSymbolicLink()) out[path] = 'link:' + readlinkSync(full);
+    else if (st.isDirectory()) visit(full);
+    else out[path] = hash(full);
   }
+  for (const repo of heads) out[(repo || '.') + '@HEAD'] = head(join(base, repo), base);
   return out;
 }
 const diff = (a, b) =>
@@ -208,13 +280,14 @@ if (free < required)
 scratch = mkdtempSync(scratchPrefix);
 writeFileSync(join(scratch, markerName), token);
 const copy = join(scratch, 'copy');
-cpSync(root, copy, { recursive: true, verbatimSymlinks: true, preserveTimestamps: true });
+// Асинхронно: сигнал во время долгого копирования обрабатывается сразу.
+await cp(root, copy, { recursive: true, verbatimSymlinks: true, preserveTimestamps: true });
 const copyBefore = tree(copy);
 const mismatch = diff(originalBefore, copyBefore);
 if (mismatch.length)
   fail(
-    'копия не совпала с оригиналом: во время копирования менялись каталоги данных ' +
-      '(остановите writers базы и повторите):\n  ' +
+    'копия не совпала с оригиналом: во время копирования менялись данные, конфигурация ' +
+      'или HEAD репозитория (остановите writers и повторите):\n  ' +
       listed(mismatch),
   );
 
@@ -254,41 +327,50 @@ const dataBefore = databases(copy);
 const touched = diff(copyBefore, tree(copy));
 if (touched.length) fail('чтение баз изменило копию до проверки:\n  ' + listed(touched));
 
+// Скрипт контейнера неизменен; пути и архив передаются аргументами ($1…),
+// а не подстановкой в текст. Контейнер работает от пользователя хоста:
+// файлы, которые он создаёт в копии, удаляются без root.
 const script = [
   'set -e',
+  'export HOME=/tmp/precheck-home && mkdir -p "$HOME"',
   'git config --global --add safe.directory "*"',
   'git config --global user.name precheck && git config --global user.email precheck@example.invalid',
-  'mkdir -p /opt/dc && cd /opt/dc',
-  'npm install --omit=dev --ignore-scripts --no-audit --no-fund /archive/' +
-    basename(archive) +
-    ' >/dev/null',
+  'mkdir -p /tmp/dc && cd /tmp/dc',
+  'npm install --omit=dev --ignore-scripts --no-audit --no-fund "/archive/$1" >/dev/null',
   'cd /',
-  `/opt/dc/node_modules/.bin/devcontour doctor --scope data ${target.map((a) => JSON.stringify(a)).join(' ')}`,
+  'exec /tmp/dc/node_modules/.bin/devcontour doctor --scope data "$2" "$3"',
 ].join('\n');
+const user =
+  typeof process.getuid === 'function' ? ['--user', `${process.getuid()}:${process.getgid()}`] : [];
+const dockerArgs = [
+  'run',
+  '--rm',
+  ...user,
+  // Копия смонтирована по абсолютному пути оригинала; сам оригинал — нет.
+  '-v',
+  `${copy}:${root}`,
+  '-v',
+  `${dirname(archive)}:/archive:ro`,
+  image,
+  'bash',
+  '-c',
+  script,
+  'precheck',
+  basename(archive),
+  ...target,
+];
 let output = '';
-let status = 0;
-try {
-  output = execFileSync(
-    'docker',
-    [
-      'run',
-      '--rm',
-      // Копия смонтирована по абсолютному пути оригинала; сам оригинал — нет.
-      '-v',
-      `${copy}:${root}`,
-      '-v',
-      `${dirname(archive)}:/archive:ro`,
-      image,
-      'bash',
-      '-c',
-      script,
-    ],
-    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
-  );
-} catch (error) {
-  status = error.status ?? 1;
-  output = String(error.stdout ?? '') + String(error.stderr ?? '');
-}
+const status = await new Promise((done) => {
+  container = spawn('docker', dockerArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+  container.stdout.on('data', (chunk) => (output += chunk));
+  container.stderr.on('data', (chunk) => (output += chunk));
+  container.on('error', (error) => {
+    output += String(error);
+    done(127);
+  });
+  container.on('close', (code) => done(code ?? 1));
+});
+container = undefined;
 const originalChanged = diff(originalBefore, tree(root));
 const copyChanged = diff(copyBefore, tree(copy));
 const copyDataChanged = diff(dataBefore, databases(copy));
@@ -298,7 +380,7 @@ const report = {
   archive: basename(archive),
   image,
   scope: 'data-compatibility',
-  compared: dataDirs,
+  compared: [...watched, ...heads.map((r) => (r || '.') + '@HEAD')],
   dataCheckExit: status,
   originalUnchanged: originalChanged.length === 0,
   copyChanged,
