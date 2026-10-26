@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { AgentContext } from '../src/application/context.ts';
+import { AgentContext, type taskProgress } from '../src/application/context.ts';
 import { specDigest, DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { config, fixture, input } from './helpers.ts';
@@ -92,6 +92,45 @@ test('Progress explains dependency, pause, assignment and attempt constraints wi
     assert.ok(reasons.includes('assigned_to_another_member'));
     assert.ok(reasons.includes('attempts_exhausted'));
     assert.equal(f.store.read().runs.length, 0);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('A task held by a contract-change operation names the hold in its progress and is not eligible', () => {
+  const f = fixture();
+  try {
+    const api = new AgentContext(f.h),
+      b = f.h.createBoard('Execution');
+    const a = f.h.addTask(b.id, input('Held task'));
+    f.h.approve(b.id);
+    f.h.pause(false);
+    const progressOf = () =>
+      (
+        api.execute('task_briefing', { taskId: a.id }) as {
+          progress: ReturnType<typeof taskProgress>;
+        }
+      ).progress;
+    const before = progressOf();
+    assert.equal(before.eligible, true);
+    assert.equal(before.hold, undefined);
+    f.h.hold([a.id], 'CC-fixture', 'Меняется контракт docs/contracts/api.md');
+    const progress = progressOf();
+    assert.deepEqual(progress.reasons, ['held_by_operation']);
+    assert.deepEqual(progress.hold, {
+      operation: 'CC-fixture',
+      kind: 'contract-change',
+      reason: 'Меняется контракт docs/contracts/api.md',
+    });
+    assert.equal(progress.eligible, false);
+    // Удержание видно и рядом с паузой: после её снятия задача всё равно не выйдет.
+    f.h.pause(true);
+    const paused = progressOf();
+    assert.deepEqual(paused.reasons, ['held_by_operation', 'queue_paused']);
+    f.h.release('CC-fixture');
+    const released = progressOf();
+    assert.deepEqual(released.reasons, ['queue_paused']);
+    assert.equal(released.hold, undefined);
   } finally {
     f.cleanup();
   }

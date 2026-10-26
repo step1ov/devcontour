@@ -87,6 +87,8 @@ const waitingReasons: Record<string, string> = {
   workers_busy: 'Все исполнители заняты. Задача ждёт свободного места.',
   workspace_operation_active: 'Идёт общая проверка или проверка публикации.',
   inactive_revision: 'Задача относится к неактивной ревизии.',
+  held_by_operation:
+    'Задачу удерживает операция изменения контракта: выдача возобновится, когда операция снимет удержание.',
   failure_requires_diagnosis: 'Разберите причину сбоя перед повторной попыткой.',
   attempts_exhausted: 'Лимит попыток исчерпан. Нужна диагностика и пересмотр решения.',
 };
@@ -2095,7 +2097,12 @@ export function App() {
                         <h3>Что нужно для продолжения</h3>
                         <ul>
                           {task.progress.reasons.map((reason) => (
-                            <li key={reason}>{waitingReasons[reason] ?? reason}</li>
+                            <li key={reason}>
+                              {waitingReasons[reason] ?? reason}
+                              {reason === 'held_by_operation' &&
+                                task.progress?.hold &&
+                                ` Операция ${task.progress.hold.operation}.`}
+                            </li>
                           ))}
                         </ul>
                       </section>

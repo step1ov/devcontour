@@ -1,6 +1,7 @@
 import { memoryDirectory } from '../core/placement.ts';
 import { assertTaskPreparation } from '../core/preparation.ts';
 import { ProjectMemory } from './memory.ts';
+import { short } from './bounded.ts';
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import {
@@ -83,6 +84,11 @@ export function taskProgress(h: DevContour, s: DevContourState, t: Task, now: nu
       before.push('product_approval_required');
     }
   }
+  // Удержание операции (изменение контракта) выдача соблюдает и для готовой
+  // задачи, и после снятия паузы: без причины в прогрессе оператор видел лишь
+  // паузу или зависимости и не знал, что задача не выйдет и после них.
+  const hold = t.hold && !['done', 'cancelled'].includes(t.status) ? t.hold : undefined;
+  if (hold) before.push('held_by_operation');
   if (t.status === 'ready') {
     const active = s.boards.some(
       (b) => b.revisions.at(-1)?.status === 'active' && b.revisions.at(-1)!.taskIds.includes(t.id),
@@ -114,6 +120,17 @@ export function taskProgress(h: DevContour, s: DevContourState, t: Task, now: nu
     attempt: t.attempt,
     dependencies: shared.dependencies,
     reasons: [...before, ...shared.reasons.map((r) => sharedReasons[r]), ...after],
+    ...(hold
+      ? {
+          hold: {
+            operation: short(hold.operation),
+            kind: hold.operation.startsWith('CC-') ? 'contract-change' : 'operation',
+            // Причину пишет операция, и её длину не ограничивает схема: в
+            // каждой строке задачи сводки она сокращена.
+            reason: short(hold.reason),
+          },
+        }
+      : {}),
     eligible: shared.eligible,
   };
 }
