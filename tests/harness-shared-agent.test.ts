@@ -20,12 +20,21 @@ import { fixture, input } from './helpers.ts';
 
 // Снято на HEAD 59e5000 (alpha.10, прежний код) и совпадает с baseline ab35a6a:
 //   node --import tsx -e "import('./src/application/agent.ts').then(a=>process.stdout.write(JSON.stringify(a.capabilities())))"
+// Каталог называет версию продукта; снимок снят на 0.4.0-alpha.7. Байты
+// сравниваются с подставленной версией снимка, версия — с package.json.
 const CATALOG_DIGEST = '862305bac2a606004d67a709234f7bbcd08c666e8bcd1b243a0d75e303770f1e';
+const SNAPSHOT_VERSION = '0.4.0-alpha.7';
+const { version } = JSON.parse(readFileSync(resolve('package.json'), 'utf8')) as {
+  version: string;
+};
+const atSnapshot = (text: string) =>
+  text.replace(`"version":"${version}"`, `"version":"${SNAPSHOT_VERSION}"`);
 const sha = (text: string | Buffer) => createHash('sha256').update(text).digest('hex');
 
 test('AC18: каталог DevContour байтово прежний — catalogDigest, HTTP /api/capabilities, CLI; каталоги harness и хоста раздельны', async () => {
-  assert.equal(digest(capabilities()), CATALOG_DIGEST);
-  assert.equal(sha(JSON.stringify(capabilities())), CATALOG_DIGEST);
+  assert.equal(capabilities().version, version);
+  assert.equal(digest({ ...capabilities(), version: SNAPSHOT_VERSION }), CATALOG_DIGEST);
+  assert.equal(sha(atSnapshot(JSON.stringify(capabilities()))), CATALOG_DIGEST);
   const c = capabilities();
   assert.equal(c.protocolVersion, 1);
   assert.equal(c.maxInputBytes, 100000);
@@ -41,7 +50,11 @@ test('AC18: каталог DevContour байтово прежний — catalogD
   const app = await serve(f.h, new Scheduler(f.h, f.root), { port: 0 });
   try {
     const body = Buffer.from(await (await fetch(app.url + '/api/capabilities')).arrayBuffer());
-    assert.equal(sha(body), CATALOG_DIGEST, 'тело HTTP /api/capabilities байтово прежнее');
+    assert.equal(
+      sha(atSnapshot(body.toString('utf8'))),
+      CATALOG_DIGEST,
+      'тело HTTP /api/capabilities байтово прежнее',
+    );
   } finally {
     await app.close();
     f.cleanup();
