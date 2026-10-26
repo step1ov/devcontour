@@ -1,5 +1,5 @@
 import { access, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
-import { constants } from 'node:fs';
+import { constants, existsSync } from 'node:fs';
 import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Config, DevContourState, Role } from '../core/model.ts';
@@ -23,7 +23,7 @@ import { agentEnvironment, reviewerRunsChecks, toolProfileFor, writerRunsChecks 
 import { taskContext } from './context.ts';
 import { forgeAdapter } from './forge.ts';
 import { DevContour } from '../core/service.ts';
-import { Store } from '../core/store.ts';
+import { Store, journalFiles } from '../core/store.ts';
 import { z } from 'zod';
 
 type Check = { id: string; status: 'passed' | 'blocked' | 'not-checked'; detail: string };
@@ -109,6 +109,20 @@ export function dataDoctor(config: Config, root: string) {
     return 'Конфигурация загружена штатным загрузчиком, принадлежит workspace и согласована';
   });
   let store: Store | undefined;
+  // Без файлов журнала база читается как неизменяемая (Store, только чтение):
+  // ни `-wal`, ни `-shm` проверка не создаёт. Появились они за время
+  // проверки — базу открыл writer, и прочитанное могло устареть.
+  const journal = journalFiles(join(root, 'state.sqlite'));
+  const quiet = !journal.some((f) => existsSync(f));
+  const settled = () => {
+    if (quiet && journal.some((f) => existsSync(f)))
+      checks.push({
+        id: 'storage-quiet',
+        status: 'blocked',
+        detail:
+          'Во время проверки базу открыл другой процесс (появились файлы журнала SQLite): остановите writers и повторите проверку',
+      });
+  };
   if (
     !check('storage', () => {
       store = new Store(
@@ -154,6 +168,7 @@ export function dataDoctor(config: Config, root: string) {
   } finally {
     store!.close();
   }
+  settled();
   return result();
 }
 

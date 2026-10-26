@@ -36,6 +36,7 @@ import { Workspace } from '../src/core/workspace.ts';
 import { repositories } from '../src/core/repositories.ts';
 import { DevContourExecutionStore } from '../src/harness/store.ts';
 import { executionOf } from '../src/harness/execution.ts';
+import { dataDoctor } from '../src/runner/doctor.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { syncGit } from '../src/runner/git-sync.ts';
@@ -636,6 +637,89 @@ function syncPeer(root: string, name: string, tamper?: (receipts: string) => voi
   gitIn(repo, 'update-ref', 'refs/heads/' + config.targetBranch, 'HEAD');
   return { h, store, repo };
 }
+
+/** Изменить документ состояния копии напрямую, как его оставила бы ранняя версия. */
+function editState(file: string, edit: (state: { runs: Record<string, unknown>[] }) => void) {
+  const db = new DatabaseSync(file);
+  const row = db.prepare('SELECT data FROM main.state WHERE id=1').get() as { data: string };
+  const state = JSON.parse(row.data) as { runs: Record<string, unknown>[] };
+  edit(state);
+  db.prepare('UPDATE main.state SET data=? WHERE id=1').run(JSON.stringify(state));
+  db.close();
+}
+
+/**
+ * Формы `continuedFrom`, записанные ранними версиями и перенесённые 0.3.0 как
+ * есть: без `kind` (продолжался только черновик по времени), `timeout` и
+ * `review`; рядом — текущая форма, которая не меняется. Попытки — из базы
+ * прежней версии, источники продолжения вымышленные.
+ */
+const earlyContinuations: Record<string, [Record<string, unknown>, Record<string, unknown>]> = {
+  'af5fb1da-11b2-4562-9f48-76773f735c7c': [
+    { runId: 'e7f8ae26-663a-4aef-a968-515bd8c57573', applied: true, files: ['src/a.ts'] },
+    { kind: 'unfinished', reason: 'timeout' },
+  ],
+  '3a999852-de00-4651-9320-8eecb36d3292': [
+    {
+      runId: 'af5fb1da-11b2-4562-9f48-76773f735c7c',
+      kind: 'review',
+      applied: true,
+      files: ['src/a.ts', 'src/b.ts'],
+    },
+    { kind: 'candidate', reason: 'review' },
+  ],
+  '62397b3d-3bb0-4ca5-b537-27d72749dcdf': [
+    { runId: 'cd460b1d-c592-4472-bd37-db4c80c7e3f6', kind: 'timeout', applied: false, files: [] },
+    { kind: 'unfinished', reason: 'timeout' },
+  ],
+  '8dbafef9-9e3b-4e37-a0be-51bac7d2fd5f': [
+    {
+      runId: '62397b3d-3bb0-4ca5-b537-27d72749dcdf',
+      kind: 'candidate',
+      reason: 'gate',
+      respecified: true,
+      applied: true,
+      files: ['src/c.ts'],
+    },
+    {},
+  ],
+};
+
+test('T35 central: продолжения попыток ранних версий читаются по смыслу, запись и проверка данных их не меняют', () =>
+  withLegacy('central', (c) => {
+    editState(c.files[0], (state) => {
+      for (const run of state.runs) {
+        const early = earlyContinuations[run.id as string];
+        if (early) run.continuedFrom = early[0];
+      }
+    });
+    const before = c.files.map(dump);
+    const s = new DevContourExecutionStore(openStore(c), options);
+    const attempts = new Map(s.read((v) => v.attempts()).map((a) => [a.id, a.continuedFrom]));
+    for (const [id, [recorded, meaning]] of Object.entries(earlyContinuations))
+      assert.deepEqual(attempts.get(id), { ...recorded, ...meaning }, id);
+    assert.deepEqual(c.files.map(dump), before, 'чтение не записало ничего');
+    const runs = s.store.read().runs;
+    // Неизменённая попытка записывается с той формой продолжения, что была.
+    s.transact('run.phase', (tx) => {
+      for (const a of tx.attempts()) tx.putAttempt(a);
+    });
+    assert.deepEqual(s.store.read().runs, runs, 'прежние формы не переписаны');
+    s.close();
+    const result = dataDoctor(configOf(c), c.data);
+    assert.equal(result.compatible, true, JSON.stringify(result.checks));
+    // Неизвестная форма не подменяется: её отклоняет договор harness.
+    editState(c.files[0], (state) => {
+      const run = state.runs.find((r) => r.id === '3a999852-de00-4651-9320-8eecb36d3292')!;
+      (run.continuedFrom as Record<string, unknown>).kind = 'other';
+    });
+    const unknown = dataDoctor(configOf(c), c.data);
+    assert.equal(unknown.compatible, false);
+    assert.match(
+      unknown.checks.find((x) => x.id === 'execution-state')?.detail ?? '',
+      /3a999852.*continuedFrom\.kind/,
+    );
+  }));
 
 /** Изменить receipt задачи по названию в клоне участника. */
 const editReceipt =

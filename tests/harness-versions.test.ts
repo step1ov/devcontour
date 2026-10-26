@@ -230,6 +230,39 @@ const editDocument = (file: string, edit: (state: Record<string, unknown>) => vo
   db.close();
 };
 
+test('doctor --scope data не создаёт файлы журнала рядом с базой WAL и учитывает журнал работающего writer', () => {
+  const f = stateWith(() => {});
+  try {
+    const listing = () => readdirSync(f.root).sort();
+    // Режим WAL — по заголовку файла: любое соединение создало бы -wal и -shm.
+    assert.deepEqual([...readFileSync(f.file).subarray(18, 20)], [2, 2], 'база в режиме WAL');
+    const before = listing();
+    assert.deepEqual(
+      before.filter((n) => /-(wal|shm|journal)$/.test(n)),
+      [],
+      'база закрыта штатно',
+    );
+    const hashed = hash(f.file);
+    const result = dataDoctor(config(), f.root);
+    assert.equal(result.compatible, true, JSON.stringify(result.checks));
+    assert.deepEqual(listing(), before, 'в каталоге данных не появилось ни одного файла');
+    assert.equal(hash(f.file), hashed);
+    // Writer держит базу: её журнал учитывается, его файлы не трогаются.
+    const writer = new DatabaseSync(f.file);
+    writer.exec('PRAGMA journal_mode=WAL; BEGIN IMMEDIATE; COMMIT;');
+    try {
+      const open = listing();
+      assert.ok(open.includes('state.sqlite-wal'), open.join(','));
+      assert.equal(dataDoctor(config(), f.root).compatible, true);
+      assert.deepEqual(listing(), open);
+    } finally {
+      writer.close();
+    }
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
 test('S4-R3-01/02: doctor --scope data открывает базы только для чтения, проверяет версию каждого документа и ничего не создаёт', () => {
   const blocked = (result: ReturnType<typeof dataDoctor>, id: string, pattern: RegExp) => {
     assert.equal(result.compatible, false, JSON.stringify(result.checks));

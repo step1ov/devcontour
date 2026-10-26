@@ -1,7 +1,8 @@
 import { ComponentStorage, type ComponentLocation } from './component-storage.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { existsSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { emptyState, type DevContourState, type AuditEvent } from './model.ts';
 /**
  * Пауза, записанная прежней версией, читается по её правилам.
@@ -34,6 +35,27 @@ function normalizePause(state: DevContourState & { pauseFailure?: unknown }) {
     state.pauseFailures = ['unknown'];
   return !!changed;
 }
+/** Служебные файлы журнала SQLite рядом с базой. */
+export const journalFiles = (path: string) =>
+  ['-wal', '-shm', '-journal'].map((suffix) => path + suffix);
+
+/**
+ * Адрес базы для соединения только для чтения. Даже такое соединение с базой
+ * в режиме WAL создаёт рядом `-wal` и `-shm`, если их нет. Нет ни одного
+ * служебного файла журнала — у базы нет незавершённых записей и открытых
+ * writers: она открывается как неизменяемая (`immutable=1`), без блокировок и
+ * без файлов рядом. Есть — обычным соединением только для чтения: чтение
+ * должно учесть журнал (файлы уже созданы их writer). Writer, начавший
+ * работу во время неизменяемого чтения, оставит свои файлы журнала — их
+ * появление проверяет вызывающий (`journalFiles`).
+ */
+function readOnlyLocation(path: string): string | URL {
+  if (journalFiles(path).some((f) => existsSync(f))) return path;
+  const url = pathToFileURL(resolve(path));
+  url.searchParams.set('immutable', '1');
+  return url;
+}
+
 export class Store {
   private db: DatabaseSync;
   /** Файл БД: его каталог — локальный корень, который не должен попадать в Git. */
@@ -63,7 +85,7 @@ export class Store {
     if (readOnly) {
       if (path === ':memory:' || !existsSync(path))
         throw new Error('База состояния не найдена: ' + path);
-      this.db = new DatabaseSync(path, { readOnly: true });
+      this.db = new DatabaseSync(readOnlyLocation(path), { readOnly: true });
     } else {
       if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
       this.db = new DatabaseSync(path);

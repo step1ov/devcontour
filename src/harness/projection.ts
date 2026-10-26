@@ -40,6 +40,7 @@ import type {
   Verification,
 } from '../core/model.ts';
 import { specDigest } from '../core/service.ts';
+import { isDeepStrictEqual } from 'node:util';
 
 /** Сведения хоста, которых нет в самих записях. */
 export interface ProjectionOptions {
@@ -332,6 +333,35 @@ const attemptKeys = Object.keys(attemptStateSchema.shape).filter(
 const toHarnessRuntime = (r: string) => (r === 'demo' ? 'fixture' : r);
 const toHostRuntime = (r: string) => (r === 'fixture' ? 'demo' : r);
 
+/**
+ * Продолжение попытки в форме договора harness. Ранние версии записывали
+ * источник продолжения иначе, и такие записи остались в истории:
+ *
+ * - без `kind` — продолжался только черновик попытки, исчерпавшей время
+ *   (других источников не было): незаконченная работа, отказ `timeout`;
+ * - `kind: 'timeout'` — тот же черновик по времени: незаконченная работа,
+ *   отказ `timeout`;
+ * - `kind: 'review'` — кандидат, отклонённый ревью: кандидат, отказ `review`.
+ *
+ * Класс отказа источника в этих формах был самим `kind`; записанный `reason`
+ * не заменяется. Запись в базе не переписывается: перевод — только на
+ * границе чтения, а `putAttempt` возвращает прежнюю форму, если движок её
+ * не менял. Неизвестное значение не подменяется — его отклоняет схема.
+ */
+export function continuationOf(
+  from: Run['continuedFrom'],
+): AttemptState['continuedFrom'] | Run['continuedFrom'] {
+  if (!from) return from;
+  const legacy =
+    from.kind === undefined || from.kind === 'timeout'
+      ? { kind: 'unfinished' as const, reason: 'timeout' as const }
+      : from.kind === 'review'
+        ? { kind: 'candidate' as const, reason: 'review' as const }
+        : undefined;
+  if (!legacy) return from;
+  return { ...from, kind: legacy.kind, reason: from.reason ?? legacy.reason };
+}
+
 export function attemptOf(state: DevContourState, run: Run): AttemptState {
   const repositoryId =
     run.repositoryId ?? state.tasks.find((t) => t.id === run.taskId)?.repositoryId ?? 'main';
@@ -339,6 +369,7 @@ export function attemptOf(state: DevContourState, run: Run): AttemptState {
     ...Object.fromEntries(
       attemptKeys.map((k) => [k, (run as unknown as Record<string, unknown>)[k]]),
     ),
+    continuedFrom: continuationOf(run.continuedFrom),
     workId: run.taskId,
     repositoryId,
     runtime: toHarnessRuntime(run.runtime),
@@ -356,7 +387,11 @@ export function putAttempt(state: DevContourState, attempt: AttemptState) {
     state.runs.push(run);
   }
   const target = run as unknown as Record<string, unknown>;
+  // Продолжение прежней формы, которое движок не менял, остаётся как записано.
+  const recorded = run.continuedFrom;
   assign(target, attemptKeys, next);
+  if (recorded && isDeepStrictEqual(defined(continuationOf(recorded)!), next.continuedFrom))
+    run.continuedFrom = recorded;
   target.taskId = next.workId;
   target.repositoryId = next.repositoryId;
   target.runtime = toHostRuntime(next.runtime);
