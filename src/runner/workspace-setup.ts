@@ -119,6 +119,13 @@ const withComponentRoles = <T extends Record<string, unknown>>(
       }
     : top;
 const differs = (a: unknown, b: unknown) => JSON.stringify(a) !== JSON.stringify(b);
+type Review = NonNullable<z.infer<typeof configSchema.shape.review>>;
+/**
+ * Правила ревью переносятся по видам: реестр, объявивший только `code`, не
+ * стирает выбранные в config.json `plan` и `contract`.
+ */
+const withReview = (existing: Review | undefined, declared: Review | undefined) =>
+  declared ? { ...existing, ...declared } : existing;
 export async function setupWorkspace(file: string, data?: string) {
   const source = await realpath(resolve(file));
   const workspaceRoot = dirname(source);
@@ -290,7 +297,9 @@ export async function setupWorkspace(file: string, data?: string) {
           ),
           runTimeoutMs: config.runTimeoutMs,
           protectedPaths: repos[0].protectedPaths,
-          ...(input.review ? { review: input.review } : {}),
+          ...(input.review
+            ? { review: withReview((raw as { review?: Review }).review, input.review) }
+            : {}),
           roles: withComponentRoles(
             withDeclaredRoles(
               (raw as { roles?: Record<string, Record<string, unknown>> }).roles ?? {},
@@ -409,7 +418,7 @@ export async function setupWorkspace(file: string, data?: string) {
       // оставалось действующим.
       JSON.stringify(existing.contextPacks.map(declaration)) !==
         JSON.stringify(config.contextPacks.map(declaration)) ||
-      (input.review !== undefined && differs(existing.review, input.review)) ||
+      differs(existing.review, withReview(existing.review, input.review)) ||
       derivedStale;
     if (declarationChanged) {
       const contextPacks = withPins(existing.contextPacks, config.contextPacks);
@@ -423,7 +432,7 @@ export async function setupWorkspace(file: string, data?: string) {
           contextPacks,
           environment: config.environment,
           toolProfiles: config.toolProfiles,
-          review: input.review ?? existing.review,
+          review: withReview(existing.review, input.review),
           roles,
         },
         null,

@@ -548,6 +548,9 @@ test('workspace-init переносит правила ревью, а панел
       name: 'Product',
       kind: 'product',
       gates: [{ ...testGate, id: 'component-own' }],
+      // Ревьюер компонента проверяет его роли без своего ревьюера: копия роли
+      // на верхнем уровне обязана нести его, а не общий codex.
+      reviewer: { runtime: 'claude' },
       roles: {
         backend: {
           runtime: 'claude',
@@ -555,6 +558,11 @@ test('workspace-init переносит правила ревью, а панел
           reviewVendor: 'same-vendor-allowed',
           requiresContract: true,
         },
+        architect: { runtime: 'codex' },
+        frontend: { runtime: 'codex' },
+        qa: { runtime: 'codex' },
+        // Роль только компонента на верхний уровень не копируется.
+        mobile: { runtime: 'codex', reviewer: { runtime: 'claude' }, title: 'Мобильный' },
       },
     };
     await json(componentPath, component);
@@ -591,6 +599,8 @@ test('workspace-init переносит правила ревью, а панел
     assert.ok(!refreshed.protectedPaths.includes('stale/'));
     assert.equal(refreshed.roles.backend.reviewer.runtime, 'claude');
     assert.equal(refreshed.roles.backend.reviewVendor, 'same-vendor-allowed');
+    assert.equal(refreshed.roles.qa.reviewer.runtime, 'claude', 'ревьюер компонента');
+    assert.ok(!('mobile' in refreshed.roles), 'роль компонента не стала общей');
     assert.equal((await setupWorkspace(registry)).status, 'preserved');
 
     // Правила ревью объявляются реестром и переносятся workspace-init.
@@ -607,6 +617,12 @@ test('workspace-init переносит правила ревью, а панел
     await json(registry, declared);
     assert.equal((await setupWorkspace(registry)).status, 'preserved');
     assert.deepEqual(loadConfig(configPath).review, review);
+    // Реестр, объявивший один вид, заменяет только его: plan и contract,
+    // выбранные раньше, не стираются.
+    const code = { reviewer: { runtime: 'claude' }, vendor: 'same-vendor-allowed' };
+    await json(registry, { ...declared, review: { code } });
+    assert.equal((await setupWorkspace(registry)).status, 'declaration-updated');
+    assert.deepEqual(loadConfig(configPath).review, { ...review, code });
 
     // Объявление проверяется до записи: неизвестное правило и ревьюер того же
     // вендора без явного разрешения отклоняются, config.json не меняется.

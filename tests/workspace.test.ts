@@ -1042,3 +1042,40 @@ test('Продуктовые условия записи проверки: пр�
     f.cleanup();
   }
 });
+
+test('workspace-init не трогает общие роли верхнего уровня, когда компонентов несколько', async () => {
+  // При нескольких компонентах верхнеуровневая роль — общий запасной выбор,
+  // а не копия одного компонента: привязка роли в одном из них не должна её
+  // переписать.
+  const f = await multiRepo();
+  try {
+    const path = join(f.c.workspaceRoot!, 'workspace.json');
+    const registry = {
+      version: 1,
+      name: 'Example workspace',
+      repositories: f.c.repositories.map((r) => ({ ...r, profile: 'react-vite-admin' })) as {
+        roles?: Record<string, unknown>;
+      }[],
+      workspaceGates: f.c.workspaceGates,
+    };
+    await writeFile(path, JSON.stringify(registry));
+    assert.equal((await setupWorkspace(path, f.data)).status, 'configured');
+    const configPath = join(f.data, 'config.json');
+    const shared = JSON.parse(await readFile(configPath, 'utf8')) as {
+      roles: Record<string, { model?: string }>;
+    };
+    shared.roles.backend.model = 'shared-fallback';
+    await writeFile(configPath, JSON.stringify(shared));
+    registry.repositories[0].roles = {
+      backend: { runtime: 'claude', model: 'component-choice', reviewer: { runtime: 'codex' } },
+    };
+    await writeFile(path, JSON.stringify(registry));
+    assert.equal((await setupWorkspace(path, f.data)).status, 'declaration-updated');
+    const after = loadConfig(configPath);
+    assert.equal(after.repositories[0].roles!.backend.model, 'component-choice');
+    assert.equal(after.roles.backend.model, 'shared-fallback', 'общий выбор не переписан');
+    assert.equal((await setupWorkspace(path, f.data)).status, 'preserved');
+  } finally {
+    await f.cleanup();
+  }
+});

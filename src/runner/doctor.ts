@@ -41,6 +41,9 @@ type Check = {
   status: 'passed' | 'blocked' | 'not-checked' | 'degraded';
   detail: string;
 };
+/** Готовность снимает только `blocked`; `degraded` и `not-checked` её не снимают. */
+export const doctorReady = (checks: Pick<Check, 'status'>[]) =>
+  !checks.some((c) => c.status === 'blocked');
 const bindingLabel = (b: { runtime: string; model?: string }) =>
   b.model ? `${b.runtime} (${b.model})` : b.runtime;
 export async function executable(file: string) {
@@ -704,7 +707,7 @@ export async function doctor(
     });
   const result = {
     scope: probe ? 'configured-probes' : 'static',
-    ready: !checks.some((c) => c.status === 'blocked'),
+    ready: doctorReady(checks),
     checks,
   };
   await mkdir(root, { recursive: true });

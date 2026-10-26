@@ -26,7 +26,7 @@ import { ResourcePool, resourceDatabase, withResources } from '../src/runner/res
 import { snapshotDependencies, assertDependencies } from '../src/runner/dependencies.ts';
 import { DeliveryRunner } from '../src/runner/forge.ts';
 import { attachJournal } from '../src/runner/journal.ts';
-import { doctor } from '../src/runner/doctor.ts';
+import { doctor, doctorReady } from '../src/runner/doctor.ts';
 import { importKnowledge } from '../src/runner/knowledge.ts';
 
 const makeRoot = () => mkdtemp(join(tmpdir(), 'devcontour-enterprise-'));
@@ -915,4 +915,10 @@ test('Doctor marks a claude reviewer without a tool profile as degraded and name
   } finally {
     await f.close();
   }
+});
+
+test('Doctor readiness: degraded and not-checked do not block, blocked does', () => {
+  assert.equal(doctorReady([{ status: 'passed' }, { status: 'degraded' }]), true);
+  assert.equal(doctorReady([{ status: 'not-checked' }]), true);
+  assert.equal(doctorReady([{ status: 'degraded' }, { status: 'blocked' }]), false);
 });

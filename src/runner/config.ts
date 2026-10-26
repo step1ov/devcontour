@@ -31,12 +31,16 @@ export function loadConfig(path: string, text = readFileSync(path, 'utf8')): Con
     // устаревала после правки файла компонента, и панель с doctor показывали
     // список, по которому контур уже не работал. Действует то, что объявил
     // компонент.
-    if (raw.repositories[0].gates) raw.gates = raw.repositories[0].gates;
+    // Схема требует верхнеуровневые gates; действующее значение ставится ниже.
+    raw.gates ??= raw.repositories[0].gates;
   }
   const c = configSchema.parse(raw);
-  // protectedPaths — после разбора: у компонента без своего списка действует
-  // умолчание схемы компонента, а не прежняя копия верхнего уровня.
-  if (c.repositories.length) c.protectedPaths = c.repositories[0].protectedPaths;
+  // Оба значения — после разбора: у компонента без своего списка
+  // protectedPaths действует умолчание схемы компонента, а не прежняя копия.
+  if (c.repositories.length) {
+    c.gates = c.repositories[0].gates;
+    c.protectedPaths = c.repositories[0].protectedPaths;
+  }
   // Исходные написания нужны очистке диагностики до того, как их заменит realpath.
   configuredSpellings.set(
     c,
