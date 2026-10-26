@@ -6,7 +6,10 @@ import { fileURLToPath } from 'node:url';
 import { resolveProfile as harnessResolveProfile } from 'devcontour-harness';
 import { HarnessError } from 'devcontour-harness/contracts';
 import { resolveProfile, profilePin } from '../src/runner/packs.ts';
-import { projectConfig } from '../src/runner/setup.ts';
+import { projectConfig, setupProject } from '../src/runner/setup.ts';
+import { mkdir, mkdtemp, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // OP-PROFILE-01 (Q5): DevContour разрешает профили алгоритмом harness, а не
 // своей копией. expected.json — выдача прежнего резолвера DevContour
@@ -172,4 +175,86 @@ test('packs.ts keeps no copy of the resolver algorithm', () => {
     'toolchain не поддерживается',
   ])
     assert.ok(!source.includes(marker), 'packs.ts всё ещё содержит ' + marker);
+});
+
+// DC-F003 / contract-map §34: путь отчёта JUnit с концом строки — намеренное
+// отличие (тот же принцип, что §31 у путей draft). Прежний резолвер его
+// принимал; resolver harness отклоняет текстом K10 до любой записи setup.
+// Прочие отказы пути (выход вверх, абсолютный, обратная косая, glob) — как прежде.
+test('DC-F003: путь JUnit с концом строки, вверх, абсолютный, с обратной косой или glob — отказ; setup ничего не пишет', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'devcontour-junit-path-')));
+  try {
+    const paths: [string, RegExp][] = [
+      ['test\nreport.xml', /Путь JUnit gate tests/],
+      ['test\rreport.xml', /Путь JUnit gate tests/],
+      ['test report.xml', /Путь JUnit gate tests/],
+      ['test report.xml', /Путь JUnit gate tests/],
+      ['../out.xml', /Путь JUnit gate tests/],
+      ['/abs/out.xml', /Путь JUnit gate tests/],
+      ['a\\b.xml', /Путь JUnit gate tests/],
+      ['reports/*.xml', /Путь JUnit gate tests/],
+    ];
+    for (const [index, [path, refusal]] of paths.entries()) {
+      const repo = join(root, 'p' + index);
+      await mkdir(join(repo, 'profiles'), { recursive: true });
+      await mkdir(join(repo, 'docs'));
+      await writeFile(join(repo, 'docs/spec.md'), '# Каталог\nПоиск.');
+      // Вход DC-F003 (codex-work/junit-newline/profile.json) с разными путями.
+      await writeFile(
+        join(repo, 'profiles/junit.json'),
+        JSON.stringify({
+          id: 'junit-path',
+          version: '1.0.0',
+          gates: [
+            {
+              id: 'tests',
+              kind: 'test',
+              command: ['node', '-e', '0'],
+              report: { type: 'junit', path },
+            },
+          ],
+        }),
+      );
+      assert.throws(
+        () => resolveProfile('./profiles/junit.json', repo),
+        refusal,
+        JSON.stringify(path),
+      );
+      const before = (await readdir(repo, { recursive: true })).sort();
+      await assert.rejects(
+        setupProject({ repository: repo, profile: './profiles/junit.json' }),
+        refusal,
+        JSON.stringify(path),
+      );
+      assert.deepEqual(
+        (await readdir(repo, { recursive: true })).sort(),
+        before,
+        'setup ничего не записал',
+      );
+    }
+    // Обычный относительный путь тем же профилем по-прежнему принимается.
+    const ok = join(root, 'ok');
+    await mkdir(join(ok, 'profiles'), { recursive: true });
+    await writeFile(
+      join(ok, 'profiles/junit.json'),
+      JSON.stringify({
+        id: 'junit-path',
+        version: '1.0.0',
+        gates: [
+          {
+            id: 'tests',
+            kind: 'test',
+            command: ['node', '-e', '0'],
+            report: { type: 'junit', path: 'reports/junit.xml' },
+          },
+        ],
+      }),
+    );
+    assert.equal(
+      resolveProfile('./profiles/junit.json', ok).gates[0].report?.path,
+      'reports/junit.xml',
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
