@@ -13,8 +13,9 @@ import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } 
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { DevContour } from '../src/core/service.ts';
-import { Store } from '../src/core/store.ts';
+import { Store, readOnlyLocation } from '../src/core/store.ts';
 import { harnessVersion } from '../src/harness/index.ts';
 import { dataDoctor, engineCheck } from '../src/runner/doctor.ts';
 import { config, fixture, input } from './helpers.ts';
@@ -230,7 +231,17 @@ const editDocument = (file: string, edit: (state: Record<string, unknown>) => vo
   db.close();
 };
 
-test('doctor --scope data не создаёт файлы журнала рядом с базой WAL и учитывает журнал работающего writer', () => {
+/** Живая роль controller другой версии: проверка `engine` её видит, если читает актуальное состояние. */
+const liveForeignLeader = (db: DatabaseSync) => {
+  const row = db.prepare('SELECT data FROM main.state WHERE id=1').get() as { data: string };
+  const state = JSON.parse(row.data) as Record<string, unknown>;
+  state.leader = { owner: 'x', leaseUntil: Date.now() + 60_000, engineVersion: '9.9.9-newer' };
+  db.prepare('UPDATE main.state SET data=? WHERE id=1').run(JSON.stringify(state));
+};
+const engineStatus = (result: ReturnType<typeof dataDoctor>) =>
+  result.checks.find((c) => c.id === 'engine')?.status;
+
+test('WAL: doctor --scope data не создаёт файлы журнала рядом с базой и читает состояние, которое есть только в журнале writer', () => {
   const f = stateWith(() => {});
   try {
     const listing = () => readdirSync(f.root).sort();
@@ -247,19 +258,67 @@ test('doctor --scope data не создаёт файлы журнала рядо
     assert.equal(result.compatible, true, JSON.stringify(result.checks));
     assert.deepEqual(listing(), before, 'в каталоге данных не появилось ни одного файла');
     assert.equal(hash(f.file), hashed);
-    // Writer держит базу: её журнал учитывается, его файлы не трогаются.
+    // Writer держит базу, и его запись лежит только в журнале: проверка её
+    // видит (журнал учтён), его файлы не трогаются.
     const writer = new DatabaseSync(f.file);
-    writer.exec('PRAGMA journal_mode=WAL; BEGIN IMMEDIATE; COMMIT;');
+    writer.exec('PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;');
+    liveForeignLeader(writer);
     try {
+      assert.equal(hash(f.file), hashed, 'запись не перенесена в файл базы');
       const open = listing();
       assert.ok(open.includes('state.sqlite-wal'), open.join(','));
-      assert.equal(dataDoctor(config(), f.root).compatible, true);
+      const live = dataDoctor(config(), f.root);
+      assert.equal(engineStatus(live), 'blocked', JSON.stringify(live.checks));
       assert.deepEqual(listing(), open);
     } finally {
       writer.close();
     }
   } finally {
     rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('WAL: writer, записавший и закрывший базу во время проверки данных, делает итог несовместимым (storage-quiet)', () => {
+  const f = stateWith(() => {});
+  const read: Store['read'] = Reflect.get(Store.prototype, 'read');
+  try {
+    // Writer открывает базу, пишет, переносит журнал в файл и закрывается
+    // посреди проверки: файлов журнала после него нет, меняется сам файл.
+    Store.prototype.read = function (this: Store) {
+      const state = read.call(this);
+      const writer = new DatabaseSync(f.file);
+      liveForeignLeader(writer);
+      writer.close();
+      return state;
+    };
+    const result = dataDoctor(config(), f.root);
+    assert.deepEqual(
+      readdirSync(f.root).filter((n) => /-(wal|shm|journal)$/.test(n)),
+      [],
+      'файлов журнала после writer нет',
+    );
+    assert.equal(result.compatible, false, JSON.stringify(result.checks));
+    assert.equal(result.checks.find((c) => c.id === 'storage-quiet')?.status, 'blocked');
+  } finally {
+    Store.prototype.read = read;
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('Неизменяемым чтение открывает только базу WAL без файлов журнала; база DELETE — с блокировками', () => {
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-data-doctor-'));
+  try {
+    const file = join(root, 'state.sqlite');
+    const db = new DatabaseSync(file);
+    db.exec('PRAGMA journal_mode=DELETE; CREATE TABLE x(a); INSERT INTO x VALUES (1);');
+    db.close();
+    assert.equal(readOnlyLocation(file), file, 'база DELETE');
+    const wal = new DatabaseSync(file);
+    wal.exec('PRAGMA journal_mode=WAL;');
+    wal.close();
+    assert.equal(String(readOnlyLocation(file)), pathToFileURL(file).href + '?immutable=1');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

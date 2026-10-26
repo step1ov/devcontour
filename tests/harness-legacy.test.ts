@@ -672,6 +672,27 @@ const earlyContinuations: Record<string, [Record<string, unknown>, Record<string
     { runId: 'cd460b1d-c592-4472-bd37-db4c80c7e3f6', kind: 'timeout', applied: false, files: [] },
     { kind: 'unfinished', reason: 'timeout' },
   ],
+  // Прежняя форма с записанным классом отказа: класс сохраняется.
+  'e7f8ae26-663a-4aef-a968-515bd8c57573': [
+    {
+      runId: '0facc6e5-580b-4958-903f-7943fc77339e',
+      kind: 'timeout',
+      reason: 'environment',
+      applied: true,
+      files: [],
+    },
+    { kind: 'unfinished' },
+  ],
+  'cd460b1d-c592-4472-bd37-db4c80c7e3f6': [
+    {
+      runId: '4cc47c4f-1d29-4929-8067-d08e8aaeac7b',
+      kind: 'review',
+      reason: 'gate',
+      applied: false,
+      files: ['src/d.ts'],
+    },
+    { kind: 'candidate' },
+  ],
   '8dbafef9-9e3b-4e37-a0be-51bac7d2fd5f': [
     {
       runId: '62397b3d-3bb0-4ca5-b537-27d72749dcdf',
@@ -705,6 +726,19 @@ test('T35 central: продолжения попыток ранних верси
       for (const a of tx.attempts()) tx.putAttempt(a);
     });
     assert.deepEqual(s.store.read().runs, runs, 'прежние формы не переписаны');
+    // Движок изменил продолжение прежней попытки — записано новое значение.
+    const changed = '3a999852-de00-4651-9320-8eecb36d3292';
+    s.transact('run.phase', (tx) => {
+      const a = tx.attempts().find((x) => x.id === changed)!;
+      tx.putAttempt({ ...a, continuedFrom: { ...a.continuedFrom!, applied: false, files: [] } });
+    });
+    assert.deepEqual(s.store.read().runs.find((r) => r.id === changed)?.continuedFrom, {
+      runId: 'af5fb1da-11b2-4562-9f48-76773f735c7c',
+      kind: 'candidate',
+      reason: 'review',
+      applied: false,
+      files: [],
+    });
     s.close();
     const result = dataDoctor(configOf(c), c.data);
     assert.equal(result.compatible, true, JSON.stringify(result.checks));

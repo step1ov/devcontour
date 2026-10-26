@@ -1,6 +1,6 @@
 import { ComponentStorage, type ComponentLocation } from './component-storage.ts';
 import { DatabaseSync } from 'node:sqlite';
-import { existsSync, mkdirSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { emptyState, type DevContourState, type AuditEvent } from './model.ts';
@@ -39,18 +39,32 @@ function normalizePause(state: DevContourState & { pauseFailure?: unknown }) {
 export const journalFiles = (path: string) =>
   ['-wal', '-shm', '-journal'].map((suffix) => path + suffix);
 
+/** База в режиме WAL: версии записи и чтения в заголовке файла (байты 18–19) равны 2. */
+function walMode(path: string) {
+  const header = Buffer.alloc(20);
+  const fd = openSync(path, 'r');
+  try {
+    if (readSync(fd, header, 0, 20, 0) < 20) return false;
+  } finally {
+    closeSync(fd);
+  }
+  return header[18] === 2 && header[19] === 2;
+}
+
 /**
  * Адрес базы для соединения только для чтения. Даже такое соединение с базой
- * в режиме WAL создаёт рядом `-wal` и `-shm`, если их нет. Нет ни одного
- * служебного файла журнала — у базы нет незавершённых записей и открытых
- * writers: она открывается как неизменяемая (`immutable=1`), без блокировок и
- * без файлов рядом. Есть — обычным соединением только для чтения: чтение
- * должно учесть журнал (файлы уже созданы их writer). Writer, начавший
- * работу во время неизменяемого чтения, оставит свои файлы журнала — их
- * появление проверяет вызывающий (`journalFiles`).
+ * в режиме WAL создаёт рядом `-wal` и `-shm`, если их нет. База WAL без
+ * служебных файлов журнала не имеет незавершённых записей и открытых
+ * writers: она открывается как неизменяемая (`immutable=1`), без файлов
+ * рядом. Есть файлы журнала — обычным соединением: чтение учитывает журнал.
+ * Базу в режиме DELETE соединение только для чтения файлами не дополняет, а
+ * writer между транзакциями файлов не оставляет: она открывается обычно, с
+ * блокировками, — неизменяемое чтение допустило бы разорванное чтение.
+ * Writer, начавший работу во время неизменяемого чтения, проверяет
+ * вызывающий (`journalFiles`, отпечаток файла базы).
  */
-function readOnlyLocation(path: string): string | URL {
-  if (journalFiles(path).some((f) => existsSync(f))) return path;
+export function readOnlyLocation(path: string): string | URL {
+  if (journalFiles(path).some((f) => existsSync(f)) || !walMode(path)) return path;
   const url = pathToFileURL(resolve(path));
   url.searchParams.set('immutable', '1');
   return url;

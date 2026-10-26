@@ -1,5 +1,5 @@
 import { access, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
-import { constants, existsSync } from 'node:fs';
+import { constants, existsSync, statSync } from 'node:fs';
 import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Config, DevContourState, Role } from '../core/model.ts';
@@ -109,18 +109,29 @@ export function dataDoctor(config: Config, root: string) {
     return 'Конфигурация загружена штатным загрузчиком, принадлежит workspace и согласована';
   });
   let store: Store | undefined;
-  // Без файлов журнала база читается как неизменяемая (Store, только чтение):
-  // ни `-wal`, ни `-shm` проверка не создаёт. Появились они за время
-  // проверки — базу открыл writer, и прочитанное могло устареть.
-  const journal = journalFiles(join(root, 'state.sqlite'));
+  // Без файлов журнала база WAL читается как неизменяемая (Store, только
+  // чтение): ни `-wal`, ни `-shm` проверка не создаёт. Появились файлы
+  // журнала или изменился сам файл базы (writer открыл, записал, перенёс
+  // журнал в базу и закрылся) — прочитанное могло устареть.
+  const file = join(root, 'state.sqlite');
+  const journal = journalFiles(file);
+  const print = () => {
+    try {
+      const s = statSync(file);
+      return JSON.stringify([s.ino, s.size, s.mtimeMs, s.ctimeMs]);
+    } catch {
+      return 'missing';
+    }
+  };
   const quiet = !journal.some((f) => existsSync(f));
+  const before = print();
   const settled = () => {
-    if (quiet && journal.some((f) => existsSync(f)))
+    if (quiet && (journal.some((f) => existsSync(f)) || print() !== before))
       checks.push({
         id: 'storage-quiet',
         status: 'blocked',
         detail:
-          'Во время проверки базу открыл другой процесс (появились файлы журнала SQLite): остановите writers и повторите проверку',
+          'Во время проверки базу менял другой процесс (файлы журнала SQLite или файл базы): остановите writers и повторите проверку',
       });
   };
   if (
