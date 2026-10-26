@@ -66,6 +66,33 @@ export const contractProposal = z
   .refine((p) => Boolean(p.content) !== Boolean(p.file), {
     message: 'Укажите либо file — путь к контракту в репозитории, либо content',
   });
+/**
+ * Предупреждение до вызова модели: предложение без `checks` ревьюер оценит по
+ * правилу `verifiability`, и контракт с вычислительными обещаниями будет
+ * отклонён. Есть ли такие обещания, решает ревьюер по смыслу — по словам
+ * контур их не определяет, поэтому это предупреждение, а не отказ. Оно
+ * касается и изменения контракта, утверждённого до появления договора
+ * проверки: прежняя редакция без `checks` не освобождает новую от правила.
+ */
+export function checksWarnings(
+  proposal: { checks?: unknown },
+  current?: { checks?: unknown } | null,
+) {
+  if (proposal.checks) return [];
+  return [
+    {
+      code: 'checks-missing' as const,
+      rule: VERIFIABILITY,
+      message:
+        'Предложение без checks: ревью оценит контракт по правилу verifiability, и контракт с вычислительными обещаниями (точность, оптимальность, полнота, производительность) без структурного checks будет отклонён. Объявите обязательства по docs/check-contracts.md; для контракта без таких обещаний (CRUD, сценарии) checks не нужен.' +
+        (current
+          ? current.checks
+            ? ' Действующая редакция объявляет checks — предложение его снимает.'
+            : ' Правило действует и для контракта, утверждённого до появления checks.'
+          : ''),
+    },
+  ];
+}
 type Author = 'codex' | 'claude';
 type Runtimes = Record<Author, AgentAdapter>;
 

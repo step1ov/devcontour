@@ -15,11 +15,15 @@ import fs, {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { config, fixture, input } from './helpers.ts';
 import { repositorySchema } from '../src/core/model.ts';
-import { reviewContract, reviewPlan } from '../src/runner/agent-control.ts';
-import { ContractChanges, type ContractChange } from '../src/runner/contract-change.ts';
+import { checksWarnings, reviewContract, reviewPlan } from '../src/runner/agent-control.ts';
+import {
+  ContractChanges,
+  clipAtBoundary,
+  type ContractChange,
+} from '../src/runner/contract-change.ts';
 import { contractImpact } from '../src/runner/contract-impact.ts';
 import { adapters, type AgentAdapter, type AgentRequest } from '../src/runner/adapters.ts';
 import { readyTasks } from '../src/core/graph.ts';
@@ -35,6 +39,7 @@ import { Previews } from '../src/core/preview.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { serveReconfigure } from '../src/runner/reconfigure.ts';
+import { command } from '../src/runner/process.ts';
 
 /** Ревьюер-фикстура: одобряет и считает вызовы по предмету ревью. */
 function reviewers(calls: string[]) {
@@ -148,6 +153,123 @@ test('A contract change runs as one command: review, rebind, plan review, base a
     assert.equal(s.store.read().paused, true, 'пауза оператора не снята');
     // Повтор команды по той же редакции ничего не меняет.
     assert.equal((await s.changes().start(s.proposal, 'codex')).status, 'unchanged');
+  } finally {
+    await s.remove();
+  }
+});
+
+test('A revision without checks is warned about before the model call; a rejected review keeps a readable detail and a link to its full text', async () => {
+  const s = await stage();
+  try {
+    s.h.pause(true);
+    // Предупреждение видно до ревью: в отчёте влияния и при старте операции.
+    const impact = await contractImpact(s.h, s.proposal);
+    assert.equal(impact.warnings.length, 1);
+    assert.equal(impact.warnings[0].code, 'checks-missing');
+    assert.equal(impact.warnings[0].rule, 'verifiability');
+    assert.match(impact.warnings[0].message, /утверждённого до появления checks/);
+    assert.deepEqual(checksWarnings({ checks: { version: 1 } }, s.c1), []);
+    const started = (await s.changes().start(s.proposal, 'codex')) as {
+      operation: ContractChange;
+      warnings: { code: string }[];
+    };
+    assert.deepEqual(
+      started.warnings.map((w) => w.code),
+      ['checks-missing'],
+    );
+    assert.equal(s.calls.length, 0, 'предупреждение — до вызова модели');
+    assert.ok(started.operation.history.some((h) => h.event === 'warning'));
+    // Ревьюер отклоняет с длинным итогом: запись истории ограничена, но не
+    // обрывается посреди слова, и полный текст доступен по ссылке.
+    const summary = Array.from(
+      { length: 40 },
+      (_, i) => `Обязательство номер ${i} не объявлено в договоре проверки`,
+    ).join('. ');
+    const rejecting = (name: 'codex' | 'claude'): AgentAdapter => ({
+      name,
+      execute: () =>
+        Promise.resolve({
+          data: { approved: false, summary, findings: [], discoveries: [] },
+          log: 'Fixture only; no provider called',
+          command: ['fixture'],
+        }),
+    });
+    const failed = await new ContractChanges(s.h, s.root, {
+      codex: rejecting('codex'),
+      claude: rejecting('claude'),
+    }).advance(started.operation.id);
+    assert.equal(failed.status, 'failed');
+    const entry = failed.history.at(-1)!;
+    assert.equal(entry.step, 'review');
+    assert.ok(entry.detail!.length <= 500, String(entry.detail!.length));
+    assert.ok(entry.detail!.endsWith('…'), entry.detail);
+    const kept = entry.detail!.slice(0, -1);
+    const message = 'Независимое ревью отклонено: ' + summary;
+    assert.ok(message.startsWith(kept), 'начало текста сохранено');
+    assert.match(message.slice(kept.length), /^[.;\s]/, 'обрыв по границе фразы или слова');
+    const attempt = s.store.read().contractAttempts!.find((a) => a.id === entry.review?.id);
+    assert.ok(attempt, 'ссылка на попытку ревью');
+    assert.equal(attempt.summary, summary, 'полный текст доступен по ссылке');
+    assert.equal(entry.review!.artifact, attempt.artifact);
+    assert.ok(failed.error!.length <= 1000 && failed.error!.endsWith('…'));
+  } finally {
+    await s.remove();
+  }
+});
+
+test('clipAtBoundary keeps short text and cuts long text at a sentence or word boundary', () => {
+  assert.equal(clipAtBoundary('short text', 50), 'short text');
+  assert.equal(clipAtBoundary('one two three four five', 12), 'one two…');
+  assert.equal(
+    clipAtBoundary('First sentence is here. Second one goes on and on', 30),
+    'First sentence is here.…',
+  );
+  assert.equal(clipAtBoundary('x'.repeat(20), 10), 'x'.repeat(9) + '…');
+});
+
+test('contract-change exits non-zero when the operation fails, and still prints its JSON', async () => {
+  const s = await stage();
+  try {
+    s.h.pause(true);
+    // Процесс CLI читает конфигурацию с диска; модели он не вызывает: шаг
+    // hold отказывает раньше ревью.
+    const runtime = { runtime: 'codex' };
+    await writeFile(
+      join(s.root, 'config.json'),
+      JSON.stringify({
+        ...s.h.config,
+        roles: Object.fromEntries(Object.keys(s.h.config.roles).map((r) => [r, runtime])),
+        reviewer: { runtime: 'claude' },
+      }),
+    );
+    const started = (await s.changes().start(s.proposal, 'codex')) as {
+      operation: ContractChange;
+    };
+    // Задачу держит другая операция: шаг hold отказывает без вызова модели.
+    s.h.hold([s.api.id], 'CC-other', 'другая операция');
+    const run = await command(
+      [
+        process.execPath,
+        '--import',
+        import.meta.resolve('tsx'),
+        resolve('src/cli.ts'),
+        'contract-change',
+        '--id',
+        started.operation.id,
+        '--data',
+        s.root,
+      ],
+      process.cwd(),
+      {
+        timeoutMs: 120000,
+        env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR },
+      },
+    );
+    if (!run.stdout) throw new Error(run.stderr);
+    const out = JSON.parse(run.stdout) as { status: string; error?: string };
+    assert.equal(out.status, 'failed', run.stderr);
+    assert.match(out.error ?? '', /другая операция|удерживает/);
+    assert.equal(run.code, 1);
   } finally {
     await s.remove();
   }

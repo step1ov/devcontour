@@ -7,7 +7,13 @@ import {
 } from '../core/model.ts';
 import { contractDigest, samePin, type DevContour } from '../core/service.ts';
 import { repository } from '../core/repositories.ts';
-import { artifactGuard, contractContent, contractProposal, defaultOwner } from './agent-control.ts';
+import {
+  artifactGuard,
+  checksWarnings,
+  contractContent,
+  contractProposal,
+  defaultOwner,
+} from './agent-control.ts';
 import { unguardedMessage, type Dependency, type Exempted } from './artifact-closure.ts';
 import { pinArtifacts } from './contract-artifacts.ts';
 import { git } from './process.ts';
@@ -192,6 +198,8 @@ export async function contractImpact(h: DevContour, input: unknown) {
     base,
     closure,
     requiredReviews,
+    // Структурные предупреждения до ревью: их видно без вызова модели.
+    warnings: status === 'unchanged' ? [] : checksWarnings(parsed, current),
     // Отчёт ничего не меняет: применение — отдельный шаг после ревью.
     applied: false as const,
     ...(!current && elsewhere.length

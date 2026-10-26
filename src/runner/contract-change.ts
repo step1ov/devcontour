@@ -114,8 +114,38 @@ export type ContractChange = {
   boards: string[];
   /** Принятые задачи прежней редакции: их меняет корректировка, а не операция. */
   corrections: string[];
-  history: { at: string; step: Step | 'start'; event: string; detail?: string }[];
+  history: {
+    at: string;
+    step: Step | 'start';
+    event: string;
+    detail?: string;
+    /**
+     * Попытка ревью, на которой закончился шаг: полный текст её итога и
+     * находок — `GET /api/contract-attempts/:id/findings` и запись `artifact`.
+     */
+    review?: { id: string; artifact: string };
+  }[];
 };
+
+/**
+ * Сократить текст до `n` знаков по границе фразы или слова, с «…».
+ *
+ * История операции хранится в записи и ограничена по размеру, но обрыв
+ * посреди слова делал причину отказа нечитаемой. Граница предложения берётся,
+ * если она не дальше трети предела от конца, иначе — последний пробел.
+ * Полный текст ревью доступен по ссылке `review` записи истории.
+ */
+export function clipAtBoundary(text: string, n: number) {
+  if (text.length <= n) return text;
+  const head = text.slice(0, n - 1);
+  const sentence = Math.max(...['. ', '; ', '! ', '? ', '.\n'].map((m) => head.lastIndexOf(m)));
+  const space = head.search(/\s\S*$/);
+  const cut = sentence >= (n * 2) / 3 ? sentence + 1 : space > n / 3 ? space : head.length;
+  return head.slice(0, cut).trimEnd() + '…';
+}
+/** Предел подробности записи истории и текста ошибки операции. */
+const DETAIL = 500;
+const ERROR = 1000;
 
 const KIND = 'contract-change';
 const active = (op: ContractChange) =>
@@ -152,8 +182,15 @@ export class ContractChanges {
     step: ContractChange['history'][number]['step'],
     event: string,
     detail?: string,
+    review?: { id: string; artifact: string },
   ) {
-    op.history.push({ at: new Date().toISOString(), step, event, ...(detail ? { detail } : {}) });
+    op.history.push({
+      at: new Date().toISOString(),
+      step,
+      event,
+      ...(detail ? { detail: clipAtBoundary(detail, DETAIL) } : {}),
+      ...(review ? { review } : {}),
+    });
     op.history = op.history.slice(-100);
   }
   /** Внешнее представление: без token и lease. */
@@ -222,8 +259,9 @@ export class ContractChanges {
         'queued',
         `${impact.tasks.direct.length} прямых, ${impact.tasks.transitive.length} зависимых задач`,
       );
+      for (const w of impact.warnings) this.log(op, 'start', 'warning', w.message);
       this.save(op);
-      return { status: 'started' as const, operation: op };
+      return { status: 'started' as const, operation: op, warnings: impact.warnings };
     });
   }
 
@@ -282,18 +320,37 @@ export class ContractChanges {
     status: 'waiting' | 'failed' | 'stale',
     message: string,
     waitingFor?: string[],
+    /** Начало этого продолжения: ссылка — только на ревью, проведённое в нём. */
+    since?: string,
   ) {
     this.h.store.atomic(() => {
       const current = this.get(op.id);
       if (current.token !== op.token || current.status !== 'running') return;
       current.status = status;
-      current.error = status === 'waiting' ? undefined : message.slice(0, 1000);
+      current.error = status === 'waiting' ? undefined : clipAtBoundary(message, ERROR);
       current.waitingFor = waitingFor;
       current.token = undefined;
       current.leaseUntil = undefined;
-      this.log(current, stepsOf(current)[current.step], status, message.slice(0, 500));
+      const step = stepsOf(current)[current.step];
+      this.log(
+        current,
+        step,
+        status,
+        message,
+        step === 'review' && since ? this.lastReview(current, since) : undefined,
+      );
       this.save(current);
     });
+  }
+
+  /** Последняя попытка ревью контракта этой операции — ссылка на полный текст. */
+  private lastReview(op: ContractChange, since: string) {
+    const attempt = (this.h.store.read().contractAttempts ?? [])
+      .filter(
+        (a) => a.subject.startsWith('contract') && a.title === op.proposal.title && a.at >= since,
+      )
+      .at(-1);
+    return attempt ? { id: attempt.id, artifact: attempt.artifact } : undefined;
   }
 
   /** Продолжить операцию с сохранённого шага, пока она не ждёт, не упала или не завершилась. */
@@ -301,6 +358,7 @@ export class ContractChanges {
     const claimed = this.claim(id);
     if (!claimed) return this.view(this.get(id));
     let op = claimed;
+    const since = new Date().toISOString();
     const heartbeat = setInterval(
       () => {
         try {
@@ -328,7 +386,7 @@ export class ContractChanges {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.settle(op, error instanceof StaleChange ? 'stale' : 'failed', message);
+      this.settle(op, error instanceof StaleChange ? 'stale' : 'failed', message, undefined, since);
     } finally {
       clearInterval(heartbeat);
     }

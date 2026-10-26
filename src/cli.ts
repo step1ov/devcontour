@@ -831,9 +831,16 @@ async function main() {
             authorRuntime(),
             include,
           );
+          for (const w of 'warnings' in started ? (started.warnings ?? []) : [])
+            console.error('Предупреждение: ' + w.message);
           result =
             started.status === 'unchanged' ? started : await changes.advance(started.operation.id);
         }
+        // Отклонённое ревью и устаревшая операция — неуспех: скрипт, который
+        // проверяет только код выхода, иначе принял бы отказ за успех. JSON
+        // операции по-прежнему печатается в stdout.
+        if (['failed', 'stale'].includes((result as { status?: string }).status ?? ''))
+          process.exitCode = 1;
       } else if (operation === 'checks-approve') {
         // Ручное техническое подтверждение принятия корпуса (operator mode):
         // команда оператора, в агентском API её нет.
