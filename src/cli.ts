@@ -455,7 +455,7 @@ async function main() {
   // Полный doctor тоже только читает базу: он не writer и не создаёт таблиц
   // и строк, которых нет в базе прежней версии (их создаст первый writer).
   if (operation === 'doctor') {
-    const { state: s, check } = doctorState(config, root);
+    const { state: s, engine, check } = doctorState(config, root);
     if (
       args.includes('--probe') &&
       (!s ||
@@ -472,7 +472,7 @@ async function main() {
           ? 'doctor --probe требует остановленную очередь'
           : 'doctor --probe требует прочитанное состояние: ' + check?.detail,
       );
-    const result = await doctor(config, root, args.includes('--probe'), s, check);
+    const result = await doctor(config, root, args.includes('--probe'), s ?? engine, check);
     console.log(JSON.stringify(result, null, 2));
     if (!result.ready) process.exitCode = 1;
     return;

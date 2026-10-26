@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
+  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -353,6 +354,29 @@ test('Полный doctor (CLI) читает базу только для чте
     }
   } finally {
     rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('Полный doctor: база компонента ещё не создана — проверка engine по центральной базе не пропускается', () => {
+  const w = componentWorkspace();
+  try {
+    editDocument(join(w.workspace, 'state.sqlite'), (s) => {
+      s.leader = { owner: 'x', leaseUntil: Date.now() + 60_000, engineVersion: '9.9.9-newer' };
+    });
+    rmSync(join(w.root, 'library', '.devcontour-local', 'state.sqlite'));
+    const { state, engine, check } = doctorState(w.config, w.workspace);
+    assert.equal(state, undefined);
+    assert.equal(check?.status, 'not-checked', JSON.stringify(check));
+    assert.match(check.detail, /library/);
+    assert.ok(engine, 'роль controller прочитана из центральной базы');
+    assert.equal(engineCheck(engine).status, 'blocked', 'роль другой версии движка видна');
+    assert.equal(
+      existsSync(join(w.root, 'library', '.devcontour-local', 'state.sqlite')),
+      false,
+      'doctor базу не создал',
+    );
+  } finally {
+    rmSync(w.root, { recursive: true, force: true });
   }
 });
 

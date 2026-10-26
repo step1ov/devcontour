@@ -26,7 +26,8 @@ import { DevContour, supersededBy } from '../core/service.ts';
 import { repository } from '../core/repositories.ts';
 import { artifactGuard } from './agent-control.ts';
 import { unguardedMessage } from './artifact-closure.ts';
-import { Store, journalFiles } from '../core/store.ts';
+import { Store, journalFiles, readOnlyLocation } from '../core/store.ts';
+import { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 
 type Check = { id: string; status: 'passed' | 'blocked' | 'not-checked'; detail: string };
@@ -202,21 +203,51 @@ export function dataDoctor(config: Config, root: string) {
 export function doctorState(
   config: Config,
   root: string,
-): { state?: DevContourState; check?: Check } {
+): {
+  state?: DevContourState;
+  engine?: Pick<DevContourState, 'leader' | 'runs'>;
+  check?: Check;
+} {
   const file = join(root, 'state.sqlite');
   if (!existsSync(file)) return { state: emptyState() };
   const components = config.storage === 'component' ? repositories(config) : undefined;
   const missing = (components ?? []).filter(
     (r) => !existsSync(join(r.path, '.devcontour-local', 'state.sqlite')),
   );
-  if (missing.length)
-    return {
-      check: {
-        id: 'state',
-        status: 'not-checked',
-        detail: `Базы компонентов ещё не созданы: ${missing.map((r) => r.id).join(', ')}. Doctor баз не создаёт — их создаст первый writer (serve или run); состояние не проверено`,
-      },
-    };
+  if (missing.length) {
+    // Без баз компонентов полное состояние не собрать, но роль controller
+    // хранит центральная база: проверка `engine` по ней не пропускается.
+    const pending = `Базы компонентов ещё не созданы: ${missing.map((r) => r.id).join(', ')}. Doctor баз не создаёт — их создаст первый writer (serve или run)`;
+    try {
+      const db = new DatabaseSync(readOnlyLocation(file), { readOnly: true });
+      let central: Partial<DevContourState>;
+      try {
+        const row = db.prepare('SELECT data FROM main.state WHERE id=1').get() as
+          { data: string } | undefined;
+        if (!row) throw new Error('В базе нет состояния: ' + file);
+        central = JSON.parse(row.data) as Partial<DevContourState>;
+      } finally {
+        db.close();
+      }
+      if (central.version !== 1) throw new Error('Unsupported state version');
+      return {
+        engine: { leader: central.leader, runs: central.runs ?? [] },
+        check: {
+          id: 'state',
+          status: 'not-checked',
+          detail: `${pending}; проверены только роль controller и попытки центральной базы`,
+        },
+      };
+    } catch (e) {
+      return {
+        check: {
+          id: 'state',
+          status: 'blocked',
+          detail: `${pending}; центральная база не читается: ${e instanceof Error ? e.message : String(e)}`,
+        },
+      };
+    }
+  }
   const print = () => {
     try {
       const s = statSync(file);
