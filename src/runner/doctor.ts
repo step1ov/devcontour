@@ -2,7 +2,7 @@ import { access, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:
 import { constants, existsSync, statSync } from 'node:fs';
 import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { Config, DevContourState, Role } from '../core/model.ts';
+import { emptyState, type Config, type DevContourState, type Role } from '../core/model.ts';
 import {
   codeReviewVendor,
   declaredRoles,
@@ -186,13 +186,86 @@ export function dataDoctor(config: Config, root: string) {
   return result();
 }
 
+/**
+ * Состояние для полного `doctor` — только чтением, как в проверке данных:
+ * без PRAGMA режима журнала, DDL, начальных строк и владельца баз
+ * компонентов. Полный doctor не становится writer: таблицы и строки, которых
+ * нет в базе прежней версии, создаёт первый writer (`serve`, `run`).
+ *
+ * База WAL без файлов журнала читается как неизменяемая. Если за время чтения
+ * появились файлы журнала или изменился файл базы, прочитанное могло
+ * устареть — чтение повторяется (теперь с журналом, обычным соединением).
+ *
+ * Базы ещё нет (центральной — пустое состояние, как у новой базы; базы
+ * компонента — проверка `state` not-checked): doctor её не создаёт.
+ */
+export function doctorState(
+  config: Config,
+  root: string,
+): { state?: DevContourState; check?: Check } {
+  const file = join(root, 'state.sqlite');
+  if (!existsSync(file)) return { state: emptyState() };
+  const components = config.storage === 'component' ? repositories(config) : undefined;
+  const missing = (components ?? []).filter(
+    (r) => !existsSync(join(r.path, '.devcontour-local', 'state.sqlite')),
+  );
+  if (missing.length)
+    return {
+      check: {
+        id: 'state',
+        status: 'not-checked',
+        detail: `Базы компонентов ещё не созданы: ${missing.map((r) => r.id).join(', ')}. Doctor баз не создаёт — их создаст первый writer (serve или run); состояние не проверено`,
+      },
+    };
+  const print = () => {
+    try {
+      const s = statSync(file);
+      return JSON.stringify([s.ino, s.size, s.mtimeMs, s.ctimeMs]);
+    } catch {
+      return 'missing';
+    }
+  };
+  for (let attempt = 1; ; attempt++) {
+    const journal = journalFiles(file);
+    const quiet = !journal.some((f) => existsSync(f));
+    const before = print();
+    let state: DevContourState | undefined;
+    let failure: unknown;
+    try {
+      const store = new Store(file, components, false, undefined, true);
+      try {
+        state = store.read();
+      } finally {
+        store.close();
+      }
+    } catch (e) {
+      failure = e;
+    }
+    const settled = !quiet || (!journal.some((f) => existsSync(f)) && print() === before);
+    if (settled || attempt === 3) {
+      if (state && settled) return { state };
+      return {
+        check: {
+          id: 'state',
+          status: 'blocked',
+          detail: settled
+            ? `Состояние не читается: ${failure instanceof Error ? failure.message : String(failure)}`
+            : 'Базу непрерывно меняет другой процесс: состояние не прочитано согласованно',
+        },
+      };
+    }
+  }
+}
+
 export async function doctor(
   config: Config,
   root: string,
   probe = false,
   state?: Pick<DevContourState, 'leader' | 'runs'> & Partial<Pick<DevContourState, 'contracts'>>,
+  stateCheck?: Check,
 ) {
   const checks: Check[] = [];
+  if (stateCheck) checks.push(stateCheck);
   if (state) checks.push(engineCheck(state));
   const check = async (id: string, action: () => Promise<string>) => {
     try {

@@ -9,7 +9,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import {
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
@@ -17,7 +26,7 @@ import { pathToFileURL } from 'node:url';
 import { DevContour } from '../src/core/service.ts';
 import { Store, readOnlyLocation } from '../src/core/store.ts';
 import { harnessVersion } from '../src/harness/index.ts';
-import { dataDoctor, engineCheck } from '../src/runner/doctor.ts';
+import { dataDoctor, doctorState, engineCheck } from '../src/runner/doctor.ts';
 import { config, fixture, input } from './helpers.ts';
 import { repositorySchema } from '../src/core/model.ts';
 
@@ -299,6 +308,76 @@ test('WAL: writer, записавший и закрывший базу во вр
     );
     assert.equal(result.compatible, false, JSON.stringify(result.checks));
     assert.equal(result.checks.find((c) => c.id === 'storage-quiet')?.status, 'blocked');
+  } finally {
+    Store.prototype.read = read;
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('Полный doctor (CLI) читает базу только для чтения: база прежней версии без таблицы revision не получает DDL, строк и файлов журнала', () => {
+  const f = stateWith(() => {});
+  try {
+    // База прежней версии: таблицы ревизии ещё нет.
+    const db = new DatabaseSync(f.file);
+    db.exec('DROP TABLE revision; PRAGMA wal_checkpoint(TRUNCATE);');
+    db.close();
+    writeFileSync(join(f.root, 'config.json'), JSON.stringify(config()));
+    const listing = () => readdirSync(f.root).sort();
+    const before = listing();
+    assert.deepEqual(
+      before.filter((n) => /-(wal|shm|journal)$/.test(n)),
+      [],
+    );
+    const hashed = hash(f.file);
+    const r = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', 'src/cli.ts', 'doctor', '--data', f.root],
+      { encoding: 'utf8' },
+    );
+    const result = JSON.parse(r.stdout) as { checks: { id: string; status: string }[] };
+    assert.equal(
+      result.checks.find((c) => c.id === 'engine')?.status,
+      'passed',
+      'состояние прочитано: ' + r.stderr,
+    );
+    assert.equal(hash(f.file), hashed, 'файл базы не изменился');
+    assert.deepEqual(listing(), [...before, 'doctor.json'].sort(), 'появился только отчёт doctor');
+    const check = new DatabaseSync(f.file, { readOnly: true });
+    try {
+      assert.equal(
+        check.prepare("SELECT name FROM sqlite_master WHERE name='revision'").get(),
+        undefined,
+      );
+    } finally {
+      check.close();
+    }
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('Полный doctor: writer, записавший базу во время неизменяемого чтения, — состояние перечитывается', () => {
+  const f = stateWith(() => {});
+  const read: Store['read'] = Reflect.get(Store.prototype, 'read');
+  let writes = 0;
+  try {
+    Store.prototype.read = function (this: Store) {
+      const state = read.call(this);
+      if (!writes++) {
+        const writer = new DatabaseSync(f.file);
+        liveForeignLeader(writer);
+        writer.close();
+      }
+      return state;
+    };
+    const { state, check } = doctorState(config(), f.root);
+    assert.equal(check, undefined);
+    assert.equal(
+      (state?.leader as { engineVersion?: string } | undefined)?.engineVersion,
+      '9.9.9-newer',
+      'прочитана запись writer',
+    );
+    assert.equal(writes, 2, 'чтение повторено');
   } finally {
     Store.prototype.read = read;
     rmSync(f.root, { recursive: true, force: true });

@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { AgentService, capabilities } from './application/agent.ts';
 import { serveMcp } from './server/mcp.ts';
 import { repositories } from './core/repositories.ts';
-import { dataDoctor, doctor } from './runner/doctor.ts';
+import { dataDoctor, doctor, doctorState } from './runner/doctor.ts';
 import { cleanupEnvironment } from './runner/environment.ts';
 import { importKnowledge } from './runner/knowledge.ts';
 import { PreviewRunner } from './runner/preview.ts';
@@ -442,6 +442,31 @@ async function main() {
     const result = dataDoctor(config, root);
     console.log(JSON.stringify(result, null, 2));
     if (!result.compatible) process.exitCode = 1;
+    return;
+  }
+  // Полный doctor тоже только читает базу: он не writer и не создаёт таблиц
+  // и строк, которых нет в базе прежней версии (их создаст первый writer).
+  if (operation === 'doctor') {
+    const { state: s, check } = doctorState(config, root);
+    if (
+      args.includes('--probe') &&
+      (!s ||
+        !s.paused ||
+        s.runs.some((r) => r.status === 'active') ||
+        s.changeSets.some(
+          (c) =>
+            c.verifications.some((v) => v.status === 'active') ||
+            c.deliveries?.some((d) => d.status === 'active'),
+        ))
+    )
+      throw new Error(
+        s
+          ? 'doctor --probe требует остановленную очередь'
+          : 'doctor --probe требует прочитанное состояние: ' + check?.detail,
+      );
+    const result = await doctor(config, root, args.includes('--probe'), s, check);
+    console.log(JSON.stringify(result, null, 2));
+    if (!result.ready) process.exitCode = 1;
     return;
   }
   if (operation === 'storage-migrate') {
@@ -897,28 +922,6 @@ async function main() {
       if (store.projectionError) console.error('Journal: ' + store.projectionError);
     } finally {
       await workspaceRunner.stop();
-      store.close();
-    }
-    return;
-  }
-  if (operation === 'doctor') {
-    try {
-      const s = store.read();
-      if (
-        args.includes('--probe') &&
-        (!s.paused ||
-          s.runs.some((r) => r.status === 'active') ||
-          s.changeSets.some(
-            (c) =>
-              c.verifications.some((v) => v.status === 'active') ||
-              c.deliveries?.some((d) => d.status === 'active'),
-          ))
-      )
-        throw new Error('doctor --probe требует остановленную очередь');
-      const result = await doctor(config, root, args.includes('--probe'), s);
-      console.log(JSON.stringify(result, null, 2));
-      if (!result.ready) process.exitCode = 1;
-    } finally {
       store.close();
     }
     return;
