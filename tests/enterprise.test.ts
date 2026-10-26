@@ -898,6 +898,14 @@ test('Doctor marks a claude reviewer without a tool profile as degraded and name
     assert.equal(implicit?.status, 'degraded');
     assert.match(implicit?.detail ?? '', /claude-review/);
     assert.match(implicit?.detail ?? '', /"Bash"/);
+    // Degraded готовность не снимает: в этом fixture нет ни одной blocked-строки.
+    const whole = await doctor(f.c, f.data);
+    assert.deepEqual(
+      whole.checks.filter((c) => c.status === 'blocked').map((c) => c.id),
+      [],
+    );
+    assert.ok(whole.checks.some((c) => c.status === 'degraded'));
+    assert.equal(whole.ready, true);
     f.c.toolProfiles['claude-review'] = {
       runtime: 'claude',
       claudeTools: ['Read', 'Glob', 'Grep'],
