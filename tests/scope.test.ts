@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, realpath, readFile, writeFile, rm, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { commandScope } from '../src/runner/scope.ts';
+import { commandScope, launchHint, launcher } from '../src/runner/scope.ts';
 import { setupProject } from '../src/runner/setup.ts';
 import { command } from '../src/runner/process.ts';
 import { Store } from '../src/core/store.ts';
@@ -57,6 +57,25 @@ test('Product commands require scope; invalid or conflicting scope never silentl
     /один раз/,
   );
   assert.throws(() => commandScope(['demo', '--workspace', '/tmp/a'], 'demo'), /Demo/);
+});
+
+test('CLI называет версии DevContour и движка; справка называет способ запуска своей установки', async () => {
+  const own = JSON.parse(await readFile('package.json', 'utf8')) as { version: string };
+  const harness = JSON.parse(
+    await readFile('node_modules/devcontour-harness/package.json', 'utf8'),
+  ) as { version: string };
+  for (const flag of ['--version', 'version']) {
+    const r = await run(tmpdir(), flag);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(r.stdout, `devcontour ${own.version}\ndevcontour-harness ${harness.version}\n`);
+  }
+  // Из исходников — npm script checkout; из собранного пакета — бинарник.
+  assert.match((await run(tmpdir(), 'help')).stdout, /Запуск: npm run devcontour -- <команда>/);
+  assert.equal(launcher(), 'npm run devcontour --');
+  const installed = 'file:///opt/app/node_modules/devcontour/lib/runner/scope.js';
+  assert.equal(launcher(installed), 'devcontour');
+  assert.match(launchHint(installed), /^devcontour <команда>.*npx devcontour <команда>/);
+  assert.doesNotMatch(launchHint(installed), /npm run/);
 });
 
 test('Bare CLI fails before creating demo files; two CLI sessions address separate workspace databases', async () => {

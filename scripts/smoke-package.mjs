@@ -214,7 +214,16 @@ syncBuiltinESMExports();
   // Keep it bounded without applying the 30s command-response budget to all nine stages.
   const cli = (...args) =>
     exec(bin, args, { cwd: outside, timeout: args[0] === 'engineering-evals' ? 120000 : 30000 });
-  assert.match((await cli('help')).stdout, /DevContour/);
+  const help = (await cli('help')).stdout;
+  assert.match(help, /DevContour/);
+  // Установленный пакет называет свой бинарник, а не npm script checkout.
+  assert.match(help, /Запуск: devcontour <команда>.*npx devcontour/);
+  assert.doesNotMatch(help, /npm run devcontour/);
+  for (const flag of ['--version', 'version'])
+    assert.equal(
+      (await cli(flag)).stdout,
+      `devcontour ${pinned.version}\ndevcontour-harness ${harnessVersion}\n`,
+    );
   await assert.rejects(cli('serve'), /workspace/);
   await assert.rejects(cli('serve', '--workspace', installed), /вне каталога/);
 

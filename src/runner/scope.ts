@@ -3,6 +3,20 @@ import { existsSync, realpathSync } from 'node:fs';
 
 import { fileURLToPath } from 'node:url';
 
+/**
+ * Как вызвать CLI в справке и подсказках. Из исходников (модуль `.ts`) —
+ * npm script checkout; из установленного пакета (собранный `lib/*.js`) —
+ * бинарник `devcontour`, без глобальной установки — `npx devcontour`.
+ */
+export function launcher(moduleUrl: string = import.meta.url) {
+  return moduleUrl.endsWith('.ts') ? 'npm run devcontour --' : 'devcontour';
+}
+export function launchHint(moduleUrl: string = import.meta.url) {
+  return launcher(moduleUrl) === 'devcontour'
+    ? 'devcontour <команда> [параметры] (в каталоге установки: npx devcontour <команда> [параметры])'
+    : 'npm run devcontour -- <команда> [параметры]';
+}
+
 // Scope is passed per invocation. There is no shared "current workspace" setting.
 export function commandScope(args: string[], operation: string) {
   const value = (flag: string) => {
@@ -30,7 +44,9 @@ export function commandScope(args: string[], operation: string) {
     throw new Error('Demo использует отдельные данные; не указывайте продуктовый --workspace');
   if (operation !== 'demo' && operation !== 'workspace-init' && !workspace && !data)
     throw new Error(
-      'В какой папке вести workspace этого проекта? Укажите --workspace /absolute/path (или --data для существующей конфигурации). Demo запускается явно: npm run devcontour -- demo.',
+      'В какой папке вести workspace этого проекта? Укажите --workspace /absolute/path (или --data для существующей конфигурации). Demo запускается явно: ' +
+        launcher() +
+        ' demo.',
     );
   return {
     workspace: workspace ? resolve(workspace) : undefined,
