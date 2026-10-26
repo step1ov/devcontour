@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import {
   checkDeclarationSchema,
   declarationProblems as harnessDeclarationProblems,
+  obligationGates,
   orderPropertyProblems,
   type ContractDocument,
   type GatePolicy,
@@ -16,8 +17,11 @@ import { repository } from './repositories.ts';
  * контракты задачи в форме harness.
  */
 export {
+  isReference,
+  obligationGates,
   obligationSchema,
   promiseKinds,
+  referenceNote,
   strongPromises,
   type CheckDeclaration,
   type Obligation,
@@ -54,16 +58,19 @@ export function declarationProblems(
   });
 }
 
-/** Обязательство по property ID среди договоров задачи (чтение для экранов и receipt). */
+/**
+ * Обязательство по property ID среди договоров задачи (чтение для экранов и
+ * receipt). `gates` — все gates обязательства (свои или gate договора),
+ * `gate` — первый из них.
+ */
 export function obligationOf(task: Pick<Task, 'contracts'>, contracts: Contract[], id: string) {
   return contracts
     .filter((c) => task.contracts.includes(c.id) && c.checks)
     .flatMap((c) =>
-      c.checks!.obligations.map((obligation) => ({
-        contract: c,
-        gate: c.checks!.gate,
-        obligation,
-      })),
+      c.checks!.obligations.map((obligation) => {
+        const gates = obligationGates(c.checks!, obligation);
+        return { contract: c, gate: gates[0], gates, obligation };
+      }),
     )
     .find((x) => x.obligation.property === id);
 }
@@ -76,8 +83,9 @@ const gatePolicies = (gates: Config['repositories'][number]['gates']) =>
   gates as unknown as GatePolicy[];
 
 /**
- * Свойства задачи существуют в её договорах и исполняются её генеративными
- * gates (правило harness). Задача без `properties` — прежний уровень.
+ * Свойства задачи существуют в её договорах и исполняются её gates —
+ * генеративными или, у эталонного обязательства, gates эталонных наборов
+ * (правило harness). Задача без `properties` — прежний уровень.
  */
 export function assertTaskProperties(
   task: Pick<Task, 'id' | 'contracts' | 'properties' | 'gates' | 'requirements'>,

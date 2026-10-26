@@ -24,7 +24,13 @@ import { adapters, type AgentAdapter } from './adapters.ts';
 import { repositories, repository } from '../core/repositories.ts';
 import { git } from './process.ts';
 import { assertRequirementProof } from './requirements.ts';
-import { checkDeclaration, declarationProblems, type CheckDeclaration } from '../core/checks.ts';
+import {
+  checkDeclaration,
+  declarationProblems,
+  isReference,
+  obligationGates,
+  type CheckDeclaration,
+} from '../core/checks.ts';
 import { spikeRecord, spikesOf } from './checks.ts';
 
 // Контракт живёт в репозитории, и предложение должно на него ссылаться, а не
@@ -139,6 +145,7 @@ export const VERIFIABILITY = 'verifiability';
  */
 const verifiabilityReview = [
   `Assess verifiability. Every computational promise of the contract (accuracy, optimality, completeness, performance) must appear as an obligation of that kind in the structured "checks" declaration, with its input domain, answer rules, an independent verification method with its applicability, coverage families including boundary and adversarial inputs, and separate resource budgets for the implementation and the oracle. A contract with such promises and no checks declaration, an incomplete classification, or a method whose expected answers are derived from the implementation under test or its key algorithm (a shared input format is fine) is a blocking finding with rule "${VERIFIABILITY}". Name the provenance of expected answers you relied on. For obligations marked hard, read the spike: a timeout is inconclusive for that method and budget — it neither proves hardness or impossibility nor allows weakening the obligation; success on a sample does not prove a bound for every input. Ordinary CRUD needs only concrete scenarios with independently stated expected behaviour; do not demand an oracle there.`,
+  `An obligation with verification "reference" is checked against pinned reference answer sets instead of a generator: an oracle computed the answers offline, they were cross-checked against another method and pinned as contract artifacts, and each of its gates must report that it replayed its declared share of inputs per family (the controller enforces the counts). This is a legitimate method; judge its substance, listed separately under "references": the oracle must be independent of the implementation and its stated limits (time limits, excluded unsolved inputs) must not bias the sets toward easy inputs without saying so; a cross-check on an unrelated family or a small sample is weak evidence; the sets prove the answer only on the inputs they contain. Read "gaps" — what the sets do not prove, such as generalization beyond the set or input classes outside it. A promise of the contract that rests only on a gap, with no other declared method (a generative property, an invariant or an analytic argument), or gaps that understate what the sets miss, is a blocking finding with rule "${VERIFIABILITY}".`,
 ];
 /**
  * Проверка выполнимости обязательств контракта. Ревью одобрило обязательство,
@@ -331,6 +338,24 @@ export function assertDeclaration(
   if (problems.length)
     throw new DomainError('Договор проверки неполон: ' + problems.join('; '), 400);
 }
+/** Эталонные обязательства договора в форме для ревьюера. */
+function references(declaration: CheckDeclaration | undefined) {
+  return (declaration?.obligations ?? [])
+    .filter((o) => isReference(o) && o.reference)
+    .map((o) => ({
+      property: o.property,
+      promise: o.promise,
+      gates: obligationGates(declaration!, o),
+      oracle: o.reference!.oracle,
+      crossChecks: o.reference!.crossChecks,
+      sets: o.reference!.sets.map((s) => ({
+        gate: s.gate,
+        artifacts: s.artifacts,
+        minCases: s.minCases,
+      })),
+      gaps: o.reference!.gaps,
+    }));
+}
 function referencedSpikes(h: DevContour, repositoryId: string, declaration: CheckDeclaration) {
   const ids = new Set(declaration.obligations.flatMap((o) => o.feasibility?.spike ?? []));
   return spikesOf(h, repositoryId).filter((s) => ids.has(s.id));
@@ -488,6 +513,9 @@ export async function reviewContract(
     // Эксперименты выполнимости, на которые ссылаются обязательства: их
     // результат и пределы вывода ревьюер читает сам, а не со слов автора.
     ...(parsed.checks ? { spikes: referencedSpikes(h, owner.id, parsed.checks) } : {}),
+    // Эталонные обязательства отдельно: эталон, сверка, наборы и пределы
+    // (`gaps`) — ревьюер видит, чего наборы не доказывают, рядом с договором.
+    ...(references(parsed.checks).length ? { references: references(parsed.checks) } : {}),
   };
   const approval = await review(
     h,

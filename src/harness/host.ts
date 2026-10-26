@@ -550,11 +550,16 @@ export function suiteBasisOf(contract: Pick<ContractDocument, 'artifacts' | 'che
   return digest({
     artifacts: (contract.artifacts ?? []).map((a) => ({ path: a.path, blob: a.blob })),
     gate: declaration.gate,
+    // Gates обязательства и эталонная проверка входят, только когда
+    // объявлены: основание прежних корпусов не меняется (как suiteBasis harness).
     obligations: declaration.obligations.map((o) => ({
       property: o.property,
       domain: o.domain,
       answer: o.answer,
       method: o.method,
+      ...(o.gates ? { gates: o.gates } : {}),
+      ...(o.verification ? { verification: o.verification } : {}),
+      ...(o.reference ? { reference: o.reference } : {}),
     })),
   });
 }

@@ -5,7 +5,9 @@ import { reviewContract, reviewPlan } from '../src/runner/agent-control.ts';
 import type { AgentAdapter, AgentRequest } from '../src/runner/adapters.ts';
 import { AgentService } from '../src/application/agent.ts';
 import type { Spike } from '../src/runner/checks.ts';
-import { specDigest } from '../src/core/service.ts';
+import { digest, specDigest } from '../src/core/service.ts';
+import { suiteBasisOf } from '../src/harness/host.ts';
+import type { CheckDeclaration } from '../src/core/checks.ts';
 import { git } from '../src/runner/process.ts';
 import { checkProject, declaration, fixture, knap, reach, removeRoot } from './check-fixture.ts';
 import { statePrevious } from './helpers.ts';
@@ -111,6 +113,122 @@ test('AC04: an exact obligation without domain, independent method or coverage i
     const same = await reviewContract(f.h, p.root, proposal(tighter), 'codex', r.adapters);
     assert.equal(same.status, 'already-approved');
     assert.equal(r.prompts.length, 2);
+  } finally {
+    await f.close();
+    await removeRoot(p.root);
+  }
+});
+
+test('A reference-set obligation on plain test gates is declarable; its gaps and cross-check reach the reviewer; the generative rule stays', async () => {
+  const p = await checkProject();
+  const golden = (id: string) => ({
+    id,
+    kind: 'test' as const,
+    command: ['node', 'check.mjs'],
+    timeoutMs: 30000,
+    report: { type: 'junit' as const, path: `.reports/${id}.xml` },
+  });
+  const f = await fixture(p, {
+    declaration: false,
+    config: { gates: [golden('golden-a'), golden('golden-b')] },
+  });
+  try {
+    f.h.config.mode = 'local';
+    const r = runtimes();
+    const base = declaration().obligations[0];
+    const reference = {
+      ...base,
+      gates: ['golden-a', 'golden-b'],
+      verification: 'reference' as const,
+      coverage: { ...base.coverage, corpus: false },
+      reference: {
+        oracle: { description: 'Полный перебор подмножеств, заранее', limits: 'До 8 предметов' },
+        crossChecks: [
+          { family: 'до 6 предметов', against: 'DP по вместимости', matches: 800, total: 800 },
+        ],
+        sets: [
+          {
+            gate: 'golden-a',
+            artifacts: ['oracle.mjs'],
+            minCases: 50,
+            families: [{ id: 'boundary', minCases: 30 }],
+          },
+          {
+            gate: 'golden-b',
+            artifacts: ['oracle.mjs'],
+            minCases: 50,
+            families: [{ id: 'adversarial', minCases: 30 }],
+          },
+        ],
+        gaps: 'Входы больше 8 предметов наборы не покрывают',
+      },
+    };
+    const checks = (o: object): CheckDeclaration =>
+      ({ version: 1, gate: 'golden-a', obligations: [o] }) as CheckDeclaration;
+    const proposal = (c: CheckDeclaration) => ({
+      title: 'Knapsack reference',
+      content: 'Оптимум рюкзака по эталонным наборам.',
+      artifacts,
+      checks: c,
+    });
+    // Без способа reference тот же договор на gates без генератора — отказ до модели.
+    const generative = { ...reference, verification: undefined, reference: undefined };
+    await assert.rejects(
+      reviewContract(f.h, p.root, proposal(checks(generative)), 'codex', r.adapters),
+      /gate golden-a не генеративный \(нет property\)/,
+    );
+    // Сверка эталона с расхождением — тоже до модели.
+    await assert.rejects(
+      reviewContract(
+        f.h,
+        p.root,
+        proposal(
+          checks({
+            ...reference,
+            reference: {
+              ...reference.reference,
+              crossChecks: [{ ...reference.reference.crossChecks[0], matches: 799 }],
+            },
+          }),
+        ),
+        'codex',
+        r.adapters,
+      ),
+      /расходится \(799 из 800\)/,
+    );
+    assert.equal(r.prompts.length, 0);
+    const ok = await reviewContract(f.h, p.root, proposal(checks(reference)), 'codex', r.adapters);
+    assert.equal(ok.status, 'approved');
+    assert.equal(r.prompts.length, 1);
+    assert.match(
+      r.prompts[0],
+      /verification "reference" is checked against pinned reference answer sets/,
+    );
+    assert.match(r.prompts[0], /"references": \[/);
+    assert.match(r.prompts[0], /"gaps": "Входы больше 8 предметов наборы не покрывают"/);
+    // Основание корпуса: прежний договор — прежняя формула; новые поля его меняют.
+    const old = { artifacts: [], checks: declaration() };
+    assert.equal(
+      suiteBasisOf(old),
+      digest({
+        artifacts: [],
+        gate: 'properties',
+        obligations: declaration().obligations.map((o) => ({
+          property: o.property,
+          domain: o.domain,
+          answer: o.answer,
+          method: o.method,
+        })),
+      }),
+    );
+    const withGaps = (gaps: string) =>
+      suiteBasisOf({
+        checks: checks({ ...reference, reference: { ...reference.reference, gaps } }),
+      });
+    assert.notEqual(
+      withGaps('Входы больше 8 предметов наборы не покрывают'),
+      withGaps('Другие пределы наборов'),
+    );
   } finally {
     await f.close();
     await removeRoot(p.root);

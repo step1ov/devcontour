@@ -76,6 +76,8 @@ export function taskChecks(h: DevContour, raw: unknown) {
       id: p,
       promise: found?.obligation.promise ?? null,
       gate: found?.gate ?? null,
+      gates: found?.gates ?? [],
+      verification: found?.obligation.verification ?? (found ? 'property' : null),
       contract: found?.contract.id ?? null,
       minCases: found?.obligation.coverage.minCases ?? null,
       families:
