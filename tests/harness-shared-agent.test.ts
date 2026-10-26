@@ -22,7 +22,10 @@ import { fixture, input } from './helpers.ts';
 //   node --import tsx -e "import('./src/application/agent.ts').then(a=>process.stdout.write(JSON.stringify(a.capabilities())))"
 // Каталог называет версию продукта; снимок снят на 0.4.0-alpha.7. Байты
 // сравниваются с подставленной версией снимка, версия — с package.json.
-const CATALOG_DIGEST = '862305bac2a606004d67a709234f7bbcd08c666e8bcd1b243a0d75e303770f1e';
+// Намеренное изменение: contract_change_revise получил необязательный
+// `proposal` (исправленное предложение того же контракта); прочие операции
+// байтово прежние.
+const CATALOG_DIGEST = '7e26fb1533e26e18796f7c8eff13c3804bfba9d38438757ee48398c2babf0be2';
 const SNAPSHOT_VERSION = '0.4.0-alpha.7';
 const { version } = JSON.parse(readFileSync(resolve('package.json'), 'utf8')) as {
   version: string;

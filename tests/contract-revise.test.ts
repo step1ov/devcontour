@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fixture as base, input, statePrevious } from './helpers.ts';
 import { reviewContract } from '../src/runner/agent-control.ts';
+import { AgentService } from '../src/application/agent.ts';
 import { ContractChanges, type ContractChange } from '../src/runner/contract-change.ts';
 import type { AgentAdapter, AgentRequest } from '../src/runner/adapters.ts';
 import { digest, specDigest } from '../src/core/service.ts';
@@ -493,6 +494,97 @@ test('A rejected operation is revised from a new proposal file: same operation a
     assert.deepEqual(reviewed.checks, declaration());
     assert.ok(reviewed.artifacts?.some((a) => a.path === 'oracle.mjs'));
     assert.deepEqual(s.store.read().contracts.at(-1)!.checks, declaration());
+  } finally {
+    await s.remove();
+  }
+});
+
+test('A revise keeps the contract identity: a repositoryId or title change is refused, and no parallel contract is registered', async () => {
+  const s = await stage();
+  try {
+    const decide = rejectFirstContract();
+    const { operation } = (await s.changes(decide).start(s.proposal, 'codex')) as {
+      operation: ContractChange;
+    };
+    const rejected = await s.changes(decide).advance(operation.id);
+    assert.equal(rejected.status, 'failed');
+    const calls = s.calls.length;
+    // Тот же файл, но repositoryId записан иначе: отчёт влияния видит его как
+    // новый контракт рядом с прежним — пересмотр так его не регистрирует.
+    await assert.rejects(
+      s.changes(decide).revise(operation.id, rejected.version!, undefined, {
+        ...s.proposal,
+        repositoryId: 'main',
+      }),
+      /уже зарегистрирован|тот же контракт/,
+    );
+    await assert.rejects(
+      s.changes(decide).revise(operation.id, rejected.version!, undefined, {
+        ...s.proposal,
+        title: 'Catalog API v2',
+      }),
+      /тот же контракт/,
+    );
+    // Агентский API передаёт исправленное предложение так же, как --file.
+    await assert.rejects(
+      new AgentService(s.h, s.root).run({
+        operation: 'contract_change_revise',
+        input: {
+          id: operation.id,
+          expectedVersion: rejected.version!,
+          proposal: { ...s.proposal, title: 'Catalog API v2' },
+        },
+      }),
+      /тот же контракт/,
+    );
+    assert.equal(s.calls.length, calls, 'ревьюер не вызван');
+    assert.equal(s.store.read().contracts.length, 1, 'параллельный контракт не появился');
+    assert.equal(s.task(s.api.id).hold?.operation, operation.id, 'удержание на месте');
+    assert.equal(s.changes().get(operation.id).version, rejected.version);
+  } finally {
+    await s.remove();
+  }
+});
+
+test('Review history belongs to the operation: a same-titled review elsewhere is not listed, and a failure without a new review gets no link', async () => {
+  const s = await stage();
+  try {
+    const decide = rejectFirstContract();
+    const { operation } = (await s.changes(decide).start(s.proposal, 'codex')) as {
+      operation: ContractChange;
+    };
+    const rejected = await s.changes(decide).advance(operation.id);
+    assert.equal(rejected.status, 'failed');
+    const own = rejected.history.at(-1)!.review;
+    assert.ok(own, 'отказ ревью ссылается на свою попытку');
+    // Сбой модели без ответа ревью: запись истории без ссылки на прежнюю попытку.
+    const broken: AgentAdapter = {
+      name: 'claude',
+      execute: () => Promise.reject(new Error('transport closed')),
+    };
+    const failed = await new ContractChanges(s.h, s.root, {
+      codex: { ...broken, name: 'codex' },
+      claude: broken,
+    }).advance(operation.id);
+    assert.equal(failed.status, 'failed');
+    assert.equal(failed.history.at(-1)!.step, 'review');
+    assert.equal(failed.history.at(-1)!.review, undefined, 'нет устаревшей ссылки');
+    // Ревью другого контракта с тем же названием — не история этой операции.
+    await reviewContract(
+      s.h,
+      s.root,
+      { title: s.proposal.title, content: '# Другой документ\n' },
+      'codex',
+      s.changes().runtimes,
+    ).catch(() => undefined);
+    const other = s.store.read().contractAttempts!.at(-1)!;
+    assert.notEqual(other.id, own.id);
+    await s.schema('{"price":"number","currency":"string"}\n');
+    const revised = await s.changes(decide).revise(operation.id, failed.version!);
+    assert.deepEqual(
+      revised.operation.revisions![0].reviews.map((r) => r.id),
+      [own.id],
+    );
   } finally {
     await s.remove();
   }

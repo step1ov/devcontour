@@ -27,6 +27,7 @@ import { CheckCorpus } from '../core/check-store.ts';
 import { checkJsonBytes, operationCatalog, recoveryActions } from 'devcontour-harness';
 import { applyCases } from '../runner/recovery.ts';
 import { ContractChanges } from '../runner/contract-change.ts';
+import { contractProposal } from '../runner/agent-control.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 export const agentInputs = {
@@ -121,6 +122,12 @@ export const agentInputs = {
     id: z.string().regex(/^CC-[A-Za-z0-9-]{1,80}$/),
     expectedVersion: z.number().int().min(0),
     include: z.array(id).max(30).optional(),
+    /**
+     * Исправленное предложение того же контракта (как файл `--file` CLI):
+     * текст, artifacts, checks, underTest. Проходит предпроверки старта до
+     * вызова модели; без него пересмотр берёт прежнее предложение.
+     */
+    proposal: contractProposal.optional(),
   }),
 };
 /**
@@ -241,7 +248,7 @@ export const descriptions: Record<AgentOperation, string> = {
   contract_change_status:
     'Read a contract-change operation: its step, holds, history, earlier redactions and the next step. Read-only.',
   contract_change_revise:
-    'Revise a failed, stale or waiting contract change to the current committed redaction with the expected record version. Before side effects the same operation is re-reviewed with its history kept; after them a linked successor takes the holds over. Effects are never rolled back.',
+    'Revise a failed, stale or waiting contract change to the current committed redaction with the expected record version. An optional proposal replaces the stored one for the same contract (same file or inline title, repositoryId and component) — new text, artifacts, checks, underTest — after the start pre-checks (artifact pinning, import closure, check declaration) and before any model call. Before side effects the same operation is re-reviewed with its holds and history kept; after them a linked successor takes the holds over. Effects are never rolled back.',
   preview_status:
     'Read the local preview: which verified release serves the URL, its states (built, deployed, healthy, confirmed or unconfirmed), and past deployments with their errors. Deploying and rolling back are separate controlled actions through the CLI or panel.',
 };
@@ -372,7 +379,12 @@ export class AgentService {
       case 'contract_change_revise': {
         const v = agentInputs.contract_change_revise.parse(input);
         return this.bounded(
-          await new ContractChanges(this.h, this.root).revise(v.id, v.expectedVersion, v.include),
+          await new ContractChanges(this.h, this.root).revise(
+            v.id,
+            v.expectedVersion,
+            v.include,
+            v.proposal,
+          ),
         );
       }
       default:

@@ -72,6 +72,16 @@ const args = process.argv.slice(2),
   operation = args[0] ?? 'serve';
 const option = (name: string, fallback: string) =>
   args.includes(name) ? args[args.indexOf(name) + 1] : fallback;
+/**
+ * Файл предложения из `--file`. Флаг без значения (или со следующим флагом
+ * вместо пути) — понятный отказ, а не EISDIR от чтения каталога.
+ */
+const proposalFile = async () => {
+  const value = option('--file', '');
+  if (!value || value.startsWith('--'))
+    throw new Error('Укажите путь к файлу предложения: --file proposal.json');
+  return JSON.parse(await readFile(resolve(value), 'utf8')) as unknown;
+};
 let root: string;
 let workspacePath: string | undefined;
 const authorRuntime = () => {
@@ -824,9 +834,7 @@ async function main() {
             option('--id', ''),
             Number(option('--expected-version', '')),
             include,
-            args.includes('--file')
-              ? JSON.parse(await readFile(resolve(option('--file', '')), 'utf8'))
-              : undefined,
+            args.includes('--file') ? await proposalFile() : undefined,
           );
           result = await changes.advance(revised.operation.id);
         } else if (args.includes('--id')) result = await changes.advance(option('--id', ''));

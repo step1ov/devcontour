@@ -100,6 +100,12 @@ export type ContractChange = {
     reason: string;
     reviews: { id: string; approved: boolean; summary: string }[];
   }[];
+  /**
+   * Попытки ревью контракта, проведённые этой операцией (id `contractAttempts`).
+   * История ревью связывается с операцией, а не с названием: у другого
+   * контракта может быть то же название. У операций прежних версий поля нет.
+   */
+  reviews?: string[];
   /** Подготовленные новые черновики, явно включённые в ревью плана для утверждения. */
   include?: string[];
   /** Связанная редакция: операция, которую эта продолжила после побочных эффектов. */
@@ -140,7 +146,11 @@ export type ContractChange = {
  */
 export function clipAtBoundary(text: string, n: number) {
   if (text.length <= n) return text;
-  const head = text.slice(0, n - 1);
+  // Не разрезать суррогатную пару: половина символа в JSON — мусор.
+  let end = n - 1;
+  const code = text.charCodeAt(end - 1);
+  if (code >= 0xd800 && code <= 0xdbff) end--;
+  const head = text.slice(0, end);
   const sentence = Math.max(...['. ', '; ', '! ', '? ', '.\n'].map((m) => head.lastIndexOf(m)));
   const space = head.search(/\s\S*$/);
   const cut = sentence >= (n * 2) / 3 ? sentence + 1 : space > n / 3 ? space : head.length;
@@ -323,8 +333,8 @@ export class ContractChanges {
     status: 'waiting' | 'failed' | 'stale',
     message: string,
     waitingFor?: string[],
-    /** Начало этого продолжения: ссылка — только на ревью, проведённое в нём. */
-    since?: string,
+    /** Попытка ревью, которой закончился шаг (только из ответа этого ревью). */
+    review?: { id: string; artifact: string },
   ) {
     this.h.store.atomic(() => {
       const current = this.get(op.id);
@@ -335,25 +345,36 @@ export class ContractChanges {
       current.token = undefined;
       current.leaseUntil = undefined;
       const step = stepsOf(current)[current.step];
-      this.log(
-        current,
-        step,
-        status,
-        message,
-        step === 'review' && since ? this.lastReview(current, since) : undefined,
-      );
+      if (review) current.reviews = [...new Set([...(current.reviews ?? []), review.id])];
+      this.log(current, step, status, message, review);
       this.save(current);
     });
   }
 
-  /** Последняя попытка ревью контракта этой операции — ссылка на полный текст. */
-  private lastReview(op: ContractChange, since: string) {
-    const attempt = (this.h.store.read().contractAttempts ?? [])
-      .filter(
-        (a) => a.subject.startsWith('contract') && a.title === op.proposal.title && a.at >= since,
-      )
-      .at(-1);
+  /**
+   * Попытка ревью по каталогу её решения. Ссылка строится только по каталогу,
+   * который назвал сам ответ ревью: отказ без нового ревью (сбой модели или
+   * транспорта) ссылки не получает, и чужая попытка с тем же названием не
+   * подставляется.
+   */
+  private attemptOf(artifact: string | undefined) {
+    if (!artifact) return undefined;
+    const attempt = (this.h.store.read().contractAttempts ?? []).find(
+      (a) => a.artifact === artifact,
+    );
     return attempt ? { id: attempt.id, artifact: attempt.artifact } : undefined;
+  }
+  /** Ревью этой операции; прежние операции без `reviews` — по названию и началу. */
+  private reviewsOf(op: ContractChange) {
+    const attempts = this.h.store.read().contractAttempts ?? [];
+    return op.reviews
+      ? attempts.filter((a) => op.reviews!.includes(a.id))
+      : attempts.filter(
+          (a) =>
+            a.subject.startsWith('contract') &&
+            a.title === op.proposal.title &&
+            a.at >= op.startedAt,
+        );
   }
 
   /** Продолжить операцию с сохранённого шага, пока она не ждёт, не упала или не завершилась. */
@@ -361,7 +382,6 @@ export class ContractChanges {
     const claimed = this.claim(id);
     if (!claimed) return this.view(this.get(id));
     let op = claimed;
-    const since = new Date().toISOString();
     const heartbeat = setInterval(
       () => {
         try {
@@ -389,7 +409,13 @@ export class ContractChanges {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.settle(op, error instanceof StaleChange ? 'stale' : 'failed', message, undefined, since);
+      this.settle(
+        op,
+        error instanceof StaleChange ? 'stale' : 'failed',
+        message,
+        undefined,
+        error instanceof ReviewRejected ? this.attemptOf(error.artifact) : undefined,
+      );
     } finally {
       clearInterval(heartbeat);
     }
@@ -434,15 +460,27 @@ export class ContractChanges {
       throw new DomainError(`Пересмотр недоступен операции в состоянии ${op.status}`, 409);
     const proposal = input === undefined ? op.proposal : contractProposal.parse(input);
     const impact = await contractImpact(this.h, proposal);
+    // Тот же отказ, что у старта: файл, зарегистрированный под другим
+    // компонентом, — параллельный контракт, а не новая редакция.
+    if ('registeredUnder' in impact && impact.registeredUnder?.length)
+      throw new DomainError(impact.warning!, 409);
     if (input !== undefined) {
-      if (
+      // Пересмотр меняет тот же контракт: та же нормализованная идентичность
+      // (компонент, источник, repositoryId в том виде, как он записан, и
+      // название). Иначе редакция регистрировалась бы рядом с прежней, а
+      // задачи оставались бы привязаны к старой.
+      const same =
         digest({
           owner: impact.repositoryId,
           source: proposal.file ?? `title:${proposal.title}`,
-        }) !== op.key
-      )
+        }) === op.key &&
+        (proposal.repositoryId ?? null) === (op.proposal.repositoryId ?? null) &&
+        (proposal.file ?? null) === (op.proposal.file ?? null) &&
+        proposal.title === op.proposal.title &&
+        (impact.current?.id ?? null) === op.expected.current;
+      if (!same)
         throw new DomainError(
-          'Пересмотр меняет тот же контракт: файл, название inline-предложения и компонент должны совпадать',
+          'Пересмотр меняет тот же контракт: файл, название, repositoryId и компонент должны совпадать с операцией',
           400,
         );
       if (impact.closure.refusal) throw new DomainError(impact.closure.refusal, 400);
@@ -466,12 +504,11 @@ export class ContractChanges {
     const effects =
       !!op.contractId || op.rebound.length > 0 || op.step > stepsOf(op).indexOf('review');
     const at = new Date().toISOString();
-    const reviews = (this.h.store.read().contractAttempts ?? [])
-      .filter(
-        (a) =>
-          a.subject.startsWith('contract') && a.title === op.proposal.title && a.at >= op.startedAt,
-      )
-      .map((a) => ({ id: a.id, approved: a.approved, summary: a.summary.slice(0, 500) }));
+    const reviews = this.reviewsOf(op).map((a) => ({
+      id: a.id,
+      approved: a.approved,
+      summary: a.summary.slice(0, 500),
+    }));
     const held = [...impact.tasks.direct, ...impact.tasks.transitive]
       .filter((t) => !['done', 'cancelled'].includes(t.status))
       .map((t) => t.id);
@@ -492,6 +529,8 @@ export class ContractChanges {
             reviews,
           },
         ];
+        // Ревью прежней редакции сохранены в revisions; новая начинает свой список.
+        current.reviews = [];
         current.expected = {
           head: impact.proposed.revision,
           proposedDigest: impact.proposed.digest,
@@ -681,12 +720,22 @@ export class ContractChanges {
           this.runtimes,
           () => this.guard(op),
           op.expected.head,
-        );
+        ).catch((error: unknown) => {
+          // Отказ ревью называет каталог своего решения: по нему операция
+          // связывает запись истории с попыткой. Сбой без ревью его не несёт.
+          const message = error instanceof Error ? error.message : String(error);
+          const artifact = /Артефакты: (.+)$/.exec(message)?.[1];
+          throw artifact && this.attemptOf(artifact)
+            ? new ReviewRejected(message, artifact)
+            : error;
+        });
         if (!('contract' in result) || !result.contract)
           throw new DomainError('Ревью контракта не зарегистрировало редакцию: ' + result.status);
         const contractId = result.contract.id;
+        const approved = this.attemptOf(result.contract.approval?.artifact);
         this.advanceStep(op, (current) => {
           current.contractId = contractId;
+          if (approved) current.reviews = [...new Set([...(current.reviews ?? []), approved.id])];
         });
         return {};
       }
@@ -979,3 +1028,12 @@ export class ContractChanges {
 }
 
 class StaleChange extends DomainError {}
+/** Ревью отклонило редакцию; `artifact` — каталог решения этой попытки. */
+class ReviewRejected extends DomainError {
+  constructor(
+    message: string,
+    readonly artifact: string,
+  ) {
+    super(message, 400);
+  }
+}

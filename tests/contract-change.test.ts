@@ -225,6 +225,10 @@ test('clipAtBoundary keeps short text and cuts long text at a sentence or word b
     'First sentence is here.…',
   );
   assert.equal(clipAtBoundary('x'.repeat(20), 10), 'x'.repeat(9) + '…');
+  // Суррогатная пара не разрезается: эмодзи на границе уходит целиком.
+  const cut = clipAtBoundary('x'.repeat(8) + '😀' + 'y'.repeat(10), 10);
+  assert.equal(cut, 'x'.repeat(8) + '…');
+  assert.ok(!/[\uD800-\uDBFF]…$/.test(cut));
 });
 
 test('contract-change exits non-zero when the operation fails, and still prints its JSON', async () => {
@@ -266,10 +270,36 @@ test('contract-change exits non-zero when the operation fails, and still prints 
       },
     );
     if (!run.stdout) throw new Error(run.stderr);
-    const out = JSON.parse(run.stdout) as { status: string; error?: string };
+    const out = JSON.parse(run.stdout) as { status: string; error?: string; version?: number };
     assert.equal(out.status, 'failed', run.stderr);
     assert.match(out.error ?? '', /другая операция|удерживает/);
     assert.equal(run.code, 1);
+    // --file без значения — понятный отказ, а не чтение каталога.
+    const missing = await command(
+      [
+        process.execPath,
+        '--import',
+        import.meta.resolve('tsx'),
+        resolve('src/cli.ts'),
+        'contract-change',
+        '--id',
+        started.operation.id,
+        '--revise',
+        '--expected-version',
+        String(out.version ?? 0),
+        '--data',
+        s.root,
+        '--file',
+      ],
+      process.cwd(),
+      {
+        timeoutMs: 120000,
+        env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR },
+      },
+    );
+    assert.equal(missing.code, 1);
+    assert.match(missing.stderr, /Укажите путь к файлу предложения/);
+    assert.doesNotMatch(missing.stderr, /EISDIR/);
   } finally {
     await s.remove();
   }
