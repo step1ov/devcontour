@@ -10,6 +10,7 @@ import { contractDigest, digest, type DevContour } from '../core/service.ts';
 import { repositories, repository } from '../core/repositories.ts';
 import {
   contractContent,
+  assertDeclaration,
   contractProposal,
   defaultOwner,
   reviewContract,
@@ -94,6 +95,8 @@ export type ContractChange = {
     at: string;
     head: string;
     digest: string;
+    /** Digest файла предложения, по которому шла эта редакция. */
+    proposal?: string;
     reason: string;
     reviews: { id: string; approved: boolean; summary: string }[];
   }[];
@@ -410,8 +413,16 @@ export class ContractChanges {
    * После регистрации, перепривязки или переноса базы эти эффекты не
    * отменяются: создаётся связанная следующая операция, которой удержания
    * передаются атомарно, а прежняя помечается заменённой.
+   *
+   * `input` — исправленный файл предложения (текст или файл, artifacts,
+   * checks, underTest) того же контракта. Без него пересмотр берёт прежнее
+   * предложение, и исправить, например, отсутствующий договор проверки было
+   * нельзя: оставалось отменить операцию и снять удержания. Новое предложение
+   * проходит те же предпроверки, что и старт, — закрепление артефактов,
+   * замыкание их зависимостей и структуру договора проверки — до записи и до
+   * вызова модели.
    */
-  async revise(id: string, expectedVersion: number, include?: string[]) {
+  async revise(id: string, expectedVersion: number, include?: string[], input?: unknown) {
     const op = this.get(id);
     if ((op.version ?? 0) !== expectedVersion)
       throw new DomainError('Операция изменилась; прочитайте её заново и повторите', 409);
@@ -421,7 +432,30 @@ export class ContractChanges {
     // допустим, его поздний ответ отсечёт проверка владения.
     if (!['failed', 'stale', 'waiting', 'queued', 'running'].includes(op.status))
       throw new DomainError(`Пересмотр недоступен операции в состоянии ${op.status}`, 409);
-    const impact = await contractImpact(this.h, op.proposal);
+    const proposal = input === undefined ? op.proposal : contractProposal.parse(input);
+    const impact = await contractImpact(this.h, proposal);
+    if (input !== undefined) {
+      if (
+        digest({
+          owner: impact.repositoryId,
+          source: proposal.file ?? `title:${proposal.title}`,
+        }) !== op.key
+      )
+        throw new DomainError(
+          'Пересмотр меняет тот же контракт: файл, название inline-предложения и компонент должны совпадать',
+          400,
+        );
+      if (impact.closure.refusal) throw new DomainError(impact.closure.refusal, 400);
+      if (proposal.checks) {
+        const pinned = await pinArtifacts(
+          repository(this.h.config, impact.repositoryId),
+          proposal.artifacts ?? [],
+          impact.proposed.revision,
+          this.h.config.contractArtifacts,
+        );
+        assertDeclaration(this.h, impact.repositoryId, proposal.checks, pinned.artifacts);
+      }
+    }
     if (
       impact.proposed.revision === op.expected.head &&
       impact.proposed.digest === op.expected.proposedDigest
@@ -453,6 +487,7 @@ export class ContractChanges {
             at,
             head: current.expected.head,
             digest: current.expected.proposedDigest,
+            proposal: digest(current.proposal),
             reason: current.error ?? current.status,
             reviews,
           },
@@ -478,7 +513,14 @@ export class ContractChanges {
         current.token = undefined;
         current.leaseUntil = undefined;
         if (include) current.include = include;
-        this.log(current, 'start', 'revised', `${impact.proposed.revision.slice(0, 12)}`);
+        current.proposal = proposal;
+        this.log(
+          current,
+          'start',
+          'revised',
+          `${impact.proposed.revision.slice(0, 12)}; предложение ${digest(proposal).slice(0, 12)}${input === undefined ? '' : ' (новый файл)'}`,
+        );
+        for (const w of impact.warnings) this.log(current, 'start', 'warning', w.message);
         this.save(current);
         return { status: 'revised' as const, operation: this.view(current) };
       }
@@ -486,7 +528,7 @@ export class ContractChanges {
         id: 'CC-' + randomUUID(),
         key: current.key,
         owner: current.owner,
-        proposal: current.proposal,
+        proposal,
         authorRuntime: current.authorRuntime,
         expected: {
           head: impact.proposed.revision,
@@ -521,7 +563,12 @@ export class ContractChanges {
         'superseded',
         `следующая редакция ${next.id}; эффекты этой операции остаются в истории`,
       );
-      this.log(next, 'start', 'queued', `продолжает ${current.id}`);
+      this.log(
+        next,
+        'start',
+        'queued',
+        `продолжает ${current.id}; предложение ${digest(proposal).slice(0, 12)}`,
+      );
       this.h.clearWait('context-lock', current.id);
       // Пауза и запрос применения принадлежали заменённой операции: следующая
       // проведёт перезакрепление и применение сама.

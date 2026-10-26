@@ -818,10 +818,15 @@ async function main() {
         else if (args.includes('--id') && args.includes('--revise')) {
           // Пересмотр берёт текущий закоммиченный HEAD явно и сверяет версию
           // записи, прочитанную ведущим.
+          // С --file пересмотр берёт исправленный файл предложения (checks,
+          // artifacts, underTest); без него — прежнее предложение.
           const revised = await changes.revise(
             option('--id', ''),
             Number(option('--expected-version', '')),
             include,
+            args.includes('--file')
+              ? JSON.parse(await readFile(resolve(option('--file', '')), 'utf8'))
+              : undefined,
           );
           result = await changes.advance(revised.operation.id);
         } else if (args.includes('--id')) result = await changes.advance(option('--id', ''));

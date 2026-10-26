@@ -8,7 +8,7 @@ import { fixture as base, input, statePrevious } from './helpers.ts';
 import { reviewContract } from '../src/runner/agent-control.ts';
 import { ContractChanges, type ContractChange } from '../src/runner/contract-change.ts';
 import type { AgentAdapter, AgentRequest } from '../src/runner/adapters.ts';
-import { specDigest } from '../src/core/service.ts';
+import { digest, specDigest } from '../src/core/service.ts';
 import { readyTasks } from '../src/core/graph.ts';
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
 import { submitCase } from '../src/runner/checks.ts';
@@ -16,7 +16,9 @@ import { git as gitCommand } from '../src/runner/process.ts';
 import {
   check,
   checkProject,
+  declaration,
   fixture as checkFixture,
+  propertyGate,
   knap,
   rejection,
   removeRoot,
@@ -411,5 +413,87 @@ test('AC32: a base check wait and a human pause stay distinct, the pause is not 
   } finally {
     await f.close();
     await removeRoot(p.root);
+  }
+});
+
+test('A rejected operation is revised from a new proposal file: same operation and holds, pre-checks before the model, the proposal digest recorded', async () => {
+  const s = await stage();
+  try {
+    s.h.config.gates = [...s.h.config.gates, propertyGate()];
+    // Эталон и проверка без локальных импортов; отдельный файл — с
+    // незакреплённым helper.
+    await writeFile(join(s.repo, 'oracle.mjs'), 'export const best = () => 0;\n');
+    await writeFile(join(s.repo, 'check.mjs'), 'export const run = () => true;\n');
+    await writeFile(join(s.repo, 'helper.mjs'), 'export const h = 1;\n');
+    await writeFile(join(s.repo, 'bad.mjs'), "import { h } from './helper.mjs';\nexport { h };\n");
+    s.sh('add', '.');
+    s.sh('commit', '-qm', 'oracle');
+    const decide = rejectFirstContract();
+    const { operation } = (await s.changes(decide).start(s.proposal, 'codex')) as {
+      operation: ContractChange;
+    };
+    const rejected = await s.changes(decide).advance(operation.id);
+    assert.equal(rejected.status, 'failed');
+    assert.equal(rejected.next, 'review');
+    const calls = s.calls.length;
+    const version = rejected.version!;
+    const artifacts = [
+      ...s.proposal.artifacts,
+      { path: 'oracle.mjs', purpose: 'Эталон' },
+      { path: 'check.mjs', purpose: 'Свойства' },
+    ];
+    const fixed = { ...s.proposal, artifacts, checks: declaration() };
+    // Устаревшая версия записи — отказ.
+    await assert.rejects(
+      s.changes(decide).revise(operation.id, version - 1, undefined, fixed),
+      /изменилась/,
+    );
+    // Незащищённая зависимость артефакта — отказ до модели и до записи.
+    await assert.rejects(
+      s.changes(decide).revise(operation.id, version, undefined, {
+        ...fixed,
+        artifacts: [...artifacts, { path: 'bad.mjs', purpose: 'Проверка' }],
+      }),
+      /helper\.mjs/,
+    );
+    // Структурно неполный договор проверки — тоже до модели.
+    await assert.rejects(
+      s.changes(decide).revise(operation.id, version, undefined, {
+        ...fixed,
+        artifacts: s.proposal.artifacts,
+      }),
+      /Договор проверки неполон/,
+    );
+    // Другой контракт тем же пересмотром не подменяется.
+    await assert.rejects(
+      s.changes(decide).revise(operation.id, version, undefined, {
+        ...fixed,
+        file: 'schema.json',
+      }),
+      /тот же контракт/,
+    );
+    assert.equal(s.calls.length, calls, 'ревьюер не вызван');
+    assert.equal(s.changes().get(operation.id).version, version, 'операция не изменилась');
+    // Файлы отказного случая убраны: перенос базы видит только контракт.
+    s.sh('rm', '-q', 'bad.mjs', 'helper.mjs');
+    s.sh('commit', '-qm', 'drop helper');
+    const revised = await s.changes(decide).revise(operation.id, version, undefined, fixed);
+    assert.equal(revised.status, 'revised');
+    assert.equal(revised.operation.id, operation.id, 'та же операция');
+    assert.equal(s.task(s.api.id).hold?.operation, operation.id, 'удержание сохранено');
+    assert.equal(revised.operation.revisions![0].proposal, digest(s.proposal));
+    assert.match(
+      revised.operation.history.at(-1)!.detail ?? '',
+      new RegExp(`предложение ${digest(fixed).slice(0, 12)}`),
+    );
+    const done = await s.changes(decide).advance(operation.id);
+    assert.equal(done.status, 'completed', done.error);
+    // Ревью шло по новому предложению: с договором проверки и эталоном.
+    const reviewed = s.proposals[calls] as { checks?: unknown; artifacts?: { path: string }[] };
+    assert.deepEqual(reviewed.checks, declaration());
+    assert.ok(reviewed.artifacts?.some((a) => a.path === 'oracle.mjs'));
+    assert.deepEqual(s.store.read().contracts.at(-1)!.checks, declaration());
+  } finally {
+    await s.remove();
   }
 });

@@ -175,6 +175,11 @@ test('a pinned acceptance file with an unpinned local helper is refused before r
     // Операция изменения контракта отказывает до удержания задач и ревью.
     const impact = await contractImpact(h, proposal('Catalog'));
     assert.match(impact.closure.refusal ?? '', /acceptance-helpers\.mjs/);
+    // Предупреждение о договоре проверки — рядом с отказом, а не вместо него.
+    assert.deepEqual(
+      impact.warnings.map((w) => w.code),
+      ['checks-missing'],
+    );
     assert.deepEqual(impact.closure.exempted, [
       {
         path: 'src/catalog.mjs',
