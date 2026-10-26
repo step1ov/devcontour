@@ -33,7 +33,7 @@
 // при SIGINT/SIGTERM, кроме завершённой проверки с `--keep`. Удаляется только
 // каталог, созданный этим запуском: `$TMPDIR/dc-copy-precheck-*` с меткой, в
 // которой токен запуска.
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   cpSync,
@@ -63,6 +63,7 @@ const token = randomUUID();
 let scratch;
 let keepScratch = false;
 let container;
+const containerName = 'dc-copy-precheck-' + token;
 const removeOwnScratch = () => {
   const dir = scratch;
   scratch = undefined;
@@ -98,7 +99,19 @@ for (const [signal, code] of [
 ])
   process.on(signal, () => {
     console.error('copy-precheck: прервано (' + signal + ')');
-    container?.kill('SIGTERM');
+    if (container) {
+      // Сигнал клиенту docker не останавливает контейнер, который ещё пишет в
+      // копию: контейнер удаляется явно и до удаления копии (не дольше 30 с).
+      const removed = spawnSync('docker', ['rm', '-f', containerName], {
+        stdio: 'ignore',
+        timeout: 30000,
+      });
+      if (removed.status !== 0)
+        console.error(
+          `copy-precheck: контейнер ${containerName} не удалён (docker rm -f) — копия может ещё меняться`,
+        );
+      container.kill('SIGTERM');
+    }
     process.exit(code);
   });
 
@@ -345,6 +358,10 @@ const user =
 const dockerArgs = [
   'run',
   '--rm',
+  // init (PID 1) передаёт сигналы doctor; имя — чтобы удалить контейнер при прерывании.
+  '--init',
+  '--name',
+  containerName,
   ...user,
   // Копия смонтирована по абсолютному пути оригинала; сам оригинал — нет.
   '-v',

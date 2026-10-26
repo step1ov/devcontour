@@ -92,6 +92,12 @@ import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { join } from 'node:path';
 const args = process.argv.slice(2);
+if (args[0] === 'rm') {
+  // docker rm -f NAME: записать вызов и остановить «контейнер».
+  fs.appendFileSync(process.env.FAKE_DOCKER_RECORD + '.rm', args.join(' ') + '\\n');
+  try { process.kill(Number(fs.readFileSync(process.env.FAKE_DOCKER_RECORD + '.pid', 'utf8')), 'SIGKILL'); } catch {}
+  process.exit(0);
+}
 const mount = args[args.indexOf('-v') + 1];
 const copy = mount.slice(0, mount.indexOf(':'));
 const data = join(copy, 'ws', '.devcontour-local');
@@ -100,12 +106,19 @@ const files = Object.fromEntries(
     .map((n) => [n, createHash('sha256').update(fs.readFileSync(join(data, n))).digest('hex')]),
 );
 fs.writeFileSync(process.env.FAKE_DOCKER_RECORD, JSON.stringify({ args, files }));
+if (process.env.FAKE_DOCKER_MODE === 'hang') {
+  // Контейнер, который не завершается сам и SIGTERM клиента не слушает.
+  fs.writeFileSync(process.env.FAKE_DOCKER_RECORD + '.pid', String(process.pid));
+  process.on('SIGTERM', () => {});
+  setInterval(() => {}, 1000);
+} else {
 if (process.env.FAKE_DOCKER_MODE === 'write-db') {
   const db = new DatabaseSync(join(data, 'state.sqlite'));
   db.exec("INSERT INTO state VALUES (2, 'written by the container')");
   db.close();
 }
 console.log(JSON.stringify({ scope: 'data-compatibility', compatible: true }));
+}
 `;
 
 type Report = {
@@ -399,6 +412,41 @@ test('copy-precheck: SIGTERM во время копирования — копи
     assert.deepEqual(readdirSync(f.temp), [], 'копия удалена');
     assert.equal(existsSync(f.record), false);
   } finally {
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+test('copy-precheck: SIGTERM во время проверки — контейнер удалён (docker rm -f по имени) до удаления копии', async () => {
+  const f = fixture();
+  const pidFile = f.record + '.pid';
+  try {
+    const child = spawn(process.execPath, f.argv([]), {
+      env: f.env({ FAKE_DOCKER_MODE: 'hang' }),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.on('data', (c: Buffer) => (stderr += String(c)));
+    const exited = new Promise<number | null>((done) => child.on('close', (code) => done(code)));
+    for (let i = 0; i < 300 && !existsSync(pidFile); i++) await delay(50);
+    assert.ok(existsSync(pidFile), 'контейнер запущен: ' + stderr);
+    const { args } = f.seen();
+    const name = args[args.indexOf('--name') + 1];
+    assert.match(name, /^dc-copy-precheck-[0-9a-f-]{36}$/);
+    assert.ok(args.includes('--init'));
+    child.kill('SIGTERM');
+    assert.equal(await exited, 143, stderr);
+    assert.equal(readFileSync(f.record + '.rm', 'utf8'), `rm -f ${name}\n`);
+    assert.throws(
+      () => process.kill(Number(readFileSync(pidFile, 'utf8')), 0),
+      'контейнер остановлен',
+    );
+    assert.deepEqual(readdirSync(f.temp), [], 'копия удалена');
+  } finally {
+    try {
+      process.kill(Number(readFileSync(pidFile, 'utf8')), 'SIGKILL');
+    } catch {
+      /* уже остановлен */
+    }
     rmSync(f.base, { recursive: true, force: true });
   }
 });
