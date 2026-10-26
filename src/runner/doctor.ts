@@ -205,7 +205,7 @@ export function doctorState(
   root: string,
 ): {
   state?: DevContourState;
-  engine?: Pick<DevContourState, 'leader' | 'runs'>;
+  engine?: Pick<DevContourState, 'leader' | 'runs' | 'contracts'>;
   check?: Check;
 } {
   const file = join(root, 'state.sqlite');
@@ -214,40 +214,6 @@ export function doctorState(
   const missing = (components ?? []).filter(
     (r) => !existsSync(join(r.path, '.devcontour-local', 'state.sqlite')),
   );
-  if (missing.length) {
-    // Без баз компонентов полное состояние не собрать, но роль controller
-    // хранит центральная база: проверка `engine` по ней не пропускается.
-    const pending = `Базы компонентов ещё не созданы: ${missing.map((r) => r.id).join(', ')}. Doctor баз не создаёт — их создаст первый writer (serve или run)`;
-    try {
-      const db = new DatabaseSync(readOnlyLocation(file), { readOnly: true });
-      let central: Partial<DevContourState>;
-      try {
-        const row = db.prepare('SELECT data FROM main.state WHERE id=1').get() as
-          { data: string } | undefined;
-        if (!row) throw new Error('В базе нет состояния: ' + file);
-        central = JSON.parse(row.data) as Partial<DevContourState>;
-      } finally {
-        db.close();
-      }
-      if (central.version !== 1) throw new Error('Unsupported state version');
-      return {
-        engine: { leader: central.leader, runs: central.runs ?? [] },
-        check: {
-          id: 'state',
-          status: 'not-checked',
-          detail: `${pending}; проверены только роль controller и попытки центральной базы`,
-        },
-      };
-    } catch (e) {
-      return {
-        check: {
-          id: 'state',
-          status: 'blocked',
-          detail: `${pending}; центральная база не читается: ${e instanceof Error ? e.message : String(e)}`,
-        },
-      };
-    }
-  }
   const print = () => {
     try {
       const s = statSync(file);
@@ -256,36 +222,91 @@ export function doctorState(
       return 'missing';
     }
   };
-  for (let attempt = 1; ; attempt++) {
-    const journal = journalFiles(file);
-    const quiet = !journal.some((f) => existsSync(f));
-    const before = print();
-    let state: DevContourState | undefined;
-    let failure: unknown;
-    try {
-      const store = new Store(file, components, false, undefined, true);
+  // Чтение, которому не помешал writer: база WAL без файлов журнала читается
+  // неизменяемой, и если за это время появились файлы журнала или изменился
+  // файл базы, чтение повторяется (уже с журналом).
+  const settledRead = <T>(read: () => T): { value?: T; failure?: unknown; settled: boolean } => {
+    for (let attempt = 1; ; attempt++) {
+      const journal = journalFiles(file);
+      const quiet = !journal.some((f) => existsSync(f));
+      const before = print();
+      let value: T | undefined;
+      let failure: unknown;
       try {
-        state = store.read();
-      } finally {
-        store.close();
+        value = read();
+      } catch (e) {
+        failure = e;
       }
-    } catch (e) {
-      failure = e;
+      const settled = !quiet || (!journal.some((f) => existsSync(f)) && print() === before);
+      if (settled || attempt === 3) return { value, failure, settled };
     }
-    const settled = !quiet || (!journal.some((f) => existsSync(f)) && print() === before);
-    if (settled || attempt === 3) {
-      if (state && settled) return { state };
+  };
+  const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
+  const restless = 'Базу непрерывно меняет другой процесс: состояние не прочитано согласованно';
+  if (missing.length) {
+    // Без баз компонентов полное состояние не собрать, но роль controller,
+    // попытки и контракты без владельца-компонента хранит центральная база:
+    // проверки `engine` и закрепления контрактов по ней не пропускаются.
+    const pending = `Базы компонентов ещё не созданы: ${missing.map((r) => r.id).join(', ')}. Doctor баз не создаёт — их создаст первый writer (serve или run)`;
+    const {
+      value: central,
+      failure,
+      settled,
+    } = settledRead(() => {
+      const db = new DatabaseSync(readOnlyLocation(file), { readOnly: true });
+      try {
+        const row = db.prepare('SELECT data FROM main.state WHERE id=1').get() as
+          { data: string } | undefined;
+        if (!row) throw new Error('В базе нет состояния: ' + file);
+        const document = JSON.parse(row.data) as Partial<DevContourState>;
+        if (document.version !== 1) throw new Error('Unsupported state version');
+        return document;
+      } finally {
+        db.close();
+      }
+    });
+    if (!central || !settled)
       return {
         check: {
           id: 'state',
           status: 'blocked',
-          detail: settled
-            ? `Состояние не читается: ${failure instanceof Error ? failure.message : String(failure)}`
-            : 'Базу непрерывно меняет другой процесс: состояние не прочитано согласованно',
+          detail: `${pending}; центральная база не читается: ${settled ? message(failure) : restless}`,
         },
       };
-    }
+    // Записи компонентов в центральной базе — ссылки на их базы: остаются
+    // только контракты, которые лежат в ней самой.
+    const contracts = (central.contracts ?? []).filter(
+      (c) => c && typeof c === 'object' && !('$devcontourComponentObject' in c),
+    );
+    return {
+      engine: { leader: central.leader, runs: central.runs ?? [], contracts },
+      check: {
+        id: 'state',
+        status: 'not-checked',
+        detail: `${pending}; проверены только роль controller, попытки и контракты центральной базы`,
+      },
+    };
   }
+  const {
+    value: state,
+    failure,
+    settled,
+  } = settledRead(() => {
+    const store = new Store(file, components, false, undefined, true);
+    try {
+      return store.read();
+    } finally {
+      store.close();
+    }
+  });
+  if (state && settled) return { state };
+  return {
+    check: {
+      id: 'state',
+      status: 'blocked',
+      detail: settled ? `Состояние не читается: ${message(failure)}` : restless,
+    },
+  };
 }
 
 export async function doctor(
@@ -605,6 +626,15 @@ export async function doctor(
   // закреплённой приёмки — предупреждение, а не блокировка. Новая редакция
   // с ним отклоняется до ревью (review-contract, contract-change).
   checks.push(...(await contractClosureChecks(config, state?.contracts ?? [])));
+  // Состояние прочитано не полностью: контракты баз компонентов не видны, и
+  // отсутствие находок закрепления ничего не доказывает.
+  if (stateCheck)
+    checks.push({
+      id: 'contract-closure:unread',
+      status: 'not-checked',
+      detail:
+        'Состояние прочитано не полностью (проверка state): закрепление контрактов, которых doctor не прочитал, не проверено',
+    });
   if (config.contextPacks.length)
     await check('context', async () => {
       for (const role of declaredRoles(config))

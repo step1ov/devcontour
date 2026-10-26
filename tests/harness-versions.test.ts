@@ -27,7 +27,7 @@ import { pathToFileURL } from 'node:url';
 import { DevContour } from '../src/core/service.ts';
 import { Store, readOnlyLocation } from '../src/core/store.ts';
 import { harnessVersion } from '../src/harness/index.ts';
-import { dataDoctor, doctorState, engineCheck } from '../src/runner/doctor.ts';
+import { dataDoctor, doctor, doctorState, engineCheck } from '../src/runner/doctor.ts';
 import { config, fixture, input } from './helpers.ts';
 import { repositorySchema } from '../src/core/model.ts';
 
@@ -374,6 +374,31 @@ test('Полный doctor: база компонента ещё не созда�
       existsSync(join(w.root, 'library', '.devcontour-local', 'state.sqlite')),
       false,
       'doctor базу не создал',
+    );
+  } finally {
+    rmSync(w.root, { recursive: true, force: true });
+  }
+});
+
+test('Полный doctor: база компонента ещё не создана — контракты центральной базы проверяются, остальные названы непроверенными', async () => {
+  const w = componentWorkspace();
+  const central = { id: 'C-central', title: 'Central', revisions: [] };
+  try {
+    editDocument(join(w.workspace, 'state.sqlite'), (s) => {
+      s.contracts = [
+        ...(s.contracts as unknown[]),
+        central,
+        { $devcontourComponentObject: 'product', id: 'x' },
+      ];
+    });
+    rmSync(join(w.root, 'library', '.devcontour-local', 'state.sqlite'));
+    const { engine, check } = doctorState(w.config, w.workspace);
+    assert.deepEqual(engine?.contracts, [central], 'ссылки на базы компонентов отброшены');
+    const result = await doctor(w.config, w.workspace, false, engine, check);
+    assert.equal(
+      result.checks.find((c) => c.id === 'contract-closure:unread')?.status,
+      'not-checked',
+      JSON.stringify(result.checks.map((c) => c.id)),
     );
   } finally {
     rmSync(w.root, { recursive: true, force: true });
