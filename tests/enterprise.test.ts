@@ -872,3 +872,47 @@ test('Cleanup recovery preserves component environment and rejects live owners a
     await f.close();
   }
 });
+
+test('Doctor marks a claude reviewer without a tool profile as degraded and names the fix', async () => {
+  // Смена ревьюера с codex на claude не должна молча ослаблять ревью:
+  // codex-ревьюер без профиля запускает проверки, claude-ревьюер без профиля —
+  // нет. Doctor называет это строкой degraded с исправлением, а явный отказ
+  // профиля остаётся not-checked.
+  const f = await fixture(false);
+  try {
+    const role = Object.keys(f.c.roles)[0];
+    const repo = f.c.repositories[0].id;
+    const original = { roles: f.c.roles[role], profiles: { ...f.c.toolProfiles } };
+    const reviewer = async () =>
+      (await doctor(f.c, f.data)).checks.find((c) => c.id === `reviewer:${repo}:${role}`);
+    f.c.roles[role] = { runtime: 'codex', reviewer: { runtime: 'codex' } };
+    delete f.c.toolProfiles['codex-review'];
+    assert.equal(
+      (await reviewer())?.status,
+      'passed',
+      'codex-ревьюер без профиля запускает проверки',
+    );
+    f.c.roles[role] = { runtime: 'codex', reviewer: { runtime: 'claude' } };
+    delete f.c.toolProfiles['claude-review'];
+    const implicit = await reviewer();
+    assert.equal(implicit?.status, 'degraded');
+    assert.match(implicit?.detail ?? '', /claude-review/);
+    assert.match(implicit?.detail ?? '', /"Bash"/);
+    f.c.toolProfiles['claude-review'] = {
+      runtime: 'claude',
+      claudeTools: ['Read', 'Glob', 'Grep'],
+    } as never;
+    const explicit = await reviewer();
+    assert.equal(explicit?.status, 'not-checked', 'явный отказ профиля — выбор оператора');
+    assert.match(explicit?.detail ?? '', /добавьте Bash/);
+    f.c.toolProfiles['claude-review'] = {
+      runtime: 'claude',
+      claudeTools: ['Read', 'Glob', 'Grep', 'Bash'],
+    } as never;
+    assert.equal((await reviewer())?.status, 'passed');
+    f.c.roles[role] = original.roles;
+    f.c.toolProfiles = original.profiles;
+  } finally {
+    await f.close();
+  }
+});

@@ -30,7 +30,17 @@ import { Store, journalFiles, readOnlyLocation } from '../core/store.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 
-type Check = { id: string; status: 'passed' | 'blocked' | 'not-checked'; detail: string };
+/**
+ * `degraded` — работать можно, но слабее, чем ожидает оператор, и не по его
+ * явному выбору: например, claude-ревьюер без профиля инструментов только
+ * читает, хотя codex-ревьюер на его месте запускал проверки. Готовность не
+ * снимает, но называет исправление.
+ */
+type Check = {
+  id: string;
+  status: 'passed' | 'blocked' | 'not-checked' | 'degraded';
+  detail: string;
+};
 const bindingLabel = (b: { runtime: string; model?: string }) =>
   b.model ? `${b.runtime} (${b.model})` : b.runtime;
 export async function executable(file: string) {
@@ -380,12 +390,23 @@ export async function doctor(
   for (const { repo, role, review, binding } of bindings.filter((b) => b.review)) {
     const profile = toolProfileFor(config, binding.runtime, role, review, repo.id);
     const runsChecks = reviewerRunsChecks(binding.runtime, profile);
+    // Профиля нет вовсе — это не выбор оператора, а умолчание: codex-ревьюер
+    // без профиля получает shell, claude-ревьюер — нет. Смена ревьюера с codex
+    // на claude молча ослабляла ревью, поэтому строка называет исправление.
+    const implicit = !profile && binding.runtime === 'claude';
+    const name = binding.toolProfile ?? `${binding.runtime}-review`;
+    const fix =
+      binding.runtime === 'claude'
+        ? implicit
+          ? `Объявите toolProfiles["${name}"] = { "runtime": "claude", "claudeTools": ["Read", "Glob", "Grep", "Bash"] } или задайте ревьюеру toolProfile с Bash в claudeTools.`
+          : `Если отказ не намеренный, добавьте Bash в claudeTools профиля ${name}.`
+        : `Если отказ не намеренный, уберите codexShell: false в профиле ${name}.`;
     checks.push({
       id: `reviewer:${repo.id}:${role}`,
-      status: runsChecks ? 'passed' : 'not-checked',
+      status: runsChecks ? 'passed' : implicit ? 'degraded' : 'not-checked',
       detail: runsChecks
         ? `${binding.runtime} может выполнить проверки при ревью — в песочнице ОС без сети и без записи в проверяемый каталог`
-        : `${binding.runtime} проверяет только чтением: профиль не даёт запускать команды. Ревью не обнаружит то, что видно лишь прогоном.`,
+        : `${binding.runtime} проверяет только чтением: ${implicit ? 'профиля инструментов ревьюера нет, а без него claude не получает Bash (codex-ревьюер на его месте запускал бы проверки)' : 'профиль не даёт запускать команды'}. Ревью не обнаружит то, что видно лишь прогоном. ${fix}`,
     });
   }
   // Исполнитель без shell пишет вслепую: не запускает ни тесты, ни проверку
