@@ -32,6 +32,10 @@ const registrySchema = z.object({
   toolProfiles: configSchema.shape.toolProfiles,
   completionMode: configSchema.shape.completionMode,
   forgeConnections: configSchema.shape.forgeConnections,
+  // Правила ревью — объявление workspace, как профили инструментов: кто
+  // проверяет код, план и контракт и разрешён ли ревьюер того же вендора.
+  // Нет поля — реестр ревью не управляет, и выбор в config.json сохраняется.
+  review: configSchema.shape.review,
 });
 
 // Роль, которой в конфигурации ещё нет, добавляется: именно этого не хватало,
@@ -87,6 +91,34 @@ const withDeclaredRoles = (
   // Роли компонента объявляются отдельно, в реестре, и это не затрагивает.
   return upgrade ? { ...declared } : { ...declared, ...existing };
 };
+/**
+ * Верхнеуровневая привязка роли, которую объявил и единственный компонент, —
+ * мёртвая копия: действует привязка компонента (`roleBinding`). Она
+ * оставалась прежней после смены ревьюеров в файле компонента и показывала в
+ * config.json ревьюеров, которых контур уже не вызывает. При одном
+ * компоненте копия обновляется по нему; при нескольких верхний уровень —
+ * общий запасной выбор, и он не трогается.
+ */
+// Копия несёт действующего ревьюера: роль компонента без своего ревьюера
+// проверяет ревьюер компонента, а не общий.
+const withComponentRoles = <T extends Record<string, unknown>>(
+  top: Record<string, T>,
+  repos: { roles?: Record<string, T>; reviewer?: unknown }[],
+): Record<string, T> =>
+  repos.length === 1
+    ? {
+        ...top,
+        ...Object.fromEntries(
+          Object.entries(repos[0].roles ?? {})
+            .filter(([id]) => id in top)
+            .map(([id, b]) => [
+              id,
+              b.reviewer || !repos[0].reviewer ? b : { ...b, reviewer: repos[0].reviewer },
+            ]),
+        ),
+      }
+    : top;
+const differs = (a: unknown, b: unknown) => JSON.stringify(a) !== JSON.stringify(b);
 export async function setupWorkspace(file: string, data?: string) {
   const source = await realpath(resolve(file));
   const workspaceRoot = dirname(source);
@@ -158,8 +190,11 @@ export async function setupWorkspace(file: string, data?: string) {
   )
     throw new Error('IDs и пути репозиториев должны быть уникальны');
   const packs = [...new Map(selected.map((p) => [packKey(p), p])).values()];
+  const base = projectConfig(repos[0].path, selected[0], input.approvalMode);
   const config = configSchema.parse({
-    ...projectConfig(repos[0].path, selected[0], input.approvalMode),
+    ...base,
+    roles: withComponentRoles(base.roles, repos),
+    protectedPaths: repos[0].protectedPaths,
     name: input.name,
     workspaceRoot,
     workspaceMode,
@@ -196,6 +231,7 @@ export async function setupWorkspace(file: string, data?: string) {
     toolProfiles: input.toolProfiles,
     completionMode: input.completionMode,
     forgeConnections: input.forgeConnections,
+    ...(input.review ? { review: input.review } : {}),
     storage: workspaceMode === 'embedded' ? 'central' : 'component',
     gates: repos[0].gates,
     packs: packs.map(profileMetadata),
@@ -253,10 +289,15 @@ export async function setupWorkspace(file: string, data?: string) {
             config.contextPacks,
           ),
           runTimeoutMs: config.runTimeoutMs,
-          roles: withDeclaredRoles(
-            (raw as { roles?: Record<string, Record<string, unknown>> }).roles ?? {},
-            config.roles,
-            true,
+          protectedPaths: repos[0].protectedPaths,
+          ...(input.review ? { review: input.review } : {}),
+          roles: withComponentRoles(
+            withDeclaredRoles(
+              (raw as { roles?: Record<string, Record<string, unknown>> }).roles ?? {},
+              config.roles,
+              true,
+            ),
+            repos,
           ),
         },
         null,
@@ -326,6 +367,15 @@ export async function setupWorkspace(file: string, data?: string) {
     )
       throw new Error('Существующая конфигурация относится к другому workspace или профилю');
     await reserveRepositories(existing, root);
+    // Производные копии в самом файле: верхнеуровневые gates, protectedPaths и
+    // роли единственного компонента. Загрузка их уже не применяет, но
+    // устаревшая копия в config.json вводила в заблуждение того, кто его читает.
+    const stored = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
+    const roles = withComponentRoles(withDeclaredRoles(existing.roles, config.roles), repos);
+    const derivedStale =
+      ('gates' in stored && differs(stored.gates, config.gates)) ||
+      ('protectedPaths' in stored && differs(stored.protectedPaths, repos[0].protectedPaths)) ||
+      differs(sortedRoles(existing.roles), sortedRoles(roles));
     const known = declaredNames(existing, existing.repositories);
     // The workspace, its repositories and the pinned profile are the same, so
     // what the registry declares about them may still change afterwards: a joint
@@ -358,26 +408,32 @@ export async function setupWorkspace(file: string, data?: string) {
       // запускался, и устаревшее объявление вместе со своим закреплением
       // оставалось действующим.
       JSON.stringify(existing.contextPacks.map(declaration)) !==
-        JSON.stringify(config.contextPacks.map(declaration));
+        JSON.stringify(config.contextPacks.map(declaration)) ||
+      (input.review !== undefined && differs(existing.review, input.review)) ||
+      derivedStale;
     if (declarationChanged) {
       const contextPacks = withPins(existing.contextPacks, config.contextPacks);
-      await writeFile(
-        configPath,
-        JSON.stringify(
-          {
-            ...existing,
-            workspaceGates: config.workspaceGates,
-            gates: config.gates,
-            repositories: repos,
-            contextPacks,
-            environment: config.environment,
-            toolProfiles: config.toolProfiles,
-            roles: withDeclaredRoles(existing.roles, config.roles),
-          },
-          null,
-          2,
-        ),
+      const text = JSON.stringify(
+        {
+          ...existing,
+          workspaceGates: config.workspaceGates,
+          gates: config.gates,
+          protectedPaths: repos[0].protectedPaths,
+          repositories: repos,
+          contextPacks,
+          environment: config.environment,
+          toolProfiles: config.toolProfiles,
+          review: input.review ?? existing.review,
+          roles,
+        },
+        null,
+        2,
       );
+      // Объявление проверяется до записи тем же загрузчиком, что и сервер:
+      // ревьюер того же вендора без явного разрешения отклоняется, и
+      // config.json остаётся прежним.
+      loadConfig(configPath, text);
+      await writeFile(configPath, text);
       return { status: 'declaration-updated', data: root, config: configPath, delivered };
     }
     return { status: 'preserved', data: root, config: configPath, delivered };

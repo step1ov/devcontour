@@ -509,3 +509,116 @@ test('Обновление профиля называет значения, к�
     await f.close();
   }
 });
+
+test('workspace-init переносит правила ревью, а панель и doctor видят действующие gates и роли компонента', async () => {
+  // Файл компонента сильнее профиля и верхнего уровня config.json. Копии
+  // верхнего уровня (gates, protectedPaths, роли единственного компонента)
+  // устаревали: панель читала список gates, по которому контур уже не
+  // работал, а роли показывали прежних ревьюеров. Правила ревью задавались
+  // только ручной правкой config.json.
+  const f = await fixture();
+  try {
+    await git(f.repo, 'init', '-b', 'main');
+    await git(f.repo, 'config', 'user.name', 'Profile fixture');
+    await git(f.repo, 'config', 'user.email', 'fixture@example.invalid');
+    await git(f.repo, 'add', '.');
+    await git(f.repo, 'commit', '-m', 'Own profile');
+    const control = join(f.root, 'control');
+    await mkdir(control);
+    const registry = join(control, 'workspace.json');
+    const declared = {
+      version: 1,
+      name: 'Review rules',
+      repositories: [
+        {
+          id: 'product',
+          name: 'Product',
+          path: f.repo,
+          profile: './profiles/main.json',
+          configFile: 'devcontour.component.json',
+        },
+      ],
+    };
+    await json(registry, declared);
+    const componentPath = join(f.repo, 'devcontour.component.json');
+    const component: { gates: unknown[]; roles: Record<string, Record<string, unknown>> } & Record<
+      string,
+      unknown
+    > = {
+      name: 'Product',
+      kind: 'product',
+      gates: [{ ...testGate, id: 'component-own' }],
+      roles: {
+        backend: {
+          runtime: 'claude',
+          reviewer: { runtime: 'claude' },
+          reviewVendor: 'same-vendor-allowed',
+          requiresContract: true,
+        },
+      },
+    };
+    await json(componentPath, component);
+    const { config: configPath } = await setupWorkspace(registry);
+
+    // config.json прежней версии: копии верхнего уровня записаны и устарели.
+    const stale = JSON.parse(await readFile(configPath, 'utf8'));
+    stale.gates = [testGate];
+    stale.protectedPaths = ['stale/'];
+    stale.roles.backend = { runtime: 'claude', reviewer: { runtime: 'codex' } };
+    await json(configPath, stale);
+    // Компонент добавил gate без повторного workspace-init.
+    component.gates.push({ ...testGate, id: 'component-new' });
+    await json(componentPath, component);
+    // Панель и doctor читают загруженную конфигурацию: в ней действует компонент.
+    const loaded = loadConfig(configPath);
+    assert.deepEqual(
+      loaded.gates.map((g) => g.id),
+      ['component-own', 'component-new'],
+    );
+    assert.ok(!loaded.protectedPaths.includes('stale/'));
+
+    // workspace-init обновляет и сами копии в файле.
+    assert.equal((await setupWorkspace(registry)).status, 'declaration-updated');
+    const refreshed = JSON.parse(await readFile(configPath, 'utf8')) as {
+      gates: { id: string }[];
+      protectedPaths: string[];
+      roles: Record<string, { reviewer: { runtime: string }; reviewVendor?: string }>;
+    };
+    assert.deepEqual(
+      refreshed.gates.map((g) => g.id),
+      ['component-own', 'component-new'],
+    );
+    assert.ok(!refreshed.protectedPaths.includes('stale/'));
+    assert.equal(refreshed.roles.backend.reviewer.runtime, 'claude');
+    assert.equal(refreshed.roles.backend.reviewVendor, 'same-vendor-allowed');
+    assert.equal((await setupWorkspace(registry)).status, 'preserved');
+
+    // Правила ревью объявляются реестром и переносятся workspace-init.
+    const review = {
+      code: { vendor: 'same-vendor-allowed' },
+      plan: { reviewer: { runtime: 'claude' }, vendor: 'same-vendor-allowed' },
+      contract: { reviewer: { runtime: 'claude' }, vendor: 'same-vendor-allowed' },
+    };
+    await json(registry, { ...declared, review });
+    assert.equal((await setupWorkspace(registry)).status, 'declaration-updated');
+    assert.deepEqual(loadConfig(configPath).review, review);
+    assert.equal((await setupWorkspace(registry)).status, 'preserved');
+    // Реестр без review правилами не управляет: выбор в config.json остаётся.
+    await json(registry, declared);
+    assert.equal((await setupWorkspace(registry)).status, 'preserved');
+    assert.deepEqual(loadConfig(configPath).review, review);
+
+    // Объявление проверяется до записи: неизвестное правило и ревьюер того же
+    // вендора без явного разрешения отклоняются, config.json не меняется.
+    const before = await readFile(configPath, 'utf8');
+    await json(registry, { ...declared, review: { code: { vendor: 'any-vendor' } } });
+    await assert.rejects(setupWorkspace(registry));
+    delete component.roles.backend.reviewVendor;
+    await json(componentPath, component);
+    await json(registry, { ...declared, review: { code: { vendor: 'different-vendor' } } });
+    await assert.rejects(setupWorkspace(registry), /вендора/);
+    assert.equal(await readFile(configPath, 'utf8'), before);
+  } finally {
+    await f.close();
+  }
+});
