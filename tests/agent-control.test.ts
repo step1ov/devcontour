@@ -18,11 +18,7 @@ import type { AgentAdapter, AgentRequest } from '../src/runner/adapters.ts';
  * Fixture-ревьюер. С blocking отклоняет план находкой; contradictory — ответ
  * approved=true при blocking-находке, который протокол harness не применяет.
  */
-function runtimes(
-  action?: (r: AgentRequest) => void,
-  blocking = false,
-  contradictory = false,
-) {
+function runtimes(action?: (r: AgentRequest) => void, blocking = false, contradictory = false) {
   const make = (name: 'codex' | 'claude'): AgentAdapter => ({
     name,
     async execute(r) {
