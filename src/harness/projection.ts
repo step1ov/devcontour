@@ -128,6 +128,18 @@ export function boardOf(state: DevContourState, taskId: string): Board | undefin
   );
 }
 
+/**
+ * Digest контракта — из того же состояния, в котором прочитана задача. Иначе
+ * каждая задача без утверждённой постановки перечитывала и разбирала всё
+ * хранилище: на такте очереди с сотней задач это была большая часть его
+ * стоимости.
+ */
+const withState = (state: DevContourState, options?: ProjectionOptions) =>
+  options && {
+    ...options,
+    contractDigest: (id: string) => state.contracts.find((c) => c.id === id)?.digest,
+  };
+
 /** Поручение задачи: поля постановки DevContour в форме `WorkOrder`. */
 export function orderOf(task: Task, options?: ProjectionOptions): WorkOrder {
   // Без области у задачи и роли — весь репозиторий, как прежде; защищённые
@@ -194,7 +206,7 @@ export function workOf(state: DevContourState, task: Task, options?: ProjectionO
   const value = defined({
     id: task.id,
     graphId: boardOf(state, task.id)?.id ?? UNASSIGNED_GRAPH,
-    order: orderOf(task, options),
+    order: orderOf(task, withState(state, options)),
     ...Object.fromEntries(workFields.map((k) => [k, task[k]])),
   });
   return parsed(workStateSchema, value, 'Задача ' + task.id);
@@ -210,7 +222,7 @@ export function putWork(state: DevContourState, work: WorkState, options?: Proje
   const next = parsed(workStateSchema, work, 'Поручение ' + work.id);
   const task = state.tasks.find((t) => t.id === next.id);
   if (task) {
-    if (JSON.stringify(orderOf(task, options)) !== JSON.stringify(next.order))
+    if (JSON.stringify(orderOf(task, withState(state, options))) !== JSON.stringify(next.order))
       throw new HarnessError(
         'INVALID_INPUT',
         `Поручение ${next.id}: постановку задачи меняет продукт, а не исполнение`,
@@ -271,7 +283,7 @@ export function graphOf(
     apiVersion: API_VERSION,
     id: board.id,
     source: { connector: 'devcontour', ref: board.id, revision: String(revision.number) },
-    orders: tasks.map((t) => orderOf(t, options)),
+    orders: tasks.map((t) => orderOf(t, withState(state, options))),
     prerequisites: [],
   };
   const digest = workGraphDigest(graph);
@@ -379,7 +391,25 @@ export function continuationOf(
   return { ...from, kind: legacy.kind, reason: from.reason ?? legacy.reason };
 }
 
+/**
+ * Разобранные попытки замороженного снимка. Снимок версии данных неизменяем,
+ * и его попытка — тот же объект, пока версия та же: схема разбирает её один
+ * раз, а не на каждом такте очереди (`claim`, `expire`, `recover` читают все
+ * попытки). Изменяемое состояние транзакции не кешируется; вызывающий
+ * получает свою копию.
+ */
+const parsedAttempts = new WeakMap<Run, AttemptState>();
+
 export function attemptOf(state: DevContourState, run: Run): AttemptState {
+  const frozen = Object.isFrozen(run) && Object.isFrozen(state.tasks);
+  const hit = frozen ? parsedAttempts.get(run) : undefined;
+  if (hit) return structuredClone(hit);
+  const attempt = projectAttempt(state, run);
+  if (frozen) parsedAttempts.set(run, structuredClone(attempt));
+  return attempt;
+}
+
+function projectAttempt(state: DevContourState, run: Run): AttemptState {
   const repositoryId =
     run.repositoryId ?? state.tasks.find((t) => t.id === run.taskId)?.repositoryId ?? 'main';
   const value = defined({

@@ -169,6 +169,63 @@ for (const [name, open] of [
     s.close();
   });
 
+  test(`${name}: попытка снимка разбирается один раз, но читающий получает свою копию; запись видна сразу, и в транзакции`, () => {
+    const s = open(temp());
+    seed(s.store);
+    s.store.change('run.claimed', (st) => {
+      st.runs.push(run());
+      return { runId: 'R-1' };
+    });
+    // Первое чтение разбирает и кеширует; правится уже ответ из кеша.
+    s.read((v) => v.attempt('R-1'));
+    const first = s.read((v) => v.attempt('R-1'))!;
+    (first as { phase: string }).phase = 'integrating';
+    first.evidence.push({} as never);
+    const again = s.read((v) => v.attempts('T-1'))[0];
+    assert.equal(again.phase, 'running', 'правка копии не меняет следующий ответ');
+    assert.equal(again.evidence.length, 0);
+    s.transact('run.phase', (tx) => {
+      tx.putAttempt({ ...tx.attempt('R-1')!, phase: 'verifying' });
+      assert.equal(tx.attempt('R-1')!.phase, 'verifying', 'в транзакции — записанное значение');
+    });
+    assert.equal(
+      s.read((v) => v.attempt('R-1'))!.phase,
+      'verifying',
+      'новая версия — новое значение',
+    );
+    s.close();
+  });
+
+  test(`${name}: поручение задачи без утверждения берёт digest контракта из прочитанного состояния, не перечитывая хранилище`, () => {
+    const s = open(temp());
+    seed(s.store);
+    const digest = digestOf('contract');
+    s.store.change('plan.imported', (st) => {
+      st.contracts.push({ id: 'C-1', digest } as never);
+      for (const id of ['T-2', 'T-3', 'T-4']) {
+        const task = structuredClone(st.tasks[0]);
+        Object.assign(task, { id, contracts: ['C-1'], status: 'draft' });
+        delete task.approvedDigest;
+        delete task.approval;
+        st.tasks.push(task);
+      }
+      return {};
+    });
+    const read = s.store.read.bind(s.store);
+    let reads = 0;
+    s.store.read = () => {
+      reads++;
+      return read();
+    };
+    const works = s.read((v) => v.works());
+    assert.deepEqual(
+      works.filter((w) => w.id !== 'T-1').map((w) => w.order.contracts),
+      [[{ id: 'C-1', digest }], [{ id: 'C-1', digest }], [{ id: 'C-1', digest }]],
+    );
+    assert.equal(reads, 0, 'такт очереди не перечитывает хранилище на каждую задачу');
+    s.close();
+  });
+
   test(`${name}: журнал — прежняя форма данных без токенов и harnessEvents; курсор id × 1024 + индекс`, () => {
     const s = open(temp());
     seed(s.store);

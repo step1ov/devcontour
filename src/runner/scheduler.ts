@@ -140,8 +140,7 @@ export class Scheduler {
    * `base-update`. Приёмка по-прежнему закрепляет доказанный SHA задачи, а
    * не вершину базы.
    */
-  private async fastForwardBase() {
-    const drift = await this.baseDrift();
+  private async fastForwardBase(drift: Awaited<ReturnType<Scheduler['baseDrift']>>) {
     if (!drift.length || drift.some((d) => d.ahead > 0)) return;
     const s = this.h.store.read();
     if (s.paused || s.runs.some((r) => r.status === 'active')) return;
@@ -258,8 +257,12 @@ export class Scheduler {
       serveReconfigure(this.h, join(this.root, 'config.json'), this.owner);
       const runner = this.runner;
       if (!this.h.store.view().paused && runner.active < this.h.config.concurrency) {
-        await this.fastForwardBase();
-        await this.assertBaseCurrent();
+        // Сверка базы — git на каждом такте; без расхождения повторно не читается.
+        const drift = await this.baseDrift();
+        if (drift.length) {
+          await this.fastForwardBase(drift);
+          await this.assertBaseCurrent();
+        }
         assertTeamCheckout(this.h);
       }
       await runner.tick();

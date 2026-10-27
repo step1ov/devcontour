@@ -469,7 +469,8 @@ export function syncGit(h: DevContour, options: SyncOptions = {}) {
 }
 
 export function assertTeamCheckout(h: DevContour) {
-  if (!h.store.read().team) return;
+  // Такт очереди: замороженный снимок, без разбора документа заново.
+  if (!h.store.view().team) return;
   for (const scope of scopes(h)) {
     if (
       !scope.baseline ||
