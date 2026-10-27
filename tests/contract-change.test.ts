@@ -16,7 +16,7 @@ import fs, {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { config, fixture, input } from './helpers.ts';
+import { config, fixture, input, reapprove } from './helpers.ts';
 import { repositorySchema } from '../src/core/model.ts';
 import { checksWarnings, reviewContract, reviewPlan } from '../src/runner/agent-control.ts';
 import {
@@ -580,6 +580,8 @@ async function withContextPack(s: Awaited<ReturnType<typeof stage>>) {
   const path = join(s.root, 'config.json');
   await writeFile(path, JSON.stringify(s.h.config, null, 2) + '\n');
   s.h.config = loadConfig(path);
+  // Роли сменились после утверждения плана фикстуры: план утверждается заново (D42).
+  reapprove(s.h);
   await writeFile(join(s.repo, 'docs/contracts/catalog.md'), '# Catalog\n\nPrice is a number.\n');
   s.sh('commit', '-qam', 'contract text');
   const pinnedBefore = s.h.config.contextPacks[0].revision;

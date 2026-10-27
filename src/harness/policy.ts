@@ -7,6 +7,7 @@
 // — явный отказ с указанием поля, а не молчаливая подмена.
 import {
   HarnessError,
+  digestOf,
   executionPolicySchema,
   policyIssues,
   selectReviewer,
@@ -281,4 +282,32 @@ export function technicalReviewer(
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Часть политики исполнения, которую утверждает ревью плана (D42): что и
+ * как исполняется и проверяется — gates, роли с областями записи, ревьюеры и
+ * правила вендора, защищённые и генерируемые пути, окружение, изоляция,
+ * инструменты. Эксплуатационные пределы (параллельность, сроки, попытки,
+ * бюджеты, цены, ресурсы хоста, режим согласования, повторное использование
+ * кандидата) план не меняют, и их правка повторного утверждения не требует.
+ */
+const operational = new Set([
+  'concurrency',
+  'leaseMs',
+  'runTimeoutMs',
+  'reviewProbes',
+  'maxAttempts',
+  'repairBudget',
+  'budgets',
+  'prices',
+  'resources',
+  'approvalMode',
+  'reuseImplementation',
+]);
+export function approvalPolicyDigest(config: Config) {
+  const approved = Object.fromEntries(
+    Object.entries(policyFromConfig(config)).filter(([key]) => !operational.has(key)),
+  );
+  return digestOf({ approvalPolicy: 1, ...approved });
 }

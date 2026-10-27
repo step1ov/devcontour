@@ -1,4 +1,4 @@
-import { mkdir, writeFile, access } from 'node:fs/promises';
+import { mkdir, writeFile, access, realpath } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { configSchema, type Config } from './core/model.ts';
 import { Store } from './core/store.ts';
@@ -52,7 +52,9 @@ console.log('2 fixture assertions passed. No AI model was called.');\n`,
   const config: Config = configSchema.parse({
     version: 1,
     name: 'Учебный проект',
-    repository: repo,
+    // Путь — как его прочтёт loadConfig (realpath): утверждения демо
+    // закрепляют политику исполнения, а путь входит в неё.
+    repository: await realpath(repo),
     mode: 'demo',
     concurrency: 2,
     roles: {

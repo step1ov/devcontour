@@ -121,7 +121,7 @@ export class LeadWorkflow {
     return [undefined, ...repositories(this.h.config).map((r) => r.id)].flatMap((owner) =>
       this.list(owner).map((job) => ({
         ...(job.kind === 'board' && stale.get(job.id)?.key === job.key
-          ? { approvalStale: stale.get(job.id)! }
+          ? { inputStale: stale.get(job.id)! }
           : {}),
         key: job.key,
         kind: job.kind,
@@ -151,28 +151,41 @@ export class LeadWorkflow {
    * контракт. Очередь заданий помечает такое задание `stale` только при
    * следующем взятии стадии, а на паузе стадии не берутся, и оператор видел
    * лишь паузу и удержания. Здесь устаревание считается чтением, без записи.
+   *
+   * Доска, у которой уже есть задание по текущему входу (новое задание,
+   * начатое и на паузе), не устарела: прежнее задание закроется `stale` само.
+   * Вход, который нельзя построить (продукт не согласован, доска удалена), —
+   * не устаревшее согласование: его причину называет прогресс задачи.
    */
   staleBoards(s: DevContourState = this.h.store.read()) {
     const stale = new Map<string, { key: string; reason: string; hint: string }>();
+    const fresh = new Set<string>();
+    const inputs = new Map<string, { digest: string; owner?: string } | undefined>();
+    const bound = (id: string) => {
+      if (!inputs.has(id))
+        try {
+          inputs.set(id, this.input('board', id, s));
+        } catch (error) {
+          if (!(error instanceof DomainError)) throw error;
+          inputs.set(id, undefined);
+        }
+      return inputs.get(id);
+    };
     for (const owner of [undefined, ...repositories(this.h.config).map((r) => r.id)])
       for (const job of this.list(owner)) {
         if (job.kind !== 'board' || !['queued', 'running'].includes(job.status)) continue;
-        let current: boolean;
-        try {
-          const bound = this.input('board', job.id, s);
-          current = bound.digest === job.inputDigest && bound.owner === job.owner;
-        } catch (error) {
-          if (!(error instanceof DomainError)) throw error;
-          current = false;
-        }
-        if (!current)
+        const input = bound(job.id);
+        if (!input) continue;
+        if (input.digest === job.inputDigest && input.owner === job.owner) fresh.add(job.id);
+        else
           stale.set(job.id, {
             key: job.key,
             reason:
-              'Согласование доски устарело: после него изменилась политика исполнения (роли, ревьюеры, gates), постановка или контракт',
-            hint: `Согласуйте план доски ${job.id} заново: начните новое задание доски (workflow_start, kind board); его стадия согласования проводит review-plan`,
+              'Задание доски начато по прежнему входу: после него изменились политика исполнения (роли, ревьюеры, gates), постановка или контракт',
+            hint: `Начните новое задание доски ${job.id} (workflow_start, kind board); прежнее закроется как stale, а план при другой политике утверждает review-plan`,
           });
       }
+    for (const id of fresh) stale.delete(id);
     return stale;
   }
   get(key: string, owner?: string) {

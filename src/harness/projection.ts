@@ -50,6 +50,12 @@ export interface ProjectionOptions {
    * задачи; граф harness получает текущий digest хоста.
    */
   policyDigest(): string;
+  /**
+   * Digest утверждаемой части политики (`approvalPolicyDigest`). Задача,
+   * утверждённая при другом, делает граф устаревшим: он проецируется с её
+   * закреплением вместо текущего digest. Нет — закрепления не сверяются.
+   */
+  approvalPolicy?(): string;
   /** Область записи задачи без своей: область её роли из конфигурации. */
   roleScope?(task: Task): string[] | undefined;
   /**
@@ -282,13 +288,24 @@ export function graphOf(
       .map((t) => t.approvedAt ?? '')
       .sort()
       .at(-1) || revision.createdAt;
+  // Политика, при которой граф согласован, — закреплённая утверждением задач
+  // (`approvedPolicy`). Утверждённая при другой политике задача делает граф
+  // устаревшим, и движок его работу не выдаёт: смена gate, правила ревью или
+  // области записи не применяется к плану без повторного утверждения.
+  // Утверждение прежней версии без закрепления — при текущей политике.
+  const current = options.policyDigest();
+  const approvedPolicy = options.approvalPolicy?.();
+  const stalePin = approvedPolicy
+    ? open.find((t) => t.approvedPolicy && t.approvedPolicy !== approvedPolicy)?.approvedPolicy
+    : undefined;
+  const policyDigest = stalePin ?? current;
   return parsed(
     graphStateSchema,
     defined({
       id: board.id,
       digest,
       graph,
-      policyDigest: options.policyDigest(),
+      policyDigest,
       approval:
         approved && at
           ? {

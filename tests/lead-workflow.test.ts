@@ -45,27 +45,32 @@ test('Workflow enqueue is idempotent, expired owners are fenced and changed inpu
   }
 });
 
-test('Устаревшее согласование доски видно на паузе: причина у задач, у задания и в проекциях панели', () => {
-  // Смена политики исполнения (здесь — ревьюер, как после workspace-init)
-  // делает вход задания доски устаревшим. Очередь заданий отмечает это лишь
-  // при следующем взятии стадии, а на паузе стадии не берутся: оператор видел
-  // только паузу. Проекции называют устаревание чтением, ничего не записывая.
+test('Смена политики на паузе: прогресс держит задачу (approval_stale) и называет устаревшее задание; новое задание и повторное утверждение снимают их', () => {
+  // Ревьюер изменился (как после workspace-init). Утверждение плана
+  // закрепило прежнюю политику: задача не выдаётся, `eligible` ложно.
+  // Задание доски начато по прежнему входу: это сведение, а не причина, —
+  // очередь заданий закроет его `stale` при следующем взятии стадии, а на
+  // паузе стадии не берутся. Проекции считают всё чтением, ничего не пишут.
   const f = fixture();
   try {
     const b = f.h.createBoard('Release board', '', 'main');
     const t = f.h.addTask(b.id, input());
     f.h.approve(b.id);
-    const job = new LeadWorkflow(f.h).start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    const request = { kind: 'board', id: b.id, authorRuntime: 'codex' } as const;
+    const job = new LeadWorkflow(f.h).start(request);
     f.h.pause(true, 'shutdown');
-    const reasons = (h: DevContour) =>
-      taskProgress(
+    const progressOf = (h: DevContour) => {
+      const s = h.store.read();
+      return taskProgress(
         h,
-        h.store.read(),
-        h.store.read().tasks.find((x) => x.id === t.id)!,
-        1,
-      ).reasons;
+        s,
+        s.tasks.find((x) => x.id === t.id)!,
+        Date.now(),
+      );
+    };
     assert.deepEqual([...new LeadWorkflow(f.h).staleBoards().keys()], []);
-    assert.ok(!reasons(f.h).includes('approval_stale'), reasons(f.h).join(','));
+    assert.ok(!progressOf(f.h).reasons.includes('approval_stale'));
+    assert.equal(progressOf(f.h).workflowStale, undefined);
 
     const changed = new DevContour(
       f.store,
@@ -73,30 +78,46 @@ test('Устаревшее согласование доски видно на �
     );
     const flow = new LeadWorkflow(changed);
     assert.deepEqual([...flow.staleBoards().keys()], [b.id]);
-    const s = changed.store.read();
-    const progress = taskProgress(
-      changed,
-      s,
-      s.tasks.find((x) => x.id === t.id)!,
-      Date.now(),
-    );
+    const progress = progressOf(changed);
     assert.ok(progress.reasons.includes('approval_stale'), progress.reasons.join(','));
     assert.ok(progress.reasons.includes('queue_paused'));
+    assert.equal(progress.eligible, false);
     assert.equal(progress.approvalStale?.boardId, b.id);
-    assert.match(progress.approvalStale.hint, /review-plan/);
-    assert.match(progress.approvalStale.reason, /политика исполнения/);
-    const board = flow.view().find((w) => w.key === job.key)!;
-    assert.equal(board.status, 'queued', 'задание не переписано чтением');
-    assert.match(board.approvalStale?.hint ?? '', new RegExp(`доски ${b.id}.*review-plan`));
+    assert.match(progress.approvalStale.hint, new RegExp(`review-plan --board ${b.id}`));
+    assert.equal(progress.workflowStale?.boardId, b.id);
+    assert.match(progress.workflowStale.hint, /workflow_start/);
+    const line = flow.view().find((w) => w.key === job.key)!;
+    assert.equal(line.status, 'queued', 'задание не переписано чтением');
+    assert.match(line.inputStale?.hint ?? '', new RegExp(`доски ${b.id}`));
 
     // Панель: сводка и карточка задачи несут ту же причину и подсказку.
     const summary = panelSummary(changed, f.root, {}) as PanelSummary;
-    assert.ok(summary.workflows.some((w) => w.key === job.key && w.approvalStale));
-    const line = summary.tasks.find((x) => x.id === t.id)!;
-    assert.ok(line.progress.reasons.includes('approval_stale'));
+    assert.ok(summary.workflows.some((w) => w.key === job.key && w.inputStale));
+    const row = summary.tasks.find((x) => x.id === t.id)!;
+    assert.ok(row.progress.reasons.includes('approval_stale'));
+    assert.equal(row.progress.workflowStale?.boardId, b.id);
     const card = panelTask(changed, t.id, {});
     assert.equal(card.task.progress.approvalStale?.boardId, b.id);
     assert.equal(new LeadWorkflow(changed).get(job.key, 'main').status, 'queued');
+
+    // Новое задание доски на паузе: прежнее больше не делает доску устаревшей.
+    const next = new LeadWorkflow(changed).start(request);
+    assert.notEqual(next.key, job.key);
+    assert.deepEqual([...new LeadWorkflow(changed).staleBoards().keys()], []);
+    assert.equal(progressOf(changed).workflowStale, undefined);
+    assert.ok(progressOf(changed).reasons.includes('approval_stale'), 'политика ещё не утверждена');
+    // Повторное утверждение плана при новой политике снимает причину.
+    const approved = changed.approve(b.id);
+    assert.deepEqual(approved.repinned, [t.id]);
+    assert.ok(!progressOf(changed).reasons.includes('approval_stale'));
+
+    // Вход, который нельзя построить, — не устаревшее согласование: доска без
+    // задач не получает подсказку «утвердите заново».
+    f.store.change('fixture.empty', (s) => {
+      s.boards.find((x) => x.id === b.id)!.revisions.at(-1)!.taskIds = [];
+    });
+    const other = new DevContour(f.store, config({ maxAttempts: 9 }));
+    assert.deepEqual([...new LeadWorkflow(other).staleBoards().keys()], []);
   } finally {
     f.cleanup();
   }

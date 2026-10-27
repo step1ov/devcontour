@@ -424,8 +424,20 @@ for (const kind of ['central', 'component'] as const) {
           r,
           `попытка ${r.id}`,
         );
-      for (const title of ['Задача accepted', 'Задача release', 'Задача failed', 'Задача property'])
-        assert.deepEqual(taskOf(s, title), taskOf(before, title), title);
+      // Единственная запись в них — закрепление политики за открытыми
+      // утверждениями прежней версии на первом такте (D42); принятые задачи
+      // его не получают.
+      for (const title of [
+        'Задача accepted',
+        'Задача release',
+        'Задача failed',
+        'Задача property',
+      ]) {
+        const { approvedPolicy, ...rest } = taskOf(s, title);
+        assert.deepEqual(rest, taskOf(before, title), title);
+        const open = !['done', 'cancelled', 'draft'].includes(rest.status) && !!rest.approvedDigest;
+        assert.equal(approvedPolicy, open ? h.planPolicyDigest() : undefined, title);
+      }
       assert.deepEqual(s.contracts, before.contracts);
       assert.deepEqual(s.contractAttempts, before.contractAttempts);
       assert.deepEqual(s.boards, before.boards);

@@ -19,7 +19,7 @@ import {
 } from '../src/runner/adapters.ts';
 import { git, command } from '../src/runner/process.ts';
 import { runCheck } from 'devcontour-harness';
-import { input, fixture } from './helpers.ts';
+import { input, fixture, reapprove } from './helpers.ts';
 import { acceptBoard } from '../src/runner/agent-control.ts';
 import { ProjectMemory } from '../src/application/memory.ts';
 import { repositories } from '../src/core/repositories.ts';
@@ -161,6 +161,7 @@ test('A missing required tool fails closed and never advances integration ref', 
   try {
     const before = await git(f.config.repository, 'rev-parse', f.scheduler.target);
     f.config.gates[0].command = ['devcontour-tool-that-does-not-exist'];
+    reapprove(f.h);
     f.h.pause(false);
     await f.scheduler.drain();
     const failed = f.store.read().tasks.filter((t) => t.status === 'failed');
@@ -963,6 +964,7 @@ test('Провал проверки несёт свою причину: разн
     const f = await runtimeFixture();
     try {
       f.h.config.gates[0].command = ['sh', '-c', `echo ${marker} >&2; exit 1`];
+      reapprove(f.h);
       f.h.pause(false);
       await new Scheduler(f.h, f.root).drain();
 
@@ -999,6 +1001,7 @@ test('Текст провала из отчёта проходит тот же r
       `const t=process.env.GATE_TOKEN;require('fs').mkdirSync('.reports',{recursive:true});require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase classname="auth" name="LEAKS_TOKEN"><failure message="'+'p'.repeat(184)+t+'"/></testcase><testcase name="case-'+t+'"><failure message="named"/></testcase></testsuite>');process.exit(1)`,
     ];
     f.h.config.gates[0].report = { type: 'junit', path: '.reports/unit.xml' };
+    reapprove(f.h);
     f.h.pause(false);
     await new Scheduler(f.h, f.root).drain();
     const failed = f.store.read().tasks.find((t) => t.status === 'failed')!;
@@ -1041,6 +1044,7 @@ const s=net.createServer(c=>c.end('pong')).listen(0,'127.0.0.1',()=>{
 });`;
     f.h.config.gates[0].command = [process.execPath, '-e', script];
     f.h.config.gates[0].report = { type: 'junit', path: '.reports/isolation.xml' };
+    reapprove(f.h);
     f.h.pause(false);
     await new Scheduler(f.h, f.root).drain();
 
@@ -1134,6 +1138,7 @@ test(
         // Таймаут с запасом на старт node под нагрузкой полного прогона: при
         // 4 с проверка иногда истекала раньше, чем потомок успевал запуститься.
         f.h.config.gates[0].timeoutMs = outcome === 'timeout' ? 15000 : 60000;
+        reapprove(f.h);
         f.h.pause(false);
         const scheduler = new Scheduler(f.h, f.root);
         const draining = scheduler.drain();
@@ -1453,6 +1458,7 @@ test('Проверка, которой песочница закрыла сет�
       report: undefined,
       command: networkCommand,
     });
+    reapprove(f.h);
     f.h.pause(false);
     await new Scheduler(f.h, f.root).drain();
     const run = f.store.read().runs.at(-1)!;

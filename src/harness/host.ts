@@ -45,7 +45,7 @@ import {
   orderOf,
   type ProjectionOptions,
 } from './projection.ts';
-import { policyFromConfig } from './policy.ts';
+import { approvalPolicyDigest, policyFromConfig } from './policy.ts';
 import {
   changeSnapshot,
   snapshotDigest,
@@ -100,6 +100,7 @@ export const CONSUMER_VERSION = (() => {
 export function projectionOptions(h: DevContour): ProjectionOptions {
   return {
     policyDigest: () => executionDigest(policyFromConfig(h.config)),
+    approvalPolicy: () => approvalPolicyDigest(h.config),
     // Действующая роль задачи: роль компонента заменяет одноимённую роль
     // workspace целиком, как в политике исполнения.
     roleScope: (task) => roleBinding(h.config, task.role, task.repositoryId)?.writePaths,

@@ -249,7 +249,12 @@ export class LeadRunner {
       const carried = carriedTaskIds(b, s.tasks);
       const tasks = s.tasks.filter((t) => revision.taskIds.includes(t.id) && !carried.has(t.id));
       if (job.stage === 0) {
-        if (revision.status === 'accepted' || tasks.every((t) => t.status !== 'draft'))
+        // Согласование нужно черновикам и задачам, утверждённым при другой
+        // политике исполнения: их движок не выдаёт до повторного утверждения.
+        if (
+          revision.status === 'accepted' ||
+          tasks.every((t) => t.status !== 'draft' && !this.h.approvalStale(t))
+        )
           return false;
         for (const task of tasks) assertRequirements(this.h, task);
         if (this.h.config.mode === 'demo')

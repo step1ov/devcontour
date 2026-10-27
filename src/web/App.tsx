@@ -90,7 +90,7 @@ const waitingReasons: Record<string, string> = {
   held_by_operation:
     'Задачу удерживает операция изменения контракта: выдача возобновится, когда операция снимет удержание.',
   approval_stale:
-    'Согласование плана устарело: после него изменилась политика исполнения, постановка или контракт.',
+    'План утверждён при другой политике исполнения: задача не выдаётся до повторного утверждения.',
   failure_requires_diagnosis: 'Разберите причину сбоя перед повторной попыткой.',
   attempts_exhausted: 'Лимит попыток исчерпан. Нужна диагностика и пересмотр решения.',
 };
@@ -2091,7 +2091,7 @@ export function App() {
                     <p className="text-muted-foreground break-words whitespace-pre-wrap">
                       {task.description}
                     </p>
-                    {!!task.progress?.reasons.length && (
+                    {!!(task.progress?.reasons.length || task.progress?.workflowStale) && (
                       <section
                         className="bg-secondary my-4 rounded-md p-3 text-sm break-words [&>h3]:mt-0 [&_ul]:mb-0 [&_ul]:pl-4 [&_li+li]:mt-2"
                         aria-label="Что нужно для продолжения"
@@ -2109,6 +2109,12 @@ export function App() {
                                 ` ${task.progress.approvalStale.hint}.`}
                             </li>
                           ))}
+                          {task.progress.workflowStale && (
+                            <li>
+                              {task.progress.workflowStale.reason}.{' '}
+                              {task.progress.workflowStale.hint}.
+                            </li>
+                          )}
                         </ul>
                       </section>
                     )}

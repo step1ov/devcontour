@@ -173,6 +173,10 @@ export class Scheduler {
       // повторяется, пока она не станет применённой. Отставший процесс не пишет.
       if (this.h.store.view().appliedConfig?.digest !== this.h.configDigest)
         this.h.recordConfig(this.owner);
+      // Утверждения прежних версий закрепляются за действующей политикой
+      // один раз: повторного утверждения всех планов обновление не требует.
+      if (this.h.store.view().appliedConfig?.digest === this.h.configDigest)
+        this.h.pinLegacyApprovals();
       // Запрошенное операцией применение конфигурации — до выдачи.
       serveReconfigure(this.h, join(this.root, 'config.json'), this.owner);
       const runner = this.runner;

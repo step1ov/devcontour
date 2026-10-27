@@ -53,6 +53,17 @@ export const proposalLimits = { artifacts: 50, purpose: 200, underTest: 50 } as 
 const proposalSchema = (bounded: boolean) => {
   const limit = (name: keyof typeof proposalLimits) =>
     bounded ? proposalLimits[name] : proposalLimits[name] * 10;
+  // Сообщение превышения называет величину и исправление и там, где схему
+  // проверяет транспорт (агентский API), до parseProposal.
+  const tooBig = (name: keyof typeof proposalLimits) => (issue: { input?: unknown }) => {
+    const actual =
+      typeof issue.input === 'string'
+        ? issue.input.length
+        : Array.isArray(issue.input)
+          ? issue.input.length
+          : limit(name) + 1;
+    return limitsMessage([{ limit: name, max: limit(name), actual, over: actual - limit(name) }]);
+  };
   return z
     .object({
       repositoryId: z.string().optional(),
@@ -72,11 +83,11 @@ const proposalSchema = (bounded: boolean) => {
               .trim()
               .min(1)
               .max(limit('purpose'), {
-                error: `purpose артефакта длиннее ${limit('purpose')} знаков`,
+                error: tooBig('purpose'),
               }),
           }),
         )
-        .max(limit('artifacts'), { error: `artifacts: больше ${limit('artifacts')} элементов` })
+        .max(limit('artifacts'), { error: tooBig('artifacts') })
         .optional(),
       /**
        * Реализация, которую закреплённая приёмка проверяет и импортирует
@@ -86,7 +97,7 @@ const proposalSchema = (bounded: boolean) => {
        */
       underTest: z
         .array(relativePath)
-        .max(limit('underTest'), { error: `underTest: больше ${limit('underTest')} элементов` })
+        .max(limit('underTest'), { error: tooBig('underTest') })
         .transform((paths) => [...new Set(paths)].sort())
         .optional(),
       /**
@@ -150,7 +161,7 @@ export function proposalLimitIssues(input: unknown): LimitIssue[] {
 export function limitsMessage(issues: LimitIssue[]) {
   const lines = issues.map((i) =>
     i.limit === 'purpose'
-      ? `artifacts[${i.index}].purpose${i.path ? ` (${i.path})` : ''}: ${i.actual} знаков при пределе ${i.max}, длиннее на ${i.over}`
+      ? `${i.index === undefined ? 'purpose' : `artifacts[${i.index}].purpose`}${i.path ? ` (${i.path})` : ''}: ${i.actual} знаков при пределе ${i.max}, длиннее на ${i.over}`
       : `${i.limit}: ${i.actual} элементов при пределе ${i.max}, лишних ${i.over}`,
   );
   const remedies = [
@@ -164,7 +175,9 @@ export function limitsMessage(issues: LimitIssue[]) {
       ? ['сократите purpose до одной фразы о роли файла']
       : []),
     ...(issues.some((i) => i.limit === 'underTest')
-      ? ['укажите в underTest каталоги реализации вместо отдельных файлов']
+      ? [
+          'оставьте в underTest только файлы реализации, которые закреплённая приёмка импортирует (каталоги underTest не принимает)',
+        ]
       : []),
   ];
   return (
@@ -734,22 +747,25 @@ export async function reviewPlan(
   if (revision.status !== 'active') throw new DomainError('Доска уже принята');
   const all = state.tasks.filter((t) => revision.taskIds.includes(t.id));
   if (!all.length) throw new DomainError('Добавьте задачи перед ревью плана');
-  const foreign = (selected ?? []).filter(
-    (id) => !all.some((t) => t.id === id && t.status === 'draft'),
-  );
+  // Утверждается черновик и задача, чей план утверждён при другой политике
+  // исполнения (`approvalStale`): её движок не выдаёт до повторного
+  // утверждения, и «already-approved» оставил бы её без пути вперёд.
+  const policy = h.planPolicyDigest();
+  const pending = (t: (typeof all)[number]) => t.status === 'draft' || h.approvalStale(t, policy);
+  const foreign = (selected ?? []).filter((id) => !all.some((t) => t.id === id && pending(t)));
   if (foreign.length) throw new DomainError('Не черновики этой доски: ' + foreign.join(', '));
   // С контекстом ревьюер видит всю ревизию — и невыбранные черновики, — но
   // утверждаются только выбранные. «Видно ревьюеру» и «можно выпустить» не
   // смешиваются: соседний черновик не утверждается побочно.
   const tasks =
-    selected && !context ? all.filter((t) => t.status !== 'draft' || selected.includes(t.id)) : all;
+    selected && !context ? all.filter((t) => !pending(t) || selected.includes(t.id)) : all;
   const drafts = selected
-    ? all.filter((t) => t.status === 'draft' && selected.includes(t.id))
-    : all.filter((t) => t.status === 'draft');
+    ? all.filter((t) => pending(t) && selected.includes(t.id))
+    : all.filter(pending);
   if (!drafts.length) return { status: 'already-approved', boardId };
   // Предусловия утверждения — до ревью: отказ после одобрения тратил вызов
-  // модели впустую.
-  drafts.forEach((t) => h.approvable(state, t));
+  // модели впустую. Повторное утверждение по политике постановку не меняет.
+  drafts.filter((t) => t.status === 'draft').forEach((t) => h.approvable(state, t));
   const contractIds = new Set(tasks.flatMap((t) => t.contracts));
   // Зависимости вне предложения ревьюер проверить не может: база контура
   // ему закрыта. Это задачи других досок и невыбранные черновики своей —
@@ -849,6 +865,8 @@ export async function reviewPlan(
         ),
       ].map((id) => [id, h.policyDigest(id)]),
     ),
+    // Политика исполнения целиком: утверждение закрепляет именно её.
+    execution: policy,
   };
   const owner = boardOwner(board, state);
   const approval = await withIntegrationCheckout(h, root, owner, (checkout) =>

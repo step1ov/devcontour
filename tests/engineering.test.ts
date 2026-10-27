@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { config, fixture, input } from './helpers.ts';
+import { config, fixture, input, reapprove } from './helpers.ts';
 import { orderedGates, validateWorkflow } from '../src/core/workflow.ts';
 import { BlockedError, taskInput, type Contract } from '../src/core/model.ts';
 import { specDigest, DevContour } from '../src/core/service.ts';
@@ -254,6 +254,7 @@ test('Role and task write scopes reject an otherwise passing implementation befo
   const f = await runnerFixture();
   try {
     f.c.roles.architect.writePaths = ['allowed/'];
+    reapprove(f.h);
     f.h.pause(false);
     await f.scheduler.drain();
     assert.match(f.store.read().tasks.find((t) => t.status === 'failed')!.failure!, /вне области/);
@@ -278,6 +279,7 @@ test('Generated files are protected and implementation discoveries enter the exi
         },
       },
     };
+    reapprove(f.h);
     f.h.pause(false);
     await new Scheduler(f.h, f.root, runtimes).drain();
     assert.equal(f.store.read().tasks.filter((t) => t.finding).length, 1);
@@ -300,6 +302,7 @@ test('Generated files are protected and implementation discoveries enter the exi
         generatedPaths: ['deliverables/'],
       },
     ];
+    reapprove(g.h);
     g.h.pause(false);
     await g.scheduler.drain();
     assert.match(g.store.read().tasks.find((t) => t.status === 'failed')!.failure!, /защищённые/);
@@ -344,6 +347,7 @@ test('Ordered codegen runs from its cwd before a real test in candidate and inte
         timeoutMs: 10000,
       },
     ];
+    reapprove(f.h);
     f.h.pause(false);
     await f.scheduler.drain();
     assert.ok(

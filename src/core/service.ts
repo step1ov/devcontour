@@ -22,6 +22,7 @@ import {
   type PropertyRecovery,
 } from 'devcontour-harness';
 import { closeEpisodeIfBasisChanged } from '../harness/host.ts';
+import { approvalPolicyDigest } from '../harness/policy.ts';
 import { planResult } from './plan.ts';
 import { boardOwner, completion, receiptHolds, receiptRecordBytes } from './sync-state.ts';
 import { carriedTaskIds } from './work-status.ts';
@@ -465,6 +466,40 @@ export class DevContour {
     const { engine } = executionOf(this);
     domain(() => engine.recordPolicy(by));
   }
+  /** Digest политики исполнения этой конфигурации — то, с чем сверяется утверждение плана. */
+  planPolicyDigest() {
+    return approvalPolicyDigest(this.config);
+  }
+  /**
+   * Утверждение плана задачи дано при другой политике исполнения. Такую
+   * задачу движок не выдаёт (граф проецируется с закреплённым digest), пока
+   * план не утверждён заново (review-plan). Утверждение прежней версии без
+   * закрепления считается данным при текущей политике.
+   */
+  approvalStale(t: Task, policy = this.planPolicyDigest()) {
+    return (
+      !['draft', 'done', 'cancelled'].includes(t.status) &&
+      !!t.approvedDigest &&
+      !!t.approvedPolicy &&
+      t.approvedPolicy !== policy
+    );
+  }
+  /**
+   * Утверждения прежних версий (без `approvedPolicy`) закрепляются за текущей
+   * политикой: первый такт controller после обновления, а не повторное
+   * утверждение всех планов. Пишет, только если такие задачи есть.
+   */
+  pinLegacyApprovals() {
+    const open = (t: Task) =>
+      !!t.approvedDigest && !t.approvedPolicy && !['draft', 'done', 'cancelled'].includes(t.status);
+    if (!this.store.view().tasks.some(open)) return [];
+    const policy = this.planPolicyDigest();
+    return this.currentChange('approval.policy-pinned', (s) => {
+      const pinned = s.tasks.filter(open);
+      for (const t of pinned) t.approvedPolicy = policy;
+      return pinned.length ? { tasks: pinned.map((t) => t.id) } : undefined;
+    });
+  }
   /** Снять завершённый запрос операции. */
   clearReconfigure(operation: string) {
     const { engine } = executionOf(this);
@@ -861,8 +896,11 @@ export class DevContour {
       policies?: Record<string, string>;
       /** Область проверок утверждаемых задач (gates, потребители) на момент ревью. */
       scopes?: Record<string, string>;
+      /** Digest политики исполнения, при которой ревьюер читал план. */
+      execution?: string;
     },
   ) {
+    const policy = this.planPolicyDigest();
     return this.currentChange('board.approved', (s) => {
       developmentBinding(s);
       const r = activeRevision(s, boardId);
@@ -887,24 +925,38 @@ export class DevContour {
             ([id, pinned]) => scopeDigest(task(s, id)) !== pinned,
           ) ||
           digest(expected.taskIds) !== digest(r.taskIds) ||
+          (expected.execution !== undefined && expected.execution !== policy) ||
           selected.some((id) => {
             const current = task(s, id);
-            return current.status !== 'draft' || expected.tasks[id] !== specDigest(current);
+            return (
+              (current.status !== 'draft' && !this.approvalStale(current, policy)) ||
+              expected.tasks[id] !== specDigest(current)
+            );
           }))
       )
         throw new DomainError('План изменился во время ревью; требуется повторная проверка');
+      const repinned: string[] = [];
       for (const id of selected) {
         const t = task(s, id);
-        if (t.status !== 'draft') continue;
-        t.contractDigests = this.approvable(s, t);
-        t.approvedAt = now();
-        t.approvedDigest = specDigest(t);
-        t.approvedScope = scopeDigest(t);
-        t.approval = approval;
-        t.status = 'ready';
-        closeEpisodeIfBasisChanged(t, now());
+        if (t.status === 'draft') {
+          t.contractDigests = this.approvable(s, t);
+          t.approvedAt = now();
+          t.approvedDigest = specDigest(t);
+          t.approvedScope = scopeDigest(t);
+          t.approvedPolicy = policy;
+          t.approval = approval;
+          t.status = 'ready';
+          closeEpisodeIfBasisChanged(t, now());
+        } else if (this.approvalStale(t, policy)) {
+          // Повторное утверждение после смены политики: постановка и
+          // закреплённые контракты прежние, утверждается план при новой
+          // политике исполнения.
+          t.approvedPolicy = policy;
+          t.approval = approval;
+          repinned.push(t.id);
+        }
       }
-      return { boardId, revision: r.number, approval };
+      return { boardId, revision: r.number, approval, ...(repinned.length ? { repinned } : {}) };
     });
   }
   impact(boardId: string, roots: string[]) {

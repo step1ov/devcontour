@@ -61,6 +61,22 @@ export const CANDIDATE = 'c'.repeat(40);
 export const MERGED = 'b'.repeat(40);
 const FIXTURE_DIGEST = 'e'.repeat(64);
 
+/**
+ * Повторное утверждение открытых досок после правки политики в тесте (D42):
+ * утверждение закрепляет политику, и задачи, утверждённые до правки, иначе
+ * не выдаются. Так тест меняет gate или окружение до запуска очереди.
+ */
+export function reapprove(h: DevContour) {
+  const s = h.store.read();
+  for (const b of s.boards) {
+    const r = b.revisions.at(-1);
+    if (
+      r?.status === 'active' &&
+      s.tasks.some((t) => r.taskIds.includes(t.id) && h.approvalStale(t))
+    )
+      h.approve(b.id);
+  }
+}
 export function complete(
   h: DevContour,
   id: string,
