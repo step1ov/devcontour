@@ -541,10 +541,10 @@ test('P-F17: a lease that expires while the summary parses and was renewed meanw
     });
     // Снимок сводки уже открыт; пока разбирается состояние, другой процесс
     // продлевает lease, а старый срок истекает.
-    const store = d.store as unknown as { readUnlocked(): unknown };
-    const original = store.readUnlocked.bind(d.store);
+    const store = d.store as unknown as { frozenUnlocked(): unknown };
+    const original = store.frozenUnlocked.bind(d.store);
     let raced = false;
-    store.readUnlocked = () => {
+    store.frozenUnlocked = () => {
       if (!raced) {
         raced = true;
         writer.change('heartbeat', (s) => {

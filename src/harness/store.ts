@@ -30,7 +30,7 @@ import {
   type TransactionKind,
   type WorkState,
 } from 'devcontour-harness';
-import type { Store } from '../core/store.ts';
+import { Draft, type Store } from '../core/store.ts';
 import type { DevContourState } from '../core/model.ts';
 import type { UsageRecord } from '../core/usage.ts';
 import {
@@ -72,7 +72,8 @@ export interface HostTransaction {
 }
 
 interface Frame {
-  state: DevContourState;
+  /** Документ транзакции: копия для записи создаётся при первом изменении. */
+  draft: Draft;
   drafts: RunEventDraft[];
   legacy?: Record<string, unknown>;
   works: Set<string>;
@@ -91,7 +92,7 @@ export class DevContourExecutionStore implements ExecutionStore {
   readonly stateVersion = STATE_VERSION;
   private frame?: Frame;
   /** Документ DevContour каждого выданного вида: порты хоста читают продуктовые поля. */
-  private readonly states = new WeakMap<ExecutionView, DevContourState>();
+  private readonly states = new WeakMap<ExecutionView, () => DevContourState>();
   constructor(
     readonly store: Store,
     readonly options: ProjectionOptions,
@@ -126,7 +127,10 @@ export class DevContourExecutionStore implements ExecutionStore {
   host<T>(kind: string, fn: (h: HostTransaction) => T): T {
     const run = (frame: Frame) =>
       fn({
-        state: frame.state,
+        // Продуктовые поля хост меняет прямо в документе: копия для записи.
+        get state() {
+          return frame.draft.edit();
+        },
         journal: (data) => (frame.legacy = data),
         tx: this.view(frame),
       });
@@ -145,7 +149,7 @@ export class DevContourExecutionStore implements ExecutionStore {
 
   /** Вложенная часть: тот же документ; при отказе возвращается её часть документа и журнала. */
   private nested<T>(frame: Frame, run: () => T): T {
-    const saved = structuredClone(frame.state);
+    const saved = frame.draft.mark();
     const drafts = frame.drafts.length;
     const legacy = frame.legacy;
     const works = new Set(frame.works);
@@ -153,9 +157,7 @@ export class DevContourExecutionStore implements ExecutionStore {
     try {
       return this.store.atomic(() => this.settled(run()));
     } catch (error) {
-      const state = frame.state as unknown as Record<string, unknown>;
-      for (const key of Object.keys(state)) delete state[key];
-      Object.assign(state, saved);
+      frame.draft.restore(saved);
       frame.drafts.length = drafts;
       frame.legacy = legacy;
       frame.works = works;
@@ -176,8 +178,8 @@ export class DevContourExecutionStore implements ExecutionStore {
     let drafts: RunEventDraft[] = [];
     this.store.atomic(() => {
       const before = this.store.lastEventId();
-      this.store.change(kind, (state) => {
-        const frame: Frame = { state, drafts: [], works: new Set(), attempts: new Set() };
+      this.store.update(kind, (draft) => {
+        const frame: Frame = { draft, drafts: [], works: new Set(), attempts: new Set() };
         this.frame = frame;
         try {
           out = this.settled(run(frame));
@@ -209,7 +211,7 @@ export class DevContourExecutionStore implements ExecutionStore {
       frame.legacy ??
       (() => {
         const runId = frame.attempts.size === 1 ? [...frame.attempts][0] : undefined;
-        const run = runId ? frame.state.runs.find((r) => r.id === runId) : undefined;
+        const run = runId ? frame.draft.current.runs.find((r) => r.id === runId) : undefined;
         const taskId = run?.taskId ?? (frame.works.size === 1 ? [...frame.works][0] : undefined);
         return { ...(taskId ? { taskId } : {}), ...(runId ? { runId } : {}) };
       })();
@@ -223,8 +225,16 @@ export class DevContourExecutionStore implements ExecutionStore {
   read<T>(fn: (view: ExecutionView) => T): T {
     if (this.frame) return fn(this.view(this.frame));
     return this.store.snapshot(() => {
+      // Чтение без копии: общий замороженный снимок версии данных.
+      const state = this.store.view() as DevContourState;
       const frame: Frame = {
-        state: this.store.read(),
+        draft: new Draft(
+          () => state,
+          () => {
+            throw new Error('Запись вне транзакции');
+          },
+          state.leader,
+        ),
         drafts: [],
         works: new Set(),
         attempts: new Set(),
@@ -272,14 +282,20 @@ export class DevContourExecutionStore implements ExecutionStore {
   stateOf(view: ExecutionView): DevContourState {
     const state = this.states.get(view);
     if (!state) throw new Error('Вид получен не от этого хранилища');
-    return state;
+    return state();
   }
 
   private view(frame: Frame, writable = true): ExecutionTransaction {
     const { options, store } = this;
-    const state = () => frame.state;
+    // Чтение — состояние транзакции (до первого изменения — общий снимок);
+    // запись — копия документа для записи.
+    const state = () => frame.draft.current as DevContourState;
     const inTx = () => {
       if (!writable || this.frame !== frame) throw new Error('Запись вне транзакции');
+    };
+    const edit = () => {
+      inTx();
+      return frame.draft.edit();
     };
     const tasksOf = () => state().tasks;
     const local = <N extends LocalNamespace>(namespace: N, owner: string, key: string) => {
@@ -289,7 +305,9 @@ export class DevContourExecutionStore implements ExecutionStore {
         const contract = state().contracts.find((c) => c.digest === key);
         if (contract && owner === WORKSPACE_OWNER) return contractDocumentOf(contract);
       }
-      const raw = store.localRecords<unknown>(hostNamespace[namespace], hostOwner(owner))[key];
+      // Одна запись — одним запросом: обход пространства (`locals`) иначе
+      // разбирал бы все его записи на каждый ключ.
+      const raw = store.localRecord<unknown>(hostNamespace[namespace], hostOwner(owner), key);
       if (raw === undefined) return undefined;
       return localSchemas[namespace].parse(
         namespace === 'usage' ? callOf(raw as UsageRecord) : raw,
@@ -352,31 +370,24 @@ export class DevContourExecutionStore implements ExecutionStore {
           })
           .map((e) => ({ ...e, value: local(namespace, e.owner, e.key)! }));
       }) as ExecutionView['locals'],
-      putGraph: (graph: GraphState) => {
-        inTx();
-        putGraph(state(), graph, options);
-      },
+      putGraph: (graph: GraphState) => putGraph(edit(), graph, options),
       putWork: (work: WorkState) => {
-        inTx();
-        putWork(state(), work, options);
+        putWork(edit(), work, options);
         frame.works.add(work.id);
       },
       putAttempt: (attempt: AttemptState) => {
-        inTx();
-        putAttempt(state(), attempt);
+        putAttempt(edit(), attempt);
         frame.attempts.add(attempt.id);
       },
-      putVerification: (verification: JointVerificationState) => {
-        inTx();
-        putVerification(state(), verification, this.jointTarget);
-      },
-      setControl: (control) => {
-        inTx();
-        setControl(state(), control);
-      },
+      putVerification: (verification: JointVerificationState) =>
+        putVerification(edit(), verification, this.jointTarget),
+      setControl: (control) => setControl(edit(), control),
+      // Роль controller — своя строка хранилища: её продление документ не копирует.
       setController: (lease) => {
         inTx();
-        setController(state(), lease);
+        const holder: { leader?: DevContourState['leader'] } = {};
+        setController(holder as DevContourState, lease);
+        frame.draft.leader = holder.leader;
       },
       putLocal: (namespace: LocalNamespace, owner: string, key: string, value: unknown) => {
         inTx();
@@ -387,7 +398,7 @@ export class DevContourExecutionStore implements ExecutionStore {
               'INVALID_INPUT',
               'Реестр воспроизведений — по поручению у workspace',
             );
-          putReproductions(state(), parsed as Parameters<typeof putReproductions>[1]);
+          putReproductions(edit(), parsed as Parameters<typeof putReproductions>[1]);
           return;
         }
         store.saveLocal(
@@ -409,7 +420,7 @@ export class DevContourExecutionStore implements ExecutionStore {
         frame.drafts.push(structuredClone(event));
       },
     };
-    this.states.set(view, frame.state);
+    this.states.set(view, state);
     return view;
   }
 }

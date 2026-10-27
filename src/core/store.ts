@@ -70,6 +70,124 @@ export function readOnlyLocation(path: string): string | URL {
   return url;
 }
 
+/** Роль controller: владелец, срок и версия движка. */
+type Leader = NonNullable<DevContourState['leader']>;
+
+/**
+ * Роль controller хранится отдельной строкой, а не в документе состояния.
+ * Её продлевают несколько раз за такт очереди даже тогда, когда ничего не
+ * происходит; в документе это переписывало бы всё состояние (мегабайты на
+ * большой истории) ради одного срока. `data` NULL — роль снята. Строки нет —
+ * база прежней версии: роль читается из документа. Таблица создаётся первой
+ * записью роли: открытие и чтение базы прежней версии её не меняют.
+ */
+const CONTROLLER_TABLE =
+  'CREATE TABLE IF NOT EXISTS controller (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT);';
+
+/**
+ * Роль controller из строки базы `db` (схема `schema`): `undefined` — строки
+ * или таблицы нет (роль в документе, как у прежних версий), `null` — снята.
+ */
+export function controllerRow(db: DatabaseSync, schema = 'main'): Leader | null | undefined {
+  if (
+    !db
+      .prepare(`SELECT 1 FROM ${schema}.sqlite_master WHERE type='table' AND name='controller'`)
+      .get()
+  )
+    return undefined;
+  const row = db.prepare(`SELECT data FROM ${schema}.controller WHERE id=1`).get() as
+    { data: string | null } | undefined;
+  if (!row) return undefined;
+  return row.data === null ? null : (JSON.parse(row.data) as Leader);
+}
+
+/**
+ * Действующая роль controller по документу и строке. Строка пишется этой
+ * версией и новее; документ — прежними. Из двух записей действует более
+ * поздний срок: роль, которую ещё держит процесс, не теряется.
+ */
+export function effectiveLeader(
+  document: Leader | undefined,
+  row: Leader | null | undefined,
+): Leader | undefined {
+  if (!row) return document;
+  if (!document) return row;
+  return document.leaseUntil > row.leaseUntil ? document : row;
+}
+
+/**
+ * Изменение документа в транзакции. Документ копируется для записи только
+ * при первом обращении к `edit()`: транзакция, которая лишь читает (выдача на
+ * паузе, проверка истёкших попыток), не разбирает и не сериализует всё
+ * состояние. `current` — состояние транзакции для чтения: до `edit()` это
+ * общий замороженный снимок, после — изменяемая копия.
+ */
+export class Draft {
+  private mutable?: DevContourState;
+  private overlay?: { base: DevContourState; leader?: Leader; value: DevContourState };
+  constructor(
+    private readonly base: () => DevContourState,
+    private readonly copy: () => DevContourState,
+    private leaderValue: Leader | undefined,
+  ) {}
+  get edited() {
+    return !!this.mutable;
+  }
+  get current(): Readonly<DevContourState> {
+    if (this.mutable) return this.mutable;
+    const base = this.base();
+    if (base.leader === this.leaderValue) return base;
+    const cached = this.overlay;
+    if (cached?.base === base && cached.leader === this.leaderValue) return cached.value;
+    const value = Object.freeze({ ...base, leader: this.leaderValue });
+    if (!this.leaderValue) delete (value as { leader?: Leader }).leader;
+    this.overlay = { base, leader: this.leaderValue, value };
+    return value;
+  }
+  edit(): DevContourState {
+    if (!this.mutable) {
+      const state = this.copy();
+      // Та же роль остаётся на своём месте: неизменённый документ
+      // сериализуется в тот же текст.
+      if (JSON.stringify(state.leader ?? null) !== JSON.stringify(this.leaderValue ?? null)) {
+        delete state.leader;
+        if (this.leaderValue) state.leader = structuredClone(this.leaderValue);
+      }
+      this.mutable = state;
+    }
+    return this.mutable;
+  }
+  get leader(): Leader | undefined {
+    return this.mutable ? this.mutable.leader : this.leaderValue;
+  }
+  set leader(value: Leader | undefined) {
+    if (this.mutable) {
+      if (value) this.mutable.leader = value;
+      else delete this.mutable.leader;
+    } else this.leaderValue = value;
+  }
+  /** Точка отката вложенной части транзакции. */
+  mark() {
+    return {
+      mutable: this.mutable,
+      copy: this.mutable ? structuredClone(this.mutable) : undefined,
+      leader: this.leaderValue,
+    };
+  }
+  /** Вернуть документ к точке `mark`; изменяемая копия, если была, — тот же объект. */
+  restore(mark: ReturnType<Draft['mark']>) {
+    this.leaderValue = mark.leader;
+    if (!mark.mutable) {
+      this.mutable = undefined;
+      return;
+    }
+    const target = mark.mutable as unknown as Record<string, unknown>;
+    for (const key of Object.keys(target)) delete target[key];
+    Object.assign(target, mark.copy);
+    this.mutable = mark.mutable;
+  }
+}
+
 export class Store {
   private db: DatabaseSync;
   /** Файл БД: его каталог — локальный корень, который не должен попадать в Git. */
@@ -231,11 +349,20 @@ export class Store {
       }
     }
   }
+  /** Изменяемая копия текущего состояния. */
   read(): DevContourState {
     // Компонентное хранение читает несколько баз — одним снимком; внутри
     // `snapshot()` или транзакции записи используется уже открытый.
-    if (!this.components) return this.readUnlocked();
     return this.atomicRead(() => this.readUnlocked());
+  }
+  /**
+   * Текущее состояние без копии: общий замороженный снимок версии данных,
+   * роль controller — из её строки. Для частых чтений, которые ничего не
+   * меняют (такт очереди, проекции): на неизменной версии ничего не
+   * разбирается заново.
+   */
+  view(): Readonly<DevContourState> {
+    return this.atomicRead(() => this.frozenUnlocked());
   }
   /** Согласованное чтение: ревизия и состояние из одного снимка БД. */
   private reading = false;
@@ -261,20 +388,33 @@ export class Store {
     }
   }
   private readUnlocked(): DevContourState {
-    return this.load().state;
+    if (this.components) return this.load().state;
+    const doc = this.document();
+    const state = this.parseDocument(doc.text).state;
+    const leader = effectiveLeader(state.leader, controllerRow(this.db));
+    if (leader) state.leader = structuredClone(leader);
+    else delete state.leader;
+    return state;
+  }
+  private overlay?: { base: DevContourState; leader: string; value: DevContourState };
+  private frozenUnlocked(): Readonly<DevContourState> {
+    if (this.components) return deepFreeze(this.load().state);
+    const base = this.document().frozen();
+    const leader = effectiveLeader(base.leader, controllerRow(this.db));
+    if (leader === base.leader) return base;
+    const key = JSON.stringify(leader ?? null);
+    if (this.overlay?.base === base && this.overlay.leader === key) return this.overlay.value;
+    const value = { ...base, leader };
+    if (!leader) delete value.leader;
+    this.overlay = { base, leader: key, value: deepFreeze(value) };
+    return this.overlay.value;
   }
   /**
-   * Состояние вместе с текстом строки, из которой оно прочитано. `text`
-   * возвращается, только если чтение ничего не нормализовало: тогда он равен
-   * сериализации состояния, и запись сравнивает с ним, не сериализуя всё
-   * состояние ещё раз. Сериализация большого состояния — основная цена каждой
-   * записи, включая heartbeat.
+   * Разобранная строка документа. Строка прежних версий может не иметь полей,
+   * которые тип считает обязательными; они восполняются (`normalized`).
    */
-  private load(): { state: DevContourState; text?: string } {
-    const row = this.db.prepare('SELECT data FROM main.state WHERE id=1').get() as { data: string };
-    // Строка прежних версий может не иметь полей, которые тип считает
-    // обязательными; ниже они восполняются.
-    const raw = JSON.parse(row.data) as DevContourState & { componentLayout?: unknown };
+  private parseDocument(text: string): { state: DevContourState; normalized: boolean } {
+    const raw = JSON.parse(text) as DevContourState & { componentLayout?: unknown };
     const state: DevContourState & { componentLayout?: unknown; changeSets?: unknown[] } = this
       .components
       ? this.components.read(raw)
@@ -290,29 +430,105 @@ export class Store {
         normalized = true;
       }
     if (normalizePause(state)) normalized = true;
-    return { state, text: this.components || normalized ? undefined : row.data };
+    return { state, normalized };
+  }
+  /** Состояние компонентного хранения: собирается из баз на каждом чтении. */
+  private load(): { state: DevContourState } {
+    const row = this.db.prepare('SELECT data FROM main.state WHERE id=1').get() as { data: string };
+    const { state } = this.parseDocument(row.data);
+    const leader = effectiveLeader(state.leader, controllerRow(this.db));
+    if (leader) state.leader = leader;
+    else delete state.leader;
+    return { state };
+  }
+  /**
+   * Документ центрального хранения, разобранный один раз на версию данных.
+   * Версия — счётчики `revision` и `PRAGMA data_version`: последний меняется
+   * при любой записи другого соединения, даже не поднявшей счётчик. Запись
+   * этого соединения кэш обновляет сама — текстом, который записала.
+   */
+  private committed?: { key: string; text: string; frozen?: DevContourState };
+  /** Документ, записанный открытой транзакцией: до COMMIT он не зафиксирован. */
+  private written?: { text: string; frozen?: DevContourState };
+  /** Версия зафиксированных данных на начало открытой транзакции записи. */
+  private startKey?: string;
+  private get hasRevision() {
+    return (this.revisionTable ??= !!this.db
+      .prepare("SELECT 1 FROM main.sqlite_master WHERE type='table' AND name='revision'")
+      .get());
+  }
+  private revisionTable?: boolean;
+  private versionKey() {
+    // Сначала data_version, затем счётчики и сама строка: запись другого
+    // соединения между ними даёт ключ, которого больше не будет, — промах, а
+    // не устаревший текст под новым ключом.
+    const { data_version } = this.db.prepare('PRAGMA main.data_version').get() as {
+      data_version: number;
+    };
+    // База прежней версии без таблицы ревизии (только чтение): версия — data_version.
+    const counters = this.hasRevision ? this.version() : { revision: '-', lease: '-' };
+    return `${data_version}:${counters.revision}:${counters.lease}`;
+  }
+  private document(): { text: string; frozen: () => DevContourState } {
+    const entry =
+      this.written ??
+      (() => {
+        // В транзакции записи документ до первой записи — зафиксированный на
+        // её начало (лок записи у этой транзакции); локальные записи
+        // поднимают счётчик, но документ не меняют.
+        const key = this.transaction && this.startKey ? this.startKey : this.versionKey();
+        if (this.committed?.key !== key) {
+          const row = this.db.prepare('SELECT data FROM main.state WHERE id=1').get() as {
+            data: string;
+          };
+          const { state, normalized } = this.parseDocument(row.data);
+          this.committed = {
+            key,
+            text: normalized ? JSON.stringify(state) : row.data,
+            frozen: deepFreeze(state),
+          };
+        }
+        return this.committed;
+      })();
+    return {
+      text: entry.text,
+      frozen: () => (entry.frozen ??= deepFreeze(this.parseDocument(entry.text).state)),
+    };
   }
   // Synchronous composition: local idempotency records and domain mutations commit together.
   atomic<T>(action: () => T): T {
     const outer = this.transaction;
     const point = 'nested_' + ++this.savepoint;
     const pending = this.projectionPending;
+    const written = this.written;
     this.db.exec(outer ? `SAVEPOINT ${point}` : 'BEGIN IMMEDIATE');
     this.transaction = true;
+    if (!outer) {
+      this.written = undefined;
+      this.startKey = this.components ? undefined : this.versionKey();
+    }
     let value: T;
     try {
       value = action();
       if (value && typeof (value as any).then === 'function')
         throw new Error('Store.atomic cannot await external work');
+      const key = !outer && this.written ? this.versionKey() : undefined;
       this.db.exec(outer ? `RELEASE ${point}` : 'COMMIT');
+      if (key && this.written) this.committed = { key, ...this.written };
     } catch (error) {
       this.db.exec(outer ? `ROLLBACK TO ${point}; RELEASE ${point}` : 'ROLLBACK');
       this.cached = undefined;
       this.projectionPending = pending;
+      this.written = written;
       this.transaction = outer;
+      if (!outer) this.startKey = undefined;
       throw error;
     }
     this.transaction = outer;
+    if (!outer) {
+      this.written = undefined;
+      this.startKey = undefined;
+    }
     if (!outer && this.projectionPending) {
       this.projectionPending = false;
       this.refreshProjection();
@@ -320,25 +536,104 @@ export class Store {
     return value;
   }
   change<T>(type: string, action: (state: DevContourState) => T): T {
+    return this.update(type, (draft) => action(draft.edit()));
+  }
+  /**
+   * Изменение с ленивой копией документа (`Draft`): пока транзакция не
+   * вызвала `edit()`, документ не разбирается и не сериализуется. Роль
+   * controller (`draft.leader`) пишется своей строкой: её продление документ
+   * не переписывает.
+   */
+  update<T>(type: string, action: (draft: Draft) => T): T {
     return this.atomic(() => {
-      const loaded = this.load();
-      const state = loaded.state;
-      const before = loaded.text ?? JSON.stringify(state);
-      const result = action(state);
-      const after = JSON.stringify(state);
-      if (before === after) return result;
-      if (this.components) this.components.write(state);
-      else this.db.prepare('UPDATE main.state SET data=? WHERE id=1').run(after);
+      const row = controllerRow(this.db);
+      let before: string;
+      let documentLeader: Leader | undefined;
+      let draft: Draft;
+      if (this.components) {
+        const raw = this.db.prepare('SELECT data FROM main.state WHERE id=1').get() as {
+          data: string;
+        };
+        const { state } = this.parseDocument(raw.data);
+        before = JSON.stringify(state);
+        documentLeader = state.leader;
+        draft = new Draft(
+          () => state,
+          () => state,
+          effectiveLeader(documentLeader, row),
+        );
+        draft.edit();
+      } else {
+        const doc = this.document();
+        before = doc.text;
+        documentLeader = doc.frozen().leader;
+        draft = new Draft(
+          doc.frozen,
+          () => this.parseDocument(doc.text).state,
+          effectiveLeader(documentLeader, row),
+        );
+      }
+      const leaderBefore = JSON.stringify(draft.leader ?? null);
+      const result = action(draft);
+      const leader = draft.leader;
+      const leaderChanged = JSON.stringify(leader ?? null) !== leaderBefore;
+      // Роль прежней версии лежит в документе: при её изменении документ
+      // переписывается без неё — дальше роль ведёт только строка.
+      if (leaderChanged && documentLeader) draft.edit();
+      // Неизменённая роль прежней версии остаётся в документе как есть.
+      const keep =
+        !!documentLeader && JSON.stringify(leader ?? null) === JSON.stringify(documentLeader);
+      const withoutLeader = <R>(state: DevContourState, fn: () => R): R => {
+        if (keep) return fn();
+        delete state.leader;
+        try {
+          return fn();
+        } finally {
+          if (leader) state.leader = leader;
+        }
+      };
+      let documentChanged = false;
+      if (draft.edited) {
+        const state = draft.edit();
+        const after = withoutLeader(state, () => JSON.stringify(state));
+        if (after !== before) {
+          documentChanged = true;
+          if (this.components) {
+            const components = this.components;
+            withoutLeader(state, () => components.write(state));
+          } else {
+            this.db.prepare('UPDATE main.state SET data=? WHERE id=1').run(after);
+            this.written = { text: after };
+          }
+        }
+      }
+      const rowChanged = leaderChanged || (documentChanged && !!documentLeader && !keep);
+      if (rowChanged) this.db.exec(CONTROLLER_TABLE);
+      if (rowChanged)
+        this.db
+          .prepare('INSERT OR REPLACE INTO main.controller (id,data) VALUES(1,?)')
+          .run(leader ? JSON.stringify(leader) : null);
+      if (!documentChanged && !rowChanged) return result;
       // Heartbeat продлевает только сроки владения (lease): ревизия данных от
       // них не растёт, иначе каждый опрос панели видел бы «изменение». Сроки
-      // ведёт отдельный счётчик — по нему кэш узнаёт, что они продлены.
-      this.bump(type === 'heartbeat' ? 'lease' : 'data');
+      // в документе (попытки, операции) ведёт отдельный счётчик — по нему кэш
+      // узнаёт, что они продлены. Продление одной роли controller — только
+      // её строка: документ и кэши с ним не меняются, а роль читается из
+      // строки при каждом чтении.
+      if (documentChanged) this.bump(type === 'heartbeat' ? 'lease' : 'data');
+      else if (type !== 'heartbeat') this.bump('lease');
       if (type !== 'heartbeat') {
         const at = new Date().toISOString();
         const inserted = this.db
           .prepare('INSERT INTO main.events(at,type,data) VALUES(?,?,?)')
           .run(at, type, this.components ? 'null' : JSON.stringify(result ?? null));
-        this.components?.event(Number(inserted.lastInsertRowid), at, type, result ?? null, state);
+        this.components?.event(
+          Number(inserted.lastInsertRowid),
+          at,
+          type,
+          result ?? null,
+          draft.edit(),
+        );
         this.projectionPending = true;
       }
       return result;
@@ -429,6 +724,22 @@ export class Store {
       .all(namespace, owner ?? '@workspace') as { key: string; data: string }[];
     return Object.fromEntries(rows.map((r) => [r.key, JSON.parse(r.data)]));
   }
+  /** Одна локальная запись владельца; `undefined` — записи нет. */
+  localRecord<T>(namespace: string, owner: string | undefined, key: string): T | undefined {
+    const schema = this.syncSchema(owner);
+    if (
+      !this.db
+        .prepare(
+          `SELECT name FROM ${schema}.sqlite_master WHERE type='table' AND name='local_workflow'`,
+        )
+        .get()
+    )
+      return undefined;
+    const row = this.db
+      .prepare(`SELECT data FROM ${schema}.local_workflow WHERE namespace=? AND owner=? AND key=?`)
+      .get(namespace, owner ?? '@workspace', key) as { data: string } | undefined;
+    return row ? (JSON.parse(row.data) as T) : undefined;
+  }
   saveLocal(namespace: string, owner: string | undefined, key: string, value: unknown) {
     if (!this.transaction) throw new Error('Local workflow writes require an atomic transaction');
     const schema = this.syncSchema(owner);
@@ -488,7 +799,7 @@ export class Store {
     return this.atomicRead(() => {
       const version = this.version();
       if (this.transaction)
-        return { ...version, snapshotAt: Date.now(), state: deepFreeze(this.readUnlocked()) };
+        return { ...version, snapshotAt: Date.now(), state: this.frozenUnlocked() };
       const cached = this.cached;
       const fresh =
         cached?.revision === version.revision &&
@@ -501,7 +812,7 @@ export class Store {
         this.cached = {
           ...version,
           readAt: this.reading ? this.readStartedAt : Date.now(),
-          state: deepFreeze(this.readUnlocked()),
+          state: this.frozenUnlocked(),
         };
       const { revision, lease, state } = this.cached!;
       return { revision, lease, snapshotAt: this.readStartedAt, state };

@@ -26,7 +26,13 @@ import { DevContour, supersededBy } from '../core/service.ts';
 import { repository } from '../core/repositories.ts';
 import { artifactGuard } from './agent-control.ts';
 import { unguardedMessage } from './artifact-closure.ts';
-import { Store, journalFiles, readOnlyLocation } from '../core/store.ts';
+import {
+  Store,
+  controllerRow,
+  effectiveLeader,
+  journalFiles,
+  readOnlyLocation,
+} from '../core/store.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 
@@ -273,7 +279,8 @@ export function doctorState(
         if (!row) throw new Error('В базе нет состояния: ' + file);
         const document = JSON.parse(row.data) as Partial<DevContourState>;
         if (document.version !== 1) throw new Error('Unsupported state version');
-        return document;
+        // Роль controller — своя строка базы; прежние версии хранили её в документе.
+        return { ...document, leader: effectiveLeader(document.leader, controllerRow(db)) };
       } finally {
         db.close();
       }

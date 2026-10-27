@@ -53,7 +53,7 @@ export class Scheduler {
       adapters: runtimeAdapters(this.h, execution.engine.policy, this.runtimes),
       // Снимок контекста — закреплённые context packs задачи (те же байты, прежний digest пакета).
       context: (work) => {
-        const task = this.h.store.read().tasks.find((t) => t.id === work.id);
+        const task = this.h.store.view().tasks.find((t) => t.id === work.id);
         return task && taskPacks(this.h, task).length ? context.forTask(work.id) : undefined;
       },
       hooks: devcontourHooks(this.h),
@@ -171,12 +171,12 @@ export class Scheduler {
       }
       // Запуск применяет конфигурацию этого процесса, когда он стал controller;
       // повторяется, пока она не станет применённой. Отставший процесс не пишет.
-      if (this.h.store.read().appliedConfig?.digest !== this.h.configDigest)
+      if (this.h.store.view().appliedConfig?.digest !== this.h.configDigest)
         this.h.recordConfig(this.owner);
       // Запрошенное операцией применение конфигурации — до выдачи.
       serveReconfigure(this.h, join(this.root, 'config.json'), this.owner);
       const runner = this.runner;
-      if (!this.h.store.read().paused && runner.active < this.h.config.concurrency) {
+      if (!this.h.store.view().paused && runner.active < this.h.config.concurrency) {
         await this.assertBaseCurrent();
         assertTeamCheckout(this.h);
       }
