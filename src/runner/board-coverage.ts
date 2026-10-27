@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { runGatesAt } from 'devcontour-harness';
+import { homedir, tmpdir } from 'node:os';
+import { CLIP_SHORT, HarnessError, clipText, runGatesAt } from 'devcontour-harness';
 import {
   BOARD_COVERAGE,
   boardCoverageKey,
@@ -10,7 +11,8 @@ import {
   type DevContour,
 } from '../core/service.ts';
 import { DomainError, type Evidence, type Revision, type Task } from '../core/model.ts';
-import { repository } from '../core/repositories.ts';
+import { repositories, repository } from '../core/repositories.ts';
+import { redactor } from './redaction.ts';
 import { executionOf, toDomain } from '../harness/execution.ts';
 import { controllerBoundary } from './checks.ts';
 
@@ -139,14 +141,13 @@ export async function coverBoard(
     } catch (error) {
       // Отказ самой проверки (окружение, отмена, утрата владения) — тоже
       // исход начатой проверки: журнал не остаётся с одним «started».
-      const message = error instanceof Error ? error.message : String(error);
       try {
         event('board.coverage.failed', {
           repositoryId: gap.repositoryId,
           sha,
           runId: record.runId,
           gates: gap.gates,
-          error: message.slice(0, 2000),
+          error: journalError(error, [root, ...repositories(h.config).map((r) => r.path)]),
         });
       } catch {
         // Без права записи событие не пишется; причина — исходная ошибка.
@@ -172,4 +173,18 @@ export async function coverBoard(
   if (failed.length)
     throw new DomainError('Проверка доски на итоговом SHA не пройдена: ' + failed.join('; '));
   return runs;
+}
+
+/**
+ * Ошибка проверки доски для журнала: код и короткое сообщение. Каталоги
+ * контура и компонентов, домашний и временный каталоги маскируются тем же
+ * redactor, что и прочие записи; длина — предел короткой строки.
+ */
+export function journalError(error: unknown, roots: string[]) {
+  const raw = error instanceof Error ? error.message : String(error);
+  const local = redactor([...roots, homedir(), tmpdir()]);
+  return {
+    code: error instanceof HarnessError ? error.code : 'CHECK_FAILED',
+    message: clipText(local(raw), CLIP_SHORT) ?? '',
+  };
 }

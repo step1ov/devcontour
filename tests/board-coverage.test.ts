@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
+import { CLIP_SHORT } from 'devcontour-harness';
 import { join } from 'node:path';
 import { setupDemo } from '../src/demo.ts';
 import { loadConfig } from '../src/runner/config.ts';
@@ -20,6 +21,7 @@ import { Scheduler } from '../src/runner/scheduler.ts';
 import { updateBase } from '../src/runner/base-update.ts';
 import { git } from '../src/runner/process.ts';
 import { acceptBoard, reviewPlan } from '../src/runner/agent-control.ts';
+import { journalError } from '../src/runner/board-coverage.ts';
 import { AgentService } from '../src/application/agent.ts';
 import { workflowMetrics } from '../src/application/metrics.ts';
 import { completion, receiptHolds, taskOwner } from '../src/core/sync-state.ts';
@@ -431,6 +433,13 @@ test('Провал непокрытого gate на итоговом SHA дос�
       ['board.coverage.started', false],
       ['board.coverage.failed', true],
     ]);
+    // В журнале — код и короткое сообщение без локальных путей.
+    const failedEvent = f.store.events().find((e) => e.type === 'board.coverage.failed')!;
+    const error = (failedEvent.data as { error: { code: string; message: string } }).error;
+    assert.equal(error.code, 'CHECK_FAILED');
+    assert.ok(error.message.length > 0 && error.message.length <= CLIP_SHORT + 1, error.message);
+    for (const local of [f.root, f.config.repository, homedir()])
+      assert.ok(!error.message.includes(local), error.message);
   } finally {
     await f.cleanup();
     await rm(marks, { recursive: true, force: true });
@@ -589,4 +598,19 @@ test('Прогноз пробела называет предпосылки пр
   } finally {
     f.cleanup();
   }
+});
+
+test('Ошибка проверки доски в журнале — код и короткое сообщение без локальных путей', () => {
+  const root = join(tmpdir(), 'devcontour-root-fixture');
+  const error = journalError(
+    new Error(
+      `spawn failed in ${root}/gates-at/BC-1/worktree and ${homedir()}/.cache: ` + 'x'.repeat(3000),
+    ),
+    [root],
+  );
+  assert.equal(error.code, 'CHECK_FAILED');
+  assert.ok(error.message.length <= CLIP_SHORT + 1, String(error.message.length));
+  assert.ok(!error.message.includes(root), error.message);
+  assert.ok(!error.message.includes(homedir()), error.message);
+  assert.match(error.message, /^spawn failed in /);
 });
