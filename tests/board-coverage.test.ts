@@ -358,11 +358,14 @@ test('Провал непокрытого gate на итоговом SHA дос�
       [['smoke', head, false]],
     );
     assert.equal(f.store.read().boards[0].revisions.at(-1)!.status, 'active');
-    // Без каталога состояния проверки доски нет — и приёмки тоже.
-    await assert.rejects(
-      acceptBoard(f.h, f.board.id, 'codex'),
-      /Полный набор проверок не пройден: main: smoke/,
-    );
+    // Без каталога состояния (HTTP accept без планировщика) проверки доски
+    // нет — и приёмки тоже; отказ называет, чем принять доску.
+    await assert.rejects(acceptBoard(f.h, f.board.id, 'codex'), (e: Error) => {
+      assert.match(e.message, /Полный набор проверок не пройден: main: smoke/);
+      assert.ok(e.message.includes(`devcontour accept --board ${f.board.id}`), e.message);
+      assert.match(e.message, /стадией 2 workflow/);
+      return true;
+    });
   } finally {
     await f.cleanup();
   }
