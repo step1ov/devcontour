@@ -47,16 +47,33 @@ export async function coverBoard(
   for (const gap of gaps) {
     const sha = heads[gap.repositoryId];
     if (!sha) throw new DomainError(`Нет итогового SHA доски в ${gap.repositoryId}`);
+    const policyDigest = h.policyDigest(gap.repositoryId);
+    // Запись одна на ревизию и компонент. Прошедшее evidence прежней проверки
+    // того же SHA, договора и ревизии переносится: иначе повтор после
+    // частичного провала перезаписал бы его, и уже прошедший gate снова
+    // оказался бы непокрытым.
+    const previous = h.store.localRecord<BoardCoverage>(
+      BOARD_COVERAGE,
+      gap.repositoryId,
+      boardCoverageKey(boardId, revision.number),
+    );
+    const kept =
+      previous &&
+      previous.sha === sha &&
+      previous.policyDigest === policyDigest &&
+      previous.revisionDigest === revisionDigest
+        ? previous.evidence.filter((e) => e.passed)
+        : [];
     const record: BoardCoverage = {
       boardId,
       revision: revision.number,
       repositoryId: gap.repositoryId,
       sha,
-      policyDigest: h.policyDigest(gap.repositoryId),
+      policyDigest,
       revisionDigest,
       runId: 'BC-' + randomUUID(),
       gates: gap.gates,
-      evidence: [],
+      evidence: [...kept],
       at: new Date().toISOString(),
     };
     const save = () =>
@@ -108,7 +125,7 @@ export async function coverBoard(
     } catch (error) {
       throw toDomain(error);
     }
-    record.gates = result.gates;
+    record.gates = [...new Set([...kept.map((e) => e.gate), ...result.gates])];
     if (result.failure) record.failure = result.failure;
     save();
     if (result.failure)

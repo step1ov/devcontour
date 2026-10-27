@@ -20,6 +20,8 @@ import { updateBase } from '../src/runner/base-update.ts';
 import { git } from '../src/runner/process.ts';
 import { acceptBoard, reviewPlan } from '../src/runner/agent-control.ts';
 import { AgentService } from '../src/application/agent.ts';
+import { workflowMetrics } from '../src/application/metrics.ts';
+import { completion, receiptHolds, taskOwner } from '../src/core/sync-state.ts';
 import { adapters, type AgentAdapter, type AgentRequest } from '../src/runner/adapters.ts';
 import { CANDIDATE, closePrevious, fixture, input, MERGED } from './helpers.ts';
 
@@ -179,7 +181,7 @@ test('Покрытие доски засчитывает проверку дос
  * integration, runId проверки доски) и падает, если в дереве итогового SHA
  * есть SMOKE_BROKEN.
  */
-async function realBoard(broken: boolean) {
+async function realBoard(broken: boolean, options: { marker?: string; emptyB?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'devcontour-coverage-'));
   await setupDemo(root);
   const config = loadConfig(join(root, 'config.json'));
@@ -210,6 +212,20 @@ process.exit(ok ? 0 : 1);
     { ...gate('unit'), command: [process.execPath, 'unit.mjs'] },
     { ...gate('smoke'), command: [process.execPath, 'smoke.mjs'] },
   ];
+  // Второй непокрытый gate, исход которого задаётся вне дерева: провал и
+  // проход на одном и том же итоговом SHA.
+  if (options.marker)
+    config.gates.push({
+      ...gate('nightly'),
+      command: [
+        process.execPath,
+        '-e',
+        junit(`!existsSync(${JSON.stringify(options.marker)})`).replace(
+          /^import .*\n/,
+          "const { writeFileSync, mkdirSync, existsSync } = require('node:fs');\n",
+        ),
+      ],
+    });
   config.protectedPaths = [...config.protectedPaths, 'unit.mjs', 'smoke.mjs'];
   const board = h.createBoard('Scoped release');
   const a = h.addTask(board.id, { ...input('Part A'), gates: ['unit'] });
@@ -222,7 +238,25 @@ process.exit(ok ? 0 : 1);
       async execute(r: AgentRequest) {
         if (r.review)
           return {
-            data: { approved: true, summary: 'Looks fine', findings: [] },
+            data: {
+              approved: true,
+              summary: 'Looks fine',
+              findings: [],
+              ...(options.emptyB && r.task.id === b.id
+                ? {
+                    alreadySatisfied: {
+                      gates: ['unit'],
+                      evidence: 'Part A already delivered this part; unit is green on this SHA.',
+                    },
+                  }
+                : {}),
+            },
+            log: 'fixture',
+            command: ['fixture'],
+          };
+        if (options.emptyB && r.task.id === b.id)
+          return {
+            data: { completed: true, summary: 'Already delivered by Part A' },
             log: 'fixture',
             command: ['fixture'],
           };
@@ -328,6 +362,89 @@ test('Провал непокрытого gate на итоговом SHA дос�
     await assert.rejects(
       acceptBoard(f.h, f.board.id, 'codex'),
       /Полный набор проверок не пройден: main: smoke/,
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('Повтор приёмки после частичного провала сохраняет прошедшие gates проверки доски: второй прогон исполняет только упавший', async () => {
+  const marks = await mkdtemp(join(tmpdir(), 'devcontour-coverage-mark-'));
+  const marker = join(marks, 'NIGHTLY_BROKEN');
+  await writeFile(marker, 'x\n');
+  const f = await realBoard(false, { marker });
+  try {
+    const head = f.store.read().tasks.find((t) => t.id === f.tasks[1].id)!.resultSha!;
+    await assert.rejects(
+      acceptBoard(f.h, f.board.id, 'codex', false, undefined, { root: f.root }),
+      /main\/nightly/,
+    );
+    const key = boardCoverageKey(f.board.id, 1);
+    const first = f.store.localRecord<BoardCoverage>(BOARD_COVERAGE, 'main', key)!;
+    assert.deepEqual(
+      first.evidence.map((e) => [e.gate, e.passed]),
+      [
+        ['smoke', true],
+        ['nightly', false],
+      ],
+    );
+    await rm(marker);
+    const accepted = await acceptBoard(f.h, f.board.id, 'codex', false, undefined, {
+      root: f.root,
+    });
+    assert.equal(accepted.status, 'accepted');
+    const second = f.store.localRecord<BoardCoverage>(BOARD_COVERAGE, 'main', key)!;
+    assert.deepEqual(
+      second.evidence.map((e) => [e.gate, e.passed, e.sha]),
+      [
+        ['smoke', true, head],
+        ['nightly', true, head],
+      ],
+      'прошедший smoke сохранён, повторён только nightly',
+    );
+    assert.equal(second.evidence[0].id, first.evidence[0].id);
+  } finally {
+    await f.cleanup();
+    await rm(marks, { recursive: true, force: true });
+  }
+});
+
+test('Задача, работу которой сделала зависимость, — done без коммита и проходит receipt, принятую историю и метрики', async () => {
+  const f = await realBoard(false, { emptyB: true });
+  try {
+    const state = f.store.read();
+    const [a, b] = f.tasks.map((t) => state.tasks.find((x) => x.id === t.id)!);
+    assert.equal(b.status, 'done', b.failure);
+    assert.equal(b.resultSha, a.resultSha, 'нового коммита нет');
+    const run = state.runs.find((r) => r.taskId === b.id && r.status === 'succeeded')!;
+    assert.equal(run.candidateSha, run.baseSha);
+    // Receipt строится и подтверждается текущей конфигурацией у получателя.
+    const receipt = completion(f.h, state, b);
+    assert.equal(receipt.resultSha, b.resultSha);
+    const received = { ...b, sharedCompletion: { receipt, sourceCommit: b.resultSha! } };
+    assert.ok(
+      receiptHolds(
+        f.h,
+        { ...state, tasks: state.tasks.map((t) => (t.id === b.id ? received : t)) },
+        received,
+      ),
+    );
+    const accepted = await acceptBoard(f.h, f.board.id, 'codex', false, undefined, {
+      root: f.root,
+    });
+    assert.equal(accepted.status, 'accepted');
+    const revision = f.store.read().boards[0].revisions.at(-1)!;
+    assert.deepEqual(
+      revision.snapshot?.tasks.map((t) => [t.id, t.resultSha]),
+      [
+        [a.id, a.resultSha],
+        [b.id, a.resultSha],
+      ],
+    );
+    const metrics = workflowMetrics(f.h, taskOwner(b));
+    assert.ok(
+      metrics.attempts.some((m) => m.taskId === b.id && m.status === 'succeeded'),
+      'метрики видят попытку без коммита',
     );
   } finally {
     await f.cleanup();
