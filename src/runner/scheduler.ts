@@ -3,11 +3,12 @@
 // Выдача, реализация, gates, независимое ревью обеих фаз, интеграция, CAS
 // продвижения ветки и recovery — `Runner` пакета harness над тем же Store.
 // Здесь остаются продуктовые шаги вокруг очереди: подготовка веток
-// компонентов, проверка, что база прогонов не отстала от рабочей ветки,
-// режим команды, применение конфигурации операцией. Правил приёмки здесь нет.
+// компонентов, проверка, что база прогонов не отстала от рабочей ветки (и её
+// перемотка, когда она — чистый fast-forward), режим команды, применение
+// конфигурации операцией. Правил приёмки здесь нет.
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { HarnessError, Runner } from 'devcontour-harness';
+import { HarnessError, Runner, fencedRefMove } from 'devcontour-harness';
 import { DevContour } from '../core/service.ts';
 import { repository, repositories } from '../core/repositories.ts';
 import { validateWorkflow } from '../core/workflow.ts';
@@ -126,6 +127,82 @@ export class Scheduler {
     }
     return drift;
   }
+  /**
+   * Перемотать отставшую базу прогонов, когда это чистый fast-forward: база —
+   * предок рабочей ветки (HEAD на ветке, не detached), принятая история
+   * остаётся в ней целиком, слияния нет. Это то же, что `base-update`, но без
+   * ручного шага: перенос, ради которого очередь вставала, не требует
+   * решения. Только на работающей очереди без попыток, без незавершённой
+   * операции изменения контракта и применения конфигурации; сдвиг ref — CAS
+   * в транзакции, проверяющей, что очередь не встала, попыток не появилось и
+   * роль controller у этого процесса. Расхождение линий, detached HEAD или
+   * любой отказ оставляют прежнее поведение — остановку с подсказкой
+   * `base-update`. Приёмка по-прежнему закрепляет доказанный SHA задачи, а
+   * не вершину базы.
+   */
+  private async fastForwardBase() {
+    const drift = await this.baseDrift();
+    if (!drift.length || drift.some((d) => d.ahead > 0)) return;
+    const s = this.h.store.read();
+    if (s.paused || s.runs.some((r) => r.status === 'active')) return;
+    if (s.reconfigure && !s.reconfigure.appliedAt) return;
+    const openChange = repositories(this.h.config).some((r) =>
+      Object.values(this.h.store.localRecords<{ status: string }>('contract-change', r.id)).some(
+        (op) => ['queued', 'running', 'waiting', 'failed'].includes(op.status),
+      ),
+    );
+    if (openChange) return;
+    const moves: {
+      repositoryId: string;
+      path: string;
+      branch: string;
+      from: string;
+      to: string;
+    }[] = [];
+    for (const d of drift) {
+      const repo = repository(this.h.config, d.repositoryId);
+      const branch = await git(repo.path, 'symbolic-ref', '-q', '--short', 'HEAD').catch(() => '');
+      if (!branch) return;
+      const to = await git(repo.path, 'rev-parse', 'HEAD');
+      const from = await git(repo.path, 'rev-parse', this.targetFor(repo.id));
+      // Цель — предок рабочей линии: перемотка ничего не теряет и не переписывает.
+      if (
+        !(await git(repo.path, 'merge-base', '--is-ancestor', from, to).then(
+          () => true,
+          () => false,
+        ))
+      )
+        return;
+      moves.push({ repositoryId: repo.id, path: repo.path, branch, from, to });
+    }
+    const move = fencedRefMove(executionOf(this.h).store, (view) => {
+      if (view.control().paused) throw new Error('очередь остановлена');
+      if (view.attempts().some((a) => a.status === 'active')) throw new Error('идёт попытка');
+      if (view.controller()?.owner !== this.owner) throw new Error('роль controller утрачена');
+    });
+    const moved: typeof moves = [];
+    try {
+      for (const m of moves) {
+        await move(m.path, this.targetFor(m.repositoryId), m.to, m.from);
+        moved.push(m);
+      }
+    } catch {
+      // Несостоявшийся сдвиг — прежняя остановка с подсказкой base-update.
+    }
+    // Журнал называет перемотку отдельно от ручного base-update: это не
+    // вмешательство человека, и пауза base-check для неё не ставится.
+    if (moved.length)
+      this.h.store.atomic(() =>
+        this.h.store.appendEvent('base.fast-forwarded', {
+          updated: moved.map(({ repositoryId, branch, from, to }) => ({
+            repositoryId,
+            branch,
+            from,
+            to,
+          })),
+        }),
+      );
+  }
   private async assertBaseCurrent() {
     const drift = await this.baseDrift();
     if (!drift.length) return;
@@ -181,6 +258,7 @@ export class Scheduler {
       serveReconfigure(this.h, join(this.root, 'config.json'), this.owner);
       const runner = this.runner;
       if (!this.h.store.view().paused && runner.active < this.h.config.concurrency) {
+        await this.fastForwardBase();
         await this.assertBaseCurrent();
         assertTeamCheckout(this.h);
       }

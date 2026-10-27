@@ -392,7 +392,7 @@ test('Process timeout interrupts actual child processes', async () => {
   assert.notEqual(r.code, 0);
 });
 
-test('A stale run base stops the queue and base-update brings the preparation in', async () => {
+test('A stale run base that is a pure fast-forward moves on the next tick; a diverged one still stops the queue', async () => {
   const f = await runtimeFixture();
   try {
     const repo = repositories(f.config)[0];
@@ -403,29 +403,80 @@ test('A stale run base stops the queue and base-update brings the preparation in
       await git(repo.path, '-c', 'core.hooksPath=/dev/null', 'commit', '--no-gpg-sign', '-m', name);
       return git(repo.path, 'rev-parse', 'HEAD');
     };
+    const forwarded = () => f.store.events().filter((e) => e.type === 'base.fast-forwarded');
+    // Исполнитель сразу отказывает: тик только выдаёт попытку, базу она не двигает.
+    const idle = {
+      ...adapters,
+      demo: {
+        ...adapters.demo,
+        execute: () => Promise.reject(new BlockedError('исполнитель не нужен этой проверке')),
+      },
+    };
 
     // База начинает совпадать с рабочей веткой: дальше проверяется расхождение,
     // а не то, что демо-фикстура уже успела проинтегрировать.
-    await git(repo.path, 'update-ref', target, await git(repo.path, 'rev-parse', 'HEAD'));
+    const start = await git(repo.path, 'rev-parse', 'HEAD');
+    await git(repo.path, 'update-ref', target, start);
 
     // Ведущий агент готовит контракт на рабочей ветке. База прогонов его не
     // содержит, поэтому исполнитель получил бы дерево без контракта.
     const prepared = await commit('CONTRACT.md');
-    const scheduler = new Scheduler(f.h, f.root);
-    await scheduler.init();
+
+    // На остановленной очереди база не двигается: перенос — не решение о работе.
+    const paused = new Scheduler(f.h, f.root, idle);
+    await paused.init();
+    f.h.pause(true);
+    await paused.tick();
+    assert.equal(await git(repo.path, 'rev-parse', target), start, 'пауза держит базу');
+    await paused.stop();
+
+    // Detached HEAD — не рабочая ветка: перемотки нет, прежняя остановка.
+    await git(repo.path, 'checkout', '-q', '--detach', 'HEAD');
+    const detached = new Scheduler(f.h, f.root, idle);
+    await detached.init();
     f.h.pause(false);
     const before = f.store.read().runs.length;
-    // Диспетчер отказывается выдавать работу и называет команду, которой это
-    // чинится. Цикл планировщика такой отказ превращает в паузу очереди.
-    await assert.rejects(scheduler.tick(), /base-update/);
+    await assert.rejects(detached.tick(), /base-update/);
+    assert.equal(await git(repo.path, 'rev-parse', target), start);
     assert.equal(f.store.read().runs.length, before, 'ни одного прогона на устаревшей базе');
-    await scheduler.stop();
+    await detached.stop();
+    await git(repo.path, 'checkout', '-q', '-');
 
-    // Перемотка: цель — предок рабочей ветки, история не переписывается.
-    const ff = await updateBase(f.config, f.root);
-    assert.equal(ff.updated[0].kind, 'fast-forward');
-    assert.equal(await git(repo.path, 'rev-parse', target), prepared);
-    assert.deepEqual(await new Scheduler(f.h, f.root).baseDrift(), []);
+    // Незавершённая операция изменения контракта ведёт перенос сама.
+    const operation = (status: string) =>
+      f.store.atomic(() =>
+        f.store.saveLocal('contract-change', repo.id, 'CC-open', { id: 'CC-open', status }),
+      );
+    operation('waiting');
+    const held = new Scheduler(f.h, f.root, idle);
+    await held.init();
+    f.h.pause(false);
+    await assert.rejects(held.tick(), /base-update/);
+    assert.equal(await git(repo.path, 'rev-parse', target), start, 'операция держит базу');
+    await held.stop();
+    operation('completed');
+
+    // Чистая перемотка на работающей очереди — без ручного base-update.
+    const scheduler = new Scheduler(f.h, f.root, idle);
+    await scheduler.init();
+    f.h.pause(false);
+    await scheduler.tick();
+    assert.equal(await git(repo.path, 'rev-parse', target), prepared, 'база перемотана');
+    await git(repo.path, 'merge-base', '--is-ancestor', start, target);
+    assert.deepEqual(await scheduler.baseDrift(), []);
+    assert.deepEqual(forwarded().at(-1)?.data, {
+      updated: [
+        {
+          repositoryId: repo.id,
+          branch: await git(repo.path, 'symbolic-ref', '--short', 'HEAD'),
+          from: start,
+          to: prepared,
+        },
+      ],
+    });
+    assert.equal(forwarded().length, 1, 'перемотка — одно событие, не ручное вмешательство');
+    assert.ok(f.store.read().runs.length > before, 'выдача продолжилась на новой базе');
+    await scheduler.stop();
 
     // Слияние: обе линии несут работу — принятый прогон в базе и новая
     // подготовка в рабочей ветке. Контур сводит их явной командой.
@@ -447,6 +498,13 @@ test('A stale run base stops the queue and base-update brings the preparation in
     await git(repo.path, 'worktree', 'remove', '--force', accepted);
 
     const acceptedTip = await git(repo.path, 'rev-parse', target);
+    // Обе линии несут работу: автоматической перемотки нет, очередь стоит.
+    const diverged = new Scheduler(f.h, f.root, idle);
+    await diverged.init();
+    f.h.pause(false);
+    await assert.rejects(diverged.tick(), /base-update/);
+    assert.equal(await git(repo.path, 'rev-parse', target), acceptedTip, 'принятое не потеряно');
+    await diverged.stop();
     const merged = await updateBase(f.config, f.root);
     assert.equal(merged.updated[0].kind, 'merge');
     const tip = await git(repo.path, 'rev-parse', target);
