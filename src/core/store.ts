@@ -115,7 +115,7 @@ const isRowMarker = (leader: Leader | undefined) =>
 function rowMarker(leader: Leader | undefined, current: Leader | undefined) {
   if (!leader) return undefined;
   const { owner, leaseUntil, engineVersion } = leader as Leader & { engineVersion?: string };
-  const held = current as (Leader & { engineVersion?: string }) | undefined;
+  const held: (Leader & { engineVersion?: string }) | undefined = current;
   if (isRowMarker(held) && held!.owner === owner && held!.engineVersion === engineVersion)
     return held;
   return {
