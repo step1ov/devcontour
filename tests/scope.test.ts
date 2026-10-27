@@ -68,9 +68,15 @@ test('CLI называет версии DevContour и движка; справк
     const r = await run(tmpdir(), flag);
     assert.equal(r.code, 0, r.stderr);
     assert.equal(r.stdout, `devcontour ${own.version}\ndevcontour-harness ${harness.version}\n`);
+    // Версии печатаются без загрузки команд: SQLite не открывается, и
+    // предупреждений node в stderr нет — вывод пригоден для скриптов.
+    assert.equal(r.stderr, '');
   }
   // Из исходников — npm script checkout; из собранного пакета — бинарник.
-  assert.match((await run(tmpdir(), 'help')).stdout, /Запуск: npm run devcontour -- <команда>/);
+  const help = await run(tmpdir(), 'help');
+  assert.match(help.stdout, /Запуск: npm run devcontour -- <команда>/);
+  assert.equal(help.stderr, '');
+  assert.equal((await run(tmpdir(), 'doctor', '--help')).stderr, '');
   assert.equal(launcher(), 'npm run devcontour --');
   const installed = 'file:///opt/app/node_modules/devcontour/lib/runner/scope.js';
   assert.equal(launcher(installed), 'devcontour');
