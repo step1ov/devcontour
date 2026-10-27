@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, realpath, readFile, writeFile, rm, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { commandScope, launchHint, launcher } from '../src/runner/scope.ts';
 import { setupProject } from '../src/runner/setup.ts';
 import { command } from '../src/runner/process.ts';
@@ -82,6 +83,25 @@ test('CLI называет версии DevContour и движка; справк
   assert.equal(launcher(installed), 'devcontour');
   assert.match(launchHint(installed), /^devcontour <команда>.*npx devcontour <команда>/);
   assert.doesNotMatch(launchHint(installed), /npm run/);
+});
+
+test('CLI отсекает только предупреждение SQLite: другие предупреждения node выводит', async () => {
+  const warnings = resolve('src/warnings.ts');
+  const script = [
+    `const { suppressSqliteWarning } = await import(${JSON.stringify(pathToFileURL(warnings).href)});`,
+    'suppressSqliteWarning();',
+    "await import('node:sqlite');",
+    "process.emitWarning('Other feature is experimental', 'ExperimentalWarning');",
+    "process.emitWarning('Old call', { type: 'DeprecationWarning', code: 'DEP_FIXTURE' });",
+  ].join('\n');
+  const r = await command(
+    [process.execPath, '--import', loader, '--input-type=module', '-e', script],
+    tmpdir(),
+  );
+  assert.equal(r.code, 0, r.stderr);
+  assert.doesNotMatch(r.stderr, /SQLite/);
+  assert.match(r.stderr, /ExperimentalWarning: Other feature is experimental/);
+  assert.match(r.stderr, /DEP_FIXTURE/);
 });
 
 test('Bare CLI fails before creating demo files; two CLI sessions address separate workspace databases', async () => {

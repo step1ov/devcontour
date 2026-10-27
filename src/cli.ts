@@ -4,6 +4,7 @@
 // экспериментальном статусе даже там, где база не нужна.
 import { createRequire } from 'node:module';
 import { printHelp } from './cli-help.ts';
+import { suppressSqliteWarning } from './warnings.ts';
 
 const args = process.argv.slice(2);
 const operation = args[0] ?? 'serve';
@@ -25,5 +26,7 @@ if (operation === 'version' || operation === '--version') {
 } else if (operation === 'help' || (args.includes('--help') && !ownHelp.includes(operation))) {
   printHelp();
 } else {
+  // Только предупреждение SQLite: остальные node выводит как прежде.
+  suppressSqliteWarning();
   await import('./commands.ts');
 }

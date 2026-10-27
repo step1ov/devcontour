@@ -321,6 +321,23 @@ test('WAL: writer, записавший и закрывший базу во вр
   }
 });
 
+test('doctor --scope data (CLI) не печатает предупреждение SQLite: stderr пуст, отчёт в stdout', () => {
+  const f = stateWith(() => {});
+  try {
+    writeFileSync(join(f.root, 'config.json'), JSON.stringify(config()));
+    const r = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', 'src/cli.ts', 'doctor', '--scope', 'data', '--data', f.root],
+      { encoding: 'utf8' },
+    );
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal((JSON.parse(r.stdout) as { compatible: boolean }).compatible, true);
+    assert.equal(r.stderr, '');
+  } finally {
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
 test('Полный doctor (CLI) читает базу только для чтения: база прежней версии без таблицы revision не получает DDL, строк и файлов журнала', () => {
   const f = stateWith(() => {});
   try {
