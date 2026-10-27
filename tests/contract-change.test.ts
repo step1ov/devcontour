@@ -580,7 +580,7 @@ async function withContextPack(s: Awaited<ReturnType<typeof stage>>) {
   const path = join(s.root, 'config.json');
   await writeFile(path, JSON.stringify(s.h.config, null, 2) + '\n');
   s.h.config = loadConfig(path);
-  // Роли сменились после утверждения плана фикстуры: план утверждается заново (D42).
+  // Роли сменились после утверждения плана фикстуры: план утверждается заново (D43).
   reapprove(s.h);
   await writeFile(join(s.repo, 'docs/contracts/catalog.md'), '# Catalog\n\nPrice is a number.\n');
   s.sh('commit', '-qam', 'contract text');
