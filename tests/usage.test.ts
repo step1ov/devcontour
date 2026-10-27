@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseUsage } from '../src/runner/usage.ts';
+import { LINE_LIMIT, parseUsage, usageStream } from '../src/runner/usage.ts';
+import { command } from '../src/runner/process.ts';
 import { measuredAgentCall as measuredExecute } from '../src/harness/measured.ts';
-import { priceUsage, usageTotals, type UsageRecord } from '../src/core/usage.ts';
+import { priceUsage, usageTotals, type Usage, type UsageRecord } from '../src/core/usage.ts';
 import { workflowMetrics } from '../src/application/metrics.ts';
 import { Observability } from '../src/application/observability.ts';
 import { fixture, input, complete } from './helpers.ts';
@@ -324,6 +325,126 @@ test('Effective tariffs are snapshotted and cannot retroactively change call est
         }),
       /Duplicate/,
     );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Streaming telemetry joins split lines, keeps the last result and the first model, and flags malformed or oversized lines', () => {
+  const result = (usd: number) =>
+    JSON.stringify({
+      type: 'result',
+      total_cost_usd: usd,
+      usage: {
+        input_tokens: 1,
+        output_tokens: 2,
+        cache_read_input_tokens: 3,
+        cache_creation_input_tokens: 4,
+      },
+    });
+  const split = usageStream('claude');
+  const text = [
+    JSON.stringify({ type: 'system', model: 'first' }),
+    result(1),
+    JSON.stringify({ type: 'system', model: 'second' }),
+    result(2),
+  ].join('\n');
+  // No trailing newline: the final line is parsed on flush.
+  for (let i = 0; i < text.length; i += 7) split.push(text.slice(i, i + 7));
+  const u = split.usage(true);
+  assert.deepEqual(
+    [u.reportedUsd, u.inputTokens, u.complete, split.model()],
+    [2, 8, true, 'first'],
+  );
+  const broken = usageStream('claude');
+  broken.push('{"type":"assistant"\n' + result(1) + '\n');
+  assert.deepEqual([broken.usage(true).reportedUsd, broken.usage(true).complete], [1, false]);
+  const long = usageStream('claude');
+  long.push('{"type":"assistant","text":"' + 'x'.repeat(LINE_LIMIT));
+  long.push('"}\n' + result(3) + '\n');
+  assert.deepEqual([long.usage(true).reportedUsd, long.usage(true).complete], [3, false]);
+  assert.ok(LINE_LIMIT <= 8_000_000);
+  const turn = JSON.stringify({
+    type: 'turn.completed',
+    usage: { input_tokens: 5, cached_input_tokens: 1, output_tokens: 2 },
+  });
+  const codex = usageStream('codex');
+  codex.push(turn + '\n' + turn + '\n');
+  assert.deepEqual([codex.usage(true).inputTokens, codex.usage(true).outputTokens], [10, 4]);
+  assert.equal(usageStream('claude').usage(true).reportedUsd, null);
+});
+
+test('Streaming telemetry survives a deeply nested usage without throwing from the output handler', () => {
+  const depth = 200_000;
+  const deep = '{"a":'.repeat(depth) + '1' + '}'.repeat(depth);
+  const claude = usageStream('claude');
+  assert.doesNotThrow(() =>
+    claude.push('{"type":"result","total_cost_usd":1.5,"usage":' + deep + '}\n'),
+  );
+  assert.equal(claude.usage(true).reportedUsd, 1.5);
+  const codex = usageStream('codex');
+  assert.doesNotThrow(() => codex.push('{"type":"turn.completed","usage":' + deep + '}\n'));
+});
+
+test('Raw stdout reaches the telemetry hook up to EOF, including the decoder remainder', async () => {
+  let raw = '';
+  const r = await command(
+    [process.execPath, '-e', 'process.stdout.write(Buffer.from([0x61, 0xe2]))'],
+    process.cwd(),
+    { onRawStdout: (text) => (raw += text) },
+  );
+  assert.equal(r.code, 0);
+  assert.equal(raw, 'a\ufffd');
+});
+
+test('An aborted call that still exits 0 keeps its reported cost but counts as incomplete', async () => {
+  const f = fixture();
+  try {
+    const bin = join(f.root, 'bin');
+    await mkdir(bin);
+    await writeFile(
+      join(bin, 'claude'),
+      `#!${process.execPath}
+if (process.argv.includes('--version')) console.log('claude fixture-only');
+else {
+  process.stdin.resume();
+  process.stdin.on('end', () => {
+    process.stdout.write(JSON.stringify({ type: 'system', model: 'm' }) + '\\n');
+    setInterval(() => {}, 1000);
+  });
+  process.on('SIGTERM', () => {
+    process.stdout.write(JSON.stringify({ type: 'result', structured_output: { completed: true, summary: 's' }, total_cost_usd: 0.4, usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }) + '\\n', () => process.exit(0));
+  });
+}
+`,
+      { mode: 0o755 },
+    );
+    const artifactDir = join(f.root, 'artifacts');
+    const controller = new AbortController();
+    let usage: Usage | undefined;
+    const pending = cliAdapter('claude').execute({
+      cwd: f.root,
+      artifactDir,
+      prompt: 'Fixture request',
+      review: false,
+      task: {} as Task,
+      signal: controller.signal,
+      timeoutMs: 60_000,
+      execution: {
+        env: { PATH: bin + delimiter + (process.env.PATH ?? '') },
+        redact: (text) => text,
+      },
+      onUsage: (reported) => (usage = reported),
+    });
+    for (let i = 0; i < 200; i++) {
+      await new Promise((done) => setTimeout(done, 50));
+      const log = await readFile(join(artifactDir, 'runtime.log'), 'utf8').catch(() => '');
+      if (log.includes('"system"')) break;
+    }
+    controller.abort();
+    await assert.rejects(pending, /прерван/);
+    assert.equal(usage?.reportedUsd, 0.4);
+    assert.equal(usage?.complete, false);
   } finally {
     f.cleanup();
   }
