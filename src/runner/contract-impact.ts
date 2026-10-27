@@ -11,8 +11,11 @@ import {
   artifactGuard,
   checksWarnings,
   contractContent,
-  contractProposal,
   defaultOwner,
+  limitsMessage,
+  proposalLimitIssues,
+  proposalLimits,
+  unboundedProposal,
 } from './agent-control.ts';
 import { unguardedMessage, type Dependency, type Exempted } from './artifact-closure.ts';
 import { pinArtifacts } from './contract-artifacts.ts';
@@ -43,7 +46,17 @@ const boardOf = (s: DevContourState, t: Task) =>
   s.boards.find((b) => b.revisions.some((r) => r.taskIds.includes(t.id)))?.id;
 
 export async function contractImpact(h: DevContour, input: unknown) {
-  const parsed = contractProposal.parse(input);
+  // Отчёт читает предложение без пределов proposalLimits и называет
+  // превышения в `limits` рядом с остальными предпроверками: оператор видит
+  // их до отправки, вместе с замыканием и задачами. Изменение контракта по
+  // такому предложению откажет до ревью.
+  const parsed = unboundedProposal.parse(input);
+  const limitIssues = proposalLimitIssues(input);
+  const limits = {
+    max: proposalLimits,
+    issues: limitIssues,
+    ...(limitIssues.length ? { refusal: limitsMessage(limitIssues) } : {}),
+  };
   const owner = repository(h.config, parsed.repositoryId ?? defaultOwner(h));
   // Отчёт строится по одному закреплённому commit: документ, digest,
   // revision и сверка базы берутся из HEAD, а не из рабочего дерева.
@@ -197,6 +210,7 @@ export async function contractImpact(h: DevContour, input: unknown) {
     tasks: { direct: direct.map(describe), transitive: transitive.map(describe) },
     base,
     closure,
+    limits,
     requiredReviews,
     // Структурные предупреждения до ревью: их видно без вызова модели.
     warnings: status === 'unchanged' ? [] : checksWarnings(parsed, current),

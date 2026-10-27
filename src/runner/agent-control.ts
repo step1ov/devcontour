@@ -37,41 +37,149 @@ import { spikeRecord, spikesOf } from './checks.ts';
 // нести копию: копию легко отправить на ревью устаревшей, и тогда принятый
 // digest не относится ни к одному файлу в дереве. Inline-текст остаётся для
 // предложений, у которых файла ещё нет.
-export const contractProposal = z
-  .object({
-    repositoryId: z.string().optional(),
-    title: z.string().trim().min(1).max(180),
-    content: z.string().trim().min(1).max(60000).optional(),
-    file: relativePath.optional(),
-    /**
-     * Нормативные файлы договора в том же компоненте: схема, приёмка, эталон.
-     * Их содержимое входит в ревью и в digest контракта.
-     */
-    artifacts: z
-      .array(z.object({ path: relativePath, purpose: z.string().trim().min(1).max(200) }))
-      .max(50)
-      .optional(),
-    /**
-     * Реализация, которую закреплённая приёмка проверяет и импортирует
-     * намеренно: файлы или каталоги, которые пишет исполнитель. Замыкание
-     * зависимостей артефактов в них не заходит; прочие локальные импорты
-     * артефактов должны быть закреплены или защищены (artifact-closure.ts).
-     */
-    underTest: z
-      .array(relativePath)
-      .max(50)
-      .transform((paths) => [...new Set(paths)].sort())
-      .optional(),
-    /**
-     * Договор проверки: обязательства, независимый способ проверки, покрытие
-     * и политика расширения корпуса (core/checks.ts). Структурные пропуски
-     * отклоняются до вызова модели; смысл оценивает ревьюер.
-     */
-    checks: checkDeclaration.optional(),
-  })
-  .refine((p) => Boolean(p.content) !== Boolean(p.file), {
-    message: 'Укажите либо file — путь к контракту в репозитории, либо content',
-  });
+/**
+ * Пределы предложения контракта. Они те же, что у записи контракта в
+ * синхронизации команды (`core/sync-model.ts`): принятая редакция переносится
+ * между клонами одной записью, и предложение сверх них не стало бы
+ * контрактом. Документированы в docs/cli.md и docs/check-contracts.md.
+ */
+export const proposalLimits = { artifacts: 50, purpose: 200, underTest: 50 } as const;
+/**
+ * Схема предложения. `bounded: false` — та же схема без пределов
+ * proposalLimits (с запасом от бесконечного входа): ею contract-impact читает
+ * предложение, чтобы назвать превышения в отчёте рядом с остальными
+ * предпроверками, а не отказать до отчёта.
+ */
+const proposalSchema = (bounded: boolean) => {
+  const limit = (name: keyof typeof proposalLimits) =>
+    bounded ? proposalLimits[name] : proposalLimits[name] * 10;
+  return z
+    .object({
+      repositoryId: z.string().optional(),
+      title: z.string().trim().min(1).max(180),
+      content: z.string().trim().min(1).max(60000).optional(),
+      file: relativePath.optional(),
+      /**
+       * Нормативные файлы договора в том же компоненте: схема, приёмка, эталон.
+       * Их содержимое входит в ревью и в digest контракта.
+       */
+      artifacts: z
+        .array(
+          z.object({
+            path: relativePath,
+            purpose: z
+              .string()
+              .trim()
+              .min(1)
+              .max(limit('purpose'), {
+                error: `purpose артефакта длиннее ${limit('purpose')} знаков`,
+              }),
+          }),
+        )
+        .max(limit('artifacts'), { error: `artifacts: больше ${limit('artifacts')} элементов` })
+        .optional(),
+      /**
+       * Реализация, которую закреплённая приёмка проверяет и импортирует
+       * намеренно: файлы или каталоги, которые пишет исполнитель. Замыкание
+       * зависимостей артефактов в них не заходит; прочие локальные импорты
+       * артефактов должны быть закреплены или защищены (artifact-closure.ts).
+       */
+      underTest: z
+        .array(relativePath)
+        .max(limit('underTest'), { error: `underTest: больше ${limit('underTest')} элементов` })
+        .transform((paths) => [...new Set(paths)].sort())
+        .optional(),
+      /**
+       * Договор проверки: обязательства, независимый способ проверки, покрытие
+       * и политика расширения корпуса (core/checks.ts). Структурные пропуски
+       * отклоняются до вызова модели; смысл оценивает ревьюер.
+       */
+      checks: checkDeclaration.optional(),
+    })
+    .refine((p) => Boolean(p.content) !== Boolean(p.file), {
+      message: 'Укажите либо file — путь к контракту в репозитории, либо content',
+    });
+};
+export const contractProposal = proposalSchema(true);
+/** Предложение без пределов proposalLimits — только для отчёта contract-impact. */
+export const unboundedProposal = proposalSchema(false);
+
+export type LimitIssue = {
+  limit: keyof typeof proposalLimits;
+  max: number;
+  actual: number;
+  over: number;
+  index?: number;
+  path?: string;
+};
+/**
+ * Превышения proposalLimits — по сырому входу, до схемы: какой предел, какие
+ * элементы и на сколько. Пусто — пределы соблюдены.
+ */
+export function proposalLimitIssues(input: unknown): LimitIssue[] {
+  const p = (input ?? {}) as { artifacts?: unknown; underTest?: unknown };
+  const issues: LimitIssue[] = [];
+  const count = (limit: 'artifacts' | 'underTest', list: unknown) => {
+    if (Array.isArray(list) && list.length > proposalLimits[limit])
+      issues.push({
+        limit,
+        max: proposalLimits[limit],
+        actual: list.length,
+        over: list.length - proposalLimits[limit],
+      });
+  };
+  count('artifacts', p.artifacts);
+  if (Array.isArray(p.artifacts))
+    p.artifacts.forEach((a: unknown, index) => {
+      const { purpose, path } = (a ?? {}) as { purpose?: unknown; path?: unknown };
+      const length = typeof purpose === 'string' ? purpose.trim().length : 0;
+      if (length > proposalLimits.purpose)
+        issues.push({
+          limit: 'purpose',
+          max: proposalLimits.purpose,
+          actual: length,
+          over: length - proposalLimits.purpose,
+          index,
+          ...(typeof path === 'string' ? { path } : {}),
+        });
+    });
+  count('underTest', p.underTest);
+  return issues;
+}
+/** Отказ по пределам: что превышено, на сколько и как это исправить. */
+export function limitsMessage(issues: LimitIssue[]) {
+  const lines = issues.map((i) =>
+    i.limit === 'purpose'
+      ? `artifacts[${i.index}].purpose${i.path ? ` (${i.path})` : ''}: ${i.actual} знаков при пределе ${i.max}, длиннее на ${i.over}`
+      : `${i.limit}: ${i.actual} элементов при пределе ${i.max}, лишних ${i.over}`,
+  );
+  const remedies = [
+    ...(issues.some((i) => i.limit === 'artifacts')
+      ? [
+          'файлы, которые закреплённые артефакты не импортируют и на которые не ссылаются checks (sets, crossChecks), — журналы, данные, отчёты — уберите из artifacts и защитите через protectedPaths компонента',
+          'журналы сверки сведите в один сводный артефакт и назовите его в crossChecks',
+        ]
+      : []),
+    ...(issues.some((i) => i.limit === 'purpose')
+      ? ['сократите purpose до одной фразы о роли файла']
+      : []),
+    ...(issues.some((i) => i.limit === 'underTest')
+      ? ['укажите в underTest каталоги реализации вместо отдельных файлов']
+      : []),
+  ];
+  return (
+    'Предложение контракта превышает пределы (docs/cli.md, «Пределы предложения»):\n' +
+    lines.map((l) => '- ' + l).join('\n') +
+    '\nКак исправить:\n' +
+    remedies.map((r) => '- ' + r).join('\n')
+  );
+}
+/** Строгий разбор предложения: превышение пределов — понятный отказ, а не массив zod. */
+export function parseProposal(input: unknown) {
+  const issues = proposalLimitIssues(input);
+  if (issues.length) throw new DomainError(limitsMessage(issues), 400);
+  return contractProposal.parse(input);
+}
 /**
  * Предупреждение до вызова модели: предложение без `checks` ревьюер оценит по
  * правилу `verifiability`, и контракт с вычислительными обещаниями будет
@@ -446,7 +554,7 @@ export async function reviewContract(
   /** Ревьюировать документ из этого commit (см. contractContent). */
   revision?: string,
 ) {
-  const parsed = contractProposal.parse(input);
+  const parsed = parseProposal(input);
   const content = await contractContent(h, parsed, revision);
   const owner = repository(h.config, parsed.repositoryId ?? defaultOwner(h));
   const pinned = await pinArtifacts(

@@ -12,6 +12,7 @@ import {
   contractContent,
   assertDeclaration,
   contractProposal,
+  parseProposal,
   defaultOwner,
   reviewContract,
   reviewPlan,
@@ -221,7 +222,7 @@ export class ContractChanges {
         'В режиме operator изменение контракта проводит оператор: ревью ждёт его подтверждения',
         409,
       );
-    const proposal = contractProposal.parse(input);
+    const proposal = parseProposal(input);
     const impact = await contractImpact(this.h, proposal);
     if (impact.status === 'unchanged') return { status: 'unchanged' as const, impact };
     // Отказ до удержания задач и ревью: новая редакция с незащищённым
@@ -458,7 +459,7 @@ export class ContractChanges {
     // допустим, его поздний ответ отсечёт проверка владения.
     if (!['failed', 'stale', 'waiting', 'queued', 'running'].includes(op.status))
       throw new DomainError(`Пересмотр недоступен операции в состоянии ${op.status}`, 409);
-    const proposal = input === undefined ? op.proposal : contractProposal.parse(input);
+    const proposal = input === undefined ? op.proposal : parseProposal(input);
     const impact = await contractImpact(this.h, proposal);
     // Тот же отказ, что у старта: файл, зарегистрированный под другим
     // компонентом, — параллельный контракт, а не новая редакция.
