@@ -411,6 +411,26 @@ test('Провал непокрытого gate на итоговом SHA дос�
       assert.match(e.message, /стадией 2 workflow/);
       return true;
     });
+    // Отказ самой проверки (здесь — prepare компонента) тоже закрывает
+    // начатую проверку событием failed с причиной.
+    f.h.config.prepare = [
+      {
+        id: 'broken-prepare',
+        command: [process.execPath, '-e', 'process.exit(3)'],
+        timeoutMs: 60_000,
+      },
+    ] as never;
+    await assert.rejects(acceptBoard(f.h, f.board.id, 'codex', false, undefined, { root: f.root }));
+    const last = f.store
+      .events()
+      .filter((e) => e.type.startsWith('board.coverage.'))
+      .slice(0, 2)
+      .reverse()
+      .map((e) => [e.type, (e.data as { error?: string }).error !== undefined]);
+    assert.deepEqual(last, [
+      ['board.coverage.started', false],
+      ['board.coverage.failed', true],
+    ]);
   } finally {
     await f.cleanup();
     await rm(marks, { recursive: true, force: true });

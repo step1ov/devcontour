@@ -137,6 +137,20 @@ export async function coverBoard(
         },
       );
     } catch (error) {
+      // Отказ самой проверки (окружение, отмена, утрата владения) — тоже
+      // исход начатой проверки: журнал не остаётся с одним «started».
+      const message = error instanceof Error ? error.message : String(error);
+      try {
+        event('board.coverage.failed', {
+          repositoryId: gap.repositoryId,
+          sha,
+          runId: record.runId,
+          gates: gap.gates,
+          error: message.slice(0, 2000),
+        });
+      } catch {
+        // Без права записи событие не пишется; причина — исходная ошибка.
+      }
       throw toDomain(error);
     }
     record.gates = [...new Set([...kept.map((e) => e.gate), ...result.gates])];
