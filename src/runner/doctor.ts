@@ -77,19 +77,22 @@ export function engineCheck(
 ): Check {
   const leader: { owner: string; leaseUntil: number; engineVersion?: string } | undefined =
     state.leader;
-  const attempts = [
-    ...new Set(
-      state.runs.flatMap((r) => {
-        const v = (r as { engineVersion?: string }).engineVersion;
-        return v ? [v] : [];
-      }),
-    ),
-  ].sort();
+  const versionOf = (r: unknown) => (r as { engineVersion?: string }).engineVersion;
+  const attempts = [...new Set(state.runs.flatMap((r) => versionOf(r) ?? []))].sort();
+  // Попытки ранних версий версию движка не записывали: они есть, но без версии.
+  const unversioned = state.runs.filter((r) => !versionOf(r)).length;
+  const recorded = !state.runs.length
+    ? 'попыток нет'
+    : [
+        `попыток ${state.runs.length}`,
+        ...(attempts.length ? [`записаны версиями: ${attempts.join(', ')}`] : []),
+        ...(unversioned ? [`без записанной версии: ${unversioned}`] : []),
+      ].join(', ');
   const live = !!leader && leader.leaseUntil > now;
   const controller = leader
     ? `роль controller ${leader.owner} (${leader.engineVersion ?? 'версия не записана'}${live ? ', живая' : ', истекла'})`
     : 'роли controller нет';
-  const detail = `devcontour-harness ${harnessVersion}; ${controller}; попытки записаны версиями: ${attempts.join(', ') || 'нет попыток'}`;
+  const detail = `devcontour-harness ${harnessVersion}; ${controller}; ${recorded}`;
   if (live && leader.engineVersion !== harnessVersion)
     return {
       id: 'engine',

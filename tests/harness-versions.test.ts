@@ -135,6 +135,12 @@ test('doctor называет версию движка и версии, зап�
   assert.match(idle.detail, new RegExp(`devcontour-harness ${harnessVersion}`));
   assert.match(idle.detail, /роли controller нет/);
   assert.match(idle.detail, new RegExp(`0\\.1\\.0-alpha\\.0\\.s3\\.15, ${harnessVersion}`));
+  assert.match(idle.detail, /попыток 4, .*без записанной версии: 1/);
+  // Попытки ранних версий без записанной версии — не «нет попыток».
+  const early = engineCheck({ runs: [run(), run(), run()] }, now).detail;
+  assert.match(early, /попыток 3, без записанной версии: 3/);
+  assert.doesNotMatch(early, /нет попыток|попыток нет|записаны версиями/);
+  assert.match(engineCheck({ runs: [] }, now).detail, /попыток нет/);
 
   const other = { owner: 'c1', leaseUntil: now + 60_000, engineVersion: '9.9.9-other' };
   const blocked = engineCheck({ runs, leader: other }, now);
