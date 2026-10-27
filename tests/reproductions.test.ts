@@ -17,7 +17,7 @@ function persisted(root: string, config: ReturnType<typeof loadConfig>) {
   return loadConfig(path);
 }
 import { Scheduler } from '../src/runner/scheduler.ts';
-import { adapters, type AgentRequest } from '../src/runner/adapters.ts';
+import { adapters, reviewResult, reviewSchema, type AgentRequest } from '../src/runner/adapters.ts';
 import { AgentService } from '../src/application/agent.ts';
 
 // Реестр воспроизведений (без дублей, «наблюдено» только по журналу controller,
@@ -26,6 +26,33 @@ import { AgentService } from '../src/application/agent.ts';
 // tests/reproductions.test.ts и tests/review-probe.test.ts пакета (S2-R1-06,
 // S2-R2-05). Здесь — полный путь DevContour: маскирование ответа ревью и
 // продуктовый брифинг ведущего по реестру задачи.
+
+test('Схема ответа ревью требует класс входов, как у движка; ответ прежней формы без него разбирается', () => {
+  const item = reviewSchema.properties.findings.items.properties.reproduction.anyOf[1] as {
+    properties: Record<string, unknown>;
+    required: string[];
+  };
+  assert.deepEqual(item.properties.inputClass, { type: ['string', 'null'] });
+  assert.ok(item.required.includes('inputClass'), 'обязательное поле структурного ответа');
+  const finding = (reproduction: Record<string, unknown>) => ({
+    approved: false,
+    summary: 's',
+    findings: [{ severity: 'blocking', message: 'm', reproduction }],
+  });
+  const base = {
+    property: 'REQ-1',
+    input: '{}',
+    expected: null,
+    actual: null,
+    command: null,
+    executed: false,
+    run: null,
+  };
+  const named = reviewResult.parse(finding({ ...base, inputClass: 'пустые входы' }));
+  assert.equal(named.findings[0].reproduction?.inputClass, 'пустые входы');
+  const legacy = reviewResult.parse(finding(base));
+  assert.equal(legacy.findings[0].reproduction?.property, 'REQ-1', 'прежняя форма не отброшена');
+});
 
 test('Брифинг задачи ведущего показывает воспроизведения реестра задачи', () => {
   const root = mkdtempSync(join(tmpdir(), 'devcontour-repro-briefing-'));

@@ -83,6 +83,12 @@ function reportedModel(stdout: string): string | undefined {
 export const reproductionInput = z.object({
   property: z.string().max(200).nullable(),
   input: z.string().min(1).max(8000),
+  /**
+   * Класс входов примера — генератор или семейство, а не экземпляр. В схеме
+   * ответа поле обязательно (как у движка); ответ прежней формы без него
+   * разбирается, длинный текст обрезается при записи, а не отбрасывает пример.
+   */
+  inputClass: z.string().nullable().optional(),
   expected: z.string().max(2000).nullable(),
   actual: z.string().max(2000).nullable(),
   command: z.array(z.string()).max(64).nullable(),
@@ -129,7 +135,7 @@ const implementationSchema = {
   },
   required: ['completed', 'summary', 'discoveries'],
 };
-const reviewSchema = {
+export const reviewSchema = {
   type: 'object',
   additionalProperties: false,
   properties: {
@@ -164,13 +170,23 @@ const reviewSchema = {
                 properties: {
                   property: { type: ['string', 'null'] },
                   input: { type: 'string' },
+                  inputClass: { type: ['string', 'null'] },
                   expected: { type: ['string', 'null'] },
                   actual: { type: ['string', 'null'] },
                   command: { type: ['array', 'null'], items: { type: 'string' } },
                   executed: { type: 'boolean' },
                   run: { type: ['string', 'null'] },
                 },
-                required: ['property', 'input', 'expected', 'actual', 'command', 'executed', 'run'],
+                required: [
+                  'property',
+                  'input',
+                  'inputClass',
+                  'expected',
+                  'actual',
+                  'command',
+                  'executed',
+                  'run',
+                ],
               },
             ],
           },

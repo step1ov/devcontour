@@ -200,6 +200,8 @@ const workFields = [
   'checkVersion',
   'recovery',
   'recoveryHistory',
+  // Поле движка новее вложенного: пока его нет, ключ пуст и не пишется.
+  'neutralFailures',
 ] as const;
 
 export function workOf(state: DevContourState, task: Task, options?: ProjectionOptions): WorkState {
@@ -636,6 +638,8 @@ export function reproductionsOf(state: DevContourState, taskId: string) {
         property: r.property,
         inputHash: r.inputHash,
         input: r.input,
+        // Только записанное: движок прежней версии поля не знает.
+        ...(r.inputClass ? { inputClass: r.inputClass } : {}),
         expected: r.expected,
         actual: r.actual,
         command: r.command,
@@ -675,6 +679,9 @@ export function putReproductions(
       taskId: next.workId,
       property: item.property,
       input: item.input,
+      ...((item as { inputClass?: string | null }).inputClass
+        ? { inputClass: (item as { inputClass?: string | null }).inputClass }
+        : {}),
       inputHash: item.inputHash,
       expected: item.expected,
       actual: item.actual,

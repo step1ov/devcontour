@@ -240,6 +240,8 @@ export interface Task extends TaskInput {
   failureKind?: FailureKind;
   /** Отпечаток последнего отказа: по нему считаются одинаковые повторы. */
   failureFingerprint?: string;
+  /** Незасчитанные отказы окружения после начала работы (счётчик движка). */
+  neutralFailures?: number;
   approval?: Approval;
 }
 export interface Approval {
@@ -499,6 +501,11 @@ export interface Run {
   properties?: string[];
   /** Свойства, названные ревьюером, но не объявленные: только для разбора. */
   unboundProperties?: string[];
+  /** Классы входов и пары «свойство — класс» отклонившего ревью (движок). */
+  inputClasses?: string[];
+  classified?: { property: string; inputClass: string }[];
+  /** Попытку прервала штатная остановка: задача возвращена в очередь. */
+  interrupted?: 'shutdown';
   /** Основание эпизода восстановления при выдаче: постановка и контракты. */
   episodeBasis?: string;
   /** Digest оснований реализации: по нему решается, можно ли взять кандидата. */
@@ -565,6 +572,8 @@ export interface Reproduction {
   taskId: string;
   property: string | null;
   input: string;
+  /** Класс входов, названный ревьюером; у записей прежних версий нет. */
+  inputClass?: string | null;
   inputHash: string;
   expected: string | null;
   actual: string | null;
