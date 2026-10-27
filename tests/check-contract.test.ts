@@ -1,5 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { ZodError } from 'zod';
 import { reviewContract, reviewPlan } from '../src/runner/agent-control.ts';
 import type { AgentAdapter, AgentRequest } from '../src/runner/adapters.ts';
@@ -7,7 +11,8 @@ import { AgentService } from '../src/application/agent.ts';
 import type { Spike } from '../src/runner/checks.ts';
 import { digest, specDigest } from '../src/core/service.ts';
 import { suiteBasisOf } from '../src/harness/host.ts';
-import type { CheckDeclaration } from '../src/core/checks.ts';
+import { checkDeclaration, type CheckDeclaration } from '../src/core/checks.ts';
+import { declarationProblems as harnessProblems } from 'devcontour-harness';
 import { git } from '../src/runner/process.ts';
 import { checkProject, declaration, fixture, knap, reach, removeRoot } from './check-fixture.ts';
 import { statePrevious } from './helpers.ts';
@@ -169,6 +174,7 @@ test('A reference-set obligation on plain test gates is declarable; its gaps and
       title: 'Knapsack reference',
       content: 'Оптимум рюкзака по эталонным наборам.',
       artifacts,
+      underTest,
       checks: c,
     });
     // Без способа reference тот же договор на gates без генератора — отказ до модели.
@@ -205,6 +211,7 @@ test('A reference-set obligation on plain test gates is declarable; its gaps and
       /verification "reference" is checked against pinned reference answer sets/,
     );
     assert.match(r.prompts[0], /"references": \[/);
+    assert.match(r.prompts[0], /without "artifacts" .* is an unverified claim of the author/);
     assert.match(r.prompts[0], /"gaps": "Входы больше 8 предметов наборы не покрывают"/);
     // Основание корпуса: прежний договор — прежняя формула; новые поля его меняют.
     const old = { artifacts: [], checks: declaration() };
@@ -232,6 +239,76 @@ test('A reference-set obligation on plain test gates is declarable; its gaps and
   } finally {
     await f.close();
     await removeRoot(p.root);
+  }
+});
+
+test('The reference example of the docs is a valid declaration and its property id matches a real node:test JUnit testcase', () => {
+  const md = readFileSync(new URL('../docs/check-contracts.md', import.meta.url), 'utf8');
+  const block = md.split('## Эталонные наборы')[1].split('```json')[1].split('```')[0];
+  const example = JSON.parse(block) as {
+    property: string;
+    reference: {
+      sets: { gate: string; artifacts: string[] }[];
+      crossChecks: { artifacts?: string[] }[];
+    };
+  };
+  // Поля, которые пример опускает как общие для любого обязательства.
+  const obligation = {
+    requirements: ['REQ-optimal'],
+    domain: { inputs: 'целые w, v ≥ 0', bounds: 'до 60 предметов', invalid: 'отклоняются' },
+    answer: { rules: 'точный оптимум' },
+    method: {
+      kind: 'oracle',
+      description: 'MILP',
+      applicability: 'до 60 предметов',
+      artifacts: ['golden/small.json'],
+    },
+    resources: { subject: '< 1 с на вход', oracle: 'заранее, вне gate' },
+    ...example,
+  };
+  const parsed = checkDeclaration.parse({
+    version: 1,
+    gate: 'golden-small',
+    obligations: [obligation],
+  });
+  const gate = (id: string) => ({
+    id,
+    kind: 'test',
+    command: ['node', '--test'],
+    timeoutMs: 1000,
+    report: { type: 'junit', path: `.reports/${id}.xml` },
+  });
+  // Артефакты контракта примера: наборы и журнал сверки.
+  const files = ['golden/small.json', 'golden/large.json', 'golden/cross-check.log'];
+  assert.deepEqual(
+    harnessProblems(parsed, {
+      gates: [gate('golden-small'), gate('golden-large')] as never,
+      repositoryId: 'main',
+      artifacts: files,
+    }),
+    [],
+  );
+  // ID testcase node:test — classname.name, и classname всегда "test".
+  const dir = mkdtempSync(join(tmpdir(), 'devcontour-junit-'));
+  try {
+    writeFileSync(
+      join(dir, 'golden.test.mjs'),
+      "import { test } from 'node:test';\ntest('knapsack-optimal', () => {});\n",
+    );
+    const out = join(dir, 'junit.xml');
+    execFileSync(
+      process.execPath,
+      ['--test', '--test-reporter=junit', `--test-reporter-destination=${out}`, 'golden.test.mjs'],
+      {
+        cwd: dir,
+        env: { ...process.env, NODE_TEST_CONTEXT: undefined },
+      },
+    );
+    const xml = readFileSync(out, 'utf8');
+    const [, name, classname] = /<testcase name="([^"]+)"[^>]*classname="([^"]+)"/.exec(xml)!;
+    assert.equal(`${classname}.${name}`, example.property);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
