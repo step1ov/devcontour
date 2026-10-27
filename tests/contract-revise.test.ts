@@ -589,3 +589,31 @@ test('Review history belongs to the operation: a same-titled review elsewhere is
     await s.remove();
   }
 });
+
+test('A revise with a file after the review registered the contract continues as a linked successor', async () => {
+  const s = await stage();
+  try {
+    const { operation } = (await s.changes().start(s.proposal, 'codex')) as {
+      operation: ContractChange;
+    };
+    const stopped = await s
+      .changes(undefined, (step) => {
+        if (step === 'rebind') throw new Error('crash after rebind');
+      })
+      .advance(operation.id);
+    assert.equal(stopped.status, 'failed');
+    assert.ok(stopped.contractId, 'редакция зарегистрирована операцией');
+    await s.schema('{"price":"number","currency":"string"}\n');
+    const revised = await s
+      .changes()
+      .revise(operation.id, stopped.version!, undefined, { ...s.proposal });
+    assert.equal(revised.status, 'superseded');
+    assert.notEqual(revised.operation.id, operation.id);
+    assert.equal(revised.operation.previous, operation.id);
+    assert.equal(s.task(s.api.id).hold?.operation, revised.operation.id, 'удержание передано');
+    const done = await s.changes().advance(revised.operation.id);
+    assert.equal(done.status, 'completed', done.error);
+  } finally {
+    await s.remove();
+  }
+});

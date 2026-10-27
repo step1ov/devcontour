@@ -477,7 +477,9 @@ export class ContractChanges {
         (proposal.repositoryId ?? null) === (op.proposal.repositoryId ?? null) &&
         (proposal.file ?? null) === (op.proposal.file ?? null) &&
         proposal.title === op.proposal.title &&
-        (impact.current?.id ?? null) === op.expected.current;
+        // После регистрации действующая редакция — та, что зарегистрировала
+        // сама операция: пересмотр продолжается связанной следующей операцией.
+        (impact.current?.id ?? null) === (op.contractId ?? op.expected.current);
       if (!same)
         throw new DomainError(
           'Пересмотр меняет тот же контракт: файл, название, repositoryId и компонент должны совпадать с операцией',
