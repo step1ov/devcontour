@@ -17,16 +17,11 @@ import { digest } from '../src/core/service.ts';
 import { serve } from '../src/server/http.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { fixture, input } from './helpers.ts';
+import { CATALOG_DIGEST, SNAPSHOT_VERSION } from './catalog-snapshot.ts';
 
 // Снято на HEAD 59e5000 (alpha.10, прежний код) и совпадает с baseline ab35a6a:
 //   node --import tsx -e "import('./src/application/agent.ts').then(a=>process.stdout.write(JSON.stringify(a.capabilities())))"
-// Каталог называет версию продукта; снимок снят на 0.4.0-alpha.7. Байты
-// сравниваются с подставленной версией снимка, версия — с package.json.
-// Намеренное изменение: contract_change_revise получил необязательный
-// `proposal` (исправленное предложение того же контракта); прочие операции
-// байтово прежние.
-const CATALOG_DIGEST = '7e26fb1533e26e18796f7c8eff13c3804bfba9d38438757ee48398c2babf0be2';
-const SNAPSHOT_VERSION = '0.4.0-alpha.7';
+// Байты сравниваются с подставленной версией снимка, версия — с package.json.
 const { version } = JSON.parse(readFileSync(resolve('package.json'), 'utf8')) as {
   version: string;
 };

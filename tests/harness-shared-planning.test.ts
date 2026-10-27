@@ -17,6 +17,7 @@ import { hostInstructions, plan } from '../src/runner/planner.ts';
 import { capabilities } from '../src/application/agent.ts';
 import { digest } from '../src/core/service.ts';
 import { config, fixture, input } from './helpers.ts';
+import { CATALOG_DIGEST, SNAPSHOT_VERSION } from './catalog-snapshot.ts';
 import {
   declaredRoles,
   repositories,
@@ -31,8 +32,6 @@ const sha = (text: string) => createHash('sha256').update(text).digest('hex');
 //   ... z.toJSONSchema(m.planResult, { io: 'input' }) ...; digest(capabilities())
 const PLAN_SCHEMA_SHA = 'b6461127f7f0831181187c2d2d9c87671f5a196ecf97d9010120a86b7e46179e';
 const PLAN_INPUT_SCHEMA_SHA = '36c5ec758791d049f5929522d60dd730363d925c07cedc144f682703db4f05f7';
-// Каталог снят на 0.4.0-alpha.7 и называет версию продукта: digest — с версией снимка.
-const CATALOG_DIGEST = '862305bac2a606004d67a709234f7bbcd08c666e8bcd1b243a0d75e303770f1e';
 
 test('M03 схема: planResult — planDraft harness; JSON Schema runtime, inputSchema plan_import и catalogDigest байтово прежние', () => {
   assert.equal(sha(JSON.stringify(planSchema)), PLAN_SCHEMA_SHA);
@@ -40,7 +39,7 @@ test('M03 схема: planResult — planDraft harness; JSON Schema runtime, inp
     sha(JSON.stringify(z.toJSONSchema(planResult, { io: 'input' }))),
     PLAN_INPUT_SCHEMA_SHA,
   );
-  assert.equal(digest({ ...capabilities(), version: '0.4.0-alpha.7' }), CATALOG_DIGEST);
+  assert.equal(digest({ ...capabilities(), version: SNAPSHOT_VERSION }), CATALOG_DIGEST);
   // Порядок полей держит keyOrder: без него у того же расширения байты другие.
   const bare = planDraft({
     featureId: z.string().optional(),
