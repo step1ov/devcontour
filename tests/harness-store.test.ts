@@ -169,6 +169,41 @@ for (const [name, open] of [
     s.close();
   });
 
+  test(`${name}: класс входов воспроизведения проходит туда и обратно; запись без него остаётся без него`, () => {
+    const s = open(temp());
+    seed(s.store);
+    const item = (input: string, inputClass?: string) => ({
+      key: digestOf(['T-1', input]),
+      property: 'REQ-1',
+      inputHash: digestOf(input),
+      input,
+      ...(inputClass ? { inputClass } : {}),
+      expected: null,
+      actual: null,
+      command: null,
+      message: 'm',
+      claimed: false,
+      observed: false,
+      run: null,
+      runs: [{ runId: 'R-1', sha: 'a'.repeat(40), at: '2026-01-01T00:00:00.000Z' }],
+    });
+    s.transact('reproduction.recorded', (tx) =>
+      tx.putLocal('reproductions', WORKSPACE_OWNER, 'T-1', {
+        workId: 'T-1',
+        items: [item('{"a":1}', 'пустые входы'), item('{"a":2}')],
+      }),
+    );
+    const stored = s.store.read().reproductions!;
+    assert.equal(stored[0].inputClass, 'пустые входы');
+    assert.equal('inputClass' in stored[1], false);
+    const back = s.read((v) => v.local('reproductions', WORKSPACE_OWNER, 'T-1'))!;
+    assert.deepEqual(
+      back.items.map((x) => x.inputClass),
+      ['пустые входы', undefined],
+    );
+    s.close();
+  });
+
   test(`${name}: попытка снимка разбирается один раз, но читающий получает свою копию; запись видна сразу, и в транзакции`, () => {
     const s = open(temp());
     seed(s.store);

@@ -112,7 +112,10 @@ test('Expired attempts are fenced, retries get fresh run IDs and tokens', () => 
     const newer = f.h.claim('one')!;
     assert.notEqual(old.token, newer.token);
     assert.notEqual(old.id, newer.id);
-    assert.equal(newer.attempt, 2);
+    // Истёкшее владение попытку не засчитывает: номер тот же, расходуется
+    // только предел незасчитанных отказов.
+    assert.equal(newer.attempt, 1);
+    assert.equal(f.store.read().tasks[0].neutralFailures, 1);
     assert.throws(() => f.h.finish(old.id, old.token, MERGED), /владение/);
   } finally {
     f.cleanup();
