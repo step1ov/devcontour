@@ -1,7 +1,7 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { BlockedError, type Task } from '../src/core/model.ts';
-import { mkdtemp, readFile, writeFile, rm, mkdir } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm, mkdir, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -596,6 +596,22 @@ test('Auto fast-forward refuses commits that touch acceptance or contour files a
     // Защищённый путь компонента — из его конфигурации.
     const guarded = repo.protectedPaths[0];
     const protectedFile = guarded.endsWith('/') ? guarded + 'guard.txt' : guarded;
+    // Каталог контура, закоммиченный ссылкой: путь без «/» — тот же каталог.
+    await sync();
+    await symlink('elsewhere', join(repo.path, '.devcontour'));
+    await git(repo.path, 'add', '.devcontour');
+    await git(repo.path, '-c', 'core.hooksPath=/dev/null', 'commit', '--no-gpg-sign', '-m', 'link');
+    await refused('symlink .devcontour', /main:\.devcontour[^/]/);
+    await git(repo.path, 'rm', '-q', '.devcontour');
+    await git(
+      repo.path,
+      '-c',
+      'core.hooksPath=/dev/null',
+      'commit',
+      '--no-gpg-sign',
+      '-m',
+      'unlink',
+    );
     for (const file of [
       'acceptance/pin.test.js',
       'docs/contracts/pin.md',

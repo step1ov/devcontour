@@ -272,7 +272,8 @@ export class Scheduler {
     const hit = changed.filter(
       (p) =>
         exact.has(p) ||
-        prefixes.some((x) => p.startsWith(x)) ||
+        // Каталог, закоммиченный ссылкой или gitlink, — путь без «/»: тоже он.
+        prefixes.some((x) => p.startsWith(x) || p === x.slice(0, -1)) ||
         [...exact].some((x) => p.startsWith(x + '/')),
     );
     // Закреплённые редакции артефактов открытой работы на `to` — те же blob.
