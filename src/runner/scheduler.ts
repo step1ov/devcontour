@@ -7,9 +7,10 @@
 // перемотка, когда она — чистый fast-forward), режим команды, применение
 // конфигурации операцией. Правил приёмки здесь нет.
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { HarnessError, Runner, fencedRefMove } from 'devcontour-harness';
 import { DevContour } from '../core/service.ts';
+import type { DevContourState } from '../core/model.ts';
 import { repository, repositories } from '../core/repositories.ts';
 import { validateWorkflow } from '../core/workflow.ts';
 import { TaskFailure } from '../core/failure.ts';
@@ -18,6 +19,7 @@ import { devcontourContextSource, taskPacks } from '../harness/host.ts';
 import { runtimeAdapters } from '../harness/adapters.ts';
 import { devcontourHooks } from '../harness/hooks.ts';
 import { adapters } from './adapters.ts';
+import { assertArtifactsInBase, componentArtifacts } from './contract-artifacts.ts';
 import { git } from './process.ts';
 import { assertTeamCheckout } from './git-sync.ts';
 import { reserveRepositories } from './ownership.ts';
@@ -128,29 +130,33 @@ export class Scheduler {
     return drift;
   }
   /**
-   * Перемотать отставшую базу прогонов, когда это чистый fast-forward: база —
-   * предок рабочей ветки (HEAD на ветке, не detached), принятая история
-   * остаётся в ней целиком, слияния нет. Это то же, что `base-update`, но без
-   * ручного шага: перенос, ради которого очередь вставала, не требует
-   * решения. Только на работающей очереди без попыток, без незавершённой
-   * операции изменения контракта и применения конфигурации; сдвиг ref — CAS
-   * в транзакции, проверяющей, что очередь не встала, попыток не появилось и
-   * роль controller у этого процесса. Расхождение линий, detached HEAD или
-   * любой отказ оставляют прежнее поведение — остановку с подсказкой
-   * `base-update`. Приёмка по-прежнему закрепляет доказанный SHA задачи, а
-   * не вершину базы.
+   * Перемотать отставшую базу прогонов, когда это чистый fast-forward одних
+   * лишь продуктовых изменений: база — предок рабочей ветки (HEAD на ветке,
+   * не detached), принятая история остаётся в ней целиком, слияния нет, и
+   * перематываемые коммиты не трогают того, что задаёт приёмку и исполнение
+   * (`sensitivePaths`). Это та часть `base-update`, которая не требует
+   * решения: ручной путь стоит только ради неё.
+   *
+   * Только на работающей очереди без попыток, без незавершённой операции
+   * изменения контракта и применения конфигурации; сдвиг ref — CAS в
+   * транзакции, проверяющей, что очередь не встала, попыток не появилось и
+   * роль controller у этого процесса. Как и после ручного переноса, очередь
+   * встаёт на ожидание `base-check`: новую базу проверяют гейтами до выдачи
+   * (D42). Отказ возвращает чувствительные пути — остановка их называет.
    */
-  private async fastForwardBase(drift: Awaited<ReturnType<Scheduler['baseDrift']>>) {
-    if (!drift.length || drift.some((d) => d.ahead > 0)) return;
+  private async fastForwardBase(
+    drift: Awaited<ReturnType<Scheduler['baseDrift']>>,
+  ): Promise<string[]> {
+    if (!drift.length || drift.some((d) => d.ahead > 0)) return [];
     const s = this.h.store.read();
-    if (s.paused || s.runs.some((r) => r.status === 'active')) return;
-    if (s.reconfigure && !s.reconfigure.appliedAt) return;
+    // Пауза и идущие попытки проверяет транзакция сдвига (ниже) — атомарно со сдвигом.
+    if (s.reconfigure && !s.reconfigure.appliedAt) return [];
     const openChange = repositories(this.h.config).some((r) =>
       Object.values(this.h.store.localRecords<{ status: string }>('contract-change', r.id)).some(
         (op) => ['queued', 'running', 'waiting', 'failed'].includes(op.status),
       ),
     );
-    if (openChange) return;
+    if (openChange) return [];
     const moves: {
       repositoryId: string;
       path: string;
@@ -161,7 +167,7 @@ export class Scheduler {
     for (const d of drift) {
       const repo = repository(this.h.config, d.repositoryId);
       const branch = await git(repo.path, 'symbolic-ref', '-q', '--short', 'HEAD').catch(() => '');
-      if (!branch) return;
+      if (!branch) return [];
       const to = await git(repo.path, 'rev-parse', 'HEAD');
       const from = await git(repo.path, 'rev-parse', this.targetFor(repo.id));
       // Цель — предок рабочей линии: перемотка ничего не теряет и не переписывает.
@@ -171,7 +177,9 @@ export class Scheduler {
           () => false,
         ))
       )
-        return;
+        return [];
+      const touched = await this.sensitivePaths(s, repo.id, from, to);
+      if (touched.length) return touched.map((p) => `${repo.id}:${p}`);
       moves.push({ repositoryId: repo.id, path: repo.path, branch, from, to });
     }
     const move = fencedRefMove(executionOf(this.h).store, (view) => {
@@ -188,27 +196,105 @@ export class Scheduler {
     } catch {
       // Несостоявшийся сдвиг — прежняя остановка с подсказкой base-update.
     }
-    // Журнал называет перемотку отдельно от ручного base-update: это не
-    // вмешательство человека, и пауза base-check для неё не ставится.
-    if (moved.length)
-      this.h.store.atomic(() =>
-        this.h.store.appendEvent('base.fast-forwarded', {
-          updated: moved.map(({ repositoryId, branch, from, to }) => ({
-            repositoryId,
-            branch,
-            from,
-            to,
-          })),
-        }),
-      );
+    if (!moved.length) return [];
+    // Журнал называет перемотку отдельно от ручного base-update (метрики
+    // считают её автоматической); ожидание base-check — то же, что после
+    // ручного переноса: до проверки гейтами новая база не выдаётся.
+    this.h.store.change('base.fast-forwarded', (st) => {
+      st.paused = true;
+      if (st.pauseReason !== 'operator') st.pauseReason = 'base-check';
+      st.pausedAt = new Date().toISOString();
+      st.waits = [
+        ...(st.waits ?? []).filter((w) => w.kind !== 'base-check'),
+        {
+          kind: 'base-check',
+          detail: `База прогонов перемотана автоматически (${moved.map((m) => m.repositoryId).join(', ')}): проверьте её гейтами и продолжите очередь`,
+          at: new Date().toISOString(),
+        },
+      ];
+      return {
+        updated: moved.map(({ repositoryId, branch, from, to }) => ({
+          repositoryId,
+          branch,
+          from,
+          to,
+        })),
+      };
+    });
+    return [];
   }
-  private async assertBaseCurrent() {
+  /**
+   * Изменённые между `from` и `to` пути, которые перемотка без ревью трогать не
+   * вправе: документы и закреплённые артефакты контрактов, файлы закреплённых
+   * context packs, защищённые и генерируемые пути компонента, его файл
+   * конфигурации, каталоги и файлы контура. Гейт сверяет артефакт по
+   * закреплённому blob только при регистрации контракта, поэтому ослабленный
+   * человеком файл приёмки стал бы базой незамеченным; сверка закреплённых
+   * редакций на `to` закрывает и правку, внесённую не этими коммитами.
+   */
+  private async sensitivePaths(
+    s: Readonly<DevContourState>,
+    repositoryId: string,
+    from: string,
+    to: string,
+  ) {
+    const repo = repository(this.h.config, repositoryId);
+    const changed = (await git(repo.path, 'diff', '--name-only', '--no-renames', from, to))
+      .split('\n')
+      .filter(Boolean);
+    const own = (r?: string) => (r ?? 'main') === repositoryId;
+    const exact = new Set<string>();
+    const prefixes: string[] = ['.devcontour/', '.devcontour-local/'];
+    for (const c of s.contracts) {
+      if (c.source && own(c.repositoryId)) exact.add(c.source);
+      for (const a of c.artifacts ?? []) if (a.repositoryId === repositoryId) exact.add(a.path);
+    }
+    for (const pack of this.h.config.contextPacks)
+      if (pack.repositoryId === repositoryId)
+        for (const f of [...pack.files, ...pack.references]) exact.add(f);
+    for (const p of [...repo.protectedPaths, ...(repo.generatedPaths ?? [])])
+      if (p.endsWith('/')) prefixes.push(p);
+      else exact.add(p);
+    if (repo.configFile) exact.add(repo.configFile);
+    // Каталог данных контура внутри репозитория (embedded): его файлы — тоже.
+    const data = relative(repo.path, this.root);
+    if (data === '')
+      for (const f of [
+        'config.json',
+        'workspace.json',
+        'devcontour.workspace.json',
+        'workspace-selection.json',
+        'packs.lock.json',
+      ])
+        exact.add(f);
+    if (data === '') prefixes.push('profiles/');
+    else if (!data.startsWith('..') && !isAbsolute(data)) prefixes.push(data + '/');
+    const hit = changed.filter(
+      (p) =>
+        exact.has(p) ||
+        prefixes.some((x) => p.startsWith(x)) ||
+        [...exact].some((x) => p.startsWith(x + '/')),
+    );
+    // Закреплённые редакции артефактов открытой работы на `to` — те же blob.
+    const open = s.tasks.filter((t) => !['done', 'cancelled'].includes(t.status));
+    const pinned = s.contracts.filter((c) => open.some((t) => t.contracts.includes(c.id)));
+    const stale = await assertArtifactsInBase(
+      repo.path,
+      to,
+      componentArtifacts(pinned, repositoryId),
+    );
+    return [...new Set([...hit, ...stale])];
+  }
+  private async assertBaseCurrent(sensitive: string[] = []) {
     const drift = await this.baseDrift();
     if (!drift.length) return;
     throw new TaskFailure(
       'stale-base',
       'База прогонов отстала от рабочей ветки: ' +
         drift.map((d) => `${d.repositoryId} — ${d.branch} без ${d.behind} коммитов`).join('; ') +
+        (sensitive.length
+          ? `. Перемотка не выполнена автоматически: коммиты меняют приёмку или настройку контура (${sensitive.slice(0, 20).join(', ')})`
+          : '') +
         '. Выполните devcontour base-update, иначе исполнитель получит дерево без подготовленной работы.',
     );
   }
@@ -259,10 +345,7 @@ export class Scheduler {
       if (!this.h.store.view().paused && runner.active < this.h.config.concurrency) {
         // Сверка базы — git на каждом такте; без расхождения повторно не читается.
         const drift = await this.baseDrift();
-        if (drift.length) {
-          await this.fastForwardBase(drift);
-          await this.assertBaseCurrent();
-        }
+        if (drift.length) await this.assertBaseCurrent(await this.fastForwardBase(drift));
         assertTeamCheckout(this.h);
       }
       await runner.tick();

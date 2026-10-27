@@ -172,6 +172,8 @@ function feedbackMetrics(
       bump(data.taskId);
   }
   const baseUpdates = events.filter((e) => e.type === 'base.updated').length;
+  // Перемотка диспетчером — не вмешательство человека: считается отдельно.
+  const automaticBaseUpdates = events.filter((e) => e.type === 'base.fast-forwarded').length;
   const accepted = tasks.filter((t) => t.status === 'done' && !t.sharedCompletion);
   const recoveryCalls = calls.filter((c) => c.stage === 'property-recovery');
   return {
@@ -203,6 +205,7 @@ function feedbackMetrics(
       corpusVersions: suites.reduce((n, s) => n + s.versions.length, 0),
       contractChanges: durations(operations.map((o) => elapsed(o.startedAt, o.finishedAt))),
       technicalInterventions: [...manual.values()].reduce((a, b) => a + b, 0) + baseUpdates,
+      automaticBaseUpdates,
     },
     // Последние 50 утверждённых задач: ответ ограничен, полный список — CLI-отчёт.
     progress: tasks

@@ -24,6 +24,7 @@ import { acceptBoard } from '../src/runner/agent-control.ts';
 import { ProjectMemory } from '../src/application/memory.ts';
 import { repositories } from '../src/core/repositories.ts';
 import { updateBase } from '../src/runner/base-update.ts';
+import { executionOf } from '../src/harness/execution.ts';
 import { workflowMetrics } from '../src/application/metrics.ts';
 import { taskOwner } from '../src/core/sync-state.ts';
 const demos = demoPool(setupDemo);
@@ -475,7 +476,13 @@ test('A stale run base that is a pure fast-forward moves on the next tick; a div
       ],
     });
     assert.equal(forwarded().length, 1, 'перемотка — одно событие, не ручное вмешательство');
-    assert.ok(f.store.read().runs.length > before, 'выдача продолжилась на новой базе');
+    // Как после ручного переноса: до проверки гейтами новая база не выдаётся.
+    const checked = f.store.read();
+    assert.equal(checked.paused, true);
+    assert.equal(checked.pauseReason, 'base-check');
+    assert.ok(checked.waits?.some((w) => w.kind === 'base-check'));
+    assert.equal(checked.runs.length, before, 'выдачи до проверки базы нет');
+    assert.equal(workflowMetrics(f.h).feedback.feedbackCost.automaticBaseUpdates, 1);
     await scheduler.stop();
 
     // Слияние: обе линии несут работу — принятый прогон в базе и новая
@@ -515,6 +522,172 @@ test('A stale run base that is a pure fast-forward moves on the next tick; a div
     assert.notEqual(tip, prepared);
     assert.notEqual(tip, acceptedTip);
     assert.deepEqual(await new Scheduler(f.h, f.root).baseDrift(), []);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('Auto fast-forward refuses commits that touch acceptance or contour files and every guard holds', async () => {
+  const f = await runtimeFixture();
+  try {
+    const repo = repositories(f.config)[0];
+    const target = `refs/heads/${repo.targetBranch}`;
+    const commit = async (name: string, text = '# ' + name + '\n') => {
+      await mkdir(join(repo.path, name, '..'), { recursive: true });
+      await writeFile(join(repo.path, name), text);
+      await git(repo.path, 'add', name);
+      await git(repo.path, '-c', 'core.hooksPath=/dev/null', 'commit', '--no-gpg-sign', '-m', name);
+      return git(repo.path, 'rev-parse', 'HEAD');
+    };
+    const idle = {
+      ...adapters,
+      demo: {
+        ...adapters.demo,
+        execute: () => Promise.reject(new BlockedError('исполнитель не нужен этой проверке')),
+      },
+    };
+    const base = () => git(repo.path, 'rev-parse', target);
+    const sync = async () =>
+      git(repo.path, 'update-ref', target, await git(repo.path, 'rev-parse', 'HEAD'));
+    // Попытки нужны как образец: тик на совпадающей базе выдаёт и сразу закрывает их.
+    await sync();
+    const warm = new Scheduler(f.h, f.root, idle);
+    await warm.init();
+    f.h.pause(false);
+    await warm.drain();
+    await warm.stop();
+    const sample = f.store.read().runs.at(-1)!;
+    assert.ok(sample, 'образец попытки');
+
+    // Закреплённый артефакт контракта: коммит, его меняющий, базой сам не становится.
+    f.store.change('test.contract', (st) => {
+      st.contracts.push({
+        id: 'C-pin',
+        title: 'Приёмка',
+        content: 'x',
+        digest: 'a'.repeat(64),
+        source: 'docs/contracts/pin.md',
+        artifacts: [
+          {
+            repositoryId: repo.id,
+            path: 'acceptance/pin.test.js',
+            purpose: 'приёмка',
+            revision: 'b'.repeat(40),
+            blob: 'c'.repeat(40),
+            digest: 'd'.repeat(64),
+          },
+        ],
+      } as never);
+      return {};
+    });
+    const refused = async (label: string, pattern: RegExp) => {
+      const s = new Scheduler(f.h, f.root, idle);
+      await s.init();
+      f.h.pause(false);
+      const from = await base();
+      await assert.rejects(s.tick(), (e: Error) => {
+        assert.match(e.message, /base-update/, label);
+        assert.match(e.message, pattern, label);
+        return true;
+      });
+      assert.equal(await base(), from, label + ': база не сдвинута');
+      await s.stop();
+    };
+    // Защищённый путь компонента — из его конфигурации.
+    const guarded = repo.protectedPaths[0];
+    const protectedFile = guarded.endsWith('/') ? guarded + 'guard.txt' : guarded;
+    for (const file of [
+      'acceptance/pin.test.js',
+      'docs/contracts/pin.md',
+      protectedFile,
+      '.devcontour/notes.md',
+    ]) {
+      await sync();
+      await commit(file);
+      await refused(file, new RegExp('main:' + file.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')));
+    }
+
+    // Закреплённая редакция артефакта открытой работы на новой вершине должна совпадать.
+    await sync();
+    const open = f.store.read().tasks.find((t) => !['done', 'cancelled'].includes(t.status))!;
+    f.store.change('test.pin', (st) => {
+      st.tasks.find((t) => t.id === open.id)!.contracts.push('C-pin');
+      st.contracts.find((c) => c.id === 'C-pin')!.artifacts![0].path = 'acceptance/other.test.js';
+      return {};
+    });
+    await commit('src/product-a.js');
+    await refused('stale pin', /main:acceptance\/other\.test\.js/);
+    f.store.change('test.unpin', (st) => {
+      const t = st.tasks.find((x) => x.id === open.id)!;
+      t.contracts = t.contracts.filter((c) => c !== 'C-pin');
+      return {};
+    });
+
+    // Охрана внутри: прямой вызов перемотки на продуктовом коммите.
+    const s = new Scheduler(f.h, f.root, idle);
+    await s.init();
+    f.h.pause(false);
+    assert.ok(f.h.leader(s.owner), 'роль controller у проверяемого процесса');
+    const forward = async () => {
+      const from = await base();
+      const sensitive = await (
+        s as unknown as { fastForwardBase(d: unknown): Promise<string[]> }
+      ).fastForwardBase(await s.baseDrift());
+      return { moved: (await base()) !== from, sensitive };
+    };
+    // Идёт попытка (видна снаружи) — перемотки нет.
+    f.store.change('test.run', (st) => {
+      st.runs.push({
+        ...structuredClone(sample),
+        id: 'R-live',
+        status: 'active',
+        leaseUntil: Date.now() + 60_000,
+      });
+      return {};
+    });
+    assert.equal((await forward()).moved, false, 'активная попытка держит базу');
+    // Та же попытка видна только транзакции сдвига — её проверка держит базу.
+    const read = f.h.store.read.bind(f.h.store);
+    f.h.store.read = () => {
+      const st = read();
+      st.runs = st.runs.filter((r) => r.id !== 'R-live');
+      return st;
+    };
+    try {
+      assert.equal((await forward()).moved, false, 'проверка в транзакции сдвига');
+    } finally {
+      f.h.store.read = read;
+    }
+    f.store.change('test.run-done', (st) => {
+      st.runs = st.runs.filter((r) => r.id !== 'R-live');
+      return {};
+    });
+    // Роль controller утрачена — перемотки нет.
+    executionOf(f.h).engine.release(s.owner);
+    assert.equal((await forward()).moved, false, 'без роли controller база не двигается');
+    assert.ok(f.h.leader(s.owner));
+    // Остановленная очередь — перемотки нет (проверка в транзакции сдвига).
+    f.h.pause(true);
+    assert.equal((await forward()).moved, false, 'пауза держит базу');
+    f.h.pause(false);
+    // Ожидающее применение конфигурации — перемотки нет.
+    f.store.change('test.reconfigure', (st) => {
+      st.reconfigure = {
+        operation: 'OP-1',
+        digest: 'e'.repeat(64),
+        requestedAt: new Date().toISOString(),
+      };
+      return {};
+    });
+    assert.equal((await forward()).moved, false, 'применение конфигурации держит базу');
+    f.store.change('test.reconfigure-done', (st) => {
+      delete st.reconfigure;
+      return {};
+    });
+    // Без препятствий продуктовый коммит перематывается — и ставит base-check.
+    assert.deepEqual(await forward(), { moved: true, sensitive: [] });
+    assert.equal(f.store.read().pauseReason, 'base-check');
+    await s.stop();
   } finally {
     await f.cleanup();
   }
