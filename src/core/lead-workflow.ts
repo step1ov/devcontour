@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { HarnessError, WorkflowQueue, type WorkflowJob as HarnessJob } from 'devcontour-harness';
 import { domain, executionOf } from '../harness/execution.ts';
 import type { DevContourState } from './model.ts';
-import { DevContour, digest } from './service.ts';
+import { DevContour, digest, scopeGaps } from './service.ts';
 import { taskInput, DomainError } from './model.ts';
 import { boardOwner } from './sync-state.ts';
 import { Workspace } from './workspace.ts';
@@ -194,6 +194,21 @@ export class LeadWorkflow {
   start(raw: unknown) {
     const input = workflowInput.parse(raw);
     return domain(() => this.queue().start(input)) as WorkflowJob;
+  }
+  /**
+   * Пробелы областей задач досок работы (`scopeGaps`): видны при регистрации,
+   * а не через часы исполнения на приёмке. Регистрацию они не останавливают —
+   * приёмка доски выполнит эти gates на её итоговом SHA.
+   */
+  scopeGaps(kind: WorkflowJob['kind'], id: string, s: DevContourState = this.h.store.read()) {
+    const boardIds =
+      kind === 'changeset' ? (s.changeSets.find((c) => c.id === id)?.boardIds ?? []) : [id];
+    return boardIds.flatMap((boardId) => {
+      const revision = s.boards.find((b) => b.id === boardId)?.revisions.at(-1);
+      if (!revision || revision.status === 'accepted') return [];
+      const tasks = s.tasks.filter((t) => revision.taskIds.includes(t.id));
+      return scopeGaps(this.h, tasks).map((gap) => ({ boardId, ...gap }));
+    });
   }
   claim(key: string, owner?: string) {
     return domain(() => this.queue().claim(key, owner)) as WorkflowJob | undefined;

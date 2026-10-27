@@ -881,7 +881,9 @@ async function main() {
           args.includes('--tasks') ? option('--tasks', '').split(',').filter(Boolean) : undefined,
         );
       else if (operation === 'accept')
-        result = await acceptBoard(h, option('--board', ''), authorRuntime());
+        result = await acceptBoard(h, option('--board', ''), authorRuntime(), false, undefined, {
+          root,
+        });
       else if (operation === 'queue') {
         if (args.includes('--start') === args.includes('--pause'))
           throw new Error('Укажите только --start или --pause');

@@ -16,6 +16,8 @@ import {
   samePin,
   specDigest,
   scopeDigest,
+  scopeGaps,
+  scopeGapWarning,
 } from '../core/service.ts';
 import { blobBytes, pinArtifacts } from './contract-artifacts.ts';
 import { assertUnderTest, unguardedDependencies, unguardedMessage } from './artifact-closure.ts';
@@ -32,6 +34,7 @@ import {
   type CheckDeclaration,
 } from '../core/checks.ts';
 import { spikeRecord, spikesOf } from './checks.ts';
+import { coverBoard } from './board-coverage.ts';
 
 // Контракт живёт в репозитории, и предложение должно на него ссылаться, а не
 // нести копию: копию легко отправить на ревью устаревшей, и тогда принятый
@@ -762,7 +765,11 @@ export async function reviewPlan(
   const drafts = selected
     ? all.filter((t) => pending(t) && selected.includes(t.id))
     : all.filter(pending);
-  if (!drafts.length) return { status: 'already-approved', boardId };
+  // Пробел областей — прогноз по постановкам до исполнения: gates, которых нет
+  // в области ни одной задачи, приёмка доски выполнит на её итоговом SHA.
+  const gaps = scopeGaps(h, all);
+  const coverage = gaps.length ? { coverageGaps: gaps, warning: scopeGapWarning(gaps) } : {};
+  if (!drafts.length) return { status: 'already-approved', boardId, ...coverage };
   // Предусловия утверждения — до ревью: отказ после одобрения тратил вызов
   // модели впустую. Повторное утверждение по политике постановку не меняет.
   drafts.filter((t) => t.status === 'draft').forEach((t) => h.approvable(state, t));
@@ -874,9 +881,10 @@ export async function reviewPlan(
   );
   beforeCommit();
   if (h.config.approvalMode === 'operator')
-    return { status: 'awaiting-operator', boardId, approval };
+    return { status: 'awaiting-operator', boardId, approval, ...coverage };
   return {
     status: 'approved',
+    ...coverage,
     ...h.store.atomic(() => {
       beforeCommit();
       return h.approve(
@@ -895,6 +903,11 @@ export async function acceptBoard(
   author: Author,
   manual = false,
   beforeCommit: () => void = () => {},
+  /**
+   * Каталог состояния контура: в нём проверка доски держит рабочее дерево
+   * итогового SHA (`coverBoard`). Без него пробел покрытия — отказ приёмки.
+   */
+  options: { root?: string; signal?: AbortSignal } = {},
 ) {
   const state = h.store.read();
   const board = state.boards.find((b) => b.id === boardId);
@@ -946,8 +959,23 @@ export async function acceptBoard(
   const head = Object.values(heads)[0];
   if (h.config.approvalMode === 'operator' && !manual)
     return { status: 'awaiting-operator', boardId, head };
+  // Gates, которые не исполнила ни одна задача (области задач их не включали),
+  // проверяются один раз на итоговом SHA доски; приёмка — только если прошли.
+  const coverage = options.root
+    ? await coverBoard(
+        h,
+        options.root,
+        boardId,
+        revision,
+        tasks,
+        heads,
+        beforeCommit,
+        options.signal,
+      )
+    : [];
   return {
     status: 'accepted',
+    ...(coverage.length ? { coverage } : {}),
     ...h.store.atomic(() => {
       beforeCommit();
       return h.accept(

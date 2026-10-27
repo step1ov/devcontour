@@ -293,16 +293,99 @@ function sourceUnchanged(
  * явной области выполнялась профилем своего времени, и gate, добавленный или
  * изменённый позже, ею не покрыт).
  */
-export function uncoveredGates(h: DevContour, s: DevContourState, tasks: Task[]) {
+export function uncoveredGates(
+  h: DevContour,
+  s: DevContourState,
+  tasks: Task[],
+  /** Проверка доски на её итоговом SHA (`boardCoverageWorks`): её evidence тоже покрывает. */
+  extra: { repositoryId: string; resultSha: string; evidence: readonly Evidence[] }[] = [],
+) {
   const ids = [...new Set(tasks.map((t) => t.repositoryId))];
   return harnessUncoveredGates(
     ids.map((id) => ({ id, gates: repository(h.config, id).gates })),
-    tasks.map((t) => ({
-      repositoryId: t.repositoryId,
-      resultSha: t.resultSha,
-      evidence: taskEvidence(s, t, h),
-    })),
+    [
+      ...tasks.map((t) => ({
+        repositoryId: t.repositoryId,
+        resultSha: t.resultSha,
+        evidence: taskEvidence(s, t, h),
+      })),
+      ...extra,
+    ],
   );
+}
+
+/**
+ * Gates профиля, которых нет в области ни одной задачи доски, — по
+ * постановкам, до исполнения. То же правило, что у приёмки: задача без
+ * области покрывает весь профиль своего компонента, отменённая не покрывает
+ * ничего. Такие gates приёмка доски выполнит один раз на итоговом SHA доски
+ * (`acceptBoard`), поэтому пробел — предупреждение, а не отказ.
+ */
+export function scopeGaps(h: DevContour, tasks: Pick<Task, 'repositoryId' | 'gates' | 'status'>[]) {
+  const live = tasks.filter((t) => t.status !== 'cancelled');
+  return [...new Set(live.map((t) => t.repositoryId))].flatMap((id) => {
+    const repo = repository(h.config, id);
+    const covered = new Set(
+      live.filter((t) => t.repositoryId === id).flatMap((t) => expandGates(repo, t.gates)),
+    );
+    const gates = repo.gates.map((g) => g.id).filter((g) => !covered.has(g));
+    return gates.length ? [{ repositoryId: id, gates }] : [];
+  });
+}
+/** Предупреждение о пробеле областей с исправлением, или undefined. */
+export function scopeGapWarning(gaps: { repositoryId: string; gates: string[] }[]) {
+  if (!gaps.length) return undefined;
+  return (
+    'Области задач доски не включают gates: ' +
+    gaps.map((g) => `${g.repositoryId}: ${g.gates.join(', ')}`).join('; ') +
+    '. Приёмка доски выполнит их один раз на итоговом integration SHA доски и примет её, только если они пройдут. ' +
+    'Чтобы их провал находила задача, а не приёмка, включите их в область (gates) задачи, которая меняет проверяемый ими код.'
+  );
+}
+
+/** Проверка доски на её итоговом SHA: gates, не исполненные ни одной задачей. */
+export interface BoardCoverage {
+  boardId: string;
+  revision: number;
+  repositoryId: string;
+  sha: string;
+  /** Договор компонента, под которым шла проверка (`policyDigest`). */
+  policyDigest: string;
+  /** Ревизия доски, для которой шла проверка (digest, как у приёмки). */
+  revisionDigest: string;
+  runId: string;
+  gates: string[];
+  evidence: Evidence[];
+  failure?: { gate: string; message: string };
+  at: string;
+}
+export const BOARD_COVERAGE = 'board-coverage';
+export const boardCoverageKey = (boardId: string, revision: number) => `${boardId}:${revision}`;
+/**
+ * Evidence проверок доски, которое покрывает её приёмку: запись этой ревизии
+ * (тот же digest) на итоговом SHA компонента и под действующим договором
+ * компонента. Другой SHA, другой договор или изменённая ревизия — не
+ * покрытие.
+ */
+export function boardCoverageWorks(
+  h: DevContour,
+  boardId: string,
+  revision: { number: number },
+  heads: Record<string, string>,
+) {
+  return Object.entries(heads).flatMap(([repositoryId, sha]) => {
+    const record = h.store.localRecord<BoardCoverage>(
+      BOARD_COVERAGE,
+      repositoryId,
+      boardCoverageKey(boardId, revision.number),
+    );
+    return record &&
+      record.sha === sha &&
+      record.policyDigest === h.policyDigest(repositoryId) &&
+      record.revisionDigest === digest(revision)
+      ? [{ repositoryId, resultSha: sha, evidence: record.evidence }]
+      : [];
+  });
 }
 
 /**
@@ -1093,7 +1176,12 @@ export class DevContour {
               : unproven,
           );
       }
-      const uncovered = uncoveredGates(this, s, tasks);
+      const uncovered = uncoveredGates(
+        this,
+        s,
+        tasks,
+        repositories ? boardCoverageWorks(this, boardId, r, repositories) : [],
+      );
       if (uncovered.length) {
         // Receipt другого clone с другими проверками или без их тождества
         // покрытия не даёт — причина названа: задачу нужно перепроверить.
@@ -1101,10 +1189,10 @@ export class DevContour {
         throw new DomainError(
           'Полный набор проверок не пройден: ' +
             uncovered.map((u) => `${u.repositoryId}: ${u.gates.join(', ')}`).join('; ') +
-            ' — ни одна задача доски не прошла их на integration. ' +
+            ' — ни одна задача доски и ни одна проверка доски на её итоговом SHA не прошли их на integration. ' +
             (recheck.length
               ? `Receipt задач ${recheck.join(', ')} подтверждает другие проверки или не называет их (прежний формат) — нужна перепроверка задач под текущей конфигурацией`
-              : 'Добавьте задачу, чья область их включает'),
+              : 'Приёмка через acceptBoard выполняет их на итоговом SHA доски'),
         );
       }
       r.status = 'accepted';

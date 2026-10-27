@@ -530,7 +530,14 @@ export async function serve(
             else if (parts[3] === 'approve')
               result = h.approve(parts[2], z.array(z.string()).optional().parse(input.taskIds));
             else if (parts[3] === 'accept') {
-              result = await acceptBoard(h, parts[2], 'codex', true);
+              result = await acceptBoard(
+                h,
+                parts[2],
+                'codex',
+                true,
+                undefined,
+                scheduler ? { root: scheduler.root } : {},
+              );
             } else if (parts[3] === 'correct')
               result = h.correct(
                 parts[2],

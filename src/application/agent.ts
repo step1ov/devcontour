@@ -15,7 +15,7 @@ import { repositories, repository } from '../core/repositories.ts';
 import { z } from 'zod';
 import { readFileSync } from 'node:fs';
 import { AgentContext, contextInputs, type ContextOperation } from './context.ts';
-import { DevContour, specDigest } from '../core/service.ts';
+import { DevContour, scopeGapWarning, specDigest } from '../core/service.ts';
 import { taskInput, DomainError } from '../core/model.ts';
 import { planResult } from '../core/plan.ts';
 import { Workspace, changeSetInput } from '../core/workspace.ts';
@@ -443,8 +443,15 @@ export class AgentService {
         return {
           events: new SignalInbox(h).list(agentInputs.signal_status.parse(input).repositoryId),
         };
-      case 'workflow_start':
-        return this.workflowView(new LeadWorkflow(h).start(input));
+      case 'workflow_start': {
+        const workflow = new LeadWorkflow(h);
+        const job = workflow.start(input);
+        const gaps = workflow.scopeGaps(job.kind, job.id);
+        return {
+          ...this.workflowView(job),
+          ...(gaps.length ? { coverageGaps: gaps, warning: scopeGapWarning(gaps) } : {}),
+        };
+      }
       case 'workflow_status':
         return {
           jobs: new LeadWorkflow(h)

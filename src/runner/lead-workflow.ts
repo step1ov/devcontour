@@ -349,7 +349,10 @@ export class LeadRunner {
           return true;
         }
         for (const task of tasks) assertRequirements(this.h, task);
-        await acceptBoard(this.h, b.id, job.authorRuntime, false, guard);
+        const root = job.owner
+          ? join(repository(this.h.config, job.owner).path, '.devcontour-local')
+          : this.root;
+        await acceptBoard(this.h, b.id, job.authorRuntime, false, guard, { root, signal });
       }
       return false;
     }
