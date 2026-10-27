@@ -102,14 +102,41 @@ export function controllerRow(db: DatabaseSync, schema = 'main'): Leader | null 
 }
 
 /**
- * Действующая роль controller по документу и строке. Строка пишется этой
- * версией и новее; документ — прежними. Из двух записей действует более
- * поздний срок: роль, которую ещё держит процесс, не теряется.
+ * Пока роль держит строка, в документе лежит её метка: запись роли с полем
+ * `heldInRow`. Прежние версии читают роль только из документа и строгой
+ * схемой: поле им неизвестно, и они отказывают до любой записи и выдачи,
+ * а не перенимают роль, которую держит процесс этой версии. Метку пишут
+ * только получение роли (смена владельца или версии движка) и её снятие;
+ * продление меняет одну строку.
+ */
+const ROW_MARKER = 'heldInRow';
+const isRowMarker = (leader: Leader | undefined) =>
+  !!leader && (leader as Record<string, unknown>)[ROW_MARKER] === true;
+function rowMarker(leader: Leader | undefined, current: Leader | undefined) {
+  if (!leader) return undefined;
+  const { owner, leaseUntil, engineVersion } = leader as Leader & { engineVersion?: string };
+  const held = current as (Leader & { engineVersion?: string }) | undefined;
+  if (isRowMarker(held) && held!.owner === owner && held!.engineVersion === engineVersion)
+    return held;
+  return {
+    owner,
+    leaseUntil,
+    ...(engineVersion ? { engineVersion } : {}),
+    [ROW_MARKER]: true,
+  } as Leader;
+}
+
+/**
+ * Действующая роль controller по документу и строке. Метка в документе —
+ * роль в строке. Без метки документ записан прежней версией: из двух
+ * записей действует более поздний срок — роль, которую ещё держит процесс,
+ * не теряется.
  */
 export function effectiveLeader(
   document: Leader | undefined,
   row: Leader | null | undefined,
 ): Leader | undefined {
+  if (isRowMarker(document)) return row ?? undefined;
   if (!row) return document;
   if (!document) return row;
   return document.leaseUntil > row.leaseUntil ? document : row;
@@ -139,19 +166,20 @@ export class Draft {
     if (base.leader === this.leaderValue) return base;
     const cached = this.overlay;
     if (cached?.base === base && cached.leader === this.leaderValue) return cached.value;
-    const value = Object.freeze({ ...base, leader: this.leaderValue });
-    if (!this.leaderValue) delete (value as { leader?: Leader }).leader;
+    const value: DevContourState = { ...base, leader: this.leaderValue };
+    if (!this.leaderValue) delete value.leader;
+    Object.freeze(value);
     this.overlay = { base, leader: this.leaderValue, value };
     return value;
   }
   edit(): DevContourState {
     if (!this.mutable) {
       const state = this.copy();
-      // Та же роль остаётся на своём месте: неизменённый документ
-      // сериализуется в тот же текст.
+      // Роль заменяется на своём месте: неизменённый документ сериализуется
+      // в тот же текст.
       if (JSON.stringify(state.leader ?? null) !== JSON.stringify(this.leaderValue ?? null)) {
-        delete state.leader;
         if (this.leaderValue) state.leader = structuredClone(this.leaderValue);
+        else delete state.leader;
       }
       this.mutable = state;
     }
@@ -398,8 +426,16 @@ export class Store {
   }
   private overlay?: { base: DevContourState; leader: string; value: DevContourState };
   private frozenUnlocked(): Readonly<DevContourState> {
-    if (this.components) return deepFreeze(this.load().state);
-    const base = this.document().frozen();
+    return this.withRole(this.frozenDocument());
+  }
+  /** Замороженный документ без наложенной роли controller (в нём может быть её метка). */
+  private frozenDocument(): DevContourState {
+    if (!this.components) return this.document().frozen();
+    const row = this.db.prepare('SELECT data FROM main.state WHERE id=1').get() as { data: string };
+    return deepFreeze(this.parseDocument(row.data).state);
+  }
+  /** Документ `base` с действующей ролью controller — из строки, прочитанной сейчас. */
+  private withRole(base: DevContourState): Readonly<DevContourState> {
     const leader = effectiveLeader(base.leader, controllerRow(this.db));
     if (leader === base.leader) return base;
     const key = JSON.stringify(leader ?? null);
@@ -577,19 +613,20 @@ export class Store {
       const result = action(draft);
       const leader = draft.leader;
       const leaderChanged = JSON.stringify(leader ?? null) !== leaderBefore;
-      // Роль прежней версии лежит в документе: при её изменении документ
-      // переписывается без неё — дальше роль ведёт только строка.
-      if (leaderChanged && documentLeader) draft.edit();
-      // Неизменённая роль прежней версии остаётся в документе как есть.
-      const keep =
-        !!documentLeader && JSON.stringify(leader ?? null) === JSON.stringify(documentLeader);
+      // В документ идёт метка роли (`rowMarker`), сама роль — в строку. Роль
+      // не менялась — роль документа остаётся как есть (и роль прежней
+      // версии тоже); сменилась — документ переписывается, только если
+      // меняется метка: получение и снятие роли, перенос роли прежней версии.
+      const marker = leaderChanged ? rowMarker(leader, documentLeader) : documentLeader;
+      if (JSON.stringify(marker ?? null) !== JSON.stringify(documentLeader ?? null)) draft.edit();
       const withoutLeader = <R>(state: DevContourState, fn: () => R): R => {
-        if (keep) return fn();
-        delete state.leader;
+        if (marker) state.leader = marker;
+        else delete state.leader;
         try {
           return fn();
         } finally {
           if (leader) state.leader = leader;
+          else delete state.leader;
         }
       };
       let documentChanged = false;
@@ -607,7 +644,8 @@ export class Store {
           }
         }
       }
-      const rowChanged = leaderChanged || (documentChanged && !!documentLeader && !keep);
+      const rowChanged =
+        leaderChanged && JSON.stringify(leader ?? null) !== JSON.stringify(row ?? null);
       if (rowChanged) this.db.exec(CONTROLLER_TABLE);
       if (rowChanged)
         this.db
@@ -785,6 +823,10 @@ export class Store {
    * вызывающий, которому важны только некоторые сроки, передаёт `leaseStale`:
    * кэш со старыми сроками остаётся, пока эта проверка не скажет, что
    * показанный по нему срок уже мог истечь.
+   *
+   * Роль controller в кэш не входит: её продление счётчиков не меняет, и
+   * роль накладывается на кэшированный документ из своей строки при каждом
+   * чтении.
    */
   readShared(leaseStale?: (state: Readonly<DevContourState>, readAt: number) => boolean): {
     revision: number;
@@ -800,6 +842,7 @@ export class Store {
       const version = this.version();
       if (this.transaction)
         return { ...version, snapshotAt: Date.now(), state: this.frozenUnlocked() };
+      // Кэш — документ без наложенной роли; роль — из строки на это чтение.
       const cached = this.cached;
       const fresh =
         cached?.revision === version.revision &&
@@ -812,10 +855,10 @@ export class Store {
         this.cached = {
           ...version,
           readAt: this.reading ? this.readStartedAt : Date.now(),
-          state: this.frozenUnlocked(),
+          state: this.frozenDocument(),
         };
       const { revision, lease, state } = this.cached!;
-      return { revision, lease, snapshotAt: this.readStartedAt, state };
+      return { revision, lease, snapshotAt: this.readStartedAt, state: this.withRole(state) };
     });
   }
   /** Согласованное чтение нескольких значений из одного снимка БД. */

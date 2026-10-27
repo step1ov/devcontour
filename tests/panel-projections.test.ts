@@ -465,7 +465,12 @@ test('P-F03/P-F12: lease renewals keep the summary number and the parsed cache; 
         unchanged: true,
       });
     }
-    assert.equal(d.store.readShared(() => false).state, cached);
+    // Документ не перечитан (те же объекты); роль controller накладывается
+    // из своей строки — она у состояния новая.
+    const shared = d.store.readShared(() => false).state;
+    assert.equal(shared.changeSets, cached.changeSets);
+    assert.equal(shared.tasks, cached.tasks);
+    assert.equal(shared.leader?.owner, 'panel-probe');
     // После показанного срока клиент берёт сводку целиком: в ней продлённый
     // lease, а не снятая блокировка.
     while (Date.now() <= now + 400) await new Promise((r) => setTimeout(r, 20));
@@ -541,10 +546,10 @@ test('P-F17: a lease that expires while the summary parses and was renewed meanw
     });
     // Снимок сводки уже открыт; пока разбирается состояние, другой процесс
     // продлевает lease, а старый срок истекает.
-    const store = d.store as unknown as { frozenUnlocked(): unknown };
-    const original = store.frozenUnlocked.bind(d.store);
+    const store = d.store as unknown as { frozenDocument(): unknown };
+    const original = store.frozenDocument.bind(d.store);
     let raced = false;
-    store.frozenUnlocked = () => {
+    store.frozenDocument = () => {
       if (!raced) {
         raced = true;
         writer.change('heartbeat', (s) => {

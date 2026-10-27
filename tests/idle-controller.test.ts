@@ -6,7 +6,12 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { amplifyHistory, completedDemo } from './large-history.ts';
 import { demoPool } from './demo-pool.ts';
-import { Store } from '../src/core/store.ts';
+import { Draft, Store, effectiveLeader } from '../src/core/store.ts';
+import { controllerLeaseSchema } from 'devcontour-harness';
+import { executionOf } from '../src/harness/execution.ts';
+import { controllerOf } from '../src/harness/projection.ts';
+import type { DevContourState } from '../src/core/model.ts';
+import { config } from './helpers.ts';
 import { DevContour } from '../src/core/service.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
@@ -216,7 +221,8 @@ test('The controller role lives in its own row: renewal leaves the document alon
     // Новая роль: документ переписан без роли, роль — в своей строке.
     const next = { owner: 'current', leaseUntil: now + 120_000, engineVersion: '0.0.1' };
     p.a.update('heartbeat', (draft) => (draft.leader = next));
-    assert.equal('leader' in p.document(), false, 'роль ушла из документа');
+    // В документе — только метка роли, сама роль — в строке.
+    assert.deepEqual(p.document().leader, { ...next, heldInRow: true }, 'роль ушла из документа');
     assert.deepEqual(p.b.read().leader, next);
     // Продление: документ не меняется ни на байт, меняется только строка роли.
     const before = p.text();
@@ -229,10 +235,91 @@ test('The controller role lives in its own row: renewal leaves the document alon
     // Снятие роли.
     p.a.update('scheduler.released', (draft) => (draft.leader = undefined));
     assert.equal(p.b.read().leader, undefined);
+    assert.equal('leader' in p.document(), false, 'метка снята вместе с ролью');
     const row = p.raw.prepare('SELECT data FROM controller WHERE id=1').get() as {
       data: string | null;
     };
     assert.equal(row.data, null);
+  } finally {
+    p.close();
+  }
+});
+
+test('While this version holds the role, an older version that reads the role from the document refuses before any write; after release it may lead', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'devcontour-store-cache-'));
+  const file = join(dir, 'state.sqlite');
+  const store = new Store(file);
+  const h = new DevContour(store, config());
+  const raw = new DatabaseSync(file);
+  const text = () =>
+    (raw.prepare('SELECT data FROM state WHERE id=1').get() as { data: string }).data;
+  // Прежние версии читают роль только из документа строгой схемой движка
+  // (`controllerOf` адаптера) и строки роли не знают.
+  const earlier = () => controllerOf(JSON.parse(text()) as DevContourState);
+  try {
+    assert.equal(h.leader('current'), true);
+    const document = JSON.parse(text()) as { leader?: unknown };
+    assert.equal(
+      controllerLeaseSchema.safeParse(document.leader).success,
+      false,
+      'метку роли строгая схема прежних версий не принимает',
+    );
+    assert.throws(earlier, /Роль controller/, 'прежняя версия отказывает до записи и выдачи');
+    // Продление документ не трогает.
+    const held = text();
+    assert.equal(h.leader('current'), true);
+    assert.equal(text(), held);
+    // Снятие роли снимает метку: прежняя версия снова может вести очередь.
+    executionOf(h).engine.release('current');
+    assert.equal('leader' in (JSON.parse(text()) as object), false);
+    assert.equal(earlier(), undefined, 'прежняя версия читает документ без роли');
+  } finally {
+    raw.close();
+    store.close();
+    if (dir.startsWith(tmpdir()) && dir.includes('devcontour-store-cache-'))
+      rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('A role written into the document by an earlier version with a later lease than the row wins; a marker defers to the row', () => {
+  const row = { owner: 'current', leaseUntil: 1_000 };
+  const later = { owner: 'earlier', leaseUntil: 2_000 };
+  assert.deepEqual(effectiveLeader(later, row), later);
+  assert.deepEqual(effectiveLeader({ owner: 'earlier', leaseUntil: 500 }, row), row);
+  assert.equal(effectiveLeader(undefined, null), undefined);
+  const marker = { ...later, heldInRow: true } as typeof later;
+  assert.deepEqual(effectiveLeader(marker, row), row);
+  assert.equal(effectiveLeader(marker, null), undefined);
+});
+
+test('A nested part that set the role and failed leaves the role as it was', () => {
+  const base = Object.freeze({ leader: undefined }) as never;
+  const first = { owner: 'first', leaseUntil: 1 };
+  const draft = new Draft(
+    () => base,
+    () => ({}) as never,
+    first,
+  );
+  const mark = draft.mark();
+  draft.leader = { owner: 'second', leaseUntil: 2 };
+  draft.restore(mark);
+  assert.deepEqual(draft.leader, first);
+  // То же после копии документа для записи.
+  draft.edit();
+  const edited = draft.mark();
+  draft.leader = undefined;
+  draft.restore(edited);
+  assert.deepEqual(draft.leader, first);
+});
+
+test('The shared panel snapshot shows the renewed role, not the one it cached', () => {
+  const p = pair();
+  try {
+    p.a.update('heartbeat', (draft) => (draft.leader = { owner: 'c', leaseUntil: 1_000 }));
+    assert.equal(p.a.readShared().state.leader?.leaseUntil, 1_000);
+    p.b.update('heartbeat', (draft) => (draft.leader = { owner: 'c', leaseUntil: 2_000 }));
+    assert.equal(p.a.readShared().state.leader?.leaseUntil, 2_000);
+    assert.equal(p.a.readShared(() => false).state.leader?.leaseUntil, 2_000);
   } finally {
     p.close();
   }
