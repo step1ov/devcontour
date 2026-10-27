@@ -117,8 +117,12 @@ export class LeadWorkflow {
    * интерфейсу они не нужны и не должны быть доступны.
    */
   view() {
+    const stale = this.staleBoards();
     return [undefined, ...repositories(this.h.config).map((r) => r.id)].flatMap((owner) =>
       this.list(owner).map((job) => ({
+        ...(job.kind === 'board' && stale.get(job.id)?.key === job.key
+          ? { approvalStale: stale.get(job.id)! }
+          : {}),
         key: job.key,
         kind: job.kind,
         id: job.id,
@@ -139,6 +143,37 @@ export class LeadWorkflow {
         history: job.history.slice(-20),
       })),
     );
+  }
+  /**
+   * Доски, чьё действующее задание ведущего (queued или running) согласовано
+   * по прежнему входу: после согласования изменилась политика исполнения
+   * (роли, ревьюеры, gates — например, после workspace-init), постановка или
+   * контракт. Очередь заданий помечает такое задание `stale` только при
+   * следующем взятии стадии, а на паузе стадии не берутся, и оператор видел
+   * лишь паузу и удержания. Здесь устаревание считается чтением, без записи.
+   */
+  staleBoards(s: DevContourState = this.h.store.read()) {
+    const stale = new Map<string, { key: string; reason: string; hint: string }>();
+    for (const owner of [undefined, ...repositories(this.h.config).map((r) => r.id)])
+      for (const job of this.list(owner)) {
+        if (job.kind !== 'board' || !['queued', 'running'].includes(job.status)) continue;
+        let current: boolean;
+        try {
+          const bound = this.input('board', job.id, s);
+          current = bound.digest === job.inputDigest && bound.owner === job.owner;
+        } catch (error) {
+          if (!(error instanceof DomainError)) throw error;
+          current = false;
+        }
+        if (!current)
+          stale.set(job.id, {
+            key: job.key,
+            reason:
+              'Согласование доски устарело: после него изменилась политика исполнения (роли, ревьюеры, gates), постановка или контракт',
+            hint: `Согласуйте план доски ${job.id} заново: начните новое задание доски (workflow_start, kind board); его стадия согласования проводит review-plan`,
+          });
+      }
+    return stale;
   }
   get(key: string, owner?: string) {
     return domain(() => this.queue().get(key, owner)) as WorkflowJob;

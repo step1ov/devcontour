@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { complete, fixture, input, MERGED } from './helpers.ts';
+import { complete, config, fixture, input, MERGED } from './helpers.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
 import { Store } from '../src/core/store.ts';
@@ -12,6 +12,8 @@ import { setupDemo } from '../src/demo.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Workspace, changeSnapshot } from '../src/core/workspace.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
+import { taskProgress } from '../src/application/context.ts';
+import { panelSummary, panelTask, type PanelSummary } from '../src/application/panel.ts';
 
 test('Workflow enqueue is idempotent, expired owners are fenced and changed inputs become stale', () => {
   const f = fixture();
@@ -38,6 +40,63 @@ test('Workflow enqueue is idempotent, expired owners are fenced and changed inpu
     assert.equal(flow.claim(job.key, 'main'), undefined);
     assert.equal(flow.get(job.key, 'main').status, 'stale');
     assert.notEqual(flow.start(request).key, job.key);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Устаревшее согласование доски видно на паузе: причина у задач, у задания и в проекциях панели', () => {
+  // Смена политики исполнения (здесь — ревьюер, как после workspace-init)
+  // делает вход задания доски устаревшим. Очередь заданий отмечает это лишь
+  // при следующем взятии стадии, а на паузе стадии не берутся: оператор видел
+  // только паузу. Проекции называют устаревание чтением, ничего не записывая.
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Release board', '', 'main');
+    const t = f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    const job = new LeadWorkflow(f.h).start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    f.h.pause(true, 'shutdown');
+    const reasons = (h: DevContour) =>
+      taskProgress(
+        h,
+        h.store.read(),
+        h.store.read().tasks.find((x) => x.id === t.id)!,
+        1,
+      ).reasons;
+    assert.deepEqual([...new LeadWorkflow(f.h).staleBoards().keys()], []);
+    assert.ok(!reasons(f.h).includes('approval_stale'), reasons(f.h).join(','));
+
+    const changed = new DevContour(
+      f.store,
+      config({ reviewer: { runtime: 'demo', model: 'another-reviewer' } }),
+    );
+    const flow = new LeadWorkflow(changed);
+    assert.deepEqual([...flow.staleBoards().keys()], [b.id]);
+    const s = changed.store.read();
+    const progress = taskProgress(
+      changed,
+      s,
+      s.tasks.find((x) => x.id === t.id)!,
+      Date.now(),
+    );
+    assert.ok(progress.reasons.includes('approval_stale'), progress.reasons.join(','));
+    assert.ok(progress.reasons.includes('queue_paused'));
+    assert.equal(progress.approvalStale?.boardId, b.id);
+    assert.match(progress.approvalStale.hint, /review-plan/);
+    assert.match(progress.approvalStale.reason, /политика исполнения/);
+    const board = flow.view().find((w) => w.key === job.key)!;
+    assert.equal(board.status, 'queued', 'задание не переписано чтением');
+    assert.match(board.approvalStale?.hint ?? '', new RegExp(`доски ${b.id}.*review-plan`));
+
+    // Панель: сводка и карточка задачи несут ту же причину и подсказку.
+    const summary = panelSummary(changed, f.root, {}) as PanelSummary;
+    assert.ok(summary.workflows.some((w) => w.key === job.key && w.approvalStale));
+    const line = summary.tasks.find((x) => x.id === t.id)!;
+    assert.ok(line.progress.reasons.includes('approval_stale'));
+    const card = panelTask(changed, t.id, {});
+    assert.equal(card.task.progress.approvalStale?.boardId, b.id);
+    assert.equal(new LeadWorkflow(changed).get(job.key, 'main').status, 'queued');
   } finally {
     f.cleanup();
   }

@@ -89,6 +89,8 @@ const waitingReasons: Record<string, string> = {
   inactive_revision: 'Задача относится к неактивной ревизии.',
   held_by_operation:
     'Задачу удерживает операция изменения контракта: выдача возобновится, когда операция снимет удержание.',
+  approval_stale:
+    'Согласование плана устарело: после него изменилась политика исполнения, постановка или контракт.',
   failure_requires_diagnosis: 'Разберите причину сбоя перед повторной попыткой.',
   attempts_exhausted: 'Лимит попыток исчерпан. Нужна диагностика и пересмотр решения.',
 };
@@ -2102,6 +2104,9 @@ export function App() {
                               {reason === 'held_by_operation' &&
                                 task.progress?.hold &&
                                 ` Операция ${task.progress.hold.operation}.`}
+                              {reason === 'approval_stale' &&
+                                task.progress?.approvalStale &&
+                                ` ${task.progress.approvalStale.hint}.`}
                             </li>
                           ))}
                         </ul>

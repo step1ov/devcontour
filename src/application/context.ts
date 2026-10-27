@@ -23,6 +23,7 @@ import {
 } from '../core/model.ts';
 import { repositories, repository, roleBinding, reviewerBinding } from '../core/repositories.ts';
 import { identitySchema } from '../core/sync-model.ts';
+import { LeadWorkflow } from '../core/lead-workflow.ts';
 import {
   HarnessError,
   checkJsonBytes,
@@ -89,6 +90,18 @@ export function taskProgress(h: DevContour, s: DevContourState, t: Task, now: nu
   // паузу или зависимости и не знал, что задача не выйдет и после них.
   const hold = t.hold && !['done', 'cancelled'].includes(t.status) ? t.hold : undefined;
   if (hold) before.push('held_by_operation');
+  // Устаревшее согласование доски видно и на паузе: задание ведущего узнаёт
+  // о нём только при следующем взятии стадии, а на паузе стадии не берутся.
+  const staleBoard = !['done', 'cancelled'].includes(t.status)
+    ? s.boards.find(
+        (b) => b.revisions.at(-1)?.taskIds.includes(t.id) && staleBoardsOf(h, s, now).has(b.id),
+      )
+    : undefined;
+  const approvalStale = staleBoard && {
+    boardId: staleBoard.id,
+    ...staleBoardsOf(h, s, now).get(staleBoard.id)!,
+  };
+  if (approvalStale) before.push('approval_stale');
   if (t.status === 'ready') {
     const active = s.boards.some(
       (b) => b.revisions.at(-1)?.status === 'active' && b.revisions.at(-1)!.taskIds.includes(t.id),
@@ -131,8 +144,34 @@ export function taskProgress(h: DevContour, s: DevContourState, t: Task, now: nu
           },
         }
       : {}),
+    ...(approvalStale
+      ? {
+          approvalStale: {
+            boardId: approvalStale.boardId,
+            workflow: short(approvalStale.key),
+            reason: approvalStale.reason,
+            hint: approvalStale.hint,
+          },
+        }
+      : {}),
     eligible: shared.eligible,
   };
+}
+/**
+ * Устаревшие согласования досок — один расчёт на ответ: тот же снимок и тот
+ * же момент `now`. Задания ведущего хранятся вне снимка, поэтому следующий
+ * ответ (другой `now`) считает заново.
+ */
+const staleBoardCache = new WeakMap<
+  DevContourState,
+  { now: number; stale: ReturnType<LeadWorkflow['staleBoards']> }
+>();
+function staleBoardsOf(h: DevContour, s: DevContourState, now: number) {
+  const cached = staleBoardCache.get(s);
+  if (cached?.now === now) return cached.stale;
+  const stale = new LeadWorkflow(h).staleBoards(s);
+  staleBoardCache.set(s, { now, stale });
+  return stale;
 }
 function boardOwner(b: Board, s: DevContourState) {
   if (b.scope === 'workspace') return undefined;
