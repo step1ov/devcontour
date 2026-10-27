@@ -22,6 +22,12 @@ export async function command(
     redact?: Redactor;
     onOutput?: (stream: 'stdout' | 'stderr', text: string) => void;
     /**
+     * Немаскированный stdout — только в памяти вызывающего, для разбора
+     * телеметрии runtime: маска без списка секретов копит вывод до конца и
+     * держит лишь его хвост. Сохранять его нельзя.
+     */
+    onRawStdout?: (text: string) => void;
+    /**
      * Владеть всеми потомками, включая сменивших группу или сессию: после
      * завершения они останавливаются, и результат не возвращается, пока
      * хотя бы один жив. Сигнал группе не достаёт отсоединившегося потомка.
@@ -74,7 +80,9 @@ export async function command(
     };
     child.stdout.on('data', (d: Buffer) => {
       lastOutputAt = new Date().toISOString();
-      append('stdout', maskOut(stdoutDecoder.write(d)));
+      const text = stdoutDecoder.write(d);
+      options.onRawStdout?.(text);
+      append('stdout', maskOut(text));
     });
     child.stderr.on('data', (d: Buffer) => {
       lastOutputAt = new Date().toISOString();
@@ -171,7 +179,9 @@ export async function command(
           child.stderr.destroy();
         }
       }
-      append('stdout', maskOut(stdoutDecoder.end(), true));
+      const rest = stdoutDecoder.end();
+      options.onRawStdout?.(rest);
+      append('stdout', maskOut(rest, true));
       append('stderr', maskErr(stderrDecoder.end(), true));
       if (outputError) {
         reject(outputError);

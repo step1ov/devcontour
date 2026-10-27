@@ -1,4 +1,4 @@
-import { parseUsage, runtimeVersion } from './usage.ts';
+import { runtimeVersion, usageStream } from './usage.ts';
 import type { Usage } from '../core/usage.ts';
 import { evaluationResult } from '../core/evaluation.ts';
 import type { ToolProfile } from '../core/integrations.ts';
@@ -61,21 +61,6 @@ function runtimeReason(
   return `: ${cleaned}`;
 }
 
-// Какую модель runtime выбрал на самом деле. Записывалась запрошенная, а при
-// незакреплённой модели — null: оператор не мог увидеть, что прогон ушёл на
-// длинноконтекстный вариант, который подпиской не покрыт и требует кредитов.
-// Имя приходит от самого runtime: у claude — в событии system, у codex — в
-// ключах modelUsage.
-function reportedModel(stdout: string): string | undefined {
-  for (const event of runtimeEvents(stdout).events) {
-    if (typeof event.model === 'string' && event.model && event.model !== '<synthetic>')
-      return event.model;
-    const usage = event.modelUsage as Record<string, unknown> | undefined;
-    const [name] = Object.keys(usage ?? {});
-    if (name) return name;
-  }
-  return undefined;
-}
 /**
  * Воспроизводимый вход находки. Вход — строка: для structured output схема
  * должна быть закрытой, а форма входа у каждого проекта своя.
@@ -472,12 +457,16 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
       const logPath = join(r.artifactDir, 'runtime.log');
       await writeFile(logPath, `Runtime ${name}; started ${new Date().toISOString()}\n`);
       let loggedBytes = 0;
+      // Телеметрия — по всему потоку, независимо от предела runtime.log и
+      // хвоста stdout: итоговое событие долгого вызова лежит за ними.
+      const telemetry = usageStream(name);
       const result = await command(argv, r.cwd, {
         // Потомки рантайма — shell-команды, серверы проверок — не переживают
         // прогон, даже отсоединившись от его группы.
         // Каталог по признаку владения — только worktree исполнителя: ревью
         // плана идёт в основном checkout, где работает и человек.
         contain: { dirs: r.review ? [] : (r.isolation?.write ?? []) },
+        onRawStdout: (text) => telemetry.push(text),
         onOutput: (stream, text) => {
           // Keep live logs bounded; final diagnostics retain both stream tails.
           if (loggedBytes >= 10_000_000) return;
@@ -509,24 +498,15 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
           throw new BlockedError(`${name}: runtime не запускается: ${String(error)}`);
         throw error;
       });
+      const usage = telemetry.usage(result.code === 0 && !result.timedOut && !r.signal.aborted);
+      // Сообщённые runtime счётчики и стоимость — и в диагностике вызова:
+      // runtime.log ограничен и итоговой строки может не содержать.
       await writeFile(
         join(r.artifactDir, 'runtime.json'),
-        JSON.stringify(result.diagnostics, null, 2),
+        JSON.stringify({ ...result.diagnostics, usage }, null, 2),
       );
       r.onDiagnostics?.(result.diagnostics);
-      const usedModel = reportedModel(result.stdout);
-      r.onUsage?.(
-        parseUsage(
-          name,
-          result.stdout,
-          result.code === 0 &&
-            !result.timedOut &&
-            !r.signal.aborted &&
-            result.stdout.length < 2_000_000,
-        ),
-        version,
-        usedModel,
-      );
+      r.onUsage?.(usage, version, telemetry.model());
       const log = result.stdout + '\n' + result.stderr;
       // Отказ окружения — это когда runtime не начал работать: не запустился,
       // не авторизовался, оборвался до первой попытки. Отсутствие кандидата

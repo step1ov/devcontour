@@ -213,6 +213,68 @@ else { console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:100
   }
 });
 
+test('Provider-reported cost of a long call survives the bounded runtime.log and stdout tail', async () => {
+  const f = fixture();
+  try {
+    const bin = join(f.root, 'bin');
+    await mkdir(bin);
+    // More stream than the runtime.log cap and the stdout tail; the final result line comes last.
+    await writeFile(
+      join(bin, 'claude'),
+      `#!${process.execPath}
+if (process.argv.includes('--version')) console.log('claude fixture-only');
+else {
+  process.stdin.resume();
+  process.stdin.on('end', async () => {
+    const write = (event) => new Promise((done) => process.stdout.write(JSON.stringify(event) + '\\n', done));
+    await write({ type: 'system', subtype: 'init', model: 'fixture-model' });
+    const text = 'x'.repeat(100_000);
+    for (let sent = 0; sent < 12_000_000; sent += text.length)
+      await write({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
+    await write({
+      type: 'result',
+      structured_output: { completed: true, summary: 'done' },
+      total_cost_usd: 17.25,
+      usage: { input_tokens: 10, output_tokens: 20, cache_read_input_tokens: 30, cache_creation_input_tokens: 40 },
+    });
+  });
+}
+`,
+      { mode: 0o755 },
+    );
+    const artifactDir = join(f.root, 'artifacts');
+    await measuredExecute(
+      f.h,
+      cliAdapter('claude'),
+      {
+        cwd: f.root,
+        artifactDir,
+        prompt: 'Fixture request',
+        review: false,
+        task: {} as Task,
+        signal: new AbortController().signal,
+        timeoutMs: 60_000,
+        execution: {
+          env: { PATH: bin + delimiter + (process.env.PATH ?? '') },
+          redact: (text) => text,
+        },
+      },
+      { repositoryId: 'main', stage: 'implementation' },
+    );
+    const record = Object.values(f.store.localRecords<UsageRecord>('usage', 'main'))[0];
+    assert.equal(record.usage.reportedUsd, 17.25);
+    assert.equal(record.usage.inputTokens, 80);
+    assert.equal(record.usage.complete, true);
+    assert.equal(record.model, 'fixture-model');
+    assert.equal(usageTotals([record]).costUsd, 17.25);
+    const diagnostics = JSON.parse(await readFile(join(artifactDir, 'runtime.json'), 'utf8')) as {
+      usage: { reportedUsd: number };
+    };
+    assert.equal(diagnostics.usage.reportedUsd, 17.25);
+  } finally {
+    f.cleanup();
+  }
+});
 test('Effective tariffs are snapshotted and cannot retroactively change call estimates', async () => {
   const f = fixture();
   try {

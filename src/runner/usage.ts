@@ -54,6 +54,89 @@ export function parseUsage(runtime: 'codex' | 'claude', stdout: string, complete
     return unknownUsage();
   }
 }
+// Какую модель runtime выбрал на самом деле. Записывалась запрошенная, а при
+// незакреплённой модели — null: оператор не мог увидеть, что прогон ушёл на
+// длинноконтекстный вариант, который подпиской не покрыт и требует кредитов.
+// Имя приходит от самого runtime: у claude — в событии system, у codex — в
+// ключах modelUsage.
+export function eventModel(event: Record<string, unknown>): string | undefined {
+  if (typeof event.model === 'string' && event.model && event.model !== '<synthetic>')
+    return event.model;
+  const usage = event.modelUsage as Record<string, unknown> | undefined;
+  return Object.keys(usage ?? {})[0];
+}
+/** Строка потока длиннее — не разбирается и делает телеметрию неполной. */
+const LINE_LIMIT = 64_000_000;
+/**
+ * Телеметрия, собранная по ходу потока runtime, а не из хвоста вывода. Хвост
+ * stdout и runtime.log ограничены, и у долгого вызова итоговое событие
+ * `result` (стоимость и счётчики claude) или ранние `turn.completed` codex
+ * оказывались за пределом: стоимость, сообщённая провайдером, терялась или
+ * учитывалась неполной. Каждая строка разбирается сразу; хранятся только поля
+ * телеметрии — последнее `result`, события `turn.completed` и первая
+ * сообщённая модель, — а не текст вывода.
+ */
+export function usageStream(runtime: 'codex' | 'claude') {
+  let partial = '',
+    overflow = false,
+    malformed = false,
+    model: string | undefined,
+    result: string | undefined;
+  const turns: string[] = [];
+  const line = (text: string) => {
+    if (!text.trim()) return;
+    let event: unknown;
+    try {
+      event = JSON.parse(text);
+    } catch {
+      malformed = true;
+      return;
+    }
+    if (!event || typeof event !== 'object' || Array.isArray(event)) {
+      malformed = true;
+      return;
+    }
+    const e = event as Record<string, unknown>;
+    model ??= eventModel(e);
+    if (runtime === 'claude' && e.type === 'result')
+      result = JSON.stringify({ type: e.type, usage: e.usage, total_cost_usd: e.total_cost_usd });
+    if (runtime === 'codex' && e.type === 'turn.completed')
+      turns.push(JSON.stringify({ type: e.type, usage: e.usage }));
+  };
+  const flush = () => {
+    if (overflow) malformed = true;
+    else line(partial);
+    partial = '';
+    overflow = false;
+  };
+  return {
+    /** Очередной фрагмент stdout runtime. */
+    push(text: string) {
+      let start = 0;
+      for (let end = text.indexOf('\n'); end >= 0; end = text.indexOf('\n', start)) {
+        if (!overflow) partial += text.slice(start, end);
+        flush();
+        start = end + 1;
+      }
+      if (overflow) return;
+      partial += text.slice(start);
+      if (partial.length > LINE_LIMIT) {
+        partial = '';
+        overflow = true;
+      }
+    },
+    /** Телеметрия всего потока; `completed` — вызов завершился штатно. */
+    usage(completed: boolean): Usage {
+      flush();
+      return parseUsage(
+        runtime,
+        [...turns, ...(result ? [result] : [])].join('\n'),
+        completed && !malformed,
+      );
+    },
+    model: () => model,
+  };
+}
 const versions = new Map<string, Promise<string | null>>();
 export function runtimeVersion(runtime: string, env?: NodeJS.ProcessEnv) {
   const key = JSON.stringify([runtime, env?.PATH ?? process.env.PATH]);
