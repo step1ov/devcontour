@@ -12,6 +12,7 @@ import {
   boardCoverageKey,
   digest,
   scopeGaps,
+  scopeGapWarning,
   uncoveredGates,
   type BoardCoverage,
 } from '../src/core/service.ts';
@@ -181,7 +182,10 @@ test('Покрытие доски засчитывает проверку дос
  * integration, runId проверки доски) и падает, если в дереве итогового SHA
  * есть SMOKE_BROKEN.
  */
-async function realBoard(broken: boolean, options: { marker?: string; emptyB?: boolean } = {}) {
+async function realBoard(
+  broken: boolean,
+  options: { marker?: string; emptyB?: boolean; install?: boolean } = {},
+) {
   const root = await mkdtemp(join(tmpdir(), 'devcontour-coverage-'));
   await setupDemo(root);
   const config = loadConfig(join(root, 'config.json'));
@@ -202,13 +206,29 @@ process.exit(ok ? 0 : 1);
   await writeFile(
     join(config.repository, 'smoke.mjs'),
     junit(
-      "!existsSync('SMOKE_BROKEN') && process.env.DEVCONTOUR_PHASE === 'integration' && process.env.DEVCONTOUR_RUN_ID.startsWith('BC-')",
+      "!existsSync('SMOKE_BROKEN') && process.env.DEVCONTOUR_PHASE === 'integration' && process.env.DEVCONTOUR_RUN_ID.startsWith('BC-')" +
+        (options.install ? " && existsSync('.deps/ok')" : ''),
     ),
   );
   await git(config.repository, 'add', '.');
   await git(config.repository, 'commit', '-m', 'Gates unit and smoke');
   await git(config.repository, 'update-ref', 'refs/heads/' + config.targetBranch, 'HEAD');
   config.gates = [
+    // Профиль в режиме порядка массива: установка первой, без dependsOn.
+    ...(options.install
+      ? [
+          {
+            id: 'install',
+            kind: 'check' as const,
+            command: [
+              process.execPath,
+              '-e',
+              "require('fs').mkdirSync('.deps',{recursive:true});require('fs').writeFileSync('.deps/ok','1')",
+            ],
+            timeoutMs: 60_000,
+          },
+        ]
+      : []),
     { ...gate('unit'), command: [process.execPath, 'unit.mjs'] },
     { ...gate('smoke'), command: [process.execPath, 'smoke.mjs'] },
   ];
@@ -228,8 +248,9 @@ process.exit(ok ? 0 : 1);
     });
   config.protectedPaths = [...config.protectedPaths, 'unit.mjs', 'smoke.mjs'];
   const board = h.createBoard('Scoped release');
-  const a = h.addTask(board.id, { ...input('Part A'), gates: ['unit'] });
-  const b = h.addTask(board.id, { ...input('Part B', [a.id]), gates: ['unit'] });
+  const scope = options.install ? ['install', 'unit'] : ['unit'];
+  const a = h.addTask(board.id, { ...input('Part A'), gates: scope });
+  const b = h.addTask(board.id, { ...input('Part B', [a.id]), gates: scope });
   h.approve(board.id);
   const runtimes = {
     ...adapters,
@@ -338,15 +359,36 @@ test('Приёмка доски выполняет непокрытые gates о
 });
 
 test('Провал непокрытого gate на итоговом SHA доски — отказ приёмки с названным gate; evidence провала записано', async () => {
-  const f = await realBoard(true);
+  const marks = await mkdtemp(join(tmpdir(), 'devcontour-coverage-mark-'));
+  const marker = join(marks, 'NIGHTLY_BROKEN');
+  await writeFile(marker, 'x\n');
+  const f = await realBoard(true, { marker });
   try {
     const state = f.store.read();
     assert.ok(state.tasks.every((t) => t.status === 'done'));
     const head = state.tasks.find((t) => t.id === f.tasks[1].id)!.resultSha!;
+    // Оба провала — одним отказом: стадия не тратит попытку на каждый gate.
     await assert.rejects(
       acceptBoard(f.h, f.board.id, 'codex', false, undefined, { root: f.root }),
-      new RegExp(`Проверка доски на итоговом SHA ${head} не пройдена: main/smoke`),
+      (e: Error) => {
+        assert.ok(e.message.includes(`main/smoke на ${head}`), e.message);
+        assert.ok(e.message.includes(`main/nightly на ${head}`), e.message);
+        return true;
+      },
     );
+    const events = f.store
+      .events()
+      .filter((e) => e.type.startsWith('board.coverage.'))
+      .reverse()
+      .map((e) => [
+        e.type,
+        (e.data as { gates: string[]; failures?: string[] }).gates,
+        (e.data as { failures?: string[] }).failures,
+      ]);
+    assert.deepEqual(events, [
+      ['board.coverage.started', ['smoke', 'nightly'], undefined],
+      ['board.coverage.failed', ['smoke', 'nightly'], ['smoke', 'nightly']],
+    ]);
     const record = f.store.localRecord<BoardCoverage>(
       BOARD_COVERAGE,
       'main',
@@ -355,7 +397,10 @@ test('Провал непокрытого gate на итоговом SHA дос�
     assert.equal(record.failure?.gate, 'smoke');
     assert.deepEqual(
       record.evidence.map((e) => [e.gate, e.sha, e.passed]),
-      [['smoke', head, false]],
+      [
+        ['smoke', head, false],
+        ['nightly', head, false],
+      ],
     );
     assert.equal(f.store.read().boards[0].revisions.at(-1)!.status, 'active');
     // Без каталога состояния (HTTP accept без планировщика) проверки доски
@@ -368,6 +413,7 @@ test('Провал непокрытого gate на итоговом SHA дос�
     });
   } finally {
     await f.cleanup();
+    await rm(marks, { recursive: true, force: true });
   }
 });
 
@@ -451,5 +497,76 @@ test('Задача, работу которой сделала зависимо�
     );
   } finally {
     await f.cleanup();
+  }
+});
+
+test('Профиль в порядке массива: проверка доски исполняет непокрытый gate после более ранних check gates (установки), как их исполняли задачи', async () => {
+  const f = await realBoard(false, { install: true });
+  try {
+    const state = f.store.read();
+    assert.ok(
+      state.tasks.every((t) => t.status === 'done'),
+      JSON.stringify(state.tasks.map((t) => [t.id, t.status, t.failure])),
+    );
+    const head = state.tasks.find((t) => t.id === f.tasks[1].id)!.resultSha!;
+    const accepted = await acceptBoard(f.h, f.board.id, 'codex', false, undefined, {
+      root: f.root,
+    });
+    assert.equal(accepted.status, 'accepted');
+    const record = f.store.localRecord<BoardCoverage>(
+      BOARD_COVERAGE,
+      'main',
+      boardCoverageKey(f.board.id, 1),
+    )!;
+    assert.deepEqual(
+      record.evidence.map((e) => [e.gate, e.passed, e.sha]),
+      [
+        ['install', true, head],
+        ['smoke', true, head],
+      ],
+      'установка исполнена перед smoke, ранний unit не повторён',
+    );
+    assert.deepEqual(
+      f.store
+        .events()
+        .filter((e) => e.type.startsWith('board.coverage.'))
+        .map((e) => e.type)
+        .reverse(),
+      ['board.coverage.started', 'board.coverage.passed'],
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('Прогноз пробела называет предпосылки проверки доски и gates, которым проверка доски не даст подготовки', () => {
+  const f = fixture();
+  try {
+    const check = (id: string) => ({
+      id,
+      kind: 'check' as const,
+      command: ['node', id + '.mjs'],
+      timeoutMs: 60_000,
+    });
+    f.h.config.gates = [gate('nightly'), check('install'), gate('unit'), gate('engine')];
+    const b = f.h.createBoard('Array order', '', 'main');
+    f.h.addTask(b.id, { ...input('Unit part'), gates: ['install', 'unit'] });
+    const gaps = scopeGaps(f.h, f.store.read().tasks);
+    assert.deepEqual(gaps, [
+      {
+        repositoryId: 'main',
+        gates: ['nightly', 'engine'],
+        prerequisites: ['install'],
+        withoutSetup: ['nightly'],
+      },
+    ]);
+    const warning = scopeGapWarning(gaps)!;
+    assert.match(warning, /с предпосылками install/);
+    assert.match(warning, /Без подготовки окружения: main: nightly/);
+    // Prepare компонента — подготовка есть: предупреждения нет.
+    f.h.config.prepare = [{ command: ['node', 'setup.mjs'], timeoutMs: 60_000 }] as never;
+    assert.equal(scopeGaps(f.h, f.store.read().tasks)[0].withoutSetup, undefined);
+  } finally {
+    f.cleanup();
   }
 });

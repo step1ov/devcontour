@@ -43,6 +43,14 @@ export async function coverBoard(
     boardCoverageWorks(h, boardId, revision, heads),
   );
   const runs: { repositoryId: string; sha: string; runId: string; gates: string[] }[] = [];
+  // Все непрошедшие gates всех компонентов — одним отказом: иначе каждый
+  // провал стоил бы отдельной попытки стадии.
+  const failed: string[] = [];
+  const event = (type: string, data: Record<string, unknown>) =>
+    h.store.atomic(() => {
+      guard();
+      h.store.appendEvent(type, { boardId, revision: revision.number, ...data });
+    });
   const revisionDigest = digest(revision);
   for (const gap of gaps) {
     const sha = heads[gap.repositoryId];
@@ -100,6 +108,12 @@ export async function coverBoard(
         );
       });
     const { engine } = executionOf(h);
+    event('board.coverage.started', {
+      repositoryId: gap.repositoryId,
+      sha,
+      runId: record.runId,
+      gates: gap.gates,
+    });
     let result;
     try {
       result = await runGatesAt(
@@ -127,12 +141,21 @@ export async function coverBoard(
     }
     record.gates = [...new Set([...kept.map((e) => e.gate), ...result.gates])];
     if (result.failure) record.failure = result.failure;
+    if (result.failures.length) record.failures = result.failures;
     save();
-    if (result.failure)
-      throw new DomainError(
-        `Проверка доски на итоговом SHA ${sha} не пройдена: ${gap.repositoryId}/${result.failure.gate}: ${result.failure.message}`,
-      );
+    event(result.failures.length ? 'board.coverage.failed' : 'board.coverage.passed', {
+      repositoryId: gap.repositoryId,
+      sha,
+      runId: record.runId,
+      gates: result.gates,
+      ...(result.failures.length ? { failures: result.failures.map((f) => f.gate) } : {}),
+    });
+    for (const f of result.failures)
+      failed.push(`${gap.repositoryId}/${f.gate} на ${sha}: ${f.message}`);
+    if (result.failures.length) continue;
     runs.push({ repositoryId: gap.repositoryId, sha, runId: record.runId, gates: result.gates });
   }
+  if (failed.length)
+    throw new DomainError('Проверка доски на итоговом SHA не пройдена: ' + failed.join('; '));
   return runs;
 }

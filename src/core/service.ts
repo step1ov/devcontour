@@ -18,6 +18,8 @@ import {
   draftIssues,
   recoveryActions,
   uncoveredGates as harnessUncoveredGates,
+  gatePrerequisites,
+  standaloneScope,
   type CodedIssue,
   type PropertyRecovery,
 } from 'devcontour-harness';
@@ -327,21 +329,59 @@ export function scopeGaps(h: DevContour, tasks: Pick<Task, 'repositoryId' | 'gat
   const live = tasks.filter((t) => t.status !== 'cancelled');
   return [...new Set(live.map((t) => t.repositoryId))].flatMap((id) => {
     const repo = repository(h.config, id);
-    const covered = new Set(
-      live.filter((t) => t.repositoryId === id).flatMap((t) => expandGates(repo, t.gates)),
-    );
+    const scopes = live.filter((t) => t.repositoryId === id).map((t) => expandGates(repo, t.gates));
+    const covered = new Set(scopes.flat());
     const gates = repo.gates.map((g) => g.id).filter((g) => !covered.has(g));
-    return gates.length ? [{ repositoryId: id, gates }] : [];
+    if (!gates.length) return [];
+    // Проверка доски исполнит каждый gate с предпосылками, которые выводит
+    // из профиля harness (`gatePrerequisites`): `dependsOn` или более ранние
+    // check gates. Если задачи опирались на check gates своей области, а
+    // gate проверки доски не получит ни одной предпосылки и prepare у
+    // компонента нет, — проверка, скорее всего, упадёт на окружении.
+    const prerequisites = standaloneScope(repo.gates, gates).filter((g) => !gates.includes(g));
+    const checks = new Set(repo.gates.filter((g) => g.kind === 'check').map((g) => g.id));
+    const tasksUseSetup = scopes.some((scope) => scope.some((g) => checks.has(g)));
+    const withoutSetup =
+      tasksUseSetup && !(repo.prepare ?? []).length
+        ? gates.filter((g) => !gatePrerequisites(repo.gates, g).length)
+        : [];
+    return [
+      {
+        repositoryId: id,
+        gates,
+        ...(prerequisites.length ? { prerequisites } : {}),
+        ...(withoutSetup.length ? { withoutSetup } : {}),
+      },
+    ];
   });
 }
 /** Предупреждение о пробеле областей с исправлением, или undefined. */
-export function scopeGapWarning(gaps: { repositoryId: string; gates: string[] }[]) {
+export function scopeGapWarning(
+  gaps: {
+    repositoryId: string;
+    gates: string[];
+    prerequisites?: string[];
+    withoutSetup?: string[];
+  }[],
+) {
   if (!gaps.length) return undefined;
+  const setup = gaps.filter((g) => g.withoutSetup?.length);
   return (
     'Области задач доски не включают gates: ' +
-    gaps.map((g) => `${g.repositoryId}: ${g.gates.join(', ')}`).join('; ') +
+    gaps
+      .map(
+        (g) =>
+          `${g.repositoryId}: ${g.gates.join(', ')}` +
+          (g.prerequisites?.length ? ` (с предпосылками ${g.prerequisites.join(', ')})` : ''),
+      )
+      .join('; ') +
     '. Приёмка доски выполнит их один раз на итоговом integration SHA доски и примет её, только если они пройдут. ' +
-    'Чтобы их провал находила задача, а не приёмка, включите их в область (gates) задачи, которая меняет проверяемый ими код.'
+    'Чтобы их провал находила задача, а не приёмка, включите их в область (gates) задачи, которая меняет проверяемый ими код.' +
+    (setup.length
+      ? ' Без подготовки окружения: ' +
+        setup.map((g) => `${g.repositoryId}: ${g.withoutSetup!.join(', ')}`).join('; ') +
+        ' — проверка доски не получит ни одной предпосылки (нет dependsOn, более ранних check gates и prepare), хотя задачи опирались на check gates своей области. Добавьте dependsOn или prepare компонента.'
+      : '')
   );
 }
 
@@ -359,6 +399,8 @@ export interface BoardCoverage {
   gates: string[];
   evidence: Evidence[];
   failure?: { gate: string; message: string };
+  /** Все непрошедшие gates проверки (`failure` — первый из них). */
+  failures?: { gate: string; message: string }[];
   at: string;
 }
 export const BOARD_COVERAGE = 'board-coverage';
