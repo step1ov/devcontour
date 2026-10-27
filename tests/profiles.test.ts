@@ -567,12 +567,18 @@ test('workspace-init переносит правила ревью, а панел
     };
     await json(componentPath, component);
     const { config: configPath } = await setupWorkspace(registry);
+    assert.deepEqual(
+      (JSON.parse(await readFile(configPath, 'utf8')) as { reviewer: unknown }).reviewer,
+      { runtime: 'claude' },
+      'установка копирует ревьюера единственного компонента',
+    );
 
     // config.json прежней версии: копии верхнего уровня записаны и устарели.
     const stale = JSON.parse(await readFile(configPath, 'utf8'));
     stale.gates = [testGate];
     stale.protectedPaths = ['stale/'];
     stale.roles.backend = { runtime: 'claude', reviewer: { runtime: 'codex' } };
+    stale.reviewer = { runtime: 'codex' };
     await json(configPath, stale);
     // Компонент добавил gate без повторного workspace-init.
     component.gates.push({ ...testGate, id: 'component-new' });
@@ -591,6 +597,7 @@ test('workspace-init переносит правила ревью, а панел
       gates: { id: string }[];
       protectedPaths: string[];
       roles: Record<string, { reviewer: { runtime: string }; reviewVendor?: string }>;
+      reviewer: { runtime: string };
     };
     assert.deepEqual(
       refreshed.gates.map((g) => g.id),
@@ -600,7 +607,15 @@ test('workspace-init переносит правила ревью, а панел
     assert.equal(refreshed.roles.backend.reviewer.runtime, 'claude');
     assert.equal(refreshed.roles.backend.reviewVendor, 'same-vendor-allowed');
     assert.equal(refreshed.roles.qa.reviewer.runtime, 'claude', 'ревьюер компонента');
+    // Верхнеуровневый reviewer при единственном компоненте — тоже копия:
+    // прежняя версия оставляла в нём ревьюера, которого контур уже не вызывает.
+    assert.deepEqual(refreshed.reviewer, { runtime: 'claude' });
     assert.ok(!('mobile' in refreshed.roles), 'роль компонента не стала общей');
+    assert.equal((await setupWorkspace(registry)).status, 'preserved');
+    // Устаревшая копия одного reviewer — тоже повод обновить файл.
+    await json(configPath, { ...refreshed, reviewer: { runtime: 'codex' } });
+    assert.equal((await setupWorkspace(registry)).status, 'declaration-updated');
+    assert.deepEqual(loadConfig(configPath).reviewer, { runtime: 'claude' });
     assert.equal((await setupWorkspace(registry)).status, 'preserved');
 
     // Правила ревью объявляются реестром и переносятся workspace-init.

@@ -2,7 +2,12 @@ import { selectedWorkspaceMode, assertControllerCheckout } from './workspace-mod
 import { mkdir, readFile, writeFile, realpath, mkdtemp, rm } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
 import { z } from 'zod';
-import { configSchema, repositorySchema, type ContextPack } from '../core/model.ts';
+import {
+  configSchema,
+  repositorySchema,
+  reviewerBindingSchema,
+  type ContextPack,
+} from '../core/model.ts';
 import { profile, packKey, profileMetadata } from './packs.ts';
 import { projectConfig, profileLock } from './setup.ts';
 import { loadConfig, readComponentConfig, scopedConfig } from './config.ts';
@@ -118,6 +123,15 @@ const withComponentRoles = <T extends Record<string, unknown>>(
         ),
       }
     : top;
+/**
+ * Верхнеуровневый `reviewer` при единственном компоненте, объявившем своего
+ * ревьюера, — такая же копия, как роли: роли компонента проверяет ревьюер
+ * компонента (`reviewerBinding`). Копия оставалась прежней после смены
+ * ревьюера в файле компонента. При нескольких компонентах или без ревьюера
+ * компонента верхний уровень — общий выбор, и он не трогается.
+ */
+const withComponentReviewer = <T>(top: T, repos: { reviewer?: T }[]): T =>
+  repos.length === 1 && repos[0].reviewer ? repos[0].reviewer : top;
 const differs = (a: unknown, b: unknown) => JSON.stringify(a) !== JSON.stringify(b);
 type Review = NonNullable<z.infer<typeof configSchema.shape.review>>;
 /**
@@ -201,6 +215,7 @@ export async function setupWorkspace(file: string, data?: string) {
   const config = configSchema.parse({
     ...base,
     roles: withComponentRoles(base.roles, repos),
+    reviewer: withComponentReviewer(base.reviewer, repos),
     protectedPaths: repos[0].protectedPaths,
     name: input.name,
     workspaceRoot,
@@ -381,10 +396,12 @@ export async function setupWorkspace(file: string, data?: string) {
     // устаревшая копия в config.json вводила в заблуждение того, кто его читает.
     const stored = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
     const roles = withComponentRoles(withDeclaredRoles(existing.roles, config.roles), repos);
+    const reviewer = reviewerBindingSchema.parse(withComponentReviewer(existing.reviewer, repos));
     const derivedStale =
       ('gates' in stored && differs(stored.gates, config.gates)) ||
       ('protectedPaths' in stored && differs(stored.protectedPaths, repos[0].protectedPaths)) ||
-      differs(sortedRoles(existing.roles), sortedRoles(roles));
+      differs(sortedRoles(existing.roles), sortedRoles(roles)) ||
+      differs(existing.reviewer, reviewer);
     const known = declaredNames(existing, existing.repositories);
     // The workspace, its repositories and the pinned profile are the same, so
     // what the registry declares about them may still change afterwards: a joint
@@ -434,6 +451,7 @@ export async function setupWorkspace(file: string, data?: string) {
           toolProfiles: config.toolProfiles,
           review: withReview(existing.review, input.review),
           roles,
+          reviewer,
         },
         null,
         2,

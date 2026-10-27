@@ -1069,11 +1069,18 @@ test('workspace-init не трогает общие роли верхнего у
     registry.repositories[0].roles = {
       backend: { runtime: 'claude', model: 'component-choice', reviewer: { runtime: 'codex' } },
     };
+    // Ревьюер одного из компонентов не становится общим ревьюером.
+    (registry.repositories[0] as { reviewer?: unknown }).reviewer = {
+      runtime: 'codex',
+      model: 'component-reviewer',
+    };
     await writeFile(path, JSON.stringify(registry));
     assert.equal((await setupWorkspace(path, f.data)).status, 'declaration-updated');
     const after = loadConfig(configPath);
     assert.equal(after.repositories[0].roles!.backend.model, 'component-choice');
     assert.equal(after.roles.backend.model, 'shared-fallback', 'общий выбор не переписан');
+    assert.equal(after.repositories[0].reviewer?.model, 'component-reviewer');
+    assert.notEqual(after.reviewer.model, 'component-reviewer', 'общий reviewer не переписан');
     assert.equal((await setupWorkspace(path, f.data)).status, 'preserved');
   } finally {
     await f.cleanup();
