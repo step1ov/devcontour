@@ -14,6 +14,7 @@ import { DomainError } from '../src/core/model.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { parseProposal, proposalLimitIssues, proposalLimits } from '../src/runner/agent-control.ts';
 import { contractImpact } from '../src/runner/contract-impact.ts';
+import { agentInputs } from '../src/application/agent.ts';
 import { command, git } from '../src/runner/process.ts';
 
 const artifacts = (n: number) =>
@@ -61,6 +62,41 @@ test('Пределы предложения: превышение называе
     underTest: Array.from({ length: 52 }, (_, i) => `src/m${i}.ts`),
   });
   assert.deepEqual(under, [{ limit: 'underTest', max: 50, actual: 52, over: 2 }]);
+  // Исправление underTest не предлагает каталогов: их underTest не принимает.
+  assert.throws(
+    () =>
+      parseProposal({
+        title: 'T',
+        file: 'c.md',
+        underTest: Array.from({ length: 52 }, (_, i) => `src/m${i}.ts`),
+      }),
+    (e: Error) =>
+      /underTest: 52 элементов при пределе 50, лишних 2/.test(e.message) &&
+      /каталоги underTest не принимает/.test(e.message) &&
+      !/каталоги реализации вместо/.test(e.message),
+  );
+});
+
+test('Пределы и там, где схему проверяет транспорт агентского API, и сверх запаса отчёта — понятным сообщением', async () => {
+  // Транспорт (MCP) проверяет вход схемой до обработчика: сообщение схемы
+  // само называет предел, величину и исправление.
+  const revise = agentInputs.contract_change_revise.safeParse({
+    id: 'CC-1',
+    expectedVersion: 1,
+    proposal: { title: 'T', file: 'c.md', artifacts: artifacts(56) },
+  });
+  assert.equal(revise.success, false);
+  const messages = revise.error.issues.map((i) => i.message).join('\n');
+  assert.match(messages, /artifacts: 56 элементов при пределе 50, лишних 6/);
+  assert.match(messages, /protectedPaths/);
+  // contract-impact читает предложение с запасом (×10); за ним — тот же
+  // понятный отказ, а не массив схемы. До чтения репозитория.
+  await assert.rejects(
+    contractImpact({} as never, { title: 'T', file: 'c.md', artifacts: artifacts(501) }),
+    (e: Error) =>
+      e instanceof DomainError &&
+      /artifacts: 501 элементов при пределе 50, лишних 451/.test(e.message),
+  );
 });
 
 test('contract-impact (CLI) называет превышение пределов в отчёте; contract-change отказывает понятным сообщением без массива zod', async () => {

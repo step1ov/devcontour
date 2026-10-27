@@ -27,7 +27,7 @@ import { CheckCorpus } from '../core/check-store.ts';
 import { checkJsonBytes, operationCatalog, recoveryActions } from 'devcontour-harness';
 import { applyCases } from '../runner/recovery.ts';
 import { ContractChanges } from '../runner/contract-change.ts';
-import { contractProposal } from '../runner/agent-control.ts';
+import { contractProposal, limitsMessage, proposalLimitIssues } from '../runner/agent-control.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 export const agentInputs = {
@@ -377,6 +377,10 @@ export class AgentService {
         });
       }
       case 'contract_change_revise': {
+        // Пределы предложения — тем же понятным отказом, что у CLI, а не
+        // массивом схемы.
+        const issues = proposalLimitIssues((input as { proposal?: unknown } | null)?.proposal);
+        if (issues.length) throw new DomainError(limitsMessage(issues), 400);
         const v = agentInputs.contract_change_revise.parse(input);
         return this.bounded(
           await new ContractChanges(this.h, this.root).revise(

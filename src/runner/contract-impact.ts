@@ -50,8 +50,12 @@ export async function contractImpact(h: DevContour, input: unknown) {
   // превышения в `limits` рядом с остальными предпроверками: оператор видит
   // их до отправки, вместе с замыканием и задачами. Изменение контракта по
   // такому предложению откажет до ревью.
-  const parsed = unboundedProposal.parse(input);
   const limitIssues = proposalLimitIssues(input);
+  // Предложение даже за запасом отчёта — тот же понятный отказ, что у
+  // изменения контракта, а не массив схемы.
+  const read = unboundedProposal.safeParse(input);
+  if (!read.success && limitIssues.length) throw new DomainError(limitsMessage(limitIssues), 400);
+  const parsed = unboundedProposal.parse(input);
   const limits = {
     max: proposalLimits,
     issues: limitIssues,
