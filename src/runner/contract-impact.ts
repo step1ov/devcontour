@@ -18,7 +18,7 @@ import {
   unboundedProposal,
 } from './agent-control.ts';
 import { unguardedMessage, type Dependency, type Exempted } from './artifact-closure.ts';
-import { pinArtifacts } from './contract-artifacts.ts';
+import { gitObjects, pinArtifacts } from './contract-artifacts.ts';
 import { git } from './process.ts';
 
 /**
@@ -160,8 +160,19 @@ export async function contractImpact(h: DevContour, input: unknown) {
   // иначе задачи после перепривязки блокируются на сверке закреплений.
   const target = `refs/heads/${owner.targetBranch}`;
   const tip = await git(owner.path, 'rev-parse', '--verify', target).catch(() => undefined);
-  const inBase = async (path: string, blob: string) =>
-    tip ? (await git(owner.path, 'rev-parse', `${tip}:${path}`).catch(() => '')) === blob : false;
+  // Сверка с базой — один пакетный запрос Git на документ и все артефакты,
+  // а не rev-parse на каждый путь. Отсутствующее имя — пустой blob, как у
+  // прежнего rev-parse с отказом.
+  const specs = [
+    ...(parsed.file ? [`${head}:${parsed.file}`] : []),
+    ...(tip ? [parsed.file, ...pinned.artifacts.map((a) => a.path)] : [])
+      .filter((path) => path !== undefined)
+      .map((path) => `${tip}:${path}`),
+  ];
+  const objects = await gitObjects(owner.path, specs);
+  const blobs = new Map(specs.map((spec, i) => [spec, objects[i]?.blob ?? '']));
+  const at = (rev: string, path: string) => blobs.get(`${rev}:${path}`) ?? '';
+  const inBase = (path: string, blob: string) => (tip ? at(tip, path) === blob : false);
   const base = {
     branch: owner.targetBranch,
     tip: tip ?? null,
@@ -169,18 +180,8 @@ export async function contractImpact(h: DevContour, input: unknown) {
     // артефакты, а не от позднего HEAD.
     behind: tip ? Number(await git(owner.path, 'rev-list', '--count', `${tip}..${head}`)) : null,
     missing: [
-      ...(parsed.file &&
-      !(await inBase(
-        parsed.file,
-        await git(owner.path, 'rev-parse', `${head}:${parsed.file}`).catch(() => ''),
-      ))
-        ? [parsed.file]
-        : []),
-      ...(
-        await Promise.all(
-          pinned.artifacts.map(async (a) => ((await inBase(a.path, a.blob)) ? '' : a.path)),
-        )
-      ).filter(Boolean),
+      ...(parsed.file && !inBase(parsed.file, at(head, parsed.file)) ? [parsed.file] : []),
+      ...pinned.artifacts.filter((a) => !inBase(a.path, a.blob)).map((a) => a.path),
     ],
   };
 

@@ -6,7 +6,8 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setupDemo } from '../src/demo.ts';
@@ -14,6 +15,7 @@ import { DomainError } from '../src/core/model.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { parseProposal, proposalLimitIssues, proposalLimits } from '../src/runner/agent-control.ts';
 import { contractImpact } from '../src/runner/contract-impact.ts';
+import { assertArtifactsInBase, pinArtifacts } from '../src/runner/contract-artifacts.ts';
 import { agentInputs } from '../src/application/agent.ts';
 import { command, git } from '../src/runner/process.ts';
 
@@ -157,6 +159,119 @@ test('contract-impact (CLI) называет превышение предело
     assert.match(change.stderr, /artifacts\[3\]\.purpose \(golden\/log-3\.log\): 230 знаков/);
     assert.match(change.stderr, /protectedPaths/);
     assert.doesNotMatch(change.stderr, /too_big|"origin"|ExperimentalWarning/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Число вызовов Git у contract-impact не растёт с числом артефактов: прежде
+ * каждый артефакт стоил пяти-шести процессов Git, и отчёт по 56 файлам под
+ * нагрузкой полного прогона не укладывался в таймаут. Счёт — по вызовам, а
+ * не по времени: он не зависит от нагрузки машины.
+ */
+test('contract-impact и закрепление спрашивают Git постоянное число раз; отказы и сверка базы — как по одному', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'devcontour-git-calls-'));
+  try {
+    await setupDemo(root);
+    const repo = loadConfig(join(root, 'config.json')).repository;
+    await mkdir(join(repo, 'golden'), { recursive: true });
+    for (let i = 0; i < 56; i++) await writeFile(join(repo, `golden/log-${i}.log`), `log ${i}\n`);
+    await writeFile(join(repo, 'contract.md'), '# Contract\n\nStable results.\n');
+    await git(repo, 'add', '.');
+    await git(repo, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'Contract');
+    // Обёртка git на PATH записывает каждый вызов и передаёт его настоящему git.
+    const real = (await command(['sh', '-c', 'command -v git'], root)).stdout.trim();
+    const bin = join(root, 'bin'),
+      log = join(root, 'git-calls.log');
+    await mkdir(bin);
+    await writeFile(join(bin, 'git'), `#!/bin/sh\necho "$1" >> "${log}"\nexec "${real}" "$@"\n`, {
+      mode: 0o755,
+    });
+    const calls = async (n: number) => {
+      const file = join(root, `proposal-${n}.json`);
+      await writeFile(
+        file,
+        JSON.stringify({ title: 'Catalog search', file: 'contract.md', artifacts: artifacts(n) }),
+      );
+      await writeFile(log, '');
+      const r = await command(
+        [
+          process.execPath,
+          '--import',
+          import.meta.resolve('tsx'),
+          resolve('src/cli.ts'),
+          'contract-impact',
+          '--file',
+          file,
+          '--data',
+          root,
+        ],
+        root,
+        { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } },
+      );
+      assert.equal(r.code, 0, r.stderr);
+      const report = JSON.parse(r.stdout) as Awaited<ReturnType<typeof contractImpact>>;
+      assert.equal(report.changes.artifacts.length, n);
+      assert.deepEqual(report.base.missing.length, n + 1, 'база ещё не получила документ и файлы');
+      return (await readFile(log, 'utf8')).split('\n').filter(Boolean).length;
+    };
+    const few = await calls(2);
+    const many = await calls(56);
+    assert.ok(few > 0, 'обёртка git действительно вызывалась');
+    assert.equal(many, few, `вызовов Git: ${few} на 2 артефакта, ${many} на 56`);
+
+    // Те же отказы и тот же порядок, что при проверке по одному.
+    const owner = { id: 'main', path: repo };
+    const list = artifacts(56);
+    const report = await pinArtifacts(owner, list);
+    assert.equal(report.artifacts.length, 56);
+    assert.equal(report.artifacts[40].path, 'golden/log-40.log');
+    assert.equal(report.artifacts[40].blob, await git(repo, 'rev-parse', 'HEAD:golden/log-40.log'));
+    assert.equal(
+      report.artifacts[40].digest,
+      createHash('sha256').update('log 40\n').digest('hex'),
+    );
+    assert.deepEqual(report.contents[7], {
+      path: 'golden/log-7.log',
+      purpose: 'Журнал сверки',
+      content: 'log 7\n',
+    });
+    await writeFile(join(repo, 'golden/new.log'), 'new\n');
+    await writeFile(join(repo, 'golden/log-30.log'), 'dirty\n');
+    // Ранний неотслеживаемый файл опережает поздний отказ файловой системы
+    // и поздний изменённый файл.
+    await assert.rejects(
+      pinArtifacts(owner, [
+        ...list.slice(0, 5),
+        { path: 'golden/new.log', purpose: 'x' },
+        ...list.slice(5),
+        { path: 'golden/absent.log', purpose: 'x' },
+      ]),
+      /не в Git: golden\/new\.log/,
+    );
+    await assert.rejects(
+      pinArtifacts(owner, [...list, { path: 'golden/absent.log', purpose: 'x' }]),
+      /изменён после коммита — закоммитьте его до ревью контракта: golden\/log-30\.log/,
+    );
+    await assert.rejects(
+      pinArtifacts(owner, [list[0], { path: 'golden/absent.log', purpose: 'x' }, list[30]]),
+      /не найден: golden\/absent\.log/,
+    );
+    await assert.rejects(pinArtifacts(owner, [list[0], list[0]]), /указан дважды/);
+    await git(repo, 'checkout', '--', 'golden/log-30.log');
+
+    // Сверка базы пакетом: blob на месте — не устаревший, другой или
+    // отсутствующий — устаревший.
+    const head = await git(repo, 'rev-parse', 'HEAD');
+    assert.deepEqual(await assertArtifactsInBase(repo, head, report.artifacts), []);
+    const forged = report.artifacts.map((a, i) =>
+      i === 3 ? { ...a, blob: report.artifacts[4].blob } : i === 9 ? { ...a, path: 'gone.log' } : a,
+    );
+    assert.deepEqual(await assertArtifactsInBase(repo, head, forged), [
+      'golden/log-3.log',
+      'gone.log',
+    ]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
