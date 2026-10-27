@@ -33,6 +33,7 @@ export default tseslint.config(
       'lib/**',
       'dist/**',
       '.devcontour-local/**',
+      '.claude/**',
       'evidence/**',
       'playwright-report/**',
       'test-results/**',
