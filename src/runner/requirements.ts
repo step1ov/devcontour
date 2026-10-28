@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { hostGitArgs } from './process.ts';
 import { DevContour, digest } from '../core/service.ts';
 import {
   DomainError,
@@ -46,7 +47,11 @@ export function requirementSnapshot(cwd: string, source: string, ref = 'HEAD') {
   relativePath.parse(source);
   if (!/^(HEAD|[a-f0-9]{40,64})$/.test(ref)) throw new DomainError('Нужен HEAD или точный SHA');
   const git = (...args: string[]) =>
-    execFileSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 1100000 }).trimEnd();
+    execFileSync('git', hostGitArgs(cwd, args), {
+      cwd,
+      encoding: 'utf8',
+      maxBuffer: 1100000,
+    }).trimEnd();
   const sha = git('rev-parse', '--verify', ref + '^{commit}');
   if (!/^100(644|755) blob /.test(git('ls-tree', sha, '--', source)))
     throw new DomainError('ТЗ должно быть обычным Git-файлом: ' + source);

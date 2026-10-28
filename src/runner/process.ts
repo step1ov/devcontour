@@ -2,6 +2,15 @@ import { spawn, spawnSync, execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import { StringDecoder } from 'node:string_decoder';
+import { resolve } from 'node:path';
+import {
+  assertTrustedCheckout,
+  forgetWorktree,
+  gitHardening,
+  rememberWorktree,
+  worktreeAddPath,
+  worktreeKey,
+} from './git-trust.ts';
 import { outputRedactor, type Redactor } from './redaction.ts';
 import type { RuntimeDiagnostics } from '../core/runtime-diagnostics.ts';
 export interface CommandResult {
@@ -245,10 +254,25 @@ function captureProcessTree(pid?: number): RuntimeDiagnostics['processTree'] {
   }
   return { available: true, processes: rows.filter((r) => ids.has(r.pid)).slice(0, 100) };
 }
+/**
+ * Аргументы git хоста над `cwd`: репозиторий сверен (`assertTrustedCheckout`),
+ * исполняемые настройки сняты. Один путь для вызовов git над checkout.
+ */
+export function hostGitArgs(cwd: string, args: string[]) {
+  assertTrustedCheckout(cwd);
+  return [...gitHardening, ...args];
+}
 export async function git(cwd: string, ...args: string[]) {
-  const result = await command(['git', ...args], cwd, {
+  const added = worktreeAddPath(args);
+  // Путь убираемого дерева — до удаления: потом настоящий путь уже не узнать.
+  const removed =
+    args[0] === 'worktree' && args[1] === 'remove'
+      ? worktreeKey(resolve(cwd, args.at(-1)!))
+      : undefined;
+  const result = await command(['git', ...hostGitArgs(cwd, args)], cwd, {
     env: {
       ...process.env,
+      GIT_CONFIG_NOSYSTEM: '1',
       GIT_TERMINAL_PROMPT: '0',
       GIT_AUTHOR_NAME: 'DevContour',
       GIT_AUTHOR_EMAIL: 'devcontour@localhost',
@@ -258,6 +282,8 @@ export async function git(cwd: string, ...args: string[]) {
   });
   if (result.code !== 0)
     throw new Error(`git ${args[0]}: ${result.stderr.trim() || result.stdout.trim()}`);
+  if (added) rememberWorktree(resolve(cwd, added));
+  if (removed) forgetWorktree(removed);
   return result.stdout.trim();
 }
 

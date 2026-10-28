@@ -1,7 +1,5 @@
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { join, sep } from 'node:path';
-import { createRequire } from 'node:module';
-import { writeFile, mkdir } from 'node:fs/promises';
 import { realpathSync, readdirSync } from 'node:fs';
 import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
 
@@ -232,9 +230,10 @@ export function codexPermissions(policy: Isolation, network: boolean) {
   ];
 }
 
-const srtCli = createRequire(import.meta.url).resolve('@anthropic-ai/sandbox-runtime/dist/cli.js');
-
-/** Готов ли механизм изоляции проверок на этой машине. */
+/**
+ * Готов ли механизм изоляции проверок на этой машине. Сами проверки
+ * исполняет harness (`runCheck`): политика srt и её запреты — там.
+ */
 export function isolationSupport() {
   if (!SandboxManager.isSupportedPlatform())
     return { ok: false, detail: `Платформа ${process.platform} не поддерживается sandbox-runtime` };
@@ -242,60 +241,4 @@ export function isolationSupport() {
   return errors.length
     ? { ok: false, detail: 'Не хватает зависимостей песочницы: ' + errors.join('; ') }
     : { ok: true, detail: warnings.join('; ') };
-}
-
-/**
- * Команда проверки внутри sandbox-runtime.
- *
- * Настройки пишутся в файл: srt отказывает, если файл пуст или невалиден, и
- * не откатывается к умолчаниям. Собственный служебный сокет srt кладёт во
- * временный каталог процесса, поэтому srt получает короткий системный
- * TMPDIR, а команде внутри передаётся свой scratch.
- */
-export async function isolatedCommand(
-  policy: Isolation,
-  argv: string[],
-  settingsDir: string,
-  scratch: string,
-  /**
-   * Файл, который обёртка создаёт внутри песочницы перед exec команды. Его
-   * отсутствие — единственный достоверный признак, что команда не начиналась.
-   */
-  started: string,
-) {
-  await mkdir(settingsDir, { recursive: true });
-  const settings = join(settingsDir, 'isolation.json');
-  await writeFile(
-    settings,
-    JSON.stringify(
-      {
-        network: { allowedDomains: policy.domains, deniedDomains: [], allowLocalBinding: true },
-        filesystem: {
-          allowWrite: policy.write,
-          denyWrite: [],
-          denyRead: policy.hidden,
-          allowRead: policy.readable,
-        },
-      },
-      null,
-      2,
-    ),
-  );
-  return {
-    argv: [
-      process.execPath,
-      srtCli,
-      '--settings',
-      settings,
-      '--',
-      '/bin/sh',
-      '-c',
-      ': > "$0" && exec "$@"',
-      started,
-      '/usr/bin/env',
-      `TMPDIR=${scratch}`,
-      ...argv,
-    ],
-    env: { TMPDIR: tmpdir() },
-  };
 }
