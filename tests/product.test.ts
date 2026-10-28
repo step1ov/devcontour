@@ -166,7 +166,7 @@ const map = () => {
   });
   return definition;
 };
-async function fixture() {
+async function fixture(local: typeof localDefinition = localDefinition) {
   const root = await mkdtemp(join(tmpdir(), 'devcontour-product-'));
   const repos: Repository[] = [];
   const commit = async (path: string, message: string) => {
@@ -251,7 +251,7 @@ process.exitCode=ok?0:1;`,
   for (const repo of repos) {
     await writeFile(
       join(repo.path, 'INTENT.md'),
-      intent.render({ repositoryId: repo.id, definition: localDefinition }).markdown,
+      intent.render({ repositoryId: repo.id, definition: local }).markdown,
     );
     await commit(repo.path, 'Local product stories');
   }
@@ -557,7 +557,18 @@ test('Changing the product map after joint verification blocks acceptance and re
 });
 
 test('A release proof pins only its own tasks: other work in the component keeps it current, relevant changes invalidate it', async () => {
-  const f = await fixture();
+  // В компоненте есть история следующего релиза на тот же REQ: её задачи
+  // явно назначены своей истории и не входят в покрытие этого релиза.
+  const local = structuredClone(localDefinition);
+  local.releases.push({ id: 'later', title: 'Аудит' });
+  local.stories.push({
+    ...structuredClone(local.stories[0]),
+    id: 'audit',
+    title: 'Аудит блокировки',
+    releaseId: 'later',
+    criteria: [{ ...structuredClone(local.stories[0].criteria[0]), id: 'audited' }],
+  });
+  const f = await fixture(local);
   try {
     f.plan();
     await f.run();
@@ -645,6 +656,69 @@ test('A release proof pins only its own tasks: other work in the component keeps
         .revisions.at(-1)!
         .taskIds.push(added.id);
     });
+    const detailed = relevant.requirements!.filter((r) => r.source !== 'INTENT.md');
+    assert.equal(detailed.length, 1);
+    // (iv) Контроль: задача невыбранной доски на тот же подробный REQ, но
+    // явно назначенная истории другого релиза, покрытие этого не меняет.
+    const audit = f.intent.snapshot({ repositoryId: 'app', storyId: 'audit' });
+    if (!audit.stories) throw new Error('Expected stories');
+    const assigned = f.h.addTask(next.id, {
+      ...input('Аудит блокировки'),
+      repositoryId: 'app',
+      requirements: [
+        { ...audit.stories[0].requirement, gate: 'local', scenario: 'Аудит.' },
+        ...structuredClone(detailed),
+      ],
+    });
+    check();
+    f.store.change('fixture.assigned-running', (s) => {
+      s.tasks.find((t) => t.id === assigned.id)!.status = 'running';
+    });
+    check();
+    // (iii) Задача другой доски заменяет задачу релиза: та становится
+    // исключённой — покрытие релиза изменилось.
+    mutate('superseded', (s) => {
+      const replacement = {
+        ...structuredClone(s.tasks.find((t) => t.id === other.id)!),
+        id: other.id + '-replacement',
+        supersedes: relevant.id,
+      };
+      s.tasks.push(replacement);
+      s.boards
+        .find((b) => b.id === next.id)!
+        .revisions.at(-1)!
+        .taskIds.push(replacement.id);
+    });
+    // Вид и отчёт совместного gate доказательство не закрепляет: их смена
+    // меняет договор проверки ChangeSet (`workspacePolicyDigest`), и прежняя
+    // проверка перестаёт быть актуальной до проверки доказательства.
+    const gate = structuredClone(f.c.workspaceGates[0]);
+    f.c.workspaceGates[0] = { ...gate, kind: 'check' };
+    try {
+      assert.equal(f.view().verification, undefined);
+      assert.throws(() => f.runner.workspace.accept(change.id), /актуальной/);
+    } finally {
+      f.c.workspaceGates[0] = gate;
+    }
+    assert.ok(f.view().verification);
+    // (i) Живой неназначенный вклад: задача невыбранной доски несёт подробный
+    // REQ истории релиза без своей связи REQ-intent — она входит в историю
+    // (`belongs`), и прежняя проверка релиза больше не действует.
+    const stray = f.h.createBoard('Сторонняя правка', '', 'app');
+    const contributor = f.h.addTask(stray.id, {
+      ...input('Сторонняя правка блокировки'),
+      repositoryId: 'app',
+      requirements: structuredClone(detailed),
+    });
+    assert.throws(check, stale, 'unassigned contributor');
+    // (ii) Отменённая, она остаётся в отчёте истории исключённой — набор
+    // задач релиза всё равно отличается от закреплённого: нужна новая проверка.
+    f.h.cancel(contributor.id, 'Правка не нужна');
+    const report = f.intent.report({ repositoryId: 'app', releaseId: 'mvp' }) as {
+      stories: { excludedTasks: { id: string }[] }[];
+    };
+    assert.ok(report.stories[0].excludedTasks.some((t) => t.id === contributor.id));
+    assert.throws(check, stale, 'cancelled contributor');
   } finally {
     await f.close();
   }
