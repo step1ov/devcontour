@@ -8,7 +8,7 @@ import { repositorySchema, type Repository } from '../src/core/model.ts';
 import { intentDefinition, parseIntent } from '../src/core/intent.ts';
 import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
-import { Workspace } from '../src/core/workspace.ts';
+import { Workspace, changeSnapshot } from '../src/core/workspace.ts';
 import { IntentService } from '../src/runner/intent.ts';
 import { WorkspaceRunner } from '../src/runner/workspace.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
@@ -552,6 +552,100 @@ test('Changing the product map after joint verification blocks acceptance and re
     assert.equal(f.view().coverageComplete, false);
   } finally {
     await lead.stop();
+    await f.close();
+  }
+});
+
+test('A release proof pins only its own tasks: other work in the component keeps it current, relevant changes invalidate it', async () => {
+  const f = await fixture();
+  try {
+    f.plan();
+    await f.run();
+    await f.accept();
+    const change = f.runner.workspace.create({
+      title: 'Релиз модерации',
+      description: 'Приёмка идёт, пока в компоненте работает следующий релиз.',
+      boardIds: f.boards,
+      releaseId: 'mvp',
+    });
+    await f.runner.verify(change.id);
+    const check = () => {
+      const s = f.store.read(),
+        c = s.changeSets.find((x) => x.id === change.id)!,
+        v = c.verifications.at(-1)!;
+      f.intent.validate(v.productRelease!, changeSnapshot(s, c), v.manifest);
+    };
+    const stale = /Покрытие или проверки релиза изменились; нужна новая проверка/;
+    check();
+    // (a) Задача другой доски того же компонента проходит ready → running →
+    // failed с попытками, выдачей и отказом: приёмка релиза от неё не зависит.
+    const next = f.h.createBoard('Следующий релиз', '', 'app');
+    const other = f.h.addTask(next.id, {
+      ...input('Работа следующего релиза'),
+      repositoryId: 'app',
+    });
+    check();
+    for (const [status, extra] of [
+      ['ready', {}],
+      [
+        'running',
+        { attempt: 1, activeRunId: 'R-other', budgetBlock: { reason: 'лимит', at: '2026-01-01' } },
+      ],
+      ['failed', { attempt: 2, activeRunId: undefined, failure: 'Тест упал', neutralFailures: 1 }],
+    ] as const) {
+      f.store.change('fixture.other-work', (s) => {
+        Object.assign(
+          s.tasks.find((t) => t.id === other.id)!,
+          { status, ...extra },
+        );
+      });
+      check();
+    }
+    assert.ok(f.view().verification, 'чужая работа не снимает проверку релиза');
+    const relevant = f.store
+      .read()
+      .tasks.find((t) => t.repositoryId === 'app' && t.id !== other.id)!;
+    const mutate = (name: string, apply: (s: ReturnType<typeof f.store.read>) => void) => {
+      const before = structuredClone(f.store.read());
+      f.store.change('fixture.' + name, apply);
+      assert.throws(check, stale, name);
+      f.store.change('fixture.restore-' + name, (s) => {
+        s.tasks = before.tasks;
+        s.runs = before.runs;
+        s.boards = before.boards;
+      });
+      check();
+    };
+    const task = (s: ReturnType<typeof f.store.read>) => s.tasks.find((t) => t.id === relevant.id)!;
+    // (b) Поля задачи релиза, которые читают покрытие и приёмка.
+    mutate('result-sha', (s) => (task(s).resultSha = 'f'.repeat(40)));
+    mutate('status', (s) => (task(s).status = 'running'));
+    mutate('requirements', (s) => (task(s).requirements![1].testId = 'other case'));
+    mutate('story-bindings', (s) => {
+      task(s).storyBindings = [
+        { source: 'INTENT.md', id: 'REQ-intent-block', digest: 'x', boundAt: '2026-01-01' },
+      ];
+    });
+    // (c) Новая успешная попытка задачи релиза с другим evidence.
+    mutate('new-run', (s) => {
+      const last = s.runs.findLast((r) => r.taskId === relevant.id && r.status === 'succeeded')!;
+      s.runs.push({ ...structuredClone(last), id: last.id + '-again', evidence: [] });
+    });
+    // (d) Новая задача в выбранной доске — даже без новой ревизии и без связи
+    // с историями релиза: её закрепляет состав доски, а не покрытие.
+    mutate('board-task', (s) => {
+      const added = {
+        ...structuredClone(task(s)),
+        id: relevant.id + '-added',
+        requirements: undefined,
+      };
+      s.tasks.push(added);
+      s.boards
+        .find((b) => b.id === f.boards[0])!
+        .revisions.at(-1)!
+        .taskIds.push(added.id);
+    });
+  } finally {
     await f.close();
   }
 });

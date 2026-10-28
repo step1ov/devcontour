@@ -631,10 +631,7 @@ export class IntentService implements ProductReleaseGuard {
           digest: this.sourceDigest(c.repositoryId, files, 'HEAD'),
         };
       }),
-      stateDigest: this.coverageStateDigest(
-        coverage.release.components.map((c) => c.repositoryId),
-        selected,
-      ),
+      stateDigest: this.coverageStateDigest(coverage, selected),
     };
   }
 
@@ -651,25 +648,66 @@ export class IntentService implements ProductReleaseGuard {
     );
   }
 
+  /**
+   * Состояние, от которого зависит приёмка этого релиза: задачи выбранных в
+   * ChangeSet досок и задачи историй релиза — тот же расчёт покрытия
+   * (`belongs`: связанные, привязанные и исключённые), — только поля, которые
+   * читают покрытие и приёмка, и решающие проверки этих задач. Попытки,
+   * прогресс и блокеры, а также задачи других релизов того же компонента
+   * доказательство не закрепляют: иначе релиз нельзя принять, пока в его
+   * компонентах идёт любая другая работа. Новая задача, которая начала
+   * принадлежать истории релиза, меняет сам набор — и доказательство.
+   */
   private coverageStateDigest(
-    repositoryIds: string[],
-    selected: ReturnType<typeof changeSnapshot>,
+    coverage: ReturnType<IntentService['workspaceCoverage']>,
+    selected: Pick<ReturnType<typeof changeSnapshot>, 'boards'>,
   ) {
-    const state = this.h.store.read();
-    const tasks = state.tasks.filter((t) => repositoryIds.includes(taskOwner(t) ?? ''));
-    const ids = new Set(tasks.map((t) => t.id));
+    const state = this.h.store.read(),
+      replaced = new Set(state.tasks.map((t) => t.supersedes));
+    const boards = selected.boards
+      .map((b) => {
+        const revision = state.boards.find((x) => x.id === b.id)?.revisions.at(-1);
+        return {
+          id: b.id,
+          revision: revision?.number,
+          status: revision?.status,
+          taskIds: revision?.taskIds ?? [],
+        };
+      })
+      .toSorted((a, b) => a.id.localeCompare(b.id));
+    const ids = new Set(boards.flatMap((b) => b.taskIds));
+    for (const local of coverage.locals.values())
+      for (const story of local.stories) {
+        story.taskIds.forEach((id) => ids.add(id));
+        story.excludedTasks.forEach((t) => ids.add(t.id));
+      }
+    const tasks = state.tasks.filter((t) => ids.has(t.id));
     return digest({
-      tasks: tasks.toSorted((a, b) => a.id.localeCompare(b.id)),
+      // Отсутствующая задача из набора тоже часть состояния: её id остаётся.
+      taskIds: [...ids].sort(),
+      tasks: tasks
+        .map((t) => ({
+          id: t.id,
+          owner: taskOwner(t) ?? null,
+          status: t.status,
+          spec: specDigest(t),
+          approvedDigest: t.approvedDigest ?? null,
+          resultSha: t.resultSha ?? null,
+          requirements: t.requirements ?? [],
+          storyBindings: t.storyBindings ?? [],
+          supersedes: t.supersedes ?? null,
+          superseded: replaced.has(t.id),
+          // Решающая запись без `current` — то, что читает покрытие, в том
+          // числе receipt Git sync, если своей успешной попытки нет.
+          evidence: taskEvidence(state, t),
+          checks: taskChecks(state, t) ?? null,
+        }))
+        .toSorted((a, b) => a.id.localeCompare(b.id)),
       checks: state.runs
         .filter((r) => ids.has(r.taskId) && r.status === 'succeeded')
         .map((r) => ({ id: r.id, taskId: r.taskId, evidence: r.evidence }))
         .toSorted((a, b) => a.id.localeCompare(b.id)),
-      boards: selected.boards
-        .map((b) => {
-          const revision = state.boards.find((x) => x.id === b.id)?.revisions.at(-1);
-          return { id: b.id, revision: revision?.number, status: revision?.status };
-        })
-        .toSorted((a, b) => a.id.localeCompare(b.id)),
+      boards: boards.map(({ id, revision, status }) => ({ id, revision, status })),
     });
   }
 
@@ -688,7 +726,7 @@ export class IntentService implements ProductReleaseGuard {
       this.mapGateIds(release) !== JSON.stringify(proof.gateIds) ||
       proof.stateDigest !==
         this.coverageStateDigest(
-          release.components.map((c) => c.repositoryId),
+          this.workspaceCoverage(doc, proof.releaseId, undefined, proof.acceptedHeads),
           selected,
         )
     )
