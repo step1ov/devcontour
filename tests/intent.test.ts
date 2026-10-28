@@ -278,6 +278,7 @@ test('Real Git acceptance covers intent; criteria changes invalidate coverage an
     await scheduler.drain();
     assert.equal(f.store.read().tasks.find((t) => t.id === next.id)!.status, 'done');
     assert.equal(f.report().coverageComplete, true);
+    assert.deepEqual(f.report().stories[0].excludedTasks, [{ id: task.id, reason: 'superseded' }]);
     assert.equal(f.store.read().boards[0].revisions[0].snapshot!.digest, history);
     // Matching task state alone cannot hide a missing test record.
     const proof = f.store.read().runs.find((r) => r.taskId === next.id)!.evidence;
@@ -295,6 +296,24 @@ test('Real Git acceptance covers intent; criteria changes invalidate coverage an
     assert.ok(f.report().stories[0].unverifiedTaskIds.includes(extra.id));
   } finally {
     await scheduler.stop();
+    await f.close();
+  }
+});
+
+test('A story whose only linked tasks are cancelled is uncovered, and the cancelled work stays visible as excluded', async () => {
+  const f = await fixture();
+  try {
+    const board = f.h.createBoard('Abandoned plan', '', 'main');
+    const task = f.h.addTask(board.id, { ...input(), requirements: links(f) });
+    assert.equal(f.report().stories[0].criteria[0].requirements[0].status, 'unverified');
+    f.h.cancel(task.id, 'Plan replaced');
+    const story = f.report().stories[0];
+    assert.equal(f.report().coverageComplete, false);
+    assert.equal(story.verified, false);
+    assert.deepEqual(story.taskIds, []);
+    assert.deepEqual(story.excludedTasks, [{ id: task.id, reason: 'cancelled' }]);
+    assert.equal(story.criteria[0].requirements[0].status, 'unplanned');
+  } finally {
     await f.close();
   }
 });
