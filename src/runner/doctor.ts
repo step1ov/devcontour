@@ -14,6 +14,7 @@ import { DevContourExecutionStore, harnessVersion } from '../harness/index.ts';
 import { projectionOptions } from '../harness/host.ts';
 import { technicalReviewer } from '../harness/policy.ts';
 import { isolationSupport } from './isolation.ts';
+import { installProbe } from './install-probe.ts';
 import { validateWorkflow } from '../core/workflow.ts';
 import { command, git } from './process.ts';
 import { outdatedContextPacks } from './context-library.ts';
@@ -496,6 +497,21 @@ export async function doctor(
       (support.detail ? `; ${support.detail}` : '')
     );
   });
+  // Механизм на месте ещё не значит, что gate установки в нём пройдёт:
+  // песочница всегда закрывает часть путей и внутри worktree. Проба ставит
+  // зависимость с каталогом IDE на чистом дереве в той же песочнице.
+  if (probe && config.isolation.mode === 'os' && isolationSupport().ok)
+    checks.push({
+      id: 'isolation:install',
+      // Сбой самой пробы (tar, запуск песочницы) — тоже отказ проверки, а не
+      // падение всего doctor.
+      ...(await installProbe(config, root).catch((e: unknown) => ({
+        status: 'blocked' as const,
+        detail:
+          'Проба установки в песочнице не выполнилась: ' +
+          (e instanceof Error ? e.message : String(e)),
+      }))),
+    });
   if (config.preview)
     await check('preview', async () => {
       const docker = await command(['docker', 'info', '--format', '{{.ServerVersion}}'], root);
