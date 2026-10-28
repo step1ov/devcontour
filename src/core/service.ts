@@ -1316,6 +1316,27 @@ export class DevContour {
       return { updated };
     });
   }
+  /**
+   * Остановка выдачи под перенос базы в режиме агента. В режиме оператора
+   * перенос требует паузы человека, и она остаётся его паузой. В режиме
+   * агента согласования ведёт контур: ручная пауза перед переносом
+   * превращалась в паузу человека, и очередь потом ждала ручного
+   * `queue --start`. Здесь очередь сразу встаёт на техническое ожидание
+   * `base-check`, которое цикл ведущего снимает после прохождения gates базы.
+   */
+  holdForBaseUpdate() {
+    return this.store.change('base.update.hold', (s) => {
+      if (this.config.approvalMode !== 'agent')
+        throw new DomainError('Сначала приостановите очередь: queue --pause', 409);
+      if (s.paused) return { held: false };
+      if (s.runs.some((r) => r.status === 'active'))
+        throw new DomainError('Дождитесь завершения попыток перед переносом базы', 409);
+      s.paused = true;
+      s.pauseReason = 'base-check';
+      s.pausedAt = now();
+      return { held: true };
+    });
+  }
   /** Техническое ожидание операции: видно отдельно от паузы и её не трогает. */
   waitFor(kind: 'context-lock', operation: string, detail: string) {
     return this.store.change('wait.started', (s) => {

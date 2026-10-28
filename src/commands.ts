@@ -724,11 +724,20 @@ async function main() {
         };
       } else if (operation === 'base-update') {
         const s = store.read();
-        if (!s.paused) throw new Error('Сначала приостановите очередь: queue --pause');
-        if (s.runs.some((r) => r.status === 'active'))
+        // В режиме агента перенос сам ставит очередь на ожидание base-check.
+        const held = !s.paused && config.approvalMode === 'agent' && h.holdForBaseUpdate().held;
+        if (!store.read().paused) throw new Error('Сначала приостановите очередь: queue --pause');
+        if (store.read().runs.some((r) => r.status === 'active'))
           throw new Error('Дождитесь завершения попыток перед переносом базы');
-        const base = await updateBase(config, root);
+        let base;
+        try {
+          base = await updateBase(config, root);
+        } catch (error) {
+          if (held) h.pause(false);
+          throw error;
+        }
         if (base.updated.length) h.baseUpdated(base.updated);
+        else if (held) h.pause(false);
         result = base;
       } else if (operation === 'context-adopt') {
         const s = store.read();

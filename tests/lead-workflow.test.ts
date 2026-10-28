@@ -14,6 +14,8 @@ import { Workspace, changeSnapshot } from '../src/core/workspace.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { taskProgress } from '../src/application/context.ts';
 import { panelSummary, panelTask, type PanelSummary } from '../src/application/panel.ts';
+import { git } from '../src/runner/process.ts';
+import { writeFile } from 'node:fs/promises';
 
 test('Workflow enqueue is idempotent, expired owners are fenced and changed inputs become stale', () => {
   const f = fixture();
@@ -253,6 +255,100 @@ test('A real Git board resumes after process replacement without duplicating rev
   } finally {
     await lead.stop();
     await scheduler?.stop();
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('В режиме агента workflow доски сам проверяет перенесённую базу gates: провал держит ожидание base-check, прохождение продолжает очередь', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'devcontour-base-check-'));
+  await setupDemo(root);
+  const config = loadConfig(join(root, 'config.json'));
+  // Gate базы: проходит, пока в базе файл base.txt равен «ok».
+  config.gates = [
+    {
+      id: 'base-gate',
+      kind: 'test',
+      timeoutMs: 10000,
+      command: [
+        process.execPath,
+        '-e',
+        "const fs=require('fs');const ok=fs.readFileSync('base.txt','utf8').trim()==='ok';fs.mkdirSync('.reports',{recursive:true});fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase name=\"base\">'+(ok?'':'<failure message=\"broken\"/>')+'</testcase></testsuite>');process.exit(ok?0:1)",
+      ],
+      report: { type: 'junit', path: '.reports/base.xml' },
+    },
+  ];
+  // Своя база состояния: политика с этим gate применяется при первом запуске.
+  const store = new Store(join(root, 'base-check.sqlite'));
+  const h = new DevContour(store, config);
+  const lead = new LeadRunner(h, root);
+  const target = 'refs/heads/' + config.targetBranch;
+  const commit = async (text: string) => {
+    await writeFile(join(config.repository, 'base.txt'), text);
+    await git(config.repository, 'add', 'base.txt');
+    await git(config.repository, 'commit', '-qm', 'Base ' + text);
+    const sha = await git(config.repository, 'rev-parse', 'HEAD');
+    const from = await git(config.repository, 'rev-parse', target);
+    await git(config.repository, 'update-ref', target, sha);
+    h.baseUpdated([{ repositoryId: 'main', from, to: sha }]);
+    return sha;
+  };
+  const events = (type: string) => store.allEvents().filter((e) => e.type === type);
+  try {
+    store.change('fixture.reset', (s) => {
+      s.tasks = [];
+      s.boards = [];
+      s.runs = [];
+    });
+    const b = h.createBoard('Base check board', '', 'main');
+    h.addTask(b.id, input());
+    new LeadWorkflow(h).start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    await lead.tick();
+    await lead.tick();
+    assert.equal(
+      store.read().paused,
+      false,
+      'workflow запустил очередь: ' + JSON.stringify(new LeadWorkflow(h).list('main')),
+    );
+    // Перенос в режиме агента сам ставит очередь на ожидание проверки базы.
+    assert.deepEqual(h.holdForBaseUpdate(), { held: true });
+    assert.equal(store.read().pauseReason, 'base-check');
+    const broken = await commit('broken');
+    await lead.tick();
+    let state = store.read();
+    assert.equal(state.paused, true, 'провал gate базы держит очередь');
+    assert.equal(state.pauseReason, 'base-check');
+    assert.match(
+      state.waits?.find((w) => w.kind === 'base-check')?.detail ?? '',
+      /main\/base-gate/,
+    );
+    assert.deepEqual(
+      events('base.check.failed').map((e) => (e.data as { sha: string }).sha),
+      [broken],
+    );
+    // Та же база повторно не проверяется.
+    await lead.tick();
+    assert.equal(events('base.check.started').length, 1);
+    const fixed = await commit('ok');
+    await lead.tick();
+    state = store.read();
+    assert.equal(state.paused, false, 'прошедшая проверка базы продолжает очередь');
+    assert.equal(state.waits, undefined);
+    assert.deepEqual(
+      events('base.check.passed').map((e) => (e.data as { sha: string }).sha),
+      [fixed],
+    );
+    assert.equal(events('base.checked').length, 1);
+    // В режиме оператора ожидание остаётся решением человека.
+    h.config.approvalMode = 'operator';
+    assert.throws(() => h.holdForBaseUpdate(), /queue --pause/);
+    h.pause(true, 'shutdown');
+    await commit('ok again');
+    await lead.tick();
+    assert.equal(store.read().pauseReason, 'base-check');
+    assert.equal(events('base.check.started').length, 2);
+  } finally {
+    await lead.stop();
     store.close();
     await rm(root, { recursive: true, force: true });
   }
