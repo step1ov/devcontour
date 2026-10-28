@@ -12,7 +12,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { git, hostGitArgs } from '../src/runner/process.ts';
-import { UntrustedCheckoutError, resetGitTrust } from '../src/runner/git-trust.ts';
+import { UntrustedCheckoutError, resetGitTrust } from 'devcontour-harness';
 
 /** Временный репозиторий с первым коммитом. */
 function repo() {

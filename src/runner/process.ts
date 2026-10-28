@@ -3,14 +3,16 @@ import { randomUUID } from 'node:crypto';
 import { readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import { StringDecoder } from 'node:string_decoder';
 import { resolve } from 'node:path';
+// Сверка git хоста над checkout — та же, что у движка: одно состояние на
+// процесс, и деревья, созданные DevContour, и деревья harness проверяются
+// одними правилами.
 import {
-  assertTrustedCheckout,
   forgetWorktree,
-  gitHardening,
+  hostGitArgs,
   rememberWorktree,
   worktreeAddPath,
   worktreeKey,
-} from './git-trust.ts';
+} from 'devcontour-harness';
 import { outputRedactor, type Redactor } from './redaction.ts';
 import type { RuntimeDiagnostics } from '../core/runtime-diagnostics.ts';
 export interface CommandResult {
@@ -258,10 +260,7 @@ function captureProcessTree(pid?: number): RuntimeDiagnostics['processTree'] {
  * Аргументы git хоста над `cwd`: репозиторий сверен (`assertTrustedCheckout`),
  * исполняемые настройки сняты. Один путь для вызовов git над checkout.
  */
-export function hostGitArgs(cwd: string, args: string[]) {
-  assertTrustedCheckout(cwd);
-  return [...gitHardening, ...args];
-}
+export { hostGitArgs };
 export async function git(cwd: string, ...args: string[]) {
   const added = worktreeAddPath(args);
   // Путь убираемого дерева — до удаления: потом настоящий путь уже не узнать.
