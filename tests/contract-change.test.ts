@@ -42,6 +42,13 @@ import { serveReconfigure } from '../src/runner/reconfigure.ts';
 import { command } from '../src/runner/process.ts';
 
 /** Ревьюер-фикстура: одобряет и считает вызовы по предмету ревью. */
+// Аргументы git после флагов `-c ключ=значение`: git хоста (harness) ставит
+// перед командой флаги, снимающие исполняемые настройки.
+function gitCommand(args: string[]) {
+  let i = 0;
+  while (args[i] === '-c') i += 2;
+  return args.slice(i);
+}
 function reviewers(calls: string[]) {
   const make = (name: 'codex' | 'claude'): AgentAdapter => ({
     name,
@@ -1748,8 +1755,8 @@ test('A base move cannot happen after the operation was abandoned inside the bas
       if (
         armed &&
         command === 'git' &&
-        args[0] === 'rev-parse' &&
-        args[1] === 'refs/heads/devcontour/accepted'
+        gitCommand(args)[0] === 'rev-parse' &&
+        gitCommand(args)[1] === 'refs/heads/devcontour/accepted'
       ) {
         armed = false;
         other.atomic(() =>
@@ -1981,8 +1988,8 @@ test('Утрата владения операцией перед самым с�
       if (
         armed &&
         command === 'git' &&
-        args[0] === 'rev-list' &&
-        String(args[2] ?? '').endsWith('..refs/heads/devcontour/accepted')
+        gitCommand(args)[0] === 'rev-list' &&
+        String(gitCommand(args)[2] ?? '').endsWith('..refs/heads/devcontour/accepted')
       ) {
         armed = false;
         other.atomic(() =>
