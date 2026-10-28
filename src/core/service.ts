@@ -446,6 +446,13 @@ export function receiptBytes(h: DevContour, s: DevContourState, t: Task) {
   }
   return receiptRecordBytes(receipt);
 }
+/** Путь поля плана для отказа: `tasks[2].gates`. */
+function planPath(path: PropertyKey[]) {
+  return (
+    path.map((p, i) => (typeof p === 'number' ? `[${p}]` : (i ? '.' : '') + String(p))).join('') ||
+    'план'
+  );
+}
 export class DevContour {
   constructor(
     readonly store: Store,
@@ -738,7 +745,19 @@ export class DevContour {
    * проверяет и прежние результаты. Цель этапа хранится в причине ревизии.
    */
   importPlan(input: unknown, boardId?: string) {
-    const plan = planResult.parse(input);
+    // Отказ схемы плана — по путям и сообщениям, а не сырым массивом zod:
+    // ведущий исправляет план по названному полю.
+    const parsedPlan = planResult.safeParse(input);
+    if (!parsedPlan.success)
+      throw new DomainError(
+        'План не принят: ' +
+          parsedPlan.error.issues
+            .slice(0, 10)
+            .map((i) => `${planPath(i.path)}: ${i.message}`)
+            .join('; '),
+        400,
+      );
+    const plan = parsedPlan.data;
     const stage = boardId ? `Следующий этап: ${plan.title}\n\n${plan.description}`.trim() : '';
     if (stage.length > 5000)
       throw new DomainError('Цель этапа: название и описание вместе до 5000 символов', 400);

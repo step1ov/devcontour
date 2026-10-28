@@ -132,6 +132,19 @@ export const requirementLink = z.strictObject({
   testId: z.string().min(1).max(300).optional(),
 });
 export type RequirementLink = z.infer<typeof requirementLink>;
+/**
+ * Предел ссылок на gates в одной области задачи (собственная область и
+ * область потребителя). Он равен пределу gates профиля стека в harness
+ * (`GATE_SCOPE_LIMIT`): задача может назвать весь профиль, и «включите gate в
+ * область задачи» выполнимо одной задачей. Превышение — понятный отказ.
+ */
+export const GATE_SCOPE_LIMIT = 100;
+const gateScope = z.array(gateRef).max(GATE_SCOPE_LIMIT, {
+  error: (issue) => {
+    const actual = Array.isArray(issue.input) ? issue.input.length : GATE_SCOPE_LIMIT + 1;
+    return `область gates: ${actual} при пределе ${GATE_SCOPE_LIMIT}, лишних ${actual - GATE_SCOPE_LIMIT}. Назовите группу gates (@имя) или уберите повторы`;
+  },
+});
 export const taskInput = z.object({
   preparation: preparationBinding.optional(),
   // Which approved product feature this task delivers, so the panel can show
@@ -158,7 +171,7 @@ export const taskInput = z.object({
   // доказательства параллельная декомпозиция упирается в общий набор, где
   // зелёный gate не различает, чьи ожидания закрыты. Полный набор остаётся
   // обязательным для приёмки доски и релиза.
-  gates: z.array(gateRef).max(20).optional(),
+  gates: gateScope.optional(),
   /**
    * Явная область проверок потребителей: компоненты, которые зависят от
    * компонента задачи, и их gates или группы. Они выполняются на integration
@@ -166,7 +179,7 @@ export const taskInput = z.object({
    * не проверяются — ничего не подключается неявно.
    */
   consumers: z
-    .array(z.object({ repositoryId: id, gates: z.array(gateRef).min(1).max(20) }))
+    .array(z.object({ repositoryId: id, gates: gateScope.min(1) }))
     .max(10)
     .optional(),
   /**

@@ -11,7 +11,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setupDemo } from '../src/demo.ts';
-import { DomainError } from '../src/core/model.ts';
+import { DomainError, GATE_SCOPE_LIMIT, taskInput } from '../src/core/model.ts';
+import { fixture, input } from './helpers.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { parseProposal, proposalLimitIssues, proposalLimits } from '../src/runner/agent-control.ts';
 import { contractImpact } from '../src/runner/contract-impact.ts';
@@ -274,5 +275,50 @@ test('contract-impact и закрепление спрашивают Git пос�
     ]);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Область gates задачи вмещает профиль до предела gates профиля; превышение и отказ плана — по названному полю, без сырого zod', () => {
+  assert.equal(GATE_SCOPE_LIMIT, 100);
+  const gates = (n: number) => Array.from({ length: n }, (_, i) => `gate-${i}`);
+  assert.equal(taskInput.parse({ ...input(), gates: gates(25) }).gates?.length, 25);
+  assert.equal(
+    taskInput.parse({ ...input(), consumers: [{ repositoryId: 'lib', gates: gates(25) }] })
+      .consumers?.[0].gates.length,
+    25,
+  );
+  const over = taskInput.safeParse({ ...input(), gates: gates(104) });
+  assert.equal(
+    over.error?.issues[0].message,
+    'область gates: 104 при пределе 100, лишних 4. Назовите группу gates (@имя) или уберите повторы',
+  );
+  const f = fixture();
+  try {
+    const task = (key: string, extra: Record<string, unknown> = {}) => ({
+      key,
+      title: 'Задача ' + key,
+      description: 'Описание задачи плана.',
+      role: 'developer',
+      dependsOn: [],
+      acceptance: ['Проверки зелёные'],
+      contracts: [],
+      ...extra,
+    });
+    assert.throws(
+      () =>
+        f.h.importPlan({
+          title: 'План',
+          description: '',
+          tasks: [task('a'), task('b'), task('c', { gates: gates(104) })],
+        }),
+      (e: unknown) => {
+        assert.ok(e instanceof DomainError, String(e));
+        assert.match(e.message, /^План не принят: tasks\[2\]\.gates: /);
+        assert.ok(!e.message.includes('"code"'), e.message);
+        return true;
+      },
+    );
+  } finally {
+    f.cleanup();
   }
 });
