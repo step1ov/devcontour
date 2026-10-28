@@ -10,6 +10,7 @@ import { repository } from '../core/repositories.ts';
 import { command } from './process.ts';
 import { executionEnvironment } from './environment.ts';
 import { runCheck } from 'devcontour-harness';
+import { checkoutRoots } from './checkout-root.ts';
 import { parse } from 'yaml';
 
 /** Свободный порт на loopback для пробного запуска выкладки. */
@@ -633,6 +634,8 @@ export class PreviewRunner {
             write: [context],
             readable: [],
             controller: [this.root],
+            // Рабочие деревья попыток вне каталога контура тоже закрыты.
+            checkouts: checkoutRoots(this.h),
             settingsDir: join(this.root, 'artifacts', 'preview', p.id, 'smoke'),
           });
           smoke = {

@@ -15,6 +15,7 @@ import { repositories, repository } from '../core/repositories.ts';
 import { redactor } from './redaction.ts';
 import { executionOf, toDomain } from '../harness/execution.ts';
 import { controllerBoundary } from './checks.ts';
+import { checkoutRootOption, workspaceCheckoutRoot } from './checkout-root.ts';
 
 /**
  * Полный профиль доски на её итоговом SHA. Gates, которые не прошли
@@ -124,6 +125,9 @@ export async function coverBoard(
           stateDir: root,
           repoPath: (r) => repository(h.config, r.id).path,
           boundary: () => controllerBoundary(h, root),
+          // Дерево проверки — под корнем рабочих деревьев workspace, а не в
+          // каталоге состояния доски (он может лежать внутри репозитория).
+          ...checkoutRootOption(workspaceCheckoutRoot(h)),
           ...(h.config.resourceDatabase ? { resourceDatabase: h.config.resourceDatabase } : {}),
         },
         {

@@ -3,6 +3,7 @@ import { repositories } from '../core/repositories.ts';
 import type { Config } from '../core/model.ts';
 import type { DevContour } from '../core/service.ts';
 import { policyFromConfig } from '../harness/policy.ts';
+import { checkoutRootFor, checkoutRootOption } from './checkout-root.ts';
 
 // Прогон ответвляется от ветки интеграции, а контракты, схемы и каркас
 // готовятся на рабочей ветке репозитория. Перенос базы сводит эти линии явно и
@@ -32,6 +33,8 @@ export async function updateBase(
     policy,
     baseDir: dataRoot,
     stateDir: dataRoot,
+    // Дерево слияния — под корнем рабочих деревьев workspace, как у попыток.
+    ...checkoutRootOption(checkoutRootFor(config, dataRoot)),
     ...(only ? { only } : {}),
     ...(move ? { move } : {}),
   });

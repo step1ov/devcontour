@@ -15,7 +15,7 @@ projects/
   product/                    # Git продукта, docs/spec.md, локальные тесты и память
   shared-library/             # отдельный Git, API библиотеки, тесты, CHANGELOG
     devcontour.component.json    # локальные роли, gates, среда и правила
-    .devcontour-local/           # SQLite задач, worktrees, artifacts
+    .devcontour-local/           # SQLite задач, artifacts (worktrees — в корне рабочих деревьев)
     .devcontour-local/journal/         # подробный журнал библиотеки
   product-workspace/          # общий контур управления; вне Git компонентов
     workspace.json           # реестр, подготовленный агентом
@@ -28,7 +28,19 @@ projects/
       packs.lock.json
       state.sqlite           # координация и ссылки; задачи/evidence — в компонентах
       workspace-checks/      # закреплённые SHA, manifest, отчёты и логи
+~/Library/Caches/devcontour-harness/<hash>/   # корень рабочих деревьев workspace
+  <repositoryId>/worktrees/  # попытки; рядом dependencies/, gates-at/, base/, review-checkouts/…
+  joint/<id>/components/     # компоненты совместной проверки
 ```
+
+Рабочие деревья попыток и проверок лежат не в `.devcontour-local`, а в одном
+корне рабочих деревьев workspace вне деревьев репозиториев: на macOS
+`~/Library/Caches/devcontour-harness/<hash>`, на Linux
+`$XDG_CACHE_HOME/devcontour-harness/<hash>` (или `~/.cache/…`), где `<hash>` —
+устойчивый хэш каталога данных workspace. Корень можно задать явно —
+`checkoutRoot` в `config.json` (абсолютный путь, лучше на томе репозиториев).
+Действующий корень и его происхождение показывает `doctor` (проверка
+`checkouts`). Подробности — [configuration](configuration.md#изоляция-исполнителя-ревьюера-и-проверок).
 
 Дневник отвечает на вопросы «что хотели изменить», «какие репозитории затронуты», «что проверили» и «какие версии приняли». Это автоматически пересобираемая проекция SQLite. Ручные выводы и решения агент сохраняет отдельно в `docs/decisions/`, а публичные изменения API — в CHANGELOG и памяти соответствующей библиотеки. Содержимое дневника не заменяет changelog выпуска или описание PR.
 

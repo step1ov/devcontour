@@ -1,3 +1,4 @@
+import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { JointRunner } from 'devcontour-harness';
 import type { DevContour } from '../core/service.ts';
@@ -5,6 +6,7 @@ import { Workspace } from '../core/workspace.ts';
 import { executionOf, toDomain } from '../harness/execution.ts';
 import { IntentService } from './intent.ts';
 import { reserveRepositories } from './ownership.ts';
+import { checkoutRootOption, workspaceCheckoutRoot } from './checkout-root.ts';
 
 /**
  * Исполнение совместной проверки ChangeSet — `JointRunner` пакета harness:
@@ -41,6 +43,8 @@ export class WorkspaceRunner {
       stateDir: this.root,
       baseDir: this.root,
       directory: (v) => join(this.root, 'workspace-checks', v.id),
+      // Снимки компонентов — под корнем рабочих деревьев workspace.
+      ...checkoutRootOption(workspaceCheckoutRoot(this.h)),
       env: () => ({ DEVCONTOUR_CHANGESET_ID: changeSetId }),
       prepare: async () => {
         await reserveRepositories(this.h.config, this.root);
@@ -51,6 +55,10 @@ export class WorkspaceRunner {
     });
     const started = engine.read((view) => view.verification(verificationId));
     if (!started) throw new Error('Проверка workspace не найдена: ' + verificationId);
+    // Каталог проверки создаётся здесь: с корнем рабочих деревьев вне дерева
+    // снимки компонентов лежат не в нём, и сам он иначе не появляется до
+    // записи impact.json.
+    await mkdir(join(this.root, 'workspace-checks', verificationId), { recursive: true });
     const result = await runner.run(started, controller.signal).catch((error: unknown) => {
       throw toDomain(error);
     });

@@ -26,12 +26,12 @@ chat-backend/
   memory/
   .devcontour-local/
     state.sqlite                 # задачи, попытки, события, исторические снимки
-    worktrees/
     artifacts/
-    dependencies/                # закреплённые входные зависимости этой попытки
   .devcontour-local/journal/activity.md    # автоматически собранный местный журнал
 chat-admin/                      # та же структура
 ```
+
+Рабочие деревья попыток (`worktrees/`), закреплённые входные зависимости (`dependencies/`), проверки на SHA и рабочие копии ревью лежат не в `.devcontour-local/`, а в одном корне рабочих деревьев workspace вне репозиториев: `<root>/<repositoryId>/<вид>/<id>`, по умолчанию в кэше пользователя (macOS `~/Library/Caches/devcontour-harness/<hash>`, Linux `$XDG_CACHE_HOME/devcontour-harness/<hash>`). `checkoutRoot` в `config.json` задаёт корень явно; `doctor` показывает действующий (проверка `checkouts`).
 
 `devcontour.component.json` и инструкции следует коммитить. `.devcontour-local/` исключается из Git. Дневник — проекция базы; библиотечный CHANGELOG и устойчивые решения обновляются отдельно в самой библиотеке. Старый оркестратор используется только как донор, его scheduler не запускается.
 

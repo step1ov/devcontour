@@ -952,6 +952,11 @@ export const configSchema = z.object({
   contextPacks: z.array(contextPackSchema).default([]),
   resources: z.array(resourceSchema).default([]),
   resourceDatabase: z.string().optional(),
+  /**
+   * Корень рабочих деревьев попыток и проверок (абсолютный путь). Без него —
+   * кэш пользователя вне дерева (`src/runner/checkout-root.ts`).
+   */
+  checkoutRoot: z.string().optional(),
   verificationMode: z.enum(['all', 'affected']).default('all'),
   generatedPaths: z.array(relativePath).default([]),
   repositories: z.array(repositorySchema).default([]),

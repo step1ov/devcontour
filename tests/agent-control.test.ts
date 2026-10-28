@@ -10,6 +10,7 @@ import cp, { execFileSync } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { reviewContract, reviewPlan, acceptBoard } from '../src/runner/agent-control.ts';
+import { workspaceCheckoutRoot } from '../src/runner/checkout-root.ts';
 import { contractImpact } from '../src/runner/contract-impact.ts';
 import { digest, specDigest, supersededBy } from '../src/core/service.ts';
 import type { AgentAdapter, AgentRequest } from '../src/runner/adapters.ts';
@@ -780,6 +781,10 @@ test('Ревью плана читает ветку интеграции и ви
     assert.match(prompt, new RegExp(`devcontour/accepted at ${accepted}`));
     assert.match(prompt, /"externalDependencies"/);
     assert.match(prompt, new RegExp(`"id": "${core.id}"[\\s\\S]*"status": "done"`));
+    // Рабочая копия — под корнем рабочих деревьев workspace, вне дерева
+    // человека и каталога контура.
+    const trees = workspaceCheckoutRoot(f.h).root!;
+    assert.ok(cwd.startsWith(join(trees, 'main', 'review-checkouts') + '/'), cwd);
     // Рабочая копия ревью удаляется, checkout человека не тронут.
     assert.equal(existsSync(cwd), false);
     assert.doesNotMatch(git('worktree', 'list'), /review-checkouts/);

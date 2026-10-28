@@ -23,6 +23,7 @@ import { git } from './process.ts';
 import { assertTeamCheckout } from './git-sync.ts';
 import { reserveRepositories } from './ownership.ts';
 import { serveReconfigure } from './reconfigure.ts';
+import { checkoutRootOption, checkoutRoots, workspaceCheckoutRoot } from './checkout-root.ts';
 
 export { classifyFailure } from 'devcontour-harness';
 
@@ -61,6 +62,9 @@ export class Scheduler {
       hooks: devcontourHooks(this.h),
       owner: this.owner,
       branchPrefix: 'devcontour/run-',
+      // Один корень рабочих деревьев на workspace — тот же, что у проверок
+      // доски и базы, переноса базы и совместной проверки.
+      ...checkoutRootOption(workspaceCheckoutRoot(this.h)),
       ...(this.h.config.resourceDatabase
         ? { resourceDatabase: this.h.config.resourceDatabase }
         : {}),
@@ -69,12 +73,17 @@ export class Scheduler {
     return runner;
   }
 
-  /** Граница исполнителя и ревьюера: каталоги контура и рабочие деревья компонентов закрыты. */
+  /**
+   * Граница исполнителя и ревьюера: каталоги контура и рабочие деревья
+   * компонентов закрыты; чужие попытки под корнем рабочих деревьев вне
+   * дерева закрыты (`checkouts`).
+   */
   boundary(repositoryId = 'main') {
     const repos = repositories(this.h.config);
     return {
       hidden: [...new Set([this.root, this.runRoot(repositoryId), ...repos.map((r) => r.path)])],
       readable: repos.map((r) => join(r.path, '.git')),
+      checkouts: checkoutRoots(this.h),
     };
   }
   runRoot(repositoryId = 'main') {

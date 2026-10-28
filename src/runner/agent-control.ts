@@ -4,7 +4,7 @@ import { runtimeAdapters } from '../harness/adapters.ts';
 import { carriedTaskIds } from '../core/work-status.ts';
 import { boardOwner } from '../core/sync-state.ts';
 import { mkdir, writeFile, readFile, realpath } from 'node:fs/promises';
-import { join, resolve, sep } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
@@ -35,6 +35,7 @@ import {
 } from '../core/checks.ts';
 import { spikeRecord, spikesOf } from './checks.ts';
 import { coverBoard } from './board-coverage.ts';
+import { closedWorkspaceCheckouts, workspaceCheckout } from './checkout-root.ts';
 
 // Контракт живёт в репозитории, и предложение должно на него ссылаться, а не
 // нести копию: копию легко отправить на ревью устаревшей, и тогда принятый
@@ -382,8 +383,10 @@ async function review(
       cwd: checkout?.path ?? h.config.repository,
       artifactDir: artifact,
       // База и журналы контура закрыты reviewer, даже когда лежат внутри
-      // checkout (embedded): более конкретный путь побеждает.
-      denied: [root],
+      // checkout (embedded): более конкретный путь побеждает. Рабочие деревья
+      // попыток под корнем вне дерева закрыты поэлементно: своя рабочая
+      // копия ревью и её предки открыты.
+      denied: [root, ...closedWorkspaceCheckouts(h, [checkout?.path ?? h.config.repository])],
       meta: {
         ...(repositoryId ? { repositoryId } : {}),
         ...(subjectId ? { subjectId } : {}),
@@ -712,8 +715,19 @@ async function withIntegrationCheckout<T>(
   } catch {
     return action();
   }
-  const path = join(root, 'review-checkouts', randomUUID());
-  await mkdir(join(root, 'review-checkouts'), { recursive: true });
+  // Рабочая копия — под корнем рабочих деревьев workspace: в каталоге
+  // состояния внутри репозитория (embedded) она была бы вложена в закрытое
+  // песочницей дерево, и инструменты ревьюера, ищущие конфигурацию вверх по
+  // дереву, получали бы EPERM.
+  const id = randomUUID();
+  const path = workspaceCheckout(
+    h,
+    join(root, 'review-checkouts', id),
+    repo.id,
+    'review-checkouts',
+    id,
+  );
+  await mkdir(dirname(path), { recursive: true });
   await git(repo.path, 'worktree', 'add', '--detach', path, sha);
   try {
     return await action({ path, ref: repo.targetBranch, sha });

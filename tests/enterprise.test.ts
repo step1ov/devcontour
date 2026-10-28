@@ -27,6 +27,7 @@ import { snapshotDependencies, assertDependencies } from '../src/runner/dependen
 import { DeliveryRunner } from '../src/runner/forge.ts';
 import { attachJournal } from '../src/runner/journal.ts';
 import { doctor, doctorReady } from '../src/runner/doctor.ts';
+import { workspaceCheckoutRoot } from '../src/runner/checkout-root.ts';
 import { importKnowledge } from '../src/runner/knowledge.ts';
 
 const makeRoot = () => mkdtemp(join(tmpdir(), 'devcontour-enterprise-'));
@@ -405,9 +406,17 @@ test('Component databases contain local specifications, snapshots and events; co
     } finally {
       lib.close();
     }
+    // Рабочие деревья попыток — не внутри репозитория компонента (там их
+    // закрывала бы песочница вместе с каталогом состояния), а под корнем
+    // рабочих деревьев workspace, по каталогу своего компонента.
+    const trees = workspaceCheckoutRoot(f.h).root!;
     for (const run of f.store.read().runs) {
       assert.ok(
-        run.worktree!.startsWith(f.c.repositories.find((r) => r.id === run.repositoryId)!.path),
+        run.worktree!.startsWith(join(trees, run.repositoryId!, 'worktrees') + '/'),
+        run.worktree,
+      );
+      assert.ok(
+        !run.worktree!.startsWith(f.c.repositories.find((r) => r.id === run.repositoryId)!.path),
       );
     }
     const journal = await readFile(

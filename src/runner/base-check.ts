@@ -6,6 +6,7 @@ import { repositories, repository } from '../core/repositories.ts';
 import { executionOf } from '../harness/execution.ts';
 import { git } from './process.ts';
 import { controllerBoundary } from './checks.ts';
+import { checkoutRootOption, workspaceCheckoutRoot } from './checkout-root.ts';
 import { journalError } from './board-coverage.ts';
 import { sensitiveBasePaths } from './sensitive-paths.ts';
 
@@ -147,6 +148,8 @@ export async function checkBase(
             stateDir: roots.state,
             repoPath: (r) => repository(h.config, r.id).path,
             boundary: () => controllerBoundary(h, roots.state),
+            // Тот же корень рабочих деревьев, что у попыток планировщика.
+            ...checkoutRootOption(workspaceCheckoutRoot(h)),
             ...(h.config.resourceDatabase ? { resourceDatabase: h.config.resourceDatabase } : {}),
           },
           {

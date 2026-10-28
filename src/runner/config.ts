@@ -147,6 +147,8 @@ export function loadConfig(path: string, text = readFileSync(path, 'utf8')): Con
   }
   if (c.resourceDatabase && !isAbsolute(c.resourceDatabase))
     throw new Error('resourceDatabase требует абсолютный путь');
+  if (c.checkoutRoot && !isAbsolute(c.checkoutRoot))
+    throw new Error('checkoutRoot требует абсолютный путь');
   validateWorkflow(c);
   // Источник для проверки поколения: процесс, прочитавший эти байты, позже
   // узнаёт, лежат ли в файлах они же.

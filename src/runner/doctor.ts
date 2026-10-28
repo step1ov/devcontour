@@ -1,6 +1,6 @@
 import { access, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
-import { constants, existsSync, statSync } from 'node:fs';
-import { delimiter, isAbsolute, join, resolve } from 'node:path';
+import { constants, existsSync, realpathSync, statSync } from 'node:fs';
+import { delimiter, isAbsolute, join, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { emptyState, type Config, type DevContourState, type Role } from '../core/model.ts';
 import {
@@ -14,6 +14,7 @@ import { DevContourExecutionStore, harnessVersion } from '../harness/index.ts';
 import { projectionOptions } from '../harness/host.ts';
 import { technicalReviewer } from '../harness/policy.ts';
 import { isolationSupport } from './isolation.ts';
+import { checkoutRootFor } from './checkout-root.ts';
 import { installProbe } from './install-probe.ts';
 import { validateWorkflow } from '../core/workflow.ts';
 import { command, git } from './process.ts';
@@ -497,6 +498,7 @@ export async function doctor(
       (support.detail ? `; ${support.detail}` : '')
     );
   });
+  checks.push(checkoutsCheck(config, root));
   // Механизм на месте ещё не значит, что gate установки в нём пройдёт:
   // песочница всегда закрывает часть путей и внутри worktree. Проба ставит
   // зависимость с каталогом IDE на чистом дереве в той же песочнице.
@@ -739,6 +741,53 @@ export async function doctor(
   await mkdir(root, { recursive: true });
   await writeFile(join(root, 'doctor.json'), JSON.stringify(result, null, 2));
   return result;
+}
+
+/**
+ * Где лежат рабочие деревья попыток и проверок (`checkout-root.ts`). Каталог
+ * состояния закрыт песочнице целиком: checkout внутри него (или внутри
+ * репозитория) упирает инструменты, которые ищут конфигурацию вверх по
+ * дереву, в EPERM. Кэш на другом томе, чем репозиторий, оставляет деревья на
+ * прежнем месте — работать можно, но этот EPERM остаётся; исправление —
+ * `checkoutRoot` на томе репозитория.
+ */
+export function checkoutsCheck(config: Config, root: string): Check {
+  const choice = checkoutRootFor(config, root);
+  const real = (path: string) => {
+    try {
+      return realpathSync(path);
+    } catch {
+      return resolve(path);
+    }
+  };
+  const at = choice.root;
+  const inside = at
+    ? [root, ...repositories(config).map((r) => r.path)]
+        .map(real)
+        .find((dir) => at === dir || at.startsWith(dir + sep))
+    : undefined;
+  if (choice.placement === 'cross-volume')
+    return {
+      id: 'checkouts',
+      status: 'degraded',
+      detail: `Рабочие деревья остаются в каталоге состояния: ${choice.note ?? 'кэш пользователя на другом томе'}. Инструменты, ищущие конфигурацию вверх по дереву (browserslist, Metro, postcss, tsconfig), в песочнице получат EPERM. Задайте checkoutRoot (абсолютный путь на томе репозитория) в config.json.`,
+    };
+  if (inside)
+    return {
+      id: 'checkouts',
+      status: 'degraded',
+      detail: `checkoutRoot ${at} лежит внутри ${inside}: этот каталог закрыт песочнице, и инструменты, ищущие конфигурацию вверх по дереву, получат EPERM. Задайте корень вне репозиториев и каталога контура.`,
+    };
+  return {
+    id: 'checkouts',
+    status: 'passed',
+    detail:
+      choice.placement === 'cache'
+        ? `Рабочие деревья попыток и проверок — вне дерева, в кэше пользователя ${choice.root}`
+        : choice.placement === 'configured'
+          ? `Рабочие деревья попыток и проверок — в заданном checkoutRoot ${choice.root}`
+          : `Рабочие деревья попыток и проверок — в каталоге состояния ${root}`,
+  };
 }
 
 /**

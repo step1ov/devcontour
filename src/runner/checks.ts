@@ -17,6 +17,7 @@ import { repositories, repository } from '../core/repositories.ts';
 import { CheckCorpus, localRoots } from '../core/check-store.ts';
 import { taskContracts } from '../core/checks.ts';
 import { executionOf, toDomain } from '../harness/execution.ts';
+import { checkoutRoots, workspaceCheckout, workspaceCheckoutRoot } from './checkout-root.ts';
 
 /**
  * Ограниченный эксперимент выполнимости (spike) — эксперимент harness:
@@ -54,13 +55,31 @@ export function spikeRecord(h: DevContour, repositoryId: string, id: string) {
   return executionOf(h).engine.read((view) => spikeOf(view, repositoryId, id));
 }
 
-/** Каталоги, закрытые проверке: база контура и исходные checkout компонентов. */
+/**
+ * Каталоги, закрытые проверке: база контура и исходные checkout компонентов.
+ * Корень рабочих деревьев workspace вне дерева передаётся в `checkouts`:
+ * чужие попытки под ним закрыты, своё дерево проверки открыто.
+ */
 export function controllerBoundary(h: DevContour, root: string) {
   const repos = repositories(h.config);
   return {
     hidden: [...new Set([root, ...repos.map((r) => r.path)])],
     readable: repos.map((r) => join(r.path, '.git')),
+    checkouts: checkoutRoots(h),
   };
+}
+
+/**
+ * Каталог дерева эксперимента или подтверждения случая под корнем workspace;
+ * без корня вне дерева — прежнее место в каталоге состояния (harness).
+ */
+function checkoutOf(h: DevContour) {
+  return workspaceCheckoutRoot(h).root
+    ? {
+        checkout: (repositoryId: string, kind: string, id: string) =>
+          workspaceCheckout(h, '', repositoryId, kind, id),
+      }
+    : {};
 }
 
 export async function runSpike(h: DevContour, root: string, raw: unknown) {
@@ -73,6 +92,7 @@ export async function runSpike(h: DevContour, root: string, raw: unknown) {
         stateDir: root,
         repoPath: (repo) => repository(h.config, repo.id).path,
         boundary: () => controllerBoundary(h, root),
+        ...checkoutOf(h),
       },
       spikeInput.parse(raw),
     );
@@ -172,6 +192,7 @@ export async function submitCase(h: DevContour, root: string, raw: unknown) {
     stateDir: root,
     repoPath: (repo) => repository(h.config, repo.id).path,
     boundary: () => controllerBoundary(h, root),
+    ...checkoutOf(h),
   };
   const { taskId, ...rest } = input;
   try {
