@@ -362,7 +362,7 @@ test('Задача с 25 gates проходит проекцию в движок
       ],
     });
     h.approve(boardId);
-    const task = h.store.read().tasks[0]!;
+    const task = h.store.read().tasks[0];
     const { engine } = executionOf(h);
     const work = engine.read((v) => v.work(task.id))!;
     assert.deepEqual(work.order.gates, ids);
