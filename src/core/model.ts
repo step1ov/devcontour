@@ -383,6 +383,12 @@ export interface Evidence {
    */
   tests?: { id: string; status: 'passed' | 'failed' | 'skipped'; opaque?: true }[];
   /**
+   * Повтор провала gate интеграции на том же SHA (harness): `of` — ID
+   * повторённой записи; `flaky` — повтор прошёл, и первый провал вызван
+   * средой; `confirmed` — провал подтвердился.
+   */
+  recheck?: { of: string; outcome: 'flaky' | 'confirmed' };
+  /**
    * Манифест обрезан по пределу размера: по нему нельзя судить об отсутствии
    * теста, поэтому подтверждение на уровне testcase по такому evidence не
    * выдаётся.

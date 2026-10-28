@@ -396,6 +396,31 @@ export function gateScopeMetrics(h: DevContour, runs: Run[], tasks: Task[]) {
   };
 }
 
+/**
+ * Повторы провалов gates интеграции: `flaky` — провал не подтвердился на том
+ * же SHA (вызван средой, отказ не засчитан), `confirmed` — подтвердился.
+ * Каждый повтор называет попытку, gate и повторённую запись.
+ */
+export function gateRechecks(runs: Run[]) {
+  const items = runs.flatMap((r) =>
+    r.evidence
+      .filter((e) => e.recheck)
+      .map((e) => ({
+        taskId: r.taskId,
+        runId: r.id,
+        gate: e.gate,
+        evidenceId: e.id,
+        of: e.recheck!.of,
+        outcome: e.recheck!.outcome,
+      })),
+  );
+  return {
+    flaky: items.filter((i) => i.outcome === 'flaky').length,
+    confirmed: items.filter((i) => i.outcome === 'confirmed').length,
+    items,
+  };
+}
+
 export function workflowMetrics(
   h: DevContour,
   repositoryId?: string,
@@ -432,6 +457,7 @@ export function workflowMetrics(
       importedResults: tasks.filter((t) => t.sharedCompletion).length,
     },
     gateScope: gateScopeMetrics(h, runs, tasks),
+    gateRechecks: gateRechecks(runs),
     budgets: budgetOverview(h),
     firstAttemptAcceptanceRate: tasks.filter(
       (t) =>
