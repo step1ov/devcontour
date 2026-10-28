@@ -420,6 +420,14 @@ export class DevContourExecutionStore implements ExecutionStore {
         frame.drafts.push(structuredClone(event));
       },
     };
+    // Быстрый путь движка (необязательный метод представления): такт очереди
+    // ищет истёкшие среди активных попыток и не строит всю историю попыток.
+    Object.assign(view, {
+      activeAttempts: () =>
+        state()
+          .runs.filter((r) => r.status === 'active')
+          .map((r) => attemptOf(state(), r)),
+    });
     this.states.set(view, state);
     return view;
   }
