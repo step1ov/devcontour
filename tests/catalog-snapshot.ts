@@ -6,6 +6,6 @@
 // с движком 0.1.0-alpha.16 — поля обязательства `gates`, `verification`,
 // `reference` и `crossChecks[].artifacts`; область gates задачи (`gates`,
 // `consumers[].gates`) — до предела gates профиля (100 вместо 20); прочие
-// операции байтово прежние.
-export const CATALOG_DIGEST = '88c0a6c8ae63960350a6752e9ac14449c5c2138d5ce3693a3a55c415249eec9e';
+// операции байтово прежние. Digest перевзят с движком 0.1.0-alpha.19.
+export const CATALOG_DIGEST = 'ac0e8747b898624ff186efa43593f7b16cb4ea6e2a2fa3be8f5d1062bf3b8993';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

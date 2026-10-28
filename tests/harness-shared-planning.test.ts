@@ -27,11 +27,12 @@ import {
 
 const sha = (text: string) => createHash('sha256').update(text).digest('hex');
 
-// Снято до переключения на HEAD d3e2d10 и совпадает с baseline ab35a6a:
+// Снято до переключения на HEAD d3e2d10 и совпадает с baseline ab35a6a;
+// перевзято с движком 0.1.0-alpha.19: область gates задачи — до 100 вместо 20.
 //   node --import tsx -e "import('./src/core/plan.ts').then(m=>process.stdout.write(JSON.stringify(m.planSchema)))"
 //   ... z.toJSONSchema(m.planResult, { io: 'input' }) ...; digest(capabilities())
-const PLAN_SCHEMA_SHA = 'b6461127f7f0831181187c2d2d9c87671f5a196ecf97d9010120a86b7e46179e';
-const PLAN_INPUT_SCHEMA_SHA = '36c5ec758791d049f5929522d60dd730363d925c07cedc144f682703db4f05f7';
+const PLAN_SCHEMA_SHA = '5e05430223e4b076be18b02902987b50df8a3027f2f1f86048fb74bc878d3bda';
+const PLAN_INPUT_SCHEMA_SHA = 'e35ec7ad5494f9fe00d5007dbeda4c842a80b499afc7e6b85ab9a01c90c01031';
 
 test('M03 схема: planResult — planDraft harness; JSON Schema runtime, inputSchema plan_import и catalogDigest байтово прежние', () => {
   assert.equal(sha(JSON.stringify(planSchema)), PLAN_SCHEMA_SHA);
