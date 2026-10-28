@@ -42,6 +42,7 @@ import {
   type Evidence,
   type Run,
   type Approval,
+  type BaseMove,
 } from './model.ts';
 export const digest = (value: unknown) =>
   createHash('sha256')
@@ -446,6 +447,47 @@ export function receiptBytes(h: DevContour, s: DevContourState, t: Task) {
   }
   return receiptRecordBytes(receipt);
 }
+/**
+ * Ожидание проверки перенесённой базы. Перенос поверх ещё не проверенного
+ * сохраняет первую непроверенную базу компонента (`from`): автоматическая
+ * проверка сверяет чувствительные пути всего непроверенного диапазона, а не
+ * только последнего шага.
+ */
+/**
+ * Непроверенный диапазон текущего ожидания `base-check`: только записанный
+ * для этого ожидания (то же время постановки). Нет ожидания или диапазон от
+ * другого — `undefined`.
+ */
+export function baseMovesOf(s: Readonly<DevContourState>) {
+  const wait = s.waits?.find((w) => w.kind === 'base-check');
+  return wait && s.baseMoves?.at === wait.at ? s.baseMoves.bases : undefined;
+}
+export function waitBaseCheck(s: DevContourState, updated: BaseMove[], detail: string) {
+  // Диапазон копится только поверх ещё стоящего ожидания: снятое ожидание
+  // (проверка прошла, queue --start) оставляет прежний диапазон в прошлом.
+  const at = now();
+  const previous = baseMovesOf(s) ?? [];
+  const bases = [
+    ...previous.filter((p) => !updated.some((u) => u.repositoryId === p.repositoryId)),
+    ...updated.map((u) => ({
+      repositoryId: u.repositoryId,
+      from: previous.find((p) => p.repositoryId === u.repositoryId)?.from ?? u.from,
+      to: u.to,
+    })),
+  ];
+  s.baseMoves = { at, bases };
+  s.waits = [
+    ...(s.waits ?? []).filter((w) => w.kind !== 'base-check'),
+    { kind: 'base-check', detail, at },
+  ];
+}
+/** Путь поля плана для отказа: `tasks[2].gates`. */
+function planPath(path: PropertyKey[]) {
+  return (
+    path.map((p, i) => (typeof p === 'number' ? `[${p}]` : (i ? '.' : '') + String(p))).join('') ||
+    'план'
+  );
+}
 export class DevContour {
   constructor(
     readonly store: Store,
@@ -738,7 +780,19 @@ export class DevContour {
    * проверяет и прежние результаты. Цель этапа хранится в причине ревизии.
    */
   importPlan(input: unknown, boardId?: string) {
-    const plan = planResult.parse(input);
+    // Отказ схемы плана — по путям и сообщениям, а не сырым массивом zod:
+    // ведущий исправляет план по названному полю.
+    const parsedPlan = planResult.safeParse(input);
+    if (!parsedPlan.success)
+      throw new DomainError(
+        'План не принят: ' +
+          parsedPlan.error.issues
+            .slice(0, 10)
+            .map((i) => `${planPath(i.path)}: ${i.message}`)
+            .join('; '),
+        400,
+      );
+    const plan = parsedPlan.data;
     const stage = boardId ? `Следующий этап: ${plan.title}\n\n${plan.description}`.trim() : '';
     if (stage.length > 5000)
       throw new DomainError('Цель этапа: название и описание вместе до 5000 символов', 400);
@@ -1294,26 +1348,48 @@ export class DevContour {
     });
   }
   // Перенос базы устраняет причину, по которой диспетчер встал, но очередь не
-  // запускает: сначала человек проверяет базу гейтами. Пауза переходит к нему,
-  // а прежний сбой перестаёт называться причиной — иначе экран продолжал
-  // советовать уже выполненный base-update. Событие оставляет перенос в журнале.
-  baseUpdated(updated: { repositoryId: string; from: string; to: string }[]) {
+  // запускает: сначала базу проверяют гейтами. Прежний сбой перестаёт
+  // называться причиной — иначе экран продолжал советовать уже выполненный
+  // base-update. Событие оставляет перенос в журнале.
+  baseUpdated(updated: BaseMove[]) {
     return this.store.change('base.updated', (s) => {
       if (!s.paused) throw new DomainError('Перенос базы выполняется на остановленной очереди');
-      // Пауза человека остаётся его паузой; иначе очередь ждёт проверки базы —
-      // это техническое ожидание, а не решение человека.
-      if (s.pauseReason !== 'operator') s.pauseReason = 'base-check';
+      // Пауза человека остаётся его паузой, а остановка из-за отказа
+      // провайдера — своей причиной со сбоями: перенос базы провайдер не
+      // чинит. Иначе очередь ждёт проверки базы — это техническое ожидание,
+      // а не решение человека.
+      if (s.pauseReason !== 'operator' && s.pauseReason !== 'runtime') {
+        s.pauseReason = 'base-check';
+        s.pauseFailures = undefined;
+      }
       s.pausedAt = now();
-      s.pauseFailures = undefined;
-      s.waits = [
-        ...(s.waits ?? []).filter((w) => w.kind !== 'base-check'),
-        {
-          kind: 'base-check',
-          detail: `База прогонов перенесена (${updated.map((u) => u.repositoryId).join(', ')}): проверьте её гейтами и продолжите очередь`,
-          at: now(),
-        },
-      ];
+      waitBaseCheck(
+        s,
+        updated,
+        `База прогонов перенесена (${updated.map((u) => u.repositoryId).join(', ')}): проверьте её гейтами и продолжите очередь`,
+      );
       return { updated };
+    });
+  }
+  /**
+   * Остановка выдачи под перенос базы в режиме агента. В режиме оператора
+   * перенос требует паузы человека, и она остаётся его паузой. В режиме
+   * агента согласования ведёт контур: ручная пауза перед переносом
+   * превращалась в паузу человека, и очередь потом ждала ручного
+   * `queue --start`. Здесь очередь сразу встаёт на техническое ожидание
+   * `base-check`, которое цикл ведущего снимает после прохождения gates базы.
+   */
+  holdForBaseUpdate() {
+    return this.store.change('base.update.hold', (s) => {
+      if (this.config.approvalMode !== 'agent')
+        throw new DomainError('Сначала приостановите очередь: queue --pause', 409);
+      if (s.paused) return { held: false };
+      if (s.runs.some((r) => r.status === 'active'))
+        throw new DomainError('Дождитесь завершения попыток перед переносом базы', 409);
+      s.paused = true;
+      s.pauseReason = 'base-check';
+      s.pausedAt = now();
+      return { held: true };
     });
   }
   /** Техническое ожидание операции: видно отдельно от паузы и её не трогает. */

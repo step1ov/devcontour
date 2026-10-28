@@ -11,7 +11,11 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { setupDemo } from '../src/demo.ts';
-import { DomainError } from '../src/core/model.ts';
+import { DomainError, GATE_SCOPE_LIMIT, taskInput } from '../src/core/model.ts';
+import { config, fixture, input } from './helpers.ts';
+import { DevContour } from '../src/core/service.ts';
+import { Store } from '../src/core/store.ts';
+import { executionOf } from '../src/harness/execution.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { parseProposal, proposalLimitIssues, proposalLimits } from '../src/runner/agent-control.ts';
 import { contractImpact } from '../src/runner/contract-impact.ts';
@@ -273,6 +277,102 @@ test('contract-impact и закрепление спрашивают Git пос�
       'gone.log',
     ]);
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Область gates задачи вмещает профиль до предела gates профиля; превышение и отказ плана — по названному полю, без сырого zod', () => {
+  assert.equal(GATE_SCOPE_LIMIT, 100);
+  const gates = (n: number) => Array.from({ length: n }, (_, i) => `gate-${i}`);
+  assert.equal(taskInput.parse({ ...input(), gates: gates(25) }).gates?.length, 25);
+  assert.equal(
+    taskInput.parse({ ...input(), consumers: [{ repositoryId: 'lib', gates: gates(25) }] })
+      .consumers?.[0].gates.length,
+    25,
+  );
+  const over = taskInput.safeParse({ ...input(), gates: gates(104) });
+  assert.equal(
+    over.error?.issues[0].message,
+    'область gates: 104 при пределе 100, лишних 4. Назовите группу gates (@имя) или уберите повторы',
+  );
+  const f = fixture();
+  try {
+    const task = (key: string, extra: Record<string, unknown> = {}) => ({
+      key,
+      title: 'Задача ' + key,
+      description: 'Описание задачи плана.',
+      role: 'developer',
+      dependsOn: [],
+      acceptance: ['Проверки зелёные'],
+      contracts: [],
+      ...extra,
+    });
+    assert.throws(
+      () =>
+        f.h.importPlan({
+          title: 'План',
+          description: '',
+          tasks: [task('a'), task('b'), task('c', { gates: gates(104) })],
+        }),
+      (e: unknown) => {
+        assert.ok(e instanceof DomainError, String(e));
+        assert.match(e.message, /^План не принят: tasks\[2\]\.gates: /);
+        assert.ok(!e.message.includes('"code"'), e.message);
+        return true;
+      },
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Задача с 25 gates проходит проекцию в движок: поручение, граф доски и выдача попытки, без сырого zod', async () => {
+  // Предел DevContour — предел поручения harness: задача, принятая продуктом,
+  // проходит схему поручения исполнения и выдаётся движком.
+  const ids = Array.from({ length: 25 }, (_, i) => `gate-${i}`);
+  const root = await mkdtemp(join(tmpdir(), 'devcontour-gate-scope-'));
+  const store = new Store(join(root, 'state.sqlite'));
+  try {
+    const h = new DevContour(
+      store,
+      config({
+        gates: ids.map((id) => ({
+          id,
+          kind: 'test',
+          command: ['node', 'verify.mjs'],
+          timeoutMs: 60_000,
+          report: { type: 'junit', path: `.reports/${id}.xml` },
+        })),
+      }),
+    );
+    const { boardId } = h.importPlan({
+      title: 'План',
+      description: '',
+      tasks: [
+        {
+          key: 'wide',
+          title: 'Задача на весь профиль',
+          description: 'Описание задачи плана.',
+          role: 'qa',
+          dependsOn: [],
+          acceptance: ['Проверки зелёные'],
+          contracts: [],
+          gates: ids,
+        },
+      ],
+    });
+    h.approve(boardId);
+    const task = h.store.read().tasks[0];
+    const { engine } = executionOf(h);
+    const work = engine.read((v) => v.work(task.id))!;
+    assert.deepEqual(work.order.gates, ids);
+    const graph = engine.read((v) => v.graph(boardId))!;
+    assert.deepEqual(graph.graph.orders[0]?.gates, ids);
+    h.pause(false);
+    const run = h.claim('test');
+    assert.equal(run?.taskId, task.id, 'движок выдал попытку задачи с 25 gates');
+  } finally {
+    store.close();
     await rm(root, { recursive: true, force: true });
   }
 });

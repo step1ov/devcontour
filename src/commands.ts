@@ -29,7 +29,7 @@ import { cleanupEnvironment } from './runner/environment.ts';
 import { importKnowledge } from './runner/knowledge.ts';
 import { PreviewRunner } from './runner/preview.ts';
 import { DeliveryRunner } from './runner/forge.ts';
-import { updateBase } from './runner/base-update.ts';
+import { baseUpdateOperation } from './runner/base-update.ts';
 import { adoptContextPack } from './runner/context-library.ts';
 import { contextSources, importContextSource } from './runner/context-import.ts';
 import { lockContextFile, taskContext } from './runner/context.ts';
@@ -723,13 +723,7 @@ async function main() {
           next: 'Перезапустите сервер, чтобы загрузить закреплённый контекст.',
         };
       } else if (operation === 'base-update') {
-        const s = store.read();
-        if (!s.paused) throw new Error('Сначала приостановите очередь: queue --pause');
-        if (s.runs.some((r) => r.status === 'active'))
-          throw new Error('Дождитесь завершения попыток перед переносом базы');
-        const base = await updateBase(config, root);
-        if (base.updated.length) h.baseUpdated(base.updated);
-        result = base;
+        result = await baseUpdateOperation(h, root);
       } else if (operation === 'context-adopt') {
         const s = store.read();
         if (!s.paused) throw new Error('Сначала приостановите очередь: queue --pause');

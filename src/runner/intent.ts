@@ -363,8 +363,8 @@ export class IntentService implements ProductReleaseGuard {
     const coverage = this.workspaceCoverage(doc, releaseId, undefined, acceptedHeads);
     if (!coverage.complete)
       throw new DomainError(
-        'Продуктовый релиз не покрыт актуальными требованиями и задачами' +
-          (coverage.issues.length ? ': ' + coverage.issues.join('; ') : ''),
+        'Продуктовый релиз не покрыт актуальными требованиями и задачами: ' +
+          coverageGaps(coverage).join('; '),
       );
     const state = this.h.store.read();
     for (const board of selected.boards) {
@@ -612,7 +612,12 @@ export class IntentService implements ProductReleaseGuard {
     if (!doc.releases.some((r) => r.id === releaseId)) throw new DomainError('Неизвестный релиз');
     const state = this.h.store.read(),
       replaced = new Set(state.tasks.map((t) => t.supersedes));
-    const tasks = state.tasks.filter((t) => taskOwner(t) === repositoryId && !replaced.has(t.id));
+    // Отменённая или заменённая задача не является актуальной работой истории:
+    // она остаётся в отчёте как исключённая, но не держит покрытие неполным.
+    const owned = state.tasks.filter((t) => taskOwner(t) === repositoryId);
+    const live = (t: Task) => t.status !== 'cancelled' && !replaced.has(t.id);
+    const tasks = owned.filter(live);
+    const inactive = owned.filter((t) => !live(t));
     const issues: { kind: string; source?: string; id?: string }[] = [];
     const sources = new Map<
       string,
@@ -735,7 +740,7 @@ export class IntentService implements ProductReleaseGuard {
         const requirementKeys = new Set(
           story.criteria.flatMap((c) => c.requirements.map(referenceKey)),
         );
-        const related = tasks.filter((t) => {
+        const belongs = (t: Task) => {
           const links = t.requirements ?? [];
           if (links.some((r) => r.source === this.source(repositoryId) && r.id === binding.id))
             return true;
@@ -745,7 +750,12 @@ export class IntentService implements ProductReleaseGuard {
             !links.some((r) => r.source === this.source(repositoryId) && knownStories.has(r.id)) &&
             links.some((r) => requirementKeys.has(referenceKey(r)))
           );
-        });
+        };
+        const related = tasks.filter(belongs);
+        const excludedTasks = inactive.filter(belongs).map((t) => ({
+          id: t.id,
+          reason: replaced.has(t.id) ? ('superseded' as const) : ('cancelled' as const),
+        }));
         const eligible = related.filter(
           (t) =>
             completed(t) &&
@@ -801,6 +811,7 @@ export class IntentService implements ProductReleaseGuard {
           title: story.title,
           taskIds: related.map((t) => t.id),
           unverifiedTaskIds: related.filter((t) => !eligible.includes(t)).map((t) => t.id),
+          excludedTasks,
           verified:
             related.length > 0 &&
             related.length === eligible.length &&
@@ -827,4 +838,80 @@ export class IntentService implements ProductReleaseGuard {
       note: 'Coverage of declared REQ sources only. Review source inventory and test adequacy. Completion is historical SHA evidence, not a new whole-product test or release acceptance.',
     };
   }
+}
+
+const gapLimit = 12;
+const requirementGap: Record<string, string> = {
+  'stale-source': 'источник изменился',
+  unplanned: 'нет актуальной задачи',
+  unverified: 'задачи не подтверждены',
+};
+/** Перечисляет, почему покрытие релиза неполное: компоненты, истории и требования. */
+export function coverageGaps(coverage: {
+  issues: string[];
+  components: {
+    repositoryId: string;
+    fresh: boolean;
+    coverageComplete: boolean;
+    unavailable?: boolean;
+  }[];
+  locals: Map<
+    string,
+    {
+      issues: { kind: string; source?: string; id?: string }[];
+      stories: {
+        id: string;
+        verified: boolean;
+        taskIds: string[];
+        unverifiedTaskIds: string[];
+        excludedTasks: { id: string }[];
+        criteria: { requirements: { source: string; id: string; status: string }[] }[];
+      }[];
+    }
+  >;
+}) {
+  const gaps = [...coverage.issues];
+  for (const c of coverage.components) {
+    if (c.coverageComplete) continue;
+    const local = coverage.locals.get(c.repositoryId);
+    if (c.unavailable || !local) {
+      gaps.push(c.repositoryId + ': карта компонента недоступна');
+      continue;
+    }
+    if (!c.fresh) gaps.push(c.repositoryId + ': карта компонента изменилась после закрепления');
+    for (const issue of local.issues)
+      gaps.push(
+        c.repositoryId +
+          ': ' +
+          issue.kind +
+          (issue.id ? ' ' + (issue.source ? issue.source + '#' : '') + issue.id : ''),
+      );
+    for (const story of local.stories.filter((s) => !s.verified)) {
+      const reasons: string[] = [];
+      if (!story.taskIds.length)
+        reasons.push(
+          'нет актуальных задач' +
+            (story.excludedTasks.length
+              ? ' (исключено отменённых или заменённых: ' + story.excludedTasks.length + ')'
+              : ''),
+        );
+      else if (story.unverifiedTaskIds.length)
+        reasons.push(
+          'не подтверждены задачи ' +
+            story.unverifiedTaskIds.slice(0, 5).join(', ') +
+            (story.unverifiedTaskIds.length > 5
+              ? ' и ещё ' + (story.unverifiedTaskIds.length - 5)
+              : ''),
+        );
+      for (const r of story.criteria.flatMap((x) => x.requirements))
+        if (r.status !== 'verified')
+          reasons.push(r.id + ' — ' + (requirementGap[r.status] ?? r.status));
+      const text = [...new Set(reasons)].join(', ') || 'критерии не подтверждены';
+      gaps.push('история ' + c.repositoryId + '/' + story.id + ': ' + text);
+    }
+  }
+  if (!gaps.length) gaps.push('причина не определена; запустите intent-report');
+  return gaps.length > gapLimit
+    ? [...gaps.slice(0, gapLimit), 'и ещё ' + (gaps.length - gapLimit)]
+    : gaps;
 }

@@ -13,6 +13,7 @@ import { repairDecision } from '../core/repair.ts';
 import { executionOf } from '../harness/execution.ts';
 import type { AgentAdapter } from './adapters.ts';
 import { analyzeRecovery, applyCases } from './recovery.ts';
+import { checkBase } from './base-check.ts';
 
 export class LeadRunner {
   readonly workflow: LeadWorkflow;
@@ -234,6 +235,11 @@ export class LeadRunner {
     if (r.status === 'retry' || r.status === 'retrying') return true;
     throw new Error(`${taskId}: ${r.reason ?? r.status}`);
   }
+  private boardRoot(job: WorkflowJob) {
+    return job.owner
+      ? join(repository(this.h.config, job.owner).path, '.devcontour-local')
+      : this.root;
+  }
   async execute(job: WorkflowJob, signal: AbortSignal): Promise<boolean> {
     const guard = () => {
       signal.throwIfAborted();
@@ -311,6 +317,11 @@ export class LeadRunner {
         // Пауза человека без времени записана прежней версией. Когда она
         // поставлена, неизвестно, а отсутствие сведений — не разрешение:
         // такая пауза стоит до явного продолжения.
+        // В режиме агента перенесённую базу проверяет сам цикл: её gates
+        // прошли — ожидание снято (base-check.ts); в режиме оператора это
+        // по-прежнему решение человека.
+        if (s.paused && s.pauseReason === 'base-check' && !tasks.every((t) => t.status === 'done'))
+          await checkBase(this.h, { data: this.root, state: this.boardRoot(job) }, guard, signal);
         const decided =
           s.paused &&
           (s.pauseReason === 'runtime' ||
@@ -341,6 +352,8 @@ export class LeadRunner {
         )
           return true;
         if (!tasks.every((t) => t.status === 'done')) {
+          if (s.paused && s.pauseReason === 'base-check')
+            await checkBase(this.h, { data: this.root, state: this.boardRoot(job) }, guard, signal);
           if (s.paused && s.pauseReason === 'shutdown')
             this.h.store.atomic(() => {
               guard();

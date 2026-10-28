@@ -398,6 +398,31 @@ test('A product release needs every local board and real joint tests; acceptance
     assert.throws(() => f.runner.verify(change.id), /завершите/);
     await f.run();
     assert.equal(f.view().features[0].status, 'awaiting-verification');
+    // A live unfinished task keeps the release uncovered, and the refusal names it.
+    const late = f.h.createBoard('Поздняя правка', '', 'app');
+    const pending = f.h.addTask(late.id, {
+      ...input('Поздняя правка блокировки'),
+      repositoryId: 'app',
+      requirements: f.store.read().tasks.find((t) => t.repositoryId === 'app')!.requirements,
+    });
+    assert.equal(f.view().features[0].status, 'in-progress');
+    assert.throws(
+      () => f.runner.verify(change.id),
+      (e: Error) =>
+        /не покрыт/.test(e.message) &&
+        e.message.includes('история app/block: не подтверждены задачи ' + pending.id),
+    );
+    // A cancelled task is not current work: it stays visible as excluded and
+    // does not hold the release open.
+    f.h.cancel(pending.id, 'Правка не нужна');
+    assert.equal(f.view().features[0].status, 'awaiting-verification');
+    const local = f.intent.report({ repositoryId: 'app', releaseId: 'mvp' }) as {
+      coverageComplete: boolean;
+      stories: { excludedTasks: { id: string; reason: string }[]; taskIds: string[] }[];
+    };
+    assert.equal(local.coverageComplete, true);
+    assert.deepEqual(local.stories[0].excludedTasks, [{ id: pending.id, reason: 'cancelled' }]);
+    assert.ok(!local.stories[0].taskIds.includes(pending.id));
     assert.throws(() => f.runner.verify(change.id), /примите/);
     await f.accept();
     assert.throws(() => new Workspace(f.h).start(change.id), /runner/);

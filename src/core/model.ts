@@ -3,6 +3,7 @@ import type { FailureKind } from './failure.ts';
 import { priceSchema } from './usage.ts';
 import type { ReviewInspection } from './review.ts';
 import { z } from 'zod';
+import { GATE_SCOPE_LIMIT, gateScopeTooBig } from 'devcontour-harness/contracts';
 import type { CompletionReceipt } from './sync-model.ts';
 import {
   environmentSchema,
@@ -132,6 +133,16 @@ export const requirementLink = z.strictObject({
   testId: z.string().min(1).max(300).optional(),
 });
 export type RequirementLink = z.infer<typeof requirementLink>;
+/**
+ * Предел ссылок на gates в одной области задачи (собственная область и
+ * область потребителя) берётся из harness (`GATE_SCOPE_LIMIT`): поручение
+ * исполнения проверяет тот же предел, и задача, принятая здесь, не падает при
+ * проекции в движок. Он равен пределу gates профиля стека: задача может
+ * назвать весь профиль, и «включите gate в область задачи» выполнимо одной
+ * задачей. Превышение — понятный отказ с величиной и исправлением.
+ */
+export { GATE_SCOPE_LIMIT };
+const gateScope = z.array(gateRef).max(GATE_SCOPE_LIMIT, { error: gateScopeTooBig });
 export const taskInput = z.object({
   preparation: preparationBinding.optional(),
   // Which approved product feature this task delivers, so the panel can show
@@ -158,7 +169,7 @@ export const taskInput = z.object({
   // доказательства параллельная декомпозиция упирается в общий набор, где
   // зелёный gate не различает, чьи ожидания закрыты. Полный набор остаётся
   // обязательным для приёмки доски и релиза.
-  gates: z.array(gateRef).max(20).optional(),
+  gates: gateScope.optional(),
   /**
    * Явная область проверок потребителей: компоненты, которые зависят от
    * компонента задачи, и их gates или группы. Они выполняются на integration
@@ -166,7 +177,7 @@ export const taskInput = z.object({
    * не проверяются — ничего не подключается неявно.
    */
   consumers: z
-    .array(z.object({ repositoryId: id, gates: z.array(gateRef).min(1).max(20) }))
+    .array(z.object({ repositoryId: id, gates: gateScope.min(1) }))
     .max(10)
     .optional(),
   /**
@@ -369,6 +380,12 @@ export interface Evidence {
    * иначе `case-[REDACTED]` совпал бы с тестом, которого никто не запускал.
    */
   tests?: { id: string; status: 'passed' | 'failed' | 'skipped'; opaque?: true }[];
+  /**
+   * Повтор провала gate интеграции на том же SHA (harness): `of` — ID
+   * повторённой записи; `flaky` — повтор прошёл, и первый провал вызван
+   * средой; `confirmed` — провал подтвердился.
+   */
+  recheck?: { of: string; outcome: 'flaky' | 'confirmed' };
   /**
    * Манифест обрезан по пределу размера: по нему нельзя судить об отсутствии
    * теста, поэтому подтверждение на уровне testcase по такому evidence не
@@ -608,6 +625,12 @@ export interface ContractAttempt {
   authorRuntime: string;
   reviewerRuntime: string;
 }
+/** Перенос базы прогонов компонента: от какого SHA к какому. */
+export interface BaseMove {
+  repositoryId: string;
+  from: string;
+  to: string;
+}
 export interface DevContourState {
   preparation?: PreparationState;
   team?: { member: string };
@@ -658,7 +681,22 @@ export interface DevContourState {
    * базы, перезакрепление контекста после смены контракта. Они видны рядом с
    * паузой и её не снимают.
    */
-  waits?: { kind: 'base-check' | 'context-lock'; detail: string; at: string; operation?: string }[];
+  waits?: {
+    kind: 'base-check' | 'context-lock';
+    detail: string;
+    at: string;
+    operation?: string;
+  }[];
+  /**
+   * Непроверенный перенос базы при ожидании `base-check`: диапазон каждого
+   * компонента с последней проверки (`from` — первая непроверенная база).
+   * Автоматическая проверка базы сверяет по нему чувствительные пути (D42).
+   * Ожидание принадлежит договору harness, поэтому диапазон хранится рядом
+   * с ним и привязан к нему временем постановки (`at` = `waits[].at`):
+   * снятое ожидание удаляет диапазон, а ожидание, поставленное без него
+   * (прежней версией после отката), чужого диапазона не наследует.
+   */
+  baseMoves?: { at: string; bases: BaseMove[] };
   /**
    * Классы отказов, держащие выдачу. Их несколько намеренно: временный
    * обрыв и отказ провайдера могут прийти с разных досок, и запомнив

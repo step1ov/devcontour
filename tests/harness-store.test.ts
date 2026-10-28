@@ -521,9 +521,14 @@ test('движок поверх адаптера: выдача, fencing чужо
   const snapshot = JSON.stringify(store.read().runs);
   assert.throws(() => engine.heartbeat(a.id, 'x'.repeat(32)), refused('LEASE_STALE'));
   assert.equal(JSON.stringify(store.read().runs), snapshot, 'чужой токен ничего не записал');
+  // Быстрый путь такта: только активные попытки, без построения истории.
+  const active = (v: object) =>
+    (v as { activeAttempts?: () => { id: string }[] }).activeAttempts?.().map((x) => x.id);
+  assert.deepEqual(adapter.read(active), [a.id]);
   now += policy.leaseMs + 1;
   engine.expire();
   assert.equal(store.read().runs[0].status, 'expired');
+  assert.deepEqual(adapter.read(active), [], 'истёкшая попытка не активна');
   assert.throws(
     () => engine.phase(a.id, a.token, 'verifying', { candidateSha: 'c'.repeat(40) }),
     refused('LEASE_STALE'),
