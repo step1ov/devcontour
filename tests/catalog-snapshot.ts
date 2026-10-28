@@ -7,5 +7,8 @@
 // `reference` и `crossChecks[].artifacts`; область gates задачи (`gates`,
 // `consumers[].gates`) — до предела gates профиля (100 вместо 20); прочие
 // операции байтово прежние. Digest перевзят с движком 0.1.0-alpha.19.
-export const CATALOG_DIGEST = 'ac0e8747b898624ff186efa43593f7b16cb4ea6e2a2fa3be8f5d1062bf3b8993';
+// Намеренное изменение: новая пишущая операция task_story (привязка
+// выполненной задачи к истории INTENT без изменения постановки) после
+// task_assign; прочие операции байтово прежние.
+export const CATALOG_DIGEST = '6e4d0841f952adaa76f15065e6746d9361c4a62e23562428273cbae2bb731664';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

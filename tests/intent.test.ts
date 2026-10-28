@@ -5,11 +5,13 @@ import { join } from 'node:path';
 import { setupDemo } from '../src/demo.ts';
 import { demoPool } from './demo-pool.ts';
 import { loadConfig } from '../src/runner/config.ts';
-import { DevContour } from '../src/core/service.ts';
+import { DevContour, digest, specDigest } from '../src/core/service.ts';
+import { AgentService } from '../src/application/agent.ts';
 import { Store } from '../src/core/store.ts';
 import { repositories } from '../src/core/repositories.ts';
-import { IntentService } from '../src/runner/intent.ts';
+import { IntentService, type StoryGap } from '../src/runner/intent.ts';
 import { parseIntent, renderIntent } from '../src/core/intent.ts';
+import type { RequirementLink } from '../src/core/model.ts';
 import {
   parseRequirements,
   requirementSnapshot,
@@ -19,7 +21,7 @@ import {
 import { updateBase } from '../src/runner/base-update.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { adapters, type AgentRequest } from '../src/runner/adapters.ts';
-import { acceptBoard } from '../src/runner/agent-control.ts';
+import { acceptBoard, reviewPlan } from '../src/runner/agent-control.ts';
 import { git, command } from '../src/runner/process.ts';
 import { syncGit } from '../src/runner/git-sync.ts';
 import { input } from './helpers.ts';
@@ -125,6 +127,14 @@ type Coverage = {
     excludedTasks: { id: string; reason: string }[];
     criteria: { requirements: { status: string }[] }[];
   }[];
+};
+/** Покрытие с задачами, привязанными к истории после приёмки (`task_story`). */
+type Bound = Coverage & {
+  stories: {
+    unverifiedTaskIds: string[];
+    boundTasks?: { id: string; boundAfterAcceptance: true; fresh: boolean }[];
+  }[];
+  invalidStoryBindings?: { taskId: string; id: string }[];
 };
 function links(f: Awaited<ReturnType<typeof fixture>>) {
   const binding = (f.intent.snapshot({ repositoryId: 'main', storyId: 'list' }) as any).stories[0]
@@ -499,6 +509,313 @@ test('Покрытие INTENT подтверждается тем же прав�
     const report = f.report();
     assert.equal(report.coverageComplete, false);
     assert.equal(report.stories[0].criteria[0].verified, false);
+  } finally {
+    await scheduler.stop();
+    await f.close();
+  }
+});
+
+test('Утверждение отклоняет задачу с подробным REQ истории без связи с историей до вызова модели', async () => {
+  const f = await fixture();
+  try {
+    const [story] = links(f) as RequirementLink[];
+    const board = f.h.createBoard('Story binding at approval', '', 'main');
+    const detailed = f.h.addTask(board.id, { ...input(), requirements: links(f).slice(1) });
+    // Предупреждение плана — до ревью: ведущий исправит черновик сразу.
+    const warned = new AgentService(f.h).execute({
+      operation: 'task_create',
+      input: { boardId: board.id, task: { ...input(), requirements: links(f).slice(1) } },
+    }) as { taskId: string; storyGaps: StoryGap[] };
+    assert.deepEqual(warned.storyGaps[0].candidates, [
+      { storyId: 'list', source: 'INTENT.md', id: 'REQ-intent-list', digest: story.digest },
+    ]);
+    assert.equal(warned.storyGaps[0].kind, 'missing-story');
+    assert.deepEqual(warned.storyGaps[0].requirementIds, ['REQ-list']);
+    f.h.cancel(warned.taskId, 'Duplicate draft of the warning check');
+    const imported = new AgentService(f.h).execute({
+      operation: 'plan_import',
+      input: {
+        plan: {
+          title: 'Imported unbound plan',
+          description: 'Plan whose task lacks the story link',
+          tasks: [{ ...input(), key: 'a', contracts: [], requirements: links(f).slice(1) }],
+        },
+      },
+    }) as { boardId: string; storyGaps: StoryGap[]; storyWarning: string };
+    assert.equal(imported.storyGaps.length, 1);
+    assert.deepEqual(imported.storyGaps[0].requirementIds, ['REQ-list']);
+    assert.match(imported.storyWarning, /REQ-intent-list/);
+    const refusal = (e: unknown) => {
+      const message = (e as Error).message;
+      assert.match(message, new RegExp(detailed.id + ': REQ-list входит в критерии истории list'));
+      assert.ok(message.includes('"id":"REQ-intent-list"'), message);
+      assert.ok(message.includes(story.digest), message);
+      return true;
+    };
+    assert.throws(() => f.h.approve(board.id), refusal);
+    // Ревью плана отклоняет тот же план до модели.
+    let calls = 0;
+    const counting = {
+      name: 'counting',
+      execute: () => {
+        calls++;
+        return Promise.reject(new Error('model must not be called'));
+      },
+    };
+    const runtimes = { codex: counting, claude: counting } as unknown as Parameters<
+      typeof reviewPlan
+    >[4];
+    await assert.rejects(reviewPlan(f.h, f.root, board.id, 'codex', runtimes), refusal);
+    assert.equal(calls, 0);
+    assert.equal(f.store.read().tasks.find((t) => t.id === detailed.id)!.status, 'draft');
+    // Устаревшая связь с историей — тот же отказ с текущим digest.
+    const stale = links(f) as RequirementLink[];
+    const earlier = 'Earlier text of the story before the map was revised.';
+    stale[0] = { ...stale[0], text: earlier, digest: digest(earlier) };
+    f.h.editTask(detailed.id, { ...input(), requirements: stale }, specDigest(detailed));
+    assert.throws(() => f.h.approve(board.id), /REQ-intent-list устарела/);
+    // REQ, не входящий ни в одну историю, связи с историей не требует.
+    const excluded = requirementSnapshot(f.config.repository, 'docs/spec.md').requirements.find(
+      (r) => r.id === 'REQ-out',
+    )!;
+    const current = f.store.read().tasks.find((t) => t.id === detailed.id)!;
+    f.h.editTask(
+      detailed.id,
+      {
+        ...input(),
+        requirements: [
+          {
+            ...excluded,
+            source: 'docs/spec.md',
+            gate: f.config.gates[0].id,
+            scenario: 'Billing stays out of scope',
+          },
+        ],
+      },
+      specDigest(current),
+    );
+    const other = f.h.createBoard('Story binding: unrelated requirement', '', 'main');
+    f.h.addTask(other.id, { ...input(), requirements: links(f) });
+    f.h.approve(other.id);
+    f.h.approve(board.id);
+    assert.ok(
+      f.store
+        .read()
+        .tasks.filter((t) => t.id === detailed.id || t.id === warned.taskId)
+        .every((t) => t.status !== 'draft'),
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test('Нечитаемая карта INTENT останавливает утверждение, а отсутствующая — нет', async () => {
+  const f = await fixture();
+  try {
+    const detailedOnly = links(f).slice(1) as RequirementLink[];
+    const board = f.h.createBoard('Unreadable intent map', '', 'main');
+    f.h.addTask(board.id, { ...input(), requirements: detailedOnly });
+    const markdown = await readFile(join(f.config.repository, 'INTENT.md'), 'utf8');
+    await writeFile(
+      join(f.config.repository, 'INTENT.md'),
+      markdown.replace('Product context:', 'Weakened context:'),
+    );
+    await git(f.config.repository, 'commit', '-qam', 'Hand-edited intent prose');
+    assert.throws(
+      () => f.h.approve(board.id),
+      /Карта INTENT INTENT\.md компонента main не читается/,
+    );
+    assert.match(
+      (
+        new AgentService(f.h).execute({
+          operation: 'task_create',
+          input: { boardId: board.id, task: { ...input(), requirements: detailedOnly } },
+        }) as { storyWarning: string }
+      ).storyWarning,
+      /не читается/,
+    );
+    await git(f.config.repository, 'rm', '-q', 'INTENT.md');
+    await git(f.config.repository, 'commit', '-m', 'No intent map');
+    f.h.approve(board.id);
+    assert.ok(f.store.read().tasks.every((t) => t.status === 'ready'));
+  } finally {
+    await f.close();
+  }
+});
+
+test('task_story привязывает принятую задачу к истории без изменения постановки и теряет силу со сменой истории', async () => {
+  const f = await fixture();
+  const scheduler = new Scheduler(f.h, f.root);
+  const agent = new AgentService(f.h);
+  const reason = 'Work implements the story but was approved unbound';
+  const bind = (taskIds: string[], storyId = 'list', repositoryId?: string) =>
+    agent.execute({
+      operation: 'task_story',
+      input: { storyId, taskIds, reason, ...(repositoryId ? { repositoryId } : {}) },
+    }) as { binding: { id: string } };
+  const report = () => f.report() as Bound;
+  const read = (id: string) => f.store.read().tasks.find((t) => t.id === id)!;
+  try {
+    // Задачи утверждены, когда карты INTENT ещё не было: так возникает
+    // принятая работа без связи с историей.
+    const all = links(f) as RequirementLink[];
+    const detailedOnly = all.slice(1);
+    await git(f.config.repository, 'rm', '-q', 'INTENT.md');
+    await git(f.config.repository, 'commit', '-m', 'Intent not yet written');
+    const board = f.h.createBoard('Unbound accepted work', '', 'main');
+    const done = f.h.addTask(board.id, { ...input('Unbound A'), requirements: detailedOnly });
+    const other = f.h.addTask(board.id, { ...input('Unbound B'), requirements: detailedOnly });
+    const linked = f.h.addTask(board.id, { ...input('Linked'), requirements: all });
+    f.h.approve(board.id);
+    await git(f.config.repository, 'revert', '--no-edit', 'HEAD');
+    await scheduler.init();
+    await updateBase(f.config, f.root);
+    f.h.pause(false);
+    await scheduler.drain();
+    for (const t of [done, other, linked])
+      assert.equal(read(t.id).status, 'done', read(t.id).failure);
+    const accepted = read(done.id);
+    assert.equal(report().coverageComplete, false);
+    assert.deepEqual(report().stories[0].unverifiedTaskIds.sort(), [done.id, other.id].sort());
+
+    // Привязка из Git sync проверяется заново: запись к истории, в критерии
+    // которой REQ задачи не входит, не действует и не уводит задачу из истории.
+    f.store.change('fixture.foreign-binding', (s) => {
+      s.tasks.find((t) => t.id === done.id)!.storyBindings = [
+        {
+          source: 'INTENT.md',
+          id: 'REQ-intent-export',
+          digest: 'e'.repeat(64),
+          boundAt: accepted.createdAt,
+        },
+      ];
+    });
+    assert.ok(report().stories[0].taskIds.includes(done.id));
+    assert.deepEqual(report().invalidStoryBindings, [{ taskId: done.id, id: 'REQ-intent-export' }]);
+    f.store.change('fixture.drop-foreign-binding', (s) => {
+      delete s.tasks.find((t) => t.id === done.id)!.storyBindings;
+    });
+
+    // Отказы: неизвестная история, REQ вне критериев, не выполненная задача,
+    // задача со связью в постановке, задачи чужого компонента.
+    assert.throws(() => bind([done.id], 'absent'), /Неизвестная история absent/);
+    assert.throws(() => bind([done.id], 'export'), /REQ-list не входит в критерии истории export/);
+    const draftBoard = f.h.createBoard('Unbound draft', '', 'main');
+    const draft = f.h.addTask(draftBoard.id, { ...input(), requirements: detailedOnly });
+    assert.throws(() => bind([done.id, draft.id]), /только выполненную задачу/);
+    f.h.cancel(draft.id, 'Not part of the binding check');
+    assert.throws(() => bind([linked.id]), /уже связана с историей в постановке/);
+    const main = repositories(f.config)[0];
+    f.config.repositories = [main, { ...main, id: 'library', name: 'Library' }];
+    const shared = f.h.createBoard('Library work', '', 'library');
+    const foreign = f.h.addTask(shared.id, { ...input(), repositoryId: 'library' });
+    assert.throws(() => bind([done.id, foreign.id]), /одного компонента/);
+    assert.throws(() => bind([done.id], 'list', 'library'), /одного компонента/);
+    assert.throws(
+      () =>
+        f.h.bindStory({
+          repositoryId: 'library',
+          storyId: 'list',
+          binding: { source: 'INTENT.md', id: 'REQ-intent-list', digest: all[0].digest },
+          criteria: [JSON.stringify(['docs/spec.md', 'REQ-list'])],
+          taskIds: [done.id],
+          reason,
+          actor: 'operator',
+        }),
+      /вне компонента library/,
+    );
+    f.h.cancel(foreign.id, 'Only used for the component check');
+    f.config.repositories = [main];
+    // В operator mode агент сам историю не подтверждает.
+    f.config.approvalMode = 'operator';
+    assert.throws(() => bind([other.id]), /выполняет оператор: devcontour task-story/);
+    f.config.approvalMode = 'agent';
+    assert.equal(read(done.id).storyBindings, undefined);
+    assert.equal(read(other.id).storyBindings, undefined);
+
+    // Оператор привязывает через CLI, агент в agent mode — через API.
+    const cli = await command(
+      [
+        process.execPath,
+        '--import',
+        'tsx',
+        'src/cli.ts',
+        'task-story',
+        '--story',
+        'list',
+        '--tasks',
+        done.id,
+        '--reason',
+        reason,
+        '--data',
+        f.root,
+      ],
+      process.cwd(),
+      { timeoutMs: 30000 },
+    );
+    assert.equal(cli.code, 0, cli.stderr);
+    assert.equal((JSON.parse(cli.stdout) as { actor: string }).actor, 'operator');
+    assert.equal(bind([other.id]).binding.id, 'REQ-intent-list');
+    const bound = read(done.id);
+    assert.equal(bound.approvedDigest, accepted.approvedDigest);
+    assert.equal(specDigest(bound), accepted.approvedDigest);
+    assert.deepEqual(bound.requirements, accepted.requirements);
+    const journaled = f.store
+      .events()
+      .filter((e) => e.type === 'task.story')
+      .map((e) => JSON.stringify(e.data));
+    assert.equal(journaled.length, 2);
+    assert.ok(
+      journaled.some(
+        (e) => e.includes(done.id) && e.includes(reason) && e.includes('"actor":"operator"'),
+      ),
+    );
+    assert.ok(journaled.some((e) => e.includes(other.id) && e.includes('"actor":"agent"')));
+    assert.equal(report().coverageComplete, true);
+    assert.equal(report().stories[0].verified, true);
+    assert.deepEqual(
+      report()
+        .stories[0].boundTasks?.map((t) => t.id)
+        .sort(),
+      [done.id, other.id].sort(),
+    );
+    assert.ok(report().stories[0].boundTasks?.every((t) => t.boundAfterAcceptance && t.fresh));
+    assert.equal(report().invalidStoryBindings, undefined);
+    // Привязка не заменяет доказательство: без записи теста подробной связи
+    // история снова не подтверждена.
+    const proof = f.store.read().runs.find((r) => r.taskId === done.id)!.evidence;
+    f.store.change('fixture.remove-proof', (s) => {
+      s.runs.find((r) => r.taskId === done.id)!.evidence = [];
+    });
+    assert.equal(report().stories[0].verified, false);
+    f.store.change('fixture.restore-proof', (s) => {
+      s.runs.find((r) => r.taskId === done.id)!.evidence = proof;
+    });
+    assert.equal(report().stories[0].verified, true);
+
+    // Текст истории изменился: автор его не видел, привязка к прежнему
+    // тексту историю больше не подтверждает, и повторная привязка этого не
+    // обходит — нужна корректировка с повторным прогоном.
+    const altered = definition();
+    altered.stories[0].criteria[0].text = 'Show the catalogue with a result count.';
+    await f.save(altered);
+    assert.equal(report().coverageComplete, false);
+    assert.ok(report().stories[0].unverifiedTaskIds.includes(done.id));
+    assert.equal(report().stories[0].boundTasks?.[0].fresh, false);
+    assert.throws(() => bind([done.id]), /уже привязана к истории list.*board_correct/);
+    assert.equal(report().stories[0].verified, false);
+
+    // Замена корректировкой привязку оригинала не наследует, а заменённый
+    // оригинал больше не привязать.
+    // Приёмка доски здесь не предмет проверки: ревизия помечается принятой.
+    f.store.change('fixture.accept-revision', (s) => {
+      s.boards.find((b) => b.id === board.id)!.revisions.at(-1)!.status = 'accepted';
+    });
+    const corrected = f.h.correct(board.id, [done.id], 'Re-run against the revised story text');
+    const replacement = read(corrected.replacements[done.id]);
+    assert.equal(replacement.status, 'draft');
+    assert.equal(replacement.storyBindings, undefined);
+    assert.throws(() => bind([done.id]), /заменена корректировкой/);
   } finally {
     await scheduler.stop();
     await f.close();

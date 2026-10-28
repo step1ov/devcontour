@@ -1,6 +1,11 @@
 import { Preparation } from '../core/preparation.ts';
 import { preparationInputs, type PreparationOperation } from '../core/preparation-model.ts';
-import { IntentService, intentInputs } from '../runner/intent.ts';
+import {
+  IntentService,
+  intentInputs,
+  storyBindingInput,
+  storyGapMessage,
+} from '../runner/intent.ts';
 import { Observability, observabilityInputs } from './observability.ts';
 import { ProjectMemory, memoryInputs } from './memory.ts';
 import { SignalInbox, signalInput } from '../core/signals.ts';
@@ -16,7 +21,7 @@ import { z } from 'zod';
 import { readFileSync } from 'node:fs';
 import { AgentContext, contextInputs, type ContextOperation } from './context.ts';
 import { DevContour, scopeGapWarning, specDigest } from '../core/service.ts';
-import { taskInput, DomainError } from '../core/model.ts';
+import { taskInput, DomainError, type Task } from '../core/model.ts';
 import { planResult } from '../core/plan.ts';
 import { Workspace, changeSetInput } from '../core/workspace.ts';
 import { servingPreview } from '../core/preview.ts';
@@ -64,6 +69,7 @@ export const agentInputs = {
   task_assign: z
     .object({ taskId: id, member: z.string().regex(/^[A-Za-z0-9_.@-]{1,80}$/) })
     .strict(),
+  task_story: storyBindingInput,
   board_correct: z
     .object({
       boardId: id,
@@ -227,6 +233,8 @@ export const descriptions: Record<AgentOperation, string> = {
   task_retry:
     'Explicitly retry a failed or cancelled task within the attempt budget. Diagnose the failure first.',
   task_assign: 'Assign a task to a team member. Assignment is not a distributed lease.',
+  task_story:
+    "Bind done tasks to an INTENT story without changing their approved spec, when they link the story's detailed REQs but not REQ-intent-<story>. Every detailed REQ of each task must be in that story's criteria; the story digest is pinned from committed HEAD and a reason is journaled. intent_report marks these tasks boundAfterAcceptance: the story text was not in the author's prompt. Drafts get the REQ-intent link in requirements instead.",
   board_correct:
     'Create a correction after board acceptance, preserving history and recalculating transitive impact.',
   changeset_create:
@@ -399,6 +407,27 @@ export class AgentService {
     const { token: _token, ...publicJob } = job;
     return publicJob;
   }
+  /**
+   * Предупреждение, не отказ: черновики, которые утверждение отклонит из-за
+   * отсутствующей связи с историей INTENT. Ведущий исправляет их до ревью
+   * плана, не тратя вызов модели.
+   */
+  private storyWarning(boardId?: string, tasks?: Task[]) {
+    const state = this.h.store.read();
+    const revision = boardId && state.boards.find((b) => b.id === boardId)?.revisions.at(-1);
+    const drafts =
+      tasks ??
+      (revision
+        ? state.tasks.filter((t) => revision.taskIds.includes(t.id) && t.status === 'draft')
+        : []);
+    try {
+      const storyGaps = new IntentService(this.h).storyGaps(drafts);
+      return storyGaps.length ? { storyGaps, storyWarning: storyGapMessage(storyGaps) } : {};
+    } catch (error) {
+      // Нечитаемая карта — тоже предупреждение: утверждение её отклонит.
+      return { storyWarning: error instanceof Error ? error.message : String(error) };
+    }
+  }
   private dispatch(raw: unknown): Record<string, unknown> {
     if (!checkJsonBytes(raw, 100000).within)
       throw new DomainError('Запрос превышает 100000 байт', 413);
@@ -477,7 +506,8 @@ export class AgentService {
       }
       case 'plan_import': {
         const value = agentInputs.plan_import.parse(input);
-        return h.importPlan(value.plan, value.boardId);
+        const result = h.importPlan(value.plan, value.boardId);
+        return { ...result, ...this.storyWarning(result.boardId) };
       }
       case 'board_create': {
         const value = agentInputs.board_create.parse(input);
@@ -487,7 +517,12 @@ export class AgentService {
       case 'task_create': {
         const value = agentInputs.task_create.parse(input),
           task = h.addTask(value.boardId, value.task);
-        return { taskId: task.id, status: task.status, specDigest: specDigest(task) };
+        return {
+          taskId: task.id,
+          status: task.status,
+          specDigest: specDigest(task),
+          ...this.storyWarning(undefined, [task]),
+        };
       }
       case 'task_edit': {
         const value = agentInputs.task_edit.parse(input),
@@ -504,6 +539,15 @@ export class AgentService {
         h.assign(value.taskId, value.member);
         return value;
       }
+      case 'task_story':
+        // Привязка подтверждает историю принятой работой — решение того, кто
+        // утверждает. В operator mode агент её не делает сам.
+        if (h.config.approvalMode === 'operator')
+          throw new DomainError(
+            'В approvalMode operator привязку к истории выполняет оператор: devcontour task-story --story ID --tasks T1,T2 --reason ...',
+            409,
+          );
+        return new IntentService(h).bindStory(input, 'agent');
       case 'board_correct': {
         const value = agentInputs.board_correct.parse(input),
           result = h.correct(value.boardId, value.roots, value.reason);

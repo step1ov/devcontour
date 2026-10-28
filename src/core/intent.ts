@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { DomainError, relativePath } from './model.ts';
+import { DomainError, relativePath, type Task } from './model.ts';
 import { productMap, featureScope, validateProductMap } from './product-map.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,50}$/);
@@ -107,6 +107,27 @@ export type WorkspaceIntent = Extract<IntentDocument, { kind: 'workspace' }>;
 export const intentRequirementId = (storyId: string) => 'REQ-intent-' + storyId;
 export const referenceKey = (ref: { source: string; id: string }) =>
   JSON.stringify([ref.source, ref.id]);
+/**
+ * Проверка привязки к истории INTENT при утверждении. Ядро не читает Git:
+ * карту читает runner (`IntentService`), хост внедряет его так же, как
+ * проверку продуктового релиза. Без карты компонента проверка ничего не делает.
+ */
+export interface StoryBindingGuard {
+  assertStoryBindings(tasks: Task[]): void;
+  /** Читает карты заранее; возвращённая проверка только сравнивает. */
+  prepareStoryBindings(tasks: Task[]): (tasks: Task[]) => void;
+}
+/**
+ * Привязка выполненной задачи к истории после приёмки (`task_story`).
+ * Классификация, как `featureId`: в постановку и `specDigest` не входит,
+ * автор задачи текста истории не видел — отчёт помечает такую задачу.
+ */
+export interface StoryBinding {
+  source: string;
+  id: string;
+  digest: string;
+  boundAt: string;
+}
 
 export function validateIntent(value: z.infer<typeof intentDefinition>) {
   const unique = (values: string[], label: string) => {

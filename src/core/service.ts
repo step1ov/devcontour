@@ -23,7 +23,8 @@ import {
   type CodedIssue,
   type PropertyRecovery,
 } from 'devcontour-harness';
-import { closeEpisodeIfBasisChanged } from '../harness/host.ts';
+import { closeEpisodeIfBasisChanged, storyGuard } from '../harness/host.ts';
+import { referenceKey, type StoryBinding } from './intent.ts';
 import { approvalPolicyDigest } from '../harness/policy.ts';
 import { planResult } from './plan.ts';
 import { boardOwner, completion, receiptHolds, receiptRecordBytes } from './sync-state.ts';
@@ -1060,6 +1061,15 @@ export class DevContour {
       }),
     );
   }
+  /**
+   * Задача, ссылающаяся на подробный REQ из критериев истории, обязана нести
+   * и связь с самой историей (`REQ-intent-<story>`) текущего digest. Карту
+   * читает внедрённая проверка runner; без карты компонента — ничего, а
+   * карта, которую не прочитать, — отказ.
+   */
+  assertStoryBindings(tasks: Task[]) {
+    if (tasks.length) storyGuard(this).assertStoryBindings(tasks);
+  }
   approve(
     boardId: string,
     taskIds?: string[],
@@ -1082,6 +1092,13 @@ export class DevContour {
     },
   ) {
     const policy = this.planPolicyDigest();
+    // Карты INTENT читаются до транзакции записи: Git не держит её открытой.
+    // Внутри — только сравнение черновиков с прочитанными картами.
+    const before = this.store.read();
+    const revision = before.boards.find((b) => b.id === boardId)?.revisions.at(-1);
+    const storyCheck = storyGuard(this).prepareStoryBindings(
+      before.tasks.filter((t) => revision?.taskIds.includes(t.id) && t.status === 'draft'),
+    );
     return this.currentChange('board.approved', (s) => {
       developmentBinding(s);
       const r = activeRevision(s, boardId);
@@ -1116,6 +1133,9 @@ export class DevContour {
           }))
       )
         throw new DomainError('План изменился во время ревью; требуется повторная проверка');
+      // Связь с историей INTENT — предусловие выпуска, как связь с фичей:
+      // без неё принятая работа держала бы историю непроверенной навсегда.
+      storyCheck(selected.map((id) => task(s, id)).filter((t) => t.status === 'draft'));
       const repinned: string[] = [];
       for (const id of selected) {
         const t = task(s, id);
@@ -1211,7 +1231,11 @@ export class DevContour {
           approvedAt: undefined,
           approvedDigest: undefined,
           approvedScope: undefined,
+          approvedPolicy: undefined,
           approval: undefined,
+          // Привязка к истории подтверждала принятый результат оригинала;
+          // замена связывается с историей своей постановкой.
+          storyBindings: undefined,
           activeRunId: undefined,
           resultSha: undefined,
           failure: undefined,
@@ -1345,6 +1369,72 @@ export class DevContour {
       const previous = t.featureId;
       t.featureId = featureId;
       return { taskId: t.id, featureId, previous };
+    });
+  }
+  /**
+   * Привязка выполненной задачи к истории INTENT без изменения постановки —
+   * восстановление для работы, принятой без связи с историей. Связь в
+   * `requirements` изменила бы `specDigest` и потребовала бы повторного
+   * прогона; привязка хранится отдельно, как `featureId`. Историю и её digest
+   * на текущей карте проверяет runner (`IntentService.bindStory`); здесь —
+   * сами задачи: выполнена, не заменена, не связана с историей в постановке,
+   * и каждый её подробный REQ входит в критерии этой истории.
+   */
+  bindStory(input: {
+    repositoryId: string;
+    storyId: string;
+    binding: Omit<StoryBinding, 'boundAt'>;
+    criteria: string[];
+    taskIds: string[];
+    reason: string;
+    actor: Approval['actor'];
+  }) {
+    const reason = input.reason.trim();
+    if (reason.length < 10 || reason.length > 5000)
+      throw new DomainError('Укажите причину привязки: от 10 до 5000 символов', 400);
+    const criteria = new Set(input.criteria);
+    return this.store.change('task.story', (s) => {
+      const at = now();
+      for (const id of new Set(input.taskIds)) {
+        const t = task(s, id);
+        if ((t.scope === 'workspace' ? undefined : t.repositoryId) !== input.repositoryId)
+          throw new DomainError(`${t.id}: задача вне компонента ${input.repositoryId}`, 409);
+        if (t.status !== 'done')
+          throw new DomainError(
+            `${t.id}: привязать к истории можно только выполненную задачу; черновику добавьте связь ${input.binding.id} в requirements`,
+            409,
+          );
+        if (s.tasks.some((x) => x.supersedes === t.id))
+          throw new DomainError(`${t.id}: задача заменена корректировкой`, 409);
+        const links = t.requirements ?? [];
+        if (links.some((r) => r.source === input.binding.source))
+          throw new DomainError(`${t.id}: задача уже связана с историей в постановке`, 409);
+        if (!links.length)
+          throw new DomainError(`${t.id}: у задачи нет подробных REQ этой истории`, 409);
+        const outside = links.filter((r) => !criteria.has(referenceKey(r)));
+        if (outside.length)
+          throw new DomainError(
+            `${t.id}: ${outside.map((r) => r.source + '#' + r.id).join(', ')} не входит в критерии истории ${input.storyId}`,
+            409,
+          );
+        // Повторная привязка переподтвердила бы изменённую историю без
+        // прогона: автор новой редакции не видел. Устаревшая привязка
+        // восстанавливается как задача со связью — корректировкой доски.
+        if (t.storyBindings?.some((b) => b.id === input.binding.id))
+          throw new DomainError(
+            `${t.id}: задача уже привязана к истории ${input.storyId}; привязка к изменённой истории не обновляется — нужна корректировка доски (board_correct) с повторным прогоном`,
+            409,
+          );
+        t.storyBindings = [...(t.storyBindings ?? []), { ...input.binding, boundAt: at }];
+      }
+      return {
+        repositoryId: input.repositoryId,
+        storyId: input.storyId,
+        binding: input.binding,
+        taskIds: [...new Set(input.taskIds)],
+        reason,
+        actor: input.actor,
+      };
     });
   }
   // Перенос базы устраняет причину, по которой диспетчер встал, но очередь не

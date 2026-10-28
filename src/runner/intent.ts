@@ -51,6 +51,55 @@ export const intentInputs = {
   intent_report: z.strictObject({ ...scope, releaseId: id }),
   product_view: z.strictObject({ releaseId: id.optional() }),
 };
+/** Вход `task_story`: история компонента, выполненные задачи и обязательная причина. */
+export const storyBindingInput = z.strictObject({
+  ...scope,
+  storyId: id,
+  taskIds: z
+    .array(z.string().regex(/^[A-Za-z0-9_-]{1,80}$/))
+    .min(1)
+    .max(100),
+  reason: z.string().trim().min(10).max(5000),
+});
+/** Задача ссылается на подробный REQ истории, но не на саму историю (или на устаревшую). */
+export interface StoryGap {
+  taskId: string;
+  kind: 'missing-story' | 'stale-story' | 'unknown-story';
+  requirementIds: string[];
+  /** Связь, которую нужно добавить в requirements: история и её текущий digest. */
+  candidates: { storyId: string; source: string; id: string; digest: string }[];
+}
+type GapTask = Pick<Task, 'id' | 'scope' | 'repositoryId' | 'requirements'>;
+type StoryMap = {
+  source: string;
+  stories: { id: string; binding: { id: string; digest: string }; keys: Set<string> }[];
+};
+type StoryMaps = Map<string, StoryMap | null | Error>;
+const gapShown = 5;
+/** Отказ утверждения: что не так и какую связь добавить. */
+export function storyGapMessage(gaps: StoryGap[]) {
+  const link = (c: StoryGap['candidates'][number]) =>
+    JSON.stringify({ source: c.source, id: c.id, digest: c.digest });
+  const lines = gaps.slice(0, gapShown).map((g) => {
+    const stories = g.candidates.map((c) => c.storyId).join(', ');
+    const add =
+      g.candidates.length === 1
+        ? 'добавьте в requirements связь ' + link(g.candidates[0])
+        : 'добавьте в requirements связь с той историей, которую задача реализует: ' +
+          g.candidates.map(link).join(' или ');
+    if (g.kind === 'unknown-story')
+      return `${g.taskId}: связь ${g.requirementIds.join(', ')} не называет историю текущей карты INTENT`;
+    if (g.kind === 'stale-story')
+      return `${g.taskId}: связь ${g.requirementIds.join(', ')} устарела — история изменилась; ${add}`;
+    return `${g.taskId}: ${g.requirementIds.join(', ')} входит в критерии истории ${stories}, но связи с историей нет — ${add}`;
+  });
+  return (
+    'Задачи не связаны с историями INTENT: ' +
+    lines.join('; ') +
+    (gaps.length > gapShown ? `; и ещё ${gaps.length - gapShown}` : '') +
+    '. Текст связи — intent_snapshot (storyId), gate и сценарий — те же, что у подробного REQ. Без связи intent-report не закроет историю.'
+  );
+}
 function git(root: string, ...args: string[]) {
   return execFileSync('git', args, {
     cwd: root,
@@ -110,6 +159,195 @@ export class IntentService implements ProductReleaseGuard {
     manifest?: Verification['manifest'],
   ) {
     return this.reading(() => this.validateCurrent(proof, selected, manifest));
+  }
+  /**
+   * Пробелы привязки к историям: задача ссылается на REQ из критериев
+   * истории своего компонента, но не несёт `REQ-intent-<история>`, либо её
+   * связь с историей устарела или называет неизвестную историю. Компонент
+   * без карты INTENT в HEAD пробелов не имеет; карта, которую не прочитать
+   * (неверный формат, сбой Git), — отказ с причиной, а не молчаливый пропуск.
+   */
+  storyGaps(tasks: GapTask[]): StoryGap[] {
+    return this.reading(() => this.storyGapsCurrent(tasks, this.storyMaps(tasks)));
+  }
+  /** Отказ утверждения до вызова модели: см. `storyGaps`. */
+  assertStoryBindings(tasks: Task[]) {
+    this.prepareStoryBindings(tasks)(tasks);
+  }
+  /**
+   * Карты читаются заранее, вне транзакции утверждения: в ней остаётся
+   * только сравнение. Карту компонента, которого не было в предварительном
+   * чтении, проверка дочитывает на месте. Окно между чтением и записью —
+   * время одной транзакции; HEAD внутри неё не перечитывается.
+   */
+  prepareStoryBindings(tasks: GapTask[]) {
+    const maps = this.reading(() => this.storyMaps(tasks));
+    return (current: GapTask[]) => {
+      const gaps = this.reading(() => {
+        for (const [owner, map] of this.storyMaps(current.filter((t) => !maps.has(taskOwner(t)!))))
+          maps.set(owner, map);
+        return this.storyGapsCurrent(current, maps);
+      });
+      if (gaps.length) throw new DomainError(storyGapMessage(gaps), 409);
+    };
+  }
+  /**
+   * `task_story`: привязать выполненные задачи к истории текущей карты без
+   * изменения постановки. История и её digest — с HEAD карты; правила самих
+   * задач проверяет ядро в той же транзакции, что и запись.
+   */
+  bindStory(raw: unknown, actor: 'agent' | 'operator') {
+    const input = storyBindingInput.parse(raw);
+    return this.reading(() => {
+      const state = this.h.store.read();
+      const owners = new Set(
+        input.taskIds.map((id) => {
+          const t = state.tasks.find((x) => x.id === id);
+          if (!t) throw new DomainError('Задача не найдена: ' + id, 404);
+          return taskOwner(t);
+        }),
+      );
+      const owner = input.repositoryId ?? [...owners][0];
+      if (!owner || owners.size !== 1 || !owners.has(owner))
+        throw new DomainError('Привязываются задачи одного компонента, владельца истории', 400);
+      const snapshot = this.read(owner);
+      if (snapshot.document.kind !== 'component') throw new DomainError('Нужна карта компонента');
+      const story = snapshot.document.stories.find((s) => s.id === input.storyId);
+      if (!story)
+        throw new DomainError(
+          `Неизвестная история ${input.storyId} в карте ${snapshot.source} компонента ${owner}`,
+          404,
+        );
+      const binding = parseRequirements(snapshot.markdown).find(
+        (b) => b.id === intentRequirementId(story.id),
+      )!;
+      return this.h.bindStory({
+        repositoryId: owner,
+        storyId: story.id,
+        binding: { source: snapshot.source, id: binding.id, digest: binding.digest },
+        criteria: story.criteria.flatMap((c) => c.requirements.map(referenceKey)),
+        taskIds: input.taskIds,
+        reason: input.reason,
+        actor,
+      });
+    });
+  }
+  private storyGapsCurrent(tasks: GapTask[], maps: StoryMaps) {
+    const gaps: StoryGap[] = [];
+    for (const t of tasks) {
+      const owner = taskOwner(t),
+        links = t.requirements ?? [];
+      if (!owner || !links.length) continue;
+      const map = maps.get(owner);
+      if (map instanceof Error) throw map;
+      if (!map) continue;
+      const candidate = (s: (typeof map.stories)[number]) => ({
+        storyId: s.id,
+        source: map.source,
+        id: s.binding.id,
+        digest: s.binding.digest,
+      });
+      const own = links.filter((r) => r.source === map.source),
+        detailed = links.filter((r) => r.source !== map.source);
+      const unknown = own.filter((r) => !map.stories.some((s) => s.binding.id === r.id));
+      if (unknown.length) {
+        gaps.push({
+          taskId: t.id,
+          kind: 'unknown-story',
+          requirementIds: unknown.map((r) => r.id),
+          candidates: [],
+        });
+        continue;
+      }
+      const stale = own.filter((r) =>
+        map.stories.some((s) => s.binding.id === r.id && s.binding.digest !== r.digest),
+      );
+      if (stale.length) {
+        gaps.push({
+          taskId: t.id,
+          kind: 'stale-story',
+          requirementIds: stale.map((r) => r.id),
+          candidates: map.stories
+            .filter((s) => stale.some((r) => r.id === s.binding.id))
+            .map(candidate),
+        });
+        continue;
+      }
+      if (own.length) continue;
+      const stories = map.stories.filter((s) => detailed.some((r) => s.keys.has(referenceKey(r))));
+      if (!stories.length) continue;
+      gaps.push({
+        taskId: t.id,
+        kind: 'missing-story',
+        requirementIds: detailed
+          .filter((r) => stories.some((s) => s.keys.has(referenceKey(r))))
+          .map((r) => r.id),
+        candidates: stories.map(candidate),
+      });
+    }
+    return gaps;
+  }
+  /** Карты компонентов задач со связями: карта, null (карты нет) или ошибка чтения. */
+  private storyMaps(tasks: GapTask[]): StoryMaps {
+    const maps: StoryMaps = new Map();
+    for (const t of tasks) {
+      const owner = taskOwner(t);
+      if (!owner || !t.requirements?.length || maps.has(owner)) continue;
+      try {
+        maps.set(owner, this.storyMap(owner));
+      } catch (error) {
+        maps.set(owner, error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+    return maps;
+  }
+  /**
+   * Истории закоммиченной карты компонента: их связь и REQ критериев. Нет
+   * файла карты в HEAD (или ещё нет коммитов) — null: проверке не подлежит.
+   * Недоступный репозиторий или карта, которую не разобрать, — отказ.
+   */
+  private storyMap(owner: string) {
+    const root = this.root(owner),
+      source = this.source(owner),
+      refuse = (why: string) =>
+        new DomainError(
+          `Карта INTENT ${source} компонента ${owner} не читается: ${why}. Связь задач с историями не проверить — исправьте карту (intent_render) и закоммитьте`,
+          409,
+        );
+    try {
+      this.git(root, 'rev-parse', '--git-dir');
+    } catch {
+      throw refuse('репозиторий недоступен');
+    }
+    let sha: string;
+    try {
+      sha = this.git(root, 'rev-parse', '--verify', '-q', 'HEAD^{commit}');
+    } catch {
+      return null;
+    }
+    let listed: string;
+    try {
+      listed = this.git(root, '--literal-pathspecs', 'ls-tree', sha, '--', source);
+    } catch (error) {
+      throw refuse(error instanceof Error ? error.message.split('\n')[0] : String(error));
+    }
+    if (!listed) return null;
+    let snapshot;
+    try {
+      snapshot = this.read(owner, sha);
+    } catch (error) {
+      throw refuse(error instanceof Error ? error.message.split('\n')[0] : String(error));
+    }
+    if (snapshot.document.kind !== 'component') throw refuse('нужна карта компонента');
+    const bindings = parseRequirements(snapshot.markdown);
+    return {
+      source: snapshot.source,
+      stories: snapshot.document.stories.map((s) => ({
+        id: s.id,
+        binding: bindings.find((b) => b.id === intentRequirementId(s.id))!,
+        keys: new Set(s.criteria.flatMap((c) => c.requirements.map(referenceKey))),
+      })),
+    };
   }
   private root(repositoryId?: string) {
     return repositoryId
@@ -657,6 +895,35 @@ export class IntentService implements ProductReleaseGuard {
         issues.push({ kind: 'stale-exclusion', source: e.source, id: e.id });
     const bindings = parseRequirements(snapshot.markdown);
     const knownStories = new Set(bindings.map((b) => b.id));
+    const intentSource = this.source(repositoryId);
+    // Привязка после приёмки проверяется заново при каждом отчёте: запись
+    // могла прийти через Git sync от чужой установки. Она действует, только
+    // если задача выполнена, не связана с историей в постановке и каждый её
+    // подробный REQ входит в критерии этой истории текущей карты; иначе она
+    // не учитывается и видна в `invalidStoryBindings`.
+    const storyCriteria = new Map(
+      doc.stories.map((s) => [
+        intentRequirementId(s.id),
+        new Set(s.criteria.flatMap((c) => c.requirements.map(referenceKey))),
+      ]),
+    );
+    const validBinding = (t: Task, b: NonNullable<Task['storyBindings']>[number]) => {
+      const links = t.requirements ?? [];
+      const detailed = links.filter((r) => r.source !== intentSource);
+      return (
+        b.source === intentSource &&
+        t.status === 'done' &&
+        !links.some((r) => r.source === intentSource) &&
+        detailed.length > 0 &&
+        detailed.every((r) => storyCriteria.get(b.id)?.has(referenceKey(r)))
+      );
+    };
+    const storyBindings = (t: Task) => (t.storyBindings ?? []).filter((b) => validBinding(t, b));
+    const invalidStoryBindings = owned.flatMap((t) =>
+      (t.storyBindings ?? [])
+        .filter((b) => !validBinding(t, b))
+        .map((b) => ({ taskId: t.id, id: b.id })),
+    );
     const fresh = (task: Task) => {
       return (task.requirements ?? []).every((r) =>
         sectionsAt(r.source)?.some((s) => s.id === r.id && s.digest === r.digest),
@@ -740,15 +1007,32 @@ export class IntentService implements ProductReleaseGuard {
         const requirementKeys = new Set(
           story.criteria.flatMap((c) => c.requirements.map(referenceKey)),
         );
+        // Привязка после приёмки (`task_story`) — явное назначение, как связь
+        // в постановке: задача принадлежит этой истории и не числится
+        // неназначенным вкладом других.
+        const bound = (t: Task) => storyBindings(t).find((b) => b.id === binding.id);
         const belongs = (t: Task) => {
           const links = t.requirements ?? [];
-          if (links.some((r) => r.source === this.source(repositoryId) && r.id === binding.id))
+          if (links.some((r) => r.source === intentSource && r.id === binding.id) || bound(t))
             return true;
           // An unassigned contributor cannot disappear behind another completed task.
           // Explicitly assigned stories of other releases retain their own scope.
           return (
-            !links.some((r) => r.source === this.source(repositoryId) && knownStories.has(r.id)) &&
+            !links.some((r) => r.source === intentSource && knownStories.has(r.id)) &&
+            !storyBindings(t).some((b) => knownStories.has(b.id)) &&
             links.some((r) => requirementKeys.has(referenceKey(r)))
+          );
+        };
+        // Задача, привязанная после приёмки, подтверждает историю тем же
+        // правилом: привязка к текущему тексту истории и доказательство
+        // каждой подробной связи — своё, ведь связи с историей в постановке
+        // нет. Автор задачи текста истории не видел; отчёт это показывает.
+        const boundProven = (t: Task) => {
+          const detailed = (t.requirements ?? []).filter((r) => r.source !== intentSource);
+          return (
+            bound(t)?.digest === binding.digest &&
+            detailed.length > 0 &&
+            detailed.every((r) => proven(t, r))
           );
         };
         const related = tasks.filter(belongs);
@@ -756,18 +1040,29 @@ export class IntentService implements ProductReleaseGuard {
           id: t.id,
           reason: replaced.has(t.id) ? ('superseded' as const) : ('cancelled' as const),
         }));
+        const linked = (t: Task) =>
+          !!t.requirements?.some((r) => r.source === intentSource && r.id === binding.id);
         const eligible = related.filter(
           (t) =>
             completed(t) &&
-            t.requirements?.some(
-              (r) =>
-                r.source === this.source(repositoryId) &&
-                r.id === binding.id &&
-                r.digest === binding.digest &&
-                proven(t, r),
-            ) &&
+            (linked(t)
+              ? t.requirements!.some(
+                  (r) =>
+                    r.source === intentSource &&
+                    r.id === binding.id &&
+                    r.digest === binding.digest &&
+                    proven(t, r),
+                )
+              : boundProven(t)) &&
             checked(t, 'requirement-source'),
         );
+        const boundTasks = related
+          .filter((t) => !linked(t) && bound(t))
+          .map((t) => ({
+            id: t.id,
+            boundAfterAcceptance: true as const,
+            fresh: bound(t)!.digest === binding.digest,
+          }));
         const criteria = story.criteria.map((c) => {
           const requirements = c.requirements.map((r) => {
             const matching = related.filter((t) =>
@@ -812,6 +1107,7 @@ export class IntentService implements ProductReleaseGuard {
           taskIds: related.map((t) => t.id),
           unverifiedTaskIds: related.filter((t) => !eligible.includes(t)).map((t) => t.id),
           excludedTasks,
+          ...(boundTasks.length ? { boundTasks } : {}),
           verified:
             related.length > 0 &&
             related.length === eligible.length &&
@@ -834,6 +1130,7 @@ export class IntentService implements ProductReleaseGuard {
       },
       issues,
       stories,
+      ...(invalidStoryBindings.length ? { invalidStoryBindings } : {}),
       releaseAccepted: false,
       note: 'Coverage of declared REQ sources only. Review source inventory and test adequacy. Completion is historical SHA evidence, not a new whole-product test or release acceptance.',
     };

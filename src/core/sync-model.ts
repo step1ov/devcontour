@@ -169,6 +169,18 @@ const progress = z.strictObject({
   approvedDigest: hash.optional(),
   approvedScope: hash.optional(),
   approval: sharedApprovalSchema.optional(),
+  /** Привязки к историям после приёмки (`task_story`); вне постановки. */
+  storyBindings: z
+    .array(
+      z.strictObject({
+        source: relativePath,
+        id: z.string().regex(/^REQ-[A-Za-z0-9_-]{1,64}$/),
+        digest: hash,
+        boundAt: date,
+      }),
+    )
+    .max(100)
+    .optional(),
 });
 const revision = z.strictObject({
   number: z.number().int().positive(),
