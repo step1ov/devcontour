@@ -714,7 +714,9 @@ digest доказательства продуктового релиза нов
 - **Смена закреплённого движка в checkout DevContour** —
   `node scripts/vendor-harness.mjs ./devcontour-harness-<version>.tgz --commit <SHA исходников>`,
   затем `npm ci` и `npm run check`. Меняются только `package.json`,
-  `package-lock.json` и `vendor/harness`; пакет сам не обновляется.
+  `package-lock.json` и `vendor/harness`; пакет сам не обновляется. Check
+  репозитория harness для уже проверенного архива не повторяется:
+  [руководство разработчика](development.md#три-уровня-проверки).
 
 После обновления — **обязательно полный** `devcontour doctor --workspace W`
 на хосте, до возобновления writers: это проверка среды (CLI агентов,

@@ -98,7 +98,7 @@ shared-library/             код, правила и задачи библио�
 
 ## Развивать DevContour
 
-Начните с [руководства разработчика](docs/development.md), затем прочитайте [архитектуру](docs/architecture.md) и [обоснования решений](docs/decisions.md). Для проверки изменений: `npm run check` и `npm run format:check`.
+Начните с [руководства разработчика](docs/development.md), затем прочитайте [архитектуру](docs/architecture.md) и [обоснования решений](docs/decisions.md). Для проверки правки — `npm run check:fast`, перед push и выпуском — `npm run check` и `npm run format:check` ([три уровня проверки](docs/development.md#три-уровня-проверки)).
 
 [GitHub Actions](https://github.com/step1ov/devcontour/actions) показывает статус опубликованного кода. План развития — в [roadmap](todo/roadmap/2026-09-24-ai-native-development.md). Наличие workflow само по себе не означает успешного прохождения проверок.
 
