@@ -1434,6 +1434,47 @@ test(
     }
   },
 );
+test('Потомок с очищенным окружением завершается и при нелатинской локали', async () => {
+  // С русской локалью ps печатал время старта по-русски, Date.parse давал NaN,
+  // и потомок без метки, найденный только по каталогу, оставался жить.
+  // Команда выходит до первого опроса: потомка находит лишь поиск по каталогу.
+  const saved = { LANG: process.env.LANG, LC_ALL: process.env.LC_ALL };
+  process.env.LANG = process.env.LC_ALL = 'ru_RU.UTF-8';
+  const dir = await mkdtemp(join(tmpdir(), 'devcontour-locale-'));
+  let pid = 0;
+  try {
+    const result = await command(
+      [
+        process.execPath,
+        '-e',
+        `const c=require('child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'ignore',env:{PATH:process.env.PATH}});c.unref();console.log('ORPHAN-PID:'+c.pid);`,
+      ],
+      dir,
+      { contain: { dirs: [dir] }, timeoutMs: 30000 },
+    );
+    pid = Number(/ORPHAN-PID:(\d+)/.exec(result.stdout)?.[1]);
+    assert.ok(pid > 0, 'потомок был запущен');
+    await new Promise((r) => setTimeout(r, 300));
+    let alive = true;
+    try {
+      process.kill(pid, 0);
+    } catch {
+      alive = false;
+    }
+    assert.equal(alive, false, `потомок ${pid} завершён`);
+  } finally {
+    for (const [key, value] of Object.entries(saved))
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    if (pid > 0)
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        /* Already gone. */
+      }
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 test('Проверка повторяется, только если песочница отказала до запуска команды', async () => {
   // Повтор по тексту stderr перезапускал уже начавшуюся команду: её первый
   // провал терялся, а побочные эффекты удваивались. Признак — метка старта,

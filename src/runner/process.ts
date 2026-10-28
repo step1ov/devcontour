@@ -231,6 +231,7 @@ function captureProcessTree(pid?: number): RuntimeDiagnostics['processTree'] {
     };
   const result = spawnSync('ps', ['-axo', 'pid=,ppid=,pgid=,comm='], {
     encoding: 'utf8',
+    env: osToolEnv(),
     timeout: 250,
     maxBuffer: 1_000_000,
   });
@@ -286,11 +287,19 @@ export async function git(cwd: string, ...args: string[]) {
   return result.stdout.trim();
 }
 
+/**
+ * Окружение разбираемых системных утилит: локаль C. С русской локалью ps
+ * печатает время старта как «среда, 28 октября 2026 г.», Date.parse даёт NaN.
+ */
+const osToolEnv = () => ({ ...process.env, LC_ALL: 'C', LANG: 'C' });
 /** Вывод команды или null, если она не выполнилась. Не блокирует event loop. */
 function output(command: string, args: string[], timeout: number): Promise<string | null> {
   return new Promise((resolve) => {
-    execFile(command, args, { encoding: 'utf8', timeout, maxBuffer: 64_000_000 }, (error, stdout) =>
-      resolve(error ? null : stdout),
+    execFile(
+      command,
+      args,
+      { encoding: 'utf8', timeout, maxBuffer: 64_000_000, env: osToolEnv() },
+      (error, stdout) => resolve(error ? null : stdout),
     );
   });
 }
@@ -357,7 +366,12 @@ async function inside(dirs: string[], since: number): Promise<number[]> {
     }
   });
   const started = new Map((await processTable()).map((r) => [r.pid, Date.parse(r.start)]));
-  const fresh = (pid: number) => (started.get(pid) ?? 0) >= since - 1000;
+  // Неразобранное время старта не освобождает процесс: в каталогах самой
+  // проверки его лучше завершить, чем оставить. Нет в таблице — уже вышел.
+  const fresh = (pid: number) => {
+    const at = started.get(pid);
+    return at !== undefined && (Number.isNaN(at) || at >= since - 1000);
+  };
   const within = (path: string) => dirs.some((d) => path === d || path.startsWith(d + '/'));
   if (process.platform === 'linux')
     return readdirSync('/proc').flatMap((entry) => {
