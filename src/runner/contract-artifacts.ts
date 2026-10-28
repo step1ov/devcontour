@@ -4,7 +4,7 @@ import { lstat, realpath } from 'node:fs/promises';
 import { relative, resolve, sep } from 'node:path';
 import { DomainError, type Contract, type ContractArtifact } from '../core/model.ts';
 import { digest } from '../core/service.ts';
-import { git } from './process.ts';
+import { git, hostGitArgs } from './process.ts';
 
 /**
  * Пределы закрепления. Закрепление и текст для ревьюера — разные вещи: прежде
@@ -213,7 +213,7 @@ const gitEnv = () => ({ ...process.env, GIT_TERMINAL_PROMPT: '0' });
 /** Необрезанный stdout Git; ввод — в stdin. */
 function gitRaw(repoPath: string, args: string[], input?: string) {
   return new Promise<string>((ok, fail) => {
-    const child = spawn('git', args, {
+    const child = spawn('git', hostGitArgs(repoPath, args), {
       cwd: repoPath,
       env: gitEnv(),
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -312,7 +312,7 @@ function blobReader(keep: number) {
  */
 export function streamBlob(repoPath: string, blob: string, keep: number) {
   return new Promise<BlobRead>((ok, fail) => {
-    const child = spawn('git', ['cat-file', 'blob', blob], {
+    const child = spawn('git', hostGitArgs(repoPath, ['cat-file', 'blob', blob]), {
       cwd: repoPath,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -343,7 +343,7 @@ export function streamBlobs(
 ) {
   if (!blobs.length) return Promise.resolve();
   return new Promise<void>((ok, fail) => {
-    const child = spawn('git', ['cat-file', '--batch'], {
+    const child = spawn('git', hostGitArgs(repoPath, ['cat-file', '--batch']), {
       cwd: repoPath,
       env: gitEnv(),
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -418,7 +418,7 @@ export function streamBlobs(
 
 /** Точные байты Git blob, без обрезки и перекодирования. */
 export function blobBytes(repoPath: string, blob: string) {
-  return execFileSync('git', ['cat-file', 'blob', blob], {
+  return execFileSync('git', hostGitArgs(repoPath, ['cat-file', 'blob', blob]), {
     cwd: repoPath,
     maxBuffer: 520 * 1024 * 1024,
   });
@@ -437,7 +437,9 @@ export function verifyArtifacts(repoPath: (repositoryId: string) => string, cont
       const path = repoPath(a.repositoryId);
       let blob: string, bytes: Buffer;
       try {
-        blob = execFileSync('git', ['rev-parse', `${a.revision}:${a.path}`], { cwd: path })
+        blob = execFileSync('git', hostGitArgs(path, ['rev-parse', `${a.revision}:${a.path}`]), {
+          cwd: path,
+        })
           .toString()
           .trim();
         bytes = blobBytes(path, a.blob);

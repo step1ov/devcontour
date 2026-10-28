@@ -52,7 +52,7 @@ test(
       assert.match(result.detail, /\.idea/);
       assert.match(result.detail, /EPERM|TAR_ENTRY_ERROR|Operation not permitted/i);
     }
-    assert.deepEqual(readdirSync(join(root, 'doctor')), [], 'the probe removes its own directory');
+    assert.equal(existsSync(join(root, 'doctor')), false, 'the probe removes doctor/ it created');
   },
 );
 
@@ -129,4 +129,12 @@ test('fixture package really carries an .idea directory', async () => {
   await installProbe(os, workspace(), run);
   assert.match(seen, /package\/\.idea\/codeStyles\/codeStyleConfig\.xml/);
   assert.doesNotMatch(seen, /\._/, 'no AppleDouble entries');
+});
+
+test('install probe keeps a doctor/ directory that existed before it', async () => {
+  const root = workspace();
+  await mkdir(join(root, 'doctor'));
+  await writeFile(join(root, 'doctor', 'keep.txt'), 'x');
+  await installProbe(os, root, fake({ code: 0, install: true }).run);
+  assert.deepEqual(readdirSync(join(root, 'doctor')), ['keep.txt']);
 });

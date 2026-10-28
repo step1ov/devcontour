@@ -1,4 +1,4 @@
-import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, rm, rmdir, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { delimiter, dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -39,7 +39,7 @@ function npmPath() {
 
 export async function installProbe(
   config: Pick<Config, 'isolation'>,
-  /** Каталог workspace: проба создаёт и убирает свой подкаталог `doctor/<uuid>`. */
+  /** Каталог workspace: проба создаёт и убирает свой подкаталог `doctor/install-<uuid>` (и `doctor/`, если создала его). */
   root: string,
   run: typeof runCheck = runCheck,
 ): Promise<InstallProbeResult> {
@@ -54,7 +54,10 @@ export async function installProbe(
       status: 'not-checked',
       detail: 'npm не найден: установку в песочнице проверить нечем',
     };
-  const dir = join(root, 'doctor', 'install-' + randomUUID());
+  const parent = join(root, 'doctor');
+  // Каталог `doctor/` убирается вместе с пробой, если его создала она.
+  const ownParent = !existsSync(parent);
+  const dir = join(parent, 'install-' + randomUUID());
   await mkdir(dir, { recursive: true });
   try {
     const base = await realpath(dir);
@@ -134,5 +137,7 @@ export async function installProbe(
   } finally {
     // Убирается только собственный каталог пробы с уникальным именем.
     await rm(dir, { recursive: true, force: true });
+    // rmdir снимает только пустой каталог: чужое в нём остаётся.
+    if (ownParent) await rmdir(parent).catch(() => undefined);
   }
 }
