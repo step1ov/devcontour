@@ -13,7 +13,11 @@ export async function exists(path: string) {
     return false;
   }
 }
-export async function setupDemo(root: string) {
+/**
+ * Учебный workspace. `checkoutRoot` — корень рабочих деревьев (тесты держат
+ * его в своём временном каталоге); без него — выбор по умолчанию.
+ */
+export async function setupDemo(root: string, options: { checkoutRoot?: string } = {}) {
   root = resolve(root);
   const configPath = join(root, 'config.json');
   if (await exists(configPath)) return;
@@ -73,6 +77,7 @@ console.log('2 fixture assertions passed. No AI model was called.');\n`,
       },
     ],
     protectedPaths: ['verify.mjs', '.gitignore'],
+    ...(options.checkoutRoot ? { checkoutRoot: options.checkoutRoot } : {}),
     packs: [
       { id: 'base-process', version: '0.1.0', capabilities: ['dag', 'revisions', 'evidence'] },
     ],

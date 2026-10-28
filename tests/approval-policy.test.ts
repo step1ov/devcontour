@@ -6,12 +6,12 @@
  * «already-approved». Реальный Git: учебный workspace демо.
  */
 import { test } from 'node:test';
+import { testDemo } from './demo-pool.ts';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { setupDemo } from '../src/demo.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
 import type { Config } from '../src/core/model.ts';
@@ -44,7 +44,7 @@ test('Политика после утверждения плана: смена 
   const root = await mkdtemp(join(tmpdir(), 'devcontour-approval-policy-'));
   const stores: Store[] = [];
   try {
-    await setupDemo(root);
+    await testDemo(root);
     const base = loadConfig(join(root, 'config.json'));
     // Новый процесс с изменённым config.json — как перезапуск после правки.
     const open = (config: Config) => {

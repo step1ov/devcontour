@@ -5,12 +5,12 @@
  * рядом с остальными предпроверками, без сырого массива zod.
  */
 import { test } from 'node:test';
+import { testDemo } from './demo-pool.ts';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { setupDemo } from '../src/demo.ts';
 import { DomainError, GATE_SCOPE_LIMIT, taskInput } from '../src/core/model.ts';
 import { config, fixture, input } from './helpers.ts';
 import { DevContour } from '../src/core/service.ts';
@@ -108,7 +108,7 @@ test('Пределы и там, где схему проверяет транс�
 test('contract-impact (CLI) называет превышение пределов в отчёте; contract-change отказывает понятным сообщением без массива zod', async () => {
   const root = await mkdtemp(join(tmpdir(), 'devcontour-limits-'));
   try {
-    await setupDemo(root);
+    await testDemo(root);
     const config = loadConfig(join(root, 'config.json'));
     const repo = config.repository;
     await mkdir(join(repo, 'golden'), { recursive: true });
@@ -177,7 +177,7 @@ test('contract-impact (CLI) называет превышение предело
 test('contract-impact и закрепление спрашивают Git постоянное число раз; отказы и сверка базы — как по одному', async () => {
   const root = await mkdtemp(join(tmpdir(), 'devcontour-git-calls-'));
   try {
-    await setupDemo(root);
+    await testDemo(root);
     const repo = loadConfig(join(root, 'config.json')).repository;
     await mkdir(join(repo, 'golden'), { recursive: true });
     for (let i = 0; i < 56; i++) await writeFile(join(repo, `golden/log-${i}.log`), `log ${i}\n`);

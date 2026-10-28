@@ -1,10 +1,10 @@
 import { test } from 'node:test';
+import { testDemo } from './demo-pool.ts';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { setupDemo } from '../src/demo.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
 import { loadConfig } from '../src/runner/config.ts';
@@ -95,7 +95,7 @@ test('Брифинг задачи ведущего показывает восп
 
 test('Review findings, summary and review.json are masked in every secret form', async () => {
   const root = await mkdtemp(join(tmpdir(), 'devcontour-review-redaction-'));
-  await setupDemo(root);
+  await testDemo(root);
   const config = loadConfig(join(root, 'config.json'));
   // Секрет с кавычкой: в review.json он экранирован как \".
   const secret = 'review"secret-4419';

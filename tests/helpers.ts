@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { configSchema, type Config } from '../src/core/model.ts';
 import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
+/** Корень рабочих деревьев теста: внутри его временного каталога, убирается вместе с ним. */
+export const testCheckoutRoot = (root: string) => join(root, '.checkouts');
 export const config = (overrides: Partial<Config> = {}): Config =>
   configSchema.parse({
     version: 1,
@@ -38,7 +40,8 @@ export const input = (title = 'Example task', dependsOn: string[] = []) => ({
 export function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'devcontour-test-'));
   const store = new Store(join(root, 'state.sqlite'));
-  const h = new DevContour(store, config());
+  // Рабочие деревья — в каталоге фикстуры, а не в кэше пользователя.
+  const h = new DevContour(store, config({ checkoutRoot: testCheckoutRoot(root) }));
   return {
     root,
     store,

@@ -1,9 +1,9 @@
 import { test } from 'node:test';
+import { testDemo } from './demo-pool.ts';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { setupDemo } from '../src/demo.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
 import { loadConfig } from '../src/runner/config.ts';
@@ -55,7 +55,7 @@ const weakened = `export const boundsMismatch = () => false;\n`;
 
 test('a pinned acceptance file with an unpinned local helper is refused before review; pinning or protecting it is accepted, and a candidate editing it violates the boundary', async () => {
   const root = await mkdtemp(join(tmpdir(), 'devcontour-closure-'));
-  await setupDemo(root);
+  await testDemo(root);
   const config = loadConfig(join(root, 'config.json'));
   const store = new Store(join(root, 'state.sqlite'));
   const h = new DevContour(store, config);

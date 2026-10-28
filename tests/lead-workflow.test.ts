@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { testDemo } from './demo-pool.ts';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -8,7 +9,6 @@ import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour, specDigest } from '../src/core/service.ts';
-import { setupDemo } from '../src/demo.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Workspace, changeSnapshot } from '../src/core/workspace.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
@@ -177,7 +177,7 @@ test('Removed workflow inputs become stale without starving unrelated jobs', asy
 
 test('A real Git board resumes after process replacement without duplicating review or acceptance', async () => {
   const root = await mkdtemp(join(tmpdir(), 'devcontour-lead-'));
-  await setupDemo(root);
+  await testDemo(root);
   const config = loadConfig(join(root, 'config.json'));
   let store = new Store(join(root, 'state.sqlite'));
   let h = new DevContour(store, config),
@@ -266,7 +266,7 @@ test('A real Git board resumes after process replacement without duplicating rev
 /** Демо-workspace в режиме агента с gate базы: проходит, пока base.txt входит в `accepted`. */
 async function baseCheckFixture() {
   const root = await mkdtemp(join(tmpdir(), 'devcontour-base-check-'));
-  await setupDemo(root);
+  await testDemo(root);
   const config = loadConfig(join(root, 'config.json'));
   const gate = (accepted: string[]) => [
     process.execPath,

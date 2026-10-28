@@ -1,9 +1,9 @@
 import { test } from 'node:test';
+import { testDemo } from './demo-pool.ts';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { setupDemo } from '../src/demo.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
 import { loadConfig } from '../src/runner/config.ts';
@@ -15,7 +15,7 @@ import { git } from '../src/runner/process.ts';
 
 test('A run uses the pinned artifact revision from its base, and a candidate cannot edit it', async () => {
   const root = await mkdtemp(join(tmpdir(), 'devcontour-artifacts-'));
-  await setupDemo(root);
+  await testDemo(root);
   const config = loadConfig(join(root, 'config.json'));
   const store = new Store(join(root, 'state.sqlite'));
   const h = new DevContour(store, config);

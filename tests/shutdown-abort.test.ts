@@ -19,8 +19,7 @@ import {
 import { tmpdir } from 'node:os';
 import { delimiter, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { setupDemo } from '../src/demo.ts';
-import { demoPool } from './demo-pool.ts';
+import { demoPool, testDemo } from './demo-pool.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { DevContour } from '../src/core/service.ts';
@@ -30,7 +29,7 @@ import { git } from '../src/runner/process.ts';
 import { repositories } from '../src/core/repositories.ts';
 import { input } from './helpers.ts';
 
-const demos = demoPool(setupDemo);
+const demos = demoPool(testDemo);
 after(() => demos.close());
 
 const hung = (ms: number) => new Promise<'hung'>((r) => setTimeout(() => r('hung'), ms).unref());

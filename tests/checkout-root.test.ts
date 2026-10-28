@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, readdirSync, realpathSync } from 'node:fs';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
@@ -16,6 +17,9 @@ import { updateBase } from '../src/runner/base-update.ts';
 import { checkoutsCheck } from '../src/runner/doctor.ts';
 import { workspaceCheckoutRoot } from '../src/runner/checkout-root.ts';
 import { git } from '../src/runner/process.ts';
+import { loadConfig } from '../src/runner/config.ts';
+import { testDemo } from './demo-pool.ts';
+import { fixture } from './helpers.ts';
 
 const within = (path: string, root: string) => path === root || path.startsWith(root + sep);
 
@@ -91,10 +95,9 @@ async function embedded(checkoutRoot?: string) {
     worktrees,
     cleanup: async () => {
       store.close();
-      // Удаляется только свой временный каталог и свой подкаталог кэша.
+      // Удаляется только свой временный каталог (кэш пользователя в тесте —
+      // внутри него, см. withHome).
       await rm(tmp, { recursive: true, force: true });
-      if (!checkoutRoot && within(choice.root!, checkoutCacheBase()))
-        await rm(choice.root!, { recursive: true, force: true });
     },
   };
 }
@@ -167,23 +170,57 @@ async function exercise(f: Awaited<ReturnType<typeof embedded>>) {
   assert.ok(existsSync(join(choice.root!, 'main')), 'деревья создавались под корнем');
 }
 
-test('Embedded workspace: попытки, перенос и проверка базы — под одним корнем в кэше пользователя; doctor его называет', async () => {
-  const f = await embedded();
+/**
+ * Подменённый домашний каталог: выбор по умолчанию (кэш пользователя) идёт
+ * в него, а не в настоящий `~/Library/Caches`. Git получает автора из
+ * окружения — глобальной конфигурации в подменённом каталоге нет.
+ */
+async function withHome<T>(action: (home: string) => Promise<T>) {
+  const home = await realpath(await mkdtemp(join(tmpdir(), 'devcontour-home-')));
+  const keys = [
+    'HOME',
+    'GIT_AUTHOR_NAME',
+    'GIT_AUTHOR_EMAIL',
+    'GIT_COMMITTER_NAME',
+    'GIT_COMMITTER_EMAIL',
+  ] as const;
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  Object.assign(process.env, {
+    HOME: home,
+    GIT_AUTHOR_NAME: 'DevContour test',
+    GIT_AUTHOR_EMAIL: 'test@example.invalid',
+    GIT_COMMITTER_NAME: 'DevContour test',
+    GIT_COMMITTER_EMAIL: 'test@example.invalid',
+  });
   try {
-    assert.equal(f.choice.placement, 'cache');
-    assert.ok(within(f.choice.root!, checkoutCacheBase()), f.choice.root);
-    assert.ok(!within(f.choice.root!, f.repo));
-    // Корень не зависит от каталога состояния вызова: каталог доски
-    // компонента внутри репозитория даёт тот же корень.
-    const doctor = checkoutsCheck(f.config, f.data);
-    assert.equal(doctor.status, 'passed');
-    assert.match(doctor.detail, /кэше пользователя/);
-    assert.ok(doctor.detail.includes(f.choice.root!), doctor.detail);
-    await exercise(f);
+    return await action(home);
   } finally {
-    await f.cleanup();
+    for (const k of keys)
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    await rm(home, { recursive: true, force: true });
   }
-});
+}
+
+test('Embedded workspace: попытки, перенос и проверка базы — под одним корнем в кэше пользователя; doctor его называет', () =>
+  withHome(async (home) => {
+    const f = await embedded();
+    try {
+      assert.ok(within(checkoutCacheBase(), home), 'кэш пользователя — в подменённом HOME');
+      assert.equal(f.choice.placement, 'cache');
+      assert.ok(within(f.choice.root!, checkoutCacheBase()), f.choice.root);
+      assert.ok(!within(f.choice.root!, f.repo));
+      // Корень не зависит от каталога состояния вызова: каталог доски
+      // компонента внутри репозитория даёт тот же корень.
+      const doctor = checkoutsCheck(f.config, f.data);
+      assert.equal(doctor.status, 'passed');
+      assert.match(doctor.detail, /кэше пользователя/);
+      assert.ok(doctor.detail.includes(f.choice.root!), doctor.detail);
+      await exercise(f);
+    } finally {
+      await f.cleanup();
+    }
+  }));
 
 test('Embedded workspace: заданный checkoutRoot получают планировщик, проверка базы и перенос базы', async () => {
   const configured = await realpath(await mkdtemp(join(tmpdir(), 'devcontour-checkout-root-')));
@@ -228,5 +265,37 @@ test('doctor: checkoutRoot внутри репозитория — ослабл�
     assert.match(check.detail, /EPERM/);
   } finally {
     await rm(tmp, { recursive: true, force: true });
+  }
+});
+
+test('Стандартные фикстуры тестов не пишут в настоящий кэш пользователя', async () => {
+  // Настоящий кэш — до любой подмены HOME; каталог этой фикстуры в нём
+  // назывался бы хэшем её каталога данных.
+  const cache = checkoutCacheBase();
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'devcontour-fixture-cache-')));
+  const hash = createHash('sha256').update(root).digest('hex').slice(0, 16);
+  try {
+    await testDemo(root);
+    const config = loadConfig(join(root, 'config.json'));
+    const store = new Store(join(root, 'state.sqlite'));
+    try {
+      const h = new DevContour(store, config);
+      const choice = workspaceCheckoutRoot(h);
+      assert.equal(choice.placement, 'configured');
+      assert.ok(within(choice.root!, root), choice.root);
+      // Демо прогнало очередь: попытки были, а в кэше пользователя их нет.
+      assert.ok(store.read().runs.some((r) => r.status === 'succeeded'));
+      assert.equal(existsSync(join(cache, hash)), false, 'нет каталога фикстуры в кэше');
+    } finally {
+      store.close();
+    }
+    const f = fixture();
+    try {
+      assert.ok(within(workspaceCheckoutRoot(f.h).root!, realpathSync(f.root)));
+    } finally {
+      f.cleanup();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });

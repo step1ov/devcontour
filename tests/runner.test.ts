@@ -5,8 +5,7 @@ import { mkdtemp, readFile, writeFile, rm, mkdir, symlink } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { setupDemo } from '../src/demo.ts';
-import { demoPool } from './demo-pool.ts';
+import { demoPool, testDemo } from './demo-pool.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { DevContour } from '../src/core/service.ts';
@@ -28,7 +27,7 @@ import { updateBase } from '../src/runner/base-update.ts';
 import { executionOf } from '../src/harness/execution.ts';
 import { workflowMetrics } from '../src/application/metrics.ts';
 import { taskOwner } from '../src/core/sync-state.ts';
-const demos = demoPool(setupDemo);
+const demos = demoPool(testDemo);
 after(() => demos.close());
 async function runtimeFixture() {
   const seed = await demos.acquire();

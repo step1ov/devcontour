@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
+import { testDemo } from './demo-pool.ts';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { setupDemo } from '../src/demo.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
@@ -48,7 +48,7 @@ export async function largeHistory(root: string, shape: HistoryShape = LARGE) {
 
 /** A real completed demo; all processes and SQLite handles are closed on return. */
 export async function completedDemo(root: string) {
-  await setupDemo(root);
+  await testDemo(root);
   const config = loadConfig(join(root, 'config.json'));
   const store = new Store(join(root, 'state.sqlite'));
   const h = new DevContour(store, config);

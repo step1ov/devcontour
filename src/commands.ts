@@ -421,7 +421,13 @@ async function main() {
     'cancel',
     'correct',
   ];
-  if (operation === 'demo') await setupDemo(root);
+  if (operation === 'demo')
+    await setupDemo(
+      root,
+      args.includes('--checkout-root')
+        ? { checkoutRoot: resolve(option('--checkout-root', '')) }
+        : {},
+    );
   const config = loadConfig(join(root, 'config.json'));
   if (workspacePath && config.workspaceRoot !== (await realpath(workspacePath)))
     throw new Error(

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { config, input } from './helpers.ts';
+import { config, input, testCheckoutRoot } from './helpers.ts';
 import { repositorySchema, type Run } from '../src/core/model.ts';
 import { environmentSchema, lifecycleSchema, toolProfileSchema } from '../src/core/integrations.ts';
 import { Store } from '../src/core/store.ts';
@@ -80,6 +80,7 @@ async function fixture(components = true) {
     runTimeoutMs: 60000,
     maxAttempts: 5,
     resourceDatabase: join(root, 'resources.sqlite'),
+    checkoutRoot: testCheckoutRoot(root),
     workspaceGates: [
       {
         id: 'together',

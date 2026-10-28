@@ -1,9 +1,9 @@
 import { test } from 'node:test';
+import { testDemo } from './demo-pool.ts';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { setupDemo } from '../src/demo.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour, specDigest } from '../src/core/service.ts';
@@ -32,7 +32,7 @@ test('Requirement parser ignores examples, rejects duplicate IDs and bounds sect
 
 test('Requirements survive real Git execution; changed spec loses current coverage and creates immutable correction', async () => {
   const root = await mkdtemp(join(tmpdir(), 'devcontour-requirements-'));
-  await setupDemo(root);
+  await testDemo(root);
   const config = loadConfig(join(root, 'config.json'));
   const store = new Store(join(root, 'state.sqlite'));
   const h = new DevContour(store, config),

@@ -2,8 +2,7 @@ import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { setupDemo } from '../src/demo.ts';
-import { demoPool } from './demo-pool.ts';
+import { demoPool, testDemo } from './demo-pool.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
@@ -23,7 +22,7 @@ import { configSchema } from '../src/core/model.ts';
  * полный цикл только по явному правилу вендора; без него — отказ до вызова
  * модели. Модель здесь — управляемый demo-агент под именем claude.
  */
-const demos = demoPool(setupDemo);
+const demos = demoPool(testDemo);
 after(() => demos.close());
 
 async function sameVendor(rule: 'same-vendor-allowed' | undefined) {

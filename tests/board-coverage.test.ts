@@ -1,10 +1,10 @@
 import { test } from 'node:test';
+import { testDemo } from './demo-pool.ts';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { CLIP_SHORT } from 'devcontour-harness';
 import { join } from 'node:path';
-import { setupDemo } from '../src/demo.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Store } from '../src/core/store.ts';
 import {
@@ -189,7 +189,7 @@ async function realBoard(
   options: { marker?: string; emptyB?: boolean; install?: boolean } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), 'devcontour-coverage-'));
-  await setupDemo(root);
+  await testDemo(root);
   const config = loadConfig(join(root, 'config.json'));
   const store = new Store(join(root, 'state.sqlite'));
   const h = new DevContour(store, config);

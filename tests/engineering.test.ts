@@ -13,8 +13,7 @@ import { specDigest, DevContour } from '../src/core/service.ts';
 import { ResourcePool, resourceKey, withResources } from '../src/runner/resources.ts';
 import { pinContext, taskContext } from '../src/runner/context.ts';
 import { git, command } from '../src/runner/process.ts';
-import { setupDemo } from '../src/demo.ts';
-import { demoPool } from './demo-pool.ts';
+import { demoPool, testDemo } from './demo-pool.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Store } from '../src/core/store.ts';
 import { updateBase } from '../src/runner/base-update.ts';
@@ -101,7 +100,7 @@ test('Discovered debt becomes a deduplicated draft with provenance; scope and co
   }
 });
 
-const demos = demoPool(setupDemo);
+const demos = demoPool(testDemo);
 after(() => demos.close());
 async function runnerFixture() {
   const seed = await demos.acquire();

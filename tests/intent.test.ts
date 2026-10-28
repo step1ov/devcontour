@@ -2,8 +2,7 @@ import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, readFile, writeFile, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import { setupDemo } from '../src/demo.ts';
-import { demoPool } from './demo-pool.ts';
+import { demoPool, testDemo } from './demo-pool.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { DevContour, digest, specDigest } from '../src/core/service.ts';
 import { AgentService } from '../src/application/agent.ts';
@@ -74,7 +73,7 @@ const definition = () => ({
     },
   ],
 });
-const demos = demoPool(setupDemo);
+const demos = demoPool(testDemo);
 after(() => demos.close());
 async function fixture() {
   const seed = await demos.acquire();

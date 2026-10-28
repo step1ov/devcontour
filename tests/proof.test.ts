@@ -1,11 +1,11 @@
 import { test } from 'node:test';
+import { testDemo } from './demo-pool.ts';
 import assert from 'node:assert/strict';
 import type { Evidence } from '../src/core/model.ts';
 import { mkdtemp, writeFile, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
 import { realpathSync } from 'node:fs';
-import { setupDemo } from '../src/demo.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
@@ -46,7 +46,7 @@ test('На настоящем прогоне приёмка требует им�
   // Проверка идёт через реальный gate с отчётом JUnit: манифест собирается из
   // того, что действительно выполнилось, а не подставляется в evidence руками.
   const root = await mkdtemp(join(tmpdir(), 'devcontour-proof-'));
-  await setupDemo(root);
+  await testDemo(root);
   const config = loadConfig(join(root, 'config.json'));
   const store = new Store(join(root, 'state.sqlite'));
   const h = new DevContour(store, config);
@@ -244,7 +244,7 @@ test('Намеренно внесённый дефект ловится назв
   // написал исполнитель, и пишет в отчёт исход каждого testcase. Исполнитель
   // сначала вносит значимый дефект (вычитание вместо сложения), затем чинит.
   const root = await mkdtemp(join(tmpdir(), 'devcontour-oracle-'));
-  await setupDemo(root);
+  await testDemo(root);
   const config = loadConfig(join(root, 'config.json'));
   const store = new Store(join(root, 'state.sqlite'));
   const h = new DevContour(store, config);
@@ -352,7 +352,7 @@ test('Задача без названного testcase не публикует�
   // результат лежал в целевой ветке, и зависимая задача работала поверх
   // неподтверждённого результата. Тест назван с момента утверждения.
   const root = await mkdtemp(join(tmpdir(), 'devcontour-admission-'));
-  await setupDemo(root);
+  await testDemo(root);
   const config = loadConfig(join(root, 'config.json'));
   const store = new Store(join(root, 'state.sqlite'));
   const h = new DevContour(store, config);
