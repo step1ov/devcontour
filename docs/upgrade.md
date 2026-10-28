@@ -563,8 +563,8 @@ SHA-256 `f4c394d621588665f3ff15cf0f919edfe310df5defd5c0a24bd5d3e63ad120d8`.
 
 Следующая версия поставляет движок `devcontour-harness` 0.1.0-alpha.23 —
 архив `vendor/harness/devcontour-harness-0.1.0-alpha.23.tgz` с SHA-256
-`db09bd305e63f6852624cc5f8832acd7f1caa04e9386fabf5c37fd657382ccfc`
-(commit `828d4fe0d88c7172dd3975210cc898ddf6a01c3c`). Он включает всё из
+`dc36966fbc3f3bf11e3a42c4eedcec0699e10db55af703872af86bd242c22ca1`
+(commit `b9e665ef119b02dd5b9b7611f42e8eeecb61d342`). Он включает всё из
 0.1.0-alpha.22. Формат состояния движка не меняется.
 
 - **Движок 0.1.0-alpha.23: рабочие деревья вне дерева человека.** Рабочие
