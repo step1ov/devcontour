@@ -3,6 +3,7 @@ import type { FailureKind } from './failure.ts';
 import { priceSchema } from './usage.ts';
 import type { ReviewInspection } from './review.ts';
 import { z } from 'zod';
+import { GATE_SCOPE_LIMIT, gateScopeTooBig } from 'devcontour-harness/contracts';
 import type { CompletionReceipt } from './sync-model.ts';
 import {
   environmentSchema,
@@ -134,17 +135,14 @@ export const requirementLink = z.strictObject({
 export type RequirementLink = z.infer<typeof requirementLink>;
 /**
  * Предел ссылок на gates в одной области задачи (собственная область и
- * область потребителя). Он равен пределу gates профиля стека в harness
- * (`GATE_SCOPE_LIMIT`): задача может назвать весь профиль, и «включите gate в
- * область задачи» выполнимо одной задачей. Превышение — понятный отказ.
+ * область потребителя) берётся из harness (`GATE_SCOPE_LIMIT`): поручение
+ * исполнения проверяет тот же предел, и задача, принятая здесь, не падает при
+ * проекции в движок. Он равен пределу gates профиля стека: задача может
+ * назвать весь профиль, и «включите gate в область задачи» выполнимо одной
+ * задачей. Превышение — понятный отказ с величиной и исправлением.
  */
-export const GATE_SCOPE_LIMIT = 100;
-const gateScope = z.array(gateRef).max(GATE_SCOPE_LIMIT, {
-  error: (issue) => {
-    const actual = Array.isArray(issue.input) ? issue.input.length : GATE_SCOPE_LIMIT + 1;
-    return `область gates: ${actual} при пределе ${GATE_SCOPE_LIMIT}, лишних ${actual - GATE_SCOPE_LIMIT}. Назовите группу gates (@имя) или уберите повторы`;
-  },
-});
+export { GATE_SCOPE_LIMIT };
+const gateScope = z.array(gateRef).max(GATE_SCOPE_LIMIT, { error: gateScopeTooBig });
 export const taskInput = z.object({
   preparation: preparationBinding.optional(),
   // Which approved product feature this task delivers, so the panel can show
