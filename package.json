@@ -38,6 +38,8 @@
     "check:install": "node scripts/install-check.mjs",
     "check:upgrade": "node scripts/upgrade-check.mjs",
     "test": "node scripts/test.mjs",
+    "test:fast": "node scripts/test.mjs --fast",
+    "test:affected": "node --import tsx scripts/test.mjs --affected",
     "test:e2e": "playwright test",
     "lint": "node scripts/check-tokens.mjs && node scripts/lint-ratchet.mjs",
     "lint:debt-update": "node scripts/lint-ratchet.mjs --update",
