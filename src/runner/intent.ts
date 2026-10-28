@@ -51,6 +51,49 @@ export const intentInputs = {
   intent_report: z.strictObject({ ...scope, releaseId: id }),
   product_view: z.strictObject({ releaseId: id.optional() }),
 };
+/** Вход `task_story`: история компонента, выполненные задачи и обязательная причина. */
+export const storyBindingInput = z.strictObject({
+  ...scope,
+  storyId: id,
+  taskIds: z
+    .array(z.string().regex(/^[A-Za-z0-9_-]{1,80}$/))
+    .min(1)
+    .max(100),
+  reason: z.string().trim().min(10).max(5000),
+});
+/** Задача ссылается на подробный REQ истории, но не на саму историю (или на устаревшую). */
+export interface StoryGap {
+  taskId: string;
+  kind: 'missing-story' | 'stale-story' | 'unknown-story';
+  requirementIds: string[];
+  /** Связь, которую нужно добавить в requirements: история и её текущий digest. */
+  candidates: { storyId: string; source: string; id: string; digest: string }[];
+}
+const gapShown = 5;
+/** Отказ утверждения: что не так и какую связь добавить. */
+export function storyGapMessage(gaps: StoryGap[]) {
+  const link = (c: StoryGap['candidates'][number]) =>
+    JSON.stringify({ source: c.source, id: c.id, digest: c.digest });
+  const lines = gaps.slice(0, gapShown).map((g) => {
+    const stories = g.candidates.map((c) => c.storyId).join(', ');
+    const add =
+      g.candidates.length === 1
+        ? 'добавьте в requirements связь ' + link(g.candidates[0])
+        : 'добавьте в requirements связь с той историей, которую задача реализует: ' +
+          g.candidates.map(link).join(' или ');
+    if (g.kind === 'unknown-story')
+      return `${g.taskId}: связь ${g.requirementIds.join(', ')} не называет историю текущей карты INTENT`;
+    if (g.kind === 'stale-story')
+      return `${g.taskId}: связь ${g.requirementIds.join(', ')} устарела — история изменилась; ${add}`;
+    return `${g.taskId}: ${g.requirementIds.join(', ')} входит в критерии истории ${stories}, но связи с историей нет — ${add}`;
+  });
+  return (
+    'Задачи не связаны с историями INTENT: ' +
+    lines.join('; ') +
+    (gaps.length > gapShown ? `; и ещё ${gaps.length - gapShown}` : '') +
+    '. Текст связи — intent_snapshot (storyId), gate и сценарий — те же, что у подробного REQ. Без связи intent-report не закроет историю.'
+  );
+}
 function git(root: string, ...args: string[]) {
   return execFileSync('git', args, {
     cwd: root,
@@ -110,6 +153,136 @@ export class IntentService implements ProductReleaseGuard {
     manifest?: Verification['manifest'],
   ) {
     return this.reading(() => this.validateCurrent(proof, selected, manifest));
+  }
+  /**
+   * Пробелы привязки к историям: задача ссылается на REQ из критериев
+   * истории своего компонента, но не несёт `REQ-intent-<история>`, либо её
+   * связь с историей устарела или называет неизвестную историю. Без
+   * закоммиченной карты компонента пробелов нет.
+   */
+  storyGaps(tasks: Pick<Task, 'id' | 'scope' | 'repositoryId' | 'requirements'>[]): StoryGap[] {
+    return this.reading(() => this.storyGapsCurrent(tasks));
+  }
+  /** Отказ утверждения до вызова модели: см. `storyGaps`. */
+  assertStoryBindings(tasks: Task[]) {
+    const gaps = this.storyGaps(tasks);
+    if (gaps.length) throw new DomainError(storyGapMessage(gaps), 409);
+  }
+  /**
+   * `task_story`: привязать выполненные задачи к истории текущей карты без
+   * изменения постановки. История и её digest — с HEAD карты; правила самих
+   * задач проверяет ядро в той же транзакции, что и запись.
+   */
+  bindStory(raw: unknown, actor: 'agent' | 'operator') {
+    const input = storyBindingInput.parse(raw);
+    return this.reading(() => {
+      const state = this.h.store.read();
+      const owners = new Set(
+        input.taskIds.map((id) => {
+          const t = state.tasks.find((x) => x.id === id);
+          if (!t) throw new DomainError('Задача не найдена: ' + id, 404);
+          return taskOwner(t);
+        }),
+      );
+      const owner = input.repositoryId ?? [...owners][0];
+      if (!owner || owners.size !== 1 || !owners.has(owner))
+        throw new DomainError('Привязываются задачи одного компонента, владельца истории', 400);
+      const snapshot = this.read(owner);
+      if (snapshot.document.kind !== 'component') throw new DomainError('Нужна карта компонента');
+      const story = snapshot.document.stories.find((s) => s.id === input.storyId);
+      if (!story)
+        throw new DomainError(
+          `Неизвестная история ${input.storyId} в карте ${snapshot.source} компонента ${owner}`,
+          404,
+        );
+      const binding = parseRequirements(snapshot.markdown).find(
+        (b) => b.id === intentRequirementId(story.id),
+      )!;
+      return this.h.bindStory({
+        repositoryId: owner,
+        storyId: story.id,
+        binding: { source: snapshot.source, id: binding.id, digest: binding.digest },
+        criteria: story.criteria.flatMap((c) => c.requirements.map(referenceKey)),
+        taskIds: input.taskIds,
+        reason: input.reason,
+        actor,
+      });
+    });
+  }
+  private storyGapsCurrent(tasks: Pick<Task, 'id' | 'scope' | 'repositoryId' | 'requirements'>[]) {
+    const maps = new Map<string, ReturnType<IntentService['storyMap']>>();
+    const gaps: StoryGap[] = [];
+    for (const t of tasks) {
+      const owner = taskOwner(t),
+        links = t.requirements ?? [];
+      if (!owner || !links.length) continue;
+      if (!maps.has(owner)) maps.set(owner, this.storyMap(owner));
+      const map = maps.get(owner);
+      if (!map) continue;
+      const candidate = (s: (typeof map.stories)[number]) => ({
+        storyId: s.id,
+        source: map.source,
+        id: s.binding.id,
+        digest: s.binding.digest,
+      });
+      const own = links.filter((r) => r.source === map.source),
+        detailed = links.filter((r) => r.source !== map.source);
+      const unknown = own.filter((r) => !map.stories.some((s) => s.binding.id === r.id));
+      if (unknown.length) {
+        gaps.push({
+          taskId: t.id,
+          kind: 'unknown-story',
+          requirementIds: unknown.map((r) => r.id),
+          candidates: [],
+        });
+        continue;
+      }
+      const stale = own.filter((r) =>
+        map.stories.some((s) => s.binding.id === r.id && s.binding.digest !== r.digest),
+      );
+      if (stale.length) {
+        gaps.push({
+          taskId: t.id,
+          kind: 'stale-story',
+          requirementIds: stale.map((r) => r.id),
+          candidates: map.stories
+            .filter((s) => stale.some((r) => r.id === s.binding.id))
+            .map(candidate),
+        });
+        continue;
+      }
+      if (own.length) continue;
+      const stories = map.stories.filter((s) => detailed.some((r) => s.keys.has(referenceKey(r))));
+      if (!stories.length) continue;
+      gaps.push({
+        taskId: t.id,
+        kind: 'missing-story',
+        requirementIds: detailed
+          .filter((r) => stories.some((s) => s.keys.has(referenceKey(r))))
+          .map((r) => r.id),
+        candidates: stories.map(candidate),
+      });
+    }
+    return gaps;
+  }
+  /** Истории закоммиченной карты компонента: их связь и REQ критериев; нет карты — null. */
+  private storyMap(owner: string) {
+    let snapshot;
+    try {
+      snapshot = this.read(owner);
+    } catch {
+      return null;
+    }
+    if (snapshot.document.kind !== 'component') return null;
+    const bindings = parseRequirements(snapshot.markdown);
+    return {
+      source: snapshot.source,
+      stories: snapshot.document.stories.map((s) => ({
+        id: s.id,
+        binding: bindings.find((b) => b.id === intentRequirementId(s.id))!,
+        keys: new Set(s.criteria.flatMap((c) => c.requirements.map(referenceKey))),
+      })),
+    };
   }
   private root(repositoryId?: string) {
     return repositoryId
@@ -740,15 +913,34 @@ export class IntentService implements ProductReleaseGuard {
         const requirementKeys = new Set(
           story.criteria.flatMap((c) => c.requirements.map(referenceKey)),
         );
+        const intentSource = this.source(repositoryId);
+        // Привязка после приёмки (`task_story`) — явное назначение, как связь
+        // в постановке: задача принадлежит этой истории и не числится
+        // неназначенным вкладом других.
+        const bound = (t: Task) =>
+          t.storyBindings?.find((b) => b.source === intentSource && b.id === binding.id);
         const belongs = (t: Task) => {
           const links = t.requirements ?? [];
-          if (links.some((r) => r.source === this.source(repositoryId) && r.id === binding.id))
+          if (links.some((r) => r.source === intentSource && r.id === binding.id) || bound(t))
             return true;
           // An unassigned contributor cannot disappear behind another completed task.
           // Explicitly assigned stories of other releases retain their own scope.
           return (
-            !links.some((r) => r.source === this.source(repositoryId) && knownStories.has(r.id)) &&
+            !links.some((r) => r.source === intentSource && knownStories.has(r.id)) &&
+            !t.storyBindings?.some((b) => b.source === intentSource && knownStories.has(b.id)) &&
             links.some((r) => requirementKeys.has(referenceKey(r)))
+          );
+        };
+        // Задача, привязанная после приёмки, подтверждает историю тем же
+        // правилом: привязка к текущему тексту истории и доказательство
+        // каждой подробной связи — своё, ведь связи с историей в постановке
+        // нет. Автор задачи текста истории не видел; отчёт это показывает.
+        const boundProven = (t: Task) => {
+          const detailed = (t.requirements ?? []).filter((r) => r.source !== intentSource);
+          return (
+            bound(t)?.digest === binding.digest &&
+            detailed.length > 0 &&
+            detailed.every((r) => proven(t, r))
           );
         };
         const related = tasks.filter(belongs);
@@ -756,18 +948,29 @@ export class IntentService implements ProductReleaseGuard {
           id: t.id,
           reason: replaced.has(t.id) ? ('superseded' as const) : ('cancelled' as const),
         }));
+        const linked = (t: Task) =>
+          !!t.requirements?.some((r) => r.source === intentSource && r.id === binding.id);
         const eligible = related.filter(
           (t) =>
             completed(t) &&
-            t.requirements?.some(
-              (r) =>
-                r.source === this.source(repositoryId) &&
-                r.id === binding.id &&
-                r.digest === binding.digest &&
-                proven(t, r),
-            ) &&
+            (linked(t)
+              ? t.requirements!.some(
+                  (r) =>
+                    r.source === intentSource &&
+                    r.id === binding.id &&
+                    r.digest === binding.digest &&
+                    proven(t, r),
+                )
+              : boundProven(t)) &&
             checked(t, 'requirement-source'),
         );
+        const boundTasks = related
+          .filter((t) => !linked(t) && bound(t))
+          .map((t) => ({
+            id: t.id,
+            boundAfterAcceptance: true as const,
+            fresh: bound(t)!.digest === binding.digest,
+          }));
         const criteria = story.criteria.map((c) => {
           const requirements = c.requirements.map((r) => {
             const matching = related.filter((t) =>
@@ -812,6 +1015,7 @@ export class IntentService implements ProductReleaseGuard {
           taskIds: related.map((t) => t.id),
           unverifiedTaskIds: related.filter((t) => !eligible.includes(t)).map((t) => t.id),
           excludedTasks,
+          ...(boundTasks.length ? { boundTasks } : {}),
           verified:
             related.length > 0 &&
             related.length === eligible.length &&

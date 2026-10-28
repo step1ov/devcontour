@@ -211,6 +211,11 @@ export interface Task extends TaskInput {
   /** Выдача остановлена бюджетом: превышен или не определён. Снимается сама, когда бюджет позволяет. */
   budgetBlock?: { reason: string; at: string };
   supersedes?: string;
+  /**
+   * Привязки к историям INTENT, сделанные после приёмки (`task_story`).
+   * Вне постановки: утверждённый digest и принятый результат не меняются.
+   */
+  storyBindings?: import('./intent.ts').StoryBinding[];
   createdAt: string;
   approvedAt?: string;
   approvedDigest?: string;

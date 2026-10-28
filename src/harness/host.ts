@@ -53,9 +53,15 @@ import {
   type ProductReleaseGuard,
 } from '../core/workspace.ts';
 import { IntentService } from '../runner/intent.ts';
+import type { StoryBindingGuard } from '../core/intent.ts';
 
 /** Проверка продуктового релиза (INTENT) — продуктовая служба DevContour. */
 const releaseGuard = (h: DevContour): ProductReleaseGuard => new IntentService(h);
+/**
+ * Проверка привязки задач к историям INTENT при утверждении — та же служба:
+ * ядро получает её отсюда и Git само не читает.
+ */
+export const storyGuard = (h: DevContour): StoryBindingGuard => new IntentService(h);
 import type { DevContourExecutionStore } from './store.ts';
 
 const refusal = (code: NonNullable<HostRefusal>['code'], message: string): HostRefusal => ({

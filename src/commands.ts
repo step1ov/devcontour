@@ -417,6 +417,7 @@ async function main() {
     'edit-task',
     'edit-board',
     'task-feature',
+    'task-story',
     'cancel',
     'correct',
   ];
@@ -900,7 +901,21 @@ async function main() {
         result = h.cancel(option('--task', ''), option('--reason', ''));
       } else if (operation === 'task-feature')
         result = h.bindFeature(option('--task', ''), option('--feature', ''));
-      else if (operation === 'edit-task') {
+      else if (operation === 'task-story') {
+        if (!args.includes('--reason') || !option('--reason', '').trim())
+          throw new Error('Укажите --reason: почему задачи относятся к истории');
+        result = new IntentService(h).bindStory(
+          {
+            storyId: option('--story', ''),
+            taskIds: option('--tasks', '').split(',').filter(Boolean),
+            reason: option('--reason', ''),
+            ...(args.includes('--repository-id')
+              ? { repositoryId: option('--repository-id', '') }
+              : {}),
+          },
+          'operator',
+        );
+      } else if (operation === 'edit-task') {
         const task = store.read().tasks.find((t) => t.id === option('--task', ''));
         if (!task) throw new Error('Задача не найдена');
         result = h.editTask(

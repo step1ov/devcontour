@@ -83,7 +83,7 @@ void test('capabilities — ответ operationCatalog на каталоге х
   assert.equal(arg.protocolVersion, 1);
   assert.equal(arg.maxInputBytes, 100000);
   assert.equal(arg.maxResultBytes, 65536);
-  assert.equal(Object.keys(arg.operations).length, 53);
+  assert.equal(Object.keys(arg.operations).length, 54);
   assert.equal(Object.keys(arg.operations)[0], 'preparation_status');
   const catalogError = new Error('spy: каталог');
   reset({ catalogError });

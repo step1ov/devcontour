@@ -3614,6 +3614,45 @@
       }
     },
     {
+      "name": "task_story",
+      "description": "Bind done tasks to an INTENT story without changing their approved spec, when they link the story's detailed REQs but not REQ-intent-<story>. Every detailed REQ of each task must be in that story's criteria; the story digest is pinned from committed HEAD and a reason is journaled. intent_report marks these tasks boundAfterAcceptance: the story text was not in the author's prompt. Drafts get the REQ-intent link in requirements instead.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "repositoryId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "storyId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,50}$"
+          },
+          "taskIds": {
+            "minItems": 1,
+            "maxItems": 100,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,80}$"
+            }
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 5000
+          }
+        },
+        "required": [
+          "storyId",
+          "taskIds",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "board_correct",
       "description": "Create a correction after board acceptance, preserving history and recalculating transitive impact.",
       "readOnly": false,

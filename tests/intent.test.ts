@@ -5,11 +5,13 @@ import { join } from 'node:path';
 import { setupDemo } from '../src/demo.ts';
 import { demoPool } from './demo-pool.ts';
 import { loadConfig } from '../src/runner/config.ts';
-import { DevContour } from '../src/core/service.ts';
+import { DevContour, digest, specDigest } from '../src/core/service.ts';
+import { AgentService } from '../src/application/agent.ts';
 import { Store } from '../src/core/store.ts';
 import { repositories } from '../src/core/repositories.ts';
-import { IntentService } from '../src/runner/intent.ts';
+import { IntentService, type StoryGap } from '../src/runner/intent.ts';
 import { parseIntent, renderIntent } from '../src/core/intent.ts';
+import type { RequirementLink } from '../src/core/model.ts';
 import {
   parseRequirements,
   requirementSnapshot,
@@ -19,7 +21,7 @@ import {
 import { updateBase } from '../src/runner/base-update.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { adapters, type AgentRequest } from '../src/runner/adapters.ts';
-import { acceptBoard } from '../src/runner/agent-control.ts';
+import { acceptBoard, reviewPlan } from '../src/runner/agent-control.ts';
 import { git, command } from '../src/runner/process.ts';
 import { syncGit } from '../src/runner/git-sync.ts';
 import { input } from './helpers.ts';
@@ -124,6 +126,13 @@ type Coverage = {
     taskIds: string[];
     excludedTasks: { id: string; reason: string }[];
     criteria: { requirements: { status: string }[] }[];
+  }[];
+};
+/** Покрытие с задачами, привязанными к истории после приёмки (`task_story`). */
+type Bound = Coverage & {
+  stories: {
+    unverifiedTaskIds: string[];
+    boundTasks?: { id: string; boundAfterAcceptance: true; fresh: boolean }[];
   }[];
 };
 function links(f: Awaited<ReturnType<typeof fixture>>) {
@@ -499,6 +508,167 @@ test('Покрытие INTENT подтверждается тем же прав�
     const report = f.report();
     assert.equal(report.coverageComplete, false);
     assert.equal(report.stories[0].criteria[0].verified, false);
+  } finally {
+    await scheduler.stop();
+    await f.close();
+  }
+});
+
+test('Утверждение отклоняет задачу с подробным REQ истории без связи с историей до вызова модели', async () => {
+  const f = await fixture();
+  try {
+    const [story] = links(f) as RequirementLink[];
+    const board = f.h.createBoard('Story binding at approval', '', 'main');
+    const detailed = f.h.addTask(board.id, { ...input(), requirements: links(f).slice(1) });
+    // Предупреждение плана — до ревью: ведущий исправит черновик сразу.
+    const warned = new AgentService(f.h).execute({
+      operation: 'task_create',
+      input: { boardId: board.id, task: { ...input(), requirements: links(f).slice(1) } },
+    }) as { taskId: string; storyGaps: StoryGap[] };
+    assert.deepEqual(warned.storyGaps[0].candidates, [
+      { storyId: 'list', source: 'INTENT.md', id: 'REQ-intent-list', digest: story.digest },
+    ]);
+    assert.equal(warned.storyGaps[0].kind, 'missing-story');
+    assert.deepEqual(warned.storyGaps[0].requirementIds, ['REQ-list']);
+    f.h.cancel(warned.taskId, 'Duplicate draft of the warning check');
+    const refusal = (e: unknown) => {
+      const message = (e as Error).message;
+      assert.match(message, new RegExp(detailed.id + ': REQ-list входит в критерии истории list'));
+      assert.ok(message.includes('"id":"REQ-intent-list"'), message);
+      assert.ok(message.includes(story.digest), message);
+      return true;
+    };
+    assert.throws(() => f.h.approve(board.id), refusal);
+    // Ревью плана отклоняет тот же план до модели.
+    let calls = 0;
+    const counting = {
+      name: 'counting',
+      execute: () => {
+        calls++;
+        return Promise.reject(new Error('model must not be called'));
+      },
+    };
+    const runtimes = { codex: counting, claude: counting } as unknown as Parameters<
+      typeof reviewPlan
+    >[4];
+    await assert.rejects(reviewPlan(f.h, f.root, board.id, 'codex', runtimes), refusal);
+    assert.equal(calls, 0);
+    assert.equal(f.store.read().tasks.find((t) => t.id === detailed.id)!.status, 'draft');
+    // Устаревшая связь с историей — тот же отказ с текущим digest.
+    const stale = links(f) as RequirementLink[];
+    const earlier = 'Earlier text of the story before the map was revised.';
+    stale[0] = { ...stale[0], text: earlier, digest: digest(earlier) };
+    f.h.editTask(detailed.id, { ...input(), requirements: stale }, specDigest(detailed));
+    assert.throws(() => f.h.approve(board.id), /REQ-intent-list устарела/);
+    // REQ, не входящий ни в одну историю, связи с историей не требует.
+    const excluded = requirementSnapshot(f.config.repository, 'docs/spec.md').requirements.find(
+      (r) => r.id === 'REQ-out',
+    )!;
+    const current = f.store.read().tasks.find((t) => t.id === detailed.id)!;
+    f.h.editTask(
+      detailed.id,
+      {
+        ...input(),
+        requirements: [
+          {
+            ...excluded,
+            source: 'docs/spec.md',
+            gate: f.config.gates[0].id,
+            scenario: 'Billing stays out of scope',
+          },
+        ],
+      },
+      specDigest(current),
+    );
+    const other = f.h.createBoard('Story binding: unrelated requirement', '', 'main');
+    f.h.addTask(other.id, { ...input(), requirements: links(f) });
+    f.h.approve(other.id);
+    f.h.approve(board.id);
+    assert.ok(f.store.read().tasks.every((t) => t.status !== 'draft'));
+  } finally {
+    await f.close();
+  }
+});
+
+test('task_story привязывает принятую задачу к истории без изменения постановки и теряет силу со сменой истории', async () => {
+  const f = await fixture();
+  const scheduler = new Scheduler(f.h, f.root);
+  const agent = new AgentService(f.h);
+  const bind = (taskIds: string[], storyId = 'list') =>
+    agent.execute({
+      operation: 'task_story',
+      input: { storyId, taskIds, reason: 'Work implements the story but was approved unbound' },
+    }) as { binding: { id: string } };
+  const report = () => f.report() as Bound;
+  try {
+    // Задача утверждена, когда карты INTENT ещё не было: так возникает
+    // принятая работа без связи с историей.
+    const detailedOnly = links(f).slice(1);
+    await git(f.config.repository, 'rm', '-q', 'INTENT.md');
+    await git(f.config.repository, 'commit', '-m', 'Intent not yet written');
+    const board = f.h.createBoard('Unbound accepted work', '', 'main');
+    const done = f.h.addTask(board.id, { ...input(), requirements: detailedOnly });
+    f.h.approve(board.id);
+    await git(f.config.repository, 'revert', '--no-edit', 'HEAD');
+    await scheduler.init();
+    await updateBase(f.config, f.root);
+    f.h.pause(false);
+    await scheduler.drain();
+    const accepted = f.store.read().tasks.find((t) => t.id === done.id)!;
+    assert.equal(accepted.status, 'done', accepted.failure);
+    assert.equal(report().coverageComplete, false);
+    assert.deepEqual(report().stories[0].unverifiedTaskIds, [done.id]);
+
+    // Отказы: неизвестная история, REQ вне критериев истории, не выполненная задача.
+    assert.throws(() => bind([done.id], 'absent'), /Неизвестная история absent/);
+    assert.throws(() => bind([done.id], 'export'), /REQ-list не входит в критерии истории export/);
+    const draftBoard = f.h.createBoard('Unbound draft', '', 'main');
+    const draft = f.h.addTask(draftBoard.id, { ...input(), requirements: links(f).slice(1) });
+    assert.throws(() => bind([done.id, draft.id]), /только выполненную задачу/);
+    f.h.cancel(draft.id, 'Not part of the binding check');
+    assert.equal(f.store.read().tasks.find((t) => t.id === done.id)!.storyBindings, undefined);
+
+    const result = bind([done.id]);
+    assert.equal(result.binding.id, 'REQ-intent-list');
+    const bound = f.store.read().tasks.find((t) => t.id === done.id)!;
+    assert.equal(bound.approvedDigest, accepted.approvedDigest);
+    assert.equal(specDigest(bound), accepted.approvedDigest);
+    assert.deepEqual(bound.requirements, accepted.requirements);
+    assert.ok(
+      f.store
+        .events()
+        .some(
+          (e) =>
+            e.type === 'task.story' &&
+            JSON.stringify(e.data).includes('approved unbound') &&
+            JSON.stringify(e.data).includes('"actor":"agent"'),
+        ),
+    );
+    assert.equal(report().coverageComplete, true);
+    assert.equal(report().stories[0].verified, true);
+    assert.deepEqual(report().stories[0].boundTasks, [
+      { id: done.id, boundAfterAcceptance: true, fresh: true },
+    ]);
+    // Привязка не заменяет доказательство: без записи теста подробной связи
+    // история снова не подтверждена.
+    const proof = f.store.read().runs.find((r) => r.taskId === done.id)!.evidence;
+    f.store.change('fixture.remove-proof', (s) => {
+      s.runs.find((r) => r.taskId === done.id)!.evidence = [];
+    });
+    assert.equal(report().stories[0].verified, false);
+    f.store.change('fixture.restore-proof', (s) => {
+      s.runs.find((r) => r.taskId === done.id)!.evidence = proof;
+    });
+    assert.equal(report().stories[0].verified, true);
+
+    // Текст истории изменился: автор его не видел, привязка к прежнему
+    // тексту историю больше не подтверждает.
+    const altered = definition();
+    altered.stories[0].criteria[0].text = 'Show the catalogue with a result count.';
+    await f.save(altered);
+    assert.equal(report().coverageComplete, false);
+    assert.deepEqual(report().stories[0].unverifiedTaskIds, [done.id]);
+    assert.equal(report().stories[0].boundTasks?.[0].fresh, false);
   } finally {
     await scheduler.stop();
     await f.close();
