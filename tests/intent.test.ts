@@ -116,6 +116,16 @@ async function fixture() {
     },
   };
 }
+/** Отчёт покрытия в той мере, в какой его читают тесты исключённой работы. */
+type Coverage = {
+  coverageComplete: boolean;
+  stories: {
+    verified: boolean;
+    taskIds: string[];
+    excludedTasks: { id: string; reason: string }[];
+    criteria: { requirements: { status: string }[] }[];
+  }[];
+};
 function links(f: Awaited<ReturnType<typeof fixture>>) {
   const binding = (f.intent.snapshot({ repositoryId: 'main', storyId: 'list' }) as any).stories[0]
     .requirement;
@@ -278,7 +288,9 @@ test('Real Git acceptance covers intent; criteria changes invalidate coverage an
     await scheduler.drain();
     assert.equal(f.store.read().tasks.find((t) => t.id === next.id)!.status, 'done');
     assert.equal(f.report().coverageComplete, true);
-    assert.deepEqual(f.report().stories[0].excludedTasks, [{ id: task.id, reason: 'superseded' }]);
+    assert.deepEqual((f.report() as Coverage).stories[0].excludedTasks, [
+      { id: task.id, reason: 'superseded' },
+    ]);
     assert.equal(f.store.read().boards[0].revisions[0].snapshot!.digest, history);
     // Matching task state alone cannot hide a missing test record.
     const proof = f.store.read().runs.find((r) => r.taskId === next.id)!.evidence;
@@ -303,12 +315,13 @@ test('Real Git acceptance covers intent; criteria changes invalidate coverage an
 test('A story whose only linked tasks are cancelled is uncovered, and the cancelled work stays visible as excluded', async () => {
   const f = await fixture();
   try {
+    const report = () => f.report() as Coverage;
     const board = f.h.createBoard('Abandoned plan', '', 'main');
     const task = f.h.addTask(board.id, { ...input(), requirements: links(f) });
-    assert.equal(f.report().stories[0].criteria[0].requirements[0].status, 'unverified');
+    assert.equal(report().stories[0].criteria[0].requirements[0].status, 'unverified');
     f.h.cancel(task.id, 'Plan replaced');
-    const story = f.report().stories[0];
-    assert.equal(f.report().coverageComplete, false);
+    const story = report().stories[0];
+    assert.equal(report().coverageComplete, false);
     assert.equal(story.verified, false);
     assert.deepEqual(story.taskIds, []);
     assert.deepEqual(story.excludedTasks, [{ id: task.id, reason: 'cancelled' }]);

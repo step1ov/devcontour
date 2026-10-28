@@ -416,7 +416,10 @@ test('A product release needs every local board and real joint tests; acceptance
     // does not hold the release open.
     f.h.cancel(pending.id, 'Правка не нужна');
     assert.equal(f.view().features[0].status, 'awaiting-verification');
-    const local = f.intent.report({ repositoryId: 'app', releaseId: 'mvp' }) as any;
+    const local = f.intent.report({ repositoryId: 'app', releaseId: 'mvp' }) as {
+      coverageComplete: boolean;
+      stories: { excludedTasks: { id: string; reason: string }[]; taskIds: string[] }[];
+    };
     assert.equal(local.coverageComplete, true);
     assert.deepEqual(local.stories[0].excludedTasks, [{ id: pending.id, reason: 'cancelled' }]);
     assert.ok(!local.stories[0].taskIds.includes(pending.id));
