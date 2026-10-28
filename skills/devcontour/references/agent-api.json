@@ -1,6 +1,6 @@
 {
   "name": "devcontour",
-  "version": "0.4.0-alpha.12",
+  "version": "0.4.0-alpha.13",
   "protocolVersion": 1,
   "maxInputBytes": 100000,
   "maxResultBytes": 65536,
@@ -2785,7 +2785,7 @@
                       }
                     },
                     "gates": {
-                      "maxItems": 20,
+                      "maxItems": 100,
                       "type": "array",
                       "items": {
                         "type": "string",
