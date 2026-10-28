@@ -80,7 +80,7 @@ async function fixture(components = true) {
     runTimeoutMs: 60000,
     maxAttempts: 5,
     resourceDatabase: join(root, 'resources.sqlite'),
-    checkoutRoot: testCheckoutRoot(root),
+    checkoutRoot: testCheckoutRoot(),
     workspaceGates: [
       {
         id: 'together',

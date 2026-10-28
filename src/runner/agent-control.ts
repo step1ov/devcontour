@@ -35,7 +35,7 @@ import {
 } from '../core/checks.ts';
 import { spikeRecord, spikesOf } from './checks.ts';
 import { coverBoard } from './board-coverage.ts';
-import { closedWorkspaceCheckouts, workspaceCheckout } from './checkout-root.ts';
+import { checkoutRoots, workspaceCheckout } from './checkout-root.ts';
 
 // Контракт живёт в репозитории, и предложение должно на него ссылаться, а не
 // нести копию: копию легко отправить на ревью устаревшей, и тогда принятый
@@ -383,10 +383,10 @@ async function review(
       cwd: checkout?.path ?? h.config.repository,
       artifactDir: artifact,
       // База и журналы контура закрыты reviewer, даже когда лежат внутри
-      // checkout (embedded): более конкретный путь побеждает. Рабочие деревья
-      // попыток под корнем вне дерева закрыты поэлементно: своя рабочая
-      // копия ревью и её предки открыты.
-      denied: [root, ...closedWorkspaceCheckouts(h, [checkout?.path ?? h.config.repository])],
+      // checkout (embedded): более конкретный путь побеждает. Корень рабочих
+      // деревьев закрыт целиком, как в harness: своя рабочая копия ревью
+      // открыта более конкретным разрешением (`readable` с cwd).
+      denied: [root, ...checkoutRoots(h)],
       meta: {
         ...(repositoryId ? { repositoryId } : {}),
         ...(subjectId ? { subjectId } : {}),

@@ -177,6 +177,9 @@ async function exercise(f: Awaited<ReturnType<typeof embedded>>) {
  */
 async function withHome<T>(action: (home: string) => Promise<T>) {
   const home = await realpath(await mkdtemp(join(tmpdir(), 'devcontour-home-')));
+  // Каталог кэша ОС есть у любого пользователя; harness создаёт только свой.
+  await mkdir(join(home, 'Library', 'Caches'), { recursive: true });
+  await mkdir(join(home, '.cache'), { recursive: true });
   const keys = [
     'HOME',
     'GIT_AUTHOR_NAME',
@@ -238,7 +241,7 @@ test('Embedded workspace: заданный checkoutRoot получают пла�
   }
 });
 
-test('doctor: checkoutRoot внутри репозитория — ослабление с объяснением', async () => {
+test('checkoutRoot внутри репозитория: doctor блокирует с причиной, загрузка конфигурации отказывает понятно', async () => {
   const tmp = await realpath(await mkdtemp(join(tmpdir(), 'devcontour-checkout-doctor-')));
   try {
     const repo = join(tmp, 'w');
@@ -261,8 +264,14 @@ test('doctor: checkoutRoot внутри репозитория — ослабл�
       checkoutRoot: join(repo, 'trees'),
     });
     const check = checkoutsCheck(config, join(repo, '.devcontour-local'));
-    assert.equal(check.status, 'degraded');
-    assert.match(check.detail, /EPERM/);
+    // harness отклоняет такой корень: doctor называет причину блокировкой,
+    // загрузка конфигурации — понятной ошибкой, а не сбоем процесса.
+    assert.equal(check.status, 'blocked');
+    assert.match(check.detail, /Недопустимый checkoutRoot в config\.json: checkoutRoot .* внутри/);
+    const data = join(repo, '.devcontour-local');
+    await mkdir(data, { recursive: true });
+    await writeFile(join(data, 'config.json'), JSON.stringify(config));
+    assert.throws(() => loadConfig(join(data, 'config.json')), /Недопустимый checkoutRoot/);
   } finally {
     await rm(tmp, { recursive: true, force: true });
   }
@@ -282,7 +291,8 @@ test('Стандартные фикстуры тестов не пишут в н
       const h = new DevContour(store, config);
       const choice = workspaceCheckoutRoot(h);
       assert.equal(choice.placement, 'configured');
-      assert.ok(within(choice.root!, root), choice.root);
+      assert.ok(!within(choice.root!, cache), choice.root);
+      assert.ok(!within(choice.root!, root), 'не внутри каталога данных');
       // Демо прогнало очередь: попытки были, а в кэше пользователя их нет.
       assert.ok(store.read().runs.some((r) => r.status === 'succeeded'));
       assert.equal(existsSync(join(cache, hash)), false, 'нет каталога фикстуры в кэше');
@@ -291,7 +301,9 @@ test('Стандартные фикстуры тестов не пишут в н
     }
     const f = fixture();
     try {
-      assert.ok(within(workspaceCheckoutRoot(f.h).root!, realpathSync(f.root)));
+      const own = workspaceCheckoutRoot(f.h);
+      assert.equal(own.placement, 'configured');
+      assert.ok(!within(own.root!, cache), own.root);
     } finally {
       f.cleanup();
     }

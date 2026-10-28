@@ -1,6 +1,6 @@
 import { access, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
-import { constants, existsSync, realpathSync, statSync } from 'node:fs';
-import { delimiter, isAbsolute, join, resolve, sep } from 'node:path';
+import { constants, existsSync, statSync } from 'node:fs';
+import { delimiter, isAbsolute, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { emptyState, type Config, type DevContourState, type Role } from '../core/model.ts';
 import {
@@ -14,7 +14,7 @@ import { DevContourExecutionStore, harnessVersion } from '../harness/index.ts';
 import { projectionOptions } from '../harness/host.ts';
 import { technicalReviewer } from '../harness/policy.ts';
 import { isolationSupport } from './isolation.ts';
-import { checkoutRootFor } from './checkout-root.ts';
+import { CheckoutRootError, checkoutRootFor } from './checkout-root.ts';
 import { installProbe } from './install-probe.ts';
 import { validateWorkflow } from '../core/workflow.ts';
 import { command, git } from './process.ts';
@@ -749,34 +749,26 @@ export async function doctor(
  * репозитория) упирает инструменты, которые ищут конфигурацию вверх по
  * дереву, в EPERM. Кэш на другом томе, чем репозиторий, оставляет деревья на
  * прежнем месте — работать можно, но этот EPERM остаётся; исправление —
- * `checkoutRoot` на томе репозитория.
+ * `checkoutRoot` на томе репозитория. Корень, который harness отклоняет
+ * (внутри репозитория, каталога состояния или закрытого пути), — блокировка:
+ * исполнение с ним не начнётся.
  */
 export function checkoutsCheck(config: Config, root: string): Check {
-  const choice = checkoutRootFor(config, root);
-  const real = (path: string) => {
-    try {
-      return realpathSync(path);
-    } catch {
-      return resolve(path);
-    }
-  };
-  const at = choice.root;
-  const inside = at
-    ? [root, ...repositories(config).map((r) => r.path)]
-        .map(real)
-        .find((dir) => at === dir || at.startsWith(dir + sep))
-    : undefined;
-  if (choice.placement === 'cross-volume')
+  let choice;
+  try {
+    // Диагностика каталогов кэша не создаёт.
+    choice = checkoutRootFor(config, root, false);
+  } catch (error) {
+    if (!(error instanceof CheckoutRootError)) throw error;
+    return { id: 'checkouts', status: 'blocked', detail: error.message };
+  }
+  // Прежнее место с пояснением — кэш пользователя отклонён (другой том,
+  // ссылка, чужой владелец, кэш внутри закрытого пути).
+  if (choice.placement === 'cross-volume' || (choice.placement === 'in-place' && choice.note))
     return {
       id: 'checkouts',
       status: 'degraded',
       detail: `Рабочие деревья остаются в каталоге состояния: ${choice.note ?? 'кэш пользователя на другом томе'}. Инструменты, ищущие конфигурацию вверх по дереву (browserslist, Metro, postcss, tsconfig), в песочнице получат EPERM. Задайте checkoutRoot (абсолютный путь на томе репозитория) в config.json.`,
-    };
-  if (inside)
-    return {
-      id: 'checkouts',
-      status: 'degraded',
-      detail: `checkoutRoot ${at} лежит внутри ${inside}: этот каталог закрыт песочнице, и инструменты, ищущие конфигурацию вверх по дереву, получат EPERM. Задайте корень вне репозиториев и каталога контура.`,
     };
   return {
     id: 'checkouts',

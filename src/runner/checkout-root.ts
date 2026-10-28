@@ -1,6 +1,10 @@
-import { readdirSync, realpathSync } from 'node:fs';
-import { dirname, join, resolve, sep } from 'node:path';
-import { checkoutPath, chooseCheckoutRoot, type CheckoutRoot } from 'devcontour-harness';
+import { dirname, join, resolve } from 'node:path';
+import {
+  HarnessError,
+  checkoutPath,
+  chooseCheckoutRoot,
+  type CheckoutRoot,
+} from 'devcontour-harness';
 import type { Config } from '../core/model.ts';
 import type { DevContour } from '../core/service.ts';
 import { repositories } from '../core/repositories.ts';
@@ -27,14 +31,39 @@ import { credentialPaths } from './isolation.ts';
  * вызовов: хэш берётся по каталогу данных workspace, и планировщик, проверки
  * доски и базы, перенос базы и совместная проверка видят одно и то же место.
  */
-export function checkoutRootFor(config: Config, dataRoot: string): CheckoutRoot {
+export function checkoutRootFor(
+  config: Config,
+  dataRoot: string,
+  /** `false` — диагностика: каталоги кэша не создаются, только проверяются. */
+  create = true,
+): CheckoutRoot {
   const repos = repositories(config);
-  return chooseCheckoutRoot({
-    stateDirs: [resolve(dataRoot), ...repos.map((r) => join(r.path, '.devcontour-local'))],
-    repositories: repos.map((r) => r.path),
-    hidden: credentialPaths(),
-    ...(config.checkoutRoot ? { configured: config.checkoutRoot } : {}),
-  });
+  try {
+    return chooseCheckoutRoot({
+      stateDirs: [resolve(dataRoot), ...repos.map((r) => join(r.path, '.devcontour-local'))],
+      repositories: repos.map((r) => r.path),
+      hidden: credentialPaths(),
+      ...(config.checkoutRoot ? { configured: config.checkoutRoot } : {}),
+      create,
+    });
+  } catch (error) {
+    // Отказ harness (корень внутри репозитория, каталога состояния или
+    // закрытого пути; ссылка; чужой владелец) — ошибка настройки, которую
+    // оператор исправляет в config.json, а не сбой процесса.
+    if (error instanceof HarnessError && error.code === 'INVALID_INPUT')
+      throw new CheckoutRootError(error.message);
+    throw error;
+  }
+}
+
+/** Недопустимый `checkoutRoot` конфигурации: сообщение называет исправление. */
+export class CheckoutRootError extends Error {
+  constructor(reason: string) {
+    super(
+      `Недопустимый checkoutRoot в config.json: ${reason}. Задайте абсолютный путь вне репозиториев и каталога контура или уберите checkoutRoot (тогда — кэш пользователя).`,
+    );
+    this.name = 'CheckoutRootError';
+  }
 }
 
 /** Каталог данных workspace: каталог его базы (`<data>/state.sqlite`). */
@@ -79,37 +108,4 @@ export function workspaceCheckout(
   id: string,
 ) {
   return checkoutPath(workspaceCheckoutRoot(h), legacy, repositoryId, kind, id);
-}
-
-/**
- * Что под корнем закрыть песочнице, оставив открытыми `open` и их предков:
- * чужие попытки закрыты, свой checkout виден целиком вверх по дереву.
- * Корень, не содержащий открытых путей, закрыт целиком. Элемент, появившийся
- * после построения границы (параллельная попытка), не закрыт — та же граница
- * подхода, что у поэлементных запретов harness.
- */
-export function closedWorkspaceCheckouts(h: DevContour, open: string[]) {
-  const root = workspaceCheckoutRoot(h).root;
-  if (!root) return [];
-  const real = (path: string) => {
-    try {
-      return realpathSync(path);
-    } catch {
-      return resolve(path);
-    }
-  };
-  const opened = open.map(real);
-  const within = (path: string, dir: string) => path === dir || path.startsWith(dir + sep);
-  const expand = (dir: string): string[] => {
-    if (opened.some((p) => within(dir, p))) return [];
-    if (!opened.some((p) => within(p, dir))) return [dir];
-    let names: string[];
-    try {
-      names = readdirSync(dir);
-    } catch {
-      return [];
-    }
-    return names.flatMap((name) => expand(join(dir, name)));
-  };
-  return expand(real(root));
 }

@@ -1,11 +1,33 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { configSchema, type Config } from '../src/core/model.ts';
 import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
-/** Корень рабочих деревьев теста: внутри его временного каталога, убирается вместе с ним. */
-export const testCheckoutRoot = (root: string) => join(root, '.checkouts');
+/**
+ * Корень рабочих деревьев теста — свой временный каталог, а не кэш
+ * пользователя. Внутри каталога данных фикстуры его держать нельзя: harness
+ * отклоняет корень внутри каталога состояния. Убирается при завершении
+ * процесса (и раньше — `cleanup` фикстуры); удаляются только каталоги,
+ * созданные здесь.
+ */
+const testCheckoutRoots = new Set<string>();
+let removeOnExit = false;
+export function testCheckoutRoot() {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'devcontour-test-checkouts-')));
+  testCheckoutRoots.add(dir);
+  if (!removeOnExit) {
+    removeOnExit = true;
+    process.once('exit', () => {
+      for (const d of testCheckoutRoots) rmSync(d, { recursive: true, force: true });
+    });
+  }
+  return dir;
+}
+export function removeTestCheckoutRoot(dir: string) {
+  if (!testCheckoutRoots.delete(dir)) return;
+  rmSync(dir, { recursive: true, force: true });
+}
 export const config = (overrides: Partial<Config> = {}): Config =>
   configSchema.parse({
     version: 1,
@@ -40,8 +62,9 @@ export const input = (title = 'Example task', dependsOn: string[] = []) => ({
 export function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'devcontour-test-'));
   const store = new Store(join(root, 'state.sqlite'));
-  // Рабочие деревья — в каталоге фикстуры, а не в кэше пользователя.
-  const h = new DevContour(store, config({ checkoutRoot: testCheckoutRoot(root) }));
+  // Рабочие деревья — в своём временном каталоге, а не в кэше пользователя.
+  const checkouts = testCheckoutRoot();
+  const h = new DevContour(store, config({ checkoutRoot: checkouts }));
   return {
     root,
     store,
@@ -49,6 +72,7 @@ export function fixture() {
     cleanup: () => {
       store.close();
       rmSync(root, { recursive: true, force: true });
+      removeTestCheckoutRoot(checkouts);
     },
   };
 }

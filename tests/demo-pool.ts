@@ -3,14 +3,14 @@ import { cpSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setupDemo } from '../src/demo.ts';
+import { testCheckoutRoot } from './helpers.ts';
 
 /**
- * Учебный workspace для тестов: рабочие деревья — в его же временном каталоге
- * (`<root>/.checkouts`), а не в кэше пользователя. Продуктовый `demo` держит
- * выбор по умолчанию.
+ * Учебный workspace для тестов: рабочие деревья — в своём временном каталоге
+ * теста (`testCheckoutRoot`), а не в кэше пользователя. Продуктовый `demo`
+ * держит выбор по умолчанию.
  */
-export const testDemo = (root: string) =>
-  setupDemo(root, { checkoutRoot: join(root, '.checkouts') });
+export const testDemo = (root: string) => setupDemo(root, { checkoutRoot: testCheckoutRoot() });
 
 /**
  * Process-local snapshots of a stopped demo. Restore each slot at its original

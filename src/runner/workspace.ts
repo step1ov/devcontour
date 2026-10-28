@@ -1,4 +1,3 @@
-import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { JointRunner } from 'devcontour-harness';
 import type { DevContour } from '../core/service.ts';
@@ -55,10 +54,6 @@ export class WorkspaceRunner {
     });
     const started = engine.read((view) => view.verification(verificationId));
     if (!started) throw new Error('Проверка workspace не найдена: ' + verificationId);
-    // Каталог проверки создаётся здесь: с корнем рабочих деревьев вне дерева
-    // снимки компонентов лежат не в нём, и сам он иначе не появляется до
-    // записи impact.json.
-    await mkdir(join(this.root, 'workspace-checks', verificationId), { recursive: true });
     const result = await runner.run(started, controller.signal).catch((error: unknown) => {
       throw toDomain(error);
     });

@@ -4,6 +4,7 @@ import { readFileSync, realpathSync, writeFileSync, existsSync, lstatSync } from
 import { isAbsolute, resolve, dirname, join, sep } from 'node:path';
 import { repositories } from '../core/repositories.ts';
 import { packKey, resolveProfile } from './packs.ts';
+import { checkoutRootFor } from './checkout-root.ts';
 import { configSchema, type Config } from '../core/model.ts';
 import {
   bytesDigest,
@@ -149,6 +150,9 @@ export function loadConfig(path: string, text = readFileSync(path, 'utf8')): Con
     throw new Error('resourceDatabase требует абсолютный путь');
   if (c.checkoutRoot && !isAbsolute(c.checkoutRoot))
     throw new Error('checkoutRoot требует абсолютный путь');
+  // Корень, который harness отклонит, — отказ загрузки с понятной причиной,
+  // а не сбой первого запуска очереди.
+  if (c.checkoutRoot) checkoutRootFor(c, dirname(resolve(path)), false);
   validateWorkflow(c);
   // Источник для проверки поколения: процесс, прочитавший эти байты, позже
   // узнаёт, лежат ли в файлах они же.
