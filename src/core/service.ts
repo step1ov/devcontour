@@ -453,11 +453,21 @@ export function receiptBytes(h: DevContour, s: DevContourState, t: Task) {
  * проверка сверяет чувствительные пути всего непроверенного диапазона, а не
  * только последнего шага.
  */
+/**
+ * Непроверенный диапазон текущего ожидания `base-check`: только записанный
+ * для этого ожидания (то же время постановки). Нет ожидания или диапазон от
+ * другого — `undefined`.
+ */
+export function baseMovesOf(s: Readonly<DevContourState>) {
+  const wait = s.waits?.find((w) => w.kind === 'base-check');
+  return wait && s.baseMoves?.at === wait.at ? s.baseMoves.bases : undefined;
+}
 export function waitBaseCheck(s: DevContourState, updated: BaseMove[], detail: string) {
   // Диапазон копится только поверх ещё стоящего ожидания: снятое ожидание
   // (проверка прошла, queue --start) оставляет прежний диапазон в прошлом.
-  const previous = s.waits?.some((w) => w.kind === 'base-check') ? (s.baseMoves ?? []) : [];
-  s.baseMoves = [
+  const at = now();
+  const previous = baseMovesOf(s) ?? [];
+  const bases = [
     ...previous.filter((p) => !updated.some((u) => u.repositoryId === p.repositoryId)),
     ...updated.map((u) => ({
       repositoryId: u.repositoryId,
@@ -465,9 +475,10 @@ export function waitBaseCheck(s: DevContourState, updated: BaseMove[], detail: s
       to: u.to,
     })),
   ];
+  s.baseMoves = { at, bases };
   s.waits = [
     ...(s.waits ?? []).filter((w) => w.kind !== 'base-check'),
-    { kind: 'base-check', detail, at: now() },
+    { kind: 'base-check', detail, at },
   ];
 }
 /** Путь поля плана для отказа: `tasks[2].gates`. */

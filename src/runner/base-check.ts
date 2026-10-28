@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { runGatesAt, type EvidenceRecord } from 'devcontour-harness';
-import type { DevContour } from '../core/service.ts';
+import { baseMovesOf, type DevContour } from '../core/service.ts';
 import { repositories, repository } from '../core/repositories.ts';
 import { executionOf } from '../harness/execution.ts';
 import { git } from './process.ts';
@@ -79,16 +79,13 @@ export async function checkBase(
     const s = h.store.read();
     return s.paused && s.pauseReason === 'base-check';
   };
-  const ranges = () => {
-    const s = h.store.read();
-    return s.waits?.some((w) => w.kind === 'base-check') ? JSON.stringify(s.baseMoves ?? null) : '';
-  };
+  const ranges = () => JSON.stringify(baseMovesOf(h.store.read()) ?? null);
   if (h.config.approvalMode !== 'agent' || !waiting()) return !waiting();
   const state = h.store.read();
   const range = ranges();
   // Ожидание без диапазона (поставлено до переноса или прежней версией) —
   // решение человека.
-  const moves = range ? state.baseMoves : undefined;
+  const moves = baseMovesOf(state);
   if (!moves) return false;
   /** Ожидание остаётся и называет причину; событие — только при новой причине. */
   const hold = (type: string, detail: string, data: Record<string, unknown>) => {

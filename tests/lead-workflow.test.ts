@@ -355,14 +355,7 @@ test('В режиме агента workflow доски сам проверяет
     const fixed = await commit('ok');
     await lead.tick();
     state = store.read();
-    assert.equal(
-      state.paused,
-      false,
-      'прошедшая проверка базы продолжает очередь: ' +
-        detail() +
-        JSON.stringify(state.baseMoves) +
-        state.pauseReason,
-    );
+    assert.equal(state.paused, false, 'прошедшая проверка базы продолжает очередь');
     assert.equal(state.waits, undefined);
     assert.deepEqual(
       events('base.check.passed').map((e) => (e.data as { sha: string }).sha),
@@ -491,6 +484,39 @@ test('Проверка базы: сдвиг базы до решения не с
     assert.equal(await checkBase(h, roots, () => {}), true, 'не ожидание base-check');
     state = store.read();
     assert.equal(state.pauseReason, 'runtime', 'проверка базы паузу провайдера не снимает');
+
+    // Снятое ожидание удаляет свой диапазон.
+    h.pause(false);
+    assert.equal(store.read().baseMoves, undefined, 'queue --start удалил диапазон');
+    h.holdForBaseUpdate();
+    const first = await commit('ok 3');
+    assert.ok(store.read().baseMoves);
+    // Откат на версию, не знающую диапазона: она снимает ожидание мимо него и
+    // ставит своё. После обновления чужой диапазон не используется.
+    store.change('fixture.older', (s) => {
+      s.paused = false;
+      s.pauseReason = undefined;
+      s.waits = undefined;
+    });
+    await new Promise((r) => setTimeout(r, 5));
+    const target2 = await commit('broken', {}, false);
+    execFileSync('git', ['-C', config.repository, 'update-ref', target, target2]);
+    store.change('fixture.older', (s) => {
+      s.paused = true;
+      s.pauseReason = 'base-check';
+      s.waits = [
+        { kind: 'base-check', detail: 'База прогонов перенесена', at: new Date().toISOString() },
+      ];
+    });
+    const started = events('base.check.started').length;
+    assert.equal(await checkBase(h, roots, () => {}), false, 'ожидание без своего диапазона');
+    assert.equal(events('base.check.started').length, started, 'gates по чужому диапазону не шли');
+    assert.ok(waiting());
+    // Следующий перенос новой версии начинает диапазон заново.
+    const from = await git(config.repository, 'rev-parse', target);
+    const next = await commit('ok 4');
+    assert.deepEqual(store.read().baseMoves?.bases, [{ repositoryId: 'main', from, to: next }]);
+    assert.notEqual(from, first);
   } finally {
     await f.cleanup();
   }
@@ -515,7 +541,9 @@ test('base-update в режиме агента: работающая очере�
     let state = store.read();
     assert.equal(state.paused, true);
     assert.equal(state.pauseReason, 'base-check');
-    assert.deepEqual(state.baseMoves, [{ repositoryId: 'main', from: moved.updated[0].from, to }]);
+    assert.deepEqual(state.baseMoves?.bases, [
+      { repositoryId: 'main', from: moved.updated[0].from, to },
+    ]);
     h.pause(false);
     // Отказ переноса (рабочая ветка разошлась с базой и конфликтует) снимает
     // поставленное им ожидание; очередь остаётся работающей.

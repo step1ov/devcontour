@@ -476,6 +476,9 @@ export function setControl(state: DevContourState, control: ControlState) {
     ['pauseReason', 'pausedAt', 'pauseOperation', 'pauseFailures', 'waits', 'reconfigure'],
     next,
   );
+  // Диапазон переноса живёт, пока стоит его ожидание base-check: снятие
+  // ожидания (queue --start, проверка базы) удаляет и его.
+  if (!next.waits?.some((w) => w.kind === 'base-check')) delete state.baseMoves;
   if (next.appliedPolicy) state.appliedConfig = structuredClone(next.appliedPolicy);
   else delete state.appliedConfig;
 }
