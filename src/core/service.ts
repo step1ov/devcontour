@@ -42,6 +42,7 @@ import {
   type Evidence,
   type Run,
   type Approval,
+  type BaseMove,
 } from './model.ts';
 export const digest = (value: unknown) =>
   createHash('sha256')
@@ -445,6 +446,29 @@ export function receiptBytes(h: DevContour, s: DevContourState, t: Task) {
     return 0;
   }
   return receiptRecordBytes(receipt);
+}
+/**
+ * Ожидание проверки перенесённой базы. Перенос поверх ещё не проверенного
+ * сохраняет первую непроверенную базу компонента (`from`): автоматическая
+ * проверка сверяет чувствительные пути всего непроверенного диапазона, а не
+ * только последнего шага.
+ */
+export function waitBaseCheck(s: DevContourState, updated: BaseMove[], detail: string) {
+  // Диапазон копится только поверх ещё стоящего ожидания: снятое ожидание
+  // (проверка прошла, queue --start) оставляет прежний диапазон в прошлом.
+  const previous = s.waits?.some((w) => w.kind === 'base-check') ? (s.baseMoves ?? []) : [];
+  s.baseMoves = [
+    ...previous.filter((p) => !updated.some((u) => u.repositoryId === p.repositoryId)),
+    ...updated.map((u) => ({
+      repositoryId: u.repositoryId,
+      from: previous.find((p) => p.repositoryId === u.repositoryId)?.from ?? u.from,
+      to: u.to,
+    })),
+  ];
+  s.waits = [
+    ...(s.waits ?? []).filter((w) => w.kind !== 'base-check'),
+    { kind: 'base-check', detail, at: now() },
+  ];
 }
 /** Путь поля плана для отказа: `tasks[2].gates`. */
 function planPath(path: PropertyKey[]) {
@@ -1313,25 +1337,26 @@ export class DevContour {
     });
   }
   // Перенос базы устраняет причину, по которой диспетчер встал, но очередь не
-  // запускает: сначала человек проверяет базу гейтами. Пауза переходит к нему,
-  // а прежний сбой перестаёт называться причиной — иначе экран продолжал
-  // советовать уже выполненный base-update. Событие оставляет перенос в журнале.
-  baseUpdated(updated: { repositoryId: string; from: string; to: string }[]) {
+  // запускает: сначала базу проверяют гейтами. Прежний сбой перестаёт
+  // называться причиной — иначе экран продолжал советовать уже выполненный
+  // base-update. Событие оставляет перенос в журнале.
+  baseUpdated(updated: BaseMove[]) {
     return this.store.change('base.updated', (s) => {
       if (!s.paused) throw new DomainError('Перенос базы выполняется на остановленной очереди');
-      // Пауза человека остаётся его паузой; иначе очередь ждёт проверки базы —
-      // это техническое ожидание, а не решение человека.
-      if (s.pauseReason !== 'operator') s.pauseReason = 'base-check';
+      // Пауза человека остаётся его паузой, а остановка из-за отказа
+      // провайдера — своей причиной со сбоями: перенос базы провайдер не
+      // чинит. Иначе очередь ждёт проверки базы — это техническое ожидание,
+      // а не решение человека.
+      if (s.pauseReason !== 'operator' && s.pauseReason !== 'runtime') {
+        s.pauseReason = 'base-check';
+        s.pauseFailures = undefined;
+      }
       s.pausedAt = now();
-      s.pauseFailures = undefined;
-      s.waits = [
-        ...(s.waits ?? []).filter((w) => w.kind !== 'base-check'),
-        {
-          kind: 'base-check',
-          detail: `База прогонов перенесена (${updated.map((u) => u.repositoryId).join(', ')}): проверьте её гейтами и продолжите очередь`,
-          at: now(),
-        },
-      ];
+      waitBaseCheck(
+        s,
+        updated,
+        `База прогонов перенесена (${updated.map((u) => u.repositoryId).join(', ')}): проверьте её гейтами и продолжите очередь`,
+      );
       return { updated };
     });
   }

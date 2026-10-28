@@ -29,7 +29,7 @@ import { cleanupEnvironment } from './runner/environment.ts';
 import { importKnowledge } from './runner/knowledge.ts';
 import { PreviewRunner } from './runner/preview.ts';
 import { DeliveryRunner } from './runner/forge.ts';
-import { updateBase } from './runner/base-update.ts';
+import { baseUpdateOperation } from './runner/base-update.ts';
 import { adoptContextPack } from './runner/context-library.ts';
 import { contextSources, importContextSource } from './runner/context-import.ts';
 import { lockContextFile, taskContext } from './runner/context.ts';
@@ -723,22 +723,7 @@ async function main() {
           next: 'Перезапустите сервер, чтобы загрузить закреплённый контекст.',
         };
       } else if (operation === 'base-update') {
-        const s = store.read();
-        // В режиме агента перенос сам ставит очередь на ожидание base-check.
-        const held = !s.paused && config.approvalMode === 'agent' && h.holdForBaseUpdate().held;
-        if (!store.read().paused) throw new Error('Сначала приостановите очередь: queue --pause');
-        if (store.read().runs.some((r) => r.status === 'active'))
-          throw new Error('Дождитесь завершения попыток перед переносом базы');
-        let base;
-        try {
-          base = await updateBase(config, root);
-        } catch (error) {
-          if (held) h.pause(false);
-          throw error;
-        }
-        if (base.updated.length) h.baseUpdated(base.updated);
-        else if (held) h.pause(false);
-        result = base;
+        result = await baseUpdateOperation(h, root);
       } else if (operation === 'context-adopt') {
         const s = store.read();
         if (!s.paused) throw new Error('Сначала приостановите очередь: queue --pause');

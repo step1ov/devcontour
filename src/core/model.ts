@@ -625,6 +625,12 @@ export interface ContractAttempt {
   authorRuntime: string;
   reviewerRuntime: string;
 }
+/** Перенос базы прогонов компонента: от какого SHA к какому. */
+export interface BaseMove {
+  repositoryId: string;
+  from: string;
+  to: string;
+}
 export interface DevContourState {
   preparation?: PreparationState;
   team?: { member: string };
@@ -675,7 +681,20 @@ export interface DevContourState {
    * базы, перезакрепление контекста после смены контракта. Они видны рядом с
    * паузой и её не снимают.
    */
-  waits?: { kind: 'base-check' | 'context-lock'; detail: string; at: string; operation?: string }[];
+  waits?: {
+    kind: 'base-check' | 'context-lock';
+    detail: string;
+    at: string;
+    operation?: string;
+  }[];
+  /**
+   * Непроверенный перенос базы при ожидании `base-check`: диапазон каждого
+   * компонента с последней проверки (`from` — первая непроверенная база).
+   * Автоматическая проверка базы сверяет по нему чувствительные пути (D42).
+   * Вне ожидания значения не имеет. Ожидание принадлежит договору harness,
+   * поэтому диапазон хранится рядом с ним, а не в нём.
+   */
+  baseMoves?: BaseMove[];
   /**
    * Классы отказов, держащие выдачу. Их несколько намеренно: временный
    * обрыв и отказ провайдера могут прийти с разных досок, и запомнив

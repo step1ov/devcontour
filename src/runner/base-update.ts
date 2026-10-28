@@ -1,6 +1,7 @@
 import { moveBase, type RefMove } from 'devcontour-harness';
 import { repositories } from '../core/repositories.ts';
 import type { Config } from '../core/model.ts';
+import type { DevContour } from '../core/service.ts';
 import { policyFromConfig } from '../harness/policy.ts';
 
 // Прогон ответвляется от ветки интеграции, а контракты, схемы и каркас
@@ -70,4 +71,29 @@ export async function updateBase(
         : 'База обновлена. Проверьте её гейтами и запустите очередь: queue --start.'
       : 'База уже содержит рабочую ветку; менять нечего.',
   };
+}
+
+/**
+ * Команда `base-update`: перенос на остановленной очереди без попыток. В
+ * режиме агента перенос сам ставит работающую очередь на ожидание
+ * `base-check` (`holdForBaseUpdate`); если переносить нечего или перенос не
+ * удался, поставленное им ожидание снимается — очередь остаётся такой, какой
+ * была. Перенесённая база ждёт проверки (`baseUpdated`).
+ */
+export async function baseUpdateOperation(h: DevContour, dataRoot: string) {
+  const s = h.store.read();
+  const held = !s.paused && h.config.approvalMode === 'agent' && h.holdForBaseUpdate().held;
+  if (!h.store.read().paused) throw new Error('Сначала приостановите очередь: queue --pause');
+  if (h.store.read().runs.some((r) => r.status === 'active'))
+    throw new Error('Дождитесь завершения попыток перед переносом базы');
+  let base;
+  try {
+    base = await updateBase(h.config, dataRoot);
+  } catch (error) {
+    if (held) h.pause(false);
+    throw error;
+  }
+  if (base.updated.length) h.baseUpdated(base.updated);
+  else if (held) h.pause(false);
+  return base;
 }

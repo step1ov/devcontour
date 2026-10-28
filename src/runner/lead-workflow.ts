@@ -321,7 +321,7 @@ export class LeadRunner {
         // прошли — ожидание снято (base-check.ts); в режиме оператора это
         // по-прежнему решение человека.
         if (s.paused && s.pauseReason === 'base-check' && !tasks.every((t) => t.status === 'done'))
-          await checkBase(this.h, this.boardRoot(job), guard, signal);
+          await checkBase(this.h, { data: this.root, state: this.boardRoot(job) }, guard, signal);
         const decided =
           s.paused &&
           (s.pauseReason === 'runtime' ||
@@ -353,7 +353,7 @@ export class LeadRunner {
           return true;
         if (!tasks.every((t) => t.status === 'done')) {
           if (s.paused && s.pauseReason === 'base-check')
-            await checkBase(this.h, this.boardRoot(job), guard, signal);
+            await checkBase(this.h, { data: this.root, state: this.boardRoot(job) }, guard, signal);
           if (s.paused && s.pauseReason === 'shutdown')
             this.h.store.atomic(() => {
               guard();
