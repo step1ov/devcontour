@@ -410,7 +410,7 @@ export class AgentService {
   /**
    * Предупреждение, не отказ: черновики, которые утверждение отклонит из-за
    * отсутствующей связи с историей INTENT. Ведущий исправляет их до ревью
-   * плана, не тратя вызов модели. Сбой чтения карты предупреждение опускает.
+   * плана, не тратя вызов модели.
    */
   private storyWarning(boardId?: string, tasks?: Task[]) {
     const state = this.h.store.read();
@@ -420,8 +420,13 @@ export class AgentService {
       (revision
         ? state.tasks.filter((t) => revision.taskIds.includes(t.id) && t.status === 'draft')
         : []);
-    const storyGaps = new IntentService(this.h).storyGaps(drafts);
-    return storyGaps.length ? { storyGaps, storyWarning: storyGapMessage(storyGaps) } : {};
+    try {
+      const storyGaps = new IntentService(this.h).storyGaps(drafts);
+      return storyGaps.length ? { storyGaps, storyWarning: storyGapMessage(storyGaps) } : {};
+    } catch (error) {
+      // Нечитаемая карта — тоже предупреждение: утверждение её отклонит.
+      return { storyWarning: error instanceof Error ? error.message : String(error) };
+    }
   }
   private dispatch(raw: unknown): Record<string, unknown> {
     if (!checkJsonBytes(raw, 100000).within)
@@ -535,6 +540,13 @@ export class AgentService {
         return value;
       }
       case 'task_story':
+        // Привязка подтверждает историю принятой работой — решение того, кто
+        // утверждает. В operator mode агент её не делает сам.
+        if (h.config.approvalMode === 'operator')
+          throw new DomainError(
+            'В approvalMode operator привязку к истории выполняет оператор: devcontour task-story --story ID --tasks T1,T2 --reason ...',
+            409,
+          );
         return new IntentService(h).bindStory(input, 'agent');
       case 'board_correct': {
         const value = agentInputs.board_correct.parse(input),

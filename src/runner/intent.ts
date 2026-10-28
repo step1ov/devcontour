@@ -69,6 +69,12 @@ export interface StoryGap {
   /** Связь, которую нужно добавить в requirements: история и её текущий digest. */
   candidates: { storyId: string; source: string; id: string; digest: string }[];
 }
+type GapTask = Pick<Task, 'id' | 'scope' | 'repositoryId' | 'requirements'>;
+type StoryMap = {
+  source: string;
+  stories: { id: string; binding: { id: string; digest: string }; keys: Set<string> }[];
+};
+type StoryMaps = Map<string, StoryMap | null | Error>;
 const gapShown = 5;
 /** Отказ утверждения: что не так и какую связь добавить. */
 export function storyGapMessage(gaps: StoryGap[]) {
@@ -157,16 +163,33 @@ export class IntentService implements ProductReleaseGuard {
   /**
    * Пробелы привязки к историям: задача ссылается на REQ из критериев
    * истории своего компонента, но не несёт `REQ-intent-<история>`, либо её
-   * связь с историей устарела или называет неизвестную историю. Без
-   * закоммиченной карты компонента пробелов нет.
+   * связь с историей устарела или называет неизвестную историю. Компонент
+   * без карты INTENT в HEAD пробелов не имеет; карта, которую не прочитать
+   * (неверный формат, сбой Git), — отказ с причиной, а не молчаливый пропуск.
    */
-  storyGaps(tasks: Pick<Task, 'id' | 'scope' | 'repositoryId' | 'requirements'>[]): StoryGap[] {
-    return this.reading(() => this.storyGapsCurrent(tasks));
+  storyGaps(tasks: GapTask[]): StoryGap[] {
+    return this.reading(() => this.storyGapsCurrent(tasks, this.storyMaps(tasks)));
   }
   /** Отказ утверждения до вызова модели: см. `storyGaps`. */
   assertStoryBindings(tasks: Task[]) {
-    const gaps = this.storyGaps(tasks);
-    if (gaps.length) throw new DomainError(storyGapMessage(gaps), 409);
+    this.prepareStoryBindings(tasks)(tasks);
+  }
+  /**
+   * Карты читаются заранее, вне транзакции утверждения: в ней остаётся
+   * только сравнение. Карту компонента, которого не было в предварительном
+   * чтении, проверка дочитывает на месте. Окно между чтением и записью —
+   * время одной транзакции; HEAD внутри неё не перечитывается.
+   */
+  prepareStoryBindings(tasks: GapTask[]) {
+    const maps = this.reading(() => this.storyMaps(tasks));
+    return (current: GapTask[]) => {
+      const gaps = this.reading(() => {
+        for (const [owner, map] of this.storyMaps(current.filter((t) => !maps.has(taskOwner(t)!))))
+          maps.set(owner, map);
+        return this.storyGapsCurrent(current, maps);
+      });
+      if (gaps.length) throw new DomainError(storyGapMessage(gaps), 409);
+    };
   }
   /**
    * `task_story`: привязать выполненные задачи к истории текущей карты без
@@ -209,15 +232,14 @@ export class IntentService implements ProductReleaseGuard {
       });
     });
   }
-  private storyGapsCurrent(tasks: Pick<Task, 'id' | 'scope' | 'repositoryId' | 'requirements'>[]) {
-    const maps = new Map<string, ReturnType<IntentService['storyMap']>>();
+  private storyGapsCurrent(tasks: GapTask[], maps: StoryMaps) {
     const gaps: StoryGap[] = [];
     for (const t of tasks) {
       const owner = taskOwner(t),
         links = t.requirements ?? [];
       if (!owner || !links.length) continue;
-      if (!maps.has(owner)) maps.set(owner, this.storyMap(owner));
       const map = maps.get(owner);
+      if (map instanceof Error) throw map;
       if (!map) continue;
       const candidate = (s: (typeof map.stories)[number]) => ({
         storyId: s.id,
@@ -265,15 +287,58 @@ export class IntentService implements ProductReleaseGuard {
     }
     return gaps;
   }
-  /** Истории закоммиченной карты компонента: их связь и REQ критериев; нет карты — null. */
+  /** Карты компонентов задач со связями: карта, null (карты нет) или ошибка чтения. */
+  private storyMaps(tasks: GapTask[]): StoryMaps {
+    const maps: StoryMaps = new Map();
+    for (const t of tasks) {
+      const owner = taskOwner(t);
+      if (!owner || !t.requirements?.length || maps.has(owner)) continue;
+      try {
+        maps.set(owner, this.storyMap(owner));
+      } catch (error) {
+        maps.set(owner, error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+    return maps;
+  }
+  /**
+   * Истории закоммиченной карты компонента: их связь и REQ критериев. Нет
+   * файла карты в HEAD (или ещё нет коммитов) — null: проверке не подлежит.
+   * Недоступный репозиторий или карта, которую не разобрать, — отказ.
+   */
   private storyMap(owner: string) {
-    let snapshot;
+    const root = this.root(owner),
+      source = this.source(owner),
+      refuse = (why: string) =>
+        new DomainError(
+          `Карта INTENT ${source} компонента ${owner} не читается: ${why}. Связь задач с историями не проверить — исправьте карту (intent_render) и закоммитьте`,
+          409,
+        );
     try {
-      snapshot = this.read(owner);
+      this.git(root, 'rev-parse', '--git-dir');
+    } catch {
+      throw refuse('репозиторий недоступен');
+    }
+    let sha: string;
+    try {
+      sha = this.git(root, 'rev-parse', '--verify', '-q', 'HEAD^{commit}');
     } catch {
       return null;
     }
-    if (snapshot.document.kind !== 'component') return null;
+    let listed: string;
+    try {
+      listed = this.git(root, '--literal-pathspecs', 'ls-tree', sha, '--', source);
+    } catch (error) {
+      throw refuse(error instanceof Error ? error.message.split('\n')[0] : String(error));
+    }
+    if (!listed) return null;
+    let snapshot;
+    try {
+      snapshot = this.read(owner, sha);
+    } catch (error) {
+      throw refuse(error instanceof Error ? error.message.split('\n')[0] : String(error));
+    }
+    if (snapshot.document.kind !== 'component') throw refuse('нужна карта компонента');
     const bindings = parseRequirements(snapshot.markdown);
     return {
       source: snapshot.source,
@@ -830,6 +895,35 @@ export class IntentService implements ProductReleaseGuard {
         issues.push({ kind: 'stale-exclusion', source: e.source, id: e.id });
     const bindings = parseRequirements(snapshot.markdown);
     const knownStories = new Set(bindings.map((b) => b.id));
+    const intentSource = this.source(repositoryId);
+    // Привязка после приёмки проверяется заново при каждом отчёте: запись
+    // могла прийти через Git sync от чужой установки. Она действует, только
+    // если задача выполнена, не связана с историей в постановке и каждый её
+    // подробный REQ входит в критерии этой истории текущей карты; иначе она
+    // не учитывается и видна в `invalidStoryBindings`.
+    const storyCriteria = new Map(
+      doc.stories.map((s) => [
+        intentRequirementId(s.id),
+        new Set(s.criteria.flatMap((c) => c.requirements.map(referenceKey))),
+      ]),
+    );
+    const validBinding = (t: Task, b: NonNullable<Task['storyBindings']>[number]) => {
+      const links = t.requirements ?? [];
+      const detailed = links.filter((r) => r.source !== intentSource);
+      return (
+        b.source === intentSource &&
+        t.status === 'done' &&
+        !links.some((r) => r.source === intentSource) &&
+        detailed.length > 0 &&
+        detailed.every((r) => storyCriteria.get(b.id)?.has(referenceKey(r)))
+      );
+    };
+    const storyBindings = (t: Task) => (t.storyBindings ?? []).filter((b) => validBinding(t, b));
+    const invalidStoryBindings = owned.flatMap((t) =>
+      (t.storyBindings ?? [])
+        .filter((b) => !validBinding(t, b))
+        .map((b) => ({ taskId: t.id, id: b.id })),
+    );
     const fresh = (task: Task) => {
       return (task.requirements ?? []).every((r) =>
         sectionsAt(r.source)?.some((s) => s.id === r.id && s.digest === r.digest),
@@ -913,12 +1007,10 @@ export class IntentService implements ProductReleaseGuard {
         const requirementKeys = new Set(
           story.criteria.flatMap((c) => c.requirements.map(referenceKey)),
         );
-        const intentSource = this.source(repositoryId);
         // Привязка после приёмки (`task_story`) — явное назначение, как связь
         // в постановке: задача принадлежит этой истории и не числится
         // неназначенным вкладом других.
-        const bound = (t: Task) =>
-          t.storyBindings?.find((b) => b.source === intentSource && b.id === binding.id);
+        const bound = (t: Task) => storyBindings(t).find((b) => b.id === binding.id);
         const belongs = (t: Task) => {
           const links = t.requirements ?? [];
           if (links.some((r) => r.source === intentSource && r.id === binding.id) || bound(t))
@@ -927,7 +1019,7 @@ export class IntentService implements ProductReleaseGuard {
           // Explicitly assigned stories of other releases retain their own scope.
           return (
             !links.some((r) => r.source === intentSource && knownStories.has(r.id)) &&
-            !t.storyBindings?.some((b) => b.source === intentSource && knownStories.has(b.id)) &&
+            !storyBindings(t).some((b) => knownStories.has(b.id)) &&
             links.some((r) => requirementKeys.has(referenceKey(r)))
           );
         };
@@ -1038,6 +1130,7 @@ export class IntentService implements ProductReleaseGuard {
       },
       issues,
       stories,
+      ...(invalidStoryBindings.length ? { invalidStoryBindings } : {}),
       releaseAccepted: false,
       note: 'Coverage of declared REQ sources only. Review source inventory and test adequacy. Completion is historical SHA evidence, not a new whole-product test or release acceptance.',
     };

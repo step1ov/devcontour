@@ -114,6 +114,8 @@ export const referenceKey = (ref: { source: string; id: string }) =>
  */
 export interface StoryBindingGuard {
   assertStoryBindings(tasks: Task[]): void;
+  /** Читает карты заранее; возвращённая проверка только сравнивает. */
+  prepareStoryBindings(tasks: Task[]): (tasks: Task[]) => void;
 }
 /**
  * Привязка выполненной задачи к истории после приёмки (`task_story`).

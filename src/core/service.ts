@@ -1064,7 +1064,8 @@ export class DevContour {
   /**
    * Задача, ссылающаяся на подробный REQ из критериев истории, обязана нести
    * и связь с самой историей (`REQ-intent-<story>`) текущего digest. Карту
-   * читает внедрённая проверка runner; без карты компонента — ничего.
+   * читает внедрённая проверка runner; без карты компонента — ничего, а
+   * карта, которую не прочитать, — отказ.
    */
   assertStoryBindings(tasks: Task[]) {
     if (tasks.length) storyGuard(this).assertStoryBindings(tasks);
@@ -1091,6 +1092,13 @@ export class DevContour {
     },
   ) {
     const policy = this.planPolicyDigest();
+    // Карты INTENT читаются до транзакции записи: Git не держит её открытой.
+    // Внутри — только сравнение черновиков с прочитанными картами.
+    const before = this.store.read();
+    const revision = before.boards.find((b) => b.id === boardId)?.revisions.at(-1);
+    const storyCheck = storyGuard(this).prepareStoryBindings(
+      before.tasks.filter((t) => revision?.taskIds.includes(t.id) && t.status === 'draft'),
+    );
     return this.currentChange('board.approved', (s) => {
       developmentBinding(s);
       const r = activeRevision(s, boardId);
@@ -1127,9 +1135,7 @@ export class DevContour {
         throw new DomainError('План изменился во время ревью; требуется повторная проверка');
       // Связь с историей INTENT — предусловие выпуска, как связь с фичей:
       // без неё принятая работа держала бы историю непроверенной навсегда.
-      this.assertStoryBindings(
-        selected.map((id) => task(s, id)).filter((t) => t.status === 'draft'),
-      );
+      storyCheck(selected.map((id) => task(s, id)).filter((t) => t.status === 'draft'));
       const repinned: string[] = [];
       for (const id of selected) {
         const t = task(s, id);
@@ -1225,7 +1231,11 @@ export class DevContour {
           approvedAt: undefined,
           approvedDigest: undefined,
           approvedScope: undefined,
+          approvedPolicy: undefined,
           approval: undefined,
+          // Привязка к истории подтверждала принятый результат оригинала;
+          // замена связывается с историей своей постановкой.
+          storyBindings: undefined,
           activeRunId: undefined,
           resultSha: undefined,
           failure: undefined,
@@ -1385,7 +1395,6 @@ export class DevContour {
     const criteria = new Set(input.criteria);
     return this.store.change('task.story', (s) => {
       const at = now();
-      const previous: Record<string, string | undefined> = {};
       for (const id of new Set(input.taskIds)) {
         const t = task(s, id);
         if ((t.scope === 'workspace' ? undefined : t.repositoryId) !== input.repositoryId)
@@ -1408,18 +1417,21 @@ export class DevContour {
             `${t.id}: ${outside.map((r) => r.source + '#' + r.id).join(', ')} не входит в критерии истории ${input.storyId}`,
             409,
           );
-        previous[t.id] = t.storyBindings?.find((b) => b.id === input.binding.id)?.digest;
-        t.storyBindings = [
-          ...(t.storyBindings ?? []).filter((b) => b.id !== input.binding.id),
-          { ...input.binding, boundAt: at },
-        ];
+        // Повторная привязка переподтвердила бы изменённую историю без
+        // прогона: автор новой редакции не видел. Устаревшая привязка
+        // восстанавливается как задача со связью — корректировкой доски.
+        if (t.storyBindings?.some((b) => b.id === input.binding.id))
+          throw new DomainError(
+            `${t.id}: задача уже привязана к истории ${input.storyId}; привязка к изменённой истории не обновляется — нужна корректировка доски (board_correct) с повторным прогоном`,
+            409,
+          );
+        t.storyBindings = [...(t.storyBindings ?? []), { ...input.binding, boundAt: at }];
       }
       return {
         repositoryId: input.repositoryId,
         storyId: input.storyId,
         binding: input.binding,
         taskIds: [...new Set(input.taskIds)],
-        previous,
         reason,
         actor: input.actor,
       };
