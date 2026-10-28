@@ -18,6 +18,7 @@ import {
   type AgentRequest,
 } from '../src/runner/adapters.ts';
 import { git, command } from '../src/runner/process.ts';
+import { lsofName, osToolEnv } from '../src/runner/os-tools.ts';
 import { runCheck } from 'devcontour-harness';
 import { input, fixture, reapprove } from './helpers.ts';
 import { acceptBoard } from '../src/runner/agent-control.ts';
@@ -1434,46 +1435,64 @@ test(
     }
   },
 );
-test('Потомок с очищенным окружением завершается и при нелатинской локали', async () => {
-  // С русской локалью ps печатал время старта по-русски, Date.parse давал NaN,
-  // и потомок без метки, найденный только по каталогу, оставался жить.
+test('Потомок с очищенным окружением завершается при любой локали пользователя', async () => {
+  // Локаль наследуют ps и lsof: в ru_RU время старта из ps не читалось, и
+  // потомок без метки, найденный только по каталогу, считался старше команды;
+  // в C lsof экранировал кириллицу пути, и каталог не узнавался.
   // Команда выходит до первого опроса: потомка находит лишь поиск по каталогу.
+  const cases = [
+    { locale: 'ru_RU.UTF-8', prefix: 'devcontour-locale-' },
+    { locale: 'C', prefix: 'devcontour-локаль-' },
+  ];
   const saved = { LANG: process.env.LANG, LC_ALL: process.env.LC_ALL };
-  process.env.LANG = process.env.LC_ALL = 'ru_RU.UTF-8';
-  const dir = await mkdtemp(join(tmpdir(), 'devcontour-locale-'));
-  let pid = 0;
-  try {
-    const result = await command(
-      [
-        process.execPath,
-        '-e',
-        `const c=require('child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'ignore',env:{PATH:process.env.PATH}});c.unref();console.log('ORPHAN-PID:'+c.pid);`,
-      ],
-      dir,
-      { contain: { dirs: [dir] }, timeoutMs: 30000 },
-    );
-    pid = Number(/ORPHAN-PID:(\d+)/.exec(result.stdout)?.[1]);
-    assert.ok(pid > 0, 'потомок был запущен');
-    await new Promise((r) => setTimeout(r, 300));
-    let alive = true;
+  for (const { locale, prefix } of cases) {
+    process.env.LANG = process.env.LC_ALL = locale;
+    const dir = await mkdtemp(join(tmpdir(), prefix));
+    let pid = 0;
     try {
-      process.kill(pid, 0);
-    } catch {
-      alive = false;
-    }
-    assert.equal(alive, false, `потомок ${pid} завершён`);
-  } finally {
-    for (const [key, value] of Object.entries(saved))
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    if (pid > 0)
+      const result = await command(
+        [
+          process.execPath,
+          '-e',
+          `const c=require('child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'ignore',env:{PATH:process.env.PATH}});c.unref();console.log('ORPHAN-PID:'+c.pid);`,
+        ],
+        dir,
+        { contain: { dirs: [dir] }, timeoutMs: 30000 },
+      );
+      pid = Number(/ORPHAN-PID:(\d+)/.exec(result.stdout)?.[1]);
+      assert.ok(pid > 0, 'потомок был запущен');
+      await new Promise((r) => setTimeout(r, 300));
+      let alive = true;
       try {
-        process.kill(pid, 'SIGKILL');
+        process.kill(pid, 0);
       } catch {
-        /* Already gone. */
+        alive = false;
       }
-    await rm(dir, { recursive: true, force: true });
+      assert.equal(alive, false, `потомок ${pid} завершён (локаль ${locale})`);
+    } finally {
+      for (const [key, value] of Object.entries(saved))
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      if (pid > 0)
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          /* Already gone. */
+        }
+      if (dir.startsWith(join(tmpdir(), prefix))) await rm(dir, { recursive: true, force: true });
+    }
   }
+});
+test('Локаль системных утилит: даты и числа в C, кодировка символов пользователя; экранирование lsof снимается', () => {
+  const env = osToolEnv({ PATH: '/bin', LANG: 'ru_RU.UTF-8', LC_ALL: 'ru_RU.UTF-8' });
+  assert.equal(env.LC_ALL, undefined, 'LC_ALL перекрыл бы LC_TIME');
+  assert.equal(env.LC_TIME, 'C');
+  assert.equal(env.LC_CTYPE, 'ru_RU.UTF-8', 'LC_CTYPE берётся из LC_ALL');
+  assert.equal(env.PATH, '/bin');
+  assert.equal(osToolEnv({ LC_CTYPE: 'en_US.UTF-8' }).LC_CTYPE, 'en_US.UTF-8');
+  assert.equal(lsofName('/tmp/\\xd0\\xbb\\xd0\\xbe\\xd0\\xba'), '/tmp/лок');
+  assert.equal(lsofName('/tmp/a\\\\x41b'), '/tmp/a\\x41b', 'экранированная обратная косая');
+  assert.equal(lsofName('/tmp/лок a'), '/tmp/лок a');
 });
 test('Проверка повторяется, только если песочница отказала до запуска команды', async () => {
   // Повтор по тексту stderr перезапускал уже начавшуюся команду: её первый

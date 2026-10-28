@@ -13,6 +13,7 @@ import {
   worktreeAddPath,
   worktreeKey,
 } from 'devcontour-harness';
+import { lsofName, osToolEnv } from './os-tools.ts';
 import { outputRedactor, type Redactor } from './redaction.ts';
 import type { RuntimeDiagnostics } from '../core/runtime-diagnostics.ts';
 export interface CommandResult {
@@ -288,11 +289,9 @@ export async function git(cwd: string, ...args: string[]) {
 }
 
 /**
- * Окружение разбираемых системных утилит: локаль C. С русской локалью ps
- * печатает время старта как «среда, 28 октября 2026 г.», Date.parse даёт NaN.
+ * Вывод команды или null, если она не выполнилась. Не блокирует event loop.
+ * Локаль фиксирована (`osToolEnv`): вывод разбирается.
  */
-const osToolEnv = () => ({ ...process.env, LC_ALL: 'C', LANG: 'C' });
-/** Вывод команды или null, если она не выполнилась. Не блокирует event loop. */
 function output(command: string, args: string[], timeout: number): Promise<string | null> {
   return new Promise((resolve) => {
     execFile(
@@ -366,11 +365,16 @@ async function inside(dirs: string[], since: number): Promise<number[]> {
     }
   });
   const started = new Map((await processTable()).map((r) => [r.pid, Date.parse(r.start)]));
-  // Неразобранное время старта не освобождает процесс: в каталогах самой
-  // проверки его лучше завершить, чем оставить. Нет в таблице — уже вышел.
+  // Нечитаемое время старта — не повод оставить процесс: каталоги принадлежат
+  // только этой команде, и утечка её потомка хуже ошибочной остановки.
+  // Отсекается только процесс, о котором точно известно, что он старше
+  // команды. Процесса нет в снимке — он запущен после снимка; это и сам
+  // lsof с текущим каталогом внутри, поэтому такой процесс не берётся: его
+  // потомка найдёт следующий проход.
   const fresh = (pid: number) => {
-    const at = started.get(pid);
-    return at !== undefined && (Number.isNaN(at) || at >= since - 1000);
+    if (!started.has(pid)) return false;
+    const at = started.get(pid)!;
+    return !Number.isFinite(at) || at >= since - 1000;
   };
   const within = (path: string) => dirs.some((d) => path === d || path.startsWith(d + '/'));
   if (process.platform === 'linux')
@@ -393,7 +397,12 @@ async function inside(dirs: string[], since: number): Promise<number[]> {
   let pid = 0;
   for (const line of (stdout ?? '').split('\n')) {
     if (line.startsWith('p')) pid = Number(line.slice(1));
-    else if (line.startsWith('n') && within(line.slice(1)) && pid !== process.pid && fresh(pid))
+    else if (
+      line.startsWith('n') &&
+      within(lsofName(line.slice(1))) &&
+      pid !== process.pid &&
+      fresh(pid)
+    )
       pids.push(pid);
   }
   return pids;
