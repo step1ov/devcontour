@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { config, input } from './helpers.ts';
+import { config, input, testCheckoutRoot } from './helpers.ts';
 import { repositorySchema, type Repository } from '../src/core/model.ts';
 import { intentDefinition, parseIntent } from '../src/core/intent.ts';
 import { DevContour } from '../src/core/service.ts';
@@ -230,6 +230,8 @@ process.exitCode=ok?0:1;`,
     repository: repos[0].path,
     repositories: repos,
     workspaceRoot: control,
+    // Рабочие деревья — во временном каталоге теста, а не в кэше пользователя.
+    checkoutRoot: testCheckoutRoot(),
     approvalMode: 'agent',
     maxAttempts: 8,
     verificationMode: 'affected',
