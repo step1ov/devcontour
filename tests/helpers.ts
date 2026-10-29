@@ -199,6 +199,7 @@ export async function withTestHome<T>(action: (home: string) => Promise<T>) {
   await mkdir(join(home, '.cache'), { recursive: true });
   const keys = [
     'HOME',
+    'XDG_CACHE_HOME',
     'GIT_AUTHOR_NAME',
     'GIT_AUTHOR_EMAIL',
     'GIT_COMMITTER_NAME',
@@ -207,6 +208,7 @@ export async function withTestHome<T>(action: (home: string) => Promise<T>) {
   const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
   Object.assign(process.env, {
     HOME: home,
+    XDG_CACHE_HOME: join(home, '.cache'),
     GIT_AUTHOR_NAME: 'DevContour test',
     GIT_AUTHOR_EMAIL: 'test@example.invalid',
     GIT_COMMITTER_NAME: 'DevContour test',

@@ -4,6 +4,7 @@ import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { run } from 'node:test';
 import { spec } from 'node:test/reporters';
+import { testEnvironment } from './test-environment.mjs';
 
 // Scheduling hints, not a test allowlist. Every tests/*.test.ts file is run.
 // Start expensive files first to avoid a single long file at the end. Keep
@@ -69,6 +70,17 @@ if (args.length === 1 && args[0] === '--list') {
     }
   };
   const before = entries();
+  const originalEnv = { ...process.env };
+  const isolated = testEnvironment();
+  Object.assign(process.env, isolated.env);
+  const cleanup = () => {
+    for (const key of Object.keys(isolated.env)) {
+      if (originalEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = originalEnv[key];
+    }
+    isolated.cleanup();
+  };
+  process.once('exit', cleanup);
   const results = run({
     files,
     concurrency: 4,
@@ -92,6 +104,8 @@ if (args.length === 1 && args[0] === '--list') {
     }
     process.removeListener('SIGINT', interrupt);
     process.removeListener('SIGTERM', terminate);
+    cleanup();
+    process.removeListener('exit', cleanup);
   });
   results.compose(spec).pipe(process.stdout);
 }
