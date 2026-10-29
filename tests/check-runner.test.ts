@@ -108,7 +108,13 @@ test('Fast tier omits its named slow test but still refuses explicit skip and to
     await mkdir(join(root, 'scripts'));
     await mkdir(join(root, 'tests'));
     await symlink(join(source, 'node_modules'), join(root, 'node_modules'), 'dir');
-    for (const file of ['test.mjs', 'test-tiers.mjs', 'test-environment.mjs'])
+    for (const file of [
+      'test.mjs',
+      'test-tiers.mjs',
+      'test-environment.mjs',
+      'check-test-environment.mjs',
+      'check-processes.mjs',
+    ])
       await copyFile(join(source, 'scripts', file), join(root, 'scripts', file));
     const tiersFile: string = '../scripts/test-tiers.mjs';
     const tiers = (await import(tiersFile)) as { slowTests: Record<string, true | string[]> };

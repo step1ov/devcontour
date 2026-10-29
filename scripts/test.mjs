@@ -6,6 +6,7 @@ import { parseArgs } from 'node:util';
 import { run } from 'node:test';
 import { spec } from 'node:test/reporters';
 import { testEnvironment } from './test-environment.mjs';
+import { checkTestEnvironment, requiresTestTools } from './check-test-environment.mjs';
 import { slowFile, slowFirst, slowPatterns } from './test-tiers.mjs';
 
 // Without options every tests/*.test.ts file and every test in it is run: that
@@ -121,23 +122,7 @@ if (options.list) {
     isolated.cleanup();
   };
   process.once('exit', cleanup);
-  const results = run({
-    files,
-    concurrency: 4,
-    execArgv: ['--import', 'tsx'],
-    signal: controller.signal,
-    // Tests left out by name are not reported at all, so the skip/todo
-    // refusal below stays exact in every tier.
-    ...(options.fast ? { testSkipPatterns: slowPatterns() } : {}),
-  });
-  results.on('test:fail', () => (process.exitCode ||= 1));
-  results.on('test:pass', ({ skip, todo }) => {
-    if (skip || todo) {
-      console.error('Full test suite must not contain skipped or todo tests.');
-      process.exitCode ||= 1;
-    }
-  });
-  results.once('end', () => {
+  const finish = () => {
     const added = [...entries()].filter((name) => !before.has(name));
     if (added.length) {
       console.error(
@@ -149,6 +134,35 @@ if (options.list) {
     process.removeListener('SIGTERM', terminate);
     cleanup();
     process.removeListener('exit', cleanup);
-  });
-  results.compose(spec).pipe(process.stdout);
+  };
+  let ready = true;
+  try {
+    if (requiresTestTools(names, options.fast))
+      console.error(await checkTestEnvironment(isolated.env, { signal: controller.signal }));
+  } catch (error) {
+    console.error(error.message);
+    process.exitCode ||= 1;
+    ready = false;
+    finish();
+  }
+  if (ready) {
+    const results = run({
+      files,
+      concurrency: 4,
+      execArgv: ['--import', 'tsx'],
+      signal: controller.signal,
+      // Tests left out by name are not reported at all, so the skip/todo
+      // refusal below stays exact in every tier.
+      ...(options.fast ? { testSkipPatterns: slowPatterns() } : {}),
+    });
+    results.on('test:fail', () => (process.exitCode ||= 1));
+    results.on('test:pass', ({ skip, todo }) => {
+      if (skip || todo) {
+        console.error('Full test suite must not contain skipped or todo tests.');
+        process.exitCode ||= 1;
+      }
+    });
+    results.once('end', finish);
+    results.compose(spec).pipe(process.stdout);
+  }
 }
