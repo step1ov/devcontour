@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { checkProcesses } from './check-processes.mjs';
 
 // `npm run check` (release) and `npm run check:fast` (one fix).
 //
@@ -36,27 +36,21 @@ const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const commands = {
   'smoke-package': [process.execPath, ['scripts/smoke-package.mjs']],
 };
-const running = new Set();
-const isGroup = new WeakSet();
-let stopping = false;
+const processes = checkProcesses();
 
 function step(name, rest, prefix) {
   const [command, base] = commands[name] ?? [npm, ['run', '--silent', name]];
   const argv = [...base, ...(rest.length ? (commands[name] ? rest : ['--', ...rest]) : [])];
   return new Promise((resolve) => {
-    if (stopping) return resolve(false);
+    if (processes.stopping) return resolve(false);
     const started = Date.now();
     console.error(`${prefix}▶ ${name}`);
-    const child = spawn(command, argv, {
+    const child = processes.spawn(command, argv, {
       cwd: new URL('../', import.meta.url),
       stdio: prefix ? ['ignore', 'pipe', 'pipe'] : 'inherit',
-      // A concurrent step gets its own process group, so a stop after a
-      // sibling failed reaches npm's children, not only npm. A step running
-      // alone stays in the terminal's group and gets Ctrl-C directly.
-      detached: !!prefix && process.platform !== 'win32',
     });
-    running.add(child);
-    if (prefix && process.platform !== 'win32') isGroup.add(child);
+    if (!child) return resolve(false);
+    child.once('error', (error) => console.error(`${prefix}${error.message}`));
     // Concurrent steps: each line carries its step name.
     for (const [stream, out] of [
       [child.stdout, process.stdout],
@@ -72,7 +66,6 @@ function step(name, rest, prefix) {
       stream?.on('end', () => buffer && out.write(prefix + buffer + '\n'));
     }
     child.on('close', (code, signal) => {
-      running.delete(child);
       const seconds = ((Date.now() - started) / 1000).toFixed(1);
       const ok = code === 0;
       console.error(
@@ -83,19 +76,6 @@ function step(name, rest, prefix) {
   });
 }
 
-const stop = (signal) => {
-  stopping = true;
-  for (const child of running)
-    try {
-      if (isGroup.has(child)) process.kill(-child.pid, signal);
-      else child.kill(signal);
-    } catch {
-      // Already gone.
-    }
-};
-process.once('SIGINT', () => ((process.exitCode = 130), stop('SIGINT')));
-process.once('SIGTERM', () => ((process.exitCode = 143), stop('SIGTERM')));
-
 const started = Date.now();
 for (const chains of stages) {
   const parallel = chains.length > 1;
@@ -104,7 +84,7 @@ for (const chains of stages) {
       for (const name of chain) {
         const prefix = parallel ? `[${name}] ` : '';
         if (!(await step(name, name === last ? extra : [], prefix))) {
-          stop('SIGTERM');
+          processes.stop('SIGTERM');
           return false;
         }
       }
@@ -120,3 +100,5 @@ const total = ((Date.now() - started) / 1000).toFixed(1);
 console.error(
   `check${isFast ? ':fast' : ''}: ${process.exitCode ? 'FAILED' : 'passed'} in ${total}s`,
 );
+
+processes.dispose();
