@@ -271,10 +271,28 @@ export async function setupWorkspace(file: string, data?: string) {
     );
   const lock = { version: 1, packs: packs.flatMap((p) => profileLock(p).packs) };
   try {
-    await readFile(configPath);
+    const storedText = await readFile(configPath, 'utf8');
+    const stored = JSON.parse(storedText) as Record<string, unknown>;
     let existing;
+    let introducedToolProfiles = false;
     try {
-      existing = loadConfig(configPath);
+      const previousProfiles = configSchema.shape.toolProfiles.parse(stored.toolProfiles);
+      introducedToolProfiles = Object.keys(config.toolProfiles).some(
+        (id) => !(id in previousProfiles),
+      );
+      // Файл компонента уже может ссылаться на новое имя из реестра. Для
+      // проверки прежней конфигурации добавляем только такие имена: старые
+      // определения, правила, identity и pin остаются прежними. Этот union
+      // не записывается; полное новое объявление проверяется ниже до write.
+      existing = loadConfig(
+        configPath,
+        introducedToolProfiles
+          ? JSON.stringify({
+              ...stored,
+              toolProfiles: { ...config.toolProfiles, ...previousProfiles },
+            })
+          : storedText,
+      );
     } catch (error) {
       // Профиль пинится digest, и изменить его после установки было нечем.
       // Поднятая автором версия — явное заявление «изменилось намеренно»:
@@ -394,7 +412,6 @@ export async function setupWorkspace(file: string, data?: string) {
     // Производные копии в самом файле: верхнеуровневые gates, protectedPaths и
     // роли единственного компонента. Загрузка их уже не применяет, но
     // устаревшая копия в config.json вводила в заблуждение того, кто его читает.
-    const stored = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
     const roles = withComponentRoles(withDeclaredRoles(existing.roles, config.roles), repos);
     const reviewer = reviewerBindingSchema.parse(withComponentReviewer(existing.reviewer, repos));
     const derivedStale =
@@ -411,6 +428,7 @@ export async function setupWorkspace(file: string, data?: string) {
     // follows the registry, otherwise it stays frozen at first install and there
     // is no route to any of these but a fresh workspace.
     const declarationChanged =
+      introducedToolProfiles ||
       JSON.stringify(existing.workspaceGates) !== JSON.stringify(config.workspaceGates) ||
       JSON.stringify(existing.gates) !== JSON.stringify(config.gates) ||
       JSON.stringify(existing.repositories.map((r) => r.gates)) !==
