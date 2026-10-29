@@ -96,9 +96,8 @@ for (const chains of stages) {
     break;
   }
 }
+await processes.dispose();
 const total = ((Date.now() - started) / 1000).toFixed(1);
 console.error(
   `check${isFast ? ':fast' : ''}: ${process.exitCode ? 'FAILED' : 'passed'} in ${total}s`,
 );
-
-processes.dispose();
