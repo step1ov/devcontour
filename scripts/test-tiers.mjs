@@ -19,14 +19,24 @@ export const slowFirst = [
 ];
 
 // The slow tier that `--fast` leaves out: whole files (`true`) or top-level
-// tests by name prefix. Chosen from per-test durations of a full parallel run
-// (0.4.0-alpha.11 log): every test above 30 s there, about 5 s on an idle
-// host. Together they are about 80% of the summed test time; the release
-// check runs them as before. tests/test-tiers.test.ts keeps each prefix
-// pointing at exactly one test file that still contains it. A renamed test
-// silently moves to the fast tier, which costs time, never coverage.
+// tests by name prefix. Updated from measured full-suite durations: cases
+// above 30 s under concurrent load, plus their generated case family where
+// names share one source template. These are local feedback tiers only; the
+// full release check still runs every case. tests/test-selection.test.ts
+// checks that each prefix identifies an existing test file. A renamed test
+// returns to the fast tier, increasing time rather than losing coverage.
 export const slowTests = {
+  'approval-policy': [
+    'Политика после утверждения плана: смена gate и правила вендора ревью держат',
+  ],
   'autonomous-loop': true,
+  'board-coverage': [
+    'Приёмка доски выполняет непокрытые gates один раз на итоговом SHA и принимает',
+    'Провал непокрытого gate на итоговом SHA доски — отказ приёмки с названным gate;',
+    'Повтор приёмки после частичного провала сохраняет прошедшие gates проверки',
+    'Задача, работу которой сделала зависимость, — done без коммита и проходит',
+    'Профиль в порядке массива: проверка доски исполняет непокрытый gate после более',
+  ],
   'check-api': [
     'AC35: metrics keep their denominators over gate, review and',
     'AC33: Agent API, CLI, HTTP and MCP share version checks,',
@@ -35,8 +45,16 @@ export const slowTests = {
   'check-corpus': [
     'AC13, AC19: a confirmed defect stops the next candidate at the',
     'AC17: adoption waits for an active run, a stale owner cannot',
+    'AC10–AC12, AC18: the pinned oracle decides a reviewer example; wrong',
+    'AC14: an implementation fitted to the confirmed case is caught by the generator',
+    'AC16: an attempt cannot edit the checker or pass evidence of another check',
   ],
   'check-sync': true,
+  'checkout-root': [
+    'Embedded workspace: попытки, перенос и проверка базы — под одним корнем в кэше',
+    'Embedded workspace: заданный checkoutRoot получают планировщик, проверка базы и',
+    'Стандартные фикстуры тестов не пишут в настоящий кэш',
+  ],
   'contract-artifacts': true,
   'contract-change': [
     'A user pause set before or during the operation survives it;',
@@ -63,19 +81,31 @@ export const slowTests = {
     'C-F05/C-F07: a verification and a process from the previous',
     'The base ref move inside the transaction runs no repository',
     'C-F16: a config edit made before the context step is not taken',
+    'A revision without checks is warned about before the model call; a rejected',
+    'A contract change waits for running attempts, refuses concurrent changes and',
+    'A contract change does not move base work that is not part of the contract, and',
+    'Утрата владения операцией перед самым сдвигом ref — сдвига нет: проверка',
+  ],
+  'contract-closure': ['a pinned acceptance file with an unpinned local helper is refused before'],
+  'contract-evals': [
+    'The contract feasibility corpus scores false rejections and misses separately',
   ],
   'contract-revise': [
     'AC30: a revise after rebind or base never fakes a rollback, a',
     'AC31: the plan reviewer sees a rebound draft and a new',
     'AC29: a rejected contract fixed before side effects is revised',
     'AC32: a base check wait and a human pause stay distinct, the',
+    'A rejected operation is revised from a new proposal file: same operation and',
+    'A revise keeps the contract identity: a repositoryId or title change is',
+    'Review history belongs to the operation: a same-titled review elsewhere is not',
+    'A revise with a file after the review registered the contract continues as a',
   ],
-  'engineering-evals': ['Engineering corpus exercises real candidate/integration gates'],
   engineering: [
     'Pinned role/library documents are selected reproducibly,',
     'Ordered codegen runs from its cwd before a real test in',
     'Generated files are protected and implementation discoveries',
   ],
+  'engineering-evals': ['Engineering corpus exercises real candidate/integration gates'],
   enterprise: [
     'Manual handoff supports GitLab and GitHub; read-only',
     'Component databases contain local specifications, snapshots and',
@@ -91,16 +121,27 @@ export const slowTests = {
     'Peer completion needs a committed receipt and present Git',
     'Синхронизация не возрождает задачу, отменённую в ревизии,',
     'An unresolved real Git merge conflict blocks synchronization',
+    'A contract with underTest round-trips between clones, and a changed underTest',
+    'Независимый клон получает манифест testcases и подтверждает критерий тем же',
   ],
   'harness-legacy': ['T36: receipts Git-синхронизации прежней версии импортируются'],
   'harness-roles': ['Роль claude → ревьюер claude с same-vendor-allowed проходит'],
+  'idle-controller': [
+    'An idle paused controller neither rewrites nor reparses the state document; it',
+  ],
   intent: [
     'Real Git acceptance covers intent; criteria changes invalidate',
     'Intent format pins local sources, rejects ambiguous IDs and',
     'Покрытие INTENT подтверждается тем же правилом testcase, что и',
+    'task_story привязывает принятую задачу к истории без изменения постановки и',
   ],
   'large-artifacts': ['AC09: a byte changed outside the sample, dirty, untracked,'],
-  'lead-workflow': ['A real Git board resumes after process replacement without'],
+  'lead-workflow': [
+    'A real Git board resumes after process replacement without',
+    'В режиме агента workflow доски сам проверяет перенесённую базу gates: провал',
+    'Проверка базы: сдвиг базы до решения не снимает ожидание; смена договора',
+    'base-update в режиме агента: работающая очередь встаёт на base-check; нечего',
+  ],
   'panel-projections': ['The polled summary is bounded, carries no history bodies and'],
   preview: [
     'Preview не обходит границы: настройки, Compose, секреты,',
@@ -113,7 +154,9 @@ export const slowTests = {
     'Joint verification masks secrets in its JUnit copy, evidence,',
     'Product map separates monorepo channels and cross-repository',
     'Git sync preserves product release binding across clones',
+    'A release proof pins only its own tasks: other work in the component keeps it',
   ],
+  profiles: ['Custom Python gate fails a no-op writer, then verifies candidate and'],
   proof: [
     'Намеренно внесённый дефект ловится названным тестом: без этого',
     'Задача без названного testcase не публикуется и не открывает',
@@ -129,10 +172,18 @@ export const slowTests = {
     'AC25: an infrastructure failure between failures neither counts',
     'AC28: a human pause, a cancellation, operator mode and a',
     'AC27: a restart, a duplicate or re-registered workflow and a',
+    'AC24: two substantive failures on one property with different messages and',
+  ],
+  'proposal-limits': [
+    'contract-impact (CLI) называет превышение пределов в отчёте; contract-change',
+    'contract-impact и закрепление спрашивают Git постоянное число раз; отказы и',
   ],
   'receipt-identity': [
     'S3-R3-01: receipt не подтверждает приёмку, если у получателя',
     'S3-R5: переносимость пути — только буквальная запись внутри',
+    'T23/S3-R1-01: receipt подтверждает приёмку доски только теми же проверками —',
+    'S3-R3-02 (',
+    'S3-R6-01: неподтверждённое написание корня не делает переносимым внешний вход —',
   ],
   reproductions: ['Review findings, summary and review.json are masked in every'],
   requirements: ['Requirements survive real Git execution; changed spec loses'],
@@ -147,14 +198,18 @@ export const slowTests = {
     'Проверка исполняется в песочнице: полезное работает,',
     'Кандидат не берётся, если сдвинулась база, ревью отклонило код',
     'A retry is told where the previous review objected, not only',
+    'A stale run base that is a pure fast-forward moves on the next tick; a diverged',
+    'Auto fast-forward refuses commits that touch acceptance or contour files and',
+  ],
+  'shutdown-abort': ['Shutdown aborts a host adapter wrapped by fromAgentAdapter and requeues its'],
+  workspace: [
+    'Real multi-repo DAG, isolated ownership, failing then passing',
+    'Consumer impact executes prerequisites and affected product',
+    'Workspace gates cannot change manifest or another component',
   ],
   'workspace-mode': [
     'Embedded product map and local intent drive real worktrees,',
     'One-Git preparation and task memory survive independent clones;',
-  ],
-  workspace: [
-    'Real multi-repo DAG, isolated ownership, failing then passing',
-    'Consumer impact executes prerequisites and affected product',
   ],
 };
 
