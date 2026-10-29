@@ -23,7 +23,7 @@ import { loadConfig } from '../src/runner/config.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour, specDigest } from '../src/core/service.ts';
 import { syncGit, syncPreparation, assertTeamCheckout } from '../src/runner/git-sync.ts';
-import { config, input } from './helpers.ts';
+import { config, input, withTestHome } from './helpers.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { IntentService } from '../src/runner/intent.ts';
 import { requirementSnapshot } from '../src/runner/requirements.ts';
@@ -125,46 +125,49 @@ test('Workspace placement is explicit before first launch, persisted on restart 
   }
 });
 
-test('Embedded startup attaches approved single-repository setup without a second database or server', async () => {
-  const root = temp();
-  init(root);
-  const app = await startWorkspace(root, { port: 0, workspaceMode: 'embedded' });
-  try {
-    const early = preparationStore(join(root, '.devcontour-local'));
+// Сервер подключает движок сразу после setup — конфигурация без checkoutRoot,
+// поэтому кэш пользователя — в подменённом HOME, а не в настоящем.
+test('Embedded startup attaches approved single-repository setup without a second database or server', () =>
+  withTestHome(async () => {
+    const root = temp();
+    init(root);
+    const app = await startWorkspace(root, { port: 0, workspaceMode: 'embedded' });
     try {
-      approvePreparation(new Preparation(early));
+      const early = preparationStore(join(root, '.devcontour-local'));
+      try {
+        approvePreparation(new Preparation(early));
+      } finally {
+        early.close();
+      }
+      await setupProject({ repository: root, workspace: root, profile: 'react-vite-admin' });
+      const c = loadConfig(join(root, '.devcontour-local/config.json'));
+      assert.equal(c.storage, 'central');
+      assert.equal(c.workspaceMode, 'embedded');
+      assert.equal(c.repositories.length, 1);
+      assert.equal(c.repositories[0].path, root);
+      assert.ok(existsSync(join(root, 'devcontour.component.json')));
+      assert.match(readFileSync(join(root, '.gitignore'), 'utf8'), /\.devcontour-local/);
+      // Подключение идёт в фоне, и под нагрузкой полного прогона четырёх секунд
+      // не хватало. Дедлайн с запасом; при отказе видно последнее состояние.
+      let preparation: { engineConnected?: boolean } = {};
+      for (const deadline = Date.now() + 30_000; Date.now() < deadline;) {
+        preparation = await (await fetch(app.url + '/api/preparation')).json();
+        if (preparation.engineConnected) break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      assert.equal(preparation.engineConnected, true, JSON.stringify(preparation).slice(0, 2000));
+      const s = await (await fetch(app.url + '/api/state')).json();
+      assert.equal(s.config.workspaceMode, 'embedded');
+      assert.equal(s.dataRoot, join(root, '.devcontour-local'));
+      assert.equal(s.paused, true);
+      const saved = readFileSync(join(root, '.devcontour-local/config.json'), 'utf8');
+      await setupProject({ repository: root, workspace: root, profile: 'react-vite-admin' });
+      assert.equal(readFileSync(join(root, '.devcontour-local/config.json'), 'utf8'), saved);
     } finally {
-      early.close();
+      await app.close();
+      rmSync(root, { recursive: true, force: true });
     }
-    await setupProject({ repository: root, workspace: root, profile: 'react-vite-admin' });
-    const c = loadConfig(join(root, '.devcontour-local/config.json'));
-    assert.equal(c.storage, 'central');
-    assert.equal(c.workspaceMode, 'embedded');
-    assert.equal(c.repositories.length, 1);
-    assert.equal(c.repositories[0].path, root);
-    assert.ok(existsSync(join(root, 'devcontour.component.json')));
-    assert.match(readFileSync(join(root, '.gitignore'), 'utf8'), /\.devcontour-local/);
-    // Подключение идёт в фоне, и под нагрузкой полного прогона четырёх секунд
-    // не хватало. Дедлайн с запасом; при отказе видно последнее состояние.
-    let preparation: { engineConnected?: boolean } = {};
-    for (const deadline = Date.now() + 30_000; Date.now() < deadline;) {
-      preparation = await (await fetch(app.url + '/api/preparation')).json();
-      if (preparation.engineConnected) break;
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    assert.equal(preparation.engineConnected, true, JSON.stringify(preparation).slice(0, 2000));
-    const s = await (await fetch(app.url + '/api/state')).json();
-    assert.equal(s.config.workspaceMode, 'embedded');
-    assert.equal(s.dataRoot, join(root, '.devcontour-local'));
-    assert.equal(s.paused, true);
-    const saved = readFileSync(join(root, '.devcontour-local/config.json'), 'utf8');
-    await setupProject({ repository: root, workspace: root, profile: 'react-vite-admin' });
-    assert.equal(readFileSync(join(root, '.devcontour-local/config.json'), 'utf8'), saved);
-  } finally {
-    await app.close();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
+  }));
 
 test('A worker worktree cannot launch another embedded controller, even before configuration exists', async () => {
   const root = temp(),

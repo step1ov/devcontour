@@ -1,4 +1,6 @@
 import { readdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { run } from 'node:test';
 import { spec } from 'node:test/reporters';
@@ -50,6 +52,23 @@ if (args.length === 1 && args[0] === '--list') {
   };
   process.once('SIGINT', interrupt);
   process.once('SIGTERM', terminate);
+  // Тесты держат рабочие деревья в своих временных каталогах (checkoutRoot
+  // фикстур). Новый элемент в настоящем кэше пользователя после прогона —
+  // тест, который пишет туда: прогон не проходит. Сравнение — до и после,
+  // поэтому во время полного прогона другие процессы harness не запускают.
+  const xdg = process.env.XDG_CACHE_HOME;
+  const cache =
+    process.platform === 'darwin'
+      ? join(homedir(), 'Library', 'Caches', 'devcontour-harness')
+      : join(xdg && isAbsolute(xdg) ? xdg : join(homedir(), '.cache'), 'devcontour-harness');
+  const entries = () => {
+    try {
+      return new Set(readdirSync(cache));
+    } catch {
+      return new Set();
+    }
+  };
+  const before = entries();
   const results = run({
     files,
     concurrency: 4,
@@ -64,6 +83,13 @@ if (args.length === 1 && args[0] === '--list') {
     }
   });
   results.once('end', () => {
+    const added = [...entries()].filter((name) => !before.has(name));
+    if (added.length) {
+      console.error(
+        `Tests created ${added.length} entr${added.length === 1 ? 'y' : 'ies'} in the real user cache ${cache}: ${added.join(', ')}. Give the fixture a checkoutRoot (tests/helpers.ts testCheckoutRoot).`,
+      );
+      process.exitCode ||= 1;
+    }
     process.removeListener('SIGINT', interrupt);
     process.removeListener('SIGTERM', terminate);
   });

@@ -1,4 +1,5 @@
 import { copyFile, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { sharedCheckoutRoot } from './helpers.ts';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { configSchema, type Config } from '../src/core/model.ts';
@@ -197,6 +198,8 @@ export function fixtureConfig(p: { root: string; repo: string }, extra: Partial<
     reviewer: { runtime: 'demo' },
     gates: [propertyGate()],
     protectedPaths: ['check.mjs', 'harness.mjs', 'oracle.mjs', 'points.mjs', '.gitignore'],
+    // Рабочие деревья — не в кэше пользователя.
+    checkoutRoot: sharedCheckoutRoot(),
     ...extra,
   });
 }

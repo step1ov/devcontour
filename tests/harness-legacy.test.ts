@@ -41,7 +41,7 @@ import { loadConfig } from '../src/runner/config.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { syncGit } from '../src/runner/git-sync.ts';
 import { requirementReport } from '../src/runner/requirements.ts';
-import { closePrevious, complete, config as testConfig } from './helpers.ts';
+import { closePrevious, complete, config as testConfig, sharedCheckoutRoot } from './helpers.ts';
 import { reviewContract, reviewPlan } from '../src/runner/agent-control.ts';
 import type { AgentAdapter, AgentRequest } from '../src/runner/adapters.ts';
 
@@ -172,7 +172,15 @@ function copy(kind: Kind) {
 
 /** Конфигурация workspace прежней версии — обычным загрузчиком, как у `serve`. */
 function configOf(c: Copy): Config {
-  return loadConfig(join(c.data, 'config.json'));
+  // Рабочие деревья копии — не в кэше пользователя: корень дописывается в
+  // файл копии до загрузки (правка в памяти сняла бы происхождение конфигурации).
+  const path = join(c.data, 'config.json');
+  const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+  if (!raw.checkoutRoot) {
+    raw.checkoutRoot = sharedCheckoutRoot();
+    writeFileSync(path, JSON.stringify(raw, null, 2) + '\n');
+  }
+  return loadConfig(path);
 }
 
 function openStore(c: Copy) {

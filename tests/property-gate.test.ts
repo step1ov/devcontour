@@ -1,4 +1,5 @@
 import { test } from 'node:test';
+import { sharedCheckoutRoot } from './helpers.ts';
 import assert from 'node:assert/strict';
 import {
   chmod,
@@ -104,7 +105,8 @@ const variants = {
  * нужен test gate с JUnit — простой отчёт об одном случае.
  */
 function withUnit(raw: Record<string, unknown>) {
-  const config = configSchema.parse(raw);
+  // Рабочие деревья — не в кэше пользователя.
+  const config = configSchema.parse({ checkoutRoot: sharedCheckoutRoot(), ...raw });
   if (config.gates.some((g) => g.kind === 'test' && g.report)) return config;
   config.gates = [
     ...config.gates.map((g) =>
