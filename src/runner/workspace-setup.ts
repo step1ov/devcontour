@@ -278,7 +278,7 @@ export async function setupWorkspace(file: string, data?: string) {
     try {
       const previousProfiles = configSchema.shape.toolProfiles.parse(stored.toolProfiles);
       introducedToolProfiles = Object.keys(config.toolProfiles).some(
-        (id) => !(id in previousProfiles),
+        (id) => !Object.hasOwn(previousProfiles, id),
       );
       // Файл компонента уже может ссылаться на новое имя из реестра. Для
       // проверки прежней конфигурации добавляем только такие имена: старые

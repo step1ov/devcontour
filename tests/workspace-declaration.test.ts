@@ -19,13 +19,13 @@ test('Workspace declaration adds a tool profile with the component bindings that
     await git(repo, 'init', '-b', 'main');
     const componentPath = join(repo, 'devcontour.component.json');
     const registryPath = join(control, 'workspace.json');
-    const bindings = (runtime: 'claude' | 'codex') =>
+    const bindings = (runtime: 'claude' | 'codex', toolProfile: string = runtime) =>
       Object.fromEntries(
         ['architect', 'backend', 'frontend', 'qa'].map((role) => [
           role,
           {
             runtime,
-            toolProfile: runtime,
+            toolProfile,
             reviewer: { runtime: 'codex' },
             ...(runtime === 'codex' ? { reviewVendor: 'same-vendor-allowed' } : {}),
           },
@@ -139,6 +139,18 @@ test('Workspace declaration adds a tool profile with the component bindings that
     assert.equal((await setupWorkspace(registryPath)).status, 'declaration-updated');
     assert.equal(loadConfig(configPath).toolProfiles.codex.runtime, 'codex');
     assert.equal((await setupWorkspace(registryPath)).status, 'preserved');
+
+    // Profile names are arbitrary strings, including Object prototype names.
+    for (const name of ['constructor', 'toString']) {
+      await writeFile(configPath, before);
+      await json(componentPath, { ...component, roles: bindings('codex', name) });
+      await json(registryPath, { ...registry, toolProfiles: { [name]: { runtime: 'codex' } } });
+      assert.equal((await setupWorkspace(registryPath)).status, 'declaration-updated');
+      const custom = loadConfig(configPath);
+      assert.deepEqual(Object.keys(custom.toolProfiles), [name]);
+      assert.equal(custom.roles.backend.toolProfile, name);
+      assert.equal((await setupWorkspace(registryPath)).status, 'preserved');
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }
