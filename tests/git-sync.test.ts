@@ -28,6 +28,7 @@ import { repositories } from '../src/core/repositories.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { repositorySchema, type ContractArtifact } from '../src/core/model.ts';
 import { config, input } from './helpers.ts';
+import { Workspace } from '../src/core/workspace.ts';
 import {
   requirementSnapshot,
   requirementReport,
@@ -1130,6 +1131,50 @@ test('Receipt, чей manifest не подтверждает названный 
       b.store.read().tasks.some((x) => x.id === t.id && x.status === 'done'),
       false,
     );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Independent clone sync transfers ChangeSet definition without local acceptance or joint budget checkpoint', () => {
+  const f = fixture();
+  try {
+    const a = f.create('budget-a');
+    syncGit(a.h, { member: 'alice' });
+    const board = a.h.createBoard('Joint definition', '', 'main');
+    const change = new Workspace(a.h).create({
+      title: 'Joint acceptance',
+      description: 'Local joint history stays in its controller',
+      boardIds: [board.id],
+    });
+    a.store.change('fixture.local-acceptance', (s) => {
+      s.changeSets[0].acceptance = {
+        at: '2026-01-01T00:00:00.000Z',
+        verificationId: 'local-proof',
+        digest: 'e'.repeat(64),
+        approval: { actor: 'agent' },
+        jointBudgetCheckpoint: {
+          verificationId: 'local-proof',
+          settledVerificationIds: ['local-proof'],
+        },
+      };
+    });
+    const local = structuredClone(a.store.read().changeSets[0].acceptance);
+    syncGit(a.h, { member: 'alice' });
+    a.commit();
+    const b = f.create('budget-b', a);
+    syncGit(b.h, { member: 'bob' });
+    const imported = b.store.read().changeSets.find((c) => c.id === change.id)!;
+    assert.equal(imported.acceptance, undefined);
+    assert.deepEqual(imported.verifications, []);
+    const files = git(a.workspace, 'ls-files', '.devcontour');
+    for (const file of files.split('\n').filter(Boolean)) {
+      const text = readFileSync(join(a.workspace, file), 'utf8');
+      assert.ok(!text.includes('jointBudgetCheckpoint'));
+      assert.ok(!text.includes('local-proof'));
+    }
+    syncGit(a.h, { member: 'alice' });
+    assert.deepEqual(a.store.read().changeSets[0].acceptance, local);
   } finally {
     f.cleanup();
   }

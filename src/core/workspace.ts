@@ -1,4 +1,5 @@
 import { assertTaskPreparation } from './preparation.ts';
+import { settledJointVerifications } from './joint-budget.ts';
 import { delivered } from './delivery.ts';
 import { entityId } from './ids.ts';
 import { z } from 'zod';
@@ -277,6 +278,13 @@ export class Workspace {
         deliveryId: delivery?.id,
         digest: digest(v),
         approval,
+        jointBudgetCheckpoint: {
+          verificationId: v.id,
+          settledVerificationIds: settledJointVerifications(
+            s,
+            v.tasks.map((t) => t.id),
+          ),
+        },
       };
       return { status: 'accepted', changeSetId: id, ...c.acceptance };
     });

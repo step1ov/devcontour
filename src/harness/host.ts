@@ -52,6 +52,7 @@ import {
   workspacePolicyDigest,
   type ProductReleaseGuard,
 } from '../core/workspace.ts';
+import { acceptedJointBudgetCheckpoints } from '../core/joint-budget.ts';
 import { IntentService } from '../runner/intent.ts';
 import type { StoryBindingGuard } from '../core/intent.ts';
 
@@ -173,6 +174,8 @@ export function devcontourHost(h: DevContour, store: DevContourExecutionStore): 
         }),
       // Совместная проверка — прежние формулы DevContour: ими подписаны принятые ChangeSet.
       jointPolicyDigest: () => workspacePolicyDigest(h.config),
+      jointBudgetCheckpoints: (workIds, view) =>
+        acceptedJointBudgetCheckpoints(state(view), workIds),
       jointSpecDigest: (workIds, view, verificationId) => {
         const s = state(view);
         const changeSet = verificationId

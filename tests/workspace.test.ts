@@ -1086,3 +1086,53 @@ test('workspace-init не трогает общие роли верхнего у
     await f.cleanup();
   }
 });
+
+test('Real Git joint gates: third accepted proof permits fresh full verification without rewriting accepted evidence', async () => {
+  const f = await multiRepo();
+  try {
+    f.c.maxAttempts = 3;
+    const b = f.h.createBoard('Completed integration');
+    const lib = f.h.addTask(b.id, { ...input('Library change'), repositoryId: 'library' });
+    f.h.addTask(b.id, { ...input('Product fix', [lib.id]), repositoryId: 'product' });
+    f.h.approve(b.id);
+    f.h.pause(false);
+    await f.scheduler.drain();
+    assert.ok(f.store.read().tasks.every((t) => t.status === 'done'));
+    const old = f.runner.workspace.create({
+      title: 'Joint budget cycle',
+      description: 'Run pinned product and library integration',
+      boardIds: [b.id],
+    });
+    // The failing command changes policy, rather than the accepted task result.
+    const command = f.c.workspaceGates[0].command;
+    f.c.workspaceGates[0].command = [process.execPath, '-e', 'process.exit(1)'];
+    await assert.rejects(f.runner.verify(old.id), /exit=1/);
+    await assert.rejects(f.runner.verify(old.id), /exit=1/);
+    f.c.workspaceGates[0].command = command;
+    await f.runner.verify(old.id);
+    assert.equal(f.runner.workspace.accept(old.id).status, 'accepted');
+    const history = structuredClone(f.store.read().changeSets[0]);
+    assert.equal(history.verifications.length, 3);
+    assert.equal(history.acceptance!.jointBudgetCheckpoint!.settledVerificationIds.length, 3);
+    f.c.repositories[0].reviewer = { runtime: 'demo', model: 'new-model' };
+    const next = f.runner.workspace.create({
+      title: 'Fresh policy proof',
+      description: 'Reverify accepted works under current policy',
+      boardIds: [b.id],
+      supersedes: old.id,
+    });
+    await f.runner.verify(next.id);
+    const proof = f.store.read().changeSets.find((c) => c.id === next.id)!.verifications[0];
+    assert.equal(proof.status, 'passed');
+    assert.equal(proof.impact!.mode, 'all');
+    assert.deepEqual(proof.manifest, history.verifications.at(-1)!.manifest);
+    assert.ok(proof.evidence.some((e) => e.gate === 'product-e2e' && e.passed));
+    assert.equal(f.runner.workspace.accept(next.id).status, 'accepted');
+    assert.deepEqual(
+      f.store.read().changeSets.find((c) => c.id === old.id),
+      history,
+    );
+  } finally {
+    await f.cleanup();
+  }
+});

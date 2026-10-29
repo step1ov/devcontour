@@ -3,6 +3,7 @@ import type { FailureKind } from './failure.ts';
 import { priceSchema } from './usage.ts';
 import type { ReviewInspection } from './review.ts';
 import { z } from 'zod';
+import type { JointBudgetCheckpoint } from 'devcontour-harness/contracts';
 import { GATE_SCOPE_LIMIT, gateScopeTooBig } from 'devcontour-harness/contracts';
 import type { CompletionReceipt } from './sync-model.ts';
 import {
@@ -876,6 +877,8 @@ export interface ChangeSet {
     digest: string;
     approval: Approval;
     deliveryId?: string;
+    /** Локальный снимок завершённых проверок при приёмке; в Git не переносится. */
+    jointBudgetCheckpoint?: JointBudgetCheckpoint;
   };
 }
 
