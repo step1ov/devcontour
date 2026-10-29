@@ -66,7 +66,7 @@ test('Workspace declaration adds a tool profile with the component bindings that
     const configPath = created.config;
     const lockPath = join(created.data, 'packs.lock.json');
     const ownerPath = join(repo, '.git/devcontour-owner.json');
-    const stored = JSON.parse(await readFile(configPath, 'utf8'));
+    const stored = JSON.parse(await readFile(configPath, 'utf8')) as ReturnType<typeof loadConfig>;
     stored.approvalMode = 'operator';
     await json(configPath, stored);
     const before = await readFile(configPath, 'utf8');
@@ -97,7 +97,7 @@ test('Workspace declaration adds a tool profile with the component bindings that
       await json(registryPath, nextRegistry);
       if (invalid === 'old-policy') await json(configPath, { ...stored, concurrency: 0 });
       if (invalid === 'pin') {
-        const lock = JSON.parse(lockBefore);
+        const lock = JSON.parse(lockBefore) as { packs: Array<{ digest: string }> };
         lock.packs[0].digest = '0'.repeat(64);
         await json(lockPath, lock);
       }
