@@ -26,6 +26,7 @@ import { serveMcp } from './server/mcp.ts';
 import { repositories } from './core/repositories.ts';
 import { dataDoctor, doctor, doctorState } from './runner/doctor.ts';
 import { cleanupEnvironment } from './runner/environment.ts';
+import { environmentRoots } from './runner/checkout-root.ts';
 import { importKnowledge } from './runner/knowledge.ts';
 import { PreviewRunner } from './runner/preview.ts';
 import { DeliveryRunner } from './runner/forge.ts';
@@ -688,10 +689,9 @@ async function main() {
         )
           throw new Error('Сначала остановите очередь и активные попытки');
         const receipt = await realpath(resolve(option('--receipt', '')));
-        const allowedRoots = [
-          await realpath(root),
-          ...repositories(config).map((r) => resolve(r.path, '.devcontour-local')),
-        ];
+        // Рабочий каталог окружения новой попытки — под корнем рабочих
+        // деревьев workspace, receipt — в каталоге состояния.
+        const allowedRoots = environmentRoots(h, root);
         if (
           !allowedRoots.some((r) => receipt.startsWith(r + sep)) ||
           !receipt.endsWith('/environment.json')

@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import {
   HarnessError,
@@ -108,4 +109,26 @@ export function workspaceCheckout(
   id: string,
 ) {
   return checkoutPath(workspaceCheckoutRoot(h), legacy, repositoryId, kind, id);
+}
+
+/**
+ * Каталоги, в которых может лежать окружение попытки (`environment-cleanup`):
+ * каталог данных workspace, каталоги состояния компонентов и корень рабочих
+ * деревьев — у новых попыток рабочий каталог окружения под ним.
+ */
+export function environmentRoots(h: DevContour, dataRoot: string) {
+  const real = (path: string) => {
+    try {
+      return realpathSync(path);
+    } catch {
+      return resolve(path);
+    }
+  };
+  return [
+    ...new Set([
+      real(dataRoot),
+      ...repositories(h.config).map((r) => real(join(r.path, '.devcontour-local'))),
+      ...checkoutRoots(h).map(real),
+    ]),
+  ];
 }

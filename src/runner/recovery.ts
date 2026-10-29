@@ -7,6 +7,7 @@ import {
 } from 'devcontour-harness';
 import { DomainError, type Task } from '../core/model.ts';
 import type { DevContour } from '../core/service.ts';
+import { checkoutRoots } from './checkout-root.ts';
 import { repository, reviewerBinding } from '../core/repositories.ts';
 import { adapters, type AgentAdapter } from './adapters.ts';
 import { runtimeAdapters } from '../harness/adapters.ts';
@@ -25,6 +26,15 @@ import { submitCase } from './checks.ts';
  */
 export const recoveryResult = recoveryResultSchema;
 type RecoveryDecision = NonNullable<PropertyRecovery['decision']>;
+
+/**
+ * Граница аналитика разбора: каталог состояния и корень рабочих деревьев
+ * workspace (попытки, `.joint/`) закрыты, исходный checkout компонента
+ * открыт на чтение.
+ */
+export function recoveryBoundary(h: DevContour, root: string, repository: string) {
+  return { hidden: [root, ...checkoutRoots(h)], readable: [repository] };
+}
 
 /** Назначение вызова ведущего: профиль ревьюера роли для runtime автора и модель ревьюера. */
 export function leadBinding(h: DevContour, task: Task, author: 'codex' | 'claude') {
@@ -62,7 +72,7 @@ export async function analyzeRecovery(
         stateDir: root,
         cwd: repo.path,
         binding: leadBinding(h, task, author),
-        boundary: { hidden: [root], readable: [repo.path] },
+        boundary: recoveryBoundary(h, root, repo.path),
       },
       work,
       author,

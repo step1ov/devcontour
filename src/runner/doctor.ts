@@ -1,6 +1,6 @@
 import { access, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { constants, existsSync, statSync } from 'node:fs';
-import { delimiter, isAbsolute, join, resolve } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { emptyState, type Config, type DevContourState, type Role } from '../core/model.ts';
 import {
@@ -13,6 +13,7 @@ import {
 import { DevContourExecutionStore, harnessVersion } from '../harness/index.ts';
 import { projectionOptions } from '../harness/host.ts';
 import { technicalReviewer } from '../harness/policy.ts';
+import { checkoutPath } from 'devcontour-harness';
 import { isolationSupport } from './isolation.ts';
 import { CheckoutRootError, checkoutRootFor } from './checkout-root.ts';
 import { installProbe } from './install-probe.ts';
@@ -631,10 +632,20 @@ export async function doctor(
       });
     if (probe && repo.preflight?.length)
       await check('probe:' + repo.id, async () => {
+        // Рабочее дерево пробы — под корнем рабочих деревьев workspace (в
+        // embedded-размещении каталог состояния внутри репозитория);
+        // журналы окружения и preflight — в каталоге состояния.
         const runId = randomUUID(),
           dir = join(root, 'doctor', runId),
-          cwd = join(dir, repo.id);
+          cwd = checkoutPath(
+            checkoutRootFor(config, root),
+            join(dir, repo.id),
+            repo.id,
+            'doctor',
+            runId,
+          );
         await mkdir(dir, { recursive: true });
+        await mkdir(dirname(cwd), { recursive: true });
         const sha = await git(repo.path, 'rev-parse', 'HEAD');
         await git(repo.path, 'worktree', 'add', '--detach', cwd, sha);
         try {

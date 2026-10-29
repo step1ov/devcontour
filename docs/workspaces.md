@@ -30,7 +30,7 @@ projects/
       workspace-checks/      # закреплённые SHA, manifest, отчёты и логи
 ~/Library/Caches/devcontour-harness/<hash>/   # корень рабочих деревьев workspace
   <repositoryId>/worktrees/  # попытки; рядом dependencies/, gates-at/, base/, review-checkouts/…
-  joint/<id>/components/     # компоненты совместной проверки
+  .joint/<id>/components/    # компоненты совместной проверки
 ```
 
 Рабочие деревья попыток и проверок лежат не в `.devcontour-local`, а в одном

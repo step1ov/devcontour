@@ -27,7 +27,7 @@ import { snapshotDependencies, assertDependencies } from '../src/runner/dependen
 import { DeliveryRunner } from '../src/runner/forge.ts';
 import { attachJournal } from '../src/runner/journal.ts';
 import { doctor, doctorReady } from '../src/runner/doctor.ts';
-import { workspaceCheckoutRoot } from '../src/runner/checkout-root.ts';
+import { environmentRoots, workspaceCheckoutRoot } from '../src/runner/checkout-root.ts';
 import { importKnowledge } from '../src/runner/knowledge.ts';
 
 const makeRoot = () => mkdtemp(join(tmpdir(), 'devcontour-enterprise-'));
@@ -878,6 +878,21 @@ test('Cleanup recovery preserves component environment and rejects live owners a
     await writeFile(path, JSON.stringify(receipt));
     assert.equal((await cleanupEnvironment(path, f.c, roots)).status, 'cleaned');
     await assert.rejects(readFile(join(cwd, '.running')));
+
+    // Окружение новой попытки: рабочий каталог — под корнем рабочих деревьев
+    // workspace, receipt — в каталоге состояния. environment-cleanup его
+    // принимает (корни команды — `environmentRoots`).
+    const tree = join(workspaceCheckoutRoot(f.h).root!, repo.id, 'worktrees', 'R-outside');
+    await mkdir(tree, { recursive: true });
+    await writeFile(join(tree, '.running'), 'pending');
+    await writeFile(
+      path,
+      JSON.stringify({ ...(receipt as Record<string, unknown>), cwd: tree, status: 'active' }),
+    );
+    await assert.rejects(cleanupEnvironment(path, f.c, roots), /вне рабочих/);
+    const all = environmentRoots(f.h, f.data);
+    assert.equal((await cleanupEnvironment(path, f.c, all)).status, 'cleaned');
+    await assert.rejects(readFile(join(tree, '.running')));
   } finally {
     await f.close();
   }
