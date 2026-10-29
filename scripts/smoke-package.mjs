@@ -212,8 +212,25 @@ syncBuiltinESMExports();
       assert.equal(pinned.dependencies[name], range, 'общая зависимость ' + name);
   // The engineering corpus runs three real Git pipelines, not a single CLI query.
   // Keep it bounded without applying the 30s command-response budget to all nine stages.
+  // Установленный пакет пишет checkout кандидатов в кэш пользователя
+  // (~/Library/Caches, ~/.cache): проверка архива не трогает настоящий HOME.
+  const home = join(root, 'home');
+  await mkdir(join(home, 'Library', 'Caches'), { recursive: true });
+  await mkdir(join(home, '.cache'), { recursive: true });
+  const childEnv = {
+    ...process.env,
+    HOME: home,
+    GIT_AUTHOR_NAME: 'Package fixture',
+    GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
+    GIT_COMMITTER_NAME: 'Package fixture',
+    GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
+  };
   const cli = (...args) =>
-    exec(bin, args, { cwd: outside, timeout: args[0] === 'engineering-evals' ? 120000 : 30000 });
+    exec(bin, args, {
+      cwd: outside,
+      env: childEnv,
+      timeout: args[0] === 'engineering-evals' ? 120000 : 30000,
+    });
   const help = (await cli('help')).stdout;
   assert.match(help, /DevContour/);
   // Установленный пакет называет свой бинарник, а не npm script checkout.
@@ -366,7 +383,7 @@ syncBuiltinESMExports();
         command: bin,
         args: ['mcp', '--workspace', workspace],
         cwd: outside,
-        env: { ...process.env },
+        env: childEnv,
         stderr: 'pipe',
       }),
     );
@@ -384,13 +401,7 @@ syncBuiltinESMExports();
 
   child = spawn(bin, ['demo', '--data', join(root, 'demo'), '--port', '0'], {
     cwd: outside,
-    env: {
-      ...process.env,
-      GIT_AUTHOR_NAME: 'Package fixture',
-      GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
-      GIT_COMMITTER_NAME: 'Package fixture',
-      GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
-    },
+    env: childEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   closed = new Promise((done) => child.once('close', done));
