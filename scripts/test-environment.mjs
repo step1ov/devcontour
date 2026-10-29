@@ -5,6 +5,20 @@ import { join } from 'node:path';
 
 /** A disposable user environment inherited by test workers and their subprocesses. */
 export function testEnvironment(base = process.env) {
+  const originalHome = (process.platform === 'win32' ? base.USERPROFILE : base.HOME) || homedir();
+  const originalCache =
+    process.platform === 'darwin'
+      ? join(originalHome, 'Library', 'Caches')
+      : process.platform === 'win32'
+        ? base.LOCALAPPDATA || join(originalHome, 'AppData', 'Local')
+        : base.XDG_CACHE_HOME || join(originalHome, '.cache');
+  // Browser installations are executable tooling, not disposable test data.
+  // Match Playwright's effective override, including the special value "0".
+  const browserOverride =
+    base.PLAYWRIGHT_BROWSERS_PATH ??
+    base.npm_config_playwright_browsers_path ??
+    base.npm_package_config_playwright_browsers_path;
+  const browsers = browserOverride || join(originalCache, 'ms-playwright');
   const home = realpathSync(mkdtempSync(join(tmpdir(), 'devcontour-suite-home-')));
   const cache = join(home, '.cache');
   const config = join(home, '.config');
@@ -49,6 +63,7 @@ export function testEnvironment(base = process.env) {
       XDG_CONFIG_HOME: config,
       CODEX_HOME: join(home, '.codex'),
       CLAUDE_CONFIG_DIR: join(home, '.claude'),
+      PLAYWRIGHT_BROWSERS_PATH: browsers,
       DOCKER_CONFIG: dockerConfig,
       DOCKER_CONTEXT: '',
       ...(dockerHost ? { DOCKER_HOST: dockerHost } : {}),
