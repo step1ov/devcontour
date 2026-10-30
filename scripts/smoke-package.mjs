@@ -9,6 +9,7 @@
  * `--offline` ставит его без сети (из кэша npm).
  */
 import assert from 'node:assert/strict';
+import { packageWorkflowDiagnostics } from './package-smoke-diagnostics.mjs';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { createHash } from 'node:crypto';
@@ -471,8 +472,10 @@ syncBuiltinESMExports();
     job.key,
   );
   let completed = false;
+  let lastWorkflowReport;
   for (let count = 0; count < 450; count++) {
     const report = await agent('workflow_status', { repositoryId: 'main' });
+    lastWorkflowReport = report;
     assert.ok(report.jobs.every((j) => !('token' in j)));
     const current = report.jobs.find((j) => j.key === job.key);
     if (current.status === 'failed' || current.status === 'stale')
@@ -482,6 +485,33 @@ syncBuiltinESMExports();
       break;
     }
     await delay(100);
+  }
+  if (!completed) {
+    let diagnosticState;
+    try {
+      diagnosticState = await fetch(url + '/api/state', { signal: AbortSignal.timeout(5000) }).then(
+        (reply) => reply.json(),
+      );
+    } catch (error) {
+      console.error('smoke-package: failure state unavailable: ' + String(error));
+    }
+    const diagnostic = packageWorkflowDiagnostics({
+      lastReport: lastWorkflowReport,
+      state: diagnosticState,
+      taskId: task.taskId,
+      boardId: board.boardId,
+      serverOutput: output,
+    });
+    console.error('smoke-package: durable workflow timeout ' + JSON.stringify(diagnostic));
+    try {
+      await mkdir(join(source, '.private'), { recursive: true });
+      await writeFile(
+        join(source, '.private/package-smoke-failure.json'),
+        JSON.stringify(diagnostic, null, 2) + '\n',
+      );
+    } catch (error) {
+      console.error('smoke-package: failure artifact unavailable: ' + String(error));
+    }
   }
   assert.ok(completed, 'Installed server must advance a durable workflow without an active chat');
   const metrics = await agent('workflow_metrics', { repositoryId: 'main' });
