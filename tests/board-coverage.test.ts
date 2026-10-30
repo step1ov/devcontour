@@ -1,5 +1,5 @@
-import { test } from 'node:test';
-import { testDemo } from './demo-pool.ts';
+import { after, test } from 'node:test';
+import { demoPool, testDemo } from './demo-pool.ts';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
@@ -184,12 +184,15 @@ test('Покрытие доски засчитывает проверку дос
  * integration, runId проверки доски) и падает, если в дереве итогового SHA
  * есть SMOKE_BROKEN.
  */
+const demos = demoPool(testDemo);
+after(() => demos.close());
+
 async function realBoard(
   broken: boolean,
   options: { marker?: string; emptyB?: boolean; install?: boolean } = {},
 ) {
-  const root = await mkdtemp(join(tmpdir(), 'devcontour-coverage-'));
-  await testDemo(root);
+  const seed = await demos.acquire();
+  const { root } = seed;
   const config = loadConfig(join(root, 'config.json'));
   const store = new Store(join(root, 'state.sqlite'));
   const h = new DevContour(store, config);
@@ -306,9 +309,9 @@ process.exit(ok ? 0 : 1);
     h,
     board,
     tasks: [a, b],
-    cleanup: async () => {
+    cleanup: () => {
       store.close();
-      await rm(root, { recursive: true, force: true });
+      seed.release();
     },
   };
 }
@@ -356,7 +359,7 @@ test('Приёмка доски выполняет непокрытые gates о
     assert.equal(revision.status, 'accepted');
     assert.equal(revision.snapshot?.sha, head);
   } finally {
-    await f.cleanup();
+    f.cleanup();
   }
 });
 
@@ -441,7 +444,7 @@ test('Провал непокрытого gate на итоговом SHA дос�
     for (const local of [f.root, f.config.repository, homedir()])
       assert.ok(!error.message.includes(local), error.message);
   } finally {
-    await f.cleanup();
+    f.cleanup();
     await rm(marks, { recursive: true, force: true });
   }
 });
@@ -482,7 +485,7 @@ test('Повтор приёмки после частичного провала
     );
     assert.equal(second.evidence[0].id, first.evidence[0].id);
   } finally {
-    await f.cleanup();
+    f.cleanup();
     await rm(marks, { recursive: true, force: true });
   }
 });
@@ -525,7 +528,7 @@ test('Задача, работу которой сделала зависимо�
       'метрики видят попытку без коммита',
     );
   } finally {
-    await f.cleanup();
+    f.cleanup();
   }
 });
 
@@ -564,7 +567,7 @@ test('Профиль в порядке массива: проверка доск
       ['board.coverage.started', 'board.coverage.passed'],
     );
   } finally {
-    await f.cleanup();
+    f.cleanup();
   }
 });
 
