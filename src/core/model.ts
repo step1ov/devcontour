@@ -776,7 +776,7 @@ export const gateList = z
     }),
   )
   .min(1);
-export const reviewerBindingSchema = z.object({
+const bindingFields = z.object({
   runtime: z.enum(['codex', 'claude', 'demo']),
   model: z.string().optional(),
   /**
@@ -788,15 +788,31 @@ export const reviewerBindingSchema = z.object({
   toolProfile: z.string().optional(),
 });
 /**
+ * Уровень рассуждения передаётся только codex: у claude поле молча ничего бы
+ * не меняло, а конфигурация обещала бы экономию, которой нет. Проверка стоит в
+ * схеме, чтобы любой разбор отказывал раньше записи и коммита конфигурации.
+ */
+export const unsupportedEffort = (
+  name: string,
+  binding: { runtime: string; effort?: string } | undefined,
+) =>
+  binding?.effort && binding.runtime !== 'codex'
+    ? `effort поддерживается только для codex: ${name}`
+    : undefined;
+export const reviewerBindingSchema = bindingFields.superRefine((binding, ctx) => {
+  const message = unsupportedEffort('reviewer', binding);
+  if (message) ctx.addIssue({ code: 'custom', message, path: ['effort'] });
+});
+/**
  * Правило вендора ревью: `different-vendor` (умолчание, прежнее поведение)
  * отклоняет reviewer того же вендора, что исполнитель; `same-vendor-allowed`
  * явно разрешает его — с отдельной ролью, свежей сессией и прежними
  * условиями приёмки.
  */
 export const reviewVendorSchema = z.enum(['different-vendor', 'same-vendor-allowed']);
-export const roleBindingSchema = reviewerBindingSchema.extend({
+export const roleBindingSchema = bindingFields.extend({
   writePaths: z.array(relativePath).min(1).optional(),
-  reviewer: reviewerBindingSchema.optional(),
+  reviewer: bindingFields.optional(),
   /** Правило вендора ревью кода роли; нет — `review.code.vendor` конфигурации. */
   reviewVendor: reviewVendorSchema.optional(),
   /** Как роль называется в панели: «Мобильный разработчик», а не `mobile`. */
@@ -808,9 +824,20 @@ export const roleBindingSchema = reviewerBindingSchema.extend({
    */
   requiresContract: z.boolean().optional(),
 });
+/** Роли по ID: имя роли в отказе — как в validateWorkflow. */
+export const roleBindingsSchema = z.record(roleId, roleBindingSchema).superRefine((roles, ctx) => {
+  for (const [id, binding] of Object.entries(roles))
+    for (const [name, value, path] of [
+      [id, binding, [id, 'effort']],
+      [`${id}.reviewer`, binding.reviewer, [id, 'reviewer', 'effort']],
+    ] as const) {
+      const message = unsupportedEffort(name, value);
+      if (message) ctx.addIssue({ code: 'custom', message, path: [...path] });
+    }
+});
 export const repositorySchema = z.object({
   configFile: relativePath.optional(),
-  roles: z.record(roleId, roleBindingSchema).optional(),
+  roles: roleBindingsSchema.optional(),
   reviewer: reviewerBindingSchema.optional(),
   id,
   dependsOn: z.array(id).optional(),
@@ -925,7 +952,7 @@ export const budgetsSchema = z
 const reviewRuleConfig = z
   .object({
     /** Reviewer этого вида ревью; нет — общий `reviewer` (у плана и контракта — прежний выбор). */
-    reviewer: reviewerBindingSchema.optional(),
+    reviewer: bindingFields.optional(),
     vendor: reviewVendorSchema.optional(),
   })
   .strict();
@@ -1054,7 +1081,7 @@ export const configSchema = z.object({
   // Одна форма привязки роли на весь конфиг: два описания одного и того же
   // расходятся, и роль, объявленная компонентом, начинает уметь не то, что
   // роль, объявленная workspace.
-  roles: z.record(roleId, roleBindingSchema),
+  roles: roleBindingsSchema,
   reviewer: reviewerBindingSchema,
   gates: gateList,
   gateGroups: gateGroups.optional(),

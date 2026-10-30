@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig } from '../src/runner/config.ts';
@@ -8,6 +8,39 @@ import { git } from '../src/runner/process.ts';
 import { setupWorkspace } from '../src/runner/workspace-setup.ts';
 
 const json = (path: string, value: unknown) => writeFile(path, JSON.stringify(value) + '\n');
+
+test('Workspace refuses effort outside codex before it writes any configuration', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'devcontour-declaration-')));
+  try {
+    const repo = join(root, 'product');
+    const control = join(root, 'control');
+    await mkdir(repo);
+    await mkdir(control);
+    await git(repo, 'init', '-b', 'main');
+    const registryPath = join(control, 'workspace.json');
+    await json(registryPath, {
+      version: 1,
+      name: 'Effort',
+      repositories: [
+        {
+          id: 'product',
+          name: 'Product',
+          path: repo,
+          profile: 'react-vite-admin',
+          roles: { qa: { runtime: 'claude', effort: 'low' } },
+        },
+      ],
+    });
+    await assert.rejects(
+      setupWorkspace(registryPath),
+      /effort поддерживается только для codex: qa/,
+    );
+    assert.deepEqual(await readdir(control), ['workspace.json']);
+    assert.deepEqual(await readdir(repo), ['.git']);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test('Workspace declaration adds a tool profile with the component bindings that use it', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'devcontour-declaration-')));
