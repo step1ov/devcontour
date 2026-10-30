@@ -2760,6 +2760,7 @@
                       ]
                     },
                     "relatedRepositories": {
+                      "maxItems": 100,
                       "type": "array",
                       "items": {
                         "type": "string",
@@ -2831,6 +2832,7 @@
                       "pattern": "^[a-z][a-z0-9-]{1,30}$"
                     },
                     "dependsOn": {
+                      "maxItems": 100,
                       "type": "array",
                       "items": {
                         "type": "string"
@@ -2838,6 +2840,7 @@
                     },
                     "acceptance": {
                       "minItems": 1,
+                      "maxItems": 30,
                       "type": "array",
                       "items": {
                         "type": "string",
@@ -2845,6 +2848,7 @@
                       }
                     },
                     "contracts": {
+                      "maxItems": 30,
                       "type": "array",
                       "items": {
                         "type": "string"
@@ -3032,6 +3036,7 @@
                 ]
               },
               "relatedRepositories": {
+                "maxItems": 100,
                 "type": "array",
                 "items": {
                   "type": "string",
@@ -3364,6 +3369,7 @@
                 ]
               },
               "relatedRepositories": {
+                "maxItems": 100,
                 "type": "array",
                 "items": {
                   "type": "string",

@@ -1179,3 +1179,18 @@ test('Independent clone sync transfers ChangeSet definition without local accept
     f.cleanup();
   }
 });
+
+test('Git identity is refused before parsing when it is above its size limit', () => {
+  const f = fixture();
+  try {
+    const a = f.create('oversized-identity');
+    syncGit(a.h, { member: 'alice' });
+    const file = join(a.repo, '.devcontour/identity.json');
+    writeFileSync(file, readFileSync(file, 'utf8').trimEnd().padEnd(1000));
+    syncGit(a.h, { dryRun: true });
+    writeFileSync(file, readFileSync(file, 'utf8').padEnd(1001));
+    assert.throws(() => syncGit(a.h, { dryRun: true }), /Недопустимый файл состояния/);
+  } finally {
+    f.cleanup();
+  }
+});

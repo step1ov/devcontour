@@ -185,3 +185,29 @@ test('Memory survives independent Git clones and merges; source edits and owner 
     await f.cleanup();
   }
 });
+
+test('Shared Git identity above its size limit is refused before parsing', async () => {
+  const f = await fixture();
+  try {
+    await mkdir(join(f.repo, '.devcontour'));
+    const retain = () =>
+      f.memory.retain({
+        repositoryId: 'main',
+        subject: 'chat.identity',
+        sources: ['rules.md'],
+        kind: 'fact',
+        text: 'Pagination uses a cursor.',
+      });
+    const identity = JSON.stringify({
+      version: 1,
+      id: '11111111-1111-4111-8111-111111111111',
+      repositoryId: 'main',
+    });
+    await writeFile(join(f.repo, '.devcontour/identity.json'), identity.padEnd(1001));
+    assert.throws(retain, /Некорректная Git identity/);
+    await writeFile(join(f.repo, '.devcontour/identity.json'), identity.padEnd(1000));
+    assert.ok(retain());
+  } finally {
+    await f.cleanup();
+  }
+});

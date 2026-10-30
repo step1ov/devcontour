@@ -105,6 +105,8 @@ export class ProjectMemory {
     if (!existsSync(path) && create) {
       mkdirSync(safe(root, prefix), { recursive: true });
       const sync = safe(root, prefix + '/identity.json');
+      if (existsSync(sync) && lstatSync(sync).size > 1000)
+        throw new DomainError('Некорректная Git identity', 400);
       const shared = existsSync(sync)
         ? identitySchema.parse(JSON.parse(readFileSync(sync, 'utf8')))
         : undefined;

@@ -23,6 +23,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { AgentService, capabilities } from './application/agent.ts';
 import { serveMcp } from './server/mcp.ts';
+import { readAgentJson } from './runner/json-file.ts';
 import { repositories } from './core/repositories.ts';
 import { dataDoctor, doctor, doctorState } from './runner/doctor.ts';
 import { cleanupEnvironment } from './runner/environment.ts';
@@ -80,7 +81,7 @@ const proposalFile = async () => {
   const value = option('--file', '');
   if (!value || value.startsWith('--'))
     throw new Error('Укажите путь к файлу предложения: --file proposal.json');
-  return JSON.parse(await readFile(resolve(value), 'utf8')) as unknown;
+  return readAgentJson(resolve(value));
 };
 let root: string;
 let workspacePath: string | undefined;
@@ -271,7 +272,7 @@ async function main() {
       '--workspace-mode задаётся командой start; остальные команды используют сохранённый выбор',
     );
   if (operation === 'agent' && args.includes('--file')) {
-    const request: unknown = JSON.parse(await readFile(resolve(option('--file', '')), 'utf8'));
+    const request: unknown = await readAgentJson(resolve(option('--file', '')));
     if (
       request &&
       typeof request === 'object' &&
@@ -527,7 +528,7 @@ async function main() {
         : undefined;
       if (operation === 'intent-render') {
         if (!args.includes('--file')) throw new Error('Укажите --file definition.json');
-        const definition = JSON.parse(await readFile(resolve(option('--file', '')), 'utf8'));
+        const definition = await readAgentJson(resolve(option('--file', '')));
         process.stdout.write(service.render({ repositoryId, definition }).markdown);
       } else {
         const result =
@@ -571,7 +572,7 @@ async function main() {
     try {
       if (!args.includes('--file'))
         throw new Error('Укажите --file request.json с operation и input');
-      const request = JSON.parse(await readFile(resolve(option('--file', '')), 'utf8'));
+      const request = await readAgentJson(resolve(option('--file', '')));
       console.log(JSON.stringify(await new AgentService(h, root).run(request), null, 2));
     } finally {
       store.close();
@@ -632,7 +633,10 @@ async function main() {
           member: args.includes('--member') ? option('--member', '') : undefined,
           allowBranchChange: args.includes('--allow-branch-change'),
           resolutions: args.includes('--resolutions')
-            ? JSON.parse(await readFile(resolve(option('--resolutions', '')), 'utf8'))
+            ? ((await readAgentJson(resolve(option('--resolutions', '')))) as Record<
+                string,
+                'git' | 'local'
+              >)
             : undefined,
         });
         if ((result as { status: string }).status === 'conflict') process.exitCode = 1;
@@ -759,9 +763,7 @@ async function main() {
           pool.close();
         }
       } else if (operation === 'changeset-create')
-        result = workspace.create(
-          JSON.parse(await readFile(resolve(option('--file', 'changeset.json')), 'utf8')),
-        );
+        result = workspace.create(await readAgentJson(resolve(option('--file', 'changeset.json'))));
       else if (operation === 'workspace-verify')
         result = await workspaceRunner.verify(option('--changeset', ''));
       else if (operation === 'changeset-accept')
@@ -805,7 +807,7 @@ async function main() {
         } else if (args.includes('--id')) result = await changes.advance(option('--id', ''));
         else {
           const started = await changes.start(
-            JSON.parse(await readFile(resolve(option('--file', 'contract.json')), 'utf8')),
+            await readAgentJson(resolve(option('--file', 'contract.json'))),
             authorRuntime(),
             include,
           );
@@ -854,13 +856,13 @@ async function main() {
       } else if (operation === 'contract-impact')
         result = await contractImpact(
           h,
-          JSON.parse(await readFile(resolve(option('--file', 'contract.json')), 'utf8')),
+          await readAgentJson(resolve(option('--file', 'contract.json'))),
         );
       else if (operation === 'review-contract')
         result = await reviewContract(
           h,
           root,
-          JSON.parse(await readFile(resolve(option('--file', 'contract.json')), 'utf8')),
+          await readAgentJson(resolve(option('--file', 'contract.json'))),
           authorRuntime(),
         );
       else if (operation === 'review-plan')
@@ -918,7 +920,7 @@ async function main() {
         if (!task) throw new Error('Задача не найдена');
         result = h.editTask(
           task.id,
-          JSON.parse(await readFile(resolve(option('--file', 'task.json')), 'utf8')),
+          await readAgentJson(resolve(option('--file', 'task.json'))),
           specDigest(task),
         );
       } else if (operation === 'correct') {
@@ -966,7 +968,7 @@ async function main() {
     return;
   }
   if (operation === 'import-plan') {
-    const input = JSON.parse(await readFile(resolve(option('--file', 'plan.json')), 'utf8'));
+    const input = await readAgentJson(resolve(option('--file', 'plan.json')));
     console.log(JSON.stringify(h.importPlan(input, option('--board', '') || undefined)));
     store.close();
     return;

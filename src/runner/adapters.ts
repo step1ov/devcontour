@@ -28,6 +28,7 @@ import { appendFileSync } from 'node:fs';
 import type { Redactor } from './redaction.ts';
 import type { RuntimeDiagnostics } from '../core/runtime-diagnostics.ts';
 import { planResult, planSchema } from '../core/plan.ts';
+import { readAgentFile } from './json-file.ts';
 import { command } from './process.ts';
 import { BlockedError, discoveryInput, type RuntimeName, type Task } from '../core/model.ts';
 import type { ReviewRequestFindings } from 'devcontour-harness';
@@ -542,7 +543,7 @@ export function cliAdapter(name: 'codex' | 'claude'): AgentAdapter {
         );
       let data: unknown;
       if (name === 'codex') {
-        const raw = await readFile(resultPath, 'utf8');
+        const raw = await readAgentFile(resultPath);
         const cleaned = r.execution ? r.execution.redact(raw) : raw;
         await writeFile(resultPath, cleaned);
         data = JSON.parse(cleaned);

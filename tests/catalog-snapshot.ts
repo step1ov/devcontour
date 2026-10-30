@@ -10,5 +10,8 @@
 // Намеренное изменение: новая пишущая операция task_story (привязка
 // выполненной задачи к истории INTENT без изменения постановки) после
 // task_assign; прочие операции байтово прежние.
-export const CATALOG_DIGEST = '6e4d0841f952adaa76f15065e6746d9361c4a62e23562428273cbae2bb731664';
+// Намеренное изменение: maxItems у relatedRepositories в task_create и
+// task_edit, а в задаче plan_import ещё у dependsOn, acceptance и contracts;
+// схема плана runtime и прочие операции байтово прежние.
+export const CATALOG_DIGEST = 'fb6574e41a61b0a271f4132b56a31344376e42d1c9b2fae5d36482eb2fb7ea04';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

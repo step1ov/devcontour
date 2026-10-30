@@ -1,5 +1,6 @@
 import { planDraft, planDraftJsonSchema } from 'devcontour-harness/contracts';
-import { taskInput } from './model.ts';
+import { z } from 'zod';
+import { relatedRepositoriesTooMany, TASK_LIMITS, taskInput } from './model.ts';
 /**
  * Схема плана — общий draft harness (`planDraft`) с полями хоста: фича и
  * исполнитель. Импорт молча отбрасывал фичу: план с featureId у каждой задачи
@@ -35,3 +36,33 @@ export const planResult = planDraft(
   },
 );
 export const planSchema = planDraftJsonSchema(planResult);
+/**
+ * Вход импорта. `planResult` — общая схема harness и байты схемы runtime,
+ * поэтому пределы задачи добавлены поверх неё, только на приёме плана.
+ */
+const draftTask = planResult.shape.tasks.element;
+export const planIngest = planResult.extend({
+  tasks: z
+    .array(
+      draftTask.extend({
+        relatedRepositories: draftTask.shape.relatedRepositories
+          .unwrap()
+          .max(TASK_LIMITS.relatedRepositories, relatedRepositoriesTooMany)
+          .optional(),
+        dependsOn: draftTask.shape.dependsOn.max(
+          TASK_LIMITS.dependsOn,
+          `Зависимостей задачи не больше ${TASK_LIMITS.dependsOn}`,
+        ),
+        acceptance: draftTask.shape.acceptance.max(
+          TASK_LIMITS.acceptance,
+          `Критериев приёмки не больше ${TASK_LIMITS.acceptance}`,
+        ),
+        contracts: draftTask.shape.contracts.max(
+          TASK_LIMITS.contracts,
+          `Контрактов задачи не больше ${TASK_LIMITS.contracts}`,
+        ),
+      }),
+    )
+    .min(1)
+    .max(30),
+});

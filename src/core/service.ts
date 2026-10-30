@@ -26,13 +26,14 @@ import {
 import { closeEpisodeIfBasisChanged, storyGuard } from '../harness/host.ts';
 import { referenceKey, type StoryBinding } from './intent.ts';
 import { approvalPolicyDigest } from '../harness/policy.ts';
-import { planResult } from './plan.ts';
+import { planIngest } from './plan.ts';
 import { boardOwner, completion, receiptHolds, receiptRecordBytes } from './sync-state.ts';
 import { carriedTaskIds } from './work-status.ts';
 import { assertDag, descendants, latestTaskId, impactGraph } from './graph.ts';
 import {
   DomainError,
   requireValue,
+  taskIngest,
   taskInput,
   discoveryInput,
   type Contract,
@@ -783,7 +784,7 @@ export class DevContour {
   importPlan(input: unknown, boardId?: string) {
     // Отказ схемы плана — по путям и сообщениям, а не сырым массивом zod:
     // ведущий исправляет план по названному полю.
-    const parsedPlan = planResult.safeParse(input);
+    const parsedPlan = planIngest.safeParse(input);
     if (!parsedPlan.success)
       throw new DomainError(
         'План не принят: ' +
@@ -933,7 +934,7 @@ export class DevContour {
     });
   }
   addTask(boardId: string, input: unknown) {
-    const parsed = taskInput.parse(input);
+    const parsed = taskIngest.parse(input);
     repository(this.config, parsed.repositoryId);
     validateTaskContext(this.config, parsed);
     return this.store.change('task.created', (s) => {
@@ -958,7 +959,7 @@ export class DevContour {
     });
   }
   editTask(id: string, input: unknown, expectedDigest: string) {
-    const parsed = taskInput.parse(input);
+    const parsed = taskIngest.parse(input);
     repository(this.config, parsed.repositoryId);
     validateTaskContext(this.config, parsed);
     return this.store.change('task.edited', (s) => {

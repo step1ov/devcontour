@@ -45,6 +45,16 @@ import { attachJournal, renderJournal } from '../runner/journal.ts';
 import { runActivity } from '../runner/activity.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { queueStopReason } from '../core/work-status.ts';
+/** Панель утверждает по одной задаче: предел отсекает только чужой запрос. */
+const APPROVAL_IDS_LIMIT = 1000;
+const approvalIds = z
+  .array(z.string())
+  .max(APPROVAL_IDS_LIMIT, `Задач в одном утверждении не больше ${APPROVAL_IDS_LIMIT}`);
+/** Тот же предел, что у `roots` операции `board_correct` агентского API. */
+const CORRECTION_ROOTS_LIMIT = 100;
+const correctionRoots = z
+  .array(z.string())
+  .max(CORRECTION_ROOTS_LIMIT, `Корней корректировки не больше ${CORRECTION_ROOTS_LIMIT}`);
 const json = (res: ServerResponse, status: number, value: unknown) => {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
@@ -528,7 +538,10 @@ export async function serve(
               );
             else if (parts[3] === 'tasks') result = h.addTask(parts[2], input);
             else if (parts[3] === 'approve')
-              result = h.approve(parts[2], z.array(z.string()).optional().parse(input.taskIds));
+              result = h.approve(
+                parts[2],
+                z.object({ taskIds: approvalIds.optional() }).parse(input).taskIds,
+              );
             else if (parts[3] === 'accept') {
               result = await acceptBoard(
                 h,
@@ -538,13 +551,12 @@ export async function serve(
                 undefined,
                 scheduler ? { root: scheduler.root } : {},
               );
-            } else if (parts[3] === 'correct')
-              result = h.correct(
-                parts[2],
-                z.array(z.string()).parse(input.roots),
-                z.string().parse(input.reason),
-              );
-            else throw new DomainError('Команда не найдена', 404);
+            } else if (parts[3] === 'correct') {
+              const { roots, reason } = z
+                .object({ roots: correctionRoots, reason: z.string() })
+                .parse(input);
+              result = h.correct(parts[2], roots, reason);
+            } else throw new DomainError('Команда не найдена', 404);
           } else if (parts[1] === 'checks' && parts[3] === 'pending' && parts[5] === 'approve') {
             // Подтверждение оператора из панели: тот же доменный метод, что CLI.
             result = new CheckCorpus(h).approveAdoption(parts[2], parts[4]).pending;

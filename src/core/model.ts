@@ -144,6 +144,13 @@ export type RequirementLink = z.infer<typeof requirementLink>;
  */
 export { GATE_SCOPE_LIMIT };
 const gateScope = z.array(gateRef).max(GATE_SCOPE_LIMIT, { error: gateScopeTooBig });
+/** Пределы постановки: общие для задачи и задачи плана, чей draft задаёт harness. */
+export const TASK_LIMITS = {
+  relatedRepositories: 100,
+  dependsOn: 100,
+  acceptance: 30,
+  contracts: 30,
+} as const;
 export const taskInput = z.object({
   preparation: preparationBinding.optional(),
   // Which approved product feature this task delivers, so the panel can show
@@ -160,9 +167,9 @@ export const taskInput = z.object({
   title: z.string().trim().min(3).max(180),
   description: z.string().trim().min(10).max(12000),
   role: roleId,
-  dependsOn: z.array(id).max(100).default([]),
-  acceptance: z.array(z.string().trim().min(3).max(1500)).min(1).max(30),
-  contracts: z.array(id).max(30).default([]),
+  dependsOn: z.array(id).max(TASK_LIMITS.dependsOn).default([]),
+  acceptance: z.array(z.string().trim().min(3).max(1500)).min(1).max(TASK_LIMITS.acceptance),
+  contracts: z.array(id).max(TASK_LIMITS.contracts).default([]),
   contextPacks: z.array(id).max(30).optional(),
   writePaths: z.array(relativePath).min(1).max(100).optional(),
   // Область доказательства: подмножество проверок профиля, которым эта задача
@@ -200,6 +207,18 @@ export const taskInput = z.object({
     .optional(),
 });
 export type TaskInput = z.infer<typeof taskInput>;
+export const relatedRepositoriesTooMany = `Связанных компонентов не больше ${TASK_LIMITS.relatedRepositories}`;
+/**
+ * Новая постановка. `taskInput` читает и уже сохранённые задачи (Git sync,
+ * digest workflow), поэтому предел живёт здесь: прежняя запись сверх него
+ * продолжает загружаться.
+ */
+export const taskIngest = taskInput.extend({
+  relatedRepositories: z
+    .array(id)
+    .max(TASK_LIMITS.relatedRepositories, relatedRepositoriesTooMany)
+    .optional(),
+});
 export interface Task extends TaskInput {
   sharedCompletion?: { receipt: CompletionReceipt; sourceCommit: string };
   id: string;

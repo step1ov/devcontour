@@ -21,8 +21,8 @@ import { z } from 'zod';
 import { readFileSync } from 'node:fs';
 import { AgentContext, contextInputs, type ContextOperation } from './context.ts';
 import { DevContour, scopeGapWarning, specDigest } from '../core/service.ts';
-import { taskInput, DomainError, type Task } from '../core/model.ts';
-import { planResult } from '../core/plan.ts';
+import { taskIngest, DomainError, type Task } from '../core/model.ts';
+import { planIngest } from '../core/plan.ts';
 import { Workspace, changeSetInput } from '../core/workspace.ts';
 import { servingPreview } from '../core/preview.ts';
 import { attachJournal } from '../runner/journal.ts';
@@ -53,7 +53,7 @@ export const agentInputs = {
   requirements_report: z.strictObject({ repositoryId: id }),
   requirements_correct: z.strictObject({ boardId: id, reason: z.string().min(10).max(5000) }),
   ...contextInputs,
-  plan_import: z.object({ plan: planResult, boardId: id.optional() }).strict(),
+  plan_import: z.object({ plan: planIngest, boardId: id.optional() }).strict(),
   board_create: z
     .object({
       title: z.string().min(3).max(180),
@@ -61,9 +61,9 @@ export const agentInputs = {
       repositoryId: id.optional(),
     })
     .strict(),
-  task_create: z.object({ boardId: id, task: taskInput }).strict(),
+  task_create: z.object({ boardId: id, task: taskIngest }).strict(),
   task_edit: z
-    .object({ taskId: id, expectedDigest: z.string().regex(/^[a-f0-9]{64}$/), task: taskInput })
+    .object({ taskId: id, expectedDigest: z.string().regex(/^[a-f0-9]{64}$/), task: taskIngest })
     .strict(),
   task_retry: z.object({ taskId: id }).strict(),
   task_assign: z

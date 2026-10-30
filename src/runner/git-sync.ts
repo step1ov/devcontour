@@ -172,6 +172,8 @@ function readScopes(
     const raw = store.syncBaseline(location.owner);
     const baseline = raw ? baselineSchema.parse(raw) : undefined;
     const file = safePath(path, directory + '/identity.json');
+    if (existsSync(file) && lstatSync(file).size > 1000)
+      throw new Error('Недопустимый файл состояния: ' + file);
     const identity = existsSync(file)
       ? identitySchema.parse(JSON.parse(readFileSync(file, 'utf8')))
       : (baseline?.identity ?? {
