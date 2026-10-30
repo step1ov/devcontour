@@ -51,7 +51,7 @@
     "test:evals": "node --import tsx src/cli.ts evals",
     "lint:report": "eslint .",
     "test:live": "npm run build && node scripts/live-pilot.mjs",
-    "build:lib": "npm run typecheck && tsc -p tsconfig.build.json",
+    "build:lib": "npm run typecheck && node scripts/clean-lib.mjs && tsc -p tsconfig.build.json",
     "test:live:isolation": "node --import tsx scripts/live-isolation.ts"
   },
   "dependencies": {
