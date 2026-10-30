@@ -2,9 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { PassThrough } from 'node:stream';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { AgentService, capabilities } from '../src/application/agent.ts';
+import { serveMcp } from '../src/server/mcp.ts';
 import { fixture, input } from './helpers.ts';
 const data = (result: { structuredContent?: unknown }) =>
   result.structuredContent as Record<string, unknown>;
@@ -143,4 +145,51 @@ test('Agent surface cannot provide evidence/approval; cyclic plans fail atomical
   } finally {
     f.cleanup();
   }
+});
+
+test('Closing stdin leaves the store open until the calls already started have finished', async () => {
+  const stdin = new PassThrough(),
+    stdout = new PassThrough();
+  const output: string[] = [];
+  stdout.on('data', (chunk) => output.push(String(chunk)));
+  let released = 0,
+    begin = () => {},
+    finish = () => {};
+  const started = new Promise<void>((done) => (begin = done));
+  const result = new Promise<Record<string, unknown>>((done) => (finish = () => done({})));
+  const service = {
+    run: async () => {
+      begin();
+      return result;
+    },
+  };
+  const server = await serveMcp(service, () => (released += 1), stdin, stdout);
+  const send = (message: Record<string, unknown>) =>
+    stdin.write(`${JSON.stringify({ jsonrpc: '2.0', ...message })}\n`);
+  send({
+    id: 1,
+    method: 'initialize',
+    params: {
+      protocolVersion: '2025-11-25',
+      capabilities: {},
+      clientInfo: { name: 'stdin-end', version: '1.0.0' },
+    },
+  });
+  send({ method: 'notifications/initialized' });
+  send({ id: 2, method: 'tools/call', params: { name: 'project_context', arguments: {} } });
+  await started;
+  stdin.end();
+  await new Promise<void>((done) => {
+    const previous = server.server.onclose;
+    server.server.onclose = () => {
+      previous?.();
+      done();
+    };
+  });
+  assert.equal(released, 0);
+  finish();
+  await result;
+  await new Promise((done) => setImmediate(done));
+  assert.equal(released, 1);
+  assert.ok(!output.join('').includes('"id":2'), 'the answer to a closed client is not written');
 });

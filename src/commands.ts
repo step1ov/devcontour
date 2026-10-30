@@ -560,18 +560,10 @@ async function main() {
     return;
   }
   if (operation === 'mcp') {
-    const server = await serveMcp(new AgentService(h, root));
-    let closed = false;
-    const close = () => {
-      if (!closed) {
-        closed = true;
-        store.close();
-      }
-    };
-    server.server.onclose = close;
+    const server = await serveMcp(new AgentService(h, root), () => store.close());
     for (const event of ['SIGTERM', 'SIGINT'] as const)
       process.once(event, () => {
-        void server.close().finally(close);
+        void server.close();
       });
     return;
   }

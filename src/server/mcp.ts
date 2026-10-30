@@ -1,3 +1,4 @@
+import type { Readable, Writable } from 'node:stream';
 import { McpServer, type StandardSchemaWithJSON } from '@modelcontextprotocol/server';
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { ZodError } from 'zod';
@@ -58,10 +59,40 @@ export function createMcpServer(service: Pick<AgentService, 'run'>) {
   return server;
 }
 
-export async function serveMcp(service: Pick<AgentService, 'run'>) {
-  const server = createMcpServer(service);
-  await server.connect(
-    new StdioServerTransport(process.stdin, process.stdout, { maxBufferSize: 128 * 1024 }),
-  );
+/**
+ * Клиент закрывает соединение и концом stdin, а вызов с внешними процессами при
+ * этом продолжает работать: `onDrained` срабатывает один раз, когда соединение
+ * закрыто и все начатые вызовы завершились.
+ */
+export async function serveMcp(
+  service: Pick<AgentService, 'run'>,
+  onDrained: () => void = () => {},
+  stdin: Readable = process.stdin,
+  stdout: Writable = process.stdout,
+) {
+  let active = 0,
+    closed = false,
+    drained = false;
+  const settle = () => {
+    if (!closed || active || drained) return;
+    drained = true;
+    onDrained();
+  };
+  const server = createMcpServer({
+    run: async (request) => {
+      active += 1;
+      try {
+        return await service.run(request);
+      } finally {
+        active -= 1;
+        settle();
+      }
+    },
+  });
+  server.server.onclose = () => {
+    closed = true;
+    settle();
+  };
+  await server.connect(new StdioServerTransport(stdin, stdout, { maxBufferSize: 128 * 1024 }));
   return server;
 }
