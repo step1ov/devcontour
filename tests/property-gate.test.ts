@@ -726,8 +726,9 @@ for (const [name, script, mode] of [
       process.env.DEVCONTOUR_TEST_PROPERTY_SECRET = SECRET;
       // Свой временный каталог: файлы тестов идут параллельными процессами,
       // и каталоги контура других проверок иначе попадали бы в сравнение.
-      // os.tmpdir() читает TMPDIR при каждом вызове.
-      const ownTmp = await realpath(await mkdtemp(join(tmpdir(), 'devcontour-own-tmp-')));
+      // os.tmpdir() читает TMPDIR при каждом вызове. Имя короткое: под ним
+      // песочница ОС создаёт Unix-сокет, а длина его пути ограничена.
+      const ownTmp = await realpath(await mkdtemp(join(tmpdir(), 'o-')));
       const systemTmp = process.env.TMPDIR;
       process.env.TMPDIR = ownTmp;
       const before = new Set(await readdir(tmpdir()));
