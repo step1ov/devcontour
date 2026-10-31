@@ -94,6 +94,10 @@ export class Scheduler {
   get active() {
     return this.built?.runner.active ?? 0;
   }
+  /** Убрать рабочие деревья закончившихся попыток; ветки и артефакты остаются. */
+  cleanupWorktrees(options: { dryRun?: boolean } = {}) {
+    return this.runner.cleanupWorktrees(options);
+  }
   get target() {
     return `refs/heads/${this.h.config.targetBranch}`;
   }

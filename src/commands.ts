@@ -396,6 +396,7 @@ async function main() {
     'preview-rollback',
     'knowledge-import',
     'environment-cleanup',
+    'worktree-cleanup',
     'context-lock',
     'context-adopt',
     'base-update',
@@ -694,6 +695,10 @@ async function main() {
         )
           throw new Error('Receipt должен принадлежать выбранному workspace');
         result = await cleanupEnvironment(receipt, config, allowedRoots);
+      } else if (operation === 'worktree-cleanup') {
+        const cleaned = await scheduler.cleanupWorktrees({ dryRun: args.includes('--dry-run') });
+        if (cleaned.failed) process.exitCode = 1;
+        result = cleaned;
       } else if (operation === 'context-lock') {
         const s = store.read();
         if (!s.paused) throw new Error('Сначала приостановите очередь: queue --pause');
