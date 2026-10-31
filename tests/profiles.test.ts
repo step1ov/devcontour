@@ -578,7 +578,7 @@ test('Профиль с effort не на codex не загружается, а �
     });
     assert.throws(() => loadConfig(result.config), /версия 1\.0\.0 → 1\.1\.0/);
     assert.equal((await setupWorkspace(registry)).status, 'profile-updated');
-    assert.equal(loadConfig(result.config).packs[0]!.version, '1.1.0');
+    assert.equal(loadConfig(result.config).packs[0].version, '1.1.0');
   } finally {
     await f.close();
   }
