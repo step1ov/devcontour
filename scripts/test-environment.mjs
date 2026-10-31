@@ -1,7 +1,10 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { createScratch, removeScratch } from './test-scratch.mjs';
+
+const homePrefix = 'devcontour-suite-home-';
 
 /** A disposable user environment inherited by test workers and their subprocesses. */
 export function testEnvironment(base = process.env) {
@@ -19,7 +22,8 @@ export function testEnvironment(base = process.env) {
     base.npm_config_playwright_browsers_path ??
     base.npm_package_config_playwright_browsers_path;
   const browsers = browserOverride || join(originalCache, 'ms-playwright');
-  const home = realpathSync(mkdtempSync(join(tmpdir(), 'devcontour-suite-home-')));
+  const home = realpathSync(createScratch(homePrefix));
+  const scratch = createScratch('dr-');
   const cache = join(home, '.cache');
   const config = join(home, '.config');
   for (const dir of [cache, config, join(home, 'Library', 'Caches')])
@@ -59,6 +63,7 @@ export function testEnvironment(base = process.env) {
       ...base,
       HOME: home,
       USERPROFILE: home,
+      TMPDIR: scratch,
       XDG_CACHE_HOME: cache,
       XDG_CONFIG_HOME: config,
       CODEX_HOME: join(home, '.codex'),
@@ -77,6 +82,9 @@ export function testEnvironment(base = process.env) {
       npm_config_userconfig: npmrc,
       NPM_CONFIG_USERCONFIG: npmrc,
     },
-    cleanup: () => rmSync(home, { recursive: true, force: true }),
+    cleanup: () => {
+      removeScratch(home, homePrefix);
+      removeScratch(scratch, 'dr-');
+    },
   };
 }

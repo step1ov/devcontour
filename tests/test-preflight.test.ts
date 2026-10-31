@@ -28,6 +28,7 @@ for (const mode of ['pass', 'fail', 'cancel', 'fast', 'unit'] as const)
         'test.mjs',
         'test-tiers.mjs',
         'test-environment.mjs',
+        'test-scratch.mjs',
         'check-test-environment.mjs',
         'check-processes.mjs',
       ])
@@ -101,6 +102,7 @@ test('Real tooling worker refuses a missing Compose plugin before browser launch
       'check-test-tools.mjs',
       'check-processes.mjs',
       'test-environment.mjs',
+      'test-scratch.mjs',
     ])
       await copyFile(join(source, 'scripts', file), join(root, 'scripts', file));
     const docker = join(root, 'bin', 'docker');

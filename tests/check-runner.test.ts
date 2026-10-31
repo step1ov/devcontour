@@ -111,6 +111,7 @@ test('Fast tier omits its named slow test but still refuses explicit skip and to
     for (const file of [
       'test.mjs',
       'test-tiers.mjs',
+      'test-scratch.mjs',
       'test-environment.mjs',
       'check-test-environment.mjs',
       'check-processes.mjs',

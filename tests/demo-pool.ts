@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { cpSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { constants, cpSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setupDemo } from '../src/demo.ts';
@@ -30,6 +30,7 @@ export function demoPool(prepare: (root: string) => Promise<unknown>) {
           recursive: true,
           preserveTimestamps: true,
           verbatimSymlinks: true,
+          mode: constants.COPYFILE_FICLONE,
         });
       } else {
         const base = realpathSync(mkdtempSync(join(tmpdir(), 'devcontour-demo-seed-')));
@@ -40,6 +41,7 @@ export function demoPool(prepare: (root: string) => Promise<unknown>) {
             recursive: true,
             preserveTimestamps: true,
             verbatimSymlinks: true,
+            mode: constants.COPYFILE_FICLONE,
           });
           slots.push(slot);
         } catch (error) {
