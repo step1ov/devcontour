@@ -60,7 +60,8 @@ test('A run removes its directory while TMPDIR still points into it', () => {
     assert.equal(removeScratch(run, prefix), true);
     assert.equal(existsSync(run), false);
   } finally {
-    process.env.TMPDIR = saved;
+    if (saved === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = saved;
   }
 });
 
@@ -100,4 +101,26 @@ test('The test environment gives a run its own TMPDIR and survives a leftover it
     chmodSync(closed, 0o755);
     assert.equal(removeScratch(scratch, prefix), true);
   }
+});
+
+test('A read-only leftover under HOME warns and still lets the run remove its TMPDIR', () => {
+  const environment = testEnvironment();
+  const scratch = environment.env.TMPDIR!;
+  const cache = join(environment.home, 'go', 'pkg');
+  mkdirSync(cache, { recursive: true });
+  writeFileSync(join(cache, 'module'), 'x');
+  chmodSync(cache, 0o555);
+  const warn = console.error;
+  const warnings: string[] = [];
+  console.error = (text: string) => void warnings.push(text);
+  try {
+    environment.cleanup();
+    assert.match(warnings[0], /not removed/);
+    assert.equal(existsSync(scratch), false, 'TMPDIR is removed after the HOME failure');
+  } finally {
+    console.error = warn;
+    chmodSync(cache, 0o755);
+    environment.cleanup();
+  }
+  assert.equal(existsSync(environment.home), false);
 });
