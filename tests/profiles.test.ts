@@ -540,6 +540,50 @@ test('Обновление профиля называет значения, к�
   }
 });
 
+test('Профиль с effort не на codex не загружается, а правка с новой версией возвращает установку', async () => {
+  const f = await fixture();
+  try {
+    await git(f.repo, 'init', '-b', 'main');
+    await git(f.repo, 'config', 'user.name', 'Profile fixture');
+    await git(f.repo, 'config', 'user.email', 'fixture@example.invalid');
+    await git(f.repo, 'add', '.');
+    await git(f.repo, 'commit', '-m', 'Own profile');
+    const control = join(f.root, 'control');
+    await mkdir(control);
+    const registry = join(control, 'workspace.json');
+    const roles = { qa: { runtime: 'codex', reviewer: { runtime: 'claude' } } };
+    await json(registry, {
+      version: 1,
+      name: 'Effort',
+      repositories: [
+        { id: 'product', name: 'Product', path: f.repo, profile: './profiles/main.json', roles },
+      ],
+    });
+    const result = await setupWorkspace(registry);
+    const main = {
+      id: 'custom-api',
+      extends: ['./stack.json', './tests.json', './env.json'],
+    };
+    // Реестр заменяет роль целиком, но поле профиля всё равно остаётся отказом.
+    await json(join(f.repo, 'profiles/main.json'), {
+      ...main,
+      version: '1.0.0',
+      roles: { qa: { runtime: 'claude', effort: 'low' } },
+    });
+    assert.throws(() => loadConfig(result.config), /effort поддерживается только для codex: qa/);
+    await json(join(f.repo, 'profiles/main.json'), {
+      ...main,
+      version: '1.1.0',
+      roles: { qa: { runtime: 'claude' } },
+    });
+    assert.throws(() => loadConfig(result.config), /версия 1\.0\.0 → 1\.1\.0/);
+    assert.equal((await setupWorkspace(registry)).status, 'profile-updated');
+    assert.equal(loadConfig(result.config).packs[0]!.version, '1.1.0');
+  } finally {
+    await f.close();
+  }
+});
+
 test('workspace-init переносит правила ревью, а панель и doctor видят действующие gates и роли компонента', async () => {
   // Файл компонента сильнее профиля и верхнего уровня config.json. Копии
   // верхнего уровня (gates, protectedPaths, роли единственного компонента)

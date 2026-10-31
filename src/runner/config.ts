@@ -141,11 +141,11 @@ export function loadConfig(path: string, text = readFileSync(path, 'utf8')): Con
       if (matches.length === 1 && actual.id === pack.id && pinned.version === pack.version) {
         if (actual.version !== pack.version)
           throw new Error(
-            `Профиль изменился после установки: ${pack.id}, версия ${pack.version} → ${actual.version}; примените обновление командой workspace-init`,
+            `Профиль изменился после установки: ${pack.id}, версия ${pack.version} → ${actual.version}; примените обновление командой workspace-init --file <реестр workspace.json>; после setup реестр создаётся вручную`,
           );
         if (changedAtSameVersion)
           throw new Error(
-            `Профиль изменился после установки: ${pack.id}, версия ${pack.version} прежняя; поднимите version этого профиля (правка вложенного не считается) и выполните workspace-init`,
+            `Профиль изменился после установки: ${pack.id}, версия ${pack.version} прежняя; поднимите version этого профиля (правка вложенного не считается) и выполните workspace-init --file <реестр workspace.json>; после setup реестр создаётся вручную`,
           );
       } else
         throw new Error(
