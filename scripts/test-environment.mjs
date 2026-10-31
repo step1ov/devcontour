@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'nod
 import { spawnSync } from 'node:child_process';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createScratch, removeScratch } from './test-scratch.mjs';
 
 /** A disposable user environment inherited by test workers and their subprocesses. */
 export function testEnvironment(base = process.env) {
@@ -20,10 +21,7 @@ export function testEnvironment(base = process.env) {
     base.npm_package_config_playwright_browsers_path;
   const browsers = browserOverride || join(originalCache, 'ms-playwright');
   const home = realpathSync(mkdtempSync(join(tmpdir(), 'devcontour-suite-home-')));
-  // Fixtures leave their temporary directories behind: hundreds of thousands
-  // of them in the shared $TMPDIR slow everything that reads it. A run keeps
-  // them in its own directory; the name is short because Unix sockets live there.
-  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'dr-')));
+  const scratch = createScratch('dr-');
   const cache = join(home, '.cache');
   const config = join(home, '.config');
   for (const dir of [cache, config, join(home, 'Library', 'Caches')])
@@ -84,7 +82,7 @@ export function testEnvironment(base = process.env) {
     },
     cleanup: () => {
       rmSync(home, { recursive: true, force: true });
-      rmSync(scratch, { recursive: true, force: true, maxRetries: 2 });
+      removeScratch(scratch, 'dr-');
     },
   };
 }
