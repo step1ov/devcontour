@@ -185,6 +185,7 @@ export function policyFromConfig(
       prepare: r.prepare ?? [],
       dependencyBuild: r.dependencyBuild ?? [],
       dependencyArtifacts: r.dependencyArtifacts ?? [],
+      ...(r.dependencyStore ? { dependencyStore: r.dependencyStore } : {}),
       preflight: r.preflight ?? [],
       ...(r.roles
         ? {

@@ -67,6 +67,36 @@ function board(f: ReturnType<typeof fixture>, titles = ['Task A']) {
 /* Политика                                                            */
 /* ------------------------------------------------------------------ */
 
+test('Конфигурация → политика: dependencyStore компонента доходит до движка, без него поля нет', () => {
+  const component = {
+    id: 'api',
+    name: 'API',
+    kind: 'product' as const,
+    path: '/tmp/api',
+    targetBranch: 'devcontour/accepted',
+    gates: config().gates,
+    protectedPaths: ['.github/'],
+  };
+  const withStore = configSchema.parse({
+    ...config(),
+    repositories: [{ ...component, dependencyStore: { manager: 'pnpm', maxBytes: 1 << 30 } }],
+  });
+  assert.deepEqual(policyFromConfig(withStore).repositories[0].dependencyStore, {
+    manager: 'pnpm',
+    lockfile: 'pnpm-lock.yaml',
+    maxBytes: 1 << 30,
+    timeoutMs: 600000,
+  });
+  const without = configSchema.parse({ ...config(), repositories: [component] });
+  assert.equal('dependencyStore' in policyFromConfig(without).repositories[0], false);
+  assert.throws(() =>
+    configSchema.parse({
+      ...config(),
+      repositories: [{ ...component, dependencyStore: { manager: 'npm' } }],
+    }),
+  );
+});
+
 test('Конфигурация → политика: runtime, роли компонента, ревью и правило вендора, бюджеты; прежний demo self-review — явным правилом', () => {
   const demo = policyFromConfig(config());
   assert.equal(demo.mode, 'fixture');

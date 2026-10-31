@@ -58,7 +58,9 @@ Schema defaults и выбранный профиль — разные уровн
 
 ## Компоненты и роли
 
-Компонент задаёт `id`, `name`, `kind: product|library`, `path`, `targetBranch`, `gates`, `protectedPaths`. Дополнительно: `roles`, `reviewer`, `generatedPaths`, `environment`, `prepare`, `preflight`, `lifecycle`, `dependencyBuild`, `dependencyArtifacts`, `forge`. Состав `dependsOn` принадлежит registry и описывает прямые входные компоненты.
+Компонент задаёт `id`, `name`, `kind: product|library`, `path`, `targetBranch`, `gates`, `protectedPaths`. Дополнительно: `roles`, `reviewer`, `generatedPaths`, `environment`, `prepare`, `preflight`, `lifecycle`, `dependencyBuild`, `dependencyArtifacts`, `dependencyStore`, `forge`. Состав `dependsOn` принадлежит registry и описывает прямые входные компоненты.
+
+`dependencyStore` — общее хранилище пакетов pnpm для рабочих деревьев компонента: `{ "manager": "pnpm", "lockfile": "pnpm-lock.yaml", "maxBytes": 8589934592, "timeoutMs": 600000 }`, обязателен только `manager`. Поле передаётся движку как есть; без него политика и её digest не меняются. Правила, поддержанные версии pnpm и отказы описаны в документации `devcontour-harness`: `docs/toolchains.md`.
 
 Роли объявляет workspace, а не инструмент. `architect`, `backend`, `frontend`, `qa` создаются при setup как умолчание для нового контура; продукт добавляет свои — `mobile`, `qa-web`, `qa-mobile` — там, где область записи и инструментарий разные. Идентификатор: строчные латинские буквы, цифры и дефис. Задача может ссылаться только на объявленную роль; у неизвестной нет ни runtime, ни ревьюера, ни области записи.
 

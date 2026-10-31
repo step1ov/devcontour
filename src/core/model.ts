@@ -4,7 +4,11 @@ import { priceSchema } from './usage.ts';
 import type { ReviewInspection } from './review.ts';
 import { z } from 'zod';
 import type { JointBudgetCheckpoint } from 'devcontour-harness/contracts';
-import { GATE_SCOPE_LIMIT, gateScopeTooBig } from 'devcontour-harness/contracts';
+import {
+  GATE_SCOPE_LIMIT,
+  dependencyStoreSchema,
+  gateScopeTooBig,
+} from 'devcontour-harness/contracts';
 import type { CompletionReceipt } from './sync-model.ts';
 import {
   environmentSchema,
@@ -848,6 +852,7 @@ export const repositorySchema = z.object({
   prepare: z.array(stepSchema).optional(),
   dependencyBuild: z.array(stepSchema).optional(),
   dependencyArtifacts: z.array(relativePath).optional(),
+  dependencyStore: dependencyStoreSchema.optional(),
   preflight: z.array(stepSchema).optional(),
   forge: forgeSchema.optional(),
   name: z.string().min(1),
