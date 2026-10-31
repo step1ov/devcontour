@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fixture, input, complete, config, CANDIDATE, MERGED } from './helpers.ts';
+import { z } from 'zod';
+import { repositorySchema } from '../src/core/model.ts';
+import { profileSchema } from '../src/runner/packs.ts';
 import { specDigest, supersededBy } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
@@ -632,6 +635,57 @@ test('Цель доски правится до утверждения план�
   } finally {
     f.cleanup();
   }
+});
+
+test('effort вне codex отклоняет сама схема: роль, ревьюер роли, ревьюер, профиль', () => {
+  const refused = (schema: z.ZodType, value: unknown) => {
+    const parsed = schema.safeParse(value);
+    return parsed.success ? [] : parsed.error.issues.map((i) => [i.path.join('.'), i.message]);
+  };
+  const message = (name: string) => `effort поддерживается только для codex: ${name}`;
+  const repository = (over: Record<string, unknown>) => ({
+    id: 'app',
+    name: 'App',
+    path: '/tmp/app',
+    gates: [{ id: 'unit', kind: 'test', command: ['t'] }],
+    ...over,
+  });
+  assert.deepEqual(
+    refused(repositorySchema, repository({ roles: { qa: { runtime: 'claude', effort: 'low' } } })),
+    [['roles.qa.effort', message('qa')]],
+  );
+  assert.deepEqual(
+    refused(
+      repositorySchema,
+      repository({
+        roles: { qa: { runtime: 'codex', reviewer: { runtime: 'demo', effort: 'low' } } },
+      }),
+    ),
+    [['roles.qa.reviewer.effort', message('qa.reviewer')]],
+  );
+  assert.deepEqual(
+    refused(repositorySchema, repository({ reviewer: { runtime: 'claude', effort: 'high' } })),
+    [['reviewer.effort', message('reviewer')]],
+  );
+  assert.deepEqual(
+    refused(profileSchema, {
+      id: 'p',
+      version: '1.0.0',
+      roles: { qa: { runtime: 'claude', effort: 'low' } },
+    }),
+    [['roles.qa.effort', message('qa')]],
+  );
+  // У codex и без effort схема не вмешивается.
+  assert.deepEqual(
+    refused(
+      repositorySchema,
+      repository({
+        roles: { qa: { runtime: 'codex', effort: 'low', reviewer: { runtime: 'claude' } } },
+        reviewer: { runtime: 'codex', effort: 'high' },
+      }),
+    ),
+    [],
+  );
 });
 
 test('Уровень рассуждения роли доходит до прогона, а у claude отвергается', () => {

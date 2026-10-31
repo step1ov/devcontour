@@ -187,9 +187,33 @@ test('Setup pins transitive local sources, preserves policy and never silently i
       version: '2.0.1',
       gates: [testGate],
     });
-    assert.throws(() => loadConfig(configPath), /Профиль изменился/);
-    await assert.rejects(setupProject(options), /Профиль изменился/);
+    // Правка вложенного профиля: чинится версией установленного, и отказ это говорит.
+    const raise =
+      /custom-api, версия 1\.0\.0 прежняя; поднимите version этого профиля .*workspace-init/;
+    assert.throws(() => loadConfig(configPath), raise);
+    await assert.rejects(setupProject(options), raise);
     assert.equal(JSON.parse(await readFile(localFile, 'utf8')).gates[0].timeoutMs, 3210);
+  } finally {
+    await f.close();
+  }
+});
+
+test('Damaged lock keeps the generic refusal: raising the version would not explain it', async () => {
+  const f = await fixture();
+  try {
+    const first = await setupProject({
+      repository: f.repo,
+      profile: './profiles/main.json',
+      workspace: join(f.root, 'control'),
+    });
+    const lock = join(first.data, 'packs.lock.json');
+    const pinned = JSON.parse(await readFile(lock, 'utf8')) as { packs: { version: string }[] };
+    pinned.packs[0].version = '9.9.9';
+    await json(lock, pinned);
+    assert.throws(
+      () => loadConfig(join(first.data, 'config.json')),
+      /custom-api; проверьте обновление и lock-файл/,
+    );
   } finally {
     await f.close();
   }
@@ -246,9 +270,10 @@ test('Independent component profiles with the same ID retain owner-local policie
       version: '1.0.1',
       environment: { values: { PROJECT_MARKER: 'new' } },
     });
-    assert.throws(() => loadConfig(result.config), /Профиль изменился/);
+    const raise = /custom-api, версия 1\.0\.0 прежняя; поднимите version этого профиля/;
+    assert.throws(() => loadConfig(result.config), raise);
     // Правка без смены версии остаётся отказом: пин защищает от тихой подмены.
-    await assert.rejects(setupWorkspace(registry), /Профиль изменился/);
+    await assert.rejects(setupWorkspace(registry), raise);
     // Поднятая версия составного профиля — заявление «изменилось намеренно»,
     // и только она разрешает переписать lock. Правка вложенного профиля версию
     // составного не меняет, поэтому сама по себе установку не разрешает: автор
@@ -258,6 +283,11 @@ test('Independent component profiles with the same ID retain owner-local policie
       version: '1.1.0',
       extends: ['./stack.json', './tests.json', './env.json'],
     });
+    // Версия поднята: команды до обновления называют его, а не просят поднять снова.
+    assert.throws(
+      () => loadConfig(result.config),
+      /custom-api, версия 1\.0\.0 → 1\.1\.0; примените обновление командой workspace-init/,
+    );
     assert.equal((await setupWorkspace(registry)).status, 'profile-updated');
     assert.equal(
       loadConfig(result.config).repositories.find((r) => r.id === 'library')!.environment!.values
@@ -505,6 +535,50 @@ test('Обновление профиля называет значения, к�
       loadConfig(result.config).repositories[0].gates.map((g) => g.id),
       ['component-own'],
     );
+  } finally {
+    await f.close();
+  }
+});
+
+test('Профиль с effort не на codex не загружается, а правка с новой версией возвращает установку', async () => {
+  const f = await fixture();
+  try {
+    await git(f.repo, 'init', '-b', 'main');
+    await git(f.repo, 'config', 'user.name', 'Profile fixture');
+    await git(f.repo, 'config', 'user.email', 'fixture@example.invalid');
+    await git(f.repo, 'add', '.');
+    await git(f.repo, 'commit', '-m', 'Own profile');
+    const control = join(f.root, 'control');
+    await mkdir(control);
+    const registry = join(control, 'workspace.json');
+    const roles = { qa: { runtime: 'codex', reviewer: { runtime: 'claude' } } };
+    await json(registry, {
+      version: 1,
+      name: 'Effort',
+      repositories: [
+        { id: 'product', name: 'Product', path: f.repo, profile: './profiles/main.json', roles },
+      ],
+    });
+    const result = await setupWorkspace(registry);
+    const main = {
+      id: 'custom-api',
+      extends: ['./stack.json', './tests.json', './env.json'],
+    };
+    // Реестр заменяет роль целиком, но поле профиля всё равно остаётся отказом.
+    await json(join(f.repo, 'profiles/main.json'), {
+      ...main,
+      version: '1.0.0',
+      roles: { qa: { runtime: 'claude', effort: 'low' } },
+    });
+    assert.throws(() => loadConfig(result.config), /effort поддерживается только для codex: qa/);
+    await json(join(f.repo, 'profiles/main.json'), {
+      ...main,
+      version: '1.1.0',
+      roles: { qa: { runtime: 'claude' } },
+    });
+    assert.throws(() => loadConfig(result.config), /версия 1\.0\.0 → 1\.1\.0/);
+    assert.equal((await setupWorkspace(registry)).status, 'profile-updated');
+    assert.equal(loadConfig(result.config).packs[0]!.version, '1.1.0');
   } finally {
     await f.close();
   }

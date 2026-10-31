@@ -4,8 +4,7 @@ import { resolveProfile as resolveHarnessProfile } from 'devcontour-harness';
 import {
   gateList,
   relativePath,
-  roleId,
-  roleBindingSchema,
+  roleBindingsSchema,
   contextPackSchema,
   type Config,
 } from '../core/model.ts';
@@ -38,7 +37,7 @@ export const profileSchema = z.strictObject({
   // Роли, которых требует поверхность профиля. Мобильное приложение — это своя
   // область записи и свой инструментарий прогона; профиль знает это о себе, а
   // контур заранее не знает, какие роли бывают у продукта.
-  roles: z.record(roleId, roleBindingSchema).default({}),
+  roles: roleBindingsSchema.default({}),
   // Инструкции, которых требует стек профиля. Роли профиль объявлять умел, а
   // знание — нет: файлы копировались в продукт при setup, и библиотека не
   // росла, потому что её некуда было положить так, чтобы она сама приезжала

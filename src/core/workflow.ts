@@ -1,5 +1,6 @@
 import {
   DomainError,
+  unsupportedEffort,
   type Config,
   type Gate,
   type TaskInput,
@@ -55,8 +56,7 @@ function assertPrerequisites(repo: { gates: Gate[] }, selected: string[], label:
 
 export function validateWorkflow(config: Config) {
   const repos = repositories(config);
-  // Уровень рассуждения передаётся только codex: у claude поле молча ничего бы
-  // не меняло, а конфигурация обещала бы экономию, которой нет.
+  // Схема отказывает раньше; здесь — итог слияния и имя с репозиторием.
   const effortBindings = [
     ['reviewer', config.reviewer],
     ...Object.entries(config.roles).flatMap(([id, b]) => [
@@ -71,9 +71,10 @@ export function validateWorkflow(config: Config) {
       ]),
     ]),
   ] as [string, { runtime: string; effort?: string } | undefined][];
-  for (const [name, binding] of effortBindings)
-    if (binding?.effort && binding.runtime !== 'codex')
-      throw new DomainError(`effort поддерживается только для codex: ${name}`);
+  for (const [name, binding] of effortBindings) {
+    const message = unsupportedEffort(name, binding);
+    if (message) throw new DomainError(message);
+  }
   if (
     config.workspaceMode === 'embedded' &&
     (!config.workspaceRoot ||

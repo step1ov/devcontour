@@ -133,14 +133,21 @@ export function loadConfig(path: string, text = readFileSync(path, 'utf8')): Con
       const matches =
         lock.packs?.filter((p: Config['packs'][number]) => packKey(p) === packKey(pack)) ?? [];
       const pinned = matches[0];
-      if (
-        matches.length !== 1 ||
-        actual.id !== pack.id ||
-        actual.version !== pack.version ||
+      const changedAtSameVersion =
         JSON.stringify(actual.capabilities) !== JSON.stringify(pack.capabilities) ||
-        pinned.version !== pack.version ||
-        pinned.digest !== actual.digest
-      )
+        pinned?.digest !== actual.digest;
+      // Lock и файл профиля называют один профиль: дальше отказ может сказать,
+      // что делать. Только поднятая версия разрешает workspace-init переписать lock.
+      if (matches.length === 1 && actual.id === pack.id && pinned.version === pack.version) {
+        if (actual.version !== pack.version)
+          throw new Error(
+            `Профиль изменился после установки: ${pack.id}, версия ${pack.version} → ${actual.version}; примените обновление командой workspace-init --file <реестр workspace.json>; после setup реестр создаётся вручную`,
+          );
+        if (changedAtSameVersion)
+          throw new Error(
+            `Профиль изменился после установки: ${pack.id}, версия ${pack.version} прежняя; поднимите version этого профиля (правка вложенного не считается) и выполните workspace-init --file <реестр workspace.json>; после setup реестр создаётся вручную`,
+          );
+      } else
         throw new Error(
           'Профиль изменился после установки: ' + pack.id + '; проверьте обновление и lock-файл',
         );
