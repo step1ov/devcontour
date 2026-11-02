@@ -67,7 +67,8 @@ test('Агентский запрос с неверным входом откл�
     // Сбой разбора внутри исполнения (сохранённые данные, конфигурация) — не
     // отказ запроса: он остаётся внутренней ошибкой, а не «Запрос не принят».
     f.h.createBoard = () => {
-      throw z.object({ stored: z.string() }).parse({});
+      z.object({ stored: z.string() }).parse({});
+      throw new Error('разбор должен был отказать');
     };
     const internal = (e: unknown) => {
       assert.ok(e instanceof ZodError, String(e));
