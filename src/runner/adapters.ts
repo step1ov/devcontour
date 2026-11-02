@@ -31,7 +31,13 @@ import { planResult, planSchema } from '../core/plan.ts';
 import { readAgentFile } from './json-file.ts';
 import { command } from './process.ts';
 import { BlockedError, discoveryInput, type RuntimeName, type Task } from '../core/model.ts';
-import type { ReviewRequestFindings } from 'devcontour-harness';
+import {
+  FINDING_BASIS_PATTERN,
+  FINDING_ID_PATTERN,
+  REVIEW_ITEMS_LIMIT,
+  findingStatuses,
+  type ReviewRequestFindings,
+} from 'devcontour-harness';
 export const implementationResult = z.object({
   completed: z.boolean(),
   summary: z.string(),
@@ -189,8 +195,26 @@ export const reviewSchema = {
         ],
       },
     },
+    // Состояние прежних открытых находок — та же форма, что у схемы ответа
+    // harness. Ревью плана и контракта ведёт harness: его запрос требует
+    // назвать каждую прежнюю находку, и закрытая схема без этого поля делала
+    // такой раунд неодобряемым. Без прежних находок — пустой список.
+    previous: {
+      type: 'array',
+      maxItems: REVIEW_ITEMS_LIMIT,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string', pattern: FINDING_ID_PATTERN },
+          status: { type: 'string', enum: [...findingStatuses] },
+          basis: { type: 'string', pattern: FINDING_BASIS_PATTERN },
+        },
+        required: ['id', 'status', 'basis'],
+      },
+    },
   },
-  required: ['approved', 'summary', 'findings', 'discoveries', 'execution'],
+  required: ['approved', 'summary', 'findings', 'discoveries', 'execution', 'previous'],
 };
 /** Решение ведущего по повторяющемуся свойству (runner/recovery.ts). */
 export const recoverySchema = {
@@ -259,7 +283,9 @@ export interface AgentRequest {
   /**
    * Находки ревью кода, выданные controller (протокол переходов harness).
    * Приходят только адаптеру с `reviewProtocol: 1`: ответ называет в
-   * `previous` состояние каждой открытой находки по её ID.
+   * `previous` состояние каждой открытой находки по её ID. Схема ответа
+   * ревью (`reviewSchema`) несёт `previous` всегда: прежние находки ревью
+   * плана и контракта harness называет в самом запросе.
    */
   findings?: ReviewRequestFindings;
 }
