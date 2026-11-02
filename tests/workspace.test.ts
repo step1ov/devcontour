@@ -340,8 +340,10 @@ test('Workspace setup preserves policy on repeat and detects a competing control
     );
     const created = await setupWorkspace(path, f.data);
     assert.equal(created.status, 'configured');
+    // Оператор правит config.json как файл, а не записывает загруженную
+    // конфигурацию: та несёт поля компонентов, взятые из их файлов.
     const configPath = join(f.data, 'config.json'),
-      c = loadConfig(configPath);
+      c = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
     c.approvalMode = 'operator';
     await writeFile(configPath, JSON.stringify(c));
     assert.equal((await setupWorkspace(path, f.data)).status, 'preserved');
