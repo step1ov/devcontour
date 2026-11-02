@@ -24,7 +24,7 @@ export class LeadRunner {
   constructor(
     readonly h: DevContour,
     readonly root: string,
-    /** Рантаймы ведущего для разбора повторяющегося свойства. */
+    /** Рантаймы ведущего: ревью плана доски и разбор повторяющегося свойства. */
     readonly runtimes: Record<'codex' | 'claude', AgentAdapter> = adapters,
   ) {
     this.workflow = new LeadWorkflow(h);
@@ -269,26 +269,23 @@ export class LeadRunner {
             this.h.approve(b.id);
           });
         else {
-          const runtimes = Object.fromEntries(
-            ['codex', 'claude'].map((name) => {
-              const adapter = adapters[name as 'codex' | 'claude'];
-              return [
-                name,
-                {
-                  ...adapter,
-                  execute: (request: Parameters<typeof adapter.execute>[0]) =>
-                    adapter.execute({
-                      ...request,
-                      signal: AbortSignal.any([signal, request.signal]),
-                    }),
-                },
-              ];
-            }),
-          ) as Pick<typeof adapters, 'codex' | 'claude'>;
+          // Адаптеры — как есть, отмена задания — сигналом: живой адаптер
+          // harness выбирается по тождеству (`runtimeAdapters`), и оболочка
+          // отправила бы ревью запасным путём.
           const root = job.owner
             ? join(repository(this.h.config, job.owner).path, '.devcontour-local')
             : this.root;
-          await reviewPlan(this.h, root, b.id, job.authorRuntime, runtimes, guard);
+          await reviewPlan(
+            this.h,
+            root,
+            b.id,
+            job.authorRuntime,
+            this.runtimes,
+            guard,
+            undefined,
+            false,
+            signal,
+          );
         }
       } else if (job.stage === 1) {
         if (

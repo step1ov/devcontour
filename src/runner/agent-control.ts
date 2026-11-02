@@ -333,6 +333,8 @@ async function review(
   repositoryId?: string,
   subjectId?: string,
   checkout?: { path: string; ref: string; sha: string },
+  /** Отмена вызывающего (задания ведущего) — вместе со сроком вызова. */
+  cancel?: AbortSignal,
 ): Promise<Approval> {
   if (h.config.mode !== 'local')
     throw new DomainError('AI-согласование доступно только для local mode');
@@ -402,7 +404,9 @@ async function review(
           : {}),
       },
       ...(history ? { history } : {}),
-      signal: AbortSignal.timeout(h.config.runTimeoutMs),
+      signal: cancel
+        ? AbortSignal.any([cancel, AbortSignal.timeout(h.config.runTimeoutMs)])
+        : AbortSignal.timeout(h.config.runTimeoutMs),
     },
   ).catch((error: unknown) => {
     throw toDomain(error);
@@ -756,6 +760,13 @@ export async function reviewPlan(
    * находок — нет: неразобранные находки в предложение не входят.
    */
   context = false,
+  /**
+   * Отмена задания ведущего. Передаётся сигналом, а не оболочкой адаптеров:
+   * оболочка теряла тождество живого адаптера, и ревью шло через запасной
+   * путь со схемой ответа без `previous` — раунд с прежними находками
+   * отклонялся всегда.
+   */
+  signal?: AbortSignal,
 ) {
   const state = h.store.read();
   const board = state.boards.find((b) => b.id === boardId);
@@ -894,7 +905,7 @@ export async function reviewPlan(
   };
   const owner = boardOwner(board, state);
   const approval = await withIntegrationCheckout(h, root, owner, (checkout) =>
-    review(h, root, author, 'task plan', proposal, runtimes, owner, boardId, checkout),
+    review(h, root, author, 'task plan', proposal, runtimes, owner, boardId, checkout, signal),
   );
   beforeCommit();
   if (h.config.approvalMode === 'operator')
