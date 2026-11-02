@@ -316,22 +316,40 @@ export function capabilities() {
 const fieldPath = (path: readonly PropertyKey[]) =>
   path.map((p, i) => (typeof p === 'number' ? `[${p}]` : (i ? '.' : '') + String(p))).join('') ||
   'input';
-/**
- * Отказ схемы входа — по названным полям, а не сырым массивом zod: CLI
- * (`agent --file`), HTTP и MCP показывали JSON с `code` и `path`, и автор
- * запроса искал поле сам.
- */
-export function readableInputError(error: unknown, raw: unknown) {
-  if (!(error instanceof ZodError)) return error;
-  const operation = (raw as { operation?: unknown } | null)?.operation;
+/** Отказ схемы входа запроса — по названным полям, со статусом 400. */
+function inputRefusal(error: ZodError, operation: unknown) {
   const shown = error.issues.slice(0, 10).map((i) => `${fieldPath(i.path)}: ${i.message}`);
   const rest = error.issues.length - shown.length;
+  // Имя операции приходит от автора запроса: в сообщение — не длиннее 80 символов.
+  const name = typeof operation === 'string' ? ' ' + operation.slice(0, 80) : '';
   return new DomainError(
-    `Запрос${typeof operation === 'string' ? ' ' + operation : ''} не принят: ` +
-      shown.join('; ') +
-      (rest > 0 ? `; и ещё ${rest}` : ''),
+    `Запрос${name} не принят: ` + shown.join('; ') + (rest > 0 ? `; и ещё ${rest}` : ''),
     400,
   );
+}
+/**
+ * Проверка запроса и входа операции до исполнения. Отказ схемы — по
+ * названным полям, а не сырым массивом zod: CLI (`agent --file`), HTTP и MCP
+ * показывали JSON с `code` и `path`, и автор запроса искал поле сам. Так
+ * переводится только разбор самого запроса: сбой разбора сохранённых данных
+ * или конфигурации при исполнении остаётся внутренней ошибкой.
+ */
+export function checkedAgentRequest(raw: unknown) {
+  if (!checkJsonBytes(raw, 100000).within)
+    throw new DomainError('Запрос превышает 100000 байт', 413);
+  const request = agentRequest.safeParse(raw);
+  if (!request.success)
+    throw inputRefusal(request.error, (raw as { operation?: unknown } | null)?.operation);
+  const { operation } = request.data;
+  const input = request.data.input ?? {};
+  // Пределы предложения — тем же понятным отказом, что у CLI, до схемы.
+  if (operation === 'contract_change_revise') {
+    const issues = proposalLimitIssues((input as { proposal?: unknown } | null)?.proposal);
+    if (issues.length) throw new DomainError(limitsMessage(issues), 400);
+  }
+  const parsed = (agentInputs[operation] as z.ZodType).safeParse(input);
+  if (!parsed.success) throw inputRefusal(parsed.error, operation);
+  return request.data;
 }
 export class AgentService {
   constructor(
@@ -340,13 +358,8 @@ export class AgentService {
     readonly root?: string,
   ) {}
   execute(raw: unknown): Record<string, unknown> {
-    let result: Record<string, unknown>;
-    try {
-      result = this.dispatch(raw);
-    } catch (error) {
-      throw readableInputError(error, raw);
-    }
-    return this.bounded(result);
+    checkedAgentRequest(raw);
+    return this.bounded(this.dispatch(raw));
   }
   private bounded(result: Record<string, unknown>) {
     if (!checkJsonBytes(result, 65536).within)
@@ -355,16 +368,7 @@ export class AgentService {
   }
   /** Общий вход транспортов: синхронные операции и операции с внешними процессами. */
   async run(raw: unknown): Promise<Record<string, unknown>> {
-    try {
-      return await this.runUnchecked(raw);
-    } catch (error) {
-      throw readableInputError(error, raw);
-    }
-  }
-  private async runUnchecked(raw: unknown): Promise<Record<string, unknown>> {
-    if (!checkJsonBytes(raw, 100000).within)
-      throw new DomainError('Запрос превышает 100000 байт', 413);
-    const request = agentRequest.parse(raw);
+    const request = checkedAgentRequest(raw);
     if (!asyncOperations.has(request.operation)) return this.execute(raw);
     if (!this.root)
       throw new DomainError('Операция запускает процессы и требует каталога данных контура', 409);

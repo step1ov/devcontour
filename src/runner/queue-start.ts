@@ -32,8 +32,9 @@ export async function startQueue(
       paused: true,
       reason: s.pauseReason ?? 'runtime',
       ...(stopReason ? { stopReason } : {}),
-      error:
-        'Очередь снова остановлена работающим сервером' + (stopReason ? ': ' + stopReason : ''),
+      // Кто поставил паузу в этом окне — сервер или другой участник, — не
+      // известно: ответ называет состояние и причину, а не виновника.
+      error: 'Очередь осталась на паузе' + (stopReason ? ': ' + stopReason : ''),
     };
   }
   // Сервер не сделал двух тактов за отведённое время: снятие паузы записано,

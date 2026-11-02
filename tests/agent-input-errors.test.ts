@@ -7,6 +7,7 @@ import { config, fixture } from './helpers.ts';
 import { AgentService } from '../src/application/agent.ts';
 import { DomainError } from '../src/core/model.ts';
 import { command } from '../src/runner/process.ts';
+import { z, ZodError } from 'zod';
 
 const invalidPlan = {
   operation: 'plan_import',
@@ -55,7 +56,32 @@ test('Агентский запрос с неверным входом откл�
       assert.match(e.message, /^Запрос plan_imprt не принят: operation: /);
       return true;
     });
+    // Имя операции из запроса в сообщении не длиннее 80 символов.
+    await assert.rejects(api.run({ operation: 'x'.repeat(500), input: {} }), (e: unknown) => {
+      assert.ok(e instanceof DomainError && e.status === 400, String(e));
+      assert.ok(e.message.startsWith(`Запрос ${'x'.repeat(80)} не принят: operation: `), e.message);
+      return true;
+    });
     assert.equal(f.store.read().tasks.length, 0);
+
+    // Сбой разбора внутри исполнения (сохранённые данные, конфигурация) — не
+    // отказ запроса: он остаётся внутренней ошибкой, а не «Запрос не принят».
+    f.h.createBoard = () => {
+      throw z.object({ stored: z.string() }).parse({});
+    };
+    const internal = (e: unknown) => {
+      assert.ok(e instanceof ZodError, String(e));
+      assert.ok(!(e instanceof DomainError));
+      return true;
+    };
+    assert.throws(
+      () => api.execute({ operation: 'board_create', input: { title: 'Доска' } }),
+      internal,
+    );
+    await assert.rejects(
+      api.run({ operation: 'board_create', input: { title: 'Доска' } }),
+      internal,
+    );
   } finally {
     f.cleanup();
   }

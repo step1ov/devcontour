@@ -63,7 +63,7 @@ test('queue --start при работающем сервере, который �
     };
     assert.equal(result.paused, true);
     assert.match(result.stopReason ?? '', /base-update/);
-    assert.match(result.error ?? '', /снова остановлена работающим сервером/);
+    assert.match(result.error ?? '', /^Очередь осталась на паузе: .*base-update/);
   } finally {
     stop();
     serving.store.close();
