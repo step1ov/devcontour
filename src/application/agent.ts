@@ -327,21 +327,27 @@ function inputRefusal(error: ZodError, operation: unknown) {
     400,
   );
 }
+type ParsedAgentRequest = z.infer<typeof agentRequest>;
 /**
- * Проверка запроса и входа операции до исполнения. Отказ схемы — по
- * названным полям, а не сырым массивом zod: CLI (`agent --file`), HTTP и MCP
- * показывали JSON с `code` и `path`, и автор запроса искал поле сам. Так
- * переводится только разбор самого запроса: сбой разбора сохранённых данных
- * или конфигурации при исполнении остаётся внутренней ошибкой.
+ * Разбор запроса: размер и имя операции. Отказ схемы — по названным полям, а
+ * не сырым массивом zod: CLI (`agent --file`), HTTP и MCP показывали JSON с
+ * `code` и `path`, и автор запроса искал поле сам.
  */
-export function checkedAgentRequest(raw: unknown) {
+export function parseAgentRequest(raw: unknown): ParsedAgentRequest {
   if (!checkJsonBytes(raw, 100000).within)
     throw new DomainError('Запрос превышает 100000 байт', 413);
   const request = agentRequest.safeParse(raw);
   if (!request.success)
     throw inputRefusal(request.error, (raw as { operation?: unknown } | null)?.operation);
-  const { operation } = request.data;
-  const input = request.data.input ?? {};
+  return request.data;
+}
+/**
+ * Вход операции по её схеме — после проверок, которые объясняют, как
+ * вызывать операцию (409). Так переводится только разбор самого запроса:
+ * сбой разбора сохранённых данных или конфигурации при исполнении остаётся
+ * внутренней ошибкой.
+ */
+function checkAgentInput({ operation, input = {} }: ParsedAgentRequest) {
   // Пределы предложения — тем же понятным отказом, что у CLI, до схемы.
   if (operation === 'contract_change_revise') {
     const issues = proposalLimitIssues((input as { proposal?: unknown } | null)?.proposal);
@@ -349,7 +355,6 @@ export function checkedAgentRequest(raw: unknown) {
   }
   const parsed = (agentInputs[operation] as z.ZodType).safeParse(input);
   if (!parsed.success) throw inputRefusal(parsed.error, operation);
-  return request.data;
 }
 export class AgentService {
   constructor(
@@ -358,8 +363,7 @@ export class AgentService {
     readonly root?: string,
   ) {}
   execute(raw: unknown): Record<string, unknown> {
-    checkedAgentRequest(raw);
-    return this.bounded(this.dispatch(raw));
+    return this.bounded(this.dispatch(parseAgentRequest(raw)));
   }
   private bounded(result: Record<string, unknown>) {
     if (!checkJsonBytes(result, 65536).within)
@@ -368,10 +372,11 @@ export class AgentService {
   }
   /** Общий вход транспортов: синхронные операции и операции с внешними процессами. */
   async run(raw: unknown): Promise<Record<string, unknown>> {
-    const request = checkedAgentRequest(raw);
-    if (!asyncOperations.has(request.operation)) return this.execute(raw);
+    const request = parseAgentRequest(raw);
+    if (!asyncOperations.has(request.operation)) return this.bounded(this.dispatch(request));
     if (!this.root)
       throw new DomainError('Операция запускает процессы и требует каталога данных контура', 409);
+    checkAgentInput(request);
     if (this.h.store.projectionKind !== 'full') attachJournal(this.h);
     const input = request.input ?? {};
     switch (request.operation) {
@@ -465,14 +470,12 @@ export class AgentService {
       return { storyWarning: error instanceof Error ? error.message : String(error) };
     }
   }
-  private dispatch(raw: unknown): Record<string, unknown> {
-    if (!checkJsonBytes(raw, 100000).within)
-      throw new DomainError('Запрос превышает 100000 байт', 413);
-    const request = agentRequest.parse(raw),
-      { operation } = request;
+  private dispatch(request: ParsedAgentRequest): Record<string, unknown> {
+    const { operation } = request;
     const input = request.input ?? {};
     if (asyncOperations.has(operation))
       throw new DomainError('Операция запускает процессы: вызовите её через run', 409);
+    checkAgentInput(request);
     if (operation in contextInputs) {
       const result = new AgentContext(this.h).execute(
         operation as ContextOperation,
