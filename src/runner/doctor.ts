@@ -15,6 +15,7 @@ import { projectionOptions } from '../harness/host.ts';
 import { technicalReviewer } from '../harness/policy.ts';
 import { checkoutPath } from 'devcontour-harness';
 import { isolationSupport } from './isolation.ts';
+import { ignoredComponentCopies } from './config.ts';
 import { CheckoutRootError, checkoutRootFor } from './checkout-root.ts';
 import { installProbe } from './install-probe.ts';
 import { validateWorkflow } from '../core/workflow.ts';
@@ -356,6 +357,15 @@ export async function doctor(
     validateWorkflow(config);
     return 'Графы и профили согласованы';
   });
+  // config.json прежней версии хранил рядом со ссылкой на файл компонента
+  // полную копию его полей. Теперь действует только файл, и значение, которое
+  // раньше молча бралось из копии, оператор должен увидеть.
+  for (const copy of ignoredComponentCopies.get(config) ?? [])
+    checks.push({
+      id: `component-copy:${copy.repositoryId}`,
+      status: 'degraded',
+      detail: `config.json хранит копию полей компонента, которая расходится с ${copy.file} и не применяется: ${copy.keys.join(', ')}. Действует файл компонента. Чтобы вернуть прежнее поведение, впишите эти ключи в файл компонента (значения — из копии в config.json) или объявите их для репозитория в workspace.json; значения профиля workspace-init дописывает в файл сам при обновлении профиля (поднятая version). Затем выполните workspace-init --file <реестр workspace.json>: он уберёт копию.`,
+    });
   // Роли берутся объявленные, а не только workspace-уровня: роль, добавленную
   // компонентом, doctor иначе не проверил бы вовсе.
   const bindings = repositories(config).flatMap((repo) =>

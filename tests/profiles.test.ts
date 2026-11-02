@@ -9,6 +9,7 @@ import {
   realpath,
   symlink,
   access,
+  chmod,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -537,6 +538,359 @@ test('Обновление профиля называет значения, к�
     );
   } finally {
     await f.close();
+  }
+});
+
+test('workspace-init хранит компонент с файлом ссылкой, и поле, удалённое из файла, не действует из копии', async () => {
+  // Прежняя версия записывала в config.json полную копию полей компонента.
+  // Удалённый из файла prepare продолжал действовать из копии.
+  const f = await fixture();
+  try {
+    await git(f.repo, 'init', '-b', 'main');
+    await git(f.repo, 'config', 'user.name', 'Profile fixture');
+    await git(f.repo, 'config', 'user.email', 'fixture@example.invalid');
+    await git(f.repo, 'add', '.');
+    await git(f.repo, 'commit', '-m', 'Own profile');
+    const control = join(f.root, 'control');
+    await mkdir(control);
+    const registry = join(control, 'workspace.json');
+    await json(registry, {
+      version: 1,
+      name: 'Component copy',
+      repositories: [
+        {
+          id: 'product',
+          name: 'Product',
+          path: f.repo,
+          profile: './profiles/main.json',
+          configFile: 'devcontour.component.json',
+        },
+      ],
+    });
+    const componentPath = join(f.repo, 'devcontour.component.json');
+    const component: Record<string, unknown> = {
+      name: 'Product',
+      kind: 'product',
+      gates: [testGate],
+      prepare: [{ id: 'install', command: ['python3', '-V'] }],
+    };
+    await json(componentPath, component);
+    const { config: configPath } = await setupWorkspace(registry);
+    // config.json прежней версии: рядом со ссылкой — копия полей компонента.
+    const stored = JSON.parse(await readFile(configPath, 'utf8')) as { repositories: unknown[] };
+    stored.repositories = loadConfig(configPath).repositories.map((r) => ({ ...r }));
+    await json(configPath, stored);
+
+    delete component.prepare;
+    await json(componentPath, component);
+    assert.equal(loadConfig(configPath).repositories[0].prepare, undefined);
+
+    // workspace-init убирает копию: остаётся ссылка с ролями профиля.
+    assert.equal((await setupWorkspace(registry)).status, 'declaration-updated');
+    const refreshed = JSON.parse(await readFile(configPath, 'utf8')) as {
+      repositories: Record<string, unknown>[];
+    };
+    assert.deepEqual(Object.keys(refreshed.repositories[0]).sort(), [
+      'configFile',
+      'id',
+      'path',
+      'roles',
+    ]);
+    assert.equal(loadConfig(configPath).repositories[0].prepare, undefined);
+    assert.equal((await setupWorkspace(registry)).status, 'preserved');
+
+    // Обратный случай: поле, добавленное в файл, действует без workspace-init.
+    await json(componentPath, { ...component, prepare: [{ id: 'again', command: ['true'] }] });
+    assert.deepEqual(
+      loadConfig(configPath).repositories[0].prepare?.map((s) => s.id),
+      ['again'],
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+async function componentWorkspace(component: Record<string, unknown>, registryEntry = {}) {
+  const f = await fixture();
+  // Первая версия профиля без окружения: его добавит следующая.
+  await json(join(f.repo, 'profiles/main.json'), {
+    id: 'custom-api',
+    version: '1.0.0',
+    extends: ['./stack.json', './tests.json'],
+  });
+  await git(f.repo, 'init', '-b', 'main');
+  await git(f.repo, 'config', 'user.name', 'Profile fixture');
+  await git(f.repo, 'config', 'user.email', 'fixture@example.invalid');
+  await git(f.repo, 'add', '.');
+  await git(f.repo, 'commit', '-m', 'Own profile');
+  const control = join(f.root, 'control');
+  await mkdir(control);
+  const registry = join(control, 'workspace.json');
+  const entry = {
+    id: 'product',
+    name: 'Product',
+    path: f.repo,
+    profile: './profiles/main.json',
+    configFile: 'devcontour.component.json',
+    ...registryEntry,
+  };
+  await json(registry, { version: 1, name: 'Completion', repositories: [entry] });
+  const componentPath = join(f.repo, 'devcontour.component.json');
+  await json(componentPath, { name: 'Product', kind: 'product', gates: [testGate], ...component });
+  const read = async () =>
+    JSON.parse(await readFile(componentPath, 'utf8')) as Record<string, unknown>;
+  const bumpProfile = async (version: string, values: Record<string, string>) => {
+    await json(join(f.repo, 'profiles/env.json'), {
+      id: 'env',
+      version,
+      environment: { values },
+    });
+    await json(join(f.repo, 'profiles/main.json'), {
+      id: 'custom-api',
+      version,
+      extends: ['./stack.json', './tests.json', './env.json'],
+    });
+  };
+  return { f, registry, entry, componentPath, read, bumpProfile };
+}
+
+test('Обновление профиля дописывает в файл компонента новое поле профиля, но не трогает поле файла', async () => {
+  // Поля компонента берутся только из его файла. Окружение, добавленное
+  // новой версией профиля, иначе не применялось, а workspace-init сообщал
+  // profile-updated.
+  const w = await componentWorkspace({});
+  try {
+    const { config: configPath } = await setupWorkspace(w.registry);
+    assert.equal(loadConfig(configPath).repositories[0].environment, undefined);
+    await w.bumpProfile('1.1.0', { PROJECT_MARKER: 'profile' });
+    const updated = await setupWorkspace(w.registry);
+    assert.equal(updated.status, 'profile-updated');
+    assert.deepEqual('added' in updated ? updated.added : undefined, [
+      { repositoryId: 'product', file: 'devcontour.component.json', keys: ['environment'] },
+    ]);
+    // Перекрытым названо только то, что в файле уже было: новый файл
+    // профиля защищён профилем, а список путей файла его не содержит.
+    assert.deepEqual('shadowed' in updated ? updated.shadowed : undefined, [
+      { repositoryId: 'product', file: 'devcontour.component.json', keys: ['protectedPaths'] },
+    ]);
+    assert.deepEqual((await w.read()).environment, {
+      inherit: [],
+      values: { PROJECT_MARKER: 'profile' },
+      secrets: {},
+    });
+    assert.equal(
+      loadConfig(configPath).repositories[0].environment?.values.PROJECT_MARKER,
+      'profile',
+    );
+
+    // Обратный случай: своё значение файла не перезаписывается — профиль
+    // перекрыт, и это названо.
+    await json(w.componentPath, {
+      ...(await w.read()),
+      environment: { values: { PROJECT_MARKER: 'component' } },
+    });
+    await w.bumpProfile('1.2.0', { PROJECT_MARKER: 'profile-2' });
+    const shadowed = await setupWorkspace(w.registry);
+    assert.equal(shadowed.status, 'profile-updated');
+    assert.ok(!('added' in shadowed));
+    assert.deepEqual('shadowed' in shadowed ? shadowed.shadowed : undefined, [
+      {
+        repositoryId: 'product',
+        file: 'devcontour.component.json',
+        keys: ['environment', 'protectedPaths'],
+      },
+    ]);
+    assert.equal(
+      loadConfig(configPath).repositories[0].environment?.values.PROJECT_MARKER,
+      'component',
+    );
+  } finally {
+    await w.f.close();
+  }
+});
+
+test('Поле компонента, объявленное реестром, попадает в файл компонента, а своё значение файла остаётся', async () => {
+  const w = await componentWorkspace({});
+  try {
+    const { config: configPath } = await setupWorkspace(w.registry);
+    // Реестр объявил preflight и артефакты сборки, которых в файле нет.
+    const preflight = [{ id: 'tools', command: ['python3', '-V'] }];
+    await json(w.registry, {
+      version: 1,
+      name: 'Completion',
+      repositories: [{ ...w.entry, preflight, dependencyArtifacts: ['dist'] }],
+    });
+    const updated = await setupWorkspace(w.registry);
+    assert.equal(updated.status, 'declaration-updated');
+    assert.deepEqual('added' in updated ? updated.added : undefined, [
+      {
+        repositoryId: 'product',
+        file: 'devcontour.component.json',
+        keys: ['dependencyArtifacts', 'preflight'],
+      },
+    ]);
+    const loaded = loadConfig(configPath).repositories[0];
+    assert.deepEqual(
+      loaded.preflight?.map((s) => s.id),
+      ['tools'],
+    );
+    assert.deepEqual(loaded.dependencyArtifacts, ['dist']);
+    assert.equal((await setupWorkspace(w.registry)).status, 'preserved');
+
+    // Обратный случай: файл объявил свой preflight — значение реестра его не
+    // заменяет, и повторный workspace-init ничего не дописывает.
+    await json(w.componentPath, {
+      ...(await w.read()),
+      preflight: [{ id: 'own', command: ['true'] }],
+    });
+    await json(w.registry, {
+      version: 1,
+      name: 'Completion',
+      repositories: [
+        {
+          ...w.entry,
+          preflight: [{ id: 'registry', command: ['true'] }],
+          dependencyArtifacts: ['dist'],
+        },
+      ],
+    });
+    assert.equal((await setupWorkspace(w.registry)).status, 'preserved');
+    assert.deepEqual(
+      loadConfig(configPath).repositories[0].preflight?.map((s) => s.id),
+      ['own'],
+    );
+  } finally {
+    await w.f.close();
+  }
+});
+
+test('Дописать в файл компонента с незафиксированной правкой workspace-init отказывается', async () => {
+  const w = await componentWorkspace({});
+  try {
+    const { config: configPath } = await setupWorkspace(w.registry);
+    await git(w.f.repo, 'add', 'devcontour.component.json');
+    await git(w.f.repo, 'commit', '-m', 'Component config');
+    // Оператор правит файл и не фиксирует правку.
+    await json(w.componentPath, { ...(await w.read()), generatedPaths: ['build'] });
+    const before = await readFile(w.componentPath, 'utf8');
+    const configBefore = await readFile(configPath, 'utf8');
+    await json(w.registry, {
+      version: 1,
+      name: 'Completion',
+      repositories: [{ ...w.entry, dependencyArtifacts: ['dist'] }],
+    });
+    await assert.rejects(
+      setupWorkspace(w.registry),
+      /devcontour\.component\.json\) изменён и не зафиксирован.*dependencyArtifacts/,
+    );
+    assert.equal(await readFile(w.componentPath, 'utf8'), before);
+    assert.equal(await readFile(configPath, 'utf8'), configBefore);
+    // Правка зафиксирована — дописывание проходит.
+    await git(w.f.repo, 'commit', '-am', 'Generated paths');
+    assert.equal((await setupWorkspace(w.registry)).status, 'declaration-updated');
+    assert.deepEqual((await w.read()).dependencyArtifacts, ['dist']);
+  } finally {
+    await w.f.close();
+  }
+});
+
+test('dependencyStore, объявленный реестром, попадает в файл компонента и действует; своё значение файла остаётся', async () => {
+  const dependencyStore = { manager: 'pnpm' };
+  const w = await componentWorkspace({}, { dependencyStore });
+  try {
+    const installed = await setupWorkspace(w.registry);
+    // Вместе с ним установка дописывает пути, которые защищает профиль.
+    assert.deepEqual('added' in installed ? installed.added : undefined, [
+      {
+        repositoryId: 'product',
+        file: 'devcontour.component.json',
+        keys: ['dependencyStore', 'protectedPaths'],
+      },
+    ]);
+    assert.match('addedNote' in installed ? String(installed.addedNote) : '', /APPROVAL_STALE/);
+    assert.match('addedNote' in installed ? String(installed.addedNote) : '', /base-update/);
+    assert.equal(
+      ((await w.read()).dependencyStore as { manager?: string } | undefined)?.manager,
+      'pnpm',
+    );
+    assert.equal(
+      loadConfig(installed.config).repositories[0].dependencyStore?.lockfile,
+      'pnpm-lock.yaml',
+    );
+
+    // Обратный случай: файл объявил своё хранилище — реестр его не заменяет.
+    await json(w.componentPath, {
+      ...(await w.read()),
+      dependencyStore: { manager: 'pnpm', lockfile: 'app/pnpm-lock.yaml' },
+    });
+    assert.equal((await setupWorkspace(w.registry)).status, 'preserved');
+    assert.equal(
+      loadConfig(installed.config).repositories[0].dependencyStore?.lockfile,
+      'app/pnpm-lock.yaml',
+    );
+  } finally {
+    await w.f.close();
+  }
+});
+
+test('Отказ после записи файлов компонентов возвращает их все', async () => {
+  // Два компонента получают дописанные ключи, затем запись config.json
+  // отказывает: оба файла должны вернуться к прежнему содержимому.
+  const a = await componentWorkspace({});
+  const b = await fixture();
+  try {
+    await git(b.repo, 'init', '-b', 'main');
+    await git(b.repo, 'config', 'user.name', 'Profile fixture');
+    await git(b.repo, 'config', 'user.email', 'fixture@example.invalid');
+    await git(b.repo, 'add', '.');
+    await git(b.repo, 'commit', '-m', 'Library');
+    const libraryFile = join(b.repo, 'devcontour.component.json');
+    await json(libraryFile, { name: 'Library', kind: 'library', gates: [testGate] });
+    const library = {
+      id: 'library',
+      name: 'Library',
+      path: b.repo,
+      profile: './profiles/main.json',
+      configFile: 'devcontour.component.json',
+    };
+    const registry = (extra: Record<string, unknown>) =>
+      json(a.registry, {
+        version: 1,
+        name: 'Completion',
+        repositories: [
+          { ...a.entry, ...extra },
+          { ...library, ...extra },
+        ],
+      });
+    await registry({});
+    const { data, config: configPath } = await setupWorkspace(a.registry);
+    const before = [await readFile(a.componentPath, 'utf8'), await readFile(libraryFile, 'utf8')];
+    const configBefore = await readFile(configPath, 'utf8');
+    await registry({ dependencyArtifacts: ['dist'] });
+    // Каталог данных только для чтения: config.json не записать.
+    await chmod(data, 0o555);
+    try {
+      await assert.rejects(setupWorkspace(a.registry), /EACCES|permission denied/i);
+    } finally {
+      await chmod(data, 0o755);
+    }
+    assert.deepEqual(
+      [await readFile(a.componentPath, 'utf8'), await readFile(libraryFile, 'utf8')],
+      before,
+      'оба файла компонентов возвращены',
+    );
+    assert.equal(await readFile(configPath, 'utf8'), configBefore);
+    // Причина устранена — повтор дописывает оба файла.
+    assert.equal((await setupWorkspace(a.registry)).status, 'declaration-updated');
+    assert.deepEqual((await a.read()).dependencyArtifacts, ['dist']);
+    assert.deepEqual(
+      (JSON.parse(await readFile(libraryFile, 'utf8')) as Record<string, unknown>)
+        .dependencyArtifacts,
+      ['dist'],
+    );
+  } finally {
+    await a.f.close();
+    await b.close();
   }
 });
 

@@ -1288,9 +1288,16 @@ test('C-F28: a component config reached through a switched symlink does not keep
   try {
     const repo = join(root, 'product');
     await mkdir(repo);
-    // Component config — symlink на файл A внутри репозитория.
-    await writeFile(join(repo, 'component.a.json'), JSON.stringify({ protectedPaths: ['a.txt'] }));
-    await writeFile(join(repo, 'component.b.json'), JSON.stringify({ protectedPaths: ['b.txt'] }));
+    // Component config — symlink на файл A внутри репозитория. Поля компонента
+    // берутся только из файла, поэтому имя и gates лежат в нём.
+    await writeFile(
+      join(repo, 'component.a.json'),
+      JSON.stringify({ name: 'Product', gates: config().gates, protectedPaths: ['a.txt'] }),
+    );
+    await writeFile(
+      join(repo, 'component.b.json'),
+      JSON.stringify({ name: 'Product', gates: config().gates, protectedPaths: ['b.txt'] }),
+    );
     symlinkSync('component.a.json', join(repo, 'devcontour.component.json'));
     const base = config();
     const path = join(root, 'config.json');
@@ -1620,7 +1627,10 @@ test('C-F08: the expected digest covers component config files, not only config.
     const repo = join(root, 'product');
     await mkdir(repo);
     const component = join(repo, 'devcontour.component.json');
-    await writeFile(component, JSON.stringify({ protectedPaths: ['a.txt'] }));
+    await writeFile(
+      component,
+      JSON.stringify({ name: 'Product', gates: config().gates, protectedPaths: ['a.txt'] }),
+    );
     const base = config();
     const path = join(root, 'config.json');
     await writeFile(
@@ -1642,7 +1652,10 @@ test('C-F08: the expected digest covers component config files, not only config.
     const text = readFileSync(path, 'utf8');
     const first = loadedDigest(loadConfig(path));
     // Главный файл не менялся, component config — да: digest другой.
-    await writeFile(component, JSON.stringify({ protectedPaths: ['b.txt'] }));
+    await writeFile(
+      component,
+      JSON.stringify({ name: 'Product', gates: config().gates, protectedPaths: ['b.txt'] }),
+    );
     assert.equal(readFileSync(path, 'utf8'), text);
     assert.notEqual(loadedDigest(loadConfig(path)), first);
   } finally {

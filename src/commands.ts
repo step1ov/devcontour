@@ -32,6 +32,7 @@ import { importKnowledge } from './runner/knowledge.ts';
 import { PreviewRunner } from './runner/preview.ts';
 import { DeliveryRunner } from './runner/forge.ts';
 import { baseUpdateOperation } from './runner/base-update.ts';
+import { startQueue } from './runner/queue-start.ts';
 import { adoptContextPack } from './runner/context-library.ts';
 import { contextSources, importContextSource } from './runner/context-import.ts';
 import { lockContextFile, taskContext } from './runner/context.ts';
@@ -887,7 +888,13 @@ async function main() {
       else if (operation === 'queue') {
         if (args.includes('--start') === args.includes('--pause'))
           throw new Error('Укажите только --start или --pause');
-        result = h.pause(args.includes('--pause'));
+        if (args.includes('--pause')) result = h.pause(true);
+        else {
+          // Снятие паузы подтверждает работающий сервер: очередь, которую он
+          // сразу снова остановил, — отказ с его причиной, а не успех.
+          result = await startQueue(h);
+          if ((result as { paused: boolean }).paused) process.exitCode = 1;
+        }
       } else if (operation === 'reopen')
         result = h.reopen(option('--task', ''), option('--reason', ''));
       else if (operation === 'retry')
