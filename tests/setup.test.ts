@@ -85,7 +85,7 @@ test('Setup preserves existing files and explicit operator mode across repeated 
       approvalMode: 'operator',
     });
     const configFile = join(first.data, 'config.json');
-    const config = loadConfig(configFile);
+    const config = JSON.parse(await readFile(configFile, 'utf8')) as Record<string, unknown>;
     config.concurrency = 1;
     await writeFile(configFile, JSON.stringify(config));
     const before = await readFile(configFile, 'utf8');

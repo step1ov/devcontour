@@ -161,7 +161,7 @@ test('Baseline setup: repeat keeps user files, overrides and profile byte-for-by
     });
     assert.deepEqual(rel(root, first.preserved).sort(), ['.gitignore', 'AGENTS.md', 'CLAUDE.md']);
     const configFile = join(first.data, 'config.json');
-    const config = loadConfig(configFile);
+    const config = JSON.parse(await readFile(configFile, 'utf8')) as Record<string, unknown>;
     config.concurrency = 1;
     config.runTimeoutMs = 1_234_567;
     await writeFile(configFile, JSON.stringify(config));
