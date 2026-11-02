@@ -4,6 +4,7 @@ import { junitSummary } from 'devcontour-harness';
 import {
   evaluateBackground,
   evaluateLog,
+  evaluateReach,
   evaluateTapHits,
   evaluateVisible,
   evaluateVisual,
@@ -603,7 +604,7 @@ test('log-forbid: число строк, пропущенных каждым р�
   assert.equal(junitSummary(xml).failures, 0);
 });
 
-// Состояние с вводом и отправкой: шаг 2 касается кнопки отправки.
+// Состояние с вводом и отправкой: шаги 0, 2 и 3 — касания, у каждого своя запись.
 const reachSpec = visualSpecSchema.parse({
   version: 1,
   platform: 'ios-simulator',
@@ -621,6 +622,17 @@ const reachSpec = visualSpecSchema.parse({
     },
   ],
 });
+const amountTap = {
+  step: 0,
+  element: 'amount',
+  frame: { x: 52, y: 165, width: 264, height: 44 },
+  window,
+  keyboard: null,
+  point: { x: 184, y: 187 },
+  hit: { kind: 'element', element: 'amount' },
+  before: { visible: ['amount'], focused: null },
+  after: { visible: ['amount'], focused: field('') },
+};
 const stepTap = (extra: Record<string, unknown> = {}) => ({
   step: 2,
   element: 'submit',
@@ -633,7 +645,24 @@ const stepTap = (extra: Record<string, unknown> = {}) => ({
   after: { visible: ['submit', 'result'], focused: null },
   ...extra,
 });
-const unreached = (stepTaps: unknown[]) =>
+// Кандидаты префикса записаны не по порядку: первым в порядке чтения идёт row-b.
+const rowTap = (extra: Record<string, unknown> = {}) => ({
+  step: 3,
+  element: 'row-b',
+  frame: { x: 20, y: 100, width: 350, height: 40 },
+  window,
+  keyboard: null,
+  point: { x: 195, y: 120 },
+  hit: { kind: 'element', element: 'row-b' },
+  before: { visible: [], focused: null },
+  after: { visible: [], focused: null },
+  candidates: [
+    { id: 'row-a', frame: { x: 20, y: 300, width: 350, height: 40 } },
+    { id: 'row-b', frame: { x: 20, y: 100, width: 350, height: 40 } },
+  ],
+  ...extra,
+});
+const unreached = (stepTaps: unknown[], extra: Record<string, unknown> = {}) =>
   evaluateVisual(reachSpec, {
     'UI-form-sent': {
       unreached: visualFramesErrorSchema.parse({
@@ -641,12 +670,23 @@ const unreached = (stepTaps: unknown[]) =>
         state: 'UI-form-sent',
         error: 'step wait result: not shown within 5 s',
         stepTaps,
+        ...extra,
       }),
+    },
+  });
+const reachedWith = (taps: unknown[], spec = reachSpec) =>
+  evaluateVisual(spec, {
+    'UI-form-sent': {
+      frames: frames({
+        elements: { result: window },
+        stepTaps: taps,
+      } as Partial<VisualFramesInput>),
     },
   });
 
 test('reach: шаг, заблокированный клавиатурой, — провал продукта с доказательством касания', () => {
   const blocked = unreached([
+    amountTap,
     stepTap({
       keyboard,
       hit: { kind: 'keyboard' },
@@ -665,9 +705,10 @@ test('reach: шаг, заблокированный клавиатурой, — 
   assert.match(message, /шаг 2 submit: точка касания \(195, 591\) под клавиатурой y ≥ 583/);
   assert.match(message, /касание принял клавиатура/);
   assert.match(message, /"57,5" → "57,55"/);
+  assert.doesNotMatch(message, /договора драйвером/);
   assert.match(blocked[1].message ?? '', /см\. visual\.UI-form-sent\.reach/);
-  // Обратный случай: касание шага в порядке, драйвер не дождался — окружение.
-  const driver = unreached([stepTap()]);
+  // Обратный случай: касания шагов в порядке, драйвер не дождался — окружение.
+  const driver = unreached([amountTap, stepTap()]);
   assert.deepEqual(
     driver.map((c) => [c.name, c.status]),
     [
@@ -678,45 +719,162 @@ test('reach: шаг, заблокированный клавиатурой, — 
   assert.match(driver[0].message ?? '', /драйвер: step wait result/);
 });
 
+test('reach: у каждого касания шага ровно одна запись', () => {
+  const status = (taps: unknown[]) => reachedWith(taps)[0];
+  assert.equal(status([amountTap, stepTap(), rowTap()]).status, 'passed');
+  // Без записей шагов достижение не доказано.
+  const none = status([]);
+  assert.equal(none.status, 'error');
+  assert.match(none.message ?? '', /нет записи касания шагов 0, 2, 3/);
+  // Запись заблокированного шага выброшена — не проходит.
+  const dropped = status([amountTap, rowTap()]);
+  assert.equal(dropped.status, 'error');
+  assert.match(dropped.message ?? '', /нет записи касания шагов 2/);
+  // Повтор записи шага — нарушение договора.
+  const twice = status([amountTap, stepTap(), stepTap(), rowTap()]);
+  assert.equal(twice.status, 'error');
+  assert.match(twice.message ?? '', /повтор записи касания шага 2/);
+  // Недостигнутое состояние: нужны записи всех касаний до последнего записанного.
+  const gap = unreached([stepTap()]);
+  assert.equal(gap[0].status, 'error');
+  assert.match(gap[0].message ?? '', /нет записи касания шагов 0/);
+  // Достигнутое состояние с записью отсутствия цели — противоречие.
+  const contradiction = evaluateVisual(reachSpec, {
+    'UI-form-sent': {
+      frames: frames({
+        elements: { result: window },
+        stepTaps: [amountTap, stepTap(), rowTap()],
+        missing: { step: 4, target: 'result', visible: [] },
+      } as Partial<VisualFramesInput>),
+    },
+  })[0];
+  assert.equal(contradiction.status, 'error');
+});
+
+test('reach: нарушение договора не скрывает уже найденный заблокированный шаг', () => {
+  const result = unreached([
+    amountTap,
+    stepTap({ keyboard, hit: { kind: 'keyboard' } }),
+    rowTap({ candidates: undefined }),
+  ])[0];
+  assert.equal(result.status, 'failed');
+  assert.match(result.message ?? '', /шаг 2 submit: точка касания/);
+  assert.match(
+    result.message ?? '',
+    /нарушения договора драйвером: шаг 3: .*не записал кандидатов/,
+  );
+  // Без заблокированного шага то же нарушение — ошибка окружения.
+  assert.equal(
+    unreached([amountTap, stepTap(), rowTap({ candidates: undefined })])[0].status,
+    'error',
+  );
+});
+
 test('reach: запись касания сверяется со спецификацией и договором координат', () => {
-  // Селектор по префиксу: подходит id с префиксом, другой id — ошибка записи.
-  const row = stepTap({
-    step: 3,
-    element: 'row-7f3a',
-    hit: { kind: 'element', element: 'row-7f3a' },
-    before: { visible: [], focused: null },
-    after: { visible: [], focused: null },
-  });
-  assert.equal(unreached([row])[0].status, 'error');
-  assert.match(unreached([row])[0].message ?? '', /^драйвер:/);
   const wrong = unreached([
-    { ...row, element: 'col-1', hit: { kind: 'element', element: 'col-1' } },
+    amountTap,
+    stepTap(),
+    rowTap({ element: 'col-1', hit: { kind: 'element', element: 'col-1' } }),
   ]);
   assert.match(wrong[0].message ?? '', /не соответствует шагу спецификации/);
-  assert.match(unreached([stepTap({ step: 1 })])[0].message ?? '', /не соответствует/);
+  assert.match(unreached([amountTap, stepTap({ step: 1 })])[0].message ?? '', /не соответствует/);
   // Касание фреймворка в незакрытую полоску — нарушение договора драйвером.
-  const strip = unreached([stepTap({ keyboard, point: { x: 195, y: 570 } })]);
+  const strip = unreached([amountTap, stepTap({ keyboard, point: { x: 195, y: 570 } })]);
   assert.equal(strip[0].status, 'error');
   assert.match(strip[0].message ?? '', /не в центре видимой рамки/);
-  // Достигнутое состояние с чистыми касаниями шагов — reach проходит,
-  // с заблокированным шагом — падает, утверждения оцениваются как обычно.
-  const reached = (taps: unknown[]) =>
-    evaluateVisual(reachSpec, {
-      'UI-form-sent': {
-        frames: frames({
-          elements: { result: window },
-          stepTaps: taps,
-        } as Partial<VisualFramesInput>),
+  // Достигнутое состояние с заблокированным шагом: reach падает, утверждения
+  // оцениваются как обычно.
+  assert.deepEqual(
+    reachedWith([amountTap, stepTap({ hit: { kind: 'none' } }), rowTap()]).map((c) => [
+      c.name,
+      c.status,
+    ]),
+    [
+      ['reach', 'failed'],
+      ['visible', 'passed'],
+    ],
+  );
+});
+
+test('reach: индекс цели-префикса проверяется по кандидатам в порядке чтения', () => {
+  const run = (row: unknown) => reachedWith([amountTap, stepTap(), row])[0];
+  assert.equal(run(rowTap()).status, 'passed');
+  // Драйвер выбрал второй в порядке чтения.
+  const second = run(
+    rowTap({
+      element: 'row-a',
+      frame: { x: 20, y: 300, width: 350, height: 40 },
+      point: { x: 195, y: 320 },
+      hit: { kind: 'element', element: 'row-a' },
+    }),
+  );
+  assert.equal(second.status, 'error');
+  assert.match(
+    second.message ?? '',
+    /row-\*\[0\] в порядке чтения — row-b, а драйвер выбрал row-a/,
+  );
+  assert.equal(run(rowTap({ candidates: undefined })).status, 'error');
+  const foreign = run(
+    rowTap({ candidates: [{ id: 'col-1', frame: window }, ...rowTap().candidates] }),
+  );
+  assert.match(foreign.message ?? '', /не все с префиксом/);
+  // Одна строка: при равном y порядок — слева направо.
+  const sideBySide = run(
+    rowTap({
+      candidates: [
+        { id: 'row-a', frame: { x: 200, y: 100.2, width: 170, height: 40 } },
+        { id: 'row-b', frame: { x: 20, y: 100, width: 170, height: 40 } },
+      ],
+    }),
+  );
+  assert.equal(sideBySide.status, 'passed');
+});
+
+test('reach: для clear after снят до удаления — меняться текст не должен', () => {
+  const spec = visualSpecSchema.parse({
+    version: 1,
+    platform: 'ios-simulator',
+    states: [
+      {
+        id: 'UI-form-sent',
+        steps: [{ clear: 'amount' }],
+        assert: [{ kind: 'visible', element: 'result' }],
       },
-    }).map((c) => [c.name, c.status]);
-  assert.deepEqual(reached([stepTap()]), [
-    ['reach', 'passed'],
-    ['visible', 'passed'],
-  ]);
-  assert.deepEqual(reached([stepTap({ hit: { kind: 'none' } })]), [
-    ['reach', 'failed'],
-    ['visible', 'passed'],
-  ]);
+    ],
+  });
+  const clear = (text: string) =>
+    reachedWith(
+      [
+        {
+          ...amountTap,
+          before: { visible: ['amount'], focused: field('57,5') },
+          after: { visible: ['amount'], focused: field(text) },
+        },
+      ],
+      spec,
+    )[0];
+  assert.equal(clear('57,5').status, 'passed');
+  const typed = clear('57,55');
+  assert.equal(typed.status, 'failed');
+  assert.match(typed.message ?? '', /"57,5" → "57,55"/);
+  // Снимок после удаления — нарушение формата записи драйвером, а не дефект поля.
+  const late = clear('');
+  assert.equal(late.status, 'error');
+  assert.match(late.message ?? '', /after для clear снят после удаления текста/);
+  // Фокусирующее касание на другом поле: текст исходного поля не сравнивается.
+  assert.equal(
+    reachedWith(
+      [
+        {
+          ...amountTap,
+          before: { visible: ['amount'], focused: { element: 'note', text: 'x' } },
+          after: { visible: ['amount'], focused: field('57,5') },
+        },
+      ],
+      spec,
+    )[0].status,
+    'passed',
+  );
 });
 
 test('Шаги: scroll, clear и селектор по префиксу строгие; имя reach занято', () => {
@@ -773,12 +931,17 @@ test('log: окна журнала по состояниям называют с
     ],
   });
   const lines = ['app started', 'helper is deprecated', 'sent', 'late deprecated'];
-  const offsets = [0, 12, 33, 38];
+  const spans: [number, number][] = [
+    [0, 12],
+    [12, 33],
+    [33, 38],
+    [38, 54],
+  ];
   const at = (from: number, to: number) => frames({ elements: { a: window }, log: { from, to } });
   const result = evaluateVisual(
     spec,
     { 'UI-form-empty': { frames: at(0, 12) }, 'UI-form-sent': { frames: at(12, 38) } },
-    { lines, offsets },
+    { lines, spans, size: 54 },
   );
   const log = result.find((c) => c.classname === 'visual.log');
   assert.equal(log?.status, 'failed');
@@ -788,7 +951,7 @@ test('log: окна журнала по состояниям называют с
   const plain = evaluateVisual(
     spec,
     { 'UI-form-empty': { frames: frames({ elements: { a: window } }) } },
-    { lines, offsets },
+    { lines, spans, size: 54 },
   ).find((c) => c.classname === 'visual.log');
   assert.doesNotMatch(plain?.message ?? '', /\[UI-/);
   assert.equal(
@@ -797,54 +960,45 @@ test('log: окна журнала по состояниям называют с
   );
 });
 
-test('hit: декоративный элемент не считается промахом, другой элемент — считается', () => {
-  const spec = visualSpecSchema.parse({
-    ...reachSpec,
-    decorative: ['backdrop'],
-  });
-  const run = (hit: unknown) =>
-    evaluateVisual(spec, {
-      'UI-form-sent': {
-        frames: frames({
-          elements: { result: window },
-          stepTaps: [stepTap({ hit })],
-        } as Partial<VisualFramesInput>),
-      },
-    })[0];
-  assert.equal(run({ kind: 'element', element: 'backdrop' }).status, 'passed');
-  // Обратный случай: тот же hit без объявления decorative — промах.
-  const plain = evaluateVisual(reachSpec, {
-    'UI-form-sent': {
-      frames: frames({
-        elements: { result: window },
-        stepTaps: [stepTap({ hit: { kind: 'element', element: 'backdrop' } })],
-      } as Partial<VisualFramesInput>),
-    },
-  })[0];
-  assert.equal(plain.status, 'failed');
-  assert.match(plain.message ?? '', /касание принял backdrop/);
+test('hit: декоративный id в hit — промах; вложенный в цель элемент — попадание', () => {
+  const spec = visualSpecSchema.parse({ ...reachSpec, decorative: ['backdrop'] });
+  const run = (hit: unknown, s = spec) =>
+    reachedWith([amountTap, stepTap({ hit }), rowTap()], s)[0];
+  // Драйвер обязан исключать декоративные id: названный — перекрытие, провал.
+  const decorative = run({ kind: 'element', element: 'backdrop' });
+  assert.equal(decorative.status, 'failed');
+  assert.match(decorative.message ?? '', /касание принял декоративный backdrop/);
   assert.equal(run({ kind: 'element', element: 'overlay' }).status, 'failed');
-  // Декоративность не скрывает клавиатуру.
-  const under = evaluateVisual(spec, {
-    'UI-form-sent': {
-      frames: frames({
-        elements: { result: window },
-        stepTaps: [stepTap({ keyboard, hit: { kind: 'element', element: 'backdrop' } })],
-      } as Partial<VisualFramesInput>),
+  // Подпись внутри кнопки со своим id — то же касание.
+  const label = { x: 150, y: 580, width: 90, height: 20 };
+  assert.equal(run({ kind: 'element', element: 'submit-label', frame: label }).status, 'passed');
+  assert.equal(
+    run({ kind: 'element', element: 'submit-label', frame: { ...label, y: 610 } }).status,
+    'failed',
+  );
+  assert.equal(run({ kind: 'element', element: 'submit-label' }).status, 'failed');
+  // Цель шага, объявленная декоративной, — провал (защита сверх схемы).
+  const state = reachSpec.states[0];
+  const forced = evaluateReach(
+    state,
+    {
+      frames: frames({ stepTaps: [amountTap, stepTap(), rowTap()] } as Partial<VisualFramesInput>),
     },
-  })[0];
-  assert.match(under.message ?? '', /под клавиатурой/);
+    new Set(['row-b']),
+  );
+  assert.equal(forced.status, 'failed');
+  assert.match(forced.message ?? '', /цель row-b объявлена декоративной/);
 });
 
 test('decorative: строгая проверка — без повторов, нельзя касаться декоративного', () => {
-  const parse = (value: Record<string, unknown>) =>
+  const parse = (value: Record<string, unknown>, steps: unknown[] = [{ tap: 'submit' }]) =>
     visualSpecSchema.safeParse({
       version: 1,
       platform: 'ios-simulator',
       states: [
         {
           id: 'UI-form-empty',
-          steps: [{ tap: 'submit' }],
+          steps,
           assert: [{ kind: 'tap-hits', element: 'send', expect: { visible: 'done' } }],
         },
       ],
@@ -855,6 +1009,10 @@ test('decorative: строгая проверка — без повторов, �
   assert.equal(parse({ decorative: ['submit'] }), false);
   assert.equal(parse({ decorative: ['send'] }), false);
   assert.equal(parse({ decorative: ['bad id'] }), false);
+  // Префикс касания не может покрывать декоративный id.
+  const prefixed = [{ tap: { prefix: 'row-', index: 0 } }];
+  assert.equal(parse({ decorative: ['row-backdrop'] }, prefixed), false);
+  assert.equal(parse({ decorative: ['backdrop'] }, prefixed), true);
 });
 
 test('reach: цель вне окна и отсутствующий id — провал продукта, а не окружения', () => {
@@ -866,11 +1024,14 @@ test('reach: цель вне окна и отсутствующий id — пр�
     keyboard: null,
     point: null,
   };
-  const outside = unreached([offWindow]);
+  const outside = unreached([amountTap, offWindow]);
   assert.equal(outside[0].status, 'failed');
   assert.match(outside[0].message ?? '', /шаг 2 submit: цель шага вне окна \(submit y 900–956/);
   // Рамка в окне, а касания нет — нарушение договора драйвером.
-  const lazy = unreached([{ ...offWindow, frame: { x: 20, y: 500, width: 350, height: 56 } }]);
+  const lazy = unreached([
+    amountTap,
+    { ...offWindow, frame: { x: 20, y: 500, width: 350, height: 56 } },
+  ]);
   assert.equal(lazy[0].status, 'error');
   // point: null требует отсутствия полей касания.
   assert.equal(
@@ -882,26 +1043,22 @@ test('reach: цель вне окна и отсутствующий id — пр�
     }).success,
     false,
   );
-  const missing = (record: unknown) =>
-    evaluateVisual(reachSpec, {
-      'UI-form-sent': {
-        unreached: visualFramesErrorSchema.parse({
-          version: 1,
-          state: 'UI-form-sent',
-          error: 'step wait result: not shown within 5 s',
-          missing: record,
-        }),
-      },
-    })[0];
+  const missing = (record: unknown, taps: unknown[] = [amountTap, stepTap(), rowTap()]) =>
+    unreached(taps, { missing: record })[0];
   const absent = missing({ step: 4, target: 'result', visible: ['amount', 'submit'] });
   assert.equal(absent.status, 'failed');
   assert.match(
     absent.message ?? '',
     /шаг 4: цель result не найдена на экране за время шага; на экране: amount, submit/,
   );
-  const prefixed = missing({ step: 3, target: 'row-*[0]', visible: [] });
-  assert.equal(prefixed.status, 'failed');
+  assert.equal(
+    missing({ step: 3, target: 'row-*[0]', visible: [] }, [amountTap, stepTap()]).status,
+    'failed',
+  );
   // Запись, не совпадающая с шагом спецификации, — ошибка драйвера.
   assert.equal(missing({ step: 4, target: 'other', visible: [] }).status, 'error');
-  assert.equal(missing({ step: 1, target: '57,5', visible: [] }).status, 'error');
+  assert.equal(missing({ step: 1, target: '57,5', visible: [] }, [amountTap]).status, 'error');
+  // Отсутствие цели шага 4 требует записей касаний шагов 0, 2 и 3.
+  const unproven = missing({ step: 4, target: 'result', visible: [] }, [amountTap]);
+  assert.match(unproven.message ?? '', /нет записи касания шагов 2, 3/);
 });

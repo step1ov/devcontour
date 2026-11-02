@@ -380,6 +380,14 @@ export const visualSpecSchema = z
       s.steps.forEach((step, position) => {
         const target = 'tap' in step ? step.tap : 'clear' in step ? step.clear : undefined;
         if (typeof target === 'string') touched(target, ['states', index, 'steps', position]);
+        else if (target)
+          for (const id of decorative)
+            if (id.startsWith(target.prefix))
+              context.addIssue({
+                code: 'custom',
+                path: ['states', index, 'steps', position],
+                message: `префикс ${target.prefix} покрывает декоративный ${id}`,
+              });
       });
       const names = new Set<string>();
       s.assert.forEach((a, position) => {
@@ -455,7 +463,12 @@ const snapshot = z.strictObject({
  * без id и скрытые от доступности слои драйвер не видит.
  */
 export const visualHitSchema = z.discriminatedUnion('kind', [
-  z.strictObject({ kind: z.literal('element'), element: visualElementId }),
+  z.strictObject({
+    kind: z.literal('element'),
+    element: visualElementId,
+    /** Рамка принявшего элемента: вложенный в цель элемент со своим id — не промах. */
+    frame: rect.optional(),
+  }),
   z.strictObject({ kind: z.literal('keyboard') }),
   z.strictObject({ kind: z.literal('none') }),
 ]);
@@ -481,6 +494,14 @@ export type VisualTap = z.infer<typeof tapRecord>;
  * доказательством, а не ошибкой окружения.
  */
 const stepIndex = z.number().int().min(0).max(31);
+/**
+ * Для цели-префикса — все элементы на экране с этим префиксом и их рамки:
+ * оценщик сам упорядочивает их и проверяет, что выбран `index`-й.
+ */
+const candidates = z
+  .array(z.strictObject({ id: visualElementId, frame: rect }))
+  .min(1)
+  .max(200);
 const stepTapRecord = z.union([
   z.strictObject({
     /** Номер шага в `steps` состояния, с нуля. */
@@ -494,6 +515,7 @@ const stepTapRecord = z.union([
     hit: visualHitSchema,
     before: snapshot,
     after: snapshot,
+    candidates: candidates.optional(),
   }),
   /**
    * Цель найдена, но её рамка вне окна: видимого центра нет, касания не было.
@@ -506,6 +528,7 @@ const stepTapRecord = z.union([
     window: rect,
     keyboard: rect.nullable(),
     point: z.null(),
+    candidates: candidates.optional(),
   }),
 ]);
 export type VisualStepTap = z.infer<typeof stepTapRecord>;
@@ -585,6 +608,12 @@ export function intersect(a: Rect, b: Rect): Rect | undefined {
     height = Math.min(a.y + a.height, b.y + b.height) - y;
   return width > 0 && height > 0 ? { x, y, width, height } : undefined;
 }
+/** Рамка `inner` целиком внутри `outer` с допуском EPS. */
+const contains = (outer: Rect, inner: Rect) =>
+  inner.x >= outer.x - EPS &&
+  inner.y >= outer.y - EPS &&
+  inner.x + inner.width <= outer.x + outer.width + EPS &&
+  inner.y + inner.height <= outer.y + outer.height + EPS;
 const inside = (p: { x: number; y: number }, r: Rect) =>
   p.x >= r.x && p.x <= r.x + r.width && p.y >= r.y && p.y <= r.y + r.height;
 
@@ -645,7 +674,7 @@ export function evaluateTapHits(
     return environment(`драйвер записал касание ${tap.element} вместо ${a.element}`);
   const offCentre = centreProblem(shown, tap.point);
   if (offCentre) return environment(offCentre);
-  const problems = tapProblems(tap, frames.keyboard, decorative);
+  const problems = tapProblems(tap, frame, frames.keyboard, decorative);
   if ('visible' in a.expect) {
     const target = a.expect.visible;
     if (!tap.after.visible.includes(target)) problems.push(`после касания ${target} не появился`);
@@ -689,6 +718,7 @@ function centreProblem(shown: Rect, point: { x: number; y: number }) {
  */
 function tapProblems(
   tap: Pick<VisualTap, 'element' | 'point' | 'hit' | 'before' | 'after'>,
+  target: Rect,
   keyboard: Rect | null,
   decorative: ReadonlySet<string>,
 ) {
@@ -697,12 +727,18 @@ function tapProblems(
     problems.push(
       `точка касания (${fmt(tap.point.x)}, ${fmt(tap.point.y)}) под клавиатурой y ≥ ${fmt(keyboard.y)}`,
     );
-  // `hit` — приближение драйвера; декоративный элемент касаний не принимает,
-  // и такой `hit` не доказывает промах.
-  const ignored = tap.hit.kind === 'element' && decorative.has(tap.hit.element);
-  if (!ignored && (tap.hit.kind !== 'element' || tap.hit.element !== tap.element))
-    problems.push(`касание принял ${hitLabel(tap.hit)}, а не ${tap.element}`);
+  const hit = tap.hit;
+  if (hit.kind === 'element' && decorative.has(hit.element))
+    // Декоративный id драйвер исключает из расчёта hit; если он всё же назван,
+    // касание приняло то, что не должно принимать касаний, — промах.
+    problems.push(`касание принял декоративный ${hit.element}, а не ${tap.element}`);
+  else if (hit.kind !== 'element')
+    problems.push(`касание принял ${hitLabel(hit)}, а не ${tap.element}`);
+  else if (hit.element !== tap.element && !(hit.frame && contains(target, hit.frame)))
+    problems.push(`касание принял ${hit.element}, а не ${tap.element}`);
   const field = tap.before.focused;
+  // Для `clear` `after` снимается сразу после фокусирующего касания, до
+  // удаления текста: касание само по себе текст менять не должно.
   if (
     field &&
     tap.after.focused?.element === field.element &&
@@ -728,9 +764,22 @@ export function evaluateReach(
   decorative: ReadonlySet<string> = new Set(),
 ): VisualOutcome {
   if ('error' in input) return environment(input.error);
+  const reached = !('unreached' in input);
   const observed = 'unreached' in input ? input.unreached : input.frames;
   const blocked: string[] = [];
+  // Нарушения договора драйвером копятся отдельно: они не отменяют уже
+  // найденный дефект продукта, но без него делают результат ошибкой окружения.
+  const driver: string[] = [];
+  const tapSteps = state.steps.flatMap((step, index) =>
+    'tap' in step || 'clear' in step ? [index] : [],
+  );
+  const recorded = new Set<number>();
   for (const tap of observed.stepTaps) {
+    if (recorded.has(tap.step)) {
+      driver.push(`повтор записи касания шага ${tap.step}`);
+      continue;
+    }
+    recorded.add(tap.step);
     const declared = state.steps[tap.step];
     const target =
       declared && 'tap' in declared
@@ -738,46 +787,115 @@ export function evaluateReach(
         : declared && 'clear' in declared
           ? declared.clear
           : undefined;
-    if (!target || !targetMatches(target, tap.element))
-      return environment(
+    if (!target || !targetMatches(target, tap.element)) {
+      driver.push(
         `запись касания шага ${tap.step} (${tap.element}) не соответствует шагу спецификации`,
-      );
-    const shown = intersect(tap.frame, tap.window);
-    if (tap.point === null) {
-      if (shown)
-        return environment(
-          `шаг ${tap.step}: драйвер не коснулся ${tap.element}, хотя его рамка в окне`,
-        );
-      blocked.push(
-        `шаг ${tap.step} ${targetLabel(target)}: цель шага вне окна ` +
-          `(${tap.element} y ${span(tap.frame.y, tap.frame.y + tap.frame.height)}, ` +
-          `окно y ${span(tap.window.y, tap.window.y + tap.window.height)})`,
       );
       continue;
     }
-    if (!shown) return environment(`шаг ${tap.step}: касание ${tap.element}, чья рамка вне окна`);
+    const order = candidateProblem(target, tap.element, tap.candidates);
+    if (order) {
+      driver.push(`шаг ${tap.step}: ${order}`);
+      continue;
+    }
+    const label = `шаг ${tap.step} ${targetLabel(target)}`;
+    if (decorative.has(tap.element)) {
+      blocked.push(`${label}: цель ${tap.element} объявлена декоративной`);
+      continue;
+    }
+    const shown = intersect(tap.frame, tap.window);
+    if (tap.point === null) {
+      if (shown)
+        driver.push(`шаг ${tap.step}: драйвер не коснулся ${tap.element}, хотя его рамка в окне`);
+      else
+        blocked.push(
+          `${label}: цель шага вне окна ` +
+            `(${tap.element} y ${span(tap.frame.y, tap.frame.y + tap.frame.height)}, ` +
+            `окно y ${span(tap.window.y, tap.window.y + tap.window.height)})`,
+        );
+      continue;
+    }
+    if (!shown) {
+      driver.push(`шаг ${tap.step}: касание ${tap.element}, чья рамка вне окна`);
+      continue;
+    }
     const offCentre = centreProblem(shown, tap.point);
-    if (offCentre) return environment(`шаг ${tap.step}: ${offCentre}`);
-    const problems = tapProblems(tap, tap.keyboard, decorative);
-    if (problems.length)
-      blocked.push(`шаг ${tap.step} ${targetLabel(target)}: ${problems.join('; ')}`);
+    if (offCentre) {
+      driver.push(`шаг ${tap.step}: ${offCentre}`);
+      continue;
+    }
+    // Для `clear` `after` — снимок сразу после фокусирующего касания. Пустое
+    // поле вместо прежнего текста значит, что драйвер снял его после удаления:
+    // это не дефект продукта, а нарушение формата записи.
+    const before = tap.before.focused,
+      after = tap.after.focused;
+    if (
+      'clear' in declared &&
+      before &&
+      after?.element === before.element &&
+      before.text !== '' &&
+      after.text === ''
+    ) {
+      driver.push(`шаг ${tap.step}: after для clear снят после удаления текста`);
+      continue;
+    }
+    const problems = tapProblems(tap, tap.frame, tap.keyboard, decorative);
+    if (problems.length) blocked.push(`${label}: ${problems.join('; ')}`);
   }
-  if (observed.missing) {
-    const { step, target, visible } = observed.missing;
-    const declared = state.steps[step];
+  const missing = observed.missing;
+  if (missing) {
+    const declared = state.steps[missing.step];
     const expected = declared ? stepTarget(declared) : undefined;
-    if (!expected || targetLabel(expected) !== target)
-      return environment(
-        `запись отсутствия цели шага ${step} (${target}) не соответствует спецификации`,
+    if (reached)
+      driver.push(`достигнутое состояние с записью отсутствия цели шага ${missing.step}`);
+    else if (!expected || targetLabel(expected) !== missing.target)
+      driver.push(
+        `запись отсутствия цели шага ${missing.step} (${missing.target}) не соответствует спецификации`,
       );
-    blocked.push(
-      `шаг ${step}: цель ${target} не найдена на экране за время шага` +
-        (visible.length ? `; на экране: ${visible.slice(0, 20).join(', ')}` : ''),
-    );
+    else
+      blocked.push(
+        `шаг ${missing.step}: цель ${missing.target} не найдена на экране за время шага` +
+          (missing.visible.length ? `; на экране: ${missing.visible.slice(0, 20).join(', ')}` : ''),
+      );
   }
+  // Каждое касание шага должно иметь запись: без неё заблокированный шаг
+  // был бы неотличим от чистого. Для недостигнутого состояния — все шаги до
+  // последнего записанного.
+  const last = Math.max(-1, ...recorded, missing && !reached ? missing.step - 1 : -1);
+  const required = reached ? tapSteps : tapSteps.filter((index) => index <= last);
+  const absent = required.filter((index) => !recorded.has(index));
+  if (absent.length) driver.push(`нет записи касания шагов ${absent.join(', ')}`);
+  const contract = driver.length ? `нарушения договора драйвером: ${driver.join('; ')}` : '';
   if (blocked.length)
-    return failed(('unreached' in input ? 'состояние не достигнуто: ' : '') + blocked.join('\n'));
+    return failed(
+      (reached ? '' : 'состояние не достигнуто: ') +
+        blocked.join('\n') +
+        (contract ? `\n${contract}` : ''),
+    );
+  if (contract) return environment(contract);
   return 'unreached' in input ? environment(`драйвер: ${input.unreached.error}`) : passed();
+}
+
+/**
+ * Цель-префикс: записанные кандидаты упорядочиваются сверху вниз, затем слева
+ * направо, и `index`-й должен быть выбранным элементом.
+ */
+function candidateProblem(
+  target: VisualTarget,
+  element: string,
+  list: { id: string; frame: Rect }[] | undefined,
+): string | undefined {
+  if (typeof target === 'string') return undefined;
+  if (!list) return `для цели ${targetLabel(target)} драйвер не записал кандидатов`;
+  if (list.some((c) => !c.id.startsWith(target.prefix)))
+    return `кандидаты цели ${targetLabel(target)} не все с префиксом ${target.prefix}`;
+  const ordered = [...list].sort((a, b) =>
+    Math.abs(a.frame.y - b.frame.y) > EPS ? a.frame.y - b.frame.y : a.frame.x - b.frame.x,
+  );
+  const chosen = ordered[target.index]?.id;
+  return chosen === element
+    ? undefined
+    : `${targetLabel(target)} в порядке чтения — ${chosen ?? 'нет такого кандидата'}, а драйвер выбрал ${element}`;
 }
 
 /** Сетка выборки фона: до GRID × GRID точек. */
@@ -925,7 +1043,16 @@ export type VisualStateInput =
   | { frames: VisualFrames; screenshot?: VisualImage | { error: string } };
 
 /** Журнал прогона: строки и, если известны, байтовые смещения их начал. */
-export type VisualLogInput = string[] | { lines: string[]; offsets?: number[] } | { error: string };
+export type VisualLogInput =
+  | string[]
+  | {
+      lines: string[];
+      /** Байтовый полуинтервал каждой строки в log.txt, включая перевод строки. */
+      spans?: [number, number][];
+      /** Размер log.txt в байтах: окна состояний не выходят за него. */
+      size?: number;
+    }
+  | { error: string };
 
 /** testcase журнала: одна проверка на прогон, вне состояний. */
 export const VISUAL_LOG_CASE = { classname: 'visual.log', name: 'no-forbidden' } as const;
@@ -975,11 +1102,17 @@ export function evaluateVisual(
       if (!log) return environment('драйвер не записал журнал прогона');
       if ('error' in log) return environment(log.error);
       if (Array.isArray(log)) return evaluateLog(rules, log);
-      const offsets = log.offsets;
+      const { spans, size } = log;
+      const outside = size === undefined ? undefined : windows.find((w) => w.to > size);
+      if (outside && size !== undefined)
+        return environment(
+          `окно журнала состояния ${outside.state} [${outside.from}, ${outside.to}) за пределами log.txt (${size} байт)`,
+        );
+      // Строка принадлежит окну, с которым пересекается её байтовый отрезок.
       const origin =
-        offsets && windows.length
+        spans && windows.length
           ? (index: number) =>
-              windows.find((w) => offsets[index] >= w.from && offsets[index] < w.to)?.state
+              windows.find((w) => spans[index][0] < w.to && spans[index][1] > w.from)?.state
           : undefined;
       return evaluateLog(rules, log.lines, origin);
     };

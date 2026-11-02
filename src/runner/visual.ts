@@ -115,18 +115,22 @@ async function stateInput(
 async function logLines(directory: string): Promise<VisualLogInput> {
   try {
     const bytes = await bounded(join(directory, 'log.txt'), LOG_LIMIT);
+    // NUL в тексте — почти наверняка UTF-16: как UTF-8 он прочитался бы
+    // строками с нулями, и запрет не нашёл бы ни одного совпадения.
+    if (bytes.includes(0))
+      return { error: 'log.txt содержит байты NUL: журнал должен быть в UTF-8, не UTF-16' };
     const lines: string[] = [],
-      offsets: number[] = [];
+      spans: [number, number][] = [];
     let start = 0;
-    while (start <= bytes.length) {
+    // Завершающий перевод строки не порождает лишней пустой строки.
+    while (start < bytes.length) {
       const end = bytes.indexOf(0x0a, start);
       const stop = end < 0 ? bytes.length : end;
-      offsets.push(start);
+      spans.push([start, end < 0 ? bytes.length : end + 1]);
       lines.push(bytes.toString('utf8', start, stop).replace(/\r$/, ''));
-      if (end < 0) break;
-      start = end + 1;
+      start = stop + 1;
     }
-    return { lines, offsets };
+    return { lines, spans, size: bytes.length };
   } catch (error) {
     return {
       error: missing(error)

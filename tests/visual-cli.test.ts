@@ -126,6 +126,20 @@ const observe = (directory: string, buttonY: number, logText: string) => {
         submit: { x: 10, y: buttonY, width: 175, height: 28 },
         card: { x: 10, y: 60, width: 175, height: 80 },
       },
+      // Касание шага 1 (tap amount) с доказательством.
+      stepTaps: [
+        {
+          step: 1,
+          element: 'amount',
+          frame: { x: 10, y: 150, width: 175, height: 28 },
+          window: { x: 0, y: 0, width: 195, height: 422 },
+          keyboard: null,
+          point: { x: 97.5, y: 164 },
+          hit: { kind: 'element', element: 'amount' },
+          before: { visible: ['amount'], focused: null },
+          after: { visible: ['amount'], focused: { element: 'amount', text: '' } },
+        },
+      ],
     }),
   );
   // Снимок в масштабе 2×: шумный фон и белая карточка.
@@ -502,4 +516,28 @@ test('Наблюдения: окна журнала в байтах, недос�
     spec,
   );
   assert.match(outside.xml, /\[вне окон состояний\] helper is deprecated/);
+});
+
+test('Журнал: завершающий перевод строки, NUL, окна за пределами файла и по пересечению', async () => {
+  const spec = {
+    version: 1,
+    platform: 'ios-simulator',
+    log: { forbid: ['deprecated'] },
+    states: [{ id: 'UI-form-focused', assert: [{ kind: 'visible', element: 'submit' }] }],
+  };
+  const run = (log: string | Buffer, extra: Record<string, unknown> = {}) =>
+    evaluate({ 'UI-form-focused.frames.json': frames(extra), 'log.txt': log }, spec);
+  const clean = await run('app started\nrender ok\n');
+  assert.match(clean.xml, /проверено строк журнала: 2</);
+  const utf16 = await run(Buffer.from('helper is deprecated\n', 'utf16le'));
+  assert.match(utf16.xml, /<error type="environment" message="log.txt содержит байты NUL/);
+  const beyond = await run('app started\n', { log: { from: 0, to: 100 } });
+  assert.match(
+    beyond.xml,
+    /<error type="environment" message="окно журнала состояния UI-form-focused \[0, 100\) за пределами log.txt \(12 байт\)/,
+  );
+  // Окно начинается внутри строки: строка всё равно принадлежит состоянию.
+  const text = 'helper is deprecated\nrender ok\n';
+  const overlap = await run(text, { log: { from: 5, to: Buffer.byteLength(text) } });
+  assert.match(overlap.xml, /\[UI-form-focused\] helper is deprecated/);
 });
