@@ -7,6 +7,7 @@ import {
   evaluateTapHits,
   evaluateVisible,
   evaluateVisual,
+  visualFramesErrorSchema,
   visualFramesSchema,
   visualJunit,
   visualSpecSchema,
@@ -100,7 +101,7 @@ const tapFrames = (tap: Partial<VisualTap>, extra: Partial<VisualFramesInput> = 
       'tap-hits': {
         element: 'submit',
         point: { x: 195, y: 591 },
-        hit: 'submit',
+        hit: { kind: 'element', element: 'submit' },
         before: { visible: ['submit'], focused: field('135') },
         after: { visible: ['submit', 'result'], focused: field('135') },
         ...tap,
@@ -125,7 +126,7 @@ test('tap-hits: касание центра под клавиатурой пад
     tapHits,
     tapFrames(
       {
-        hit: null,
+        hit: { kind: 'keyboard' },
         after: { visible: ['submit'], focused: field('1352') },
       },
       { keyboard },
@@ -134,7 +135,7 @@ test('tap-hits: касание центра под клавиатурой пад
   assert.equal(typed.status, 'failed');
   assert.match(typed.message ?? '', /result не появился/);
   assert.match(typed.message ?? '', /"135" → "1352"/);
-  assert.match(typed.message ?? '', /пустой участок/);
+  assert.match(typed.message ?? '', /касание принял клавиатура/);
 });
 
 test('tap-hits: эффект должен наступить именно после касания', () => {
@@ -373,8 +374,10 @@ test('JUnit: testcase на каждое утверждение, ошибка о�
   assert.deepEqual(
     summary.cases.map((c) => [c.id, c.status]),
     [
+      ['visual.UI-form-focused.reach', 'passed'],
       ['visual.UI-form-focused.visible', 'failed'],
       ['visual.UI-form-focused.background', 'passed'],
+      ['visual.UI-form-result.reach', 'failed'],
       ['visual.UI-form-result.visible', 'failed'],
       ['visual.log.no-forbidden', 'passed'],
     ],
@@ -386,7 +389,7 @@ test('JUnit: testcase на каждое утверждение, ошибка о�
     xml,
     /<error type="environment" message="драйвер не записал наблюдения состояния UI-form-result"/,
   );
-  assert.match(xml, /tests="4" failures="1" errors="1" skipped="0"/);
+  assert.match(xml, /tests="6" failures="1" errors="2" skipped="0"/);
   assert.doesNotMatch(xml, /<skipped/);
   // Пустой прогон — провал.
   const empty = junitSummary(visualJunit([]));
@@ -471,18 +474,21 @@ test('tap-hits: hit обязателен; смена фокуса после о�
       taps: { 'tap-hits': record },
     }).success;
   assert.equal(parse(tap), false);
-  assert.equal(parse({ ...tap, hit: null }), true);
+  assert.equal(parse({ ...tap, hit: { kind: 'none' } }), true);
+  // Клавиатура называется явно, а не id элемента.
+  assert.equal(parse({ ...tap, hit: 'keyboard' }), false);
+  const submitHit = { kind: 'element', element: 'submit' } as const;
   // Поле потеряло фокус после отправки: текст не сравнивается.
-  assert.equal(evaluateTapHits(tapHits, tapFrames({ ...tap, hit: 'submit' })).status, 'passed');
+  assert.equal(evaluateTapHits(tapHits, tapFrames({ ...tap, hit: submitHit })).status, 'passed');
   // Фокус перешёл на другое поле — тоже не изменение текста исходного поля.
   const moved = {
     ...tap,
-    hit: 'submit',
+    hit: submitHit,
     after: { ...tap.after, focused: { element: 'note', text: '' } },
   };
   assert.equal(evaluateTapHits(tapHits, tapFrames(moved)).status, 'passed');
   // То же поле в фокусе с другим текстом — провал.
-  const typed = { ...tap, hit: 'submit', after: { ...tap.after, focused: field('1352') } };
+  const typed = { ...tap, hit: submitHit, after: { ...tap.after, focused: field('1352') } };
   assert.match(evaluateTapHits(tapHits, tapFrames(typed)).message ?? '', /"135" → "1352"/);
 });
 
@@ -595,4 +601,198 @@ test('log-forbid: число строк, пропущенных каждым р�
   );
   assert.match(xml, /<system-out>проверено строк журнала: 3\n.*пропущено строк 2<\/system-out>/);
   assert.equal(junitSummary(xml).failures, 0);
+});
+
+// Состояние с вводом и отправкой: шаг 2 касается кнопки отправки.
+const reachSpec = visualSpecSchema.parse({
+  version: 1,
+  platform: 'ios-simulator',
+  states: [
+    {
+      id: 'UI-form-sent',
+      steps: [
+        { tap: 'amount' },
+        { type: '57,5' },
+        { tap: 'submit' },
+        { tap: { prefix: 'row-', index: 0 } },
+        { wait: 'result' },
+      ],
+      assert: [{ kind: 'visible', element: 'result' }],
+    },
+  ],
+});
+const stepTap = (extra: Record<string, unknown> = {}) => ({
+  step: 2,
+  element: 'submit',
+  frame: { x: 20, y: 563, width: 350, height: 56 },
+  window,
+  keyboard: null,
+  point: { x: 195, y: 591 },
+  hit: { kind: 'element', element: 'submit' },
+  before: { visible: ['submit'], focused: field('57,5') },
+  after: { visible: ['submit', 'result'], focused: null },
+  ...extra,
+});
+const unreached = (stepTaps: unknown[]) =>
+  evaluateVisual(reachSpec, {
+    'UI-form-sent': {
+      unreached: visualFramesErrorSchema.parse({
+        version: 1,
+        state: 'UI-form-sent',
+        error: 'step wait result: not shown within 5 s',
+        stepTaps,
+      }),
+    },
+  });
+
+test('reach: шаг, заблокированный клавиатурой, — провал продукта с доказательством касания', () => {
+  const blocked = unreached([
+    stepTap({
+      keyboard,
+      hit: { kind: 'keyboard' },
+      after: { visible: ['submit'], focused: field('57,55') },
+    }),
+  ]);
+  assert.deepEqual(
+    blocked.map((c) => [c.name, c.status]),
+    [
+      ['reach', 'failed'],
+      ['visible', 'failed'],
+    ],
+  );
+  const message = blocked[0].message ?? '';
+  assert.match(message, /состояние не достигнуто/);
+  assert.match(message, /шаг 2 submit: точка касания \(195, 591\) под клавиатурой y ≥ 583/);
+  assert.match(message, /касание принял клавиатура/);
+  assert.match(message, /"57,5" → "57,55"/);
+  assert.match(blocked[1].message ?? '', /см\. visual\.UI-form-sent\.reach/);
+  // Обратный случай: касание шага в порядке, драйвер не дождался — окружение.
+  const driver = unreached([stepTap()]);
+  assert.deepEqual(
+    driver.map((c) => [c.name, c.status]),
+    [
+      ['reach', 'error'],
+      ['visible', 'error'],
+    ],
+  );
+  assert.match(driver[0].message ?? '', /драйвер: step wait result/);
+});
+
+test('reach: запись касания сверяется со спецификацией и договором координат', () => {
+  // Селектор по префиксу: подходит id с префиксом, другой id — ошибка записи.
+  const row = stepTap({
+    step: 3,
+    element: 'row-7f3a',
+    hit: { kind: 'element', element: 'row-7f3a' },
+    before: { visible: [], focused: null },
+    after: { visible: [], focused: null },
+  });
+  assert.equal(unreached([row])[0].status, 'error');
+  assert.match(unreached([row])[0].message ?? '', /^драйвер:/);
+  const wrong = unreached([
+    { ...row, element: 'col-1', hit: { kind: 'element', element: 'col-1' } },
+  ]);
+  assert.match(wrong[0].message ?? '', /не соответствует шагу спецификации/);
+  assert.match(unreached([stepTap({ step: 1 })])[0].message ?? '', /не соответствует/);
+  // Касание фреймворка в незакрытую полоску — нарушение договора драйвером.
+  const strip = unreached([stepTap({ keyboard, point: { x: 195, y: 570 } })]);
+  assert.equal(strip[0].status, 'error');
+  assert.match(strip[0].message ?? '', /не в центре видимой рамки/);
+  // Достигнутое состояние с чистыми касаниями шагов — reach проходит,
+  // с заблокированным шагом — падает, утверждения оцениваются как обычно.
+  const reached = (taps: unknown[]) =>
+    evaluateVisual(reachSpec, {
+      'UI-form-sent': {
+        frames: frames({
+          elements: { result: window },
+          stepTaps: taps,
+        } as Partial<VisualFramesInput>),
+      },
+    }).map((c) => [c.name, c.status]);
+  assert.deepEqual(reached([stepTap()]), [
+    ['reach', 'passed'],
+    ['visible', 'passed'],
+  ]);
+  assert.deepEqual(reached([stepTap({ hit: { kind: 'none' } })]), [
+    ['reach', 'failed'],
+    ['visible', 'passed'],
+  ]);
+});
+
+test('Шаги: scroll, clear и селектор по префиксу строгие; имя reach занято', () => {
+  const steps = (value: unknown[]) =>
+    visualSpecSchema.safeParse({
+      version: 1,
+      platform: 'ios-simulator',
+      states: [{ id: 'UI-form-empty', steps: value, assert: [{ kind: 'visible', element: 'a' }] }],
+    }).success;
+  assert.ok(
+    steps([
+      { clear: 'amount' },
+      { scroll: 'list', to: 'end' },
+      { scroll: 'list', to: { prefix: 'row-', index: 3 }, maxSwipes: 5 },
+      { tap: { prefix: 'item-add-', index: 0 } },
+      { wait: { prefix: 'row-', index: 49 } },
+    ]),
+  );
+  assert.equal(steps([{ scroll: 'list' }]), false);
+  assert.equal(steps([{ scroll: 'list', to: 'top of list' }]), false);
+  assert.equal(steps([{ scroll: 'list', to: 'end', maxSwipes: 21 }]), false);
+  assert.equal(steps([{ tap: { prefix: 'r', index: 0 } }]), false);
+  assert.equal(steps([{ tap: { prefix: 'row-', index: 50 } }]), false);
+  assert.equal(steps([{ tap: { prefix: 'row-' } }]), false);
+  assert.equal(steps([{ tap: { prefix: 'row-', index: 0, extra: 1 } }]), false);
+  assert.equal(steps([{ clear: 'amount', type: 'x' }]), false);
+  assert.equal(specWith({}, [{ kind: 'visible', element: 'a', name: 'reach' }]), false);
+});
+
+test('background: доля и цвета пишутся в system-out и при зелёном результате', () => {
+  const spec = visualSpecSchema.parse({
+    version: 1,
+    platform: 'ios-simulator',
+    states: [{ id: 'UI-form-empty', assert: [{ kind: 'background' }] }],
+  });
+  const run = (paint: (x: number, y: number) => [number, number, number]) =>
+    visualJunit(
+      evaluateVisual(spec, { 'UI-form-empty': { frames: frames(), screenshot: image(paint) } }),
+    );
+  const green = run(noise);
+  assert.equal(junitSummary(green).failures, 0);
+  assert.match(green, /<system-out>flatShare 0\.0\d\d \(порог 0\.5\), точек 9216, цвета: #/);
+  assert.match(run(flatWithCard), /<system-out>flatShare 1\.000/);
+});
+
+test('log: окна журнала по состояниям называют состояние запрещённой строки', () => {
+  const spec = visualSpecSchema.parse({
+    version: 1,
+    platform: 'ios-simulator',
+    log: { forbid: ['deprecated'] },
+    states: [
+      { id: 'UI-form-empty', assert: [{ kind: 'visible', element: 'a' }] },
+      { id: 'UI-form-sent', assert: [{ kind: 'visible', element: 'a' }] },
+    ],
+  });
+  const lines = ['app started', 'helper is deprecated', 'sent', 'late deprecated'];
+  const offsets = [0, 12, 33, 38];
+  const at = (from: number, to: number) => frames({ elements: { a: window }, log: { from, to } });
+  const result = evaluateVisual(
+    spec,
+    { 'UI-form-empty': { frames: at(0, 12) }, 'UI-form-sent': { frames: at(12, 38) } },
+    { lines, offsets },
+  );
+  const log = result.find((c) => c.classname === 'visual.log');
+  assert.equal(log?.status, 'failed');
+  assert.match(log?.message ?? '', /\[UI-form-sent\] helper is deprecated/);
+  assert.match(log?.message ?? '', /\[вне окон состояний\] late deprecated/);
+  // Без окон строки не приписываются состояниям.
+  const plain = evaluateVisual(
+    spec,
+    { 'UI-form-empty': { frames: frames({ elements: { a: window } }) } },
+    { lines, offsets },
+  ).find((c) => c.classname === 'visual.log');
+  assert.doesNotMatch(plain?.message ?? '', /\[UI-/);
+  assert.equal(
+    visualFramesSchema.safeParse({ ...at(0, 1), log: { from: 5, to: 1 } }).success,
+    false,
+  );
 });

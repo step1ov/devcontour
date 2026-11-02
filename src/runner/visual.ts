@@ -8,6 +8,7 @@ import {
   visualSpecSchema,
   type VisualCase,
   type VisualImage,
+  type VisualLogInput,
   type VisualSpec,
   type VisualStateInput,
 } from '../core/visual.ts';
@@ -99,16 +100,33 @@ async function stateInput(
   const frames = parsed.data;
   if (frames.state !== state.id)
     return { error: `${state.id}.frames.json описывает состояние ${frames.state}` };
-  if ('error' in frames) return { error: `драйвер: ${frames.error}` };
+  // Недостигнутое состояние несёт касания шагов: заблокированный шаг —
+  // провал reach, а не ошибка окружения.
+  if ('error' in frames) return { unreached: frames };
   // Снимок декодируется только там, где его читает утверждение.
   if (!state.assert.some((a) => a.kind === 'background')) return { frames };
   return { frames, screenshot: await screenshot(directory, state.id, frames.screenshot) };
 }
 
-async function logLines(directory: string): Promise<string[] | { error: string }> {
+/**
+ * Строки журнала и байтовые смещения их начал: окна `log` в frames.json
+ * задаются байтами `log.txt`, а не номерами строк.
+ */
+async function logLines(directory: string): Promise<VisualLogInput> {
   try {
-    const text = (await bounded(join(directory, 'log.txt'), LOG_LIMIT)).toString('utf8');
-    return text.split(/\r?\n/);
+    const bytes = await bounded(join(directory, 'log.txt'), LOG_LIMIT);
+    const lines: string[] = [],
+      offsets: number[] = [];
+    let start = 0;
+    while (start <= bytes.length) {
+      const end = bytes.indexOf(0x0a, start);
+      const stop = end < 0 ? bytes.length : end;
+      offsets.push(start);
+      lines.push(bytes.toString('utf8', start, stop).replace(/\r$/, ''));
+      if (end < 0) break;
+      start = end + 1;
+    }
+    return { lines, offsets };
   } catch (error) {
     return {
       error: missing(error)

@@ -24,6 +24,8 @@ export const VISUAL_STATE_TIMEOUT_MAX_MS = 60_000;
 export const VISUAL_RUN_BUDGET_MS = 420_000;
 /** Порог доли «плоских» цветов фона по умолчанию. */
 export const VISUAL_MAX_FLAT_SHARE = 0.5;
+/** testcase достижения состояния: `visual.<stateId>.reach`. */
+export const VISUAL_REACH = 'reach';
 
 const finite = z.number().finite();
 const size = z.number().finite().nonnegative();
@@ -206,11 +208,40 @@ const timeout = z.number().int().min(100).max(VISUAL_STATE_TIMEOUT_MAX_MS);
  * фреймворка может попасть в незакрытую полоску кнопки, которую пользователь
  * не видит.
  */
+/**
+ * Цель шага: id элемента или селектор по префиксу для id, создаваемых во
+ * время работы (`item-add-<uuid>`): `index`-й элемент с этим префиксом в
+ * порядке чтения — сверху вниз, затем слева направо по рамкам на экране.
+ */
+export const visualTargetSchema = z.union([
+  visualElementId,
+  z.strictObject({
+    prefix: z
+      .string()
+      .regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{1,63}$/, 'префикс id: 2–64 символа без пробелов'),
+    index: z.number().int().min(0).max(49),
+  }),
+]);
+export type VisualTarget = z.infer<typeof visualTargetSchema>;
+/** Подходит ли id элемента под цель шага. */
+export const targetMatches = (target: VisualTarget, id: string) =>
+  typeof target === 'string' ? id === target : id.startsWith(target.prefix);
+export const targetLabel = (target: VisualTarget) =>
+  typeof target === 'string' ? target : `${target.prefix}*[${target.index}]`;
+
 const step = z.union([
   z.strictObject({ launch: z.literal(true) }),
-  z.strictObject({ tap: visualElementId }),
+  z.strictObject({ tap: visualTargetSchema }),
   z.strictObject({ type: z.string().min(1).max(500) }),
-  z.strictObject({ wait: visualElementId, timeoutMs: timeout.optional() }),
+  /** Очистить поле: фокус и удаление всего текста. */
+  z.strictObject({ clear: visualTargetSchema }),
+  z.strictObject({ wait: visualTargetSchema, timeoutMs: timeout.optional() }),
+  /** Прокрутка контейнера до элемента или до конца; не больше `maxSwipes` жестов. */
+  z.strictObject({
+    scroll: visualElementId,
+    to: z.union([visualTargetSchema, z.literal('end')]),
+    maxSwipes: z.number().int().min(1).max(20).default(10),
+  }),
 ]);
 export type VisualStep = z.infer<typeof step>;
 
@@ -328,6 +359,12 @@ export const visualSpecSchema = z
       const names = new Set<string>();
       s.assert.forEach((a, position) => {
         const name = assertionId(a);
+        if (name === VISUAL_REACH)
+          context.addIssue({
+            code: 'custom',
+            path: ['states', index, 'assert', position, 'name'],
+            message: `Имя ${VISUAL_REACH} занято проверкой достижения состояния`,
+          });
         if (names.has(name))
           context.addIssue({
             code: 'custom',
@@ -381,21 +418,66 @@ const snapshot = z.strictObject({
   /** Поле в фокусе и его текст; null — фокуса нет. */
   focused: z.strictObject({ element: visualElementId, text: z.string().max(10_000) }).nullable(),
 });
+/**
+ * Кто принял касание — лучшее доказательство драйвера. Клавиатура названа
+ * явно, а не id элемента: testID `keyboard` у продукта возможен. Драйвер
+ * без hit-test (XCUITest) вычисляет так: точка в рамке клавиатуры —
+ * `keyboard`; иначе самый верхний (последний в порядке отрисовки, при
+ * равенстве — наименьший по площади) элемент, чья рамка содержит точку, —
+ * `element`; иначе `none`.
+ */
+export const visualHitSchema = z.discriminatedUnion('kind', [
+  z.strictObject({ kind: z.literal('element'), element: visualElementId }),
+  z.strictObject({ kind: z.literal('keyboard') }),
+  z.strictObject({ kind: z.literal('none') }),
+]);
+export type VisualHit = z.infer<typeof visualHitSchema>;
+const hitLabel = (hit: VisualHit) =>
+  hit.kind === 'element'
+    ? hit.element
+    : hit.kind === 'keyboard'
+      ? 'клавиатура'
+      : 'пустой участок экрана';
 const tapRecord = z.strictObject({
   element: visualElementId,
   point: z.strictObject({ x: finite, y: finite }),
-  /** Элемент, принявший касание; null — пустой участок. Драйвер обязан записать. */
-  hit: visualElementId.nullable(),
+  hit: visualHitSchema,
   before: snapshot,
   after: snapshot,
 });
 export type VisualTap = z.infer<typeof tapRecord>;
+
+/**
+ * Касание шага (`tap`, `clear`): записывается и для недостигнутого
+ * состояния — заблокированный шаг становится провалом `reach` с этим
+ * доказательством, а не ошибкой окружения.
+ */
+const stepTapRecord = z.strictObject({
+  /** Номер шага в `steps` состояния, с нуля. */
+  step: z.number().int().min(0).max(31),
+  element: visualElementId,
+  /** Рамка элемента в момент касания. */
+  frame: rect,
+  window: rect,
+  keyboard: rect.nullable(),
+  point: z.strictObject({ x: finite, y: finite }),
+  hit: visualHitSchema,
+  before: snapshot,
+  after: snapshot,
+});
+export type VisualStepTap = z.infer<typeof stepTapRecord>;
+/** Байтовое окно `log.txt`, записанное за время состояния: [from, to). */
+const logWindow = z
+  .strictObject({ from: z.number().int().min(0), to: z.number().int().min(0) })
+  .refine((w) => w.from <= w.to, 'окно журнала: from ≤ to');
 
 /** Драйвер не смог достичь или измерить состояние. */
 export const visualFramesErrorSchema = z.strictObject({
   version: z.literal(1),
   state: visualStateId,
   error: z.string().min(1).max(4000),
+  stepTaps: z.array(stepTapRecord).max(32).default([]),
+  log: logWindow.optional(),
 });
 export const visualFramesObservedSchema = z.strictObject({
   version: z.literal(1),
@@ -407,6 +489,8 @@ export const visualFramesObservedSchema = z.strictObject({
   elements: z.record(visualElementId, rect),
   /** Касания утверждений `tap-hits` по имени утверждения. */
   taps: z.record(assertionName, tapRecord).default({}),
+  stepTaps: z.array(stepTapRecord).max(32).default([]),
+  log: logWindow.optional(),
   /** Размер снимка для сырого `.rgba`; PNG несёт размер сам. */
   screenshot: z
     .strictObject({ width: z.number().int().positive(), height: z.number().int().positive() })
@@ -497,23 +581,13 @@ export function evaluateTapHits(
   if (!frame) return failed(`элемент ${a.element} не найден на экране`);
   const shown = intersect(frame, frames.window);
   if (!shown) return failed(`элемент ${a.element} вне окна`);
-  const centre = { x: shown.x + shown.width / 2, y: shown.y + shown.height / 2 };
   const tap = frames.taps[name];
   if (!tap) return environment(`драйвер не записал касание утверждения ${name}`);
   if (tap.element !== a.element)
     return environment(`драйвер записал касание ${tap.element} вместо ${a.element}`);
-  if (Math.abs(tap.point.x - centre.x) > EPS * 2 || Math.abs(tap.point.y - centre.y) > EPS * 2)
-    return environment(
-      `касание (${fmt(tap.point.x)}, ${fmt(tap.point.y)}) не в центре видимой рамки ` +
-        `(${fmt(centre.x)}, ${fmt(centre.y)}): драйвер нарушил договор координатного касания`,
-    );
-  const problems: string[] = [];
-  if (frames.keyboard && inside(tap.point, frames.keyboard))
-    problems.push(
-      `точка касания (${fmt(tap.point.x)}, ${fmt(tap.point.y)}) под клавиатурой y ≥ ${fmt(frames.keyboard.y)}`,
-    );
-  if (tap.hit !== a.element)
-    problems.push(`касание принял ${tap.hit ?? 'пустой участок экрана'}, а не ${a.element}`);
+  const offCentre = centreProblem(shown, tap.point);
+  if (offCentre) return environment(offCentre);
+  const problems = tapProblems(tap, frames.keyboard);
   if ('visible' in a.expect) {
     const target = a.expect.visible;
     if (!tap.after.visible.includes(target)) problems.push(`после касания ${target} не появился`);
@@ -526,8 +600,37 @@ export function evaluateTapHits(
     else if (tap.after.visible.includes(target))
       problems.push(`после касания ${target} не скрылся`);
   }
-  // Текст сравнивается, только пока фокус на том же поле: отправка формы
-  // законно снимает фокус, а набор в чужую клавиатуру его сохраняет.
+  return problems.length ? failed(`${a.element}: ${problems.join('; ')}`) : passed();
+}
+
+/** Касание не в центре видимой рамки — нарушение договора драйвером. */
+function centreProblem(shown: Rect, point: { x: number; y: number }) {
+  const centre = { x: shown.x + shown.width / 2, y: shown.y + shown.height / 2 };
+  if (Math.abs(point.x - centre.x) <= EPS * 2 && Math.abs(point.y - centre.y) <= EPS * 2)
+    return undefined;
+  return (
+    `касание (${fmt(point.x)}, ${fmt(point.y)}) не в центре видимой рамки ` +
+    `(${fmt(centre.x)}, ${fmt(centre.y)}): драйвер нарушил договор координатного касания`
+  );
+}
+
+/**
+ * Признаки касания мимо цели: точка под клавиатурой, касание принял не
+ * элемент, текст поля в фокусе изменился. Текст сравнивается, только пока
+ * фокус на том же поле: отправка формы законно снимает фокус, а набор в
+ * чужую клавиатуру его сохраняет.
+ */
+function tapProblems(
+  tap: Pick<VisualTap, 'element' | 'point' | 'hit' | 'before' | 'after'>,
+  keyboard: Rect | null,
+) {
+  const problems: string[] = [];
+  if (keyboard && inside(tap.point, keyboard))
+    problems.push(
+      `точка касания (${fmt(tap.point.x)}, ${fmt(tap.point.y)}) под клавиатурой y ≥ ${fmt(keyboard.y)}`,
+    );
+  if (tap.hit.kind !== 'element' || tap.hit.element !== tap.element)
+    problems.push(`касание принял ${hitLabel(tap.hit)}, а не ${tap.element}`);
   const field = tap.before.focused;
   if (
     field &&
@@ -538,7 +641,46 @@ export function evaluateTapHits(
       `касание изменило текст поля ${field.element} в фокусе: ${JSON.stringify(field.text)} → ` +
         JSON.stringify(tap.after.focused.text),
     );
-  return problems.length ? failed(`${a.element}: ${problems.join('; ')}`) : passed();
+  return problems;
+}
+
+/**
+ * `reach`: состояние достигнуто, и ни одно касание шага не ушло мимо цели.
+ * Заблокированный шаг (точка под клавиатурой, касание принял другой
+ * элемент, набор в поле) — провал продукта с доказательством касания, даже
+ * если драйвер дальше не смог достичь состояния. Сбой драйвера без такого
+ * шага — ошибка окружения.
+ */
+export function evaluateReach(state: VisualState, input: VisualStateInput): VisualOutcome {
+  if ('error' in input) return environment(input.error);
+  const observed = 'unreached' in input ? input.unreached : input.frames;
+  const blocked: string[] = [];
+  for (const tap of observed.stepTaps) {
+    const declared = state.steps[tap.step];
+    const target =
+      declared && 'tap' in declared
+        ? declared.tap
+        : declared && 'clear' in declared
+          ? declared.clear
+          : undefined;
+    if (!target || !targetMatches(target, tap.element))
+      return environment(
+        `запись касания шага ${tap.step} (${tap.element}) не соответствует шагу спецификации`,
+      );
+    const shown = intersect(tap.frame, tap.window);
+    if (!shown) {
+      blocked.push(`шаг ${tap.step} ${targetLabel(target)}: элемент ${tap.element} вне окна`);
+      continue;
+    }
+    const offCentre = centreProblem(shown, tap.point);
+    if (offCentre) return environment(`шаг ${tap.step}: ${offCentre}`);
+    const problems = tapProblems(tap, tap.keyboard);
+    if (problems.length)
+      blocked.push(`шаг ${tap.step} ${targetLabel(target)}: ${problems.join('; ')}`);
+  }
+  if (blocked.length)
+    return failed(('unreached' in input ? 'состояние не достигнуто: ' : '') + blocked.join('\n'));
+  return 'unreached' in input ? environment(`драйвер: ${input.unreached.error}`) : passed();
 }
 
 /** Сетка выборки фона: до GRID × GRID точек. */
@@ -608,20 +750,24 @@ export function evaluateBackground(
     return failed(`в области оценки фона ${total} точек выборки, нужно не меньше ${MIN_SAMPLES}`);
   const top = [...counts.entries()].sort((x, y) => y[1] - x[1]).slice(0, TOP_COLORS);
   const flatShare = top.reduce((sum, [, n]) => sum + n, 0) / total;
-  if (flatShare <= a.maxFlatShare) return { ...passed(), flatShare };
   const hex = (key: number) =>
     '#' +
     [(key >> 10) & 31, (key >> 5) & 31, key & 31]
       .map((c) => (c << 3).toString(16).padStart(2, '0'))
       .join('')
       .toUpperCase();
+  const colors = top.map(([key, n]) => `${hex(key)} ${Math.round((n / total) * 100)}%`).join(', ');
+  // Доля и цвета остаются в evidence и при зелёном результате: видно, насколько
+  // фон близок к порогу.
+  const output = `flatShare ${flatShare.toFixed(3)} (порог ${a.maxFlatShare}), точек ${total}, цвета: ${colors}`;
+  if (flatShare <= a.maxFlatShare) return { ...passed(), flatShare, output };
   return {
     ...failed(
       `доля трёх самых частых цветов ${flatShare.toFixed(2)} > ${a.maxFlatShare} ` +
-        `(${top.map(([key, n]) => `${hex(key)} ${Math.round((n / total) * 100)}%`).join(', ')}): ` +
-        'фон области — плоская заливка',
+        `(${colors}): фон области — плоская заливка`,
     ),
     flatShare,
+    output,
   };
 }
 
@@ -629,19 +775,28 @@ export function evaluateBackground(
 const LOG_EXAMPLES = 5;
 
 /** `log-forbid`: строки журнала, совпавшие с запретом и не разрешённые явно. */
-export function evaluateLog(log: NonNullable<VisualSpec['log']>, lines: string[]): VisualOutcome {
+export function evaluateLog(
+  log: NonNullable<VisualSpec['log']>,
+  lines: string[],
+  /** Состояние, в окне журнала которого записана строка, если драйвер записал окна. */
+  origin?: (index: number) => string | undefined,
+): VisualOutcome {
   // Пустой журнал не доказывает отсутствие предупреждений: захват не подтверждён.
   if (!lines.some((line) => line.trim()))
     return environment('журнал прогона пуст: захват журнала не подтверждён');
   const forbid = log.forbid.map((p) => new RegExp(p, 'i'));
   const allow = log.allow.map((a) => new RegExp(a.pattern, 'i'));
   const allowed = log.allow.map(() => 0);
-  const found = lines.filter((line) => {
-    if (!forbid.some((r) => r.test(line))) return false;
+  const found: string[] = [];
+  lines.forEach((line, index) => {
+    if (!forbid.some((r) => r.test(line))) return;
     const by = allow.findIndex((r) => r.test(line));
-    if (by < 0) return true;
-    allowed[by]++;
-    return false;
+    if (by >= 0) {
+      allowed[by]++;
+      return;
+    }
+    const text = line.slice(0, 300);
+    found.push(origin ? `[${origin(index) ?? 'вне окон состояний'}] ${text}` : text);
   });
   // Число пропущенных каждым разрешением строк остаётся в evidence: слишком
   // широкое разрешение видно, даже когда testcase зелёный.
@@ -655,11 +810,7 @@ export function evaluateLog(log: NonNullable<VisualSpec['log']>, lines: string[]
   if (!found.length) return { ...passed(), output };
   return {
     ...failed(
-      `запрещённых строк журнала: ${found.length}\n` +
-        found
-          .slice(0, LOG_EXAMPLES)
-          .map((line) => line.slice(0, 300))
-          .join('\n'),
+      `запрещённых строк журнала: ${found.length}\n` + found.slice(0, LOG_EXAMPLES).join('\n'),
     ),
     output,
   };
@@ -672,7 +823,12 @@ export type VisualCase = VisualOutcome & { classname: string; name: string };
 
 /** Наблюдения одного состояния; отсутствующий файл — `{ error }` от читателя. */
 export type VisualStateInput =
-  { error: string } | { frames: VisualFrames; screenshot?: VisualImage | { error: string } };
+  | { error: string }
+  | { unreached: z.infer<typeof visualFramesErrorSchema> }
+  | { frames: VisualFrames; screenshot?: VisualImage | { error: string } };
+
+/** Журнал прогона: строки и, если известны, байтовые смещения их начал. */
+export type VisualLogInput = string[] | { lines: string[]; offsets?: number[] } | { error: string };
 
 /** testcase журнала: одна проверка на прогон, вне состояний. */
 export const VISUAL_LOG_CASE = { classname: 'visual.log', name: 'no-forbidden' } as const;
@@ -685,42 +841,59 @@ export const VISUAL_LOG_CASE = { classname: 'visual.log', name: 'no-forbidden' }
 export function evaluateVisual(
   spec: VisualSpec,
   states: Readonly<Record<string, VisualStateInput | undefined>>,
-  log?: string[] | { error: string },
+  log?: VisualLogInput,
 ): VisualCase[] {
   const cases: VisualCase[] = [];
+  const windows: { state: string; from: number; to: number }[] = [];
   for (const s of spec.states) {
     const input = states[s.id] ?? { error: `драйвер не записал наблюдения состояния ${s.id}` };
+    const observed =
+      'frames' in input ? input.frames : 'unreached' in input ? input.unreached : undefined;
+    if (observed?.log) windows.push({ state: s.id, ...observed.log });
+    const reach = evaluateReach(s, input);
+    cases.push({ classname: `visual.${s.id}`, name: VISUAL_REACH, ...reach });
     for (const a of s.assert) {
       const head = { classname: `visual.${s.id}`, name: assertionId(a) };
       const outcome = (): VisualOutcome => {
         if ('error' in input) return environment(input.error);
+        if ('unreached' in input)
+          return reach.status === 'failed'
+            ? failed(`состояние не достигнуто: см. visual.${s.id}.${VISUAL_REACH}`)
+            : environment(`драйвер: ${input.unreached.error}`);
         if (a.kind === 'visible') return evaluateVisible(a, input.frames);
         if (a.kind === 'tap-hits') return evaluateTapHits(a, input.frames);
         const shot = input.screenshot;
         if (!shot) return environment(`нет снимка экрана состояния ${s.id}`);
         if ('error' in shot) return environment(shot.error);
-        const { status, message } = evaluateBackground(a, input.frames, shot);
-        return { status, message };
+        const { status, message, output } = evaluateBackground(a, input.frames, shot);
+        return { status, message, output };
       };
       cases.push({ ...head, ...outcome() });
     }
   }
-  if (spec.log)
-    cases.push({
-      ...VISUAL_LOG_CASE,
-      ...(!log
-        ? environment('драйвер не записал журнал прогона')
-        : 'error' in log
-          ? environment(log.error)
-          : evaluateLog(spec.log, log)),
-    });
+  const rules = spec.log;
+  if (rules) {
+    const outcome = (): VisualOutcome => {
+      if (!log) return environment('драйвер не записал журнал прогона');
+      if ('error' in log) return environment(log.error);
+      if (Array.isArray(log)) return evaluateLog(rules, log);
+      const offsets = log.offsets;
+      const origin =
+        offsets && windows.length
+          ? (index: number) =>
+              windows.find((w) => offsets[index] >= w.from && offsets[index] < w.to)?.state
+          : undefined;
+      return evaluateLog(rules, log.lines, origin);
+    };
+    cases.push({ ...VISUAL_LOG_CASE, ...outcome() });
+  }
   return cases;
 }
 
 /** Символы, недопустимые в XML 1.0, удаляются; разметка экранируется. */
 const xml = (value: string) =>
   value
-    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F￾￿]/g, '')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g, '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')

@@ -159,6 +159,7 @@ test('visual evaluate: дефектные наблюдения дают пров
   assert.deepEqual(
     summary.cases.map((c) => [c.id, c.status]),
     [
+      ['visual.UI-form-focused.reach', 'passed'],
       ['visual.UI-form-focused.visible', 'failed'],
       ['visual.UI-form-focused.background', 'passed'],
       ['visual.log.no-forbidden', 'failed'],
@@ -182,7 +183,7 @@ test('visual evaluate: дефектные наблюдения дают пров
   );
   assert.equal(good.status, 0, good.stdout + good.stderr);
   const green = junitSummary(readFileSync(fixed, 'utf8'));
-  assert.equal(green.tests, 3);
+  assert.equal(green.tests, 4);
   assert.equal(green.failures, 0);
 });
 
@@ -203,9 +204,9 @@ test('visual evaluate: нет наблюдений — ошибка окруже
   );
   assert.equal(run.status, 1);
   const xml = readFileSync(report, 'utf8');
-  assert.equal((xml.match(/<error type="environment"/g) ?? []).length, 3);
+  assert.equal((xml.match(/<error type="environment"/g) ?? []).length, 4);
   assert.doesNotMatch(xml, /<skipped/);
-  assert.equal(junitSummary(xml).failures, 3);
+  assert.equal(junitSummary(xml).failures, 4);
 
   writeFileSync(specPath, JSON.stringify({ ...spec, states: [] }));
   const invalid = join(root, 'invalid.xml');
@@ -316,7 +317,10 @@ test('Наблюдения: плоский PNG падает, .rgba читает�
     'UI-form-focused.frames.json': frames(),
     'UI-form-focused.png': encodePng(390, 844, 3, flat),
   });
-  assert.deepEqual(status(flatPng.xml), [['visual.UI-form-focused.background', 'failed']]);
+  assert.deepEqual(status(flatPng.xml), [
+    ['visual.UI-form-focused.reach', 'passed'],
+    ['visual.UI-form-focused.background', 'failed'],
+  ]);
   assert.match(flatPng.xml, /type="assertion"/);
 
   const size = { screenshot: { width: 390, height: 844 } };
@@ -329,7 +333,10 @@ test('Наблюдения: плоский PNG падает, .rgba читает�
     'UI-form-focused.frames.json': frames(size),
     'UI-form-focused.rgba': shot(flat),
   });
-  assert.deepEqual(status(flatRgba.xml), [['visual.UI-form-focused.background', 'failed']]);
+  assert.deepEqual(status(flatRgba.xml), [
+    ['visual.UI-form-focused.reach', 'passed'],
+    ['visual.UI-form-focused.background', 'failed'],
+  ]);
 
   const corrupt = await evaluate({
     'UI-form-focused.frames.json': frames(size),
@@ -337,6 +344,7 @@ test('Наблюдения: плоский PNG падает, .rgba читает�
     'UI-form-focused.rgba': shot(noise),
   });
   assert.equal(corrupt.result.errors, 1);
+  assert.equal(corrupt.result.tests, 2);
   assert.match(
     corrupt.xml,
     /<error type="environment" message="снимок UI-form-focused.png не читается/,
@@ -393,6 +401,7 @@ test('Журнал читается целиком: строка 55 000 не т�
     logSpec,
   );
   assert.deepEqual(status(late.xml), [
+    ['visual.UI-form-focused.reach', 'passed'],
     ['visual.UI-form-focused.visible', 'passed'],
     ['visual.log.no-forbidden', 'failed'],
   ]);
@@ -429,4 +438,68 @@ test('PNG: порядок блоков, фильтр строки и объём 
   assert.throws(() => decodePng(rawPng(Buffer.from([5, 1, 2, 3, 4, 5, 6]))), /фильтр PNG 5/);
   assert.throws(() => decodePng(rawPng(Buffer.concat([row, Buffer.alloc(7)]))), /размер данных/);
   assert.throws(() => decodePng(rawPng(row.subarray(0, 5))), /размер данных/);
+});
+
+test('Наблюдения: окна журнала в байтах, недостигнутое состояние с касанием шага', async () => {
+  // Многобайтовые символы и CRLF: окна задаются байтами файла, не символами.
+  const head = 'запуск приложения\r\n';
+  const log = head + 'helper is deprecated\n';
+  const window = { from: Buffer.byteLength(head), to: Buffer.byteLength(log) };
+  const spec = {
+    version: 1,
+    platform: 'ios-simulator',
+    log: { forbid: ['deprecated'] },
+    states: [
+      {
+        id: 'UI-form-focused',
+        steps: [{ tap: 'submit' }],
+        assert: [{ kind: 'visible', element: 'submit' }],
+      },
+    ],
+  };
+  const blocked = await evaluate(
+    {
+      'UI-form-focused.frames.json': JSON.stringify({
+        version: 1,
+        state: 'UI-form-focused',
+        error: 'step wait: not shown',
+        log: window,
+        stepTaps: [
+          {
+            step: 0,
+            element: 'submit',
+            frame: { x: 10, y: 281, width: 175, height: 28 },
+            window: { x: 0, y: 0, width: 195, height: 422 },
+            keyboard: { x: 0, y: 290, width: 195, height: 132 },
+            point: { x: 97.5, y: 295 },
+            hit: { kind: 'keyboard' },
+            before: { visible: ['submit'], focused: { element: 'amount', text: '60' } },
+            after: { visible: ['submit'], focused: { element: 'amount', text: '602' } },
+          },
+        ],
+      }),
+      'log.txt': log,
+    },
+    spec,
+  );
+  assert.deepEqual(status(blocked.xml), [
+    ['visual.UI-form-focused.reach', 'failed'],
+    ['visual.UI-form-focused.visible', 'failed'],
+    ['visual.log.no-forbidden', 'failed'],
+  ]);
+  assert.match(
+    blocked.xml,
+    /type="assertion" message="состояние не достигнуто: шаг 0 submit: точка касания/,
+  );
+  assert.match(blocked.xml, /\[UI-form-focused\] helper is deprecated/);
+  assert.match(blocked.xml, /&quot;60&quot; → &quot;602&quot;/);
+  // Окно, не покрывающее строку, не приписывает её состоянию.
+  const outside = await evaluate(
+    {
+      'UI-form-focused.frames.json': frames({ log: { from: 0, to: window.from } }),
+      'log.txt': log,
+    },
+    spec,
+  );
+  assert.match(outside.xml, /\[вне окон состояний\] helper is deprecated/);
 });
