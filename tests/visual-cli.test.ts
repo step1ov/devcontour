@@ -402,3 +402,31 @@ test('Журнал читается целиком: строка 55 000 не т�
   );
   assert.match(empty.xml, /<error type="environment" message="журнал прогона пуст/);
 });
+
+// PNG 2×1 RGB из готовых строк: фильтр и объём данных задаёт тест.
+const rawPng = (rows: Buffer, before: Buffer[] = [], ihdrCount = 1) => {
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(2, 0);
+  header.writeUInt32BE(1, 4);
+  header.set([8, 2, 0, 0, 0], 8);
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    ...before,
+    ...Array.from({ length: ihdrCount }, () => chunk('IHDR', header)),
+    chunk('IDAT', deflateSync(rows)),
+    chunk('IEND', Buffer.alloc(0)),
+  ]);
+};
+
+test('PNG: порядок блоков, фильтр строки и объём данных проверяются', () => {
+  const row = Buffer.from([0, 1, 2, 3, 4, 5, 6]);
+  assert.deepEqual([...decodePng(rawPng(row)).data], [1, 2, 3, 255, 4, 5, 6, 255]);
+  assert.throws(() => decodePng(rawPng(row, [], 2)), /больше одного IHDR/);
+  assert.throws(
+    () => decodePng(rawPng(row, [chunk('tEXt', Buffer.from('a\0b'))])),
+    /начинаться с IHDR/,
+  );
+  assert.throws(() => decodePng(rawPng(Buffer.from([5, 1, 2, 3, 4, 5, 6]))), /фильтр PNG 5/);
+  assert.throws(() => decodePng(rawPng(Buffer.concat([row, Buffer.alloc(7)]))), /размер данных/);
+  assert.throws(() => decodePng(rawPng(row.subarray(0, 5))), /размер данных/);
+});

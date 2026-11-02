@@ -537,3 +537,62 @@ test('log-forbid: пустой журнал — ошибка окружения,
   assert.equal(evaluateLog(log, ['', '  ']).status, 'error');
   assert.equal(evaluateLog(log, ['app started']).status, 'passed');
 });
+
+test('Разрешения журнала: обходы запрета отклоняются, конкретное разрешение принимается', () => {
+  const allow = (forbid: string[], pattern: string) =>
+    specWith({ log: { forbid, allow: [{ pattern, reason: 'известный долг' }] } });
+  const rejected: [string[], string][] = [
+    [['deprecated'], ':'],
+    [['deprecated'], 'warn'],
+    [['deprecated'], 'is'],
+    [['^WARN\\b'], 'WARN '],
+    [['deprecat[a-z]'], 'deprecated'],
+    [['foo|bar'], '^bar'],
+    [['foo|bar'], 'bar'],
+    // Альтернатива разрешения проверяется отдельно: конкретная часть не прикрывает общую.
+    [['deprecated'], 'Require cycle|:'],
+    [['deprecat[a-z]'], 'deprecation:'],
+    [['warning: [a-z]'], 'warning: x'],
+    // Свой текст есть, но разрешение покрывает любую строку запрета — пример строки ловит.
+    [['Warning: helper deprecated soon'], 'helper deprecated'],
+    [['Warning: [0-9] deprecated'], 'Warning: \\d deprecated'],
+  ];
+  for (const [forbid, pattern] of rejected)
+    assert.equal(allow(forbid, pattern), false, `${forbid.join(',')} + ${pattern}`);
+  const accepted: [string[], string][] = [
+    [['deprecated', '^WARN\\b'], 'WARN Require cycle'],
+    [['deprecated'], 'Require cycle'],
+    [['deprecat[a-z]'], 'legacyHelper is deprecated'],
+    [['foo|bar'], 'bar in vendor bundle'],
+  ];
+  for (const [forbid, pattern] of accepted)
+    assert.equal(allow(forbid, pattern), true, `${forbid.join(',')} + ${pattern}`);
+});
+
+test('log-forbid: число строк, пропущенных каждым разрешением, попадает в system-out', () => {
+  const spec = visualSpecSchema.parse({
+    version: 1,
+    platform: 'ios-simulator',
+    log: {
+      forbid: ['deprecated|obsolete', '^WARN\\b'],
+      allow: [{ pattern: 'WARN Require cycle', reason: 'известный долг' }],
+    },
+    states: [{ id: 'UI-form-empty', assert: [{ kind: 'visible', element: 'a' }] }],
+  });
+  const lines = ['app started', 'WARN Require cycle: a -> b', 'WARN Require cycle: c -> d'];
+  const clean = evaluateLog(spec.log!, lines);
+  assert.equal(clean.status, 'passed');
+  assert.match(clean.output ?? '', /"WARN Require cycle" \(известный долг\): пропущено строк 2/);
+  const dirty = evaluateLog(spec.log!, [...lines, 'helper is obsolete']);
+  assert.equal(dirty.status, 'failed');
+  assert.match(dirty.output ?? '', /пропущено строк 2/);
+  const xml = visualJunit(
+    evaluateVisual(
+      spec,
+      { 'UI-form-empty': { frames: frames({ elements: { a: window } }) } },
+      lines,
+    ),
+  );
+  assert.match(xml, /<system-out>проверено строк журнала: 3\n.*пропущено строк 2<\/system-out>/);
+  assert.equal(junitSummary(xml).failures, 0);
+});

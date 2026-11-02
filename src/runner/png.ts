@@ -56,7 +56,13 @@ export function decodePng(file: Buffer): VisualImage {
   if (!data.length) throw new Error('в PNG нет данных изображения');
   const { width, height, channels } = header;
   const stride = width * channels;
-  const raw = inflateSync(Buffer.concat(data), { maxOutputLength: (stride + 1) * height });
+  let raw: Buffer;
+  try {
+    raw = inflateSync(Buffer.concat(data), { maxOutputLength: (stride + 1) * height });
+  } catch {
+    // Лишние данные превышают ожидаемый размер, повреждённые не распаковываются.
+    throw new Error('размер данных PNG не совпадает или данные повреждены');
+  }
   if (raw.length !== (stride + 1) * height) throw new Error('размер данных PNG не совпадает');
   const out = new Uint8Array(width * height * 4);
   let previous = new Uint8Array(stride);

@@ -80,9 +80,124 @@ const pattern = z
   });
 /** Строки, которые разрешающий шаблон не должен покрывать: иначе он разрешает всё. */
 const NEUTRAL_LINES = ['', ' ', 'a', 'ok', '0'];
-/** Текст запрещающего шаблона без якорей и escape — пример строки, которую он ловит. */
-const forbiddenSample = (value: string) =>
-  value.replace(/\\[bB]|[$^]/g, '').replace(/\\(.)/g, '$1');
+/** Собственный текст разрешения: не короче этого, и не только текст запрета. */
+const ALLOW_MIN_LITERAL = 8;
+const ALLOW_MIN_OWN = 4;
+
+/** Альтернативы верхнего уровня шаблона журнала (групп в шаблонах нет). */
+export function patternAlternatives(value: string): string[] {
+  const out: string[] = [];
+  let current = '',
+    inClass = false;
+  for (let i = 0; i < value.length; i++) {
+    const c = value[i];
+    if (c === '\\') {
+      current += c + (value[i + 1] ?? '');
+      i++;
+      continue;
+    }
+    if (inClass) inClass = c !== ']';
+    else if (c === '[') inClass = true;
+    else if (c === '|') {
+      out.push(current);
+      current = '';
+      continue;
+    }
+    current += c;
+  }
+  out.push(current);
+  return out;
+}
+
+/** Символ для escape-класса в примере строки; undefined — буквальный символ. */
+const ESCAPE_SAMPLES: Record<string, string> = {
+  b: ' ',
+  B: '',
+  d: '0',
+  D: 'a',
+  w: 'a',
+  W: ' ',
+  s: ' ',
+  S: 'a',
+  n: '\n',
+  t: '\t',
+  r: '\r',
+  f: '\f',
+  v: '\v',
+};
+/** Печатные ASCII — кандидаты на член класса `[...]`. */
+const PRINTABLE = Array.from({ length: 95 }, (_, i) => String.fromCharCode(32 + i));
+
+/**
+ * Разбор альтернативы на токены: пример строки, которую она ловит (класс
+ * заменён его членом, `\b` — пробелом, якоря опущены), и буквальные отрезки.
+ */
+function patternTokens(alternative: string) {
+  const tokens: { sample: string; literal: boolean }[] = [];
+  for (let i = 0; i < alternative.length; i++) {
+    const c = alternative[i];
+    if (c === '\\') {
+      const next = alternative[i + 1] ?? '';
+      i++;
+      const sample = ESCAPE_SAMPLES[next];
+      tokens.push(
+        sample === undefined ? { sample: next, literal: true } : { sample, literal: false },
+      );
+    } else if (c === '[') {
+      let end = i + 1;
+      while (end < alternative.length && alternative[end] !== ']')
+        end += alternative[end] === '\\' ? 2 : 1;
+      const member = new RegExp(`^${alternative.slice(i, end + 1)}$`, 'i');
+      tokens.push({ sample: PRINTABLE.find((ch) => member.test(ch)) ?? '', literal: false });
+      i = end;
+    } else if (c === '^' || c === '$') tokens.push({ sample: '', literal: false });
+    else if (c === '.') tokens.push({ sample: 'a', literal: false });
+    else tokens.push({ sample: c, literal: true });
+  }
+  return tokens;
+}
+const patternSample = (alternative: string) =>
+  patternTokens(alternative)
+    .map((t) => t.sample)
+    .join('');
+function longestLiteral(alternative: string) {
+  let best = '',
+    run = '';
+  for (const t of patternTokens(alternative)) {
+    run = t.literal ? run + t.sample : '';
+    if (run.length > best.length) best = run;
+  }
+  return best;
+}
+
+/**
+ * Разрешение должно быть уже запрета: каждая его альтернатива не покрывает
+ * нейтральную строку и пример запрещённой строки и несёт собственный
+ * буквальный текст — не короче 8 символов и не сводящийся к тексту запрета с
+ * разделителями. Иначе `:` или `warn` молча разрешили бы настоящие
+ * предупреждения.
+ */
+export function allowPatternProblem(allow: string, forbid: string[]): string | undefined {
+  const forbidden = forbid.flatMap(patternAlternatives);
+  const samples = forbidden.map(patternSample);
+  for (const alternative of patternAlternatives(allow)) {
+    const matcher = new RegExp(alternative, 'i');
+    const neutral = NEUTRAL_LINES.find((line) => matcher.test(line));
+    if (neutral !== undefined)
+      return `разрешение ${alternative} покрывает обычную строку ${JSON.stringify(neutral)}`;
+    const sample = samples.find((line) => matcher.test(line));
+    if (sample !== undefined)
+      return `разрешение ${alternative} покрывает запрещённую строку ${JSON.stringify(sample)}`;
+    const literal = longestLiteral(alternative);
+    if (literal.length < ALLOW_MIN_LITERAL)
+      return `разрешение ${alternative}: нужен буквальный текст не короче ${ALLOW_MIN_LITERAL} символов`;
+    let own = literal;
+    for (const f of forbidden) if (f) own = own.replace(new RegExp(f, 'gi'), '');
+    if (own.replace(/[^\p{L}\p{N}]/gu, '').length < ALLOW_MIN_OWN)
+      return `разрешение ${alternative} сводится к тексту запрета и разделителям`;
+  }
+  return undefined;
+}
 const timeout = z.number().int().min(100).max(VISUAL_STATE_TIMEOUT_MAX_MS);
 
 /**
@@ -235,17 +350,12 @@ export const visualSpecSchema = z
       });
     });
     spec.log?.allow.forEach((a, index) => {
-      const allow = new RegExp(a.pattern, 'i');
-      const neutral = NEUTRAL_LINES.find((line) => allow.test(line));
-      const forbidden = spec.log?.forbid.find((f) => allow.test(forbiddenSample(f)));
-      if (neutral !== undefined || forbidden !== undefined)
+      const problem = allowPatternProblem(a.pattern, spec.log?.forbid ?? []);
+      if (problem)
         context.addIssue({
           code: 'custom',
           path: ['log', 'allow', index, 'pattern'],
-          message:
-            neutral !== undefined
-              ? `разрешающий шаблон покрывает обычную строку ${JSON.stringify(neutral)}`
-              : `разрешающий шаблон покрывает сам запрет ${forbidden}`,
+          message: problem,
         });
     });
     if (budget > VISUAL_RUN_BUDGET_MS)
@@ -315,6 +425,8 @@ export type VisualImage = { width: number; height: number; data: Uint8Array };
 export type VisualOutcome = {
   status: 'passed' | 'failed' | 'error';
   message?: string;
+  /** Сведения для evidence (`<system-out>`), при любом статусе. */
+  output?: string;
 };
 const passed = (): VisualOutcome => ({ status: 'passed' });
 const failed = (message: string): VisualOutcome => ({ status: 'failed', message });
@@ -523,17 +635,34 @@ export function evaluateLog(log: NonNullable<VisualSpec['log']>, lines: string[]
     return environment('журнал прогона пуст: захват журнала не подтверждён');
   const forbid = log.forbid.map((p) => new RegExp(p, 'i'));
   const allow = log.allow.map((a) => new RegExp(a.pattern, 'i'));
-  const found = lines.filter(
-    (line) => forbid.some((r) => r.test(line)) && !allow.some((r) => r.test(line)),
-  );
-  if (!found.length) return passed();
-  return failed(
-    `запрещённых строк журнала: ${found.length}\n` +
-      found
-        .slice(0, LOG_EXAMPLES)
-        .map((line) => line.slice(0, 300))
-        .join('\n'),
-  );
+  const allowed = log.allow.map(() => 0);
+  const found = lines.filter((line) => {
+    if (!forbid.some((r) => r.test(line))) return false;
+    const by = allow.findIndex((r) => r.test(line));
+    if (by < 0) return true;
+    allowed[by]++;
+    return false;
+  });
+  // Число пропущенных каждым разрешением строк остаётся в evidence: слишком
+  // широкое разрешение видно, даже когда testcase зелёный.
+  const output = [
+    `проверено строк журнала: ${lines.length}`,
+    ...log.allow.map(
+      (a, i) =>
+        `разрешение ${JSON.stringify(a.pattern)} (${a.reason}): пропущено строк ${allowed[i]}`,
+    ),
+  ].join('\n');
+  if (!found.length) return { ...passed(), output };
+  return {
+    ...failed(
+      `запрещённых строк журнала: ${found.length}\n` +
+        found
+          .slice(0, LOG_EXAMPLES)
+          .map((line) => line.slice(0, 300))
+          .join('\n'),
+    ),
+    output,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -621,13 +750,14 @@ export function visualJunit(input: readonly VisualCase[]): string {
   const errors = cases.filter((c) => c.status === 'error').length;
   const body = cases.map((c) => {
     const open = `    <testcase classname="${attribute(c.classname)}" name="${attribute(c.name)}"`;
-    if (c.status === 'passed') return `${open}/>`;
+    const out = c.output ? `\n      <system-out>${xml(c.output)}</system-out>` : '';
+    if (c.status === 'passed') return out ? `${open}>${out}\n    </testcase>` : `${open}/>`;
     const tag = c.status === 'failed' ? 'failure' : 'error';
     const type = c.status === 'failed' ? 'assertion' : 'environment';
     const message = c.message ?? '';
     return (
       `${open}>\n      <${tag} type="${type}" message="${attribute(message.split('\n')[0])}">` +
-      `${xml(message)}</${tag}>\n    </testcase>`
+      `${xml(message)}</${tag}>${out}\n    </testcase>`
     );
   });
   const counts = `tests="${cases.length}" failures="${failures}" errors="${errors}" skipped="0"`;
