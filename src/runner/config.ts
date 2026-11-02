@@ -5,7 +5,7 @@ import { isAbsolute, resolve, dirname, join, sep } from 'node:path';
 import { repositories } from '../core/repositories.ts';
 import { packKey, resolveProfile } from './packs.ts';
 import { checkoutRootFor } from './checkout-root.ts';
-import { configSchema, type Config } from '../core/model.ts';
+import { configSchema, repositorySchema, type Config } from '../core/model.ts';
 import {
   bytesDigest,
   configSources,
@@ -20,12 +20,17 @@ import { configuredSpellings } from '../core/check-store.ts';
  */
 export function loadConfig(path: string, text = readFileSync(path, 'utf8')): Config {
   const raw = JSON.parse(text);
+  let ignoredCopies: IgnoredComponentCopy[] = [];
   // Хэш ровно тех байтов, что разобраны: главного файла и component config.
   const sources: ConfigSourceFile[] = [
     { path: resolve(path), real: realpathSync(path), sha: bytesDigest(text) },
   ];
   if (raw.repositories?.length) {
-    raw.repositories = raw.repositories.map((r: any) => readComponentConfig(r, sources));
+    const ignored: IgnoredComponentCopy[] = [];
+    raw.repositories = raw.repositories.map((r: any) =>
+      readComponentConfig(r, sources, false, ignored),
+    );
+    ignoredCopies = ignored;
     // Верхнеуровневые gates и protectedPaths при списке репозиториев —
     // производная копия первого компонента: исполнение берёт их из
     // компонента (`repositories(c)`). Копия, сохранённая в config.json,
@@ -36,6 +41,7 @@ export function loadConfig(path: string, text = readFileSync(path, 'utf8')): Con
     raw.gates ??= raw.repositories[0].gates;
   }
   const c = configSchema.parse(raw);
+  if (ignoredCopies.length) ignoredComponentCopies.set(c, ignoredCopies);
   // Оба значения — после разбора: у компонента без своего списка
   // protectedPaths действует умолчание схемы компонента, а не прежняя копия.
   if (c.repositories.length) {
@@ -167,7 +173,43 @@ export function loadConfig(path: string, text = readFileSync(path, 'utf8')): Con
   return c;
 }
 
-export function readComponentConfig(entry: any, sources?: ConfigSourceFile[]) {
+/**
+ * Поля записи репозитория, которыми владеет общая конфигурация, а не файл
+ * компонента: топология (`id`, `path`, `dependsOn`, `configFile`) и роли,
+ * пришедшие из профиля компонента (они складываются с ролями файла).
+ */
+export const registryOwnedKeys = ['id', 'path', 'dependsOn', 'configFile', 'roles'] as const;
+const registryOwned = new Set<string>(registryOwnedKeys);
+/** Поле компонента, копия которого в config.json не применяется: действует файл. */
+export type IgnoredComponentCopy = { repositoryId: string; file: string; keys: string[] };
+/** Расхождения копий, проигнорированных при загрузке: их называет doctor. */
+export const ignoredComponentCopies = new WeakMap<Config, IgnoredComponentCopy[]>();
+/** Запись репозитория для config.json: при `configFile` — только поля общей записи. */
+export function componentRef<T extends { configFile?: string }>(repo: T): Partial<T> {
+  if (!repo.configFile) return repo;
+  return Object.fromEntries(
+    Object.entries(repo).filter(([k, v]) => registryOwned.has(k) && v !== undefined),
+  ) as Partial<T>;
+}
+/** Есть ли в записи config.json копии полей, которыми владеет файл компонента. */
+export const hasComponentCopies = (entry: Record<string, unknown>) =>
+  !!entry.configFile && Object.keys(entry).some((k) => !registryOwned.has(k));
+/**
+ * Запись репозитория вместе с его файлом компонента.
+ *
+ * `inherit` — объявление реестра (`workspace.json`): файл уточняет то, что
+ * объявил реестр, а недостающее берётся из реестра. Для рабочей
+ * `config.json` (`inherit` = false) поля компонента берутся только из файла:
+ * прежняя версия записывала в общую запись полную копию компонента, и поле,
+ * удалённое из файла, продолжало действовать из устаревшей копии. Такие
+ * расхождения складываются в `ignored`.
+ */
+export function readComponentConfig(
+  entry: any,
+  sources?: ConfigSourceFile[],
+  inherit = true,
+  ignored?: IgnoredComponentCopy[],
+) {
   if (!entry.configFile) return entry;
   const declared = { path: String(entry.path), file: String(entry.configFile) };
   const root = realpathSync(resolve(declared.path));
@@ -180,7 +222,7 @@ export function readComponentConfig(entry: any, sources?: ConfigSourceFile[]) {
     real: path,
     sha: bytesDigest(text),
   });
-  const file = JSON.parse(text) as {
+  const file = JSON.parse(text) as Record<string, unknown> & {
     roles?: Record<string, unknown>;
   };
   // Роли складываются по ключам, а не заменяются целиком: компонент уточняет
@@ -188,8 +230,30 @@ export function readComponentConfig(entry: any, sources?: ConfigSourceFile[]) {
   // конфигурации обязаны остаться — иначе mobile и qa-mobile исчезали у
   // компонента, который их и объявил.
   const roles = entry.roles || file.roles ? { ...entry.roles, ...file.roles } : undefined;
+  if (!inherit && ignored) {
+    // Сравнение в нормализованной форме: копия записана после разбора схемой,
+    // и без этого умолчания схемы выглядели бы расхождением.
+    const shape = repositorySchema.shape as Record<
+      string,
+      { safeParse(v: unknown): { success: boolean; data?: unknown } }
+    >;
+    const normalized = (k: string, v: unknown) => {
+      const parsed = shape[k]?.safeParse(v);
+      return JSON.stringify(parsed?.success ? parsed.data : v);
+    };
+    const stored = entry as Record<string, unknown>;
+    const keys = Object.keys(stored)
+      .filter(
+        (k) =>
+          !registryOwned.has(k) &&
+          stored[k] !== undefined &&
+          normalized(k, stored[k]) !== normalized(k, file[k]),
+      )
+      .sort();
+    if (keys.length) ignored.push({ repositoryId: String(stored.id), file: declared.file, keys });
+  }
   return {
-    ...entry,
+    ...(inherit ? (entry as Record<string, unknown>) : {}),
     ...file,
     ...(roles ? { roles } : {}),
     id: entry.id,

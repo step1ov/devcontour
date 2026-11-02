@@ -10,7 +10,13 @@ import {
 } from '../core/model.ts';
 import { profile, packKey, profileMetadata } from './packs.ts';
 import { projectConfig, profileLock } from './setup.ts';
-import { loadConfig, readComponentConfig, scopedConfig } from './config.ts';
+import {
+  componentRef,
+  hasComponentCopies,
+  loadConfig,
+  readComponentConfig,
+  scopedConfig,
+} from './config.ts';
 import { reserveRepositories } from './ownership.ts';
 import { deliverContextPacks } from './context-library.ts';
 
@@ -322,7 +328,9 @@ export async function setupWorkspace(file: string, data?: string) {
           ...raw,
           packs: config.packs,
           gates: config.gates,
-          repositories: repos,
+          // Компонент с файлом хранится ссылкой: копия его полей в config.json
+          // устаревала, как только поле удаляли из файла.
+          repositories: repos.map(componentRef),
           workspaceGates: config.workspaceGates,
           contextPacks: withPins(
             (raw as { contextPacks?: ContextPack[] }).contextPacks ?? [],
@@ -418,7 +426,10 @@ export async function setupWorkspace(file: string, data?: string) {
       ('gates' in stored && differs(stored.gates, config.gates)) ||
       ('protectedPaths' in stored && differs(stored.protectedPaths, repos[0].protectedPaths)) ||
       differs(sortedRoles(existing.roles), sortedRoles(roles)) ||
-      differs(existing.reviewer, reviewer);
+      differs(existing.reviewer, reviewer) ||
+      // Прежняя версия хранила рядом со ссылкой на файл компонента полную копию
+      // его полей. Загрузка её не применяет; workspace-init убирает копию.
+      ((stored.repositories ?? []) as Record<string, unknown>[]).some(hasComponentCopies);
     const known = declaredNames(existing, existing.repositories);
     // The workspace, its repositories and the pinned profile are the same, so
     // what the registry declares about them may still change afterwards: a joint
@@ -463,7 +474,9 @@ export async function setupWorkspace(file: string, data?: string) {
           workspaceGates: config.workspaceGates,
           gates: config.gates,
           protectedPaths: repos[0].protectedPaths,
-          repositories: repos,
+          // Компонент с файлом хранится ссылкой: копия его полей в config.json
+          // устаревала, как только поле удаляли из файла.
+          repositories: repos.map(componentRef),
           contextPacks,
           environment: config.environment,
           toolProfiles: config.toolProfiles,

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { profile } from '../src/runner/packs.ts';
 import { config, fixture, input } from './helpers.ts';
 import { declaredRoles, requiresContract } from '../src/core/repositories.ts';
-import { loadConfig, readComponentConfig } from '../src/runner/config.ts';
+import { ignoredComponentCopies, loadConfig, readComponentConfig } from '../src/runner/config.ts';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -156,6 +156,90 @@ test('A component keeps the roles its own profile brought, across a config reloa
     }) as { roles: Record<string, { runtime: string; title?: string }> };
     assert.equal(entry.roles.mobile.title, 'Мобильный разработчик', 'роль профиля сохранена');
     assert.equal(entry.roles.backend.runtime, 'codex', 'компонент уточняет свою роль');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Поле, удалённое из файла компонента, перестаёт действовать, даже если config.json хранит его копию', () => {
+  // config.json прежней версии хранил рядом со ссылкой на файл компонента
+  // полную копию его полей. Удалённые из файла prepare и environment.inherit
+  // продолжали действовать из копии, и отключить их можно было только явным
+  // пустым значением в файле.
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-component-copy-'));
+  try {
+    const base = config();
+    const prepare = [{ id: 'install', command: ['npm', 'ci'] }];
+    const componentPath = join(root, 'devcontour.component.json');
+    const component: Record<string, unknown> = {
+      name: 'Product',
+      gates: base.gates,
+      prepare,
+      environment: { inherit: ['HOME_TOOL'] },
+    };
+    writeFileSync(componentPath, JSON.stringify(component));
+    const file = join(root, 'config.json');
+    writeFileSync(
+      file,
+      JSON.stringify({
+        ...base,
+        repository: root,
+        repositories: [
+          {
+            id: 'product',
+            path: root,
+            configFile: 'devcontour.component.json',
+            // Устаревшая копия полей компонента.
+            name: 'Product',
+            gates: base.gates,
+            prepare,
+            environment: { inherit: ['HOME_TOOL'], values: {}, secrets: {} },
+            roles: { mobile: { runtime: 'demo' } },
+          },
+        ],
+      }),
+    );
+    let loaded = loadConfig(file);
+    assert.deepEqual(
+      loaded.repositories[0].prepare?.map((s) => s.id),
+      ['install'],
+    );
+    assert.deepEqual(loaded.repositories[0].environment?.inherit, ['HOME_TOOL']);
+    assert.equal(ignoredComponentCopies.get(loaded), undefined, 'копия совпадает с файлом');
+
+    // Поля удалены из файла компонента — их нет и в действующей конфигурации.
+    delete component.prepare;
+    delete component.environment;
+    writeFileSync(componentPath, JSON.stringify(component));
+    loaded = loadConfig(file);
+    assert.equal(loaded.repositories[0].prepare, undefined);
+    assert.equal(loaded.repositories[0].environment, undefined);
+    // Роли общей записи по-прежнему складываются с ролями файла.
+    assert.equal(loaded.repositories[0].roles?.mobile?.runtime, 'demo');
+    // Расхождение с копией названо: doctor показывает его оператору.
+    assert.deepEqual(ignoredComponentCopies.get(loaded), [
+      {
+        repositoryId: 'product',
+        file: 'devcontour.component.json',
+        keys: ['environment', 'prepare'],
+      },
+    ]);
+
+    // Обратный случай: поле, добавленное только в файл, действует без копии.
+    const ref = JSON.parse(readFileSync(file, 'utf8')) as { repositories: unknown[] };
+    ref.repositories[0] = {
+      id: 'product',
+      path: root,
+      configFile: 'devcontour.component.json',
+    };
+    writeFileSync(file, JSON.stringify(ref));
+    writeFileSync(componentPath, JSON.stringify({ ...component, prepare }));
+    loaded = loadConfig(file);
+    assert.deepEqual(
+      loaded.repositories[0].prepare?.map((s) => s.id),
+      ['install'],
+    );
+    assert.equal(ignoredComponentCopies.get(loaded), undefined);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

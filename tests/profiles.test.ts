@@ -540,6 +540,75 @@ test('Обновление профиля называет значения, к�
   }
 });
 
+test('workspace-init хранит компонент с файлом ссылкой, и поле, удалённое из файла, не действует из копии', async () => {
+  // Прежняя версия записывала в config.json полную копию полей компонента.
+  // Удалённый из файла prepare продолжал действовать из копии.
+  const f = await fixture();
+  try {
+    await git(f.repo, 'init', '-b', 'main');
+    await git(f.repo, 'config', 'user.name', 'Profile fixture');
+    await git(f.repo, 'config', 'user.email', 'fixture@example.invalid');
+    await git(f.repo, 'add', '.');
+    await git(f.repo, 'commit', '-m', 'Own profile');
+    const control = join(f.root, 'control');
+    await mkdir(control);
+    const registry = join(control, 'workspace.json');
+    await json(registry, {
+      version: 1,
+      name: 'Component copy',
+      repositories: [
+        {
+          id: 'product',
+          name: 'Product',
+          path: f.repo,
+          profile: './profiles/main.json',
+          configFile: 'devcontour.component.json',
+        },
+      ],
+    });
+    const componentPath = join(f.repo, 'devcontour.component.json');
+    const component: Record<string, unknown> = {
+      name: 'Product',
+      kind: 'product',
+      gates: [testGate],
+      prepare: [{ id: 'install', command: ['python3', '-V'] }],
+    };
+    await json(componentPath, component);
+    const { config: configPath } = await setupWorkspace(registry);
+    // config.json прежней версии: рядом со ссылкой — копия полей компонента.
+    const stored = JSON.parse(await readFile(configPath, 'utf8')) as { repositories: unknown[] };
+    stored.repositories = loadConfig(configPath).repositories.map((r) => ({ ...r }));
+    await json(configPath, stored);
+
+    delete component.prepare;
+    await json(componentPath, component);
+    assert.equal(loadConfig(configPath).repositories[0].prepare, undefined);
+
+    // workspace-init убирает копию: остаётся ссылка с ролями профиля.
+    assert.equal((await setupWorkspace(registry)).status, 'declaration-updated');
+    const refreshed = JSON.parse(await readFile(configPath, 'utf8')) as {
+      repositories: Record<string, unknown>[];
+    };
+    assert.deepEqual(Object.keys(refreshed.repositories[0]).sort(), [
+      'configFile',
+      'id',
+      'path',
+      'roles',
+    ]);
+    assert.equal(loadConfig(configPath).repositories[0].prepare, undefined);
+    assert.equal((await setupWorkspace(registry)).status, 'preserved');
+
+    // Обратный случай: поле, добавленное в файл, действует без workspace-init.
+    await json(componentPath, { ...component, prepare: [{ id: 'again', command: ['true'] }] });
+    assert.deepEqual(
+      loadConfig(configPath).repositories[0].prepare?.map((s) => s.id),
+      ['again'],
+    );
+  } finally {
+    await f.close();
+  }
+});
+
 test('Профиль с effort не на codex не загружается, а правка с новой версией возвращает установку', async () => {
   const f = await fixture();
   try {
