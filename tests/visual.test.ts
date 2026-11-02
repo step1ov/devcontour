@@ -819,15 +819,115 @@ test('reach: индекс цели-префикса проверяется по 
   );
   assert.match(foreign.message ?? '', /не все с префиксом/);
   // Одна строка: при равном y порядок — слева направо.
+  const left = { x: 20, y: 100, width: 170, height: 40 };
   const sideBySide = run(
     rowTap({
+      frame: left,
+      point: { x: 105, y: 120 },
       candidates: [
         { id: 'row-a', frame: { x: 200, y: 100.2, width: 170, height: 40 } },
-        { id: 'row-b', frame: { x: 20, y: 100, width: 170, height: 40 } },
+        { id: 'row-b', frame: left },
       ],
     }),
   );
   assert.equal(sideBySide.status, 'passed');
+});
+
+test('reach: кандидатам префикса не доверяют вслепую', () => {
+  const run = (row: unknown) => reachedWith([amountTap, stepTap(), row])[0];
+  // Настоящий первый row-a пропущен в кандидатах, хотя был виден до касания.
+  const omitted = run(
+    rowTap({
+      before: { visible: ['row-a', 'row-b'], focused: null },
+      candidates: [{ id: 'row-b', frame: { x: 20, y: 100, width: 350, height: 40 } }],
+    }),
+  );
+  assert.equal(omitted.status, 'error');
+  assert.match(omitted.message ?? '', /не включают видимые row-a/);
+  // Обратный случай: все видимые с префиксом — кандидаты.
+  assert.equal(
+    run(rowTap({ before: { visible: ['row-a', 'row-b', 'amount'], focused: null } })).status,
+    'passed',
+  );
+  // Рамка выбранного кандидата не совпадает с рамкой касания.
+  const moved = run(
+    rowTap({
+      candidates: [
+        { id: 'row-a', frame: { x: 20, y: 300, width: 350, height: 40 } },
+        { id: 'row-b', frame: { x: 20, y: 150, width: 350, height: 40 } },
+      ],
+    }),
+  );
+  assert.equal(moved.status, 'error');
+  assert.match(moved.message ?? '', /рамка кандидата row-b не совпадает/);
+  // Повтор id среди кандидатов.
+  const twice = run(rowTap({ candidates: [...rowTap().candidates, rowTap().candidates[1]] }));
+  assert.match(twice.message ?? '', /кандидаты цели row-\*\[0\] повторяются/);
+});
+
+test('reach: порядок чтения транзитивен — строки группируются до сортировки по x', () => {
+  // y 0, 0.4 и 0.8: первые два — одна строка, третий — следующая (0.8 − 0 > EPS).
+  const items = [
+    { id: 'row-a', frame: { x: 300, y: 0, width: 50, height: 40 } },
+    { id: 'row-b', frame: { x: 10, y: 0.4, width: 50, height: 40 } },
+    { id: 'row-c', frame: { x: 5, y: 0.8, width: 50, height: 40 } },
+  ];
+  const run = (chosen: (typeof items)[number], candidates: typeof items) =>
+    reachedWith([
+      amountTap,
+      stepTap(),
+      rowTap({
+        element: chosen.id,
+        frame: chosen.frame,
+        point: { x: chosen.frame.x + 25, y: chosen.frame.y + 20 },
+        hit: { kind: 'element', element: chosen.id },
+        candidates,
+      }),
+    ])[0].status;
+  // Порядок чтения: row-b (x 10), row-a (x 300) — строка y 0; затем row-c.
+  for (const order of [
+    [0, 1, 2],
+    [2, 1, 0],
+    [1, 2, 0],
+    [2, 0, 1],
+  ])
+    assert.equal(
+      run(
+        items[1],
+        order.map((i) => items[i]),
+      ),
+      'passed',
+      order.join(','),
+    );
+  assert.equal(run(items[2], items), 'error');
+});
+
+test('reach: нарушение записи не скрывает касание под клавиатурой', () => {
+  // Касание фреймворка не по центру (нарушение договора) и под клавиатурой.
+  const result = unreached([
+    amountTap,
+    stepTap({ keyboard, point: { x: 195, y: 600 }, hit: { kind: 'keyboard' } }),
+  ])[0];
+  assert.equal(result.status, 'failed');
+  assert.match(result.message ?? '', /шаг 2 submit: точка касания \(195, 600\) под клавиатурой/);
+  assert.match(
+    result.message ?? '',
+    /нарушения договора драйвером: шаг 2: касание \(195, 600\) не в центре/,
+  );
+});
+
+test('hit: перекрытие той же рамкой — промах, потомок — попадание', () => {
+  const run = (hit: unknown) => reachedWith([amountTap, stepTap({ hit }), rowTap()])[0];
+  const target = { x: 20, y: 563, width: 350, height: 56 };
+  // Соседний слой той же рамки поверх кнопки.
+  const overlay = run({ kind: 'element', element: 'submit-overlay', frame: target });
+  assert.equal(overlay.status, 'failed');
+  assert.match(overlay.message ?? '', /касание принял submit-overlay/);
+  // Драйвер с иерархией подтверждает потомка — даже с той же рамкой.
+  assert.equal(
+    run({ kind: 'element', element: 'submit-text', frame: target, descendant: true }).status,
+    'passed',
+  );
 });
 
 test('reach: для clear after снят до удаления — меняться текст не должен', () => {

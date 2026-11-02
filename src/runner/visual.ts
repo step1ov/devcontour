@@ -112,6 +112,9 @@ async function stateInput(
  * Строки журнала и байтовые смещения их начал: окна `log` в frames.json
  * задаются байтами `log.txt`, а не номерами строк.
  */
+/** Управляющие последовательности ANSI (цвет, курсор) — не текст строки. */
+const stripAnsi = (line: string) => line.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '');
+
 async function logLines(directory: string): Promise<VisualLogInput> {
   try {
     const bytes = await bounded(join(directory, 'log.txt'), LOG_LIMIT);
@@ -121,14 +124,19 @@ async function logLines(directory: string): Promise<VisualLogInput> {
       return { error: 'log.txt содержит байты NUL: журнал должен быть в UTF-8, не UTF-16' };
     const lines: string[] = [],
       spans: [number, number][] = [];
+    // Строки разделяют \n, \r\n и одиночный \r (прогресс bundler перезаписывает
+    // строку через \r); завершающий разделитель не даёт лишней пустой строки.
     let start = 0;
-    // Завершающий перевод строки не порождает лишней пустой строки.
     while (start < bytes.length) {
-      const end = bytes.indexOf(0x0a, start);
-      const stop = end < 0 ? bytes.length : end;
-      spans.push([start, end < 0 ? bytes.length : end + 1]);
-      lines.push(bytes.toString('utf8', start, stop).replace(/\r$/, ''));
-      start = stop + 1;
+      let stop = start;
+      while (stop < bytes.length && bytes[stop] !== 0x0a && bytes[stop] !== 0x0d) stop++;
+      let next = stop;
+      if (bytes[next] === 0x0d) next++;
+      if (bytes[next] === 0x0a && (next === stop || next === stop + 1)) next++;
+      else if (next === stop && stop < bytes.length) next++;
+      spans.push([start, Math.min(next, bytes.length)]);
+      lines.push(stripAnsi(bytes.toString('utf8', start, stop)));
+      start = next;
     }
     return { lines, spans, size: bytes.length };
   } catch (error) {

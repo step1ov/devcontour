@@ -468,6 +468,8 @@ export const visualHitSchema = z.discriminatedUnion('kind', [
     element: visualElementId,
     /** Рамка принявшего элемента: вложенный в цель элемент со своим id — не промах. */
     frame: rect.optional(),
+    /** Драйвер с настоящей иерархией (web) подтверждает, что элемент — потомок цели. */
+    descendant: z.literal(true).optional(),
   }),
   z.strictObject({ kind: z.literal('keyboard') }),
   z.strictObject({ kind: z.literal('none') }),
@@ -716,8 +718,8 @@ function centreProblem(shown: Rect, point: { x: number; y: number }) {
  * фокус на том же поле: отправка формы законно снимает фокус, а набор в
  * чужую клавиатуру его сохраняет.
  */
-function tapProblems(
-  tap: Pick<VisualTap, 'element' | 'point' | 'hit' | 'before' | 'after'>,
+function hitProblems(
+  tap: Pick<VisualTap, 'element' | 'point' | 'hit'>,
   target: Rect,
   keyboard: Rect | null,
   decorative: ReadonlySet<string>,
@@ -734,21 +736,55 @@ function tapProblems(
     problems.push(`касание принял декоративный ${hit.element}, а не ${tap.element}`);
   else if (hit.kind !== 'element')
     problems.push(`касание принял ${hitLabel(hit)}, а не ${tap.element}`);
-  else if (hit.element !== tap.element && !(hit.frame && contains(target, hit.frame)))
+  else if (hit.element !== tap.element && !nested(hit, target))
     problems.push(`касание принял ${hit.element}, а не ${tap.element}`);
+  return problems;
+}
+
+/**
+ * Вложенный в цель элемент (подпись в кнопке) — то же касание: если драйвер
+ * с иерархией подтвердил потомка, или если рамка строго меньше цели и лежит
+ * в ней. Перекрытие той же рамки соседним слоем этим не оправдывается.
+ */
+function nested(hit: Extract<VisualHit, { kind: 'element' }>, target: Rect) {
+  if (hit.descendant) return true;
+  const frame = hit.frame;
+  if (!frame || !contains(target, frame)) return false;
+  const inner =
+    frame.x - target.x > EPS ||
+    frame.y - target.y > EPS ||
+    target.x + target.width - (frame.x + frame.width) > EPS ||
+    target.y + target.height - (frame.y + frame.height) > EPS;
+  return inner && frame.width * frame.height < target.width * target.height;
+}
+
+/**
+ * Касание изменило текст поля в фокусе. Сравнивается, только пока фокус на
+ * том же поле: отправка формы законно снимает фокус, а набор в чужую
+ * клавиатуру его сохраняет. Для `clear` `after` снимается сразу после
+ * фокусирующего касания, до удаления текста.
+ */
+function textProblems(tap: Pick<VisualTap, 'before' | 'after'>) {
   const field = tap.before.focused;
-  // Для `clear` `after` снимается сразу после фокусирующего касания, до
-  // удаления текста: касание само по себе текст менять не должно.
   if (
     field &&
     tap.after.focused?.element === field.element &&
     tap.after.focused.text !== field.text
   )
-    problems.push(
+    return [
       `касание изменило текст поля ${field.element} в фокусе: ${JSON.stringify(field.text)} → ` +
         JSON.stringify(tap.after.focused.text),
-    );
-  return problems;
+    ];
+  return [];
+}
+
+function tapProblems(
+  tap: Pick<VisualTap, 'element' | 'point' | 'hit' | 'before' | 'after'>,
+  target: Rect,
+  keyboard: Rect | null,
+  decorative: ReadonlySet<string>,
+) {
+  return [...hitProblems(tap, target, keyboard, decorative), ...textProblems(tap)];
 }
 
 /**
@@ -775,6 +811,16 @@ export function evaluateReach(
   );
   const recorded = new Set<number>();
   for (const tap of observed.stepTaps) {
+    // Точка под клавиатурой и чужой hit не зависят от исправности остальной
+    // записи: нарушение договора не должно скрывать заблокированное касание.
+    const geometry =
+      tap.point === null
+        ? []
+        : hitProblems({ ...tap, point: tap.point }, tap.frame, tap.keyboard, decorative);
+    const contract = (problem: string) => {
+      driver.push(problem);
+      if (geometry.length) blocked.push(`шаг ${tap.step} ${tap.element}: ${geometry.join('; ')}`);
+    };
     if (recorded.has(tap.step)) {
       driver.push(`повтор записи касания шага ${tap.step}`);
       continue;
@@ -788,14 +834,14 @@ export function evaluateReach(
           ? declared.clear
           : undefined;
     if (!target || !targetMatches(target, tap.element)) {
-      driver.push(
+      contract(
         `запись касания шага ${tap.step} (${tap.element}) не соответствует шагу спецификации`,
       );
       continue;
     }
-    const order = candidateProblem(target, tap.element, tap.candidates);
+    const order = candidateProblem(target, tap);
     if (order) {
-      driver.push(`шаг ${tap.step}: ${order}`);
+      contract(`шаг ${tap.step}: ${order}`);
       continue;
     }
     const label = `шаг ${tap.step} ${targetLabel(target)}`;
@@ -816,12 +862,12 @@ export function evaluateReach(
       continue;
     }
     if (!shown) {
-      driver.push(`шаг ${tap.step}: касание ${tap.element}, чья рамка вне окна`);
+      contract(`шаг ${tap.step}: касание ${tap.element}, чья рамка вне окна`);
       continue;
     }
     const offCentre = centreProblem(shown, tap.point);
     if (offCentre) {
-      driver.push(`шаг ${tap.step}: ${offCentre}`);
+      contract(`шаг ${tap.step}: ${offCentre}`);
       continue;
     }
     // Для `clear` `after` — снимок сразу после фокусирующего касания. Пустое
@@ -836,10 +882,10 @@ export function evaluateReach(
       before.text !== '' &&
       after.text === ''
     ) {
-      driver.push(`шаг ${tap.step}: after для clear снят после удаления текста`);
+      contract(`шаг ${tap.step}: after для clear снят после удаления текста`);
       continue;
     }
-    const problems = tapProblems(tap, tap.frame, tap.keyboard, decorative);
+    const problems = [...geometry, ...textProblems(tap)];
     if (problems.length) blocked.push(`${label}: ${problems.join('; ')}`);
   }
   const missing = observed.missing;
@@ -880,22 +926,45 @@ export function evaluateReach(
  * Цель-префикс: записанные кандидаты упорядочиваются сверху вниз, затем слева
  * направо, и `index`-й должен быть выбранным элементом.
  */
-function candidateProblem(
-  target: VisualTarget,
-  element: string,
-  list: { id: string; frame: Rect }[] | undefined,
-): string | undefined {
+function candidateProblem(target: VisualTarget, tap: VisualStepTap): string | undefined {
   if (typeof target === 'string') return undefined;
-  if (!list) return `для цели ${targetLabel(target)} драйвер не записал кандидатов`;
+  const label = targetLabel(target);
+  const list = tap.candidates;
+  if (!list) return `для цели ${label} драйвер не записал кандидатов`;
   if (list.some((c) => !c.id.startsWith(target.prefix)))
-    return `кандидаты цели ${targetLabel(target)} не все с префиксом ${target.prefix}`;
-  const ordered = [...list].sort((a, b) =>
-    Math.abs(a.frame.y - b.frame.y) > EPS ? a.frame.y - b.frame.y : a.frame.x - b.frame.x,
-  );
-  const chosen = ordered[target.index]?.id;
-  return chosen === element
-    ? undefined
-    : `${targetLabel(target)} в порядке чтения — ${chosen ?? 'нет такого кандидата'}, а драйвер выбрал ${element}`;
+    return `кандидаты цели ${label} не все с префиксом ${target.prefix}`;
+  const ids = new Set(list.map((c) => c.id));
+  if (ids.size !== list.length) return `кандидаты цели ${label} повторяются`;
+  // Каждый видимый до касания элемент с префиксом обязан быть кандидатом:
+  // иначе пропуск настоящего первого сдвинул бы индекс.
+  if (tap.point !== null) {
+    const omitted = tap.before.visible.filter((id) => id.startsWith(target.prefix) && !ids.has(id));
+    if (omitted.length) return `кандидаты цели ${label} не включают видимые ${omitted.join(', ')}`;
+  }
+  const chosen = readingOrder(list)[target.index];
+  if (chosen?.id !== tap.element)
+    return `${label} в порядке чтения — ${chosen?.id ?? 'нет такого кандидата'}, а драйвер выбрал ${tap.element}`;
+  const same =
+    Math.abs(chosen.frame.x - tap.frame.x) <= EPS &&
+    Math.abs(chosen.frame.y - tap.frame.y) <= EPS &&
+    Math.abs(chosen.frame.width - tap.frame.width) <= EPS &&
+    Math.abs(chosen.frame.height - tap.frame.height) <= EPS;
+  return same ? undefined : `рамка кандидата ${chosen.id} не совпадает с рамкой записи касания`;
+}
+
+/**
+ * Порядок чтения: строки по y (новая строка, если y дальше EPS от первого
+ * элемента строки), внутри строки — по x. Группировка по строкам делает
+ * порядок транзитивным и независимым от порядка записи.
+ */
+function readingOrder<T extends { frame: Rect }>(list: readonly T[]): T[] {
+  const rows: T[][] = [];
+  for (const item of [...list].sort((a, b) => a.frame.y - b.frame.y)) {
+    const row = rows.at(-1);
+    if (row && item.frame.y - row[0].frame.y <= EPS) row.push(item);
+    else rows.push([item]);
+  }
+  return rows.flatMap((row) => row.sort((a, b) => a.frame.x - b.frame.x));
 }
 
 /** Сетка выборки фона: до GRID × GRID точек. */

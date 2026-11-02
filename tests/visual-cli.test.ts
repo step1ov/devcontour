@@ -541,3 +541,23 @@ test('Журнал: завершающий перевод строки, NUL, о�
   const overlap = await run(text, { log: { from: 5, to: Buffer.byteLength(text) } });
   assert.match(overlap.xml, /\[UI-form-focused\] helper is deprecated/);
 });
+
+test('Журнал: одиночный \\r и ANSI-последовательности не прячут строку от ^WARN\\b', async () => {
+  const spec = {
+    version: 1,
+    platform: 'ios-simulator',
+    log: { forbid: ['^WARN\\b'] },
+    states: [{ id: 'UI-form-focused', assert: [{ kind: 'visible', element: 'submit' }] }],
+  };
+  const run = (log: string) =>
+    evaluate({ 'UI-form-focused.frames.json': frames(), 'log.txt': log }, spec);
+  const progress = await run('Bundling 50%\rWARN legacy helper\n');
+  assert.match(progress.xml, /запрещённых строк журнала: 1/);
+  assert.match(progress.xml, /проверено строк журнала: 2</);
+  const colored = await run('\u001b[33mWARN legacy helper\u001b[0m\n');
+  assert.match(colored.xml, /запрещённых строк журнала: 1/);
+  // Обратный случай: те же строки без предупреждения проходят.
+  const clean = await run('Bundling 50%\rBundling 100%\r\n\u001b[32mdone\u001b[0m\n');
+  assert.equal(clean.result.passed, true, clean.xml);
+  assert.match(clean.xml, /проверено строк журнала: 3</);
+});
