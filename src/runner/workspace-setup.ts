@@ -1,5 +1,5 @@
 import { selectedWorkspaceMode, assertControllerCheckout } from './workspace-mode.ts';
-import { mkdir, readFile, writeFile, realpath, mkdtemp, rm } from 'node:fs/promises';
+import { lstat, mkdir, readFile, writeFile, realpath, mkdtemp, rm } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import {
@@ -19,6 +19,7 @@ import {
 } from './config.ts';
 import { reserveRepositories } from './ownership.ts';
 import { deliverContextPacks } from './context-library.ts';
+import { git } from './process.ts';
 
 const registrySchema = z.object({
   version: z.literal(1),
@@ -146,6 +147,89 @@ type Review = NonNullable<z.infer<typeof configSchema.shape.review>>;
  */
 const withReview = (existing: Review | undefined, declared: Review | undefined) =>
   declared ? { ...existing, ...declared } : existing;
+/** Поля записи реестра, которые не переносятся в файл компонента. */
+const registryOnly = new Set(['id', 'path', 'dependsOn', 'configFile', 'roles', 'profile']);
+/** Поля компонента, которые может дать профиль. */
+const profileFields = [
+  'environment',
+  'lifecycle',
+  'prepare',
+  'gates',
+  'generatedPaths',
+  'protectedPaths',
+] as const;
+type ComponentAddition = { repositoryId: string; file: string; keys: string[] };
+const repositoryShape = (repositorySchema as unknown as { shape: Record<string, z.ZodType> }).shape;
+/** Значение совпадает с умолчанием схемы: дописывать его в файл незачем. */
+const schemaDefault = (key: string, value: unknown) => {
+  const absent = repositoryShape[key]?.safeParse(undefined);
+  const given = repositoryShape[key]?.safeParse(value);
+  return (
+    !!absent?.success &&
+    !!given?.success &&
+    JSON.stringify(absent.data) === JSON.stringify(given.data)
+  );
+};
+/**
+ * Дописать в файлы компонентов ключи, которые объявляет реестр или профиль,
+ * а файла в них нет. Поля компонента берутся только из его файла
+ * (`readComponentConfig`), поэтому иначе такое значение не применилось бы
+ * вовсе, а workspace-init сообщал бы об успехе. Существующие ключи не
+ * трогаются; правила записи — как у `scopedConfig`: файл внутри репозитория
+ * и не symlink. Файл с незафиксированной правкой не меняется: отказ называет
+ * его. Возвращает отмену записи.
+ */
+async function completeComponentFiles(
+  additions: (ComponentAddition & { path: string; values: Record<string, unknown> })[],
+) {
+  const written: { destination: string; previous: string }[] = [];
+  const undo = async () => {
+    for (const w of written.reverse()) await writeFile(w.destination, w.previous);
+  };
+  try {
+    for (const a of additions) {
+      const root = await realpath(a.path);
+      const destination = resolve(root, a.file);
+      if (!destination.startsWith(root + sep) || (await lstat(destination)).isSymbolicLink())
+        throw new Error(
+          `Файл компонента ${a.repositoryId} (${a.file}) вне репозитория или symlink`,
+        );
+      const dirty = (await git(root, 'status', '--porcelain', '--', a.file).catch(() => ''))
+        .split('\n')
+        .some((line) => line.trim() && !line.startsWith('??'));
+      if (dirty)
+        throw new Error(
+          `Файл компонента ${a.repositoryId} (${a.file}) изменён и не зафиксирован, а workspace-init должен дописать в него ${a.keys.join(', ')}. Зафиксируйте или отмените правку и повторите workspace-init.`,
+        );
+      const previous = await readFile(destination, 'utf8');
+      const next = { ...(JSON.parse(previous) as Record<string, unknown>) };
+      for (const k of a.keys) if (!(k in next)) next[k] = a.values[k];
+      try {
+        await writeFile(destination, JSON.stringify(next, null, 2) + '\n');
+      } catch (error) {
+        throw new Error(
+          `Не удалось дописать ${a.keys.join(', ')} в файл компонента ${a.repositoryId} (${a.file}): ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      written.push({ destination, previous });
+    }
+  } catch (error) {
+    await undo();
+    throw error;
+  }
+  return undo;
+}
+const additionsNote = (added: ComponentAddition[]) =>
+  added.length
+    ? {
+        added,
+        addedNote: `В файлы компонентов дописаны значения реестра и профиля, которых в них не было: ${added
+          .map((x) => `${x.file}: ${x.keys.join(', ')}`)
+          .join('; ')}. Зафиксируйте изменение в Git.`,
+      }
+    : {};
+const publicAdditions = (a: ComponentAddition[]) =>
+  a.map(({ repositoryId, file, keys }) => ({ repositoryId, file, keys }));
 export async function setupWorkspace(file: string, data?: string) {
   const source = await realpath(resolve(file));
   const workspaceRoot = dirname(source);
@@ -216,6 +300,27 @@ export async function setupWorkspace(file: string, data?: string) {
     new Set(repos.map((r) => r.path)).size !== repos.length
   )
     throw new Error('IDs и пути репозиториев должны быть уникальны');
+  // Чего нет в файлах компонентов, но объявляют реестр (всегда) или профиль
+  // (только при обновлении профиля: его новые значения и есть цель).
+  const additionsFor = (withProfile: boolean) =>
+    repos.flatMap((repo, i) => {
+      const file = componentFiles[i];
+      if (!file || !repo.configFile) return [];
+      const declared = Object.keys(entries[i]).filter((k) => !registryOnly.has(k));
+      const fromProfile = withProfile
+        ? profileFields.filter((k) => {
+            const v = (selected[i] as unknown as Record<string, unknown>)[k];
+            return v !== undefined && !(Array.isArray(v) && !v.length);
+          })
+        : [];
+      const values = repo as unknown as Record<string, unknown>;
+      const keys = [...new Set<string>([...declared, ...fromProfile])]
+        .filter((k) => !(k in file) && values[k] !== undefined && !schemaDefault(k, values[k]))
+        .sort();
+      return keys.length
+        ? [{ repositoryId: repo.id, file: repo.configFile, path: repo.path, keys, values }]
+        : [];
+    });
   const packs = [...new Map(selected.map((p) => [packKey(p), p])).values()];
   const base = projectConfig(repos[0].path, selected[0], input.approvalMode);
   const config = configSchema.parse({
@@ -353,6 +458,8 @@ export async function setupWorkspace(file: string, data?: string) {
         null,
         2,
       );
+      const additions = additionsFor(true);
+      const undoFiles = await completeComponentFiles(additions);
       await writeFile(join(root, 'packs.lock.json'), JSON.stringify(lock, null, 2) + '\n');
       await writeFile(configPath, upgraded);
       try {
@@ -361,6 +468,7 @@ export async function setupWorkspace(file: string, data?: string) {
         // Вернуть как было: иначе номер версии израсходован, а починить нечем.
         await writeFile(configPath, previousConfig);
         if (previousLock !== null) await writeFile(join(root, 'packs.lock.json'), previousLock);
+        await undoFiles();
         throw invalid;
       }
       // Файл компонента сильнее профиля. Обновление профиля, чьи ключи
@@ -385,7 +493,13 @@ export async function setupWorkspace(file: string, data?: string) {
               (k) =>
                 !['roles', 'id', 'path', 'dependsOn', 'configFile'].includes(k) &&
                 k in profileKeys &&
-                differs(normalized(k), profileKeys[k]),
+                // Списки путей профиль дополняет, а не заменяет: перекрыт
+                // только путь профиля, которого в файле нет.
+                (k === 'protectedPaths' || k === 'generatedPaths'
+                  ? (profileKeys[k] as string[]).some(
+                      (x) => !((normalized(k) as string[] | undefined) ?? []).includes(x),
+                    )
+                  : differs(normalized(k), profileKeys[k])),
             )
             .sort(),
           ...Object.entries((file.roles ?? {}) as Record<string, unknown>)
@@ -399,12 +513,15 @@ export async function setupWorkspace(file: string, data?: string) {
         data: root,
         config: configPath,
         delivered,
+        ...additionsNote(publicAdditions(additions)),
         ...(shadowed.length
           ? {
               shadowed,
               warning: `Файл компонента переопределяет профиль, и эти значения профиля не применены: ${shadowed
                 .map((x) => `${x.file}: ${x.keys.join(', ')}`)
-                .join('; ')}. Перенесите изменение в файл компонента или удалите из него ключ.`,
+                .join(
+                  '; ',
+                )}. Перенесите изменение в файл компонента: поля компонента берутся только из него.`,
             }
           : {}),
       };
@@ -466,7 +583,10 @@ export async function setupWorkspace(file: string, data?: string) {
         JSON.stringify(config.contextPacks.map(declaration)) ||
       differs(existing.review, withReview(existing.review, input.review)) ||
       derivedStale;
-    if (declarationChanged) {
+    // Значение реестра, которого нет в файле компонента, без записи в файл не
+    // действует: это тоже изменённое объявление.
+    const registryAdditions = additionsFor(false);
+    if (declarationChanged || registryAdditions.length) {
       const contextPacks = withPins(existing.contextPacks, config.contextPacks);
       const text = JSON.stringify(
         {
@@ -490,9 +610,21 @@ export async function setupWorkspace(file: string, data?: string) {
       // Объявление проверяется до записи тем же загрузчиком, что и сервер:
       // ревьюер того же вендора без явного разрешения отклоняется, и
       // config.json остаётся прежним.
-      loadConfig(configPath, text);
+      const undoFiles = await completeComponentFiles(registryAdditions);
+      try {
+        loadConfig(configPath, text);
+      } catch (invalid) {
+        await undoFiles();
+        throw invalid;
+      }
       await writeFile(configPath, text);
-      return { status: 'declaration-updated', data: root, config: configPath, delivered };
+      return {
+        status: 'declaration-updated',
+        data: root,
+        config: configPath,
+        delivered,
+        ...additionsNote(publicAdditions(registryAdditions)),
+      };
     }
     return { status: 'preserved', data: root, config: configPath, delivered };
   } catch (error) {
@@ -500,7 +632,14 @@ export async function setupWorkspace(file: string, data?: string) {
   }
   await mkdir(root, { recursive: true });
   const previewRoot = await mkdtemp(join(root, '.setup-'));
+  // Установка с уже существующим файлом компонента: недостающие в нём значения
+  // реестра и профиля дописываются до проверки — загрузчик берёт поля
+  // компонента только из файла.
+  const installAdditions = additionsFor(true);
+  let undoFiles = async () => {};
+  let installed = false;
   try {
+    undoFiles = await completeComponentFiles(installAdditions);
     const preview = join(previewRoot, 'config.json');
     await writeFile(join(previewRoot, 'packs.lock.json'), JSON.stringify(lock));
     await writeFile(preview, JSON.stringify(config));
@@ -521,13 +660,16 @@ export async function setupWorkspace(file: string, data?: string) {
     await writeFile(configPath, JSON.stringify(scopedConfig(validated), null, 2) + '\n', {
       flag: 'wx',
     });
+    installed = true;
   } finally {
+    if (!installed) await undoFiles();
     await rm(previewRoot, { recursive: true, force: true });
   }
   return {
     status: 'configured',
     data: root,
     config: configPath,
+    ...additionsNote(publicAdditions(installAdditions)),
     next: 'Ведущий агент проверяет команды workspaceGates, импортирует планы с repositoryId и создаёт ChangeSet.',
   };
 }

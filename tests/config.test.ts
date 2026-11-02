@@ -4,6 +4,7 @@ import { profile } from '../src/runner/packs.ts';
 import { config, fixture, input } from './helpers.ts';
 import { declaredRoles, requiresContract } from '../src/core/repositories.ts';
 import { ignoredComponentCopies, loadConfig, readComponentConfig } from '../src/runner/config.ts';
+import { doctor } from '../src/runner/doctor.ts';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -161,7 +162,7 @@ test('A component keeps the roles its own profile brought, across a config reloa
   }
 });
 
-test('Поле, удалённое из файла компонента, перестаёт действовать, даже если config.json хранит его копию', () => {
+test('Поле, удалённое из файла компонента, перестаёт действовать, даже если config.json хранит его копию', async () => {
   // config.json прежней версии хранил рядом со ссылкой на файл компонента
   // полную копию его полей. Удалённые из файла prepare и environment.inherit
   // продолжали действовать из копии, и отключить их можно было только явным
@@ -224,6 +225,13 @@ test('Поле, удалённое из файла компонента, пер�
         keys: ['environment', 'prepare'],
       },
     ]);
+    const report = await doctor(loaded, join(root, 'data'));
+    const copy = report.checks.find((c) => c.id === 'component-copy:product');
+    assert.equal(copy?.status, 'degraded');
+    assert.match(
+      copy?.detail ?? '',
+      /devcontour\.component\.json и не применяется: environment, prepare/,
+    );
 
     // Обратный случай: поле, добавленное только в файл, действует без копии.
     const ref = JSON.parse(readFileSync(file, 'utf8')) as { repositories: unknown[] };
@@ -240,6 +248,11 @@ test('Поле, удалённое из файла компонента, пер�
       ['install'],
     );
     assert.equal(ignoredComponentCopies.get(loaded), undefined);
+    assert.ok(
+      !(await doctor(loaded, join(root, 'data'))).checks.some((c) =>
+        c.id.startsWith('component-copy:'),
+      ),
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
