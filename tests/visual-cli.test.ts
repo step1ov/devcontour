@@ -4,9 +4,19 @@ import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { deflateSync } from 'node:zlib';
+import { crc32, deflateSync } from 'node:zlib';
 import { junitSummary } from 'devcontour-harness';
 import { decodePng } from '../src/runner/png.ts';
+import { evaluateVisualRun } from '../src/runner/visual.ts';
+
+const chunk = (type: string, data: Buffer) => {
+  const head = Buffer.alloc(8);
+  head.writeUInt32BE(data.length, 0);
+  head.write(type, 4, 'latin1');
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(Buffer.concat([head.subarray(4), data])), 0);
+  return Buffer.concat([head, data, crc]);
+};
 
 // PNG с фильтром строки y % 5: декодер проверяется на всех пяти фильтрах.
 function encodePng(
@@ -41,13 +51,6 @@ function encodePng(
     rows.push(out);
     previous = line;
   }
-  const chunk = (type: string, data: Buffer) => {
-    const head = Buffer.alloc(8);
-    head.writeUInt32BE(data.length, 0);
-    head.write(type, 4, 'latin1');
-    // CRC декодер не проверяет: снимок пишет локальный драйвер, не сеть.
-    return Buffer.concat([head, data, Buffer.alloc(4)]);
-  };
   const header = Buffer.alloc(13);
   header.writeUInt32BE(width, 0);
   header.writeUInt32BE(height, 4);
@@ -226,4 +229,176 @@ test('visual evaluate: нет наблюдений — ошибка окруже
   const usage = cli('run');
   assert.equal(usage.status, 1);
   assert.match(usage.stderr, /visual run ещё не реализован/);
+});
+
+// IHDR валидного PNG заменяется изменённым, с верным CRC: отказ — по смыслу
+// заголовка, а не по испорченной контрольной сумме.
+const withHeader = (png: Buffer, patch: (header: Buffer) => Buffer) =>
+  Buffer.concat([
+    png.subarray(0, 8),
+    chunk('IHDR', patch(Buffer.from(png.subarray(16, 29)))),
+    png.subarray(33),
+  ]);
+
+test('PNG: неподдерживаемые и повреждённые файлы отклоняются', () => {
+  const valid = encodePng(8, 8, 4, noise);
+  assert.equal(decodePng(valid).width, 8);
+  const set = (index: number, value: number) => (header: Buffer) => {
+    header[index] = value;
+    return header;
+  };
+  const cases: [string, Buffer, RegExp][] = [
+    ['палитра', withHeader(valid, set(9, 3)), /RGB\/RGBA/],
+    ['16 бит', withHeader(valid, set(8, 16)), /8 бит/],
+    ['interlace', withHeader(valid, set(12, 1)), /interlace/],
+    ['метод сжатия', withHeader(valid, set(10, 1)), /метод сжатия/],
+    ['длина IHDR', withHeader(valid, (h) => Buffer.concat([h, Buffer.alloc(1)])), /длину 13/],
+    ['обрезан', valid.subarray(0, valid.length - 20), /обрезан/],
+    ['без IEND', valid.subarray(0, valid.length - 12), /нет IEND/],
+    [
+      'CRC',
+      Buffer.concat([valid.subarray(0, 29), Buffer.from([valid[29] ^ 1]), valid.subarray(30)]),
+      /CRC/,
+    ],
+    [
+      'размер',
+      withHeader(valid, (h) => {
+        h.writeUInt32BE(5000, 0);
+        h.writeUInt32BE(5000, 4);
+        return h;
+      }),
+      /вне пределов/,
+    ],
+  ];
+  for (const [name, file, error] of cases) assert.throws(() => decodePng(file), error, name);
+});
+
+const shot = (paint: (x: number, y: number) => number[]) => {
+  const data = Buffer.alloc(390 * 844 * 4);
+  for (let y = 0; y < 844; y++)
+    for (let x = 0; x < 390; x++) data.set(paint(x, y).slice(0, 4), (y * 390 + x) * 4);
+  return data;
+};
+const flat = () => [242, 242, 242, 255];
+const frames = (extra: Record<string, unknown> = {}) =>
+  JSON.stringify({
+    version: 1,
+    state: 'UI-form-focused',
+    window: { x: 0, y: 0, width: 195, height: 422 },
+    safeArea: { x: 0, y: 24, width: 195, height: 380 },
+    keyboard: null,
+    elements: { submit: { x: 10, y: 200, width: 175, height: 28 } },
+    ...extra,
+  });
+const backgroundSpec = {
+  version: 1,
+  platform: 'ios-simulator',
+  states: [{ id: 'UI-form-focused', assert: [{ kind: 'background' }] }],
+};
+const evaluate = async (
+  files: Record<string, string | Buffer>,
+  value: unknown = backgroundSpec,
+) => {
+  const root = mkdtempSync(join(tmpdir(), 'dc-visual-'));
+  const observations = join(root, 'observations');
+  mkdirSync(observations);
+  for (const [name, content] of Object.entries(files))
+    writeFileSync(join(observations, name), content);
+  writeFileSync(join(root, 'spec.json'), JSON.stringify(value));
+  const report = join(root, 'visual.xml');
+  const result = await evaluateVisualRun({ spec: join(root, 'spec.json'), observations, report });
+  return { result, xml: readFileSync(report, 'utf8') };
+};
+const status = (xml: string) => junitSummary(xml).cases.map((c) => [c.id, c.status]);
+
+test('Наблюдения: плоский PNG падает, .rgba читается, битый PNG не подменяется .rgba', async () => {
+  const flatPng = await evaluate({
+    'UI-form-focused.frames.json': frames(),
+    'UI-form-focused.png': encodePng(390, 844, 3, flat),
+  });
+  assert.deepEqual(status(flatPng.xml), [['visual.UI-form-focused.background', 'failed']]);
+  assert.match(flatPng.xml, /type="assertion"/);
+
+  const size = { screenshot: { width: 390, height: 844 } };
+  const rgba = await evaluate({
+    'UI-form-focused.frames.json': frames(size),
+    'UI-form-focused.rgba': shot(noise),
+  });
+  assert.equal(rgba.result.passed, true, rgba.xml);
+  const flatRgba = await evaluate({
+    'UI-form-focused.frames.json': frames(size),
+    'UI-form-focused.rgba': shot(flat),
+  });
+  assert.deepEqual(status(flatRgba.xml), [['visual.UI-form-focused.background', 'failed']]);
+
+  const corrupt = await evaluate({
+    'UI-form-focused.frames.json': frames(size),
+    'UI-form-focused.png': Buffer.from('not a png'),
+    'UI-form-focused.rgba': shot(noise),
+  });
+  assert.equal(corrupt.result.errors, 1);
+  assert.match(
+    corrupt.xml,
+    /<error type="environment" message="снимок UI-form-focused.png не читается/,
+  );
+});
+
+test('Наблюдения: чужое состояние, ошибка драйвера и неверное поле — ошибки окружения', async () => {
+  const shotFile = { 'UI-form-focused.png': encodePng(390, 844, 3, noise) };
+  const other = await evaluate({
+    ...shotFile,
+    'UI-form-focused.frames.json': frames({ state: 'UI-form-other' }),
+  });
+  assert.match(
+    other.xml,
+    /<error type="environment" message="UI-form-focused.frames.json описывает состояние UI-form-other/,
+  );
+  const driver = await evaluate({
+    'UI-form-focused.frames.json': JSON.stringify({
+      version: 1,
+      state: 'UI-form-focused',
+      error: 'simulator did not boot',
+    }),
+  });
+  assert.match(driver.xml, /<error type="environment" message="драйвер: simulator did not boot"/);
+  const withoutKeyboard = JSON.parse(frames()) as Record<string, unknown>;
+  delete withoutKeyboard.keyboard;
+  const field = await evaluate({
+    ...shotFile,
+    'UI-form-focused.frames.json': JSON.stringify(withoutKeyboard),
+  });
+  assert.match(field.xml, /не по формату: keyboard:/);
+  // Обратный случай: те же файлы с верными наблюдениями проходят.
+  const fine = await evaluate({ ...shotFile, 'UI-form-focused.frames.json': frames() });
+  assert.equal(fine.result.passed, true, fine.xml);
+});
+
+const logSpec = {
+  version: 1,
+  platform: 'ios-simulator',
+  log: { forbid: ['deprecated'] },
+  states: [{ id: 'UI-form-focused', assert: [{ kind: 'visible', element: 'submit' }] }],
+};
+
+test('Журнал читается целиком: строка 55 000 не теряется, пустой журнал — ошибка', async () => {
+  const lines = Array.from({ length: 60_000 }, (_, i) => `line ${i}`);
+  const clean = await evaluate(
+    { 'UI-form-focused.frames.json': frames(), 'log.txt': lines.join('\n') },
+    logSpec,
+  );
+  assert.equal(clean.result.passed, true, clean.xml);
+  lines[55_000] = 'helper is deprecated';
+  const late = await evaluate(
+    { 'UI-form-focused.frames.json': frames(), 'log.txt': lines.join('\n') },
+    logSpec,
+  );
+  assert.deepEqual(status(late.xml), [
+    ['visual.UI-form-focused.visible', 'passed'],
+    ['visual.log.no-forbidden', 'failed'],
+  ]);
+  const empty = await evaluate(
+    { 'UI-form-focused.frames.json': frames(), 'log.txt': '\n  \n' },
+    logSpec,
+  );
+  assert.match(empty.xml, /<error type="environment" message="журнал прогона пуст/);
 });

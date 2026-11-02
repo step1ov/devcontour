@@ -1,4 +1,4 @@
-import { inflateSync } from 'node:zlib';
+import { crc32, inflateSync } from 'node:zlib';
 import type { VisualImage } from '../core/visual.ts';
 
 /**
@@ -7,34 +7,52 @@ import type { VisualImage } from '../core/visual.ts';
  * получают понятный отказ вместо новой зависимости.
  */
 const SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-/** Предел стороны снимка: защищает от распаковки многогигабайтного буфера. */
+/** Пределы снимка: защищают от распаковки многогигабайтного буфера. */
 export const PNG_MAX_SIDE = 8192;
+export const PNG_MAX_PIXELS = 16 * 1024 * 1024;
 
 export function decodePng(file: Buffer): VisualImage {
   if (file.length < 8 || !file.subarray(0, 8).equals(SIGNATURE)) throw new Error('файл не PNG');
   let offset = 8;
   let header: { width: number; height: number; channels: number } | undefined;
   const data: Buffer[] = [];
+  let ended = false;
   while (offset + 8 <= file.length) {
     const length = file.readUInt32BE(offset);
     const type = file.toString('latin1', offset + 4, offset + 8);
     const start = offset + 8;
     if (start + length + 4 > file.length) throw new Error('PNG обрезан');
     const chunk = file.subarray(start, start + length);
+    if (crc32(file.subarray(offset + 4, start + length)) !== file.readUInt32BE(start + length))
+      throw new Error(`CRC блока ${type} PNG не совпадает`);
     offset = start + length + 4;
+    if (!header && type !== 'IHDR') throw new Error('PNG должен начинаться с IHDR');
     if (type === 'IHDR') {
+      if (header) throw new Error('в PNG больше одного IHDR');
+      if (length !== 13) throw new Error('IHDR PNG должен иметь длину 13');
       const width = chunk.readUInt32BE(0),
         height = chunk.readUInt32BE(4);
-      const [depth, color, , , interlace] = chunk.subarray(8, 13);
+      const [depth, color, compression, filter, interlace] = chunk.subarray(8, 13);
+      if (compression !== 0 || filter !== 0) throw new Error('неизвестный метод сжатия PNG');
       if (depth !== 8 || (color !== 2 && color !== 6) || interlace !== 0)
         throw new Error('поддерживается PNG 8 бит RGB/RGBA без interlace');
-      if (!width || !height || width > PNG_MAX_SIDE || height > PNG_MAX_SIDE)
+      if (
+        !width ||
+        !height ||
+        width > PNG_MAX_SIDE ||
+        height > PNG_MAX_SIDE ||
+        width * height > PNG_MAX_PIXELS
+      )
         throw new Error(`размер PNG ${width}×${height} вне пределов`);
       header = { width, height, channels: color === 6 ? 4 : 3 };
     } else if (type === 'IDAT') data.push(chunk);
-    else if (type === 'IEND') break;
+    else if (type === 'IEND') {
+      ended = true;
+      break;
+    }
   }
   if (!header) throw new Error('в PNG нет IHDR');
+  if (!ended) throw new Error('PNG обрезан: нет IEND');
   if (!data.length) throw new Error('в PNG нет данных изображения');
   const { width, height, channels } = header;
   const stride = width * channels;

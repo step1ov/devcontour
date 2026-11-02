@@ -61,7 +61,12 @@ test('visible: кнопка под клавиатурой падает с зак
   // Без клавиатуры на экране исходная рамка видима.
   assert.equal(evaluateVisible(visible, frames({ elements: { submit: button } })).status, 'passed');
   // notUnder: [] явно отключает проверку клавиатуры.
-  const ignore = assertion<'visible'>({ kind: 'visible', element: 'submit', notUnder: [] });
+  const ignore = assertion<'visible'>({
+    kind: 'visible',
+    element: 'submit',
+    notUnder: [],
+    reason: 'экран без поля ввода',
+  });
   assert.equal(
     evaluateVisible(ignore, frames({ keyboard, elements: { submit: button } })).status,
     'passed',
@@ -87,6 +92,7 @@ test('visible: выход за safe area и отсутствие элемент�
   assert.match(evaluateVisible(plain, frames()).message ?? '', /не найден/);
 });
 
+const field = (text: string) => ({ element: 'amount', text });
 const tapFrames = (tap: Partial<VisualTap>, extra: Partial<VisualFramesInput> = {}) =>
   frames({
     elements: { submit: { x: 20, y: 563, width: 350, height: 56 } },
@@ -95,8 +101,8 @@ const tapFrames = (tap: Partial<VisualTap>, extra: Partial<VisualFramesInput> = 
         element: 'submit',
         point: { x: 195, y: 591 },
         hit: 'submit',
-        before: { visible: ['submit'], focusedText: '135' },
-        after: { visible: ['submit', 'result'], focusedText: '135' },
+        before: { visible: ['submit'], focused: field('135') },
+        after: { visible: ['submit', 'result'], focused: field('135') },
         ...tap,
       },
     },
@@ -120,7 +126,7 @@ test('tap-hits: касание центра под клавиатурой пад
     tapFrames(
       {
         hit: null,
-        after: { visible: ['submit'], focusedText: '1352' },
+        after: { visible: ['submit'], focused: field('1352') },
       },
       { keyboard },
     ),
@@ -139,7 +145,7 @@ test('tap-hits: эффект должен наступить именно пос
   });
   const already = evaluateTapHits(
     tapHits,
-    tapFrames({ before: { visible: ['submit', 'result'], focusedText: '135' } }),
+    tapFrames({ before: { visible: ['submit', 'result'], focused: field('135') } }),
   );
   assert.equal(already.status, 'failed');
   assert.match(already.message ?? '', /эффект не доказан/);
@@ -152,8 +158,8 @@ test('tap-hits: эффект должен наступить именно пос
     evaluateTapHits(
       hide,
       tapFrames({
-        before: { visible: ['submit', 'sheet'] },
-        after: { visible: ['submit'] },
+        before: { visible: ['submit', 'sheet'], focused: null },
+        after: { visible: ['submit'], focused: null },
       }),
     ).status,
     'passed',
@@ -162,8 +168,8 @@ test('tap-hits: эффект должен наступить именно пос
     evaluateTapHits(
       hide,
       tapFrames({
-        before: { visible: ['submit', 'sheet'] },
-        after: { visible: ['submit', 'sheet'] },
+        before: { visible: ['submit', 'sheet'], focused: null },
+        after: { visible: ['submit', 'sheet'], focused: null },
       }),
     ).status,
     'failed',
@@ -393,4 +399,141 @@ test('JUnit: testcase на каждое утверждение, ошибка о�
     { classname: 'visual.UI-a-b', name: 'visible', status: 'failed', message: 'a <b> & "c"\nd' },
   ]);
   assert.equal(junitSummary(escaped).failedDetails[0], 'visual.UI-a-b.visible: a <b> & "c"');
+});
+
+const specWith = (
+  extra: Record<string, unknown>,
+  assert: Record<string, unknown>[] = [{ kind: 'visible', element: 'a' }],
+) =>
+  visualSpecSchema.safeParse({
+    version: 1,
+    platform: 'ios-simulator',
+    states: [{ id: 'UI-form-empty', assert }],
+    ...extra,
+  }).success;
+
+test('Шаблоны журнала: без групп, квантификаторов и обратных ссылок; проверка линейна', () => {
+  for (const bad of ['(a+)+b', '.*deprecated', 'a{2,}', 'x?', '(a)\\1', '(?=x)', '(?:a|b)c'])
+    assert.equal(specWith({ log: { forbid: [bad] } }), false, bad);
+  for (const good of ['deprecated', '^WARN\\b', 'deprecated|obsolete', '[*+?]', 'a\\.b'])
+    assert.equal(specWith({ log: { forbid: [good] } }), true, good);
+  const log = visualSpecSchema.parse({
+    version: 1,
+    platform: 'ios-simulator',
+    log: { forbid: ['deprecated', '^WARN\\b', 'warning: [a-z]'] },
+    states: [{ id: 'UI-form-empty', assert: [{ kind: 'visible', element: 'a' }] }],
+  }).log!;
+  const long = 'a'.repeat(2 * 1024 * 1024);
+  const started = performance.now();
+  assert.equal(evaluateLog(log, [long]).status, 'passed');
+  assert.equal(evaluateLog(log, [long + ' deprecated']).status, 'failed');
+  const elapsed = performance.now() - started;
+  assert.ok(elapsed < 1000, `две строки по 2 МБ проверялись ${Math.round(elapsed)} мс`);
+});
+
+test('Пустые утверждения отклоняются: порог 1, всеразрешающий allow, notUnder [] без причины', () => {
+  const background = (maxFlatShare: number) => [{ kind: 'background', maxFlatShare }];
+  assert.equal(specWith({}, background(0.9)), true);
+  assert.equal(specWith({}, background(1)), false);
+  const allow = (pattern: string, forbid = ['deprecated', '^WARN\\b']) =>
+    specWith({ log: { forbid, allow: [{ pattern, reason: 'известный долг' }] } });
+  assert.equal(allow('Require cycle'), true);
+  assert.equal(allow('WARN Require cycle'), true);
+  for (const vacuous of ['.', '^', 'a|', 'deprecated', 'WARN', 'e', '\\d', 'o'])
+    assert.equal(allow(vacuous), false, vacuous);
+  assert.equal(specWith({}, [{ kind: 'visible', element: 'a', notUnder: [] }]), false);
+  assert.equal(
+    specWith({}, [{ kind: 'visible', element: 'a', notUnder: [], reason: 'нет поля ввода' }]),
+    true,
+  );
+});
+
+test('tap-hits: hit обязателен; смена фокуса после отправки — не провал', () => {
+  const tapHits = assertion<'tap-hits'>({
+    kind: 'tap-hits',
+    element: 'submit',
+    expect: { visible: 'result' },
+  });
+  const tap = {
+    element: 'submit',
+    point: { x: 195, y: 591 },
+    before: { visible: ['submit'], focused: field('135') },
+    after: { visible: ['submit', 'result'], focused: null },
+  };
+  const parse = (record: Record<string, unknown>) =>
+    visualFramesSchema.safeParse({
+      version: 1,
+      state: 'UI-form-focused',
+      window,
+      safeArea,
+      keyboard: null,
+      elements: {},
+      taps: { 'tap-hits': record },
+    }).success;
+  assert.equal(parse(tap), false);
+  assert.equal(parse({ ...tap, hit: null }), true);
+  // Поле потеряло фокус после отправки: текст не сравнивается.
+  assert.equal(evaluateTapHits(tapHits, tapFrames({ ...tap, hit: 'submit' })).status, 'passed');
+  // Фокус перешёл на другое поле — тоже не изменение текста исходного поля.
+  const moved = {
+    ...tap,
+    hit: 'submit',
+    after: { ...tap.after, focused: { element: 'note', text: '' } },
+  };
+  assert.equal(evaluateTapHits(tapHits, tapFrames(moved)).status, 'passed');
+  // То же поле в фокусе с другим текстом — провал.
+  const typed = { ...tap, hit: 'submit', after: { ...tap.after, focused: field('1352') } };
+  assert.match(evaluateTapHits(tapHits, tapFrames(typed)).message ?? '', /"135" → "1352"/);
+});
+
+test('Граница клавиатуры: касание края — под клавиатурой, допуск рамки 0.5 pt', () => {
+  const visible = assertion<'visible'>({ kind: 'visible', element: 'submit' });
+  const at = (bottom: number) =>
+    evaluateVisible(
+      visible,
+      frames({ keyboard, elements: { submit: { x: 20, y: bottom - 56, width: 350, height: 56 } } }),
+    ).status;
+  assert.equal(at(583), 'passed');
+  assert.equal(at(583.4), 'passed');
+  assert.equal(at(583.6), 'failed');
+  const tapHits = assertion<'tap-hits'>({
+    kind: 'tap-hits',
+    element: 'submit',
+    expect: { visible: 'result' },
+  });
+  // Центр кнопки y 555–611 — ровно на верхнем крае клавиатуры.
+  const edge = (keyboardY: number) =>
+    evaluateTapHits(
+      tapHits,
+      tapFrames(
+        { point: { x: 195, y: 583 } },
+        {
+          keyboard: { ...keyboard, y: keyboardY },
+          elements: { submit: { x: 20, y: 555, width: 350, height: 56 } },
+        },
+      ),
+    );
+  assert.match(edge(583).message ?? '', /под клавиатурой/);
+  assert.equal(edge(584).status, 'passed');
+});
+
+test('background: клавиатура не считается фоном приложения', () => {
+  // Шум над клавиатурой, плоская серая клавиатура занимает большую часть safe area.
+  const shot = image((x, y) => (y >= 300 ? [210, 213, 219] : noise(x, y)));
+  const background = assertion<'background'>({ kind: 'background' });
+  const low = { x: 0, y: 300, width: 390, height: 544 };
+  assert.equal(evaluateBackground(background, frames({ keyboard: low }), shot).status, 'passed');
+  assert.equal(evaluateBackground(background, frames(), shot).status, 'failed');
+});
+
+test('log-forbid: пустой журнал — ошибка окружения, а не чистый журнал', () => {
+  const log = visualSpecSchema.parse({
+    version: 1,
+    platform: 'ios-simulator',
+    log: { forbid: ['deprecated'] },
+    states: [{ id: 'UI-form-empty', assert: [{ kind: 'visible', element: 'a' }] }],
+  }).log!;
+  assert.equal(evaluateLog(log, []).status, 'error');
+  assert.equal(evaluateLog(log, ['', '  ']).status, 'error');
+  assert.equal(evaluateLog(log, ['app started']).status, 'passed');
 });

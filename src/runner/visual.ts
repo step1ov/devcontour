@@ -2,7 +2,8 @@ import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import {
   evaluateVisual,
-  visualFramesSchema,
+  visualFramesErrorSchema,
+  visualFramesObservedSchema,
   visualJunit,
   visualSpecSchema,
   type VisualCase,
@@ -27,8 +28,9 @@ import { decodePng } from './png.ts';
 /** Пределы чтения: наблюдения пишет драйвер, но размер всё равно ограничен. */
 const FRAMES_LIMIT = 2 * 1024 * 1024;
 const SCREENSHOT_LIMIT = 64 * 1024 * 1024;
+/** Журнал читается целиком: больше предела — ошибка, а не проверка начала. */
 const LOG_LIMIT = 32 * 1024 * 1024;
-const LOG_LINES = 50_000;
+const SPEC_LIMIT = 256 * 1024;
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
@@ -82,9 +84,18 @@ async function stateInput(
         : `${state.id}.frames.json не читается: ${message(error)}`,
     };
   }
-  const parsed = visualFramesSchema.safeParse(raw);
-  if (!parsed.success)
-    return { error: `${state.id}.frames.json не по формату: ${parsed.error.issues[0]?.message}` };
+  // Вариант выбирается по полю error: ошибка объединения схем не назвала бы,
+  // какое поле наблюдений неверно.
+  const schema =
+    raw && typeof raw === 'object' && 'error' in raw
+      ? visualFramesErrorSchema
+      : visualFramesObservedSchema;
+  const parsed = schema.safeParse(raw);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const path = issue?.path.map(String).join('.') || '(корень)';
+    return { error: `${state.id}.frames.json не по формату: ${path}: ${issue?.message}` };
+  }
   const frames = parsed.data;
   if (frames.state !== state.id)
     return { error: `${state.id}.frames.json описывает состояние ${frames.state}` };
@@ -97,7 +108,7 @@ async function stateInput(
 async function logLines(directory: string): Promise<string[] | { error: string }> {
   try {
     const text = (await bounded(join(directory, 'log.txt'), LOG_LIMIT)).toString('utf8');
-    return text.split(/\r?\n/).slice(0, LOG_LINES);
+    return text.split(/\r?\n/);
   } catch (error) {
     return {
       error: missing(error)
@@ -113,7 +124,8 @@ export const VISUAL_SPEC_CASE = { classname: 'visual.spec', name: 'valid' } as c
 async function runCases(input: { spec: string; observations: string }): Promise<VisualCase[]> {
   let spec: VisualSpec;
   try {
-    spec = visualSpecSchema.parse(JSON.parse(await readFile(input.spec, 'utf8')));
+    const text = (await bounded(input.spec, SPEC_LIMIT)).toString('utf8');
+    spec = visualSpecSchema.parse(JSON.parse(text));
   } catch (error) {
     const issues =
       error && typeof error === 'object' && 'issues' in error && Array.isArray(error.issues)

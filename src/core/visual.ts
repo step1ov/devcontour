@@ -39,18 +39,50 @@ export const visualStateId = z
 const assertionName = z
   .string()
   .regex(/^[a-z][a-z0-9-]{0,47}$/, 'имя утверждения: строчные латинские буквы, цифры и дефис');
+/**
+ * Шаблоны журнала — регулярные выражения без групп, квантификаторов,
+ * обратных ссылок и lookaround; альтернативы `|` — только на верхнем уровне.
+ * Каждая альтернатива тогда — последовательность фиксированной длины, и
+ * проверка строки линейна по её длине: шаблон спецификации не может сделать
+ * gate медленным (`.*x` на строке в 200 000 символов шёл бы минуту), а строки
+ * журнала не обрезаются и читаются целиком.
+ */
+export function logPatternProblem(value: string): string | undefined {
+  let inClass = false;
+  for (let i = 0; i < value.length; i++) {
+    const c = value[i];
+    if (c === '\\') {
+      const next = value[i + 1] ?? '';
+      if (/[1-9k]/.test(next)) return 'обратные ссылки не поддерживаются';
+      if (/[pPu]/.test(next)) return 'escape \\p и \\u не поддерживаются';
+      i++;
+    } else if (inClass) inClass = c !== ']';
+    else if (c === '[') {
+      inClass = true;
+    } else if (c === '(' || c === ')')
+      return 'группы не поддерживаются: альтернативы — через | на верхнем уровне';
+    else if ('*+?{'.includes(c)) return 'квантификаторы не поддерживаются';
+  }
+  try {
+    new RegExp(value, 'i');
+  } catch {
+    return 'некорректное регулярное выражение';
+  }
+  return undefined;
+}
 const pattern = z
   .string()
   .min(1)
   .max(200)
-  .refine((value) => {
-    try {
-      new RegExp(value, 'i');
-      return true;
-    } catch {
-      return false;
-    }
-  }, 'некорректное регулярное выражение');
+  .superRefine((value, context) => {
+    const problem = logPatternProblem(value);
+    if (problem) context.addIssue({ code: 'custom', message: problem });
+  });
+/** Строки, которые разрешающий шаблон не должен покрывать: иначе он разрешает всё. */
+const NEUTRAL_LINES = ['', ' ', 'a', 'ok', '0'];
+/** Текст запрещающего шаблона без якорей и escape — пример строки, которую он ловит. */
+const forbiddenSample = (value: string) =>
+  value.replace(/\\[bB]|[$^]/g, '').replace(/\\(.)/g, '$1');
 const timeout = z.number().int().min(100).max(VISUAL_STATE_TIMEOUT_MAX_MS);
 
 /**
@@ -84,6 +116,8 @@ const assertion = z.discriminatedUnion('kind', [
     element: visualElementId,
     /** Без поля клавиатура проверяется, если она на экране; `[]` отключает. */
     notUnder: z.array(z.literal('keyboard')).max(1).optional(),
+    /** Обязательная причина, если `notUnder: []` отключает проверку клавиатуры. */
+    reason: z.string().trim().min(3).max(300).optional(),
     inset: z.literal('safe-area').optional(),
   }),
   z.strictObject({
@@ -101,7 +135,8 @@ const assertion = z.discriminatedUnion('kind', [
     region: region.default('content'),
     /** Элементы-поверхности (карточки, панели), исключаемые из области. */
     surfaces: z.array(visualElementId).max(32).default([]),
-    maxFlatShare: z.number().finite().gt(0).max(1).default(VISUAL_MAX_FLAT_SHARE),
+    /** Не выше 0.9: порог 1 пропускал бы любую заливку. */
+    maxFlatShare: z.number().finite().gt(0).max(0.9).default(VISUAL_MAX_FLAT_SHARE),
   }),
 ]);
 export type VisualAssertion = z.infer<typeof assertion>;
@@ -185,6 +220,12 @@ export const visualSpecSchema = z
             message: `Повтор утверждения ${name} в ${s.id}: задайте разные name`,
           });
         names.add(name);
+        if (a.kind === 'visible' && a.notUnder?.length === 0 && !a.reason)
+          context.addIssue({
+            code: 'custom',
+            path: ['states', index, 'assert', position, 'reason'],
+            message: 'notUnder: [] отключает проверку клавиатуры: укажите reason',
+          });
         if (spec.platform === 'web' && a.kind === 'visible' && a.notUnder?.includes('keyboard'))
           context.addIssue({
             code: 'custom',
@@ -192,6 +233,20 @@ export const visualSpecSchema = z
             message: 'Для web экранной клавиатуры нет: notUnder keyboard не применим',
           });
       });
+    });
+    spec.log?.allow.forEach((a, index) => {
+      const allow = new RegExp(a.pattern, 'i');
+      const neutral = NEUTRAL_LINES.find((line) => allow.test(line));
+      const forbidden = spec.log?.forbid.find((f) => allow.test(forbiddenSample(f)));
+      if (neutral !== undefined || forbidden !== undefined)
+        context.addIssue({
+          code: 'custom',
+          path: ['log', 'allow', index, 'pattern'],
+          message:
+            neutral !== undefined
+              ? `разрешающий шаблон покрывает обычную строку ${JSON.stringify(neutral)}`
+              : `разрешающий шаблон покрывает сам запрет ${forbidden}`,
+        });
     });
     if (budget > VISUAL_RUN_BUDGET_MS)
       context.addIssue({
@@ -213,42 +268,41 @@ export type Rect = z.infer<typeof rect>;
 const snapshot = z.strictObject({
   /** id элементов, видимых на экране. */
   visible: z.array(visualElementId).max(1000),
-  /** Текст поля в фокусе; нет поля — нет фокуса. */
-  focusedText: z.string().max(10_000).optional(),
+  /** Поле в фокусе и его текст; null — фокуса нет. */
+  focused: z.strictObject({ element: visualElementId, text: z.string().max(10_000) }).nullable(),
 });
 const tapRecord = z.strictObject({
   element: visualElementId,
   point: z.strictObject({ x: finite, y: finite }),
-  /** Элемент, принявший касание, если драйвер его знает; null — пустое место. */
-  hit: visualElementId.nullable().optional(),
+  /** Элемент, принявший касание; null — пустой участок. Драйвер обязан записать. */
+  hit: visualElementId.nullable(),
   before: snapshot,
   after: snapshot,
 });
 export type VisualTap = z.infer<typeof tapRecord>;
 
-export const visualFramesSchema = z.union([
-  z.strictObject({
-    version: z.literal(1),
-    state: visualStateId,
-    /** Драйвер не смог достичь или измерить состояние. */
-    error: z.string().min(1).max(4000),
-  }),
-  z.strictObject({
-    version: z.literal(1),
-    state: visualStateId,
-    window: rect,
-    safeArea: rect,
-    /** null — клавиатуры на экране нет; отсутствие поля — драйвер не измерил. */
-    keyboard: rect.nullable(),
-    elements: z.record(visualElementId, rect),
-    /** Касания утверждений `tap-hits` по имени утверждения. */
-    taps: z.record(assertionName, tapRecord).default({}),
-    /** Размер снимка для сырого `.rgba`; PNG несёт размер сам. */
-    screenshot: z
-      .strictObject({ width: z.number().int().positive(), height: z.number().int().positive() })
-      .optional(),
-  }),
-]);
+/** Драйвер не смог достичь или измерить состояние. */
+export const visualFramesErrorSchema = z.strictObject({
+  version: z.literal(1),
+  state: visualStateId,
+  error: z.string().min(1).max(4000),
+});
+export const visualFramesObservedSchema = z.strictObject({
+  version: z.literal(1),
+  state: visualStateId,
+  window: rect,
+  safeArea: rect,
+  /** null — клавиатуры на экране нет; отсутствие поля — драйвер не измерил. */
+  keyboard: rect.nullable(),
+  elements: z.record(visualElementId, rect),
+  /** Касания утверждений `tap-hits` по имени утверждения. */
+  taps: z.record(assertionName, tapRecord).default({}),
+  /** Размер снимка для сырого `.rgba`; PNG несёт размер сам. */
+  screenshot: z
+    .strictObject({ width: z.number().int().positive(), height: z.number().int().positive() })
+    .optional(),
+});
+export const visualFramesSchema = z.union([visualFramesErrorSchema, visualFramesObservedSchema]);
 export type VisualFramesInput = z.input<typeof visualFramesSchema>;
 export type VisualFrames = Extract<z.infer<typeof visualFramesSchema>, { window: Rect }>;
 
@@ -346,7 +400,7 @@ export function evaluateTapHits(
     problems.push(
       `точка касания (${fmt(tap.point.x)}, ${fmt(tap.point.y)}) под клавиатурой y ≥ ${fmt(frames.keyboard.y)}`,
     );
-  if (tap.hit !== undefined && tap.hit !== a.element)
+  if (tap.hit !== a.element)
     problems.push(`касание принял ${tap.hit ?? 'пустой участок экрана'}, а не ${a.element}`);
   if ('visible' in a.expect) {
     const target = a.expect.visible;
@@ -360,10 +414,17 @@ export function evaluateTapHits(
     else if (tap.after.visible.includes(target))
       problems.push(`после касания ${target} не скрылся`);
   }
-  if (tap.before.focusedText !== undefined && tap.after.focusedText !== tap.before.focusedText)
+  // Текст сравнивается, только пока фокус на том же поле: отправка формы
+  // законно снимает фокус, а набор в чужую клавиатуру его сохраняет.
+  const field = tap.before.focused;
+  if (
+    field &&
+    tap.after.focused?.element === field.element &&
+    tap.after.focused.text !== field.text
+  )
     problems.push(
-      `касание изменило текст поля в фокусе: ${JSON.stringify(tap.before.focusedText)} → ` +
-        JSON.stringify(tap.after.focusedText ?? ''),
+      `касание изменило текст поля ${field.element} в фокусе: ${JSON.stringify(field.text)} → ` +
+        JSON.stringify(tap.after.focused.text),
     );
   return problems.length ? failed(`${a.element}: ${problems.join('; ')}`) : passed();
 }
@@ -408,6 +469,8 @@ export function evaluateBackground(
     if (!frame) return failed(`поверхность ${id} не найдена на экране`);
     surfaces.push(frame);
   }
+  // Клавиатура — не фон приложения.
+  if (frames.keyboard) surfaces.push(frames.keyboard);
   const nx = Math.max(1, Math.min(GRID, Math.floor(area.width * scale)));
   const ny = Math.max(1, Math.min(GRID, Math.floor(area.height * scale)));
   const counts = new Map<number, number>();
@@ -455,6 +518,9 @@ const LOG_EXAMPLES = 5;
 
 /** `log-forbid`: строки журнала, совпавшие с запретом и не разрешённые явно. */
 export function evaluateLog(log: NonNullable<VisualSpec['log']>, lines: string[]): VisualOutcome {
+  // Пустой журнал не доказывает отсутствие предупреждений: захват не подтверждён.
+  if (!lines.some((line) => line.trim()))
+    return environment('журнал прогона пуст: захват журнала не подтверждён');
   const forbid = log.forbid.map((p) => new RegExp(p, 'i'));
   const allow = log.allow.map((a) => new RegExp(a.pattern, 'i'));
   const found = lines.filter(
