@@ -1,6 +1,7 @@
 import { selectedWorkspaceMode, assertControllerCheckout } from './workspace-mode.ts';
-import { lstat, mkdir, readFile, writeFile, realpath, mkdtemp, rm } from 'node:fs/promises';
-import { dirname, join, resolve, sep } from 'node:path';
+import { lstat, mkdir, readFile, rename, writeFile, realpath, mkdtemp, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import {
   configSchema,
@@ -171,21 +172,62 @@ const schemaDefault = (key: string, value: unknown) => {
   );
 };
 /**
+ * Запись целиком или никак: временный файл в том же каталоге и rename.
+ * Оборванная запись не оставляет полупустой config.json или файл компонента.
+ */
+async function atomicWrite(path: string, text: string) {
+  const temp = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
+  try {
+    await writeFile(temp, text, { flag: 'wx' });
+    await rename(temp, path);
+  } catch (error) {
+    await rm(temp, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+/**
+ * Отмена записанного: пробуются все файлы, исходный отказ сохраняется, а
+ * несостоявшиеся откаты дописываются к нему — оператор видит и причину, и
+ * какие файлы вернуть вручную.
+ */
+type Undo = () => Promise<string[]>;
+async function failWith(error: unknown, ...undos: Undo[]): Promise<never> {
+  const failed: string[] = [];
+  for (const undo of undos) failed.push(...(await undo()));
+  if (failed.length && error instanceof Error) {
+    error.message += `. Откат не удался: ${failed.join('; ')}`;
+    (error as Error & { undoErrors?: string[] }).undoErrors = failed;
+  }
+  throw error;
+}
+/** Вернуть прежнее содержимое файлов; несостоявшиеся откаты — в ответе. */
+const restoring =
+  (files: { path: string; previous: string | null }[]): Undo =>
+  async () => {
+    const failed: string[] = [];
+    for (const f of [...files].reverse())
+      try {
+        if (f.previous === null) await rm(f.path, { force: true });
+        else await atomicWrite(f.path, f.previous);
+      } catch (e) {
+        failed.push(`${f.path}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    return failed;
+  };
+/**
  * Дописать в файлы компонентов ключи, которые объявляет реестр или профиль,
  * а файла в них нет. Поля компонента берутся только из его файла
  * (`readComponentConfig`), поэтому иначе такое значение не применилось бы
  * вовсе, а workspace-init сообщал бы об успехе. Существующие ключи не
  * трогаются; правила записи — как у `scopedConfig`: файл внутри репозитория
- * и не symlink. Файл с незафиксированной правкой не меняется: отказ называет
- * его. Возвращает отмену записи.
+ * и не symlink. Файл с незафиксированной правкой (или чьё состояние в Git
+ * не удалось узнать) не меняется: отказ называет его. Возвращает отмену.
  */
 async function completeComponentFiles(
   additions: (ComponentAddition & { path: string; values: Record<string, unknown> })[],
-) {
-  const written: { destination: string; previous: string }[] = [];
-  const undo = async () => {
-    for (const w of written.reverse()) await writeFile(w.destination, w.previous);
-  };
+): Promise<Undo> {
+  const written: { path: string; previous: string }[] = [];
+  const undo = restoring(written);
   try {
     for (const a of additions) {
       const root = await realpath(a.path);
@@ -194,10 +236,15 @@ async function completeComponentFiles(
         throw new Error(
           `Файл компонента ${a.repositoryId} (${a.file}) вне репозитория или symlink`,
         );
-      const dirty = (await git(root, 'status', '--porcelain', '--', a.file).catch(() => ''))
-        .split('\n')
-        .some((line) => line.trim() && !line.startsWith('??'));
-      if (dirty)
+      let status: string;
+      try {
+        status = await git(root, 'status', '--porcelain', '--', a.file);
+      } catch (e) {
+        throw new Error(
+          `Не удалось проверить в Git файл компонента ${a.repositoryId} (${a.file}), а workspace-init должен дописать в него ${a.keys.join(', ')}: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+      if (status.split('\n').some((line) => line.trim() && !line.startsWith('??')))
         throw new Error(
           `Файл компонента ${a.repositoryId} (${a.file}) изменён и не зафиксирован, а workspace-init должен дописать в него ${a.keys.join(', ')}. Зафиксируйте или отмените правку и повторите workspace-init.`,
         );
@@ -205,17 +252,16 @@ async function completeComponentFiles(
       const next = { ...(JSON.parse(previous) as Record<string, unknown>) };
       for (const k of a.keys) if (!(k in next)) next[k] = a.values[k];
       try {
-        await writeFile(destination, JSON.stringify(next, null, 2) + '\n');
+        await atomicWrite(destination, JSON.stringify(next, null, 2) + '\n');
       } catch (error) {
         throw new Error(
           `Не удалось дописать ${a.keys.join(', ')} в файл компонента ${a.repositoryId} (${a.file}): ${error instanceof Error ? error.message : String(error)}`,
         );
       }
-      written.push({ destination, previous });
+      written.push({ path: destination, previous });
     }
   } catch (error) {
-    await undo();
-    throw error;
+    return failWith(error, undo);
   }
   return undo;
 }
@@ -225,7 +271,9 @@ const additionsNote = (added: ComponentAddition[]) =>
         added,
         addedNote: `В файлы компонентов дописаны значения реестра и профиля, которых в них не было: ${added
           .map((x) => `${x.file}: ${x.keys.join(', ')}`)
-          .join('; ')}. Зафиксируйте изменение в Git.`,
+          .join(
+            '; ',
+          )}. Действующая политика исполнения изменилась: утверждённые незавершённые задачи получат APPROVAL_STALE и потребуют повторного согласования. Зафиксируйте изменение в Git; файл компонента — чувствительный путь, поэтому после коммита база прогонов отстанет, и работающий serve остановит очередь до devcontour base-update.`,
       }
     : {};
 const publicAdditions = (a: ComponentAddition[]) =>
@@ -274,11 +322,13 @@ export async function setupWorkspace(file: string, data?: string) {
       prepare: r.prepare ?? selected[i].prepare,
       dependencyBuild: r.dependencyBuild,
       dependencyArtifacts: r.dependencyArtifacts,
+      dependencyStore: r.dependencyStore,
       preflight: r.preflight,
       forge: r.forge,
       path: await realpath(resolve(workspaceRoot, r.path)),
       targetBranch: r.targetBranch,
       gates: r.gates ?? selected[i].gates,
+      gateGroups: r.gateGroups,
       protectedPaths: [
         ...new Set([
           ...(r.protectedPaths ?? projectConfig('.', selected[i]).protectedPaths),
@@ -460,16 +510,20 @@ export async function setupWorkspace(file: string, data?: string) {
       );
       const additions = additionsFor(true);
       const undoFiles = await completeComponentFiles(additions);
-      await writeFile(join(root, 'packs.lock.json'), JSON.stringify(lock, null, 2) + '\n');
-      await writeFile(configPath, upgraded);
       try {
+        await atomicWrite(join(root, 'packs.lock.json'), JSON.stringify(lock, null, 2) + '\n');
+        await atomicWrite(configPath, upgraded);
         await reserveRepositories(loadConfig(configPath), root);
       } catch (invalid) {
         // Вернуть как было: иначе номер версии израсходован, а починить нечем.
-        await writeFile(configPath, previousConfig);
-        if (previousLock !== null) await writeFile(join(root, 'packs.lock.json'), previousLock);
-        await undoFiles();
-        throw invalid;
+        await failWith(
+          invalid,
+          restoring([
+            { path: join(root, 'packs.lock.json'), previous: previousLock },
+            { path: configPath, previous: previousConfig },
+          ]),
+          undoFiles,
+        );
       }
       // Файл компонента сильнее профиля. Обновление профиля, чьи ключи
       // компонент переопределяет, до конфигурации не доходило, а команда
@@ -613,11 +667,10 @@ export async function setupWorkspace(file: string, data?: string) {
       const undoFiles = await completeComponentFiles(registryAdditions);
       try {
         loadConfig(configPath, text);
+        await atomicWrite(configPath, text);
       } catch (invalid) {
-        await undoFiles();
-        throw invalid;
+        await failWith(invalid, undoFiles);
       }
-      await writeFile(configPath, text);
       return {
         status: 'declaration-updated',
         data: root,
@@ -636,8 +689,7 @@ export async function setupWorkspace(file: string, data?: string) {
   // реестра и профиля дописываются до проверки — загрузчик берёт поля
   // компонента только из файла.
   const installAdditions = additionsFor(true);
-  let undoFiles = async () => {};
-  let installed = false;
+  let undoFiles: Undo = () => Promise.resolve([]);
   try {
     undoFiles = await completeComponentFiles(installAdditions);
     const preview = join(previewRoot, 'config.json');
@@ -660,9 +712,9 @@ export async function setupWorkspace(file: string, data?: string) {
     await writeFile(configPath, JSON.stringify(scopedConfig(validated), null, 2) + '\n', {
       flag: 'wx',
     });
-    installed = true;
+  } catch (error) {
+    await failWith(error, undoFiles);
   } finally {
-    if (!installed) await undoFiles();
     await rm(previewRoot, { recursive: true, force: true });
   }
   return {

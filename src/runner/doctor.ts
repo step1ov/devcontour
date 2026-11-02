@@ -364,7 +364,7 @@ export async function doctor(
     checks.push({
       id: `component-copy:${copy.repositoryId}`,
       status: 'degraded',
-      detail: `config.json хранит копию полей компонента, которая расходится с ${copy.file} и не применяется: ${copy.keys.join(', ')}. Действует файл компонента; перенесите в него нужные значения и выполните workspace-init --file <реестр workspace.json>, чтобы убрать копию.`,
+      detail: `config.json хранит копию полей компонента, которая расходится с ${copy.file} и не применяется: ${copy.keys.join(', ')}. Действует файл компонента. Чтобы вернуть прежнее поведение, впишите эти ключи в файл компонента (значения — из копии в config.json) или объявите их для репозитория в workspace.json; значения профиля workspace-init дописывает в файл сам при обновлении профиля (поднятая version). Затем выполните workspace-init --file <реестр workspace.json>: он уберёт копию.`,
     });
   // Роли берутся объявленные, а не только workspace-уровня: роль, добавленную
   // компонентом, doctor иначе не проверил бы вовсе.

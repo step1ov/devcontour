@@ -9,6 +9,7 @@ import {
   realpath,
   symlink,
   access,
+  chmod,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -790,6 +791,106 @@ test('Дописать в файл компонента с незафиксир�
     assert.deepEqual((await w.read()).dependencyArtifacts, ['dist']);
   } finally {
     await w.f.close();
+  }
+});
+
+test('dependencyStore, объявленный реестром, попадает в файл компонента и действует; своё значение файла остаётся', async () => {
+  const dependencyStore = { manager: 'pnpm' };
+  const w = await componentWorkspace({}, { dependencyStore });
+  try {
+    const installed = await setupWorkspace(w.registry);
+    // Вместе с ним установка дописывает пути, которые защищает профиль.
+    assert.deepEqual('added' in installed ? installed.added : undefined, [
+      {
+        repositoryId: 'product',
+        file: 'devcontour.component.json',
+        keys: ['dependencyStore', 'protectedPaths'],
+      },
+    ]);
+    assert.match('addedNote' in installed ? String(installed.addedNote) : '', /APPROVAL_STALE/);
+    assert.match('addedNote' in installed ? String(installed.addedNote) : '', /base-update/);
+    assert.equal(
+      ((await w.read()).dependencyStore as { manager?: string } | undefined)?.manager,
+      'pnpm',
+    );
+    assert.equal(
+      loadConfig(installed.config).repositories[0].dependencyStore?.lockfile,
+      'pnpm-lock.yaml',
+    );
+
+    // Обратный случай: файл объявил своё хранилище — реестр его не заменяет.
+    await json(w.componentPath, {
+      ...(await w.read()),
+      dependencyStore: { manager: 'pnpm', lockfile: 'app/pnpm-lock.yaml' },
+    });
+    assert.equal((await setupWorkspace(w.registry)).status, 'preserved');
+    assert.equal(
+      loadConfig(installed.config).repositories[0].dependencyStore?.lockfile,
+      'app/pnpm-lock.yaml',
+    );
+  } finally {
+    await w.f.close();
+  }
+});
+
+test('Отказ после записи файлов компонентов возвращает их все', async () => {
+  // Два компонента получают дописанные ключи, затем запись config.json
+  // отказывает: оба файла должны вернуться к прежнему содержимому.
+  const a = await componentWorkspace({});
+  const b = await fixture();
+  try {
+    await git(b.repo, 'init', '-b', 'main');
+    await git(b.repo, 'config', 'user.name', 'Profile fixture');
+    await git(b.repo, 'config', 'user.email', 'fixture@example.invalid');
+    await git(b.repo, 'add', '.');
+    await git(b.repo, 'commit', '-m', 'Library');
+    const libraryFile = join(b.repo, 'devcontour.component.json');
+    await json(libraryFile, { name: 'Library', kind: 'library', gates: [testGate] });
+    const library = {
+      id: 'library',
+      name: 'Library',
+      path: b.repo,
+      profile: './profiles/main.json',
+      configFile: 'devcontour.component.json',
+    };
+    const registry = (extra: Record<string, unknown>) =>
+      json(a.registry, {
+        version: 1,
+        name: 'Completion',
+        repositories: [
+          { ...a.entry, ...extra },
+          { ...library, ...extra },
+        ],
+      });
+    await registry({});
+    const { data, config: configPath } = await setupWorkspace(a.registry);
+    const before = [await readFile(a.componentPath, 'utf8'), await readFile(libraryFile, 'utf8')];
+    const configBefore = await readFile(configPath, 'utf8');
+    await registry({ dependencyArtifacts: ['dist'] });
+    // Каталог данных только для чтения: config.json не записать.
+    await chmod(data, 0o555);
+    try {
+      await assert.rejects(setupWorkspace(a.registry), /EACCES|permission denied/i);
+    } finally {
+      await chmod(data, 0o755);
+    }
+    assert.deepEqual(
+      [await readFile(a.componentPath, 'utf8'), await readFile(libraryFile, 'utf8')],
+      before,
+      'оба файла компонентов возвращены',
+    );
+    assert.equal(await readFile(configPath, 'utf8'), configBefore);
+    // Причина устранена — повтор дописывает оба файла.
+    assert.equal((await setupWorkspace(a.registry)).status, 'declaration-updated');
+    assert.deepEqual((await a.read()).dependencyArtifacts, ['dist']);
+    assert.deepEqual(
+      (JSON.parse(await readFile(libraryFile, 'utf8')) as Record<string, unknown>)
+        .dependencyArtifacts,
+      ['dist'],
+    );
+  } finally {
+    await a.f.close();
+    await b.close();
   }
 });
 
