@@ -76,6 +76,7 @@ import { parseOperationalKeys, requestConfigApply } from './runner/reconfigure.t
 import { writeSelfCheck } from './runner/checks.ts';
 import { CheckCorpus } from './core/check-store.ts';
 import { propertySeed } from 'devcontour-harness';
+import { evaluateVisualRun } from './runner/visual.ts';
 const args = process.argv.slice(2),
   operation = args[0] ?? 'serve';
 const option = (name: string, fallback: string) =>
@@ -108,6 +109,26 @@ const authorRuntime = () => {
   return value;
 };
 async function main() {
+  if (operation === 'visual') {
+    // Чистая оценка записанных наблюдений: без workspace и базы. Драйвер
+    // симулятора (`visual run`, broker) ещё не реализован.
+    if (args[1] !== 'evaluate')
+      throw new Error(
+        'Укажите visual evaluate --spec FILE --observations DIR --report FILE (visual run ещё не реализован)',
+      );
+    for (const name of ['--spec', '--observations', '--report']) {
+      const value = option(name, '');
+      if (!value || value.startsWith('--')) throw new Error(`Укажите ${name}`);
+    }
+    const result = await evaluateVisualRun({
+      spec: resolve(option('--spec', '')),
+      observations: resolve(option('--observations', '')),
+      report: resolve(option('--report', '')),
+    });
+    console.log(JSON.stringify(result, null, 2));
+    if (!result.passed) process.exitCode = 1;
+    return;
+  }
   if (operation === 'eval-compare') {
     if (!args.includes('--baseline') || !args.includes('--candidate'))
       throw new Error('Укажите --baseline и --candidate JSON reports');

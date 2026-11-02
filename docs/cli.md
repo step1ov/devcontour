@@ -123,6 +123,8 @@ Plan содержит `title`, `description`, `tasks` (1–30), у каждой 
 | `workspace-verify` | `--changeset ID`                                             | Выполняет совместные gates на manifest компонентов                                                                                                                                          |
 | `changeset-accept` | `--changeset ID --author-runtime codex\|claude`              | Принимает успешную Verification, при remote mode требует Delivery                                                                                                                           |
 
+`visual evaluate --spec FILE --observations DIR --report FILE` не требует workspace: проверяет утверждения [визуальной приёмки](visual-gate.md) над записанными наблюдениями и пишет JUnit для `test` gate; код выхода 1 при любом провале или ошибке окружения.
+
 `run` не утверждает черновики и не выполняет весь продукт автоматически. Его успешный exit сам по себе не доказывает, что не осталось draft/blocked задач или непринятых досок. Проверяйте итоговое состояние и порученный объём.
 
 `accept`/`changeset-accept` не создают ещё один LLM-review готового отчёта. Они применяют доменные условия к уже полученным доказательствам. При `approvalMode: operator` агентский вызов возвращает `awaiting-operator`; оператор подтверждает в UI. Статус такого ответа нужно обработать, а не читать любой exit 0 как приёмку.

@@ -13,6 +13,9 @@ export function printHelp() {
     'devcontour intent-render --file definition.json [--repository-id ID] --workspace ...\ndevcontour intent-snapshot [--repository-id ID] [--story ID] --workspace ...\ndevcontour intent-report --release ID [--repository-id ID] [--require-complete] [--require-accepted] --workspace ...\ndevcontour product-view [--release ID] [--require-accepted] --workspace ...',
   );
   console.log(
+    'devcontour visual evaluate --spec contracts/ui-states/app.json --observations DIR --report .reports/visual.xml — утверждения визуальной приёмки над записанными наблюдениями, JUnit для test gate',
+  );
+  console.log(
     'devcontour engineering-evals [--live --runtime codex|claude --model ID --reviewer-model ID]\ndevcontour eval-compare --baseline report.json --candidate report.json',
   );
   console.log(
