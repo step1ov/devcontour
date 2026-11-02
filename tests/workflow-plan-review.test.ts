@@ -185,7 +185,7 @@ test('Отмена задания ведущего прерывает идуще
         () => 'finished',
         () => 'rejected',
       ),
-      delay(30_000).then(() => 'still running'),
+      delay(30_000, undefined, { ref: false }).then(() => 'still running'),
     ]);
     assert.equal(outcome, 'rejected', 'отмена остановила вызов ревьюера');
     assert.equal(approvals(f), 0);
