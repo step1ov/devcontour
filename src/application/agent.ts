@@ -17,7 +17,7 @@ import {
   correctRequirements,
 } from '../runner/requirements.ts';
 import { repositories, repository } from '../core/repositories.ts';
-import { z } from 'zod';
+import { z, ZodError } from 'zod';
 import { readFileSync } from 'node:fs';
 import { AgentContext, contextInputs, type ContextOperation } from './context.ts';
 import { DevContour, scopeGapWarning, specDigest } from '../core/service.ts';
@@ -312,6 +312,27 @@ export function capabilities() {
 }
 
 // CLI, HTTP and MCP use this layer. Review/evidence remain owned by existing runners.
+/** Путь поля так, как его пишет автор запроса: `plan.tasks[0].dependsOn`. */
+const fieldPath = (path: readonly PropertyKey[]) =>
+  path.map((p, i) => (typeof p === 'number' ? `[${p}]` : (i ? '.' : '') + String(p))).join('') ||
+  'input';
+/**
+ * Отказ схемы входа — по названным полям, а не сырым массивом zod: CLI
+ * (`agent --file`), HTTP и MCP показывали JSON с `code` и `path`, и автор
+ * запроса искал поле сам.
+ */
+export function readableInputError(error: unknown, raw: unknown) {
+  if (!(error instanceof ZodError)) return error;
+  const operation = (raw as { operation?: unknown } | null)?.operation;
+  const shown = error.issues.slice(0, 10).map((i) => `${fieldPath(i.path)}: ${i.message}`);
+  const rest = error.issues.length - shown.length;
+  return new DomainError(
+    `Запрос${typeof operation === 'string' ? ' ' + operation : ''} не принят: ` +
+      shown.join('; ') +
+      (rest > 0 ? `; и ещё ${rest}` : ''),
+    400,
+  );
+}
 export class AgentService {
   constructor(
     readonly h: DevContour,
@@ -319,7 +340,12 @@ export class AgentService {
     readonly root?: string,
   ) {}
   execute(raw: unknown): Record<string, unknown> {
-    const result = this.dispatch(raw);
+    let result: Record<string, unknown>;
+    try {
+      result = this.dispatch(raw);
+    } catch (error) {
+      throw readableInputError(error, raw);
+    }
     return this.bounded(result);
   }
   private bounded(result: Record<string, unknown>) {
@@ -329,6 +355,13 @@ export class AgentService {
   }
   /** Общий вход транспортов: синхронные операции и операции с внешними процессами. */
   async run(raw: unknown): Promise<Record<string, unknown>> {
+    try {
+      return await this.runUnchecked(raw);
+    } catch (error) {
+      throw readableInputError(error, raw);
+    }
+  }
+  private async runUnchecked(raw: unknown): Promise<Record<string, unknown>> {
     if (!checkJsonBytes(raw, 100000).within)
       throw new DomainError('Запрос превышает 100000 байт', 413);
     const request = agentRequest.parse(raw);
