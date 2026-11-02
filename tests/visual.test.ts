@@ -796,3 +796,112 @@ test('log: окна журнала по состояниям называют с
     false,
   );
 });
+
+test('hit: декоративный элемент не считается промахом, другой элемент — считается', () => {
+  const spec = visualSpecSchema.parse({
+    ...reachSpec,
+    decorative: ['backdrop'],
+  });
+  const run = (hit: unknown) =>
+    evaluateVisual(spec, {
+      'UI-form-sent': {
+        frames: frames({
+          elements: { result: window },
+          stepTaps: [stepTap({ hit })],
+        } as Partial<VisualFramesInput>),
+      },
+    })[0];
+  assert.equal(run({ kind: 'element', element: 'backdrop' }).status, 'passed');
+  // Обратный случай: тот же hit без объявления decorative — промах.
+  const plain = evaluateVisual(reachSpec, {
+    'UI-form-sent': {
+      frames: frames({
+        elements: { result: window },
+        stepTaps: [stepTap({ hit: { kind: 'element', element: 'backdrop' } })],
+      } as Partial<VisualFramesInput>),
+    },
+  })[0];
+  assert.equal(plain.status, 'failed');
+  assert.match(plain.message ?? '', /касание принял backdrop/);
+  assert.equal(run({ kind: 'element', element: 'overlay' }).status, 'failed');
+  // Декоративность не скрывает клавиатуру.
+  const under = evaluateVisual(spec, {
+    'UI-form-sent': {
+      frames: frames({
+        elements: { result: window },
+        stepTaps: [stepTap({ keyboard, hit: { kind: 'element', element: 'backdrop' } })],
+      } as Partial<VisualFramesInput>),
+    },
+  })[0];
+  assert.match(under.message ?? '', /под клавиатурой/);
+});
+
+test('decorative: строгая проверка — без повторов, нельзя касаться декоративного', () => {
+  const parse = (value: Record<string, unknown>) =>
+    visualSpecSchema.safeParse({
+      version: 1,
+      platform: 'ios-simulator',
+      states: [
+        {
+          id: 'UI-form-empty',
+          steps: [{ tap: 'submit' }],
+          assert: [{ kind: 'tap-hits', element: 'send', expect: { visible: 'done' } }],
+        },
+      ],
+      ...value,
+    }).success;
+  assert.equal(parse({ decorative: ['backdrop'] }), true);
+  assert.equal(parse({ decorative: ['backdrop', 'backdrop'] }), false);
+  assert.equal(parse({ decorative: ['submit'] }), false);
+  assert.equal(parse({ decorative: ['send'] }), false);
+  assert.equal(parse({ decorative: ['bad id'] }), false);
+});
+
+test('reach: цель вне окна и отсутствующий id — провал продукта, а не окружения', () => {
+  const offWindow = {
+    step: 2,
+    element: 'submit',
+    frame: { x: 20, y: 900, width: 350, height: 56 },
+    window,
+    keyboard: null,
+    point: null,
+  };
+  const outside = unreached([offWindow]);
+  assert.equal(outside[0].status, 'failed');
+  assert.match(outside[0].message ?? '', /шаг 2 submit: цель шага вне окна \(submit y 900–956/);
+  // Рамка в окне, а касания нет — нарушение договора драйвером.
+  const lazy = unreached([{ ...offWindow, frame: { x: 20, y: 500, width: 350, height: 56 } }]);
+  assert.equal(lazy[0].status, 'error');
+  // point: null требует отсутствия полей касания.
+  assert.equal(
+    visualFramesErrorSchema.safeParse({
+      version: 1,
+      state: 'UI-form-sent',
+      error: 'x',
+      stepTaps: [{ ...offWindow, hit: { kind: 'none' } }],
+    }).success,
+    false,
+  );
+  const missing = (record: unknown) =>
+    evaluateVisual(reachSpec, {
+      'UI-form-sent': {
+        unreached: visualFramesErrorSchema.parse({
+          version: 1,
+          state: 'UI-form-sent',
+          error: 'step wait result: not shown within 5 s',
+          missing: record,
+        }),
+      },
+    })[0];
+  const absent = missing({ step: 4, target: 'result', visible: ['amount', 'submit'] });
+  assert.equal(absent.status, 'failed');
+  assert.match(
+    absent.message ?? '',
+    /шаг 4: цель result не найдена на экране за время шага; на экране: amount, submit/,
+  );
+  const prefixed = missing({ step: 3, target: 'row-*[0]', visible: [] });
+  assert.equal(prefixed.status, 'failed');
+  // Запись, не совпадающая с шагом спецификации, — ошибка драйвера.
+  assert.equal(missing({ step: 4, target: 'other', visible: [] }).status, 'error');
+  assert.equal(missing({ step: 1, target: '57,5', visible: [] }).status, 'error');
+});

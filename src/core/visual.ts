@@ -339,12 +339,33 @@ export const visualSpecSchema = z
           .default([]),
       })
       .optional(),
+    /**
+     * id элементов, которые не принимают касаний (фоновое изображение,
+     * декоративная подложка): драйвер не называет их `hit`, а оценщик не
+     * считает такой `hit` попаданием мимо цели.
+     */
+    decorative: z.array(visualElementId).max(64).default([]),
     states: z
       .array(state)
       .min(1, 'спецификация без состояний ничего не проверяет')
       .max(VISUAL_MAX_STATES),
   })
   .superRefine((spec, context) => {
+    const decorative = new Set(spec.decorative);
+    if (decorative.size !== spec.decorative.length)
+      context.addIssue({
+        code: 'custom',
+        path: ['decorative'],
+        message: 'Повтор id в decorative',
+      });
+    const touched = (id: string, path: (string | number)[]) => {
+      if (decorative.has(id))
+        context.addIssue({
+          code: 'custom',
+          path,
+          message: `${id} объявлен декоративным: касаться его нельзя`,
+        });
+    };
     const seen = new Set<string>();
     let budget = 0;
     spec.states.forEach((s, index) => {
@@ -356,6 +377,10 @@ export const visualSpecSchema = z
         });
       seen.add(s.id);
       budget += s.timeoutMs ?? spec.defaults.stateTimeoutMs;
+      s.steps.forEach((step, position) => {
+        const target = 'tap' in step ? step.tap : 'clear' in step ? step.clear : undefined;
+        if (typeof target === 'string') touched(target, ['states', index, 'steps', position]);
+      });
       const names = new Set<string>();
       s.assert.forEach((a, position) => {
         const name = assertionId(a);
@@ -372,6 +397,8 @@ export const visualSpecSchema = z
             message: `Повтор утверждения ${name} в ${s.id}: задайте разные name`,
           });
         names.add(name);
+        if (a.kind === 'tap-hits')
+          touched(a.element, ['states', index, 'assert', position, 'element']);
         if (a.kind === 'visible' && a.notUnder?.length === 0 && !a.reason)
           context.addIssue({
             code: 'custom',
@@ -421,10 +448,11 @@ const snapshot = z.strictObject({
 /**
  * Кто принял касание — лучшее доказательство драйвера. Клавиатура названа
  * явно, а не id элемента: testID `keyboard` у продукта возможен. Драйвер
- * без hit-test (XCUITest) вычисляет так: точка в рамке клавиатуры —
- * `keyboard`; иначе самый верхний (последний в порядке отрисовки, при
- * равенстве — наименьший по площади) элемент, чья рамка содержит точку, —
- * `element`; иначе `none`.
+ * без hit-test и без надёжного порядка отрисовки (XCUITest) вычисляет так:
+ * точка в рамке клавиатуры — `keyboard`; иначе наименьшая по площади рамка,
+ * содержащая точку, среди элементов с id, кроме `decorative` и заведомо не
+ * принимающих касаний, — `element`; иначе `none`. Это приближение: перекрытия
+ * без id и скрытые от доступности слои драйвер не видит.
  */
 export const visualHitSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('element'), element: visualElementId }),
@@ -452,20 +480,47 @@ export type VisualTap = z.infer<typeof tapRecord>;
  * состояния — заблокированный шаг становится провалом `reach` с этим
  * доказательством, а не ошибкой окружения.
  */
-const stepTapRecord = z.strictObject({
-  /** Номер шага в `steps` состояния, с нуля. */
-  step: z.number().int().min(0).max(31),
-  element: visualElementId,
-  /** Рамка элемента в момент касания. */
-  frame: rect,
-  window: rect,
-  keyboard: rect.nullable(),
-  point: z.strictObject({ x: finite, y: finite }),
-  hit: visualHitSchema,
-  before: snapshot,
-  after: snapshot,
-});
+const stepIndex = z.number().int().min(0).max(31);
+const stepTapRecord = z.union([
+  z.strictObject({
+    /** Номер шага в `steps` состояния, с нуля. */
+    step: stepIndex,
+    element: visualElementId,
+    /** Рамка элемента в момент касания. */
+    frame: rect,
+    window: rect,
+    keyboard: rect.nullable(),
+    point: z.strictObject({ x: finite, y: finite }),
+    hit: visualHitSchema,
+    before: snapshot,
+    after: snapshot,
+  }),
+  /**
+   * Цель найдена, но её рамка вне окна: видимого центра нет, касания не было.
+   * Шаг `scroll` такой записи не даёт — прокрутка для этого и нужна.
+   */
+  z.strictObject({
+    step: stepIndex,
+    element: visualElementId,
+    frame: rect,
+    window: rect,
+    keyboard: rect.nullable(),
+    point: z.null(),
+  }),
+]);
 export type VisualStepTap = z.infer<typeof stepTapRecord>;
+/**
+ * Цель шага не появилась на экране за всё время шага: id нет в дереве
+ * доступности (например, его нет в коде этого SHA). Провал `reach` с
+ * названным id, а не тайм-аут драйвера.
+ */
+const missingRecord = z.strictObject({
+  step: stepIndex,
+  /** Цель шага, как её называет спецификация: id или `префикс*[index]`. */
+  target: z.string().min(1).max(100),
+  /** id, которые были на экране в конце ожидания, для диагностики. */
+  visible: z.array(visualElementId).max(200),
+});
 /** Байтовое окно `log.txt`, записанное за время состояния: [from, to). */
 const logWindow = z
   .strictObject({ from: z.number().int().min(0), to: z.number().int().min(0) })
@@ -477,6 +532,7 @@ export const visualFramesErrorSchema = z.strictObject({
   state: visualStateId,
   error: z.string().min(1).max(4000),
   stepTaps: z.array(stepTapRecord).max(32).default([]),
+  missing: missingRecord.optional(),
   log: logWindow.optional(),
 });
 export const visualFramesObservedSchema = z.strictObject({
@@ -490,6 +546,7 @@ export const visualFramesObservedSchema = z.strictObject({
   /** Касания утверждений `tap-hits` по имени утверждения. */
   taps: z.record(assertionName, tapRecord).default({}),
   stepTaps: z.array(stepTapRecord).max(32).default([]),
+  missing: missingRecord.optional(),
   log: logWindow.optional(),
   /** Размер снимка для сырого `.rgba`; PNG несёт размер сам. */
   screenshot: z
@@ -575,6 +632,7 @@ export function evaluateVisible(
 export function evaluateTapHits(
   a: Extract<VisualAssertion, { kind: 'tap-hits' }>,
   frames: VisualFrames,
+  decorative: ReadonlySet<string> = new Set(),
 ): VisualOutcome {
   const name = assertionId(a);
   const frame = frames.elements[a.element];
@@ -587,7 +645,7 @@ export function evaluateTapHits(
     return environment(`драйвер записал касание ${tap.element} вместо ${a.element}`);
   const offCentre = centreProblem(shown, tap.point);
   if (offCentre) return environment(offCentre);
-  const problems = tapProblems(tap, frames.keyboard);
+  const problems = tapProblems(tap, frames.keyboard, decorative);
   if ('visible' in a.expect) {
     const target = a.expect.visible;
     if (!tap.after.visible.includes(target)) problems.push(`после касания ${target} не появился`);
@@ -601,6 +659,15 @@ export function evaluateTapHits(
       problems.push(`после касания ${target} не скрылся`);
   }
   return problems.length ? failed(`${a.element}: ${problems.join('; ')}`) : passed();
+}
+
+/** Цель шага, если у него она есть. */
+function stepTarget(step: VisualStep): VisualTarget | undefined {
+  if ('tap' in step) return step.tap;
+  if ('clear' in step) return step.clear;
+  if ('wait' in step) return step.wait;
+  if ('scroll' in step) return step.to === 'end' ? step.scroll : step.to;
+  return undefined;
 }
 
 /** Касание не в центре видимой рамки — нарушение договора драйвером. */
@@ -623,13 +690,17 @@ function centreProblem(shown: Rect, point: { x: number; y: number }) {
 function tapProblems(
   tap: Pick<VisualTap, 'element' | 'point' | 'hit' | 'before' | 'after'>,
   keyboard: Rect | null,
+  decorative: ReadonlySet<string>,
 ) {
   const problems: string[] = [];
   if (keyboard && inside(tap.point, keyboard))
     problems.push(
       `точка касания (${fmt(tap.point.x)}, ${fmt(tap.point.y)}) под клавиатурой y ≥ ${fmt(keyboard.y)}`,
     );
-  if (tap.hit.kind !== 'element' || tap.hit.element !== tap.element)
+  // `hit` — приближение драйвера; декоративный элемент касаний не принимает,
+  // и такой `hit` не доказывает промах.
+  const ignored = tap.hit.kind === 'element' && decorative.has(tap.hit.element);
+  if (!ignored && (tap.hit.kind !== 'element' || tap.hit.element !== tap.element))
     problems.push(`касание принял ${hitLabel(tap.hit)}, а не ${tap.element}`);
   const field = tap.before.focused;
   if (
@@ -651,7 +722,11 @@ function tapProblems(
  * если драйвер дальше не смог достичь состояния. Сбой драйвера без такого
  * шага — ошибка окружения.
  */
-export function evaluateReach(state: VisualState, input: VisualStateInput): VisualOutcome {
+export function evaluateReach(
+  state: VisualState,
+  input: VisualStateInput,
+  decorative: ReadonlySet<string> = new Set(),
+): VisualOutcome {
   if ('error' in input) return environment(input.error);
   const observed = 'unreached' in input ? input.unreached : input.frames;
   const blocked: string[] = [];
@@ -668,15 +743,37 @@ export function evaluateReach(state: VisualState, input: VisualStateInput): Visu
         `запись касания шага ${tap.step} (${tap.element}) не соответствует шагу спецификации`,
       );
     const shown = intersect(tap.frame, tap.window);
-    if (!shown) {
-      blocked.push(`шаг ${tap.step} ${targetLabel(target)}: элемент ${tap.element} вне окна`);
+    if (tap.point === null) {
+      if (shown)
+        return environment(
+          `шаг ${tap.step}: драйвер не коснулся ${tap.element}, хотя его рамка в окне`,
+        );
+      blocked.push(
+        `шаг ${tap.step} ${targetLabel(target)}: цель шага вне окна ` +
+          `(${tap.element} y ${span(tap.frame.y, tap.frame.y + tap.frame.height)}, ` +
+          `окно y ${span(tap.window.y, tap.window.y + tap.window.height)})`,
+      );
       continue;
     }
+    if (!shown) return environment(`шаг ${tap.step}: касание ${tap.element}, чья рамка вне окна`);
     const offCentre = centreProblem(shown, tap.point);
     if (offCentre) return environment(`шаг ${tap.step}: ${offCentre}`);
-    const problems = tapProblems(tap, tap.keyboard);
+    const problems = tapProblems(tap, tap.keyboard, decorative);
     if (problems.length)
       blocked.push(`шаг ${tap.step} ${targetLabel(target)}: ${problems.join('; ')}`);
+  }
+  if (observed.missing) {
+    const { step, target, visible } = observed.missing;
+    const declared = state.steps[step];
+    const expected = declared ? stepTarget(declared) : undefined;
+    if (!expected || targetLabel(expected) !== target)
+      return environment(
+        `запись отсутствия цели шага ${step} (${target}) не соответствует спецификации`,
+      );
+    blocked.push(
+      `шаг ${step}: цель ${target} не найдена на экране за время шага` +
+        (visible.length ? `; на экране: ${visible.slice(0, 20).join(', ')}` : ''),
+    );
   }
   if (blocked.length)
     return failed(('unreached' in input ? 'состояние не достигнуто: ' : '') + blocked.join('\n'));
@@ -844,13 +941,14 @@ export function evaluateVisual(
   log?: VisualLogInput,
 ): VisualCase[] {
   const cases: VisualCase[] = [];
+  const decorative = new Set(spec.decorative);
   const windows: { state: string; from: number; to: number }[] = [];
   for (const s of spec.states) {
     const input = states[s.id] ?? { error: `драйвер не записал наблюдения состояния ${s.id}` };
     const observed =
       'frames' in input ? input.frames : 'unreached' in input ? input.unreached : undefined;
     if (observed?.log) windows.push({ state: s.id, ...observed.log });
-    const reach = evaluateReach(s, input);
+    const reach = evaluateReach(s, input, decorative);
     cases.push({ classname: `visual.${s.id}`, name: VISUAL_REACH, ...reach });
     for (const a of s.assert) {
       const head = { classname: `visual.${s.id}`, name: assertionId(a) };
@@ -861,7 +959,7 @@ export function evaluateVisual(
             ? failed(`состояние не достигнуто: см. visual.${s.id}.${VISUAL_REACH}`)
             : environment(`драйвер: ${input.unreached.error}`);
         if (a.kind === 'visible') return evaluateVisible(a, input.frames);
-        if (a.kind === 'tap-hits') return evaluateTapHits(a, input.frames);
+        if (a.kind === 'tap-hits') return evaluateTapHits(a, input.frames, decorative);
         const shot = input.screenshot;
         if (!shot) return environment(`нет снимка экрана состояния ${s.id}`);
         if ('error' in shot) return environment(shot.error);
