@@ -2,7 +2,8 @@
 // разойдётся с ожиданием оператора. Без чтения базы: вызовы передаёт doctor.
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { budgetsSchema, pricesSchema, type Config } from '../core/model.ts';
+import { budgetsSchema, pricesSchema, type Config, type DevContourState } from '../core/model.ts';
+import { loadedDigest } from '../core/service.ts';
 import type { Price, UsageRecord } from '../core/usage.ts';
 import { declaredRoles, repositories, reviewerBinding, roleBinding } from '../core/repositories.ts';
 
@@ -175,4 +176,29 @@ export function budgetChecks(
       });
   }
   return checks;
+}
+
+/**
+ * Показанные `prices`/`budgets` — из config.json; работающий контур действует
+ * по применённой конфигурации. Если её digest другой, правка файла ещё не
+ * действует: doctor говорит, как её применить. Без записи о применении
+ * (контур не запускался) сравнивать не с чем — проверки нет.
+ */
+export function appliedCheck(
+  config: Config,
+  state?: Partial<Pick<DevContourState, 'leader' | 'appliedConfig'>>,
+  now = Date.now(),
+): Check | undefined {
+  const applied = state?.appliedConfig;
+  if (!applied || applied.digest === loadedDigest(config)) return undefined;
+  const live = !!state.leader && state.leader.leaseUntil > now;
+  return {
+    id: 'budgets:applied',
+    status: 'degraded',
+    detail: `config.json отличается от конфигурации, применённой контуром ${applied.at}: показанные prices и budgets могут ещё не действовать. ${
+      live
+        ? 'Не применено — выполните devcontour config-apply --keys budgets,prices (прочие ключи применяет перезапуск serve)'
+        : 'Не применено — следующий запуск serve применит config.json целиком'
+    }.`,
+  };
 }

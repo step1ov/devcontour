@@ -25,7 +25,12 @@ import { executionEnvironment, runSteps, withEnvironment } from './environment.t
 import { withResources } from './resources.ts';
 import { agentEnvironment, reviewerRunsChecks, toolProfileFor, writerRunsChecks } from './tools.ts';
 import { taskContext } from './context.ts';
-import { budgetChecks, workspaceDeclaration, type DoctorCall } from './budget-doctor.ts';
+import {
+  appliedCheck,
+  budgetChecks,
+  workspaceDeclaration,
+  type DoctorCall,
+} from './budget-doctor.ts';
 import type { UsageRecord } from '../core/usage.ts';
 import { forgeAdapter } from './forge.ts';
 import { DevContour, supersededBy } from '../core/service.ts';
@@ -355,7 +360,8 @@ export async function doctor(
   config: Config,
   root: string,
   probe = false,
-  state?: Pick<DevContourState, 'leader' | 'runs'> & Partial<Pick<DevContourState, 'contracts'>>,
+  state?: Pick<DevContourState, 'leader' | 'runs'> &
+    Partial<Pick<DevContourState, 'contracts' | 'appliedConfig'>>,
   stateCheck?: Check,
   calls?: DoctorCall[],
 ) {
@@ -416,6 +422,8 @@ export async function doctor(
     }
   // Тарифы и бюджеты: что действует и где стоимость останется неизвестной.
   checks.push(...budgetChecks(config, calls, workspaceDeclaration(config)));
+  const pending = appliedCheck(config, state);
+  if (pending) checks.push(pending);
   for (const kind of ['plan', 'contract'] as const)
     checks.push({
       id: `review:${kind}`,

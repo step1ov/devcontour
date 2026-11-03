@@ -9,7 +9,8 @@ import {
   workspaceDeclaration,
   type DoctorCall,
 } from '../src/runner/budget-doctor.ts';
-import { doctorState } from '../src/runner/doctor.ts';
+import { doctor, doctorState } from '../src/runner/doctor.ts';
+import { loadedDigest } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import type { Config } from '../src/core/model.ts';
 
@@ -190,6 +191,56 @@ test('doctorState reads call records for the price check without a writer', () =
         outcome: 'returned',
       },
     ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('doctor itself reports prices, budgets, unpriced calls and a config not yet applied', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-budget-doctor-'));
+  try {
+    // Роли demo: остальные проверки doctor не зовут внешних runtime.
+    const c = config({
+      prices: [price('gpt-x')],
+      budgets: { task: { usd: 25 }, onUnknown: 'continue' },
+    });
+    const live = { owner: 'server', leaseUntil: Date.now() + 60000 };
+    const report = async (digest?: string) =>
+      byId(
+        (
+          await doctor(
+            c,
+            root,
+            false,
+            {
+              leader: live,
+              runs: [],
+              ...(digest ? { appliedConfig: { digest, at: '2026-11-01T00:00:00Z', by: 's' } } : {}),
+            },
+            undefined,
+            [call({ model: 'gpt-old', startedAt: new Date().toISOString() })],
+          )
+        ).checks,
+      );
+    let checks = await report(loadedDigest(c));
+    assert.match(checks.prices?.detail ?? '', /codex\/gpt-x с 2026-10-01T00:00:00Z/);
+    assert.equal(
+      checks.budgets?.detail,
+      'задача: 25 USD; доска: нет; workspace: нет; onUnknown: continue',
+    );
+    assert.equal(checks['prices:calls']?.status, 'degraded');
+    assert.match(checks['prices:calls'].detail, /codex\/gpt-old — 1/);
+    // Файл совпадает с применённой конфигурацией — замечания нет.
+    assert.equal(checks['budgets:applied'], undefined);
+    // Применена другая конфигурация: показанное из файла ещё не действует.
+    checks = await report('f'.repeat(64));
+    assert.equal(checks['budgets:applied']?.status, 'degraded');
+    assert.match(
+      checks['budgets:applied'].detail,
+      /Не применено — выполните devcontour config-apply --keys budgets,prices/,
+    );
+    // Контур не запускался — сравнивать не с чем.
+    assert.equal((await report())['budgets:applied'], undefined);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
