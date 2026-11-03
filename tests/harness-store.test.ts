@@ -295,7 +295,7 @@ for (const [name, open] of [
       [last.id * 1024, last.id * 1024 + 1],
     );
     assert.deepEqual(
-      s.events(events[0].seq).map((e) => e.payload),
+      s.events(events[0].seq).map((e) => (e.type === 'unknown' ? undefined : e.payload)),
       [{ phase: 'reviewing' }],
     );
     // Прежняя форма от хоста: повтор с причиной сброса; токены отсекаются на любой глубине.

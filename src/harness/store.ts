@@ -18,6 +18,7 @@ import {
   WORKSPACE_OWNER,
   clipDeep,
   localSchemas,
+  readRunEvent,
   runEventSchema,
   type AttemptState,
   type ExecutionStore,
@@ -255,13 +256,15 @@ export class DevContourExecutionStore implements ExecutionStore {
         (harnessEvents ?? []).forEach((draft, index) => {
           const seq = e.id * SEQ + index;
           if (seq > after && out.length < max)
+            // Чтение терпимо к незнакомому типу события (запись новее версии
+            // движка): такое событие приходит как `unknown`, а не ломает выдачу.
             out.push(
-              runEventSchema.parse({
+              readRunEvent({
                 apiVersion: API_VERSION,
                 seq,
                 at: e.at,
                 ...draft,
-              }) as RunEvent,
+              }),
             );
         });
         cursor = e.id;
