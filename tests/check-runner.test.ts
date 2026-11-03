@@ -148,6 +148,66 @@ test('Fast tier omits its named slow test but still refuses explicit skip and to
   }
 });
 
+test('A hung test fails by name, a file that never exits is named, and late tests still run', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'test-hang-'));
+  try {
+    await mkdir(join(root, 'scripts'));
+    await mkdir(join(root, 'tests'));
+    await symlink(join(source, 'node_modules'), join(root, 'node_modules'), 'dir');
+    for (const file of [
+      'test.mjs',
+      'test-tiers.mjs',
+      'test-scratch.mjs',
+      'test-environment.mjs',
+      'check-test-environment.mjs',
+      'check-processes.mjs',
+    ])
+      await copyFile(join(source, 'scripts', file), join(root, 'scripts', file));
+    await writeFile(join(root, 'package.json'), JSON.stringify({ type: 'module' }));
+    await writeFile(
+      join(root, 'tests', 'awaits.test.ts'),
+      `
+      import {test} from 'node:test';
+      test('awaits forever',()=>new Promise(()=>{setInterval(()=>{},1000)}));
+    `,
+    );
+    // Тест, объявленный после await, выполняется: раннер не завершает файл раньше.
+    await writeFile(
+      join(root, 'tests', 'late.test.ts'),
+      `
+      import {test} from 'node:test';
+      await new Promise((r)=>setTimeout(r,200));
+      test('declared after await',()=>{});
+    `,
+    );
+    await writeFile(
+      join(root, 'tests', 'open.test.ts'),
+      `
+      import {test} from 'node:test';
+      import {createServer} from 'node:http';
+      test('leaves a server open',()=>{createServer().listen(0)});
+    `,
+    );
+    const env: NodeJS.ProcessEnv = { ...process.env, DEVCONTOUR_TEST_TIMEOUT_MS: '2000' };
+    // This child is a new runner, not a nested test worker.
+    delete env.NODE_TEST_CONTEXT;
+    const result = spawnSync(process.execPath, ['scripts/test.mjs'], {
+      cwd: root,
+      env,
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+    assert.equal(result.signal, null, 'the runner hung: ' + result.stdout + result.stderr);
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stdout, /✖ awaits forever/);
+    assert.match(result.stdout, /✔ leaves a server open/);
+    assert.match(result.stdout, /✔ declared after await/);
+    assert.match(result.stderr, /No test events for \d+ s.*tests\/open\.test\.ts/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('Check cleanup never signals a reused PID or follows its unrelated children', async () => {
   const module: string = '../scripts/check-processes.mjs';
   const { ownedProcesses, signalSameProcesses } = (await import(module)) as {

@@ -1,6 +1,6 @@
 import { readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { run } from 'node:test';
@@ -19,6 +19,8 @@ import { slowFile, slowFirst, slowPatterns } from './test-tiers.mjs';
 //   --list       print the selected files instead of running them
 // Keep process isolation and the existing limit of four simultaneous test files.
 const directory = new URL('../tests/', import.meta.url);
+// Предел времени на один тест; переменная — для проверки самого раннера.
+const testTimeoutMs = Number(process.env.DEVCONTOUR_TEST_TIMEOUT_MS) || 15 * 60_000;
 const rank = (name) => {
   const index = slowFirst.indexOf(name.replace(/\.test\.ts$/, ''));
   return index < 0 ? slowFirst.length : index;
@@ -149,13 +151,61 @@ if (options.list) {
     const results = run({
       files,
       concurrency: 4,
-      execArgv: ['--import', 'tsx'],
+      // Зависший тест не держит прогон часами: предел времени на тест падает
+      // с именем теста (у `run()` параметр `timeout` до дочерних процессов не
+      // доходит — нужен флаг). Самый долгий тест полного прогона под
+      // нагрузкой — около 5 минут. forceExit не годится: он завершает файл
+      // после уже известных тестов и молча теряет объявленные после await.
+      execArgv: ['--import', 'tsx', `--test-timeout=${testTimeoutMs}`],
       signal: controller.signal,
       // Tests left out by name are not reported at all, so the skip/todo
       // refusal below stays exact in every tier.
       ...(options.fast ? { testSkipPatterns: slowPatterns() } : {}),
     });
     results.on('test:fail', () => (process.exitCode ||= 1));
+    // Файл, тесты которого кончились, но процесс не выходит (открытый сервер,
+    // таймер), событий больше не даёт. События идут по ходу файла: тест
+    // объявляет себя при выдаче (dequeue) и даёт итог самое позднее через
+    // предел времени. Файл без событий дольше предела с запасом назван,
+    // и прогон останавливается провалом, а не ждёт его часами.
+    const idleMs = testTimeoutMs * 1.25;
+    const pending = new Map();
+    // Файл входит в ожидание, когда поставлен в очередь, и выходит, когда его
+    // процесс завершился; поздний итог уровня файла его не возвращает.
+    results.on('test:enqueue', ({ file, name, nesting }) => {
+      if (file && nesting === 0 && name === file) pending.set(file, Date.now());
+    });
+    const touch = ({ file }) => {
+      if (file && pending.has(file)) pending.set(file, Date.now());
+    };
+    for (const type of [
+      'test:enqueue',
+      'test:dequeue',
+      'test:start',
+      'test:pass',
+      'test:fail',
+      'test:diagnostic',
+    ])
+      results.on(type, touch);
+    results.on('test:complete', ({ file, name, nesting }) => {
+      if (nesting === 0 && name === file) pending.delete(file);
+      else touch({ file });
+    });
+    const watchdog = setInterval(
+      () => {
+        const stalled = [...pending].filter(([, at]) => Date.now() - at > idleMs);
+        if (!stalled.length) return;
+        console.error(
+          `No test events for ${Math.round(idleMs / 1000)} s, the process did not exit (open server, timer or child?): ${stalled.map(([file]) => relative(process.cwd(), file)).join(', ')}`,
+        );
+        process.exitCode ||= 1;
+        clearInterval(watchdog);
+        controller.abort();
+      },
+      Math.min(10_000, idleMs / 4),
+    );
+    watchdog.unref();
+    results.once('end', () => clearInterval(watchdog));
     results.on('test:pass', ({ skip, todo }) => {
       if (skip || todo) {
         console.error('Full test suite must not contain skipped or todo tests.');
