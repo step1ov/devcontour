@@ -5,15 +5,20 @@ import AxeBuilder from '@axe-core/playwright';
 // текстом, что в `/api/state`; пока очередь идёт, баннера нет.
 
 test('Баннер называет причину остановки из /api/state', async ({ page, request }) => {
-  const { queue } = (await (await request.get('/api/state')).json()) as {
-    queue: { paused: boolean; stopReason?: string; action?: string };
-  };
+  // Демо общее для всех спецификаций: очередь может пойти или встать между
+  // чтением состояния и опросом панели. Сравнение повторяется, пока оба
+  // источника не увидят одно состояние.
   await page.goto('/');
   const banner = page.getByRole('status', { name: 'Очередь остановлена' });
-  if (queue.paused) {
-    await expect(banner).toContainText(queue.stopReason!);
-    if (queue.action) await expect(banner).toContainText(queue.action);
-  } else await expect(banner).toHaveCount(0);
+  await expect(async () => {
+    const { queue } = (await (await request.get('/api/state')).json()) as {
+      queue: { paused: boolean; stopReason?: string; action?: string };
+    };
+    if (queue.paused) {
+      await expect(banner).toContainText(queue.stopReason!, { timeout: 2000 });
+      if (queue.action) await expect(banner).toContainText(queue.action, { timeout: 2000 });
+    } else await expect(banner).toHaveCount(0, { timeout: 2000 });
+  }).toPass();
 });
 
 test('Баннер виден на каждом экране, пока очередь стоит, и исчезает, когда она идёт', async ({
@@ -43,12 +48,17 @@ test('Баннер виден на каждом экране, пока очер�
   const banner = page.getByRole('status', { name: 'Очередь остановлена' });
   await expect(banner).toContainText('Проверка базы не пройдена: test, lint');
   await expect(banner).toContainText('Что сделать: ' + stopped.action);
-  // Другой экран — тот же баннер.
-  await page
-    .getByRole('navigation', { name: 'Доски' })
-    .getByRole('button', { name: /Каталог продуктов/ })
-    .click();
-  await expect(banner).toContainText('Проверка базы не пройдена');
+  // Другие экраны — тот же баннер. Вкладки есть при любом состоянии демо;
+  // доски по имени не выбираются: другие спецификации их принимают и
+  // сворачивают в «Принятые».
+  for (const name of ['Ход работ', 'Карта продукта']) {
+    await page.getByRole('tab', { name, exact: true }).click();
+    await expect(page.getByRole('tab', { name, exact: true })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    await expect(banner).toContainText('Проверка базы не пройдена');
+  }
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   // Длинная причина не растягивает мобильный экран.
   await page.setViewportSize({ width: 390, height: 844 });
