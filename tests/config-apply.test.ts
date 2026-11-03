@@ -270,6 +270,43 @@ test('The task card computes the budget block live: raising the limit by config-
   }
 });
 
+test('A reader not on the applied config shows the server budget block, not its own limits', async () => {
+  const s = served();
+  let reader: DevContour | undefined;
+  try {
+    s.edit((raw) => (raw.budgets = { workspace: { usd: 1 }, onUnknown: 'continue' }));
+    assert.equal((await s.request()).status, 'applied');
+    const board = s.server.createBoard('Board');
+    const task = s.server.addTask(board.id, input('Work'));
+    s.server.approve(board.id);
+    spend(s.server.store, 'U1', 5);
+    // Кэш claim сервера по применённому пределу $1.
+    s.server.store.change('test.budget-block', (st) => {
+      st.tasks.find((t) => t.id === task.id)!.budgetBlock = {
+        reason: 'Бюджет total исчерпан: предел $1',
+        at: '2026-11-01T00:00:00.000Z',
+      };
+    });
+    // Файл правлен без config-apply; MCP-процесс загрузил уже новый предел.
+    s.edit((raw) => (raw.budgets = { workspace: { usd: 100 }, onUnknown: 'continue' }));
+    reader = new DevContour(new Store(join(s.root, 'state.sqlite')), loadConfig(s.path));
+    assert.notEqual(reader.configDigest, s.server.store.view().appliedConfig?.digest);
+    const st = reader.store.read();
+    const p = taskProgress(
+      reader,
+      st,
+      st.tasks.find((t) => t.id === task.id)!,
+      Date.now(),
+    );
+    assert.ok(p.reasons.includes('budget_blocked'), JSON.stringify(p));
+    assert.equal(p.budgetBlock?.reason, 'Бюджет total исчерпан: предел $1');
+    assert.equal(p.budgetBlock?.at, '2026-11-01T00:00:00.000Z');
+  } finally {
+    reader?.store.close();
+    s.cleanup();
+  }
+});
+
 test('Without budgets a stored budgetBlock cache does not block the task card', () => {
   const f = fixture();
   try {
@@ -306,7 +343,7 @@ test('config-apply does not take over the reconfigure slot of another operation,
     assert.ok(s.server.store.read().reconfigure?.appliedAt);
     await assert.rejects(
       requestConfigApply(s.root, ['budgets'], { waitMs: 0 }),
-      /Конфигурацию сейчас применяет операция CC-1 \(применена, ещё не завершена\)/,
+      /Конфигурацию сейчас применяет операция CC-1 \(применена, ещё не завершена\).*contract-change --id CC-1 --abandon/,
     );
     assert.equal(s.server.store.read().reconfigure?.operation, 'CC-1');
     // Операция сняла запрос — config-apply проходит.
@@ -314,10 +351,18 @@ test('config-apply does not take over the reconfigure slot of another operation,
     assert.equal((await s.request(['budgets'])).status, 'applied');
     // Применённый, но не снятый (падение сервера) прежний config-apply не держит следующий.
     s.edit((raw) => (raw.budgets = { workspace: { usd: 20 } }));
-    s.server.requestReconfigure('config-apply:budgets:old', 'a'.repeat(64));
-    s.server.settleReconfigure('config-apply:budgets:old', 'a'.repeat(64), 'server', 'сбой');
+    s.server.requestReconfigure('config-apply:budgets:old', s.server.configDigest);
+    s.server.settleReconfigure('config-apply:budgets:old', s.server.configDigest, 'server');
+    assert.ok(s.server.store.read().reconfigure?.appliedAt);
     assert.equal((await s.request(['budgets'])).status, 'applied');
     assert.deepEqual(s.server.config.budgets, { workspace: { usd: 20 }, onUnknown: 'stop' });
+    // Отклонённый и не снятый — тоже.
+    s.edit((raw) => (raw.budgets = { workspace: { usd: 30 } }));
+    s.server.requestReconfigure('config-apply:budgets:failed', 'a'.repeat(64));
+    s.server.settleReconfigure('config-apply:budgets:failed', 'a'.repeat(64), 'server', 'сбой');
+    assert.ok(s.server.store.read().reconfigure?.error);
+    assert.equal((await s.request(['budgets'])).status, 'applied');
+    assert.deepEqual(s.server.config.budgets, { workspace: { usd: 30 }, onUnknown: 'stop' });
   } finally {
     s.cleanup();
   }
