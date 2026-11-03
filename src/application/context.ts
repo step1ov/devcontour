@@ -212,12 +212,20 @@ function responseFacts(h: DevContour, s: DevContourState, now: number) {
 /**
  * Бюджетные блоки готовых задач ответа — одно чтение движка на ответ:
  * `budgetBlockOf` — тот же расчёт, которым claim ставит и снимает
- * `budgetBlock`, по действующим (применённым) пределам процесса. Бюджеты
- * выключены — блоков нет, даже если в задаче остался записанный кэш.
+ * `budgetBlock`, по пределам процесса, когда они совпадают с применёнными.
+ * Бюджеты выключены — блоков нет, даже если в задаче остался записанный кэш.
  */
 function budgetBlocks(h: DevContour, s: DevContourState) {
   const blocks = new Map<string, string>();
   const ready = s.tasks.filter((t) => t.status === 'ready');
+  // Процесс не на применённой конфигурации (MCP или agent, загруженный до
+  // config-apply, или файл правлен без применения): его пределы — не те, по
+  // которым выдаёт serve. Тогда карточка показывает записанный расчёт claim
+  // самого serve, а не уверенный расчёт по чужим пределам.
+  if (s.appliedConfig && s.appliedConfig.digest !== h.configDigest) {
+    for (const t of ready) if (t.budgetBlock) blocks.set(t.id, t.budgetBlock.reason);
+    return blocks;
+  }
   const { engine } = executionOf(h);
   if (!ready.length || !engine.policy.budgets) return blocks;
   engine.read((v) => {

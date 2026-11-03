@@ -245,7 +245,8 @@ export async function requestConfigApply(
         throw new Error(
           `Конфигурацию сейчас применяет операция ${current.operation}` +
             (current.appliedAt ? ' (применена, ещё не завершена)' : '') +
-            ': дождитесь её завершения и повторите config-apply',
+            (current.error ? ` (сервер отклонил: ${current.error})` : '') +
+            `: дождитесь её или отмените (devcontour contract-change --id ${current.operation} --abandon) и повторите config-apply`,
         );
       h.requestReconfigure(operation, digest);
     });
