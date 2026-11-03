@@ -71,6 +71,7 @@ export function queueStopView(
   if (!state.paused) return { paused: false };
   const agent = (options.approvalMode ?? 'agent') === 'agent';
   const start = 'devcontour queue --start';
+  const reconfiguring = 'Ничего не требуется: операция изменения контракта снимет паузу сама';
   const since = state.pausedAt;
   // Самая свежая ошибка диспетчера после паузы: более старая относится к
   // прошлой остановке и за причину текущей не выдаётся.
@@ -90,47 +91,57 @@ export function queueStopView(
     ? start
     : options.workflowActive
       ? 'Ничего не требуется: цикл ведущего продолжит выдачу, пока работает devcontour serve'
-      : 'Зарегистрируйте доску через workflow_start — цикл ведущего запустит очередь сам; ручной queue --start с этим маршрутом не смешивайте';
+      : 'Если доска ведётся workflow — зарегистрируйте её через workflow_start; если вручную — ' +
+        start +
+        '; маршруты не смешивайте';
+  // Продолжение очереди снимает и ожидание проверки базы: при нём базу
+  // проверяют до запуска.
+  const thenStart = (wait ? ', проверьте базу gates, затем ' : ', затем ') + start;
   const explain = (): [text: string, action: string, failed: boolean] => {
     if (failures.includes('provider-auth'))
       return [
         detail ??
           'Провайдер моделей отказал: нет кредитов, исчерпан лимит или runtime не авторизован',
-        'Авторизуйте CLI исполнителя, пополните баланс или дождитесь сброса лимита, затем ' + start,
+        'Авторизуйте CLI исполнителя, пополните баланс или дождитесь сброса лимита' + thenStart,
         true,
       ];
     if (failures.length)
       return [
         detail ?? 'Окружение не дало исполнителю работать',
-        'Устраните неисправность окружения, затем ' + start,
+        agent && options.workflowActive
+          ? 'Цикл ведущего один раз повторит задачу сам; если отказ повторится — устраните неисправность окружения' +
+            thenStart
+          : 'Устраните неисправность окружения' + thenStart,
         true,
       ];
-    if (wait)
+    if (wait) {
+      const checkFailed = wait.startsWith('Проверка базы не пройдена');
+      const held = /меняет приёмку или настройку контура/.test(wait);
       return [
         wait,
-        reason === 'base-check' && agent && options.workflowActive
-          ? 'Цикл ведущего проверит базу gates и продолжит выдачу сам; если проверка не прошла — исправьте базу или выполните ' +
-            start
+        reason === 'base-check' && agent && options.workflowActive && !held
+          ? checkFailed
+            ? 'Исправьте базу и выполните devcontour base-update — цикл ведущего проверит её снова'
+            : 'Цикл ведущего проверит базу gates и продолжит выдачу сам'
           : 'Проверьте базу gates, затем выполните ' +
             start +
             (reason === 'operator' ? ' — он снимет и паузу человека, и ожидание' : ''),
         false,
       ];
+    }
     switch (reason) {
       case 'operator':
         return ['Выдача остановлена человеком', start, false];
       case 'shutdown':
         return ['Сервер был остановлен штатно', resume, false];
       case 'reconfigure':
-        return [
-          'Применяется новая конфигурация после изменения контракта',
-          'Ничего не требуется: операция снимет паузу сама',
-          false,
-        ];
+        return ['Применяется новая конфигурация после изменения контракта', reconfiguring, false];
       case 'base-check':
+        // Ожидание без описания — перенос базы ещё идёт: он сам поставит
+        // описание и диапазон проверки.
         return [
           'Выдача ждёт проверки перенесённой базы gates',
-          'Проверьте базу gates, затем выполните ' + start,
+          'Идёт обновление базы — дождитесь его окончания',
           false,
         ];
       case 'not-started':
@@ -151,7 +162,10 @@ export function queueStopView(
             ];
     }
   };
-  const [text, action, failed] = explain();
+  const [text, explained, failed] = explain();
+  // Паузу применения конфигурации снимает операция: queue --start при ней не
+  // подсказывается, даже если рядом отказ или ожидание.
+  const action = reason === 'reconfigure' ? reconfiguring : explained;
   return {
     paused: true,
     reason,

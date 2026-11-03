@@ -17,7 +17,8 @@ export function queueStopOf(
 ) {
   return queueStopView(state, events, {
     approvalMode: h.config.approvalMode,
-    workflowActive: workflowActive(h),
+    // Работа ведущего нужна только для подсказки остановленной очереди.
+    workflowActive: state.paused && workflowActive(h),
   });
 }
 

@@ -17,6 +17,8 @@ import { queueStopView, type QueueStopView } from '../src/core/work-status.ts';
 const STALE =
   'TaskFailure: База прогонов отстала от рабочей ветки: main — devcontour/accepted без 1 коммитов. Выполните devcontour base-update, иначе исполнитель получит дерево без подготовленной работы.';
 const START = 'devcontour queue --start';
+const MANUAL_OR_WORKFLOW =
+  'Если доска ведётся workflow — зарегистрируйте её через workflow_start; если вручную — devcontour queue --start; маршруты не смешивайте';
 
 /**
  * Сервер панели над fixture и чтение вида остановки из всех мест, где его
@@ -138,7 +140,7 @@ test('Исходная и штатная паузы: подсказка зави
     assert.equal(initial.reason, 'not-started');
     assert.equal(initial.stopReason, 'Очередь ещё не запущена');
     assert.equal(initial.failed, undefined);
-    assert.match(initial.action ?? '', /^Зарегистрируйте доску через workflow_start/);
+    assert.equal(initial.action, MANUAL_OR_WORKFLOW);
 
     // Штатная остановка после перезапуска, режим агента без работы ведущего.
     f.h.pause(false);
@@ -146,7 +148,7 @@ test('Исходная и штатная паузы: подсказка зави
     const agentIdle = await p.read();
     assert.equal(agentIdle.reason, 'shutdown');
     assert.equal(agentIdle.stopReason, 'Сервер был остановлен штатно');
-    assert.match(agentIdle.action ?? '', /^Зарегистрируйте доску через workflow_start/);
+    assert.equal(agentIdle.action, MANUAL_OR_WORKFLOW);
 
     // С зарегистрированной работой её снимет цикл ведущего.
     const b = f.h.createBoard('Доска');
@@ -249,6 +251,87 @@ test('Сбой такта, чьё событие ушло из окна журн
     ]),
     { paused: false },
   );
+});
+
+test('Подсказка учитывает ожидание базы при отказе, применение конфигурации и работу ведущего', () => {
+  const now = new Date().toISOString();
+  const wait = (detail: string) => [{ kind: 'base-check' as const, detail, at: now }];
+  const agent = { approvalMode: 'agent' as const, workflowActive: true };
+
+  // Отказ и ожидание базы: продолжение снимет ожидание — базу проверяют до него.
+  const provider = queueStopView(
+    {
+      paused: true,
+      pauseReason: 'runtime',
+      pausedAt: now,
+      pauseFailures: ['provider-auth'],
+      waits: wait('База прогонов перенесена (main): проверьте её гейтами и продолжите очередь'),
+    },
+    [],
+  );
+  assert.equal(
+    provider.action,
+    'Авторизуйте CLI исполнителя, пополните баланс или дождитесь сброса лимита, проверьте базу gates, затем ' +
+      START,
+  );
+
+  // Применение конфигурации: паузу снимет операция, queue --start не предлагается
+  // ни при отказе, ни при ожидании базы.
+  for (const extra of [
+    {},
+    { pauseFailures: ['environment' as const] },
+    { waits: wait('База прогонов перенесена (main)') },
+  ]) {
+    const view = queueStopView(
+      { paused: true, pauseReason: 'reconfigure', pausedAt: now, ...extra },
+      [],
+      agent,
+    );
+    assert.equal(
+      view.action,
+      'Ничего не требуется: операция изменения контракта снимет паузу сама',
+      JSON.stringify(extra),
+    );
+  }
+
+  // Перенос базы ещё идёт: ожидания нет — подождать, а не запускать очередь.
+  const updating = queueStopView({ paused: true, pauseReason: 'base-check', pausedAt: now }, []);
+  assert.equal(updating.action, 'Идёт обновление базы — дождитесь его окончания');
+
+  // Проверка базы провалилась в режиме агента: сначала исправить базу.
+  const checkFailed = queueStopView(
+    {
+      paused: true,
+      pauseReason: 'base-check',
+      pausedAt: now,
+      waits: wait('Проверка базы не пройдена: test. Исправьте базу и выполните base-update'),
+    },
+    [],
+    agent,
+  );
+  assert.equal(
+    checkFailed.action,
+    'Исправьте базу и выполните devcontour base-update — цикл ведущего проверит её снова',
+  );
+  assert.doesNotMatch(checkFailed.action ?? '', /queue --start/);
+
+  // Отказ окружения при работе ведущего: один повтор цикл делает сам.
+  const environment = queueStopView(
+    { paused: true, pauseReason: 'runtime', pausedAt: now, pauseFailures: ['environment'] },
+    [],
+    agent,
+  );
+  assert.equal(
+    environment.action,
+    'Цикл ведущего один раз повторит задачу сам; если отказ повторится — устраните неисправность окружения, затем ' +
+      START,
+  );
+  const environmentManual = queueStopView(
+    { paused: true, pauseReason: 'runtime', pausedAt: now, pauseFailures: ['environment'] },
+    [],
+    { approvalMode: 'operator' },
+  );
+  assert.equal(environmentManual.action, 'Устраните неисправность окружения, затем ' + START);
 });
 
 test('CLI queue без флага печатает причину и подсказку', async () => {
