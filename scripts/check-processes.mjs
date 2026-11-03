@@ -12,7 +12,9 @@ const ps = (args) =>
       {
         encoding: 'utf8',
         env: { ...process.env, LC_ALL: 'C' },
-        timeout: 2000,
+        // Под нагрузкой машины ps отвечает секундами: короткий срок обрывал
+        // всю проверку на одном медленном снимке.
+        timeout: 15_000,
         maxBuffer: 64_000_000,
       },
       (error, stdout) =>
@@ -110,6 +112,16 @@ export function signalSameProcesses(candidates, rows, signal, kill = process.kil
       }
 }
 
+/** Подряд неудачных фоновых снимков до остановки проверки: один медленный
+ * снимок под нагрузкой — не повод обрывать прогон, устойчивый отказ — повод. */
+export const POLL_FAILURE_LIMIT = 5;
+
+/** Счётчик подряд неудачных снимков: успех его обнуляет, предел — фатален. */
+export function pollFailures(previous, failed) {
+  const count = failed ? previous + 1 : 0;
+  return { count, fatal: count >= POLL_FAILURE_LIMIT };
+}
+
 /** Own tagged descendants as well as children that leave their original process group. */
 export function checkProcesses() {
   const mark = randomUUID();
@@ -118,6 +130,7 @@ export function checkProcesses() {
   let stopping = false;
   let pending;
   let polling;
+  let failedPolls = 0;
   const remember = (rows) => {
     const found = ownedProcesses(rows, seen);
     for (const [pid, start] of found) seen.set(pid, start);
@@ -172,11 +185,19 @@ export function checkProcesses() {
   const poll = setInterval(() => {
     if (polling || stopping) return;
     polling = sample()
-      .catch((error) => {
-        process.exitCode ||= 1;
-        console.error(error.message);
-        return stop();
-      })
+      .then(
+        () => {
+          failedPolls = pollFailures(failedPolls, false).count;
+        },
+        (error) => {
+          const next = pollFailures(failedPolls, true);
+          failedPolls = next.count;
+          if (!next.fatal) return;
+          process.exitCode ||= 1;
+          console.error(`${error.message} (${next.count} snapshots in a row)`);
+          return stop();
+        },
+      )
       .finally(() => {
         polling = undefined;
       });

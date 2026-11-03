@@ -261,3 +261,20 @@ test('Darwin process snapshots do not signal same-second PID replacements with a
   );
   assert.deepEqual(killed, [901, 902], 'history alone cannot authorize killing an unmarked orphan');
 });
+
+test('A slow process snapshot under load does not stop the check; a lasting failure still does', async () => {
+  const module: string = '../scripts/check-processes.mjs';
+  const { pollFailures, POLL_FAILURE_LIMIT } = (await import(module)) as {
+    pollFailures(this: void, previous: number, failed: boolean): { count: number; fatal: boolean };
+    POLL_FAILURE_LIMIT: number;
+  };
+  assert.ok(POLL_FAILURE_LIMIT > 1);
+  let count = 0;
+  for (let i = 1; i < POLL_FAILURE_LIMIT; i++) {
+    const next = pollFailures(count, true);
+    assert.equal(next.fatal, false, `failure ${i} alone is tolerated`);
+    count = next.count;
+  }
+  assert.equal(pollFailures(count, false).count, 0, 'a good snapshot resets the streak');
+  assert.equal(pollFailures(count, true).fatal, true, 'a lasting failure stops the check');
+});
