@@ -100,12 +100,10 @@ export function workflowWork(state: LiveState) {
 
 export function LiveWork({
   state,
-  stopReason,
   onOpenTask,
   onStart,
 }: {
   state: LiveState;
-  stopReason?: string;
   onOpenTask: (boardId: string | undefined, taskId: string) => void;
   onStart?: () => void;
 }) {
@@ -142,7 +140,8 @@ export function LiveWork({
         {state.paused && (
           <span className="text-muted-foreground flex items-center gap-1">
             <PauseCircle aria-hidden="true" className="size-4" />
-            Очередь на паузе{stopReason ? `: ${stopReason}` : ''}
+            {/* Причину и подсказку показывает баннер в шапке экрана. */}
+            Очередь на паузе
           </span>
         )}
         <span className="text-muted-foreground">

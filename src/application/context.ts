@@ -24,6 +24,7 @@ import {
 import { repositories, repository, roleBinding, reviewerBinding } from '../core/repositories.ts';
 import { identitySchema } from '../core/sync-model.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
+import { queueStopOf } from './queue-stop.ts';
 import {
   HarnessError,
   checkJsonBytes,
@@ -369,6 +370,8 @@ export class AgentContext {
         completionMode: h.config.completionMode,
         storage: h.config.storage,
         paused: s.paused,
+        // Почему очередь стоит и что сделать — тот же вид, что в панели и CLI.
+        queue: queueStopOf(h, s),
         member: s.team?.member,
         repositories: repositories(h.config).map((r) => ({
           id: r.id,
@@ -398,7 +401,7 @@ export class AgentContext {
       });
       return page(
         items,
-        { scope: input.repositoryId ?? '@workspace', paused: s.paused },
+        { scope: input.repositoryId ?? '@workspace', paused: s.paused, queue: queueStopOf(h, s) },
         snap.revision,
         'overview/' + (input.repositoryId ?? ''),
         input,

@@ -76,6 +76,7 @@ import { roleLabel, currentRoles, setRoleSource } from './roles.ts';
 import { Phases, engine, elapsed } from './Workers.tsx';
 import { AttemptTimeline, LiveWork } from './LiveWork.tsx';
 import { boardPhaseLabels } from '../core/work-status.ts';
+import { QueueStopBanner } from './QueueStopBanner.tsx';
 
 const waitingReasons: Record<string, string> = {
   product_approval_required:
@@ -285,12 +286,6 @@ function reviewRoundLine(r: NonNullable<Run['evidence'][number]['reviewRound']>)
   ]
     .filter(Boolean)
     .join(' · ');
-}
-// Очередь встаёт не только по команде оператора: диспетчер останавливает её
-// сам, когда выдавать работу нельзя — база отстала, checkout команды разошёлся.
-// Причина лежит в журнале, и без неё панель показывает молчаливую паузу.
-function stopReason(data: Snapshot) {
-  return data.stopReason;
 }
 // «Где сейчас разработка» — это соотношение принятого, идущего и оставшегося,
 // а не название ревизии. Одна строка под доской отвечает на это без открытия.
@@ -1177,12 +1172,6 @@ export function App() {
             />
             <strong>{data.paused ? 'Очередь на паузе' : 'Оркестратор работает'}</strong>
           </div>
-          {/* Очередь останавливается не только по команде: диспетчер тормозит
-              сам, когда выдавать работу нельзя. Без причины на виду панель
-              просто молчит, и приходится читать журнал. */}
-          {data.paused && stopReason(data) && (
-            <p className="text-destructive break-words">{stopReason(data)}</p>
-          )}
           <p>
             {data.runs.filter((r) => r.status === 'active').length} из {data.config.concurrency}{' '}
             исполнителей занято
@@ -1211,6 +1200,10 @@ export function App() {
           </span>
         </div>
         <div className="p-8 max-[1180px]:p-5 max-[760px]:p-4">
+          {/* Очередь встаёт не только по команде оператора: диспетчер
+              останавливает её сам, когда выдавать работу нельзя. Причина и
+              подсказка — в шапке любого экрана, а не только в журнале. */}
+          <QueueStopBanner queue={data.queue} />
           <header className="mb-6 flex flex-wrap items-start justify-between gap-6 max-[760px]:mb-4 max-[760px]:gap-4">
             <div>
               <div className="flex items-center gap-3">
@@ -1418,7 +1411,6 @@ export function App() {
           )}
           <LiveWork
             state={data}
-            stopReason={stopReason(data)}
             onOpenTask={(id, taskId) => {
               if (id && id !== boardId) {
                 setBoardId(id);

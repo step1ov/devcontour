@@ -15,7 +15,8 @@ import type { Delivery } from '../core/integrations.ts';
 import { clipDeep, type PropertyRecovery } from 'devcontour-harness';
 import { blockers, readyTasks } from '../core/graph.ts';
 import { repositories } from '../core/repositories.ts';
-import { boardPhase, queueStopReason } from '../core/work-status.ts';
+import { boardPhase } from '../core/work-status.ts';
+import { queueStopOf } from './queue-stop.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { taskProgress } from './context.ts';
 import { checksSummary } from './checks.ts';
@@ -521,7 +522,9 @@ function buildSummary(
     team: state.team,
     // Журнал в сводке — только строки; данные событий — в деталях журнала.
     events: recent.slice(0, 40).map((e) => ({ id: e.id, at: e.at, type: e.type })),
-    stopReason: short(queueStopReason(state, recent), DIAGNOSTIC),
+    // Остановка очереди тем же видом, что в `/api/state`, `/api/preparation`
+    // и CLI: причина, подсказка и время. Баннер панели читает её.
+    queue: queueStopOf(h, state, recent),
     journalError: short(h.store.projectionError, DIAGNOSTIC),
     workflows: new LeadWorkflow(h)
       .view()

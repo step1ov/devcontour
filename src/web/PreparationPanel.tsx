@@ -29,7 +29,8 @@ import { Label } from '@/ui/label.tsx';
 import { Separator } from '@/ui/separator.tsx';
 import { Textarea } from '@/ui/textarea.tsx';
 import { cn } from '@/lib/utils.ts';
-import { boardPhaseLabels, type BoardPhase } from '../core/work-status.ts';
+import { boardPhaseLabels, type BoardPhase, type QueueStopView } from '../core/work-status.ts';
+import { QueueStopBanner } from './QueueStopBanner.tsx';
 
 const Development = lazy(() => import('./App.tsx').then((m) => ({ default: m.App })));
 type View = ReturnType<Preparation['status']> & {
@@ -41,7 +42,7 @@ type View = ReturnType<Preparation['status']> & {
     concurrency?: number;
   };
   workers?: Worker[];
-  queue?: { paused: boolean; stopReason?: string };
+  queue?: QueueStopView;
   engineConnected?: boolean;
   startupError?: string;
   workspace?: { mode: 'embedded' | 'separate'; path: string };
@@ -804,6 +805,9 @@ export function PreparationPanel() {
           </form>
         </aside>
         <article className="min-w-0">
+          {/* Остановка очереди видна на каждом этапе, а не только на экране
+              разработки: подготовка идёт, пока выдача стоит. */}
+          <QueueStopBanner queue={view.queue} />
           {error && (
             <Alert variant="destructive" role="alert" className="mb-4">
               <AlertDescription>{error}</AlertDescription>
@@ -941,19 +945,11 @@ export function PreparationPanel() {
                       ))}
                     </ul>
                   ) : null}
+                  {/* Причину и подсказку называет баннер в шапке экрана. */}
                   {view.queue?.paused && (
-                    <p
-                      role="status"
-                      className={cn(
-                        'mt-4 flex items-start gap-2 text-sm break-words',
-                        view.queue.stopReason ? 'text-destructive' : 'text-muted-foreground',
-                      )}
-                    >
+                    <p className="text-muted-foreground mt-4 flex items-start gap-2 text-sm break-words">
                       <PauseCircle aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
-                      <span>
-                        Очередь на паузе
-                        {view.queue.stopReason ? `: ${view.queue.stopReason}` : ''}
-                      </span>
+                      <span>Очередь на паузе</span>
                     </p>
                   )}
                   <Workers workers={view.workers ?? []} concurrency={view.setup?.concurrency} />

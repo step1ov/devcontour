@@ -1,4 +1,10 @@
-import { chainRoots, queueStop, type ChainRootCode } from 'devcontour-harness/projections';
+import {
+  CLIP_DIAGNOSTIC,
+  chainRoots,
+  clipText,
+  queueStop,
+  type ChainRootCode,
+} from 'devcontour-harness/projections';
 import type { AuditEvent, Board, DevContourState, Task } from './model.ts';
 
 /**
@@ -18,6 +24,156 @@ export function queueStopReason(
       .filter((e) => e.type === 'scheduler.error')
       .map((e) => ({ seq: e.id, message: (e.data as { error?: string } | undefined)?.error })),
   }).detail;
+}
+
+/**
+ * Остановка очереди одной записью для всех читателей: `/api/state`,
+ * `/api/preparation`, сводка панели, CLI `queue` и агентские операции.
+ * Раньше причину называл только экран этапа и только для сбоя диспетчера:
+ * ожидание проверки базы и пауза человека выглядели молчаливой паузой, а
+ * `/api/state` отдавал `paused: true` без объяснения.
+ *
+ * Порядок причин — от той, что держит выдачу дольше всех:
+ * 1. классы отказов (`pauseFailures`) — провайдер, окружение; их не снимает
+ *    ни перенос базы, ни цикл ведущего, только решение человека;
+ * 2. ожидание проверки базы — при любой паузе: `queue --start` снимает его
+ *    вместе с паузой, поэтому подсказка — сначала проверить базу;
+ * 3. сама причина паузы. Пауза без причины — либо исходная «очередь ещё не
+ *    запускали» (`not-started`), либо сбой такта диспетчера: такт ставит
+ *    `pausedAt`, а прежняя запись видна по `scheduler.error` в журнале.
+ *
+ * Подсказка зависит от режима: в `approvalMode: agent` исходную и штатную
+ * паузы снимает цикл ведущего, если есть зарегистрированная работа
+ * (`workflowActive`); без неё — `workflow_start`, ручной `queue --start` с
+ * этим маршрутом не смешивают. В режиме оператора — `queue --start`.
+ *
+ * `stopReason` усечён общим пределом диагностики, поэтому байты одинаковы во
+ * всех ответах.
+ */
+export type QueueStopReason = NonNullable<DevContourState['pauseReason']> | 'not-started';
+export interface QueueStopView {
+  paused: boolean;
+  reason?: QueueStopReason;
+  stopReason?: string;
+  /** Когда выдачу остановили (`pausedAt`), если известно. */
+  since?: string;
+  action?: string;
+  /** Остановка вызвана сбоем (рантайм, провайдер, окружение), а не решением или ожиданием. */
+  failed?: true;
+}
+/** Ошибка `scheduler.error`, записанная не раньше паузы (секунда — на порядок записи). */
+const AFTER_PAUSE_SLACK_MS = 1000;
+export function queueStopView(
+  state: Pick<DevContourState, 'paused' | 'pauseReason' | 'pausedAt' | 'pauseFailures' | 'waits'>,
+  events: Pick<AuditEvent, 'id' | 'at' | 'type' | 'data'>[],
+  options: { approvalMode?: 'agent' | 'operator'; workflowActive?: boolean } = {},
+): QueueStopView {
+  if (!state.paused) return { paused: false };
+  const agent = (options.approvalMode ?? 'agent') === 'agent';
+  const start = 'devcontour queue --start';
+  const reconfiguring = 'Ничего не требуется: операция изменения контракта снимет паузу сама';
+  const since = state.pausedAt;
+  // Самая свежая ошибка диспетчера после паузы: более старая относится к
+  // прошлой остановке и за причину текущей не выдаётся.
+  const from = since ? Date.parse(since) - AFTER_PAUSE_SLACK_MS : -Infinity;
+  const detail = queueStop({
+    paused: true,
+    errors: events
+      .filter((e) => e.type === 'scheduler.error' && Date.parse(e.at) >= from)
+      .map((e) => ({ seq: e.id, message: (e.data as { error?: string } | undefined)?.error })),
+  }).detail;
+  const reason: QueueStopReason =
+    state.pauseReason ?? (since || detail ? 'runtime' : 'not-started');
+  const failures = (state.pauseFailures ?? []).filter((f) => f !== 'unknown');
+  const wait = state.waits?.find((w) => w.kind === 'base-check')?.detail;
+  // Исходную и штатную паузы в режиме агента снимает цикл ведущего.
+  const resume = !agent
+    ? start
+    : options.workflowActive
+      ? 'Ничего не требуется: цикл ведущего продолжит выдачу, пока работает devcontour serve'
+      : 'Если доска ведётся workflow — зарегистрируйте её через workflow_start; если вручную — ' +
+        start +
+        '; маршруты не смешивайте';
+  // Продолжение очереди снимает и ожидание проверки базы: при нём базу
+  // проверяют до запуска.
+  const thenStart = (wait ? ', проверьте базу gates, затем ' : ', затем ') + start;
+  const explain = (): [text: string, action: string, failed: boolean] => {
+    if (failures.includes('provider-auth'))
+      return [
+        detail ??
+          'Провайдер моделей отказал: нет кредитов, исчерпан лимит или runtime не авторизован',
+        'Авторизуйте CLI исполнителя, пополните баланс или дождитесь сброса лимита' + thenStart,
+        true,
+      ];
+    if (failures.length)
+      return [
+        detail ?? 'Окружение не дало исполнителю работать',
+        agent && options.workflowActive
+          ? 'Цикл ведущего один раз повторит задачу сам; если отказ повторится — устраните неисправность окружения' +
+            thenStart
+          : 'Устраните неисправность окружения' + thenStart,
+        true,
+      ];
+    if (wait) {
+      const checkFailed = wait.startsWith('Проверка базы не пройдена');
+      const held = /меняет приёмку или настройку контура/.test(wait);
+      return [
+        wait,
+        reason === 'base-check' && agent && options.workflowActive && !held
+          ? checkFailed
+            ? 'Исправьте базу и выполните devcontour base-update — цикл ведущего проверит её снова'
+            : 'Цикл ведущего проверит базу gates и продолжит выдачу сам'
+          : 'Проверьте базу gates, затем выполните ' +
+            start +
+            (reason === 'operator' ? ' — он снимет и паузу человека, и ожидание' : ''),
+        false,
+      ];
+    }
+    switch (reason) {
+      case 'operator':
+        return ['Выдача остановлена человеком', start, false];
+      case 'shutdown':
+        return ['Сервер был остановлен штатно', resume, false];
+      case 'reconfigure':
+        return ['Применяется новая конфигурация после изменения контракта', reconfiguring, false];
+      case 'base-check':
+        // Ожидание без описания — перенос базы ещё идёт: он сам поставит
+        // описание и диапазон проверки.
+        return [
+          'Выдача ждёт проверки перенесённой базы gates',
+          'Идёт обновление базы — дождитесь его окончания',
+          false,
+        ];
+      case 'not-started':
+        return ['Очередь ещё не запущена', resume, false];
+      default:
+        return detail
+          ? [
+              detail,
+              /base-update/.test(detail)
+                ? 'Выполните devcontour base-update, затем проверьте базу и ' + start
+                : 'Устраните причину и выполните ' + start,
+              true,
+            ]
+          : [
+              'Выдача остановлена сбоем диспетчера; подробности — в devcontour journal',
+              'Устраните причину и выполните ' + start,
+              true,
+            ];
+    }
+  };
+  const [text, explained, failed] = explain();
+  // Паузу применения конфигурации снимает операция: queue --start при ней не
+  // подсказывается, даже если рядом отказ или ожидание.
+  const action = reason === 'reconfigure' ? reconfiguring : explained;
+  return {
+    paused: true,
+    reason,
+    stopReason: clipText(text, CLIP_DIAGNOSTIC),
+    ...(since ? { since } : {}),
+    action,
+    ...(failed ? { failed: true as const } : {}),
+  };
 }
 
 export type BoardPhase =

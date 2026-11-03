@@ -33,6 +33,7 @@ import { checkJsonBytes, operationCatalog, recoveryActions } from 'devcontour-ha
 import { applyCases } from '../runner/recovery.ts';
 import { ContractChanges } from '../runner/contract-change.ts';
 import { contractProposal, limitsMessage, proposalLimitIssues } from '../runner/agent-control.ts';
+import { queueStopOf } from './queue-stop.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 export const agentInputs = {
@@ -527,6 +528,8 @@ export class AgentService {
             .list(agentInputs.workflow_status.parse(input).repositoryId)
             .map((j) => this.workflowView(j)),
           operatorBlocked: h.config.approvalMode === 'operator',
+          // Стадии ждут выдачи: остановленная очередь и её причина — рядом.
+          queue: queueStopOf(h),
         };
       case 'workflow_retry': {
         const v = agentInputs.workflow_retry.parse(input);
@@ -668,7 +671,7 @@ export class AgentService {
       case 'queue_set': {
         const value = agentInputs.queue_set.parse(input);
         h.pause(value.paused);
-        return { ...value, serverRequiredForExecution: true };
+        return { ...value, queue: queueStopOf(h), serverRequiredForExecution: true };
       }
       default:
         throw new DomainError('Неизвестная операция', 400);

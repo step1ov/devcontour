@@ -44,7 +44,7 @@ import { IntentService } from '../runner/intent.ts';
 import { attachJournal, renderJournal } from '../runner/journal.ts';
 import { runActivity } from '../runner/activity.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
-import { queueStopReason } from '../core/work-status.ts';
+import { queueStopOf } from '../application/queue-stop.ts';
 /** Панель утверждает по одной задаче: предел отсекает только чужой запрос. */
 const APPROVAL_IDS_LIMIT = 1000;
 const approvalIds = z
@@ -204,9 +204,8 @@ export async function serve(
               }),
             // Экран этапа говорил «все исполнители свободны», пока диспетчер
             // стоял на ошибке: причина была видна только на досках.
-            queue: engine
-              ? { paused: engine.paused, stopReason: queueStopReason(engine, h!.store.events()) }
-              : undefined,
+            // Тот же вид остановки, что в `/api/state`, сводке и CLI.
+            queue: engine ? queueStopOf(h!, engine) : undefined,
             startupError,
             workspace: root ? workspaceDescription(root) : undefined,
           });
@@ -363,10 +362,14 @@ export async function serve(
           result = panelContract(h, decodeURIComponent(parts[2]));
         } else if (req.method === 'GET' && path === '/api/state') {
           const state = h.store.read();
+          const events = h.store.events();
           // Один момент на весь ответ: lease-причины задач не расходятся.
           const now = Date.now();
           result = {
             ...state,
+            // `paused` и `pauseReason` не объясняли остановку: причину и
+            // подсказку несёт общий вид остановки очереди.
+            queue: queueStopOf(h, state, events),
             tasks: state.tasks.map((t) => ({
               ...t,
               specDigest: specDigest(t),
@@ -374,7 +377,7 @@ export async function serve(
               progress: taskProgress(h!, state, t, now),
               checks: checksSummary(t),
             })),
-            events: h.store.events(),
+            events,
             journalError: h.store.projectionError,
             workflows: new LeadWorkflow(h).view(),
             dataRoot: resolve(scheduler.root),
@@ -524,7 +527,9 @@ export async function serve(
             const start = z.boolean().parse(input.start);
             h.pause(!start);
             if (start) await scheduler.tick();
-            result = { paused: !start };
+            // Такт мог сразу снова остановить очередь: ответ — то, что видно
+            // после него, с причиной.
+            result = queueStopOf(h);
           } else if (parts[1] === 'boards') {
             if (req.method === 'PATCH' && parts.length === 3)
               result = h.editBoard(
