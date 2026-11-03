@@ -11,6 +11,7 @@ import { ProjectMemory, memoryInputs } from './memory.ts';
 import { SignalInbox, signalInput } from '../core/signals.ts';
 import { LeadWorkflow, workflowInput } from '../core/lead-workflow.ts';
 import { workflowMetrics } from './metrics.ts';
+import { agentValueReport, valueReportInput } from './value-report.ts';
 import {
   requirementSnapshot,
   requirementReport,
@@ -50,6 +51,7 @@ export const agentInputs = {
     key: z.string().regex(/^[a-f0-9]{64}$/),
   }),
   workflow_metrics: z.strictObject({ repositoryId: id.optional() }),
+  value_report: valueReportInput,
   requirements_snapshot: z.strictObject({ repositoryId: id, source: z.string().min(1).max(500) }),
   requirements_report: z.strictObject({ repositoryId: id }),
   requirements_correct: z.strictObject({ boardId: id, reason: z.string().min(10).max(5000) }),
@@ -209,6 +211,8 @@ export const descriptions: Record<AgentOperation, string> = {
     'Retry a diagnosed failed stage within its original attempt budget. Never retries failed task implementations automatically.',
   workflow_metrics:
     'Read per-owner execution measurements, incomplete attempts and unknown cost. No model calls.',
+  value_report:
+    'Read the effect report: accepted tasks, first try, sent back by checks/review, approval-to-merge time, known spend per accepted task, environment failures and recorded interventions. Omit repositoryId for the whole workspace. Bounds are explicit: "lower" means at least, a range means unknown inputs, null/unknown is never zero; under 20 no percentages, under 5 no medians. JSON only; summary detail omits per-task rows and evidence links (the CLI report has them). Read-only, no model calls.',
   requirements_snapshot:
     'Read REQ sections from committed repository HEAD. Bind returned digest/text to a task and a configured test gate.',
   requirements_report:
@@ -280,6 +284,7 @@ export const readOnly = (name: AgentOperation) =>
     'requirements_snapshot',
     'requirements_report',
     'workflow_metrics',
+    'value_report',
     'workflow_status',
     'signal_status',
     'feasibility_spikes',
@@ -537,6 +542,8 @@ export class AgentService {
       }
       case 'workflow_metrics':
         return workflowMetrics(h, agentInputs.workflow_metrics.parse(input).repositoryId);
+      case 'value_report':
+        return agentValueReport(h, agentInputs.value_report.parse(input));
       case 'requirements_snapshot': {
         const v = agentInputs.requirements_snapshot.parse(input);
         return requirementSnapshot(repository(h.config, v.repositoryId).path, v.source);

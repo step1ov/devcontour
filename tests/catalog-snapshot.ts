@@ -13,5 +13,7 @@
 // Намеренное изменение: maxItems у relatedRepositories в task_create и
 // task_edit, а в задаче plan_import ещё у dependsOn, acceptance и contracts;
 // схема плана runtime и прочие операции байтово прежние.
-export const CATALOG_DIGEST = 'fb6574e41a61b0a271f4132b56a31344376e42d1c9b2fae5d36482eb2fb7ea04';
+// Намеренное изменение: новая операция только чтения value_report (отчёт об
+// эффекте) после workflow_metrics; прочие операции байтово прежние.
+export const CATALOG_DIGEST = '7d7d45f890afda6ec17201f2295e4ec2211b533dadbab93ff4c75233dea73d6a';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

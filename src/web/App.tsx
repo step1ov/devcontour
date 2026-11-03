@@ -24,6 +24,7 @@ import {
   History,
   X,
   FileCheck,
+  FileText,
   RotateCcw,
   Workflow,
   ChevronRight,
@@ -1229,6 +1230,17 @@ export function App() {
               </p>
             </div>
             <div className="flex shrink-0 flex-wrap gap-2 max-[760px]:w-full">
+              <Button variant="outline" asChild>
+                <a
+                  href="/api/report?format=html"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="Отчёт об эффекте: принятые задачи, возвраты проверками и ревью, время, расход и окружение"
+                >
+                  <FileText />
+                  Отчёт
+                </a>
+              </Button>
               {!workspaceView && board && current && revision?.status === 'accepted' && (
                 <Button
                   variant="outline"

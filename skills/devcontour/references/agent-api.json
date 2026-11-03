@@ -2463,6 +2463,48 @@
       }
     },
     {
+      "name": "value_report",
+      "description": "Read the effect report: accepted tasks, first try, sent back by checks/review, approval-to-merge time, known spend per accepted task, environment failures and recorded interventions. Omit repositoryId for the whole workspace. Bounds are explicit: \"lower\" means at least, a range means unknown inputs, null/unknown is never zero; under 20 no percentages, under 5 no medians. JSON only; summary detail omits per-task rows and evidence links (the CLI report has them). Read-only, no model calls.",
+      "readOnly": true,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "repositoryId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "since": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          },
+          "until": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          },
+          "asOf": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          },
+          "noTitles": {
+            "type": "boolean"
+          },
+          "detail": {
+            "default": "summary",
+            "type": "string",
+            "enum": [
+              "summary",
+              "full"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "requirements_snapshot",
       "description": "Read REQ sections from committed repository HEAD. Bind returned digest/text to a task and a configured test gate.",
       "readOnly": true,

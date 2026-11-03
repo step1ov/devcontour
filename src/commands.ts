@@ -12,6 +12,9 @@ import { IntentService } from './runner/intent.ts';
 import { engineeringEvals } from './runner/engineering-evals.ts';
 import { compareEvaluations } from './application/eval-comparison.ts';
 import { workflowMetrics } from './application/metrics.ts';
+import { parseReportFormat, renderValueReport } from './application/value-report.ts';
+import { readOnlyValueReport } from './runner/value-report.ts';
+import { writeReportFile } from './runner/report-file.ts';
 import { evaluateAgents } from './runner/evaluations.ts';
 import {
   requirementSnapshot,
@@ -39,7 +42,7 @@ import { contextSources, importContextSource } from './runner/context-import.ts'
 import { lockContextFile, taskContext } from './runner/context.ts';
 import { ResourcePool, resourceDatabase, processAlive } from './runner/resources.ts';
 import { mkdir, writeFile, readFile, realpath, rename } from 'node:fs/promises';
-import { join, resolve, dirname, sep } from 'node:path';
+import { join, resolve, dirname, sep, basename } from 'node:path';
 import { Store } from './core/store.ts';
 import { DevContour } from './core/service.ts';
 import { configSchema } from './core/model.ts';
@@ -469,6 +472,45 @@ async function main() {
     const result = await doctor(config, root, args.includes('--probe'), s ?? engine, check);
     console.log(JSON.stringify(result, null, 2));
     if (!result.ready) process.exitCode = 1;
+    return;
+  }
+  // Отчёт об эффекте только читает базу (как doctor): рядом может работать
+  // serve, второй writer не появляется.
+  if (operation === 'report') {
+    const value = (flag: string) => {
+      if (!args.includes(flag)) return undefined;
+      const v = option(flag, '');
+      if (!v || v.startsWith('--')) throw new Error(`Укажите значение ${flag}`);
+      return v;
+    };
+    const format = parseReportFormat(value('--format'));
+    const report = readOnlyValueReport(
+      config,
+      root,
+      {
+        repositoryId: value('--repository-id'),
+        since: value('--since'),
+        until: value('--until'),
+        asOf: value('--as-of'),
+        noTitles: args.includes('--no-titles'),
+      },
+      basename(workspacePath ?? config.workspaceRoot ?? root),
+    );
+    const text = renderValueReport(report, format);
+    const out = value('--out');
+    if (!out) {
+      process.stdout.write(text);
+      return;
+    }
+    writeReportFile(out, root, text);
+    console.log(
+      JSON.stringify({
+        out: resolve(out),
+        format,
+        bytes: Buffer.byteLength(text),
+        asOf: report.report.window.asOf,
+      }),
+    );
     return;
   }
   if (operation === 'storage-migrate') {

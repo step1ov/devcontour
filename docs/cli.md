@@ -129,15 +129,16 @@ Plan содержит `title`, `description`, `tasks` (1–30), у каждой 
 
 ## Требования, продолжение этапов и измерения
 
-| Команда                 | Параметры                                                  | Результат                                                 |
-| ----------------------- | ---------------------------------------------------------- | --------------------------------------------------------- |
-| `requirements-snapshot` | `--repository-id main --file docs/spec.md`                 | Разделы REQ из committed HEAD с digest                    |
-| `requirements-report`   | `--repository-id main`                                     | Связи требований и актуальность проверенного покрытия     |
-| `requirements-correct`  | `--board ID --reason TEXT`                                 | Draft-ревизия для изменившихся связанных требований       |
-| `metrics`               | опционально `--repository-id main`                         | Время стадий, ожидание и все попытки выбранного владельца |
-| `evals`                 | опционально `--repetitions N --max-calls N --timeout-ms N` | Изолированный eval протокола без workspace и моделей      |
+| Команда                 | Параметры                                                                                                  | Результат                                                                            |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `requirements-snapshot` | `--repository-id main --file docs/spec.md`                                                                 | Разделы REQ из committed HEAD с digest                                               |
+| `requirements-report`   | `--repository-id main`                                                                                     | Связи требований и актуальность проверенного покрытия                                |
+| `requirements-correct`  | `--board ID --reason TEXT`                                                                                 | Draft-ревизия для изменившихся связанных требований                                  |
+| `metrics`               | опционально `--repository-id main`                                                                         | Время стадий, ожидание и все попытки выбранного владельца                            |
+| `report`                | `--format json\|md\|html`, `--since`, `--until`, `--as-of`, `--repository-id`, `--no-titles`, `--out FILE` | Отчёт об эффекте: принятые задачи, возвраты, время, расход, окружение; только чтение |
+| `evals`                 | опционально `--repetitions N --max-calls N --timeout-ms N`                                                 | Изолированный eval протокола без workspace и моделей                                 |
 
-Первые четыре команды требуют `--workspace` или `--data`. Live-eval отдельно включается флагами `--live --runtime codex|claude --model MODEL`; его ограничения и интерпретация — в [evals](agent-evals.md).
+Первые четыре команды и `report` требуют `--workspace` или `--data`. `report` описан в [метриках](metrics.md#отчёт-об-эффекте). Live-eval отдельно включается флагами `--live --runtime codex|claude --model MODEL`; его ограничения и интерпретация — в [evals](agent-evals.md).
 
 `workflow_start`, `workflow_status`, `workflow_retry`, `signal_ingest` и `signal_status` вызываются через MCP, HTTP `/api/agent` или CLI `agent --file request.json --workspace ...`. Файл содержит `{ "operation": "workflow_status", "input": { "repositoryId": "main" } }`. Форматы входа берутся из `capabilities`; процедура описана в [workflow](lead-workflow.md) и [сигналах](external-signals.md). Регистрация workflow не запускает отдельный daemon: его продвигает работающий `serve`.
 

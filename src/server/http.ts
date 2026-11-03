@@ -30,7 +30,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net';
 import { readFile, realpath } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { resolve, join, extname, sep } from 'node:path';
+import { resolve, join, extname, sep, basename } from 'node:path';
 import { ZodError, z } from 'zod';
 import { utf8Bytes } from 'devcontour-harness';
 import { DevContour, specDigest } from '../core/service.ts';
@@ -45,6 +45,12 @@ import { attachJournal, renderJournal } from '../runner/journal.ts';
 import { runActivity } from '../runner/activity.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { queueStopOf } from '../application/queue-stop.ts';
+import {
+  devcontourValueReport,
+  parseReportFormat,
+  renderValueReport,
+  reportRequestInput,
+} from '../application/value-report.ts';
 /** Панель утверждает по одной задаче: предел отсекает только чужой запрос. */
 const APPROVAL_IDS_LIMIT = 1000;
 const approvalIds = z
@@ -307,6 +313,40 @@ export async function serve(
             'Панель подготовки запущена. Разработка ждёт согласований и настройки проекта',
             409,
           );
+        // Отчёт об эффекте: документ для чтения (ссылка «Отчёт» в шапке панели),
+        // не новая панель. Только чтение; HTML без скриптов и внешних ресурсов.
+        if (req.method === 'GET' && path === '/api/report') {
+          const params = Object.fromEntries(url.searchParams);
+          const format = parseReportFormat(params.format);
+          const request = reportRequestInput.parse({
+            ...(params.repositoryId ? { repositoryId: params.repositoryId } : {}),
+            ...(params.since ? { since: params.since } : {}),
+            ...(params.until ? { until: params.until } : {}),
+            ...(params.asOf ? { asOf: params.asOf } : {}),
+            ...(params.noTitles === '1' ? { noTitles: true } : {}),
+          });
+          const text = renderValueReport(
+            devcontourValueReport(h, request, {
+              label: basename(h.config.workspaceRoot ?? scheduler.root),
+              stateDir: scheduler.root,
+            }),
+            format,
+          );
+          res.writeHead(200, {
+            'Content-Type':
+              format === 'html'
+                ? 'text/html; charset=utf-8'
+                : format === 'md'
+                  ? 'text/markdown; charset=utf-8'
+                  : 'application/json; charset=utf-8',
+            'Cache-Control': 'no-store',
+            'X-Content-Type-Options': 'nosniff',
+            'Content-Security-Policy':
+              "default-src 'none'; style-src 'unsafe-inline'; img-src data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+          });
+          res.end(text);
+          return;
+        }
         const parts = path.split('/').filter(Boolean);
         let result: unknown;
         if (req.method === 'GET' && path === '/api/capabilities') {
