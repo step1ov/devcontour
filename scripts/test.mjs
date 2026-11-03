@@ -166,10 +166,12 @@ if (options.list) {
     // Файл, тесты которого кончились, но процесс не выходит (открытый сервер,
     // таймер), событий больше не даёт. run() отдаёт события файлов по порядку:
     // события следующих файлов ждут, пока не завершится первый незавершённый,
-    // поэтому застрявший файл заглушает весь прогон. Идущий тест даёт событие
-    // самое позднее через предел времени. Тишина всего прогона дольше предела
-    // с запасом — провал с именем первого незавершённого файла.
-    const idleMs = testTimeoutMs * 1.25;
+    // поэтому застрявший файл заглушает весь прогон. Предел ограничивает
+    // отдельно тест и каждый его хук (before, beforeEach, afterEach), а событие
+    // приходит после всех них; самый долгий тест полного прогона — около 5
+    // минут при пределе 15. Тишина всего прогона дольше двух пределов —
+    // провал с именем первого незавершённого файла.
+    const idleMs = testTimeoutMs * 2;
     const unfinished = new Set(files);
     let lastEvent = Date.now();
     for (const type of [
@@ -190,7 +192,7 @@ if (options.list) {
         const [stalled] = unfinished;
         if (!stalled || Date.now() - lastEvent <= idleMs) return;
         console.error(
-          `No test events for ${Math.round(idleMs / 1000)} s; the first unfinished file did not exit (open server, timer or child?): ${relative(process.cwd(), stalled)}`,
+          `No test events for ${Math.round(idleMs / 1000)} s: the first unfinished file holds the run (a process that did not exit — open server, timer, child — or a test with hooks running past the limit): ${relative(process.cwd(), stalled)}`,
         );
         process.exitCode ||= 1;
         clearInterval(watchdog);
