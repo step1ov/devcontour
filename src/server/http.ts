@@ -44,7 +44,7 @@ import { IntentService } from '../runner/intent.ts';
 import { attachJournal, renderJournal } from '../runner/journal.ts';
 import { runActivity } from '../runner/activity.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
-import { queueStopOf, queueStopView } from '../core/work-status.ts';
+import { queueStopOf } from '../application/queue-stop.ts';
 /** Панель утверждает по одной задаче: предел отсекает только чужой запрос. */
 const APPROVAL_IDS_LIMIT = 1000;
 const approvalIds = z
@@ -205,9 +205,7 @@ export async function serve(
             // Экран этапа говорил «все исполнители свободны», пока диспетчер
             // стоял на ошибке: причина была видна только на досках.
             // Тот же вид остановки, что в `/api/state`, сводке и CLI.
-            queue: engine
-              ? queueStopView(engine, h!.store.events(), { approvalMode: h!.config.approvalMode })
-              : undefined,
+            queue: engine ? queueStopOf(h!, engine) : undefined,
             startupError,
             workspace: root ? workspaceDescription(root) : undefined,
           });
@@ -371,7 +369,7 @@ export async function serve(
             ...state,
             // `paused` и `pauseReason` не объясняли остановку: причину и
             // подсказку несёт общий вид остановки очереди.
-            queue: queueStopView(state, events, { approvalMode: h.config.approvalMode }),
+            queue: queueStopOf(h, state, events),
             tasks: state.tasks.map((t) => ({
               ...t,
               specDigest: specDigest(t),

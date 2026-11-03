@@ -33,7 +33,7 @@ import { checkJsonBytes, operationCatalog, recoveryActions } from 'devcontour-ha
 import { applyCases } from '../runner/recovery.ts';
 import { ContractChanges } from '../runner/contract-change.ts';
 import { contractProposal, limitsMessage, proposalLimitIssues } from '../runner/agent-control.ts';
-import { queueStopOf } from '../core/work-status.ts';
+import { queueStopOf } from './queue-stop.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 export const agentInputs = {

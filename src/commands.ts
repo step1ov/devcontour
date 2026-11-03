@@ -33,7 +33,7 @@ import { PreviewRunner } from './runner/preview.ts';
 import { DeliveryRunner } from './runner/forge.ts';
 import { baseUpdateOperation } from './runner/base-update.ts';
 import { startQueue } from './runner/queue-start.ts';
-import { queueStopOf } from './core/work-status.ts';
+import { queueStopOf } from './application/queue-stop.ts';
 import { adoptContextPack } from './runner/context-library.ts';
 import { contextSources, importContextSource } from './runner/context-import.ts';
 import { lockContextFile, taskContext } from './runner/context.ts';

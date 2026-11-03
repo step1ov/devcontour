@@ -1,6 +1,6 @@
 import { PauseCircle } from 'lucide-react';
 import type { QueueStopView } from '../core/work-status.ts';
-import { Alert, AlertDescription, AlertTitle } from '@/ui/alert.tsx';
+import { Alert, AlertDescription } from '@/ui/alert.tsx';
 
 /**
  * Баннер остановленной очереди в шапке каждого экрана. Причина остановки
@@ -21,7 +21,9 @@ export function QueueStopBanner({ queue }: { queue?: QueueStopView }) {
     >
       <PauseCircle aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
       <div className="min-w-0 flex-1 [overflow-wrap:anywhere]">
-        <AlertTitle>Очередь остановлена</AlertTitle>
+        {/* Не заголовок: баннер стоит над h1 экрана и не должен ломать
+            порядок заголовков. */}
+        <strong className="mb-1 block leading-none font-medium">Очередь остановлена</strong>
         <AlertDescription className="grid gap-1">
           <p className="m-0">{queue.stopReason}</p>
           {queue.action && <p className="text-foreground m-0">Что сделать: {queue.action}</p>}

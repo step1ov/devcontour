@@ -251,6 +251,11 @@ export class Scheduler {
       () =>
         void this.tick().catch((e) =>
           this.h.store.change('scheduler.error', (s) => {
+            // Время остановки отличает сбой такта от исходной паузы «очередь
+            // ещё не запускали» (у обеих нет причины), даже когда событие
+            // ушло из последних записей журнала. Уже стоящую паузу сбой не
+            // передатирует.
+            if (!s.paused) s.pausedAt = new Date().toISOString();
             s.paused = true;
             return { error: String(e) };
           }),

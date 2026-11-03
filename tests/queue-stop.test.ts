@@ -3,65 +3,83 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { config, fixture } from './helpers.ts';
+import { config, fixture, input } from './helpers.ts';
 import { serve } from '../src/server/http.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
-import { AgentContext } from '../src/application/context.ts';
+import { LeadWorkflow } from '../src/core/lead-workflow.ts';
+import { AgentService } from '../src/application/agent.ts';
+import { devcontourHooks } from '../src/harness/hooks.ts';
 import { git, command } from '../src/runner/process.ts';
 import { queueStopView, type QueueStopView } from '../src/core/work-status.ts';
 
 const STALE =
   'TaskFailure: База прогонов отстала от рабочей ветки: main — devcontour/accepted без 1 коммитов. Выполните devcontour base-update, иначе исполнитель получит дерево без подготовленной работы.';
+const START = 'devcontour queue --start';
 
-test('Остановка очереди одинакова в /api/state, /api/preparation, сводке панели и агентском обзоре', async () => {
-  const f = fixture();
+/**
+ * Сервер панели над fixture и чтение вида остановки из всех мест, где его
+ * отдают: `/api/state`, `/api/preparation`, сводка панели и агентские
+ * `project_context`, `project_overview`, `workflow_status`. Байты совпадают.
+ */
+async function panel(f: ReturnType<typeof fixture>) {
   const scheduler = new Scheduler(f.h, f.root);
   const app = await serve(f.h, scheduler, { port: 0 });
   const get = async (path: string) =>
     (await (await fetch(app.url + path)).json()) as { queue?: QueueStopView };
-  /** Один вид остановки во всех читателях — и он же возвращается. */
+  const agent = (operation: string) =>
+    new AgentService(f.h).execute({ operation, input: {} }) as { queue?: QueueStopView };
   const read = async () => {
     const state = (await get('/api/state')).queue;
     assert.ok(state, '/api/state несёт вид остановки');
-    assert.deepEqual((await get('/api/preparation')).queue, state, '/api/preparation');
-    assert.deepEqual((await get('/api/summary')).queue, state, 'сводка панели');
-    const overview = new AgentContext(f.h).execute('project_overview', {}) as {
-      queue?: QueueStopView;
-    };
-    assert.deepEqual(overview.queue, state, 'project_overview');
+    const bytes = JSON.stringify(state);
+    for (const [name, other] of [
+      ['/api/preparation', (await get('/api/preparation')).queue],
+      ['/api/summary', (await get('/api/summary')).queue],
+      ['project_context', agent('project_context').queue],
+      ['project_overview', agent('project_overview').queue],
+      ['workflow_status', agent('workflow_status').queue],
+    ] as const)
+      assert.equal(JSON.stringify(other), bytes, name);
     return state;
   };
-  try {
-    // Исходная пауза: очередь ещё не запускали — не сбой.
-    const initial = await read();
-    assert.equal(initial.paused, true);
-    assert.equal(initial.stopReason, 'Очередь ещё не запущена');
-    assert.equal(initial.failed, undefined);
-    assert.match(initial.action ?? '', /devcontour queue --start/);
+  return {
+    read,
+    close: async () => {
+      await app.close();
+      await scheduler.stop();
+    },
+  };
+}
 
+test('Остановка очереди одинакова во всех ответах: сбой, проверка базы, человек, ход', async () => {
+  const f = fixture();
+  const p = await panel(f);
+  try {
     // Сбой диспетчера: отставшая база — причина из журнала и подсказка base-update.
     f.h.pause(false);
     f.h.store.change('scheduler.error', (s) => {
       s.paused = true;
       return { error: STALE };
     });
-    const runtime = await read();
+    const runtime = await p.read();
     assert.equal(runtime.reason, 'runtime');
     assert.equal(runtime.failed, true);
     assert.match(runtime.stopReason ?? '', /^База прогонов отстала от рабочей ветки/);
-    assert.match(runtime.action ?? '', /devcontour base-update/);
+    assert.equal(
+      runtime.action,
+      'Выполните devcontour base-update, затем проверьте базу и ' + START,
+    );
 
     // Перенос базы: очередь ждёт проверки базы; причина — описание ожидания,
     // а не уже выполненный base-update.
     f.h.baseUpdated([{ repositoryId: 'main', from: 'a', to: 'b' }]);
-    const baseCheck = await read();
+    const baseCheck = await p.read();
     assert.equal(baseCheck.reason, 'base-check');
     assert.equal(baseCheck.failed, undefined);
     assert.match(baseCheck.stopReason ?? '', /^База прогонов перенесена \(main\)/);
-    assert.doesNotMatch(baseCheck.stopReason ?? '', /Выполните devcontour base-update/);
-    assert.ok(baseCheck.action);
+    assert.equal(baseCheck.action, 'Проверьте базу gates, затем выполните ' + START);
     assert.ok(baseCheck.since, 'время остановки известно');
 
     // Пауза человека не выдаёт прежний сбой за причину.
@@ -71,62 +89,169 @@ test('Остановка очереди одинакова в /api/state, /api/p
       return { error: 'Error: снова' };
     });
     f.h.pause(true);
-    const operator = await read();
+    const operator = await p.read();
     assert.equal(operator.reason, 'operator');
     assert.equal(operator.stopReason, 'Выдача остановлена человеком');
-    assert.equal(operator.action, 'devcontour queue --start');
-
-    // Штатная остановка сервера.
-    f.h.pause(false);
-    f.h.pause(true, 'shutdown');
-    const shutdown = await read();
-    assert.equal(shutdown.reason, 'shutdown');
-    assert.equal(shutdown.stopReason, 'Сервер остановлен штатно');
-    assert.match(shutdown.action ?? '', /devcontour serve/);
+    assert.equal(operator.action, START);
 
     // Обратный случай: очередь идёт — ни причины, ни подсказки.
     f.h.pause(false);
-    assert.deepEqual(await read(), { paused: false });
+    assert.deepEqual(await p.read(), { paused: false });
   } finally {
-    await app.close();
-    await scheduler.stop();
+    await p.close();
     f.cleanup();
   }
 });
 
-test('Вид остановки: отказ провайдера и ожидание проверки базы в режимах агента и оператора', () => {
-  const provider = queueStopView(
-    { paused: true, pauseReason: 'runtime', pauseFailures: ['provider-auth'] },
-    [],
+test('Пауза человека перед переносом базы называет ожидание проверки базы, а не только паузу', async () => {
+  const f = fixture();
+  const p = await panel(f);
+  try {
+    // Штатный маршрут: queue --pause, затем base-update. queue --start снимет
+    // и паузу, и ожидание — поэтому подсказка: сначала проверить базу.
+    f.h.pause(false);
+    f.h.pause(true);
+    f.h.baseUpdated([{ repositoryId: 'main', from: 'a', to: 'b' }]);
+    const view = await p.read();
+    assert.equal(view.reason, 'operator');
+    assert.match(view.stopReason ?? '', /^База прогонов перенесена \(main\)/);
+    assert.equal(
+      view.action,
+      'Проверьте базу gates, затем выполните ' +
+        START +
+        ' — он снимет и паузу человека, и ожидание',
+    );
+  } finally {
+    await p.close();
+    f.cleanup();
+  }
+});
+
+test('Исходная и штатная паузы: подсказка зависит от режима и работы ведущего', async () => {
+  const f = fixture();
+  const p = await panel(f);
+  try {
+    // Режим агента без работы ведущего: исходная пауза — не сбой; очередь
+    // запускают через workflow_start, а не ручным queue --start.
+    assert.equal(f.h.config.approvalMode, 'agent');
+    const initial = await p.read();
+    assert.equal(initial.reason, 'not-started');
+    assert.equal(initial.stopReason, 'Очередь ещё не запущена');
+    assert.equal(initial.failed, undefined);
+    assert.match(initial.action ?? '', /^Зарегистрируйте доску через workflow_start/);
+
+    // Штатная остановка после перезапуска, режим агента без работы ведущего.
+    f.h.pause(false);
+    f.h.pause(true, 'shutdown');
+    const agentIdle = await p.read();
+    assert.equal(agentIdle.reason, 'shutdown');
+    assert.equal(agentIdle.stopReason, 'Сервер был остановлен штатно');
+    assert.match(agentIdle.action ?? '', /^Зарегистрируйте доску через workflow_start/);
+
+    // С зарегистрированной работой её снимет цикл ведущего.
+    const b = f.h.createBoard('Доска');
+    f.h.addTask(b.id, input('Задача'));
+    new LeadWorkflow(f.h).start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    const agentBusy = await p.read();
+    assert.match(agentBusy.action ?? '', /^Ничего не требуется: цикл ведущего продолжит выдачу/);
+
+    // Режим оператора: цикл не продвигается, паузу снимает человек.
+    f.h.config.approvalMode = 'operator';
+    const operatorMode = await p.read();
+    assert.equal(operatorMode.reason, 'shutdown');
+    assert.equal(operatorMode.action, START);
+  } finally {
+    await p.close();
+    f.cleanup();
+  }
+});
+
+test('Отказ провайдера называет свою подсказку и при паузе человека поверх него', async () => {
+  const f = fixture();
+  const p = await panel(f);
+  try {
+    const b = f.h.createBoard('Доска');
+    const t = f.h.addTask(b.id, input('Задача'));
+    f.h.approve(b.id);
+    f.h.pause(false);
+    const run = f.h.claim('test')!;
+    assert.equal(run.taskId, t.id);
+    // Путь отказа runner: движок ставит паузу с классом, затем хук `failed`
+    // пишет `scheduler.error` (engine/runner.js harness).
+    f.h.fail(run.id, run.token, 'Credit balance too low', false, 'provider-auth');
+    const attempt = f.h.store.read().runs.find((r) => r.id === run.id)!;
+    await devcontourHooks(f.h).failed?.({
+      attempt,
+      kind: 'provider-auth',
+      message: 'Credit balance too low',
+    } as never);
+    assert.deepEqual(f.h.store.read().pauseFailures, ['provider-auth']);
+    assert.ok(f.h.store.events().some((e) => e.type === 'scheduler.error'));
+    const provider = await p.read();
+    assert.equal(provider.reason, 'runtime');
+    assert.equal(provider.failed, true);
+    assert.match(provider.stopReason ?? '', /Credit balance too low/);
+    assert.match(provider.action ?? '', /^Авторизуйте CLI исполнителя/);
+
+    // Пауза человека поверх отказа не прячет класс отказа: выдача стоит из-за него.
+    f.h.store.change('test.operator', (s) => {
+      s.pauseReason = 'operator';
+      s.pausedAt = new Date().toISOString();
+    });
+    const operator = await p.read();
+    assert.equal(operator.reason, 'operator');
+    assert.match(operator.action ?? '', /^Авторизуйте CLI исполнителя/);
+  } finally {
+    await p.close();
+    f.cleanup();
+  }
+});
+
+test('Длинная ошибка диспетчера усечена одинаково во всех ответах', async () => {
+  const f = fixture();
+  const p = await panel(f);
+  try {
+    f.h.pause(false);
+    f.h.store.change('scheduler.error', (s) => {
+      s.paused = true;
+      return { error: 'Error: ' + 'длинная причина '.repeat(1000) };
+    });
+    const view = await p.read();
+    assert.equal(view.stopReason?.length, 2001, 'предел диагностики и «…»');
+    assert.ok(view.stopReason?.endsWith('…'));
+  } finally {
+    await p.close();
+    f.cleanup();
+  }
+});
+
+test('Сбой такта, чьё событие ушло из окна журнала, не выдаётся за незапущенную очередь', () => {
+  const view = queueStopView({ paused: true, pausedAt: new Date().toISOString() }, []);
+  assert.equal(view.reason, 'runtime');
+  assert.equal(view.failed, true);
+  assert.match(view.stopReason ?? '', /сбоем диспетчера/);
+  // Ошибка старше паузы относится к прошлой остановке.
+  const old = queueStopView(
+    { paused: true, pauseReason: 'runtime', pausedAt: '2026-11-03T10:00:00.000Z' },
+    [
+      {
+        id: 1,
+        at: '2026-11-03T09:00:00.000Z',
+        type: 'scheduler.error',
+        data: { error: 'Error: старое' },
+      },
+    ],
   );
-  assert.equal(provider.failed, true);
-  assert.match(provider.stopReason ?? '', /провайдера моделей/);
-  assert.match(provider.action ?? '', /Авторизуйте CLI исполнителя/);
-  const unknown = queueStopView({ paused: true, pauseReason: 'runtime' }, []);
-  assert.equal(unknown.failed, true);
-  assert.match(unknown.stopReason ?? '', /после сбоя/);
-  const waits = [
-    { kind: 'base-check' as const, detail: 'Проверка базы не пройдена: test', at: '' },
-  ];
-  const agent = queueStopView({ paused: true, pauseReason: 'base-check', waits }, [], {
-    approvalMode: 'agent',
-  });
-  const operator = queueStopView({ paused: true, pauseReason: 'base-check', waits }, [], {
-    approvalMode: 'operator',
-  });
-  assert.equal(agent.stopReason, 'Проверка базы не пройдена: test');
-  assert.equal(operator.stopReason, agent.stopReason);
-  assert.match(agent.action ?? '', /Цикл ведущего проверит базу/);
-  assert.equal(operator.action, 'Проверьте базу gates и выполните devcontour queue --start');
+  assert.doesNotMatch(old.stopReason ?? '', /старое/);
   assert.deepEqual(
     queueStopView({ paused: false, pauseReason: 'operator' }, [
-      { id: 1, type: 'scheduler.error', data: { error: 'Error: старое' } },
+      { id: 1, at: '', type: 'scheduler.error', data: { error: 'Error: старое' } },
     ]),
     { paused: false },
   );
 });
 
-test('CLI queue без флага называет причину остановки тем же текстом, что API', async () => {
+test('CLI queue без флага печатает причину и подсказку', async () => {
   const root = await mkdtemp(join(tmpdir(), 'devcontour-queue-stop-'));
   const repo = join(root, 'repo'),
     data = join(root, 'data');
@@ -147,13 +272,16 @@ test('CLI queue без флага называет причину останов
         s.paused = true;
         return { error: STALE };
       });
-      const expected = queueStopView(h.store.read(), h.store.events(), {
-        approvalMode: c.approvalMode,
-      });
       const stopped = await command(cli, process.cwd());
       assert.equal(stopped.code, 0, stopped.stderr);
-      assert.deepEqual(JSON.parse(stopped.stdout), expected);
-      assert.match((JSON.parse(stopped.stdout) as QueueStopView).stopReason ?? '', /base-update/);
+      const view = JSON.parse(stopped.stdout) as QueueStopView;
+      assert.equal(view.paused, true);
+      assert.equal(view.reason, 'runtime');
+      assert.equal(view.stopReason, STALE.replace(/^TaskFailure: /, ''));
+      assert.equal(
+        view.action,
+        'Выполните devcontour base-update, затем проверьте базу и ' + START,
+      );
       // Очередь идёт — причины нет.
       h.pause(false);
       const running = await command(cli, process.cwd());

@@ -1,5 +1,5 @@
 import type { DevContour } from '../core/service.ts';
-import { queueStopOf } from '../core/work-status.ts';
+import { queueStopOf } from '../application/queue-stop.ts';
 
 /**
  * Исход `queue --start` из CLI. Снятие паузы пишет общий документ, но выдачу
@@ -28,7 +28,7 @@ export async function startQueue(
   }
   if (s.paused) {
     // Тот же вид остановки, что в панели и API: причина и подсказка.
-    const stop = queueStopOf(h);
+    const stop = queueStopOf(h, s);
     return {
       ...stop,
       paused: true,

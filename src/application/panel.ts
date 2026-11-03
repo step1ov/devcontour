@@ -15,7 +15,8 @@ import type { Delivery } from '../core/integrations.ts';
 import { clipDeep, type PropertyRecovery } from 'devcontour-harness';
 import { blockers, readyTasks } from '../core/graph.ts';
 import { repositories } from '../core/repositories.ts';
-import { boardPhase, queueStopView } from '../core/work-status.ts';
+import { boardPhase } from '../core/work-status.ts';
+import { queueStopOf } from './queue-stop.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { taskProgress } from './context.ts';
 import { checksSummary } from './checks.ts';
@@ -523,7 +524,7 @@ function buildSummary(
     events: recent.slice(0, 40).map((e) => ({ id: e.id, at: e.at, type: e.type })),
     // Остановка очереди тем же видом, что в `/api/state`, `/api/preparation`
     // и CLI: причина, подсказка и время. Баннер панели читает её.
-    queue: boundedQueueStop(state, recent, h.config.approvalMode),
+    queue: queueStopOf(h, state, recent),
     journalError: short(h.store.projectionError, DIAGNOSTIC),
     workflows: new LeadWorkflow(h)
       .view()
@@ -558,14 +559,6 @@ function buildSummary(
   };
 }
 export type PanelSummary = ReturnType<typeof buildSummary>;
-function boundedQueueStop(
-  state: Parameters<typeof queueStopView>[0],
-  events: Parameters<typeof queueStopView>[1],
-  approvalMode: 'agent' | 'operator',
-) {
-  const view = queueStopView(state, events, { approvalMode });
-  return view.stopReason ? { ...view, stopReason: short(view.stopReason, DIAGNOSTIC) } : view;
-}
 
 /**
  * Агрегаты прогресса по всей истории: готовность по компонентам, проверки и
