@@ -21,6 +21,7 @@ import type {
   TaskStatus,
   Role,
 } from '../core/model.ts';
+import type { QueueStopView } from '../core/work-status.ts';
 import { roleLabel } from './roles.ts';
 import { WorkerCards } from './Workers.tsx';
 import { Badge } from '@/ui/badge.tsx';
@@ -705,7 +706,8 @@ export function ProgressPanel({
     contracts: { id: string; title: string; approvedAt: string }[];
     progress: PanelProgress;
     events?: Pick<AuditEvent, 'id' | 'at' | 'type'>[];
-    stopReason?: string;
+    /** Общий вид остановки очереди (сводка панели). */
+    queue?: QueueStopView;
     contractAttemptCount?: number;
     /** Номер показанного состояния: очередь перезагружается при его смене. */
     revision?: string;
@@ -744,7 +746,7 @@ export function ProgressPanel({
         paused={state.paused}
         pauseReason={state.pauseReason}
         waits={state.waits}
-        stopped={state.stopReason}
+        stopped={state.queue?.failed ? state.queue.stopReason : undefined}
         workflows={state.workflows}
       />
       <Setup

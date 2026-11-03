@@ -59,10 +59,13 @@ test('queue --start при работающем сервере, который �
     const result = JSON.parse(started.stdout) as {
       paused: boolean;
       stopReason?: string;
+      action?: string;
       error?: string;
     };
     assert.equal(result.paused, true);
     assert.match(result.stopReason ?? '', /base-update/);
+    // Тот же вид остановки, что в API и панели: с подсказкой оператору.
+    assert.match(result.action ?? '', /^Выполните devcontour base-update/);
     assert.match(result.error ?? '', /^Очередь осталась на паузе: .*base-update/);
   } finally {
     stop();

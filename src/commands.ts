@@ -33,6 +33,7 @@ import { PreviewRunner } from './runner/preview.ts';
 import { DeliveryRunner } from './runner/forge.ts';
 import { baseUpdateOperation } from './runner/base-update.ts';
 import { startQueue } from './runner/queue-start.ts';
+import { queueStopOf } from './core/work-status.ts';
 import { adoptContextPack } from './runner/context-library.ts';
 import { contextSources, importContextSource } from './runner/context-import.ts';
 import { lockContextFile, taskContext } from './runner/context.ts';
@@ -886,9 +887,11 @@ async function main() {
           root,
         });
       else if (operation === 'queue') {
-        if (args.includes('--start') === args.includes('--pause'))
+        if (args.includes('--start') && args.includes('--pause'))
           throw new Error('Укажите только --start или --pause');
-        if (args.includes('--pause')) result = h.pause(true);
+        // Без флага — состояние очереди тем же видом, что в панели и API.
+        if (!args.includes('--start') && !args.includes('--pause')) result = queueStopOf(h);
+        else if (args.includes('--pause')) result = { ...h.pause(true), ...queueStopOf(h) };
         else {
           // Снятие паузы подтверждает работающий сервер: очередь, которую он
           // сразу снова остановил, — отказ с его причиной, а не успех.

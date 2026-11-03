@@ -197,7 +197,7 @@ test('Экран этапа называет последнюю причину �
   const read = async () =>
     (
       (await (await fetch(app.url + '/api/preparation')).json()) as {
-        queue?: { paused: boolean; stopReason?: string };
+        queue?: { paused: boolean; reason?: string; stopReason?: string };
       }
     ).queue;
   try {
@@ -210,11 +210,13 @@ test('Экран этапа называет последнюю причину �
         return { error };
       });
     }
-    assert.deepEqual(await read(), { paused: true, stopReason: 'База прогонов отстала' });
-    // Перенос базы устраняет причину: очередь ждёт человека, а экран не
+    assert.equal((await read())?.stopReason, 'База прогонов отстала');
+    // Перенос базы устраняет причину: очередь ждёт проверки базы, а экран не
     // советует уже выполненный base-update.
     f.h.baseUpdated([{ repositoryId: 'main', from: 'a', to: 'b' }]);
-    assert.deepEqual(await read(), { paused: true });
+    const waiting = await read();
+    assert.equal(waiting?.reason, 'base-check');
+    assert.doesNotMatch(waiting?.stopReason ?? '', /base-update|отстала/);
     assert.equal(f.h.store.events()[0]?.type, 'base.updated');
     f.h.pause(false);
     f.h.store.change('scheduler.error', (s) => {
@@ -222,9 +224,9 @@ test('Экран этапа называет последнюю причину �
       return { error: 'Error: снова' };
     });
     f.h.pause(true);
-    assert.deepEqual(
-      await read(),
-      { paused: true },
+    assert.equal(
+      (await read())?.stopReason,
+      'Выдача остановлена человеком',
       'пауза оператора не выдаёт прежний сбой за причину',
     );
   } finally {

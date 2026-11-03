@@ -353,7 +353,7 @@ test('P-F01: long diagnostics written by runner and gates stay bounded in the su
     const text = JSON.stringify(summary);
     assert.equal(text.includes('x'.repeat(DIAGNOSTIC_MAX + 2)), false);
     assert.equal(text.includes('IMPACT'), false);
-    assert.ok(summary.stopReason?.startsWith('SCHEDULER-ERROR'));
+    assert.ok(summary.queue.stopReason?.startsWith('SCHEDULER-ERROR'));
     assert.equal(text.includes('OBLIGATION-BODY'), false);
     // Строка чужой доски — только текущая ревизия; причина — целиком в деталях.
     assert.equal(text.includes('REVISION-REASON-0 '), false);

@@ -1,5 +1,5 @@
 import type { DevContour } from '../core/service.ts';
-import { queueStopReason } from '../core/work-status.ts';
+import { queueStopOf } from '../core/work-status.ts';
 
 /**
  * Исход `queue --start` из CLI. Снятие паузы пишет общий документ, но выдачу
@@ -27,14 +27,14 @@ export async function startQueue(
     if (s.leader?.owner === lease.owner) seen.add(s.leader.leaseUntil);
   }
   if (s.paused) {
-    const stopReason = queueStopReason(s, h.store.events());
+    // Тот же вид остановки, что в панели и API: причина и подсказка.
+    const stop = queueStopOf(h);
     return {
+      ...stop,
       paused: true,
-      reason: s.pauseReason ?? 'runtime',
-      ...(stopReason ? { stopReason } : {}),
       // Кто поставил паузу в этом окне — сервер или другой участник, — не
       // известно: ответ называет состояние и причину, а не виновника.
-      error: 'Очередь осталась на паузе' + (stopReason ? ': ' + stopReason : ''),
+      error: 'Очередь осталась на паузе' + (stop.stopReason ? ': ' + stop.stopReason : ''),
     };
   }
   // Сервер не сделал двух тактов за отведённое время: снятие паузы записано,

@@ -20,6 +20,101 @@ export function queueStopReason(
   }).detail;
 }
 
+/**
+ * Остановка очереди одной записью для всех читателей: `/api/state`,
+ * `/api/preparation`, сводка панели, CLI `queue` и агентские операции.
+ * Раньше причину называл только экран этапа и только для сбоя диспетчера:
+ * ожидание проверки базы и пауза человека выглядели молчаливой паузой, а
+ * `/api/state` отдавал `paused: true` без объяснения.
+ *
+ * `stopReason` — текст для человека: сбой диспетчера (`queueStopReason`),
+ * ожидание проверки базы — его описание, остальные причины — их название.
+ * `action` — короткая подсказка оператору, если следующий шаг известен.
+ */
+export interface QueueStopView {
+  paused: boolean;
+  reason?: NonNullable<DevContourState['pauseReason']>;
+  stopReason?: string;
+  /** Когда выдачу остановили (`pausedAt`), если известно. */
+  since?: string;
+  action?: string;
+  /** Остановка вызвана сбоем (рантайм, провайдер), а не решением или ожиданием. */
+  failed?: true;
+}
+export function queueStopView(
+  state: Pick<DevContourState, 'paused' | 'pauseReason' | 'pausedAt' | 'pauseFailures' | 'waits'>,
+  events: Pick<AuditEvent, 'id' | 'type' | 'data'>[],
+  options: { approvalMode?: 'agent' | 'operator' } = {},
+): QueueStopView {
+  if (!state.paused) return { paused: false };
+  const reason = state.pauseReason ?? 'runtime';
+  const since = state.pausedAt ? { since: state.pausedAt } : {};
+  const start = 'devcontour queue --start';
+  const wait = state.waits?.find((w) => w.kind === 'base-check')?.detail;
+  let failed = false;
+  const [stopReason, action] = ((): [string, string | undefined] => {
+    switch (reason) {
+      case 'operator':
+        return ['Выдача остановлена человеком', start];
+      case 'shutdown':
+        return [
+          'Сервер остановлен штатно',
+          'Запустите devcontour serve: цикл ведущего продолжит выдачу сам',
+        ];
+      case 'reconfigure':
+        return [
+          'Применяется новая конфигурация после изменения контракта',
+          'Ничего не требуется: операция снимет паузу сама',
+        ];
+      case 'base-check':
+        return [
+          wait ?? 'Выдача ждёт проверки перенесённой базы gates',
+          options.approvalMode === 'agent'
+            ? 'Цикл ведущего проверит базу gates и продолжит выдачу сам; если проверка не прошла — исправьте базу или выполните ' +
+              start
+            : 'Проверьте базу gates и выполните ' + start,
+        ];
+      default: {
+        const detail = queueStopReason(state, events);
+        failed = !!detail || state.pauseReason === 'runtime';
+        if (detail)
+          return [
+            detail,
+            /base-update/.test(detail)
+              ? 'Выполните devcontour base-update, затем проверьте базу и ' + start
+              : 'Устраните причину и выполните ' + start,
+          ];
+        if (state.pauseFailures?.includes('provider-auth'))
+          return [
+            'Исполнитель не авторизован у провайдера моделей или закончился баланс',
+            'Авторизуйте CLI исполнителя или пополните баланс, затем ' + start,
+          ];
+        // Пауза без причины и без сбоя в журнале — исходное «очередь ещё не
+        // запускали»; названная остановка рантайма без текста — сбой,
+        // подробности которого остались только в журнале.
+        return state.pauseReason === 'runtime'
+          ? ['Выдача остановлена системой после сбоя; подробности — в журнале', start]
+          : ['Очередь ещё не запущена', start];
+      }
+    }
+  })();
+  return {
+    paused: true,
+    reason,
+    stopReason,
+    ...since,
+    ...(action ? { action } : {}),
+    ...(failed ? { failed: true as const } : {}),
+  };
+}
+/** Остановка очереди контура по его состоянию, журналу и режиму согласований. */
+export function queueStopOf(h: {
+  store: { read(): DevContourState; events(): AuditEvent[] };
+  config: { approvalMode?: 'agent' | 'operator' };
+}) {
+  return queueStopView(h.store.read(), h.store.events(), { approvalMode: h.config.approvalMode });
+}
+
 export type BoardPhase =
   'accepted' | 'running' | 'failed' | 'acceptance' | 'queued' | 'draft' | 'empty' | 'closed';
 
