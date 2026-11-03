@@ -811,7 +811,13 @@ for (const [name, script, mode] of [
             (n) =>
               n.startsWith('dc-gate-') && !before.has(n) && existsSync(join(tmpdir(), n, SECRET)),
           );
-          assert.equal(left.length, 1, 'операция проверки действительно выполнена');
+          // Причина отказа gate в сообщении: под нагрузкой проверка изредка не
+          // оставляет каталога, и без неё флейк не разобрать.
+          assert.equal(
+            left.length,
+            1,
+            `операция проверки действительно выполнена; gate: ${e.summary ?? ''}; лог: ${log.slice(-600)}`,
+          );
           scratch = join(tmpdir(), left[0]);
           // Отказ уборки scratch не оставляет каталог меток старта.
           assert.deepEqual(

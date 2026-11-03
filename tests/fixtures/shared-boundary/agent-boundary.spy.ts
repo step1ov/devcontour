@@ -108,7 +108,11 @@ void test('context pager — ответ pageItems с binding и revision зап�
       Record<string, unknown>,
     ];
     assert.ok(items.length > 0);
-    assert.deepEqual(header, { scope: 'main', paused: true });
+    assert.equal(header.scope, 'main');
+    assert.equal(header.paused, true);
+    // Шапка обзора несёт общий вид остановки очереди (queueStopView).
+    assert.deepEqual(Object.keys(header).sort(), ['paused', 'queue', 'scope']);
+    assert.equal((header.queue as { reason?: string }).reason, 'not-started');
     assert.equal(options.binding, 'overview/main');
     assert.equal(options.limit, 3);
     assert.match(String(options.revision), /^[a-f0-9]{64}$/);
