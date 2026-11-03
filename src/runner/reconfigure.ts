@@ -1,8 +1,13 @@
 import { readFileSync } from 'node:fs';
-import type { DevContour } from '../core/service.ts';
+import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { ZodError } from 'zod';
+import { DevContour, loadedDigest, operationalKeys, type OperationalKey } from '../core/service.ts';
+import type { Config } from '../core/model.ts';
+import { Store } from '../core/store.ts';
+import { repositories } from '../core/repositories.ts';
 import { executionOf } from '../harness/execution.ts';
 import { loadConfig } from './config.ts';
-import { loadedDigest } from '../core/service.ts';
 
 /**
  * Применение конфигурации — только по запросу операции изменения контракта
@@ -10,6 +15,12 @@ import { loadedDigest } from '../core/service.ts';
  * операция, и без запроса работающий процесс правки файла не подхватывает.
  * Это не hot reload: применяется ровно ожидаемое, после drain, и отличаться
  * от действующего может только закрепление context packs.
+ *
+ * Второй источник запроса — `config-apply` (`requestConfigApply`):
+ * эксплуатационные пределы `budgets` и `prices`. Тот же запрос с ожидаемым
+ * digest и тот же drain; отличаться от действующей может только названная
+ * часть, а итог — событие журнала `config.applied` или `config.apply-refused`.
+ * Запрос снимает сам сервер: операции, которая повторила бы его, нет.
  */
 
 /**
@@ -26,7 +37,12 @@ export function busyWork(h: DevContour) {
  * Применить конфигурацию из файла в этом процессе, если digest загруженной
  * конфигурации равен ожидаемому. Расхождение — отказ с обоими digest.
  */
-export function applyConfig(h: DevContour, path: string, expected: string) {
+export function applyConfig(
+  h: DevContour,
+  path: string,
+  expected: string,
+  keys?: readonly OperationalKey[],
+) {
   const text = readFileSync(path, 'utf8');
   const next = loadConfig(path, text);
   const actual = loadedDigest(next);
@@ -36,7 +52,7 @@ export function applyConfig(h: DevContour, path: string, expected: string) {
     );
   // Всегда через reconfigure, даже при совпадающем содержимом: так процесс
   // фиксирует поколение применённой конфигурации и момент её получения.
-  h.reconfigure(next);
+  h.reconfigure(next, keys);
 }
 
 /**
@@ -54,20 +70,40 @@ export function serveReconfigure(h: DevContour, path: string, by: string) {
     const request = state.reconfigure;
     if (request && !request.appliedAt && !request.error) {
       if (busyWork(h).length) return;
+      const keys = configApplyKeys(request.operation);
+      const before = keys && operationalValues(h.config, keys);
       try {
         // Применяется ровно ожидаемая: после загрузки движок процесса — с ней,
         // и подтверждение применения — правило движка.
-        applyConfig(h, path, request.digest);
+        applyConfig(h, path, request.digest, keys);
       } catch (error) {
-        h.settleReconfigure(
-          request.operation,
-          request.digest,
-          by,
-          error instanceof Error ? error.message : String(error),
-        );
+        const message = failure(error);
+        h.settleReconfigure(request.operation, request.digest, by, message);
+        if (keys) {
+          // Повторять запрос некому: снимается сразу, иначе он держал бы выдачу.
+          h.clearReconfigure(request.operation);
+          h.store.appendEvent('config.apply-refused', {
+            operation: request.operation,
+            keys,
+            digest: request.digest,
+            error: message,
+          });
+        }
         return;
       }
       h.settleReconfigure(request.operation, request.digest, by);
+      if (keys) {
+        h.clearReconfigure(request.operation);
+        const after = operationalValues(h.config, keys);
+        h.store.appendEvent('config.applied', {
+          operation: request.operation,
+          keys,
+          digest: request.digest,
+          changed: keys.filter((k) => JSON.stringify(before![k]) !== JSON.stringify(after[k])),
+          before,
+          after,
+        });
+      }
       return;
     }
     if (!request && state.applied && state.stale)
@@ -77,4 +113,160 @@ export function serveReconfigure(h: DevContour, path: string, by: string) {
         /* Догнать нельзя: процесс остаётся остановленным до перезапуска. */
       }
   });
+}
+
+/* ------------------------------------------------------------------ */
+/* config-apply: бюджеты и тарифы без перезапуска                      */
+/* ------------------------------------------------------------------ */
+
+const configApplyPrefix = 'config-apply:';
+
+/** Ключи запроса `config-apply`; у запроса другой операции — `undefined`. */
+export function configApplyKeys(operation: string): OperationalKey[] | undefined {
+  if (!operation.startsWith(configApplyPrefix)) return undefined;
+  const keys = operation.slice(configApplyPrefix.length).split(':')[0].split(',');
+  return keys.every((k): k is OperationalKey => (operationalKeys as readonly string[]).includes(k))
+    ? keys
+    : undefined;
+}
+
+/** Ключи `--keys`: подмножество `budgets,prices`; без флага — оба. */
+export function parseOperationalKeys(value?: string): OperationalKey[] {
+  if (value === undefined) return [...operationalKeys];
+  const keys = [...new Set(value.split(',').map((k) => k.trim()))].filter(Boolean);
+  const unknown = keys.filter((k) => !(operationalKeys as readonly string[]).includes(k));
+  if (!keys.length || unknown.length)
+    throw new Error(
+      `config-apply применяет без перезапуска только ${operationalKeys.join(', ')}` +
+        (unknown.length ? `; не поддерживается: ${unknown.join(', ')}` : '') +
+        '. Прочие ключи применяет перезапуск serve',
+    );
+  return operationalKeys.filter((k) => keys.includes(k));
+}
+
+const operationalValues = (config: Config, keys: readonly OperationalKey[]) =>
+  Object.fromEntries(keys.map((k) => [k, config[k] ?? null])) as Record<OperationalKey, unknown>;
+
+const failure = (error: unknown) =>
+  error instanceof ZodError
+    ? error.issues.map((i) => `${i.path.join('.') || 'config'}: ${i.message}`).join('; ')
+    : error instanceof Error
+      ? error.message
+      : String(error);
+
+export type ConfigApplyResult =
+  | { status: 'unchanged' | 'deferred'; keys: OperationalKey[]; digest: string; detail: string }
+  | {
+      status: 'applied';
+      keys: OperationalKey[];
+      digest: string;
+      operation: string;
+      changed: OperationalKey[];
+      after: Record<string, unknown>;
+    }
+  | { status: 'refused'; keys: OperationalKey[]; digest: string; operation: string; error: string }
+  | {
+      status: 'pending';
+      keys: OperationalKey[];
+      digest: string;
+      operation: string;
+      waitingFor: string[];
+      detail: string;
+    };
+
+/**
+ * `devcontour config-apply`: запросить у работающего сервера применение
+ * `budgets`/`prices` из `config.json`. Файл проверяется до запроса тем же
+ * загрузчиком, что и сервер: невалидный — отказ, применённые значения не
+ * меняются. Сервер применяет на своём такте, когда нет работ под прежней
+ * конфигурацией, и только если файл отличается от действующей конфигурации
+ * лишь названными ключами; до применения новые попытки не выдаются (правило
+ * запроса). Без живого сервера запрос не пишется: `serve` прочитает файл при
+ * запуске.
+ */
+export async function requestConfigApply(
+  root: string,
+  keys: OperationalKey[],
+  options: { waitMs?: number; workspaceRoot?: string } = {},
+): Promise<ConfigApplyResult> {
+  const waitMs = options.waitMs ?? 30000;
+  if (!Number.isFinite(waitMs) || waitMs < 0)
+    throw new Error('--wait-ms — неотрицательное число миллисекунд');
+  const path = join(root, 'config.json');
+  let next: Config;
+  try {
+    next = loadConfig(path);
+  } catch (error) {
+    throw new Error(
+      `config.json не прошёл проверку, применённые значения не изменились: ${failure(error)}`,
+    );
+  }
+  if (options.workspaceRoot !== undefined && next.workspaceRoot !== options.workspaceRoot)
+    throw new Error(
+      'Конфигурация не принадлежит выбранному workspace; для прежней конфигурации используйте --data',
+    );
+  const digest = loadedDigest(next);
+  const store = new Store(
+    join(root, 'state.sqlite'),
+    next.storage === 'component' ? repositories(next) : undefined,
+  );
+  try {
+    const h = new DevContour(store, next);
+    const { engine } = executionOf(h);
+    if (engine.policyState().applied?.digest === digest)
+      return {
+        status: 'unchanged',
+        keys,
+        digest,
+        detail: 'Работающий контур уже применил эту конфигурацию',
+      };
+    const leader = store.read().leader;
+    if (!leader || leader.leaseUntil <= Date.now())
+      return {
+        status: 'deferred',
+        keys,
+        digest,
+        detail: 'Работающего сервера нет: serve применит config.json целиком при следующем запуске',
+      };
+    const operation = `${configApplyPrefix}${keys.join(',')}:${randomUUID().slice(0, 8)}`;
+    let seen = store.lastEventId();
+    h.requestReconfigure(operation, digest);
+    const deadline = Date.now() + waitMs;
+    for (;;) {
+      for (const event of store.eventsAfter(seen, 100)) {
+        seen = event.id;
+        const data = event.data as {
+          operation?: string;
+          changed?: OperationalKey[];
+          after?: Record<string, unknown>;
+          error?: string;
+        } | null;
+        if (data?.operation !== operation) continue;
+        if (event.type === 'config.applied')
+          return {
+            status: 'applied',
+            keys,
+            digest,
+            operation,
+            changed: data.changed ?? [],
+            after: data.after ?? {},
+          };
+        if (event.type === 'config.apply-refused')
+          return { status: 'refused', keys, digest, operation, error: data.error ?? '' };
+      }
+      if (Date.now() > deadline) break;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    return {
+      status: 'pending',
+      keys,
+      digest,
+      operation,
+      waitingFor: busyWork(h),
+      detail:
+        'Сервер применит запрос, когда закончатся работы под прежней конфигурацией; до применения новые попытки не выдаются. Итог — событие config.applied или config.apply-refused в журнале',
+    };
+  } finally {
+    store.close();
+  }
 }

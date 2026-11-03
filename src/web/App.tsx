@@ -93,6 +93,7 @@ const waitingReasons: Record<string, string> = {
     'Задачу удерживает операция изменения контракта: выдача возобновится, когда операция снимет удержание.',
   approval_stale:
     'План утверждён при другой политике исполнения: задача не выдаётся до повторного утверждения.',
+  budget_blocked: 'Бюджет расходов не пускает задачу к выдаче.',
   failure_requires_diagnosis: 'Разберите причину сбоя перед повторной попыткой.',
   attempts_exhausted: 'Лимит попыток исчерпан. Нужна диагностика и пересмотр решения.',
 };
@@ -2111,6 +2112,9 @@ export function App() {
                               {reason === 'approval_stale' &&
                                 task.progress?.approvalStale &&
                                 ` ${task.progress.approvalStale.hint}.`}
+                              {reason === 'budget_blocked' &&
+                                task.progress?.budgetBlock &&
+                                ` ${task.progress.budgetBlock.reason} ${task.progress.budgetBlock.hint}.`}
                             </li>
                           ))}
                           {task.progress.workflowStale && (

@@ -955,6 +955,16 @@ export const budgetsSchema = z
     onUnknown: z.enum(['stop', 'continue']).default('stop'),
   })
   .strict();
+/** Тарифы: одна запись на runtime/model/effectiveAt. */
+export const pricesSchema = z
+  .array(priceSchema)
+  .max(100)
+  .refine(
+    (prices) =>
+      new Set(prices.map((p) => JSON.stringify([p.runtime, p.model, Date.parse(p.effectiveAt)])))
+        .size === prices.length,
+    'Duplicate tariff effectiveAt',
+  );
 const reviewRuleConfig = z
   .object({
     /** Reviewer этого вида ревью; нет — общий `reviewer` (у плана и контракта — прежний выбор). */
@@ -976,16 +986,7 @@ export const configSchema = z.object({
     .strict()
     .optional(),
   budgets: budgetsSchema.optional(),
-  prices: z
-    .array(priceSchema)
-    .max(100)
-    .refine(
-      (prices) =>
-        new Set(prices.map((p) => JSON.stringify([p.runtime, p.model, Date.parse(p.effectiveAt)])))
-          .size === prices.length,
-      'Duplicate tariff effectiveAt',
-    )
-    .default([]),
+  prices: pricesSchema.default([]),
   memoryPolicy: z
     .object({ maxBytes: z.number().int().min(0).max(24000).default(8000) })
     .default({ maxBytes: 8000 }),

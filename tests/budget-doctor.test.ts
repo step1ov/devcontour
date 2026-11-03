@@ -1,0 +1,196 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { config } from './helpers.ts';
+import {
+  budgetChecks,
+  workspaceDeclaration,
+  type DoctorCall,
+} from '../src/runner/budget-doctor.ts';
+import { doctorState } from '../src/runner/doctor.ts';
+import { Store } from '../src/core/store.ts';
+import type { Config } from '../src/core/model.ts';
+
+const now = Date.parse('2026-11-01T00:00:00Z');
+const price = (model: string, effectiveAt = '2026-10-01T00:00:00Z') => ({
+  runtime: 'codex' as const,
+  model,
+  effectiveAt,
+  input: 2,
+  output: 10,
+  cacheRead: 0.1,
+  cacheWrite: 2.5,
+});
+/** Исполнители — codex с закреплённой моделью, ревьюеры — claude (стоимость сообщает провайдер). */
+const codex = (overrides: Partial<Config> = {}) =>
+  config({
+    mode: 'local',
+    roles: Object.fromEntries(
+      ['architect', 'backend', 'frontend', 'qa'].map((r) => [
+        r,
+        { runtime: 'codex', model: 'gpt-x', reviewer: { runtime: 'claude' } },
+      ]),
+    ),
+    reviewer: { runtime: 'claude' },
+    ...overrides,
+  });
+const call = (over: Partial<DoctorCall> = {}): DoctorCall => ({
+  runtime: 'codex',
+  model: 'gpt-x',
+  startedAt: '2026-10-30T00:00:00Z',
+  costSource: 'unknown',
+  outcome: 'returned',
+  ...over,
+});
+const byId = (checks: { id: string; status: string; detail: string }[]) =>
+  Object.fromEntries(checks.map((c) => [c.id, c]));
+
+test('doctor lists prices with effectiveAt and budget limits; a priced setup has no warnings', () => {
+  const checks = byId(
+    budgetChecks(
+      codex({
+        prices: [price('gpt-x'), price('gpt-x', '2026-11-05T00:00:00Z')],
+        budgets: { task: { usd: 25 }, workspace: { timeMs: 3600000 }, onUnknown: 'stop' },
+      }),
+      [
+        call({ costSource: 'tariff-estimate' }),
+        call({ runtime: 'claude', costSource: 'provider-reported' }),
+      ],
+      undefined,
+      now,
+    ),
+  );
+  assert.match(checks.prices.detail, /codex\/gpt-x с 2026-10-01T00:00:00Z: input 2, output 10/);
+  assert.match(checks.prices.detail, /с 2026-11-05T00:00:00Z/);
+  assert.equal(
+    checks.budgets.detail,
+    'задача: 25 USD; доска: нет; workspace: 3600000 мс; onUnknown: stop',
+  );
+  assert.deepEqual(Object.keys(checks).sort(), ['budgets', 'prices']);
+});
+
+test('doctor warns about roles and recent calls without a price and about onUnknown stop', () => {
+  // Тариф ещё не вступил в силу — модели роли он не покрывает.
+  const stop = byId(
+    budgetChecks(
+      codex({
+        prices: [price('gpt-x', '2026-12-01T00:00:00Z')],
+        budgets: { task: { usd: 25 }, onUnknown: 'stop' },
+      }),
+      [
+        call({ model: 'gpt-old' }),
+        call({ model: null }),
+        call({ model: null }),
+        // Старые, идущие и оценённые вызовы не в счёт.
+        call({ model: 'gpt-ancient', startedAt: '2026-08-01T00:00:00Z' }),
+        call({ model: 'gpt-running', outcome: 'active' }),
+        call({ model: 'gpt-priced', costSource: 'provider-reported' }),
+      ],
+      undefined,
+      now,
+    ),
+  );
+  assert.equal(stop['prices:roles'].status, 'degraded');
+  assert.match(stop['prices:roles'].detail, /codex\/gpt-x — main:architect, main:backend/);
+  assert.doesNotMatch(stop['prices:roles'].detail, /ревьюер/);
+  assert.match(stop['prices:calls'].detail, /codex\/gpt-old — 1; codex \(модель не сообщена\) — 2/);
+  assert.doesNotMatch(stop['prices:calls'].detail, /ancient|running|priced/);
+  assert.match(stop['budgets:on-unknown'].detail, /выдача в его области остановится/);
+  assert.equal(stop['budgets:prices'], undefined);
+
+  // continue: не остановка, а нижняя граница — пока у runtime нет ни одного тарифа.
+  const lower = byId(
+    budgetChecks(
+      codex({ budgets: { board: { usd: 40 }, onUnknown: 'continue' } }),
+      [],
+      undefined,
+      now,
+    ),
+  );
+  assert.equal(lower['budgets:on-unknown'], undefined);
+  assert.match(lower['budgets:prices'].detail, /тарифов для codex нет/);
+
+  // Только бюджет времени: тарифы ему не нужны.
+  const time = byId(
+    budgetChecks(
+      codex({ budgets: { task: { timeMs: 1000 }, onUnknown: 'stop' } }),
+      [],
+      undefined,
+      now,
+    ),
+  );
+  assert.equal(time['budgets:on-unknown'], undefined);
+  assert.equal(time['budgets:prices'], undefined);
+});
+
+test('doctor names a divergence of config.json from the workspace.json declaration', () => {
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-budget-doctor-'));
+  try {
+    const budgets = { task: { usd: 25 }, onUnknown: 'continue' as const };
+    writeFileSync(
+      join(root, 'workspace.json'),
+      JSON.stringify({ budgets: { task: { usd: 25 }, onUnknown: 'continue' } }),
+    );
+    const declared = workspaceDeclaration(codex({ workspaceRoot: root }));
+    assert.deepEqual(declared, { budgets });
+    const same = byId(budgetChecks(codex({ budgets }), [], declared, now));
+    assert.equal(same['budgets:declaration'], undefined);
+    const local = byId(
+      budgetChecks(
+        codex({ budgets: { task: { usd: 100 }, onUnknown: 'continue' } }),
+        [],
+        declared,
+        now,
+      ),
+    );
+    assert.match(
+      local['budgets:declaration'].detail,
+      /расходится с объявлением workspace\.json: budgets/,
+    );
+    // Необъявленные prices — только локальные: расхождения нет.
+    assert.doesNotMatch(local['budgets:declaration'].detail, /prices/);
+    // Нечитаемый реестр расхождение не проверяет и doctor не роняет.
+    writeFileSync(join(root, 'workspace.json'), '{');
+    assert.equal(workspaceDeclaration(codex({ workspaceRoot: root })), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('doctorState reads call records for the price check without a writer', () => {
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-budget-doctor-'));
+  try {
+    const store = new Store(join(root, 'state.sqlite'));
+    store.atomic(() =>
+      store.saveLocal('usage', undefined, 'U1', {
+        id: 'U1',
+        stage: 'implementation',
+        runtime: 'codex',
+        model: 'gpt-old',
+        runtimeVersion: null,
+        startedAt: '2026-10-30T00:00:00Z',
+        outcome: 'returned',
+        promptBytes: 1,
+        promptDigest: 'd',
+        usage: {},
+        costUsd: null,
+        costSource: 'unknown',
+      }),
+    );
+    store.close();
+    const { calls } = doctorState(codex(), root);
+    assert.deepEqual(calls, [
+      {
+        runtime: 'codex',
+        model: 'gpt-old',
+        startedAt: '2026-10-30T00:00:00Z',
+        costSource: 'unknown',
+        outcome: 'returned',
+      },
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

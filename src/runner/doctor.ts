@@ -25,6 +25,8 @@ import { executionEnvironment, runSteps, withEnvironment } from './environment.t
 import { withResources } from './resources.ts';
 import { agentEnvironment, reviewerRunsChecks, toolProfileFor, writerRunsChecks } from './tools.ts';
 import { taskContext } from './context.ts';
+import { budgetChecks, workspaceDeclaration, type DoctorCall } from './budget-doctor.ts';
+import type { UsageRecord } from '../core/usage.ts';
 import { forgeAdapter } from './forge.ts';
 import { DevContour, supersededBy } from '../core/service.ts';
 import { repository } from '../core/repositories.ts';
@@ -233,6 +235,8 @@ export function doctorState(
   state?: DevContourState;
   engine?: Pick<DevContourState, 'leader' | 'runs' | 'contracts'>;
   check?: Check;
+  /** Записи вызовов моделей всех владельцев — для проверки тарифов. */
+  calls?: DoctorCall[];
 } {
   const file = join(root, 'state.sqlite');
   if (!existsSync(file)) return { state: emptyState() };
@@ -321,12 +325,23 @@ export function doctorState(
   } = settledRead(() => {
     const store = new Store(file, components, false, undefined, true);
     try {
-      return store.read();
+      return {
+        state: store.read(),
+        calls: store
+          .localEntries<UsageRecord>('usage')
+          .map(({ value: { runtime, model, startedAt, costSource, outcome } }) => ({
+            runtime,
+            model,
+            startedAt,
+            costSource,
+            outcome,
+          })),
+      };
     } finally {
       store.close();
     }
   });
-  if (state && settled) return { state };
+  if (state && settled) return state;
   return {
     check: {
       id: 'state',
@@ -342,6 +357,7 @@ export async function doctor(
   probe = false,
   state?: Pick<DevContourState, 'leader' | 'runs'> & Partial<Pick<DevContourState, 'contracts'>>,
   stateCheck?: Check,
+  calls?: DoctorCall[],
 ) {
   const checks: Check[] = [];
   if (stateCheck) checks.push(stateCheck);
@@ -398,6 +414,8 @@ export async function doctor(
           (same ? ' (ревью тем же вендором)' : ''),
       });
     }
+  // Тарифы и бюджеты: что действует и где стоимость останется неизвестной.
+  checks.push(...budgetChecks(config, calls, workspaceDeclaration(config)));
   for (const kind of ['plan', 'contract'] as const)
     checks.push({
       id: `review:${kind}`,
