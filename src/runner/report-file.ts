@@ -31,10 +31,19 @@ const lstatOf = (path: string) => {
  * Временный файл (имя с UUID) удаляется при неполной записи или отказе rename.
  *
  * Отказ: цель — symlink, не обычный файл, файл с несколькими жёсткими
- * ссылками или путь внутри каталога данных контура; каталог цели должен
- * существовать.
+ * ссылками или путь внутри каталога данных контура (`dataDir`) или каталога
+ * данных компонента (`componentDirs`, `.devcontour-local` его репозитория);
+ * каталог цели и каталог данных должны существовать.
+ *
+ * Правила — те же, что у `harness report --out`; общая функция записи в
+ * harness не экспортирована (её экспорт — задача пакета), поэтому здесь копия.
  */
-export function writeReportFile(out: string, dataDir: string, text: string) {
+export function writeReportFile(
+  out: string,
+  dataDir: string,
+  text: string,
+  componentDirs: readonly string[] = [],
+) {
   const target = resolve(out);
   let dir: string;
   try {
@@ -42,13 +51,27 @@ export function writeReportFile(out: string, dataDir: string, text: string) {
   } catch (error) {
     throw new Error(`--out: каталог недоступен: ${(error as Error).message}`, { cause: error });
   }
-  let data: string | undefined;
+  let data: string;
   try {
     data = realpathSync(resolve(dataDir));
-  } catch {
-    data = undefined;
+  } catch (error) {
+    throw new Error(`--out: каталог данных контура недоступен: ${(error as Error).message}`, {
+      cause: error,
+    });
   }
-  if (data && (dir === data || dir.startsWith(data + sep)))
+  // Каталог данных компонента может ещё не существовать: тогда в нём нет и
+  // каталога цели (он обязан существовать), сравнивать не с чем.
+  const protectedDirs = [
+    data,
+    ...componentDirs.flatMap((d) => {
+      try {
+        return [realpathSync(resolve(d))];
+      } catch {
+        return [];
+      }
+    }),
+  ];
+  if (protectedDirs.some((p) => dir === p || dir.startsWith(p + sep)))
     throw new Error(`--out: внутри каталога данных контура: ${out}`);
   const existing = lstatOf(target);
   if (existing) {
@@ -72,6 +95,8 @@ export function writeReportFile(out: string, dataDir: string, text: string) {
     chmodSync(temp, mode);
     renameSync(temp, join(dir, basename(target)));
     created = false;
+  } catch (error) {
+    throw new Error(`--out: не записан: ${(error as Error).message}`, { cause: error });
   } finally {
     // Только созданный здесь временный файл: имя с UUID, путь собран выше.
     if (created) rmSync(temp, { force: true });

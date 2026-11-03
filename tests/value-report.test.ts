@@ -23,8 +23,12 @@ import { valueReportSchema, type ValueReport } from 'devcontour-harness/contract
 import { complete, config, input } from './helpers.ts';
 import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
-import { configSchema } from '../src/core/model.ts';
-import type { DevContourValueReport } from '../src/application/value-report.ts';
+import { configSchema, repositorySchema } from '../src/core/model.ts';
+import {
+  devcontourValueReport,
+  type DevContourValueReport,
+} from '../src/application/value-report.ts';
+import { readOnlyValueReport } from '../src/runner/value-report.ts';
 import { command, git } from '../src/runner/process.ts';
 import { parseUsage } from '../src/runner/usage.ts';
 import { measuredAgentCall } from '../src/harness/measured.ts';
@@ -38,7 +42,7 @@ const RESET_REASON = 'Okapi reset reason after diagnosis';
 const SHA = (c: string) => c.repeat(40);
 
 /** Вызов с известной ценой (`usd`) или без неё (`null`): тот же путь учёта, что у runtime. */
-async function call(h: DevContour, runId: string, usd: number | null) {
+async function call(h: DevContour, runId: string, usd: number | null, repositoryId = 'main') {
   const usage = parseUsage(
     'claude',
     JSON.stringify({
@@ -68,7 +72,7 @@ async function call(h: DevContour, runId: string, usd: number | null) {
       model: 'fixture',
       signal: new AbortController().signal,
     } as AgentRequest,
-    { repositoryId: 'main', runId, stage: 'implementation' },
+    { repositoryId, runId, stage: 'implementation' },
   );
 }
 
@@ -230,6 +234,10 @@ test('CLI report: ключевые числа, приложение журнал
     assert.deepEqual(host.acceptedWithoutResetOrDecision, { value: 4, n: 5 });
     assert.equal(host.baseUpdates, 1);
     assert.equal(host.operatorPauses, 2);
+    assert.equal(host.automaticBaseUpdates, 0);
+    assert.equal(host.cancellations, 0);
+    assert.equal(host.reopened, 0);
+    assert.equal(host.corrections, 0);
     // Заголовок задачи — по умолчанию, причина сброса — никогда.
     assert.ok(json.stdout.includes(TITLE));
     assert.ok(!json.stdout.includes(RESET_REASON));
@@ -240,7 +248,10 @@ test('CLI report: ключевые числа, приложение журнал
     assert.match(md.stdout, /^# Harness report: data\n/);
     assert.match(md.stdout, /\*\*2 of 5\*\*/);
     assert.match(md.stdout, /## Приложение DevContour: вмешательства по журналу контура/);
-    assert.match(md.stdout, /Явные повторы задач: 4, из них со сбросом бюджета попыток: 1/);
+    assert.match(
+      md.stdout,
+      /Явные повторы задач \(оператор, ведущий агент или восстановление цикла ведущего\): 4, из них со сбросом бюджета попыток: 1/,
+    );
     assert.match(md.stdout, /Принято без явного повтора: 2 из 5\n/);
     const again = await cli('--data', data, '--format', 'md');
     assert.equal(again.stdout, md.stdout, 'те же данные — те же байты');
@@ -306,6 +317,16 @@ test('CLI report --out: временный файл и rename, права 0600 �
     const inside = await cli('--data', data, '--out', join(data, 'report.json'));
     assert.notEqual(inside.code, 0);
     assert.match(inside.stderr, /внутри каталога данных/);
+    // Каталог данных компонента (.devcontour-local его репозитория) — тоже отказ.
+    await mkdir(join(root, 'repo', '.devcontour-local'));
+    const component = await cli(
+      '--data',
+      data,
+      '--out',
+      join(root, 'repo', '.devcontour-local', 'r.md'),
+    );
+    assert.notEqual(component.code, 0);
+    assert.match(component.stderr, /внутри каталога данных/);
     const noDir = await cli('--data', data, '--out', join(root, 'absent', 'r.md'));
     assert.notEqual(noDir.code, 0);
     assert.deepEqual(
@@ -349,7 +370,10 @@ test('value_report: в каталоге только чтения со схем�
     assert.deepEqual(summary.report.defects.items, []);
     assert.equal(summary.report.defects.itemsTruncated, true);
     assert.equal(summary.host.resets, 1);
-    assert.ok(Buffer.byteLength(JSON.stringify(summary)) < 65536);
+    const limits = summary.report.limitations.map((l) => l.id);
+    assert.ok(limits.includes('summary-omitted'));
+    assert.ok(!limits.includes('works-truncated') && !limits.includes('items-truncated'));
+    assert.ok(Buffer.byteLength(JSON.stringify(summary)) <= 65536);
     const full = agent.execute({
       operation: 'value_report',
       input: { detail: 'full' },
@@ -385,14 +409,34 @@ test('value_report: в каталоге только чтения со схем�
   }
 });
 
-test('HTTP /api/report: HTML для ссылки панели, JSON и Markdown; неизвестный формат — 400', async () => {
+test('HTTP /api/report: только из панели или локального клиента, память по ревизии данных, HTML/JSON/Markdown', async () => {
   const { root, data } = await workspaceFixture();
   const c = await configOf(data);
   const store = new Store(join(data, 'state.sqlite'));
   const h = new DevContour(store, c);
   const app = await serve(h, new Scheduler(h, data), { port: 0 });
+  const panel = { 'sec-fetch-site': 'same-origin' };
+  const get = (query: string, headers: Record<string, string> = panel) =>
+    fetch(app.url + '/api/report' + query, { headers });
   try {
-    const html = await fetch(app.url + '/api/report?format=html');
+    // Память: тот же запрос при тех же данных журнал заново не читает.
+    let reads = 0;
+    const eventsAfter = store.eventsAfter.bind(store);
+    store.eventsAfter = (after, limit) => {
+      reads++;
+      return eventsAfter(after, limit);
+    };
+    // Чужой сайт (и клиент без признаков) отчёт не получает.
+    assert.equal((await get('?format=html', { 'sec-fetch-site': 'cross-site' })).status, 403);
+    assert.equal((await get('?format=html', { 'sec-fetch-site': 'same-site' })).status, 403);
+    assert.equal((await get('?format=html', {})).status, 403);
+    assert.equal(reads, 0, 'отказ — до расчёта');
+    assert.equal((await get('?format=json', { 'sec-fetch-site': 'none' })).status, 200);
+    assert.equal((await get('?format=json', { 'x-devcontour-request': '1' })).status, 200);
+
+    const first = reads;
+    assert.ok(first > 0, 'первый запрос читает журнал');
+    const html = await get('?format=html');
     assert.equal(html.status, 200);
     assert.match(html.headers.get('content-type')!, /^text\/html/);
     assert.match(html.headers.get('content-security-policy')!, /default-src 'none'/);
@@ -400,18 +444,177 @@ test('HTTP /api/report: HTML для ссылки панели, JSON и Markdown;
     assert.ok(page.includes('Приложение DevContour'));
     assert.ok(page.includes(TITLE));
     assert.ok(!/<script/.test(page));
-    const hidden = await (await fetch(app.url + '/api/report?format=md&noTitles=1')).text();
+    assert.equal(await (await get('?format=html')).text(), page);
+    assert.equal((await get('?format=md')).status, 200);
+    assert.equal(reads, first, 'та же ревизия и те же параметры — без нового чтения журнала');
+    h.pause(false);
+    h.pause(true);
+    const after = parsed(await (await get('?format=json')).text());
+    assert.ok(reads > first, 'новые данные — новый расчёт');
+    assert.equal(after.host.operatorPauses, 3);
+
+    const hidden = await (await get('?format=md&noTitles=1')).text();
     assert.ok(hidden.startsWith('# Harness report'));
     assert.ok(!hidden.includes(TITLE));
-    const json = await fetch(app.url + '/api/report?format=json');
-    assert.equal(json.status, 200);
-    const body = parsed(await json.text());
-    assert.equal(body.host.resets, 1);
-    assert.equal((await fetch(app.url + '/api/report?format=pdf')).status, 400);
-    assert.equal((await fetch(app.url + '/api/report?since=yesterday')).status, 400);
+    assert.equal((await get('?format=md&noTitles=true')).status, 400);
+    assert.equal((await get('?format=md&noTitles=0')).status, 400);
+    assert.equal((await get('?format=pdf')).status, 400);
+    assert.equal((await get('?since=yesterday')).status, 400);
   } finally {
     await app.close();
     store.close();
+    await removeFixture(root);
+  }
+});
+
+/**
+ * Два компонента: поручения, вызовы, ревью плана, доски, перенос и перемотка
+ * базы, отмена и возврат относятся каждый к своему; workspace — всё вместе.
+ */
+test('Отчёт компонента: поручения, вызовы, ревью, доски и перенос базы — только свои', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dc-report-')));
+  const data = join(root, 'data');
+  await mkdir(data);
+  const repos = [];
+  for (const id of ['product', 'library']) {
+    const path = join(root, id);
+    await mkdir(path);
+    await git(path, 'init', '-b', 'main');
+    await writeFile(join(path, 'README.md'), id);
+    await git(path, 'add', '.');
+    await git(path, 'commit', '-m', 'fixture');
+    repos.push(repositorySchema.parse({ id, name: id, kind: id, path, gates: config().gates }));
+  }
+  const c = config({ repository: repos[0].path, repositories: repos });
+  const store = new Store(join(data, 'state.sqlite'));
+  const h = new DevContour(store, c);
+  try {
+    const board = (repositoryId: string, titles: string[]) => {
+      const b = h.createBoard('Board ' + repositoryId, '', repositoryId);
+      const ids: string[] = [];
+      for (const title of titles)
+        ids.push(h.addTask(b.id, { ...input(title, ids.slice(-1)), repositoryId }).id);
+      h.approve(b.id);
+      return { boardId: b.id, ids };
+    };
+    const product = board('product', ['Task P1', 'Task P2', 'Task P3']);
+    const library = board('library', ['Task L1', 'Task L2', 'Task L3']);
+    // Продукт: две приёмки (вторая — после возврата проверкой), третья задача отменена.
+    await call(h, complete(h, product.ids[0]).id, 1, 'product');
+    h.pause(false);
+    const gate = h.claim(h.store.read().leader?.owner ?? 'test')!;
+    assert.equal(gate.taskId, product.ids[1]);
+    h.fail(gate.id, gate.token, 'gate failed', false, 'gate');
+    h.retry(product.ids[1]);
+    complete(h, product.ids[1]);
+    h.cancel(product.ids[2], 'not needed any more');
+    // Библиотека: две приёмки с первой попытки, третья возвращена в черновик.
+    await call(h, complete(h, library.ids[0]).id, 3, 'library');
+    complete(h, library.ids[1]);
+    h.reopen(library.ids[2], 'requirements changed for this task');
+    // Ревью плана — запись ревью о доске библиотеки.
+    store.atomic(() =>
+      store.saveLocal('reviews', undefined, 'R-plan-library', {
+        id: 'R-plan-library',
+        kind: 'plan',
+        subject: library.boardId,
+        digest: 'd'.repeat(64),
+        round: 1,
+        at: new Date().toISOString(),
+        approved: false,
+        summary: 'Fixture round',
+        authorRuntime: 'claude',
+        reviewerRuntime: 'codex',
+        sameVendor: false,
+        findings: [],
+        artifact: '',
+      }),
+    );
+    h.pause(true);
+    h.baseUpdated([{ repositoryId: 'library', from: SHA('1'), to: SHA('2') }]);
+    // Как у диспетчера: перемотка меняет документ (время паузы), иначе
+    // событие журнала не пишется.
+    store.change('base.fast-forwarded', (st) => {
+      st.pausedAt = new Date(Date.now() + 1000).toISOString();
+      return {
+        updated: [{ repositoryId: 'product', branch: 'main', from: SHA('3'), to: SHA('4') }],
+      };
+    });
+
+    const of = (repositoryId?: string) => {
+      const value = devcontourValueReport(h, { repositoryId });
+      return { report: valueReportSchema.parse(value.report), host: value.host };
+    };
+    const whole = of();
+    const p = of('product');
+    const l = of('library');
+    // coverage.works — поручения с попытками: отменённая без попытки и
+    // возвращённая в черновик не входят.
+    assert.equal(whole.report.coverage.works, 4);
+    assert.equal(p.report.coverage.works, 2);
+    assert.equal(l.report.coverage.works, 2);
+    assert.equal(p.report.coverage.attempts, 3);
+    assert.equal(l.report.coverage.attempts, 2);
+    assert.equal(p.report.defects.byKind.gate, 1);
+    assert.equal(l.report.defects.byKind.gate, 0);
+    assert.equal(whole.report.cost.knownUsd, 4);
+    assert.equal(p.report.cost.knownUsd, 1);
+    assert.equal(l.report.cost.knownUsd, 3);
+    assert.equal(whole.report.coverage.reviews, 1);
+    assert.equal(p.report.coverage.reviews, 0);
+    assert.equal(l.report.coverage.reviews, 1);
+    assert.deepEqual([p.host.retries, l.host.retries, whole.host.retries], [1, 0, 1]);
+    assert.deepEqual([p.host.cancellations, l.host.cancellations], [1, 0]);
+    assert.deepEqual([p.host.reopened, l.host.reopened], [0, 1]);
+    assert.deepEqual([p.host.baseUpdates, l.host.baseUpdates, whole.host.baseUpdates], [0, 1, 1]);
+    assert.deepEqual(
+      [p.host.automaticBaseUpdates, l.host.automaticBaseUpdates, whole.host.automaticBaseUpdates],
+      [1, 0, 1],
+    );
+    assert.deepEqual([p.host.corrections, l.host.corrections], [0, 0]);
+    // Пауза очереди общая: она в отчёте каждого компонента.
+    assert.equal(p.host.operatorPauses, l.host.operatorPauses);
+    assert.deepEqual(p.host.acceptedWithoutRetry, { value: 1, n: 2 });
+    assert.deepEqual(l.host.acceptedWithoutRetry, { value: 2, n: 2 });
+    assert.throws(() => devcontourValueReport(h, { repositoryId: 'nope' }));
+  } finally {
+    store.close();
+    await removeFixture(root);
+  }
+});
+
+test('CLI-чтение повторяется, если во время чтения начал работу writer; непрерывная запись — отказ', async () => {
+  const { root, data } = await workspaceFixture();
+  const c = await configOf(data);
+  try {
+    // Writer открыл базу во время первого чтения: появились файлы журнала —
+    // чтение повторяется уже обычным соединением с журналом.
+    const attempts: number[] = [];
+    let writer: Store | undefined;
+    const value = readOnlyValueReport(c, data, {}, 'data', (attempt) => {
+      attempts.push(attempt);
+      writer ??= new Store(join(data, 'state.sqlite'));
+    });
+    writer?.close();
+    assert.deepEqual(attempts, [1, 2]);
+    assert.equal(headline(valueReportSchema.parse(value.report), 'accepted').value, '5');
+    // Writer пишет и закрывается после каждого чтения: файл базы меняется,
+    // согласованного чтения нет — отказ после трёх попыток.
+    let writes = 0;
+    assert.throws(
+      () =>
+        readOnlyValueReport(c, data, {}, 'data', () => {
+          const s = new Store(join(data, 'state.sqlite'));
+          try {
+            new DevContour(s, c).pause(writes++ % 2 === 0);
+          } finally {
+            s.close();
+          }
+        }),
+      /непрерывно меняет другой процесс/,
+    );
+    assert.equal(writes, 3);
+  } finally {
     await removeFixture(root);
   }
 });

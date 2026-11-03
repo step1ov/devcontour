@@ -52,7 +52,11 @@ export interface HostAppendix {
   source: 'devcontour-journal';
   /** Первая запись журнала: раньше вмешательства не наблюдаются. */
   journalFrom: string | null;
-  /** Явные повторы задач (`task.retry`: оператор в панели или CLI, ведущий агент). */
+  /**
+   * Явные повторы задач (`task.retry`): оператор в панели или CLI, ведущий
+   * агент и восстановление цикла ведущего (`workflow`), которое повторяет
+   * упавшую задачу само; автоматические повторы движка внутри бюджета — нет.
+   */
   retries: number;
   /** Из них со сбросом бюджета попыток (`retry --reset` с причиной). */
   resets: number;
@@ -64,7 +68,7 @@ export interface HostAppendix {
   baseUpdates: number;
   /** Перемотка базы диспетчером — не вмешательство человека. */
   automaticBaseUpdates: number;
-  /** Пауза очереди человеком. */
+  /** Пауза очереди с причиной `operator`: оператор или ведущий агент (`queue_set`). */
   operatorPauses: number;
   /** Отмены задач (с попытками и без). */
   cancellations: number;
@@ -184,11 +188,12 @@ function appendixOf(
       if (e.type === 'task.retry' && ownTask) {
         counts.retries++;
         if (data.reset) counts.resets++;
-      } else if (e.type === 'base.updated') {
+      } else if (e.type === 'base.updated' || e.type === 'base.fast-forwarded') {
+        // Перенос и перемотка называют затронутые компоненты (`updated[]`).
         if (!repositoryId || data.updated?.some((u) => u.repositoryId === repositoryId))
-          counts.baseUpdates++;
-      } else if (e.type === 'base.fast-forwarded') counts.automaticBaseUpdates++;
-      else if (e.type === 'scheduler.paused' && data.reason === 'operator') counts.operatorPauses++;
+          counts[e.type === 'base.updated' ? 'baseUpdates' : 'automaticBaseUpdates']++;
+      } else if (e.type === 'scheduler.paused' && data.reason === 'operator')
+        counts.operatorPauses++;
       else if (e.type === 'task.cancelled' && ownTask) counts.cancellations++;
       else if (e.type === 'task.reopened' && ownTask) counts.reopened++;
       else if (
@@ -266,6 +271,50 @@ export function devcontourValueReport(
   return { report, host: appendixOf(h, input, report, request.repositoryId) };
 }
 
+/** Сколько разных запросов отчёта помнит процесс (на экземпляр `DevContour`). */
+const CACHE_ENTRIES = 8;
+const caches = new WeakMap<DevContour, Map<string, DevContourValueReport>>();
+
+/**
+ * Отчёт с памятью для работающего сервера: расчёт идёт синхронно по всему
+ * журналу, поэтому повторный запрос при тех же данных (ревизия данных и
+ * последнее событие журнала, конфигурация) и тех же параметрах берёт
+ * готовый результат. Расчёт синхронный: два запроса в одном процессе его не
+ * разделяют, второй получает результат первого. `asOf` по умолчанию — из
+ * данных, поэтому ответ при тех же данных тот же.
+ */
+export function cachedValueReport(
+  h: DevContour,
+  request: ReportRequest,
+  meta: { label?: string; stateDir?: string } = {},
+): DevContourValueReport {
+  const key = JSON.stringify([
+    h.store.revision(),
+    h.store.lastEventId(),
+    h.configDigest,
+    request.repositoryId ?? null,
+    request.since ?? null,
+    request.until ?? null,
+    request.asOf ?? null,
+    !!request.noTitles,
+    meta.label ?? null,
+    meta.stateDir ?? null,
+  ]);
+  let cache = caches.get(h);
+  if (!cache) caches.set(h, (cache = new Map<string, DevContourValueReport>()));
+  const hit = cache.get(key);
+  if (hit) {
+    // Последний использованный — в конец: вытесняется самый давний.
+    cache.delete(key);
+    cache.set(key, hit);
+    return hit;
+  }
+  const value = devcontourValueReport(h, request, meta);
+  cache.set(key, value);
+  while (cache.size > CACHE_ENTRIES) cache.delete(cache.keys().next().value!);
+  return value;
+}
+
 /** «k из n»; процент — только при знаменателе от 20. */
 const ratio = (r: HostRatio) =>
   r.n >= 20
@@ -279,13 +328,13 @@ function appendixLines(host: HostAppendix) {
     note:
       'Журнал DevContour за то же окно' +
       (host.journalFrom ? ` (записи с ${host.journalFrom})` : '') +
-      '. Отчёт harness этих событий не получает: в его разделе Autonomy повторы, сбросы и перенос базы — unknown. Повтор — явная команда оператора или ведущего агента; автоматические повторы движка сюда не входят. Причины не выводятся.',
+      '. Отчёт harness этих событий не получает: в его разделе Autonomy повторы, сбросы и перенос базы — unknown. Повтор — команда повтора задачи: оператора, ведущего агента или восстановления цикла ведущего; повторы движка внутри бюджета попыток сюда не входят. Журнал не называет, кто повторил и кто поставил паузу. Причины не выводятся.',
     items: [
-      `Явные повторы задач: ${host.retries}, из них со сбросом бюджета попыток: ${host.resets}`,
+      `Явные повторы задач (оператор, ведущий агент или восстановление цикла ведущего): ${host.retries}, из них со сбросом бюджета попыток: ${host.resets}`,
       `Принято без явного повтора: ${ratio(host.acceptedWithoutRetry)}`,
       `Принято без сброса бюджета и решения оператора по разбору: ${ratio(host.acceptedWithoutResetOrDecision)}`,
       `Перенос базы вручную: ${host.baseUpdates}; перемотка диспетчером: ${host.automaticBaseUpdates}`,
-      `Паузы очереди оператором: ${host.operatorPauses}`,
+      `Паузы очереди оператором или ведущим агентом: ${host.operatorPauses}`,
       `Отмены задач: ${host.cancellations}; возвраты в черновик: ${host.reopened}; корректировки принятых досок: ${host.corrections}`,
     ],
   };
@@ -370,11 +419,21 @@ export function agentValueReport(h: DevContour, input: z.infer<typeof valueRepor
   if (detail === 'full' && size(value) <= AGENT_REPORT_BYTES)
     return { ...value, detail: 'full', omitted: [] as string[] };
   const { report } = value;
+  // Ограничения об усечении списков полного отчёта к сводке не относятся:
+  // в ней этих списков нет совсем, о чём говорит своё ограничение.
+  const omittedLists = new Set(['works-truncated', 'items-truncated']);
   return {
     report: {
       ...report,
       works: { ...report.works, rows: [], truncated: report.works.total > 0 },
       defects: { ...report.defects, items: [], itemsTruncated: report.defects.itemsTotal > 0 },
+      limitations: [
+        ...report.limitations.filter((l) => !omittedLists.has(l.id)),
+        {
+          id: 'summary-omitted',
+          text: 'Summary: per-task rows and rejection evidence are omitted; devcontour report shows them.',
+        },
+      ],
     },
     host: value.host,
     detail: 'summary',

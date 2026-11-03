@@ -46,7 +46,7 @@ import { runActivity } from '../runner/activity.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { queueStopOf } from '../application/queue-stop.ts';
 import {
-  devcontourValueReport,
+  cachedValueReport,
   parseReportFormat,
   renderValueReport,
   reportRequestInput,
@@ -316,8 +316,22 @@ export async function serve(
         // Отчёт об эффекте: документ для чтения (ссылка «Отчёт» в шапке панели),
         // не новая панель. Только чтение; HTML без скриптов и внешних ресурсов.
         if (req.method === 'GET' && path === '/api/report') {
+          // GET без заголовка локального клиента доступен любой странице
+          // браузера: отчёт читает весь журнал, поэтому чужой сайт его не
+          // вызывает. Браузер сообщает источник (`Sec-Fetch-Site`): ссылка
+          // панели — same-origin, адрес, набранный вручную, — none; прочие
+          // клиенты передают заголовок локального клиента.
+          const site = req.headers['sec-fetch-site'];
+          if (
+            req.headers['x-devcontour-request'] !== '1' &&
+            site !== 'same-origin' &&
+            site !== 'none'
+          )
+            throw new DomainError('Отчёт открывается из панели или локальным клиентом', 403);
           const params = Object.fromEntries(url.searchParams);
           const format = parseReportFormat(params.format);
+          if (params.noTitles !== undefined && params.noTitles !== '1')
+            throw new DomainError('noTitles: ожидается 1', 400);
           const request = reportRequestInput.parse({
             ...(params.repositoryId ? { repositoryId: params.repositoryId } : {}),
             ...(params.since ? { since: params.since } : {}),
@@ -326,7 +340,7 @@ export async function serve(
             ...(params.noTitles === '1' ? { noTitles: true } : {}),
           });
           const text = renderValueReport(
-            devcontourValueReport(h, request, {
+            cachedValueReport(h, request, {
               label: basename(h.config.workspaceRoot ?? scheduler.root),
               stateDir: scheduler.root,
             }),

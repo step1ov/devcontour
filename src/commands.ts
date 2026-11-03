@@ -502,7 +502,12 @@ async function main() {
       process.stdout.write(text);
       return;
     }
-    writeReportFile(out, root, text);
+    writeReportFile(
+      out,
+      root,
+      text,
+      repositories(config).map((r) => join(r.path, '.devcontour-local')),
+    );
     console.log(
       JSON.stringify({
         out: resolve(out),

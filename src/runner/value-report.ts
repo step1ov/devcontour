@@ -33,6 +33,8 @@ export function readOnlyValueReport(
   root: string,
   request: ReportRequest,
   label: string,
+  /** Наблюдение за попытками чтения (тесты: writer начинает работу во время чтения). */
+  afterRead?: (attempt: number) => void,
 ): DevContourValueReport {
   const file = join(root, 'state.sqlite');
   if (!existsSync(file)) throw new Error('База состояния не найдена: ' + file);
@@ -51,6 +53,7 @@ export function readOnlyValueReport(
     } finally {
       store.close();
     }
+    afterRead?.(attempt);
     if (!quiet || (!journal.some((f) => existsSync(f)) && fingerprint(file) === before))
       return value;
     if (attempt === 3)
