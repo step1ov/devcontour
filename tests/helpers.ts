@@ -14,8 +14,8 @@ import { Store } from '../src/core/store.ts';
  */
 const testCheckoutRoots = new Set<string>();
 let removeOnExit = false;
-export function testCheckoutRoot() {
-  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'devcontour-test-checkouts-')));
+export function testCheckoutRoot(prefix = 'devcontour-test-checkouts-') {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
   testCheckoutRoots.add(dir);
   if (!removeOnExit) {
     removeOnExit = true;
@@ -36,11 +36,21 @@ export function removeTestCheckoutRoot(dir: string) {
  */
 let shared: string | undefined;
 export const sharedCheckoutRoot = () => (shared ??= testCheckoutRoot());
+/**
+ * Репозиторий `config()` по умолчанию — пустой каталог процесса рядом с
+ * корнями рабочих деревьев, а не `/tmp`: при TMPDIR внутри `/tmp` корень
+ * рабочих деревьев оказывался внутри репозитория, и проверка checkoutRoot
+ * отказывала. Создаётся, только если тест не задал свой репозиторий;
+ * убирается при завершении процесса.
+ */
+let repository: string | undefined;
+export const defaultRepository = () =>
+  (repository ??= testCheckoutRoot('devcontour-test-repository-'));
 export const config = (overrides: Partial<Config> = {}): Config =>
   configSchema.parse({
     version: 1,
     name: 'Test',
-    repository: '/tmp',
+    repository: overrides.repository ?? defaultRepository(),
     mode: 'demo',
     concurrency: 2,
     roles: {
