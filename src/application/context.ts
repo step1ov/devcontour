@@ -91,6 +91,11 @@ export function taskProgress(h: DevContour, s: DevContourState, t: Task, now: nu
   // паузу или зависимости и не знал, что задача не выйдет и после них.
   const hold = t.hold && !['done', 'cancelled'].includes(t.status) ? t.hold : undefined;
   if (hold) before.push('held_by_operation');
+  // Бюджет не пускает задачу к выдаче: причина (какой предел, сколько
+  // израсходовано) видна на карточке задачи, а не только в цепочке ожидания.
+  const budgetBlock =
+    t.budgetBlock && !['done', 'cancelled'].includes(t.status) ? t.budgetBlock : undefined;
+  if (budgetBlock) before.push('budget_blocked');
   // План утверждён при другой политике исполнения: движок задачу не выдаёт
   // (граф проецируется с закреплённым digest), пока план не утверждён заново.
   // Причина видна и на паузе, и `eligible` с ней ложно, как и выдача.
@@ -154,6 +159,15 @@ export function taskProgress(h: DevContour, s: DevContourState, t: Task, now: nu
         }
       : {}),
     ...(approvalStale ? { approvalStale } : {}),
+    ...(budgetBlock
+      ? {
+          budgetBlock: {
+            reason: short(budgetBlock.reason),
+            at: budgetBlock.at,
+            hint: 'Поднимите предел или задайте onUnknown в budgets и примените: devcontour config-apply --keys budgets',
+          },
+        }
+      : {}),
     ...(job && board
       ? {
           workflowStale: {

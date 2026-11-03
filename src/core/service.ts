@@ -46,6 +46,13 @@ import {
   type Approval,
   type BaseMove,
 } from './model.ts';
+/**
+ * Эксплуатационные ключи, которые работающий сервер применяет по запросу
+ * `config-apply` без перезапуска: в digest утверждения плана они не входят
+ * (`approvalPolicyDigest`), и попытки по ним не устаревают.
+ */
+export const operationalKeys = ['budgets', 'prices'] as const;
+export type OperationalKey = (typeof operationalKeys)[number];
 export const digest = (value: unknown) =>
   createHash('sha256')
     .update(typeof value === 'string' ? value : JSON.stringify(value))
@@ -564,22 +571,30 @@ export class DevContour {
    * изменения контракта: она сверила digest, дождалась окончания работ и
    * держит паузу. Отличаться может только закрепление context packs — всё
    * остальное требует перезапуска процесса.
+   *
+   * `keys` — запрос `config-apply` эксплуатационных пределов: тогда
+   * отличаться могут только названные ключи (`budgets`, `prices`), а
+   * закрепление пакетов — нет.
    */
-  reconfigure(next: Config) {
+  reconfigure(next: Config, keys?: readonly OperationalKey[]) {
     // Без перезапуска меняется только закрепление пакетов — их revision и
     // digest. Состав пакетов, их роли, файлы и версии — другая конфигурация.
     const rest = (c: Config) =>
-      digest({
-        ...c,
-        contextPacks: c.contextPacks.map((pack) => ({
-          ...pack,
-          revision: undefined,
-          digest: undefined,
-        })),
-      });
+      keys
+        ? digest({ ...c, ...Object.fromEntries(keys.map((k) => [k, undefined])) })
+        : digest({
+            ...c,
+            contextPacks: c.contextPacks.map((pack) => ({
+              ...pack,
+              revision: undefined,
+              digest: undefined,
+            })),
+          });
     if (rest(next) !== rest(this.config))
       throw new DomainError(
-        'Новая конфигурация отличается не только закреплением context packs (revision и digest): примените её перезапуском сервера',
+        keys
+          ? `config.json отличается от действующей конфигурации не только ${keys.join(', ')}: примените правку перезапуском сервера или верните прочие ключи`
+          : 'Новая конфигурация отличается не только закреплением context packs (revision и digest): примените её перезапуском сервера',
         409,
       );
     validateWorkflow(next);

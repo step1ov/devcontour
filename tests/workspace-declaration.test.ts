@@ -188,3 +188,71 @@ test('Workspace declaration adds a tool profile with the component bindings that
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('Workspace declaration carries budgets and prices; the declaration wins over a local edit, an undeclared key stays local', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'devcontour-declaration-')));
+  try {
+    const repo = join(root, 'product');
+    const control = join(root, 'control');
+    await mkdir(repo);
+    await mkdir(control);
+    await git(repo, 'init', '-b', 'main');
+    const registryPath = join(control, 'workspace.json');
+    const price = {
+      runtime: 'codex',
+      model: 'EXAMPLE_MODEL',
+      effectiveAt: '2026-01-01T00:00:00Z',
+      input: 1,
+      output: 4,
+      cacheRead: 0.1,
+      cacheWrite: 1,
+    };
+    const registry = {
+      version: 1,
+      name: 'Budgets',
+      repositories: [{ id: 'product', name: 'Product', path: repo, profile: 'react-vite-admin' }],
+      budgets: { task: { usd: 25 }, onUnknown: 'continue' },
+      prices: [price],
+    };
+    // Объявление проверяется той же схемой: неверный предел — отказ до записи.
+    await json(registryPath, { ...registry, budgets: { task: {} } });
+    await assert.rejects(setupWorkspace(registryPath), /usd или timeMs/);
+    assert.deepEqual(await readdir(control), ['workspace.json']);
+
+    await json(registryPath, registry);
+    const created = await setupWorkspace(registryPath);
+    const configPath = created.config;
+    let loaded = loadConfig(configPath);
+    assert.deepEqual(loaded.budgets, { task: { usd: 25 }, onUnknown: 'continue' });
+    assert.deepEqual(loaded.prices, [price]);
+    assert.equal((await setupWorkspace(registryPath)).status, 'preserved');
+
+    // Локальная правка config.json действует до следующего workspace-init,
+    // который возвращает объявление и называет заменённое.
+    const stored = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
+    await json(configPath, { ...stored, budgets: { task: { usd: 100 }, onUnknown: 'continue' } });
+    const updated = (await setupWorkspace(registryPath)) as {
+      status: string;
+      operational?: { replaced: string[]; note: string };
+    };
+    assert.equal(updated.status, 'declaration-updated');
+    assert.deepEqual(updated.operational?.replaced, ['budgets']);
+    assert.match(updated.operational?.note ?? '', /config-apply --keys budgets/);
+    loaded = loadConfig(configPath);
+    assert.deepEqual(loaded.budgets, { task: { usd: 25 }, onUnknown: 'continue' });
+
+    // Реестр без этих ключей ими не управляет: локальные значения сохраняются.
+    const undeclared = { ...registry, budgets: undefined, prices: undefined };
+    await json(configPath, {
+      ...(JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>),
+      budgets: { workspace: { usd: 7 } },
+    });
+    await json(registryPath, undeclared);
+    assert.equal((await setupWorkspace(registryPath)).status, 'preserved');
+    loaded = loadConfig(configPath);
+    assert.deepEqual(loaded.budgets, { workspace: { usd: 7 }, onUnknown: 'stop' });
+    assert.deepEqual(loaded.prices, [price]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -68,6 +68,7 @@ import { restoreBackup } from './runner/backup.ts';
 import { contractEvals } from './runner/contract-evals.ts';
 import { contractImpact } from './runner/contract-impact.ts';
 import { ContractChanges } from './runner/contract-change.ts';
+import { parseOperationalKeys, requestConfigApply } from './runner/reconfigure.ts';
 import { writeSelfCheck } from './runner/checks.ts';
 import { CheckCorpus } from './core/check-store.ts';
 import { propertySeed } from 'devcontour-harness';
@@ -433,6 +434,21 @@ async function main() {
         ? { checkoutRoot: resolve(option('--checkout-root', '')) }
         : {},
     );
+  // Файл проверяется своим сообщением до общей загрузки: невалидный
+  // config.json — отказ применения, а не сырой разбор схемы.
+  if (operation === 'config-apply') {
+    const result = await requestConfigApply(
+      root,
+      parseOperationalKeys(args.includes('--keys') ? option('--keys', '') : undefined),
+      {
+        waitMs: Number(option('--wait-ms', '30000')),
+        ...(workspacePath ? { workspaceRoot: await realpath(workspacePath) } : {}),
+      },
+    );
+    console.log(JSON.stringify(result, null, 2));
+    if (result.status === 'refused') process.exitCode = 1;
+    return;
+  }
   const config = loadConfig(join(root, 'config.json'));
   if (workspacePath && config.workspaceRoot !== (await realpath(workspacePath)))
     throw new Error(
@@ -449,7 +465,7 @@ async function main() {
   // Полный doctor тоже только читает базу: он не writer и не создаёт таблиц
   // и строк, которых нет в базе прежней версии (их создаст первый writer).
   if (operation === 'doctor') {
-    const { state: s, engine, check } = doctorState(config, root);
+    const { state: s, engine, check, calls } = doctorState(config, root);
     if (
       args.includes('--probe') &&
       (!s ||
@@ -466,7 +482,7 @@ async function main() {
           ? 'doctor --probe требует остановленную очередь'
           : 'doctor --probe требует прочитанное состояние: ' + check?.detail,
       );
-    const result = await doctor(config, root, args.includes('--probe'), s ?? engine, check);
+    const result = await doctor(config, root, args.includes('--probe'), s ?? engine, check, calls);
     console.log(JSON.stringify(result, null, 2));
     if (!result.ready) process.exitCode = 1;
     return;

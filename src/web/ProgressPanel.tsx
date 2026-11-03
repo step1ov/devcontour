@@ -122,6 +122,8 @@ const eventNames: Record<string, string> = {
   preparation_question: 'Задан вопрос пользователю',
   preparation_progress: 'Заметка о работе агента',
   'config.saved': 'Сохранена конфигурация',
+  'config.applied': 'Сервер применил бюджеты и тарифы',
+  'config.apply-refused': 'Бюджеты и тарифы не применены',
   'context.locked': 'Закреплены context packs',
   'task.created': 'Создана задача',
   'task.status': 'Изменён статус задачи',

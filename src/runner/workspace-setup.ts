@@ -4,8 +4,11 @@ import { randomUUID } from 'node:crypto';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import {
+  budgetsSchema,
   configSchema,
+  pricesSchema,
   repositorySchema,
+  type Config,
   reviewerBindingSchema,
   type ContextPack,
 } from '../core/model.ts';
@@ -49,7 +52,40 @@ const registrySchema = z.object({
   // проверяет код, план и контракт и разрешён ли ревьюер того же вендора.
   // Нет поля — реестр ревью не управляет, и выбор в config.json сохраняется.
   review: configSchema.shape.review,
+  // Эксплуатационные пределы — та же схема, что в config.json. Объявленный
+  // ключ workspace-init переносит в config.json (объявление сильнее);
+  // необъявленный остаётся только локальным значением config.json.
+  budgets: budgetsSchema.optional(),
+  prices: pricesSchema.optional(),
 });
+
+/**
+ * Объявленные в реестре `budgets`/`prices` и ключи, где config.json с ними
+ * расходится. Порядок: объявление workspace.json → config.json при каждом
+ * workspace-init; правка config.json между запусками — локальное
+ * переопределение до следующего workspace-init (его называет doctor).
+ */
+export function operationalDeclaration(
+  declared: { budgets?: Config['budgets']; prices?: Config['prices'] },
+  current?: Pick<Config, 'budgets' | 'prices'>,
+) {
+  const values: Partial<Pick<Config, 'budgets' | 'prices'>> = {};
+  if (declared.budgets !== undefined) values.budgets = declared.budgets;
+  if (declared.prices !== undefined) values.prices = declared.prices;
+  const differs = (Object.keys(values) as ('budgets' | 'prices')[]).filter(
+    (k) => JSON.stringify(current?.[k] ?? null) !== JSON.stringify(values[k]),
+  );
+  return { values, differs };
+}
+const operationalNote = (replaced: string[]) =>
+  replaced.length
+    ? {
+        operational: {
+          replaced,
+          note: `${replaced.join(', ')} в config.json заменены объявлением workspace.json (объявление сильнее локального значения). Работающий serve применит их без перезапуска: devcontour config-apply --keys ${replaced.join(',')}`,
+        },
+      }
+    : {};
 
 // Роль, которой в конфигурации ещё нет, добавляется: именно этого не хватало,
 // когда продукт обзаводился мобильным приложением. Уже существующая роль не
@@ -415,6 +451,7 @@ export async function setupWorkspace(file: string, data?: string) {
     completionMode: input.completionMode,
     forgeConnections: input.forgeConnections,
     ...(input.review ? { review: input.review } : {}),
+    ...operationalDeclaration(input).values,
     storage: workspaceMode === 'embedded' ? 'central' : 'component',
     gates: repos[0].gates,
     packs: packs.map(profileMetadata),
@@ -493,6 +530,7 @@ export async function setupWorkspace(file: string, data?: string) {
           ),
           runTimeoutMs: config.runTimeoutMs,
           protectedPaths: repos[0].protectedPaths,
+          ...operationalDeclaration(input).values,
           ...(input.review
             ? { review: withReview((raw as { review?: Review }).review, input.review) }
             : {}),
@@ -567,6 +605,12 @@ export async function setupWorkspace(file: string, data?: string) {
         data: root,
         config: configPath,
         delivered,
+        ...operationalNote(
+          operationalDeclaration(
+            input,
+            configSchema.pick({ budgets: true, prices: true }).safeParse(raw).data,
+          ).differs,
+        ),
         ...additionsNote(publicAdditions(additions)),
         ...(shadowed.length
           ? {
@@ -602,6 +646,7 @@ export async function setupWorkspace(file: string, data?: string) {
       // его полей. Загрузка её не применяет; workspace-init убирает копию.
       ((stored.repositories ?? []) as Record<string, unknown>[]).some(hasComponentCopies);
     const known = declaredNames(existing, existing.repositories);
+    const operational = operationalDeclaration(input, existing);
     // The workspace, its repositories and the pinned profile are the same, so
     // what the registry declares about them may still change afterwards: a joint
     // release gate did not exist at setup, a component splits one suite into a
@@ -636,6 +681,7 @@ export async function setupWorkspace(file: string, data?: string) {
       JSON.stringify(existing.contextPacks.map(declaration)) !==
         JSON.stringify(config.contextPacks.map(declaration)) ||
       differs(existing.review, withReview(existing.review, input.review)) ||
+      operational.differs.length > 0 ||
       derivedStale;
     // Значение реестра, которого нет в файле компонента, без записи в файл не
     // действует: это тоже изменённое объявление.
@@ -655,6 +701,7 @@ export async function setupWorkspace(file: string, data?: string) {
           environment: config.environment,
           toolProfiles: config.toolProfiles,
           review: withReview(existing.review, input.review),
+          ...operational.values,
           roles,
           reviewer,
         },
@@ -676,6 +723,7 @@ export async function setupWorkspace(file: string, data?: string) {
         data: root,
         config: configPath,
         delivered,
+        ...operationalNote(operational.differs),
         ...additionsNote(publicAdditions(registryAdditions)),
       };
     }
