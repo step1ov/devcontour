@@ -5,7 +5,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig } from '../src/runner/config.ts';
 import { git } from '../src/runner/process.ts';
-import { setupWorkspace } from '../src/runner/workspace-setup.ts';
+import {
+  operationalCurrent,
+  operationalDeclaration,
+  setupWorkspace,
+} from '../src/runner/workspace-setup.ts';
 
 const json = (path: string, value: unknown) => writeFile(path, JSON.stringify(value) + '\n');
 
@@ -255,4 +259,12 @@ test('Workspace declaration carries budgets and prices; the declaration wins ove
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test('A local config with one invalid operational key reports only that key as replaced', () => {
+  const budgets = { task: { usd: 25 }, onUnknown: 'continue' as const };
+  const current = operationalCurrent({ budgets, prices: [{ runtime: 'codex' }] });
+  assert.deepEqual(current.budgets, budgets);
+  // Объявление тех же budgets и любых prices: заменены только невалидные prices.
+  assert.deepEqual(operationalDeclaration({ budgets, prices: [] }, current).differs, ['prices']);
 });

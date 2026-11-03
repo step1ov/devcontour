@@ -77,6 +77,21 @@ export function operationalDeclaration(
   );
   return { values, differs };
 }
+/**
+ * Прежние `budgets`/`prices` файла — по каждому ключу отдельно: невалидный
+ * один ключ не делает «заменёнными» оба. Невалидное значение сравнивается как
+ * есть — объявление его и правда заменило.
+ */
+export function operationalCurrent(raw: Record<string, unknown>) {
+  const value = <K extends 'budgets' | 'prices'>(k: K) => {
+    const parsed = configSchema.shape[k].safeParse(raw[k]);
+    return parsed.success ? parsed.data : raw[k];
+  };
+  return { budgets: value('budgets'), prices: value('prices') } as Pick<
+    Config,
+    'budgets' | 'prices'
+  >;
+}
 const operationalNote = (replaced: string[]) =>
   replaced.length
     ? {
@@ -605,12 +620,7 @@ export async function setupWorkspace(file: string, data?: string) {
         data: root,
         config: configPath,
         delivered,
-        ...operationalNote(
-          operationalDeclaration(
-            input,
-            configSchema.pick({ budgets: true, prices: true }).safeParse(raw).data,
-          ).differs,
-        ),
+        ...operationalNote(operationalDeclaration(input, operationalCurrent(raw)).differs),
         ...additionsNote(publicAdditions(additions)),
         ...(shadowed.length
           ? {

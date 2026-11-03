@@ -230,7 +230,25 @@ export async function requestConfigApply(
       };
     const operation = `${configApplyPrefix}${keys.join(',')}:${randomUUID().slice(0, 8)}`;
     let seen = store.lastEventId();
-    h.requestReconfigure(operation, digest);
+    // Слот запроса один на контур. Запрос другой операции занят и после
+    // `appliedAt`, пока она его не сняла: изменение контракта между применением
+    // и снятием ещё ждёт своего подтверждения, и чужой запрос подменил бы его.
+    // Движок отказывает только неприменённому, поэтому проверка — здесь, в той
+    // же транзакции, что и запрос. Завершённый (применённый или отклонённый)
+    // запрос прежнего config-apply никто не ждёт: сервер снимает его сразу, а
+    // оставшийся после падения между подтверждением и снятием снимается здесь.
+    store.atomic(() => {
+      const current = store.read().reconfigure;
+      if (current && configApplyKeys(current.operation) && (current.appliedAt || current.error))
+        h.clearReconfigure(current.operation);
+      else if (current)
+        throw new Error(
+          `Конфигурацию сейчас применяет операция ${current.operation}` +
+            (current.appliedAt ? ' (применена, ещё не завершена)' : '') +
+            ': дождитесь её завершения и повторите config-apply',
+        );
+      h.requestReconfigure(operation, digest);
+    });
     const deadline = Date.now() + waitMs;
     for (;;) {
       for (const event of store.eventsAfter(seen, 100)) {

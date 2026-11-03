@@ -25,6 +25,7 @@ import { repositories, repository, roleBinding, reviewerBinding } from '../core/
 import { identitySchema } from '../core/sync-model.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { queueStopOf } from './queue-stop.ts';
+import { executionOf } from '../harness/execution.ts';
 import {
   HarnessError,
   checkJsonBytes,
@@ -93,14 +94,16 @@ export function taskProgress(h: DevContour, s: DevContourState, t: Task, now: nu
   if (hold) before.push('held_by_operation');
   // Бюджет не пускает задачу к выдаче: причина (какой предел, сколько
   // израсходовано) видна на карточке задачи, а не только в цепочке ожидания.
-  const budgetBlock =
-    t.budgetBlock && !['done', 'cancelled'].includes(t.status) ? t.budgetBlock : undefined;
-  if (budgetBlock) before.push('budget_blocked');
+  // Записанный `budgetBlock` — лишь кэш расчёта claim (claim его не обновляет
+  // на паузе, при drain и занятых исполнителях): карточка считает тем же
+  // правилом движка, что и объяснение очереди, — только для готовой задачи.
+  const facts = responseFacts(h, s, now);
+  const budgetReason = facts.budget.get(t.id);
+  if (budgetReason) before.push('budget_blocked');
   // План утверждён при другой политике исполнения: движок задачу не выдаёт
   // (граф проецируется с закреплённым digest), пока план не утверждён заново.
   // Причина видна и на паузе, и `eligible` с ней ложно, как и выдача.
   const board = s.boards.find((b) => b.revisions.at(-1)?.taskIds.includes(t.id));
-  const facts = responseFacts(h, s, now);
   const approvalStale =
     board && h.approvalStale(t, facts.policy)
       ? {
@@ -159,12 +162,13 @@ export function taskProgress(h: DevContour, s: DevContourState, t: Task, now: nu
         }
       : {}),
     ...(approvalStale ? { approvalStale } : {}),
-    ...(budgetBlock
+    ...(budgetReason
       ? {
           budgetBlock: {
-            reason: short(budgetBlock.reason),
-            at: budgetBlock.at,
-            hint: 'Поднимите предел или задайте onUnknown в budgets и примените: devcontour config-apply --keys budgets',
+            reason: short(budgetReason),
+            // Момент записи кэша — только если кэш о том же пределе.
+            ...(t.budgetBlock?.reason === budgetReason ? { at: t.budgetBlock.at } : {}),
+            hint: budgetHint(budgetReason),
           },
         }
       : {}),
@@ -186,7 +190,12 @@ export function taskProgress(h: DevContour, s: DevContourState, t: Task, now: nu
  * же момент `now`. Задания ведущего хранятся вне снимка, поэтому следующий
  * ответ (другой `now`) считает заново.
  */
-type Facts = { now: number; policy: string; stale: ReturnType<LeadWorkflow['staleBoards']> };
+type Facts = {
+  now: number;
+  policy: string;
+  stale: ReturnType<LeadWorkflow['staleBoards']>;
+  budget: Map<string, string>;
+};
 const factsCache = new WeakMap<DevContourState, Facts>();
 function responseFacts(h: DevContour, s: DevContourState, now: number) {
   const cached = factsCache.get(s);
@@ -195,9 +204,39 @@ function responseFacts(h: DevContour, s: DevContourState, now: number) {
     now,
     policy: h.planPolicyDigest(),
     stale: new LeadWorkflow(h).staleBoards(s),
+    budget: budgetBlocks(h, s),
   };
   factsCache.set(s, facts);
   return facts;
+}
+/**
+ * Бюджетные блоки готовых задач ответа — одно чтение движка на ответ:
+ * `budgetBlockOf` — тот же расчёт, которым claim ставит и снимает
+ * `budgetBlock`, по действующим (применённым) пределам процесса. Бюджеты
+ * выключены — блоков нет, даже если в задаче остался записанный кэш.
+ */
+function budgetBlocks(h: DevContour, s: DevContourState) {
+  const blocks = new Map<string, string>();
+  const ready = s.tasks.filter((t) => t.status === 'ready');
+  const { engine } = executionOf(h);
+  if (!ready.length || !engine.policy.budgets) return blocks;
+  engine.read((v) => {
+    for (const t of ready) {
+      const reason = engine.budgetBlockOf(t.id, v);
+      if (reason) blocks.set(t.id, reason);
+    }
+  });
+  return blocks;
+}
+/**
+ * Что сделать с бюджетным блоком. Неопределённый бюджет (стоимость вызовов
+ * неизвестна) снимает не предел, а `onUnknown: "continue"` в `budgets`; тариф
+ * в `prices` прошлые вызовы не переоценивает. Исчерпанный — более высокий предел.
+ */
+function budgetHint(reason: string) {
+  return /не определён/.test(reason)
+    ? 'Стоимость части вызовов неизвестна, и предел её не снимет: задайте onUnknown: "continue" в budgets (тариф модели в prices оценит только новые вызовы) и примените: devcontour config-apply --keys budgets,prices'
+    : 'Поднимите предел в budgets и примените: devcontour config-apply --keys budgets';
 }
 function boardOwner(b: Board, s: DevContourState) {
   if (b.scope === 'workspace') return undefined;

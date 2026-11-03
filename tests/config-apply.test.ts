@@ -195,38 +195,130 @@ test('--keys accepts only budgets and prices', () => {
   assert.throws(() => parseOperationalKeys(''), /только budgets, prices/);
 });
 
-test('Task progress names the budget block with its reason; a cancelled task does not', () => {
+/** Завершённый вызов модели с известной стоимостью: расход общего бюджета. */
+function spend(store: Store, id: string, costUsd: number | null) {
+  store.atomic(() =>
+    store.saveLocal('usage', undefined, id, {
+      id,
+      stage: 'implementation',
+      runtime: 'codex',
+      model: 'EXAMPLE_MODEL',
+      runtimeVersion: null,
+      startedAt: '2026-11-01T00:00:00Z',
+      outcome: 'returned',
+      promptBytes: 1,
+      promptDigest: 'd'.repeat(64),
+      usage: {
+        inputTokens: 1,
+        outputTokens: 1,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reportedUsd: costUsd,
+        complete: true,
+        source: 'fixture',
+      },
+      costUsd,
+      costSource: costUsd === null ? 'unknown' : 'provider-reported',
+    }),
+  );
+}
+
+test('The task card computes the budget block live: raising the limit by config-apply clears it without a claim', async () => {
+  const s = served();
+  try {
+    s.edit((raw) => (raw.budgets = { workspace: { usd: 1 }, onUnknown: 'continue' }));
+    assert.equal((await s.request()).status, 'applied');
+    const board = s.server.createBoard('Board');
+    const task = s.server.addTask(board.id, input('Work'));
+    s.server.approve(board.id);
+    spend(s.server.store, 'U1', 5);
+    const progress = () => {
+      const st = s.server.store.read();
+      return taskProgress(
+        s.server,
+        st,
+        st.tasks.find((t) => t.id === task.id)!,
+        Date.now(),
+      );
+    };
+    // Блок есть, хотя claim его ещё не записал: карточка считает тем же правилом движка.
+    assert.equal(s.server.store.read().tasks.find((t) => t.id === task.id)!.budgetBlock, undefined);
+    let p = progress();
+    assert.ok(p.reasons.includes('budget_blocked'), JSON.stringify(p));
+    assert.match(p.budgetBlock?.reason ?? '', /Бюджет total исчерпан: предел \$1/);
+    assert.match(p.budgetBlock!.hint, /Поднимите предел в budgets.*config-apply --keys budgets$/);
+    // Повышение предела применено, выдачи не было (очередь на паузе): блок снят сразу.
+    s.edit((raw) => (raw.budgets = { workspace: { usd: 100 }, onUnknown: 'continue' }));
+    assert.equal((await s.request()).status, 'applied');
+    p = progress();
+    assert.ok(!p.reasons.includes('budget_blocked'), JSON.stringify(p));
+    assert.equal(p.budgetBlock, undefined);
+    // Неизвестная стоимость при onUnknown: stop — предел не поможет: подсказка о onUnknown.
+    s.edit((raw) => (raw.budgets = { workspace: { usd: 100 }, onUnknown: 'stop' }));
+    assert.equal((await s.request()).status, 'applied');
+    spend(s.server.store, 'U2', null);
+    p = progress();
+    assert.match(p.budgetBlock?.reason ?? '', /не определён/);
+    assert.match(p.budgetBlock!.hint, /onUnknown: "continue".*config-apply --keys budgets,prices/);
+    // Отменённая задача бюджетом не держится.
+    s.server.store.change('test.cancelled', (st) => {
+      st.tasks.find((t) => t.id === task.id)!.status = 'cancelled';
+    });
+    assert.equal(progress().budgetBlock, undefined);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('Without budgets a stored budgetBlock cache does not block the task card', () => {
   const f = fixture();
   try {
     const board = f.h.createBoard('Board');
     const task = f.h.addTask(board.id, input('Work'));
     f.h.approve(board.id);
-    const progress = () => {
-      const s = f.store.read();
-      return taskProgress(
-        f.h,
-        s,
-        s.tasks.find((t) => t.id === task.id)!,
-        Date.now(),
-      );
-    };
-    assert.ok(!progress().reasons.includes('budget_blocked'));
-    assert.equal(progress().budgetBlock, undefined);
     f.store.change('test.budget-block', (s) => {
       s.tasks.find((t) => t.id === task.id)!.budgetBlock = {
         reason: 'Бюджет задачи исчерпан: 25.4 из 25 USD',
         at: '2026-11-01T00:00:00.000Z',
       };
     });
-    assert.ok(progress().reasons.includes('budget_blocked'));
-    assert.equal(progress().budgetBlock?.reason, 'Бюджет задачи исчерпан: 25.4 из 25 USD');
-    assert.match(progress().budgetBlock!.hint, /config-apply --keys budgets/);
-    f.store.change('test.cancelled', (s) => {
-      s.tasks.find((t) => t.id === task.id)!.status = 'cancelled';
-    });
-    assert.ok(!progress().reasons.includes('budget_blocked'));
-    assert.equal(progress().budgetBlock, undefined);
+    const s = f.store.read();
+    const p = taskProgress(
+      f.h,
+      s,
+      s.tasks.find((t) => t.id === task.id)!,
+      Date.now(),
+    );
+    assert.ok(!p.reasons.includes('budget_blocked'));
+    assert.equal(p.budgetBlock, undefined);
   } finally {
     f.cleanup();
+  }
+});
+
+test('config-apply does not take over the reconfigure slot of another operation, even once applied', async () => {
+  const s = served();
+  try {
+    s.edit((raw) => (raw.budgets = { workspace: { usd: 10 } }));
+    // Изменение контракта применило конфигурацию, но ещё не сняло свой запрос.
+    s.server.requestReconfigure('CC-1', s.server.configDigest);
+    s.server.settleReconfigure('CC-1', s.server.configDigest, 'server');
+    assert.ok(s.server.store.read().reconfigure?.appliedAt);
+    await assert.rejects(
+      requestConfigApply(s.root, ['budgets'], { waitMs: 0 }),
+      /Конфигурацию сейчас применяет операция CC-1 \(применена, ещё не завершена\)/,
+    );
+    assert.equal(s.server.store.read().reconfigure?.operation, 'CC-1');
+    // Операция сняла запрос — config-apply проходит.
+    s.server.clearReconfigure('CC-1');
+    assert.equal((await s.request(['budgets'])).status, 'applied');
+    // Применённый, но не снятый (падение сервера) прежний config-apply не держит следующий.
+    s.edit((raw) => (raw.budgets = { workspace: { usd: 20 } }));
+    s.server.requestReconfigure('config-apply:budgets:old', 'a'.repeat(64));
+    s.server.settleReconfigure('config-apply:budgets:old', 'a'.repeat(64), 'server', 'сбой');
+    assert.equal((await s.request(['budgets'])).status, 'applied');
+    assert.deepEqual(s.server.config.budgets, { workspace: { usd: 20 }, onUnknown: 'stop' });
+  } finally {
+    s.cleanup();
   }
 });
