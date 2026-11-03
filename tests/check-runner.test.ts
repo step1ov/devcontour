@@ -168,9 +168,20 @@ test('A hung test fails by name, a file that never exits is named, and late test
       join(root, 'tests', 'awaits.test.ts'),
       `
       import {test} from 'node:test';
-      test('awaits forever',()=>new Promise(()=>{setInterval(()=>{},1000)}));
+      test('awaits forever',()=>new Promise(()=>{}));
     `,
     );
+    // Файлов больше, чем исполнителей, и прогон дольше предела тишины: файлы
+    // в очереди и те, чьи события ждут предыдущих, тревоги не поднимают.
+    for (const n of [1, 2, 3, 4, 5])
+      await writeFile(
+        join(root, 'tests', `long${n}.test.ts`),
+        `
+        import {test} from 'node:test';
+        for (const i of [1, 2, 3])
+          test('long ${n}.' + i, () => new Promise((r) => setTimeout(r, 1000)));
+      `,
+      );
     // Тест, объявленный после await, выполняется: раннер не завершает файл раньше.
     await writeFile(
       join(root, 'tests', 'late.test.ts'),
@@ -195,14 +206,16 @@ test('A hung test fails by name, a file that never exits is named, and late test
       cwd: root,
       env,
       encoding: 'utf8',
-      timeout: 30_000,
+      timeout: 60_000,
     });
     assert.equal(result.signal, null, 'the runner hung: ' + result.stdout + result.stderr);
     assert.equal(result.status, 1, result.stdout + result.stderr);
     assert.match(result.stdout, /✖ awaits forever/);
     assert.match(result.stdout, /✔ leaves a server open/);
     assert.match(result.stdout, /✔ declared after await/);
-    assert.match(result.stderr, /No test events for \d+ s.*tests\/open\.test\.ts/);
+    for (const n of [1, 2, 3, 4, 5]) assert.match(result.stdout, new RegExp(`✔ long ${n}\\.3`));
+    assert.match(result.stderr, /No test events for \d+ s.*: tests\/open\.test\.ts$/m);
+    assert.equal(result.stderr.match(/No test events/g)?.length, 1, result.stderr);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -164,20 +164,14 @@ if (options.list) {
     });
     results.on('test:fail', () => (process.exitCode ||= 1));
     // Файл, тесты которого кончились, но процесс не выходит (открытый сервер,
-    // таймер), событий больше не даёт. События идут по ходу файла: тест
-    // объявляет себя при выдаче (dequeue) и даёт итог самое позднее через
-    // предел времени. Файл без событий дольше предела с запасом назван,
-    // и прогон останавливается провалом, а не ждёт его часами.
+    // таймер), событий больше не даёт. run() отдаёт события файлов по порядку:
+    // события следующих файлов ждут, пока не завершится первый незавершённый,
+    // поэтому застрявший файл заглушает весь прогон. Идущий тест даёт событие
+    // самое позднее через предел времени. Тишина всего прогона дольше предела
+    // с запасом — провал с именем первого незавершённого файла.
     const idleMs = testTimeoutMs * 1.25;
-    const pending = new Map();
-    // Файл входит в ожидание, когда поставлен в очередь, и выходит, когда его
-    // процесс завершился; поздний итог уровня файла его не возвращает.
-    results.on('test:enqueue', ({ file, name, nesting }) => {
-      if (file && nesting === 0 && name === file) pending.set(file, Date.now());
-    });
-    const touch = ({ file }) => {
-      if (file && pending.has(file)) pending.set(file, Date.now());
-    };
+    const unfinished = new Set(files);
+    let lastEvent = Date.now();
     for (const type of [
       'test:enqueue',
       'test:dequeue',
@@ -186,17 +180,17 @@ if (options.list) {
       'test:fail',
       'test:diagnostic',
     ])
-      results.on(type, touch);
+      results.on(type, () => (lastEvent = Date.now()));
     results.on('test:complete', ({ file, name, nesting }) => {
-      if (nesting === 0 && name === file) pending.delete(file);
-      else touch({ file });
+      lastEvent = Date.now();
+      if (nesting === 0 && name === file) unfinished.delete(file);
     });
     const watchdog = setInterval(
       () => {
-        const stalled = [...pending].filter(([, at]) => Date.now() - at > idleMs);
-        if (!stalled.length) return;
+        const [stalled] = unfinished;
+        if (!stalled || Date.now() - lastEvent <= idleMs) return;
         console.error(
-          `No test events for ${Math.round(idleMs / 1000)} s, the process did not exit (open server, timer or child?): ${stalled.map(([file]) => relative(process.cwd(), file)).join(', ')}`,
+          `No test events for ${Math.round(idleMs / 1000)} s; the first unfinished file did not exit (open server, timer or child?): ${relative(process.cwd(), stalled)}`,
         );
         process.exitCode ||= 1;
         clearInterval(watchdog);
