@@ -31,7 +31,7 @@ export const handoffRequestInput = z.strictObject({
   intentions: z.array(z.string().trim().min(1).max(1000)).max(20).optional(),
 });
 
-/** Вход операции `handoff` агентского API. */
+/** Вход операции `session_handoff` агентского API. */
 export const handoffInput = handoffRequestInput.extend({
   format: z.enum(handoffFormats).default('json'),
 });

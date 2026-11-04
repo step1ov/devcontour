@@ -1,4 +1,4 @@
-// Пакет передачи контекста новой сессии ведущего агента: операция `handoff`
+// Пакет передачи контекста новой сессии ведущего агента: операция `session_handoff`
 // и CLI `session-handoff` отдают пакет harness (`handoffPack`) над движком
 // DevContour; вложенные чтения пакета идут одним снимком хранилища.
 import { test } from 'node:test';
@@ -53,9 +53,9 @@ type JsonHandoff = { format: 'json'; pack: HandoffPack; commands: Record<string,
 type MdHandoff = { format: 'md'; markdown: string; commands: Record<string, string> };
 const status = (e: unknown) => (e as { status?: number }).status;
 
-test('handoff: в каталоге только чтения со схемой входа; JSON по схеме harness, ничего не пишет', () => {
-  const tool = capabilities().tools.find((t) => t.name === 'handoff')!;
-  assert.ok(tool, 'операция handoff в каталоге');
+test('session_handoff: в каталоге только чтения со схемой входа; JSON по схеме harness, ничего не пишет', () => {
+  const tool = capabilities().tools.find((t) => t.name === 'session_handoff')!;
+  assert.ok(tool, 'операция session_handoff в каталоге');
   assert.equal(tool.readOnly, true);
   assert.match(tool.description, /new lead session/);
   assert.match(tool.description, /Read-only, no model calls/);
@@ -67,7 +67,10 @@ test('handoff: в каталоге только чтения со схемой �
     const agent = new AgentService(f.h, f.root);
     const events = f.store.lastEventId();
     const revision = f.store.revision();
-    const value = agent.execute({ operation: 'handoff', input: {} }) as unknown as JsonHandoff;
+    const value = agent.execute({
+      operation: 'session_handoff',
+      input: {},
+    }) as unknown as JsonHandoff;
     assert.equal(value.format, 'json');
     const pack = handoffPackSchema.parse(value.pack);
     assert.equal(pack.handoffVersion, 1);
@@ -87,18 +90,18 @@ test('handoff: в каталоге только чтения со схемой �
   }
 });
 
-test('handoff: намерения доходят до пакета, Markdown — тот же пакет, пределы входа — 400', () => {
+test('session_handoff: намерения доходят до пакета, Markdown — тот же пакет, пределы входа — 400', () => {
   const f = fixture();
   try {
     boards(f.h);
     const agent = new AgentService(f.h, f.root);
     const json = agent.execute({
-      operation: 'handoff',
+      operation: 'session_handoff',
       input: { intentions: [INTENT, '  second  '] },
     }) as unknown as JsonHandoff;
     assert.deepEqual(handoffPackSchema.parse(json.pack).intentions, [INTENT, 'second']);
     const md = agent.execute({
-      operation: 'handoff',
+      operation: 'session_handoff',
       input: { format: 'md', intentions: [INTENT] },
     }) as unknown as MdHandoff;
     assert.equal(md.format, 'md');
@@ -109,17 +112,18 @@ test('handoff: намерения доходят до пакета, Markdown —
     assert.throws(
       () =>
         agent.execute({
-          operation: 'handoff',
+          operation: 'session_handoff',
           input: { intentions: Array.from({ length: 21 }, (_, i) => 'intent ' + i) },
         }),
       (e) => status(e) === 400,
     );
     assert.throws(
-      () => agent.execute({ operation: 'handoff', input: { intentions: ['x'.repeat(1001)] } }),
+      () =>
+        agent.execute({ operation: 'session_handoff', input: { intentions: ['x'.repeat(1001)] } }),
       (e) => status(e) === 400,
     );
     assert.throws(
-      () => agent.execute({ operation: 'handoff', input: { format: 'html' } }),
+      () => agent.execute({ operation: 'session_handoff', input: { format: 'html' } }),
       (e) => status(e) === 400,
     );
   } finally {
@@ -127,14 +131,18 @@ test('handoff: намерения доходят до пакета, Markdown —
   }
 });
 
-test('handoff: boardId — граф harness той же доски; неизвестная доска — 404, черновая — 409', () => {
+test('session_handoff: boardId — граф harness той же доски; неизвестная доска — 404, черновая — 409', () => {
   const f = fixture();
   try {
     const ids = boards(f.h);
     const agent = new AgentService(f.h, f.root);
     const a = handoffPackSchema.parse(
-      (agent.execute({ operation: 'handoff', input: { boardId: ids.a } }) as unknown as JsonHandoff)
-        .pack,
+      (
+        agent.execute({
+          operation: 'session_handoff',
+          input: { boardId: ids.a },
+        }) as unknown as JsonHandoff
+      ).pack,
     );
     assert.equal(a.graphId, ids.a);
     assert.equal(a.summary.works, 2);
@@ -151,11 +159,11 @@ test('handoff: boardId — граф harness той же доски; неизве
     );
     assert.deepEqual(b.failures, []);
     assert.throws(
-      () => agent.execute({ operation: 'handoff', input: { boardId: 'missing' } }),
+      () => agent.execute({ operation: 'session_handoff', input: { boardId: 'missing' } }),
       (e) => status(e) === 404,
     );
     assert.throws(
-      () => agent.execute({ operation: 'handoff', input: { boardId: ids.draft } }),
+      () => agent.execute({ operation: 'session_handoff', input: { boardId: ids.draft } }),
       (e) => status(e) === 409 && /не выпущена/.test((e as Error).message),
     );
   } finally {
@@ -163,7 +171,7 @@ test('handoff: boardId — граф harness той же доски; неизве
   }
 });
 
-test('handoff: предел ответа отбрасывает записи порядком пакета и считает их в truncated', () => {
+test('session_handoff: предел ответа отбрасывает записи порядком пакета и считает их в truncated', () => {
   const f = fixture();
   try {
     boards(f.h);
@@ -246,7 +254,7 @@ test('ExecutionStore.read: вложенное чтение — тот же сн�
   }
 });
 
-test('handoff: компонентное хранение — центральная база и базы компонентов одним снимком', () => {
+test('session_handoff: компонентное хранение — центральная база и базы компонентов одним снимком', () => {
   const f = fixture();
   let store: Store | undefined;
   try {
