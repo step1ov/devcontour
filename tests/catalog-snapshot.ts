@@ -18,5 +18,7 @@
 // Намеренное изменение: новая операция только чтения session_handoff (пакет передачи
 // контекста новой сессии ведущего агента) после value_report; прочие
 // операции байтово прежние.
-export const CATALOG_DIGEST = 'a8cb9344d631a6c8b440bd3884bdd0c96265c3607d2880e336a40bc490d1b885';
+// Намеренное изменение: описание workflow_status называет поля liveness и
+// operations (попытки и проверки без движения); прочие операции байтово прежние.
+export const CATALOG_DIGEST = 'c8c2463504ebd4aedb3ca5f4fade6ebaea3115c303bdb67dfe3da557baad31a6';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';
