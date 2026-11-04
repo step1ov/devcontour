@@ -21,21 +21,20 @@ const fingerprint = (file: string) => {
 };
 
 /**
- * Отчёт без записи в базу: соединение только для чтения, как у `doctor` —
+ * Чтение без записи в базу: соединение только для чтения, как у `doctor` —
  * без PRAGMA режима журнала, DDL, начальных строк, проекций и журнала.
  * Работающий `serve` остаётся единственным writer. База WAL без файлов
  * журнала читается неизменяемой и ничего рядом не создаёт; если за время
  * чтения появились файлы журнала или изменился файл базы, чтение
  * повторяется (уже обычным соединением с журналом).
  */
-export function readOnlyValueReport(
+export function readOnlyRead<T>(
   config: Config,
   root: string,
-  request: ReportRequest,
-  label: string,
+  read: (h: DevContour) => T,
   /** Наблюдение за попытками чтения (тесты: writer начинает работу во время чтения). */
   afterRead?: (attempt: number) => void,
-): DevContourValueReport {
+): T {
   const file = join(root, 'state.sqlite');
   if (!existsSync(file)) throw new Error('База состояния не найдена: ' + file);
   const components = config.storage === 'component' ? repositories(config) : undefined;
@@ -44,12 +43,9 @@ export function readOnlyValueReport(
     const quiet = !journal.some((f) => existsSync(f));
     const before = fingerprint(file);
     const store = new Store(file, components, false, undefined, true);
-    let value: DevContourValueReport;
+    let value: T;
     try {
-      value = devcontourValueReport(new DevContour(store, config), request, {
-        label,
-        stateDir: root,
-      });
+      value = read(new DevContour(store, config));
     } finally {
       store.close();
     }
@@ -57,6 +53,23 @@ export function readOnlyValueReport(
     if (!quiet || (!journal.some((f) => existsSync(f)) && fingerprint(file) === before))
       return value;
     if (attempt === 3)
-      throw new Error('Базу непрерывно меняет другой процесс: отчёт не прочитан согласованно');
+      throw new Error('Базу непрерывно меняет другой процесс: состояние не прочитано согласованно');
   }
+}
+
+/** Отчёт об эффекте из базы, открытой только для чтения (`readOnlyRead`). */
+export function readOnlyValueReport(
+  config: Config,
+  root: string,
+  request: ReportRequest,
+  label: string,
+  /** Наблюдение за попытками чтения (тесты: writer начинает работу во время чтения). */
+  afterRead?: (attempt: number) => void,
+): DevContourValueReport {
+  return readOnlyRead(
+    config,
+    root,
+    (h) => devcontourValueReport(h, request, { label, stateDir: root }),
+    afterRead,
+  );
 }

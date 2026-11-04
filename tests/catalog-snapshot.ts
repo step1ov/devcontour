@@ -15,5 +15,8 @@
 // схема плана runtime и прочие операции байтово прежние.
 // Намеренное изменение: новая операция только чтения value_report (отчёт об
 // эффекте) после workflow_metrics; прочие операции байтово прежние.
-export const CATALOG_DIGEST = '7d7d45f890afda6ec17201f2295e4ec2211b533dadbab93ff4c75233dea73d6a';
+// Намеренное изменение: новая операция только чтения session_handoff (пакет передачи
+// контекста новой сессии ведущего агента) после value_report; прочие
+// операции байтово прежние.
+export const CATALOG_DIGEST = 'a8cb9344d631a6c8b440bd3884bdd0c96265c3607d2880e336a40bc490d1b885';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

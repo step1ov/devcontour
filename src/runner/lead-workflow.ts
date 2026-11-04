@@ -1,5 +1,4 @@
 import { join } from 'node:path';
-import { carriedTaskIds } from '../core/work-status.ts';
 import { LeadWorkflow, type WorkflowJob } from '../core/lead-workflow.ts';
 import type { DevContour } from '../core/service.ts';
 import { repositories, repository } from '../core/repositories.ts';
@@ -9,7 +8,14 @@ import { WorkspaceRunner } from './workspace.ts';
 import { adapters } from './adapters.ts';
 import { assertRequirements } from './requirements.ts';
 import { IntentService } from './intent.ts';
-import { repairDecision } from '../core/repair.ts';
+import {
+  afterStep,
+  boardTasks,
+  loopOutlook,
+  pauseStep,
+  recoveryStep,
+  repairStep,
+} from './lead-outlook.ts';
 import { executionOf } from '../harness/execution.ts';
 import type { AgentAdapter } from './adapters.ts';
 import { analyzeRecovery, applyCases } from './recovery.ts';
@@ -104,12 +110,9 @@ export class LeadRunner {
     // снимок, а повтор назначался уже отменённой работе. Внутри транзакции
     // такого промежутка нет, а остановка ничего не пишет и откатывается.
     const decision = this.h.store.atomic(() => {
-      const state = this.h.store.read();
-      const tasks = state.tasks.filter((t) => taskIds.includes(t.id));
-      const decided = repairDecision(this.h, tasks, {
-        budgetLeft: this.h.config.repairBudget - (job.repairs ?? 0),
-        maxAttempts: this.h.config.maxAttempts,
-      });
+      // Решение — общее правило цикла (`repairStep`): по нему же пакет
+      // передачи называет следующий шаг.
+      const decided = repairStep(this.h, job, taskIds);
       if (!decided || decided.action === 'stop') return decided;
       this.workflow.repair(job, `repair:${decided.kind}`, () => {
         this.h.retry(decided.taskId);
@@ -145,78 +148,60 @@ export class LeadRunner {
    * получают.
    */
   private async recoverProperties(job: WorkflowJob, taskIds: string[], signal: AbortSignal) {
-    const s = this.h.store.read();
-    const tasks = s.tasks.filter((t) => taskIds.includes(t.id) && t.recovery);
-    for (const task of tasks) {
-      const r = task.recovery!;
-      if (task.status === 'cancelled') continue;
-      switch (r.status) {
-        case 'awaiting-lead': {
-          // Пауза человека, наступившая после старта работы, — его решение:
-          // разбор её не обходит.
-          if (
-            s.paused &&
-            s.pauseReason === 'operator' &&
-            (!s.pausedAt || s.pausedAt >= job.startedAt)
-          )
-            throw new Error(
-              `${task.id}: разбор свойства ${r.property} ждёт снятия паузы человеком`,
-            );
-          if ((job.repairs ?? 0) >= this.h.config.repairBudget)
-            throw new Error(
-              `${task.id}: исчерпан бюджет восстановлений доски; разбор свойства ${r.property} — решение человека`,
-            );
-          const reserved = this.h.store.atomic(() => {
-            this.workflow.repair(job, `recovery:${r.property}`, () => undefined);
-            return this.h.recoveryReserve(task.id, r.id);
-          });
-          if (reserved.status !== 'analyzing') throw new Error(`${task.id}: ${reserved.reason}`);
-          let decision;
-          try {
-            decision = await analyzeRecovery(
-              this.h,
-              this.root,
-              this.h.store.read().tasks.find((t) => t.id === task.id)!,
-              job.authorRuntime,
-              signal,
-              this.runtimes,
-            );
-          } catch (error) {
-            this.h.recoveryInterrupted(
-              task.id,
-              r.id,
-              'Разбор ведущего не дал решения: ' +
-                (error instanceof Error ? error.message : String(error)),
-            );
-            throw error;
-          }
-          this.workflow.guard(job);
-          const decided = this.h.recoveryDecide(task.id, r.id, decision);
-          if (decided.status === 'applying') await this.applyRecovery(task.id);
-          return this.afterDecision(task.id);
-        }
-        case 'analyzing':
-          // Разбор оборвался без решения (рестарт): вызов уже учтён.
+    // Решение по эпизоду — общее правило цикла (`recoveryStep`); здесь
+    // только его исполнение.
+    const step = recoveryStep(this.h, this.h.store.read(), job, taskIds);
+    if (!step) return false;
+    const { task } = step;
+    const r = task.recovery!;
+    switch (step.kind) {
+      case 'stop':
+        throw new Error(step.reason);
+      case 'analyze': {
+        const reserved = this.h.store.atomic(() => {
+          this.workflow.repair(job, `recovery:${r.property}`, () => undefined);
+          return this.h.recoveryReserve(task.id, r.id);
+        });
+        if (reserved.status !== 'analyzing') throw new Error(`${task.id}: ${reserved.reason}`);
+        let decision;
+        try {
+          decision = await analyzeRecovery(
+            this.h,
+            this.root,
+            this.h.store.read().tasks.find((t) => t.id === task.id)!,
+            job.authorRuntime,
+            signal,
+            this.runtimes,
+          );
+        } catch (error) {
           this.h.recoveryInterrupted(
             task.id,
             r.id,
-            'Разбор ведущего прерван до решения; повторный автоматический вызов не выполняется.',
+            'Разбор ведущего не дал решения: ' +
+              (error instanceof Error ? error.message : String(error)),
           );
-          throw new Error(`${task.id}: разбор прерван до решения; нужен ведущий или пользователь`);
-        case 'applying':
-          // Добавление случаев идемпотентно по ключам эпизода.
-          await this.applyRecovery(task.id);
-          return this.afterDecision(task.id);
-        case 'retry':
-        case 'retrying':
-          return this.afterDecision(task.id);
-        default:
-          throw new Error(
-            `${task.id}: ${r.reason ?? 'разбор свойства ' + r.property + ' ждёт решения'}`,
-          );
+          throw error;
+        }
+        this.workflow.guard(job);
+        const decided = this.h.recoveryDecide(task.id, r.id, decision);
+        if (decided.status === 'applying') await this.applyRecovery(task.id);
+        return this.afterDecision(task.id);
       }
+      case 'interrupted':
+        // Разбор оборвался без решения (рестарт): вызов уже учтён.
+        this.h.recoveryInterrupted(
+          task.id,
+          r.id,
+          'Разбор ведущего прерван до решения; повторный автоматический вызов не выполняется.',
+        );
+        throw new Error(step.reason);
+      case 'apply':
+        // Добавление случаев идемпотентно по ключам эпизода.
+        await this.applyRecovery(task.id);
+        return this.afterDecision(task.id);
+      case 'after':
+        return this.afterDecision(task.id);
     }
-    return false;
   }
   private async applyRecovery(taskId: string) {
     const task = this.h.store.read().tasks.find((t) => t.id === taskId)!;
@@ -225,15 +210,11 @@ export class LeadRunner {
   }
   private afterDecision(taskId: string) {
     const task = this.h.store.read().tasks.find((t) => t.id === taskId)!;
-    const r = task.recovery;
-    if (!r) return false;
-    if (r.status === 'retry' && ['failed', 'cancelled'].includes(task.status)) {
-      if (task.status === 'cancelled') throw new Error(`${taskId}: задача отменена человеком`);
-      this.h.retry(taskId);
-      return true;
-    }
-    if (r.status === 'retry' || r.status === 'retrying') return true;
-    throw new Error(`${taskId}: ${r.reason ?? r.status}`);
+    const after = afterStep(task);
+    if (after.kind === 'none') return false;
+    if (after.kind === 'stop') throw new Error(after.reason);
+    if (after.kind === 'retry-task') this.h.retry(taskId);
+    return true;
   }
   private boardRoot(job: WorkflowJob) {
     return job.owner
@@ -248,20 +229,14 @@ export class LeadRunner {
     const s = this.h.store.read();
     guard();
     if (job.kind === 'board') {
-      const b = s.boards.find((b) => b.id === job.id)!,
-        revision = b.revisions.at(-1)!;
       // Работа ревизии — без задач, перенесённых из принятой предыдущей: их
       // результат и отмены уже учтены приёмкой (см. carriedTaskIds).
-      const carried = carriedTaskIds(b, s.tasks);
-      const tasks = s.tasks.filter((t) => revision.taskIds.includes(t.id) && !carried.has(t.id));
+      const { board: b, tasks } = boardTasks(s, job.id)!;
       if (job.stage === 0) {
         // Согласование нужно черновикам и задачам, утверждённым при другой
-        // политике исполнения: их движок не выдаёт до повторного утверждения.
-        if (
-          revision.status === 'accepted' ||
-          tasks.every((t) => t.status !== 'draft' && !this.h.approvalStale(t))
-        )
-          return false;
+        // политике исполнения: их движок не выдаёт до повторного утверждения
+        // (правило `loopOutlook`).
+        if (loopOutlook(this.h, s, job).step !== 'review-plan') return false;
         for (const task of tasks) assertRequirements(this.h, task);
         if (this.h.config.mode === 'demo')
           this.h.store.atomic(() => {
@@ -304,30 +279,15 @@ export class LeadRunner {
         )
           return true;
         // Стадия включает выдачу — но не отменяет чужих решений. Остановка
-        // человека («operator») и блокировка по отказу рантайма («runtime»)
-        // сохраняются: разрешение начать работу однажды не означает права
-        // снимать любые будущие паузы, а критерий восстановления прямо
-        // требует, чтобы пауза останавливала новые выдачи. Снимаются только
-        // штатная остановка сервера и исходное «очередь ещё не запускали», у
-        // которого причины нет: это не решение о работе.
-        //
-        // Пауза человека без времени записана прежней версией. Когда она
-        // поставлена, неизвестно, а отсутствие сведений — не разрешение:
-        // такая пауза стоит до явного продолжения.
-        // В режиме агента перенесённую базу проверяет сам цикл: её gates
-        // прошли — ожидание снято (base-check.ts); в режиме оператора это
-        // по-прежнему решение человека.
-        if (s.paused && s.pauseReason === 'base-check' && !tasks.every((t) => t.status === 'done'))
+        // человека после старта задания и блокировка по отказу рантайма
+        // сохраняются; снимаются исходное «очередь ещё не запускали», штатная
+        // остановка сервера и пауза человека до старта задания. В режиме
+        // агента перенесённую базу проверяет сам цикл (base-check.ts).
+        // Правило — `pauseStep`, общее с пакетом передачи.
+        const pause = pauseStep(s, job, tasks);
+        if (pause.checkBase)
           await checkBase(this.h, { data: this.root, state: this.boardRoot(job) }, guard, signal);
-        const decided =
-          s.paused &&
-          (s.pauseReason === 'runtime' ||
-            // Перенесённую базу проверяет ведущий или человек: цикл не снимает
-            // это ожидание сам.
-            s.pauseReason === 'base-check' ||
-            (s.pauseReason === 'operator' &&
-              (s.pausedAt === undefined || s.pausedAt >= job.startedAt)));
-        if (!tasks.every((t) => t.status === 'done') && !decided)
+        if (pause.lift)
           this.h.store.atomic(() => {
             guard();
             this.h.pause(false);
@@ -349,9 +309,10 @@ export class LeadRunner {
         )
           return true;
         if (!tasks.every((t) => t.status === 'done')) {
-          if (s.paused && s.pauseReason === 'base-check')
+          const pause = pauseStep(s, job, tasks);
+          if (pause.checkBase)
             await checkBase(this.h, { data: this.root, state: this.boardRoot(job) }, guard, signal);
-          if (s.paused && s.pauseReason === 'shutdown')
+          if (pause.lift)
             this.h.store.atomic(() => {
               guard();
               this.h.pause(false);

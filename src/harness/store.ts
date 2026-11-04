@@ -223,8 +223,17 @@ export class DevContourExecutionStore implements ExecutionStore {
     return Object.keys(data).length ? data : null;
   }
 
+  /**
+   * Вид внешнего чтения: вложенное чтение (status, диагнозы и задания внутри
+   * одного `read`, как у пакета передачи) получает тот же снимок и тот же
+   * документ, не разбирая его заново. `settled` не даёт чтению уйти в
+   * асинхронную работу, поэтому вид снимается в `finally` того же вызова.
+   */
+  private reading?: ExecutionView;
+
   read<T>(fn: (view: ExecutionView) => T): T {
     if (this.frame) return fn(this.view(this.frame));
+    if (this.reading) return this.settled(fn(this.reading));
     return this.store.snapshot(() => {
       // Чтение без копии: общий замороженный снимок версии данных.
       const state = this.store.view() as DevContourState;
@@ -240,7 +249,13 @@ export class DevContourExecutionStore implements ExecutionStore {
         works: new Set(),
         attempts: new Set(),
       };
-      return this.settled(fn(this.view(frame, false)));
+      const view = this.view(frame, false);
+      this.reading = view;
+      try {
+        return this.settled(fn(view));
+      } finally {
+        this.reading = undefined;
+      }
     });
   }
 
