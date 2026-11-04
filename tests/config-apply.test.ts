@@ -370,3 +370,40 @@ test('config-apply does not take over the reconfigure slot of another operation,
     s.cleanup();
   }
 });
+
+test('config-apply --keys stallSweep against a server that refuses without clearing: refused, request cleared, issuance not held', async () => {
+  const s = served();
+  try {
+    s.edit((raw) => {
+      raw.stallSweep = { action: 'stop' };
+    });
+    const pending = requestConfigApply(s.root, ['stallSweep'], { waitMs: 5000 });
+    // Сервер прежней версии: ключа не знает, читает запрос как применение
+    // операцией, отклоняет и запрос не снимает.
+    let request = s.server.store.read().reconfigure;
+    for (let i = 0; i < 100 && !request; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+      request = s.server.store.read().reconfigure;
+    }
+    assert.ok(request, 'запрос записан');
+    s.server.settleReconfigure(
+      request.operation,
+      request.digest,
+      'server',
+      'Новая конфигурация отличается не только закреплением context packs',
+    );
+    assert.ok(s.server.store.read().reconfigure?.error, 'отклонён, но не снят');
+    const result = await pending;
+    assert.equal(result.status, 'refused', JSON.stringify(result));
+    assert.match(
+      (result as { error: string }).error,
+      /^Новая конфигурация отличается.*Запрос снят командой.*stallSweep.*перезапуском serve$/,
+    );
+    assert.equal(s.server.store.read().reconfigure, undefined, 'запрос снят');
+    const [event] = s.events('config.apply-refused');
+    assert.equal((event.data as { clearedBy?: string }).clearedBy, 'config-apply');
+    assert.equal(s.server.config.stallSweep, undefined, 'действующая конфигурация прежняя');
+  } finally {
+    s.cleanup();
+  }
+});

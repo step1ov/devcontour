@@ -363,6 +363,40 @@ test('Проверка базы с молчащим gate: runGatesAt → соб�
       await writeFile(barrier, '');
       assert.equal(await checking, true, 'база проверена, ожидание снято');
       assert.deepEqual(operations(), [], 'законченная проверка вида не даёт');
+      // Отмена задания посреди проверки: закрывающее событие пишется под
+      // fencing (`closing`), хотя обычная граница после отмены отказывает.
+      await rm(barrier);
+      await writeFile(join(c.repository, 'base.txt'), 'moved again');
+      await git(c.repository, 'add', '--', 'base.txt');
+      await git(c.repository, 'commit', '-qm', 'Base moved again');
+      const again = await git(c.repository, 'rev-parse', 'HEAD');
+      await git(c.repository, 'update-ref', target, again);
+      h.store.change('test.pause', (s) => {
+        s.paused = true;
+      });
+      h.baseUpdated([{ repositoryId: 'main', from: sha, to: again }]);
+      const abort = new AbortController();
+      const closings: boolean[] = [];
+      const aborted = checkBase(
+        h,
+        { data: root, state: root },
+        (options) => {
+          closings.push(!!options?.closing);
+          if (!options?.closing) abort.signal.throwIfAborted();
+          h.leader('server');
+        },
+        abort.signal,
+      );
+      await until(() => operations().find((o) => o.state === 'stalled'));
+      abort.abort();
+      await assert.rejects(aborted);
+      const last = store
+        .allEvents()
+        .filter((e) => e.type.startsWith('base.check.'))
+        .at(-1)!;
+      assert.equal(last.type, 'base.check.failed', 'отменённая проверка закрыта событием');
+      assert.ok(closings.includes(true), 'закрывающее событие — под границей closing');
+      assert.deepEqual(operations(), [], 'отменённая проверка вида не даёт');
     } finally {
       store.close();
     }

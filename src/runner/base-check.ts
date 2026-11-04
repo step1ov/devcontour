@@ -41,6 +41,12 @@ const targetSha = (path: string, branch: string) =>
   }).trim();
 
 /**
+ * Граница записи проверки: fencing задания и отмена. Закрывающее событие
+ * (`*.passed`/`*.failed`) пишется и после отмены (`closing`), иначе начатая
+ * проверка оставалась бы в журнале без окончания; fencing соблюдается и тогда.
+ */
+export type CheckGuard = (options?: { closing?: boolean }) => void;
+/**
  * Проверка перенесённой базы gates компонентов в режиме `approvalMode: agent`.
  *
  * После `base-update` и автоматической перемотки очередь ждёт `base-check`:
@@ -73,7 +79,7 @@ export async function checkBase(
     /** Каталог состояния прогона gates. */
     state: string;
   },
-  guard: () => void,
+  guard: CheckGuard,
   signal?: AbortSignal,
 ): Promise<boolean> {
   const waiting = () => {
@@ -129,9 +135,9 @@ export async function checkBase(
     while (!record || (!record.passed && (record.tries ?? 1) <= BASE_CHECK_RETRIES)) {
       const tries = (record?.tries ?? 0) + 1;
       const runId = 'BK-' + randomUUID();
-      const event = (type: string, data: Record<string, unknown>) =>
+      const event = (type: string, data: Record<string, unknown>, closing = false) =>
         h.store.atomic(() => {
-          guard();
+          guard(closing ? { closing } : undefined);
           h.store.appendEvent(type, {
             repositoryId: base.repositoryId,
             sha: base.sha,
@@ -175,9 +181,16 @@ export async function checkBase(
         );
       } catch (error) {
         try {
-          event('base.check.failed', {
-            error: journalError(error, [roots.state, ...repositories(h.config).map((r) => r.path)]),
-          });
+          event(
+            'base.check.failed',
+            {
+              error: journalError(error, [
+                roots.state,
+                ...repositories(h.config).map((r) => r.path),
+              ]),
+            },
+            true,
+          );
         } catch {
           // Без права записи событие не пишется; причина — исходная ошибка.
         }
@@ -204,18 +217,32 @@ export async function checkBase(
         // Начатая проверка кончается событием и тогда, когда исход не
         // записался: иначе её последний переход живости висел бы как идущий.
         try {
-          event('base.check.failed', {
-            error: journalError(error, [roots.state, ...repositories(h.config).map((r) => r.path)]),
-          });
+          event(
+            'base.check.failed',
+            {
+              // Не провал gates: исход проверки не записался.
+              reason: 'record',
+              ...(saved.passed ? { gatesPassed: true } : {}),
+              error: journalError(error, [
+                roots.state,
+                ...repositories(h.config).map((r) => r.path),
+              ]),
+            },
+            true,
+          );
         } catch {
           // Без права записи событие не пишется; причина — исходная ошибка.
         }
         throw error;
       }
-      event(saved.passed ? 'base.check.passed' : 'base.check.failed', {
-        gates: saved.gates,
-        ...(saved.passed ? {} : { failures: saved.failures.map((f) => f.gate) }),
-      });
+      event(
+        saved.passed ? 'base.check.passed' : 'base.check.failed',
+        {
+          gates: saved.gates,
+          ...(saved.passed ? {} : { failures: saved.failures.map((f) => f.gate) }),
+        },
+        true,
+      );
       record = saved;
     }
     for (const f of record.failures) failed.push(`${base.repositoryId}/${f.gate}`);

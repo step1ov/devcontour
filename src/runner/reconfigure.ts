@@ -282,6 +282,34 @@ export async function requestConfigApply(
         if (event.type === 'config.apply-refused')
           return { status: 'refused', keys, digest, operation, error: data.error ?? '' };
       }
+      // Сервер отклонил запрос, но не снял его: так поступает сервер версии,
+      // не знающей ключа (`stallSweep`), — он читает запрос как применение
+      // конфигурации операцией. Неснятый запрос держал бы выдачу; он
+      // завершён (`error`), и его снимает команда — как и завершённый
+      // запрос прежнего config-apply перед новым.
+      const refused = store.atomic(() => {
+        const current = store.read().reconfigure;
+        if (current?.operation !== operation || !current.error || current.appliedAt) return;
+        h.clearReconfigure(operation);
+        store.appendEvent('config.apply-refused', {
+          operation,
+          keys,
+          digest,
+          error: current.error,
+          clearedBy: 'config-apply',
+        });
+        return current.error;
+      });
+      if (refused !== undefined)
+        return {
+          status: 'refused',
+          keys,
+          digest,
+          operation,
+          // Сервер отклонил и не снял запрос (вероятно, его версия не знает
+          // ключа): запрос снят, применит перезапуск serve.
+          error: `${refused}. Запрос снят командой: сервер его не снял (вероятно, его версия не знает ключа ${keys.join(', ')}); примените конфигурацию перезапуском serve`,
+        };
       if (Date.now() > deadline) break;
       await new Promise((r) => setTimeout(r, 200));
     }

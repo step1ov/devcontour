@@ -32,6 +32,11 @@ export class Scheduler {
   private timer?: NodeJS.Timeout;
   private ticking = false;
   private built?: { execution: Execution; runner: Runner };
+  /** Исполнители прежних конфигураций: `stop` дожидается их окончания. */
+  private retired: Runner[] = [];
+  /** Идущий такт интервала `start`: `stop` дожидается его до закрытия хранилища. */
+  private current?: Promise<unknown>;
+  private stopped = false;
   constructor(
     readonly h: DevContour,
     readonly root: string,
@@ -50,7 +55,14 @@ export class Scheduler {
     // ведёт очередь: его продление роли и обход зависших останавливаются,
     // когда закончатся его попытки (`settled`), иначе их интервалы жили бы
     // рядом с интервалами нового.
-    if (this.built) void this.built.runner.settled().catch(() => {});
+    if (this.built) {
+      const previous = this.built.runner;
+      this.retired.push(previous);
+      void previous
+        .settled()
+        .catch(() => {})
+        .finally(() => (this.retired = this.retired.filter((r) => r !== previous)));
+    }
     const context = devcontourContextSource(this.h, execution.store);
     const runner = new Runner({
       engine: execution.engine,
@@ -250,11 +262,20 @@ export class Scheduler {
         '. Выполните devcontour base-update, иначе исполнитель получит дерево без подготовленной работы.',
     );
   }
+  /**
+   * Вести очередь интервалом. Повторный вызов (сервер запускает уже
+   * запущенный планировщик) ничего не меняет. Сбой такта пишется в журнал,
+   * только пока планировщик не остановлен: после `stop` хранилище могут
+   * закрыть, и запись из запоздавшего такта упала бы необработанным отказом.
+   */
   start() {
     if (this.timer) return;
-    this.timer = setInterval(
-      () =>
-        void this.tick().catch((e) =>
+    this.stopped = false;
+    this.timer = setInterval(() => {
+      if (this.stopped || this.current) return;
+      this.current = this.tick()
+        .catch((e: unknown) => {
+          if (this.stopped) return;
           this.h.store.change('scheduler.error', (s) => {
             // Время остановки отличает сбой такта от исходной паузы «очередь
             // ещё не запускали» (у обеих нет причины), даже когда событие
@@ -263,19 +284,29 @@ export class Scheduler {
             if (!s.paused) s.pausedAt = new Date().toISOString();
             s.paused = true;
             return { error: String(e) };
-          }),
-        ),
-      750,
-    );
+          });
+        })
+        .catch(() => {
+          // Запись сбоя не удалась (хранилище недоступно): следующий такт
+          // повторит сам такт; необработанного отказа нет.
+        })
+        .finally(() => (this.current = undefined));
+    }, 750);
     this.timer.unref();
   }
   async stop() {
+    this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    // Идущий такт доводится до конца до остановки исполнителей: после
+    // `stop` вызывающий закрывает хранилище.
+    await this.current;
     // Пауза штатной остановки — продуктовая форма (поверх паузы операции);
     // остановка попыток и освобождение роли controller — исполнитель harness.
     this.h.pause(true, 'shutdown');
     await this.runner.stop();
+    await Promise.all(this.retired.map((r) => r.settled().catch(() => {})));
+    this.retired = [];
   }
   async tick() {
     if (this.ticking) return;
