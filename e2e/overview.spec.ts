@@ -8,7 +8,9 @@ test('Обзор открывается первым, доступен с кла
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto('/');
-  await expect(page.getByRole('tab', { name: 'Обзор' })).toHaveAttribute('aria-selected', 'true');
+  await expect(
+    page.getByRole('navigation', { name: 'Workspace' }).getByRole('link', { name: 'Обзор' }),
+  ).toHaveAttribute('aria-current', 'page');
   for (const name of ['Попробовать', 'Нужно ваше решение', 'Что изменилось', 'Расходы'])
     await expect(page.getByRole('heading', { name, exact: true })).toBeVisible();
   // В demo preview не настроен: экран говорит это прямо, а не показывает пустоту.

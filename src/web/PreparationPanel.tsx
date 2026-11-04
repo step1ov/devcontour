@@ -88,7 +88,10 @@ function readLocation() {
   };
 }
 function writeLocation(state: { change: string; tab: Stage; boards: boolean }, replace = false) {
-  const params = new URLSearchParams();
+  // Параметры панели разработки (вид, доска, задача) принадлежат ей и
+  // сохраняются: иначе ссылка на задачу терялась при открытии.
+  const params = new URLSearchParams(window.location.search);
+  for (const key of ['change', 'stage', 'view']) params.delete(key);
   if (state.change) params.set('change', state.change);
   if (state.tab !== 'product') params.set('stage', state.tab);
   if (state.boards) params.set('view', 'boards');

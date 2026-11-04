@@ -44,12 +44,12 @@ export const engine = (runtime?: string, model?: string) =>
 export function Phases({ current }: { current?: string }) {
   const at = phases.findIndex((p) => p.id === current);
   return (
-    <ol className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+    <ol className="flex shrink-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-xs">
       {phases.map((phase, i) => {
         const done = at >= 0 && i < at;
         const now = phase.id === current;
         return (
-          <li key={phase.id} className="flex items-center gap-2">
+          <li key={phase.id} className="flex items-center gap-1.5">
             {i > 0 && (
               <span aria-hidden="true" className="text-muted-foreground">
                 →
@@ -57,10 +57,10 @@ export function Phases({ current }: { current?: string }) {
             )}
             <span
               className={cn(
-                'flex items-center gap-1 rounded-full px-2 py-0.5',
-                now && 'bg-primary/15 text-primary font-medium',
+                'flex items-center gap-1 rounded-xs px-1.5 py-px',
+                now && 'bg-info-foreground text-info font-medium',
                 done && 'text-muted-foreground',
-                !now && !done && 'text-muted-foreground/60',
+                !now && !done && 'text-faint',
               )}
             >
               {now && <Loader2 aria-hidden="true" className="size-3 animate-spin" />}
@@ -99,7 +99,7 @@ export function Activity({ runId, lines: limit = 3 }: { runId: string; lines?: n
   }, [runId, limit]);
   if (!lines.length) return null;
   return (
-    <ol className="text-muted-foreground m-0 grid gap-0.5 font-mono text-xs">
+    <ol className="text-muted-foreground m-0 grid min-w-0 gap-0.5 font-mono text-xs">
       {lines.map((line, i) => (
         <li key={i} className="truncate" title={line.text}>
           {line.text}
@@ -113,10 +113,10 @@ export function WorkerCards({ workers, concurrency }: { workers: Worker[]; concu
   return (
     <div className="grid gap-3">
       {workers.map((w) => (
-        <Card key={w.runId} className="border-primary/30">
+        <Card key={w.runId}>
           <CardContent className="grid gap-3 p-4">
             <div className="flex flex-wrap items-center gap-3">
-              <Bot className="text-primary size-5 shrink-0" aria-hidden="true" />
+              <Bot className="text-info size-5 shrink-0" aria-hidden="true" />
               <strong className="text-md">
                 {w.roleTitle ?? (w.role ? roleLabel(w.role) : 'Исполнитель')}
               </strong>

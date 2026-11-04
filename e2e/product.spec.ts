@@ -50,7 +50,8 @@ test('Product UI presents application scope, release selection, repository navig
     await route.fulfill({ json: view });
   });
   await page.goto('/');
-  await page.getByRole('tab', { name: 'Карта продукта', exact: true }).click();
+  const workspace = page.getByRole('navigation', { name: 'Workspace' });
+  await workspace.getByRole('link', { name: 'Карта продукта', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Система общения', exact: true })).toBeVisible();
   await expect(page.getByText('Ждёт сквозной проверки', { exact: true })).toBeVisible();
   await expect(page.getByText('Не применяется', { exact: true })).toBeVisible();
@@ -67,19 +68,22 @@ test('Product UI presents application scope, release selection, repository navig
   );
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   await page.getByRole('button', { name: 'product', exact: true }).first().click();
-  await expect(page.getByRole('tab', { name: 'Общий граф', exact: true })).toHaveAttribute(
-    'aria-selected',
-    'true',
+  await expect(workspace.getByRole('link', { name: 'Общий граф', exact: true })).toHaveAttribute(
+    'aria-current',
+    'page',
   );
   unavailable = true;
-  await page.getByRole('tab', { name: 'Карта продукта', exact: true }).click();
+  await workspace.getByRole('link', { name: 'Карта продукта', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('INTENT изменён');
   await expect(page.getByRole('table')).toHaveCount(0);
 });
 
 test('Product UI explains a missing map without claiming product readiness', async ({ page }) => {
   await page.goto('/');
-  await page.getByRole('tab', { name: 'Карта продукта', exact: true }).click();
+  await page
+    .getByRole('navigation', { name: 'Workspace' })
+    .getByRole('link', { name: 'Карта продукта', exact: true })
+    .click();
   await expect(
     page.getByRole('heading', { name: 'Карта продукта ещё не подготовлена' }),
   ).toBeVisible();

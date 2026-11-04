@@ -15,8 +15,11 @@ test('Plan → parallel execution → acceptance → correction → acceptance p
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto('/');
-  // Автор попадает на обзор; доску открывает навигацией.
-  await expect(page.getByRole('tab', { name: 'Обзор' })).toHaveAttribute('aria-selected', 'true');
+  // Автор попадает на обзор; доску открывает навигацией. Обзор — экран
+  // workspace в боковой навигации, а не вкладка доски.
+  await expect(
+    page.getByRole('navigation', { name: 'Workspace' }).getByRole('link', { name: 'Обзор' }),
+  ).toHaveAttribute('aria-current', 'page');
   await page
     .getByRole('navigation', { name: 'Доски' })
     .getByRole('button', { name: /Каталог продуктов/ })
@@ -120,8 +123,10 @@ test('Operator can create a board, tasks and dependency; invalid cycle is explai
   await page.getByRole('button', { name: 'Сохранить черновик' }).click();
   await expect(page.getByRole('alert')).toContainText('Цикл зависимостей');
   await page.getByRole('button', { name: 'Закрыть диалог' }).click();
-  // Зависимость названа задачей, а не её UUID.
-  await expect(page.getByRole('button', { name: /Экран сервиса/ })).toContainText(
+  // Зависимость названа задачей, а не её UUID. Строка списка — в рабочей
+  // области: инспектор называет ту же задачу в «От неё зависят».
+  const work = page.getByRole('region', { name: 'Рабочая область' });
+  await expect(work.getByRole('button', { name: /Экран сервиса/ })).toContainText(
     'после: Контракт сервиса',
   );
   // Отменённая задача — история: по умолчанию её не видно, по запросу видно.

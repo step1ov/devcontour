@@ -1,10 +1,11 @@
-import { Bot, Eye, PauseCircle } from 'lucide-react';
+import { Bot, Eye } from 'lucide-react';
 import type { Run, Task } from '../core/model.ts';
 import { Button } from '@/ui/button.tsx';
 import { cn } from '@/lib/utils.ts';
 import { roleLabel } from './roles.ts';
 import { Activity, Phases, elapsed, engine } from './Workers.tsx';
-import { chainBlockers } from '../core/work-status.ts';
+import { chainBlockers, type QueueStopView } from '../core/work-status.ts';
+import { QueueStopBanner } from './QueueStopBanner.tsx';
 
 // «Кто сейчас над чем работает» — первый вопрос, пока идёт разработка. Ответ
 // был на отдельной вкладке хода работ, ниже настроек контура; на графе и в
@@ -101,152 +102,166 @@ export function workflowWork(state: LiveState) {
 export function LiveWork({
   state,
   onOpenTask,
-  onStart,
+  queue,
 }: {
   state: LiveState;
   onOpenTask: (boardId: string | undefined, taskId: string) => void;
-  onStart?: () => void;
+  /** Остановка очереди: причина и что сделать — в той же зарезервированной ячейке. */
+  queue?: QueueStopView;
 }) {
   const work = activeWork(state);
   const flows = workflowWork(state);
   const free = Math.max(0, state.config.concurrency - work.length);
-  const failed = state.tasks.filter((t) => t.status === 'failed').length;
-  const waiting = state.tasks.filter((t) => t.status === 'ready' && t.blockers?.length).length;
-  const ready = state.ready.length;
   // Исполнители свободны, а задачи ждут: чего именно. Без этого полоса
   // говорила «никто не работает» и только числом «ждут зависимостей».
   const stuck =
     work.length || flows.length ? [] : chainBlockers(state.tasks, state.config.maxAttempts);
+  const stopped = !!(queue?.paused && queue.stopReason);
+  // Высота ячейки зарезервирована под исполнителей (не больше двух строк):
+  // старт и конец попытки не сдвигают граф и вкладки под курсором. Больше
+  // строк — прокрутка внутри ячейки.
+  const slots = Math.max(1, Math.min(state.config.concurrency, 2));
+  const rows = flows.length + work.length + stuck.length + (stopped ? 1 : 0);
   return (
-    <section
-      aria-label="Сейчас работают"
-      className="bg-card mb-4 grid gap-2 rounded-lg border p-3 shadow-sm"
-    >
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
-        <strong className="flex items-center gap-2">
-          <span
-            aria-hidden="true"
-            className={cn(
-              'inline-block size-2 rounded-full',
-              work.length || flows.length ? 'bg-success animate-pulse' : 'bg-(--text-secondary)',
-            )}
-          />
+    <section aria-label="Сейчас работают" className="grid min-w-0 content-start gap-1 px-3 py-2">
+      <div className="flex h-5 min-w-0 items-center gap-2 overflow-hidden text-xs whitespace-nowrap">
+        <span
+          aria-hidden="true"
+          className={cn(
+            'inline-block size-2 shrink-0 rounded-full',
+            work.length || flows.length ? 'bg-success' : 'bg-(--text-faint)',
+          )}
+        />
+        <strong className="text-sm font-medium">
           {work.length
             ? `Работают: ${work.length} из ${state.config.concurrency}`
             : flows.length
               ? flows.map((f) => f.label).join(', ')
               : 'Сейчас никто не работает'}
         </strong>
-        {state.paused && (
-          <span className="text-muted-foreground flex items-center gap-1">
-            <PauseCircle aria-hidden="true" className="size-4" />
-            {/* Причину и подсказку показывает баннер в шапке экрана. */}
-            Очередь на паузе
+        {/* Пауза при идущей работе — не противоречие: новые задачи не
+            выдаются, текущие доработают. */}
+        {state.paused && work.length > 0 && (
+          <span className="text-muted-foreground truncate">
+            пауза: новые не выдаются, текущие доработают
           </span>
         )}
-        <span className="text-muted-foreground">
-          готово к запуску {ready} · ждут зависимостей {waiting}
-          {failed ? ` · со сбоем ${failed}` : ''}
-          {work.length && free ? ` · свободно мест ${free}` : ''}
-        </span>
-        {state.paused && ready > 0 && onStart && (
-          <Button variant="outline" size="sm" className="ml-auto" onClick={onStart}>
-            Запустить очередь
-          </Button>
+        {!state.paused && work.length > 0 && free > 0 && (
+          <span className="text-muted-foreground tabular">свободно мест {free}</span>
         )}
       </div>
-      {stuck.length > 0 && (
-        <ul className="m-0 grid list-none gap-2 p-0" aria-label="Чего ждёт цепочка">
-          {stuck.map((b) => {
-            const owner = state.tasks.find((t) => t.id === b.taskId)?.boardId;
-            const board = state.boards.find((x) => x.id === owner);
-            return (
+      {/* Прокрутка внутри зарезервированной высоты доступна и с клавиатуры. */}
+      <div
+        role="group"
+        aria-label="Исполнители и причины ожидания"
+        tabIndex={0}
+        className="grid min-w-0 content-start gap-1 overflow-y-auto rounded-xs"
+        style={{ height: `calc(var(--live-row-height) * ${slots})` }}
+      >
+        {stopped && <QueueStopBanner queue={queue} compact />}
+        {flows.length > 0 && (
+          <ul className="m-0 grid list-none gap-1 p-0" aria-label="Работа ведущего цикла">
+            {flows.map((f) => (
               <li
-                key={b.taskId}
-                className="border-warning/40 bg-warning/5 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 rounded-md border px-3 py-2 text-sm"
+                key={f.key}
+                className="flex h-(--live-row-height) min-w-0 items-center gap-x-3 text-sm"
               >
-                <span className="text-muted-foreground">Цепочка ждёт</span>
-                <Button
-                  variant="link"
-                  className="h-auto p-0 text-sm font-semibold whitespace-normal"
-                  onClick={() => onOpenTask(board?.id, b.taskId)}
-                >
-                  {b.title}
-                </Button>
-                <span>{b.reason}</span>
-                <span className="text-muted-foreground">
-                  → {b.next} · ждут задач: {b.waiting}
+                <span className="flex shrink-0 items-center gap-1 font-medium">
+                  <Eye aria-hidden="true" className="text-info size-4 shrink-0" />
+                  {f.label}
+                </span>
+                <span className="text-muted-foreground shrink-0 font-mono text-xs">{f.who}</span>
+                <span className="min-w-0 truncate font-medium" title={f.subject}>
+                  {f.subject}
+                </span>
+                <span className="text-muted-foreground tabular ml-auto shrink-0 text-xs">
+                  {elapsed(f.since)}
                 </span>
               </li>
-            );
-          })}
-        </ul>
-      )}
-      {flows.length > 0 && (
-        <ul className="m-0 grid list-none gap-2 p-0" aria-label="Работа ведущего цикла">
-          {flows.map((f) => (
-            <li
-              key={f.key}
-              className="border-primary/30 bg-primary/5 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 rounded-md border px-3 py-2 text-sm"
-            >
-              <span className="flex items-center gap-1 font-medium">
-                <Eye aria-hidden="true" className="text-primary size-4 shrink-0" />
-                {f.label}
-              </span>
-              <span className="text-muted-foreground font-mono text-xs">{f.who}</span>
-              <span className="min-w-0 font-semibold [overflow-wrap:anywhere]">{f.subject}</span>
-              <span className="text-muted-foreground ml-auto text-xs">{elapsed(f.since)}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-      {work.length > 0 && (
-        <ul className="m-0 grid list-none gap-2 p-0">
-          {work.map(({ run, task, board, since }) => (
-            <li
-              key={run.id}
-              className="border-primary/30 bg-primary/5 grid min-w-0 gap-1 rounded-md border px-3 py-2"
-            >
-              <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-sm">
-                <span className="flex items-center gap-1 font-medium">
-                  <Bot aria-hidden="true" className="text-primary size-4 shrink-0" />
-                  {task ? roleLabel(task.role) : 'Исполнитель'}
-                </span>
-                <span className="text-muted-foreground font-mono text-xs">
-                  {engine(run.runtime, run.model)}
-                </span>
-                <Button
-                  variant="link"
-                  className="h-auto min-w-0 p-0 text-left font-semibold whitespace-normal [overflow-wrap:anywhere]"
-                  onClick={() => onOpenTask(board?.id, run.taskId)}
-                >
-                  {task?.title ?? run.taskId}
-                </Button>
-                {board && <span className="text-muted-foreground text-xs">{board.title}</span>}
-                <span className="text-muted-foreground ml-auto text-xs">
-                  {elapsed(since)} в фазе
-                  {run.attempt > 1
-                    ? ` · попытка ${run.attempt}${state.config.maxAttempts ? ` из ${state.config.maxAttempts}` : ''}`
-                    : ''}
-                  {run.reusedFrom ? ' · код взят у прошлой попытки' : ''}
-                </span>
-              </div>
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-                <Phases current={run.phase} />
-                {run.phase === 'reviewing' && (
-                  <span className="text-muted-foreground flex items-center gap-1 text-xs">
-                    <Eye aria-hidden="true" className="size-3" />
-                    проверяет {engine(run.reviewer, run.reviewerModel)}
+            ))}
+          </ul>
+        )}
+        {work.length > 0 && (
+          <ul className="m-0 grid list-none gap-1 p-0">
+            {work.map(({ run, task, board, since }) => (
+              <li
+                key={run.id}
+                className="grid h-(--live-row-height) min-w-0 content-center gap-0.5"
+                title={`${engine(run.runtime, run.model)}${run.phase === 'reviewing' ? ` · проверяет ${engine(run.reviewer, run.reviewerModel)}` : ''}`}
+              >
+                <div className="flex min-w-0 items-center gap-x-2 text-sm whitespace-nowrap">
+                  <span className="flex shrink-0 items-center gap-1 font-medium">
+                    <Bot aria-hidden="true" className="text-info size-4 shrink-0" />
+                    {task ? roleLabel(task.role) : 'Исполнитель'}
                   </span>
-                )}
-              </div>
-              {/* Последнее действие агента: фаза «пишет код» одинакова и на
-                  первой минуте, и на двадцатой. */}
-              <Activity runId={run.id} lines={1} />
-            </li>
-          ))}
-        </ul>
-      )}
+                  <Button
+                    variant="link"
+                    className="text-foreground h-auto min-w-0 justify-start p-0 font-normal"
+                    onClick={() => onOpenTask(board?.id, run.taskId)}
+                  >
+                    <span className="truncate">{task?.title ?? run.taskId}</span>
+                  </Button>
+                  {board && (
+                    <span className="text-muted-foreground hidden min-w-0 truncate text-xs min-[1280px]:inline">
+                      {board.title}
+                    </span>
+                  )}
+                  <span className="text-muted-foreground tabular ml-auto shrink-0 text-xs">
+                    {elapsed(since)} в фазе
+                    {run.attempt > 1
+                      ? ` · попытка ${run.attempt}${state.config.maxAttempts ? ` из ${state.config.maxAttempts}` : ''}`
+                      : ''}
+                    {run.reusedFrom ? ' · код взят у прошлой попытки' : ''}
+                  </span>
+                </div>
+                <div className="flex min-w-0 items-center gap-x-3 overflow-hidden whitespace-nowrap">
+                  <Phases current={run.phase} />
+                  {/* Последнее действие агента: фаза «пишет код» одинакова и на
+                      первой минуте, и на двадцатой. */}
+                  <Activity runId={run.id} lines={1} />
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+        {stuck.length > 0 && (
+          <ul className="m-0 grid list-none gap-1 p-0" aria-label="Чего ждёт цепочка">
+            {stuck.map((b) => {
+              const owner = state.tasks.find((t) => t.id === b.taskId)?.boardId;
+              const board = state.boards.find((x) => x.id === owner);
+              return (
+                <li
+                  key={b.taskId}
+                  className="flex min-h-(--live-row-height) min-w-0 flex-wrap items-center gap-x-2 text-sm"
+                >
+                  <span className="text-muted-foreground">Цепочка ждёт</span>
+                  <Button
+                    variant="link"
+                    className="h-auto min-w-0 p-0 text-sm font-medium whitespace-normal [overflow-wrap:anywhere]"
+                    onClick={() => onOpenTask(board?.id, b.taskId)}
+                  >
+                    {b.title}
+                  </Button>
+                  <span>{b.reason}</span>
+                  <span className="text-muted-foreground">
+                    → {b.next} · ждут задач: {b.waiting}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+        {/* Свободные места — приглушённые строки той же высоты: появление
+            исполнителя занимает место, а не раздвигает полосу. */}
+        {Array.from({ length: Math.max(0, Math.min(free, slots - rows)) }, (_, i) => (
+          <div
+            key={'free-' + i}
+            className="text-faint flex h-(--live-row-height) items-center border border-dashed border-rule px-2 text-xs rounded-sm"
+          >
+            Свободное место исполнителя
+          </div>
+        ))}
+      </div>
     </section>
   );
 }
@@ -299,7 +314,7 @@ function Attempt({ run, number, reset }: { run: Run; number: number; reset: bool
           className={cn(
             run.status === 'succeeded' && 'text-success',
             run.status === 'failed' && 'text-destructive',
-            run.status === 'active' && 'text-primary',
+            run.status === 'active' && 'text-info',
           )}
         >
           {outcomeNames[run.status]}

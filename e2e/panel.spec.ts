@@ -45,8 +45,9 @@ async function target(page: Page) {
 }
 async function openBusyTask(page: Page) {
   const { title, board } = await target(page);
-  await page.getByRole('tab', { name: 'Граф', exact: true }).click();
+  // Вкладки вида есть у экрана доски: сначала доска, затем её список.
   await page
+    .getByRole('navigation', { name: 'Доски' })
     .getByRole('button', { name: new RegExp(board) })
     .filter({ visible: true })
     .first()
@@ -135,12 +136,12 @@ test('A board switch that failed is loaded by the next successful poll instead o
       b.live &&
       b.revisions.at(-1)!.status === 'active',
   )!;
-  await page.getByRole('tab', { name: 'Список', exact: true }).click();
   await page
     .getByRole('button', { name: new RegExp(board) })
     .filter({ visible: true })
     .first()
     .click();
+  await page.getByRole('tab', { name: 'Список', exact: true }).click();
   await page.route('**/api/summary*', (route) =>
     route.fulfill({ status: 503, json: { error: 'стенд: сервер недоступен' } }),
   );
@@ -174,12 +175,12 @@ test('The dependency picker finds tasks on other boards through server search', 
   const other = summary.boards.find(
     (b) => b.title !== board && b.live && b.revisions.at(-1)!.status === 'active',
   )!;
-  await page.getByRole('tab', { name: 'Список', exact: true }).click();
   await page
     .getByRole('button', { name: new RegExp(other.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) })
     .filter({ visible: true })
     .first()
     .click();
+  await page.getByRole('tab', { name: 'Список', exact: true }).click();
   await page.getByRole('button', { name: 'Задача', exact: true }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByLabel('Найти задачу для зависимости').fill(title);
@@ -217,7 +218,10 @@ test('A failed verification snapshot is retried by its own retry, not by reloadi
     else await route.continue();
   });
   await page.goto(base);
-  await page.getByRole('tab', { name: 'Изменения', exact: true }).click();
+  await page
+    .getByRole('navigation', { name: 'Workspace' })
+    .getByRole('link', { name: 'Изменения', exact: true })
+    .click();
   const card = page.locator('article[id^="changeset-"]').first();
   await card.locator('summary', { hasText: 'История проверок' }).click();
   await card
@@ -234,6 +238,7 @@ test('A failed verification snapshot is retried by its own retry, not by reloadi
 
 test('A late summary response of the same view does not replace a newer one', async ({ page }) => {
   await page.goto(base);
+  await page.getByRole('navigation', { name: 'Доски' }).getByRole('button').first().click();
   await page.getByRole('tab', { name: 'Список', exact: true }).click();
   await expect(page.getByRole('region', { name: 'Сейчас работают' })).toBeVisible();
   await page.waitForTimeout(2500);
@@ -276,7 +281,10 @@ test('A late summary response of the same view does not replace a newer one', as
 
 test('A shortened change set description opens in full on request', async ({ page }) => {
   await page.goto(base);
-  await page.getByRole('tab', { name: 'Изменения', exact: true }).click();
+  await page
+    .getByRole('navigation', { name: 'Workspace' })
+    .getByRole('link', { name: 'Изменения', exact: true })
+    .click();
   const card = page
     .locator('article[id^="changeset-"]')
     .filter({ hasText: 'Обезличенное длинное' });
@@ -287,6 +295,7 @@ test('A shortened change set description opens in full on request', async ({ pag
 
 test('Review findings beyond the first page load on request', async ({ page }) => {
   await page.goto(base);
+  await page.getByRole('navigation', { name: 'Доски' }).getByRole('button').first().click();
   await page.getByRole('tab', { name: 'Ход работ', exact: true }).click();
   const review = page.locator('li').filter({ hasText: 'Обезличенный контракт' }).first();
   await expect(review).toContainText('30 замечаний');
@@ -306,6 +315,7 @@ test('A double click on "more findings" loads the page once and keeps every find
     await route.continue();
   });
   await page.goto(base);
+  await page.getByRole('navigation', { name: 'Доски' }).getByRole('button').first().click();
   await page.getByRole('tab', { name: 'Ход работ', exact: true }).click();
   const review = page.locator('li').filter({ hasText: 'Обезличенный контракт' }).first();
   await review.getByRole('button', { name: 'Ещё замечания (10)' }).dblclick();
@@ -353,7 +363,10 @@ test('A late snapshot response does not replace the snapshot chosen after it', a
     } else await route.continue();
   });
   await page.goto(base);
-  await page.getByRole('tab', { name: 'Изменения', exact: true }).click();
+  await page
+    .getByRole('navigation', { name: 'Workspace' })
+    .getByRole('link', { name: 'Изменения', exact: true })
+    .click();
   const card = page.locator('article[id^="changeset-"]').first();
   await card.locator('summary', { hasText: 'История проверок' }).click();
   const buttons = card.getByRole('button', { name: /Снимок задач/ });
@@ -383,7 +396,10 @@ test('A summary refresh while paging the verification history keeps the history 
     } else await route.continue();
   });
   await page.goto(base);
-  await page.getByRole('tab', { name: 'Изменения', exact: true }).click();
+  await page
+    .getByRole('navigation', { name: 'Workspace' })
+    .getByRole('link', { name: 'Изменения', exact: true })
+    .click();
   const card = page
     .locator('article[id^="changeset-"]')
     .filter({ hasText: 'Обезличенное длинное' });
@@ -425,7 +441,6 @@ test('Earlier revisions page in the history tab, and an earlier plan opens with 
   const first = own.board.revisions.find((r) => r.number === 1)!;
   const task = own.tasks.find((t) => first.taskIds.includes(t.id))!;
   await page.goto(base);
-  await page.getByRole('tab', { name: 'Список', exact: true }).click();
   await page
     .getByRole('button', { name: /Доска с длинной историей/ })
     .filter({ visible: true })

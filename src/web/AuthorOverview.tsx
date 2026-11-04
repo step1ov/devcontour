@@ -205,7 +205,10 @@ export function AuthorOverviewPanel({ onOpenChange }: { onOpenChange?: (id: stri
     >
       <header className="grid gap-1">
         <h2 className="m-0 text-lg font-semibold">{o.headline}</h2>
-        <p className="text-muted-foreground m-0 text-sm">{o.activity.doing}</p>
+        {/* Подпись не повторяет заголовок слово в слово. */}
+        {o.activity.doing.replace(/[.!…]+$/, '') !== o.headline.replace(/[.!…]+$/, '') && (
+          <p className="text-muted-foreground m-0 text-sm">{o.activity.doing}</p>
+        )}
         {error && (
           <p className="text-destructive m-0 text-sm" role="alert">
             Сводка не обновилась: {error}

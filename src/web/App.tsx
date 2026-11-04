@@ -6,8 +6,9 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
-  type FormEvent,
 } from 'react';
 import {
   GitBranch,
@@ -19,20 +20,16 @@ import {
   Clock,
   AlertCircle,
   ArrowUpRight,
-  LayoutGrid,
-  List,
-  History,
   X,
   FileCheck,
   FileText,
   RotateCcw,
   Workflow,
   ChevronRight,
-  Activity,
   Bot,
   Eye,
   Loader2,
-  SquareKanban,
+  Copy,
 } from 'lucide-react';
 import type { Task, Run } from '../core/model.ts';
 import { Alert, AlertDescription } from '@/ui/alert.tsx';
@@ -76,8 +73,10 @@ interface TaskDetail {
 import { roleLabel, currentRoles, setRoleSource } from './roles.ts';
 import { Phases, engine, elapsed } from './Workers.tsx';
 import { AttemptTimeline, LiveWork } from './LiveWork.tsx';
-import { boardPhaseLabels } from '../core/work-status.ts';
-import { QueueStopBanner } from './QueueStopBanner.tsx';
+import { boardPhaseLabels, chainBlockers } from '../core/work-status.ts';
+import { statusKey, statusNames, statusOfKey, taskStatus, flashOf } from './status.ts';
+import { Toaster, toast } from 'sonner';
+import { createPortal } from 'react-dom';
 
 const waitingReasons: Record<string, string> = {
   product_approval_required:
@@ -113,18 +112,6 @@ const kanbanColumns: { key: string; label: string; hint: string; statuses: strin
   },
   { key: 'done', label: 'Готово', hint: 'Прошли проверки', statuses: ['done', 'cancelled'] },
 ];
-const statusNames: Record<string, string> = {
-  draft: 'Черновик',
-  ready: 'Готова к запуску',
-  running: 'Разработка',
-  verifying: 'Проверки',
-  reviewing: 'Ревью',
-  integrating: 'Интеграция',
-  done: 'Проверена локально',
-  failed: 'Сбой',
-  cancelled: 'Отменена',
-  blocked: 'Ждёт зависимостей',
-};
 const stamp = (value?: string) =>
   value
     ? new Date(value).toLocaleString('ru-RU', {
@@ -134,11 +121,8 @@ const stamp = (value?: string) =>
         minute: '2-digit',
       })
     : '—';
-function status(t: UITask) {
-  return t.status === 'ready' && t.blockers.length ? 'blocked' : t.status;
-}
-const taskStatusName = (t: UITask) =>
-  t.status === 'done' && t.sharedCompletion ? 'Принята из Git' : statusNames[status(t)];
+const status = (t: UITask) => statusKey(t);
+const taskStatusName = (t: UITask) => taskStatus(t).label;
 // Что делает агент на узле графа: модель и фаза. Без этого граф отвечал
 // только «в работе» и не показывал, кто и на каком шаге.
 const phaseLabel: Record<string, string> = {
@@ -157,16 +141,6 @@ function liveLabel(run?: PanelRun) {
 }
 const shortId = (id: string) =>
   /^[A-Z]+-[a-f0-9-]{36}$/.test(id) ? id.slice(0, id.indexOf('-') + 9) : id;
-const badgeTone: Record<string, 'secondary' | 'ready' | 'success' | 'warning' | 'destructive'> = {
-  ready: 'ready',
-  running: 'ready',
-  verifying: 'ready',
-  reviewing: 'ready',
-  integrating: 'ready',
-  done: 'success',
-  blocked: 'warning',
-  failed: 'destructive',
-};
 // Строка задачи отвечала только «в каком она статусе». На вопрос «чем агент
 // занят прямо сейчас» это не отвечает: статус `running` одинаков и через минуту
 // после выдачи, и на третьей попытке в ревью. Живая часть строки показывает
@@ -176,14 +150,32 @@ function TaskLive({
   task,
   runs,
   maxAttempts,
+  compact = false,
+  titles,
+  hideWaiting = false,
 }: {
   task: UITask;
   runs: PanelRun[];
   maxAttempts?: number;
+  /** Карточка колонок: одна строка фазы и сводка проверок. */
+  compact?: boolean;
+  /** Названия задач по id: «ждёт» называет задачу, а не её UUID. */
+  titles?: Map<string, string>;
+  /** Строка уже называет зависимости («после: …»): «ждёт» не повторяется. */
+  hideWaiting?: boolean;
 }) {
   const run = runs.filter((r) => r.taskId === task.id).at(-1);
   const active = run?.status === 'active';
   const exhausted = maxAttempts !== undefined && task.attempt >= maxAttempts;
+  if (active && compact)
+    return (
+      <span className="grid min-w-0 gap-0.5 text-xs">
+        <span className="text-info truncate font-medium">
+          ● {phaseLabel[run.phase] ?? run.phase} · {elapsed(run.startedAt)}
+        </span>
+        <GateSummary run={run} />
+      </span>
+    );
   if (active)
     return (
       <div className="mt-2 grid gap-1">
@@ -200,9 +192,9 @@ function TaskLive({
       </div>
     );
   if (task.status === 'ready' && task.blockers.length)
-    return (
-      <small className="text-muted-foreground mt-1 block">
-        Ждёт: {task.blockers.map(shortId).join(', ')}
+    return hideWaiting ? null : (
+      <small className="text-muted-foreground mt-1 block min-w-0 [overflow-wrap:anywhere]">
+        Ждёт: {task.blockers.map((id) => titles?.get(id) ?? shortId(id)).join(', ')}
       </small>
     );
   if (task.status === 'ready')
@@ -236,7 +228,8 @@ function TaskLive({
         )}
       </small>
     );
-  if (task.status === 'done' && run) return <GateChips run={run} />;
+  if (task.status === 'done' && run)
+    return compact ? <GateSummary run={run} /> : <GateChips run={run} />;
   return null;
 }
 // Какие проверки задача уже прошла на своём SHA: зелёный gate — это и есть
@@ -247,17 +240,47 @@ function GateChips({ run }: { run: PanelRun }) {
   const gates = [...latest.values()];
   if (!gates.length) return null;
   return (
-    <span className="mt-1 flex flex-wrap gap-1">
+    <span className="mt-1 flex min-w-0 flex-wrap gap-1">
       {gates.map((e) => (
         <Badge
           key={e.id}
           variant={e.passed ? 'success' : 'destructive'}
-          className="font-mono text-[11px]"
+          className="min-w-0 font-mono"
           title={`${e.gate} · ${e.phase} · ${e.summary}`}
         >
-          {e.passed ? '✓' : '✗'} {e.gate}
+          <span className="truncate">
+            {e.passed ? '✓' : '✗'} {e.gate}
+            {e.phase === 'integration' ? ' · интеграция' : ''}
+          </span>
         </Badge>
       ))}
+    </span>
+  );
+}
+// Карточка колонок — сводка, а не протокол: проверки одной строкой по фазам,
+// полный список — в инспекторе.
+function GateSummary({ run }: { run: PanelRun }) {
+  const latest = new Map<string, PanelEvidence>();
+  for (const e of run.evidence) latest.set(e.gate + e.phase, e);
+  const gates = [...latest.values()];
+  if (!gates.length) return null;
+  const phase = (name: string) => gates.filter((e) => e.phase === name);
+  const part = (label: string, items: PanelEvidence[]) => {
+    if (!items.length) return null;
+    const failed = items.filter((e) => !e.passed).length;
+    return (
+      <span className={failed ? 'text-destructive' : 'text-success'}>
+        {label} {failed ? `✗${failed}` : `✓${items.length}`}
+      </span>
+    );
+  };
+  return (
+    <span
+      className="tabular flex flex-wrap gap-x-2 text-xs"
+      title={gates.map((e) => `${e.passed ? '✓' : '✗'} ${e.gate} · ${e.phase}`).join('\n')}
+    >
+      {part('кандидат', phase('candidate'))}
+      {part('интеграция', phase('integration'))}
     </span>
   );
 }
@@ -312,26 +335,36 @@ function BoardLink({
   current: boolean;
   onSelect: (id: string) => void;
 }) {
+  // Прогресс справа числом, фаза — строкой ниже: подпись больше не рвётся
+  // посередине «0 / из 5».
+  const share = /^(\d+) из (\d+)/.exec(b.progress ?? '');
+  const working = /· (\d+) в работе/.exec(b.progress ?? '');
+  const accepted = b.revisions.at(-1)!.status === 'accepted';
   return (
-    <Button
-      variant="outline"
+    <button
+      type="button"
       className={cn(
-        'mt-1 h-auto w-full justify-start gap-3 border-0 p-3 text-left text-sm whitespace-normal max-[760px]:w-auto max-[760px]:min-w-48 max-[760px]:shrink-0 max-[760px]:p-2',
-        current && 'text-primary bg-accent',
+        'text-foreground flex w-full min-w-0 cursor-pointer items-start gap-2 rounded-sm px-2 py-1.5 text-left text-sm transition-colors duration-(--duration-hover) hover:bg-raised max-[760px]:w-auto max-[760px]:min-w-44 max-[760px]:shrink-0',
+        current && 'bg-active hover:bg-active font-medium',
       )}
       onClick={() => onSelect(b.id)}
       aria-current={current ? 'page' : undefined}
     >
-      <LayoutGrid />
-      <span>
-        {b.title}
-        <small>
-          {boardPhaseLabels[b.phase]} · ревизия {b.revisions.at(-1)!.number}
-          {b.progress && ' · ' + b.progress}
+      <span className="min-w-0 flex-1">
+        <span className="line-clamp-2 [overflow-wrap:anywhere]">{b.title}</span>
+        <small className="truncate font-normal">
+          {boardPhaseLabels[b.phase]} · r{b.revisions.at(-1)!.number}
+          {working && ` · в работе ${working[1]}`}
         </small>
       </span>
-      {b.revisions.at(-1)!.status === 'accepted' && <Check className="nav-check" />}
-    </Button>
+      {share ? (
+        <span className="text-muted-foreground tabular shrink-0 pt-px text-xs font-normal">
+          {share[1]}/{share[2]}
+        </span>
+      ) : accepted ? (
+        <Check aria-hidden="true" className="text-success size-4 shrink-0" />
+      ) : null}
+    </button>
   );
 }
 // Причина ревизии в сводке сокращена; целиком — из деталей ревизии.
@@ -564,7 +597,8 @@ function ChangeSetHistory({
                 <ul aria-label={`Снимок задач проверки ${h.id}`} className="mt-1 grid gap-1">
                   {snapshot.items.map((t) => (
                     <li key={t.id}>
-                      {t.id} · {t.title} · {statusNames[t.status] ?? t.status}
+                      {t.id} · {t.title} ·{' '}
+                      {(statusNames as Record<string, string>)[t.status] ?? t.status}
                       {t.resultSha && <code> {t.resultSha.slice(0, 8)}</code>}
                     </li>
                   ))}
@@ -622,11 +656,8 @@ function ContractText({ id, bytes }: { id: string; bytes: number }) {
   );
 }
 function StatusBadge({ value, children }: { value: string; children?: ReactNode }) {
-  return (
-    <Badge variant={badgeTone[value] ?? 'secondary'}>
-      {children ?? statusNames[value] ?? value}
-    </Badge>
-  );
+  const known = statusOfKey(value);
+  return <Badge variant={known.badge}>{children ?? known.label}</Badge>;
 }
 async function api(path: string, input?: unknown, method = 'POST') {
   const response = await fetch(
@@ -639,10 +670,93 @@ async function api(path: string, input?: unknown, method = 'POST') {
           body: JSON.stringify(input),
         },
   );
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error ?? 'Ошибка запроса');
+  // Ответ без JSON (прокси, сбой сервера) называется по коду ответа, а не
+  // сырым «Unexpected token» парсера.
+  const data = await response.json().catch(() => undefined);
+  if (!response.ok || data === undefined)
+    throw new Error(
+      data?.error ??
+        `сервер ответил ${response.status}${response.statusText ? ' ' + response.statusText : ''}`,
+    );
   return data;
 }
+// Сетевой отказ fetch — английское «Failed to fetch»: для человека это
+// «сервер не отвечает», с адресом, который он открыл.
+function humanError(message: string) {
+  return /failed to fetch|networkerror|load failed/i.test(message)
+    ? `Сервер DevContour не отвечает по адресу ${window.location.host}. Проверьте, что devcontour serve запущен.`
+    : message;
+}
+// Экраны workspace — в боковой навигации; у доски свои вкладки. Вид, доска и
+// задача — в адресе: ссылка ведёт к доказательству, «Назад» возвращает вид.
+const boardTabs = [
+  { key: 'graph', label: 'Граф' },
+  { key: 'list', label: 'Список' },
+  { key: 'kanban', label: 'Колонки' },
+  { key: 'progress', label: 'Ход работ' },
+  { key: 'history', label: 'Ревизии' },
+] as const;
+const workspaceScreens = [
+  { key: 'overview', label: 'Обзор' },
+  { key: 'product', label: 'Карта продукта' },
+  { key: 'workspace', label: 'Общий граф' },
+  { key: 'changesets', label: 'Изменения' },
+  { key: 'contracts', label: 'Контракты' },
+] as const;
+const isBoardTab = (tab: string) => boardTabs.some((t) => t.key === tab);
+function readAppLocation() {
+  const params = new URLSearchParams(window.location.search);
+  const tab = params.get('tab') ?? '';
+  const known = isBoardTab(tab) || workspaceScreens.some((s) => s.key === tab);
+  return {
+    tab: known ? tab : 'overview',
+    board: params.get('board') ?? '',
+    task: params.get('task') ?? '',
+  };
+}
+function appHref(tab: string) {
+  const params = new URLSearchParams(window.location.search);
+  for (const key of ['tab', 'board', 'task']) params.delete(key);
+  if (tab !== 'overview') params.set('tab', tab);
+  const search = params.toString();
+  return window.location.pathname + (search ? '?' + search : '');
+}
+// Задача, которая держит приёмку: незавершённая, без незакрытых зависимостей,
+// и от неё (прямо или через других) ждёт больше всего задач доски.
+function holdingTask(tasks: UITask[]) {
+  const open = tasks.filter((t) => !['done', 'cancelled'].includes(t.status));
+  const openIds = new Set(open.map((t) => t.id));
+  const dependents = new Map<string, string[]>();
+  for (const t of open)
+    for (const d of t.dependsOn) dependents.set(d, [...(dependents.get(d) ?? []), t.id]);
+  const reach = (id: string) => {
+    const seen = new Set<string>();
+    const queue = [...(dependents.get(id) ?? [])];
+    while (queue.length) {
+      const next = queue.shift()!;
+      if (seen.has(next) || !openIds.has(next)) continue;
+      seen.add(next);
+      queue.push(...(dependents.get(next) ?? []));
+    }
+    return seen;
+  };
+  let best: { task: UITask; waiting: Set<string> } | undefined;
+  for (const t of open) {
+    if (t.blockers.length) continue;
+    const waiting = reach(t.id);
+    if (waiting.size && (!best || waiting.size > best.waiting.size)) best = { task: t, waiting };
+  }
+  return best;
+}
+const plural = (n: number, one: string, few: string, many: string) => {
+  const mod10 = n % 10,
+    mod100 = n % 100;
+  return mod10 === 1 && mod100 !== 11
+    ? one
+    : mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)
+      ? few
+      : many;
+};
 function Modal({
   title,
   children,
@@ -675,25 +789,106 @@ function Modal({
     </Dialog>
   );
 }
+// Подзаголовок экрана workspace: что на нём и для чего.
+const workspaceNotes: Record<string, string> = {
+  overview: 'Что можно попробовать, какое решение нужно и что делает система.',
+  product: 'Пользовательские возможности, приложения и проверенный результат.',
+  workspace: 'Задачи всех досок и связи между ними.',
+  changesets:
+    'Одна возможность продукта, несколько репозиториев. Приёмка фиксирует проверенную комбинацию SHA.',
+  contracts:
+    'Новая версия создаётся отдельным контрактом. Задачи закрепляют его содержимое при утверждении.',
+};
+// Описание задачи в инспекторе — три строки, целиком по запросу: длинная
+// постановка отодвигала «что нужно» и доказательства за сгиб.
+function TaskDescription({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const long = text.length > 220 || text.split('\n').length > 3;
+  return (
+    <div className="mt-2">
+      <p
+        className={cn(
+          'text-muted-foreground m-0 break-words whitespace-pre-wrap',
+          long && !open && 'line-clamp-3',
+        )}
+      >
+        {text}
+      </p>
+      {long && (
+        <Button
+          variant="link"
+          size="sm"
+          className="h-auto px-0"
+          aria-expanded={open}
+          onClick={() => setOpen(!open)}
+        >
+          {open ? 'Свернуть' : 'Показать полностью'}
+        </Button>
+      )}
+    </div>
+  );
+}
 export function App() {
   const flowRef =
     useRef<(options: { padding: number; minZoom: number; maxZoom: number }) => Promise<boolean>>(
       null,
     );
-  const canvasRef = useRef<HTMLDivElement>(null);
   const [data, setData] = useState<Snapshot>();
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState('');
-  const [boardId, setBoardId] = useState('');
+  const [boardId, setBoardId] = useState(() => readAppLocation().board);
   const [revisionNumber, setRevisionNumber] = useState<number | null>(null);
-  const [selected, setSelected] = useState('');
+  const [selected, setSelected] = useState(() => readAppLocation().task);
   // An empty graph is the least informative thing to land on: before the first
   // board exists, what the operator needs to see is how the contour is set up.
   // Автор продукта начинает с обзора: что попробовать и какое решение нужно.
-  const [tab, setTab] = useState('overview');
-  // Обзор и карта продукта — представления всего workspace, а не одной доски.
-  const workspaceView = tab === 'product' || tab === 'overview';
+  const [tab, setTab] = useState(() => readAppLocation().tab);
+  // Экран доски — одна из её вкладок; остальное — экраны всего workspace.
+  const boardScreen = isBoardTab(tab);
+  // Выбор доски из workspace открывает её последнюю вкладку (сначала —
+  // колонки, как привычная доска задач).
+  const [boardTab, setBoardTab] = useState(() =>
+    isBoardTab(readAppLocation().tab) ? readAppLocation().tab : 'kanban',
+  );
+  useEffect(() => {
+    if (boardScreen) setBoardTab(tab);
+  }, [tab, boardScreen]);
+  // Адрес: замена записи для выбора задачи и первой записи, новая запись —
+  // для смены вида или доски. Чужие параметры адреса (этап подготовки)
+  // сохраняются.
+  const wroteLocation = useRef(false);
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const before = new URLSearchParams(params);
+    for (const key of ['tab', 'board', 'task']) params.delete(key);
+    if (tab !== 'overview') params.set('tab', tab);
+    if (boardScreen && boardId) params.set('board', boardId);
+    if ((boardScreen || tab === 'workspace') && selected) params.set('task', selected);
+    const search = params.toString();
+    const next = window.location.pathname + (search ? '?' + search : '');
+    if (next === window.location.pathname + window.location.search) {
+      wroteLocation.current = true;
+      return;
+    }
+    const sameView =
+      before.get('tab') === params.get('tab') && before.get('board') === params.get('board');
+    window.history[!wroteLocation.current || sameView ? 'replaceState' : 'pushState'](
+      window.history.state,
+      '',
+      next,
+    );
+    wroteLocation.current = true;
+  }, [tab, boardId, selected, boardScreen]);
+  useEffect(() => {
+    const restore = () => {
+      const place = readAppLocation();
+      setTab(place.tab);
+      if (place.board) setBoardId(place.board);
+      setSelected(place.task);
+    };
+    window.addEventListener('popstate', restore);
+    return () => window.removeEventListener('popstate', restore);
+  }, []);
   // Переход из обзора к проверке изменения: фокус и прокрутка к его карточке.
   const [focusChange, setFocusChange] = useState('');
   useEffect(() => {
@@ -870,8 +1065,7 @@ export function App() {
   };
   const [revisionsError, setRevisionsError] = useState('');
   const current = revision?.number === board?.revisions.at(-1)?.number;
-  const editable =
-    revision?.status === 'active' && current && tab !== 'workspace' && !workspaceView;
+  const editable = revision?.status === 'active' && current && boardScreen;
   const tasks = useMemo(
     () => data?.tasks.filter((t) => revision?.taskIds.includes(t.id)) ?? [],
     [data, revision],
@@ -984,26 +1178,44 @@ export function App() {
       valid = false;
     };
   }, [modal, boardId, roots]);
-  const hasData = !!data;
+  // Кадр графа: вписывается при смене размера и состава узлов, пока человек
+  // сам не сдвинул или не приблизил граф. Смена доски, ревизии или вида
+  // возвращает автоматическое вписывание.
+  const userMoved = useRef(false);
+  const fit = useCallback(() => {
+    if (!userMoved.current) void flowRef.current?.({ padding: 0.12, minZoom: 0.75, maxZoom: 1 });
+  }, []);
+  const observer = useRef<ResizeObserver>(null);
+  const canvasRef = useCallback(
+    (element: HTMLDivElement | null) => {
+      observer.current?.disconnect();
+      if (!element) return;
+      observer.current = new ResizeObserver(() => fit());
+      observer.current.observe(element);
+    },
+    [fit],
+  );
+  useEffect(() => () => observer.current?.disconnect(), []);
   useEffect(() => {
-    if (!canvasRef.current) return;
-    const observer = new ResizeObserver(() => {
-      void flowRef.current?.({ padding: 0.12, minZoom: 0.65, maxZoom: 1 });
-    });
-    observer.observe(canvasRef.current);
-    return () => observer.disconnect();
-  }, [tab, boardId, hasData]);
+    userMoved.current = false;
+  }, [boardId, revision?.number, tab]);
+  // Итог действия — уведомление поверх экрана (Sonner): поток страницы не
+  // сдвигается, цель клика не уезжает. Ошибка в открытом диалоге показывается
+  // в диалоге, иначе — уведомлением, которое закрывает человек.
   async function act(fn: () => Promise<unknown>, message: string, close = true) {
     setBusy(true);
     setError('');
+    const inDialog = !!modal || !!log;
     try {
       await fn();
       await refresh();
-      setNotice(message);
+      if (message) toast.success(message);
       if (close) setModal(null);
       return true;
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const text = humanError(e instanceof Error ? e.message : String(e));
+      if (inDialog) setError(text);
+      else toast.error(text, { duration: Infinity, closeButton: true });
       return false;
     } finally {
       setBusy(false);
@@ -1014,9 +1226,39 @@ export function App() {
     setRevisionNumber(null);
     setSelected('');
     setQuery('');
-    // Выбор доски из обзора или карты продукта — просьба показать доску.
-    if (workspaceView) setTab('kanban');
+    // Выбор доски на экране workspace — просьба показать доску.
+    if (!boardScreen) setTab(boardTab);
   }
+  const titles = useMemo(() => new Map((data?.tasks ?? []).map((t) => [t.id, t.title])), [data]);
+  // Задача, которая держит приёмку доски, и путь от неё: единственная краска
+  // данных на графе — рёбра этого пути.
+  const holder = useMemo(
+    () => (boardScreen ? holdingTask(tasks) : undefined),
+    [boardScreen, tasks],
+  );
+  // След изменения статуса: статус задачи сменился между двумя снимками одной
+  // области (не при первой загрузке и не при смене доски или фильтра).
+  const previous = useRef<{ scope: string; statuses: Map<string, string> }>({
+    scope: '',
+    statuses: new Map(),
+  });
+  const [changed, setChanged] = useState<ReadonlySet<string>>(new Set());
+  const changedTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => {
+    const scope = `${boardId}|${revision?.number}|${tab}|${query}|${repositoryFilter}`;
+    const statuses = new Map(graphTasks.map((t) => [t.id, status(t)]));
+    const prior = previous.current;
+    previous.current = { scope, statuses };
+    if (prior.scope !== scope) return;
+    const ids = [...statuses]
+      .filter(([id, value]) => prior.statuses.has(id) && prior.statuses.get(id) !== value)
+      .map(([id]) => id);
+    if (!ids.length) return;
+    setChanged(new Set(ids));
+    clearTimeout(changedTimer.current);
+    changedTimer.current = setTimeout(() => setChanged(new Set()), 1300);
+  }, [graphTasks, boardId, revision?.number, tab, query, repositoryFilter]);
+  useEffect(() => () => clearTimeout(changedTimer.current), []);
   const graph = useMemo(() => {
     const columns = new Map<number, number>();
     const lv = levels(filtered);
@@ -1024,11 +1266,15 @@ export function App() {
     const token = (key: string) => parseFloat(styles.getPropertyValue(key));
     const dx = token('--node-width') + token('--node-gap-x'),
       dy = token('--node-height') + token('--node-gap-y');
+    // Подсвечены рёбра от задачи, которая держит приёмку, к тем, кого она
+    // держит напрямую: остальной граф тише, чтобы находка читалась.
+    const holds = holder?.task.id;
     return {
       nodes: filtered.map((t) => {
         const level = lv.get(t.id)!;
         const row = columns.get(level) ?? 0;
         columns.set(level, row + 1);
+        const shown = taskStatus(t);
         return {
           id: t.id,
           type: 'task',
@@ -1039,14 +1285,17 @@ export function App() {
             title: t.title,
             repositoryId: t.repositoryId,
             role: roleLabel(t.role),
-            status: status(t),
-            statusLabel: taskStatusName(t),
+            status: shown.key,
+            statusLabel: shown.label,
+            tone: shown.tone,
             live: liveLabel(
               data?.runs.find((r) => r.id === t.activeRunId && r.status === 'active'),
             ),
+            holds: holder?.task.id === t.id,
+            changed: changed.has(t.id),
           },
           selected: t.id === selected,
-          ariaLabel: `${t.id}: ${t.title}, ${taskStatusName(t)}`,
+          ariaLabel: `${t.id}: ${t.title}, ${shown.label}`,
         };
       }),
       edges: filtered.flatMap((t) =>
@@ -1057,33 +1306,80 @@ export function App() {
             source: d,
             target: t.id,
             type: 'smoothstep',
-            className: status(t) === 'done' ? 'edge-done' : '',
+            className: status(t) === 'done' ? 'edge-done' : d === holds ? 'edge-path' : '',
           })),
       ),
     };
-  }, [filtered, selected, data]);
+  }, [filtered, selected, data, holder, changed]);
+  const nodeSet = filtered.map((t) => t.id).join();
+  useEffect(() => {
+    const timer = setTimeout(fit, 60);
+    return () => clearTimeout(timer);
+  }, [nodeSet, fit]);
+  // «/» — к поиску задач, как в привычных инструментах.
+  const search = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+      if (!search.current) return;
+      e.preventDefault();
+      search.current.focus();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+  // Переключатель очереди: после успешного запроса кнопка остывает 600 мс —
+  // нетерпеливый второй клик в ту же точку не ставит очередь обратно на паузу.
+  const [queueBusy, setQueueBusy] = useState(false);
+  const [cooling, setCooling] = useState(false);
+  const cooldown = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(cooldown.current), []);
+  const [loadingAgain, setLoadingAgain] = useState(false);
   if (!data)
     return (
-      <main className="grid min-h-dvh place-content-center justify-items-center gap-4">
-        <Workflow />
+      <main className="bg-frame grid min-h-dvh place-content-center justify-items-center gap-3 p-6 text-center">
+        <Workflow aria-hidden="true" />
         <h1>DevContour</h1>
-        <p role="status">{error || pollError || 'Загружаем рабочий граф…'}</p>
-        {(error || pollError) && (
-          <Button variant="outline" onClick={() => location.reload()}>
-            Повторить
-          </Button>
+        {error || pollError ? (
+          <>
+            <p role="alert" className="text-destructive m-0 max-w-[60ch]">
+              Состояние не загрузилось: {humanError(error || pollError)}
+            </p>
+            <Button
+              variant="outline"
+              disabled={loadingAgain}
+              onClick={() => {
+                setLoadingAgain(true);
+                setError('');
+                refresh()
+                  .catch((e: Error) => setPollError(e.message))
+                  .finally(() => setLoadingAgain(false));
+              }}
+            >
+              {loadingAgain && <Loader2 className="animate-spin" aria-hidden="true" />}
+              Повторить
+            </Button>
+          </>
+        ) : (
+          <p role="status" className="text-muted-foreground m-0">
+            Загружаем рабочий граф…
+          </p>
         )}
       </main>
     );
   // Имена ролей объявляет workspace, а нужны они и там, где конфигурации под
   // рукой нет: источник ставится один раз, как только состояние загружено.
   setRoleSource(data.config);
+  // Счётчики полосы — в охвате доски: те же задачи, что на графе и в списке.
   const liveTasks = tasks.filter((t) => t.status !== 'cancelled');
   const done = liveTasks.filter((t) => t.status === 'done').length;
   const inWork = liveTasks.filter((t) => t.activeRunId).length;
   const failedCount = liveTasks.filter((t) => t.status === 'failed').length;
-  const blocked = tasks.filter((t) => status(t) === 'blocked').length;
-  const ready = tasks.filter((t) => data.ready.includes(t.id)).length;
+  const blocked = liveTasks.filter((t) => status(t) === 'blocked').length;
+  const ready = liveTasks.filter((t) => status(t) === 'ready').length;
+  const drafts = tasks.filter((t) => t.status === 'draft').length;
   // Полная последняя попытка — из деталей; до их загрузки — компактная строка.
   const latestRun: Run | PanelRun | undefined =
     full?.runs.items[0] ??
@@ -1098,56 +1394,251 @@ export function App() {
   const displayedReviewer = displayedRun
     ? { runtime: displayedRun.reviewer, model: displayedRun.reviewerModel }
     : plannedReviewer;
+  const activeRuns = data.runs.filter((r) => r.status === 'active').length;
+  // Одна залитая кнопка на экран — следующее решение по состоянию доски.
+  const primary =
+    !boardScreen || !board
+      ? undefined
+      : current && revision?.status === 'accepted'
+        ? 'correct'
+        : editable && drafts > 0
+          ? 'approve'
+          : editable && tasks.length > 0 && done === tasks.length
+            ? 'accept'
+            : undefined;
+  // Запуск очереди — главное действие доски, только когда другого нет и
+  // запускать есть что; иначе переключатель живёт в верхней строке.
+  const queuePrimary = boardScreen && !primary && data.paused && data.ready.length > 0;
+  const toggleQueue = async () => {
+    const start = data.paused;
+    setQueueBusy(true);
+    const ok = await act(
+      () => api('scheduler', { start }),
+      start ? 'Очередь всех досок запущена' : 'Новые задачи приостановлены; текущие продолжаются',
+      false,
+    );
+    setQueueBusy(false);
+    if (!ok) return;
+    setCooling(true);
+    clearTimeout(cooldown.current);
+    cooldown.current = setTimeout(() => setCooling(false), 600);
+  };
+  const queueButton = (main: boolean) => (
+    <Button
+      variant={main ? 'default' : 'outline'}
+      size={main ? 'default' : 'sm'}
+      className={main ? 'min-w-44' : 'min-w-36'}
+      disabled={busy || cooling || (data.paused && !data.ready.length)}
+      aria-busy={queueBusy || undefined}
+      onClick={() => void toggleQueue()}
+    >
+      {queueBusy ? (
+        <Loader2 className="animate-spin" aria-hidden="true" />
+      ) : data.paused ? (
+        <Play />
+      ) : (
+        <Pause />
+      )}
+      {queueBusy
+        ? data.paused
+          ? 'Запускаем…'
+          : 'Ставим на паузу…'
+        : data.paused
+          ? 'Запустить очередь'
+          : 'Пауза очереди'}
+    </Button>
+  );
+  const screenTitle = boardScreen
+    ? (board?.title ?? 'Создайте первую доску')
+    : (workspaceScreens.find((s) => s.key === tab)?.label ?? 'Обзор');
+  const openTask = (id: string) => {
+    setQuery('');
+    setSelected(id);
+  };
+  // Строка-находка под заголовком доски: что держит приёмку и какое следующее
+  // решение. Одна строка, высота не меняется при опросе.
+  const finding: ReactNode = (() => {
+    if (!boardScreen) return workspaceNotes[tab];
+    if (!board) return 'Опишите цель, добавьте задачи и их зависимости.';
+    if (revision?.status === 'accepted')
+      return (
+        <span className="text-success">
+          Ревизия {revision.number} принята {stamp(revision.acceptedAt)}. Снимок сохранён
+          {revision.snapshot && (
+            <>
+              {' '}
+              <code>{revision.snapshot.sha.slice(0, 8)}</code>
+            </>
+          )}
+          ; изменения начнут новый цикл и сохранят эту историю.
+        </span>
+      );
+    if (!liveTasks.length)
+      return board.description ?? 'Добавьте первый результат и критерии его приёмки.';
+    if (done === liveTasks.length) return 'Все задачи проверены — доску можно принять.';
+    const link = (t: { id: string; title: string }) => (
+      <button
+        type="button"
+        className="text-info cursor-pointer font-medium hover:underline"
+        onClick={() => openTask(t.id)}
+      >
+        {t.title}
+      </button>
+    );
+    const stuck = chainBlockers(tasks, data.config.maxAttempts).filter((b) =>
+      tasks.some((t) => t.id === b.taskId),
+    )[0];
+    if (stuck)
+      return (
+        <>
+          Приёмку держит {link({ id: stuck.taskId, title: stuck.title })}: {stuck.reason}.{' '}
+          <span className="text-muted-foreground">
+            Нужно: {stuck.next}
+            {stuck.waiting
+              ? ` · ждут ${stuck.waiting} ${plural(stuck.waiting, 'задача', 'задачи', 'задач')}`
+              : ''}
+            .
+          </span>
+        </>
+      );
+    if (holder) {
+      const t = holder.task;
+      const run = data.runs.find((r) => r.id === t.activeRunId && r.status === 'active');
+      const n = holder.waiting.size;
+      return (
+        <>
+          Приёмку держит {link(t)}: от неё {plural(n, 'ждёт', 'ждут', 'ждут')} {n}{' '}
+          {plural(n, 'задача', 'задачи', 'задач')}.{' '}
+          <span className="text-muted-foreground">
+            {run
+              ? `Сейчас: ${phaseLabel[run.phase] ?? run.phase}.`
+              : t.status === 'draft'
+                ? 'План не утверждён.'
+                : t.status === 'failed'
+                  ? 'Сбой, нужен повтор.'
+                  : data.paused
+                    ? 'Готова к запуску, ждёт очередь.'
+                    : 'Готова, ждёт свободного исполнителя.'}
+          </span>
+        </>
+      );
+    }
+    if (inWork) return `Идёт работа: в работе ${inWork}, принято ${done} из ${liveTasks.length}.`;
+    if (drafts) return 'План собран и ждёт утверждения: черновики очередь не выдаёт.';
+    return board.description ?? `Принято ${done} из ${liveTasks.length}.`;
+  })();
+  const showInspector = boardScreen ? tab !== 'progress' && tab !== 'history' : tab === 'workspace';
+  const showToolbar =
+    (boardScreen && tab !== 'progress' && tab !== 'history') || tab === 'workspace';
+  const onTabKey = (e: ReactKeyboardEvent<HTMLElement>) => {
+    const keys = boardTabs.map((t) => t.key as string);
+    const at = keys.indexOf(tab);
+    const next =
+      e.key === 'ArrowRight'
+        ? (at + 1) % keys.length
+        : e.key === 'ArrowLeft'
+          ? (at - 1 + keys.length) % keys.length
+          : e.key === 'Home'
+            ? 0
+            : e.key === 'End'
+              ? keys.length - 1
+              : -1;
+    if (next < 0) return;
+    e.preventDefault();
+    setTab(keys[next]);
+    document.getElementById('tab-' + keys[next])?.focus();
+  };
+  // Отменённая задача ничего не ждёт: в «От неё зависят» её нет.
+  const dependents = task
+    ? data.tasks.filter((t) => t.dependsOn.includes(task.id) && t.status !== 'cancelled')
+    : [];
+  const evidence = full?.runs.items[0]?.evidence ?? [];
   return (
-    <div className="grid min-h-dvh grid-cols-[var(--sidebar-width)_minmax(0,1fr)] max-[1180px]:grid-cols-[12rem_minmax(0,1fr)] max-[760px]:block">
-      <aside className="bg-card flex flex-col border-r px-3 py-6 max-[1180px]:px-2 max-[760px]:border-r-0 max-[760px]:border-b max-[760px]:p-3">
+    <div className="bg-frame grid min-h-dvh grid-cols-[var(--sidebar-width)_minmax(0,1fr)] max-[1180px]:grid-cols-[var(--sidebar-width-narrow)_minmax(0,1fr)] max-[760px]:block min-[1181px]:h-dvh min-[1181px]:overflow-hidden">
+      <aside className="flex min-h-0 min-w-0 flex-col gap-0.5 px-2 pt-3 pb-3 max-[760px]:gap-1 max-[760px]:px-4 max-[760px]:pb-1 min-[761px]:overflow-y-auto">
         <a
-          className="text-md text-foreground flex items-center gap-2 px-3 pb-8 font-semibold no-underline max-[1180px]:px-2 max-[760px]:p-0 max-[760px]:pb-3"
+          className="text-foreground flex items-center gap-2 px-2 pt-0.5 pb-1 text-sm font-semibold no-underline"
           href="/"
           aria-label="DevContour, главная"
         >
-          <span className="bg-primary text-primary-foreground flex size-(--logo-size) shrink-0 items-center justify-center rounded-md">
-            <Workflow />
-          </span>
+          <svg
+            width="18"
+            height="18"
+            viewBox="0 0 20 20"
+            aria-hidden="true"
+            className="text-info shrink-0"
+          >
+            <path
+              d="M3 5h5v4H3zM12 11h5v4h-5zM8 7h2v6h2"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.6"
+            />
+          </svg>
           DevContour
-          <span className="text-muted-foreground ml-auto text-xs font-normal max-[760px]:ml-0">
-            mvp
-          </span>
         </a>
-        <div className="mb-6 flex gap-3 rounded-md border p-3 text-sm max-[760px]:hidden">
-          <span className="bg-accent text-primary grid size-(--logo-size) shrink-0 place-items-center rounded-sm max-[1180px]:hidden">
-            D
-          </span>
-          <div>
-            <strong>{data.config.name}</strong>
-            <small>Локальное рабочее пространство</small>
-          </div>
-        </div>
-        <div className="text-muted-foreground flex items-center justify-between pl-3 text-sm max-[760px]:pl-0">
-          <span>Доски проекта</span>
+        <p
+          className="text-muted-foreground m-0 truncate px-2 pb-3 text-xs"
+          title={data.config.name}
+        >
+          {data.config.name} · локальный workspace
+        </p>
+        <nav
+          aria-label="Workspace"
+          className="grid gap-0.5 max-[760px]:flex max-[760px]:gap-1 max-[760px]:overflow-x-auto max-[760px]:pb-1"
+        >
+          {workspaceScreens.map((s) => (
+            <a
+              key={s.key}
+              href={appHref(s.key)}
+              aria-current={tab === s.key ? 'page' : undefined}
+              onClick={(e) => {
+                if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+                e.preventDefault();
+                setTab(s.key);
+              }}
+              className={cn(
+                'text-foreground flex h-8 shrink-0 items-center rounded-sm px-2 text-sm whitespace-nowrap no-underline transition-colors duration-(--duration-hover) hover:bg-raised',
+                tab === s.key && 'bg-active hover:bg-active font-medium',
+              )}
+            >
+              {s.label}
+            </a>
+          ))}
+        </nav>
+        <div className="text-muted-foreground mt-4 flex items-center justify-between px-2 text-xs max-[760px]:mt-1">
+          <span>Доски</span>
           <Button
-            variant="outline"
-            className="icon-button"
+            variant="ghost"
+            size="icon-sm"
             aria-label="Создать доску"
             onClick={() => setModal('board')}
           >
             <Plus />
           </Button>
         </div>
-        <nav aria-label="Доски">
+        <nav
+          aria-label="Доски"
+          className="grid gap-0.5 max-[760px]:flex max-[760px]:items-start max-[760px]:gap-1 max-[760px]:overflow-x-auto max-[760px]:pb-1"
+        >
           {liveBoards(data)
             .filter((b) => b.revisions.at(-1)!.status !== 'accepted')
             .map((b) => (
-              <BoardLink key={b.id} board={b} current={b.id === boardId} onSelect={switchBoard} />
+              <BoardLink
+                key={b.id}
+                board={b}
+                current={boardScreen && b.id === boardId}
+                onSelect={switchBoard}
+              />
             ))}
           {/* Принятые доски — история, а не текущая работа. Вперемешку с
               активными они выглядели параллельными потоками того же релиза. */}
           {liveBoards(data).some((b) => b.revisions.at(-1)!.status === 'accepted') && (
             <details
-              className="mt-3 max-[760px]:mt-0 max-[760px]:shrink-0"
-              open={board?.revisions.at(-1)?.status === 'accepted' || undefined}
+              className="mt-1 max-[760px]:mt-0 max-[760px]:shrink-0"
+              open={(boardScreen && board?.revisions.at(-1)?.status === 'accepted') || undefined}
             >
-              <summary className="text-muted-foreground cursor-pointer px-3 py-1 text-sm">
+              <summary className="text-muted-foreground hover:bg-raised rounded-sm px-2 py-1.5 text-sm whitespace-nowrap">
                 Принятые (
                 {liveBoards(data).filter((b) => b.revisions.at(-1)!.status === 'accepted').length})
               </summary>
@@ -1157,81 +1648,89 @@ export function App() {
                   <BoardLink
                     key={b.id}
                     board={b}
-                    current={b.id === boardId}
+                    current={boardScreen && b.id === boardId}
                     onSelect={switchBoard}
                   />
                 ))}
             </details>
           )}
         </nav>
-        <div className="text-muted-foreground mt-auto px-3 pt-8 text-xs [&_p]:my-2 max-[760px]:hidden">
-          <div className="text-foreground flex items-center gap-2">
-            <span
-              className={cn(
-                'inline-block size-2 rounded-full',
-                data.paused ? 'bg-(--text-secondary)' : 'bg-success',
-              )}
-            />
-            <strong>{data.paused ? 'Очередь на паузе' : 'Оркестратор работает'}</strong>
-          </div>
-          <p>
-            {data.runs.filter((r) => r.status === 'active').length} из {data.config.concurrency}{' '}
-            исполнителей занято
-          </p>
-          <p>
-            Интеграция в <code>{data.config.targetBranch}</code>
-          </p>
-          <p>Репозитории: {data.config.repositories.map((r) => r.id).join(', ')}</p>
-          <p>Согласования: {data.config.approvalMode === 'operator' ? 'оператор' : 'агент'}</p>
-        </div>
+        <p className="text-muted-foreground mt-auto px-2 pt-6 text-xs max-[760px]:hidden">
+          Интеграция в <code className="[overflow-wrap:anywhere]">{data.config.targetBranch}</code>{' '}
+          · согласования: {data.config.approvalMode === 'operator' ? 'оператор' : 'агент'}
+        </p>
       </aside>
-      <main className="min-w-0">
-        <div className="bg-card text-muted-foreground flex flex-wrap items-center justify-between gap-4 border-b px-8 py-4 text-xs max-[1180px]:px-5 max-[760px]:p-3 [&_svg]:size-3.5 [&>span:first-child]:flex [&>span:first-child]:items-center [&>span:first-child]:gap-2">
-          <span>
-            Проект <ChevronRight />{' '}
-            {tab === 'overview'
-              ? 'Обзор'
-              : tab === 'product'
-                ? 'Карта продукта'
-                : (board?.title ?? 'Новая доска')}
+      <div className="flex min-h-0 min-w-0 flex-col">
+        {/* Верхняя строка — единственное место состояния очереди. Высота
+            постоянна: ошибка связи встаёт в неё, а не вставляется над
+            контентом. */}
+        <header className="flex h-(--topbar-height) min-w-0 shrink-0 items-center gap-3 pr-3 pl-2 text-sm max-[760px]:h-auto max-[760px]:flex-wrap max-[760px]:gap-x-3 max-[760px]:gap-y-1 max-[760px]:px-4 max-[760px]:py-2">
+          <span className="text-muted-foreground min-w-0 truncate">
+            {data.config.name} / <span className="text-foreground font-medium">{screenTitle}</span>
+            {boardScreen && revision && ` · ревизия ${revision.number}`}
           </span>
-          <span className="text-primary bg-accent rounded-sm px-2 py-1">
+          <span className="bg-active text-muted-foreground shrink-0 rounded-xs px-2 py-0.5 text-xs whitespace-nowrap max-[1180px]:hidden">
             {data.config.mode === 'demo'
               ? 'Учебный режим · без вызовов моделей'
               : 'Локальный runtime'}
           </span>
-        </div>
-        <div className="p-8 max-[1180px]:p-5 max-[760px]:p-4">
-          {/* Очередь встаёт не только по команде оператора: диспетчер
-              останавливает её сам, когда выдавать работу нельзя. Причина и
-              подсказка — в шапке любого экрана, а не только в журнале. */}
-          <QueueStopBanner queue={data.queue} />
-          <header className="mb-6 flex flex-wrap items-start justify-between gap-6 max-[760px]:mb-4 max-[760px]:gap-4">
-            <div>
-              <div className="flex items-center gap-3">
-                <h1>
-                  {tab === 'overview'
-                    ? 'Обзор'
-                    : tab === 'product'
-                      ? 'Карта продукта'
-                      : (board?.title ?? 'Создайте первую доску')}
+          {pollError && (
+            <p
+              role="alert"
+              className="text-destructive m-0 flex min-w-0 items-center gap-1.5 text-xs"
+              title={pollError}
+            >
+              <AlertCircle aria-hidden="true" className="size-3.5 shrink-0" />
+              <span className="truncate">
+                Нет связи с сервером: {pollError}. На экране последнее полученное состояние; опрос
+                повторяется.
+              </span>
+            </p>
+          )}
+          <div className="ml-auto flex shrink-0 items-center gap-3">
+            <span className="text-muted-foreground flex items-center gap-2 text-sm whitespace-nowrap">
+              <span
+                aria-hidden="true"
+                className={cn(
+                  'inline-block size-2 rounded-full',
+                  data.paused ? 'bg-(--text-faint)' : 'bg-success',
+                )}
+              />
+              <span className="text-foreground">
+                {data.paused ? 'Очередь на паузе' : 'Очередь идёт'}
+              </span>
+              <span className="tabular max-[1180px]:hidden">
+                · {activeRuns} из {data.config.concurrency} исполнителей
+              </span>
+            </span>
+            {!queuePrimary && queueButton(false)}
+          </div>
+        </header>
+        <main
+          data-sheet
+          className="bg-card mr-2 mb-2 flex min-h-0 min-w-0 flex-1 flex-col rounded-lg border max-[760px]:m-0 max-[760px]:rounded-none max-[760px]:border-x-0"
+        >
+          <div className="flex flex-wrap items-start gap-x-6 gap-y-3 px-6 pt-4 pb-3 max-[760px]:px-4">
+            <div className="min-w-0 flex-1">
+              <div className="flex min-w-0 items-center gap-2">
+                <h1
+                  className="m-0 min-w-0 truncate"
+                  title={boardScreen ? board?.description : undefined}
+                >
+                  {screenTitle}
                 </h1>
-                {revision && !workspaceView && (
-                  <span className="text-muted-foreground rounded-sm border px-2 py-1 text-sm">
+                {boardScreen && revision && (
+                  <span className="text-muted-foreground shrink-0 rounded-xs border px-1.5 py-px font-mono text-xs">
                     r{revision.number}
                   </span>
                 )}
               </div>
-              <p>
-                {tab === 'overview'
-                  ? 'Что можно попробовать, какое решение нужно и что делает система.'
-                  : tab === 'product'
-                    ? 'Пользовательские возможности, приложения и проверенный результат.'
-                    : (board?.description ?? 'Опишите цель, добавьте задачи и их зависимости.')}
+              <p className="m-0 mt-1 min-h-5 truncate text-sm max-[1180px]:whitespace-normal">
+                {finding}
               </p>
             </div>
-            <div className="flex shrink-0 flex-wrap gap-2 max-[760px]:w-full">
-              <Button variant="outline" asChild>
+            <div className="flex shrink-0 flex-wrap items-center gap-2 max-[760px]:w-full">
+              <Button variant="ghost" asChild>
                 <a
                   href="/api/report?format=html"
                   target="_blank"
@@ -1242,10 +1741,26 @@ export function App() {
                   Отчёт
                 </a>
               </Button>
-              {!workspaceView && board && current && revision?.status === 'accepted' && (
+              {tab === 'changesets' && (
+                <Button variant="outline" onClick={() => setModal('changeset')}>
+                  <Plus />
+                  Новый ChangeSet
+                </Button>
+              )}
+              {tab === 'contracts' && (
+                <Button variant="outline" onClick={() => setModal('contract')}>
+                  <Plus />
+                  Контракт
+                </Button>
+              )}
+              {editable && (
+                <Button variant="outline" onClick={() => setModal('task')}>
+                  <Plus />
+                  Задача
+                </Button>
+              )}
+              {primary === 'correct' && (
                 <Button
-                  variant="outline"
-                  className="primary"
                   onClick={() => {
                     setRoots([]);
                     setModal('correct');
@@ -1255,290 +1770,232 @@ export function App() {
                   Создать корректировку
                 </Button>
               )}
-              {editable && (
-                <>
-                  <Button variant="outline" onClick={() => setModal('task')}>
-                    <Plus />
-                    Задача
-                  </Button>
-                  {tasks.some((t) => t.status === 'draft') && (
-                    <Button
-                      variant="outline"
-                      onClick={() =>
-                        void act(() => api(`boards/${boardId}/approve`, {}), 'Задачи утверждены')
-                      }
-                      disabled={busy}
-                    >
-                      Утвердить план
-                    </Button>
-                  )}
-                  {tasks.length > 0 && done === tasks.length && (
-                    <Button
-                      variant="outline"
-                      className="primary"
-                      disabled={busy}
-                      onClick={() =>
-                        void act(
-                          () => api(`boards/${boardId}/accept`, {}),
-                          'Ревизия принята. Снимок сохранён.',
-                        )
-                      }
-                    >
-                      <CircleCheck />
-                      {data.config.completionMode === 'remote'
-                        ? 'Принять доску локально'
-                        : 'Принять доску'}
-                    </Button>
-                  )}
-                </>
-              )}
-            </div>
-          </header>
-          {pollError && (
-            <div className="alert error" role="alert">
-              <AlertCircle />
-              <span>
-                Нет связи с сервером: {pollError}. На экране последнее полученное состояние; опрос
-                повторяется.
-              </span>
-            </div>
-          )}
-          {error && !modal && !log && (
-            <div className="alert error" role="alert">
-              <AlertCircle />
-              <span>{error}</span>
-              <Button
-                variant="outline"
-                className="icon-button"
-                onClick={() => setError('')}
-                aria-label="Скрыть ошибку"
-              >
-                <X />
-              </Button>
-            </div>
-          )}
-          {data.journalError && (
-            <p className="alert error" role="alert">
-              Дневник: {data.journalError}
-            </p>
-          )}
-          {notice && (
-            <div
-              className="text-success bg-success-foreground mb-4 flex items-center gap-3 rounded-md px-4 py-3 text-sm break-words [&>svg]:size-4.5 [&>svg]:shrink-0"
-              role="status"
-            >
-              <Check />
-              {notice}
-              <Button
-                variant="outline"
-                className="icon-button"
-                onClick={() => setNotice('')}
-                aria-label="Скрыть уведомление"
-              >
-                <X />
-              </Button>
-            </div>
-          )}
-          {!workspaceView && revision?.status === 'accepted' && (
-            <div className="text-success bg-success-foreground mb-5 flex items-center gap-3 rounded-md p-4 text-sm [&>svg]:size-6 [&>svg]:shrink-0 [&_span]:block [&_code]:ml-auto">
-              <CircleCheck />
-              <div>
-                <strong>
-                  Ревизия {revision.number} принята {stamp(revision.acceptedAt)}
-                </strong>
-                <span>Снимок сохранён. Изменения начнут новый цикл и сохранят эту историю.</span>
-              </div>
-              <code>{revision.snapshot?.sha.slice(0, 8)}</code>
-            </div>
-          )}
-          {!workspaceView && (
-            <section
-              className="bg-card mb-6 flex flex-wrap items-center gap-8 rounded-md border px-5 py-4 max-[1180px]:gap-4 max-[760px]:mb-4 max-[760px]:p-3 [&>div]:flex [&>div]:items-center [&>div]:gap-2 [&>div]:max-[760px]:flex-auto [&>div>span]:text-muted-foreground [&>div>span]:text-sm [&>div>svg]:text-muted-foreground [&>div>svg]:size-4.5 [&_strong]:text-md [&_strong>span]:text-muted-foreground [&_strong>span]:font-normal"
-              aria-label="Прогресс доски"
-            >
-              <div>
-                <CircleCheck />
-                <strong>
-                  {done}
-                  <span> / {liveTasks.length}</span>
-                </strong>
-                <span>результатов принято</span>
-              </div>
-              <div>
-                <Loader2 className={inWork ? 'animate-spin' : ''} />
-                <strong>{inWork}</strong>
-                <span>в работе</span>
-              </div>
-              {failedCount > 0 && (
-                <div>
-                  <X />
-                  <strong>{failedCount}</strong>
-                  <span>со сбоем</span>
-                </div>
-              )}
-              <div>
-                <Play />
-                <strong>{ready}</strong>
-                <span>готово к запуску</span>
-              </div>
-              <div>
-                <Clock />
-                <strong>{blocked}</strong>
-                <span>ждут зависимостей</span>
-              </div>
-              <div className="ml-auto max-[760px]:ml-0 max-[760px]:w-full [&_button]:max-[760px]:w-full">
+              {primary === 'approve' && (
                 <Button
-                  variant="outline"
-                  className={data.paused ? 'primary' : ''}
-                  disabled={busy || (data.paused && !data.ready.length)}
+                  onClick={() =>
+                    void act(() => api(`boards/${boardId}/approve`, {}), 'Задачи утверждены')
+                  }
+                  disabled={busy}
+                >
+                  Утвердить план
+                </Button>
+              )}
+              {primary === 'accept' && (
+                <Button
+                  disabled={busy}
                   onClick={() =>
                     void act(
-                      () => api('scheduler', { start: data.paused }),
-                      data.paused
-                        ? 'Очередь всех досок запущена'
-                        : 'Новые задачи приостановлены; текущие продолжаются',
-                      false,
+                      () => api(`boards/${boardId}/accept`, {}),
+                      'Ревизия принята. Снимок сохранён.',
                     )
                   }
                 >
-                  {data.paused ? <Play /> : <Pause />}
-                  {data.paused ? 'Запустить очередь' : 'Пауза очереди'}
+                  <CircleCheck />
+                  {data.config.completionMode === 'remote'
+                    ? 'Принять доску локально'
+                    : 'Принять доску'}
                 </Button>
-              </div>
-              {liveTasks.length > 0 && (
-                <div
-                  className="bg-muted h-1.5 w-full basis-full overflow-hidden rounded-full"
-                  role="progressbar"
-                  aria-label="Принято результатов"
-                  aria-valuemin={0}
-                  aria-valuemax={liveTasks.length}
-                  aria-valuenow={done}
-                >
-                  <div
-                    className="bg-success h-full"
-                    style={{ width: `${(done / liveTasks.length) * 100}%` }}
-                  />
-                </div>
               )}
-            </section>
-          )}
-          <LiveWork
-            state={data}
-            onOpenTask={(id, taskId) => {
-              if (id && id !== boardId) {
-                setBoardId(id);
-                setRevisionNumber(null);
-              }
-              setQuery('');
-              setSelected(taskId);
-              if (workspaceView || tab === 'progress') setTab('graph');
-            }}
-            onStart={
-              workspaceView
-                ? () =>
-                    void act(
-                      () => api('scheduler', { start: true }),
-                      'Очередь всех досок запущена',
-                      false,
-                    )
-                : undefined
-            }
-          />
-          <div className="mb-4 flex flex-wrap items-center justify-between gap-4">
-            <div
-              className="flex flex-wrap gap-1 max-[760px]:w-full max-[760px]:justify-between max-[760px]:gap-0"
-              role="tablist"
-              aria-label="Представление доски"
-            >
-              {[
-                { key: 'overview', label: 'Обзор', icon: <Eye /> },
-                { key: 'product', label: 'Карта продукта', icon: <LayoutGrid /> },
-                { key: 'progress', label: 'Ход работ', icon: <Activity /> },
-                { key: 'kanban', label: 'Колонки', icon: <SquareKanban /> },
-                { key: 'graph', label: 'Граф', icon: <GitBranch /> },
-                { key: 'workspace', label: 'Общий граф', icon: <Workflow /> },
-                { key: 'changesets', label: 'Изменения', icon: <FileCheck /> },
-                { key: 'list', label: 'Список', icon: <List /> },
-                { key: 'history', label: 'Ревизии', icon: <History /> },
-                { key: 'contracts', label: 'Контракты', icon: <FileCheck /> },
-              ].map((t) => (
-                <Button
-                  variant="outline"
-                  key={t.key}
-                  role="tab"
-                  aria-selected={tab === t.key}
-                  onClick={() => setTab(t.key)}
-                >
-                  {t.icon}
-                  {t.label}
-                </Button>
-              ))}
+              {queuePrimary && queueButton(true)}
             </div>
-            {!workspaceView && (
-              <>
-                <label className="max-w-60 max-[760px]:w-full max-[760px]:max-w-none">
-                  <span className="sr-only">Репозиторий</span>
-                  <select
-                    aria-label="Репозиторий"
-                    value={repositoryFilter}
-                    onChange={(e) => setRepositoryFilter(e.target.value)}
-                  >
-                    <option value="">Все репозитории</option>
-                    {data.config.repositories.map((r) => (
-                      <option key={r.id} value={r.id}>
-                        {r.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                {cancelledCount > 0 && (
-                  <label className="text-muted-foreground flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      checked={showCancelled}
-                      onChange={(e) => setShowCancelled(e.target.checked)}
-                    />
-                    Показать отменённые ({cancelledCount})
-                  </label>
-                )}
-                {tab === 'workspace' && data.acceptedBoards > 0 && (
-                  // Задачи принятых досок, от которых зависит текущая работа,
-                  // видны всегда; принятые доски целиком — по запросу.
-                  <label className="text-muted-foreground flex items-center gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      checked={showAccepted}
-                      onChange={(e) => setShowAccepted(e.target.checked)}
-                    />
-                    Показать принятые доски ({data.acceptedBoards})
-                  </label>
-                )}
-                <label className="max-w-60 max-[760px]:w-full max-[760px]:max-w-none">
-                  <span className="sr-only">Поиск задач</span>
-                  <Input
-                    placeholder="Найти задачу…"
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                  />
-                </label>
-              </>
-            )}
           </div>
+          {data.journalError && (
+            <Alert variant="destructive" role="alert" className="mx-6 mb-3 w-auto max-[760px]:mx-4">
+              <AlertDescription>Дневник: {data.journalError}</AlertDescription>
+            </Alert>
+          )}
+          {/* Полоса состояния: счётчики доски и «Сейчас» в одном разделённом
+              контейнере постоянной высоты. */}
           <div
+            role="group"
+            aria-label="Состояние доски"
             className={cn(
-              'grid items-start gap-4',
-              tab === 'changesets' || workspaceView || tab === 'progress'
-                ? 'grid-cols-[minmax(0,1fr)]'
-                : 'grid-cols-[minmax(0,1fr)_var(--inspector-width)] max-[1180px]:grid-cols-[minmax(0,1fr)]',
+              'relative mx-6 grid shrink-0 overflow-hidden rounded-md border max-[760px]:mx-4',
+              boardScreen
+                ? 'grid-cols-[repeat(5,minmax(0,0.8fr))_minmax(0,3fr)] max-[1180px]:grid-cols-5 max-[760px]:grid-cols-3'
+                : 'grid-cols-1',
             )}
           >
-            <section
-              className="bg-card min-w-0 overflow-hidden rounded-lg border shadow-sm"
-              aria-label="Рабочая область"
-            >
-              <Suspense fallback={<p role="status">Загружаем представление…</p>}>
+            {boardScreen &&
+              (
+                [
+                  ['Принято', done, liveTasks.length],
+                  ['Готово к запуску', ready],
+                  ['Ждут зависимостей', blocked],
+                  ['В работе', inWork],
+                  ['Со сбоем', failedCount],
+                ] as [string, number, number?][]
+              ).map(([label, value, total]) => (
+                <div
+                  key={label}
+                  className="border-r px-3 py-2 max-[1180px]:border-b max-[760px]:[&:nth-child(3)]:border-r-0"
+                >
+                  <span className="text-muted-foreground block truncate text-xs">{label}</span>
+                  <span
+                    className={cn(
+                      'tabular block text-lg leading-7',
+                      label === 'Со сбоем' && value > 0 && 'text-destructive',
+                      label === 'Со сбоем' && value === 0 && 'text-muted-foreground',
+                    )}
+                  >
+                    {value}
+                    {total !== undefined && (
+                      <span className="text-muted-foreground text-sm"> / {total}</span>
+                    )}
+                  </span>
+                </div>
+              ))}
+            <div className={cn('min-w-0', boardScreen && 'max-[1180px]:col-span-full')}>
+              <LiveWork
+                state={data}
+                queue={data.queue}
+                onOpenTask={(id, taskId) => {
+                  if (id && id !== boardId) {
+                    setBoardId(id);
+                    setRevisionNumber(null);
+                  }
+                  openTask(taskId);
+                  if (!boardScreen || tab === 'progress' || tab === 'history') setTab('graph');
+                }}
+              />
+            </div>
+            {boardScreen && liveTasks.length > 0 && (
+              <div
+                className="bg-rule absolute inset-x-0 bottom-0 h-[3px]"
+                role="progressbar"
+                aria-label="Принято результатов"
+                aria-valuemin={0}
+                aria-valuemax={liveTasks.length}
+                aria-valuenow={done}
+              >
+                <div
+                  className="bg-success h-full transition-[width] duration-[400ms] ease-out"
+                  style={{ width: `${(done / liveTasks.length) * 100}%` }}
+                />
+              </div>
+            )}
+          </div>
+          {(boardScreen || showToolbar) && (
+            <div className="mx-6 mt-3 flex min-h-11 shrink-0 flex-wrap items-end gap-x-4 gap-y-2 border-b max-[760px]:mx-4">
+              {boardScreen && (
+                <div
+                  role="tablist"
+                  aria-label="Представление доски"
+                  className="-mb-px flex gap-5 overflow-x-auto max-[760px]:w-full max-[760px]:gap-4"
+                  onKeyDown={onTabKey}
+                >
+                  {boardTabs.map((t) => (
+                    <button
+                      key={t.key}
+                      type="button"
+                      role="tab"
+                      id={'tab-' + t.key}
+                      aria-selected={tab === t.key}
+                      aria-controls="board-view"
+                      tabIndex={tab === t.key ? 0 : -1}
+                      onClick={() => setTab(t.key)}
+                      className={cn(
+                        'text-muted-foreground hover:text-foreground cursor-pointer border-b-2 border-transparent pt-1 pb-2.5 text-sm whitespace-nowrap',
+                        tab === t.key && 'border-foreground text-foreground font-medium',
+                      )}
+                    >
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {showToolbar && (
+                <div className="ml-auto flex flex-wrap items-center gap-2 pb-2 max-[760px]:ml-0 max-[760px]:w-full">
+                  {data.config.repositories.length > 1 && (
+                    <label className="w-48 max-[760px]:w-full">
+                      <span className="sr-only">Репозиторий</span>
+                      <select
+                        aria-label="Репозиторий"
+                        value={repositoryFilter}
+                        onChange={(e) => setRepositoryFilter(e.target.value)}
+                      >
+                        <option value="">Все репозитории</option>
+                        {data.config.repositories.map((r) => (
+                          <option key={r.id} value={r.id}>
+                            {r.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  {cancelledCount > 0 && (
+                    <label className="text-muted-foreground flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        className="mt-0"
+                        checked={showCancelled}
+                        onChange={(e) => setShowCancelled(e.target.checked)}
+                      />
+                      Показать отменённые ({cancelledCount})
+                    </label>
+                  )}
+                  {tab === 'workspace' && data.acceptedBoards > 0 && (
+                    // Задачи принятых досок, от которых зависит текущая работа,
+                    // видны всегда; принятые доски целиком — по запросу.
+                    <label className="text-muted-foreground flex items-center gap-2 text-sm">
+                      <input
+                        type="checkbox"
+                        className="mt-0"
+                        checked={showAccepted}
+                        onChange={(e) => setShowAccepted(e.target.checked)}
+                      />
+                      Показать принятые доски ({data.acceptedBoards})
+                    </label>
+                  )}
+                  <label className="relative w-56 max-[760px]:w-full">
+                    <span className="sr-only">Поиск задач</span>
+                    <Input
+                      ref={search}
+                      className="h-(--control-height) pr-8"
+                      placeholder="Найти задачу…"
+                      value={query}
+                      onChange={(e) => setQuery(e.target.value)}
+                    />
+                    <kbd
+                      aria-hidden="true"
+                      className="text-muted-foreground pointer-events-none absolute top-1/2 right-2 -translate-y-1/2 rounded-xs border px-1 font-mono text-xs leading-4"
+                    >
+                      /
+                    </kbd>
+                  </label>
+                </div>
+              )}
+            </div>
+          )}
+          <div
+            id="board-view"
+            role={boardScreen ? 'tabpanel' : undefined}
+            aria-labelledby={boardScreen ? 'tab-' + tab : undefined}
+            className={cn(
+              'grid min-h-0 flex-1 grid-rows-[minmax(0,1fr)] max-[1180px]:grid-rows-none',
+              showInspector
+                ? 'grid-cols-[minmax(0,1fr)_var(--inspector-width)] max-[1180px]:grid-cols-1'
+                : 'grid-cols-1',
+            )}
+          >
+            <section className="min-h-0 min-w-0 overflow-auto" aria-label="Рабочая область">
+              <Suspense
+                fallback={
+                  <p
+                    role="status"
+                    className="text-muted-foreground m-0 min-h-(--canvas-height) p-6"
+                  >
+                    Загружаем представление…
+                  </p>
+                }
+              >
                 {tab === 'progress' && data && (
-                  <div className="p-4">
+                  <div className="px-6 pt-4 pb-6 max-[760px]:px-4">
+                    {/* Ход работ — по всему workspace: охват подписан, чтобы
+                        его цифры не спорили со счётчиками доски выше. */}
+                    <p className="text-muted-foreground m-0 mb-3 text-xs">
+                      Ход работ по всему workspace: все доски, очередь и проверки.
+                    </p>
                     <ProgressPanel
                       state={data}
                       onSelect={(id) => {
@@ -1549,7 +2006,7 @@ export function App() {
                   </div>
                 )}
                 {tab === 'overview' && (
-                  <div className="min-w-0 p-4">
+                  <div className="min-w-0 px-6 pt-4 pb-6 max-[760px]:px-4">
                     <AuthorOverviewPanel
                       onOpenChange={(id) => {
                         setTab('changesets');
@@ -1568,7 +2025,18 @@ export function App() {
                 )}
                 {tab === 'kanban' && (
                   <div
-                    className="grid min-h-(--canvas-height) auto-cols-[minmax(10.5rem,1fr)] grid-flow-col gap-3 overflow-x-auto p-3"
+                    className="grid h-full min-h-(--canvas-height) grid-flow-col gap-3 overflow-x-auto px-6 py-4 max-[760px]:px-4"
+                    // Пустая колонка уже, чем занятая: пятая колонка не уходит
+                    // за край, пока в ней нечего показать.
+                    style={{
+                      gridTemplateColumns: kanbanColumns
+                        .map((c) =>
+                          filtered.some((t) => c.statuses.includes(t.status))
+                            ? 'minmax(12rem,1fr)'
+                            : 'minmax(7.5rem,0.55fr)',
+                        )
+                        .join(' '),
+                    }}
                     aria-label="Колонки задач"
                   >
                     {kanbanColumns.map((column) => {
@@ -1577,38 +2045,61 @@ export function App() {
                         <section
                           key={column.key}
                           aria-label={column.label}
-                          className="bg-muted/40 flex min-w-0 flex-col gap-2 rounded-md p-2"
+                          className="bg-raised flex min-w-0 flex-col gap-2 rounded-md p-2"
                         >
                           <header className="px-1 pt-1">
                             <h2 className="m-0 flex items-baseline justify-between gap-2 text-sm">
                               {column.label}
-                              <span className="text-muted-foreground text-xs">{cards.length}</span>
+                              <span className="text-muted-foreground tabular text-xs font-normal">
+                                {cards.length}
+                              </span>
                             </h2>
                             <small className="text-muted-foreground">{column.hint}</small>
                           </header>
-                          {cards.map((t) => (
-                            <Button
-                              variant="outline"
-                              key={t.id}
-                              className={cn(
-                                'bg-card h-auto w-full min-w-0 flex-col items-start gap-1 overflow-hidden p-3 text-left font-normal whitespace-normal',
-                                selected === t.id && 'border-primary bg-accent',
-                              )}
-                              aria-current={selected === t.id ? 'true' : undefined}
-                              onClick={() => setSelected(t.id)}
-                            >
-                              <span className="text-muted-foreground text-xs" title={t.id}>
-                                {shortId(t.id)} · {roleLabel(t.role)}
-                              </span>
-                              <strong className="text-sm">{t.title}</strong>
-                              <TaskLive
-                                task={t}
-                                runs={data.runs}
-                                maxAttempts={data.config.maxAttempts}
-                              />
-                              <StatusBadge value={status(t)}>{taskStatusName(t)}</StatusBadge>
-                            </Button>
-                          ))}
+                          {cards.map((t) => {
+                            const shown = taskStatus(t);
+                            return (
+                              <button
+                                type="button"
+                                key={t.id}
+                                className={cn(
+                                  'bg-card grid w-full min-w-0 cursor-pointer gap-1.5 rounded-md border p-3 text-left text-sm transition-colors duration-(--duration-hover) hover:border-control',
+                                  shown.tone === 'waiting' && 'border-dashed border-control',
+                                  selected === t.id &&
+                                    'border-info ring-info ring-1 hover:border-info',
+                                )}
+                                aria-current={selected === t.id ? 'true' : undefined}
+                                data-changed={changed.has(t.id) || undefined}
+                                style={
+                                  changed.has(t.id)
+                                    ? ({ '--flash': flashOf[shown.tone] } as CSSProperties)
+                                    : undefined
+                                }
+                                onClick={() => setSelected(t.id)}
+                              >
+                                <strong className="line-clamp-3 font-semibold [overflow-wrap:anywhere]">
+                                  {t.title}
+                                </strong>
+                                <span className="text-muted-foreground flex min-w-0 justify-between gap-2 text-xs">
+                                  <span className="truncate">{roleLabel(t.role)}</span>
+                                  <span className="shrink-0 font-mono" title={t.id}>
+                                    {shortId(t.id)}
+                                  </span>
+                                </span>
+                                <TaskLive
+                                  task={t}
+                                  runs={data.runs}
+                                  maxAttempts={data.config.maxAttempts}
+                                  titles={titles}
+                                  compact
+                                />
+                                <span>
+                                  <StatusBadge value={shown.key}>{shown.label}</StatusBadge>
+                                </span>
+                              </button>
+                            );
+                          })}
+                          {!cards.length && <p className="text-faint m-0 px-1 text-xs">Пусто</p>}
                         </section>
                       );
                     })}
@@ -1616,33 +2107,56 @@ export function App() {
                 )}
                 {(tab === 'graph' || tab === 'workspace') &&
                   (filtered.length ? (
-                    <>
-                      <div className="text-muted-foreground flex justify-between border-b px-4 py-3 text-xs [&>span:first-child]:max-[760px]:max-w-[27ch]">
-                        <span>Зависимость ведёт от условия к результату</span>
-                        <span>{graph.edges.length} связей</span>
+                    <div
+                      className="relative h-full min-h-[24rem] max-[1180px]:h-(--canvas-height) max-[760px]:h-(--canvas-height-phone) max-[760px]:min-h-0"
+                      ref={canvasRef}
+                    >
+                      <GraphPanel
+                        onInit={(instance) => {
+                          flowRef.current = (options) => instance.fitView(options);
+                        }}
+                        onMoveStart={(event) => {
+                          if (event) userMoved.current = true;
+                        }}
+                        key={`${boardId}-${revision?.number}-${tab}`}
+                        nodes={graph.nodes}
+                        edges={graph.edges}
+                        nodesDraggable={false}
+                        nodesConnectable={false}
+                        edgesFocusable={false}
+                        deleteKeyCode={null}
+                        onNodeClick={(_, n) => setSelected(n.id)}
+                        fitView
+                        fitViewOptions={{ padding: 0.12, minZoom: 0.75, maxZoom: 1 }}
+                        minZoom={0.3}
+                      />
+                      <div className="text-muted-foreground bg-card/90 pointer-events-none absolute bottom-3 left-4 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-xs px-1 text-xs max-[760px]:right-14">
+                        {holder && boardScreen && (
+                          <span className="flex items-center gap-1.5">
+                            <i
+                              aria-hidden="true"
+                              className="border-info inline-block w-4 border-t-2"
+                            />
+                            держит приёмку
+                          </span>
+                        )}
+                        <span className="flex items-center gap-1.5">
+                          <i
+                            aria-hidden="true"
+                            className="inline-block w-4 border-t border-(--canvas-edge)"
+                          />
+                          зависимость
+                        </span>
+                        <span className="flex items-center gap-1.5">
+                          <i
+                            aria-hidden="true"
+                            className="border-control inline-block size-3 rounded-xs border border-dashed"
+                          />
+                          ждёт зависимостей
+                        </span>
+                        <span className="tabular">{graph.edges.length} связей</span>
                       </div>
-                      <div
-                        className="bg-background h-(--canvas-height) max-[760px]:h-[26rem]"
-                        ref={canvasRef}
-                      >
-                        <GraphPanel
-                          onInit={(instance) => {
-                            flowRef.current = (options) => instance.fitView(options);
-                          }}
-                          key={`${boardId}-${revision?.number}-${filtered.map((t) => t.id).join()}`}
-                          nodes={graph.nodes}
-                          edges={graph.edges}
-                          nodesDraggable={false}
-                          nodesConnectable={false}
-                          edgesFocusable={false}
-                          deleteKeyCode={null}
-                          onNodeClick={(_, n) => setSelected(n.id)}
-                          fitView
-                          fitViewOptions={{ padding: 0.12, minZoom: 0.65, maxZoom: 1 }}
-                          minZoom={0.3}
-                        />
-                      </div>
-                    </>
+                    </div>
                   ) : (
                     <div className="text-muted-foreground flex min-h-64 flex-col items-center justify-center gap-3 p-8 text-center [&>svg]:size-8 [&_h2]:text-md [&_h2]:text-foreground [&_h2]:m-0 [&_p]:m-0">
                       <GitBranch />
@@ -1660,64 +2174,73 @@ export function App() {
                     </div>
                   ))}
                 {tab === 'list' && (
-                  <div className="">
+                  <div>
                     {filtered.length ? (
-                      filtered.map((t) => (
-                        <Button
-                          variant="outline"
-                          className={cn(
-                            'flex h-auto w-full items-center justify-start gap-3 rounded-none border-0 border-b p-4 text-left font-normal whitespace-normal last:border-b-0 max-[760px]:flex-wrap max-[760px]:gap-2',
-                            selected === t.id && 'bg-accent',
-                          )}
-                          key={t.id}
-                          onClick={() => setSelected(t.id)}
-                        >
-                          <span className="text-muted-foreground min-w-8 text-xs" title={t.id}>
-                            {shortId(t.id)}
-                          </span>
-                          <div className="min-w-0 flex-1">
-                            <strong>{t.title}</strong>
-                            <small>
-                              {t.repositoryId} · {roleLabel(t.role)}
-                              {t.dependsOn.length
-                                ? ` · после: ${t.dependsOn
-                                    .map(
-                                      (d) =>
-                                        data.tasks.find((x) => x.id === d)?.title ?? shortId(d),
-                                    )
-                                    .join('; ')}`
-                                : ''}
-                            </small>
-                            <TaskLive
-                              task={t}
-                              runs={data.runs}
-                              maxAttempts={data.config.maxAttempts}
+                      filtered.map((t) => {
+                        const shown = taskStatus(t);
+                        return (
+                          <button
+                            type="button"
+                            className={cn(
+                              'grid w-full min-w-0 cursor-pointer grid-cols-[6.5rem_minmax(0,1fr)_auto_auto] items-start gap-x-3 border-b px-6 py-3 text-left text-sm transition-colors duration-(--duration-hover) last:border-b-0 hover:bg-raised max-[760px]:grid-cols-[minmax(0,1fr)_auto] max-[760px]:gap-y-1 max-[760px]:px-4',
+                              selected === t.id &&
+                                'bg-active hover:bg-active shadow-[inset_2px_0_0_var(--data-accent)]',
+                            )}
+                            aria-current={selected === t.id ? 'true' : undefined}
+                            data-changed={changed.has(t.id) || undefined}
+                            style={
+                              changed.has(t.id)
+                                ? ({ '--flash': flashOf[shown.tone] } as CSSProperties)
+                                : undefined
+                            }
+                            key={t.id}
+                            onClick={() => setSelected(t.id)}
+                          >
+                            <span
+                              className="text-muted-foreground pt-px font-mono text-xs"
+                              title={t.id}
+                            >
+                              {shortId(t.id)}
+                            </span>
+                            <div className="min-w-0 max-[760px]:col-span-2 max-[760px]:row-start-2">
+                              <strong className="font-semibold [overflow-wrap:anywhere]">
+                                {t.title}
+                              </strong>
+                              <small className="[overflow-wrap:anywhere]">
+                                {roleLabel(t.role)} · {t.repositoryId}
+                                {t.dependsOn.length
+                                  ? ` · после: ${t.dependsOn
+                                      .map((d) => titles.get(d) ?? shortId(d))
+                                      .join('; ')}`
+                                  : ''}
+                              </small>
+                              <TaskLive
+                                task={t}
+                                runs={data.runs}
+                                maxAttempts={data.config.maxAttempts}
+                                titles={titles}
+                                hideWaiting
+                              />
+                            </div>
+                            <span className="max-[760px]:col-start-2 max-[760px]:row-start-1 max-[760px]:justify-self-end">
+                              <StatusBadge value={shown.key}>{shown.label}</StatusBadge>
+                            </span>
+                            <ChevronRight
+                              aria-hidden="true"
+                              className="text-muted-foreground size-4 max-[760px]:hidden"
                             />
-                          </div>
-                          <StatusBadge value={status(t)}>{taskStatusName(t)}</StatusBadge>
-                          <ChevronRight />
-                        </Button>
-                      ))
+                          </button>
+                        );
+                      })
                     ) : (
-                      <p className="text-muted-foreground flex min-h-64 flex-col items-center justify-center gap-3 p-8 text-center [&>svg]:size-8 [&_h2]:text-md [&_h2]:text-foreground [&_h2]:m-0 [&_p]:m-0">
+                      <p className="text-muted-foreground flex min-h-64 items-center justify-center p-8 text-center">
                         Нет задач для отображения.
                       </p>
                     )}
                   </div>
                 )}
                 {tab === 'changesets' && (
-                  <div className="min-h-(--canvas-height) p-6 [&>h2]:text-md [&>p]:text-muted-foreground [&>p]:max-w-[65ch] [&>p]:text-sm">
-                    <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-                      <h2>Изменения workspace</h2>
-                      <Button variant="outline" onClick={() => setModal('changeset')}>
-                        <Plus />
-                        Новый ChangeSet
-                      </Button>
-                    </div>
-                    <p>
-                      Одна возможность продукта, несколько репозиториев. Приёмка фиксирует
-                      проверенную комбинацию SHA.
-                    </p>
+                  <div className="px-6 pt-2 pb-6 max-[760px]:px-4 [&>p]:text-muted-foreground [&>p]:max-w-[65ch] [&>p]:text-sm">
                     {data.config.storage === 'component' && (
                       <p>
                         Задачи и журналы хранятся в компонентах. Здесь показан общий граф и
@@ -1744,9 +2267,14 @@ export function App() {
                             ? 'running'
                             : 'ready';
                       return (
-                        <article key={c.id} id={'changeset-' + c.id} tabIndex={-1}>
-                          <div>
-                            <strong>
+                        <article
+                          key={c.id}
+                          id={'changeset-' + c.id}
+                          tabIndex={-1}
+                          className="grid gap-2 border-t py-4 text-sm [overflow-wrap:anywhere] [&_p]:m-0"
+                        >
+                          <div className="flex flex-wrap items-start justify-between gap-2">
+                            <strong className="text-md min-w-0">
                               {c.id} · {c.title}
                             </strong>
                             <StatusBadge value={state}>
@@ -1778,7 +2306,11 @@ export function App() {
                               .join(', ')}
                             {c.supersedes && ` · продолжает ${c.supersedes}`}
                           </p>
-                          {v?.error && <p className="alert error">{v.error}</p>}
+                          {v?.error && (
+                            <p className="text-destructive bg-destructive-foreground rounded-sm px-3 py-2">
+                              {v.error}
+                            </p>
+                          )}
                           {needsDelivery && (
                             <p>Публикация человеком; DevContour проверяет merge и CI.</p>
                           )}
@@ -1792,7 +2324,11 @@ export function App() {
                                     ? 'Проверяется'
                                     : 'Ожидает публикации или CI'}
                               </p>
-                              {delivery.error && <p className="alert error">{delivery.error}</p>}
+                              {delivery.error && (
+                                <p className="text-destructive bg-destructive-foreground rounded-sm px-3 py-2">
+                                  {delivery.error}
+                                </p>
+                              )}
                               {Object.entries(delivery.components).map(([id, component]) => (
                                 <p key={id}>
                                   <strong>{id}</strong> · {component.state} ·{' '}
@@ -1829,6 +2365,7 @@ export function App() {
                               {e.gate} · {e.summary}{' '}
                               <Button
                                 variant="outline"
+                                size="sm"
                                 onClick={() =>
                                   void act(
                                     async () => {
@@ -1951,17 +2488,21 @@ export function App() {
                   </div>
                 )}
                 {tab === 'history' && (
-                  <div className="min-h-(--canvas-height) p-6 [&>h2]:text-md [&>p]:text-muted-foreground [&>p]:max-w-[65ch] [&>p]:text-sm">
-                    <h2>История результата</h2>
-                    <p>
+                  <div className="px-6 pt-4 pb-6 max-[760px]:px-4 [&>p]:text-muted-foreground [&>p]:max-w-[65ch] [&>p]:text-sm">
+                    <p className="mt-0">
                       Принятые снимки неизменяемы. Каждая корректировка имеет свой план и
                       доказательства.
                     </p>
                     {shownRevisions.map((r) => (
-                      <article key={r.number}>
-                        <div>
-                          <span className="text-primary bg-accent rounded-sm p-2">r{r.number}</span>
-                          <div>
+                      <article
+                        key={r.number}
+                        className="grid gap-2 border-t py-4 text-sm [overflow-wrap:anywhere] [&_p]:m-0"
+                      >
+                        <div className="flex items-start gap-3">
+                          <span className="bg-active shrink-0 rounded-xs px-2 py-0.5 font-mono text-xs">
+                            r{r.number}
+                          </span>
+                          <div className="min-w-0 flex-1">
                             <RevisionReason boardId={board!.id} revision={r} />
                             <small>
                               {stamp(r.createdAt)} · {r.taskIds.length} задач
@@ -1983,6 +2524,7 @@ export function App() {
                         )}
                         <Button
                           variant="outline"
+                          className="justify-self-start"
                           onClick={() => {
                             setRevisionNumber(r.number);
                             setTab('graph');
@@ -2013,21 +2555,13 @@ export function App() {
                   </div>
                 )}
                 {tab === 'contracts' && (
-                  <div className="min-h-(--canvas-height) p-6 [&>h2]:text-md [&>p]:text-muted-foreground [&>p]:max-w-[65ch] [&>p]:text-sm">
-                    <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-                      <h2>Утверждённые контракты</h2>
-                      <Button variant="outline" onClick={() => setModal('contract')}>
-                        <Plus />
-                        Контракт
-                      </Button>
-                    </div>
-                    <p>
-                      Новая версия создаётся отдельным контрактом. Задачи закрепляют его содержимое
-                      при утверждении.
-                    </p>
+                  <div className="px-6 pt-2 pb-6 max-[760px]:px-4 [&>p]:text-muted-foreground [&>p]:max-w-[65ch] [&>p]:text-sm">
                     {data.contracts.map((c) => (
-                      <article key={c.id}>
-                        <div>
+                      <article
+                        key={c.id}
+                        className="grid gap-2 border-t py-4 text-sm [overflow-wrap:anywhere] [&_p]:m-0"
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-2">
                           <strong>{c.title}</strong>
                           <StatusBadge value="done">{c.id}</StatusBadge>
                         </div>
@@ -2047,61 +2581,59 @@ export function App() {
                 )}
               </Suspense>
             </section>
-            {tab !== 'changesets' && !workspaceView && (
+            {showInspector && (
               <aside
-                className="bg-card max-h-[calc(var(--canvas-height)+var(--space-10))] overflow-auto rounded-lg border p-5 text-sm max-[1180px]:max-h-none"
+                className="min-h-0 overflow-auto border-l px-5 pt-4 pb-6 text-sm max-[1180px]:border-t max-[1180px]:border-l-0 max-[760px]:px-4"
                 aria-label="Детали задачи"
               >
                 {task ? (
                   <>
-                    <div className="text-muted-foreground mb-4 flex items-center justify-between gap-2 text-xs [&>span:first-child]:min-w-0 [&>span:first-child]:break-words">
-                      <span>{task.id}</span>
-                      <StatusBadge value={status(task)}>{taskStatusName(task)}</StatusBadge>
-                    </div>
-                    <h2>{task.title}</h2>
-                    <p>
-                      Репозиторий: <code>{task.repositoryId}</code>
-                    </p>
-                    {task.assignee && (
-                      <p>
-                        Ответственный: <strong>{task.assignee}</strong>
-                      </p>
-                    )}
-                    {task.sharedCompletion && (
-                      <div>
-                        <p>
-                          Результат принят из Git: <code>{task.resultSha?.slice(0, 12)}</code>.
-                          Проверки выполнены участником команды; локальная попытка не запускалась.
-                        </p>
-                        <details>
-                          <summary>Свидетельство участника</summary>
-                          <p>
-                            {task.sharedCompletion.receipt.runtime} →{' '}
-                            {task.sharedCompletion.receipt.reviewer}; Git{' '}
-                            <code>{task.sharedCompletion.sourceCommit.slice(0, 12)}</code>
-                          </p>
-                          <ul>
-                            {(full?.task.sharedCompletion?.receipt.checks ?? []).map(
-                              (check, index) => (
-                                <li key={index}>
-                                  {check.phase} / {check.gate}: {check.passed ? 'PASS' : 'FAIL'} ·{' '}
-                                  <code>{check.sha.slice(0, 12)}</code>
-                                </li>
-                              ),
-                            )}
-                          </ul>
-                        </details>
+                    <header className="grid gap-1.5">
+                      <div className="text-muted-foreground flex min-w-0 items-center gap-2 text-xs">
+                        <span className="font-mono whitespace-nowrap" title={task.id}>
+                          {shortId(task.id)}
+                        </span>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          className="size-6"
+                          aria-label="Скопировать полный ID задачи"
+                          title={task.id}
+                          onClick={() =>
+                            void navigator.clipboard
+                              ?.writeText(task.id)
+                              .then(() => toast.success('ID задачи скопирован'))
+                              .catch(() => toast.error('Не удалось скопировать ID'))
+                          }
+                        >
+                          <Copy />
+                        </Button>
+                        <StatusBadge value={status(task)}>{taskStatusName(task)}</StatusBadge>
                       </div>
-                    )}
-                    <p className="text-muted-foreground break-words whitespace-pre-wrap">
-                      {task.description}
-                    </p>
+                      <h2 className="m-0 line-clamp-3 [overflow-wrap:anywhere]" title={task.title}>
+                        {task.title}
+                      </h2>
+                      <p className="text-muted-foreground m-0 text-xs [overflow-wrap:anywhere]">
+                        {roleLabel(task.role)} · <code>{task.repositoryId}</code>
+                        {task.assignee && (
+                          <>
+                            {' '}
+                            · ответственный <strong className="font-medium">{task.assignee}</strong>
+                          </>
+                        )}
+                      </p>
+                    </header>
+                    <TaskDescription key={task.id} text={task.description} />
+                    {/* Что нужно для продолжения — первым: это ответ на вопрос
+                        «почему задача стоит» одной фразой. */}
                     {!!(task.progress?.reasons.length || task.progress?.workflowStale) && (
                       <section
-                        className="bg-secondary my-4 rounded-md p-3 text-sm break-words [&>h3]:mt-0 [&_ul]:mb-0 [&_ul]:pl-4 [&_li+li]:mt-2"
+                        className="bg-raised mt-3 rounded-md p-3 text-sm break-words [&_li+li]:mt-2 [&_ul]:m-0 [&_ul]:list-none [&_ul]:p-0"
                         aria-label="Что нужно для продолжения"
                       >
-                        <h3>Что нужно для продолжения</h3>
+                        <h3 className="text-muted-foreground mt-0 mb-1.5 text-xs font-medium">
+                          Что нужно для продолжения
+                        </h3>
                         <ul>
                           {task.progress.reasons.map((reason) => (
                             <li key={reason}>
@@ -2127,11 +2659,301 @@ export function App() {
                       </section>
                     )}
                     {task.progress?.eligible && (
-                      <p className="bg-secondary my-4 rounded-md p-3 text-sm break-words [&>h3]:mt-0 [&_ul]:mb-0 [&_ul]:pl-4 [&_li+li]:mt-2">
+                      <p className="bg-raised mt-3 mb-0 rounded-md p-3 text-sm">
                         Задача доступна для выдачи исполнителю.
                       </p>
                     )}
-                    <dl>
+                    {task.failure && (
+                      <p className="bg-destructive-foreground text-destructive mt-3 mb-0 rounded-md p-3 break-words [overflow-wrap:anywhere]">
+                        {task.failure}
+                      </p>
+                    )}
+                    {((task.status === 'draft' && editable) ||
+                      ['failed', 'cancelled'].includes(task.status)) && (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {task.status === 'draft' && editable && (
+                          <>
+                            <Button variant="outline" size="sm" onClick={() => setModal('edit')}>
+                              Редактировать
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              disabled={busy}
+                              onClick={() =>
+                                void act(
+                                  () => api(`boards/${boardId}/approve`, { taskIds: [task.id] }),
+                                  'Задача утверждена',
+                                  false,
+                                )
+                              }
+                            >
+                              Утвердить задачу
+                            </Button>
+                          </>
+                        )}
+                        {['failed', 'cancelled'].includes(task.status) && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={busy}
+                            onClick={() =>
+                              void act(
+                                () => api(`tasks/${task.id}/retry`, {}),
+                                'Новая попытка поставлена в очередь',
+                                false,
+                              )
+                            }
+                          >
+                            <RotateCcw />
+                            Повторить
+                          </Button>
+                        )}
+                      </div>
+                    )}
+                    <section aria-label="Доказательства на коммите" className="mt-5">
+                      <h3 className="text-muted-foreground mt-0 mb-1 text-xs font-medium">
+                        Доказательства на коммите
+                      </h3>
+                      <p className="text-faint m-0 mb-1 text-xs">
+                        {data.config.completionMode === 'remote'
+                          ? 'Приёмка ChangeSet = локальные проверки + merge + CI'
+                          : 'Приёмка = тесты + ревью + проверенная интеграция'}
+                      </p>
+                      {evidence.length ? (
+                        <ul className="m-0 grid list-none p-0">
+                          {evidence.map((e) => (
+                            <li key={e.id} className="border-rule border-b last:border-b-0">
+                              <button
+                                type="button"
+                                className="hover:bg-raised grid w-full cursor-pointer grid-cols-[1rem_minmax(0,1fr)] items-start gap-2 rounded-xs px-1 py-1.5 text-left text-sm transition-colors"
+                                onClick={() =>
+                                  void act(
+                                    async () => {
+                                      const result = await api(`evidence/${e.id}`);
+                                      setLog({
+                                        title: `${e.gate} / ${e.phase}`,
+                                        content: result.content,
+                                      });
+                                    },
+                                    '',
+                                    false,
+                                  )
+                                }
+                              >
+                                <span
+                                  className={cn(
+                                    'pt-0.5 [&_svg]:size-3.5',
+                                    e.passed ? 'text-success' : 'text-destructive',
+                                  )}
+                                  aria-label={e.passed ? 'прошла' : 'не прошла'}
+                                >
+                                  {e.passed ? <Check /> : <X />}
+                                </span>
+                                <span className="min-w-0">
+                                  {e.kind !== 'review'
+                                    ? e.gate
+                                    : e.reviewRound && e.reviewRound.protocol !== 'valid'
+                                      ? 'Ответ ревьюера вне протокола'
+                                      : 'Независимое ревью'}
+                                  <small className="[overflow-wrap:anywhere]">
+                                    {e.phase === 'integration' ? 'После интеграции' : 'Кандидат'} ·{' '}
+                                    <code>{e.sha.slice(0, 7)}</code>
+                                    {e.kind === 'review' &&
+                                      ` · ${e.inspection?.mode ?? 'команды не зафиксированы'}`}
+                                    {e.reviewRound && ` · ${reviewRoundLine(e.reviewRound)}`}
+                                  </small>
+                                </span>
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      ) : task.sharedCompletion ? (
+                        <p className="text-muted-foreground m-0 text-sm">
+                          Свидетельство участника — ниже. Логи хранятся в исходном контуре
+                          выполнения.
+                        </p>
+                      ) : (
+                        <>
+                          {/* Что будет доказано: строка на каждую проверку, «—» до попытки.
+                              Отсутствие отчёта не считается успехом. */}
+                          <ul className="m-0 grid list-none p-0">
+                            {[
+                              ...(data.config.gates ?? []).map((g) => g.id),
+                              'Независимое ревью',
+                              `Интеграция в ${data.config.targetBranch}`,
+                            ].map((name) => (
+                              <li
+                                key={name}
+                                className="border-rule grid grid-cols-[1rem_minmax(0,1fr)_auto] items-baseline gap-2 border-b px-1 py-1.5 last:border-b-0"
+                              >
+                                <span
+                                  aria-hidden="true"
+                                  className="bg-faint mt-1 inline-block size-2 rounded-full"
+                                />
+                                <span className="min-w-0 [overflow-wrap:anywhere]">{name}</span>
+                                <span className="text-muted-foreground">—</span>
+                              </li>
+                            ))}
+                          </ul>
+                          <p className="text-muted-foreground m-0 mt-1 text-xs">
+                            Появятся после запуска. Отсутствие отчёта не считается успехом.
+                          </p>
+                        </>
+                      )}
+                      {task.resultSha && (
+                        <p className="text-success m-0 mt-2">
+                          Принятый коммит <code>{task.resultSha.slice(0, 12)}</code>
+                        </p>
+                      )}
+                    </section>
+                    {task.sharedCompletion && (
+                      <div className="mt-3 text-sm [&_p]:m-0">
+                        <p>
+                          Результат принят из Git: <code>{task.resultSha?.slice(0, 12)}</code>.
+                          Проверки выполнены участником команды; локальная попытка не запускалась.
+                        </p>
+                        <details className="mt-1">
+                          <summary>Свидетельство участника</summary>
+                          <p>
+                            {task.sharedCompletion.receipt.runtime} →{' '}
+                            {task.sharedCompletion.receipt.reviewer}; Git{' '}
+                            <code>{task.sharedCompletion.sourceCommit.slice(0, 12)}</code>
+                          </p>
+                          <ul>
+                            {(full?.task.sharedCompletion?.receipt.checks ?? []).map(
+                              (check, index) => (
+                                <li key={index}>
+                                  {check.phase} / {check.gate}: {check.passed ? 'PASS' : 'FAIL'} ·{' '}
+                                  <code>{check.sha.slice(0, 12)}</code>
+                                </li>
+                              ),
+                            )}
+                          </ul>
+                        </details>
+                      </div>
+                    )}
+                    {(task.properties?.length || task.recovery || task.checkVersion) && (
+                      <Suspense fallback={null}>
+                        <CheckPanel
+                          taskId={task.id}
+                          revision={[
+                            task.status,
+                            task.attempt,
+                            task.recovery?.status,
+                            task.recovery?.version,
+                            task.checkVersion?.digest,
+                          ].join(':')}
+                        />
+                      </Suspense>
+                    )}
+                    <h3 className="text-muted-foreground mt-5 mb-1.5 text-xs font-medium">
+                      Критерии приёмки
+                    </h3>
+                    <ul className="m-0 grid list-none gap-1.5 p-0 [&_svg]:size-3.5">
+                      {task.acceptance.map((a, i) => (
+                        <li key={i} className="flex items-start gap-2 [overflow-wrap:anywhere]">
+                          <span
+                            className={cn(
+                              'tabular flex size-5 shrink-0 items-center justify-center rounded-full border text-xs',
+                              task.status === 'done'
+                                ? 'text-success bg-success-foreground border-transparent'
+                                : 'text-muted-foreground',
+                            )}
+                          >
+                            {task.status === 'done' ? <Check /> : i + 1}
+                          </span>
+                          {a}
+                        </li>
+                      ))}
+                    </ul>
+                    {task.supersedes && (
+                      <p className="bg-raised mt-3 mb-0 rounded-sm p-2">
+                        Корректирует <strong>{task.supersedes}</strong>
+                      </p>
+                    )}
+                    <h3 className="text-muted-foreground mt-5 mb-1 text-xs font-medium">
+                      Зависимости
+                    </h3>
+                    {task.dependsOn.length ? (
+                      <div className="grid">
+                        {task.dependsOn.map((id) => {
+                          const d = data.tasks.find((t) => t.id === id);
+                          return (
+                            <button
+                              type="button"
+                              key={id}
+                              className="hover:bg-raised grid cursor-pointer grid-cols-[1rem_minmax(0,1fr)_auto] items-start gap-2 rounded-xs px-1 py-1.5 text-left text-sm transition-colors [&_svg]:size-3.5"
+                              onClick={() => {
+                                if (tasks.some((t) => t.id === id)) setSelected(id);
+                                else {
+                                  const b = d?.boardId;
+                                  if (b) {
+                                    switchBoard(b);
+                                    setSelected(id);
+                                  }
+                                }
+                              }}
+                            >
+                              <span
+                                className={cn(
+                                  'pt-0.5',
+                                  d?.status === 'done' ? 'text-success' : 'text-muted-foreground',
+                                )}
+                              >
+                                {d?.status === 'done' ? <Check /> : <Clock />}
+                              </span>
+                              <span className="min-w-0 [overflow-wrap:anywhere]">
+                                {d?.title ?? shortId(id)}
+                                <small className="font-mono">{id}</small>
+                              </span>
+                              <ChevronRight className="text-muted-foreground mt-0.5" />
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <p className="text-muted-foreground m-0 text-sm">Можно начать независимо.</p>
+                    )}
+                    {dependents.length > 0 && (
+                      <>
+                        <h3 className="text-muted-foreground mt-4 mb-1 text-xs font-medium">
+                          От неё зависят
+                        </h3>
+                        <div className="grid">
+                          {dependents.map((d) => (
+                            <button
+                              type="button"
+                              key={d.id}
+                              className="hover:bg-raised flex cursor-pointer items-baseline justify-between gap-2 rounded-xs px-1 py-1.5 text-left text-sm transition-colors"
+                              onClick={() => setSelected(d.id)}
+                            >
+                              <span className="min-w-0 [overflow-wrap:anywhere]">{d.title}</span>
+                              <span className="text-muted-foreground shrink-0 font-mono text-xs">
+                                {shortId(d.id)}
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                    {task.contracts.length > 0 && (
+                      <>
+                        <h3 className="text-muted-foreground mt-4 mb-1 text-xs font-medium">
+                          Контракты
+                        </h3>
+                        <p className="text-muted-foreground m-0 text-sm [overflow-wrap:anywhere]">
+                          {task.contracts.join(', ')}
+                          {task.approvedDigest
+                            ? ' · версии закреплены'
+                            : ' · закрепятся при утверждении'}
+                        </p>
+                      </>
+                    )}
+                    <h3 className="text-muted-foreground mt-5 mb-0 text-xs font-medium">
+                      Исполнение
+                    </h3>
+                    <dl className="mt-1">
                       <div>
                         <dt>Роль</dt>
                         <dd>{roleLabel(task.role)}</dd>
@@ -2158,7 +2980,7 @@ export function App() {
                       </div>
                       <div>
                         <dt>Попытки</dt>
-                        <dd>{task.attempt}</dd>
+                        <dd className="tabular">{task.attempt}</dd>
                       </div>
                     </dl>
                     {detailError && (
@@ -2192,189 +3014,13 @@ export function App() {
                         Ранние попытки ({full.runs.total - taskRuns.length})
                       </Button>
                     )}
-                    {(task.properties?.length || task.recovery || task.checkVersion) && (
-                      <Suspense fallback={null}>
-                        <CheckPanel
-                          taskId={task.id}
-                          revision={[
-                            task.status,
-                            task.attempt,
-                            task.recovery?.status,
-                            task.recovery?.version,
-                            task.checkVersion?.digest,
-                          ].join(':')}
-                        />
-                      </Suspense>
-                    )}
-                    {task.supersedes && (
-                      <p className="bg-accent text-primary rounded-sm p-2">
-                        Корректирует <strong>{task.supersedes}</strong>
-                      </p>
-                    )}
-                    <h3>Критерии приёмки</h3>
-                    <ul className="m-0 list-none p-0 [&_svg]:size-3.5">
-                      {task.acceptance.map((a, i) => (
-                        <li key={i}>
-                          <span
-                            className={cn(
-                              'flex size-5 shrink-0 items-center justify-center rounded-full border text-xs',
-                              task.status === 'done'
-                                ? 'text-success bg-success-foreground border-transparent'
-                                : 'text-muted-foreground',
-                            )}
-                          >
-                            {task.status === 'done' ? <Check /> : i + 1}
-                          </span>
-                          {a}
-                        </li>
-                      ))}
-                    </ul>
-                    <h3>Зависимости</h3>
-                    {task.dependsOn.length ? (
-                      <div className="grid gap-2">
-                        {task.dependsOn.map((id) => {
-                          const d = data.tasks.find((t) => t.id === id);
-                          return (
-                            <Button
-                              variant="outline"
-                              key={id}
-                              onClick={() => {
-                                if (tasks.some((t) => t.id === id)) setSelected(id);
-                                else {
-                                  const b = d?.boardId;
-                                  if (b) {
-                                    switchBoard(b);
-                                    setSelected(id);
-                                  }
-                                }
-                              }}
-                            >
-                              <span
-                                className={d?.status === 'done' ? 'text-success' : 'text-warning'}
-                              >
-                                {d?.status === 'done' ? <Check /> : <Clock />}
-                              </span>
-                              <span>
-                                {id}
-                                <small>{d?.title}</small>
-                              </span>
-                              <ChevronRight />
-                            </Button>
-                          );
-                        })}
-                      </div>
-                    ) : (
-                      <p className="text-muted-foreground text-sm">Можно начать независимо.</p>
-                    )}
-                    {task.contracts.length > 0 && (
-                      <>
-                        <h3>Контракты</h3>
-                        <p className="text-muted-foreground text-sm">
-                          {task.contracts.join(', ')}
-                          {task.approvedDigest
-                            ? ' · версии закреплены'
-                            : ' · закрепятся при утверждении'}
-                        </p>
-                      </>
-                    )}
-                    <h3>Проверки и доказательства</h3>
-                    {full?.runs.items[0]?.evidence.length ? (
-                      <div className="grid gap-2">
-                        {full.runs.items[0].evidence.map((e) => (
-                          <Button
-                            variant="outline"
-                            key={e.id}
-                            onClick={() =>
-                              void act(
-                                async () => {
-                                  const result = await api(`evidence/${e.id}`);
-                                  setLog({
-                                    title: `${e.gate} / ${e.phase}`,
-                                    content: result.content,
-                                  });
-                                },
-                                'Артефакт загружен',
-                                false,
-                              )
-                            }
-                          >
-                            <span className={e.passed ? 'text-success' : 'text-destructive'}>
-                              {e.passed ? <Check /> : <X />}
-                            </span>
-                            <span>
-                              {e.kind !== 'review'
-                                ? e.gate
-                                : e.reviewRound && e.reviewRound.protocol !== 'valid'
-                                  ? 'Ответ ревьюера вне протокола'
-                                  : 'Независимое ревью'}
-                              <small>
-                                {e.phase === 'integration' ? 'После интеграции' : 'Кандидат'} ·{' '}
-                                {e.sha.slice(0, 7)}
-                                {e.kind === 'review' &&
-                                  ` · ${e.inspection?.mode ?? 'команды не зафиксированы'}`}
-                                {e.reviewRound && ` · ${reviewRoundLine(e.reviewRound)}`}
-                              </small>
-                            </span>
-                          </Button>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="text-muted-foreground text-sm">
-                        {task.sharedCompletion
-                          ? 'Свидетельство участника доступно выше. Логи хранятся в исходном контуре выполнения.'
-                          : 'Появятся после запуска. Отсутствие отчёта не считается успехом.'}
-                      </p>
-                    )}
-                    {task.resultSha && (
-                      <p className="text-success mt-4">
-                        Принятый коммит <code>{task.resultSha.slice(0, 12)}</code>
-                      </p>
-                    )}
-                    {task.failure && (
-                      <p className="bg-destructive-foreground text-destructive rounded-sm p-3 break-words [overflow-wrap:anywhere]">
-                        {task.failure}
-                      </p>
-                    )}
-                    <div className="mt-6 flex flex-wrap gap-2 border-t pt-4">
-                      {task.status === 'draft' && editable && (
-                        <>
-                          <Button variant="outline" onClick={() => setModal('edit')}>
-                            Редактировать
-                          </Button>
-                          <Button
-                            variant="outline"
-                            disabled={busy}
-                            onClick={() =>
-                              void act(
-                                () => api(`boards/${boardId}/approve`, { taskIds: [task.id] }),
-                                'Задача утверждена',
-                                false,
-                              )
-                            }
-                          >
-                            Утвердить задачу
-                          </Button>
-                        </>
-                      )}
-                      {['failed', 'cancelled'].includes(task.status) && (
+                    {/* Отмена — разрушительное действие: внизу карточки, отдельно от
+                          следующего шага. */}
+                    {!['done', 'cancelled'].includes(task.status) && (
+                      <div className="mt-6 border-t pt-4">
                         <Button
-                          variant="outline"
-                          disabled={busy}
-                          onClick={() =>
-                            void act(
-                              () => api(`tasks/${task.id}/retry`, {}),
-                              'Новая попытка поставлена в очередь',
-                              false,
-                            )
-                          }
-                        >
-                          <RotateCcw />
-                          Повторить
-                        </Button>
-                      )}
-                      {!['done', 'cancelled'].includes(task.status) && (
-                        <Button
-                          variant="outline"
+                          variant="destructive"
+                          size="sm"
                           disabled={busy}
                           onClick={() =>
                             void act(
@@ -2386,30 +3032,22 @@ export function App() {
                         >
                           Отменить задачу
                         </Button>
-                      )}
-                    </div>
+                      </div>
+                    )}
                   </>
                 ) : (
-                  <div className="text-muted-foreground flex min-h-64 flex-col items-center justify-center gap-3 p-8 text-center [&>svg]:size-8 [&_h2]:text-md [&_h2]:text-foreground [&_h2]:m-0 [&_p]:m-0">
+                  <div className="text-muted-foreground flex min-h-64 flex-col items-center justify-center gap-3 p-8 text-center [&>svg]:size-8">
                     <FileCheck />
-                    <p>Выберите задачу, чтобы увидеть зависимости и результаты проверок.</p>
+                    <p className="m-0">
+                      Выберите задачу, чтобы увидеть зависимости и результаты проверок.
+                    </p>
                   </div>
                 )}
               </aside>
             )}
           </div>
-          <footer className="text-muted-foreground mt-4 flex justify-between gap-4 text-xs [&>span:first-child]:flex [&>span:first-child]:items-center [&>span:first-child]:gap-2">
-            <span>
-              <span className="dot active" /> SQLite · состояние сохранено локально
-            </span>
-            <span>
-              {data.config.completionMode === 'remote'
-                ? 'Приёмка ChangeSet = локальные проверки + merge + CI'
-                : 'Приёмка = тесты + ревью + проверенная интеграция'}
-            </span>
-          </footer>
-        </div>
-      </main>
+        </main>
+      </div>
       {modal === 'changeset' && (
         <Modal error={error} title="Новый ChangeSet" onClose={() => setModal(null)}>
           <form
@@ -2648,6 +3286,11 @@ export function App() {
         <Modal error={error} title={log.title} onClose={() => setLog(undefined)}>
           <pre className="max-h-[65dvh] overflow-auto">{log.content}</pre>
         </Modal>
+      )}
+      {/* Уведомления — в портале поверх экрана, вне сетки каркаса. */}
+      {createPortal(
+        <Toaster position="bottom-right" visibleToasts={3} toastOptions={{ duration: 4000 }} />,
+        document.body,
       )}
     </div>
   );

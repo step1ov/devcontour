@@ -48,14 +48,15 @@ test('Баннер виден на каждом экране, пока очер�
   const banner = page.getByRole('status', { name: 'Очередь остановлена' });
   await expect(banner).toContainText('Проверка базы не пройдена: test, lint');
   await expect(banner).toContainText('Что сделать: ' + stopped.action);
-  // Другие экраны — тот же баннер. Вкладки есть при любом состоянии демо;
-  // доски по имени не выбираются: другие спецификации их принимают и
+  // Другие экраны — тот же баннер. Экраны workspace есть при любом состоянии
+  // демо; доски по имени не выбираются: другие спецификации их принимают и
   // сворачивают в «Принятые».
-  for (const name of ['Ход работ', 'Карта продукта']) {
-    await page.getByRole('tab', { name, exact: true }).click();
-    await expect(page.getByRole('tab', { name, exact: true })).toHaveAttribute(
-      'aria-selected',
-      'true',
+  const workspace = page.getByRole('navigation', { name: 'Workspace' });
+  for (const name of ['Изменения', 'Карта продукта']) {
+    await workspace.getByRole('link', { name, exact: true }).click();
+    await expect(workspace.getByRole('link', { name, exact: true })).toHaveAttribute(
+      'aria-current',
+      'page',
     );
     await expect(banner).toContainText('Проверка базы не пройдена');
   }
