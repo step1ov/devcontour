@@ -4,13 +4,29 @@
   --xy-edge-stroke-default: var(--canvas-edge);
   --xy-edge-stroke-width-default: var(--edge-width);
   --xy-background-pattern-dots-color-default: var(--graph-dot);
+  --xy-background-color-default: var(--surface-panel);
   --xy-controls-button-background-color-default: var(--surface-panel);
   --xy-controls-button-background-color-hover-default: var(--surface-subtle);
   --xy-controls-button-color-default: var(--text-primary);
+  --xy-controls-button-border-color-default: var(--border);
+  --xy-controls-box-shadow-default: none;
 }
+.react-flow__controls {
+  border: var(--border-width) solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+/* Выбранный узел — рамка и кольцо в цвете данных, без сдвига. */
 .react-flow__node.selected .task-node {
-  outline: var(--focus-width) solid var(--action-primary);
-  outline-offset: var(--space-1);
+  border-color: var(--data-accent);
+  box-shadow: 0 0 0 1px var(--data-accent);
+}
+.react-flow__node:focus-visible {
+  outline: none;
+}
+.react-flow__node:focus-visible .task-node {
+  outline: var(--focus-width) solid var(--ring);
+  outline-offset: var(--focus-width);
 }
 .react-flow__handle {
   background: var(--canvas-edge);
@@ -21,7 +37,12 @@
 .edge-done .react-flow__edge-path {
   stroke: var(--status-done);
 }
+/* Путь, который держит приёмку: единственная краска данных на графе. */
+.edge-path .react-flow__edge-path {
+  stroke: var(--edge-path);
+  stroke-width: var(--edge-path-width);
+}
 .c4-boundary {
-  border: var(--border-width) dashed var(--action-primary) !important;
-  background: var(--status-ready-bg) !important;
+  border: var(--border-width) dashed var(--data-accent) !important;
+  background: var(--data-accent-bg) !important;
 }

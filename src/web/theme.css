@@ -24,13 +24,22 @@
   --color-success-foreground: var(--success-foreground);
   --color-warning: var(--warning);
   --color-warning-foreground: var(--warning-foreground);
+  --color-info: var(--info);
+  --color-info-foreground: var(--info-foreground);
   --color-border: var(--border);
+  --color-rule: var(--rule);
+  --color-control: var(--control-border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  --color-frame: var(--surface-frame);
+  --color-raised: var(--surface-raised);
+  --color-active: var(--surface-active);
+  --color-faint: var(--text-faint);
 
   --font-sans: var(--font-body);
   --font-mono: var(--font-code);
 
+  --radius-xs: var(--radius-xs);
   --radius-sm: var(--radius-sm);
   --radius-md: var(--radius-md);
   --radius-lg: var(--radius-lg);
@@ -41,6 +50,8 @@
   --text-md: var(--text-md);
   --text-lg: var(--text-lg);
   --text-xl: var(--text-xl);
+
+  --ease-out: var(--ease-out);
 }
 
 @layer base {
@@ -57,7 +68,7 @@
   }
   :focus-visible {
     outline: var(--focus-width) solid var(--ring);
-    outline-offset: var(--space-1);
+    outline-offset: var(--focus-width);
   }
 
   /* Element defaults the panels rely on. Components live in ui/; these are the
@@ -66,15 +77,17 @@
     font-size: var(--text-xl);
     font-weight: var(--weight-bold);
     line-height: var(--line-tight);
+    letter-spacing: -0.01em;
   }
   h2 {
-    font-size: var(--text-lg);
+    font-size: var(--text-md);
     font-weight: var(--weight-bold);
+    line-height: var(--line-tight);
   }
   h3 {
     font-size: var(--text-sm);
     font-weight: var(--weight-bold);
-    margin: var(--space-6) 0 var(--space-3);
+    margin: var(--space-4) 0 var(--space-2);
   }
   small {
     display: block;
@@ -92,7 +105,7 @@
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     padding: var(--space-4);
-    background: var(--surface-page);
+    background: var(--surface-raised);
     border-radius: var(--radius-sm);
     font-size: var(--text-xs);
   }
@@ -100,13 +113,13 @@
     font-weight: var(--weight-bold);
   }
   dl {
-    margin: var(--space-5) 0;
+    margin: var(--space-3) 0;
   }
   dl > div {
     display: flex;
     justify-content: space-between;
     gap: var(--space-4);
-    margin-bottom: var(--space-2);
+    margin-bottom: var(--space-1);
   }
   dt {
     color: var(--text-secondary);
@@ -138,12 +151,13 @@
   select {
     color: var(--text-primary);
     background: var(--surface-panel);
-    border: var(--border-width) solid var(--border);
+    border: var(--border-width) solid var(--control-border);
     border-radius: var(--radius-sm);
-    padding: var(--space-2) var(--space-3);
+    padding: 0 var(--space-3);
     width: 100%;
     min-height: var(--control-height);
     font: inherit;
+    font-size: var(--text-sm);
   }
   input[type='checkbox'] {
     width: var(--space-4);
@@ -151,5 +165,111 @@
     flex-shrink: 0;
     margin-top: var(--space-1);
     accent-color: var(--action-primary);
+  }
+  summary {
+    cursor: pointer;
+  }
+}
+
+/* Числа опроса не сдвигают подписи: цифры одной ширины. */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Блоки внутри рабочего листа — секции с заголовком и линией, а не
+   карточки в карточке. */
+[data-sheet] [data-slot='card'] {
+  border-width: 0;
+  border-top-width: var(--border-width);
+  border-color: var(--rule);
+  border-radius: 0;
+  background: transparent;
+}
+[data-sheet] [data-slot='card'] [data-slot='card'] {
+  border-top-width: 0;
+}
+[data-sheet] [data-slot='card'] > * {
+  padding-inline: 0;
+}
+
+/* След изменения статуса при опросе: одно затухающее кольцо, без сдвига и
+   масштаба. Цвет — цвет нового статуса. */
+[data-changed] {
+  animation: status-changed var(--duration-flash) var(--ease-out) 1;
+}
+@keyframes status-changed {
+  from {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--flash, var(--data-accent)) 40%, transparent);
+  }
+  to {
+    box-shadow: 0 0 0 3px transparent;
+  }
+}
+
+/* Уведомления — оверлей поверх экрана: поток страницы они не сдвигают. */
+[data-sonner-toaster] {
+  --normal-bg: var(--surface-panel);
+  --normal-text: var(--text-primary);
+  --normal-border: var(--border);
+  --success-bg: var(--surface-panel);
+  --success-text: var(--status-done);
+  --success-border: var(--border);
+  --error-bg: var(--surface-panel);
+  --error-text: var(--status-failed);
+  --error-border: var(--border);
+  --border-radius: var(--radius-md);
+  font-family: var(--font-body);
+}
+[data-sonner-toast] {
+  box-shadow: var(--shadow-float) !important;
+  font-size: var(--text-sm) !important;
+}
+
+/* Диалоги: короткий вход и выход прозрачности и масштаба. */
+[data-slot='dialog-overlay'][data-state='open'] {
+  animation: fade-in var(--duration-enter) var(--ease-out);
+}
+[data-slot='dialog-overlay'][data-state='closed'] {
+  animation: fade-out var(--duration-hover) var(--ease-out);
+}
+[data-slot='dialog-content'][data-state='open'] {
+  animation: dialog-in var(--duration-modal) var(--ease-out);
+}
+[data-slot='dialog-content'][data-state='closed'] {
+  animation: dialog-out var(--duration-hover) var(--ease-out);
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes fade-out {
+  to {
+    opacity: 0;
+  }
+}
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}
+@keyframes dialog-out {
+  to {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}
+
+/* Обещание direction.md: при reduce движение гаснет целиком, включая
+   спиннеры и вход слоёв. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

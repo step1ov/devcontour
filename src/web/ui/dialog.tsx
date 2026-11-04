@@ -17,10 +17,14 @@ function DialogContent({
 }: ComponentProps<typeof DialogPrimitive.Content> & { closeLabel?: string }) {
   return (
     <DialogPrimitive.Portal>
-      <DialogPrimitive.Overlay className="bg-(--overlay) fixed inset-0 z-20" />
+      <DialogPrimitive.Overlay
+        data-slot="dialog-overlay"
+        className="fixed inset-0 z-20 bg-(--overlay)"
+      />
       <DialogPrimitive.Content
+        data-slot="dialog-content"
         className={cn(
-          'bg-card fixed top-1/2 left-1/2 z-20 grid w-[calc(100vw-2rem)] max-w-(--dialog-width) max-h-[90vh] -translate-x-1/2 -translate-y-1/2 gap-4 overflow-y-auto rounded-lg border p-6 shadow-lg',
+          'bg-card fixed top-1/2 left-1/2 z-20 grid w-[calc(100vw-2rem)] max-w-(--dialog-width) max-h-[90vh] -translate-x-1/2 -translate-y-1/2 gap-4 overflow-y-auto rounded-lg border p-6 shadow-(--shadow-modal)',
           className,
         )}
         {...props}

@@ -7,7 +7,7 @@ function TabsList({ className, ...props }: ComponentProps<typeof TabsPrimitive.L
   return (
     <TabsPrimitive.List
       className={cn(
-        'bg-secondary text-muted-foreground inline-flex h-10 items-center justify-center gap-1 rounded-md p-1',
+        'bg-secondary text-muted-foreground inline-flex h-(--control-height) items-center justify-center gap-1 rounded-sm p-1',
         className,
       )}
       {...props}
@@ -18,7 +18,7 @@ function TabsTrigger({ className, ...props }: ComponentProps<typeof TabsPrimitiv
   return (
     <TabsPrimitive.Trigger
       className={cn(
-        'ring-offset-background inline-flex cursor-pointer items-center justify-center rounded-sm px-3 py-1.5 text-sm font-medium whitespace-nowrap transition-all disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-card data-[state=active]:text-foreground data-[state=active]:shadow-sm',
+        'ring-offset-background inline-flex cursor-pointer items-center justify-center rounded-sm px-3 py-1.5 text-sm font-medium whitespace-nowrap transition-colors disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-card data-[state=active]:text-foreground data-[state=active]:shadow-sm',
         className,
       )}
       {...props}
