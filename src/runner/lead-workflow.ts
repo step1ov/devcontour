@@ -222,8 +222,11 @@ export class LeadRunner {
       : this.root;
   }
   async execute(job: WorkflowJob, signal: AbortSignal): Promise<boolean> {
-    const guard = () => {
-      signal.throwIfAborted();
+    // Закрывающее событие проверки (`closing`) пишется и после отмены:
+    // иначе отменённая проверка оставалась бы в журнале без окончания.
+    // Fencing задания соблюдается и для него.
+    const guard = (options?: { closing?: boolean }) => {
+      if (!options?.closing) signal.throwIfAborted();
       this.workflow.guard(job);
     };
     const s = this.h.store.read();

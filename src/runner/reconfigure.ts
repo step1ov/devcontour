@@ -130,9 +130,18 @@ export function configApplyKeys(operation: string): OperationalKey[] | undefined
     : undefined;
 }
 
-/** Ключи `--keys`: подмножество `budgets,prices`; без флага — оба. */
+/**
+ * Ключи без `--keys` — прежний состав запроса (`budgets,prices`). Сервер
+ * версии до `stallSweep` не знает этого ключа: запрос с ним он прочитал бы не
+ * как config-apply, а как применение конфигурации операцией, и отклонил бы
+ * его. Поэтому `stallSweep` отправляется только названным явно: такой
+ * запрос старый сервер не применит, а запрос без флага остаётся прежним.
+ */
+export const defaultOperationalKeys = ['budgets', 'prices'] as const satisfies OperationalKey[];
+
+/** Ключи `--keys`: подмножество `budgets,prices,stallSweep`; без флага — `budgets,prices`. */
 export function parseOperationalKeys(value?: string): OperationalKey[] {
-  if (value === undefined) return [...operationalKeys];
+  if (value === undefined) return [...defaultOperationalKeys];
   const keys = [...new Set(value.split(',').map((k) => k.trim()))].filter(Boolean);
   const unknown = keys.filter((k) => !(operationalKeys as readonly string[]).includes(k));
   if (!keys.length || unknown.length)
@@ -273,6 +282,34 @@ export async function requestConfigApply(
         if (event.type === 'config.apply-refused')
           return { status: 'refused', keys, digest, operation, error: data.error ?? '' };
       }
+      // Сервер отклонил запрос, но не снял его: так поступает сервер версии,
+      // не знающей ключа (`stallSweep`), — он читает запрос как применение
+      // конфигурации операцией. Неснятый запрос держал бы выдачу; он
+      // завершён (`error`), и его снимает команда — как и завершённый
+      // запрос прежнего config-apply перед новым.
+      const refused = store.atomic(() => {
+        const current = store.read().reconfigure;
+        if (current?.operation !== operation || !current.error || current.appliedAt) return;
+        h.clearReconfigure(operation);
+        store.appendEvent('config.apply-refused', {
+          operation,
+          keys,
+          digest,
+          error: current.error,
+          clearedBy: 'config-apply',
+        });
+        return current.error;
+      });
+      if (refused !== undefined)
+        return {
+          status: 'refused',
+          keys,
+          digest,
+          operation,
+          // Сервер отклонил и не снял запрос (вероятно, его версия не знает
+          // ключа): запрос снят, применит перезапуск serve.
+          error: `${refused}. Запрос снят командой: сервер его не снял (вероятно, его версия не знает ключа ${keys.join(', ')}); примените конфигурацию перезапуском serve`,
+        };
       if (Date.now() > deadline) break;
       await new Promise((r) => setTimeout(r, 200));
     }

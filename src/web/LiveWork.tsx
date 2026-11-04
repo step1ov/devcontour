@@ -5,8 +5,18 @@ import { Button } from '@/ui/button.tsx';
 import { cn } from '@/lib/utils.ts';
 import { roleLabel } from './roles.ts';
 import { Activity, Phases, elapsed, engine } from './Workers.tsx';
-import { chainBlockers, type QueueStopView } from '../core/work-status.ts';
+import {
+  activityText,
+  chainBlockers,
+  livenessText,
+  operationNames,
+  type LivenessSubject,
+  type OperationLiveness,
+  type QueueStopView,
+  type RunLiveness,
+} from '../core/work-status.ts';
 import { QueueStopBanner } from './QueueStopBanner.tsx';
+import { useNow } from './now.ts';
 
 // «Кто сейчас над чем работает» — первый вопрос, пока идёт разработка. Ответ
 // был на отдельной вкладке хода работ, ниже настроек контура; на графе и в
@@ -41,8 +51,10 @@ export type LiveState = {
     | 'startedAt'
     | 'reusedFrom'
     | 'timings'
-  > & { boardId?: string })[];
+  > & { boardId?: string; liveness?: RunLiveness })[];
   workflows?: LiveWorkflow[];
+  /** Проверки вне попыток без движения (совместная, базы, доски). */
+  operations?: OperationLiveness[];
   changeSets?: { id: string; title: string }[];
   /** Задачи текущей работы; доска задачи — `boardId` из сводки. */
   tasks: (Task & { blockers?: string[]; boardId?: string })[];
@@ -51,6 +63,59 @@ export type LiveState = {
   ready: string[];
   config: { concurrency: number; maxAttempts?: number };
 };
+
+/**
+ * Простой идущей попытки на момент показа: пока попытка молчит, записей нет и
+ * опрос отвечает `unchanged`, поэтому минуты считаются от последнего движения
+ * по часам панели (`useNow`), а не берутся из ответа.
+ */
+export function livenessNow<T extends RunLiveness>(l: T, now = Date.now()): T {
+  const moved = Date.parse(l.lastMovementAt);
+  return Number.isFinite(moved) ? { ...l, idleMs: Math.max(l.idleMs, now - moved) } : l;
+}
+
+/**
+ * Попытка без движения (обход зависаний controller). `quiet` — тихая
+ * приглушённая подпись: работа, скорее всего, идёт, но вывода нет. `stalled`
+ * при `report` — янтарь: нужно решение человека, процесс жив, но стоит.
+ * `stalled` при `stop` попытку останавливает controller — подпись без
+ * тревожного цвета. Статус всегда словами, цвет только помогает.
+ */
+export function LivenessNote({
+  liveness,
+  now,
+  subject = 'attempt',
+  className,
+}: {
+  liveness?: RunLiveness;
+  /** Часы панели (`useNow`): простой растёт и без нового ответа сервера. */
+  now: number;
+  subject?: LivenessSubject;
+  className?: string;
+}) {
+  if (!liveness) return null;
+  const l = livenessNow(liveness, now);
+  const activity = l.activity ? activityText(l.activity) : undefined;
+  return (
+    <span
+      data-liveness={l.state}
+      title={activity ? `Последняя команда: ${activity}` : undefined}
+      className={cn(
+        'inline-flex min-w-0 items-center gap-1.5 text-xs',
+        l.attention ? 'text-warning font-medium' : 'text-muted-foreground',
+        className,
+      )}
+    >
+      {l.attention && (
+        <span aria-hidden="true" className="inline-block size-2 shrink-0 rounded-full bg-current" />
+      )}
+      <span className="truncate">
+        {livenessText(l, subject)}
+        {activity ? ` · ${activity}` : ''}
+      </span>
+    </span>
+  );
+}
 
 export function activeWork(state: LiveState) {
   return state.runs
@@ -83,6 +148,7 @@ export function workflowWork(state: LiveState) {
       return w.kind === 'board'
         ? {
             key: w.key,
+            id: w.id,
             label: 'Ревью плана',
             who: w.reviewer
               ? w.reviewer.runtime + (w.reviewer.sameVendor ? ' (тот же вендор)' : '')
@@ -92,6 +158,7 @@ export function workflowWork(state: LiveState) {
           }
         : {
             key: w.key,
+            id: w.id,
             label: 'Совместная проверка',
             who: 'проверки',
             subject: change?.title ?? w.id,
@@ -118,11 +185,24 @@ export function LiveWork({
   const stuck =
     work.length || flows.length ? [] : chainBlockers(state.tasks, state.config.maxAttempts);
   const stopped = !!(queue?.paused && queue.stopReason);
+  // Зависшие попытки, которые ждут человека, названы и в заголовке ячейки:
+  // строка исполнителя может уйти под прокрутку.
+  const operations = state.operations ?? [];
+  const stalledAttempts = work.filter(({ run }) => run.liveness?.attention).length;
+  const stalledChecks = operations.filter((o) => o.attention).length;
+  const stalled = stalledAttempts + stalledChecks;
+  // Совместная проверка без движения — в своей строке ведущего цикла; прочие
+  // проверки (база, доска) своей строки не имеют и получают её здесь.
+  const jointOf = (id: string) => operations.find((o) => o.kind === 'joint' && o.subjectId === id);
+  const flowIds = new Set(flows.map((f) => f.id));
+  const checks = operations.filter((o) => !(o.kind === 'joint' && flowIds.has(o.subjectId)));
+  // Часы тикают, только пока есть что досчитывать: простой без движения.
+  const now = useNow(operations.length > 0 || work.some(({ run }) => run.liveness));
   // Высота ячейки зарезервирована под исполнителей (не больше двух строк):
   // старт и конец попытки не сдвигают граф и вкладки под курсором. Больше
   // строк — прокрутка внутри ячейки.
   const slots = Math.max(1, Math.min(state.config.concurrency, 2));
-  const rows = flows.length + work.length + stuck.length + (stopped ? 1 : 0);
+  const rows = flows.length + checks.length + work.length + stuck.length + (stopped ? 1 : 0);
   const list = useRef<HTMLDivElement>(null);
   const [overflowing, setOverflowing] = useState(false);
   useEffect(() => {
@@ -160,6 +240,15 @@ export function LiveWork({
             пауза: новые не выдаются, текущие доработают
           </span>
         )}
+        {stalled > 0 && (
+          <span className="text-warning tabular shrink-0 font-medium" data-liveness-count={stalled}>
+            {stalledAttempts && stalledChecks
+              ? `зависших: попыток ${stalledAttempts}, проверок ${stalledChecks}`
+              : stalledAttempts
+                ? `зависших попыток: ${stalledAttempts}`
+                : `зависших проверок: ${stalledChecks}`}
+          </span>
+        )}
         {!state.paused && work.length > 0 && free > 0 && (
           <span className="text-muted-foreground tabular">свободно мест {free}</span>
         )}
@@ -185,19 +274,57 @@ export function LiveWork({
             {flows.map((f) => (
               <li
                 key={f.key}
-                className="flex h-(--live-row-height) min-w-0 items-center gap-x-3 text-sm"
+                className="flex h-(--live-row-height) min-w-0 items-center gap-x-3 overflow-hidden text-sm"
               >
                 <span className="flex shrink-0 items-center gap-1 font-medium">
                   <Eye aria-hidden="true" className="text-info size-4 shrink-0" />
                   {f.label}
                 </span>
-                <span className="text-muted-foreground shrink-0 font-mono text-xs">{f.who}</span>
-                <span className="min-w-0 truncate font-medium" title={f.subject}>
+                {/* Подпись зависания важнее исполнителя: на узком экране он уступает место. */}
+                <span
+                  className={cn(
+                    'text-muted-foreground shrink-0 font-mono text-xs',
+                    jointOf(f.id) && 'max-[760px]:hidden',
+                  )}
+                >
+                  {f.who}
+                </span>
+                <span className="min-w-0 shrink-[4] truncate font-medium" title={f.subject}>
                   {f.subject}
                 </span>
+                <LivenessNote
+                  liveness={jointOf(f.id)}
+                  now={now}
+                  subject="check"
+                  className="min-w-0 max-w-[65%]"
+                />
                 <span className="text-muted-foreground tabular ml-auto shrink-0 text-xs">
                   {elapsed(f.since)}
                 </span>
+              </li>
+            ))}
+          </ul>
+        )}
+        {checks.length > 0 && (
+          <ul className="m-0 grid list-none gap-1 p-0" aria-label="Проверки без движения">
+            {checks.map((o) => (
+              <li
+                key={o.id}
+                className="flex h-(--live-row-height) min-w-0 items-center gap-x-3 overflow-hidden text-sm"
+              >
+                <span className="flex shrink-0 items-center gap-1 font-medium">
+                  <Eye aria-hidden="true" className="text-info size-4 shrink-0" />
+                  {operationNames[o.kind]}
+                </span>
+                <span className="min-w-0 shrink-[4] truncate font-medium" title={o.title}>
+                  {o.title}
+                </span>
+                <LivenessNote
+                  liveness={o}
+                  now={now}
+                  subject="check"
+                  className="min-w-0 max-w-[65%]"
+                />
               </li>
             ))}
           </ul>
@@ -236,6 +363,10 @@ export function LiveWork({
                   </span>
                 </div>
                 <div className="flex min-w-0 items-center gap-x-3 overflow-hidden whitespace-nowrap">
+                  {/* Попытка без движения — первой в строке: фазы и последнее
+                      действие агента как раз и не меняются, а строка обрезается
+                      справа. */}
+                  <LivenessNote liveness={run.liveness} now={now} className="max-w-full shrink-0" />
                   <Phases current={run.phase} />
                   {/* Последнее действие агента: фаза «пишет код» одинакова и на
                       первой минуте, и на двадцатой. */}

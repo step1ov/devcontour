@@ -30,7 +30,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net';
 import { readFile, realpath } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { resolve, join, extname, sep, basename } from 'node:path';
+import { resolve, join, extname, sep, basename, relative, isAbsolute } from 'node:path';
 import { ZodError, z } from 'zod';
 import { utf8Bytes } from 'devcontour-harness';
 import { DevContour, specDigest } from '../core/service.ts';
@@ -44,7 +44,7 @@ import { IntentService } from '../runner/intent.ts';
 import { attachJournal, renderJournal } from '../runner/journal.ts';
 import { runActivity } from '../runner/activity.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
-import { queueStopOf } from '../application/queue-stop.ts';
+import { queueStopOf, quietAttempts, quietOperations } from '../application/queue-stop.ts';
 import {
   cachedValueReport,
   parseReportFormat,
@@ -52,6 +52,17 @@ import {
   reportRequestInput,
 } from '../application/value-report.ts';
 /** Панель утверждает по одной задаче: предел отсекает только чужой запрос. */
+/**
+ * Путь снимка зависания без абсолютного пути хоста: относительно каталога
+ * данных, иначе от `artifacts/` каталога состояния компонента.
+ */
+function relativeArtifact(root: string, path: string) {
+  if (!isAbsolute(path)) return path;
+  const inside = relative(resolve(root), path);
+  if (inside && !inside.startsWith('..') && !isAbsolute(inside)) return inside;
+  const at = path.lastIndexOf(sep + 'artifacts' + sep);
+  return at >= 0 ? path.slice(at + 1) : basename(path);
+}
 const APPROVAL_IDS_LIMIT = 1000;
 const approvalIds = z
   .array(z.string())
@@ -424,6 +435,22 @@ export async function serve(
             // `paused` и `pauseReason` не объясняли остановку: причину и
             // подсказку несёт общий вид остановки очереди.
             queue: queueStopOf(h, state, events),
+            // Идущие попытки без движения тем же видом, что в workflow_status.
+            liveness: quietAttempts(state, now),
+            operations: quietOperations(h, state, now),
+            // Снимок зависания лежит в каталоге состояния: путь хоста — только
+            // относительно каталога данных, как его называет журнал.
+            runs: state.runs.map((r) =>
+              r.liveness?.artifact
+                ? {
+                    ...r,
+                    liveness: {
+                      ...r.liveness,
+                      artifact: relativeArtifact(scheduler!.root, r.liveness.artifact),
+                    },
+                  }
+                : r,
+            ),
             tasks: state.tasks.map((t) => ({
               ...t,
               specDigest: specDigest(t),

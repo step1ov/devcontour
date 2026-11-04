@@ -185,14 +185,17 @@ test('config-apply waits for work under the previous configuration; without a se
   }
 });
 
-test('--keys accepts only budgets and prices', () => {
+test('--keys accepts only budgets, prices and stallSweep', () => {
+  // Без флага — прежний состав запроса: сервер без stallSweep его понимает.
   assert.deepEqual(parseOperationalKeys(), ['budgets', 'prices']);
   assert.deepEqual(parseOperationalKeys('prices,budgets'), ['budgets', 'prices']);
+  assert.deepEqual(parseOperationalKeys('stallSweep'), ['stallSweep']);
+  assert.deepEqual(parseOperationalKeys('stallSweep,budgets'), ['budgets', 'stallSweep']);
   assert.throws(
     () => parseOperationalKeys('budgets,concurrency'),
     /не поддерживается: concurrency/,
   );
-  assert.throws(() => parseOperationalKeys(''), /только budgets, prices/);
+  assert.throws(() => parseOperationalKeys(''), /только budgets, prices, stallSweep/);
 });
 
 /** Завершённый вызов модели с известной стоимостью: расход общего бюджета. */
@@ -363,6 +366,43 @@ test('config-apply does not take over the reconfigure slot of another operation,
     assert.ok(s.server.store.read().reconfigure?.error);
     assert.equal((await s.request(['budgets'])).status, 'applied');
     assert.deepEqual(s.server.config.budgets, { workspace: { usd: 30 }, onUnknown: 'stop' });
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('config-apply --keys stallSweep against a server that refuses without clearing: refused, request cleared, issuance not held', async () => {
+  const s = served();
+  try {
+    s.edit((raw) => {
+      raw.stallSweep = { action: 'stop' };
+    });
+    const pending = requestConfigApply(s.root, ['stallSweep'], { waitMs: 5000 });
+    // Сервер прежней версии: ключа не знает, читает запрос как применение
+    // операцией, отклоняет и запрос не снимает.
+    let request = s.server.store.read().reconfigure;
+    for (let i = 0; i < 100 && !request; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+      request = s.server.store.read().reconfigure;
+    }
+    assert.ok(request, 'запрос записан');
+    s.server.settleReconfigure(
+      request.operation,
+      request.digest,
+      'server',
+      'Новая конфигурация отличается не только закреплением context packs',
+    );
+    assert.ok(s.server.store.read().reconfigure?.error, 'отклонён, но не снят');
+    const result = await pending;
+    assert.equal(result.status, 'refused', JSON.stringify(result));
+    assert.match(
+      (result as { error: string }).error,
+      /^Новая конфигурация отличается.*Запрос снят командой.*stallSweep.*перезапуском serve$/,
+    );
+    assert.equal(s.server.store.read().reconfigure, undefined, 'запрос снят');
+    const [event] = s.events('config.apply-refused');
+    assert.equal((event.data as { clearedBy?: string }).clearedBy, 'config-apply');
+    assert.equal(s.server.config.stallSweep, undefined, 'действующая конфигурация прежняя');
   } finally {
     s.cleanup();
   }

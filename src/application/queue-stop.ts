@@ -2,7 +2,18 @@ import type { DevContour } from '../core/service.ts';
 import type { AuditEvent, DevContourState } from '../core/model.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { repositories } from '../core/repositories.ts';
-import { queueStopView } from '../core/work-status.ts';
+import {
+  OPERATION_FINISH_EVENTS,
+  OPERATION_START_EVENTS,
+  OPERATION_LIVENESS_EVENTS,
+  livenessNext,
+  livenessText,
+  operationLiveness,
+  queueStopView,
+  runLiveness,
+  type OperationLiveness,
+  type RunLiveness,
+} from '../core/work-status.ts';
 
 /**
  * Остановка очереди контура (`queueStopView`) с режимом согласований и
@@ -28,4 +39,84 @@ function workflowActive(h: DevContour) {
   return [undefined, ...repositories(h.config).map((r) => r.id)].some((owner) =>
     workflow.list(owner).some((j) => j.status === 'queued' || j.status === 'running'),
   );
+}
+
+/** Идущая попытка без движения глазами ведущего агента и CLI. */
+export type QuietAttempt = RunLiveness & {
+  taskId: string;
+  title: string;
+  runId: string;
+  attempt: number;
+  phase: string;
+  repositoryId: string;
+  /** Подпись состояния словами панели («зависла 12 мин: проверьте среду»). */
+  text: string;
+  /** Что делать и кто действует. */
+  next: string;
+};
+
+/**
+ * Идущие попытки без движения (`quiet`/`stalled` обхода зависаний
+ * controller): ведущий видит их в `workflow_status`, не запрашивая журнал.
+ * Сначала требующие человека, затем дольше всех стоящие. `repositoryId` —
+ * только попытки компонента.
+ */
+export function quietAttempts(
+  state: Pick<DevContourState, 'runs' | 'tasks'>,
+  now: number,
+  repositoryId?: string,
+): QuietAttempt[] {
+  return state.runs
+    .flatMap((run) => {
+      const liveness = runLiveness(run, now);
+      if (!liveness) return [];
+      const task = state.tasks.find((t) => t.id === run.taskId);
+      const repo = run.repositoryId ?? task?.repositoryId ?? 'main';
+      if (repositoryId && repo !== repositoryId) return [];
+      return [
+        {
+          taskId: run.taskId,
+          title: task?.title ?? run.taskId,
+          runId: run.id,
+          attempt: run.attempt,
+          phase: run.phase,
+          repositoryId: repo,
+          ...liveness,
+          text: livenessText(liveness),
+          next: livenessNext(liveness, 'agent'),
+        },
+      ];
+    })
+    .sort((a, b) => Number(b.attention) - Number(a.attention) || b.idleMs - a.idleMs);
+}
+
+/** Проверка вне попытки без движения глазами ведущего агента и CLI. */
+export type QuietOperation = OperationLiveness & { text: string; next: string };
+
+/**
+ * Проверки вне попыток без движения: совместная проверка ChangeSet, проверка
+ * перенесённой базы, проверка доски на итоговом SHA. Переход живости у них —
+ * только событие журнала; читается последний переход каждой незавершённой
+ * проверки. `repositoryId` — только проверки компонента (совместная проверка
+ * относится ко всему workspace и с фильтром не выдаётся).
+ */
+export function quietOperations(
+  h: Pick<DevContour, 'store'>,
+  state: Pick<DevContourState, 'changeSets' | 'boards' | 'leader'>,
+  now: number,
+  audience: 'panel' | 'agent' = 'agent',
+  repositoryId?: string,
+): QuietOperation[] {
+  const events = h.store.latestEvents(
+    [...OPERATION_LIVENESS_EVENTS, ...OPERATION_FINISH_EVENTS, ...OPERATION_START_EVENTS],
+    200,
+  );
+  return operationLiveness(state, events, now)
+    .filter((o) => !repositoryId || o.repositoryId === repositoryId)
+    .map((o) => ({
+      ...o,
+      text: livenessText(o, 'check'),
+      next: livenessNext(o, audience, 'check'),
+    }))
+    .sort((a, b) => Number(b.attention) - Number(a.attention) || b.idleMs - a.idleMs);
 }

@@ -1,3 +1,4 @@
+import type { CheckGuard } from './base-check.ts';
 import { randomUUID } from 'node:crypto';
 import { homedir, tmpdir } from 'node:os';
 import { CLIP_SHORT, HarnessError, clipText, runGatesAt } from 'devcontour-harness';
@@ -36,7 +37,7 @@ export async function coverBoard(
   revision: Revision,
   tasks: Task[],
   heads: Record<string, string>,
-  guard: () => void = () => {},
+  guard: CheckGuard = () => {},
   signal?: AbortSignal,
 ) {
   const gaps = uncoveredGates(
@@ -49,10 +50,17 @@ export async function coverBoard(
   // Все непрошедшие gates всех компонентов — одним отказом: иначе каждый
   // провал стоил бы отдельной попытки стадии.
   const failed: string[] = [];
-  const event = (type: string, data: Record<string, unknown>) =>
+  const event = (type: string, data: Record<string, unknown>, closing = false) =>
     h.store.atomic(() => {
-      guard();
-      h.store.appendEvent(type, { boardId, revision: revision.number, ...data });
+      guard(closing ? { closing } : undefined);
+      h.store.appendEvent(type, {
+        boardId,
+        revision: revision.number,
+        ...data,
+        // Владелец роли controller в той же записи: переход живости
+        // оборванной перезапуском проверки новый сервер не выдаёт за идущий.
+        ...(type.endsWith('.liveness') ? { owner: h.store.read().leader?.owner } : {}),
+      });
     });
   const revisionDigest = digest(revision);
   for (const gap of gaps) {
@@ -139,6 +147,20 @@ export async function coverBoard(
             record.evidence.push(e as unknown as Evidence);
             save();
           },
+          // Переход живости проверки — событие журнала: при `report` это
+          // единственный след зависания до конца проверки.
+          onLiveness: (report) => {
+            try {
+              event('board.coverage.liveness', {
+                repositoryId: gap.repositoryId,
+                sha,
+                runId: record.runId,
+                ...report,
+              });
+            } catch {
+              // Без права записи переход не пишется; проверка идёт дальше.
+            }
+          },
           ...(signal ? { signal } : {}),
         },
       );
@@ -146,13 +168,17 @@ export async function coverBoard(
       // Отказ самой проверки (окружение, отмена, утрата владения) — тоже
       // исход начатой проверки: журнал не остаётся с одним «started».
       try {
-        event('board.coverage.failed', {
-          repositoryId: gap.repositoryId,
-          sha,
-          runId: record.runId,
-          gates: gap.gates,
-          error: journalError(error, [root, ...repositories(h.config).map((r) => r.path)]),
-        });
+        event(
+          'board.coverage.failed',
+          {
+            repositoryId: gap.repositoryId,
+            sha,
+            runId: record.runId,
+            gates: gap.gates,
+            error: journalError(error, [root, ...repositories(h.config).map((r) => r.path)]),
+          },
+          true,
+        );
       } catch {
         // Без права записи событие не пишется; причина — исходная ошибка.
       }
@@ -161,14 +187,41 @@ export async function coverBoard(
     record.gates = [...new Set([...kept.map((e) => e.gate), ...result.gates])];
     if (result.failure) record.failure = result.failure;
     if (result.failures.length) record.failures = result.failures;
-    save();
-    event(result.failures.length ? 'board.coverage.failed' : 'board.coverage.passed', {
-      repositoryId: gap.repositoryId,
-      sha,
-      runId: record.runId,
-      gates: result.gates,
-      ...(result.failures.length ? { failures: result.failures.map((f) => f.gate) } : {}),
-    });
+    try {
+      save();
+    } catch (error) {
+      // Ревизия доски или договор изменились во время проверки: проверка
+      // кончается событием, иначе её переход живости висел бы как идущий.
+      try {
+        event(
+          'board.coverage.failed',
+          {
+            // Не провал gates: исход проверки не записался.
+            reason: 'record',
+            repositoryId: gap.repositoryId,
+            sha,
+            runId: record.runId,
+            gates: gap.gates,
+            error: journalError(error, [root, ...repositories(h.config).map((r) => r.path)]),
+          },
+          true,
+        );
+      } catch {
+        // Без права записи событие не пишется; причина — исходная ошибка.
+      }
+      throw toDomain(error);
+    }
+    event(
+      result.failures.length ? 'board.coverage.failed' : 'board.coverage.passed',
+      {
+        repositoryId: gap.repositoryId,
+        sha,
+        runId: record.runId,
+        gates: result.gates,
+        ...(result.failures.length ? { failures: result.failures.map((f) => f.gate) } : {}),
+      },
+      true,
+    );
     for (const f of result.failures)
       failed.push(`${gap.repositoryId}/${f.gate} на ${sha}: ${f.message}`);
     if (result.failures.length) continue;
