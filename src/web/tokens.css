@@ -49,7 +49,9 @@
   --border: var(--color-line);
   --rule: var(--color-rule);
   --control-border: var(--color-control);
-  --focus: var(--color-cobalt);
+  /* Кольцо фокуса одно для всей панели — цвет текста: хорошо видно и на
+     фоне, и на листе, и не вносит цвет данных в оболочку. */
+  --focus: var(--color-ink);
   --canvas-edge: var(--color-edge);
   --edge-path: var(--color-cobalt);
   /* Статусы всегда подписаны текстом; цвет только помогает. Ожидание

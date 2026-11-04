@@ -134,7 +134,8 @@ export function LiveWork({
     observer.observe(element);
     for (const child of element.children) observer.observe(child);
     return () => observer.disconnect();
-  });
+    // Наблюдатель пересоздаётся, только когда меняется состав строк.
+  }, [rows, stopped, slots, queue?.stopReason, queue?.action]);
   return (
     <section aria-label="Сейчас работают" className="grid min-w-0 content-start gap-1 px-3 py-2">
       <div className="flex h-5 min-w-0 items-center gap-2 overflow-hidden text-xs whitespace-nowrap">

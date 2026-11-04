@@ -1,12 +1,32 @@
 import { readFile, readdir } from 'node:fs/promises';
 const errors = [];
-// Строки классов: className="…", className={`…`} и литералы внутри cn(…).
+// Строки классов: className="…", className={`…`} (статичная часть и
+// литералы внутри ${…}) и литералы в аргументах cn(…)/clsx(…) с любой
+// вложенностью скобок. Литерал сравнения (`== 'error'`) и аргумент метода
+// (`.includes('active')`) — не класс.
+function balanced(text, start) {
+  let depth = 0;
+  for (let i = start; i < text.length; i++) {
+    if (text[i] === '(' || text[i] === '{') depth++;
+    else if (text[i] === ')' || text[i] === '}') if (--depth === 0) return text.slice(start + 1, i);
+  }
+  return '';
+}
+function* literals(code) {
+  for (const m of code.matchAll(/'([^'\n]*)'|"([^"\n]*)"/g)) {
+    const before = code.slice(0, m.index);
+    if (/[=!]==?\s*$/.test(before) || /\.\w+\(\s*$/.test(before)) continue;
+    yield m[1] ?? m[2];
+  }
+}
 function* classStrings(text) {
   for (const [, value] of text.matchAll(/className="([^"]*)"/g)) yield value;
-  for (const [, value] of text.matchAll(/className=\{`([^`]*)`\}/g))
-    yield value.replace(/\$\{[^}]*\}/g, ' ');
-  for (const [, args] of text.matchAll(/\bcn\(([^()]*(?:\([^()]*\)[^()]*)*)\)/g))
-    for (const [, value] of args.matchAll(/(?<![=!]==\s*)'([^']*)'/g)) yield value;
+  for (const m of text.matchAll(/className=\{`([^`]*)`\}/g)) {
+    yield m[1].replace(/\$\{[^}]*\}/g, ' ');
+    for (const [, expression] of m[1].matchAll(/\$\{([^}]*)\}/g)) yield* literals(expression);
+  }
+  for (const m of text.matchAll(/\b(?:cn|clsx)\(/g))
+    yield* literals(balanced(text, m.index + m[0].length - 1));
 }
 const deadClasses = new Set([
   'primary',
