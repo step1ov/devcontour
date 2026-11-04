@@ -71,8 +71,15 @@ function TaskNode({ data }: NodeProps) {
 const nodeTypes = { task: TaskNode };
 export default function GraphPanel({
   nodes: input = [],
+  onControlZoom,
+  onControlFit,
   ...props
-}: ComponentProps<typeof ReactFlow>) {
+}: ComponentProps<typeof ReactFlow> & {
+  /** Приближение кнопками — решение человека: кадр больше не вписывается сам. */
+  onControlZoom?: () => void;
+  /** «Вписать» возвращает автоматическое вписывание. */
+  onControlFit?: () => void;
+}) {
   // Узлы приходят новыми объектами с каждым опросом. Замеренный размер узла
   // переносится из прежнего состояния: без него React Flow прятал узлы
   // (`visibility: hidden`) до повторного замера, и граф пустел посреди работы.
@@ -91,7 +98,13 @@ export default function GraphPanel({
       nodeTypes={nodeTypes}
     >
       <Background />
-      <Controls showInteractive={false} position="bottom-right" />
+      <Controls
+        showInteractive={false}
+        position="bottom-right"
+        onZoomIn={onControlZoom}
+        onZoomOut={onControlZoom}
+        onFitView={onControlFit}
+      />
     </ReactFlow>
   );
 }

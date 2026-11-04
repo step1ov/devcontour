@@ -102,7 +102,12 @@ const waitingReasons: Record<string, string> = {
 // Сбой остаётся в работе с красной меткой, а не прячется в отдельную колонку.
 const kanbanColumns: { key: string; label: string; hint: string; statuses: string[] }[] = [
   { key: 'inbox', label: 'Входящие', hint: 'План не утверждён', statuses: ['draft'] },
-  { key: 'todo', label: 'К выполнению', hint: 'Утверждены, ждут исполнителя', statuses: ['ready'] },
+  {
+    key: 'todo',
+    label: 'К выполнению',
+    hint: 'Утверждены, ждут исполнителя или зависимостей',
+    statuses: ['ready'],
+  },
   { key: 'doing', label: 'В работе', hint: 'Разработка и сбои', statuses: ['running', 'failed'] },
   {
     key: 'review',
@@ -839,6 +844,9 @@ export function App() {
   const [boardId, setBoardId] = useState(() => readAppLocation().board);
   const [revisionNumber, setRevisionNumber] = useState<number | null>(null);
   const [selected, setSelected] = useState(() => readAppLocation().task);
+  // Задача из ссылки и задача, оставленная в инспекторе вне показанной ревизии.
+  const linkedTask = useRef(readAppLocation().task);
+  const [outside, setOutside] = useState('');
   // An empty graph is the least informative thing to land on: before the first
   // board exists, what the operator needs to see is how the contour is set up.
   // Автор продукта начинает с обзора: что попробовать и какое решение нужно.
@@ -870,8 +878,12 @@ export function App() {
       wroteLocation.current = true;
       return;
     }
+    // Дописанные недостающие доска и задача (адрес `?tab=kanban` без доски,
+    // восстановленный «Назад») заменяют запись: иначе каждый «Назад»
+    // возвращал на тот же адрес и затирал историю вперёд.
     const sameView =
-      before.get('tab') === params.get('tab') && before.get('board') === params.get('board');
+      before.get('tab') === params.get('tab') &&
+      (!before.get('board') || before.get('board') === params.get('board'));
     window.history[!wroteLocation.current || sameView ? 'replaceState' : 'pushState'](
       window.history.state,
       '',
@@ -879,11 +891,19 @@ export function App() {
     );
     wroteLocation.current = true;
   }, [tab, boardId, selected, boardScreen]);
+  const shownBoard = useRef(boardId);
+  shownBoard.current = boardId;
   useEffect(() => {
     const restore = () => {
       const place = readAppLocation();
       setTab(place.tab);
-      if (place.board) setBoardId(place.board);
+      // Другая доска — как при выборе в навигации: последняя ревизия, без
+      // прежнего поиска.
+      if (place.board && place.board !== shownBoard.current) {
+        setBoardId(place.board);
+        setRevisionNumber(null);
+        setQuery('');
+      }
       setSelected(place.task);
     };
     window.addEventListener('popstate', restore);
@@ -933,6 +953,7 @@ export function App() {
   // Поколение запроса: ответ старше уже применённого (он опоздал, пока шёл
   // более новый запрос той же области) отбрасывается, как и его ошибка.
   const issued = useRef(0);
+  const dataScope = useRef<{ board: string; task: string }>({ board: '', task: '' });
   const applied = useRef(0);
   const refresh = useCallback(async (force = true) => {
     const generation = ++issued.current;
@@ -969,6 +990,9 @@ export function App() {
       revisionScope: key(v, v.boardId || (next.boardId ?? '')),
       expiresAt: next.expiresAt,
     });
+    // Для какой доски и задачи получены данные: по ним видно, что доски или
+    // задачи из ссылки на сервере нет, а не что ответ ещё не пришёл.
+    dataScope.current = { board: v.boardId, task: v.selected };
     setData(next);
   }, []);
   useEffect(() => {
@@ -994,6 +1018,18 @@ export function App() {
   useEffect(() => {
     if (!data) return;
     if (!boardId) setBoardId(data.boardId ?? liveBoards(data)[0]?.id ?? '');
+    // Доски из адреса нет (удалена, устаревшая ссылка): сервер ответил по
+    // своей доске — панель переходит на неё, а не показывает пустой экран.
+    else if (
+      dataScope.current.board === boardId &&
+      !data.boards.some((b) => b.id === boardId) &&
+      data.boardId
+    ) {
+      toast.error('Доска из ссылки не найдена — открыта текущая доска');
+      setBoardId(data.boardId);
+      setRevisionNumber(null);
+      setSelected('');
+    }
   }, [data, boardId]);
   // Смена доски, задачи или вида меняет состав сводки — запрос сразу.
   const [showAccepted, setShowAccepted] = useState(false);
@@ -1086,7 +1122,10 @@ export function App() {
         .toLowerCase()
         .includes(query.toLowerCase()),
   );
-  const task = graphTasks.find((t) => t.id === selected);
+  // Задача из ссылки вне показанной ревизии остаётся в инспекторе с пометкой.
+  const task =
+    graphTasks.find((t) => t.id === selected) ??
+    (selected && selected === outside ? data?.tasks.find((t) => t.id === selected) : undefined);
   // Детали выбранной задачи — по запросу: полная запись и попытки страницами.
   // Ранние страницы берутся курсором по id попытки (он не сдвигается, когда
   // появляются новые попытки); уже раскрытые страницы при обновлении задачи
@@ -1157,10 +1196,34 @@ export function App() {
       setOlderError((e as Error).message);
     }
   };
+  // Задача из ссылки показывается, даже если она отменена или из прежней
+  // ревизии: раньше её молча заменяла первая задача доски.
   useEffect(() => {
+    const linked = linkedTask.current;
+    if (linked && selected === linked && data) {
+      const t = data.tasks.find((x) => x.id === linked);
+      if (!t) {
+        // Сервер спрашивали именно об этой задаче, и её нет.
+        if (dataScope.current.task !== linked) return;
+        linkedTask.current = '';
+        toast.error('Задача из ссылки не найдена');
+      } else if (graphTasks.some((x) => x.id === linked)) {
+        linkedTask.current = '';
+        if (t.status === 'cancelled' && !showCancelled) setShowCancelled(true);
+        return;
+      } else {
+        const own = board?.revisions.find((r) => r.taskIds.includes(linked));
+        if (own && own.number !== revision?.number) return setRevisionNumber(own.number);
+        if (t.boardId && t.boardId !== boardId && tab !== 'workspace') return setBoardId(t.boardId);
+        linkedTask.current = '';
+        setOutside(linked);
+        return;
+      }
+    }
+    if (selected && selected === outside) return;
     const visible = graphTasks.filter((t) => showCancelled || t.status !== 'cancelled');
     if (visible.length && !visible.some((t) => t.id === selected)) setSelected(visible[0].id);
-  }, [graphTasks, selected, showCancelled]);
+  }, [graphTasks, selected, showCancelled, data, board, revision, boardId, tab, outside]);
   useEffect(() => {
     let valid = true;
     if (modal !== 'correct' || !roots.length) {
@@ -1337,6 +1400,19 @@ export function App() {
   const cooldown = useRef<ReturnType<typeof setTimeout>>(undefined);
   useEffect(() => () => clearTimeout(cooldown.current), []);
   const [loadingAgain, setLoadingAgain] = useState(false);
+  // Переход на экран из боковой навигации переносит фокус к заголовку экрана:
+  // клавиатура и чтение экрана начинаются с нового содержимого.
+  const heading = useRef<HTMLHeadingElement>(null);
+  const focusHeading = useRef(false);
+  const openScreen = (key: string) => {
+    focusHeading.current = true;
+    setTab(key);
+  };
+  useEffect(() => {
+    if (!focusHeading.current) return;
+    focusHeading.current = false;
+    heading.current?.focus();
+  }, [tab]);
   if (!data)
     return (
       <main className="bg-frame grid min-h-dvh place-content-center justify-items-center gap-3 p-6 text-center">
@@ -1560,6 +1636,13 @@ export function App() {
           className="text-foreground flex items-center gap-2 px-2 pt-0.5 pb-1 text-sm font-semibold no-underline"
           href="/"
           aria-label="DevContour, главная"
+          // Главная — обзор в этой же панели: без перезагрузки и без выхода
+          // из режима разработки на экране подготовки.
+          onClick={(e) => {
+            if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+            e.preventDefault();
+            openScreen('overview');
+          }}
         >
           <svg
             width="18"
@@ -1595,7 +1678,7 @@ export function App() {
               onClick={(e) => {
                 if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
                 e.preventDefault();
-                setTab(s.key);
+                openScreen(s.key);
               }}
               className={cn(
                 'text-foreground flex h-8 shrink-0 items-center rounded-sm px-2 text-sm whitespace-nowrap no-underline transition-colors duration-(--duration-hover) hover:bg-raised',
@@ -1714,7 +1797,9 @@ export function App() {
             <div className="min-w-0 flex-1">
               <div className="flex min-w-0 items-center gap-2">
                 <h1
-                  className="m-0 min-w-0 truncate"
+                  ref={heading}
+                  tabIndex={-1}
+                  className="m-0 min-w-0 truncate focus-visible:outline-none"
                   title={boardScreen ? board?.description : undefined}
                 >
                   {screenTitle}
@@ -2126,6 +2211,17 @@ export function App() {
                         edgesFocusable={false}
                         deleteKeyCode={null}
                         onNodeClick={(_, n) => setSelected(n.id)}
+                        // Выбор с клавиатуры (Enter/Space на узле) — тот же
+                        // выбор, что щелчком: инспектор и адрес следуют за ним.
+                        onSelectionChange={({ nodes }) => {
+                          if (nodes.length === 1) setSelected(nodes[0].id);
+                        }}
+                        onControlZoom={() => {
+                          userMoved.current = true;
+                        }}
+                        onControlFit={() => {
+                          userMoved.current = false;
+                        }}
                         fitView
                         fitViewOptions={{ padding: 0.12, minZoom: 0.75, maxZoom: 1 }}
                         minZoom={0.3}
@@ -2527,6 +2623,7 @@ export function App() {
                           className="justify-self-start"
                           onClick={() => {
                             setRevisionNumber(r.number);
+                            setSelected('');
                             setTab('graph');
                           }}
                         >
@@ -2623,6 +2720,11 @@ export function App() {
                         )}
                       </p>
                     </header>
+                    {!graphTasks.some((t) => t.id === task.id) && (
+                      <p className="bg-raised text-muted-foreground mt-2 mb-0 rounded-sm px-2 py-1.5 text-xs">
+                        Задача из ссылки не входит в показанную ревизию доски.
+                      </p>
+                    )}
                     <TaskDescription key={task.id} text={task.description} />
                     {/* Что нужно для продолжения — первым: это ответ на вопрос
                         «почему задача стоит» одной фразой. */}
