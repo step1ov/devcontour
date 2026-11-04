@@ -20,7 +20,14 @@ import { z } from 'zod';
 import { DomainError, type Config } from '../core/model.ts';
 import type { DevContour } from '../core/service.ts';
 import { LeadWorkflow, type WorkflowJob } from '../core/lead-workflow.ts';
-import { liftsPause, loopAhead, type LoopOutlook } from '../runner/lead-outlook.ts';
+import {
+  boardTasks,
+  liftsPause,
+  loopAhead,
+  planApproved,
+  unapprovedTasks,
+  type LoopOutlook,
+} from '../runner/lead-outlook.ts';
 import { repositories } from '../core/repositories.ts';
 import { executionOf, toDomain } from '../harness/execution.ts';
 import type { DevContourExecutionStore } from '../harness/store.ts';
@@ -87,6 +94,13 @@ export interface HandoffHostNext {
   };
   /** Что сделает цикл ведущего по этому заданию на следующем такте (`loopOutlook`). */
   loop?: LoopOutlook;
+  /**
+   * О чём решение `decide`: `plan` — план доски не согласован (объём работы
+   * решает ведущий или пользователь), `job` — задание ведущего.
+   */
+  decision?: 'plan' | 'job';
+  /** Задачи, из-за которых план не согласован (`decision: plan`). */
+  plan?: { drafts: string[]; stale: string[] };
   detail: string;
 }
 
@@ -283,9 +297,45 @@ interface HostContext {
 const OPERATOR_STEP =
   'approvalMode operator: lead workflow jobs do not run. The operator reviews plans and accepts boards in the panel, starts the queue (devcontour queue --start --workspace …) and retries failed tasks (devcontour retry --task ID --workspace …).';
 
+/** Сколько id задач называет подсказка ревью плана. */
+const PLAN_HINT_IDS = 20;
+
+/**
+ * Решение о плане доски, если он не согласован: задание отправило бы его на
+ * ревью и, одобренный, выпустило бы все задачи доски — это решение об
+ * объёме, а не шаг очереди.
+ */
+function planStep(boardId: string, ctx: HostContext): HandoffHostNext | undefined {
+  const found = boardTasks(ctx.state, boardId);
+  if (!found || planApproved(ctx.h, found.revision, found.tasks)) return undefined;
+  const plan = unapprovedTasks(ctx.h, found.tasks);
+  const ids = [...plan.drafts, ...plan.stale];
+  const shown =
+    ids.slice(0, PLAN_HINT_IDS).join(',') +
+    (ids.length > PLAN_HINT_IDS ? ` (… ещё ${ids.length - PLAN_HINT_IDS}: host.next.plan)` : '');
+  return {
+    action: 'decide',
+    decision: 'plan',
+    boardId,
+    plan,
+    detail: `The plan of board ${boardId} is not approved (${plan.drafts.length} draft task(s)${plan.stale.length ? `, ${plan.stale.length} approved under another policy` : ''}). workflow_start would send the whole plan to review and run every task once approved: choosing the scope is the lead's or the user's decision. Review the plan with an explicit scope (devcontour review-plan --board ${boardId} --tasks ${shown} --author-runtime codex|claude --workspace …, keeping only the tasks to run), or edit/cancel the tasks first; register workflow_start only for an approved plan.`,
+  };
+}
+
+/** Цикл задания сам что-то сделает (не только ждёт задач). */
+const acts = (loop: LoopOutlook | undefined) =>
+  !!loop && loop.step !== 'wait' && loop.step !== 'none';
+
 /** Шаг по заданиям одной доски: ждать, повторить, начать, исправить вход или решить. */
-function boardStep(boardId: string, ctx: HostContext): HandoffHostNext {
+function boardStep(boardId: string, ctx: HostContext): HandoffHostNext | undefined {
   const { h, state } = ctx;
+  // Принятая ревизия без открытых задач: заданию доски делать нечего.
+  const done = boardTasks(state, boardId);
+  if (
+    done?.revision.status === 'accepted' &&
+    done.tasks.every((t) => t.status === 'done' || t.status === 'cancelled')
+  )
+    return undefined;
   const jobs = ctx.jobs.filter((j) => j.id === boardId);
   const live = jobs.find(ctx.live);
   if (live) {
@@ -293,6 +343,7 @@ function boardStep(boardId: string, ctx: HostContext): HandoffHostNext {
     if (loop.step === 'stop')
       return {
         action: 'decide',
+        decision: 'job',
         boardId,
         job: jobRef(live),
         loop,
@@ -321,6 +372,7 @@ function boardStep(boardId: string, ctx: HostContext): HandoffHostNext {
       if (loop.step === 'stop')
         return {
           action: 'decide',
+          decision: 'job',
           boardId,
           job: jobRef(job),
           loop,
@@ -336,6 +388,7 @@ function boardStep(boardId: string, ctx: HostContext): HandoffHostNext {
     }
     return {
       action: 'decide',
+      decision: 'job',
       boardId,
       job: jobRef(job),
       detail: `The lead workflow job of board ${boardId} used all ${job.maxAttempts} attempts${job.error ? ': ' + job.error : ''}. workflow_start returns this failed job until the board input changes: diagnose, then change the board or its tasks (a new input registers a new job) or ask the user.`,
@@ -344,6 +397,7 @@ function boardStep(boardId: string, ctx: HostContext): HandoffHostNext {
   if (job?.status === 'stale' || job?.status === 'completed')
     return {
       action: 'decide',
+      decision: 'job',
       boardId,
       job: jobRef(job),
       detail: `A lead workflow job for exactly the current input of board ${boardId} is already ${job.status}${job.status === 'stale' ? ' (the input changed and then returned to it)' : ''}; workflow_start returns it unchanged and it will not run. Change the board or its tasks to register a new job, or continue by hand (devcontour queue --start, retry, accept; docs/cli.md), or ask the user.`,
@@ -355,6 +409,8 @@ function boardStep(boardId: string, ctx: HostContext): HandoffHostNext {
       job: jobRef(job),
       detail: `The lead workflow job of board ${boardId} is ${job.status} but does not continue now (a policy apply is pending or another process holds it); check workflow_status.`,
     };
+  const plan = planStep(boardId, ctx);
+  if (plan) return plan;
   const running = ctx.pack.active.some((a) => ctx.view.work(a.workId)?.graphId === boardId);
   const previous = jobs.find((j) => j.status !== 'completed');
   return {
@@ -379,6 +435,8 @@ const urgency: Record<HandoffHostNext['action'], number> = {
   workflow_start: 2,
   wait: 3,
 };
+/** Решение о плане не срочнее работы других досок: оно о будущем объёме. */
+const rank = (x: HandoffHostNext) => (x.decision === 'plan' ? 4 : urgency[x.action]);
 
 /**
  * Шаг DevContour по состоянию и правилам цикла ведущего (`loopOutlook`), а не
@@ -392,6 +450,43 @@ function hostNext(ctx: HostContext): HandoffHostNext | undefined {
   if (h.config.approvalMode === 'operator') return { action: 'operator', detail: OPERATOR_STEP };
   const workId = pack.next.workId;
   const next = (workId ? view.work(workId)?.graphId : undefined) ?? pack.graphId;
+  // Решение ведущего или пользователя, не связанное с очередью (разбор
+  // отказа, перепланирование зависимых), — шаг пакета: шага очереди хост
+  // не придумывает. Остаётся лишь решение по заданию или плану доски этого
+  // решения.
+  const nextDecides =
+    (pack.next.actor === 'lead' || pack.next.actor === 'user') &&
+    pack.next.action !== 'wait' &&
+    pack.next.action !== 'none' &&
+    pack.next.action !== 'resume-queue';
+  if (nextDecides) {
+    // Доски решения: его поручение, а у свёрнутой остановки без поручения —
+    // поручения той же остановки (`works`).
+    const ids = next
+      ? [next]
+      : pack.stops
+          .filter((x) => x.code === pack.next.code && x.action === pack.next.action)
+          .flatMap((x) => [...(x.workId ? [x.workId] : []), ...(x.works ?? [])])
+          .map((id) => view.work(id)?.graphId);
+    const own = [...new Set(ids)].filter(
+      (id): id is string => !!id && state.boards.some((b) => b.id === id),
+    );
+    // Выдуманный шаг очереди (начать задание, снять паузу) отбрасывается;
+    // ожидание действующего задания и повтор упавшего — шаги самой доски:
+    // без них ведущий начал бы то же решение вручную наперегонки с заданием.
+    // Ожидание задания, цикл которого лишь ждёт задач, спрятало бы решение
+    // пакета за «сервер продолжит»: вместо него — решение о плане доски,
+    // если план не согласован, иначе шага нет и стоит шаг пакета.
+    return own
+      .map((id) => {
+        const step = boardStep(id, ctx);
+        if (step?.action === 'wait' && !acts(step.loop)) return planStep(id, ctx);
+        return step;
+      })
+      .filter((x): x is HandoffHostNext => !!x)
+      .filter((x) => x.action !== 'workflow_start' && x.action !== 'queue_set')
+      .sort((a, b) => rank(a) - rank(b))[0];
+  }
   const boards =
     next && state.boards.some((b) => b.id === next)
       ? [next]
@@ -400,11 +495,16 @@ function hostNext(ctx: HostContext): HandoffHostNext | undefined {
         );
   const steps = boards
     .map((id) => boardStep(id, ctx))
-    .sort((a, b) => urgency[a.action] - urgency[b.action]);
+    .filter((x): x is HandoffHostNext => !!x)
+    .sort((a, b) => rank(a) - rank(b));
   if (state.paused) {
     // Решение по заданию (цикл остановит его, задание упало без пользы от
     // повтора, вход не построить) важнее паузы: её снятие его не исправит.
-    const decision = steps.find((x) => x.action === 'decide' || x.action === 'fix-input');
+    // Решение о плане не срочнее: оно о будущем объёме, после ожидания
+    // снимающего паузу задания и паузы человека (общий порядок `rank`).
+    const decision = steps.find(
+      (x) => (x.action === 'decide' && x.decision !== 'plan') || x.action === 'fix-input',
+    );
     if (decision) return decision;
     // Пауза выдачи общая: её снимает любое действующее задание, чей цикл
     // снимет её — сразу или после такта, который сначала чинит задачу.

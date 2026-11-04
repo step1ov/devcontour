@@ -20,12 +20,13 @@ import {
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { handoffPackSchema, type HandoffPack } from 'devcontour-harness/contracts';
-import { complete, config, fixture, input } from './helpers.ts';
+import { MERGED, complete, config, fixture, input } from './helpers.ts';
 import { AgentService, capabilities } from '../src/application/agent.ts';
 import { DevContour, specDigest } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { DomainError, repositorySchema, type Config } from '../src/core/model.ts';
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
+import { loopAhead } from '../src/runner/lead-outlook.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { DevContourExecutionStore } from '../src/harness/store.ts';
 import { projectionOptions } from '../src/harness/host.ts';
@@ -815,6 +816,284 @@ test('session_handoff: пауза человека и решение по зад
     } finally {
       f.cleanup();
     }
+  }
+});
+
+test('session_handoff: доска без согласованного плана — decide о плане, а не workflow_start', async () => {
+  const f = fixture();
+  try {
+    const board = f.h.createBoard('Board with later findings', '', 'main');
+    f.h.addTask(board.id, input('Approved task'));
+    f.h.approve(board.id);
+    const drafts = ['Finding one', 'Finding two'].map((t) => f.h.addTask(board.id, input(t)).id);
+    for (const value of [devcontourHandoff(f.h), devcontourHandoff(f.h, { boardId: board.id })]) {
+      assert.equal(value.host.next?.action, 'decide');
+      assert.equal(value.host.next?.decision, 'plan');
+      assert.equal(value.host.next?.boardId, board.id);
+      assert.deepEqual(value.host.next?.plan?.drafts.sort(), [...drafts].sort());
+      assert.match(value.host.next.detail, /review-plan --board .* --tasks/);
+      for (const id of drafts)
+        assert.ok(value.host.next.detail.includes(id), 'id задачи в подсказке');
+      assert.match(value.host.next.detail, /--workspace/);
+      assert.doesNotMatch(value.host.next.detail, /^No live/);
+    }
+    // Почему не workflow_start: задание отправило бы весь план на ревью, и
+    // после одобрения (в режиме demo — сразу) черновики выпущены все.
+    const job = new LeadWorkflow(f.h).start({
+      kind: 'board',
+      id: board.id,
+      authorRuntime: 'codex',
+      maxAttempts: 3,
+    });
+    assert.deepEqual(loopAhead(f.h, f.store.read(), job).outlook, { step: 'review-plan' });
+    await new LeadRunner(f.h, f.root).tick();
+    const released = f.store.read().tasks.filter((t) => drafts.includes(t.id));
+    assert.ok(
+      released.every((t) => t.status !== 'draft'),
+      'workflow_start выпустил все черновики',
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('session_handoff: решение ведущего или пользователя вне очереди — без придуманного шага очереди', () => {
+  const f = fixture();
+  try {
+    const h = new DevContour(
+      f.store,
+      config({ checkoutRoot: f.h.config.checkoutRoot, maxAttempts: 1 }),
+    );
+    const board = h.createBoard('Board with an exhausted task', '', 'main');
+    const task = h.addTask(board.id, input('Exhausted task')).id;
+    h.approve(board.id);
+    // Вторая доска без задания: её workflow_start был бы выдуманным шагом.
+    const other = h.createBoard('Other board', '', 'main');
+    h.addTask(other.id, input('Other task'));
+    h.approve(other.id);
+    h.pause(false);
+    const run = h.claim('test')!;
+    assert.equal(run.taskId, task);
+    h.fail(run.id, run.token, 'gate failed', false, 'gate');
+    const value = devcontourHandoff(h);
+    assert.equal(value.pack.next.actor, 'user');
+    assert.equal(value.pack.next.action, 'reset-attempts');
+    assert.equal(value.host.next, undefined, 'шаг пакета стоит; шага очереди нет');
+    // Решение по заданию доски этого решения остаётся: цикл задания
+    // остановил бы его на исчерпанной задаче.
+    const job = new LeadWorkflow(h).start({
+      kind: 'board',
+      id: board.id,
+      authorRuntime: 'codex',
+      maxAttempts: 3,
+    });
+    atStage(h, job.key, job.owner, 1);
+    const decided = devcontourHandoff(h);
+    assert.equal(decided.host.next?.action, 'decide');
+    assert.equal(decided.host.next?.decision, 'job');
+    assert.equal(decided.host.next?.loop?.step, 'stop');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('session_handoff: решение о плане с заданием доски — wait при живом задании, workflow_retry при упавшем', async () => {
+  // Живое задание стадии 0: план ревьюирует оно само — ведущий ждёт, а не
+  // ревьюирует вручную наперегонки с ним.
+  {
+    const f = fixture();
+    try {
+      const board = f.h.createBoard('Board under plan review', '', 'main');
+      f.h.addTask(board.id, input('Approved task'));
+      f.h.approve(board.id);
+      const draft = f.h.addTask(board.id, input('Later finding')).id;
+      new LeadWorkflow(f.h).start({
+        kind: 'board',
+        id: board.id,
+        authorRuntime: 'codex',
+        maxAttempts: 3,
+      });
+      for (const value of [devcontourHandoff(f.h), devcontourHandoff(f.h, { boardId: board.id })]) {
+        assert.equal(value.pack.next.action, 'review-plan');
+        assert.equal(value.host.next?.action, 'wait');
+        assert.equal(value.host.next?.loop?.step, 'review-plan');
+      }
+      await new LeadRunner(f.h, f.root).tick();
+      assert.notEqual(
+        f.store.read().tasks.find((t) => t.id === draft)!.status,
+        'draft',
+        'план разобрало задание',
+      );
+    } finally {
+      f.cleanup();
+    }
+  }
+  // Задание стадии 0 упало, попытки остались — повтор задания, и он
+  // продвигает его.
+  {
+    const f = fixture();
+    try {
+      const board = f.h.createBoard('Board with a failed plan review', '', 'main');
+      f.h.addTask(board.id, input('Approved task'));
+      f.h.approve(board.id);
+      f.h.addTask(board.id, input('Later finding'));
+      const flow = new LeadWorkflow(f.h);
+      const job = flow.start({
+        kind: 'board',
+        id: board.id,
+        authorRuntime: 'codex',
+        maxAttempts: 3,
+      });
+      flow.fail(flow.claim(job.key, job.owner)!, 'plan review runtime unavailable');
+      const value = devcontourHandoff(f.h, { boardId: board.id });
+      assert.equal(value.host.next?.action, 'workflow_retry');
+      assert.equal(value.host.next?.job?.key, job.key);
+      assert.equal(value.host.next?.loop?.step, 'review-plan');
+      flow.retry(job.key, job.owner);
+      await new LeadRunner(f.h, f.root).tick();
+      assert.notEqual(flow.get(job.key, job.owner).status, 'failed');
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test('session_handoff: принятой доске без открытых задач шаг не нужен — и с её заданием', () => {
+  for (const status of ['completed', 'failed'] as const) {
+    const f = fixture();
+    try {
+      const accepted = f.h.createBoard('Accepted board', '', 'main');
+      const done = f.h.addTask(accepted.id, input('Done task')).id;
+      const cancelled = f.h.addTask(accepted.id, input('Cancelled task')).id;
+      f.h.approve(accepted.id);
+      complete(f.h, done);
+      f.h.cancel(cancelled, 'not needed any more');
+      f.h.accept(accepted.id, MERGED);
+      assert.equal(f.store.read().boards[0].revisions.at(-1)!.status, 'accepted');
+      // Открытая работа есть, но на другой доске (без задания).
+      const other = f.h.createBoard('Open board', '', 'main');
+      f.h.addTask(other.id, input('Open task'));
+      f.h.approve(other.id);
+      // Задание по текущему входу принятой доски: завершённое или упавшее.
+      const job = new LeadWorkflow(f.h).start({
+        kind: 'board',
+        id: accepted.id,
+        authorRuntime: 'codex',
+        maxAttempts: 3,
+      });
+      atStage(f.h, job.key, job.owner, 2, { status, attempts: 1 });
+      const value = devcontourHandoff(f.h);
+      assert.ok(value.pack.summary.open > 0);
+      // Шаг пакета — решение ведущего по отменённой задаче принятой доски.
+      assert.equal(value.pack.next.action, 'replan-dependents');
+      assert.equal(value.pack.next.workId, cancelled);
+      assert.equal(value.host.next, undefined, status + ': заданию принятой доски делать нечего');
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test('session_handoff: пауза человека важнее решения о плане другой доски', () => {
+  for (const before of [true, false]) {
+    const f = fixture();
+    try {
+      const planned = f.h.createBoard('Board with an unapproved plan', '', 'main');
+      f.h.addTask(planned.id, input('Approved task'));
+      f.h.approve(planned.id);
+      f.h.addTask(planned.id, input('Later finding'));
+      const running = f.h.createBoard('Running board', '', 'main');
+      f.h.addTask(running.id, input('Running task'));
+      f.h.approve(running.id);
+      const start = () =>
+        atStage(
+          f.h,
+          new LeadWorkflow(f.h).start({
+            kind: 'board',
+            id: running.id,
+            authorRuntime: 'codex',
+            maxAttempts: 3,
+          }).key,
+          'main',
+          1,
+        );
+      if (before) {
+        f.h.pause(true);
+        tick();
+        start();
+      } else {
+        start();
+        tick();
+        f.h.pause(true);
+      }
+      const value = devcontourHandoff(f.h);
+      assert.equal(value.pack.next.action, 'resume-queue', 'шаг пакета — снять паузу');
+      if (before) {
+        // Пауза до старта задания: цикл задания снимет её.
+        assert.equal(value.host.next?.action, 'wait');
+        assert.equal(value.host.next?.boardId, running.id);
+        assert.deepEqual(value.host.next?.loop, { step: 'lift-pause', pause: 'operator' });
+      } else {
+        // Пауза после старта: решение пользователя, не решение о плане.
+        assert.equal(value.host.next?.action, 'queue_set');
+      }
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test('session_handoff: решение пакета не прячется за ожиданием задания, которое лишь ждёт задач', () => {
+  const f = fixture();
+  try {
+    const board = f.h.createBoard('Board past plan review', '', 'main');
+    f.h.addTask(board.id, input('Approved task'));
+    f.h.approve(board.id);
+    const draft = f.h.addTask(board.id, input('Finding after plan review')).id;
+    // Задание по текущему входу (с черновиком) уже на стадии приёмки: его
+    // цикл ждёт задач и черновик не выпустит.
+    const job = new LeadWorkflow(f.h).start({
+      kind: 'board',
+      id: board.id,
+      authorRuntime: 'codex',
+      maxAttempts: 3,
+    });
+    atStage(f.h, job.key, job.owner, 2);
+    const value = devcontourHandoff(f.h, { boardId: board.id });
+    assert.equal(value.pack.next.action, 'review-plan');
+    assert.deepEqual(value.host.liveBoards, [board.id], 'задание действует');
+    assert.equal(
+      loopAhead(f.h, f.store.read(), new LeadWorkflow(f.h).get(job.key, job.owner)).outlook.step,
+      'wait',
+      'задание стадии 2 только ждёт задач',
+    );
+    assert.equal(value.host.next?.action, 'decide');
+    assert.equal(value.host.next?.decision, 'plan');
+    assert.deepEqual(value.host.next?.plan?.drafts, [draft]);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('session_handoff: подсказка ревью плана называет не больше 20 задач', () => {
+  const f = fixture();
+  try {
+    const board = f.h.createBoard('Board with many findings', '', 'main');
+    f.h.addTask(board.id, input('Approved task'));
+    f.h.approve(board.id);
+    const drafts = Array.from(
+      { length: 25 },
+      (_, i) => f.h.addTask(board.id, input(`Finding ${i}`)).id,
+    );
+    const value = devcontourHandoff(f.h, { boardId: board.id });
+    assert.equal(value.host.next?.decision, 'plan');
+    const detail = value.host.next.detail;
+    const named = drafts.filter((id) => detail.includes(id));
+    assert.equal(named.length, 20);
+    assert.match(detail, /… ещё 5/);
+    assert.equal(value.host.next?.plan?.drafts.length, 25, 'полный список — в plan');
+  } finally {
+    f.cleanup();
   }
 });
 
