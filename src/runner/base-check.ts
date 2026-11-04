@@ -221,7 +221,7 @@ export async function checkBase(
             'base.check.failed',
             {
               // Не провал gates: исход проверки не записался.
-              reason: 'record',
+              reason: signal?.aborted ? 'cancelled' : 'record',
               ...(saved.passed ? { gatesPassed: true } : {}),
               error: journalError(error, [
                 roots.state,

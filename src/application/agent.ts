@@ -38,6 +38,8 @@ import { contractProposal, limitsMessage, proposalLimitIssues } from '../runner/
 import { queueStopOf, quietAttempts, quietOperations } from './queue-stop.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
+/** Отказ запуска очереди, пока процесс сервера останавливается. */
+export const SERVER_STOPPING = 'Сервер останавливается: очередь не запускается';
 export const agentInputs = {
   ...preparationInputs,
   ...intentInputs,
@@ -372,6 +374,15 @@ export class AgentService {
     readonly h: DevContour,
     /** Каталог данных контура: в нём асинхронные операции создают рабочие деревья. */
     readonly root?: string,
+    readonly options: {
+      /**
+       * Процесс сервера останавливается: снятие паузы через `queue_set`
+       * отклоняется, иначе оно сняло бы паузу остановки и такт выдал бы
+       * попытку, которую уже некому довести. Есть только у агента внутри
+       * процесса `serve` (`/api/agent`).
+       */
+      stopping?: () => boolean;
+    } = {},
   ) {}
   execute(raw: unknown): Record<string, unknown> {
     return this.bounded(this.dispatch(parseAgentRequest(raw)));
@@ -690,6 +701,7 @@ export class AgentService {
       }
       case 'queue_set': {
         const value = agentInputs.queue_set.parse(input);
+        if (!value.paused && this.options.stopping?.()) throw new DomainError(SERVER_STOPPING, 409);
         h.pause(value.paused);
         return { ...value, queue: queueStopOf(h), serverRequiredForExecution: true };
       }

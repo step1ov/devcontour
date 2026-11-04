@@ -6,7 +6,7 @@ import { LeadRunner } from '../runner/lead-workflow.ts';
 import { PreviewRunner } from '../runner/preview.ts';
 import { authorOverview } from '../application/overview.ts';
 import { DeliveryRunner } from '../runner/forge.ts';
-import { AgentService, capabilities } from '../application/agent.ts';
+import { AgentService, capabilities, SERVER_STOPPING } from '../application/agent.ts';
 import { checksSummary, taskChecks } from '../application/checks.ts';
 import {
   panelChangeSet,
@@ -377,7 +377,9 @@ export async function serve(
         if (req.method === 'GET' && path === '/api/capabilities') {
           result = capabilities();
         } else if (req.method === 'POST' && path === '/api/agent') {
-          result = await new AgentService(h, scheduler.root).run(await body(req));
+          result = await new AgentService(h, scheduler.root, {
+            stopping: () => stopping || !!scheduler?.stopping,
+          }).run(await body(req));
         } else if (req.method === 'GET' && path === '/api/overview') {
           result = authorOverview(h);
         } else if (req.method === 'GET' && path === '/api/summary') {
@@ -606,6 +608,12 @@ export async function serve(
             );
           else if (path === '/api/scheduler') {
             const start = z.boolean().parse(input.start);
+            // Сервер останавливается: запуск очереди снял бы паузу остановки,
+            // и такт выдал бы попытку, которую уже некому довести.
+            // Остановка начинается в `close` сервера (раньше остановки
+            // планировщика: сначала ведущий цикл и прочие исполнители).
+            if (start && (stopping || scheduler.stopping))
+              throw new DomainError(SERVER_STOPPING, 409);
             h.pause(!start);
             if (start) await scheduler.tick();
             // Такт мог сразу снова остановить очередь: ответ — то, что видно
