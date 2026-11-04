@@ -142,6 +142,30 @@ export function boardTasks(s: DevContourState, boardId: string) {
   };
 }
 
+/**
+ * План доски согласован: ревизия принята или ни одна её задача не черновик
+ * и не утверждена при другой политике исполнения. Иначе стадия 0 задания
+ * отправит план на ревью и, одобренный, выпустит все его задачи.
+ */
+export function planApproved(
+  h: DevContour,
+  revision: { status: string },
+  tasks: readonly Task[],
+): boolean {
+  return (
+    revision.status === 'accepted' ||
+    tasks.every((t) => t.status !== 'draft' && !h.approvalStale(t))
+  );
+}
+
+/** Почему план не согласован: черновые задачи и утверждённые при другой политике. */
+export function unapprovedTasks(h: DevContour, tasks: readonly Task[]) {
+  return {
+    drafts: tasks.filter((t) => t.status === 'draft').map((t) => t.id),
+    stale: tasks.filter((t) => t.status !== 'draft' && h.approvalStale(t)).map((t) => t.id),
+  };
+}
+
 /** Следующий такт цикла ведущего по заданию доски. */
 export type LoopOutlook =
   | { step: 'review-plan' }
@@ -171,10 +195,7 @@ export function loopOutlook(h: DevContour, s: DevContourState, job: WorkflowJob)
   if (!found) return { step: 'none' };
   const { revision, tasks } = found;
   if (job.stage === 0)
-    return revision.status === 'accepted' ||
-      tasks.every((t) => t.status !== 'draft' && !h.approvalStale(t))
-      ? { step: 'advance' }
-      : { step: 'review-plan' };
+    return planApproved(h, revision, tasks) ? { step: 'advance' } : { step: 'review-plan' };
   const ids = tasks.map((t) => t.id);
   const recovery = recoveryStep(h, s, job, ids);
   if (recovery) {
