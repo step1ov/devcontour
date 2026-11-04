@@ -33,8 +33,9 @@ import {
   AGENT_HANDOFF_BYTES,
   HANDOFF_FULL_HINT,
   devcontourHandoff,
-  fitHandoff,
+  devcontourHandoffWithin,
   handoffRedactor,
+  handoffResponse,
   type DevContourHandoff,
 } from '../src/application/handoff.ts';
 import { command } from '../src/runner/process.ts';
@@ -243,27 +244,44 @@ test('session_handoff: boardId — граф harness той же доски; не
   }
 });
 
-test('session_handoff: предел ответа отбрасывает записи порядком пакета и считает их в truncated', () => {
+test('session_handoff: предел ответа — maxBytes пакета harness за вычетом приложения DevContour; порядок отбрасывания пакета', () => {
   const f = fixture();
   try {
     boards(f.h);
-    const { pack } = devcontourHandoff(f.h, { intentions: [INTENT, 'second intention'] });
-    const size = (p: HandoffPack) => Buffer.byteLength(JSON.stringify(p));
-    const fitted = fitHandoff(pack, (p) => size(p) <= size(pack) - 1);
-    handoffPackSchema.parse(fitted);
-    assert.equal(fitted.truncated.bySize, true);
-    assert.equal(fitted.truncated.intentionsDropped, 1, 'первым уходит последнее намерение');
-    assert.deepEqual(fitted.intentions, [INTENT]);
-    assert.equal(pack.truncated.bySize, false, 'исходный пакет не меняется');
-    const tight = fitHandoff(pack, (p) => size(p) <= 1500);
-    handoffPackSchema.parse(tight);
-    assert.deepEqual(tight.intentions, []);
-    assert.deepEqual(tight.failures, []);
-    assert.equal(tight.truncated.failures, pack.failures.length + pack.truncated.failures);
-    assert.equal(
-      tight.works.length + tight.truncated.works,
-      pack.works.length + pack.truncated.works,
-    );
+    const intentions = [
+      INTENT,
+      ...Array.from({ length: 6 }, (_, i) => `intention ${i} ` + 'x'.repeat(900)),
+    ];
+    const full = devcontourHandoffWithin(f.h, { intentions });
+    assert.equal(full.trimmed, false);
+    const size = (v: DevContourHandoff, format: 'json' | 'md') =>
+      Buffer.byteLength(JSON.stringify(handoffResponse(v, format)));
+    for (const format of ['json', 'md'] as const) {
+      const total = size(full.value, format);
+      const one = devcontourHandoffWithin(f.h, { intentions }, { bytes: total - 1, format });
+      const pack = handoffPackSchema.parse(one.value.pack);
+      assert.equal(one.trimmed, true, format);
+      assert.equal(pack.truncated.bySize, true);
+      // Первыми уходят намерения с конца. В JSON — ровно одно; Markdown в ответе
+      // экранирован как строка JSON и мера пакета `markdown` берёт больший из
+      // размеров, поэтому там может уйти и больше.
+      const dropped = pack.truncated.intentionsDropped;
+      if (format === 'json') assert.equal(dropped, 1, 'json: ровно последнее намерение');
+      else assert.ok(dropped >= 1 && pack.truncated.failures === 0, 'md: только намерения');
+      assert.deepEqual(pack.intentions, intentions.slice(0, intentions.length - dropped));
+      assert.ok(size(one.value, format) <= total - 1, format + ': весь ответ в пределе');
+      assert.deepEqual(one.value.host, full.value.host, 'приложение — по полному пакету');
+      const limit = total - 4000;
+      const tight = devcontourHandoffWithin(f.h, { intentions }, { bytes: limit, format });
+      handoffPackSchema.parse(tight.value.pack);
+      assert.ok(size(tight.value, format) <= limit, format + ': и при узком пределе');
+      assert.deepEqual(
+        tight.value.pack.intentions,
+        intentions.slice(0, tight.value.pack.intentions.length),
+      );
+      assert.ok(tight.value.pack.truncated.intentionsDropped >= 2);
+    }
+    assert.equal(full.value.pack.truncated.bySize, false, 'полный пакет не урезан');
   } finally {
     f.cleanup();
   }
