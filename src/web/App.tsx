@@ -1967,6 +1967,8 @@ export function App() {
                       'tabular block text-lg leading-7',
                       label === 'Со сбоем' && value > 0 && 'text-destructive',
                       label === 'Со сбоем' && value === 0 && 'text-muted-foreground',
+                      label === 'В работе' && value > 0 && 'text-info',
+                      label === 'Принято' && value > 0 && 'text-success',
                     )}
                   >
                     {value}
