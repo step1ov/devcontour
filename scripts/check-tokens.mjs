@@ -1,5 +1,13 @@
 import { readFile, readdir } from 'node:fs/promises';
 const errors = [];
+// Строки классов: className="…", className={`…`} и литералы внутри cn(…).
+function* classStrings(text) {
+  for (const [, value] of text.matchAll(/className="([^"]*)"/g)) yield value;
+  for (const [, value] of text.matchAll(/className=\{`([^`]*)`\}/g))
+    yield value.replace(/\$\{[^}]*\}/g, ' ');
+  for (const [, args] of text.matchAll(/\bcn\(([^()]*(?:\([^()]*\)[^()]*)*)\)/g))
+    for (const [, value] of args.matchAll(/(?<![=!]==\s*)'([^']*)'/g)) yield value;
+}
 const deadClasses = new Set([
   'primary',
   'alert',
@@ -23,7 +31,7 @@ async function scan(directory) {
     // Классы удалённой таблицы стилей: CSS для них нет, и элемент молча
     // теряет вид (главная кнопка выглядела второстепенной, ошибка — текстом).
     if (path.endsWith('.tsx'))
-      for (const [, value] of text.matchAll(/className="([^"]*)"/g)) {
+      for (const value of classStrings(text)) {
         const dead = value.split(/\s+/).filter((word) => deadClasses.has(word));
         if (dead.length) errors.push(path + ': класс без стилей: ' + dead.join(', '));
       }

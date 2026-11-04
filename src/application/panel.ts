@@ -915,6 +915,9 @@ export function panelTaskSearch(h: DevContour, query: Record<string, string | un
 export function panelQueue(h: DevContour, query: Record<string, string | undefined>) {
   const state = sharedState(h);
   const active = ['running', 'verifying', 'reviewing', 'integrating'];
+  // Те же незакрытые зависимости, что `blockers()`, но одним проходом по
+  // задачам для всей страницы.
+  const done = new Set(state.tasks.filter((t) => t.status === 'done').map((t) => t.id));
   const result = paged(
     state.tasks.filter((t) => !['done', 'cancelled', ...active].includes(t.status)),
     query,
@@ -929,7 +932,7 @@ export function panelQueue(h: DevContour, query: Record<string, string | undefin
       repositoryId: t.repositoryId,
       // Готовая задача с незакрытыми зависимостями ждёт, а не готова к
       // выдаче: панель называет её тем же словом, что граф и список.
-      blockers: blockers(t, state),
+      blockers: t.dependsOn.filter((id) => !done.has(id)),
     })),
   };
 }
