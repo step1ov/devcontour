@@ -874,6 +874,10 @@ export function App() {
   // для смены вида или доски. Чужие параметры адреса (этап подготовки)
   // сохраняются.
   const wroteLocation = useRef(false);
+  const replaceNext = useRef(false);
+  const [historyDepth, setHistoryDepth] = useState(
+    () => (window.history.state as { devcontourDepth?: number } | null)?.devcontourDepth ?? 0,
+  );
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const before = new URLSearchParams(params);
@@ -893,11 +897,22 @@ export function App() {
     const sameView =
       before.get('tab') === params.get('tab') &&
       (!before.get('board') || before.get('board') === params.get('board'));
-    window.history[!wroteLocation.current || sameView ? 'replaceState' : 'pushState'](
-      window.history.state,
+    // Исправление адреса (доска из ссылки не найдена, переход задачи из
+    // ссылки на её доску) — тоже замена: «Назад» не должен вести на
+    // неверный адрес, который снова исправится и запишется вперёд.
+    const replace = !wroteLocation.current || sameView || replaceNext.current;
+    replaceNext.current = false;
+    // Глубина собственных записей панели — в состоянии записи истории:
+    // кнопка «Назад» видна, только когда есть куда вернуться внутри панели.
+    const depth =
+      (window.history.state as { devcontourDepth?: number } | null)?.devcontourDepth ?? 0;
+    const nextDepth = replace ? depth : depth + 1;
+    window.history[replace ? 'replaceState' : 'pushState'](
+      { ...(window.history.state ?? {}), devcontourDepth: nextDepth },
       '',
       next,
     );
+    setHistoryDepth(nextDepth);
     wroteLocation.current = true;
   }, [tab, boardId, selected, boardScreen]);
   const shownBoard = useRef(boardId);
@@ -905,6 +920,9 @@ export function App() {
   useEffect(() => {
     const restore = () => {
       const place = readAppLocation();
+      setHistoryDepth(
+        (window.history.state as { devcontourDepth?: number } | null)?.devcontourDepth ?? 0,
+      );
       setTab(place.tab);
       // Другая доска — как при выборе в навигации: последняя ревизия, без
       // прежнего поиска.
@@ -1035,6 +1053,7 @@ export function App() {
       data.boardId
     ) {
       toast.error('Доска из ссылки не найдена — открыта текущая доска');
+      replaceNext.current = true;
       setBoardId(data.boardId);
       setRevisionNumber(null);
       setSelected('');
@@ -1223,7 +1242,11 @@ export function App() {
       } else {
         const own = board?.revisions.find((r) => r.taskIds.includes(linked));
         if (own && own.number !== revision?.number) return setRevisionNumber(own.number);
-        if (t.boardId && t.boardId !== boardId && tab !== 'workspace') return setBoardId(t.boardId);
+        if (t.boardId && t.boardId !== boardId && tab !== 'workspace') {
+          replaceNext.current = true;
+          setRevisionNumber(null);
+          return setBoardId(t.boardId);
+        }
         linkedTask.current = '';
         setOutside(linked);
         return;
@@ -1255,7 +1278,7 @@ export function App() {
   // возвращает автоматическое вписывание.
   const userMoved = useRef(false);
   const fit = useCallback(() => {
-    if (!userMoved.current) void flowRef.current?.({ padding: 0.12, minZoom: 0.75, maxZoom: 1 });
+    if (!userMoved.current) void flowRef.current?.({ padding: 0.12, minZoom: 0.5, maxZoom: 1 });
   }, []);
   const observer = useRef<ResizeObserver>(null);
   const canvasRef = useCallback(
@@ -1772,15 +1795,21 @@ export function App() {
               постоянна: ошибка связи встаёт в неё, а не вставляется над
               контентом. */}
           <header className="flex h-(--topbar-height) min-w-0 shrink-0 items-center gap-2 border-b px-4 text-sm max-[760px]:h-auto max-[760px]:flex-wrap max-[760px]:gap-y-1 max-[760px]:py-2">
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              aria-label="Назад"
-              onClick={() => window.history.back()}
-            >
-              <ArrowLeft />
-            </Button>
-            <span aria-hidden="true" className="bg-border h-4 w-px shrink-0 max-[760px]:hidden" />
+            {/* «Назад» — только по записям самой панели: в свежей вкладке
+                он уводил со страницы. */}
+            {historyDepth > 0 && (
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label="Назад"
+                onClick={() => window.history.back()}
+              >
+                <ArrowLeft />
+              </Button>
+            )}
+            {historyDepth > 0 && (
+              <span aria-hidden="true" className="bg-border h-4 w-px shrink-0 max-[760px]:hidden" />
+            )}
             <nav
               aria-label="Путь"
               className="text-muted-foreground flex min-w-0 items-center gap-1.5 max-[760px]:flex-1"
@@ -1822,12 +1851,9 @@ export function App() {
               </p>
             )}
             <div className="ml-auto flex shrink-0 items-center gap-1 max-[760px]:ml-0 max-[760px]:w-full max-[760px]:shrink max-[760px]:flex-wrap">
-              {/* Подробности очереди — в ячейке «Сейчас» полосы состояния;
-                  здесь только точка состояния рядом с переключателем. */}
-              <span
-                className="mr-1 flex size-6 items-center justify-center"
-                title={`${data.paused ? 'Очередь на паузе' : 'Очередь идёт'} · ${activeRuns} из ${data.config.concurrency} исполнителей`}
-              >
+              {/* Коротко: точка, слово и занятость; причина остановки и
+                  исполнители — в ячейке «Сейчас» полосы состояния. */}
+              <span className="text-muted-foreground mr-1 flex items-center gap-1.5 text-xs whitespace-nowrap">
                 <span
                   aria-hidden="true"
                   className={cn(
@@ -1835,9 +1861,15 @@ export function App() {
                     data.paused ? 'bg-warning' : 'bg-success',
                   )}
                 />
-                <span className="sr-only">
-                  {data.paused ? 'Очередь на паузе' : 'Очередь идёт'}, {activeRuns} из{' '}
-                  {data.config.concurrency} исполнителей
+                <span className="text-foreground">
+                  <span aria-hidden="true">{data.paused ? 'пауза' : 'идёт'}</span>
+                  <span className="sr-only">
+                    {data.paused ? 'Очередь на паузе' : 'Очередь идёт'}
+                  </span>
+                </span>
+                <span className="tabular max-[760px]:hidden">
+                  · {activeRuns} из {data.config.concurrency}
+                  <span className="sr-only"> исполнителей</span>
                 </span>
               </span>
               {!queuePrimary && queueButton(false)}
@@ -1965,7 +1997,7 @@ export function App() {
                   key={label}
                   className="px-3 py-2.5 first:pl-0 [&:nth-child(5)]:border-r max-[1180px]:border-b max-[1180px]:[&:nth-child(5)]:border-r-0 max-[760px]:pr-2 max-[760px]:pl-0"
                 >
-                  <span className="text-muted-foreground block truncate text-xs">{label}</span>
+                  <span className="text-muted-foreground block text-xs leading-4">{label}</span>
                   <span
                     className={cn(
                       'tabular block text-lg leading-7',
@@ -2275,7 +2307,7 @@ export function App() {
                           userMoved.current = false;
                         }}
                         fitView
-                        fitViewOptions={{ padding: 0.12, minZoom: 0.75, maxZoom: 1 }}
+                        fitViewOptions={{ padding: 0.12, minZoom: 0.5, maxZoom: 1 }}
                         minZoom={0.3}
                       />
                       <div className="text-muted-foreground bg-card/90 pointer-events-none absolute bottom-3 left-4 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-xs px-1 text-xs max-[760px]:right-14">

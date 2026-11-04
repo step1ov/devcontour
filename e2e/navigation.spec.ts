@@ -49,11 +49,31 @@ test('A view link without a board fills it in place: one Back leaves the panel',
 test('An unknown board in the link opens the current board instead of an empty screen', async ({
   page,
 }) => {
+  await page.goto('about:blank');
   await page.goto('/?tab=list&board=B-00000000-0000-4000-8000-000000000000');
   await expect(page.getByText('Доска из ссылки не найдена')).toBeVisible();
   await expect(page).not.toHaveURL(/B-00000000-0000-4000-8000-000000000000/);
   await expect(page).toHaveURL(/[?&]board=B-/);
   await expect(page.getByRole('heading', { name: 'Создайте первую доску' })).toHaveCount(0);
+  // Исправленный адрес заменил неверный: «Назад» уходит со страницы, а не
+  // возвращает на ссылку, которая снова исправится.
+  await page.goBack();
+  await expect(page).toHaveURL('about:blank');
+});
+
+test('«Назад» in the path row appears only after the panel itself moved', async ({ page }) => {
+  await page.goto('/');
+  const back = page.getByRole('button', { name: 'Назад', exact: true });
+  await expect(page.getByRole('heading', { name: 'Обзор', exact: true })).toBeVisible();
+  await expect(back).toHaveCount(0);
+  await page
+    .getByRole('navigation', { name: 'Workspace' })
+    .getByRole('link', { name: 'Изменения', exact: true })
+    .click();
+  await expect(back).toBeVisible();
+  await back.click();
+  await expect(page).toHaveURL(/\/$/);
+  await expect(back).toHaveCount(0);
 });
 
 test('A graph node chosen from the keyboard is the selected task everywhere', async ({
