@@ -984,10 +984,15 @@ test('session_handoff: принятой доске без открытых за�
       atStage(f.h, job.key, job.owner, 2, { status, attempts: 1 });
       const value = devcontourHandoff(f.h);
       assert.ok(value.pack.summary.open > 0);
-      // Шаг пакета — решение ведущего по отменённой задаче принятой доски.
-      assert.equal(value.pack.next.action, 'replan-dependents');
-      assert.equal(value.pack.next.workId, cancelled);
-      assert.equal(value.host.next, undefined, status + ': заданию принятой доски делать нечего');
+      // Отменённой задаче без ждущих решение не нужно (harness alpha.33):
+      // шаг — по открытой доске, принятая доска не называется.
+      assert.notEqual(value.pack.next.workId, cancelled);
+      assert.equal(
+        value.host.next?.boardId,
+        other.id,
+        status + ': заданию принятой доски делать нечего',
+      );
+      assert.equal(value.host.next?.action, 'workflow_start');
     } finally {
       f.cleanup();
     }

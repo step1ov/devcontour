@@ -304,6 +304,16 @@ test('AC11: следующий шаг по сбою зависит от оста
       actor: 'user',
       step: 'Попытки исчерпаны: сброс — решение человека с причиной.',
     });
+    // Упавшая отменой задача не повторяется движком: решает человек.
+    f.store.change('fixture', (s) => {
+      const x = s.tasks.find((y) => y.id === t.id)!;
+      x.attempt = 1;
+      x.failureKind = 'cancelled';
+    });
+    assert.deepEqual(taskChecks(f.h, { taskId: t.id }).next, {
+      actor: 'user',
+      step: 'Попытка отменена: повторите задачу или отмените её — решение человека.',
+    });
   } finally {
     f.cleanup();
   }

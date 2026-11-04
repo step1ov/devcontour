@@ -57,8 +57,15 @@ function nextStep(
     maxAttempts: h.config.maxAttempts,
     ...(task.hold ? { hold: task.hold } : {}),
     ...(task.recovery ? { recovery: task.recovery } : {}),
+    ...(task.failureKind ? { failureKind: task.failureKind } : {}),
     waitingAdoption,
   });
+  // Упавшая отменой задача открыта: движок её не повторяет, решает человек.
+  if (view.step === 'cancelled' && task.status === 'failed')
+    return {
+      actor: view.actor,
+      step: 'Попытка отменена: повторите задачу или отмените её — решение человека.',
+    };
   return { actor: view.actor, step: stepTexts[view.step](view, h.config.approvalMode) };
 }
 
