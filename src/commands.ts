@@ -1018,9 +1018,11 @@ async function main() {
       } else if (operation === 'reopen')
         result = h.reopen(option('--task', ''), option('--reason', ''));
       else if (operation === 'retry')
+        // Команда CLI — действие человека (`operator`), как `harness retry`.
         result = h.retry(
           option('--task', ''),
           args.includes('--reset') ? { reason: option('--reason', '') } : undefined,
+          'operator',
         );
       else if (operation === 'edit-board')
         result = h.editBoard(option('--board', ''), {
@@ -1030,7 +1032,7 @@ async function main() {
       else if (operation === 'cancel') {
         if (!args.includes('--reason') || !option('--reason', '').trim())
           throw new Error('Укажите --reason: почему задача больше не нужна');
-        result = h.cancel(option('--task', ''), option('--reason', ''));
+        result = h.cancel(option('--task', ''), option('--reason', ''), 'operator');
       } else if (operation === 'task-feature')
         result = h.bindFeature(option('--task', ''), option('--feature', ''));
       else if (operation === 'task-story') {

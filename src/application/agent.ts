@@ -605,7 +605,9 @@ export class AgentService {
       }
       case 'task_retry': {
         const taskId = agentInputs.task_retry.parse(input).taskId;
-        h.retry(taskId);
+        // Повтор ведущим агентом: не человек (`operator` отчёт относит к
+        // действиям человека) и не правило восстановления — актёр не назван.
+        h.retry(taskId, undefined, 'host');
         return { taskId };
       }
       case 'task_assign': {

@@ -655,8 +655,9 @@ export async function serve(
             // Подтверждение оператора из панели: тот же доменный метод, что CLI.
             result = new CheckCorpus(h).approveAdoption(parts[2], parts[4]).pending;
           } else if (parts[1] === 'tasks') {
-            if (parts[3] === 'retry') result = h.retry(parts[2]);
-            else if (parts[3] === 'cancel') result = h.cancel(parts[2]);
+            // Кнопки панели — действие человека (`operator`).
+            if (parts[3] === 'retry') result = h.retry(parts[2], undefined, 'operator');
+            else if (parts[3] === 'cancel') result = h.cancel(parts[2], undefined, 'operator');
             else if (req.method === 'PATCH')
               result = h.editTask(parts[2], input, z.string().parse(input.expectedDigest));
             else throw new DomainError('Команда не найдена', 404);

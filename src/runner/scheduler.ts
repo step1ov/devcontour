@@ -222,11 +222,16 @@ export class Scheduler {
       if (touched.length) return touched.map((p) => `${repo.id}:${p}`);
       moves.push({ repositoryId: repo.id, path: repo.path, branch, from, to });
     }
-    const move = fencedRefMove(executionOf(this.h).store, (view) => {
-      if (view.control().paused) throw new Error('очередь остановлена');
-      if (view.attempts().some((a) => a.status === 'active')) throw new Error('идёт попытка');
-      if (view.controller()?.owner !== this.owner) throw new Error('роль controller утрачена');
-    });
+    const move = fencedRefMove(
+      executionOf(this.h).store,
+      (view) => {
+        if (view.control().paused) throw new Error('очередь остановлена');
+        if (view.attempts().some((a) => a.status === 'active')) throw new Error('идёт попытка');
+        if (view.controller()?.owner !== this.owner) throw new Error('роль controller утрачена');
+      },
+      undefined,
+      'controller',
+    );
     const moved: typeof moves = [];
     try {
       for (const m of moves) {

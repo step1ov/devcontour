@@ -847,10 +847,13 @@ export class ContractChanges {
           { [repo.id]: reviewed },
           // Сдвиг ref внутри транзакции проверки владения операцией, без hooks
           // и с пределом времени Git (`fencedRefMove` пакета harness).
+          // Актёр сдвига — `host`: операцию ведёт ведущий агент (в режиме
+          // operator она недоступна), а не человек и не перемотка очереди.
           fencedRefMove(
             executionOf(this.h).store,
             () => this.guard(op),
             ContractChanges.refMoveTimeoutMs,
+            'host',
           ),
         );
         this.advanceStep(op, (current) => {

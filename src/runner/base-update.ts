@@ -1,4 +1,5 @@
-import { moveBase, type RefMove } from 'devcontour-harness';
+import { fencedRefMove, moveBase, type RefMove } from 'devcontour-harness';
+import { executionOf } from '../harness/execution.ts';
 import { repositories } from '../core/repositories.ts';
 import type { Config } from '../core/model.ts';
 import type { DevContour } from '../core/service.ts';
@@ -91,7 +92,23 @@ export async function baseUpdateOperation(h: DevContour, dataRoot: string) {
     throw new Error('Дождитесь завершения попыток перед переносом базы');
   let base;
   try {
-    base = await updateBase(h.config, dataRoot);
+    // Сдвиг ref — в транзакции проверки (очередь стоит, попыток нет) и
+    // событием `base.moved` с актёром `operator`: команда base-update —
+    // действие человека.
+    base = await updateBase(
+      h.config,
+      dataRoot,
+      undefined,
+      fencedRefMove(
+        executionOf(h).store,
+        (view) => {
+          if (!view.control().paused) throw new Error('очередь не остановлена');
+          if (view.attempts().some((a) => a.status === 'active')) throw new Error('идёт попытка');
+        },
+        undefined,
+        'operator',
+      ),
+    );
   } catch (error) {
     if (held) h.pause(false);
     throw error;
