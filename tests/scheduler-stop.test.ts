@@ -4,6 +4,8 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { fixture } from './helpers.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { serve } from '../src/server/http.ts';
+import { LeadRunner } from '../src/runner/lead-workflow.ts';
+import { SERVER_STOPPING } from '../src/application/agent.ts';
 
 /**
  * Штатная остановка сервера: `await scheduler.stop()`, затем закрытие
@@ -111,6 +113,7 @@ test('Остановка дожидается такта HTTP-запуска о�
       await stopping;
       assert.equal(seen.running, 0, 'stop дождался такта HTTP-запуска');
       assert.equal(f.store.read().paused, true, 'запуск очереди не снял паузу остановки');
+      assert.equal(f.store.read().pauseReason, 'shutdown', 'пауза — остановки');
       assert.equal((await started).status, 200);
       await app.close();
       f.cleanup();
@@ -123,5 +126,54 @@ test('Остановка дожидается такта HTTP-запуска о�
         await app.close();
         f.cleanup();
       }
+    }
+  }));
+
+test('Пока сервер останавливается (раньше планировщика), запуск очереди из панели и агента отклоняется', () =>
+  catching(async (unhandled) => {
+    const f = fixture();
+    const scheduler = new Scheduler(f.h, f.root);
+    const app = await serve(f.h, scheduler, { port: 0 });
+    // Остановка ведущего цикла идёт до остановки планировщика: задержка
+    // открывает окно, в котором планировщик ещё не stopping.
+    // Сам метод прототипа: вызывается ниже через `call` со своим `this`.
+    const original = Object.getOwnPropertyDescriptor(LeadRunner.prototype, 'stop')!.value as (
+      this: LeadRunner,
+    ) => Promise<void>;
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    LeadRunner.prototype.stop = async function (this: LeadRunner) {
+      await held;
+      return original.call(this);
+    };
+    let closing: Promise<void> | undefined;
+    try {
+      const post = (path: string, body: unknown) =>
+        fetch(app.url + path, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-DevContour-Request': '1' },
+          body: JSON.stringify(body),
+        });
+      f.h.pause(false);
+      closing = app.close();
+      await sleep(50);
+      assert.equal(scheduler.stopping, false, 'окно: планировщик ещё не останавливается');
+      const panel = await post('/api/scheduler', { start: true });
+      assert.equal(panel.status, 409);
+      assert.match(((await panel.json()) as { error: string }).error, new RegExp(SERVER_STOPPING));
+      const agent = await post('/api/agent', { operation: 'queue_set', input: { paused: false } });
+      assert.equal(agent.status, 409);
+      assert.match(JSON.stringify(await agent.json()), new RegExp(SERVER_STOPPING));
+      release();
+      await closing;
+      closing = undefined;
+      assert.equal(f.store.read().paused, true);
+      assert.equal(f.store.read().pauseReason, 'shutdown');
+      assert.deepEqual(unhandled, []);
+    } finally {
+      LeadRunner.prototype.stop = original;
+      release();
+      await (closing ?? Promise.resolve());
+      f.cleanup();
     }
   }));
