@@ -24,6 +24,7 @@ import type {
 import type { QueueStopView } from '../core/work-status.ts';
 import { roleLabel } from './roles.ts';
 import { WorkerCards } from './Workers.tsx';
+import { taskStatus } from './status.ts';
 import { Badge } from '@/ui/badge.tsx';
 import { Card, CardContent, CardHeader, CardTitle } from '@/ui/card.tsx';
 
@@ -32,28 +33,6 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/ui/card.tsx';
 // what the tests actually cover. All of it already lives in the state; this
 // view only arranges it.
 
-const statusNames: Record<TaskStatus, string> = {
-  draft: 'Черновик',
-  ready: 'Готова к выдаче',
-  running: 'В работе',
-  verifying: 'Проверки',
-  reviewing: 'Ревью',
-  integrating: 'Интеграция',
-  done: 'Готово',
-  failed: 'Упала',
-  cancelled: 'Отменена',
-};
-const statusTone: Record<TaskStatus, 'secondary' | 'warning' | 'success' | 'destructive'> = {
-  draft: 'secondary',
-  ready: 'secondary',
-  running: 'warning',
-  verifying: 'warning',
-  reviewing: 'warning',
-  integrating: 'warning',
-  done: 'success',
-  failed: 'destructive',
-  cancelled: 'secondary',
-};
 const active: TaskStatus[] = ['running', 'verifying', 'reviewing', 'integrating'];
 
 function ago(at: string) {
@@ -85,7 +64,7 @@ function Bar({ done, total, label }: { done: number; total: number; label: strin
     <div className="grid gap-2">
       <div className="flex items-baseline justify-between gap-3">
         <span className="text-sm font-medium">{label}</span>
-        <span className="text-muted-foreground font-mono text-sm">
+        <span className="text-muted-foreground tabular text-sm">
           {done} / {total} · {percent}%
         </span>
       </div>
@@ -97,7 +76,10 @@ function Bar({ done, total, label }: { done: number; total: number; label: strin
         aria-valuemax={100}
         aria-label={label}
       >
-        <div className="bg-primary h-full rounded-full" style={{ width: percent + '%' }} />
+        <div
+          className="bg-success h-full rounded-full transition-[width] duration-[400ms] ease-out"
+          style={{ width: percent + '%' }}
+        />
       </div>
     </div>
   );
@@ -161,7 +143,7 @@ function Setup({
         {configured ? (
           <>
             <div className="grid gap-2">
-              <span className="text-muted-foreground text-xs tracking-wider uppercase">
+              <span className="text-muted-foreground text-xs font-medium">
                 Компоненты ({repositories!.length})
               </span>
               <ul className="grid gap-1 text-sm">
@@ -175,7 +157,7 @@ function Setup({
               </ul>
             </div>
             <div className="grid gap-2">
-              <span className="text-muted-foreground text-xs tracking-wider uppercase">
+              <span className="text-muted-foreground text-xs font-medium">
                 Проверки профиля ({gates?.length ?? 0})
               </span>
               {gates?.length ? (
@@ -200,9 +182,7 @@ function Setup({
               )}
             </div>
             <div className="grid gap-2">
-              <span className="text-muted-foreground text-xs tracking-wider uppercase">
-                Профиль проверок
-              </span>
+              <span className="text-muted-foreground text-xs font-medium">Профиль проверок</span>
               {packs?.length ? (
                 <ul className="grid gap-1 text-sm">
                   {packs.map((p) => (
@@ -358,7 +338,9 @@ function Contracts({
 // Очередь всех досок страницами: сводка несёт задачи выбранной доски и
 // текущей работы, а очередь отвечает на вопрос «что ещё не сделано» целиком.
 function Queue({ revision }: { revision?: string }) {
-  type Item = Pick<Task, 'id' | 'title' | 'status' | 'role' | 'repositoryId'>;
+  type Item = Pick<Task, 'id' | 'title' | 'status' | 'role' | 'repositoryId'> & {
+    blockers?: string[];
+  };
   const [items, setItems] = useState<Item[]>([]);
   const [total, setTotal] = useState(0);
   const [next, setNext] = useState<number | null>(null);
@@ -417,7 +399,7 @@ function Queue({ revision }: { revision?: string }) {
                 <span className="min-w-0 flex-1">{t.title}</span>
                 <code className="text-muted-foreground font-mono text-xs">{t.repositoryId}</code>
                 <span className="text-muted-foreground text-xs">{roleLabel(t.role)}</span>
-                <Badge variant={statusTone[t.status]}>{statusNames[t.status]}</Badge>
+                <Badge variant={taskStatus(t).badge}>{taskStatus(t).label}</Badge>
               </li>
             ))}
           </ul>
@@ -822,8 +804,11 @@ export function ProgressPanel({
               <table className="w-full min-w-[40rem] border-collapse text-sm">
                 <thead>
                   <tr>
-                    {['Проверка', 'Фаза', 'Задач покрыто', 'Прошло', 'Упало'].map((h) => (
-                      <th key={h} className="border-b p-2 text-left align-top font-medium">
+                    {['Проверка', 'Фаза', 'Задач покрыто', 'Прошло', 'Упало'].map((h, i) => (
+                      <th
+                        key={h}
+                        className={`border-b p-2 align-top font-medium ${i > 1 ? 'text-right' : 'text-left'}`}
+                      >
                         {h}
                       </th>
                     ))}
@@ -838,9 +823,9 @@ export function ProgressPanel({
                           .map((p) => (p === 'candidate' ? 'кандидат' : 'интеграция'))
                           .join(' · ')}
                       </td>
-                      <td className="border-b p-2 align-top font-mono text-xs">{g.tasks}</td>
-                      <td className="border-b p-2 align-top font-mono text-xs">{g.passed}</td>
-                      <td className="border-b p-2 align-top font-mono text-xs">
+                      <td className="tabular border-b p-2 text-right align-top">{g.tasks}</td>
+                      <td className="tabular border-b p-2 text-right align-top">{g.passed}</td>
+                      <td className="tabular border-b p-2 text-right align-top">
                         {g.failed ? <span className="text-destructive">{g.failed}</span> : g.failed}
                       </td>
                     </tr>

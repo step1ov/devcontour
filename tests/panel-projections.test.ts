@@ -701,6 +701,7 @@ test('P-F04/P-F05: task search spans boards and knows replacements; the queue pa
     const draft = d.h.addTask(b.id, { ...input('Uses accepted result'), dependsOn: [done] });
     const other = d.h.createBoard('Another draft board');
     const remote = d.h.addTask(other.id, input('Remote draft'));
+    const waits = d.h.addTask(other.id, { ...input('Waits for remote'), dependsOn: [remote.id] });
     // Поиск находит задачу другой доски и отмечает заменённые.
     const found = panelTaskSearch(d.h, { q: 'Remote draft' });
     assert.equal(found.items[0].id, remote.id);
@@ -709,6 +710,10 @@ test('P-F04/P-F05: task search spans boards and knows replacements; the queue pa
     const queue = panelQueue(d.h, { limit: '50' });
     assert.ok(queue.items.some((t) => t.id === remote.id));
     assert.ok(queue.items.some((t) => t.id === draft.id));
+    // Незакрытые зависимости — в строке очереди: панель называет такую задачу
+    // ждущей, а не готовой к выдаче. Принятая зависимость не держит.
+    assert.deepEqual(queue.items.find((t) => t.id === waits.id)?.blockers, [remote.id]);
+    assert.deepEqual(queue.items.find((t) => t.id === draft.id)?.blockers, []);
     assert.equal(
       queue.total,
       d.store

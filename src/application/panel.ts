@@ -927,6 +927,9 @@ export function panelQueue(h: DevContour, query: Record<string, string | undefin
       status: t.status,
       role: t.role,
       repositoryId: t.repositoryId,
+      // Готовая задача с незакрытыми зависимостями ждёт, а не готова к
+      // выдаче: панель называет её тем же словом, что граф и список.
+      blockers: blockers(t, state),
     })),
   };
 }
