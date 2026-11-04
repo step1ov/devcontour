@@ -298,8 +298,15 @@ const OPERATOR_STEP =
   'approvalMode operator: lead workflow jobs do not run. The operator reviews plans and accepts boards in the panel, starts the queue (devcontour queue --start --workspace …) and retries failed tasks (devcontour retry --task ID --workspace …).';
 
 /** Шаг по заданиям одной доски: ждать, повторить, начать, исправить вход или решить. */
-function boardStep(boardId: string, ctx: HostContext): HandoffHostNext {
+function boardStep(boardId: string, ctx: HostContext): HandoffHostNext | undefined {
   const { h, state } = ctx;
+  // Принятая ревизия без открытых задач: заданию доски делать нечего.
+  const done = boardTasks(state, boardId);
+  if (
+    done?.revision.status === 'accepted' &&
+    done.tasks.every((t) => t.status === 'done' || t.status === 'cancelled')
+  )
+    return undefined;
   const jobs = ctx.jobs.filter((j) => j.id === boardId);
   const live = jobs.find(ctx.live);
   if (live) {
@@ -383,7 +390,7 @@ function boardStep(boardId: string, ctx: HostContext): HandoffHostNext {
       decision: 'plan',
       boardId,
       plan,
-      detail: `The plan of board ${boardId} is not approved (${plan.drafts.length} draft task(s)${plan.stale.length ? `, ${plan.stale.length} approved under another policy` : ''}). workflow_start would send the whole plan to review and run every task once approved: choosing the scope is the lead's or the user's decision. Review the plan with an explicit scope (devcontour review-plan --board ${boardId} --tasks ID,… --author-runtime …), or edit/cancel the tasks first; register workflow_start only for an approved plan.`,
+      detail: `The plan of board ${boardId} is not approved (${plan.drafts.length} draft task(s)${plan.stale.length ? `, ${plan.stale.length} approved under another policy` : ''}). workflow_start would send the whole plan to review and run every task once approved: choosing the scope is the lead's or the user's decision. Review the plan with an explicit scope (devcontour review-plan --board ${boardId} --tasks ${[...plan.drafts, ...plan.stale].join(',')} --author-runtime codex|claude --workspace …, keeping only the tasks to run), or edit/cancel the tasks first; register workflow_start only for an approved plan.`,
     };
   }
   const running = ctx.pack.active.some((a) => ctx.view.work(a.workId)?.graphId === boardId);
@@ -446,9 +453,13 @@ function hostNext(ctx: HostContext): HandoffHostNext | undefined {
     const own = [...new Set(ids)].filter(
       (id): id is string => !!id && state.boards.some((b) => b.id === id),
     );
+    // Выдуманный шаг очереди (начать задание, снять паузу) отбрасывается;
+    // ожидание действующего задания и повтор упавшего — шаги самой доски:
+    // без них ведущий начал бы то же решение вручную наперегонки с заданием.
     return own
       .map((id) => boardStep(id, ctx))
-      .filter((x) => x.action === 'decide' || x.action === 'fix-input')
+      .filter((x): x is HandoffHostNext => !!x)
+      .filter((x) => x.action !== 'workflow_start' && x.action !== 'queue_set')
       .sort((a, b) => rank(a) - rank(b))[0];
   }
   const boards =
@@ -457,11 +468,18 @@ function hostNext(ctx: HostContext): HandoffHostNext | undefined {
       : [...new Set(pack.works.map((w) => w.graphId))].filter((id) =>
           state.boards.some((b) => b.id === id),
         );
-  const steps = boards.map((id) => boardStep(id, ctx)).sort((a, b) => rank(a) - rank(b));
+  const steps = boards
+    .map((id) => boardStep(id, ctx))
+    .filter((x): x is HandoffHostNext => !!x)
+    .sort((a, b) => rank(a) - rank(b));
   if (state.paused) {
     // Решение по заданию (цикл остановит его, задание упало без пользы от
     // повтора, вход не построить) важнее паузы: её снятие его не исправит.
-    const decision = steps.find((x) => x.action === 'decide' || x.action === 'fix-input');
+    // Решение о плане не срочнее: оно о будущем объёме, после ожидания
+    // снимающего паузу задания и паузы человека (общий порядок `rank`).
+    const decision = steps.find(
+      (x) => (x.action === 'decide' && x.decision !== 'plan') || x.action === 'fix-input',
+    );
     if (decision) return decision;
     // Пауза выдачи общая: её снимает любое действующее задание, чей цикл
     // снимет её — сразу или после такта, который сначала чинит задачу.

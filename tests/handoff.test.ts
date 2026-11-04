@@ -20,7 +20,7 @@ import {
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { handoffPackSchema, type HandoffPack } from 'devcontour-harness/contracts';
-import { complete, config, fixture, input } from './helpers.ts';
+import { MERGED, complete, config, fixture, input } from './helpers.ts';
 import { AgentService, capabilities } from '../src/application/agent.ts';
 import { DevContour, specDigest } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
@@ -832,6 +832,9 @@ test('session_handoff: доска без согласованного плана
       assert.equal(value.host.next?.boardId, board.id);
       assert.deepEqual(value.host.next?.plan?.drafts.sort(), [...drafts].sort());
       assert.match(value.host.next.detail, /review-plan --board .* --tasks/);
+      for (const id of drafts)
+        assert.ok(value.host.next.detail.includes(id), 'id задачи в подсказке');
+      assert.match(value.host.next.detail, /--workspace/);
       assert.doesNotMatch(value.host.next.detail, /^No live/);
     }
     // Почему не workflow_start: задание отправило бы весь план на ревью, и
@@ -889,6 +892,90 @@ test('session_handoff: решение ведущего или пользоват
     assert.equal(decided.host.next?.action, 'decide');
     assert.equal(decided.host.next?.decision, 'job');
     assert.equal(decided.host.next?.loop?.step, 'stop');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('session_handoff: решение о плане с заданием доски — wait при живом задании, workflow_retry при упавшем', async () => {
+  // Живое задание стадии 0: план ревьюирует оно само — ведущий ждёт, а не
+  // ревьюирует вручную наперегонки с ним.
+  {
+    const f = fixture();
+    try {
+      const board = f.h.createBoard('Board under plan review', '', 'main');
+      f.h.addTask(board.id, input('Approved task'));
+      f.h.approve(board.id);
+      const draft = f.h.addTask(board.id, input('Later finding')).id;
+      new LeadWorkflow(f.h).start({
+        kind: 'board',
+        id: board.id,
+        authorRuntime: 'codex',
+        maxAttempts: 3,
+      });
+      for (const value of [devcontourHandoff(f.h), devcontourHandoff(f.h, { boardId: board.id })]) {
+        assert.equal(value.pack.next.action, 'review-plan');
+        assert.equal(value.host.next?.action, 'wait');
+        assert.equal(value.host.next?.loop?.step, 'review-plan');
+      }
+      await new LeadRunner(f.h, f.root).tick();
+      assert.notEqual(
+        f.store.read().tasks.find((t) => t.id === draft)!.status,
+        'draft',
+        'план разобрало задание',
+      );
+    } finally {
+      f.cleanup();
+    }
+  }
+  // Задание стадии 0 упало, попытки остались — повтор задания, и он
+  // продвигает его.
+  {
+    const f = fixture();
+    try {
+      const board = f.h.createBoard('Board with a failed plan review', '', 'main');
+      f.h.addTask(board.id, input('Approved task'));
+      f.h.approve(board.id);
+      f.h.addTask(board.id, input('Later finding'));
+      const flow = new LeadWorkflow(f.h);
+      const job = flow.start({
+        kind: 'board',
+        id: board.id,
+        authorRuntime: 'codex',
+        maxAttempts: 3,
+      });
+      flow.fail(flow.claim(job.key, job.owner)!, 'plan review runtime unavailable');
+      const value = devcontourHandoff(f.h, { boardId: board.id });
+      assert.equal(value.host.next?.action, 'workflow_retry');
+      assert.equal(value.host.next?.job?.key, job.key);
+      assert.equal(value.host.next?.loop?.step, 'review-plan');
+      flow.retry(job.key, job.owner);
+      await new LeadRunner(f.h, f.root).tick();
+      assert.notEqual(flow.get(job.key, job.owner).status, 'failed');
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test('session_handoff: принятой доске без открытых задач шаг не нужен', () => {
+  const f = fixture();
+  try {
+    const accepted = f.h.createBoard('Accepted board', '', 'main');
+    const done = f.h.addTask(accepted.id, input('Done task')).id;
+    const cancelled = f.h.addTask(accepted.id, input('Cancelled task')).id;
+    f.h.approve(accepted.id);
+    complete(f.h, done);
+    f.h.cancel(cancelled, 'not needed any more');
+    f.h.accept(accepted.id, MERGED);
+    assert.equal(f.store.read().boards[0].revisions.at(-1)!.status, 'accepted');
+    const other = f.h.createBoard('Open board', '', 'main');
+    f.h.addTask(other.id, input('Open task'));
+    f.h.approve(other.id);
+    const value = devcontourHandoff(f.h);
+    assert.notEqual(value.host.next?.boardId, accepted.id, 'принятую доску шаг не называет');
+    assert.notEqual(value.host.next?.action, 'workflow_start');
+    assert.equal(devcontourHandoff(f.h, { boardId: accepted.id }).host.next, undefined);
   } finally {
     f.cleanup();
   }
