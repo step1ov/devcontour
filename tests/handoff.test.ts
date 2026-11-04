@@ -4,7 +4,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import {
   chmod,
   mkdir,
@@ -12,6 +13,7 @@ import {
   readFile,
   readdir,
   realpath,
+  stat,
   rm,
   writeFile,
 } from 'node:fs/promises';
@@ -22,10 +24,18 @@ import { complete, config, fixture, input } from './helpers.ts';
 import { AgentService, capabilities } from '../src/application/agent.ts';
 import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
-import { repositorySchema } from '../src/core/model.ts';
+import { repositorySchema, type Config } from '../src/core/model.ts';
+import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { DevContourExecutionStore } from '../src/harness/store.ts';
 import { projectionOptions } from '../src/harness/host.ts';
-import { devcontourHandoff, fitHandoff } from '../src/application/handoff.ts';
+import {
+  AGENT_HANDOFF_BYTES,
+  HANDOFF_FULL_HINT,
+  devcontourHandoff,
+  fitHandoff,
+  handoffRedactor,
+  type DevContourHandoff,
+} from '../src/application/handoff.ts';
 import { command } from '../src/runner/process.ts';
 
 const INTENT = 'Okapi intention: finish the payment board before the release';
@@ -49,8 +59,44 @@ function boards(h: DevContour) {
   return { a: a.id, b: b.id, draft: draft.id, done, failed, other, failedTask: run.taskId };
 }
 
-type JsonHandoff = { format: 'json'; pack: HandoffPack; commands: Record<string, string> };
-type MdHandoff = { format: 'md'; markdown: string; commands: Record<string, string> };
+type Host = DevContourHandoff['host'];
+type JsonHandoff = {
+  format: 'json';
+  pack: HandoffPack;
+  host: Host;
+  commands: Record<string, string>;
+  full?: string;
+};
+type MdHandoff = {
+  format: 'md';
+  markdown: string;
+  host: Host;
+  commands: Record<string, string>;
+  full?: string;
+};
+
+/**
+ * Логическое содержимое базы — все таблицы, в том числе локальные записи и
+ * строка роли controller, — и байты файлов базы и журнала.
+ */
+function dbFingerprint(file: string) {
+  const db = new DatabaseSync(file, { readOnly: true });
+  try {
+    const tables = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+      .all() as { name: string }[];
+    const rows = tables.map((t) => [
+      t.name,
+      db.prepare(`SELECT * FROM "${t.name}" ORDER BY rowid`).all(),
+    ]);
+    const files = [file, file + '-wal'].map((f) =>
+      existsSync(f) ? createHash('sha256').update(readFileSync(f)).digest('hex') : 'missing',
+    );
+    return createHash('sha256').update(JSON.stringify({ rows, files })).digest('hex');
+  } finally {
+    db.close();
+  }
+}
 const status = (e: unknown) => (e as { status?: number }).status;
 
 test('session_handoff: в каталоге только чтения со схемой входа; JSON по схеме harness, ничего не пишет', () => {
@@ -67,10 +113,12 @@ test('session_handoff: в каталоге только чтения со схе
     const agent = new AgentService(f.h, f.root);
     const events = f.store.lastEventId();
     const revision = f.store.revision();
+    const before = dbFingerprint(join(f.root, 'state.sqlite'));
     const value = agent.execute({
       operation: 'session_handoff',
       input: {},
     }) as unknown as JsonHandoff;
+    agent.execute({ operation: 'session_handoff', input: { format: 'md', boardId: ids.a } });
     assert.equal(value.format, 'json');
     const pack = handoffPackSchema.parse(value.pack);
     assert.equal(pack.handoffVersion, 1);
@@ -85,21 +133,49 @@ test('session_handoff: в каталоге только чтения со схе
     assert.ok(Buffer.byteLength(JSON.stringify(value)) <= 65536);
     assert.equal(f.store.lastEventId(), events, 'операция ничего не пишет в журнал');
     assert.equal(f.store.revision(), revision, 'операция не меняет документ');
+    assert.equal(
+      dbFingerprint(join(f.root, 'state.sqlite')),
+      before,
+      'база, локальные записи и роль controller прежние',
+    );
+    assert.equal(value.full, undefined, 'пакет уложился в предел: подсказки нет');
   } finally {
     f.cleanup();
   }
 });
 
-test('session_handoff: намерения доходят до пакета, Markdown — тот же пакет, пределы входа — 400', () => {
+test('session_handoff: намерения по правилу пакета — пробелы сняты, пустые отброшены, длинные усечены; Markdown', () => {
   const f = fixture();
   try {
     boards(f.h);
     const agent = new AgentService(f.h, f.root);
     const json = agent.execute({
       operation: 'session_handoff',
-      input: { intentions: [INTENT, '  second  '] },
+      input: { intentions: [INTENT, '  second  ', '   ', ''] },
     }) as unknown as JsonHandoff;
     assert.deepEqual(handoffPackSchema.parse(json.pack).intentions, [INTENT, 'second']);
+    const long = agent.execute({
+      operation: 'session_handoff',
+      input: { intentions: ['x'.repeat(1001)] },
+    }) as unknown as JsonHandoff;
+    assert.equal(long.pack.intentions[0].length, 1001, '1000 знаков и «…»');
+    assert.ok(long.pack.intentions[0].endsWith('…'));
+    assert.equal(long.pack.truncated.intentions, 1);
+    // Пустые не считаются: 20 непустых и пустая — в пределе.
+    const twenty = Array.from({ length: 20 }, (_, i) => 'intent ' + i);
+    const fits = agent.execute({
+      operation: 'session_handoff',
+      input: { intentions: [...twenty, ' '] },
+    }) as unknown as JsonHandoff;
+    assert.equal(fits.pack.intentions.length, 20);
+    assert.throws(
+      () =>
+        agent.execute({
+          operation: 'session_handoff',
+          input: { intentions: [...twenty, 'one more'] },
+        }),
+      (e) => status(e) === 400,
+    );
     const md = agent.execute({
       operation: 'session_handoff',
       input: { format: 'md', intentions: [INTENT] },
@@ -107,21 +183,10 @@ test('session_handoff: намерения доходят до пакета, Mark
     assert.equal(md.format, 'md');
     assert.match(md.markdown, /^# Передача контекста/);
     assert.match(md.markdown, /## Намерения/);
+    assert.match(md.markdown, /## В DevContour/);
     assert.ok(md.markdown.includes(INTENT));
     assert.ok(!('pack' in md));
-    assert.throws(
-      () =>
-        agent.execute({
-          operation: 'session_handoff',
-          input: { intentions: Array.from({ length: 21 }, (_, i) => 'intent ' + i) },
-        }),
-      (e) => status(e) === 400,
-    );
-    assert.throws(
-      () =>
-        agent.execute({ operation: 'session_handoff', input: { intentions: ['x'.repeat(1001)] } }),
-      (e) => status(e) === 400,
-    );
+    assert.ok(md.host.liveBoards);
     assert.throws(
       () => agent.execute({ operation: 'session_handoff', input: { format: 'html' } }),
       (e) => status(e) === 400,
@@ -151,7 +216,7 @@ test('session_handoff: boardId — граф harness той же доски; не
       'задачи другой доски не входят',
     );
     assert.ok(a.failures.every((x) => x.workId !== ids.other));
-    const b = handoffPackSchema.parse(devcontourHandoff(f.h, { boardId: ids.b }));
+    const b = handoffPackSchema.parse(devcontourHandoff(f.h, { boardId: ids.b }).pack);
     assert.equal(b.graphId, ids.b);
     assert.deepEqual(
       b.works.map((w) => w.id),
@@ -175,7 +240,7 @@ test('session_handoff: предел ответа отбрасывает запи
   const f = fixture();
   try {
     boards(f.h);
-    const pack = devcontourHandoff(f.h, { intentions: [INTENT, 'second intention'] });
+    const { pack } = devcontourHandoff(f.h, { intentions: [INTENT, 'second intention'] });
     const size = (p: HandoffPack) => Buffer.byteLength(JSON.stringify(p));
     const fitted = fitHandoff(pack, (p) => size(p) <= size(pack) - 1);
     handoffPackSchema.parse(fitted);
@@ -245,8 +310,8 @@ test('ExecutionStore.read: вложенное чтение — тот же сн�
     // собран первым вызовом: его сборка читает конфигурацию отдельно).
     devcontourHandoff(h);
     snapshots = 0;
-    handoffPackSchema.parse(devcontourHandoff(h));
-    assert.equal(snapshots, 1, 'пакет читается одним снимком');
+    handoffPackSchema.parse(devcontourHandoff(h).pack);
+    assert.equal(snapshots, 1, 'пакет и задания досок читаются одним снимком');
   } finally {
     writer.store.close();
     h.store.close();
@@ -283,10 +348,10 @@ test('session_handoff: компонентное хранение — центр�
       snapshots++;
       return snapshot(read);
     };
-    const all = handoffPackSchema.parse(devcontourHandoff(h));
+    const all = handoffPackSchema.parse(devcontourHandoff(h).pack);
     assert.equal(snapshots, 1, 'базы компонентов читаются одним снимком');
     assert.deepEqual(all.works.map((w) => w.id).sort(), ids.map((i) => i.task).sort());
-    const library = handoffPackSchema.parse(devcontourHandoff(h, { boardId: ids[1].board }));
+    const library = handoffPackSchema.parse(devcontourHandoff(h, { boardId: ids[1].board }).pack);
     assert.deepEqual(
       library.works.map((w) => w.id),
       [ids[1].task],
@@ -297,9 +362,153 @@ test('session_handoff: компонентное хранение — центр�
   }
 });
 
-test('session-handoff: CLI читает базу только для чтения, JSON и Markdown', async () => {
+test('session_handoff: задание ведущего по доске — задание графа: повтор назначен, восстановления видны', () => {
+  const f = fixture();
+  try {
+    const board = f.h.createBoard('Board with job', '', 'main');
+    const task = f.h.addTask(board.id, input('Task under the job')).id;
+    f.h.approve(board.id);
+    const at = () => {
+      const value = devcontourHandoff(f.h, { boardId: board.id });
+      return { ...value, pack: handoffPackSchema.parse(value.pack) };
+    };
+    // Свежий workspace: исходная пауза, задания нет — шаг DevContour —
+    // регистрация задания доски, а не «harness run».
+    const fresh = at();
+    assert.equal(fresh.pack.queue.paused, true);
+    assert.equal(fresh.pack.next.command, 'harness run');
+    assert.deepEqual(fresh.host.liveBoards, []);
+    assert.equal(fresh.host.next?.action, 'workflow_start');
+    assert.equal(fresh.host.next?.boardId, board.id);
+    assert.match(fresh.host.next.detail, /workflow_start/);
+    assert.deepEqual(fresh.pack.repairs, []);
+
+    const flow = new LeadWorkflow(f.h);
+    flow.start({ kind: 'board', id: board.id, authorRuntime: 'codex', maxAttempts: 3 });
+    const live = at();
+    assert.deepEqual(live.host.liveBoards, [board.id]);
+    assert.equal(live.host.next?.action, 'wait', 'очередь продолжит задание на сервере');
+    assert.deepEqual(
+      live.pack.repairs.map((r) => ({ graphId: r.graphId, used: r.used })),
+      [{ graphId: board.id, used: 0 }],
+    );
+
+    f.h.pause(false);
+    const run = f.h.claim('test')!;
+    assert.equal(run.taskId, task);
+    f.h.fail(run.id, run.token, 'candidate/typecheck: error', false, 'gate');
+    const failed = at();
+    const stop = failed.pack.stops.find((s) => s.workId === task || s.works?.includes(task));
+    assert.ok(stop, 'остановка упавшей задачи');
+    assert.equal(stop.code, 'GATE_FAILED');
+    assert.equal(stop.retryPlanned, true, 'цикл задания повторит задачу в бюджете');
+    assert.equal(stop.actor, 'controller');
+    const work = failed.pack.works.find((w) => w.id === task)!;
+    assert.equal(work.next.actor, 'controller');
+    assert.equal(work.next.step, 'retry-within-budget');
+    assert.equal(failed.pack.repairs.length, 1);
+    assert.equal(failed.pack.repairs[0].budget, f.h.config.repairBudget);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('session_handoff: тексты пакета маскируются секретами окружения контура и токенами forge', () => {
+  const SECRET = 'okapi-secret-value-4815162342';
+  const INHERITED = 'okapi-inherited-value-2342';
+  const previous = {
+    secret: process.env.DC_HANDOFF_SECRET,
+    inherit: process.env.DC_HANDOFF_INHERIT,
+  };
+  process.env.DC_HANDOFF_SECRET = SECRET;
+  process.env.DC_HANDOFF_INHERIT = INHERITED;
+  const f = fixture();
+  try {
+    const h = new DevContour(
+      f.store,
+      config({
+        checkoutRoot: f.h.config.checkoutRoot,
+        environment: {
+          inherit: ['DC_HANDOFF_INHERIT'],
+          values: {},
+          secrets: { API_TOKEN: 'DC_HANDOFF_SECRET' },
+        },
+      }),
+    );
+    const board = h.createBoard('Secret board', '', 'main');
+    h.addTask(board.id, input('Task with a secret in its error'));
+    h.approve(board.id);
+    h.pause(false);
+    const run = h.claim('test')!;
+    h.fail(run.id, run.token, `token ${SECRET} and ${INHERITED} leaked`, false, 'gate');
+    const text = JSON.stringify(devcontourHandoff(h).pack);
+    assert.ok(text.includes('leaked'), 'текст ошибки в пакете');
+    assert.ok(!text.includes(SECRET), 'секрет профиля замаскирован');
+    assert.ok(!text.includes(INHERITED), 'наследуемое значение замаскировано');
+    const forge = handoffRedactor(
+      {
+        ...h.config,
+        forgeConnections: { origin: { tokenEnv: 'DC_HANDOFF_FORGE' } },
+      } as unknown as Config,
+      { DC_HANDOFF_FORGE: 'forge-token-123456789' },
+    );
+    assert.ok(!forge('auth forge-token-123456789').includes('forge-token-123456789'));
+  } finally {
+    if (previous.secret === undefined) delete process.env.DC_HANDOFF_SECRET;
+    else process.env.DC_HANDOFF_SECRET = previous.secret;
+    if (previous.inherit === undefined) delete process.env.DC_HANDOFF_INHERIT;
+    else process.env.DC_HANDOFF_INHERIT = previous.inherit;
+    f.cleanup();
+  }
+});
+
+test('session_handoff: предел ответа 64 KiB на настоящем пакете — JSON и Markdown, подсказка полного пакета', () => {
+  const f = fixture();
+  try {
+    const board = f.h.createBoard('Large board', '', 'main');
+    const tasks = Array.from(
+      { length: 50 },
+      (_, i) =>
+        f.h.addTask(board.id, input(`Task ${i} ` + 'with a long descriptive title '.repeat(5))).id,
+    );
+    f.h.approve(board.id);
+    const long = (i: number) =>
+      `failure ${i}: ` + 'expected value differs from actual; '.repeat(12);
+    for (let i = 0; i < tasks.length; i++) {
+      f.h.pause(false);
+      const run = f.h.claim('test')!;
+      f.h.fail(run.id, run.token, long(i), false, 'gate');
+    }
+    const intentions = Array.from({ length: 20 }, (_, i) => `intention ${i} ` + 'y'.repeat(900));
+    const whole = devcontourHandoff(f.h, { intentions }).pack;
+    assert.ok(
+      Buffer.byteLength(JSON.stringify(whole)) > AGENT_HANDOFF_BYTES,
+      'полный пакет больше предела ответа',
+    );
+    const agent = new AgentService(f.h, f.root);
+    for (const format of ['json', 'md'] as const) {
+      const value = agent.execute({
+        operation: 'session_handoff',
+        input: { format, intentions },
+      }) as unknown as JsonHandoff | MdHandoff;
+      assert.ok(Buffer.byteLength(JSON.stringify(value)) <= 65536, format + ' в пределе ответа');
+      assert.equal(value.full, HANDOFF_FULL_HINT, format + ': подсказка полного пакета');
+      assert.match(value.full, /--intent TEXT/);
+      if (value.format === 'json') {
+        const pack = handoffPackSchema.parse(value.pack);
+        assert.equal(pack.truncated.bySize, true);
+        assert.ok(pack.truncated.intentionsDropped > 0, 'первыми уходят намерения');
+      } else assert.match(value.markdown, /^# Передача контекста/);
+    }
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('session-handoff: CLI читает базу только для чтения; ответ того же вида, что у операции; --intent=, --out', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'dc-handoff-')));
   const data = join(root, 'data');
+  const out = join(root, 'handoff.md');
   try {
     await mkdir(data);
     const c = config();
@@ -311,11 +520,7 @@ test('session-handoff: CLI читает базу только для чтени�
     } finally {
       h.store.close();
     }
-    const digest = async () =>
-      createHash('sha256')
-        .update(await readFile(join(data, 'state.sqlite')))
-        .digest('hex');
-    const before = await digest();
+    const before = dbFingerprint(join(data, 'state.sqlite'));
     const cli = (...args: string[]) =>
       command(
         ['node', '--import', 'tsx', 'src/cli.ts', 'session-handoff', ...args, '--data', data],
@@ -325,27 +530,41 @@ test('session-handoff: CLI читает базу только для чтени�
     const files = (await readdir(data)).map((n) => join(data, n));
     for (const file of files) await chmod(file, 0o444);
     await chmod(data, 0o555);
-    let json, md, html;
+    let json, md, html, written;
     try {
-      json = await cli('--board', ids.a, '--intent', INTENT);
+      json = await cli('--board', ids.a, '--intent', INTENT, '--intent=--starts with dashes');
       md = await cli('--format', 'md');
       html = await cli('--format', 'html');
+      written = await cli('--format', 'md', '--out', out);
     } finally {
       await chmod(data, 0o755);
       for (const file of files) await chmod(file, 0o644);
     }
     assert.equal(json.code, 0, json.stderr);
     const value = JSON.parse(json.stdout) as JsonHandoff;
+    assert.deepEqual(Object.keys(value).sort(), ['commands', 'format', 'host', 'pack']);
+    assert.equal(value.format, 'json');
     const pack = handoffPackSchema.parse(value.pack);
     assert.equal(pack.graphId, ids.a);
-    assert.deepEqual(pack.intentions, [INTENT]);
+    assert.deepEqual(pack.intentions, [INTENT, '--starts with dashes']);
     assert.ok(value.commands['harness run']);
+    assert.deepEqual(value.host.liveBoards, []);
     assert.equal(md.code, 0, md.stderr);
     assert.match(md.stdout, /^# Передача контекста/);
-    assert.match(md.stdout, /## Команды в DevContour/);
+    assert.match(md.stdout, /## В DevContour/);
     assert.notEqual(html.code, 0);
     assert.match(html.stderr, /json или md/);
-    assert.equal(await digest(), before, 'база не изменилась');
+    assert.equal(written.code, 0, written.stderr);
+    const receipt = JSON.parse(written.stdout) as { out: string; format: string; bytes: number };
+    assert.equal(receipt.out, out);
+    assert.equal(receipt.format, 'md');
+    const text = await readFile(out, 'utf8');
+    assert.equal(Buffer.byteLength(text), receipt.bytes);
+    assert.match(text, /^# Передача контекста/);
+    assert.equal((await stat(out)).mode & 0o777, 0o600, 'новый файл только для владельца');
+    const inside = await cli('--out', join(data, 'handoff.json'));
+    assert.notEqual(inside.code, 0, 'в каталог данных контура не пишет');
+    assert.equal(dbFingerprint(join(data, 'state.sqlite')), before, 'база не изменилась');
   } finally {
     assert.ok(root.startsWith(await realpath(tmpdir())) && root.includes('dc-handoff-'));
     await rm(root, { recursive: true, force: true });

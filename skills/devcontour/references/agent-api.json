@@ -2506,7 +2506,7 @@
     },
     {
       "name": "session_handoff",
-      "description": "Read the context handoff pack for a new lead session; start every new lead session with it instead of recalling the previous one. One store snapshot: task counts and limits, queue pause and who lifts it, controller, running and unfinished attempts, open tasks with their next step, stops and decisions awaiting the lead or user, recent failures, budgets and the next step of the board. next.command names harness CLI commands; commands maps them to DevContour (the running server is the controller). Omit boardId for the whole workspace. intentions (up to 20, 1000 chars each) are your own notes, the only text not from the store. format md returns the same pack as Markdown. Over the response limit, entries are dropped in the pack order and counted in truncated (bySize); devcontour session-handoff prints the full pack. Not the ChangeSet delivery handoff (devcontour handoff --changeset). Read-only, no model calls.",
+      "description": "Read the context handoff pack for a new lead session; start every new lead session with it instead of recalling the previous one. One store snapshot: task counts and limits, queue pause and who lifts it, controller, running and unfinished attempts, open tasks with their next step, stops and decisions awaiting the lead or user, recent failures, budgets and the next step of the board. Board lead workflow jobs count as the graph jobs: their repairs and planned retries are in the pack. next.command names harness CLI commands; host.next is the DevContour step instead (workflow_start for a board without a live job, wait for a live one, queue_set to resume) and commands maps both commands. Omit boardId for the whole workspace. intentions are your own notes, the only text not from the store: trimmed, empty ones dropped, at most 20 non-empty, longer than 1000 chars clipped and counted in truncated. format md returns the same pack as Markdown. Over the response limit, entries are dropped in the pack order and counted in truncated (bySize), and full names the CLI that prints the whole pack. Not the ChangeSet delivery handoff (devcontour handoff --changeset). Read-only, no model calls.",
       "readOnly": true,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2517,12 +2517,11 @@
             "pattern": "^[A-Za-z0-9_-]{1,80}$"
           },
           "intentions": {
-            "maxItems": 20,
+            "maxItems": 100,
             "type": "array",
             "items": {
               "type": "string",
-              "minLength": 1,
-              "maxLength": 1000
+              "maxLength": 10000
             }
           },
           "format": {

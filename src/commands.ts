@@ -545,20 +545,24 @@ async function main() {
       return v;
     };
     const format = parseHandoffFormat(value('--format'));
+    // `--intent TEXT` или `--intent=TEXT` (текст, начинающийся с `--`);
+    // пустые намерения отбрасывает пакет, как у harness.
     const intentions = args.flatMap((a, i) => {
+      if (a.startsWith('--intent=')) return [a.slice('--intent='.length)];
       if (a !== '--intent') return [];
       const v = args[i + 1];
-      if (!v || v.startsWith('--')) throw new Error('Укажите значение --intent');
+      if (v === undefined || v.startsWith('--'))
+        throw new Error('Укажите значение --intent (текст с -- в начале: --intent=TEXT)');
       return [v];
     });
     const boardId = value('--board');
-    const pack = readOnlyRead(config, root, (h) =>
+    const handoff = readOnlyRead(config, root, (h) =>
       devcontourHandoff(h, {
         ...(boardId ? { boardId } : {}),
         ...(intentions.length ? { intentions } : {}),
       }),
     );
-    const text = renderHandoff(pack, format) + (format === 'json' ? '\n' : '');
+    const text = renderHandoff(handoff, format);
     const out = value('--out');
     if (!out) {
       process.stdout.write(text);
@@ -571,7 +575,12 @@ async function main() {
       repositories(config).map((r) => join(r.path, '.devcontour-local')),
     );
     console.log(
-      JSON.stringify({ out: resolve(out), format, bytes: Buffer.byteLength(text), at: pack.at }),
+      JSON.stringify({
+        out: resolve(out),
+        format,
+        bytes: Buffer.byteLength(text),
+        at: handoff.pack.at,
+      }),
     );
     return;
   }

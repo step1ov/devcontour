@@ -90,7 +90,7 @@ export class LeadWorkflow {
    * правила. Здесь — только продуктовый вход задания (доска или ChangeSet) и
    * его владелец-компонент.
    */
-  private queue() {
+  queue() {
     const { engine, store } = executionOf(this.h);
     return new WorkflowQueue(engine.host.store, engine.policy, Date.now, {
       input: (kind, id, view) => {

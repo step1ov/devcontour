@@ -7,20 +7,31 @@
 // тот готовит результат к push/PR человеком.
 import {
   Harness,
-  WorkflowQueue,
+  composeRedactors,
   handoffMarkdown,
   handoffPack,
+  redactor,
+  type ExecutionView,
   type HandoffPack,
+  type WorkflowJob as HarnessJob,
 } from 'devcontour-harness';
 import { z } from 'zod';
-import { DomainError } from '../core/model.ts';
+import { DomainError, type Config } from '../core/model.ts';
 import type { DevContour } from '../core/service.ts';
+import { LeadWorkflow } from '../core/lead-workflow.ts';
+import { repositories } from '../core/repositories.ts';
 import { executionOf, toDomain } from '../harness/execution.ts';
+import { availableRedactor } from '../runner/environment.ts';
 
 export const handoffFormats = ['json', 'md'] as const;
 export type HandoffFormat = (typeof handoffFormats)[number];
 
-/** Предел намерений — `HANDOFF_LIMITS` пакета: 20 строк по 1000 знаков. */
+/**
+ * Намерения — по правилу пакета harness: пробелы по краям снимаются, пустые
+ * строки отбрасываются, непустых не больше 20 (иначе 400), строка длиннее
+ * 1000 знаков усекается и считается в `truncated.intentions`. Схема задаёт
+ * только транспортный предел.
+ */
 export const handoffRequestInput = z.strictObject({
   /** Доска DevContour — граф harness с тем же id; без неё — вся доска workspace. */
   boardId: z
@@ -28,7 +39,7 @@ export const handoffRequestInput = z.strictObject({
     .regex(/^[A-Za-z0-9_-]{1,80}$/)
     .optional(),
   /** Намерения агента: единственный текст пакета не из хранилища. */
-  intentions: z.array(z.string().trim().min(1).max(1000)).max(20).optional(),
+  intentions: z.array(z.string().max(10_000)).max(100).optional(),
 });
 
 /** Вход операции `session_handoff` агентского API. */
@@ -40,39 +51,127 @@ export type HandoffRequest = z.infer<typeof handoffRequestInput>;
 
 /**
  * Команды harness в `next.command` пакета (`handoffCommands`) и что делать в
- * DevContour: controller очереди — работающий сервер контура, а не `harness run`.
+ * DevContour. Controller очереди — работающий сервер контура; очередь доски
+ * продолжает её задание ведущего (`workflow_start`): снимает исходную паузу и
+ * паузу штатной остановки и чинит упавшие задачи в бюджете восстановлений.
  */
 export const handoffHostCommands = {
   'harness run':
-    'Controller is the running DevContour server: start it (devcontour start|serve --workspace …) or check /api/state; do not run harness CLI on this store.',
-  'harness resume': 'queue_set {"paused": false}, or devcontour queue --start --workspace …',
+    'The running DevContour server is the controller. A board continues under its lead workflow job: workflow_start {"kind": "board", "id": BOARD, "authorRuntime": …} registers it (workflow_status lists jobs); the job loop lifts the initial or shutdown pause and retries failed tasks within the repair budget. Never run harness CLI on this store; host.next names the step for this pack.',
+  'harness resume':
+    'queue_set {"paused": false}, or devcontour queue --start --workspace …; an operator pause is lifted only on the user\'s decision.',
 } as const;
+
+/** Шаг DevContour для `next.command` пакета: что сделать вместо команды harness. */
+export interface HandoffHostNext {
+  action: 'workflow_start' | 'wait' | 'queue_set';
+  boardId?: string;
+  detail: string;
+}
+
+/** Пакет harness и приложение DevContour. */
+export interface DevContourHandoff {
+  pack: HandoffPack;
+  host: {
+    next?: HandoffHostNext;
+    /** Доски с действующим заданием ведущего (его очередь продолжает сервер). */
+    liveBoards: string[];
+  };
+}
+
+/** Владельцы заданий ведущего: workspace и компоненты (как `LeadWorkflow.view`). */
+const ownersOf = (config: Config) => [undefined, ...repositories(config).map((r) => r.id)];
 
 /**
  * Harness для `handoffPack` поверх движка DevContour. `Harness.open` открывает
  * собственную базу harness, а исполнение DevContour идёт движком над его
  * хранилищем (`executionOf`), поэтому пакету дан вид с теми полями, которые
  * он читает: `engine`, `policy`, `workflows` и методы `status` прототипа.
- * Задания графов harness DevContour не ведёт (его стадии — доски и
- * ChangeSet): очередь заданий читается из того же хранилища и графов не
- * содержит, восстановлений графов в пакете нет.
+ *
+ * Задание графа harness в DevContour — задание ведущего по доске (id доски —
+ * id графа) у любого владельца: пакет и диагнозы видят его счётчик
+ * восстановлений, а продолжает ли оно работу, решает очередь заданий
+ * DevContour с её продуктовым входом (`LeadWorkflow.queue`). Задания
+ * ChangeSet графу не соответствуют и в пакет не входят.
  */
-function harnessOf(h: DevContour): Harness {
+function harnessOf(h: DevContour) {
   const { engine } = executionOf(h);
-  const workflows = new WorkflowQueue(engine.host.store, engine.policy, () => engine.clock());
-  return Object.assign(Object.create(Harness.prototype) as Harness, {
+  const queue = new LeadWorkflow(h).queue();
+  const owners = ownersOf(h.config);
+  const workflows = {
+    list: (): HarnessJob[] =>
+      owners
+        .flatMap((owner) => queue.list(owner))
+        .filter((job) => job.kind === 'board')
+        .map((job) => ({ ...job, kind: 'graph' })),
+    continues: (
+      job: HarnessJob,
+      view: ExecutionView,
+      options: { reconfigureApplies?: boolean } = {},
+    ) => queue.continues({ ...job, kind: 'board' }, view, options),
+  };
+  const harness = Object.assign(Object.create(Harness.prototype) as Harness, {
     engine,
     policy: engine.policy,
     workflows,
   });
+  return { harness, workflows };
+}
+
+/**
+ * Маска текстов пакета — та же, что у процессов контура: секреты и
+ * наследуемые значения профилей окружения (workspace, компонентов, preview)
+ * и токены подключений forge, заданные в окружении читающего процесса.
+ */
+export function handoffRedactor(config: Config, source = process.env) {
+  const profiles = [
+    config.environment,
+    ...repositories(config).map((r) => r.environment),
+    config.preview?.environment,
+  ];
+  const tokens = Object.values(config.forgeConnections).flatMap((c) => {
+    const token = c.tokenEnv ? source[c.tokenEnv] : undefined;
+    return token ? [token] : [];
+  });
+  return composeRedactors(availableRedactor(profiles, source), redactor(tokens));
+}
+
+/** Доска шага `next`: доска его задачи или доска пакета. */
+function nextBoard(pack: HandoffPack) {
+  const workId = pack.next.workId;
+  return (workId ? pack.works.find((w) => w.id === workId)?.graphId : undefined) ?? pack.graphId;
+}
+
+function hostNext(pack: HandoffPack, live: Set<string>): HandoffHostNext | undefined {
+  if (pack.next.command === 'harness resume')
+    return {
+      action: 'queue_set',
+      detail:
+        'Resume dispatch: queue_set {"paused": false} (devcontour queue --start); an operator pause only on the user\'s decision.',
+    };
+  if (pack.next.command !== 'harness run') return undefined;
+  const boardId = nextBoard(pack);
+  if (boardId && live.has(boardId))
+    return {
+      action: 'wait',
+      boardId,
+      detail: `Board ${boardId} has a live lead workflow job: the running DevContour server continues its queue. If the server is stopped, start it (devcontour start --workspace …).`,
+    };
+  const id = boardId ? JSON.stringify(boardId) : 'BOARD';
+  return {
+    action: 'workflow_start',
+    ...(boardId ? { boardId } : {}),
+    detail: `No live lead workflow job${boardId ? ' for board ' + boardId : ''}: with the DevContour server running, register workflow_start {"kind": "board", "id": ${id}, "authorRuntime": …}. queue_set {"paused": false} alone resumes dispatch without the job's repairs.`,
+  };
 }
 
 /**
  * Пакет передачи контекста workspace или одной доски (до 256 КБ, предел
- * пакета). Только чтение; весь пакет — один снимок хранилища.
+ * пакета) и приложение DevContour. Только чтение; пакет и действующие
+ * задания досок — один снимок хранилища.
  */
-export function devcontourHandoff(h: DevContour, input: HandoffRequest = {}): HandoffPack {
-  // CLI передаёт флаги как есть: пределы намерений и формат id — той же схемой.
+export function devcontourHandoff(h: DevContour, input: HandoffRequest = {}): DevContourHandoff {
+  // CLI передаёт флаги как есть: формат id и транспортный предел — той же схемой.
   const parsed = handoffRequestInput.safeParse(input);
   if (!parsed.success)
     throw new DomainError(
@@ -80,45 +179,72 @@ export function devcontourHandoff(h: DevContour, input: HandoffRequest = {}): Ha
       400,
     );
   const request = parsed.data;
-  const harness = harnessOf(h);
+  const { harness, workflows } = harnessOf(h);
+  const { store } = executionOf(h);
   const { boardId } = request;
-  if (boardId !== undefined) {
-    const { store } = executionOf(h);
-    const known = store.read((v) => ({
-      board: store.stateOf(v).boards.some((b) => b.id === boardId),
-      graph: Boolean(v.graph(boardId)),
-    }));
-    if (!known.board) throw new DomainError('Доска не найдена: ' + boardId, 404);
-    if (!known.graph)
-      throw new DomainError(
-        `Доска ${boardId} ещё не выпущена: у неё нет утверждённых или выпущенных задач`,
-        409,
-      );
-  }
   try {
-    return handoffPack(harness, {
-      ...(boardId !== undefined ? { graphId: boardId } : {}),
-      ...(request.intentions ? { intentions: request.intentions } : {}),
+    return store.read((v) => {
+      if (boardId !== undefined) {
+        if (!store.stateOf(v).boards.some((b) => b.id === boardId))
+          throw new DomainError('Доска не найдена: ' + boardId, 404);
+        if (!v.graph(boardId))
+          throw new DomainError(
+            `Доска ${boardId} ещё не выпущена: у неё нет утверждённых или выпущенных задач`,
+            409,
+          );
+      }
+      const pack = handoffPack(harness, {
+        ...(boardId !== undefined ? { graphId: boardId } : {}),
+        ...(request.intentions ? { intentions: request.intentions } : {}),
+        redact: handoffRedactor(h.config),
+      });
+      const live = new Set(
+        workflows
+          .list()
+          .filter((job) => workflows.continues(job, v))
+          .map((job) => job.id),
+      );
+      const next = hostNext(pack, live);
+      return { pack, host: { ...(next ? { next } : {}), liveBoards: [...live] } };
     });
   } catch (error) {
     throw toDomain(error);
   }
 }
 
-/** Текст пакета для CLI: JSON (с командами DevContour) или Markdown. */
-export function renderHandoff(pack: HandoffPack, format: HandoffFormat) {
-  if (format === 'json') return JSON.stringify({ pack, commands: handoffHostCommands }, null, 2);
-  return handoffMarkdown(pack) + commandsMarkdown();
+/**
+ * Ответ пакета — один вид у операции агентского API и CLI: JSON —
+ * `{format, pack, host, commands}`, `md` — `{format, markdown, host,
+ * commands}`; Markdown — текст пакета harness и раздел DevContour.
+ */
+export function handoffResponse(value: DevContourHandoff, format: HandoffFormat) {
+  const { pack, host } = value;
+  return format === 'md'
+    ? {
+        format,
+        markdown: handoffMarkdown(pack) + hostMarkdown(host),
+        host,
+        commands: handoffHostCommands,
+      }
+    : { format, pack, host, commands: handoffHostCommands };
 }
 
-function commandsMarkdown() {
+function hostMarkdown(host: DevContourHandoff['host']) {
   return [
     '',
-    '## Команды в DevContour',
+    '## В DevContour',
     '',
+    ...(host.next ? [`- **Следующий шаг: ${host.next.action}** — ${host.next.detail}`] : []),
+    `- Действующие задания досок: ${host.liveBoards.length ? host.liveBoards.join(', ') : 'нет'}`,
     ...Object.entries(handoffHostCommands).map(([k, v]) => `- \`${k}\` — ${v}`),
     '',
   ].join('\n');
+}
+
+/** Текст для CLI: JSON того же вида, что у операции, или Markdown. */
+export function renderHandoff(value: DevContourHandoff, format: HandoffFormat): string {
+  const response = handoffResponse(value, format);
+  return response.markdown ?? JSON.stringify(response, null, 2) + '\n';
 }
 
 export const parseHandoffFormat = (format: string | undefined): HandoffFormat => {
@@ -129,7 +255,7 @@ export const parseHandoffFormat = (format: string | undefined): HandoffFormat =>
 };
 
 /** Предел ответа операции: каталог обещает не больше 64 KiB. */
-const AGENT_HANDOFF_BYTES = 60_000;
+export const AGENT_HANDOFF_BYTES = 60_000;
 
 const isDecision = (d: { actor: string | null; action: string }) =>
   (d.actor === 'user' || d.actor === 'lead') && d.action !== 'wait';
@@ -173,24 +299,28 @@ export function fitHandoff(input: HandoffPack, fits: (pack: HandoffPack) => bool
 
 const bytes = (v: unknown) => Buffer.byteLength(JSON.stringify(v));
 
+/** Сколько записей пакета отброшено пределами (`truncated`). */
+const droppedOf = (t: HandoffPack['truncated']) =>
+  t.works + t.stops + t.failures + t.unfinished + t.budgets + t.intentionsDropped;
+
+/** CLI с полным пакетом — без предела ответа операции. */
+export const HANDOFF_FULL_HINT =
+  'devcontour session-handoff --workspace <path> [--board ID] [--intent TEXT]... [--format json|md] [--out FILE]';
+
 /**
- * Пакет для ведущего агента в пределе ответа операции: JSON — `{pack,
- * commands}` по схеме `handoffPackSchema`; `md` — тот же пакет текстом.
+ * Пакет для ведущего агента в пределе ответа операции (`handoffResponse`).
  * Сверх предела записи отбрасываются тем же порядком, что у пакета
- * (`truncated.bySize`); полный пакет — `devcontour session-handoff`.
+ * (`truncated.bySize`); тогда `full` называет CLI с полным пакетом.
  */
 export function agentHandoff(h: DevContour, input: z.infer<typeof handoffInput>) {
   const { format, ...request } = input;
-  const full = devcontourHandoff(h, request);
-  const respond = (pack: HandoffPack) =>
-    format === 'md'
-      ? { format, markdown: handoffMarkdown(pack), commands: handoffHostCommands }
-      : { format, pack, commands: handoffHostCommands };
-  const pack = fitHandoff(full, (p) => bytes(respond(p)) <= AGENT_HANDOFF_BYTES);
+  const value = devcontourHandoff(h, request);
+  const respond = (pack: HandoffPack) => handoffResponse({ ...value, pack }, format);
+  const pack = fitHandoff(value.pack, (p) => bytes(respond(p)) <= AGENT_HANDOFF_BYTES);
   return {
     ...respond(pack),
-    ...(pack.truncated.bySize && !full.truncated.bySize
-      ? { full: 'devcontour session-handoff --workspace <path> [--board ID] [--format json|md]' }
+    ...(droppedOf(pack.truncated) > droppedOf(value.pack.truncated)
+      ? { full: HANDOFF_FULL_HINT }
       : {}),
   };
 }
