@@ -560,7 +560,10 @@ test('Автор пробует проверенную версию в брау�
       (id) => document.activeElement?.id === 'changeset-' + id,
       f.change.id,
     );
-    await page.getByRole('tab', { name: 'Обзор' }).click();
+    await page
+      .getByRole('navigation', { name: 'Workspace' })
+      .getByRole('link', { name: 'Обзор' })
+      .click();
 
     // Попробовав, автор принимает изменение; фокус остаётся на сообщении об итоге.
     const accept = page.getByRole('button', { name: 'Принять изменение' });
