@@ -206,6 +206,25 @@ export function loopOutlook(h: DevContour, s: DevContourState, job: WorkflowJob)
 }
 
 /**
+ * Снимет ли цикл задания текущую паузу выдачи без решения человека: на
+ * ближайшем такте (`lift-pause`, проверка перенесённой базы) или после
+ * такта, который сначала чинит задачу или ведёт эпизод (`repair`,
+ * `recovery` с повтором или ожиданием), — тогда паузу снимает следующий такт
+ * той же стадии по `pauseStep`. Остановка задания паузу не снимает.
+ */
+export function liftsPause(h: DevContour, s: DevContourState, job: WorkflowJob): boolean {
+  if (!s.paused) return false;
+  const { stage, outlook } = loopAhead(h, s, job);
+  if (outlook.step === 'lift-pause' || outlook.step === 'check-base') return true;
+  const first =
+    outlook.step === 'repair' ||
+    (outlook.step === 'recovery' && (outlook.action === 'retry-task' || outlook.action === 'wait'));
+  if (!first) return false;
+  const found = boardTasks(s, job.id);
+  return !!found && pauseStep(s, { ...job, stage }, found.tasks).lift;
+}
+
+/**
  * Ближайший такт цикла, который что-то делает: стадия, завершающаяся без
  * действий (`advance`), пропускается — следующий такт идёт уже со следующей
  * стадии. Возвращает стадию этого такта и его решение.

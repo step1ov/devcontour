@@ -18,7 +18,7 @@ import { z } from 'zod';
 import { DomainError, type Config } from '../core/model.ts';
 import type { DevContour } from '../core/service.ts';
 import { LeadWorkflow, type WorkflowJob } from '../core/lead-workflow.ts';
-import { loopAhead, type LoopOutlook } from '../runner/lead-outlook.ts';
+import { liftsPause, loopAhead, type LoopOutlook } from '../runner/lead-outlook.ts';
 import { repositories } from '../core/repositories.ts';
 import { executionOf, toDomain } from '../harness/execution.ts';
 import type { DevContourExecutionStore } from '../harness/store.ts';
@@ -393,35 +393,49 @@ function hostNext(ctx: HostContext): HandoffHostNext | undefined {
   const { pack, view, state, h } = ctx;
   if (!pack.summary.open) return undefined;
   if (h.config.approvalMode === 'operator') return { action: 'operator', detail: OPERATOR_STEP };
+  const workId = pack.next.workId;
+  const next = (workId ? view.work(workId)?.graphId : undefined) ?? pack.graphId;
+  const boards =
+    next && state.boards.some((b) => b.id === next)
+      ? [next]
+      : [...new Set(pack.works.map((w) => w.graphId))].filter((id) =>
+          state.boards.some((b) => b.id === id),
+        );
+  const steps = boards
+    .map((id) => boardStep(id, ctx))
+    .sort((a, b) => urgency[a.action] - urgency[b.action]);
   if (state.paused) {
+    // Решение по заданию (цикл остановит его, задание упало без пользы от
+    // повтора, вход не построить) важнее паузы: её снятие его не исправит.
+    const decision = steps.find((x) => x.action === 'decide' || x.action === 'fix-input');
+    if (decision) return decision;
     // Пауза выдачи общая: её снимает любое действующее задание, чей цикл
-    // снимет её на следующем такте.
-    for (const job of ctx.jobs.filter(ctx.live)) {
-      const { stage, outlook: loop } = loopAhead(h, state, asLead(job));
-      if (loop.step === 'lift-pause')
+    // снимет её — сразу или после такта, который сначала чинит задачу.
+    const live = ctx.jobs.filter(ctx.live);
+    for (const job of live)
+      if (liftsPause(h, state, asLead(job))) {
+        const { stage, outlook: loop } = loopAhead(h, state, asLead(job));
         return {
           action: 'wait',
           boardId: job.id,
           job: jobRef(job),
           loop,
-          detail: `Dispatch is paused (${state.pauseReason ?? 'initial'}); the lead workflow job of board ${job.id} lifts the pause at stage ${stage}. The running DevContour server continues it; if the server is stopped, start it (devcontour start --workspace …).`,
+          detail: `Dispatch is paused (${state.pauseReason ?? 'initial'}); the lead workflow job of board ${job.id} lifts the pause at stage ${stage}${loop.step === 'lift-pause' ? '' : ' after it ' + loopText(loop)}. The running DevContour server continues it; if the server is stopped, start it (devcontour start --workspace …).`,
         };
-    }
-    if (state.pauseReason === 'operator')
+      }
+    if (state.pauseReason === 'operator') {
+      const first = live[0];
+      const ahead = first ? loopAhead(h, state, asLead(first)) : undefined;
       return {
         action: 'queue_set',
+        ...(first ? { boardId: first.id, job: jobRef(first), loop: ahead!.outlook } : {}),
         detail:
-          'Dispatch is paused by the operator and no job loop lifts it: resume only on the user\'s decision with queue_set {"paused": false} (devcontour queue --start).',
+          'Dispatch is paused by the operator and no job loop lifts it: resume only on the user\'s decision with queue_set {"paused": false} (devcontour queue --start).' +
+          (ahead ? ` Meanwhile the job loop of board ${first.id} ${loopText(ahead.outlook)}.` : ''),
       };
+    }
   }
-  const workId = pack.next.workId;
-  const board = (workId ? view.work(workId)?.graphId : undefined) ?? pack.graphId;
-  if (board && state.boards.some((b) => b.id === board)) return boardStep(board, ctx);
-  const boards = [...new Set(pack.works.map((w) => w.graphId))].filter((id) =>
-    state.boards.some((b) => b.id === id),
-  );
-  const steps = boards.map((id) => boardStep(id, ctx));
-  return steps.sort((a, b) => urgency[a.action] - urgency[b.action])[0];
+  return steps[0];
 }
 
 /**

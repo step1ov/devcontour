@@ -714,6 +714,92 @@ test('session_handoff: вход доски не построить — fix-input
   }
 });
 
+test('session_handoff: пауза человека и решение по заданию — decide и wait по правилам цикла', async () => {
+  // P1: задание упало на исчерпанном бюджете, очередь на паузе человека —
+  // decide: снятие паузы задание не вернёт.
+  {
+    const f = fixture();
+    try {
+      const { board, task, start } = oneBoard(f.h);
+      const flow = new LeadWorkflow(f.h);
+      const job = atStage(f.h, start().key, 'main', 1, { repairs: f.h.config.repairBudget });
+      f.h.pause(false);
+      const run = f.h.claim('test')!;
+      assert.equal(run.taskId, task);
+      f.h.fail(run.id, run.token, 'candidate/typecheck: error', false, 'gate');
+      const runner = new LeadRunner(f.h, f.root);
+      await runner.tick();
+      assert.equal(flow.get(job.key, job.owner).status, 'failed');
+      f.h.pause(true);
+      const value = devcontourHandoff(f.h, { boardId: board });
+      assert.equal(value.host.next?.action, 'decide');
+      assert.equal(value.host.next?.loop?.step, 'stop');
+      // Проверка: снятие паузы задание не продвигает.
+      f.h.pause(false);
+      await runner.tick();
+      assert.equal(flow.get(job.key, job.owner).status, 'failed');
+    } finally {
+      f.cleanup();
+    }
+  }
+  // P2: действующее задание на стадии задач, упавшая задача в бюджете,
+  // пауза человека до старта задания — wait: такт 1 чинит задачу (пауза
+  // остаётся), такт 2 снимает паузу.
+  {
+    const f = fixture();
+    try {
+      const { board, task, start } = oneBoard(f.h);
+      f.h.pause(false);
+      const run = f.h.claim('test')!;
+      assert.equal(run.taskId, task);
+      f.h.fail(run.id, run.token, 'candidate/typecheck: error', false, 'gate');
+      f.h.pause(true);
+      tick();
+      const job = atStage(f.h, start().key, 'main', 1);
+      const value = devcontourHandoff(f.h, { boardId: board });
+      assert.equal(value.host.next?.action, 'wait');
+      assert.equal(value.host.next?.loop?.step, 'repair');
+      const runner = new LeadRunner(f.h, f.root);
+      await runner.tick();
+      assert.equal(f.store.read().tasks.find((t) => t.id === task)!.status, 'ready');
+      assert.equal(f.store.read().paused, true, 'такт 1 только чинит задачу');
+      await runner.tick();
+      assert.equal(f.store.read().paused, false, 'такт 2 снимает паузу');
+      assert.notEqual(new LeadWorkflow(f.h).get(job.key, job.owner).status, 'failed');
+    } finally {
+      f.cleanup();
+    }
+  }
+  // P3: действующее задание, исчерпанный бюджет, пауза человека после
+  // старта — decide с остановкой цикла: следующий такт останавливает задание.
+  {
+    const f = fixture();
+    try {
+      const { board, task, start } = oneBoard(f.h);
+      const job = atStage(f.h, start().key, 'main', 1, { repairs: f.h.config.repairBudget });
+      f.h.pause(false);
+      const run = f.h.claim('test')!;
+      assert.equal(run.taskId, task);
+      f.h.fail(run.id, run.token, 'candidate/typecheck: error', false, 'gate');
+      tick();
+      f.h.pause(true);
+      const value = devcontourHandoff(f.h, { boardId: board });
+      assert.equal(value.host.next?.action, 'decide');
+      assert.equal(value.host.next?.loop?.step, 'stop');
+      const whole = devcontourHandoff(f.h);
+      assert.equal(whole.host.next?.action, 'decide', 'и в пакете всего workspace');
+      await new LeadRunner(f.h, f.root).tick();
+      const stopped = new LeadWorkflow(f.h).get(job.key, job.owner);
+      assert.equal(stopped.status, 'failed', 'обещанная остановка произошла');
+      assert.ok(
+        value.host.next.loop?.step === 'stop' && stopped.error === value.host.next.loop.reason,
+      );
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
 test('session_handoff: approvalMode operator — задания не идут, шаг оператора', () => {
   const f = fixture();
   try {
