@@ -606,6 +606,10 @@ export async function serve(
             );
           else if (path === '/api/scheduler') {
             const start = z.boolean().parse(input.start);
+            // Сервер останавливается: запуск очереди снял бы паузу остановки,
+            // и такт выдал бы попытку, которую уже некому довести.
+            if (start && scheduler.stopping)
+              throw new DomainError('Сервер останавливается: очередь не запускается', 409);
             h.pause(!start);
             if (start) await scheduler.tick();
             // Такт мог сразу снова остановить очередь: ответ — то, что видно

@@ -30,13 +30,24 @@ export { classifyFailure } from 'devcontour-harness';
 export class Scheduler {
   readonly owner = randomUUID();
   private timer?: NodeJS.Timeout;
-  private ticking = false;
   private built?: { execution: Execution; runner: Runner };
-  /** Исполнители прежних конфигураций: `stop` дожидается их окончания. */
+  /**
+   * Исполнители прежних конфигураций: `stop` дожидается их окончания
+   * (`settled`). Прежний исполнитель появляется только при применении
+   * конфигурации, а оно ждёт, пока под прежней не останется работ
+   * (`busyWork`), поэтому своих попыток у него нет или они уже кончаются.
+   * Прервать их, не освободив роль controller, исполнитель harness не умеет,
+   * а его `stop` отпустил бы роль, которую держит текущий исполнитель с тем
+   * же владельцем, — поэтому только `settled`.
+   */
   private retired: Runner[] = [];
-  /** Идущий такт интервала `start`: `stop` дожидается его до закрытия хранилища. */
-  private current?: Promise<unknown>;
+  /** Идущий такт (интервала, HTTP-запуска или drain): `stop` дожидается его. */
+  private current?: Promise<void>;
   private stopped = false;
+  /** Планировщик останавливается: новые такты и запуск очереди не принимаются. */
+  get stopping() {
+    return this.stopped;
+  }
   constructor(
     readonly h: DevContour,
     readonly root: string,
@@ -273,7 +284,7 @@ export class Scheduler {
     this.stopped = false;
     this.timer = setInterval(() => {
       if (this.stopped || this.current) return;
-      this.current = this.tick()
+      void this.tick()
         .catch((e: unknown) => {
           if (this.stopped) return;
           this.h.store.change('scheduler.error', (s) => {
@@ -289,8 +300,7 @@ export class Scheduler {
         .catch(() => {
           // Запись сбоя не удалась (хранилище недоступно): следующий такт
           // повторит сам такт; необработанного отказа нет.
-        })
-        .finally(() => (this.current = undefined));
+        });
     }, 750);
     this.timer.unref();
   }
@@ -298,48 +308,59 @@ export class Scheduler {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
-    // Идущий такт доводится до конца до остановки исполнителей: после
-    // `stop` вызывающий закрывает хранилище.
-    await this.current;
-    // Пауза штатной остановки — продуктовая форма (поверх паузы операции);
-    // остановка попыток и освобождение роли controller — исполнитель harness.
+    // Пауза штатной остановки — сразу, до ожидания идущего такта: он не
+    // выдаёт новых попыток, которые тут же пришлось бы прервать. Продуктовая
+    // форма (поверх паузы операции); остановка попыток и освобождение роли
+    // controller — исполнитель harness.
     this.h.pause(true, 'shutdown');
+    // Идущий такт (любой: интервала, HTTP-запуска, drain) доводится до конца
+    // до остановки исполнителей: после `stop` вызывающий закрывает хранилище.
+    await this.current?.catch(() => {});
     await this.runner.stop();
     await Promise.all(this.retired.map((r) => r.settled().catch(() => {})));
     this.retired = [];
   }
-  async tick() {
-    if (this.ticking) return;
-    this.ticking = true;
-    try {
-      if (!this.h.leader(this.owner)) {
-        // Роль у другого controller: свои попытки прерываются, новых нет.
-        await this.runner.tick().catch((error: unknown) => {
-          if (!(error instanceof HarnessError && error.code === 'CONTROLLER_BUSY')) throw error;
-        });
-        return;
-      }
-      // Запуск применяет конфигурацию этого процесса, когда он стал controller;
-      // повторяется, пока она не станет применённой. Отставший процесс не пишет.
-      if (this.h.store.view().appliedConfig?.digest !== this.h.configDigest)
-        this.h.recordConfig(this.owner);
-      // Утверждения прежних версий закрепляются за действующей политикой
-      // один раз: повторного утверждения всех планов обновление не требует.
-      if (this.h.store.view().appliedConfig?.digest === this.h.configDigest)
-        this.h.pinLegacyApprovals();
-      // Запрошенное операцией применение конфигурации — до выдачи.
-      serveReconfigure(this.h, join(this.root, 'config.json'), this.owner);
-      const runner = this.runner;
-      if (!this.h.store.view().paused && runner.active < this.h.config.concurrency) {
-        // Сверка базы — git на каждом такте; без расхождения повторно не читается.
-        const drift = await this.baseDrift();
-        if (drift.length) await this.assertBaseCurrent(await this.fastForwardBase(drift));
-        assertTeamCheckout(this.h);
-      }
-      await runner.tick();
-    } finally {
-      this.ticking = false;
+  /**
+   * Один такт очереди. Такт один на планировщик: вызов во время идущего ждёт
+   * его (без его отказа), после `stop` — ничего не делает. Идущий такт
+   * записан в `current` при любом источнике вызова, поэтому `stop` дожидается
+   * и такта HTTP-запуска очереди.
+   */
+  tick(): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    if (this.current) return this.current.catch(() => {});
+    const run = this.tickOnce().finally(() => {
+      if (this.current === run) this.current = undefined;
+    });
+    this.current = run;
+    return run;
+  }
+  private async tickOnce() {
+    if (!this.h.leader(this.owner)) {
+      // Роль у другого controller: свои попытки прерываются, новых нет.
+      await this.runner.tick().catch((error: unknown) => {
+        if (!(error instanceof HarnessError && error.code === 'CONTROLLER_BUSY')) throw error;
+      });
+      return;
     }
+    // Запуск применяет конфигурацию этого процесса, когда он стал controller;
+    // повторяется, пока она не станет применённой. Отставший процесс не пишет.
+    if (this.h.store.view().appliedConfig?.digest !== this.h.configDigest)
+      this.h.recordConfig(this.owner);
+    // Утверждения прежних версий закрепляются за действующей политикой
+    // один раз: повторного утверждения всех планов обновление не требует.
+    if (this.h.store.view().appliedConfig?.digest === this.h.configDigest)
+      this.h.pinLegacyApprovals();
+    // Запрошенное операцией применение конфигурации — до выдачи.
+    serveReconfigure(this.h, join(this.root, 'config.json'), this.owner);
+    const runner = this.runner;
+    if (!this.h.store.view().paused && runner.active < this.h.config.concurrency) {
+      // Сверка базы — git на каждом такте; без расхождения повторно не читается.
+      const drift = await this.baseDrift();
+      if (drift.length) await this.assertBaseCurrent(await this.fastForwardBase(drift));
+      assertTeamCheckout(this.h);
+    }
+    await runner.tick();
   }
   async drain() {
     while (true) {

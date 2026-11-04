@@ -197,7 +197,7 @@ export async function coverBoard(
           'board.coverage.failed',
           {
             // Не провал gates: исход проверки не записался.
-            reason: 'record',
+            reason: signal?.aborted ? 'cancelled' : 'record',
             repositoryId: gap.repositoryId,
             sha,
             runId: record.runId,

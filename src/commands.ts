@@ -259,17 +259,19 @@ async function main() {
       `DevContour: ${app.url}\nWorkspace: ${workspacePath} · ${selectedWorkspaceMode(workspacePath)}\nПродукт → согласование → архитектура и стек → согласование → разработка.`,
     );
     let closing = false;
-    const close = async () => {
-      if (closing) return;
+    // Первый сигнал — штатная остановка; второй — немедленный выход (130),
+    // если остановка зависла. Отказ остановки — код 1, а не тихое зависание.
+    const close = () => {
+      if (closing) process.exit(130);
       closing = true;
-      await app.close();
+      app.close().catch((error: unknown) => {
+        console.error(error instanceof Error ? error.message : String(error));
+        process.exitCode = 1;
+        process.exit(1);
+      });
     };
-    process.on('SIGINT', () => {
-      void close();
-    });
-    process.on('SIGTERM', () => {
-      void close();
-    });
+    process.on('SIGINT', close);
+    process.on('SIGTERM', close);
     return;
   }
   if (workspacePath && selectedWorkspaceMode(workspacePath))
@@ -1149,15 +1151,25 @@ async function main() {
     `DevContour: ${app.url}\n${config.mode === 'demo' ? 'Учебный режим: модели не вызываются.' : 'Локальный режим: запуск использует настроенные CLI и их авторизацию.'}`,
   );
   let closing = false;
-  const close = async () => {
-    if (closing) return;
+  // Первый сигнал — штатная остановка; второй — немедленный выход (130),
+  // если остановка зависла. Отказ остановки — код 1, а не тихое зависание.
+  const close = () => {
+    if (closing) process.exit(130);
     closing = true;
-    await app.close();
-    store.close();
-    process.exit(0);
+    app
+      .close()
+      .then(() => {
+        store.close();
+        process.exit(0);
+      })
+      .catch((error: unknown) => {
+        console.error(error instanceof Error ? error.message : String(error));
+        process.exitCode = 1;
+        process.exit(1);
+      });
   };
-  process.on('SIGINT', () => void close());
-  process.on('SIGTERM', () => void close());
+  process.on('SIGINT', close);
+  process.on('SIGTERM', close);
 }
 main().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
