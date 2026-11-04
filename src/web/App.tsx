@@ -357,8 +357,9 @@ function BoardLink({
     <button
       type="button"
       className={cn(
-        'text-foreground flex w-full min-w-0 cursor-pointer items-start gap-2 rounded-sm px-2 py-1.5 text-left text-sm transition-colors duration-(--duration-hover) hover:bg-raised max-[760px]:w-auto max-[760px]:min-w-44 max-[760px]:shrink-0',
-        current && 'bg-active hover:bg-active font-medium',
+        'text-foreground flex w-full min-w-0 cursor-pointer items-start gap-2 rounded-md border border-transparent px-2 py-1.5 text-left text-sm font-medium transition-colors duration-(--duration-hover) hover:bg-active max-[760px]:w-auto max-[760px]:min-w-44 max-[760px]:shrink-0',
+        // Выбранная доска выглядит так же, как выбранный экран навигации.
+        current && 'bg-card hover:bg-card border-border shadow-pill font-semibold',
       )}
       onClick={() => onSelect(b.id)}
       aria-current={current ? 'page' : undefined}
@@ -1821,19 +1822,22 @@ export function App() {
               </p>
             )}
             <div className="ml-auto flex shrink-0 items-center gap-1 max-[760px]:ml-0 max-[760px]:w-full max-[760px]:shrink max-[760px]:flex-wrap">
-              <span className="text-muted-foreground mr-2 flex items-center gap-2 whitespace-nowrap">
+              {/* Подробности очереди — в ячейке «Сейчас» полосы состояния;
+                  здесь только точка состояния рядом с переключателем. */}
+              <span
+                className="mr-1 flex size-6 items-center justify-center"
+                title={`${data.paused ? 'Очередь на паузе' : 'Очередь идёт'} · ${activeRuns} из ${data.config.concurrency} исполнителей`}
+              >
                 <span
                   aria-hidden="true"
                   className={cn(
                     'inline-block size-2 rounded-full',
-                    data.paused ? 'bg-(--text-faint)' : 'bg-success',
+                    data.paused ? 'bg-warning' : 'bg-success',
                   )}
                 />
-                <span className="text-foreground">
-                  {data.paused ? 'Очередь на паузе' : 'Очередь идёт'}
-                </span>
-                <span className="tabular max-[1180px]:hidden">
-                  · {activeRuns} из {data.config.concurrency} исполнителей
+                <span className="sr-only">
+                  {data.paused ? 'Очередь на паузе' : 'Очередь идёт'}, {activeRuns} из{' '}
+                  {data.config.concurrency} исполнителей
                 </span>
               </span>
               {!queuePrimary && queueButton(false)}

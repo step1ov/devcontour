@@ -19,27 +19,50 @@ export function QueueStopBanner({
   compact?: boolean;
 }) {
   if (!queue?.paused || !queue.stopReason) return null;
-  if (compact)
+  if (compact) {
+    // Тихая строка в тон полосе: янтарь (или красный при сбое) — только у
+    // точки и короткой подписи, причина и «что сделать» — приглушённым
+    // текстом с переносом, без обрезки. Команды выделены как код.
+    const action = queue.action?.split(/(devcontour [a-z-]+(?: --[a-z-]+)*)/);
     return (
       <div
         role="status"
         aria-label="Очередь остановлена"
         data-queue-stop={queue.reason}
-        className={cn(
-          'flex min-w-0 items-start gap-2 text-sm',
-          queue.failed ? 'text-destructive' : 'text-warning',
-        )}
+        className="grid min-w-0 gap-0.5 text-sm"
       >
-        <PauseCircle aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
         <p className="m-0 min-w-0 [overflow-wrap:anywhere]">
-          <strong className="font-medium">Очередь остановлена:</strong> {queue.stopReason}
-          {/[.!?…]$/.test(queue.stopReason) ? '' : '.'}
-          {queue.action && (
-            <span className="text-muted-foreground"> Что сделать: {queue.action}</span>
-          )}
+          <span
+            className={cn(
+              'mr-1.5 inline-flex items-center gap-1.5 font-medium',
+              queue.failed ? 'text-destructive' : 'text-warning',
+            )}
+          >
+            <span aria-hidden="true" className="inline-block size-2 rounded-full bg-current" />
+            {queue.failed ? 'Очередь остановлена' : 'Очередь на паузе'}
+          </span>
+          <span className="text-muted-foreground">
+            {queue.stopReason}
+            {/[.!?…]$/.test(queue.stopReason) ? '' : '.'}
+          </span>
         </p>
+        {action && (
+          <p className="text-muted-foreground m-0 min-w-0 pl-3.5 text-xs [overflow-wrap:anywhere]">
+            Что сделать:{' '}
+            {action.map((part, i) =>
+              i % 2 ? (
+                <code key={i} className="bg-active text-foreground rounded-xs px-1 py-px">
+                  {part}
+                </code>
+              ) : (
+                part
+              ),
+            )}
+          </p>
+        )}
       </div>
     );
+  }
   return (
     <Alert
       variant={queue.failed ? 'destructive' : 'warning'}
