@@ -276,7 +276,7 @@ export function LiveWork({
         {Array.from({ length: stopped ? 0 : Math.max(0, Math.min(free, slots - rows)) }, (_, i) => (
           <div
             key={'free-' + i}
-            className="text-faint flex h-(--live-row-height) items-center border border-dashed border-rule px-2 text-xs rounded-sm"
+            className="text-faint flex h-(--live-row-height) items-center text-xs"
           >
             Свободное место исполнителя
           </div>

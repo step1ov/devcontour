@@ -30,6 +30,14 @@ import {
   Eye,
   Loader2,
   Copy,
+  LayoutDashboard,
+  Map as MapIcon,
+  Network,
+  GitPullRequestArrow,
+  FileSignature,
+  ArrowLeft,
+  Folder,
+  SquareKanban,
 } from 'lucide-react';
 import type { Task, Run } from '../core/model.ts';
 import { Alert, AlertDescription } from '@/ui/alert.tsx';
@@ -702,11 +710,11 @@ const boardTabs = [
   { key: 'history', label: 'Ревизии' },
 ] as const;
 const workspaceScreens = [
-  { key: 'overview', label: 'Обзор' },
-  { key: 'product', label: 'Карта продукта' },
-  { key: 'workspace', label: 'Общий граф' },
-  { key: 'changesets', label: 'Изменения' },
-  { key: 'contracts', label: 'Контракты' },
+  { key: 'overview', label: 'Обзор', icon: LayoutDashboard },
+  { key: 'product', label: 'Карта продукта', icon: MapIcon },
+  { key: 'workspace', label: 'Общий граф', icon: Network },
+  { key: 'changesets', label: 'Изменения', icon: GitPullRequestArrow },
+  { key: 'contracts', label: 'Контракты', icon: FileSignature },
 ] as const;
 const isBoardTab = (tab: string) => boardTabs.some((t) => t.key === tab);
 function readAppLocation() {
@@ -1501,7 +1509,7 @@ export function App() {
   };
   const queueButton = (main: boolean) => (
     <Button
-      variant={main ? 'default' : 'outline'}
+      variant={main ? 'default' : 'ghost'}
       size={main ? 'default' : 'sm'}
       className={main ? 'min-w-44' : 'min-w-36'}
       disabled={busy || cooling || (data.paused && !data.ready.length)}
@@ -1664,7 +1672,12 @@ export function App() {
           className="text-muted-foreground m-0 truncate px-2 pb-3 text-xs"
           title={data.config.name}
         >
-          {data.config.name} · локальный workspace
+          {data.config.name}
+        </p>
+        <p className="text-muted-foreground m-0 px-2 pb-3 text-xs max-[760px]:hidden">
+          {data.config.mode === 'demo'
+            ? 'Учебный режим · без вызовов моделей'
+            : 'Локальный runtime'}
         </p>
         <nav
           aria-label="Workspace"
@@ -1681,15 +1694,17 @@ export function App() {
                 openScreen(s.key);
               }}
               className={cn(
-                'text-foreground flex h-8 shrink-0 items-center rounded-sm px-2 text-sm whitespace-nowrap no-underline transition-colors duration-(--duration-hover) hover:bg-raised',
-                tab === s.key && 'bg-active hover:bg-active font-medium',
+                'text-foreground flex h-8 shrink-0 items-center gap-2.5 rounded-md border border-transparent px-2 text-sm font-medium whitespace-nowrap no-underline transition-colors duration-(--duration-hover) hover:bg-active',
+                tab === s.key &&
+                  'bg-card hover:bg-card border-border shadow-pill font-semibold [&>svg]:text-foreground',
               )}
             >
+              <s.icon aria-hidden="true" className="text-muted-foreground size-4 shrink-0" />
               {s.label}
             </a>
           ))}
         </nav>
-        <div className="text-muted-foreground mt-4 flex items-center justify-between px-2 text-xs max-[760px]:mt-1">
+        <div className="text-muted-foreground mx-2 mt-3 flex items-center justify-between border-t pt-3 text-xs max-[760px]:mx-0 max-[760px]:mt-1 max-[760px]:border-t-0 max-[760px]:pt-0">
           <span>Доски</span>
           <Button
             variant="ghost"
@@ -1738,7 +1753,7 @@ export function App() {
             </details>
           )}
         </nav>
-        <p className="text-muted-foreground mt-auto px-2 pt-6 text-xs max-[760px]:hidden">
+        <p className="text-muted-foreground mx-2 mt-auto border-t px-0 pt-3 text-xs max-[760px]:hidden">
           Интеграция в <code className="[overflow-wrap:anywhere]">{data.config.targetBranch}</code>{' '}
           · согласования: {data.config.approvalMode === 'operator' ? 'оператор' : 'агент'}
         </p>
@@ -1747,53 +1762,95 @@ export function App() {
         {/* Верхняя строка — единственное место состояния очереди. Высота
             постоянна: ошибка связи встаёт в неё, а не вставляется над
             контентом. */}
-        <header className="flex h-(--topbar-height) min-w-0 shrink-0 items-center gap-3 pr-3 pl-2 text-sm max-[760px]:h-auto max-[760px]:flex-wrap max-[760px]:gap-x-3 max-[760px]:gap-y-1 max-[760px]:px-4 max-[760px]:py-2">
-          <span className="text-muted-foreground min-w-0 truncate">
-            {data.config.name} / <span className="text-foreground font-medium">{screenTitle}</span>
-            {boardScreen && revision && ` · ревизия ${revision.number}`}
-          </span>
-          <span className="bg-active text-muted-foreground shrink-0 rounded-xs px-2 py-0.5 text-xs whitespace-nowrap max-[1180px]:hidden">
-            {data.config.mode === 'demo'
-              ? 'Учебный режим · без вызовов моделей'
-              : 'Локальный runtime'}
-          </span>
-          {pollError && (
-            <p
-              role="alert"
-              className="text-destructive m-0 flex min-w-0 items-center gap-1.5 text-xs"
-              title={pollError}
-            >
-              <AlertCircle aria-hidden="true" className="size-3.5 shrink-0" />
-              <span className="truncate">
-                Нет связи с сервером: {pollError}. На экране последнее полученное состояние; опрос
-                повторяется.
-              </span>
-            </p>
-          )}
-          <div className="ml-auto flex shrink-0 items-center gap-3">
-            <span className="text-muted-foreground flex items-center gap-2 text-sm whitespace-nowrap">
-              <span
-                aria-hidden="true"
-                className={cn(
-                  'inline-block size-2 rounded-full',
-                  data.paused ? 'bg-(--text-faint)' : 'bg-success',
-                )}
-              />
-              <span className="text-foreground">
-                {data.paused ? 'Очередь на паузе' : 'Очередь идёт'}
-              </span>
-              <span className="tabular max-[1180px]:hidden">
-                · {activeRuns} из {data.config.concurrency} исполнителей
-              </span>
-            </span>
-            {!queuePrimary && queueButton(false)}
-          </div>
-        </header>
         <main
           data-sheet
-          className="bg-card mr-2 mb-2 flex min-h-0 min-w-0 flex-1 flex-col rounded-lg border max-[760px]:m-0 max-[760px]:rounded-none max-[760px]:border-x-0"
+          className="bg-card m-2 flex min-h-0 min-w-0 flex-1 flex-col rounded-xl border max-[760px]:m-0 max-[760px]:rounded-none max-[760px]:border-x-0"
         >
-          <div className="flex flex-wrap items-start gap-x-6 gap-y-3 px-6 pt-4 pb-3 max-[760px]:px-4">
+          {/* Строка пути — часть листа: назад, проект и экран; справа — тихие
+              действия и единственное место состояния очереди. Высота
+              постоянна: ошибка связи встаёт в неё, а не вставляется над
+              контентом. */}
+          <header className="flex h-(--topbar-height) min-w-0 shrink-0 items-center gap-2 border-b px-4 text-sm max-[760px]:h-auto max-[760px]:flex-wrap max-[760px]:gap-y-1 max-[760px]:py-2">
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label="Назад"
+              onClick={() => window.history.back()}
+            >
+              <ArrowLeft />
+            </Button>
+            <span aria-hidden="true" className="bg-border h-4 w-px shrink-0 max-[760px]:hidden" />
+            <nav
+              aria-label="Путь"
+              className="text-muted-foreground flex min-w-0 items-center gap-1.5 max-[760px]:flex-1"
+            >
+              <span className="flex min-w-0 items-center gap-1.5">
+                <Folder aria-hidden="true" className="size-4 shrink-0" />
+                <span className="truncate">{data.config.name}</span>
+              </span>
+              <ChevronRight aria-hidden="true" className="size-3.5 shrink-0" />
+              <span
+                className="text-foreground flex min-w-0 items-center gap-1.5"
+                aria-current="page"
+              >
+                {boardScreen ? (
+                  <SquareKanban
+                    aria-hidden="true"
+                    className="text-muted-foreground size-4 shrink-0"
+                  />
+                ) : null}
+                <span className="truncate">{screenTitle}</span>
+                {boardScreen && revision && (
+                  <span className="text-muted-foreground shrink-0">
+                    · ревизия {revision.number}
+                  </span>
+                )}
+              </span>
+            </nav>
+            {pollError && (
+              <p
+                role="alert"
+                className="text-destructive m-0 flex min-w-0 items-center gap-1.5 text-xs"
+                title={pollError}
+              >
+                <AlertCircle aria-hidden="true" className="size-3.5 shrink-0" />
+                <span className="truncate">
+                  Нет связи с сервером: {pollError}. На экране последнее полученное состояние; опрос
+                  повторяется.
+                </span>
+              </p>
+            )}
+            <div className="ml-auto flex shrink-0 items-center gap-1">
+              <span className="text-muted-foreground mr-2 flex items-center gap-2 whitespace-nowrap">
+                <span
+                  aria-hidden="true"
+                  className={cn(
+                    'inline-block size-2 rounded-full',
+                    data.paused ? 'bg-(--text-faint)' : 'bg-success',
+                  )}
+                />
+                <span className="text-foreground">
+                  {data.paused ? 'Очередь на паузе' : 'Очередь идёт'}
+                </span>
+                <span className="tabular max-[1180px]:hidden">
+                  · {activeRuns} из {data.config.concurrency} исполнителей
+                </span>
+              </span>
+              {!queuePrimary && queueButton(false)}
+              <Button variant="ghost" size="sm" asChild>
+                <a
+                  href="/api/report?format=html"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title="Отчёт об эффекте: принятые задачи, возвраты проверками и ревью, время, расход и окружение"
+                >
+                  <FileText />
+                  Отчёт
+                </a>
+              </Button>
+            </div>
+          </header>
+          <div className="flex flex-wrap items-start gap-x-6 gap-y-3 px-8 pt-5 pb-4 max-[760px]:px-4 max-[760px]:pt-4">
             <div className="min-w-0 flex-1">
               <div className="flex min-w-0 items-center gap-2">
                 <h1
@@ -1815,17 +1872,6 @@ export function App() {
               </p>
             </div>
             <div className="flex shrink-0 flex-wrap items-center gap-2 max-[760px]:w-full">
-              <Button variant="ghost" asChild>
-                <a
-                  href="/api/report?format=html"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  title="Отчёт об эффекте: принятые задачи, возвраты проверками и ревью, время, расход и окружение"
-                >
-                  <FileText />
-                  Отчёт
-                </a>
-              </Button>
               {tab === 'changesets' && (
                 <Button variant="outline" onClick={() => setModal('changeset')}>
                   <Plus />
@@ -1885,7 +1931,7 @@ export function App() {
             </div>
           </div>
           {data.journalError && (
-            <Alert variant="destructive" role="alert" className="mx-6 mb-3 w-auto max-[760px]:mx-4">
+            <Alert variant="destructive" role="alert" className="mx-8 mb-3 w-auto max-[760px]:mx-4">
               <AlertDescription>Дневник: {data.journalError}</AlertDescription>
             </Alert>
           )}
@@ -1895,7 +1941,7 @@ export function App() {
             role="group"
             aria-label="Состояние доски"
             className={cn(
-              'relative mx-6 grid shrink-0 overflow-hidden rounded-md border max-[760px]:mx-4',
+              'relative mx-8 grid shrink-0 border-y max-[760px]:mx-4',
               boardScreen
                 ? 'grid-cols-[repeat(5,minmax(0,0.8fr))_minmax(0,3fr)] max-[1180px]:grid-cols-5 max-[760px]:grid-cols-3'
                 : 'grid-cols-1',
@@ -1913,7 +1959,7 @@ export function App() {
               ).map(([label, value, total]) => (
                 <div
                   key={label}
-                  className="border-r px-3 py-2 max-[1180px]:border-b max-[760px]:[&:nth-child(3)]:border-r-0"
+                  className="px-3 py-2.5 first:pl-0 [&:nth-child(5)]:border-r max-[1180px]:border-b max-[1180px]:[&:nth-child(5)]:border-r-0 max-[760px]:pr-2 max-[760px]:pl-0"
                 >
                   <span className="text-muted-foreground block truncate text-xs">{label}</span>
                   <span
@@ -1946,7 +1992,7 @@ export function App() {
             </div>
             {boardScreen && liveTasks.length > 0 && (
               <div
-                className="bg-rule absolute inset-x-0 bottom-0 h-[3px]"
+                className="absolute inset-x-0 -bottom-px h-0.5"
                 role="progressbar"
                 aria-label="Принято результатов"
                 aria-valuemin={0}
@@ -1961,7 +2007,7 @@ export function App() {
             )}
           </div>
           {(boardScreen || showToolbar) && (
-            <div className="mx-6 mt-3 flex min-h-11 shrink-0 flex-wrap items-end gap-x-4 gap-y-2 border-b max-[760px]:mx-4">
+            <div className="mx-8 mt-4 flex min-h-11 shrink-0 flex-wrap items-end gap-x-4 gap-y-2 border-b max-[760px]:mx-4">
               {boardScreen && (
                 <div
                   role="tablist"
@@ -2075,7 +2121,7 @@ export function App() {
                 }
               >
                 {tab === 'progress' && data && (
-                  <div className="px-6 pt-4 pb-6 max-[760px]:px-4">
+                  <div className="px-8 pt-4 pb-6 max-[760px]:px-4">
                     {/* Ход работ — по всему workspace: охват подписан, чтобы
                         его цифры не спорили со счётчиками доски выше. */}
                     <p className="text-muted-foreground m-0 mb-3 text-xs">
@@ -2091,7 +2137,7 @@ export function App() {
                   </div>
                 )}
                 {tab === 'overview' && (
-                  <div className="min-w-0 px-6 pt-4 pb-6 max-[760px]:px-4">
+                  <div className="min-w-0 px-8 pt-4 pb-6 max-[760px]:px-4">
                     <AuthorOverviewPanel
                       onOpenChange={(id) => {
                         setTab('changesets');
@@ -2110,7 +2156,7 @@ export function App() {
                 )}
                 {tab === 'kanban' && (
                   <div
-                    className="grid h-full min-h-(--canvas-height) grid-flow-col gap-3 overflow-x-auto px-6 py-4 max-[760px]:px-4"
+                    className="grid h-full min-h-(--canvas-height) grid-flow-col gap-3 overflow-x-auto px-8 py-4 max-[760px]:px-4"
                     // Пустая колонка уже, чем занятая: пятая колонка не уходит
                     // за край, пока в ней нечего показать.
                     style={{
@@ -2130,9 +2176,9 @@ export function App() {
                         <section
                           key={column.key}
                           aria-label={column.label}
-                          className="bg-raised flex min-w-0 flex-col gap-2 rounded-md p-2"
+                          className="flex min-w-0 flex-col gap-2"
                         >
-                          <header className="px-1 pt-1">
+                          <header className="border-b px-1 pb-2">
                             <h2 className="m-0 flex items-baseline justify-between gap-2 text-sm">
                               {column.label}
                               <span className="text-muted-foreground tabular text-xs font-normal">
@@ -2271,6 +2317,17 @@ export function App() {
                   ))}
                 {tab === 'list' && (
                   <div>
+                    {/* Шапка таблицы — светлая полоса; строки делят волосяные линии. */}
+                    {filtered.length > 0 && (
+                      <div
+                        aria-hidden="true"
+                        className="bg-raised text-muted-foreground grid grid-cols-[6.5rem_minmax(0,1fr)_auto] gap-x-3 border-b px-8 py-2 text-xs max-[760px]:hidden"
+                      >
+                        <span>ID</span>
+                        <span>Задача</span>
+                        <span className="pr-7">Статус</span>
+                      </div>
+                    )}
                     {filtered.length ? (
                       filtered.map((t) => {
                         const shown = taskStatus(t);
@@ -2278,7 +2335,7 @@ export function App() {
                           <button
                             type="button"
                             className={cn(
-                              'grid w-full min-w-0 cursor-pointer grid-cols-[6.5rem_minmax(0,1fr)_auto_auto] items-start gap-x-3 border-b px-6 py-3 text-left text-sm transition-colors duration-(--duration-hover) last:border-b-0 hover:bg-raised max-[760px]:grid-cols-[minmax(0,1fr)_auto] max-[760px]:gap-y-1 max-[760px]:px-4',
+                              'grid w-full min-w-0 cursor-pointer grid-cols-[6.5rem_minmax(0,1fr)_auto_auto] items-start gap-x-3 border-rule border-b px-8 py-3 text-left text-sm transition-colors duration-(--duration-hover) last:border-b-0 hover:bg-raised max-[760px]:grid-cols-[minmax(0,1fr)_auto] max-[760px]:gap-y-1 max-[760px]:px-4',
                               selected === t.id &&
                                 'bg-active hover:bg-active shadow-[inset_2px_0_0_var(--data-accent)]',
                             )}
@@ -2336,7 +2393,7 @@ export function App() {
                   </div>
                 )}
                 {tab === 'changesets' && (
-                  <div className="px-6 pt-2 pb-6 max-[760px]:px-4 [&>p]:text-muted-foreground [&>p]:max-w-[65ch] [&>p]:text-sm">
+                  <div className="px-8 pt-2 pb-6 max-[760px]:px-4 [&>p]:text-muted-foreground [&>p]:max-w-[65ch] [&>p]:text-sm">
                     {data.config.storage === 'component' && (
                       <p>
                         Задачи и журналы хранятся в компонентах. Здесь показан общий граф и
@@ -2584,7 +2641,7 @@ export function App() {
                   </div>
                 )}
                 {tab === 'history' && (
-                  <div className="px-6 pt-4 pb-6 max-[760px]:px-4 [&>p]:text-muted-foreground [&>p]:max-w-[65ch] [&>p]:text-sm">
+                  <div className="px-8 pt-4 pb-6 max-[760px]:px-4 [&>p]:text-muted-foreground [&>p]:max-w-[65ch] [&>p]:text-sm">
                     <p className="mt-0">
                       Принятые снимки неизменяемы. Каждая корректировка имеет свой план и
                       доказательства.
@@ -2652,7 +2709,7 @@ export function App() {
                   </div>
                 )}
                 {tab === 'contracts' && (
-                  <div className="px-6 pt-2 pb-6 max-[760px]:px-4 [&>p]:text-muted-foreground [&>p]:max-w-[65ch] [&>p]:text-sm">
+                  <div className="px-8 pt-2 pb-6 max-[760px]:px-4 [&>p]:text-muted-foreground [&>p]:max-w-[65ch] [&>p]:text-sm">
                     {data.contracts.map((c) => (
                       <article
                         key={c.id}
@@ -2680,12 +2737,14 @@ export function App() {
             </section>
             {showInspector && (
               <aside
-                className="min-h-0 overflow-auto border-l px-5 pt-4 pb-6 text-sm max-[1180px]:border-t max-[1180px]:border-l-0 max-[760px]:px-4"
+                className="min-h-0 overflow-auto border-l px-6 pb-6 text-sm max-[1180px]:border-t max-[1180px]:border-l-0 max-[760px]:px-4"
                 aria-label="Детали задачи"
               >
                 {task ? (
                   <>
-                    <header className="grid gap-1.5">
+                    {/* Свой заголовок инспектора: остаётся наверху при прокрутке
+                        деталей и отделён волосяной линией. */}
+                    <header className="bg-card sticky top-0 z-10 -mx-6 grid gap-1.5 border-b px-6 pt-4 pb-3 max-[760px]:-mx-4 max-[760px]:px-4">
                       <div className="text-muted-foreground flex min-w-0 items-center gap-2 text-xs">
                         <span className="font-mono whitespace-nowrap" title={task.id}>
                           {shortId(task.id)}

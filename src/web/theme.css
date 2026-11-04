@@ -43,6 +43,7 @@
   --radius-sm: var(--radius-sm);
   --radius-md: var(--radius-md);
   --radius-lg: var(--radius-lg);
+  --radius-xl: var(--radius-xl);
 
   --text-xs: var(--text-xs);
   --text-sm: var(--text-sm);
@@ -52,6 +53,7 @@
   --text-xl: var(--text-xl);
 
   --ease-out: var(--ease-out);
+  --shadow-pill: var(--shadow-pill);
 }
 
 @layer base {
