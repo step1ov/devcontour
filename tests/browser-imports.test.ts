@@ -69,7 +69,6 @@ test('Панель в Vite dev не достигает модулей Node: ни
     root,
     entry: '/src/web/main.ts',
     configFile: false,
-    cacheDir: join(root, '.vite-cache'),
   });
   assert.deepEqual(chains(violations), [
     'src/web/main.ts -> src/core/hashing.ts -> __vite-browser-external:node:crypto',
@@ -118,7 +117,6 @@ test('С настоящим vite.config.ts (React, алиас @): harness вне
     root,
     entry: '/src/web/main.tsx',
     configFile: join(root, 'vite.config.ts'),
-    cacheDir: join(root, '.vite-cache'),
   });
   const found = chains(violations);
   const has = (pattern: RegExp) =>
@@ -142,10 +140,13 @@ test('С настоящим vite.config.ts (React, алиас @): harness вне
 });
 
 test('Настоящая панель (src/web/main.tsx) не достигает модулей Node', async () => {
-  const { modules, violations } = await browserNodeImports({
+  const { modules, files, violations } = await browserNodeImports({
     root: checkout,
     entry: '/src/web/main.tsx',
   });
   assert.deepEqual(violations, []);
-  assert.ok(modules > 20, 'граф панели обойдён целиком: ' + modules);
+  assert.ok(modules >= 50, 'граф панели обойдён целиком: ' + modules);
+  // Lazy panels are dynamic imports; the walk must reach them too.
+  for (const lazy of ['src/web/App.tsx', 'src/web/GraphPanel.tsx', 'src/web/C4Panel.tsx'])
+    assert.ok(files.includes(lazy), lazy + ' не обойдён');
 });

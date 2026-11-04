@@ -15,16 +15,18 @@
 // pre-bundles them in dev, where a builtin becomes a stub that throws only
 // when used — and URLs built at runtime, which no static walk can see.
 import { createServer } from 'vite';
-import { createHash } from 'node:crypto';
-import { realpathSync } from 'node:fs';
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, relative, sep } from 'node:path';
+import { basename, dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const external = '__vite-browser-external';
 const serverOnly = /^src\/(?:runner\/|server\/|cli(?:[.\-/]))/;
 // The harness root and most subpaths load Node modules at top level (the root
-// reaches lib/environment through createRequire); only these entries are pure.
+// reaches lib/environment through createRequire), so the page fails to load.
+// /contracts and /projections are tolerated, not pure: Vite pre-bundles them,
+// and /contracts still reaches node:crypto (digest, failure helpers), whose
+// stub throws as soon as the panel calls one of those functions.
 const harness = '/node_modules/devcontour-harness/';
 const harnessBrowserSafe =
   /\/node_modules\/devcontour-harness\/lib\/(?:contracts|projections)\/index\.js$/;
@@ -32,30 +34,37 @@ const harnessBrowserSafe =
 const workerFile = /["'`](\/[^"'`]*[?&]worker_file\b[^"'`]*)["'`]/g;
 
 /**
- * @param {{ root: string; entry: string; configFile?: string | false; cacheDir?: string }} options
- * @returns {Promise<{ modules: number; violations: { module: string; chain: string[] }[] }>}
+ * @param {{ root: string; entry: string; configFile?: string | false }} options
+ * @returns {Promise<{ modules: number; files: string[]; violations: { module: string; chain: string[] }[] }>}
  */
-export async function browserNodeImports({ root, entry, configFile, cacheDir }) {
+export async function browserNodeImports({ root, entry, configFile }) {
   // Vite reports real paths (/tmp is /private/tmp on macOS).
   const base = realpathSync(root);
-  const server = await createServer({
-    root,
-    configFile,
-    // Its own cache per checkout: the shared node_modules/.vite would
-    // invalidate the optimized deps of a running dev server, and worktrees
-    // sharing node_modules would race on one directory.
-    cacheDir:
-      cacheDir ??
-      join(
-        tmpdir(),
-        'devcontour-browser-imports-' +
-          createHash('sha256').update(base).digest('hex').slice(0, 12),
-      ),
-    logLevel: 'silent',
-    appType: 'custom',
-    server: { middlewareMode: true, hmr: false, ws: false, watch: null },
-    optimizeDeps: { noDiscovery: true, include: [] },
-  });
+  // A cache of this run only: the shared node_modules/.vite would invalidate
+  // the optimized deps of a running dev server, and parallel runs (lint and
+  // the test, several worktrees) race renaming one cold cache.
+  const scratch = realpathSync(tmpdir());
+  const prefix = 'devcontour-browser-imports-';
+  const cacheDir = mkdtempSync(join(scratch, prefix));
+  const removeCache = () => {
+    if (dirname(cacheDir) === scratch && basename(cacheDir).startsWith(prefix))
+      rmSync(cacheDir, { recursive: true, force: true });
+  };
+  let server;
+  try {
+    server = await createServer({
+      root,
+      configFile,
+      cacheDir,
+      logLevel: 'silent',
+      appType: 'custom',
+      server: { middlewareMode: true, hmr: false, ws: false, watch: null },
+      optimizeDeps: { noDiscovery: true, include: [] },
+    });
+  } catch (error) {
+    removeCache();
+    throw error;
+  }
   try {
     const client = server.environments.client;
     /** @type {Map<string, string | undefined>} url -> importer url */
@@ -99,20 +108,31 @@ export async function browserNodeImports({ root, entry, configFile, cacheDir }) 
         violations.push({ module: path, chain: chainOf(url) });
         continue;
       }
-      // Packages are pre-bundled in dev; see the header for this limit.
-      if (id.includes('/node_modules/')) continue;
+      // Packages and Vite's own pre-bundled deps: see the header for this limit.
+      if (id.includes('/node_modules/') || id.startsWith(cacheDir + sep)) continue;
       result ??= await client.transformRequest(url);
       for (const imported of node?.importedModules ?? []) visit(imported.url, url);
       for (const [, worker] of result?.code.matchAll(workerFile) ?? []) visit(worker, url);
     }
-    return { modules: parent.size, violations };
+    const files = [...parent.keys()].map((url) =>
+      label(client.moduleGraph.urlToModuleMap.get(url)?.id ?? url),
+    );
+    return { modules: parent.size, files, violations };
   } finally {
     await server.close();
+    removeCache();
   }
 }
 
+const real = (path) => {
+  try {
+    return realpathSync(path);
+  } catch {
+    return undefined;
+  }
+};
 const self = fileURLToPath(import.meta.url);
-if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(self)) {
+if (process.argv[1] && real(process.argv[1]) === real(self)) {
   const root = fileURLToPath(new URL('../', import.meta.url));
   const { modules, violations } = await browserNodeImports({ root, entry: '/src/web/main.tsx' });
   if (violations.length) {
@@ -120,7 +140,8 @@ if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(self)) {
     for (const v of violations) console.error('  ' + v.chain.join(' -> '));
     console.error(
       'Move the browser-safe part (types, pure helpers) into a module without node:*;',
-      'from devcontour-harness the panel may import only /contracts and /projections.',
+      'from devcontour-harness only /contracts and /projections are tolerated (pre-bundled;',
+      '/contracts digest and failure helpers still use node:crypto, so the panel must not call them).',
     );
     process.exit(1);
   }
