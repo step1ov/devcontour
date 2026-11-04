@@ -34,7 +34,7 @@ import { checkJsonBytes, operationCatalog, recoveryActions } from 'devcontour-ha
 import { applyCases } from '../runner/recovery.ts';
 import { ContractChanges } from '../runner/contract-change.ts';
 import { contractProposal, limitsMessage, proposalLimitIssues } from '../runner/agent-control.ts';
-import { queueStopOf } from './queue-stop.ts';
+import { queueStopOf, quietAttempts } from './queue-stop.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 export const agentInputs = {
@@ -206,7 +206,7 @@ export const descriptions: Record<AgentOperation, string> = {
   workflow_start:
     'Enqueue idempotent board review, execution and acceptance or ChangeSet verification. A running server may invoke models. Operator policy remains enforced.',
   workflow_status:
-    'Read owner-local durable stage jobs. No model calls or execution leases are granted.',
+    'Read owner-local durable stage jobs, the queue stop and running attempts without movement (liveness: quiet or stalled, idle time, activity, next step). No model calls or execution leases are granted.',
   workflow_retry:
     'Retry a diagnosed failed stage within its original attempt budget. Never retries failed task implementations automatically.',
   workflow_metrics:
@@ -527,15 +527,18 @@ export class AgentService {
           ...(gaps.length ? { coverageGaps: gaps, warning: scopeGapWarning(gaps) } : {}),
         };
       }
-      case 'workflow_status':
+      case 'workflow_status': {
+        const owner = agentInputs.workflow_status.parse(input).repositoryId;
+        const state = h.store.read();
         return {
-          jobs: new LeadWorkflow(h)
-            .list(agentInputs.workflow_status.parse(input).repositoryId)
-            .map((j) => this.workflowView(j)),
+          jobs: new LeadWorkflow(h).list(owner).map((j) => this.workflowView(j)),
           operatorBlocked: h.config.approvalMode === 'operator',
           // Стадии ждут выдачи: остановленная очередь и её причина — рядом.
-          queue: queueStopOf(h),
+          queue: queueStopOf(h, state),
+          // Идущие попытки без движения: зависание замечают без запроса журнала.
+          liveness: quietAttempts(state, Date.now(), owner),
         };
+      }
       case 'workflow_retry': {
         const v = agentInputs.workflow_retry.parse(input);
         return this.workflowView(new LeadWorkflow(h).retry(v.key, v.repositoryId));

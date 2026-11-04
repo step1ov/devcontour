@@ -80,8 +80,15 @@ interface TaskDetail {
 }
 import { roleLabel, currentRoles, setRoleSource } from './roles.ts';
 import { Phases, engine, elapsed } from './Workers.tsx';
-import { AttemptTimeline, LiveWork } from './LiveWork.tsx';
-import { boardPhaseLabels, chainBlockers } from '../core/work-status.ts';
+import { AttemptTimeline, LiveWork, LivenessNote, livenessNow } from './LiveWork.tsx';
+import {
+  activityText,
+  boardPhaseLabels,
+  chainBlockers,
+  livenessNext,
+  livenessText,
+  stalledFailureText,
+} from '../core/work-status.ts';
 import { statusKey, statusNames, statusOfKey, taskStatus, flashOf } from './status.ts';
 import { Toaster, toast } from 'sonner';
 import { createPortal } from 'react-dom';
@@ -186,6 +193,7 @@ function TaskLive({
         <span className="text-info truncate font-medium">
           ● {phaseLabel[run.phase] ?? run.phase} · {elapsed(run.startedAt)}
         </span>
+        <LivenessNote liveness={run.liveness} />
         <GateSummary run={run} />
       </span>
     );
@@ -193,6 +201,7 @@ function TaskLive({
     return (
       <div className="mt-2 grid gap-1">
         <Phases current={run.phase} />
+        <LivenessNote liveness={run.liveness} />
         <span className="text-muted-foreground flex flex-wrap items-center gap-x-2 text-xs">
           <Bot aria-hidden="true" className="size-3 shrink-0" />
           {engine(run.runtime, run.model)}
@@ -229,6 +238,8 @@ function TaskLive({
         {run?.failureKind === 'review-protocol'
           ? 'Ответ ревьюера нарушил протокол ревью, код не оценён: '
           : ''}
+        {/* Зависание — не замечание к коду: повтор или правка среды. */}
+        {run?.failureKind === 'stalled' ? stalledFailureText + ' ' : ''}
         {task.failure}
         {/* Исчерпанный бюджет — тупик, пока о сбросе никто не знает: без этой
             строки остаётся только править базу руками. */}
@@ -1503,6 +1514,11 @@ export function App() {
     ? { runtime: displayedRun.reviewer, model: displayedRun.reviewerModel }
     : plannedReviewer;
   const activeRuns = data.runs.filter((r) => r.status === 'active').length;
+  // Живость идущей попытки выбранной задачи — из сводки: детали её не несут.
+  const taskLivenessRaw = task
+    ? data.runs.find((r) => r.taskId === task.id && r.status === 'active')?.liveness
+    : undefined;
+  const taskLiveness = taskLivenessRaw ? livenessNow(taskLivenessRaw) : undefined;
   // Одна залитая кнопка на экран — следующее решение по состоянию доски.
   const primary =
     !boardScreen || !board
@@ -1619,7 +1635,7 @@ export function App() {
           {plural(n, 'задача', 'задачи', 'задач')}.{' '}
           <span className="text-muted-foreground">
             {run
-              ? `Сейчас: ${phaseLabel[run.phase] ?? run.phase}.`
+              ? `Сейчас: ${phaseLabel[run.phase] ?? run.phase}${run.liveness ? ', ' + livenessText(livenessNow(run.liveness)) : ''}.`
               : t.status === 'draft'
                 ? 'План не утверждён.'
                 : t.status === 'failed'
@@ -2857,6 +2873,31 @@ export function App() {
                         </ul>
                       </section>
                     )}
+                    {taskLiveness && (
+                      <section
+                        aria-label="Попытка без движения"
+                        data-liveness={taskLiveness.state}
+                        className={cn(
+                          'mt-3 rounded-md p-3 text-sm break-words',
+                          taskLiveness.attention
+                            ? 'bg-warning-foreground text-warning'
+                            : 'bg-raised text-muted-foreground',
+                        )}
+                      >
+                        <h3 className="mt-0 mb-1.5 text-xs font-medium">
+                          {taskLiveness.attention
+                            ? 'Попытка зависла — нужно ваше решение'
+                            : 'Попытка без движения'}
+                        </h3>
+                        <p className="m-0">
+                          {livenessText(taskLiveness)}
+                          {taskLiveness.activity
+                            ? ` · последняя команда: ${activityText(taskLiveness.activity)}`
+                            : ''}
+                        </p>
+                        <p className="text-foreground m-0 mt-1">{livenessNext(taskLiveness)}</p>
+                      </section>
+                    )}
                     {task.progress?.eligible && (
                       <p className="bg-raised mt-3 mb-0 rounded-md p-3 text-sm">
                         Задача доступна для выдачи исполнителю.
@@ -2864,7 +2905,17 @@ export function App() {
                     )}
                     {task.failure && (
                       <p className="bg-destructive-foreground text-destructive mt-3 mb-0 rounded-md p-3 break-words [overflow-wrap:anywhere]">
+                        {task.status === 'failed' && latestRun?.failureKind === 'stalled' && (
+                          <strong className="block font-medium">{stalledFailureText}</strong>
+                        )}
                         {task.failure}
+                        {task.status === 'failed' && latestRun?.failureKind === 'stalled' && (
+                          <span className="text-foreground mt-1 block">
+                            Что сделать: повторите задачу; если зависание повторится — устраните
+                            неисправность среды (сеть, сервис, блокировка) или осознанно поднимите
+                            порог stallSweep.
+                          </span>
+                        )}
                       </p>
                     )}
                     {((task.status === 'draft' && editable) ||

@@ -44,7 +44,7 @@ import { IntentService } from '../runner/intent.ts';
 import { attachJournal, renderJournal } from '../runner/journal.ts';
 import { runActivity } from '../runner/activity.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
-import { queueStopOf } from '../application/queue-stop.ts';
+import { queueStopOf, quietAttempts } from '../application/queue-stop.ts';
 import {
   cachedValueReport,
   parseReportFormat,
@@ -424,6 +424,8 @@ export async function serve(
             // `paused` и `pauseReason` не объясняли остановку: причину и
             // подсказку несёт общий вид остановки очереди.
             queue: queueStopOf(h, state, events),
+            // Идущие попытки без движения тем же видом, что в workflow_status.
+            liveness: quietAttempts(state, now),
             tasks: state.tasks.map((t) => ({
               ...t,
               specDigest: specDigest(t),

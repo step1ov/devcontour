@@ -15,7 +15,7 @@ import type { Delivery } from '../core/integrations.ts';
 import { clipDeep, type PropertyRecovery } from 'devcontour-harness';
 import { blockers, readyTasks } from '../core/graph.ts';
 import { repositories } from '../core/repositories.ts';
-import { boardPhase } from '../core/work-status.ts';
+import { boardPhase, runLiveness, type RunLiveness } from '../core/work-status.ts';
 import { queueStopOf } from './queue-stop.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { taskProgress } from './context.ts';
@@ -89,11 +89,19 @@ export type PanelRun = Pick<
   boardId?: string;
   /** Последняя отметка стадии: с неё считается «сколько идёт фаза». */
   timings?: Run['timings'];
+  /**
+   * Идущая попытка без движения (обход зависаний controller): `quiet` или
+   * `stalled`. Нет поля — попытка двигается или уже завершена. Простой панель
+   * досчитывает от `lastMovementAt`: сводка с тем же номером данных не
+   * перестраивается.
+   */
+  liveness?: RunLiveness;
   /** Последний результат каждой проверки на фазу — значки задачи. */
   evidence: PanelEvidence[];
 };
 
-function runLine(run: Run, boardId: string | undefined): PanelRun {
+function runLine(run: Run, boardId: string | undefined, now: number): PanelRun {
+  const liveness = runLiveness(run, now);
   const latest = new Map<string, Evidence>();
   for (const e of run.evidence) latest.set(e.gate + e.phase, e);
   return {
@@ -115,6 +123,7 @@ function runLine(run: Run, boardId: string | undefined): PanelRun {
     error: short(run.error),
     boardId,
     ...(run.status === 'active' && run.timings ? { timings: run.timings.slice(-1) } : {}),
+    ...(liveness ? { liveness } : {}),
     evidence: [...latest.values()].map((e) => ({
       id: e.id,
       gate: e.gate,
@@ -471,7 +480,7 @@ function buildSummary(
         r,
       ]),
     ).values(),
-  ].map((r) => runLine(r, boardOf.get(r.taskId)));
+  ].map((r) => runLine(r, boardOf.get(r.taskId), now));
   const recent = h.store.events();
   const attempts = state.contractAttempts ?? [];
   return {

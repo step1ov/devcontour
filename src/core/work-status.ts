@@ -1,11 +1,12 @@
 import {
   CLIP_DIAGNOSTIC,
+  CLIP_SHORT,
   chainRoots,
   clipText,
   queueStop,
   type ChainRootCode,
 } from 'devcontour-harness/projections';
-import type { AuditEvent, Board, DevContourState, Task } from './model.ts';
+import type { AuditEvent, Board, DevContourState, Run, Task } from './model.ts';
 
 /**
  * Почему диспетчер сам остановил выдачу работы — общая проекция harness
@@ -308,3 +309,95 @@ export function chainBlockers(
     };
   });
 }
+
+/**
+ * Живость идущей попытки по обходу зависаний controller (`stallSweep`
+ * политики harness). Переход пишется в попытку только при смене состояния,
+ * поэтому длительность простоя считается от `lastMovementAt` на момент `now`,
+ * а не берётся из записи. `active` и завершённая попытка вида не дают:
+ * оператору нужно заметить только попытку без движения.
+ *
+ * `attention` — зависание, о котором политика только сообщает
+ * (`stallSweep.action: report`): попытка идёт до своего предела времени, и
+ * действовать должен человек (harness `explain`: `fix-environment`). При
+ * `stop` попытку останавливает сам controller.
+ */
+export type RunLivenessState = 'quiet' | 'stalled';
+export type RunLivenessActivity = {
+  kind: 'agent' | 'gate' | 'step' | 'command';
+  label: string;
+};
+export interface RunLiveness {
+  state: RunLivenessState;
+  /** С какого момента попытка в этом состоянии (момент перехода). */
+  since: string;
+  lastMovementAt: string;
+  /** Сколько попытка без движения на момент ответа. */
+  idleMs: number;
+  /** Чем попытка занята: исполняющаяся команда (агент, gate, шаг среды). */
+  activity?: RunLivenessActivity;
+  action?: 'stop' | 'report';
+  /** Нужен человек: зависание при `stallSweep.action: report`. */
+  attention: boolean;
+}
+export function runLiveness(
+  run: Pick<Run, 'status' | 'liveness'>,
+  now: number,
+): RunLiveness | undefined {
+  const l = run.liveness;
+  if (run.status !== 'active' || !l || l.state === 'active') return undefined;
+  const moved = Date.parse(l.lastMovementAt);
+  return {
+    state: l.state,
+    since: l.at,
+    lastMovementAt: l.lastMovementAt,
+    idleMs: Number.isFinite(moved) ? Math.max(0, now - moved) : 0,
+    ...(l.activity
+      ? { activity: { kind: l.activity.kind, label: clipText(l.activity.label, CLIP_SHORT) ?? '' } }
+      : {}),
+    ...(l.action ? { action: l.action } : {}),
+    attention: l.state === 'stalled' && l.action !== 'stop',
+  };
+}
+
+/** Длительность простоя словами панели: «40 с», «12 мин», «1 ч 5 мин». */
+export function idleSpan(ms: number) {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return seconds + ' с';
+  if (seconds < 3600) return Math.floor(seconds / 60) + ' мин';
+  return Math.floor(seconds / 3600) + ' ч ' + Math.floor((seconds % 3600) / 60) + ' мин';
+}
+
+const activityKinds: Record<RunLivenessActivity['kind'], string> = {
+  agent: 'агент',
+  gate: 'проверка',
+  step: 'шаг среды',
+  command: 'команда',
+};
+/** Чем занята попытка: «проверка unit», «агент codex». */
+export const activityText = (a: RunLivenessActivity) => `${activityKinds[a.kind]} ${a.label}`;
+
+/** Короткая подпись состояния: строка «Сейчас», строка задачи, инспектор. */
+export function livenessText(l: Pick<RunLiveness, 'state' | 'idleMs' | 'action'>) {
+  const span = idleSpan(l.idleMs);
+  if (l.state === 'quiet') return `без движения ${span}`;
+  return l.action === 'stop'
+    ? `зависла ${span}: controller останавливает попытку`
+    : `зависла ${span}: проверьте среду`;
+}
+
+/** Что делать с попыткой без движения и кто действует. */
+export function livenessNext(l: Pick<RunLiveness, 'state' | 'action'>) {
+  if (l.state === 'quiet')
+    return 'Ничего не требуется: нет вывода, расхода процессора и смены стадий, но порог зависания ещё не пройден.';
+  return l.action === 'stop'
+    ? 'Ничего не требуется: controller остановит попытку отказом stalled и один раз повторит её.'
+    : 'Проверьте среду исполнения (сеть, сервис, блокировку): процесс жив, но не выводит, не расходует процессор и не меняет стадий. Попытка идёт до своего предела времени; снимок процессов — в журнале (attempt.liveness).';
+}
+
+/**
+ * Отказ класса `stalled`: обход остановил зависшую попытку. Это не замечание
+ * к коду: повтор или правка среды (`repairPolicy.stalled` — один повтор).
+ */
+export const stalledFailureText =
+  'Попытка зависла и остановлена: повтор или правка среды, не кода.';

@@ -3,10 +3,11 @@ import type { FailureKind } from './failure.ts';
 import { priceSchema } from './usage.ts';
 import type { ReviewInspection } from './review.ts';
 import { z } from 'zod';
-import type { JointBudgetCheckpoint } from 'devcontour-harness/contracts';
+import type { AttemptState, JointBudgetCheckpoint } from 'devcontour-harness/contracts';
 import {
   GATE_SCOPE_LIMIT,
   dependencyStoreSchema,
+  executionPolicySchema,
   gateScopeTooBig,
 } from 'devcontour-harness/contracts';
 import type { CompletionReceipt } from './sync-model.ts';
@@ -476,6 +477,12 @@ export interface Run {
     inputDigest: string;
   };
   wait?: { approvedAt?: string; readyAt?: string };
+  /**
+   * Последний переход живости попытки по обходу зависаний controller
+   * (`AttemptState.liveness`): пишется только на переходах, поэтому `at` —
+   * начало состояния, а не момент последней проверки.
+   */
+  liveness?: AttemptState['liveness'];
   timings?: {
     id: string;
     stage: string;
@@ -1028,6 +1035,14 @@ export const configSchema = z.object({
   concurrency: z.number().int().min(1).max(4).default(2),
   leaseMs: z.number().int().min(5000).default(30000),
   runTimeoutMs: z.number().int().min(1000).default(900000),
+  /**
+   * Обход зависших попыток controller (`stallSweep` политики harness):
+   * интервал обхода, пороги quiet и stalled и действие (`report` — только
+   * сообщить, `stop` — остановить попытку отказом stalled). Нет поля —
+   * умолчания harness (30 с, 3 мин, 10 мин, report). Эксплуатационный предел:
+   * план не переутверждается, digest исполнения не меняется.
+   */
+  stallSweep: executionPolicySchema.shape.stallSweep,
   // Проверки, которые ревьюер запускает сам: предел одной команды, общий
   // бюджет и резерв срока ревью на заключение. Бюджет и резерв сверх того
   // ограничены сроком фазы (см. probeLimits).

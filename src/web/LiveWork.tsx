@@ -5,7 +5,13 @@ import { Button } from '@/ui/button.tsx';
 import { cn } from '@/lib/utils.ts';
 import { roleLabel } from './roles.ts';
 import { Activity, Phases, elapsed, engine } from './Workers.tsx';
-import { chainBlockers, type QueueStopView } from '../core/work-status.ts';
+import {
+  activityText,
+  chainBlockers,
+  livenessText,
+  type QueueStopView,
+  type RunLiveness,
+} from '../core/work-status.ts';
 import { QueueStopBanner } from './QueueStopBanner.tsx';
 
 // «Кто сейчас над чем работает» — первый вопрос, пока идёт разработка. Ответ
@@ -41,7 +47,7 @@ export type LiveState = {
     | 'startedAt'
     | 'reusedFrom'
     | 'timings'
-  > & { boardId?: string })[];
+  > & { boardId?: string; liveness?: RunLiveness })[];
   workflows?: LiveWorkflow[];
   changeSets?: { id: string; title: string }[];
   /** Задачи текущей работы; доска задачи — `boardId` из сводки. */
@@ -51,6 +57,54 @@ export type LiveState = {
   ready: string[];
   config: { concurrency: number; maxAttempts?: number };
 };
+
+/**
+ * Простой идущей попытки на момент показа: сводка с тем же номером данных не
+ * перестраивается, поэтому минуты считаются от последнего движения, а не
+ * берутся из ответа.
+ */
+export function livenessNow(l: RunLiveness, now = Date.now()): RunLiveness {
+  const moved = Date.parse(l.lastMovementAt);
+  return Number.isFinite(moved) ? { ...l, idleMs: Math.max(l.idleMs, now - moved) } : l;
+}
+
+/**
+ * Попытка без движения (обход зависаний controller). `quiet` — тихая
+ * приглушённая подпись: работа, скорее всего, идёт, но вывода нет. `stalled`
+ * при `report` — янтарь: нужно решение человека, процесс жив, но стоит.
+ * `stalled` при `stop` попытку останавливает controller — подпись без
+ * тревожного цвета. Статус всегда словами, цвет только помогает.
+ */
+export function LivenessNote({
+  liveness,
+  className,
+}: {
+  liveness?: RunLiveness;
+  className?: string;
+}) {
+  if (!liveness) return null;
+  const l = livenessNow(liveness);
+  const activity = l.activity ? activityText(l.activity) : undefined;
+  return (
+    <span
+      data-liveness={l.state}
+      title={activity ? `Последняя команда: ${activity}` : undefined}
+      className={cn(
+        'inline-flex min-w-0 items-center gap-1.5 text-xs',
+        l.attention ? 'text-warning font-medium' : 'text-muted-foreground',
+        className,
+      )}
+    >
+      {l.attention && (
+        <span aria-hidden="true" className="inline-block size-2 shrink-0 rounded-full bg-current" />
+      )}
+      <span className="truncate">
+        {livenessText(l)}
+        {activity ? ` · ${activity}` : ''}
+      </span>
+    </span>
+  );
+}
 
 export function activeWork(state: LiveState) {
   return state.runs
@@ -118,6 +172,9 @@ export function LiveWork({
   const stuck =
     work.length || flows.length ? [] : chainBlockers(state.tasks, state.config.maxAttempts);
   const stopped = !!(queue?.paused && queue.stopReason);
+  // Зависшие попытки, которые ждут человека, названы и в заголовке ячейки:
+  // строка исполнителя может уйти под прокрутку.
+  const stalled = work.filter(({ run }) => run.liveness?.attention).length;
   // Высота ячейки зарезервирована под исполнителей (не больше двух строк):
   // старт и конец попытки не сдвигают граф и вкладки под курсором. Больше
   // строк — прокрутка внутри ячейки.
@@ -158,6 +215,11 @@ export function LiveWork({
         {state.paused && work.length > 0 && (
           <span className="text-muted-foreground truncate">
             пауза: новые не выдаются, текущие доработают
+          </span>
+        )}
+        {stalled > 0 && (
+          <span className="text-warning tabular shrink-0 font-medium" data-liveness-count={stalled}>
+            зависших попыток: {stalled}
           </span>
         )}
         {!state.paused && work.length > 0 && free > 0 && (
@@ -236,6 +298,10 @@ export function LiveWork({
                   </span>
                 </div>
                 <div className="flex min-w-0 items-center gap-x-3 overflow-hidden whitespace-nowrap">
+                  {/* Попытка без движения — первой в строке: фазы и последнее
+                      действие агента как раз и не меняются, а строка обрезается
+                      справа. */}
+                  <LivenessNote liveness={run.liveness} className="max-w-full shrink-0" />
                   <Phases current={run.phase} />
                   {/* Последнее действие агента: фаза «пишет код» одинакова и на
                       первой минуте, и на двадцатой. */}
