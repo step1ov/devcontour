@@ -6,12 +6,14 @@
 // Это не handoff публикации ChangeSet (`devcontour handoff --changeset`):
 // тот готовит результат к push/PR человеком.
 import {
-  Harness,
+  HANDOFF_MIN_BYTES,
   handoffMarkdown,
   handoffPack,
+  policySecrets,
   redactor,
   type ExecutionView,
   type HandoffPack,
+  type HandoffSource,
   type WorkflowJob as HarnessJob,
 } from 'devcontour-harness';
 import { z } from 'zod';
@@ -132,10 +134,9 @@ function boardInputs(h: DevContour) {
 }
 
 /**
- * Harness для `handoffPack` поверх движка DevContour. `Harness.open` открывает
- * собственную базу harness, а исполнение DevContour идёт движком над его
- * хранилищем (`executionOf`), поэтому пакету дан вид с теми полями, которые
- * он читает: `engine`, `policy`, `workflows` и методы `status` прототипа.
+ * Источник пакета (`HandoffSource`) над движком DevContour (`executionOf`):
+ * движок, его политика и адаптер очереди заданий — экземпляр `Harness` не
+ * нужен.
  *
  * Задание графа harness в DevContour — задание ведущего по доске (id доски —
  * id графа) у любого владельца: пакет и диагнозы видят его счётчик
@@ -183,12 +184,8 @@ function harnessOf(h: DevContour) {
         );
     });
   const workflows = { list, continues };
-  const harness = Object.assign(Object.create(Harness.prototype) as Harness, {
-    engine,
-    policy: engine.policy,
-    workflows,
-  });
-  return { harness, workflows, engine, current, inputOf };
+  const source: HandoffSource = { engine, policy: engine.policy, workflows };
+  return { source, workflows, engine, current, inputOf };
 }
 
 /** Наследуемое значение короче — обычное слово или число, а не учётные данные. */
@@ -196,18 +193,21 @@ const MIN_INHERITED = 8;
 
 /**
  * Маска текстов пакета. Переданная маска заменяет маску пакета по умолчанию
- * (секреты политики), поэтому здесь собраны все известные значения контура,
- * заданные в окружении читающего процесса:
- * - секреты (`secrets`) любого профиля окружения — конфигурации DevContour
- *   (workspace, компоненты, preview, профили инструментов) и политики
- *   harness — тем же обходом, что `policySecrets` пакета (его функция не
- *   экспортирована, поэтому здесь обход той же формы), — и MCP
- *   `bearerTokenEnv`, токены подключений forge (`tokenEnv`) любой длины;
- * - наследуемые значения (`inherit`) и переменные MCP (`env`) не короче
- *   8 знаков: короткие («1», «true») маскировали бы обычный текст.
+ * (секреты политики), поэтому она собрана из всех известных значений
+ * контура, заданных в окружении читающего процесса:
+ * - секреты (`secrets`) политики harness и любого профиля окружения
+ *   конфигурации DevContour (workspace, компоненты, preview, профили
+ *   инструментов) — `policySecrets` пакета над обоими;
+ * - поля DevContour, которых в политике нет: MCP `bearerTokenEnv` и токены
+ *   подключений forge (`tokenEnv`) любой длины, наследуемые значения
+ *   (`inherit`) и переменные MCP (`env`) не короче 8 знаков — короткие
+ *   («1», «true») маскировали бы обычный текст.
  */
 export function handoffRedactor(config: Config, policy: unknown, source = process.env) {
-  const values = new Set<string>();
+  const values = new Set<string>([
+    ...policySecrets(policy, source),
+    ...policySecrets(config, source),
+  ]);
   const add = (name: unknown, min = 1) => {
     const value = typeof name === 'string' ? source[name] : undefined;
     if (value && value.length >= min) values.add(value);
@@ -216,8 +216,6 @@ export function handoffRedactor(config: Config, policy: unknown, source = proces
     if (!value || typeof value !== 'object') return;
     if (Array.isArray(value)) return value.forEach(walk);
     for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
-      if (key === 'secrets' && v && typeof v === 'object' && !Array.isArray(v))
-        Object.values(v as Record<string, unknown>).forEach((name) => add(name));
       if ((key === 'inherit' || key === 'env') && Array.isArray(v))
         (v as unknown[]).forEach((name) => add(name, MIN_INHERITED));
       if (key === 'bearerTokenEnv' || key === 'tokenEnv') add(v);
@@ -225,7 +223,6 @@ export function handoffRedactor(config: Config, policy: unknown, source = proces
     }
   };
   walk(config);
-  walk(policy);
   return redactor([...values]);
 }
 
@@ -438,12 +435,35 @@ function hostNext(ctx: HostContext): HandoffHostNext | undefined {
   return steps[0];
 }
 
+/** Предел всего ответа (пакет, приложение и команды) в формате ответа. */
+export interface HandoffLimit {
+  bytes: number;
+  format: HandoffFormat;
+}
+
 /**
  * Пакет передачи контекста workspace или одной доски (до 256 КБ, предел
  * пакета) и приложение DevContour. Только чтение; пакет и задания досок —
  * один снимок хранилища.
  */
 export function devcontourHandoff(h: DevContour, input: HandoffRequest = {}): DevContourHandoff {
+  return devcontourHandoffWithin(h, input).value;
+}
+
+/**
+ * Пакет, ответ которого (`handoffResponse` в формате `limit.format`) не
+ * больше `limit.bytes`: предел пакета harness (`maxBytes`, мера `markdown` для
+ * Markdown) — предел ответа без приложения DevContour, его раздела Markdown
+ * и команд. Размер результата проверяется здесь: если пакет всё же больше,
+ * предел уменьшается на превышение (не ниже `HANDOFF_MIN_BYTES`). Приложение
+ * (`host`) строится по полному пакету. `trimmed` — пределом ответа
+ * отброшены записи, которых в полном пакете нет.
+ */
+export function devcontourHandoffWithin(
+  h: DevContour,
+  input: HandoffRequest = {},
+  limit?: HandoffLimit,
+): { value: DevContourHandoff; trimmed: boolean } {
   // CLI передаёт флаги как есть: формат id и транспортный предел — той же схемой.
   const parsed = handoffRequestInput.safeParse(input);
   if (!parsed.success)
@@ -452,7 +472,7 @@ export function devcontourHandoff(h: DevContour, input: HandoffRequest = {}): De
       400,
     );
   const request = parsed.data;
-  const { harness, workflows, engine, current, inputOf } = harnessOf(h);
+  const { source, workflows, engine, current, inputOf } = harnessOf(h);
   const { store } = executionOf(h);
   const { boardId } = request;
   try {
@@ -467,14 +487,15 @@ export function devcontourHandoff(h: DevContour, input: HandoffRequest = {}): De
             409,
           );
       }
-      const pack = handoffPack(harness, {
+      const options = {
         ...(boardId !== undefined ? { graphId: boardId } : {}),
         ...(request.intentions ? { intentions: request.intentions } : {}),
         redact: handoffRedactor(h.config, engine.policy),
-      });
-      const options = { reconfigureApplies: engine.reconfigureApplies(v) };
+      };
+      const pack = handoffPack(source, options);
+      const reconfigure = { reconfigureApplies: engine.reconfigureApplies(v) };
       const jobs = workflows.list();
-      const live = (job: HarnessJob) => workflows.continues(job, v, options);
+      const live = (job: HarnessJob) => workflows.continues(job, v, reconfigure);
       const liveBoards = [...new Set(jobs.filter(live).map((j) => j.id))];
       const next = hostNext({
         h,
@@ -489,7 +510,31 @@ export function devcontourHandoff(h: DevContour, input: HandoffRequest = {}): De
           return typeof bound === 'string' ? bound : undefined;
         },
       });
-      return { pack, host: { ...(next ? { next } : {}), liveBoards } };
+      const host = { ...(next ? { next } : {}), liveBoards };
+      if (!limit) return { value: { pack, host }, trimmed: false };
+      const size = (p: HandoffPack) => bytes(handoffResponse({ pack: p, host }, limit.format));
+      if (size(pack) <= limit.bytes) return { value: { pack, host }, trimmed: false };
+      // Предел пакета — предел ответа без того, что добавляет DevContour.
+      const own = limit.format === 'md' ? Buffer.byteLength(handoffMarkdown(pack)) : bytes(pack);
+      // Предел пакета не ниже `HANDOFF_MIN_BYTES`: уже его превышение ответ
+      // в пределе не удержит (вызывающий проверяет размер сам).
+      const clamp = (n: number) => Math.max(HANDOFF_MIN_BYTES, n);
+      let maxBytes = clamp(limit.bytes - (size(pack) - own));
+      let fitted = pack;
+      for (let i = 0; i < 4; i++) {
+        fitted = handoffPack(source, {
+          ...options,
+          maxBytes,
+          measure: limit.format === 'md' ? 'markdown' : 'json',
+        });
+        const over = size(fitted) - limit.bytes;
+        if (over <= 0 || maxBytes === HANDOFF_MIN_BYTES) break;
+        maxBytes = clamp(maxBytes - over);
+      }
+      return {
+        value: { pack: fitted, host },
+        trimmed: droppedOf(fitted.truncated) > droppedOf(pack.truncated),
+      };
     });
   } catch (error) {
     throw toDomain(error);
@@ -541,46 +586,6 @@ export const parseHandoffFormat = (format: string | undefined): HandoffFormat =>
 /** Предел ответа операции: каталог обещает не больше 64 KiB. */
 export const AGENT_HANDOFF_BYTES = 60_000;
 
-const isDecision = (d: { actor: string | null; action: string }) =>
-  (d.actor === 'user' || d.actor === 'lead') && d.action !== 'wait';
-
-/**
- * Пакет в пределе `fits`: записи отбрасываются в порядке контракта HandoffPack
- * («намерения с конца, старые провалы, поручения без решения, остановки без
- * решения, незавершённые попытки, остальные поручения и остановки, строки
- * бюджетов»), каждая — в `truncated`, с `truncated.bySize`. Тот же порядок,
- * что у предела пакета harness; функция harness с пределом не экспортирована
- * (её экспорт — задача пакета), поэтому здесь копия для предела ответа API.
- */
-export function fitHandoff(input: HandoffPack, fits: (pack: HandoffPack) => boolean): HandoffPack {
-  const pack = structuredClone(input);
-  const t = pack.truncated;
-  const dropLast = <T>(list: T[], keep: (item: T) => boolean = () => false) => {
-    for (let i = list.length - 1; i >= 0; i--)
-      if (!keep(list[i])) {
-        list.splice(i, 1);
-        return true;
-      }
-    return false;
-  };
-  const steps = [
-    () => dropLast(pack.intentions) && (t.intentionsDropped++, true),
-    () => dropLast(pack.failures) && (t.failures++, true),
-    () => dropLast(pack.works, (w) => isDecision(w.next)) && (t.works++, true),
-    () => dropLast(pack.stops, isDecision) && (t.stops++, true),
-    () => dropLast(pack.unfinished) && (t.unfinished++, true),
-    () => dropLast(pack.works) && (t.works++, true),
-    () => dropLast(pack.stops) && (t.stops++, true),
-    () => Boolean(pack.budgets && dropLast(pack.budgets.entries)) && (t.budgets++, true),
-  ];
-  for (const step of steps)
-    while (!fits(pack)) {
-      t.bySize = true;
-      if (!step()) break;
-    }
-  return pack;
-}
-
 const bytes = (v: unknown) => Buffer.byteLength(JSON.stringify(v));
 
 /** Сколько записей пакета отброшено пределами (`truncated`). */
@@ -598,13 +603,9 @@ export const HANDOFF_FULL_HINT =
  */
 export function agentHandoff(h: DevContour, input: z.infer<typeof handoffInput>) {
   const { format, ...request } = input;
-  const value = devcontourHandoff(h, request);
-  const respond = (pack: HandoffPack) => handoffResponse({ ...value, pack }, format);
-  const pack = fitHandoff(value.pack, (p) => bytes(respond(p)) <= AGENT_HANDOFF_BYTES);
-  return {
-    ...respond(pack),
-    ...(droppedOf(pack.truncated) > droppedOf(value.pack.truncated)
-      ? { full: HANDOFF_FULL_HINT }
-      : {}),
-  };
+  const { value, trimmed } = devcontourHandoffWithin(h, request, {
+    bytes: AGENT_HANDOFF_BYTES,
+    format,
+  });
+  return { ...handoffResponse(value, format), ...(trimmed ? { full: HANDOFF_FULL_HINT } : {}) };
 }
