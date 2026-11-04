@@ -10,7 +10,7 @@ import {
   User,
 } from 'lucide-react';
 import type { ProductBrief, ProductFeature } from '../core/preparation-model.ts';
-import { slugify } from '../core/preparation.ts';
+import { slugify } from '../core/slug.ts';
 import { Badge } from '@/ui/badge.tsx';
 import { Button } from '@/ui/button.tsx';
 import { Card, CardContent, CardHeader, CardTitle } from '@/ui/card.tsx';

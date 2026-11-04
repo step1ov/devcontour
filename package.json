@@ -41,7 +41,7 @@
     "test:fast": "node scripts/test.mjs --fast",
     "test:affected": "node --import tsx scripts/test.mjs --affected",
     "test:e2e": "playwright test",
-    "lint": "node scripts/check-tokens.mjs && node scripts/lint-ratchet.mjs",
+    "lint": "node scripts/check-tokens.mjs && node scripts/lint-ratchet.mjs && node scripts/check-browser-imports.mjs",
     "lint:debt-update": "node scripts/lint-ratchet.mjs --update",
     "check": "node scripts/check.mjs",
     "check:fast": "node scripts/check.mjs --fast",
