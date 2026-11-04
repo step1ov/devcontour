@@ -24,7 +24,8 @@ import { complete, config, fixture, input } from './helpers.ts';
 import { AgentService, capabilities } from '../src/application/agent.ts';
 import { DevContour, specDigest } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
-import { repositorySchema, type Config } from '../src/core/model.ts';
+import { DomainError, repositorySchema, type Config } from '../src/core/model.ts';
+import { LeadRunner } from '../src/runner/lead-workflow.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { DevContourExecutionStore } from '../src/harness/store.ts';
 import { projectionOptions } from '../src/harness/host.ts';
@@ -545,6 +546,174 @@ test('session_handoff: host.next по заданию — упавшее (пов�
   }
 });
 
+/**
+ * Задание доски на стадии `stage`, как его оставил цикл: стадия записана, а
+ * задание ждёт следующего такта (`queued`, без владельца).
+ */
+function atStage(h: DevContour, key: string, owner: string | undefined, stage: number, extra = {}) {
+  const flow = new LeadWorkflow(h);
+  const job = flow.get(key, owner);
+  const next: Record<string, unknown> = { ...job, stage, status: 'queued', ...extra };
+  delete next.token;
+  delete next.leaseUntil;
+  h.store.atomic(() => h.store.saveLocal('lead', owner, key, next));
+  return flow.get(key, owner);
+}
+
+test('session_handoff: wait — цикл ведущего действительно снимает паузу (исходную и человека до старта, по всему workspace)', async () => {
+  // Исходная пауза: задание на стадии задач снимает её на ближайшем такте.
+  {
+    const f = fixture();
+    try {
+      const { board, start } = oneBoard(f.h);
+      const job = atStage(f.h, start().key, 'main', 1);
+      assert.ok(f.h.leader('server'), 'сервер держит роль controller');
+      const value = devcontourHandoff(f.h, { boardId: board });
+      assert.equal(value.host.next?.action, 'wait');
+      assert.deepEqual(value.host.next?.loop, { step: 'lift-pause', pause: 'initial' });
+      await new LeadRunner(f.h, f.root).tick();
+      assert.equal(f.store.read().paused, false, 'обещанное снятие паузы выполнено');
+      assert.equal(new LeadWorkflow(f.h).get(job.key, job.owner).status, 'queued');
+    } finally {
+      f.cleanup();
+    }
+  }
+  // Пауза человека до старта задания: пакет всего workspace (без boardId,
+  // шаг пакета — возобновление очереди) — тоже ждать; цикл снимает её.
+  {
+    const f = fixture();
+    try {
+      const { start } = oneBoard(f.h);
+      f.h.pause(true);
+      tick();
+      const job = atStage(f.h, start().key, 'main', 1);
+      const value = devcontourHandoff(f.h);
+      assert.equal(value.host.next?.action, 'wait');
+      assert.deepEqual(value.host.next?.loop, { step: 'lift-pause', pause: 'operator' });
+      await new LeadRunner(f.h, f.root).tick();
+      assert.equal(f.store.read().paused, false);
+      // На стадии приёмки цикл снимает только паузу остановки.
+      f.h.pause(true);
+      // Пауза поставлена до старта задания: на стадии задач цикл снял бы её.
+      const late = atStage(f.h, job.key, job.owner, 2, { startedAt: '2999-01-01T00:00:00.000Z' });
+      assert.ok(f.store.read().pausedAt! < late.startedAt);
+      assert.equal(devcontourHandoff(f.h).host.next?.action, 'queue_set');
+      await new LeadRunner(f.h, f.root).tick();
+      assert.equal(f.store.read().paused, true, 'стадия 2 паузу человека не снимает');
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test('session_handoff: исчерпанный бюджет восстановлений — decide, а не workflow_retry; повтор после ручного исправления продвигает задание', async () => {
+  const f = fixture();
+  try {
+    const { board, task, start } = oneBoard(f.h);
+    const flow = new LeadWorkflow(f.h);
+    const job = atStage(f.h, start().key, 'main', 1, { repairs: f.h.config.repairBudget });
+    f.h.pause(false);
+    const run = f.h.claim('test')!;
+    assert.equal(run.taskId, task);
+    f.h.fail(run.id, run.token, 'candidate/typecheck: error', false, 'gate');
+    const runner = new LeadRunner(f.h, f.root);
+    await runner.tick();
+    const failed = flow.get(job.key, job.owner);
+    assert.equal(failed.status, 'failed', 'цикл остановил задание');
+    assert.equal(failed.attempts, 1);
+    assert.equal(f.store.read().paused, false, 'очередь не на паузе');
+    const value = devcontourHandoff(f.h, { boardId: board });
+    assert.equal(value.host.next?.action, 'decide', 'повтор задания упал бы снова');
+    assert.equal(value.host.next?.loop?.step, 'stop');
+    assert.ok(failed.error && value.host.next.detail.includes(failed.error));
+    assert.match(value.host.next.detail, /devcontour retry --task/);
+    const whole = devcontourHandoff(f.h);
+    assert.equal(whole.host.next?.action, 'decide', 'и в пакете всего workspace');
+    // Проверка обещания: повтор задания без исправления падает с той же причиной.
+    flow.retry(job.key, job.owner);
+    await runner.tick();
+    const again = flow.get(job.key, job.owner);
+    assert.equal(again.status, 'failed');
+    assert.equal(again.attempts, 2);
+    assert.equal(again.error, failed.error);
+    // Ручное исправление задачи: теперь шаг — повтор задания, и он продвигает его.
+    f.h.retry(task);
+    const fixed = devcontourHandoff(f.h, { boardId: board });
+    assert.equal(fixed.host.next?.action, 'workflow_retry');
+    assert.equal(fixed.host.next?.job?.key, job.key);
+    flow.retry(job.key, job.owner);
+    await runner.tick();
+    const progressed = flow.get(job.key, job.owner);
+    assert.notEqual(progressed.status, 'failed', 'обещанный повтор не падает');
+    assert.equal(progressed.attempts, 0, 'такт засчитан как успешный');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('session_handoff: вход доски не построить — fix-input с причиной; возвращённый вход — decide', () => {
+  {
+    const f = fixture();
+    const original = Object.getOwnPropertyDescriptor(LeadWorkflow.prototype, 'input')!
+      .value as LeadWorkflow['input'];
+    try {
+      const { board } = oneBoard(f.h);
+      const reason = 'Сначала пользователь должен утвердить референсы';
+      LeadWorkflow.prototype.input = function (kind, id, s) {
+        if (id === board) throw new DomainError(reason, 409);
+        return original.call(this, kind, id, s);
+      };
+      const value = devcontourHandoff(f.h, { boardId: board });
+      assert.equal(value.host.next?.action, 'fix-input');
+      assert.ok(value.host.next.detail.includes(reason));
+      assert.throws(
+        () => new LeadWorkflow(f.h).start({ kind: 'board', id: board, authorRuntime: 'codex' }),
+        new RegExp(reason),
+        'workflow_start отказал бы с той же причиной',
+      );
+    } finally {
+      LeadWorkflow.prototype.input = original;
+      f.cleanup();
+    }
+  }
+  {
+    const f = fixture();
+    try {
+      const board = f.h.createBoard('Board with a reverted input', '', 'main');
+      const task = f.h.addTask(board.id, input('Original task title'));
+      const flow = new LeadWorkflow(f.h);
+      const request = { kind: 'board', id: board.id, authorRuntime: 'codex', maxAttempts: 3 };
+      const job = flow.start(request);
+      const changed = f.h.editTask(task.id, { ...input('Changed task title') }, specDigest(task));
+      assert.equal(flow.claim(job.key, job.owner), undefined);
+      assert.equal(flow.get(job.key, job.owner).status, 'stale');
+      f.h.editTask(task.id, { ...input('Original task title') }, specDigest(changed));
+      f.h.approve(board.id);
+      const value = devcontourHandoff(f.h, { boardId: board.id });
+      assert.equal(value.host.next?.action, 'decide');
+      assert.match(value.host.next.detail, /returns it unchanged/);
+      assert.equal(flow.start(request).key, job.key, 'workflow_start вернул то же задание');
+      assert.equal(flow.get(job.key, job.owner).status, 'stale');
+    } finally {
+      f.cleanup();
+    }
+  }
+  {
+    // Попытка идёт, задания нет: workflow_start с пометкой о ручном пути.
+    const f = fixture();
+    try {
+      const { board } = oneBoard(f.h);
+      f.h.pause(false);
+      f.h.claim('test');
+      const value = devcontourHandoff(f.h, { boardId: board });
+      assert.equal(value.host.next?.action, 'workflow_start');
+      assert.match(value.host.next.detail, /attempt is running/);
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
 test('session_handoff: approvalMode operator — задания не идут, шаг оператора', () => {
   const f = fixture();
   try {
@@ -577,6 +746,8 @@ test('session_handoff: маска — секреты контура, полит�
     'DC_HANDOFF_SHORT',
     'DC_HANDOFF_TOOL',
     'DC_HANDOFF_MCP',
+    'DC_HANDOFF_MCPENV_SHORT',
+    'DC_HANDOFF_MCPENV_LONG',
   ] as const;
   const previous = Object.fromEntries(names.map((n) => [n, process.env[n]]));
   const SECRET = 'okapi-secret-value-4815162342';
@@ -588,6 +759,9 @@ test('session_handoff: маска — секреты контура, полит�
   process.env.DC_HANDOFF_SHORT = '3';
   process.env.DC_HANDOFF_TOOL = TOOL;
   process.env.DC_HANDOFF_MCP = MCP;
+  const MCP_ENV = 'okapi-mcp-env-credential-55';
+  process.env.DC_HANDOFF_MCPENV_SHORT = 'of';
+  process.env.DC_HANDOFF_MCPENV_LONG = MCP_ENV;
   const f = fixture();
   try {
     const h = new DevContour(
@@ -608,6 +782,7 @@ test('session_handoff: маска — секреты контура, полит�
                 transport: 'http',
                 url: 'https://mcp.example.test/',
                 bearerTokenEnv: 'DC_HANDOFF_MCP',
+                env: ['DC_HANDOFF_MCPENV_SHORT', 'DC_HANDOFF_MCPENV_LONG'],
                 tools: ['search'],
               },
             },
@@ -623,14 +798,14 @@ test('session_handoff: маска — секреты контура, полит�
     h.fail(
       run.id,
       run.token,
-      `attempt 3 of 3: ${SECRET} ${INHERITED} ${TOOL} ${MCP} leaked`,
+      `attempt 3 of 3: ${SECRET} ${INHERITED} ${TOOL} ${MCP} ${MCP_ENV} leaked`,
       false,
       'gate',
     );
     const text = JSON.stringify(devcontourHandoff(h).pack);
     assert.ok(text.includes('attempt 3 of 3'), 'короткое наследуемое значение не маскирует текст');
     assert.ok(text.includes('leaked'));
-    for (const value of [SECRET, INHERITED, TOOL, MCP])
+    for (const value of [SECRET, INHERITED, TOOL, MCP, MCP_ENV])
       assert.ok(!text.includes(value), 'замаскировано: ' + value);
     const forge = handoffRedactor(
       {

@@ -17,7 +17,8 @@ import {
 import { z } from 'zod';
 import { DomainError, type Config } from '../core/model.ts';
 import type { DevContour } from '../core/service.ts';
-import { LeadWorkflow } from '../core/lead-workflow.ts';
+import { LeadWorkflow, type WorkflowJob } from '../core/lead-workflow.ts';
+import { loopAhead, type LoopOutlook } from '../runner/lead-outlook.ts';
 import { repositories } from '../core/repositories.ts';
 import { executionOf, toDomain } from '../harness/execution.ts';
 import type { DevContourExecutionStore } from '../harness/store.ts';
@@ -52,26 +53,38 @@ export type HandoffRequest = z.infer<typeof handoffRequestInput>;
  * Команды harness в `next.command` пакета (`handoffCommands`) и что делать в
  * DevContour. Controller очереди — работающий сервер контура; работу доски
  * продолжает её задание ведущего (`workflow_start`), а не сервер сам по себе.
+ * Правила цикла — `loopOutlook` (src/runner/lead-outlook.ts).
  */
 export const handoffHostCommands = {
   'harness run':
-    'Not a DevContour command. The running server holds the controller role but does not lift pauses itself: a board continues under its lead workflow job (workflow_start {"kind": "board", "id": BOARD, "authorRuntime": …}; workflow_status lists jobs). With approvalMode agent the job loop lifts the initial pause, the shutdown pause and an operator pause set before the job started, and retries failed tasks within the repair budget. With approvalMode operator jobs do not run: the operator starts the queue and retries. host.next names the step for this pack.',
+    'Not a DevContour command. The running server holds the controller role but does not lift pauses itself: a board continues under its lead workflow job (workflow_start {"kind": "board", "id": BOARD, "authorRuntime": …}; workflow_status lists jobs). With approvalMode agent the job loop, at stage 1 (tasks), lifts the initial pause, the shutdown pause and an operator pause set before the job started, and checks a moved base itself (base-check); at stage 2 (acceptance) it lifts only the shutdown pause. It retries failed tasks within the repair budget and stops the job when the budget or the failure class allows no retry. With approvalMode operator jobs do not run: the operator starts the queue and retries. host.next names the step for this pack.',
   'harness resume':
     'queue_set {"paused": false}, or devcontour queue --start --workspace …; an operator pause is lifted only on the user\'s decision.',
 } as const;
 
 /** Шаг DevContour вместо команды harness: что сделать ведущему агенту или человеку. */
 export interface HandoffHostNext {
-  action: 'workflow_start' | 'workflow_retry' | 'wait' | 'queue_set' | 'decide' | 'operator';
+  action:
+    | 'workflow_start'
+    | 'workflow_retry'
+    | 'wait'
+    | 'queue_set'
+    | 'decide'
+    | 'fix-input'
+    | 'operator';
   boardId?: string;
-  /** Задание ведущего, к которому относится шаг (`workflow_retry`, `decide`). */
+  /** Задание ведущего, к которому относится шаг. */
   job?: {
     key: string;
     repositoryId?: string;
     status: string;
+    stage: number;
     attempts: number;
     maxAttempts: number;
+    repairs: number;
   };
+  /** Что сделает цикл ведущего по этому заданию на следующем такте (`loopOutlook`). */
+  loop?: LoopOutlook;
   detail: string;
 }
 
@@ -88,10 +101,35 @@ export interface DevContourHandoff {
 /** Владельцы заданий ведущего: workspace и компоненты (как `LeadWorkflow.view`). */
 const ownersOf = (config: Config) => [undefined, ...repositories(config).map((r) => r.id)];
 
-/** Порядок заданий: идущие и ждущие стадии — первыми, затем новые первыми. */
-const jobRank = (job: HarnessJob) => (job.status === 'running' || job.status === 'queued' ? 0 : 1);
-const byLiveness = (a: HarnessJob, b: HarnessJob) =>
-  jobRank(a) - jobRank(b) || (a.startedAt < b.startedAt ? 1 : a.startedAt > b.startedAt ? -1 : 0);
+type State = ReturnType<DevContourExecutionStore['stateOf']>;
+/** Задание harness как задание ведущего DevContour (тот же объект, другой `kind`). */
+const asLead = (job: HarnessJob) => ({ ...job, kind: 'board' }) as unknown as WorkflowJob;
+
+/**
+ * Вход задания доски по состоянию: digest и владелец (правило
+ * `LeadWorkflow.staleBoards`) или причина, по которой его не построить
+ * (нет согласованной подготовки, у доски нет задач) — тогда и
+ * `workflow_start` откажет с той же причиной.
+ */
+function boardInputs(h: DevContour) {
+  const lead = new LeadWorkflow(h);
+  const cache = new WeakMap<State, Map<string, { digest: string; owner?: string } | string>>();
+  return (id: string, state: State) => {
+    let byBoard = cache.get(state);
+    if (!byBoard) {
+      byBoard = new Map<string, { digest: string; owner?: string } | string>();
+      cache.set(state, byBoard);
+    }
+    if (!byBoard.has(id))
+      try {
+        byBoard.set(id, lead.input('board', id, state));
+      } catch (error) {
+        if (!(error instanceof DomainError)) throw error;
+        byBoard.set(id, error.message);
+      }
+    return byBoard.get(id)!;
+  };
+}
 
 /**
  * Harness для `handoffPack` поверх движка DevContour. `Harness.open` открывает
@@ -105,34 +143,52 @@ const byLiveness = (a: HarnessJob, b: HarnessJob) =>
  * DevContour с её продуктовым входом (`LeadWorkflow.queue`). Задания
  * ChangeSet графу не соответствуют и в пакет не входят. В режиме
  * `approvalMode: operator` цикл ведущего заданий не исполняет
- * (`LeadRunner.advance`): ни одно задание не продолжается. Список — идущие
- * и ждущие задания первыми, затем новые первыми (так же упорядочены
- * `repairs` пакета: у доски бывает несколько заданий).
+ * (`LeadRunner.advance`): ни одно задание не продолжается.
+ *
+ * Порядок списка (и `repairs` пакета: у доски бывает несколько заданий):
+ * действующие задания первыми, затем задания по текущему входу доски, затем
+ * новые первыми.
  */
 function harnessOf(h: DevContour) {
-  const { engine } = executionOf(h);
+  const { engine, store } = executionOf(h);
   const queue = new LeadWorkflow(h).queue();
   const owners = ownersOf(h.config);
   const operator = h.config.approvalMode === 'operator';
-  const workflows = {
-    list: (): HarnessJob[] =>
-      owners
+  const inputOf = boardInputs(h);
+  const continues = (
+    job: HarnessJob,
+    view: ExecutionView,
+    options: { reconfigureApplies?: boolean } = {},
+  ) => !operator && queue.continues({ ...job, kind: 'board' }, view, options);
+  const current = (job: HarnessJob, state: State) => {
+    const bound = inputOf(job.id, state);
+    return (
+      typeof bound !== 'string' && bound.digest === job.inputDigest && bound.owner === job.owner
+    );
+  };
+  const list = (): HarnessJob[] =>
+    store.read((view) => {
+      const state = store.stateOf(view);
+      const options = { reconfigureApplies: engine.reconfigureApplies(view) };
+      const rank = (job: HarnessJob) =>
+        (continues(job, view, options) ? 0 : 2) + (current(job, state) ? 0 : 1);
+      return owners
         .flatMap((owner) => queue.list(owner))
         .filter((job) => job.kind === 'board')
         .map((job): HarnessJob => ({ ...job, kind: 'graph' }))
-        .sort(byLiveness),
-    continues: (
-      job: HarnessJob,
-      view: ExecutionView,
-      options: { reconfigureApplies?: boolean } = {},
-    ) => !operator && queue.continues({ ...job, kind: 'board' }, view, options),
-  };
+        .sort(
+          (a, b) =>
+            rank(a) - rank(b) ||
+            (a.startedAt < b.startedAt ? 1 : a.startedAt > b.startedAt ? -1 : 0),
+        );
+    });
+  const workflows = { list, continues };
   const harness = Object.assign(Object.create(Harness.prototype) as Harness, {
     engine,
     policy: engine.policy,
     workflows,
   });
-  return { harness, workflows, engine };
+  return { harness, workflows, engine, current, inputOf };
 }
 
 /** Наследуемое значение короче — обычное слово или число, а не учётные данные. */
@@ -145,11 +201,10 @@ const MIN_INHERITED = 8;
  * - секреты (`secrets`) любого профиля окружения — конфигурации DevContour
  *   (workspace, компоненты, preview, профили инструментов) и политики
  *   harness — тем же обходом, что `policySecrets` пакета (его функция не
- *   экспортирована, поэтому здесь обход той же формы);
- * - учётные данные MCP профилей инструментов (`env`, `bearerTokenEnv`) и
- *   токены подключений forge (`tokenEnv`);
- * - наследуемые значения (`inherit`) не короче 8 знаков: короткие («1»,
- *   «true») маскировали бы обычный текст.
+ *   экспортирована, поэтому здесь обход той же формы), — и MCP
+ *   `bearerTokenEnv`, токены подключений forge (`tokenEnv`) любой длины;
+ * - наследуемые значения (`inherit`) и переменные MCP (`env`) не короче
+ *   8 знаков: короткие («1», «true») маскировали бы обычный текст.
  */
 export function handoffRedactor(config: Config, policy: unknown, source = process.env) {
   const values = new Set<string>();
@@ -163,9 +218,8 @@ export function handoffRedactor(config: Config, policy: unknown, source = proces
     for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
       if (key === 'secrets' && v && typeof v === 'object' && !Array.isArray(v))
         Object.values(v as Record<string, unknown>).forEach((name) => add(name));
-      if (key === 'inherit' && Array.isArray(v))
+      if ((key === 'inherit' || key === 'env') && Array.isArray(v))
         (v as unknown[]).forEach((name) => add(name, MIN_INHERITED));
-      if (key === 'env' && Array.isArray(v)) (v as unknown[]).forEach((name) => add(name));
       if (key === 'bearerTokenEnv' || key === 'tokenEnv') add(v);
       walk(v);
     }
@@ -180,97 +234,194 @@ const jobRef = (job: HarnessJob) => ({
   key: job.key,
   ...(job.owner ? { repositoryId: job.owner } : {}),
   status: job.status,
+  stage: job.stage,
   attempts: job.attempts,
   maxAttempts: job.maxAttempts,
+  repairs: job.repairs ?? 0,
 });
 
+/** Что сделает цикл — словами для `detail`. */
+function loopText(o: LoopOutlook) {
+  switch (o.step) {
+    case 'review-plan':
+      return 'reviews the plan';
+    case 'advance':
+      return 'finishes its stage';
+    case 'recovery':
+      return `handles the property episode of task ${o.taskId} (${o.action})`;
+    case 'repair':
+      return `retries task ${o.taskId} (${o.reason})`;
+    case 'stop':
+      return `stops the job: ${o.reason}`;
+    case 'check-base':
+      return 'checks the moved base';
+    case 'lift-pause':
+      return `lifts the ${o.pause} pause`;
+    case 'wait':
+      return "waits for the board's tasks";
+    case 'accept':
+      return 'accepts the board';
+    case 'none':
+      return 'has nothing to do';
+  }
+}
+
+/** Как снять остановку цикла: задачу чинит человек или ведущий, не повтор задания. */
+const STOP_REMEDY =
+  'Diagnose it; fix or retry the task by hand (devcontour retry --task ID [--reset --reason TEXT]; a property episode — recovery_decide) or ask the user. Retrying the job (workflow_retry) before that fails again.';
+
 interface HostContext {
+  h: DevContour;
   pack: HandoffPack;
   view: ExecutionView;
-  state: ReturnType<DevContourExecutionStore['stateOf']>;
-  operator: boolean;
-  /** Задания досок (вид графа), идущие первыми. */
+  state: State;
+  /** Задания досок (вид графа) в порядке `harnessOf`. */
   jobs: HarnessJob[];
   live: (job: HarnessJob) => boolean;
-  /** Вход задания совпадает с текущим входом доски (иначе задание устарело). */
   current: (job: HarnessJob) => boolean;
+  /** Причина, по которой вход доски не построить, или `undefined`. */
+  inputError: (boardId: string) => string | undefined;
 }
 
 const OPERATOR_STEP =
   'approvalMode operator: lead workflow jobs do not run. The operator reviews plans and accepts boards in the panel, starts the queue (devcontour queue --start --workspace …) and retries failed tasks (devcontour retry --task ID --workspace …).';
 
-/** Шаг по заданиям доски: ждать, повторить задание, начать новое или решить. */
-function jobStep(boardId: string, ctx: HostContext): HandoffHostNext {
+/** Шаг по заданиям одной доски: ждать, повторить, начать, исправить вход или решить. */
+function boardStep(boardId: string, ctx: HostContext): HandoffHostNext {
+  const { h, state } = ctx;
   const jobs = ctx.jobs.filter((j) => j.id === boardId);
-  if (jobs.some(ctx.live))
+  const live = jobs.find(ctx.live);
+  if (live) {
+    const { stage, outlook: loop } = loopAhead(h, state, asLead(live));
+    if (loop.step === 'stop')
+      return {
+        action: 'decide',
+        boardId,
+        job: jobRef(live),
+        loop,
+        detail: `Next, at stage ${stage}, the lead workflow job of board ${boardId} stops: ${loop.reason}. ${STOP_REMEDY}`,
+      };
     return {
       action: 'wait',
       boardId,
-      detail: `Board ${boardId} has a live lead workflow job: the running DevContour server continues it. If the server is stopped, start it (devcontour start --workspace …).`,
+      job: jobRef(live),
+      loop,
+      detail: `Board ${boardId} has a live lead workflow job (stage ${live.stage}); next, at stage ${stage}, the job loop ${loopText(loop)}. The running DevContour server continues it; if the server is stopped, start it (devcontour start --workspace …).`,
     };
-  const latest = jobs.find((j) => j.status !== 'completed');
-  if (latest?.status === 'failed' && ctx.current(latest)) {
-    if (latest.attempts < latest.maxAttempts)
+  }
+  const refused = ctx.inputError(boardId);
+  if (refused)
+    return {
+      action: 'fix-input',
+      boardId,
+      detail: `workflow_start for board ${boardId} would be refused: ${refused}. Fix that first (approvals in the panel, tasks of the board), then register the job.`,
+    };
+  const job = jobs.find((j) => ctx.current(j));
+  if (job?.status === 'failed') {
+    if (job.attempts < job.maxAttempts) {
+      // Повтор задания — тот же такт цикла по состоянию сейчас.
+      const { outlook: loop } = loopAhead(h, state, { ...asLead(job), status: 'queued' });
+      if (loop.step === 'stop')
+        return {
+          action: 'decide',
+          boardId,
+          job: jobRef(job),
+          loop,
+          detail: `The lead workflow job of board ${boardId} failed${job.error ? ': ' + job.error : ''}, and a retry would stop again: ${loop.reason}. ${STOP_REMEDY} Then workflow_retry {"key": ${JSON.stringify(job.key)}${job.owner ? ', "repositoryId": ' + JSON.stringify(job.owner) : ''}}.`,
+        };
       return {
         action: 'workflow_retry',
         boardId,
-        job: jobRef(latest),
-        detail: `The lead workflow job of board ${boardId} failed${latest.error ? ': ' + latest.error : ''}. Diagnose it, then workflow_retry {"key": ${JSON.stringify(latest.key)}${latest.owner ? ', "repositoryId": ' + JSON.stringify(latest.owner) : ''}} within its attempts.`,
+        job: jobRef(job),
+        loop,
+        detail: `The lead workflow job of board ${boardId} failed${job.error ? ': ' + job.error : ''}. On retry the job loop ${loopText(loop)}: workflow_retry {"key": ${JSON.stringify(job.key)}${job.owner ? ', "repositoryId": ' + JSON.stringify(job.owner) : ''}}.`,
       };
+    }
     return {
       action: 'decide',
       boardId,
-      job: jobRef(latest),
-      detail: `The lead workflow job of board ${boardId} used all ${latest.maxAttempts} attempts${latest.error ? ': ' + latest.error : ''}. workflow_start returns this failed job until the board input changes: diagnose, then correct the board or tasks (a new input registers a new job) or ask the user.`,
+      job: jobRef(job),
+      detail: `The lead workflow job of board ${boardId} used all ${job.maxAttempts} attempts${job.error ? ': ' + job.error : ''}. workflow_start returns this failed job until the board input changes: diagnose, then change the board or its tasks (a new input registers a new job) or ask the user.`,
     };
   }
-  const id = JSON.stringify(boardId);
+  if (job?.status === 'stale' || job?.status === 'completed')
+    return {
+      action: 'decide',
+      boardId,
+      job: jobRef(job),
+      detail: `A lead workflow job for exactly the current input of board ${boardId} is already ${job.status}${job.status === 'stale' ? ' (the input changed and then returned to it)' : ''}; workflow_start returns it unchanged and it will not run. Change the board or its tasks to register a new job, or continue by hand (devcontour queue --start, retry, accept; docs/cli.md), or ask the user.`,
+    };
+  if (job)
+    return {
+      action: 'wait',
+      boardId,
+      job: jobRef(job),
+      detail: `The lead workflow job of board ${boardId} is ${job.status} but does not continue now (a policy apply is pending or another process holds it); check workflow_status.`,
+    };
+  const running = ctx.pack.active.some((a) => ctx.view.work(a.workId)?.graphId === boardId);
+  const previous = jobs.find((j) => j.status !== 'completed');
   return {
     action: 'workflow_start',
     boardId,
-    ...(latest ? { job: jobRef(latest) } : {}),
-    detail: `No live lead workflow job for board ${boardId}${latest && !ctx.current(latest) ? ' (its job was started on a previous input)' : ''}: with the DevContour server running, register workflow_start {"kind": "board", "id": ${id}, "authorRuntime": …}. queue_set {"paused": false} alone resumes dispatch without the job's pause handling and repairs.`,
+    ...(previous ? { job: jobRef(previous) } : {}),
+    detail:
+      `No live lead workflow job for board ${boardId}${previous ? ` (its ${previous.status} job was started on another input)` : ''}: with the DevContour server running, register workflow_start {"kind": "board", "id": ${JSON.stringify(boardId)}, "authorRuntime": …}; queue_set {"paused": false} alone resumes dispatch without the job's pause handling and repairs.` +
+      (running
+        ? ' An attempt is running: the server finishes it without a job; the board can also be continued by hand (devcontour retry, accept; docs/cli.md).'
+        : ''),
   };
 }
 
+/** Срочность шага при выборе одного из досок workspace. */
+const urgency: Record<HandoffHostNext['action'], number> = {
+  decide: 0,
+  'fix-input': 0,
+  operator: 0,
+  queue_set: 1,
+  workflow_retry: 1,
+  workflow_start: 2,
+  wait: 3,
+};
+
 /**
- * Шаг DevContour по состоянию, а не по `next.command` пакета: с работающим
- * сервером роль controller жива, и пакет команды не называет, хотя исходную
- * паузу и паузу остановки снимает только цикл задания доски.
+ * Шаг DevContour по состоянию и правилам цикла ведущего (`loopOutlook`), а не
+ * по `next.command`: с работающим сервером роль controller жива, и пакет
+ * команды не называет, хотя исходную паузу и паузу остановки снимает только
+ * цикл задания доски.
  */
 function hostNext(ctx: HostContext): HandoffHostNext | undefined {
-  const { pack, view, state } = ctx;
+  const { pack, view, state, h } = ctx;
   if (!pack.summary.open) return undefined;
-  if (ctx.operator) return { action: 'operator', detail: OPERATOR_STEP };
-  const workId = pack.next.workId;
-  const boardId = (workId ? view.work(workId)?.graphId : undefined) ?? pack.graphId;
-  const board = boardId && state.boards.some((b) => b.id === boardId) ? boardId : undefined;
-  if (state.paused && state.pauseReason === 'operator') {
-    // Цикл стадии снимает паузу человека, поставленную до начала задания.
-    const lifts =
-      board &&
-      state.pausedAt !== undefined &&
-      ctx.jobs.some((j) => j.id === board && ctx.live(j) && state.pausedAt! < j.startedAt);
-    if (lifts) return jobStep(board, ctx);
-    return {
-      action: 'queue_set',
-      ...(board ? { boardId: board } : {}),
-      detail:
-        'Dispatch is paused by the operator: resume only on the user\'s decision with queue_set {"paused": false} (devcontour queue --start).',
-    };
+  if (h.config.approvalMode === 'operator') return { action: 'operator', detail: OPERATOR_STEP };
+  if (state.paused) {
+    // Пауза выдачи общая: её снимает любое действующее задание, чей цикл
+    // снимет её на следующем такте.
+    for (const job of ctx.jobs.filter(ctx.live)) {
+      const { stage, outlook: loop } = loopAhead(h, state, asLead(job));
+      if (loop.step === 'lift-pause')
+        return {
+          action: 'wait',
+          boardId: job.id,
+          job: jobRef(job),
+          loop,
+          detail: `Dispatch is paused (${state.pauseReason ?? 'initial'}); the lead workflow job of board ${job.id} lifts the pause at stage ${stage}. The running DevContour server continues it; if the server is stopped, start it (devcontour start --workspace …).`,
+        };
+    }
+    if (state.pauseReason === 'operator')
+      return {
+        action: 'queue_set',
+        detail:
+          'Dispatch is paused by the operator and no job loop lifts it: resume only on the user\'s decision with queue_set {"paused": false} (devcontour queue --start).',
+      };
   }
-  const controllerStep =
-    pack.next.actor === 'controller' ||
-    pack.next.command === 'harness run' ||
-    ('liftedByRun' in pack.queue && pack.queue.liftedByRun === true);
-  if (!controllerStep) return undefined;
-  if (!board)
-    return {
-      action: 'workflow_start',
-      detail:
-        'Open work waits for the controller: register workflow_start {"kind": "board", "id": BOARD, "authorRuntime": …} for each board without a live lead workflow job (workflow_status lists jobs), with the DevContour server running.',
-    };
-  return jobStep(board, ctx);
+  const workId = pack.next.workId;
+  const board = (workId ? view.work(workId)?.graphId : undefined) ?? pack.graphId;
+  if (board && state.boards.some((b) => b.id === board)) return boardStep(board, ctx);
+  const boards = [...new Set(pack.works.map((w) => w.graphId))].filter((id) =>
+    state.boards.some((b) => b.id === id),
+  );
+  const steps = boards.map((id) => boardStep(id, ctx));
+  return steps.sort((a, b) => urgency[a.action] - urgency[b.action])[0];
 }
 
 /**
@@ -287,9 +438,8 @@ export function devcontourHandoff(h: DevContour, input: HandoffRequest = {}): De
       400,
     );
   const request = parsed.data;
-  const { harness, workflows, engine } = harnessOf(h);
+  const { harness, workflows, engine, current, inputOf } = harnessOf(h);
   const { store } = executionOf(h);
-  const lead = new LeadWorkflow(h);
   const { boardId } = request;
   try {
     return store.read((v) => {
@@ -311,31 +461,19 @@ export function devcontourHandoff(h: DevContour, input: HandoffRequest = {}): De
       const options = { reconfigureApplies: engine.reconfigureApplies(v) };
       const jobs = workflows.list();
       const live = (job: HarnessJob) => workflows.continues(job, v, options);
-      // Вход доски — правило `LeadWorkflow.staleBoards`: digest и владелец.
-      const inputs = new Map<string, { digest: string; owner?: string } | undefined>();
-      const inputOf = (id: string) => {
-        if (!inputs.has(id))
-          try {
-            inputs.set(id, lead.input('board', id, state));
-          } catch (error) {
-            if (!(error instanceof DomainError)) throw error;
-            inputs.set(id, undefined);
-          }
-        return inputs.get(id);
-      };
-      const current = (job: HarnessJob) => {
-        const bound = inputOf(job.id);
-        return !!bound && bound.digest === job.inputDigest && bound.owner === job.owner;
-      };
       const liveBoards = [...new Set(jobs.filter(live).map((j) => j.id))];
       const next = hostNext({
+        h,
         pack,
         view: v,
         state,
-        operator: h.config.approvalMode === 'operator',
         jobs,
         live,
-        current,
+        current: (job) => current(job, state),
+        inputError: (id) => {
+          const bound = inputOf(id, state);
+          return typeof bound === 'string' ? bound : undefined;
+        },
       });
       return { pack, host: { ...(next ? { next } : {}), liveBoards } };
     });
