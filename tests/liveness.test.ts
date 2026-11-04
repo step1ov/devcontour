@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { config, fixture, input } from './helpers.ts';
+import { executionDigest } from 'devcontour-harness';
+import { DevContour } from '../src/core/service.ts';
 import { approvalPolicyDigest, policyFromConfig } from '../src/harness/policy.ts';
 import { serve } from '../src/server/http.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
@@ -12,7 +14,9 @@ import {
   idleSpan,
   livenessNext,
   livenessText,
+  operationLiveness,
   runLiveness,
+  stalledFailureNext,
   stalledFailureText,
 } from '../src/core/work-status.ts';
 
@@ -110,19 +114,49 @@ test('Зависшая попытка при report ждёт человека; �
     assert.equal(line.liveness?.action, 'report');
     assert.equal(line.liveness?.attention, true);
     const [stalled] = status().liveness;
-    assert.equal(stalled.text, 'зависла 12 мин: проверьте среду');
+    assert.equal(stalled.text, 'зависла 12 мин — проверьте среду');
     assert.match(stalled.next, /^Проверьте среду исполнения/);
+    // Ведущему — с именами политики и события, по которым он найдёт снимок.
+    assert.match(stalled.next, /stallSweep\.action: report/);
+    assert.match(stalled.next, /attempt\.liveness/);
 
-    // `/api/state` несёт тот же вид, что workflow_status.
+    // Настоящие /api/summary и /api/state: форма, которую ждёт панель
+    // (`RunLiveness` строки попытки), и тот же вид, что workflow_status.
     const scheduler = new Scheduler(f.h, f.root);
     const app = await serve(f.h, scheduler, { port: 0 });
     try {
+      const summary = (await (await fetch(app.url + '/api/summary')).json()) as PanelSummary;
+      const panel = summary.runs.find((r) => r.id === run.id)!.liveness!;
+      assert.deepEqual(Object.keys(panel).sort(), [
+        'action',
+        'activity',
+        'attention',
+        'idleMs',
+        'lastMovementAt',
+        'since',
+        'state',
+      ]);
+      assert.equal(panel.state, 'stalled');
+      assert.equal(panel.action, 'report');
+      assert.equal(panel.attention, true);
+      assert.deepEqual(panel.activity, { kind: 'gate', label: 'unit' });
+      assert.ok(panel.idleMs >= 12 * MIN && panel.idleMs < 13 * MIN);
+      assert.ok(!Number.isNaN(Date.parse(panel.since)));
+      assert.ok(!Number.isNaN(Date.parse(panel.lastMovementAt)));
+      assert.deepEqual(summary.operations, []);
+      // Неизменившиеся данные — ответ без тела: простой досчитывает панель.
+      const again = (await (
+        await fetch(app.url + '/api/summary?revision=' + summary.revision)
+      ).json()) as { unchanged?: boolean };
+      assert.equal(again.unchanged, true);
       const state = (await (await fetch(app.url + '/api/state')).json()) as {
         liveness: QuietAttempt[];
+        operations: unknown[];
       };
       assert.equal(state.liveness.length, 1);
       assert.equal(state.liveness[0].state, 'stalled');
       assert.equal(state.liveness[0].attention, true);
+      assert.deepEqual(state.operations, []);
     } finally {
       await app.close();
       await scheduler.stop();
@@ -143,7 +177,8 @@ test('Отказ stalled: завершённая попытка без вида 
     move('stalled', 'quiet', 11 * MIN, 'stop');
     const live = status().liveness[0];
     assert.equal(live.attention, false, 'при stop действует controller');
-    assert.match(live.text, /controller останавливает попытку/);
+    assert.equal(live.text, 'зависла 11 мин — будет остановлена и повторена автоматически');
+    assert.match(live.next, /repairPolicy\.stalled/);
     f.h.fail(run.id, run.token, 'Попытка зависла: движения нет', false, 'stalled');
     const line = summary().runs.find((r) => r.id === run.id)!;
     assert.equal(line.failureKind, 'stalled');
@@ -151,6 +186,8 @@ test('Отказ stalled: завершённая попытка без вида 
     assert.deepEqual(status().liveness, []);
     assert.equal(f.h.store.read().tasks.find((x) => x.id === t.id)!.failureKind, 'stalled');
     assert.match(stalledFailureText, /повтор или правка среды, не кода/);
+    assert.match(stalledFailureNext(false), /^Повтор назначается автоматически один раз/);
+    assert.match(stalledFailureNext(true), /^Попытка зависла повторно: повтор уже был/);
   } finally {
     f.cleanup();
   }
@@ -163,9 +200,28 @@ test('Слова живости: простой, состояние и дейс�
   assert.equal(livenessText({ state: 'quiet', idleMs: 3 * MIN }), 'без движения 3 мин');
   assert.equal(
     livenessText({ state: 'stalled', idleMs: 10 * MIN, action: 'report' }),
-    'зависла 10 мин: проверьте среду',
+    'зависла 10 мин — проверьте среду',
   );
-  assert.match(livenessNext({ state: 'stalled', action: 'stop' }), /повторит/);
+  assert.equal(
+    livenessText({ state: 'stalled', idleMs: 10 * MIN, action: 'stop' }, 'check'),
+    'зависла 10 мин — будет остановлена автоматически',
+  );
+  // Панель — без внутренних имён; ведущему — с ними.
+  for (const l of [
+    { state: 'quiet' as const },
+    { state: 'stalled' as const, action: 'report' as const },
+    { state: 'stalled' as const, action: 'stop' as const },
+  ])
+    for (const subject of ['attempt', 'check'] as const) {
+      const panel = livenessNext(l, 'panel', subject);
+      assert.doesNotMatch(panel, /controller|stallSweep|liveness|repairPolicy/, panel);
+      assert.match(livenessNext(l, 'agent', subject), /stallSweep|controller/);
+    }
+  assert.equal(
+    livenessNext({ state: 'stalled', action: 'stop' }),
+    'Ничего не требуется: попытка будет остановлена автоматически и повторена один раз.',
+  );
+  assert.match(livenessNext({ state: 'stalled', action: 'report' }), /в журнале задачи\.$/);
   const at = iso(Date.now());
   const liveness = { state: 'quiet' as const, at, lastMovementAt: at };
   assert.equal(runLiveness({ status: 'succeeded', liveness }, Date.now()), undefined);
@@ -188,12 +244,87 @@ test('stallSweep конфигурации доходит до политики �
     stalledMs: 300_000,
     action: 'stop',
   });
-  // Эксплуатационный предел: утверждённый план остаётся в силе.
+  // Частичное поле: политика получает заданное, умолчания подставляет harness.
+  assert.deepEqual(policyFromConfig(config({ stallSweep: { action: 'stop' } })).stallSweep, {
+    intervalMs: 30_000,
+    quietMs: 180_000,
+    stalledMs: 600_000,
+    action: 'stop',
+  });
+  // Эксплуатационный предел: утверждённый план, digest исполнения (основания
+  // попыток и reuse) и digest политики компонента не меняются.
   assert.equal(approvalPolicyDigest(tuned), approvalPolicyDigest(plain));
-  // Правила harness: quiet меньше stalled.
-  assert.throws(() =>
-    config({
-      stallSweep: { intervalMs: 10_000, quietMs: 60_000, stalledMs: 60_000, action: 'report' },
-    }),
+  assert.equal(executionDigest(policyFromConfig(tuned)), executionDigest(policyFromConfig(plain)));
+  const f = fixture();
+  try {
+    const tunedHost = new DevContour(f.store, { ...f.h.config, stallSweep: tuned.stallSweep });
+    assert.equal(tunedHost.policyDigest(), f.h.policyDigest());
+    assert.equal(tunedHost.planPolicyDigest(), f.h.planPolicyDigest());
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Отказ stallSweep называет действующее значение незаданного поля', () => {
+  const message = (stallSweep: object) => {
+    try {
+      config({ stallSweep });
+    } catch (error) {
+      return (error as { issues: { message: string }[] }).issues.map((i) => i.message);
+    }
+    assert.fail('ожидался отказ');
+  };
+  // Задан только quietMs: мешает intervalMs по умолчанию.
+  assert.deepEqual(message({ quietMs: 20_000 }), [
+    'stallSweep: intervalMs по умолчанию (30000) не может быть больше, чем quietMs (20000): иначе «без движения» не заметить вовремя; задайте intervalMs не больше quietMs',
+  ]);
+  assert.deepEqual(message({ quietMs: 700_000 }), [
+    'stallSweep: quietMs (700000) должен быть меньше, чем stalledMs по умолчанию (600000)',
+  ]);
+  assert.deepEqual(message({ intervalMs: 5000, quietMs: 60_000, stalledMs: 60_000 }), [
+    'stallSweep: quietMs (60000) должен быть меньше, чем stalledMs (60000)',
+  ]);
+  assert.throws(
+    () => config({ stallSweep: { intervalMs: 500 } }),
+    /stallSweep|intervalMs/,
   );
+});
+
+test('Проверка gates вне попытки: последний переход незавершённой, пока роль controller жива', () => {
+  const now = Date.now();
+  const at = (ms: number) => iso(now - ms);
+  const event = (id: number, type: string, data: object) => ({ id, at: at(0), type, data });
+  const report = (state: string, runId: string, idleMs: number) => ({
+    repositoryId: 'main',
+    sha: 'a'.repeat(40),
+    runId,
+    state,
+    previous: 'quiet',
+    lastMovementAt: at(idleMs),
+    idleMs,
+    activity: { kind: 'gate', label: 'unit' },
+    ...(state === 'stalled' ? { action: 'report' } : {}),
+  });
+  const state = {
+    changeSets: [],
+    boards: [],
+    leader: { owner: 'server', leaseUntil: now + 30_000 },
+  };
+  const events = [
+    // Новые сначала, как у Store.latestEvents.
+    event(5, 'base.check.liveness', report('stalled', 'BK-1', 12 * MIN)),
+    event(4, 'base.check.liveness', report('quiet', 'BK-1', 4 * MIN)),
+    event(3, 'base.check.passed', { runId: 'BK-0' }),
+    event(2, 'base.check.liveness', report('stalled', 'BK-0', 20 * MIN)),
+  ];
+  const [only, ...rest] = operationLiveness(state, events, now);
+  assert.equal(rest.length, 0, 'законченная проверка вида не даёт');
+  assert.equal(only.kind, 'base-check');
+  assert.equal(only.id, 'BK-1');
+  assert.equal(only.state, 'stalled');
+  assert.equal(only.attention, true);
+  assert.equal(only.subjectId, 'main');
+  assert.ok(only.idleMs >= 12 * MIN);
+  // Без живой роли controller незавершённая проверка — оборванная.
+  assert.deepEqual(operationLiveness({ ...state, leader: undefined }, events, now), []);
 });

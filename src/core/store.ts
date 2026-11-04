@@ -932,6 +932,29 @@ export class Store {
       ? this.components.events(rows)
       : rows.map((e) => ({ ...e, data: JSON.parse(e.data) as unknown }));
   }
+  /**
+   * Последние события названных типов, новые сначала. Нужен, когда событие
+   * редкое и могло уйти из последних записей журнала (переход живости
+   * проверки пишется только при смене состояния). Просматриваются последние
+   * `window` записей по первичному ключу: индекса по типу нет, и опрос панели
+   * не должен читать весь журнал.
+   */
+  latestEvents(types: readonly string[], limit = 100, window = 20_000): AuditEvent[] {
+    if (!types.length) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM main.events WHERE id > (SELECT coalesce(max(id),0) FROM main.events) - ? AND type IN (${types.map(() => '?').join(',')}) ORDER BY id DESC LIMIT ?`,
+      )
+      .all(window, ...types, limit) as unknown as {
+      id: number;
+      at: string;
+      type: string;
+      data: string;
+    }[];
+    return this.components
+      ? this.components.events(rows)
+      : rows.map((e) => ({ ...e, data: JSON.parse(e.data) as unknown }));
+  }
   events(after = 0): AuditEvent[] {
     const rows = this.db
       .prepare('SELECT * FROM main.events WHERE id>? ORDER BY id DESC LIMIT 150')

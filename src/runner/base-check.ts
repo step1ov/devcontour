@@ -158,6 +158,15 @@ export async function checkBase(
             sha: base.sha,
             gates,
             record: () => guard(),
+            // Переход живости проверки — событие журнала: при `report` это
+            // единственный след зависания до конца проверки.
+            onLiveness: (report) => {
+              try {
+                event('base.check.liveness', { ...report });
+              } catch {
+                // Без права записи переход не пишется; проверка идёт дальше.
+              }
+            },
             ...(signal ? { signal } : {}),
           },
         );

@@ -3,10 +3,14 @@ import type { AuditEvent, DevContourState } from '../core/model.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { repositories } from '../core/repositories.ts';
 import {
+  OPERATION_FINISH_EVENTS,
+  OPERATION_LIVENESS_EVENTS,
   livenessNext,
   livenessText,
+  operationLiveness,
   queueStopView,
   runLiveness,
+  type OperationLiveness,
   type RunLiveness,
 } from '../core/work-status.ts';
 
@@ -78,9 +82,40 @@ export function quietAttempts(
           repositoryId: repo,
           ...liveness,
           text: livenessText(liveness),
-          next: livenessNext(liveness),
+          next: livenessNext(liveness, 'agent'),
         },
       ];
     })
+    .sort((a, b) => Number(b.attention) - Number(a.attention) || b.idleMs - a.idleMs);
+}
+
+/** Проверка вне попытки без движения глазами ведущего агента и CLI. */
+export type QuietOperation = OperationLiveness & { text: string; next: string };
+
+/**
+ * Проверки вне попыток без движения: совместная проверка ChangeSet, проверка
+ * перенесённой базы, проверка доски на итоговом SHA. Переход живости у них —
+ * только событие журнала; читается последний переход каждой незавершённой
+ * проверки. `repositoryId` — только проверки компонента (совместная проверка
+ * относится ко всему workspace и с фильтром не выдаётся).
+ */
+export function quietOperations(
+  h: Pick<DevContour, 'store'>,
+  state: Pick<DevContourState, 'changeSets' | 'boards' | 'leader'>,
+  now: number,
+  audience: 'panel' | 'agent' = 'agent',
+  repositoryId?: string,
+): QuietOperation[] {
+  const events = h.store.latestEvents(
+    [...OPERATION_LIVENESS_EVENTS, ...OPERATION_FINISH_EVENTS],
+    200,
+  );
+  return operationLiveness(state, events, now)
+    .filter((o) => !repositoryId || o.repositoryId === repositoryId)
+    .map((o) => ({
+      ...o,
+      text: livenessText(o, 'check'),
+      next: livenessNext(o, audience, 'check'),
+    }))
     .sort((a, b) => Number(b.attention) - Number(a.attention) || b.idleMs - a.idleMs);
 }

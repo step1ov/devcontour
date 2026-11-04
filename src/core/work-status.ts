@@ -340,24 +340,136 @@ export interface RunLiveness {
   /** Нужен человек: зависание при `stallSweep.action: report`. */
   attention: boolean;
 }
+type LivenessRecord = {
+  state: 'active' | RunLivenessState;
+  lastMovementAt: string;
+  activity?: RunLivenessActivity;
+  action?: 'stop' | 'report';
+};
+/** Вид живости из записи перехода; `active` — вида нет. */
+function livenessView(l: LivenessRecord, since: string, now: number): RunLiveness | undefined {
+  if (l.state === 'active') return undefined;
+  const moved = Date.parse(l.lastMovementAt);
+  return {
+    state: l.state,
+    since,
+    lastMovementAt: l.lastMovementAt,
+    idleMs: Number.isFinite(moved) ? Math.max(0, now - moved) : 0,
+    ...(l.activity
+      ? {
+          activity: {
+            kind: l.activity.kind,
+            label: clipText(l.activity.label, CLIP_SHORT) ?? '',
+          },
+        }
+      : {}),
+    ...(l.action ? { action: l.action } : {}),
+    attention: l.state === 'stalled' && l.action !== 'stop',
+  };
+}
 export function runLiveness(
   run: Pick<Run, 'status' | 'liveness'>,
   now: number,
 ): RunLiveness | undefined {
   const l = run.liveness;
-  if (run.status !== 'active' || !l || l.state === 'active') return undefined;
-  const moved = Date.parse(l.lastMovementAt);
-  return {
-    state: l.state,
-    since: l.at,
-    lastMovementAt: l.lastMovementAt,
-    idleMs: Number.isFinite(moved) ? Math.max(0, now - moved) : 0,
-    ...(l.activity
-      ? { activity: { kind: l.activity.kind, label: clipText(l.activity.label, CLIP_SHORT) ?? '' } }
-      : {}),
-    ...(l.action ? { action: l.action } : {}),
-    attention: l.state === 'stalled' && l.action !== 'stop',
-  };
+  if (run.status !== 'active' || !l) return undefined;
+  return livenessView(l, l.at, now);
+}
+
+/**
+ * Проверка вне попытки без движения: совместная проверка ChangeSet
+ * (`joint.liveness`), проверка перенесённой базы и проверка доски на итоговом
+ * SHA (`runGatesAt` → `onLiveness`). У них нет поля живости в записи: переход —
+ * только событие журнала, поэтому вид строится по последнему переходу ещё не
+ * завершённой проверки.
+ */
+export type OperationKind = 'joint' | 'base-check' | 'board-coverage';
+export interface OperationLiveness extends RunLiveness {
+  kind: OperationKind;
+  /** Идентификатор проверки: verificationId или runId проверки gates. */
+  id: string;
+  /** ChangeSet, доска или компонент проверки. */
+  subjectId: string;
+  title: string;
+  repositoryId?: string;
+}
+export const operationNames: Record<OperationKind, string> = {
+  joint: 'Совместная проверка',
+  'base-check': 'Проверка базы',
+  'board-coverage': 'Проверка доски',
+};
+/** Типы событий журнала с переходом живости проверки. */
+export const OPERATION_LIVENESS_EVENTS = [
+  'workspace.liveness',
+  'base.check.liveness',
+  'board.coverage.liveness',
+] as const;
+const finishedTypes: Record<'base-check' | 'board-coverage', string[]> = {
+  'base-check': ['base.check.passed', 'base.check.failed'],
+  'board-coverage': ['board.coverage.passed', 'board.coverage.failed'],
+};
+/** Типы событий, которыми кончается проверка gates (по ним вид снимается). */
+export const OPERATION_FINISH_EVENTS = [
+  ...finishedTypes['base-check'],
+  ...finishedTypes['board-coverage'],
+];
+type LivenessPayload = LivenessRecord & { verificationId?: string };
+export function operationLiveness(
+  state: Pick<DevContourState, 'changeSets' | 'boards' | 'leader'>,
+  /** События переходов и окончаний проверок, новые сначала (`Store.latestEvents`). */
+  events: Pick<AuditEvent, 'id' | 'at' | 'type' | 'data'>[],
+  now: number,
+): OperationLiveness[] {
+  const seen = new Set<string>();
+  const finished = new Set(
+    events
+      .filter((e) => OPERATION_FINISH_EVENTS.includes(e.type))
+      .map((e) => (e.data as { runId?: string } | null)?.runId)
+      .filter(Boolean),
+  );
+  // Проверку gates ведёт процесс с ролью controller: без живой роли
+  // незавершённая в журнале проверка — оборванная, а не идущая.
+  const controllerAlive = (state.leader?.leaseUntil ?? 0) > now;
+  const out: OperationLiveness[] = [];
+  for (const e of events) {
+    if (!(OPERATION_LIVENESS_EVENTS as readonly string[]).includes(e.type)) continue;
+    const data = (e.data ?? {}) as Record<string, unknown>;
+    if (e.type === 'workspace.liveness') {
+      const draft = (data.harnessEvents as { type: string; payload: LivenessPayload }[] | undefined)
+        ?.filter((d) => d.type === 'joint.liveness')
+        .at(-1);
+      const id = draft?.payload.verificationId;
+      if (!draft || !id || seen.has(id)) continue;
+      seen.add(id);
+      const changeSet = state.changeSets.find((c) => c.verifications.some((v) => v.id === id));
+      if (changeSet?.verifications.find((v) => v.id === id)?.status !== 'active') continue;
+      const view = livenessView(draft.payload, e.at, now);
+      if (view)
+        out.push({ ...view, kind: 'joint', id, subjectId: changeSet.id, title: changeSet.title });
+      continue;
+    }
+    const kind = e.type === 'base.check.liveness' ? 'base-check' : 'board-coverage';
+    const runId = typeof data.runId === 'string' ? data.runId : undefined;
+    if (!runId || seen.has(runId)) continue;
+    seen.add(runId);
+    if (finished.has(runId) || !controllerAlive) continue;
+    const view = livenessView(data as unknown as LivenessPayload, e.at, now);
+    if (!view) continue;
+    const repositoryId = typeof data.repositoryId === 'string' ? data.repositoryId : undefined;
+    const boardId = typeof data.boardId === 'string' ? data.boardId : undefined;
+    out.push({
+      ...view,
+      kind,
+      id: runId,
+      subjectId: (kind === 'board-coverage' ? boardId : repositoryId) ?? runId,
+      title:
+        kind === 'board-coverage'
+          ? (state.boards.find((b) => b.id === boardId)?.title ?? boardId ?? runId)
+          : (repositoryId ?? runId),
+      ...(repositoryId ? { repositoryId } : {}),
+    });
+  }
+  return out;
 }
 
 /** Длительность простоя словами панели: «40 с», «12 мин», «1 ч 5 мин». */
@@ -377,22 +489,51 @@ const activityKinds: Record<RunLivenessActivity['kind'], string> = {
 /** Чем занята попытка: «проверка unit», «агент codex». */
 export const activityText = (a: RunLivenessActivity) => `${activityKinds[a.kind]} ${a.label}`;
 
-/** Короткая подпись состояния: строка «Сейчас», строка задачи, инспектор. */
-export function livenessText(l: Pick<RunLiveness, 'state' | 'idleMs' | 'action'>) {
+/** Чья живость: попытка задачи или проверка вне попытки (у неё нет повтора). */
+export type LivenessSubject = 'attempt' | 'check';
+
+/**
+ * Короткая подпись состояния: строка «Сейчас», строка задачи, инспектор.
+ * Одно двоеточие на строку не тратится: строка доски уже «Сейчас: …».
+ */
+export function livenessText(
+  l: Pick<RunLiveness, 'state' | 'idleMs' | 'action'>,
+  subject: LivenessSubject = 'attempt',
+) {
   const span = idleSpan(l.idleMs);
   if (l.state === 'quiet') return `без движения ${span}`;
-  return l.action === 'stop'
-    ? `зависла ${span}: controller останавливает попытку`
-    : `зависла ${span}: проверьте среду`;
+  if (l.action !== 'stop') return `зависла ${span} — проверьте среду`;
+  return subject === 'attempt'
+    ? `зависла ${span} — будет остановлена и повторена автоматически`
+    : `зависла ${span} — будет остановлена автоматически`;
 }
 
-/** Что делать с попыткой без движения и кто действует. */
-export function livenessNext(l: Pick<RunLiveness, 'state' | 'action'>) {
+/**
+ * Что делать с работой без движения и кто действует. `panel` — словами
+ * оператора, без внутренних имён; `agent` (MCP, CLI) — с именами политики и
+ * событий, по которым ведущий найдёт снимок и порог.
+ */
+export function livenessNext(
+  l: Pick<RunLiveness, 'state' | 'action'>,
+  audience: 'panel' | 'agent' = 'panel',
+  subject: LivenessSubject = 'attempt',
+) {
+  const who = subject === 'attempt' ? 'Попытка' : 'Проверка';
   if (l.state === 'quiet')
-    return 'Ничего не требуется: нет вывода, расхода процессора и смены стадий, но порог зависания ещё не пройден.';
-  return l.action === 'stop'
-    ? 'Ничего не требуется: controller остановит попытку отказом stalled и один раз повторит её.'
-    : 'Проверьте среду исполнения (сеть, сервис, блокировку): процесс жив, но не выводит, не расходует процессор и не меняет стадий. Попытка идёт до своего предела времени; снимок процессов — в журнале (attempt.liveness).';
+    return audience === 'panel'
+      ? 'Ничего не требуется: нет вывода, расхода процессора и смены стадий, но порог зависания ещё не пройден.'
+      : 'Ничего не требуется: нет вывода, расхода процессора и смены стадий, но порог stallSweep.stalledMs ещё не пройден.';
+  if (l.action === 'stop')
+    return audience === 'panel'
+      ? subject === 'attempt'
+        ? 'Ничего не требуется: попытка будет остановлена автоматически и повторена один раз.'
+        : 'Ничего не требуется: проверка будет остановлена автоматически.'
+      : subject === 'attempt'
+        ? 'Ничего не требуется: controller остановит попытку отказом stalled, repairPolicy.stalled повторит её один раз.'
+        : 'Ничего не требуется: controller остановит проверку с текстом зависания.';
+  return audience === 'panel'
+    ? `Проверьте среду исполнения (сеть, сервис, блокировку): процесс жив, но не выводит, не расходует процессор и не меняет стадий. ${who} идёт до своего предела времени; подробности — в журнале ${subject === 'attempt' ? 'задачи' : 'проверки'}.`
+    : `Проверьте среду исполнения (сеть, сервис, блокировку): процесс жив, но не выводит, не расходует процессор и не меняет стадий (stallSweep.action: report, explain: fix-environment). ${subject === 'attempt' ? 'Попытка идёт до runTimeoutMs; снимок процессов и хвост вывода — в событии attempt.liveness' : 'Проверка идёт до своего предела времени; переход — в журнале (joint.liveness, base.check.liveness, board.coverage.liveness)'}.`;
 }
 
 /**
@@ -401,3 +542,13 @@ export function livenessNext(l: Pick<RunLiveness, 'state' | 'action'>) {
  */
 export const stalledFailureText =
   'Попытка зависла и остановлена: повтор или правка среды, не кода.';
+
+/**
+ * Что делать с задачей, упавшей отказом `stalled`. Правило восстановления
+ * уже повторяет такую попытку один раз; `repeated` — зависла и повторная.
+ */
+export function stalledFailureNext(repeated: boolean) {
+  return repeated
+    ? 'Попытка зависла повторно: повтор уже был. Устраните неисправность среды (сеть, сервис, блокировка) или осознанно поднимите порог зависания, затем повторите задачу.'
+    : 'Повтор назначается автоматически один раз. Если попытка зависнет снова — устраните неисправность среды (сеть, сервис, блокировка) или осознанно поднимите порог зависания.';
+}

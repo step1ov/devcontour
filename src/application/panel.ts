@@ -16,7 +16,7 @@ import { clipDeep, type PropertyRecovery } from 'devcontour-harness';
 import { blockers, readyTasks } from '../core/graph.ts';
 import { repositories } from '../core/repositories.ts';
 import { boardPhase, runLiveness, type RunLiveness } from '../core/work-status.ts';
-import { queueStopOf } from './queue-stop.ts';
+import { queueStopOf, quietOperations } from './queue-stop.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { taskProgress } from './context.ts';
 import { checksSummary } from './checks.ts';
@@ -91,9 +91,10 @@ export type PanelRun = Pick<
   timings?: Run['timings'];
   /**
    * Идущая попытка без движения (обход зависаний controller): `quiet` или
-   * `stalled`. Нет поля — попытка двигается или уже завершена. Простой панель
-   * досчитывает от `lastMovementAt`: сводка с тем же номером данных не
-   * перестраивается.
+   * `stalled`. Нет поля — попытка двигается или уже завершена. `idleMs` — на
+   * момент построения сводки: пока попытка молчит, записей нет (heartbeat
+   * растит только счётчик сроков), и опрос отвечает `unchanged`, поэтому
+   * панель сама досчитывает простой от `lastMovementAt` своим тиком часов.
    */
   liveness?: RunLiveness;
   /** Последний результат каждой проверки на фазу — значки задачи. */
@@ -507,6 +508,8 @@ function buildSummary(
     workspaceTaskIds,
     acceptedBoards: boards.filter((b) => b.revisions.at(-1)?.status === 'accepted').length,
     runs,
+    /** Проверки вне попыток без движения (совместная, базы, доски). */
+    operations: quietOperations(h, state, now, 'panel'),
     changeSets: state.changeSets.map(changeSetLine),
     // Контракт — строкой: текст, артефакты и обязательства проверки — в деталях.
     contracts: state.contracts.map((c) => ({

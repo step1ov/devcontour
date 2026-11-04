@@ -2409,7 +2409,7 @@
     },
     {
       "name": "workflow_status",
-      "description": "Read owner-local durable stage jobs, the queue stop and running attempts without movement (liveness: quiet or stalled, idle time, activity, next step). No model calls or execution leases are granted.",
+      "description": "Read owner-local durable stage jobs, the queue stop and running attempts and checks without movement (liveness and operations: quiet or stalled, idle time, activity, next step). No model calls or execution leases are granted.",
       "readOnly": true,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

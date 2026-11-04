@@ -185,14 +185,15 @@ test('config-apply waits for work under the previous configuration; without a se
   }
 });
 
-test('--keys accepts only budgets and prices', () => {
-  assert.deepEqual(parseOperationalKeys(), ['budgets', 'prices']);
+test('--keys accepts only budgets, prices and stallSweep', () => {
+  assert.deepEqual(parseOperationalKeys(), ['budgets', 'prices', 'stallSweep']);
   assert.deepEqual(parseOperationalKeys('prices,budgets'), ['budgets', 'prices']);
+  assert.deepEqual(parseOperationalKeys('stallSweep'), ['stallSweep']);
   assert.throws(
     () => parseOperationalKeys('budgets,concurrency'),
     /не поддерживается: concurrency/,
   );
-  assert.throws(() => parseOperationalKeys(''), /только budgets, prices/);
+  assert.throws(() => parseOperationalKeys(''), /только budgets, prices, stallSweep/);
 });
 
 /** Завершённый вызов модели с известной стоимостью: расход общего бюджета. */

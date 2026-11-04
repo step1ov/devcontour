@@ -51,7 +51,7 @@ import {
  * `config-apply` без перезапуска: в digest утверждения плана они не входят
  * (`approvalPolicyDigest`), и попытки по ним не устаревают.
  */
-export const operationalKeys = ['budgets', 'prices'] as const;
+export const operationalKeys = ['budgets', 'prices', 'stallSweep'] as const;
 export type OperationalKey = (typeof operationalKeys)[number];
 export const digest = (value: unknown) =>
   createHash('sha256')

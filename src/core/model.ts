@@ -7,7 +7,7 @@ import type { AttemptState, JointBudgetCheckpoint } from 'devcontour-harness/con
 import {
   GATE_SCOPE_LIMIT,
   dependencyStoreSchema,
-  executionPolicySchema,
+  DEFAULT_STALL_SWEEP,
   gateScopeTooBig,
 } from 'devcontour-harness/contracts';
 import type { CompletionReceipt } from './sync-model.ts';
@@ -979,6 +979,39 @@ const reviewRuleConfig = z
     vendor: reviewVendorSchema.optional(),
   })
   .strict();
+/**
+ * `stallSweep` в config.json: поля как у политики harness, без подстановки
+ * умолчаний (политика получает только заданное). Сообщение называет
+ * действующее значение незаданного поля: заданный один `quietMs: 20000`
+ * отклоняется из-за `intervalMs` по умолчанию (30000), и без этого
+ * пояснения причина была бы непонятна.
+ */
+const stallSweepConfigSchema = z
+  .strictObject({
+    intervalMs: z.number().int().min(1000).max(600_000).optional(),
+    quietMs: z.number().int().positive().max(86_400_000).optional(),
+    stalledMs: z.number().int().positive().max(86_400_000).optional(),
+    action: z.enum(['stop', 'report']).optional(),
+  })
+  .superRefine((value, ctx) => {
+    const effective = { ...DEFAULT_STALL_SWEEP, ...value };
+    const named = (key: 'intervalMs' | 'quietMs' | 'stalledMs') =>
+      value[key] === undefined
+        ? `${key} по умолчанию (${DEFAULT_STALL_SWEEP[key]})`
+        : `${key} (${value[key]})`;
+    if (effective.quietMs >= effective.stalledMs)
+      ctx.addIssue({
+        code: 'custom',
+        path: ['quietMs'],
+        message: `stallSweep: ${named('quietMs')} должен быть меньше, чем ${named('stalledMs')}`,
+      });
+    if (effective.intervalMs > effective.quietMs)
+      ctx.addIssue({
+        code: 'custom',
+        path: ['intervalMs'],
+        message: `stallSweep: ${named('intervalMs')} не может быть больше, чем ${named('quietMs')}: иначе «без движения» не заметить вовремя; задайте intervalMs не больше quietMs`,
+      });
+  });
 export const configSchema = z.object({
   /**
    * Правила ревью кода, плана и контракта. Нет поля — прежнее поведение:
@@ -1042,7 +1075,7 @@ export const configSchema = z.object({
    * умолчания harness (30 с, 3 мин, 10 мин, report). Эксплуатационный предел:
    * план не переутверждается, digest исполнения не меняется.
    */
-  stallSweep: executionPolicySchema.shape.stallSweep,
+  stallSweep: stallSweepConfigSchema.optional(),
   // Проверки, которые ревьюер запускает сам: предел одной команды, общий
   // бюджет и резерв срока ревью на заключение. Бюджет и резерв сверх того
   // ограничены сроком фазы (см. probeLimits).

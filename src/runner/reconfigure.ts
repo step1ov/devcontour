@@ -130,7 +130,7 @@ export function configApplyKeys(operation: string): OperationalKey[] | undefined
     : undefined;
 }
 
-/** Ключи `--keys`: подмножество `budgets,prices`; без флага — оба. */
+/** Ключи `--keys`: подмножество `budgets,prices,stallSweep`; без флага — все. */
 export function parseOperationalKeys(value?: string): OperationalKey[] {
   if (value === undefined) return [...operationalKeys];
   const keys = [...new Set(value.split(',').map((k) => k.trim()))].filter(Boolean);

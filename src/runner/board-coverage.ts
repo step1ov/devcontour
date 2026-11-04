@@ -139,6 +139,20 @@ export async function coverBoard(
             record.evidence.push(e as unknown as Evidence);
             save();
           },
+          // Переход живости проверки — событие журнала: при `report` это
+          // единственный след зависания до конца проверки.
+          onLiveness: (report) => {
+            try {
+              event('board.coverage.liveness', {
+                repositoryId: gap.repositoryId,
+                sha,
+                runId: record.runId,
+                ...report,
+              });
+            } catch {
+              // Без права записи переход не пишется; проверка идёт дальше.
+            }
+          },
           ...(signal ? { signal } : {}),
         },
       );
