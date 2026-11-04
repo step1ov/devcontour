@@ -12,6 +12,7 @@ import { SignalInbox, signalInput } from '../core/signals.ts';
 import { LeadWorkflow, workflowInput } from '../core/lead-workflow.ts';
 import { workflowMetrics } from './metrics.ts';
 import { agentValueReport, valueReportInput } from './value-report.ts';
+import { agentHandoff, handoffInput } from './handoff.ts';
 import {
   requirementSnapshot,
   requirementReport,
@@ -52,6 +53,7 @@ export const agentInputs = {
   }),
   workflow_metrics: z.strictObject({ repositoryId: id.optional() }),
   value_report: valueReportInput,
+  handoff: handoffInput,
   requirements_snapshot: z.strictObject({ repositoryId: id, source: z.string().min(1).max(500) }),
   requirements_report: z.strictObject({ repositoryId: id }),
   requirements_correct: z.strictObject({ boardId: id, reason: z.string().min(10).max(5000) }),
@@ -213,6 +215,8 @@ export const descriptions: Record<AgentOperation, string> = {
     'Read per-owner execution measurements, incomplete attempts and unknown cost. No model calls.',
   value_report:
     'Read the effect report: accepted tasks, first try, sent back by checks/review, approval-to-merge time, known spend per accepted task, environment failures and recorded interventions. Omit repositoryId for the whole workspace. Bounds are explicit: "lower" means at least, a range means unknown inputs, null/unknown is never zero; under 20 no percentages, under 5 no medians. JSON only; summary detail omits per-task rows and evidence links (the CLI report has them). Read-only, no model calls.',
+  handoff:
+    'Read the context handoff pack for a new lead session; start every new lead session with it instead of recalling the previous one. One store snapshot: task counts and limits, queue pause and who lifts it, controller, running and unfinished attempts, open tasks with their next step, stops and decisions awaiting the lead or user, recent failures, budgets and the next step of the board. next.command names harness CLI commands; commands maps them to DevContour (the running server is the controller). Omit boardId for the whole workspace. intentions (up to 20, 1000 chars each) are your own notes, the only text not from the store. format md returns the same pack as Markdown. Over the response limit, entries are dropped in the pack order and counted in truncated (bySize); devcontour session-handoff prints the full pack. Not the ChangeSet delivery handoff. Read-only, no model calls.',
   requirements_snapshot:
     'Read REQ sections from committed repository HEAD. Bind returned digest/text to a task and a configured test gate.',
   requirements_report:
@@ -285,6 +289,7 @@ export const readOnly = (name: AgentOperation) =>
     'requirements_report',
     'workflow_metrics',
     'value_report',
+    'handoff',
     'workflow_status',
     'signal_status',
     'feasibility_spikes',
@@ -544,6 +549,8 @@ export class AgentService {
         return workflowMetrics(h, agentInputs.workflow_metrics.parse(input).repositoryId);
       case 'value_report':
         return agentValueReport(h, agentInputs.value_report.parse(input));
+      case 'handoff':
+        return agentHandoff(h, agentInputs.handoff.parse(input));
       case 'requirements_snapshot': {
         const v = agentInputs.requirements_snapshot.parse(input);
         return requirementSnapshot(repository(h.config, v.repositoryId).path, v.source);

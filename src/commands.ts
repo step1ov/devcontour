@@ -13,7 +13,8 @@ import { engineeringEvals } from './runner/engineering-evals.ts';
 import { compareEvaluations } from './application/eval-comparison.ts';
 import { workflowMetrics } from './application/metrics.ts';
 import { parseReportFormat, renderValueReport } from './application/value-report.ts';
-import { readOnlyValueReport } from './runner/value-report.ts';
+import { readOnlyRead, readOnlyValueReport } from './runner/value-report.ts';
+import { devcontourHandoff, parseHandoffFormat, renderHandoff } from './application/handoff.ts';
 import { writeReportFile } from './runner/report-file.ts';
 import { evaluateAgents } from './runner/evaluations.ts';
 import {
@@ -531,6 +532,46 @@ async function main() {
         bytes: Buffer.byteLength(text),
         asOf: report.report.window.asOf,
       }),
+    );
+    return;
+  }
+  // Пакет передачи контекста новой сессии ведущего агента — тоже только
+  // чтение базы; имя `handoff` занято публикацией ChangeSet.
+  if (operation === 'session-handoff') {
+    const value = (flag: string) => {
+      if (!args.includes(flag)) return undefined;
+      const v = option(flag, '');
+      if (!v || v.startsWith('--')) throw new Error(`Укажите значение ${flag}`);
+      return v;
+    };
+    const format = parseHandoffFormat(value('--format'));
+    const intentions = args.flatMap((a, i) => {
+      if (a !== '--intent') return [];
+      const v = args[i + 1];
+      if (!v || v.startsWith('--')) throw new Error('Укажите значение --intent');
+      return [v];
+    });
+    const boardId = value('--board');
+    const pack = readOnlyRead(config, root, (h) =>
+      devcontourHandoff(h, {
+        ...(boardId ? { boardId } : {}),
+        ...(intentions.length ? { intentions } : {}),
+      }),
+    );
+    const text = renderHandoff(pack, format) + (format === 'json' ? '\n' : '');
+    const out = value('--out');
+    if (!out) {
+      process.stdout.write(text);
+      return;
+    }
+    writeReportFile(
+      out,
+      root,
+      text,
+      repositories(config).map((r) => join(r.path, '.devcontour-local')),
+    );
+    console.log(
+      JSON.stringify({ out: resolve(out), format, bytes: Buffer.byteLength(text), at: pack.at }),
     );
     return;
   }
