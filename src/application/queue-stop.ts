@@ -4,6 +4,7 @@ import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { repositories } from '../core/repositories.ts';
 import {
   OPERATION_FINISH_EVENTS,
+  OPERATION_START_EVENTS,
   OPERATION_LIVENESS_EVENTS,
   livenessNext,
   livenessText,
@@ -107,7 +108,7 @@ export function quietOperations(
   repositoryId?: string,
 ): QuietOperation[] {
   const events = h.store.latestEvents(
-    [...OPERATION_LIVENESS_EVENTS, ...OPERATION_FINISH_EVENTS],
+    [...OPERATION_LIVENESS_EVENTS, ...OPERATION_FINISH_EVENTS, ...OPERATION_START_EVENTS],
     200,
   );
   return operationLiveness(state, events, now)

@@ -221,7 +221,12 @@ test('Слова живости: простой, состояние и дейс�
     livenessNext({ state: 'stalled', action: 'stop' }),
     'Ничего не требуется: попытка будет остановлена автоматически и повторена один раз.',
   );
-  assert.match(livenessNext({ state: 'stalled', action: 'report' }), /в журнале задачи\.$/);
+  // Главное — в начале: «Проверьте среду» и где подробности влезают в две строки.
+  assert.match(
+    livenessNext({ state: 'stalled', action: 'report' }),
+    /^Проверьте среду \(сеть, сервис, блокировку\); подробности — в журнале задачи\. Процесс жив, но ничего не выводит/,
+  );
+  assert.match(livenessNext({ state: 'stalled', action: 'report' }, 'agent'), /ничего не выводит/);
   const at = iso(Date.now());
   const liveness = { state: 'quiet' as const, at, lastMovementAt: at };
   assert.equal(runLiveness({ status: 'succeeded', liveness }, Date.now()), undefined);
@@ -284,10 +289,7 @@ test('Отказ stallSweep называет действующее значен
   assert.deepEqual(message({ intervalMs: 5000, quietMs: 60_000, stalledMs: 60_000 }), [
     'stallSweep: quietMs (60000) должен быть меньше, чем stalledMs (60000)',
   ]);
-  assert.throws(
-    () => config({ stallSweep: { intervalMs: 500 } }),
-    /stallSweep|intervalMs/,
-  );
+  assert.throws(() => config({ stallSweep: { intervalMs: 500 } }), /stallSweep|intervalMs/);
 });
 
 test('Проверка gates вне попытки: последний переход незавершённой, пока роль controller жива', () => {
@@ -304,6 +306,7 @@ test('Проверка gates вне попытки: последний пере�
     idleMs,
     activity: { kind: 'gate', label: 'unit' },
     ...(state === 'stalled' ? { action: 'report' } : {}),
+    owner: 'server',
   });
   const state = {
     changeSets: [],
@@ -327,4 +330,36 @@ test('Проверка gates вне попытки: последний пере�
   assert.ok(only.idleMs >= 12 * MIN);
   // Без живой роли controller незавершённая проверка — оборванная.
   assert.deepEqual(operationLiveness({ ...state, leader: undefined }, events, now), []);
+  // Роль жива, но у другого владельца (сервер перезапущен): переход прежнего
+  // сервера — оборванной проверки.
+  assert.deepEqual(
+    operationLiveness(
+      { ...state, leader: { owner: 'restarted', leaseUntil: now + 30_000 } },
+      events,
+      now,
+    ),
+    [],
+  );
+  // Более новое начало той же области вытесняет прежнюю проверку без окончания.
+  const restarted = [
+    event(7, 'base.check.started', { repositoryId: 'main', runId: 'BK-2' }),
+    ...events,
+    event(1, 'base.check.started', { repositoryId: 'main', runId: 'BK-1' }),
+  ];
+  assert.deepEqual(operationLiveness(state, restarted, now), []);
+  // Начало в другой области не вытесняет.
+  const other = [event(7, 'base.check.started', { repositoryId: 'lib', runId: 'BK-9' }), ...events];
+  assert.equal(operationLiveness(state, other, now).length, 1);
+  // Проверка доски: та же доска и компонент — вытесняет, другая доска — нет.
+  const board = (id: number, runId: string, boardId: string) =>
+    event(id, 'board.coverage.liveness', { ...report('stalled', runId, 5 * MIN), boardId });
+  const coverage = [
+    event(9, 'board.coverage.started', { boardId: 'B1', repositoryId: 'main', runId: 'BC-2' }),
+    board(8, 'BC-1', 'B1'),
+    board(6, 'BC-3', 'B2'),
+  ];
+  assert.deepEqual(
+    operationLiveness({ ...state, boards: [] }, coverage, now).map((o) => o.id),
+    ['BC-3'],
+  );
 });

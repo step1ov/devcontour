@@ -46,6 +46,11 @@ export class Scheduler {
   private get runner(): Runner {
     const execution = executionOf(this.h);
     if (this.built?.execution === execution) return this.built.runner;
+    // Прежний исполнитель (конфигурацию применили после drain) больше не
+    // ведёт очередь: его продление роли и обход зависших останавливаются,
+    // когда закончатся его попытки (`settled`), иначе их интервалы жили бы
+    // рядом с интервалами нового.
+    if (this.built) void this.built.runner.settled().catch(() => {});
     const context = devcontourContextSource(this.h, execution.store);
     const runner = new Runner({
       engine: execution.engine,

@@ -52,7 +52,14 @@ export async function coverBoard(
   const event = (type: string, data: Record<string, unknown>) =>
     h.store.atomic(() => {
       guard();
-      h.store.appendEvent(type, { boardId, revision: revision.number, ...data });
+      h.store.appendEvent(type, {
+        boardId,
+        revision: revision.number,
+        ...data,
+        // Владелец роли controller в той же записи: переход живости
+        // оборванной перезапуском проверки новый сервер не выдаёт за идущий.
+        ...(type.endsWith('.liveness') ? { owner: h.store.read().leader?.owner } : {}),
+      });
     });
   const revisionDigest = digest(revision);
   for (const gap of gaps) {
@@ -175,7 +182,24 @@ export async function coverBoard(
     record.gates = [...new Set([...kept.map((e) => e.gate), ...result.gates])];
     if (result.failure) record.failure = result.failure;
     if (result.failures.length) record.failures = result.failures;
-    save();
+    try {
+      save();
+    } catch (error) {
+      // Ревизия доски или договор изменились во время проверки: проверка
+      // кончается событием, иначе её переход живости висел бы как идущий.
+      try {
+        event('board.coverage.failed', {
+          repositoryId: gap.repositoryId,
+          sha,
+          runId: record.runId,
+          gates: gap.gates,
+          error: journalError(error, [root, ...repositories(h.config).map((r) => r.path)]),
+        });
+      } catch {
+        // Без права записи событие не пишется; причина — исходная ошибка.
+      }
+      throw toDomain(error);
+    }
     event(result.failures.length ? 'board.coverage.failed' : 'board.coverage.passed', {
       repositoryId: gap.repositoryId,
       sha,

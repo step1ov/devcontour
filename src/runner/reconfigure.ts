@@ -130,9 +130,18 @@ export function configApplyKeys(operation: string): OperationalKey[] | undefined
     : undefined;
 }
 
-/** Ключи `--keys`: подмножество `budgets,prices,stallSweep`; без флага — все. */
+/**
+ * Ключи без `--keys` — прежний состав запроса (`budgets,prices`). Сервер
+ * версии до `stallSweep` не знает этого ключа: запрос с ним он прочитал бы не
+ * как config-apply, а как применение конфигурации операцией, и отклонил бы
+ * его. Поэтому `stallSweep` отправляется только названным явно: такой
+ * запрос старый сервер не применит, а запрос без флага остаётся прежним.
+ */
+export const defaultOperationalKeys = ['budgets', 'prices'] as const satisfies OperationalKey[];
+
+/** Ключи `--keys`: подмножество `budgets,prices,stallSweep`; без флага — `budgets,prices`. */
 export function parseOperationalKeys(value?: string): OperationalKey[] {
-  if (value === undefined) return [...operationalKeys];
+  if (value === undefined) return [...defaultOperationalKeys];
   const keys = [...new Set(value.split(',').map((k) => k.trim()))].filter(Boolean);
   const unknown = keys.filter((k) => !(operationalKeys as readonly string[]).includes(k));
   if (!keys.length || unknown.length)

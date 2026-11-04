@@ -413,6 +413,13 @@ export const OPERATION_FINISH_EVENTS = [
   ...finishedTypes['base-check'],
   ...finishedTypes['board-coverage'],
 ];
+/** Начало проверки gates: более новое начало той же области вытесняет прежнюю. */
+export const OPERATION_START_EVENTS = ['base.check.started', 'board.coverage.started'];
+/** Область проверки gates: компонент базы или компонент доски. */
+const scopeOf = (type: string, data: Record<string, unknown>) =>
+  type.startsWith('base.check.')
+    ? `base:${String(data.repositoryId)}`
+    : `board:${String(data.boardId)}:${String(data.repositoryId)}`;
 type LivenessPayload = LivenessRecord & { verificationId?: string };
 export function operationLiveness(
   state: Pick<DevContourState, 'changeSets' | 'boards' | 'leader'>,
@@ -427,9 +434,20 @@ export function operationLiveness(
       .map((e) => (e.data as { runId?: string } | null)?.runId)
       .filter(Boolean),
   );
-  // Проверку gates ведёт процесс с ролью controller: без живой роли
-  // незавершённая в журнале проверка — оборванная, а не идущая.
-  const controllerAlive = (state.leader?.leaseUntil ?? 0) > now;
+  // Последнее начало в каждой области: проверка, у которой есть более новое
+  // начало той же области, уже не идёт (оборвана и начата заново).
+  const latestStart = new Map<string, string>();
+  for (const e of events)
+    if (OPERATION_START_EVENTS.includes(e.type)) {
+      const data = (e.data ?? {}) as Record<string, unknown>;
+      const scope = scopeOf(e.type, data);
+      if (!latestStart.has(scope) && typeof data.runId === 'string')
+        latestStart.set(scope, data.runId);
+    }
+  // Проверку gates ведёт процесс с ролью controller, и переход записан под его
+  // именем: живая роль другого владельца (сервер перезапущен) значит, что
+  // незавершённая в журнале проверка оборвана, а не идёт.
+  const leader = (state.leader?.leaseUntil ?? 0) > now ? state.leader?.owner : undefined;
   const out: OperationLiveness[] = [];
   for (const e of events) {
     if (!(OPERATION_LIVENESS_EVENTS as readonly string[]).includes(e.type)) continue;
@@ -452,7 +470,9 @@ export function operationLiveness(
     const runId = typeof data.runId === 'string' ? data.runId : undefined;
     if (!runId || seen.has(runId)) continue;
     seen.add(runId);
-    if (finished.has(runId) || !controllerAlive) continue;
+    if (finished.has(runId) || !leader || data.owner !== leader) continue;
+    const started = latestStart.get(scopeOf(e.type, data));
+    if (started && started !== runId) continue;
     const view = livenessView(data as unknown as LivenessPayload, e.at, now);
     if (!view) continue;
     const repositoryId = typeof data.repositoryId === 'string' ? data.repositoryId : undefined;
@@ -532,8 +552,8 @@ export function livenessNext(
         ? 'Ничего не требуется: controller остановит попытку отказом stalled, repairPolicy.stalled повторит её один раз.'
         : 'Ничего не требуется: controller остановит проверку с текстом зависания.';
   return audience === 'panel'
-    ? `Проверьте среду исполнения (сеть, сервис, блокировку): процесс жив, но не выводит, не расходует процессор и не меняет стадий. ${who} идёт до своего предела времени; подробности — в журнале ${subject === 'attempt' ? 'задачи' : 'проверки'}.`
-    : `Проверьте среду исполнения (сеть, сервис, блокировку): процесс жив, но не выводит, не расходует процессор и не меняет стадий (stallSweep.action: report, explain: fix-environment). ${subject === 'attempt' ? 'Попытка идёт до runTimeoutMs; снимок процессов и хвост вывода — в событии attempt.liveness' : 'Проверка идёт до своего предела времени; переход — в журнале (joint.liveness, base.check.liveness, board.coverage.liveness)'}.`;
+    ? `Проверьте среду (сеть, сервис, блокировку); подробности — в журнале ${subject === 'attempt' ? 'задачи' : 'проверки'}. Процесс жив, но ничего не выводит, не расходует процессор и не меняет стадий; ${who.toLowerCase()} идёт до своего предела времени.`
+    : `Проверьте среду исполнения (сеть, сервис, блокировку): процесс жив, но ничего не выводит, не расходует процессор и не меняет стадий (stallSweep.action: report, explain: fix-environment). ${subject === 'attempt' ? 'Попытка идёт до runTimeoutMs; снимок процессов и хвост вывода — в событии attempt.liveness' : 'Проверка идёт до своего предела времени; переход — в журнале (joint.liveness, base.check.liveness, board.coverage.liveness)'}.`;
 }
 
 /**

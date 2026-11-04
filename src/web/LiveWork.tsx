@@ -188,9 +188,9 @@ export function LiveWork({
   // Зависшие попытки, которые ждут человека, названы и в заголовке ячейки:
   // строка исполнителя может уйти под прокрутку.
   const operations = state.operations ?? [];
-  const stalled =
-    work.filter(({ run }) => run.liveness?.attention).length +
-    operations.filter((o) => o.attention).length;
+  const stalledAttempts = work.filter(({ run }) => run.liveness?.attention).length;
+  const stalledChecks = operations.filter((o) => o.attention).length;
+  const stalled = stalledAttempts + stalledChecks;
   // Совместная проверка без движения — в своей строке ведущего цикла; прочие
   // проверки (база, доска) своей строки не имеют и получают её здесь.
   const jointOf = (id: string) => operations.find((o) => o.kind === 'joint' && o.subjectId === id);
@@ -242,10 +242,11 @@ export function LiveWork({
         )}
         {stalled > 0 && (
           <span className="text-warning tabular shrink-0 font-medium" data-liveness-count={stalled}>
-            {work.some(({ run }) => run.liveness?.attention)
-              ? 'зависших попыток'
-              : 'зависших проверок'}
-            : {stalled}
+            {stalledAttempts && stalledChecks
+              ? `зависших: попыток ${stalledAttempts}, проверок ${stalledChecks}`
+              : stalledAttempts
+                ? `зависших попыток: ${stalledAttempts}`
+                : `зависших проверок: ${stalledChecks}`}
           </span>
         )}
         {!state.paused && work.length > 0 && free > 0 && (
@@ -273,21 +274,29 @@ export function LiveWork({
             {flows.map((f) => (
               <li
                 key={f.key}
-                className="flex h-(--live-row-height) min-w-0 items-center gap-x-3 text-sm"
+                className="flex h-(--live-row-height) min-w-0 items-center gap-x-3 overflow-hidden text-sm"
               >
                 <span className="flex shrink-0 items-center gap-1 font-medium">
                   <Eye aria-hidden="true" className="text-info size-4 shrink-0" />
                   {f.label}
                 </span>
-                <span className="text-muted-foreground shrink-0 font-mono text-xs">{f.who}</span>
-                <span className="min-w-0 truncate font-medium" title={f.subject}>
+                {/* Подпись зависания важнее исполнителя: на узком экране он уступает место. */}
+                <span
+                  className={cn(
+                    'text-muted-foreground shrink-0 font-mono text-xs',
+                    jointOf(f.id) && 'max-[760px]:hidden',
+                  )}
+                >
+                  {f.who}
+                </span>
+                <span className="min-w-0 shrink-[4] truncate font-medium" title={f.subject}>
                   {f.subject}
                 </span>
                 <LivenessNote
                   liveness={jointOf(f.id)}
                   now={now}
                   subject="check"
-                  className="max-w-full shrink-0"
+                  className="min-w-0 max-w-[65%]"
                 />
                 <span className="text-muted-foreground tabular ml-auto shrink-0 text-xs">
                   {elapsed(f.since)}
@@ -301,20 +310,20 @@ export function LiveWork({
             {checks.map((o) => (
               <li
                 key={o.id}
-                className="flex h-(--live-row-height) min-w-0 items-center gap-x-3 text-sm"
+                className="flex h-(--live-row-height) min-w-0 items-center gap-x-3 overflow-hidden text-sm"
               >
                 <span className="flex shrink-0 items-center gap-1 font-medium">
                   <Eye aria-hidden="true" className="text-info size-4 shrink-0" />
                   {operationNames[o.kind]}
                 </span>
-                <span className="min-w-0 truncate font-medium" title={o.title}>
+                <span className="min-w-0 shrink-[4] truncate font-medium" title={o.title}>
                   {o.title}
                 </span>
                 <LivenessNote
                   liveness={o}
                   now={now}
                   subject="check"
-                  className="max-w-full shrink-0"
+                  className="min-w-0 max-w-[65%]"
                 />
               </li>
             ))}

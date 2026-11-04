@@ -42,7 +42,13 @@ const stalled = (): Liveness => ({
   attention: true,
 });
 
-type Scenario = { run: boolean; liveness?: Liveness; operations?: Operation[] };
+type Scenario = {
+  run: boolean;
+  liveness?: Liveness;
+  operations?: Operation[];
+  workflows?: Record<string, unknown>[];
+  concurrency?: number;
+};
 async function withSummary(page: Page, scenario: () => Scenario) {
   const counts = { full: 0, unchanged: 0 };
   await page.route('**/api/summary*', async (route) => {
@@ -50,6 +56,7 @@ async function withSummary(page: Page, scenario: () => Scenario) {
     const state = (await response.json()) as {
       unchanged?: boolean;
       runs: Record<string, unknown>[];
+      workflows?: Record<string, unknown>[];
       tasks: { id: string; title: string }[];
       config: Record<string, unknown>;
     };
@@ -83,7 +90,8 @@ async function withSummary(page: Page, scenario: () => Scenario) {
         queue: { paused: false },
         runs: [...state.runs.filter((r) => r.status !== 'active'), ...(s.run ? [run] : [])],
         operations: s.operations ?? [],
-        config: { ...state.config, concurrency: 2 },
+        workflows: [...(state.workflows ?? []), ...(s.workflows ?? [])],
+        config: { ...state.config, concurrency: s.concurrency ?? 2 },
       },
     });
   });
@@ -143,7 +151,7 @@ test('Зависшая попытка видна в ячейке, строке �
   await expect(live.locator('[data-liveness-count]')).toHaveText('зависших попыток: 1');
   await expect(inspector).toHaveAttribute('data-liveness', 'stalled');
   await expect(inspector).toContainText('зависла 12 мин — проверьте среду');
-  await expect(inspector).toContainText('Нужно ваше решение. Проверьте среду исполнения');
+  await expect(inspector).toContainText('Проверьте среду (сеть, сервис, блокировку)');
   await expect(inspector).toContainText('подробности — в журнале задачи');
   // Внутренних имён в тексте панели нет.
   for (const region of [live, inspector])
@@ -202,29 +210,63 @@ test('Тихая попытка — приглушённая подпись бе
   );
 });
 
-test('Проверка базы и совместная проверка без движения — своей строкой в ячейке', async ({
+test('Проверка базы и совместная проверка без движения — своими строками, без выхода за ячейку', async ({
   page,
 }) => {
+  const check = (kind: Operation['kind'], id: string, subjectId: string, label: string) => ({
+    kind,
+    id,
+    subjectId,
+    title: subjectId,
+    ...(kind === 'joint' ? {} : { repositoryId: 'main' }),
+    ...stalled(),
+    activity: { kind: 'gate' as const, label },
+  });
   await withSummary(page, () => ({
-    run: false,
+    run: true,
+    liveness: stalled(),
     operations: [
+      check('base-check', 'BK-1', 'main', 'test'),
+      check('joint', 'WV-1', 'CHG-liveness-e2e', 'together'),
+    ],
+    // Совместная проверка набора идёт в цикле ведущего: её строка уже есть.
+    workflows: [
       {
-        kind: 'base-check',
-        id: 'BK-1',
-        subjectId: 'main',
-        title: 'main',
-        repositoryId: 'main',
-        ...stalled(),
-        activity: { kind: 'gate', label: 'test' },
+        key: 'changeset:CHG-liveness-e2e',
+        kind: 'changeset',
+        id: 'CHG-liveness-e2e',
+        stage: 1,
+        status: 'running',
+        history: [{ at: new Date().toISOString(), stage: 1, event: 'running' }],
       },
     ],
+    concurrency: 4,
   }));
   await page.goto('/?tab=graph');
   const live = page.getByRole('region', { name: 'Сейчас работают' });
-  const row = live.getByRole('list', { name: 'Проверки без движения' }).getByRole('listitem');
-  await expect(row).toContainText('Проверка базы');
-  await expect(row).toContainText('зависла 12 мин — проверьте среду · проверка test');
-  await expect(live.locator('[data-liveness-count]')).toHaveText('зависших проверок: 1');
+  const cell = page.getByRole('group', { name: 'Исполнители и причины ожидания' });
+  const checks = live.getByRole('list', { name: 'Проверки без движения' }).getByRole('listitem');
+  await expect(checks).toHaveCount(1);
+  await expect(checks).toContainText('Проверка базы');
+  await expect(checks).toContainText('зависла 12 мин — проверьте среду · проверка test');
+  // Совместная проверка — подписью в своей строке ведущего цикла (по ChangeSet).
+  const joint = live.getByRole('list', { name: 'Работа ведущего цикла' }).getByRole('listitem');
+  await expect(joint).toContainText('Совместная проверка');
+  await expect(joint.locator('[data-liveness]')).toContainText(
+    'зависла 12 мин — проверьте среду · проверка together',
+  );
+  // Попытки и проверки посчитаны раздельно.
+  await expect(live.locator('[data-liveness-count]')).toHaveText('зависших: попыток 1, проверок 2');
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
-  await shot(page, 'live-cell-base-check');
+  await shot(page, 'live-cell-checks');
+  // Телефон: строки проверок не выходят за ячейку и страницу.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(checks).toBeVisible();
+  const fits = (e: Element) => e.scrollWidth <= e.clientWidth + 1;
+  expect(await cell.evaluate(fits)).toBe(true);
+  for (const row of [checks, joint]) expect(await row.evaluate(fits)).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(
+    true,
+  );
+  await shot(page, 'live-cell-checks-phone');
 });

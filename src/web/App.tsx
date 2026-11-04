@@ -1540,8 +1540,17 @@ export function App() {
   // Отказ `stalled` выбранной задачи: правило восстановления уже повторяет
   // такую попытку один раз, поэтому вторая зависшая подряд — дело среды.
   const stalledFailure = task?.status === 'failed' && latestRun?.failureKind === 'stalled';
+  // Подряд идущие зависшие отказы с конца истории (страница — новые сначала):
+  // давний зависший отказ между другими исходами повтором не считается.
   const stalledRepeated =
-    (full?.runs.items ?? []).filter((r) => r.failureKind === 'stalled').length >= 2;
+    (() => {
+      let n = 0;
+      for (const r of full?.runs.items ?? []) {
+        if (r.failureKind !== 'stalled') break;
+        n++;
+      }
+      return n;
+    })() >= 2;
   // Одна залитая кнопка на экран — следующее решение по состоянию доски.
   const primary =
     !boardScreen || !board
@@ -2882,7 +2891,6 @@ export function App() {
                               className="text-foreground m-0 line-clamp-2"
                               title={livenessNext(taskLiveness)}
                             >
-                              {taskLiveness.attention ? 'Нужно ваше решение. ' : ''}
                               {livenessNext(taskLiveness)}
                             </p>
                           )}

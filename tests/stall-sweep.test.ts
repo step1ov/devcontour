@@ -19,7 +19,14 @@ import { serve } from '../src/server/http.ts';
 import { AgentService } from '../src/application/agent.ts';
 import { executionOf } from '../src/harness/execution.ts';
 import { requestConfigApply } from '../src/runner/reconfigure.ts';
-import type { QuietAttempt, QuietOperation } from '../src/application/queue-stop.ts';
+import {
+  quietOperations,
+  type QuietAttempt,
+  type QuietOperation,
+} from '../src/application/queue-stop.ts';
+import { checkBase } from '../src/runner/base-check.ts';
+import { operationLiveness } from '../src/core/work-status.ts';
+import { testDemo } from './demo-pool.ts';
 
 /**
  * Обход зависаний controller на настоящем исполнении: два компонента в
@@ -32,9 +39,13 @@ import type { QuietAttempt, QuietOperation } from '../src/application/queue-stop
  * `stalled`.
  */
 const SWEEP = { intervalMs: 1000, quietMs: 1000, stalledMs: 3000 };
-/** Gate без вывода и без расхода процессора: ждёт и пишет отчёт. */
-const silent = (ms: number, name: string) =>
-  `import{writeFileSync}from'node:fs';setTimeout(()=>writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase name="${name}"/></testsuite>'),${ms});`;
+/**
+ * Gate без вывода и без заметного расхода процессора: ждёт файла-барьера,
+ * который тест создаёт, увидев зависание, и пишет отчёт. Без барьера —
+ * сразу; не дождавшись за 25 с — отказ, чтобы прогон не висел.
+ */
+const silent = (barrier: string | null, name: string) =>
+  `import{existsSync,writeFileSync}from'node:fs';const done=()=>{writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase name="${name}"/></testsuite>');process.exit(0)};const barrier=${JSON.stringify(barrier)};if(!barrier)done();const end=Date.now()+25000;setInterval(()=>{if(existsSync(barrier))done();if(Date.now()>end)process.exit(1)},250);`;
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'devcontour-stall-'));
@@ -48,8 +59,11 @@ async function fixture() {
     await git(path, 'init', '-b', 'main');
     await writeFile(join(path, '.gitignore'), '.devcontour-local/\n.reports/\n.deps/\n');
     await writeFile(join(path, 'value.json'), '1');
-    await writeFile(join(path, 'verify.mjs'), silent(id === 'product' ? 6500 : 0, 'value'));
-    await writeFile(join(path, 'together.mjs'), silent(6500, 'together'));
+    await writeFile(
+      join(path, 'verify.mjs'),
+      silent(id === 'product' ? join(root, 'release-product') : null, 'value'),
+    );
+    await writeFile(join(path, 'together.mjs'), silent(join(root, 'release-joint'), 'together'));
     await git(path, 'add', '.');
     await git(path, 'commit', '-m', 'baseline');
     repos.push(
@@ -185,6 +199,8 @@ test('stallSweep доходит до runner: report виден по компон
       f.store.read().runs.find((r) => r.id === stalled.runId)?.liveness?.artifact,
       'снимок зависания сохранён',
     );
+    // Зависание увидели — gate отпускается барьером, попытка доходит до конца.
+    await writeFile(join(f.root, 'release-product'), '');
     await drained;
     const done = f.store.read();
     assert.equal(done.tasks.find((t) => t.id === task.id)?.status, 'done');
@@ -212,21 +228,40 @@ test('stallSweep доходит до runner: report виден по компон
       [],
       'совместная проверка — уровень workspace, не компонента',
     );
+    await writeFile(join(f.root, 'release-joint'), '');
     await verifying;
     assert.deepEqual(f.status().operations, [], 'законченная проверка вида не даёт');
 
     // config-apply без перезапуска: работающий сервер применяет stallSweep из
     // config.json на своём такте, и stop останавливает зависшую попытку.
+    type Lead = { leaseTimer?: unknown; sweep?: { timer?: unknown } };
+    const built = () => (f.scheduler as unknown as { built?: { runner: Lead } }).built?.runner;
+    // Сервер ведёт очередь прежним исполнителем: его продление роли и обход
+    // зависших идут, пока он ведёт очередь.
+    f.scheduler.start();
+    const previous = await until(() => {
+      const runner = built();
+      return runner?.leaseTimer !== undefined && runner?.sweep?.timer !== undefined
+        ? runner
+        : undefined;
+    });
     const configPath = join(f.data, 'config.json');
     const raw = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
     await writeFile(
       configPath,
       JSON.stringify({ ...raw, stallSweep: { ...SWEEP, action: 'stop' } }),
     );
-    f.scheduler.start();
     const applied = await requestConfigApply(f.data, ['stallSweep'], { waitMs: 20000 });
     assert.equal(applied.status, 'applied', JSON.stringify(applied));
     assert.equal(executionOf(f.h).engine.policy.stallSweep?.action, 'stop');
+    // Новый исполнитель под новой политикой; у прежнего не остаётся ни
+    // продления роли, ни интервала обхода зависших.
+    await until(() => (built() && built() !== previous ? true : undefined));
+    await until(() =>
+      previous.leaseTimer === undefined && previous.sweep?.timer === undefined ? true : undefined,
+    );
+    // Барьер снят: следующая попытка молчит, пока её не остановит controller.
+    await rm(join(f.root, 'release-product'));
     const next = f.h.createBoard('Product board 2', '', 'product');
     const second = f.h.addTask(next.id, { ...input('Slow gate again'), repositoryId: 'product' });
     f.h.approve(next.id);
@@ -256,5 +291,82 @@ test('stallSweep доходит до runner: report виден по компон
     }
   } finally {
     await f.close();
+  }
+});
+
+test('Проверка базы с молчащим gate: runGatesAt → событие журнала → вид проверки без движения', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'devcontour-stall-base-'));
+  const barrier = join(root, 'release-base');
+  try {
+    await testDemo(root);
+    const c = loadConfig(join(root, 'config.json'));
+    c.gates = [
+      {
+        id: 'base-gate',
+        kind: 'test',
+        timeoutMs: 30000,
+        command: [process.execPath, '--input-type=module', '-e', silent(barrier, 'base')],
+        report: { type: 'junit', path: '.reports/base.xml' },
+      },
+    ] as Config['gates'];
+    c.stallSweep = { ...SWEEP, action: 'report' };
+    const store = new Store(join(root, 'stall-base.sqlite'));
+    const h = new DevContour(store, c);
+    try {
+      assert.equal(c.approvalMode, 'agent');
+      // Перенос базы: коммит на рабочей ветке и перенос target на него.
+      const target = 'refs/heads/' + c.targetBranch;
+      await writeFile(join(c.repository, 'base.txt'), 'moved');
+      await git(c.repository, 'add', '--', 'base.txt');
+      await git(c.repository, 'commit', '-qm', 'Base moved');
+      const sha = await git(c.repository, 'rev-parse', 'HEAD');
+      const from = await git(c.repository, 'rev-parse', target);
+      await git(c.repository, 'update-ref', target, sha);
+      h.baseUpdated([{ repositoryId: 'main', from, to: sha }]);
+      assert.ok(h.leader('server'), 'роль controller у сервера');
+      const checking = checkBase(h, { data: root, state: root }, () => {
+        h.leader('server');
+      });
+      const operations = () =>
+        quietOperations(h, h.store.read(), Date.now(), 'agent', 'main').filter(
+          (o) => o.kind === 'base-check',
+        );
+      const stalled = await until(() => operations().find((o) => o.state === 'stalled'));
+      assert.match(stalled.id, /^BK-/);
+      assert.equal(stalled.repositoryId, 'main');
+      assert.equal(stalled.subjectId, 'main');
+      assert.equal(stalled.attention, true);
+      assert.equal(stalled.activity?.kind, 'gate');
+      assert.match(stalled.next, /stallSweep\.action: report/);
+      const event = store
+        .allEvents()
+        .filter((e) => e.type === 'base.check.liveness')
+        .at(-1)!.data as { runId: string; owner?: string; sha: string };
+      assert.equal(event.runId, stalled.id);
+      assert.equal(event.owner, 'server', 'переход записан под владельцем роли');
+      assert.equal(event.sha, sha);
+      // Роль у другого владельца (сервер перезапущен) — проверка не идущая.
+      const lease = store.read().leader!;
+      assert.deepEqual(
+        operationLiveness(
+          { ...store.read(), leader: { ...lease, owner: 'restarted' } },
+          store.latestEvents([
+            'base.check.liveness',
+            'base.check.started',
+            'base.check.passed',
+            'base.check.failed',
+          ]),
+          Date.now(),
+        ),
+        [],
+      );
+      await writeFile(barrier, '');
+      assert.equal(await checking, true, 'база проверена, ожидание снято');
+      assert.deepEqual(operations(), [], 'законченная проверка вида не даёт');
+    } finally {
+      store.close();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });

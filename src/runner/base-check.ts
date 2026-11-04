@@ -137,6 +137,9 @@ export async function checkBase(
             sha: base.sha,
             runId,
             ...data,
+            // Владелец роли controller в той же записи: переход живости
+            // оборванной перезапуском проверки новый сервер не выдаёт за идущий.
+            ...(type.endsWith('.liveness') ? { owner: h.store.read().leader?.owner } : {}),
           });
         });
       event('base.check.started', { gates, ...(tries > 1 ? { retry: tries - 1 } : {}) });
@@ -192,10 +195,23 @@ export async function checkBase(
         at: new Date().toISOString(),
         tries,
       };
-      h.store.atomic(() => {
-        guard();
-        h.store.saveLocal(BASE_CHECK, base.repositoryId, base.sha, saved);
-      });
+      try {
+        h.store.atomic(() => {
+          guard();
+          h.store.saveLocal(BASE_CHECK, base.repositoryId, base.sha, saved);
+        });
+      } catch (error) {
+        // Начатая проверка кончается событием и тогда, когда исход не
+        // записался: иначе её последний переход живости висел бы как идущий.
+        try {
+          event('base.check.failed', {
+            error: journalError(error, [roots.state, ...repositories(h.config).map((r) => r.path)]),
+          });
+        } catch {
+          // Без права записи событие не пишется; причина — исходная ошибка.
+        }
+        throw error;
+      }
       event(saved.passed ? 'base.check.passed' : 'base.check.failed', {
         gates: saved.gates,
         ...(saved.passed ? {} : { failures: saved.failures.map((f) => f.gate) }),
