@@ -1820,7 +1820,7 @@ export function App() {
                 </span>
               </p>
             )}
-            <div className="ml-auto flex shrink-0 items-center gap-1">
+            <div className="ml-auto flex shrink-0 items-center gap-1 max-[760px]:ml-0 max-[760px]:w-full max-[760px]:shrink max-[760px]:flex-wrap">
               <span className="text-muted-foreground mr-2 flex items-center gap-2 whitespace-nowrap">
                 <span
                   aria-hidden="true"

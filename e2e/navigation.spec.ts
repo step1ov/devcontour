@@ -4,6 +4,36 @@ import { test, expect } from '@playwright/test';
 // указывает, а «Назад» — уходить со страницы, а не ходить по кругу.
 
 const headers = { 'X-DevContour-Request': '1' };
+type Request = import('@playwright/test').APIRequestContext;
+/** Своя доска с задачами: демо общее, другие спецификации меняют его доски. */
+async function boardWith(request: Request, title: string, tasks: string[]) {
+  const board = (await (
+    await request.post('/api/boards', { headers, data: { title } })
+  ).json()) as {
+    id: string;
+  };
+  const ids: string[] = [];
+  for (const name of tasks)
+    ids.push(
+      (
+        (await (
+          await request.post(`/api/boards/${board.id}/tasks`, {
+            headers,
+            data: {
+              title: name,
+              description: 'Наблюдаемый результат для проверки ссылки на задачу.',
+              role: 'backend',
+              repositoryId: 'main',
+              acceptance: ['Результат проходит независимую проверку.'],
+              dependsOn: [],
+              contracts: [],
+            },
+          })
+        ).json()) as { id: string }
+      ).id,
+    );
+  return { board: board.id, ids };
+}
 
 test('A view link without a board fills it in place: one Back leaves the panel', async ({
   page,
@@ -26,8 +56,15 @@ test('An unknown board in the link opens the current board instead of an empty s
   await expect(page.getByRole('heading', { name: 'Создайте первую доску' })).toHaveCount(0);
 });
 
-test('A graph node chosen from the keyboard is the selected task everywhere', async ({ page }) => {
-  await page.goto('/?tab=graph');
+test('A graph node chosen from the keyboard is the selected task everywhere', async ({
+  page,
+  request,
+}) => {
+  const { board } = await boardWith(request, 'Выбор узла с клавиатуры', [
+    'Первая задача графа',
+    'Вторая задача графа',
+  ]);
+  await page.goto(`/?tab=graph&board=${board}`);
   const nodes = page.locator('.react-flow__node');
   await expect(nodes.nth(1)).toBeVisible();
   const id = (await nodes.nth(1).getAttribute('data-id'))!;
@@ -46,26 +83,15 @@ test('A link to a cancelled task shows that task, not the first one of the board
   page,
   request,
 }) => {
-  const board = (await (
-    await request.post('/api/boards', { headers, data: { title: 'Ссылка на отменённую задачу' } })
-  ).json()) as { id: string };
-  const make = async (title: string) =>
-    (await (
-      await request.post(`/api/boards/${board.id}/tasks`, {
-        headers,
-        data: {
-          title,
-          description: 'Наблюдаемый результат для проверки ссылки на задачу.',
-          role: 'backend',
-          repositoryId: 'main',
-          acceptance: ['Результат проходит независимую проверку.'],
-          dependsOn: [],
-          contracts: [],
-        },
-      })
-    ).json()) as { id: string };
-  await make('Живая задача по ссылке');
-  const cancelled = await make('Отменённая задача по ссылке');
+  const {
+    board: id,
+    ids: [, cancelledId],
+  } = await boardWith(request, 'Ссылка на отменённую задачу', [
+    'Живая задача по ссылке',
+    'Отменённая задача по ссылке',
+  ]);
+  const board = { id };
+  const cancelled = { id: cancelledId };
   expect(
     (await request.post(`/api/tasks/${cancelled.id}/cancel`, { headers, data: {} })).ok(),
   ).toBe(true);
