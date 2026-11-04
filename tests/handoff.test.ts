@@ -22,7 +22,7 @@ import { tmpdir } from 'node:os';
 import { handoffPackSchema, type HandoffPack } from 'devcontour-harness/contracts';
 import { complete, config, fixture, input } from './helpers.ts';
 import { AgentService, capabilities } from '../src/application/agent.ts';
-import { DevContour } from '../src/core/service.ts';
+import { DevContour, specDigest } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { repositorySchema, type Config } from '../src/core/model.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
@@ -40,8 +40,11 @@ import { command } from '../src/runner/process.ts';
 
 const INTENT = 'Okapi intention: finish the payment board before the release';
 
-/** Две выпущенные доски (задача принята, задача упала) и черновая. */
-function boards(h: DevContour) {
+/**
+ * Две выпущенные доски (задача принята, задача упала) и черновая; с `job` —
+ * действующее задание ведущего по доске B.
+ */
+function boards(h: DevContour, options: { job?: boolean } = {}) {
   const a = h.createBoard('Board A', '', 'main');
   const done = h.addTask(a.id, input('Accepted task')).id;
   const failed = h.addTask(a.id, input('Failing task')).id;
@@ -56,6 +59,8 @@ function boards(h: DevContour) {
   const run = h.claim(h.store.read().leader?.owner ?? 'test')!;
   h.fail(run.id, run.token, 'gate failed: expected 2, got 3', false, 'gate');
   h.pause(true);
+  if (options.job)
+    new LeadWorkflow(h).start({ kind: 'board', id: b.id, authorRuntime: 'codex', maxAttempts: 3 });
   return { a: a.id, b: b.id, draft: draft.id, done, failed, other, failedTask: run.taskId };
 }
 
@@ -109,7 +114,7 @@ test('session_handoff: в каталоге только чтения со схе
   assert.deepEqual(Object.keys(schema.properties).sort(), ['boardId', 'format', 'intentions']);
   const f = fixture();
   try {
-    const ids = boards(f.h);
+    const ids = boards(f.h, { job: true });
     const agent = new AgentService(f.h, f.root);
     const events = f.store.lastEventId();
     const revision = f.store.revision();
@@ -139,6 +144,7 @@ test('session_handoff: в каталоге только чтения со схе
       'база, локальные записи и роль controller прежние',
     );
     assert.equal(value.full, undefined, 'пакет уложился в предел: подсказки нет');
+    assert.deepEqual(value.host.liveBoards, [ids.b], 'задание доски B действует');
   } finally {
     f.cleanup();
   }
@@ -308,9 +314,20 @@ test('ExecutionStore.read: вложенное чтение — тот же сн�
     assert.equal(snapshots, 4);
     // Пакет передачи — одно чтение снимка Store на весь пакет (движок уже
     // собран первым вызовом: его сборка читает конфигурацию отдельно).
+    const live = h.createBoard('Board with a live job', '', 'main');
+    h.addTask(live.id, input('Task under the live job'));
+    h.approve(live.id);
+    new LeadWorkflow(h).start({
+      kind: 'board',
+      id: live.id,
+      authorRuntime: 'codex',
+      maxAttempts: 3,
+    });
     devcontourHandoff(h);
     snapshots = 0;
-    handoffPackSchema.parse(devcontourHandoff(h).pack);
+    const withJob = devcontourHandoff(h, { boardId: live.id });
+    handoffPackSchema.parse(withJob.pack);
+    assert.deepEqual(withJob.host.liveBoards, [live.id]);
     assert.equal(snapshots, 1, 'пакет и задания досок читаются одним снимком');
   } finally {
     writer.store.close();
@@ -362,43 +379,44 @@ test('session_handoff: компонентное хранение — центр�
   }
 });
 
+/** Доска с одной утверждённой задачей и пакет по ней. */
+function oneBoard(h: DevContour) {
+  const board = h.createBoard('Board with job', '', 'main');
+  const task = h.addTask(board.id, input('Task under the job')).id;
+  h.approve(board.id);
+  const at = () => {
+    const value = devcontourHandoff(h, { boardId: board.id });
+    return { ...value, pack: handoffPackSchema.parse(value.pack) };
+  };
+  const start = (maxAttempts = 3) =>
+    new LeadWorkflow(h).start({ kind: 'board', id: board.id, authorRuntime: 'codex', maxAttempts });
+  return { board: board.id, task, at, start };
+}
+
+/** Время идёт: метки ISO одной миллисекунды не упорядочены. */
+function tick() {
+  const until = Date.now() + 3;
+  while (Date.now() < until);
+}
+
 test('session_handoff: задание ведущего по доске — задание графа: повтор назначен, восстановления видны', () => {
   const f = fixture();
   try {
-    const board = f.h.createBoard('Board with job', '', 'main');
-    const task = f.h.addTask(board.id, input('Task under the job')).id;
-    f.h.approve(board.id);
-    const at = () => {
-      const value = devcontourHandoff(f.h, { boardId: board.id });
-      return { ...value, pack: handoffPackSchema.parse(value.pack) };
-    };
-    // Свежий workspace: исходная пауза, задания нет — шаг DevContour —
-    // регистрация задания доски, а не «harness run».
-    const fresh = at();
-    assert.equal(fresh.pack.queue.paused, true);
-    assert.equal(fresh.pack.next.command, 'harness run');
-    assert.deepEqual(fresh.host.liveBoards, []);
-    assert.equal(fresh.host.next?.action, 'workflow_start');
-    assert.equal(fresh.host.next?.boardId, board.id);
-    assert.match(fresh.host.next.detail, /workflow_start/);
-    assert.deepEqual(fresh.pack.repairs, []);
-
-    const flow = new LeadWorkflow(f.h);
-    flow.start({ kind: 'board', id: board.id, authorRuntime: 'codex', maxAttempts: 3 });
+    const { board, task, at, start } = oneBoard(f.h);
+    assert.deepEqual(at().pack.repairs, []);
+    start();
     const live = at();
-    assert.deepEqual(live.host.liveBoards, [board.id]);
-    assert.equal(live.host.next?.action, 'wait', 'очередь продолжит задание на сервере');
+    assert.deepEqual(live.host.liveBoards, [board]);
     assert.deepEqual(
       live.pack.repairs.map((r) => ({ graphId: r.graphId, used: r.used })),
-      [{ graphId: board.id, used: 0 }],
+      [{ graphId: board, used: 0 }],
     );
-
     f.h.pause(false);
     const run = f.h.claim('test')!;
     assert.equal(run.taskId, task);
     f.h.fail(run.id, run.token, 'candidate/typecheck: error', false, 'gate');
     const failed = at();
-    const stop = failed.pack.stops.find((s) => s.workId === task || s.works?.includes(task));
+    const stop = failed.pack.stops.find((s) => s.workId === task);
     assert.ok(stop, 'остановка упавшей задачи');
     assert.equal(stop.code, 'GATE_FAILED');
     assert.equal(stop.retryPlanned, true, 'цикл задания повторит задачу в бюджете');
@@ -408,20 +426,168 @@ test('session_handoff: задание ведущего по доске — за�
     assert.equal(work.next.step, 'retry-within-budget');
     assert.equal(failed.pack.repairs.length, 1);
     assert.equal(failed.pack.repairs[0].budget, f.h.config.repairBudget);
+    assert.equal(failed.host.next?.action, 'wait');
   } finally {
     f.cleanup();
   }
 });
 
-test('session_handoff: тексты пакета маскируются секретами окружения контура и токенами forge', () => {
+test('session_handoff: host.next по состоянию — сервер, задание, пауза остановки и человека', () => {
+  // Сервер работает (роль controller жива), задания нет: исходную паузу
+  // снимает только цикл задания доски — шаг workflow_start.
+  {
+    const f = fixture();
+    try {
+      const { board, at, start } = oneBoard(f.h);
+      assert.ok(f.h.leader('server'));
+      const running = at();
+      assert.equal(running.pack.controller?.live, true);
+      assert.equal(running.pack.queue.paused, true);
+      assert.equal(running.host.next?.action, 'workflow_start');
+      assert.equal(running.host.next?.boardId, board);
+      start();
+      const live = at();
+      assert.equal(live.host.next?.action, 'wait', 'задание продолжит работающий сервер');
+      assert.deepEqual(live.host.liveBoards, [board]);
+    } finally {
+      f.cleanup();
+    }
+  }
+  // Пауза штатной остановки при живом controller и без задания.
+  {
+    const f = fixture();
+    try {
+      const { at } = oneBoard(f.h);
+      f.h.pause(true, 'shutdown');
+      assert.ok(f.h.leader('server'));
+      assert.equal(at().host.next?.action, 'workflow_start');
+    } finally {
+      f.cleanup();
+    }
+  }
+  // Пауза человека до начала задания снимает цикл стадии — ждать; после
+  // начала задания — решение пользователя (queue_set).
+  {
+    const f = fixture();
+    try {
+      const { at, start } = oneBoard(f.h);
+      f.h.pause(true);
+      assert.equal(at().host.next?.action, 'queue_set', 'без задания — только решение человека');
+      tick();
+      start();
+      assert.equal(at().host.next?.action, 'wait');
+      tick();
+      f.h.pause(true);
+      assert.equal(f.store.read().pauseReason, 'operator');
+      assert.equal(at().host.next?.action, 'queue_set');
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test('session_handoff: host.next по заданию — упавшее (повтор или решение) и устаревшее', () => {
+  {
+    const f = fixture();
+    try {
+      const { board, at, start } = oneBoard(f.h);
+      const flow = new LeadWorkflow(f.h);
+      const job = start(3);
+      flow.fail(flow.claim(job.key, job.owner)!, 'plan review unavailable');
+      assert.equal(flow.get(job.key, job.owner).status, 'failed');
+      const failed = at();
+      assert.deepEqual(failed.host.liveBoards, []);
+      assert.equal(failed.host.next?.action, 'workflow_retry');
+      assert.equal(failed.host.next?.boardId, board);
+      assert.equal(failed.host.next?.job?.key, job.key);
+      assert.equal(failed.host.next?.job?.repositoryId, job.owner);
+      // Названный шаг исполним: повтор принимает это задание.
+      assert.equal(flow.retry(job.key, job.owner).status, 'queued');
+      assert.equal(at().host.next?.action, 'wait');
+    } finally {
+      f.cleanup();
+    }
+  }
+  {
+    const f = fixture();
+    try {
+      const { at, start } = oneBoard(f.h);
+      const flow = new LeadWorkflow(f.h);
+      const job = start(1);
+      flow.fail(flow.claim(job.key, job.owner)!, 'plan review unavailable');
+      const exhausted = at();
+      assert.equal(exhausted.host.next?.action, 'decide');
+      assert.match(exhausted.host.next.detail, /plan review unavailable/);
+      assert.equal(start(1).key, job.key, 'workflow_start вернул бы то же упавшее задание');
+    } finally {
+      f.cleanup();
+    }
+  }
+  {
+    const f = fixture();
+    try {
+      const board = f.h.createBoard('Board with a stale job', '', 'main');
+      const task = f.h.addTask(board.id, input('Task before the change'));
+      const flow = new LeadWorkflow(f.h);
+      const request = { kind: 'board', id: board.id, authorRuntime: 'codex', maxAttempts: 3 };
+      const job = flow.start(request);
+      f.h.editTask(task.id, { ...input('Task after the change') }, specDigest(task));
+      assert.equal(flow.claim(job.key, job.owner), undefined);
+      assert.equal(flow.get(job.key, job.owner).status, 'stale');
+      f.h.approve(board.id);
+      const stale = devcontourHandoff(f.h, { boardId: board.id });
+      assert.equal(stale.host.next?.action, 'workflow_start');
+      assert.equal(stale.host.next?.job?.status, 'stale');
+      assert.notEqual(flow.start(request).key, job.key, 'новый вход — новое задание');
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test('session_handoff: approvalMode operator — задания не идут, шаг оператора', () => {
+  const f = fixture();
+  try {
+    const h = new DevContour(
+      f.store,
+      config({ checkoutRoot: f.h.config.checkoutRoot, approvalMode: 'operator' }),
+    );
+    const { board, task, at, start } = oneBoard(h);
+    start();
+    h.pause(false);
+    const run = h.claim('test')!;
+    assert.equal(run.taskId, task);
+    h.fail(run.id, run.token, 'candidate/typecheck: error', false, 'gate');
+    const value = at();
+    assert.deepEqual(value.host.liveBoards, [], 'в режиме оператора задания не продолжаются');
+    assert.equal(value.host.next?.action, 'operator');
+    assert.match(value.host.next.detail, /devcontour queue --start/);
+    assert.ok(value.pack.works.some((w) => w.id === task));
+    assert.ok(!value.pack.stops.some((s) => s.workId === task && s.retryPlanned));
+    assert.ok(value.pack.repairs.every((r) => r.graphId === board));
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('session_handoff: маска — секреты контура, политики и профилей инструментов, MCP и forge; короткие наследуемые значения не маскируются', () => {
+  const names = [
+    'DC_HANDOFF_SECRET',
+    'DC_HANDOFF_INHERIT',
+    'DC_HANDOFF_SHORT',
+    'DC_HANDOFF_TOOL',
+    'DC_HANDOFF_MCP',
+  ] as const;
+  const previous = Object.fromEntries(names.map((n) => [n, process.env[n]]));
   const SECRET = 'okapi-secret-value-4815162342';
   const INHERITED = 'okapi-inherited-value-2342';
-  const previous = {
-    secret: process.env.DC_HANDOFF_SECRET,
-    inherit: process.env.DC_HANDOFF_INHERIT,
-  };
+  const TOOL = 'okapi-tool-profile-secret-77';
+  const MCP = 'okapi-mcp-bearer-token-99';
   process.env.DC_HANDOFF_SECRET = SECRET;
   process.env.DC_HANDOFF_INHERIT = INHERITED;
+  process.env.DC_HANDOFF_SHORT = '3';
+  process.env.DC_HANDOFF_TOOL = TOOL;
+  process.env.DC_HANDOFF_MCP = MCP;
   const f = fixture();
   try {
     const h = new DevContour(
@@ -429,35 +595,63 @@ test('session_handoff: тексты пакета маскируются секр
       config({
         checkoutRoot: f.h.config.checkoutRoot,
         environment: {
-          inherit: ['DC_HANDOFF_INHERIT'],
+          inherit: ['DC_HANDOFF_INHERIT', 'DC_HANDOFF_SHORT'],
           values: {},
           secrets: { API_TOKEN: 'DC_HANDOFF_SECRET' },
         },
-      }),
+        toolProfiles: {
+          reviewer: {
+            runtime: 'claude',
+            environment: { inherit: [], values: {}, secrets: { TOOL_TOKEN: 'DC_HANDOFF_TOOL' } },
+            mcp: {
+              docs: {
+                transport: 'http',
+                url: 'https://mcp.example.test/',
+                bearerTokenEnv: 'DC_HANDOFF_MCP',
+                tools: ['search'],
+              },
+            },
+          },
+        },
+      } as unknown as Partial<Config>),
     );
     const board = h.createBoard('Secret board', '', 'main');
     h.addTask(board.id, input('Task with a secret in its error'));
     h.approve(board.id);
     h.pause(false);
     const run = h.claim('test')!;
-    h.fail(run.id, run.token, `token ${SECRET} and ${INHERITED} leaked`, false, 'gate');
+    h.fail(
+      run.id,
+      run.token,
+      `attempt 3 of 3: ${SECRET} ${INHERITED} ${TOOL} ${MCP} leaked`,
+      false,
+      'gate',
+    );
     const text = JSON.stringify(devcontourHandoff(h).pack);
-    assert.ok(text.includes('leaked'), 'текст ошибки в пакете');
-    assert.ok(!text.includes(SECRET), 'секрет профиля замаскирован');
-    assert.ok(!text.includes(INHERITED), 'наследуемое значение замаскировано');
+    assert.ok(text.includes('attempt 3 of 3'), 'короткое наследуемое значение не маскирует текст');
+    assert.ok(text.includes('leaked'));
+    for (const value of [SECRET, INHERITED, TOOL, MCP])
+      assert.ok(!text.includes(value), 'замаскировано: ' + value);
     const forge = handoffRedactor(
       {
         ...h.config,
         forgeConnections: { origin: { tokenEnv: 'DC_HANDOFF_FORGE' } },
       } as unknown as Config,
+      {},
       { DC_HANDOFF_FORGE: 'forge-token-123456789' },
     );
     assert.ok(!forge('auth forge-token-123456789').includes('forge-token-123456789'));
+    // Секрет политики harness без пары в конфигурации — тоже маскируется.
+    const policy = handoffRedactor(
+      h.config,
+      { repositories: [{ environment: { secrets: { X: 'DC_POLICY_ONLY' } } }] },
+      { DC_POLICY_ONLY: 'policy-only-secret-1234' },
+    );
+    assert.ok(!policy('policy-only-secret-1234').includes('policy-only-secret-1234'));
   } finally {
-    if (previous.secret === undefined) delete process.env.DC_HANDOFF_SECRET;
-    else process.env.DC_HANDOFF_SECRET = previous.secret;
-    if (previous.inherit === undefined) delete process.env.DC_HANDOFF_INHERIT;
-    else process.env.DC_HANDOFF_INHERIT = previous.inherit;
+    for (const n of names)
+      if (previous[n] === undefined) delete process.env[n];
+      else process.env[n] = previous[n];
     f.cleanup();
   }
 });
@@ -516,7 +710,7 @@ test('session-handoff: CLI читает базу только для чтени�
     const h = new DevContour(new Store(join(data, 'state.sqlite')), c);
     let ids: ReturnType<typeof boards>;
     try {
-      ids = boards(h);
+      ids = boards(h, { job: true });
     } finally {
       h.store.close();
     }
@@ -548,7 +742,7 @@ test('session-handoff: CLI читает базу только для чтени�
     assert.equal(pack.graphId, ids.a);
     assert.deepEqual(pack.intentions, [INTENT, '--starts with dashes']);
     assert.ok(value.commands['harness run']);
-    assert.deepEqual(value.host.liveBoards, []);
+    assert.deepEqual(value.host.liveBoards, [ids.b]);
     assert.equal(md.code, 0, md.stderr);
     assert.match(md.stdout, /^# Передача контекста/);
     assert.match(md.stdout, /## В DevContour/);

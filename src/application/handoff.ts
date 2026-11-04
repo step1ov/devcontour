@@ -7,7 +7,6 @@
 // тот готовит результат к push/PR человеком.
 import {
   Harness,
-  composeRedactors,
   handoffMarkdown,
   handoffPack,
   redactor,
@@ -21,7 +20,7 @@ import type { DevContour } from '../core/service.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { repositories } from '../core/repositories.ts';
 import { executionOf, toDomain } from '../harness/execution.ts';
-import { availableRedactor } from '../runner/environment.ts';
+import type { DevContourExecutionStore } from '../harness/store.ts';
 
 export const handoffFormats = ['json', 'md'] as const;
 export type HandoffFormat = (typeof handoffFormats)[number];
@@ -51,21 +50,28 @@ export type HandoffRequest = z.infer<typeof handoffRequestInput>;
 
 /**
  * Команды harness в `next.command` пакета (`handoffCommands`) и что делать в
- * DevContour. Controller очереди — работающий сервер контура; очередь доски
- * продолжает её задание ведущего (`workflow_start`): снимает исходную паузу и
- * паузу штатной остановки и чинит упавшие задачи в бюджете восстановлений.
+ * DevContour. Controller очереди — работающий сервер контура; работу доски
+ * продолжает её задание ведущего (`workflow_start`), а не сервер сам по себе.
  */
 export const handoffHostCommands = {
   'harness run':
-    'The running DevContour server is the controller. A board continues under its lead workflow job: workflow_start {"kind": "board", "id": BOARD, "authorRuntime": …} registers it (workflow_status lists jobs); the job loop lifts the initial or shutdown pause and retries failed tasks within the repair budget. Never run harness CLI on this store; host.next names the step for this pack.',
+    'Not a DevContour command. The running server holds the controller role but does not lift pauses itself: a board continues under its lead workflow job (workflow_start {"kind": "board", "id": BOARD, "authorRuntime": …}; workflow_status lists jobs). With approvalMode agent the job loop lifts the initial pause, the shutdown pause and an operator pause set before the job started, and retries failed tasks within the repair budget. With approvalMode operator jobs do not run: the operator starts the queue and retries. host.next names the step for this pack.',
   'harness resume':
     'queue_set {"paused": false}, or devcontour queue --start --workspace …; an operator pause is lifted only on the user\'s decision.',
 } as const;
 
-/** Шаг DevContour для `next.command` пакета: что сделать вместо команды harness. */
+/** Шаг DevContour вместо команды harness: что сделать ведущему агенту или человеку. */
 export interface HandoffHostNext {
-  action: 'workflow_start' | 'wait' | 'queue_set';
+  action: 'workflow_start' | 'workflow_retry' | 'wait' | 'queue_set' | 'decide' | 'operator';
   boardId?: string;
+  /** Задание ведущего, к которому относится шаг (`workflow_retry`, `decide`). */
+  job?: {
+    key: string;
+    repositoryId?: string;
+    status: string;
+    attempts: number;
+    maxAttempts: number;
+  };
   detail: string;
 }
 
@@ -82,6 +88,11 @@ export interface DevContourHandoff {
 /** Владельцы заданий ведущего: workspace и компоненты (как `LeadWorkflow.view`). */
 const ownersOf = (config: Config) => [undefined, ...repositories(config).map((r) => r.id)];
 
+/** Порядок заданий: идущие и ждущие стадии — первыми, затем новые первыми. */
+const jobRank = (job: HarnessJob) => (job.status === 'running' || job.status === 'queued' ? 0 : 1);
+const byLiveness = (a: HarnessJob, b: HarnessJob) =>
+  jobRank(a) - jobRank(b) || (a.startedAt < b.startedAt ? 1 : a.startedAt > b.startedAt ? -1 : 0);
+
 /**
  * Harness для `handoffPack` поверх движка DevContour. `Harness.open` открывает
  * собственную базу harness, а исполнение DevContour идёт движком над его
@@ -92,83 +103,180 @@ const ownersOf = (config: Config) => [undefined, ...repositories(config).map((r)
  * id графа) у любого владельца: пакет и диагнозы видят его счётчик
  * восстановлений, а продолжает ли оно работу, решает очередь заданий
  * DevContour с её продуктовым входом (`LeadWorkflow.queue`). Задания
- * ChangeSet графу не соответствуют и в пакет не входят.
+ * ChangeSet графу не соответствуют и в пакет не входят. В режиме
+ * `approvalMode: operator` цикл ведущего заданий не исполняет
+ * (`LeadRunner.advance`): ни одно задание не продолжается. Список — идущие
+ * и ждущие задания первыми, затем новые первыми (так же упорядочены
+ * `repairs` пакета: у доски бывает несколько заданий).
  */
 function harnessOf(h: DevContour) {
   const { engine } = executionOf(h);
   const queue = new LeadWorkflow(h).queue();
   const owners = ownersOf(h.config);
+  const operator = h.config.approvalMode === 'operator';
   const workflows = {
     list: (): HarnessJob[] =>
       owners
         .flatMap((owner) => queue.list(owner))
         .filter((job) => job.kind === 'board')
-        .map((job) => ({ ...job, kind: 'graph' })),
+        .map((job): HarnessJob => ({ ...job, kind: 'graph' }))
+        .sort(byLiveness),
     continues: (
       job: HarnessJob,
       view: ExecutionView,
       options: { reconfigureApplies?: boolean } = {},
-    ) => queue.continues({ ...job, kind: 'board' }, view, options),
+    ) => !operator && queue.continues({ ...job, kind: 'board' }, view, options),
   };
   const harness = Object.assign(Object.create(Harness.prototype) as Harness, {
     engine,
     policy: engine.policy,
     workflows,
   });
-  return { harness, workflows };
+  return { harness, workflows, engine };
 }
+
+/** Наследуемое значение короче — обычное слово или число, а не учётные данные. */
+const MIN_INHERITED = 8;
 
 /**
- * Маска текстов пакета — та же, что у процессов контура: секреты и
- * наследуемые значения профилей окружения (workspace, компонентов, preview)
- * и токены подключений forge, заданные в окружении читающего процесса.
+ * Маска текстов пакета. Переданная маска заменяет маску пакета по умолчанию
+ * (секреты политики), поэтому здесь собраны все известные значения контура,
+ * заданные в окружении читающего процесса:
+ * - секреты (`secrets`) любого профиля окружения — конфигурации DevContour
+ *   (workspace, компоненты, preview, профили инструментов) и политики
+ *   harness — тем же обходом, что `policySecrets` пакета (его функция не
+ *   экспортирована, поэтому здесь обход той же формы);
+ * - учётные данные MCP профилей инструментов (`env`, `bearerTokenEnv`) и
+ *   токены подключений forge (`tokenEnv`);
+ * - наследуемые значения (`inherit`) не короче 8 знаков: короткие («1»,
+ *   «true») маскировали бы обычный текст.
  */
-export function handoffRedactor(config: Config, source = process.env) {
-  const profiles = [
-    config.environment,
-    ...repositories(config).map((r) => r.environment),
-    config.preview?.environment,
-  ];
-  const tokens = Object.values(config.forgeConnections).flatMap((c) => {
-    const token = c.tokenEnv ? source[c.tokenEnv] : undefined;
-    return token ? [token] : [];
-  });
-  return composeRedactors(availableRedactor(profiles, source), redactor(tokens));
+export function handoffRedactor(config: Config, policy: unknown, source = process.env) {
+  const values = new Set<string>();
+  const add = (name: unknown, min = 1) => {
+    const value = typeof name === 'string' ? source[name] : undefined;
+    if (value && value.length >= min) values.add(value);
+  };
+  const walk = (value: unknown) => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) return value.forEach(walk);
+    for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+      if (key === 'secrets' && v && typeof v === 'object' && !Array.isArray(v))
+        Object.values(v as Record<string, unknown>).forEach((name) => add(name));
+      if (key === 'inherit' && Array.isArray(v))
+        (v as unknown[]).forEach((name) => add(name, MIN_INHERITED));
+      if (key === 'env' && Array.isArray(v)) (v as unknown[]).forEach((name) => add(name));
+      if (key === 'bearerTokenEnv' || key === 'tokenEnv') add(v);
+      walk(v);
+    }
+  };
+  walk(config);
+  walk(policy);
+  return redactor([...values]);
 }
 
-/** Доска шага `next`: доска его задачи или доска пакета. */
-function nextBoard(pack: HandoffPack) {
-  const workId = pack.next.workId;
-  return (workId ? pack.works.find((w) => w.id === workId)?.graphId : undefined) ?? pack.graphId;
+/** Сведения задания для шага хоста. */
+const jobRef = (job: HarnessJob) => ({
+  key: job.key,
+  ...(job.owner ? { repositoryId: job.owner } : {}),
+  status: job.status,
+  attempts: job.attempts,
+  maxAttempts: job.maxAttempts,
+});
+
+interface HostContext {
+  pack: HandoffPack;
+  view: ExecutionView;
+  state: ReturnType<DevContourExecutionStore['stateOf']>;
+  operator: boolean;
+  /** Задания досок (вид графа), идущие первыми. */
+  jobs: HarnessJob[];
+  live: (job: HarnessJob) => boolean;
+  /** Вход задания совпадает с текущим входом доски (иначе задание устарело). */
+  current: (job: HarnessJob) => boolean;
 }
 
-function hostNext(pack: HandoffPack, live: Set<string>): HandoffHostNext | undefined {
-  if (pack.next.command === 'harness resume')
-    return {
-      action: 'queue_set',
-      detail:
-        'Resume dispatch: queue_set {"paused": false} (devcontour queue --start); an operator pause only on the user\'s decision.',
-    };
-  if (pack.next.command !== 'harness run') return undefined;
-  const boardId = nextBoard(pack);
-  if (boardId && live.has(boardId))
+const OPERATOR_STEP =
+  'approvalMode operator: lead workflow jobs do not run. The operator reviews plans and accepts boards in the panel, starts the queue (devcontour queue --start --workspace …) and retries failed tasks (devcontour retry --task ID --workspace …).';
+
+/** Шаг по заданиям доски: ждать, повторить задание, начать новое или решить. */
+function jobStep(boardId: string, ctx: HostContext): HandoffHostNext {
+  const jobs = ctx.jobs.filter((j) => j.id === boardId);
+  if (jobs.some(ctx.live))
     return {
       action: 'wait',
       boardId,
-      detail: `Board ${boardId} has a live lead workflow job: the running DevContour server continues its queue. If the server is stopped, start it (devcontour start --workspace …).`,
+      detail: `Board ${boardId} has a live lead workflow job: the running DevContour server continues it. If the server is stopped, start it (devcontour start --workspace …).`,
     };
-  const id = boardId ? JSON.stringify(boardId) : 'BOARD';
+  const latest = jobs.find((j) => j.status !== 'completed');
+  if (latest?.status === 'failed' && ctx.current(latest)) {
+    if (latest.attempts < latest.maxAttempts)
+      return {
+        action: 'workflow_retry',
+        boardId,
+        job: jobRef(latest),
+        detail: `The lead workflow job of board ${boardId} failed${latest.error ? ': ' + latest.error : ''}. Diagnose it, then workflow_retry {"key": ${JSON.stringify(latest.key)}${latest.owner ? ', "repositoryId": ' + JSON.stringify(latest.owner) : ''}} within its attempts.`,
+      };
+    return {
+      action: 'decide',
+      boardId,
+      job: jobRef(latest),
+      detail: `The lead workflow job of board ${boardId} used all ${latest.maxAttempts} attempts${latest.error ? ': ' + latest.error : ''}. workflow_start returns this failed job until the board input changes: diagnose, then correct the board or tasks (a new input registers a new job) or ask the user.`,
+    };
+  }
+  const id = JSON.stringify(boardId);
   return {
     action: 'workflow_start',
-    ...(boardId ? { boardId } : {}),
-    detail: `No live lead workflow job${boardId ? ' for board ' + boardId : ''}: with the DevContour server running, register workflow_start {"kind": "board", "id": ${id}, "authorRuntime": …}. queue_set {"paused": false} alone resumes dispatch without the job's repairs.`,
+    boardId,
+    ...(latest ? { job: jobRef(latest) } : {}),
+    detail: `No live lead workflow job for board ${boardId}${latest && !ctx.current(latest) ? ' (its job was started on a previous input)' : ''}: with the DevContour server running, register workflow_start {"kind": "board", "id": ${id}, "authorRuntime": …}. queue_set {"paused": false} alone resumes dispatch without the job's pause handling and repairs.`,
   };
 }
 
 /**
+ * Шаг DevContour по состоянию, а не по `next.command` пакета: с работающим
+ * сервером роль controller жива, и пакет команды не называет, хотя исходную
+ * паузу и паузу остановки снимает только цикл задания доски.
+ */
+function hostNext(ctx: HostContext): HandoffHostNext | undefined {
+  const { pack, view, state } = ctx;
+  if (!pack.summary.open) return undefined;
+  if (ctx.operator) return { action: 'operator', detail: OPERATOR_STEP };
+  const workId = pack.next.workId;
+  const boardId = (workId ? view.work(workId)?.graphId : undefined) ?? pack.graphId;
+  const board = boardId && state.boards.some((b) => b.id === boardId) ? boardId : undefined;
+  if (state.paused && state.pauseReason === 'operator') {
+    // Цикл стадии снимает паузу человека, поставленную до начала задания.
+    const lifts =
+      board &&
+      state.pausedAt !== undefined &&
+      ctx.jobs.some((j) => j.id === board && ctx.live(j) && state.pausedAt! < j.startedAt);
+    if (lifts) return jobStep(board, ctx);
+    return {
+      action: 'queue_set',
+      ...(board ? { boardId: board } : {}),
+      detail:
+        'Dispatch is paused by the operator: resume only on the user\'s decision with queue_set {"paused": false} (devcontour queue --start).',
+    };
+  }
+  const controllerStep =
+    pack.next.actor === 'controller' ||
+    pack.next.command === 'harness run' ||
+    ('liftedByRun' in pack.queue && pack.queue.liftedByRun === true);
+  if (!controllerStep) return undefined;
+  if (!board)
+    return {
+      action: 'workflow_start',
+      detail:
+        'Open work waits for the controller: register workflow_start {"kind": "board", "id": BOARD, "authorRuntime": …} for each board without a live lead workflow job (workflow_status lists jobs), with the DevContour server running.',
+    };
+  return jobStep(board, ctx);
+}
+
+/**
  * Пакет передачи контекста workspace или одной доски (до 256 КБ, предел
- * пакета) и приложение DevContour. Только чтение; пакет и действующие
- * задания досок — один снимок хранилища.
+ * пакета) и приложение DevContour. Только чтение; пакет и задания досок —
+ * один снимок хранилища.
  */
 export function devcontourHandoff(h: DevContour, input: HandoffRequest = {}): DevContourHandoff {
   // CLI передаёт флаги как есть: формат id и транспортный предел — той же схемой.
@@ -179,13 +287,15 @@ export function devcontourHandoff(h: DevContour, input: HandoffRequest = {}): De
       400,
     );
   const request = parsed.data;
-  const { harness, workflows } = harnessOf(h);
+  const { harness, workflows, engine } = harnessOf(h);
   const { store } = executionOf(h);
+  const lead = new LeadWorkflow(h);
   const { boardId } = request;
   try {
     return store.read((v) => {
+      const state = store.stateOf(v);
       if (boardId !== undefined) {
-        if (!store.stateOf(v).boards.some((b) => b.id === boardId))
+        if (!state.boards.some((b) => b.id === boardId))
           throw new DomainError('Доска не найдена: ' + boardId, 404);
         if (!v.graph(boardId))
           throw new DomainError(
@@ -196,16 +306,38 @@ export function devcontourHandoff(h: DevContour, input: HandoffRequest = {}): De
       const pack = handoffPack(harness, {
         ...(boardId !== undefined ? { graphId: boardId } : {}),
         ...(request.intentions ? { intentions: request.intentions } : {}),
-        redact: handoffRedactor(h.config),
+        redact: handoffRedactor(h.config, engine.policy),
       });
-      const live = new Set(
-        workflows
-          .list()
-          .filter((job) => workflows.continues(job, v))
-          .map((job) => job.id),
-      );
-      const next = hostNext(pack, live);
-      return { pack, host: { ...(next ? { next } : {}), liveBoards: [...live] } };
+      const options = { reconfigureApplies: engine.reconfigureApplies(v) };
+      const jobs = workflows.list();
+      const live = (job: HarnessJob) => workflows.continues(job, v, options);
+      // Вход доски — правило `LeadWorkflow.staleBoards`: digest и владелец.
+      const inputs = new Map<string, { digest: string; owner?: string } | undefined>();
+      const inputOf = (id: string) => {
+        if (!inputs.has(id))
+          try {
+            inputs.set(id, lead.input('board', id, state));
+          } catch (error) {
+            if (!(error instanceof DomainError)) throw error;
+            inputs.set(id, undefined);
+          }
+        return inputs.get(id);
+      };
+      const current = (job: HarnessJob) => {
+        const bound = inputOf(job.id);
+        return !!bound && bound.digest === job.inputDigest && bound.owner === job.owner;
+      };
+      const liveBoards = [...new Set(jobs.filter(live).map((j) => j.id))];
+      const next = hostNext({
+        pack,
+        view: v,
+        state,
+        operator: h.config.approvalMode === 'operator',
+        jobs,
+        live,
+        current,
+      });
+      return { pack, host: { ...(next ? { next } : {}), liveBoards } };
     });
   } catch (error) {
     throw toDomain(error);

@@ -18,5 +18,5 @@
 // Намеренное изменение: новая операция только чтения session_handoff (пакет передачи
 // контекста новой сессии ведущего агента) после value_report; прочие
 // операции байтово прежние.
-export const CATALOG_DIGEST = '4694766cea00f36bdceb2eaea621ef978c64edd5bc9cad44a85699258a9cd230';
+export const CATALOG_DIGEST = 'f9c3e55e95653af9596c360d28d564a63ca71c157ac52ebe84e0272508c43bb2';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';
