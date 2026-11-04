@@ -60,10 +60,31 @@ test('Баннер виден на каждом экране, пока очер�
     );
     await expect(banner).toContainText('Проверка базы не пройдена');
   }
+  // Экран доски — тот же баннер, и причина с «Что сделать» видна целиком, а
+  // не обрезана высотой ячейки «Сейчас».
+  const cell = page.getByRole('group', { name: 'Исполнители и причины ожидания' });
+  const unclipped = async () => {
+    const [b, c] = [await banner.boundingBox(), await cell.boundingBox()];
+    return (
+      !!b &&
+      !!c &&
+      b.y >= c.y - 1 &&
+      b.y + b.height <= c.y + c.height + 1 &&
+      (await cell.evaluate((e) => e.scrollHeight <= e.clientHeight + 1))
+    );
+  };
+  await page.goto('/?tab=graph');
+  await expect(page.getByRole('tab', { name: 'Граф', exact: true })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
+  await expect(banner).toContainText('Что сделать: ' + stopped.action);
+  await expect.poll(unclipped).toBe(true);
   expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
   // Длинная причина не растягивает мобильный экран.
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(banner).toBeVisible();
+  await expect.poll(unclipped).toBe(true);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(
     true,
   );

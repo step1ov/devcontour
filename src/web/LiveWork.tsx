@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react';
 import { Bot, Eye } from 'lucide-react';
 import type { Run, Task } from '../core/model.ts';
 import { Button } from '@/ui/button.tsx';
@@ -122,6 +123,18 @@ export function LiveWork({
   // строк — прокрутка внутри ячейки.
   const slots = Math.max(1, Math.min(state.config.concurrency, 2));
   const rows = flows.length + work.length + stuck.length + (stopped ? 1 : 0);
+  const list = useRef<HTMLDivElement>(null);
+  const [overflowing, setOverflowing] = useState(false);
+  useEffect(() => {
+    const element = list.current;
+    if (!element) return;
+    const check = () => setOverflowing(element.scrollHeight > element.clientHeight + 1);
+    check();
+    const observer = new ResizeObserver(check);
+    observer.observe(element);
+    for (const child of element.children) observer.observe(child);
+    return () => observer.disconnect();
+  });
   return (
     <section aria-label="Сейчас работают" className="grid min-w-0 content-start gap-1 px-3 py-2">
       <div className="flex h-5 min-w-0 items-center gap-2 overflow-hidden text-xs whitespace-nowrap">
@@ -150,13 +163,20 @@ export function LiveWork({
           <span className="text-muted-foreground tabular">свободно мест {free}</span>
         )}
       </div>
-      {/* Прокрутка внутри зарезервированной высоты доступна и с клавиатуры. */}
+      {/* Высота зарезервирована под исполнителей. Остановка очереди растягивает
+          ячейку: причина и «Что сделать» видны целиком, а не обрезаны.
+          Прокрутка лишних строк доступна и с клавиатуры. */}
       <div
+        ref={list}
         role="group"
         aria-label="Исполнители и причины ожидания"
-        tabIndex={0}
+        tabIndex={overflowing ? 0 : undefined}
         className="grid min-w-0 content-start gap-1 overflow-y-auto rounded-xs"
-        style={{ height: `calc(var(--live-row-height) * ${slots})` }}
+        style={
+          stopped
+            ? { minHeight: `calc(var(--live-row-height) * ${slots})` }
+            : { height: `calc(var(--live-row-height) * ${slots})` }
+        }
       >
         {stopped && <QueueStopBanner queue={queue} compact />}
         {flows.length > 0 && (
@@ -253,7 +273,7 @@ export function LiveWork({
         )}
         {/* Свободные места — приглушённые строки той же высоты: появление
             исполнителя занимает место, а не раздвигает полосу. */}
-        {Array.from({ length: Math.max(0, Math.min(free, slots - rows)) }, (_, i) => (
+        {Array.from({ length: stopped ? 0 : Math.max(0, Math.min(free, slots - rows)) }, (_, i) => (
           <div
             key={'free-' + i}
             className="text-faint flex h-(--live-row-height) items-center border border-dashed border-rule px-2 text-xs rounded-sm"
