@@ -54,7 +54,10 @@ function gate(g: Gate) {
     ...(g.dependsOn ? { dependsOn: g.dependsOn } : {}),
     ...(g.cwd ? { cwd: g.cwd } : {}),
     ...(g.resources ? { resources: g.resources } : {}),
-    ...(g.artifacts ? { artifacts: g.artifacts } : {}),
+    // У gate workspace по умолчанию пустой список: пустой не передаётся,
+    // иначе менялся digest политики прежних попыток и gate задачи не проходил
+    // схему harness (1–16 путей).
+    ...(g.artifacts?.length ? { artifacts: g.artifacts } : {}),
   };
 }
 

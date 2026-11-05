@@ -798,21 +798,25 @@ export interface Gate {
    */
   artifacts?: string[];
 }
+/** Общие поля gate задачи и gate workspace. */
+const gateFields = z.object({
+  id,
+  dependsOn: z.array(id).optional(),
+  cwd: relativePath.optional(),
+  resources: z.array(id).optional(),
+  kind: z.enum(['check', 'test']),
+  command: z.array(z.string().min(1)).min(1),
+  timeoutMs: z.number().positive().default(120000),
+  report: z.object({ type: z.literal('junit'), path: z.string().min(1) }).optional(),
+  property: z.object({ path: relativePath.optional() }).optional(),
+});
+/**
+ * `artifacts` gate задачи — расширением, а не общим полем: у gate workspace
+ * своё поле с другим умолчанием, и общее поле сдвинуло бы его в середину
+ * объекта, изменив digest политики прежних проверок.
+ */
 export const gateList = z
-  .array(
-    z.object({
-      id,
-      dependsOn: z.array(id).optional(),
-      cwd: relativePath.optional(),
-      resources: z.array(id).optional(),
-      kind: z.enum(['check', 'test']),
-      command: z.array(z.string().min(1)).min(1),
-      timeoutMs: z.number().positive().default(120000),
-      report: z.object({ type: z.literal('junit'), path: z.string().min(1) }).optional(),
-      property: z.object({ path: relativePath.optional() }).optional(),
-      artifacts: z.array(relativePath).min(1).max(16).optional(),
-    }),
-  )
+  .array(gateFields.extend({ artifacts: z.array(relativePath).min(1).max(16).optional() }))
   .min(1);
 const bindingFields = z.object({
   runtime: z.enum(['codex', 'claude', 'demo']),
@@ -903,7 +907,7 @@ export const repositorySchema = z.object({
     .default(['.github/', '.githooks/', 'package.json', 'package-lock.json']),
 });
 export type Repository = z.infer<typeof repositorySchema>;
-export const workspaceGateSchema = gateList.element.extend({
+export const workspaceGateSchema = gateFields.extend({
   repositoryId: id,
   artifacts: z.array(z.string().min(1)).default([]),
 });
