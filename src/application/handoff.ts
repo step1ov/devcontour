@@ -279,7 +279,7 @@ function loopText(o: LoopOutlook) {
 
 /** Как снять остановку цикла: задачу чинит человек или ведущий, не повтор задания. */
 const STOP_REMEDY =
-  'Diagnose it; fix or retry the task by hand (devcontour retry --task ID [--reset --reason TEXT]; a property episode — recovery_decide) or ask the user. Retrying the job (workflow_retry) before that fails again.';
+  'Diagnose it; fix or retry the task by hand (MCP task_retry, or devcontour retry --task ID --by host [--reset --reason TEXT]; a property episode — recovery_decide) or ask the user. Retrying the job (workflow_retry) before that fails again.';
 
 interface HostContext {
   h: DevContour;
@@ -420,7 +420,7 @@ function boardStep(boardId: string, ctx: HostContext): HandoffHostNext | undefin
     detail:
       `No live lead workflow job for board ${boardId}${previous ? ` (its ${previous.status} job was started on another input)` : ''}: with the DevContour server running, register workflow_start {"kind": "board", "id": ${JSON.stringify(boardId)}, "authorRuntime": …}; queue_set {"paused": false} alone resumes dispatch without the job's pause handling and repairs.` +
       (running
-        ? ' An attempt is running: the server finishes it without a job; the board can also be continued by hand (devcontour retry, accept; docs/cli.md).'
+        ? ' An attempt is running: the server finishes it without a job; the board can also be continued by hand (MCP task_retry or devcontour retry --by host, accept; docs/cli.md).'
         : ''),
   };
 }

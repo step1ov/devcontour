@@ -476,6 +476,14 @@ test('A stale run base that is a pure fast-forward moves on the next tick; a div
       ],
     });
     assert.equal(forwarded().length, 1, 'перемотка — одно событие, не ручное вмешательство');
+    // Событие harness: сдвиг базы перемоткой очереди — актёр controller.
+    assert.deepEqual(
+      executionOf(f.h)
+        .store.events(0, 500)
+        .filter((e) => e.type === 'base.moved')
+        .map((e) => (e as { payload?: { by?: string } }).payload?.by),
+      ['controller'],
+    );
     // Как после ручного переноса: до проверки гейтами новая база не выдаётся.
     const checked = f.store.read();
     assert.equal(checked.paused, true);

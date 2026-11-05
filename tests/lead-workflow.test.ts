@@ -1,3 +1,4 @@
+import { executionOf } from '../src/harness/execution.ts';
 import { test } from 'node:test';
 import { testDemo } from './demo-pool.ts';
 import assert from 'node:assert/strict';
@@ -544,6 +545,14 @@ test('base-update в режиме агента: работающая очере�
     assert.deepEqual(state.baseMoves?.bases, [
       { repositoryId: 'main', from: moved.updated[0].from, to },
     ]);
+    // Событие harness: base-update — сдвиг базы человеком (`operator`).
+    assert.deepEqual(
+      executionOf(h)
+        .store.events(0, 500)
+        .filter((e) => e.type === 'base.moved')
+        .map((e) => (e as { payload?: { by?: string } }).payload?.by),
+      ['operator'],
+    );
     h.pause(false);
     // Отказ переноса (рабочая ветка разошлась с базой и конфликтует) снимает
     // поставленное им ожидание; очередь остаётся работающей.

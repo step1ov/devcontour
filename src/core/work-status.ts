@@ -122,7 +122,7 @@ export function queueStopView(
         wait,
         reason === 'base-check' && agent && options.workflowActive && !held
           ? checkFailed
-            ? 'Исправьте базу и выполните devcontour base-update — цикл ведущего проверит её снова'
+            ? 'Исправьте базу и выполните devcontour base-update (ведущий агент — с --by host) — цикл ведущего проверит её снова'
             : 'Цикл ведущего проверит базу gates и продолжит выдачу сам'
           : 'Проверьте базу gates, затем выполните ' +
             start +
@@ -152,7 +152,8 @@ export function queueStopView(
           ? [
               detail,
               /base-update/.test(detail)
-                ? 'Выполните devcontour base-update, затем проверьте базу и ' + start
+                ? 'Выполните devcontour base-update (ведущий агент — с --by host), затем проверьте базу и ' +
+                  start
                 : 'Устраните причину и выполните ' + start,
               true,
             ]

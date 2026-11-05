@@ -115,7 +115,7 @@ export class LeadRunner {
       const decided = repairStep(this.h, job, taskIds);
       if (!decided || decided.action === 'stop') return decided;
       this.workflow.repair(job, `repair:${decided.kind}`, () => {
-        this.h.retry(decided.taskId);
+        this.h.retry(decided.taskId, undefined, 'recovery');
         // Отказ окружения останавливает выдачу — иначе очередь сожгла бы
         // бюджет каждой задачи на одной и той же внешней причине. Раз причина
         // признана разовой и повтор назначен, выдачу нужно вернуть.
@@ -213,7 +213,7 @@ export class LeadRunner {
     const after = afterStep(task);
     if (after.kind === 'none') return false;
     if (after.kind === 'stop') throw new Error(after.reason);
-    if (after.kind === 'retry-task') this.h.retry(taskId);
+    if (after.kind === 'retry-task') this.h.retry(taskId, undefined, 'recovery');
     return true;
   }
   private boardRoot(job: WorkflowJob) {

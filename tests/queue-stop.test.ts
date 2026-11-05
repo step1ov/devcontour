@@ -71,7 +71,8 @@ test('Остановка очереди одинакова во всех отв�
     assert.match(runtime.stopReason ?? '', /^База прогонов отстала от рабочей ветки/);
     assert.equal(
       runtime.action,
-      'Выполните devcontour base-update, затем проверьте базу и ' + START,
+      'Выполните devcontour base-update (ведущий агент — с --by host), затем проверьте базу и ' +
+        START,
     );
 
     // Перенос базы: очередь ждёт проверки базы; причина — описание ожидания,
@@ -311,7 +312,7 @@ test('Подсказка учитывает ожидание базы при о�
   );
   assert.equal(
     checkFailed.action,
-    'Исправьте базу и выполните devcontour base-update — цикл ведущего проверит её снова',
+    'Исправьте базу и выполните devcontour base-update (ведущий агент — с --by host) — цикл ведущего проверит её снова',
   );
   assert.doesNotMatch(checkFailed.action ?? '', /queue --start/);
 
@@ -363,7 +364,8 @@ test('CLI queue без флага печатает причину и подск�
       assert.equal(view.stopReason, STALE.replace(/^TaskFailure: /, ''));
       assert.equal(
         view.action,
-        'Выполните devcontour base-update, затем проверьте базу и ' + START,
+        'Выполните devcontour base-update (ведущий агент — с --by host), затем проверьте базу и ' +
+          START,
       );
       // Очередь идёт — причины нет.
       h.pause(false);

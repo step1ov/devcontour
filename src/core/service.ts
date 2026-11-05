@@ -20,8 +20,10 @@ import {
   uncoveredGates as harnessUncoveredGates,
   gatePrerequisites,
   standaloneScope,
+  type CancelActor,
   type CodedIssue,
   type PropertyRecovery,
+  type RetryActor,
 } from 'devcontour-harness';
 import { closeEpisodeIfBasisChanged, storyGuard } from '../harness/host.ts';
 import { referenceKey, type StoryBinding } from './intent.ts';
@@ -1808,14 +1810,16 @@ export class DevContour {
   }
   // Причина отмены остаётся в журнале: отменённая находка без неё неотличима
   // от забытой. Панель отменяет без причины, ведущий агент — с ней.
-  cancel(id: string, reason?: string) {
+  // `by` — актёр события `work.cancelled`: `operator` — человек (CLI, панель),
+  // `host` — актёр не назван (отчёт считает такую задачу неизвестной).
+  cancel(id: string, reason?: string, by: CancelActor = 'host') {
     const { store, engine } = executionOf(this);
     return domain(() =>
       store.host('task.cancelled', (ht) => {
         const t = task(ht.state, id);
         if (t.status === 'done')
           throw new DomainError('Принятый результат нельзя отменить; создайте корректировку');
-        engine.cancel(id, reason);
+        engine.cancel(id, reason, by);
         const data = reason ? { taskId: id, reason } : { taskId: id };
         ht.journal(data);
         return data;
@@ -1917,7 +1921,12 @@ export class DevContour {
       return rebound;
     });
   }
-  retry(id: string, reset?: { reason: string }) {
+  /**
+   * `by` — актёр события `work.retried`: `operator` — человек (CLI, панель),
+   * `recovery` — восстановление цикла ведущего по правилу, `host` — актёр не
+   * назван (по умолчанию; отчёт считает такую задачу неизвестной).
+   */
+  retry(id: string, reset?: { reason: string }, by: RetryActor = 'host') {
     const { store, engine } = executionOf(this);
     return domain(() =>
       store.host('task.retry', (ht) => {
@@ -1929,7 +1938,7 @@ export class DevContour {
           throw new DomainError('Повтор доступен после сбоя или отмены');
         const spent = t.attempt;
         const exhausted = t.attempt >= this.config.maxAttempts;
-        engine.retry(id, reset);
+        engine.retry(id, reset, by);
         const data =
           exhausted && reset
             ? { taskId: id, reset: { spent, reason: reset.reason.trim() } }

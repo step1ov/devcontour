@@ -81,6 +81,15 @@ const args = process.argv.slice(2),
 const option = (name: string, fallback: string) =>
   args.includes(name) ? args[args.indexOf(name) + 1] : fallback;
 /**
+ * Актёр вмешательства (`retry`, `cancel`, `base-update`): `operator` —
+ * человек (по умолчанию), `host` — ведущий агент, выполняющий подсказку.
+ */
+const actorOf = (): 'operator' | 'host' => {
+  const by = option('--by', 'operator');
+  if (by !== 'operator' && by !== 'host') throw new Error('--by: ожидается operator или host');
+  return by;
+};
+/**
  * Файл предложения из `--file`. Флаг без значения (или со следующим флагом
  * вместо пути) — понятный отказ, а не EISDIR от чтения каталога.
  */
@@ -847,7 +856,7 @@ async function main() {
           next: 'Перезапустите сервер, чтобы загрузить закреплённый контекст.',
         };
       } else if (operation === 'base-update') {
-        result = await baseUpdateOperation(h, root);
+        result = await baseUpdateOperation(h, root, { by: actorOf() });
       } else if (operation === 'context-adopt') {
         const s = store.read();
         if (!s.paused) throw new Error('Сначала приостановите очередь: queue --pause');
@@ -1018,9 +1027,12 @@ async function main() {
       } else if (operation === 'reopen')
         result = h.reopen(option('--task', ''), option('--reason', ''));
       else if (operation === 'retry')
+        // Команда CLI — действие человека (`operator`, как `harness retry`);
+        // ведущий агент передаёт `--by host`.
         result = h.retry(
           option('--task', ''),
           args.includes('--reset') ? { reason: option('--reason', '') } : undefined,
+          actorOf(),
         );
       else if (operation === 'edit-board')
         result = h.editBoard(option('--board', ''), {
@@ -1030,7 +1042,7 @@ async function main() {
       else if (operation === 'cancel') {
         if (!args.includes('--reason') || !option('--reason', '').trim())
           throw new Error('Укажите --reason: почему задача больше не нужна');
-        result = h.cancel(option('--task', ''), option('--reason', ''));
+        result = h.cancel(option('--task', ''), option('--reason', ''), actorOf());
       } else if (operation === 'task-feature')
         result = h.bindFeature(option('--task', ''), option('--feature', ''));
       else if (operation === 'task-story') {
