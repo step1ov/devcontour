@@ -1249,7 +1249,13 @@ test('session_handoff: предел ответа 64 KiB на настоящем 
         input: { format, intentions },
       }) as unknown as JsonHandoff | MdHandoff;
       const bytes = Buffer.byteLength(JSON.stringify(value));
-      assert.ok(bytes <= 65536, format + ' в пределе ответа');
+      assert.ok(bytes <= 65536, format + ': весь ответ в пределе каталога');
+      // Без подсказки `full` ответ — в пределе операции.
+      const response = JSON.stringify({ ...value, full: undefined });
+      assert.ok(
+        Buffer.byteLength(response) <= AGENT_HANDOFF_BYTES,
+        format + ': ответ без подсказки в пределе операции',
+      );
       // Урезано не сильно ниже предела: не дальше 10% от него.
       assert.ok(
         bytes >= AGENT_HANDOFF_BYTES * 0.9,

@@ -635,30 +635,34 @@ export function devcontourHandoffWithin(
           measure: limit.format === 'md' ? 'markdown' : 'json',
         });
       let maxBytes = clamp(limit.bytes - (size(pack) - own));
-      let best: HandoffPack | undefined;
+      let best: { pack: HandoffPack; size: number } | undefined;
       let last = pack;
+      /** Наименьший предел пакета, ответ которого превысил предел ответа. */
+      let overshot = Infinity;
       // Не больше 6 сборок: превышение — шаг вниз на превышение, запас больше
-      // 2% предела — шаг вверх на запас (в пределе ответа остаётся лучший).
+      // 2% предела — шаг вверх на запас, но ниже предела, уже давшего
+      // превышение (в пределе ответа остаётся лучший).
       for (let i = 0; i < 6; i++) {
         last = build(maxBytes);
         const got = size(last);
         if (got <= limit.bytes) {
-          if (!best || got > size(best)) best = last;
+          if (!best || got > best.size) best = { pack: last, size: got };
           const slack = limit.bytes - got;
           if (
             slack <= limit.bytes * 0.02 ||
             droppedOf(last.truncated) === droppedOf(pack.truncated)
           )
             break;
-          const up = clamp(maxBytes + slack);
-          if (up === maxBytes) break;
+          const up = Math.min(clamp(maxBytes + slack), overshot - 1);
+          if (up <= maxBytes) break;
           maxBytes = up;
         } else {
+          overshot = Math.min(overshot, maxBytes);
           if (maxBytes === HANDOFF_MIN_BYTES) break;
           maxBytes = clamp(maxBytes - (got - limit.bytes));
         }
       }
-      const fitted = best ?? last;
+      const fitted = best?.pack ?? last;
       return {
         value: { pack: fitted, host },
         trimmed: droppedOf(fitted.truncated) > droppedOf(pack.truncated),
