@@ -151,11 +151,11 @@ async function logLines(directory: string): Promise<VisualLogInput> {
 /** Некорректная спецификация — провал отчёта, а не отсутствие отчёта. */
 export const VISUAL_SPEC_CASE = { classname: 'visual.spec', name: 'valid' } as const;
 
-async function runCases(input: { spec: string; observations: string }): Promise<VisualCase[]> {
-  let spec: VisualSpec;
+/** Спецификация из файла; неверная — провал `visual.spec.valid` с причиной. */
+export async function readVisualSpec(path: string): Promise<VisualSpec | VisualCase> {
   try {
-    const text = (await bounded(input.spec, SPEC_LIMIT)).toString('utf8');
-    spec = visualSpecSchema.parse(JSON.parse(text));
+    const text = (await bounded(path, SPEC_LIMIT)).toString('utf8');
+    return visualSpecSchema.parse(JSON.parse(text));
   } catch (error) {
     const issues =
       error && typeof error === 'object' && 'issues' in error && Array.isArray(error.issues)
@@ -164,32 +164,55 @@ async function runCases(input: { spec: string; observations: string }): Promise<
             .map((i) => `${i.path.map(String).join('.') || '(корень)'}: ${i.message}`)
             .join('\n')
         : message(error);
-    return [
-      { ...VISUAL_SPEC_CASE, status: 'failed', message: `спецификация не принята\n${issues}` },
-    ];
+    return { ...VISUAL_SPEC_CASE, status: 'failed', message: `спецификация не принята\n${issues}` };
   }
-  const states: Record<string, VisualStateInput> = {};
-  for (const state of spec.states) states[state.id] = await stateInput(input.observations, state);
-  return evaluateVisual(spec, states, spec.log ? await logLines(input.observations) : undefined);
 }
+export const isVisualCase = (value: VisualSpec | VisualCase): value is VisualCase =>
+  'classname' in value;
+
+/** Утверждения спецификации над каталогом наблюдений. */
+export async function observedCases(spec: VisualSpec, observations: string) {
+  const states: Record<string, VisualStateInput> = {};
+  for (const state of spec.states) states[state.id] = await stateInput(observations, state);
+  return evaluateVisual(spec, states, spec.log ? await logLines(observations) : undefined);
+}
+
+async function runCases(input: { spec: string; observations: string }): Promise<VisualCase[]> {
+  const spec = await readVisualSpec(input.spec);
+  return isVisualCase(spec) ? [spec] : observedCases(spec, input.observations);
+}
+
+/** JUnit прогона и сводка для stdout; `exitCode` различает провал и сбой окружения. */
+export async function writeVisualReport(report: string, cases: VisualCase[]) {
+  await mkdir(dirname(report), { recursive: true });
+  await writeFile(report, visualJunit(cases));
+  const count = (status: VisualCase['status']) => cases.filter((c) => c.status === status).length;
+  const failures = count('failed'),
+    errors = count('error');
+  const passed = cases.length > 0 && count('passed') === cases.length;
+  return {
+    report,
+    tests: cases.length,
+    failures,
+    errors,
+    passed,
+    /**
+     * 0 — всё прошло; 1 — провал утверждения или пустой прогон; 75
+     * (EX_TEMPFAIL) — провалов нет, но есть ошибки окружения.
+     */
+    exitCode: passed ? 0 : failures || !cases.length ? 1 : VISUAL_ENVIRONMENT_EXIT,
+    failed: cases
+      .filter((c) => c.status !== 'passed')
+      .map((c) => `${c.classname}.${c.name}: ${(c.message ?? '').split('\n')[0]}`),
+  };
+}
+/** Код выхода, когда не прошли только проверки с ошибкой окружения. */
+export const VISUAL_ENVIRONMENT_EXIT = 75;
 
 export async function evaluateVisualRun(input: {
   spec: string;
   observations: string;
   report: string;
 }) {
-  const cases = await runCases(input);
-  await mkdir(dirname(input.report), { recursive: true });
-  await writeFile(input.report, visualJunit(cases));
-  const count = (status: VisualCase['status']) => cases.filter((c) => c.status === status).length;
-  return {
-    report: input.report,
-    tests: cases.length,
-    failures: count('failed'),
-    errors: count('error'),
-    passed: cases.length > 0 && count('passed') === cases.length,
-    failed: cases
-      .filter((c) => c.status !== 'passed')
-      .map((c) => `${c.classname}.${c.name}: ${(c.message ?? '').split('\n')[0]}`),
-  };
+  return writeVisualReport(input.report, await runCases(input));
 }

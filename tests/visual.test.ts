@@ -42,7 +42,7 @@ const frames = (input: Partial<VisualFramesInput> = {}): VisualFrames => {
 const assertion = <K extends VisualAssertion['kind']>(value: unknown) =>
   visualSpecSchema.parse({
     version: 1,
-    platform: 'ios-simulator',
+    platform: 'ios',
     states: [{ id: 'UI-form-focused', assert: [value] }],
   }).states[0].assert[0] as Extract<VisualAssertion, { kind: K }>;
 
@@ -272,7 +272,7 @@ test('background: порог настраивается, поверхности 
 test('log-forbid: запрещённая строка падает, разрешённая явно и чистый журнал проходят', () => {
   const log = visualSpecSchema.parse({
     version: 1,
-    platform: 'ios-simulator',
+    platform: 'ios',
     log: {
       forbid: ['deprecated', '^WARN\\b'],
       allow: [{ pattern: 'Require cycle', reason: 'известный долг' }],
@@ -291,7 +291,7 @@ test('log-forbid: запрещённая строка падает, разреш
 test('Спецификация строгая: формат id, пределы состояний, бюджет и лишние поля', () => {
   const base = {
     version: 1,
-    platform: 'ios-simulator',
+    platform: 'ios',
     states: [{ id: 'UI-form-empty', assert: [{ kind: 'visible', element: 'a' }] }],
   };
   assert.ok(visualSpecSchema.safeParse(base).success);
@@ -347,7 +347,7 @@ test('Спецификация строгая: формат id, пределы �
 test('JUnit: testcase на каждое утверждение, ошибка окружения — error, пустой прогон — провал', () => {
   const spec = visualSpecSchema.parse({
     version: 1,
-    platform: 'ios-simulator',
+    platform: 'ios',
     log: { forbid: ['deprecated'] },
     states: [
       {
@@ -411,7 +411,7 @@ const specWith = (
 ) =>
   visualSpecSchema.safeParse({
     version: 1,
-    platform: 'ios-simulator',
+    platform: 'ios',
     states: [{ id: 'UI-form-empty', assert }],
     ...extra,
   }).success;
@@ -423,7 +423,7 @@ test('Шаблоны журнала: без групп, квантификато
     assert.equal(specWith({ log: { forbid: [good] } }), true, good);
   const log = visualSpecSchema.parse({
     version: 1,
-    platform: 'ios-simulator',
+    platform: 'ios',
     log: { forbid: ['deprecated', '^WARN\\b', 'warning: [a-z]'] },
     states: [{ id: 'UI-form-empty', assert: [{ kind: 'visible', element: 'a' }] }],
   }).log!;
@@ -536,7 +536,7 @@ test('background: клавиатура не считается фоном при
 test('log-forbid: пустой журнал — ошибка окружения, а не чистый журнал', () => {
   const log = visualSpecSchema.parse({
     version: 1,
-    platform: 'ios-simulator',
+    platform: 'ios',
     log: { forbid: ['deprecated'] },
     states: [{ id: 'UI-form-empty', assert: [{ kind: 'visible', element: 'a' }] }],
   }).log!;
@@ -579,7 +579,7 @@ test('Разрешения журнала: обходы запрета откл�
 test('log-forbid: число строк, пропущенных каждым разрешением, попадает в system-out', () => {
   const spec = visualSpecSchema.parse({
     version: 1,
-    platform: 'ios-simulator',
+    platform: 'ios',
     log: {
       forbid: ['deprecated|obsolete', '^WARN\\b'],
       allow: [{ pattern: 'WARN Require cycle', reason: 'известный долг' }],
@@ -607,7 +607,7 @@ test('log-forbid: число строк, пропущенных каждым р�
 // Состояние с вводом и отправкой: шаги 0, 2 и 3 — касания, у каждого своя запись.
 const reachSpec = visualSpecSchema.parse({
   version: 1,
-  platform: 'ios-simulator',
+  platform: 'ios',
   states: [
     {
       id: 'UI-form-sent',
@@ -933,7 +933,7 @@ test('hit: перекрытие той же рамкой — промах, по�
 test('reach: для clear after снят до удаления — меняться текст не должен', () => {
   const spec = visualSpecSchema.parse({
     version: 1,
-    platform: 'ios-simulator',
+    platform: 'ios',
     states: [
       {
         id: 'UI-form-sent',
@@ -981,7 +981,7 @@ test('Шаги: scroll, clear и селектор по префиксу стро
   const steps = (value: unknown[]) =>
     visualSpecSchema.safeParse({
       version: 1,
-      platform: 'ios-simulator',
+      platform: 'ios',
       states: [{ id: 'UI-form-empty', steps: value, assert: [{ kind: 'visible', element: 'a' }] }],
     }).success;
   assert.ok(
@@ -1007,7 +1007,7 @@ test('Шаги: scroll, clear и селектор по префиксу стро
 test('background: доля и цвета пишутся в system-out и при зелёном результате', () => {
   const spec = visualSpecSchema.parse({
     version: 1,
-    platform: 'ios-simulator',
+    platform: 'ios',
     states: [{ id: 'UI-form-empty', assert: [{ kind: 'background' }] }],
   });
   const run = (paint: (x: number, y: number) => [number, number, number]) =>
@@ -1023,7 +1023,7 @@ test('background: доля и цвета пишутся в system-out и при 
 test('log: окна журнала по состояниям называют состояние запрещённой строки', () => {
   const spec = visualSpecSchema.parse({
     version: 1,
-    platform: 'ios-simulator',
+    platform: 'ios',
     log: { forbid: ['deprecated'] },
     states: [
       { id: 'UI-form-empty', assert: [{ kind: 'visible', element: 'a' }] },
@@ -1094,7 +1094,7 @@ test('decorative: строгая проверка — без повторов, �
   const parse = (value: Record<string, unknown>, steps: unknown[] = [{ tap: 'submit' }]) =>
     visualSpecSchema.safeParse({
       version: 1,
-      platform: 'ios-simulator',
+      platform: 'ios',
       states: [
         {
           id: 'UI-form-empty',

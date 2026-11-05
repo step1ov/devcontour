@@ -303,7 +303,13 @@ export type VisualState = z.infer<typeof state>;
 export const visualSpecSchema = z
   .strictObject({
     version: z.literal(1),
-    platform: z.enum(['ios-simulator', 'web']),
+    /** `ios` — iOS-симулятор через broker на macOS; `web` — браузер. */
+    platform: z.enum(['ios', 'web']),
+    /**
+     * Где исполняется приложение. Для `ios` — `dev-client` (по умолчанию) или
+     * `expo-go`; Expo Go принимается в gate задачи, но не в проверке уровня
+     * релиза (`visual run --release`). Для `web` — только `browser`.
+     */
     host: z.enum(['dev-client', 'expo-go', 'browser']).optional(),
     device: z
       .strictObject({
@@ -351,6 +357,16 @@ export const visualSpecSchema = z
       .max(VISUAL_MAX_STATES),
   })
   .superRefine((spec, context) => {
+    const host = visualHost(spec);
+    if ((spec.platform === 'web') !== (host === 'browser'))
+      context.addIssue({
+        code: 'custom',
+        path: ['host'],
+        message:
+          spec.platform === 'web'
+            ? 'Для web host — только browser'
+            : 'Для ios host — dev-client или expo-go',
+      });
     const decorative = new Set(spec.decorative);
     if (decorative.size !== spec.decorative.length)
       context.addIssue({
@@ -376,6 +392,15 @@ export const visualSpecSchema = z
           message: `Повтор id состояния ${s.id}`,
         });
       seen.add(s.id);
+      if (s.route && !(spec.platform === 'web' ? spec.app?.url : spec.app?.scheme))
+        context.addIssue({
+          code: 'custom',
+          path: ['states', index, 'route'],
+          message:
+            spec.platform === 'web'
+              ? 'route открывается от app.url: укажите app.url'
+              : 'route открывается deep link: укажите app.scheme',
+        });
       budget += s.timeoutMs ?? spec.defaults.stateTimeoutMs;
       s.steps.forEach((step, position) => {
         const target = 'tap' in step ? step.tap : 'clear' in step ? step.clear : undefined;
@@ -438,6 +463,10 @@ export const visualSpecSchema = z
       });
   });
 export type VisualSpec = z.infer<typeof visualSpecSchema>;
+/** Хост приложения: явный или по умолчанию для платформы. */
+export function visualHost(spec: { platform: 'ios' | 'web'; host?: VisualSpec['host'] }) {
+  return spec.host ?? (spec.platform === 'web' ? 'browser' : 'dev-client');
+}
 
 /** Имя testcase утверждения: явное `name` или вид проверки. */
 export const assertionId = (a: VisualAssertion) => a.name ?? a.kind;
@@ -957,7 +986,7 @@ function candidateProblem(target: VisualTarget, tap: VisualStepTap): string | un
  * элемента строки), внутри строки — по x. Группировка по строкам делает
  * порядок транзитивным и независимым от порядка записи.
  */
-function readingOrder<T extends { frame: Rect }>(list: readonly T[]): T[] {
+export function readingOrder<T extends { frame: Rect }>(list: readonly T[]): T[] {
   const rows: T[][] = [];
   for (const item of [...list].sort((a, b) => a.frame.y - b.frame.y)) {
     const row = rows.at(-1);

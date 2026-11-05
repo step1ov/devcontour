@@ -458,6 +458,12 @@ export interface Evidence {
    * версии не подтверждает новую.
    */
   checks?: string;
+  /**
+   * Файлы, скопированные harness по `artifacts` gate: каталог, digest и
+   * размер каждого файла и пропущенные с причиной. Нет поля — gate без
+   * `artifacts` или запись прежней версии.
+   */
+  artifactFiles?: NonNullable<import('devcontour-harness').EvidenceRecord['artifactFiles']>;
 }
 export interface Run {
   /**
@@ -771,6 +777,12 @@ export interface Gate {
   dependsOn?: string[];
   cwd?: string;
   resources?: string[];
+  /**
+   * Файлы evidence gate задачи (снимки, JSON наблюдений): относительные пути
+   * в worktree, 1–16. Harness копирует их после gate, зелёного или красного,
+   * в каталог evidence фазы с пределами размера и расширений.
+   */
+  artifacts?: string[];
 }
 export const gateList = z
   .array(
@@ -784,6 +796,7 @@ export const gateList = z
       timeoutMs: z.number().positive().default(120000),
       report: z.object({ type: z.literal('junit'), path: z.string().min(1) }).optional(),
       property: z.object({ path: relativePath.optional() }).optional(),
+      artifacts: z.array(relativePath).min(1).max(16).optional(),
     }),
   )
   .min(1);

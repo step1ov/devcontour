@@ -99,7 +99,7 @@ const cli = (...args: string[]) =>
 
 const spec = {
   version: 1,
-  platform: 'ios-simulator',
+  platform: 'ios',
   log: { forbid: ['deprecated'] },
   states: [
     {
@@ -216,7 +216,8 @@ test('visual evaluate: нет наблюдений — ошибка окруже
     '--report',
     report,
   );
-  assert.equal(run.status, 1);
+  // Только ошибки окружения: отдельный код выхода, не код провала продукта.
+  assert.equal(run.status, 75);
   const xml = readFileSync(report, 'utf8');
   assert.equal((xml.match(/<error type="environment"/g) ?? []).length, 4);
   assert.doesNotMatch(xml, /<skipped/);
@@ -243,7 +244,10 @@ test('visual evaluate: нет наблюдений — ошибка окруже
 
   const usage = cli('run');
   assert.equal(usage.status, 1);
-  assert.match(usage.stderr, /visual run ещё не реализован/);
+  assert.match(usage.stderr, /Укажите --spec/);
+  const unknown = cli('replay');
+  assert.equal(unknown.status, 1);
+  assert.match(unknown.stderr, /visual run --spec FILE/);
 });
 
 // IHDR валидного PNG заменяется изменённым, с верным CRC: отказ — по смыслу
@@ -307,7 +311,7 @@ const frames = (extra: Record<string, unknown> = {}) =>
   });
 const backgroundSpec = {
   version: 1,
-  platform: 'ios-simulator',
+  platform: 'ios',
   states: [{ id: 'UI-form-focused', assert: [{ kind: 'background' }] }],
 };
 const evaluate = async (
@@ -397,7 +401,7 @@ test('Наблюдения: чужое состояние, ошибка драй
 
 const logSpec = {
   version: 1,
-  platform: 'ios-simulator',
+  platform: 'ios',
   log: { forbid: ['deprecated'] },
   states: [{ id: 'UI-form-focused', assert: [{ kind: 'visible', element: 'submit' }] }],
 };
@@ -461,7 +465,7 @@ test('Наблюдения: окна журнала в байтах, недос�
   const window = { from: Buffer.byteLength(head), to: Buffer.byteLength(log) };
   const spec = {
     version: 1,
-    platform: 'ios-simulator',
+    platform: 'ios',
     log: { forbid: ['deprecated'] },
     states: [
       {
@@ -521,7 +525,7 @@ test('Наблюдения: окна журнала в байтах, недос�
 test('Журнал: завершающий перевод строки, NUL, окна за пределами файла и по пересечению', async () => {
   const spec = {
     version: 1,
-    platform: 'ios-simulator',
+    platform: 'ios',
     log: { forbid: ['deprecated'] },
     states: [{ id: 'UI-form-focused', assert: [{ kind: 'visible', element: 'submit' }] }],
   };
@@ -545,7 +549,7 @@ test('Журнал: завершающий перевод строки, NUL, о�
 test('Журнал: одиночный \\r и ANSI-последовательности не прячут строку от ^WARN\\b', async () => {
   const spec = {
     version: 1,
-    platform: 'ios-simulator',
+    platform: 'ios',
     log: { forbid: ['^WARN\\b'] },
     states: [{ id: 'UI-form-focused', assert: [{ kind: 'visible', element: 'submit' }] }],
   };
