@@ -1132,7 +1132,9 @@ test('session_handoff: решение о плане называет черно�
     assert.match(next.detail, /unverified agent findings/);
     assert.match(next.detail, /cancel --task ID .*--by host/);
     assert.doesNotMatch(next.detail, /review-plan --board/, 'ревью сырых находок не предлагается');
-    // Разобранная находка — с проверяемой приёмкой — идёт в область ревью.
+    assert.match(next.detail, /replaces the whole task spec.*keep its contracts and dependsOn/);
+    // Правка черновика — явный разбор: даже с прежней приёмкой находка
+    // отмечена triaged и идёт в область ревью.
     const t = f.store.read().tasks.find((x) => x.id === found)!;
     f.h.editTask(
       found,
@@ -1141,28 +1143,52 @@ test('session_handoff: решение о плане называет черно�
         role: t.role,
         title: t.title,
         description: t.description,
-        acceptance: ['Regression test for src/a.ts fails before the fix and passes after it.'],
+        acceptance: t.acceptance,
       },
       specDigest(t),
+    );
+    assert.equal(
+      f.store.read().tasks.find((x) => x.id === found)?.finding?.verification,
+      'triaged',
     );
     next = devcontourHandoff(f.h).host.next;
     assert.equal(next?.boardId, findings.id);
     assert.deepEqual(next?.plan?.unverified, []);
+    assert.deepEqual(next?.plan?.review, [found]);
     assert.match(next.detail, new RegExp(`--tasks ${found} --author-runtime`));
-    // Роль с обязательным контрактом без контракта: ревью плана откажет до
-    // модели, такой черновик в область ревью не входит.
-    const unbound = f.h.addTask(board.id, { ...input('Unbound backend'), role: 'backend' }).id;
+    // Обратное направление: находка proposed с иной приёмкой не разобрана.
+    const manual = f.h.addTask(findings.id, {
+      ...input('Manual finding'),
+      finding: { ...t.finding!, fingerprint: 'manual', verification: 'proposed' },
+    }).id;
+    next = devcontourHandoff(f.h).host.next;
+    assert.deepEqual(next?.plan?.unverified, [manual]);
+    assert.deepEqual(next?.plan?.review, [found]);
+    // Роль с обязательным контрактом без контракта: утверждение откажет, такой
+    // черновик в область ревью не входит; списки с причинами ограничены.
+    const unbound = Array.from(
+      { length: 22 },
+      (_, i) => f.h.addTask(board.id, { ...input(`Unbound backend ${i}`), role: 'backend' }).id,
+    );
     const ready = f.h.addTask(board.id, input('Ready draft')).id;
     next = devcontourHandoff(f.h, { boardId: board.id }).host.next;
     assert.equal(next?.decision, 'plan');
+    assert.equal(next?.plan?.blockedCount, 22);
     assert.deepEqual(
       next?.plan?.blocked.map((b) => b.id),
-      [unbound],
+      unbound.slice(0, 20),
     );
-    assert.match(next.plan.blocked[0].reason, /сначала привяжите утверждённый контракт/);
+    assert.deepEqual(next?.plan?.review, [ready]);
+    assert.match(
+      next.plan.blocked[0].reason,
+      /^для backend сначала привяжите утверждённый контракт/,
+    );
+    assert.ok(next.detail.includes(`${unbound[0]} — для backend`), 'id не повторяется');
     assert.match(next.detail, /fail approval preconditions/);
+    assert.match(next.detail, /… ещё 2: host\.next\.plan\.blocked/);
     assert.match(next.detail, /edit-task --task ID/);
     assert.match(next.detail, new RegExp(`--tasks ${ready} --author-runtime`));
+    assert.match(next.detail, /story bindings/);
   } finally {
     f.cleanup();
   }

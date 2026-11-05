@@ -122,6 +122,30 @@ test('Находка наследует контракты задачи-исто
       [next.id]: next.digest,
       [events.id]: events.digest,
     });
+    // Разбор ведущим — правка черновика: файл заменяет постановку целиком,
+    // поэтому контракты переносятся из текущей задачи явно.
+    const spec = {
+      repositoryId: draft.repositoryId,
+      role: draft.role,
+      title: draft.title,
+      description: draft.description,
+      dependsOn: draft.dependsOn,
+      contracts: draft.contracts,
+      acceptance: ['Regression test for legacy.ts fails before the fix and passes after it.'],
+    };
+    f.h.editTask(id, spec, specDigest(draft));
+    const edited = f.store.read().tasks.find((t) => t.id === id)!;
+    assert.equal(edited.finding?.verification, 'triaged', 'правка — разбор находки');
+    assert.deepEqual(edited.contracts, [next.id, events.id]);
+    assert.deepEqual(Object.keys(f.h.approvable(f.store.read(), edited)), [next.id, events.id]);
+    // Без контрактов в файле правка их снимает, и роль с контрактом не утверждается.
+    f.h.editTask(id, { ...spec, contracts: undefined }, specDigest(edited));
+    const dropped = f.store.read().tasks.find((t) => t.id === id)!;
+    assert.deepEqual(dropped.contracts, []);
+    assert.throws(
+      () => f.h.approvable(f.store.read(), dropped),
+      /сначала привяжите утверждённый контракт/,
+    );
   } finally {
     f.cleanup();
   }

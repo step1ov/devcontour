@@ -160,9 +160,10 @@ export function planApproved(
 
 /**
  * Почему план не согласован: черновые задачи, утверждённые при другой
- * политике, черновики, которые утверждение отвергнет (`approvable`), — ревью
- * плана откажет на них до модели, — и не разобранные ведущим находки агентов:
- * ревью отвергло бы их как непроверенные, их сначала разбирают.
+ * политике, не разобранные ведущим находки агентов — ревью отвергло бы их как
+ * непроверенные — и черновики, которые утверждение отвергнет (`approvable`).
+ * Неразобранная находка считается один раз, среди `unverified`: её разбор —
+ * правка черновика, которая исправляет и предусловия утверждения.
  */
 export function unapprovedTasks(h: DevContour, s: DevContourState, tasks: readonly Task[]) {
   const drafts = tasks.filter((t) => t.status === 'draft');
@@ -170,15 +171,21 @@ export function unapprovedTasks(h: DevContour, s: DevContourState, tasks: readon
     drafts: drafts.map((t) => t.id),
     stale: tasks.filter((t) => t.status !== 'draft' && h.approvalStale(t)).map((t) => t.id),
     unverified: drafts.filter(unverifiedFinding).map((t) => t.id),
-    blocked: drafts.flatMap((t) => {
-      try {
-        h.approvable(s, t);
-        return [];
-      } catch (e) {
-        if (!(e instanceof DomainError)) throw e;
-        return [{ id: t.id, reason: e.message }];
-      }
-    }),
+    blocked: drafts
+      .filter((t) => !unverifiedFinding(t))
+      .flatMap((t) => {
+        try {
+          h.approvable(s, t);
+          return [];
+        } catch (e) {
+          if (!(e instanceof DomainError)) throw e;
+          // Причина обычно уже начинается с id задачи: не повторять его.
+          const reason = e.message.startsWith(`${t.id}: `)
+            ? e.message.slice(t.id.length + 2)
+            : e.message;
+          return [{ id: t.id, reason }];
+        }
+      }),
   };
 }
 

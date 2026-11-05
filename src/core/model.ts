@@ -207,28 +207,21 @@ export const taskInput = z.object({
       sourceTaskId: id,
       sourceRunId: z.string(),
       sourceSha: z.string(),
-      verification: z.literal('proposed'),
+      // proposed — записана исполнителем; triaged — ведущий разобрал её
+      // правкой черновика (`editTask`).
+      verification: z.enum(['proposed', 'triaged']),
     })
     .optional(),
 });
 export type TaskInput = z.infer<typeof taskInput>;
-/**
- * Приёмка черновика находки агента до разбора ведущим. Пока она не заменена
- * проверяемой, находка не разобрана: ревью плана отвергло бы такую задачу.
- */
+/** Шаблонная приёмка черновика находки агента до разбора ведущим. */
 export const FINDING_ACCEPTANCE: readonly string[] = [
   'Воспроизвести находку и сохранить доказательство до изменения кода.',
   'После исправления выполнить регрессионный сценарий и обязательные проверки.',
 ];
-/**
- * Находка не разобрана ведущим: не подтверждена (`verification: proposed`) и
- * сохраняет шаблонную приёмку. Перехода проверки в модели нет, поэтому
- * разбором считается правка приёмки через `edit-task`.
- */
-export const unverifiedFinding = (t: Pick<TaskInput, 'finding' | 'acceptance'>) =>
-  t.finding?.verification === 'proposed' &&
-  t.acceptance.length === FINDING_ACCEPTANCE.length &&
-  t.acceptance.every((a, i) => a === FINDING_ACCEPTANCE[i]);
+/** Находка ещё не разобрана ведущим: ревью плана отвергло бы её как непроверенную. */
+export const unverifiedFinding = (t: Pick<TaskInput, 'finding'>) =>
+  t.finding?.verification === 'proposed';
 export const relatedRepositoriesTooMany = `Связанных компонентов не больше ${TASK_LIMITS.relatedRepositories}`;
 /**
  * Новая постановка. `taskInput` читает и уже сохранённые задачи (Git sync,

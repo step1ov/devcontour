@@ -995,6 +995,9 @@ export class DevContour {
       )
         throw new DomainError('Локальная доска принимает только задачи своего компонента');
       Object.assign(t, parsed, { preparation: developmentBinding(s) });
+      // Правка черновика находки — разбор ведущим: подсказка передачи
+      // контекста больше не держит её как непроверенную.
+      if (t.finding) t.finding = { ...t.finding, verification: 'triaged' };
       // Корпус договора, которого задача больше не касается, не переносится.
       if (t.checkVersion && !t.contracts.includes(t.checkVersion.suite.replace(/^KS-/, '')))
         t.checkVersion = undefined;
