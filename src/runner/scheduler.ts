@@ -135,6 +135,9 @@ export class Scheduler {
   async init() {
     validateWorkflow(this.h.config);
     await reserveRepositories(this.h.config, this.root);
+    // Отметка остановки прежнего процесса, роль которого уже не жива
+    // (освобождена или истекла после падения), снимается при запуске.
+    this.h.markStopping(this.owner, false);
     for (const repo of repositories(this.h.config)) {
       const target = this.targetFor(repo.id);
       try {
@@ -309,8 +312,21 @@ export class Scheduler {
     }, 750);
     this.timer.unref();
   }
+  /**
+   * Начало штатной остановки: отметка в базе, по которой запуск очереди из
+   * любого процесса (CLI `queue --start`, отдельный MCP) отклоняется, пока
+   * этот планировщик держит роль controller. Сервер ставит её в начале своего
+   * `close`, до остановки прочих исполнителей; `stop` — повторно (прямой
+   * вызов или отметку держал другой останавливающийся сервер). Записанная
+   * отметка повторно не пишется.
+   */
+  beginStop() {
+    if (!this.marked) this.marked = this.h.markStopping(this.owner, true);
+  }
+  private marked = false;
   async stop() {
     this.stopped = true;
+    this.beginStop();
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
     // Пауза штатной остановки — сразу, до ожидания идущего такта: он не
@@ -324,6 +340,13 @@ export class Scheduler {
     await this.runner.stop();
     await Promise.all(this.retired.map((r) => r.settled().catch(() => {})));
     this.retired = [];
+    // Роль освобождена — отметка уже не действует; снимается для порядка
+    // (не снятую снимет следующий запуск).
+    try {
+      this.h.markStopping(this.owner, false);
+    } catch {
+      /* Отметка без живой роли ничего не блокирует. */
+    }
   }
   /**
    * Один такт очереди. Такт один на планировщик: вызов во время идущего ждёт

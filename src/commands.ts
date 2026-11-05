@@ -1013,9 +1013,9 @@ async function main() {
         if (args.includes('--start') && args.includes('--pause'))
           throw new Error('Укажите только --start или --pause');
         // Без флага — состояние очереди тем же видом, что в панели и API.
-        // `--start` из другого процесса во время остановки serve не
-        // отклоняется: пауза остановки, которую он снимет, вернётся при
-        // запуске serve, а остановка процесса serve прервёт выданное.
+        // `--start` во время остановки serve отклоняется (SERVER_STOPPING):
+        // сервер отмечает остановку в базе, и отметка действует, пока он
+        // держит живую роль controller (`DevContour.pause`).
         if (!args.includes('--start') && !args.includes('--pause')) result = queueStopOf(h);
         else if (args.includes('--pause')) result = { ...h.pause(true), ...queueStopOf(h) };
         else {

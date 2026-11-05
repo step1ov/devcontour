@@ -4,7 +4,8 @@ import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { config } from './helpers.ts';
-import { DevContour } from '../src/core/service.ts';
+import { DevContour, SERVER_STOPPING, serverStopping } from '../src/core/service.ts';
+import { executionOf } from '../src/harness/execution.ts';
 import { Store } from '../src/core/store.ts';
 import { git, command } from '../src/runner/process.ts';
 import { startQueue } from '../src/runner/queue-start.ts';
@@ -104,6 +105,65 @@ test('queue --start подтверждает запуск тактами сер�
   } finally {
     stop();
     cli.store.close();
+    serving.store.close();
+    await rm(w.root, { recursive: true, force: true });
+  }
+});
+
+test('queue --start из другого процесса, пока сервер останавливается, — отказ; после остановки или падения сервера — запуск', async () => {
+  const w = await workspace();
+  const serving = w.open();
+  const other = w.open();
+  const cliArgs = ['node', '--import', 'tsx', 'src/cli.ts', 'queue', '--start', '--data', w.data];
+  try {
+    // Сервер ведёт очередь и начал штатную остановку: пауза остановки стоит.
+    serving.leader('server');
+    serving.pause(false);
+    serving.markStopping('server', true);
+    serving.pause(true, 'shutdown');
+
+    // Отдельный процесс CLI: отказ, пауза остановки осталась.
+    const refused = await command(cliArgs, process.cwd());
+    assert.notEqual(refused.code, 0);
+    assert.match(refused.stdout + refused.stderr, new RegExp(SERVER_STOPPING));
+    assert.equal(serving.store.read().paused, true);
+    assert.equal(serving.store.read().pauseReason, 'shutdown');
+    // Другое соединение с той же базой: тот же отказ (как отдельный MCP-сервер).
+    await assert.rejects(startQueue(other), (e: Error) => e.message === SERVER_STOPPING);
+    assert.equal(other.store.read().paused, true);
+
+    // Сервер упал: роль не освобождена, но её срок истёк — отметка не держит.
+    serving.store.update('test.lease-expired', (d) => {
+      d.leader = { ...d.leader!, leaseUntil: Date.now() - 1 };
+    });
+    assert.equal(serverStopping(other.store, other.store.read().leader), false);
+    const afterCrash = await command(cliArgs, process.cwd());
+    assert.equal(afterCrash.code, 0, afterCrash.stderr);
+    assert.equal(other.store.read().paused, false);
+
+    // Новый сервер с прежней отметкой в базе: её владелец уже не держит роль.
+    serving.leader('next-server');
+    other.pause(true);
+    assert.equal((await startQueue(other, { timeoutMs: 200, pollMs: 20 })).paused, false);
+
+    // Штатная остановка нового сервера закончилась освобождением роли.
+    other.pause(true);
+    serving.markStopping('next-server', true);
+    await assert.rejects(startQueue(other), (e: Error) => e.message === SERVER_STOPPING);
+    // Останавливается и второй сервер, который очередь не ведёт: действующую
+    // отметку ведущего он не заменяет и не снимает.
+    assert.equal(other.markStopping('idle-server', true), false);
+    assert.equal(other.markStopping('idle-server', false), false);
+    await assert.rejects(startQueue(other), (e: Error) => e.message === SERVER_STOPPING);
+    executionOf(serving).engine.release('next-server');
+    serving.markStopping('next-server', false);
+    assert.equal(serving.store.localRecord('server', undefined, 'stopping'), null);
+    assert.deepEqual(
+      { ...(await startQueue(other)), reason: undefined },
+      { paused: false, reason: undefined, server: 'none' },
+    );
+  } finally {
+    other.store.close();
     serving.store.close();
     await rm(w.root, { recursive: true, force: true });
   }
