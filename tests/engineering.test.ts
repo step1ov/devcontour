@@ -6,10 +6,12 @@ import { tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { config, fixture, input, reapprove } from './helpers.ts';
+import { complete, config, fixture, input, reapprove } from './helpers.ts';
 import { orderedGates, validateWorkflow } from '../src/core/workflow.ts';
 import { BlockedError, taskInput, type Contract } from '../src/core/model.ts';
 import { specDigest, DevContour } from '../src/core/service.ts';
+import { recordsFromState, stateFromRecords } from '../src/core/sync-state.ts';
+import { recordSchema } from '../src/core/sync-model.ts';
 import { ResourcePool, resourceKey, withResources } from '../src/runner/resources.ts';
 import { pinContext, taskContext } from '../src/runner/context.ts';
 import { git, command } from '../src/runner/process.ts';
@@ -95,6 +97,117 @@ test('Discovered debt becomes a deduplicated draft with provenance; scope and co
       () => f.h.discoveries(run.id, run.token, 'a'.repeat(40), [finding]),
       /Устаревшая/,
     );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Находка наследует контракты задачи-источника текущей редакцией и утверждается для роли с контрактом', () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Backend work');
+    const api = f.h.contract('API', 'v1', undefined, undefined, 'docs/contracts/api.md');
+    const events = f.h.contract('Events', 'e1', undefined, undefined, 'docs/contracts/events.md');
+    f.h.addTask(b.id, { ...input(), role: 'backend', contracts: [api.id, events.id] });
+    f.h.approve(b.id);
+    // Новая редакция API после утверждения: находка берёт её, а не прежнюю.
+    const next = f.h.contract('API', 'v2', undefined, undefined, 'docs/contracts/api.md');
+    f.h.pause(false);
+    const run = f.h.claim('writer')!;
+    const [id] = f.h.discoveries(run.id, run.token, 'a'.repeat(40), [finding]);
+    const s = f.store.read();
+    const draft = s.tasks.find((t) => t.id === id)!;
+    assert.equal(draft.role, 'backend');
+    assert.deepEqual(draft.contracts, [next.id, events.id]);
+    assert.deepEqual(draft.contractDigests, {}, 'digests закрепляет утверждение');
+    assert.deepEqual(f.h.approvable(s, draft), {
+      [next.id]: next.digest,
+      [events.id]: events.digest,
+    });
+    // Разбор ведущим — правка черновика: файл заменяет постановку целиком,
+    // поэтому контракты переносятся из текущей задачи явно.
+    const spec = {
+      repositoryId: draft.repositoryId,
+      role: draft.role,
+      title: draft.title,
+      description: draft.description,
+      dependsOn: draft.dependsOn,
+      contracts: draft.contracts,
+      acceptance: ['Regression test for legacy.ts fails before the fix and passes after it.'],
+    };
+    f.h.editTask(id, spec, specDigest(draft));
+    const edited = f.store.read().tasks.find((t) => t.id === id)!;
+    assert.ok(edited.triagedAt, 'правка — разбор находки');
+    assert.equal(edited.finding?.verification, 'proposed', 'схема находки не меняется');
+    assert.deepEqual(edited.contracts, [next.id, events.id]);
+    assert.deepEqual(Object.keys(f.h.approvable(f.store.read(), edited)), [next.id, events.id]);
+    // Без контрактов в файле правка их снимает, и роль с контрактом не утверждается.
+    f.h.editTask(id, { ...spec, contracts: undefined }, specDigest(edited));
+    const dropped = f.store.read().tasks.find((t) => t.id === id)!;
+    assert.deepEqual(dropped.contracts, []);
+    assert.throws(
+      () => f.h.approvable(f.store.read(), dropped),
+      /сначала привяжите утверждённый контракт/,
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Повтор находки: открытая, разобранная и отменённая не дублируются, после принятого исправления — новая', () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Feature work');
+    f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    f.h.pause(false);
+    const run = f.h.claim('writer')!;
+    const sha = 'a'.repeat(40);
+    const report = (x: typeof finding) => f.h.discoveries(run.id, run.token, sha, [x]);
+    const [first] = report(finding);
+    // Разобранная ведущим находка открыта: повтор её не дублирует.
+    const draft = f.store.read().tasks.find((t) => t.id === first)!;
+    f.h.editTask(
+      first,
+      {
+        repositoryId: draft.repositoryId,
+        role: draft.role,
+        title: draft.title,
+        description: draft.description,
+        acceptance: ['Regression test for legacy.ts fails before the fix and passes after it.'],
+      },
+      specDigest(draft),
+    );
+    assert.deepEqual(report(finding), []);
+    // Отметка разбора переносится Git sync в progress записи, вне постановки.
+    const state = f.store.read();
+    const triagedAt = state.tasks.find((t) => t.id === first)!.triagedAt;
+    assert.ok(triagedAt);
+    const groups = recordsFromState(f.h, state);
+    const record = [...groups.values()]
+      .flatMap((r) => Object.values(r))
+      .find((r) => r.kind === 'task' && r.data.id === first);
+    assert.ok(record?.kind === 'task');
+    assert.equal(record.progress.triagedAt, triagedAt);
+    assert.equal('triagedAt' in record.data, false);
+    assert.equal(recordSchema.safeParse(record).success, true);
+    const before = structuredClone(state);
+    delete before.tasks.find((t) => t.id === first)!.triagedAt;
+    const imported = stateFromRecords(f.h, before, groups, new Map());
+    assert.equal(imported.tasks.find((t) => t.id === first)?.triagedAt, triagedAt);
+    // Отмена — решение разбора: повтор той же находки черновика не создаёт.
+    f.h.cancel(first, 'Not reproducible on the current base');
+    assert.deepEqual(report(finding), []);
+    // Принятое исправление: та же находка снова — новый дефект.
+    const other = { ...finding, title: 'Fixed defect', path: 'fixed.ts' };
+    const [fixed] = report(other);
+    const findings = f.store.read().boards.find((x) => x.title === 'Находки агентов')!;
+    f.h.approve(findings.id, [fixed]);
+    complete(f.h, fixed);
+    assert.equal(f.store.read().tasks.find((t) => t.id === fixed)?.status, 'done');
+    const again = report(other);
+    assert.equal(again.length, 1);
+    assert.notEqual(again[0], fixed);
   } finally {
     f.cleanup();
   }

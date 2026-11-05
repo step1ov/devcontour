@@ -38,6 +38,7 @@ import {
   taskIngest,
   taskInput,
   discoveryInput,
+  FINDING_ACCEPTANCE,
   type Contract,
   type ContractArtifact,
   type Task,
@@ -994,6 +995,9 @@ export class DevContour {
       )
         throw new DomainError('Локальная доска принимает только задачи своего компонента');
       Object.assign(t, parsed, { preparation: developmentBinding(s) });
+      // Правка черновика находки — разбор ведущим: подсказка передачи
+      // контекста больше не держит её как непроверенную.
+      if (t.finding) t.triagedAt ??= now();
       // Корпус договора, которого задача больше не касается, не переносится.
       if (t.checkVersion && !t.contracts.includes(t.checkVersion.suite.replace(/^KS-/, '')))
         t.checkVersion = undefined;
@@ -1707,14 +1711,10 @@ export class DevContour {
           path: finding.path,
           observation: finding.observation,
         });
-        if (
-          s.tasks.some(
-            (t) =>
-              t.finding?.fingerprint === fingerprint &&
-              t.status !== 'done' &&
-              t.status !== 'cancelled',
-          )
-        )
+        // Открытая или отменённая находка с тем же отпечатком — та же находка:
+        // отмена — решение разбора ведущего, повтор его не отменяет. После
+        // принятого исправления повторное появление — новый дефект.
+        if (s.tasks.some((t) => t.finding?.fingerprint === fingerprint && t.status !== 'done'))
           continue;
         let inbox = s.boards.find(
           (b) => b.title === 'Находки агентов' && b.revisions.at(-1)?.status === 'active',
@@ -1743,10 +1743,7 @@ export class DevContour {
             role: source.role,
             title: finding.title,
             description: `${finding.observation}\nПоследствие: ${finding.consequence}\nВоспроизведение: ${finding.reproduction}\nИсточник: ${finding.path}:${finding.line} @ ${sha}. Находка не подтверждена.`,
-            acceptance: [
-              'Воспроизвести находку и сохранить доказательство до изменения кода.',
-              'После исправления выполнить регрессионный сценарий и обязательные проверки.',
-            ],
+            acceptance: [...FINDING_ACCEPTANCE],
             finding: {
               ...finding,
               fingerprint,
@@ -1763,9 +1760,20 @@ export class DevContour {
           createdAt: now(),
           contractDigests: {},
         };
-        // Находка относится к той же постановке и фиче, что и задача, в которой
-        // её нашли. Без привязки черновик блокировал утверждение всей доски
-        // находок сообщением, которое не называло задачу.
+        // Находка относится к той же постановке, фиче и контрактам, что и задача,
+        // в которой её нашли. Без привязки черновик блокировал утверждение всей
+        // доски находок: постановка — сообщением, которое не называло задачу,
+        // контракт — для роли, которой он обязателен. Контракт берётся текущей
+        // редакцией того же файла; исчезнувший из реестра — отбрасывается.
+        // Digests закрепляет утверждение, черновик их не несёт.
+        t.contracts = [
+          ...new Set(
+            source.contracts.flatMap((id) => {
+              const c = supersededBy(s.contracts, id) ?? s.contracts.find((x) => x.id === id);
+              return c ? [c.id] : [];
+            }),
+          ),
+        ];
         if (source.preparation) {
           try {
             t.preparation = developmentBinding(s, source.preparation.changeId);

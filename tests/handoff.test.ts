@@ -1090,13 +1090,143 @@ test('session_handoff: подсказка ревью плана называет
       { length: 25 },
       (_, i) => f.h.addTask(board.id, input(`Finding ${i}`)).id,
     );
-    const value = devcontourHandoff(f.h, { boardId: board.id });
+    let value = devcontourHandoff(f.h, { boardId: board.id });
     assert.equal(value.host.next?.decision, 'plan');
-    const detail = value.host.next.detail;
+    // Область — весь план: ревью без --tasks, id в подсказке не перечисляются.
+    let detail = value.host.next.detail;
+    assert.match(detail, /the whole plan, 25 tasks: no --tasks needed/);
+    assert.doesNotMatch(detail, /--tasks T/);
+    assert.equal(value.host.next?.plan?.drafts.length, 25, 'полный список — в plan');
+    assert.equal(value.host.next?.plan?.review.length, 20);
+    assert.equal(value.host.next?.plan?.reviewCount, 25);
+    // Область меньше плана и длиннее подсказки: усечение сказано прямо.
+    f.h.addTask(board.id, { ...input('Unbound backend'), role: 'backend' });
+    value = devcontourHandoff(f.h, { boardId: board.id });
+    detail = value.host.next!.detail;
     const named = drafts.filter((id) => detail.includes(id));
     assert.equal(named.length, 20);
-    assert.match(detail, /… ещё 5/);
-    assert.equal(value.host.next?.plan?.drafts.length, 25, 'полный список — в plan');
+    assert.match(detail, /scope truncated: the first 20 of 25 reviewable tasks/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('session_handoff: решение о плане называет черновики, которые утверждение отвергнет, и неразобранные находки', () => {
+  const f = fixture();
+  try {
+    const board = f.h.createBoard('Board with findings', '', 'main');
+    const source = f.h.addTask(board.id, input('Approved task'));
+    f.h.approve(board.id);
+    f.h.pause(false);
+    const run = f.h.claim('writer')!;
+    assert.equal(run.taskId, source.id);
+    const [found] = f.h.discoveries(run.id, run.token, 'a'.repeat(40), [
+      {
+        kind: 'bug',
+        title: 'Raw finding',
+        path: 'src/a.ts',
+        line: 1,
+        observation: 'Observation text',
+        consequence: 'Consequence',
+        reproduction: 'Reproduction',
+      },
+    ]);
+    const findings = f.store.read().boards.find((b) => b.title === 'Находки агентов')!;
+    // Сырая находка: ведущий разбирает её до ревью, ревью не предлагается.
+    let next = devcontourHandoff(f.h).host.next;
+    assert.equal(next?.decision, 'plan');
+    assert.equal(next?.boardId, findings.id);
+    assert.deepEqual(next?.plan?.unverified, [found]);
+    assert.equal(next?.plan?.blocked.length, 0);
+    assert.match(next.detail, /unverified agent findings/);
+    assert.match(next.detail, /cancel --task ID .*--by host/);
+    assert.doesNotMatch(next.detail, /review-plan --board/, 'ревью сырых находок не предлагается');
+    assert.match(
+      next.detail,
+      /fields absent from the file are kept, except repositoryId, scope, dependsOn and contracts.*copy them from the current task/,
+    );
+    // Правка черновика — явный разбор: даже с прежней приёмкой находка
+    // отмечена triaged и идёт в область ревью.
+    const t = f.store.read().tasks.find((x) => x.id === found)!;
+    f.h.editTask(
+      found,
+      {
+        repositoryId: t.repositoryId,
+        role: t.role,
+        title: t.title,
+        description: t.description,
+        acceptance: t.acceptance,
+      },
+      specDigest(t),
+    );
+    assert.ok(f.store.read().tasks.find((x) => x.id === found)?.triagedAt);
+    // Повтор разобранной находки нового черновика не создаёт.
+    assert.deepEqual(
+      f.h.discoveries(run.id, run.token, 'b'.repeat(40), [
+        {
+          kind: 'bug',
+          title: 'Raw finding',
+          path: 'src/a.ts',
+          line: 1,
+          observation: 'Observation text',
+          consequence: 'Consequence',
+          reproduction: 'Reproduction',
+        },
+      ]),
+      [],
+    );
+    next = devcontourHandoff(f.h).host.next;
+    assert.equal(next?.boardId, findings.id);
+    assert.deepEqual(next?.plan?.unverified, []);
+    assert.deepEqual(next?.plan?.review, [found]);
+    assert.match(next.detail, new RegExp(`--tasks ${found} --author-runtime`));
+    // Обратное направление: находка proposed с иной приёмкой не разобрана.
+    const manual = f.h.addTask(findings.id, {
+      ...input('Manual finding'),
+      finding: { ...t.finding!, fingerprint: 'manual', verification: 'proposed' },
+    }).id;
+    next = devcontourHandoff(f.h).host.next;
+    assert.deepEqual(next?.plan?.unverified, [manual]);
+    // Список неразобранных ограничен, полный счёт — в unverifiedCount.
+    const more = Array.from(
+      { length: 21 },
+      (_, i) =>
+        f.h.addTask(findings.id, {
+          ...input(`Manual finding ${i}`),
+          finding: { ...t.finding!, fingerprint: `manual-${i}`, verification: 'proposed' },
+        }).id,
+    );
+    next = devcontourHandoff(f.h).host.next;
+    assert.equal(next?.plan?.unverifiedCount, 22);
+    assert.deepEqual(next?.plan?.unverified, [manual, ...more].slice(0, 20));
+    assert.match(next.detail, /… ещё 2: host\.next\.plan\.unverified/);
+    for (const id of more) f.h.cancel(id, 'Duplicate of the manual finding');
+    assert.deepEqual(next?.plan?.review, [found]);
+    // Роль с обязательным контрактом без контракта: утверждение откажет, такой
+    // черновик в область ревью не входит; списки с причинами ограничены.
+    const unbound = Array.from(
+      { length: 22 },
+      (_, i) => f.h.addTask(board.id, { ...input(`Unbound backend ${i}`), role: 'backend' }).id,
+    );
+    const ready = f.h.addTask(board.id, input('Ready draft')).id;
+    next = devcontourHandoff(f.h, { boardId: board.id }).host.next;
+    assert.equal(next?.decision, 'plan');
+    assert.equal(next?.plan?.blockedCount, 22);
+    assert.deepEqual(
+      next?.plan?.blocked.map((b) => b.id),
+      unbound.slice(0, 20),
+    );
+    assert.deepEqual(next?.plan?.review, [ready]);
+    assert.match(
+      next.plan.blocked[0].reason,
+      /^для backend сначала привяжите утверждённый контракт/,
+    );
+    assert.ok(next.detail.includes(`${unbound[0]} — для backend`), 'id не повторяется');
+    assert.match(next.detail, /fail approval preconditions/);
+    assert.match(next.detail, /… ещё 2: host\.next\.plan\.blocked/);
+    assert.match(next.detail, /edit-task --task ID/);
+    assert.match(next.detail, new RegExp(`--tasks ${ready} --author-runtime`));
+    assert.match(next.detail, /story bindings/);
   } finally {
     f.cleanup();
   }

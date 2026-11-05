@@ -169,6 +169,8 @@ const progress = z.strictObject({
   approvedDigest: hash.optional(),
   approvedScope: hash.optional(),
   approval: sharedApprovalSchema.optional(),
+  /** Когда ведущий разобрал находку агента (`Task.triagedAt`); вне постановки. */
+  triagedAt: date.optional(),
   /** Привязки к историям после приёмки (`task_story`); вне постановки. */
   storyBindings: z
     .array(

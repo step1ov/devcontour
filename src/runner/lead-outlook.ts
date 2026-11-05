@@ -3,7 +3,7 @@
 // решения, пакет передачи контекста (`session_handoff`) объясняет по ним
 // следующий шаг: правила одни, разойтись им негде.
 import type { WorkflowJob } from '../core/lead-workflow.ts';
-import type { DevContourState, Task } from '../core/model.ts';
+import { DomainError, unverifiedFinding, type DevContourState, type Task } from '../core/model.ts';
 import type { DevContour } from '../core/service.ts';
 import { carriedTaskIds } from '../core/work-status.ts';
 import { repairDecision, type RepairDecision } from '../core/repair.ts';
@@ -158,11 +158,34 @@ export function planApproved(
   );
 }
 
-/** Почему план не согласован: черновые задачи и утверждённые при другой политике. */
-export function unapprovedTasks(h: DevContour, tasks: readonly Task[]) {
+/**
+ * Почему план не согласован: черновые задачи, утверждённые при другой
+ * политике, не разобранные ведущим находки агентов — ревью отвергло бы их как
+ * непроверенные — и черновики, которые утверждение отвергнет (`approvable`).
+ * Неразобранная находка считается один раз, среди `unverified`: её разбор —
+ * правка черновика, которая исправляет и предусловия утверждения.
+ */
+export function unapprovedTasks(h: DevContour, s: DevContourState, tasks: readonly Task[]) {
+  const drafts = tasks.filter((t) => t.status === 'draft');
   return {
-    drafts: tasks.filter((t) => t.status === 'draft').map((t) => t.id),
+    drafts: drafts.map((t) => t.id),
     stale: tasks.filter((t) => t.status !== 'draft' && h.approvalStale(t)).map((t) => t.id),
+    unverified: drafts.filter(unverifiedFinding).map((t) => t.id),
+    blocked: drafts
+      .filter((t) => !unverifiedFinding(t))
+      .flatMap((t) => {
+        try {
+          h.approvable(s, t);
+          return [];
+        } catch (e) {
+          if (!(e instanceof DomainError)) throw e;
+          // Причина обычно уже начинается с id задачи: не повторять его.
+          const reason = e.message.startsWith(`${t.id}: `)
+            ? e.message.slice(t.id.length + 2)
+            : e.message;
+          return [{ id: t.id, reason }];
+        }
+      }),
   };
 }
 

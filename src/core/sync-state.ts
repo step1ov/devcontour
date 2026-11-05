@@ -366,6 +366,7 @@ export function recordsFromState(
         receiptId,
         ...(t.checkVersion ? { checkVersion: t.checkVersion } : {}),
         ...(t.storyBindings?.length ? { storyBindings: t.storyBindings } : {}),
+        ...(t.triagedAt ? { triagedAt: t.triagedAt } : {}),
       },
     });
   }
@@ -649,6 +650,7 @@ export function stateFromRecords(
         approvedScope: progress.approvedDigest ? progress.approvedScope : undefined,
         ...(progress.checkVersion ? { checkVersion: progress.checkVersion } : {}),
         ...(progress.storyBindings ? { storyBindings: progress.storyBindings } : {}),
+        ...(progress.triagedAt ? { triagedAt: progress.triagedAt } : {}),
         approval:
           previous?.approvedDigest === progress.approvedDigest &&
           canonical(approval(previous?.approval)) === canonical(progress.approval)
