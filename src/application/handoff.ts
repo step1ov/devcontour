@@ -6,6 +6,7 @@
 // Это не handoff публикации ChangeSet (`devcontour handoff --changeset`):
 // тот готовит результат к push/PR человеком.
 import {
+  HANDOFF_MAX_BYTES,
   HANDOFF_MIN_BYTES,
   handoffMarkdown,
   handoffPack,
@@ -614,23 +615,54 @@ export function devcontourHandoffWithin(
       if (!limit) return { value: { pack, host }, trimmed: false };
       const size = (p: HandoffPack) => bytes(handoffResponse({ pack: p, host }, limit.format));
       if (size(pack) <= limit.bytes) return { value: { pack, host }, trimmed: false };
-      // Предел пакета — предел ответа без того, что добавляет DevContour.
-      const own = limit.format === 'md' ? Buffer.byteLength(handoffMarkdown(pack)) : bytes(pack);
-      // Предел пакета не ниже `HANDOFF_MIN_BYTES`: уже его превышение ответ
-      // в пределе не удержит (вызывающий проверяет размер сам).
-      const clamp = (n: number) => Math.max(HANDOFF_MIN_BYTES, n);
-      let maxBytes = clamp(limit.bytes - (size(pack) - own));
-      let fitted = pack;
-      for (let i = 0; i < 4; i++) {
-        fitted = handoffPack(source, {
+      // Предел пакета — предел ответа без того, что добавляет DevContour
+      // (приложение, команды, конверт). Для Markdown — без самого текста
+      // пакета в его виде в ответе (строка JSON), чтобы экранирование
+      // полного текста не считалось накладным расходом: мера пакета harness
+      // `markdown` берёт и JSON пакета, которого в ответе нет, поэтому оценка
+      // лишь начальная — дальше предел подбирается по размеру ответа.
+      const own =
+        limit.format === 'md'
+          ? Buffer.byteLength(JSON.stringify(handoffMarkdown(pack))) - 2
+          : bytes(pack);
+      // Предел пакета — от `HANDOFF_MIN_BYTES` до `HANDOFF_MAX_BYTES`: ниже
+      // ответ в пределе не удержать (вызывающий проверяет размер сам).
+      const clamp = (n: number) => Math.min(HANDOFF_MAX_BYTES, Math.max(HANDOFF_MIN_BYTES, n));
+      const build = (maxBytes: number) =>
+        handoffPack(source, {
           ...options,
           maxBytes,
           measure: limit.format === 'md' ? 'markdown' : 'json',
         });
-        const over = size(fitted) - limit.bytes;
-        if (over <= 0 || maxBytes === HANDOFF_MIN_BYTES) break;
-        maxBytes = clamp(maxBytes - over);
+      let maxBytes = clamp(limit.bytes - (size(pack) - own));
+      let best: { pack: HandoffPack; size: number } | undefined;
+      let last = pack;
+      /** Наименьший предел пакета, ответ которого превысил предел ответа. */
+      let overshot = Infinity;
+      // Не больше 6 сборок: превышение — шаг вниз на превышение, запас больше
+      // 2% предела — шаг вверх на запас, но ниже предела, уже давшего
+      // превышение (в пределе ответа остаётся лучший).
+      for (let i = 0; i < 6; i++) {
+        last = build(maxBytes);
+        const got = size(last);
+        if (got <= limit.bytes) {
+          if (!best || got > best.size) best = { pack: last, size: got };
+          const slack = limit.bytes - got;
+          if (
+            slack <= limit.bytes * 0.02 ||
+            droppedOf(last.truncated) === droppedOf(pack.truncated)
+          )
+            break;
+          const up = Math.min(clamp(maxBytes + slack), overshot - 1);
+          if (up <= maxBytes) break;
+          maxBytes = up;
+        } else {
+          overshot = Math.min(overshot, maxBytes);
+          if (maxBytes === HANDOFF_MIN_BYTES) break;
+          maxBytes = clamp(maxBytes - (got - limit.bytes));
+        }
       }
+      const fitted = best?.pack ?? last;
       return {
         value: { pack: fitted, host },
         trimmed: droppedOf(fitted.truncated) > droppedOf(pack.truncated),
