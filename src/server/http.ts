@@ -737,6 +737,13 @@ export async function serve(
     url: origin,
     close: async () => {
       stopping = true;
+      // Отметка остановки в базе — до остановки прочих исполнителей: запуск
+      // очереди из другого процесса отклоняется всё окно остановки.
+      try {
+        scheduler?.beginStop();
+      } catch {
+        // Хранилище недоступно: остановка продолжается и без отметки.
+      }
       clearInterval(connectionTimer);
       await connecting;
       await deliveryRunner?.stop();

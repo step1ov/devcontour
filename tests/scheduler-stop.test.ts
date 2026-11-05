@@ -5,7 +5,10 @@ import { fixture } from './helpers.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { serve } from '../src/server/http.ts';
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
-import { SERVER_STOPPING } from '../src/application/agent.ts';
+import { AgentService, SERVER_STOPPING } from '../src/application/agent.ts';
+import { DevContour } from '../src/core/service.ts';
+import { Store } from '../src/core/store.ts';
+import { startQueue } from '../src/runner/queue-start.ts';
 
 /**
  * Штатная остановка сервера: `await scheduler.stop()`, затем закрытие
@@ -174,6 +177,58 @@ test('Пока сервер останавливается (раньше пла�
       LeadRunner.prototype.stop = original;
       release();
       await (closing ?? Promise.resolve());
+      f.cleanup();
+    }
+  }));
+
+test('Пока сервер останавливается, запуск очереди из другого процесса (своё соединение с базой) отклоняется; после остановки — проходит', () =>
+  catching(async (unhandled) => {
+    const f = fixture();
+    const scheduler = new Scheduler(f.h, f.root);
+    const app = await serve(f.h, scheduler, { port: 0 });
+    // Другой процесс — CLI `queue --start` или отдельный MCP-сервер: своё
+    // соединение с той же базой, без памяти процесса сервера.
+    const other = new DevContour(new Store(f.store.file), f.h.config);
+    const original = Object.getOwnPropertyDescriptor(LeadRunner.prototype, 'stop')!.value as (
+      this: LeadRunner,
+    ) => Promise<void>;
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    LeadRunner.prototype.stop = async function (this: LeadRunner) {
+      await held;
+      return original.call(this);
+    };
+    let closing: Promise<void> | undefined;
+    try {
+      f.h.pause(false);
+      assert.equal(f.h.leader(scheduler.owner), true, 'сервер ведёт очередь');
+      closing = app.close();
+      await sleep(50);
+      // Окно до остановки планировщика: пауза остановки ещё не стоит.
+      assert.equal(scheduler.stopping, false);
+      other.pause(true);
+      await assert.rejects(startQueue(other), (e: Error) => e.message === SERVER_STOPPING);
+      await assert.rejects(
+        new AgentService(other, f.root).run({ operation: 'queue_set', input: { paused: false } }),
+        (e: Error) => e.message === SERVER_STOPPING,
+      );
+      assert.equal(other.store.read().paused, true);
+      release();
+      await closing;
+      closing = undefined;
+      // Остановка закончилась: роль освобождена, отметка снята — запуск проходит.
+      assert.equal(other.store.read().leader, undefined);
+      assert.equal(other.store.localRecord('server', undefined, 'stopping'), null);
+      assert.deepEqual(
+        { ...(await startQueue(other)), reason: undefined },
+        { paused: false, reason: undefined, server: 'none' },
+      );
+      assert.deepEqual(unhandled, []);
+    } finally {
+      LeadRunner.prototype.stop = original;
+      release();
+      await (closing ?? Promise.resolve());
+      other.store.close();
       f.cleanup();
     }
   }));

@@ -22,7 +22,7 @@ import { repositories, repository } from '../core/repositories.ts';
 import { z, ZodError } from 'zod';
 import { readFileSync } from 'node:fs';
 import { AgentContext, contextInputs, type ContextOperation } from './context.ts';
-import { DevContour, scopeGapWarning, specDigest } from '../core/service.ts';
+import { DevContour, SERVER_STOPPING, scopeGapWarning, specDigest } from '../core/service.ts';
 import { taskIngest, DomainError, type Task } from '../core/model.ts';
 import { planIngest } from '../core/plan.ts';
 import { Workspace, changeSetInput } from '../core/workspace.ts';
@@ -38,8 +38,7 @@ import { contractProposal, limitsMessage, proposalLimitIssues } from '../runner/
 import { queueStopOf, quietAttempts, quietOperations } from './queue-stop.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
-/** Отказ запуска очереди, пока процесс сервера останавливается. */
-export const SERVER_STOPPING = 'Сервер останавливается: очередь не запускается';
+export { SERVER_STOPPING };
 export const agentInputs = {
   ...preparationInputs,
   ...intentInputs,

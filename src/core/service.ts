@@ -1361,6 +1361,12 @@ export class DevContour {
     const { store, engine } = executionOf(this);
     return domain(() =>
       store.host(value ? 'scheduler.paused' : 'scheduler.started', (ht) => {
+        // Запуск очереди из любого процесса (CLI, отдельный MCP, панель) не
+        // снимает паузу, пока сервер, ведущий очередь, останавливается: снятая
+        // пауза остановки осталась бы в базе, и очередь пошла бы при
+        // следующем запуске без решения человека.
+        if (!value && serverStopping(this.store, ht.state.leader))
+          throw new DomainError(SERVER_STOPPING, 409);
         if (!value) developmentBinding(ht.state);
         // Решение человека заменяет паузу операции применения политики (как
         // и прежде): пауза переходит к человеку и снимается им. Выдачу до
@@ -1962,4 +1968,63 @@ export class DevContour {
     const { engine } = executionOf(this);
     return domain(() => engine.lead(owner));
   }
+  /**
+   * Отметка штатной остановки сервера-владельца `owner` (его планировщика):
+   * `true` — с начала остановки, `false` — после неё и при запуске; `false` в
+   * ответе — действующая отметка другого сервера осталась. Отметка —
+   * локальная запись базы (в sync не входит) и действует, только пока её
+   * владелец держит живую роль controller (`serverStopping`): после
+   * освобождения роли или падения процесса (срок роли истёк) она ничего не
+   * блокирует.
+   */
+  markStopping(owner: string, stopping: boolean): boolean {
+    return this.store.atomic(() => {
+      const current = this.store.localRecord<StoppingMarker | null>(
+        STOPPING_NAMESPACE,
+        undefined,
+        STOPPING_KEY,
+      );
+      // Действующую отметку другого сервера (он ведёт очередь и
+      // останавливается) не заменяет ни отметка, ни снятие: заменяется и
+      // снимается только своя или недействующая.
+      const foreign =
+        !!current &&
+        current.owner !== owner &&
+        serverStopping(this.store, this.store.read().leader);
+      if (foreign) return false;
+      if (stopping)
+        this.store.saveLocal(STOPPING_NAMESPACE, undefined, STOPPING_KEY, {
+          owner,
+          at: new Date().toISOString(),
+        } satisfies StoppingMarker);
+      else if (current) this.store.saveLocal(STOPPING_NAMESPACE, undefined, STOPPING_KEY, null);
+      return true;
+    });
+  }
+}
+
+/** Отказ запуска очереди, пока процесс сервера останавливается. */
+export const SERVER_STOPPING = 'Сервер останавливается: очередь не запускается';
+const STOPPING_NAMESPACE = 'server';
+const STOPPING_KEY = 'stopping';
+interface StoppingMarker {
+  owner: string;
+  at: string;
+}
+/**
+ * Сервер останавливается: есть отметка остановки, и её владелец всё ещё
+ * держит живую роль controller. Роль снимает исполнитель в конце остановки;
+ * у упавшего процесса истекает её срок — отметка тогда не действует.
+ */
+export function serverStopping(
+  store: Store,
+  leader: { owner: string; leaseUntil: number } | undefined,
+  at = Date.now(),
+) {
+  const marker = store.localRecord<StoppingMarker | null>(
+    STOPPING_NAMESPACE,
+    undefined,
+    STOPPING_KEY,
+  );
+  return !!marker && leader?.owner === marker.owner && leader.leaseUntil > at;
 }
