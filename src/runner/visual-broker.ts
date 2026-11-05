@@ -34,7 +34,12 @@ const framesResult = z.strictObject({
   safeArea: rect,
   elements: z.record(z.string().max(500), rect),
   focused: z
-    .strictObject({ element: z.string().max(500), text: z.string().max(10_000) })
+    .strictObject({
+      element: z.string().max(500),
+      text: z.string().max(10_000),
+      /** Поле пароля: платформа отдаёт вместо текста маску, сравнима только длина. */
+      secure: z.literal(true).optional(),
+    })
     .nullable(),
 });
 export type BrokerFrames = z.infer<typeof framesResult>;
@@ -55,9 +60,22 @@ const helloResult = z.strictObject({
     udid: z.string().min(1).max(100),
     model: z.string().min(1).max(100),
     runtime: z.string().min(1).max(100),
+    appearance: z.enum(['light', 'dark']),
+    locale: z.string().min(1).max(40),
   }),
 });
 export type BrokerHello = z.infer<typeof helloResult>;
+/** Требования спецификации к устройству: broker настраивает его по ним в `hello`. */
+export type BrokerDeviceRequest = {
+  model?: string;
+  runtime?: string;
+  appearance?: 'light' | 'dark';
+  locale?: string;
+};
+
+/** Ответ broker больше предела — сбой окружения (снимок PNG в base64 укладывается). */
+export const BROKER_RESPONSE_LIMIT = 48 * 1024 * 1024;
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 const empty = z.strictObject({});
 /**
@@ -92,7 +110,7 @@ export const brokerMethods = {
 export type BrokerMethod = keyof typeof brokerMethods;
 
 export interface VisualBroker {
-  hello(): Promise<BrokerHello>;
+  hello(device?: BrokerDeviceRequest): Promise<BrokerHello>;
   frames(ids?: string[]): Promise<BrokerFrames>;
   keyboardFrame(): Promise<BrokerRect | null>;
   tapPoint(x: number, y: number): Promise<void>;
@@ -182,6 +200,8 @@ export function httpBroker(
           authorization: `Bearer ${address.token}`,
         },
         body: JSON.stringify({ method, params }),
+        // Broker отвечает сам: перенаправление увело бы запрос с токеном с localhost.
+        redirect: 'error',
         signal: AbortSignal.timeout(options.timeoutMs ?? 30_000),
       });
     } catch (error) {
@@ -190,10 +210,17 @@ export function httpBroker(
           'Его запускает lifecycle.setup командой devcontour visual broker start',
       );
     }
+    const length = Number(response.headers.get('content-length') ?? 0);
+    if (length > BROKER_RESPONSE_LIMIT)
+      throw new BrokerError(`ответ broker на ${method} больше ${BROKER_RESPONSE_LIMIT} байт`);
     let body: unknown;
     try {
-      body = await response.json();
-    } catch {
+      const bytes = await response.arrayBuffer();
+      if (bytes.byteLength > BROKER_RESPONSE_LIMIT)
+        throw new BrokerError(`ответ broker на ${method} больше ${BROKER_RESPONSE_LIMIT} байт`);
+      body = JSON.parse(Buffer.from(bytes).toString('utf8'));
+    } catch (error) {
+      if (error instanceof BrokerError) throw error;
       throw new BrokerError(`broker ответил на ${method} не JSON (HTTP ${response.status})`);
     }
     const parsed = envelope.safeParse(body);
@@ -211,13 +238,22 @@ export function httpBroker(
     return result.data as z.infer<(typeof brokerMethods)[M]>;
   };
   return {
-    hello: () => call('hello', address.device ? { device: address.device } : {}),
+    hello: (device) =>
+      call('hello', {
+        ...(address.device ? { device: address.device } : {}),
+        ...(device && Object.keys(device).length ? { expect: device } : {}),
+      }),
     frames: async (ids) => usableFrames(await call('frames', ids ? { ids } : {})),
     keyboardFrame: async () => (await call('keyboardFrame')).keyboard,
     tapPoint: async (x, y) => void (await call('tapPoint', { x, y })),
     typeText: async (text) => void (await call('typeText', { text })),
     drag: async (from, to) => void (await call('drag', { from, to })),
-    screenshot: async () => Buffer.from((await call('screenshot')).png, 'base64'),
+    screenshot: async () => {
+      const png = Buffer.from((await call('screenshot')).png, 'base64');
+      if (!png.subarray(0, 8).equals(PNG_SIGNATURE))
+        throw new BrokerError('broker: снимок screenshot — не PNG');
+      return png;
+    },
     launch: async (args) => void (await call('launch', { args })),
     openURL: async (url) => void (await call('openURL', { url })),
     logSize: async () => (await call('logSize')).size,

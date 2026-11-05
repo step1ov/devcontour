@@ -392,6 +392,20 @@ export const visualSpecSchema = z
           message: `Повтор id состояния ${s.id}`,
         });
       seen.add(s.id);
+      if (s.seed && !s.steps.some((step) => 'launch' in step))
+        context.addIssue({
+          code: 'custom',
+          path: ['states', index, 'seed'],
+          message: 'seed передаётся приложению при запуске: добавьте шаг {"launch": true}',
+        });
+      // Касание tap-hits меняет экран: второе оценивалось бы по рамкам,
+      // снятым до первого.
+      if (s.assert.filter((a) => a.kind === 'tap-hits').length > 1)
+        context.addIssue({
+          code: 'custom',
+          path: ['states', index, 'assert'],
+          message: 'Не больше одного tap-hits в состоянии: второе касание — отдельное состояние',
+        });
       if (s.route && !(spec.platform === 'web' ? spec.app?.url : spec.app?.scheme))
         context.addIssue({
           code: 'custom',
@@ -580,6 +594,20 @@ const logWindow = z
   .strictObject({ from: z.number().int().min(0), to: z.number().int().min(0) })
   .refine((w) => w.from <= w.to, 'окно журнала: from ≤ to');
 
+/**
+ * Шаг выполнен, но экран не ответил так, как требует шаг: набор не дал
+ * ожидаемого текста, поле не в фокусе, после очистки остался текст,
+ * прокрутка не показала цель. Это провал `reach` — дефект продукта, а не
+ * сбой драйвера: связь с устройством работала, ответил сам экран.
+ */
+const stepFailureRecord = z.strictObject({
+  step: stepIndex,
+  /** Вид шага; должен совпадать с шагом спецификации. */
+  kind: z.enum(['type', 'clear', 'scroll']),
+  message: z.string().min(1).max(2000),
+});
+export type VisualStepFailure = z.infer<typeof stepFailureRecord>;
+
 /** Драйвер не смог достичь или измерить состояние. */
 export const visualFramesErrorSchema = z.strictObject({
   version: z.literal(1),
@@ -587,6 +615,7 @@ export const visualFramesErrorSchema = z.strictObject({
   error: z.string().min(1).max(4000),
   stepTaps: z.array(stepTapRecord).max(32).default([]),
   missing: missingRecord.optional(),
+  failure: stepFailureRecord.optional(),
   log: logWindow.optional(),
 });
 export const visualFramesObservedSchema = z.strictObject({
@@ -933,10 +962,26 @@ export function evaluateReach(
           (missing.visible.length ? `; на экране: ${missing.visible.slice(0, 20).join(', ')}` : ''),
       );
   }
+  const failure = 'unreached' in input ? input.unreached.failure : undefined;
+  if (failure) {
+    const declared = state.steps[failure.step];
+    if (missing)
+      driver.push(`у шага ${failure.step} одновременно запись отсутствия цели и провала`);
+    else if (!declared || !(failure.kind in declared))
+      driver.push(
+        `запись провала шага ${failure.step} (${failure.kind}) не соответствует шагу спецификации`,
+      );
+    else blocked.push(`шаг ${failure.step} (${failure.kind}): ${failure.message}`);
+  }
   // Каждое касание шага должно иметь запись: без неё заблокированный шаг
   // был бы неотличим от чистого. Для недостигнутого состояния — все шаги до
   // последнего записанного.
-  const last = Math.max(-1, ...recorded, missing && !reached ? missing.step - 1 : -1);
+  const last = Math.max(
+    -1,
+    ...recorded,
+    missing && !reached ? missing.step - 1 : -1,
+    failure ? failure.step - 1 : -1,
+  );
   const required = reached ? tapSteps : tapSteps.filter((index) => index <= last);
   const absent = required.filter((index) => !recorded.has(index));
   if (absent.length) driver.push(`нет записи касания шагов ${absent.join(', ')}`);

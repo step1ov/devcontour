@@ -1,4 +1,4 @@
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import {
   evaluateVisual,
@@ -182,10 +182,18 @@ async function runCases(input: { spec: string; observations: string }): Promise<
   return isVisualCase(spec) ? [spec] : observedCases(spec, input.observations);
 }
 
+/** Новый файл без перехода по ссылкам: существующая запись удаляется, затем `wx`. */
+export async function writeFresh(path: string, data: string | Uint8Array) {
+  const existing = await lstat(path).catch(() => undefined);
+  if (existing?.isDirectory()) throw new Error(`${path} — каталог`);
+  if (existing) await unlink(path);
+  await writeFile(path, data, { flag: 'wx' });
+}
+
 /** JUnit прогона и сводка для stdout; `exitCode` различает провал и сбой окружения. */
 export async function writeVisualReport(report: string, cases: VisualCase[]) {
   await mkdir(dirname(report), { recursive: true });
-  await writeFile(report, visualJunit(cases));
+  await writeFresh(report, visualJunit(cases));
   const count = (status: VisualCase['status']) => cases.filter((c) => c.status === status).length;
   const failures = count('failed'),
     errors = count('error');

@@ -1,13 +1,21 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { createServer } from 'node:http';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { deflateSync, crc32 } from 'node:zlib';
 import { junitSummary } from 'devcontour-harness';
-import { visualSpecSchema } from '../src/core/visual.ts';
+import { evaluateReach, visualSpecSchema } from '../src/core/visual.ts';
 import { gateList } from '../src/core/model.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { policyFromConfig } from '../src/harness/policy.ts';
@@ -78,65 +86,138 @@ function fakeApp(options: {
   background: (x: number, y: number) => number[];
   log: string;
   host?: 'dev-client' | 'expo-go';
+  device?: Partial<{
+    model: string;
+    runtime: string;
+    appearance: 'light' | 'dark';
+    locale: string;
+  }>;
+  /** Поле принимает не больше стольких символов (маска ввода, maxLength). */
+  maxLength?: number;
+  /** Поле пароля: broker отдаёт маску и `secure`. */
+  secure?: boolean;
+  /** Касание поля фокусирует другое поле. */
+  focusElsewhere?: boolean;
+  /**
+   * Часы теста: клавиатура (панель подсказок) перестраивается 300 мс после
+   * фокуса и каждого символа, кнопка движется вместе с ней.
+   */
+  animated?: () => number;
+  /** Список: `far-item` ниже видимой части; `scrolls` — прокрутка его показывает. */
+  list?: { scrolls: boolean; item: boolean };
 }) {
   let text = '';
-  let focused = false;
+  let focused: string | null = null;
   let result = false;
   let launched = false;
   let log = '';
+  let inputAt = 0;
+  let scrolled = 0;
   const calls: string[] = [];
-  const button = { x: 26, y: options.buttonY, width: 350, height: 56 };
+  const hellos: unknown[] = [];
   const input = { x: 26, y: 300, width: 350, height: 44 };
-  const keyboard = (): BrokerRect | null => (focused ? KEYBOARD : null);
+  const listFrame = { x: 0, y: 360, width: 402, height: 200 };
+  // Анимация: стадия 0, 1, 2 по 150 мс после последнего ввода.
+  const stage = () =>
+    options.animated ? Math.min(2, Math.floor((options.animated() - inputAt) / 150)) : 2;
+  const touched = () => {
+    if (options.animated) inputAt = options.animated();
+  };
+  const button = () => ({
+    x: 26,
+    y: focused && stage() < 2 ? options.buttonY - 150 : options.buttonY,
+    width: 350,
+    height: 56,
+  });
+  const keyboard = (): BrokerRect | null =>
+    focused ? (stage() < 2 ? { ...KEYBOARD, y: 800 - stage() * 100 } : KEYBOARD) : null;
   const within = (r: BrokerRect, x: number, y: number) =>
     x >= r.x && x <= r.x + r.width && y >= r.y && y <= r.y + r.height;
+  const accept = (ch: string) => {
+    if (ch === '\b') text = Array.from(text).slice(0, -1).join('');
+    else if (options.maxLength === undefined || Array.from(text).length < options.maxLength)
+      text += ch;
+  };
   const sync: Sync<VisualBroker> = {
-    hello: () => ({
-      protocol: 1 as const,
-      platform: 'ios' as const,
-      host: options.host ?? 'dev-client',
-      device: { udid: 'SIM-1', model: 'iPhone 16 Pro', runtime: 'iOS 18.5' },
-    }),
+    hello: (device) => {
+      hellos.push(device);
+      return {
+        protocol: 1 as const,
+        platform: 'ios' as const,
+        host: options.host ?? 'dev-client',
+        device: {
+          udid: 'SIM-1',
+          model: 'iPhone 16 Pro',
+          runtime: 'iOS 18.5',
+          appearance: 'light' as const,
+          locale: 'ru_RU',
+          ...options.device,
+        },
+      };
+    },
     frames: (): BrokerFrames => {
       calls.push('frames');
       const elements: Record<string, BrokerRect> = launched
         ? {
             'form-screen': WINDOW,
             'amount-input': input,
-            submit: button,
+            'other-input': { x: 26, y: 200, width: 350, height: 44 },
+            submit: button(),
             ...(result ? { result: { x: 26, y: 120, width: 350, height: 40 } } : {}),
+            ...(options.list
+              ? {
+                  list: listFrame,
+                  ...(options.list.item
+                    ? { 'far-item': { x: 20, y: 900 - scrolled * 220, width: 300, height: 40 } }
+                    : {}),
+                }
+              : {}),
           }
         : {};
       return {
         window: WINDOW,
         safeArea: SAFE,
         elements,
-        focused: focused ? { element: 'amount-input', text } : null,
+        focused: focused
+          ? {
+              element: focused,
+              text: options.secure ? '•'.repeat(Array.from(text).length) : text,
+              ...(options.secure ? { secure: true as const } : {}),
+            }
+          : null,
       };
     },
     keyboardFrame: () => keyboard(),
     tapPoint: (x, y) => {
       calls.push(`tap ${x},${y}`);
       const kb = keyboard();
-      if (kb && within(kb, x, y)) text += '2';
-      else if (within(input, x, y)) focused = true;
-      else if (within(button, x, y)) {
+      if (kb && within(kb, x, y)) accept('2');
+      else if (within(input, x, y)) {
+        focused = options.focusElsewhere ? 'other-input' : 'amount-input';
+        touched();
+      } else if (within(button(), x, y)) {
         result = true;
-        focused = false;
+        focused = null;
       }
     },
     typeText: (value) => {
       calls.push(`type ${JSON.stringify(value)}`);
-      for (const ch of value) text = ch === '\b' ? text.slice(0, -1) : text + ch;
+      for (const ch of value) accept(ch);
+      touched();
     },
-    drag: () => undefined,
+    drag: () => {
+      calls.push('drag');
+      if (options.list?.scrolls) scrolled++;
+    },
     screenshot: () => png(WINDOW.width, WINDOW.height, options.background),
-    launch: () => {
-      calls.push('launch');
+    launch: (args) => {
+      calls.push(`launch ${args.join(' ')}`.trim());
       launched = true;
       log += 'bundle ok\n' + options.log;
     },
-    openURL: () => undefined,
+    openURL: (url) => {
+      calls.push(`open ${url}`);
+    },
     logSize: () => Buffer.byteLength(log),
     logRead: (from) => ({
       size: Buffer.byteLength(log),
@@ -150,7 +231,7 @@ function fakeApp(options: {
       (...a: unknown[]) => Promise.resolve((f as (...x: unknown[]) => unknown)(...a)),
     ]),
   ) as unknown as VisualBroker;
-  return { broker, calls };
+  return { broker, calls, hellos };
 }
 
 const spec = {
@@ -197,12 +278,32 @@ const framesOf = (cwd: string) =>
     readFileSync(join(cwd, '.reports', 'visual', 'UI-form-focused.frames.json'), 'utf8'),
   ) as Frames;
 
-function workspace() {
+function workspace(value: unknown = spec) {
   const cwd = mkdtempSync(join(tmpdir(), 'dc-vrun-'));
   mkdirSync(join(cwd, 'contracts'));
-  writeFileSync(join(cwd, 'contracts', 'ui.json'), JSON.stringify(spec));
+  writeFileSync(join(cwd, 'contracts', 'ui.json'), JSON.stringify(value));
   return cwd;
 }
+/** Спецификация с одним состоянием из заданных шагов и утверждений. */
+const single = (
+  steps: unknown[],
+  assert: unknown[],
+  extra: { state?: Record<string, unknown> } & Record<string, unknown> = {},
+) => {
+  const { state, ...rest } = extra;
+  return {
+    version: 1,
+    platform: 'ios',
+    defaults: { settleMs: 0, stateTimeoutMs: 15000 },
+    decorative: ['form-screen'],
+    ...rest,
+    states: [{ id: 'UI-form-focused', steps, assert, ...state }],
+  };
+};
+const xmlOf = (cwd: string) => readFileSync(join(cwd, '.reports', 'visual.xml'), 'utf8');
+/** testcase reach: провал продукта (failure) или ошибка окружения (error). */
+const reachOf = (cwd: string) =>
+  /name="reach">\s*<(failure|error) type="(assertion|environment)"/.exec(xmlOf(cwd));
 const run = (cwd: string, broker: VisualBroker | { error: string }, extra = {}) =>
   visualRun({
     spec: 'contracts/ui.json',
@@ -304,7 +405,7 @@ test('visual run: Expo Go принимается в gate задачи и отк�
   // JUnit-сводка harness не различает error и failure; различает тип в XML.
   assert.match(
     readFileSync(join(task, '.reports', 'visual.xml'), 'utf8'),
-    /name="accepted">\s*<error type="environment" message="broker запускает приложение в expo-go/,
+    /name="accepted">\s*<error type="environment" message="устройство broker не соответствует спецификации: broker запускает приложение в expo-go/,
   );
 
   const expo = workspace();
@@ -532,4 +633,289 @@ test('CLI visual run: без ресурсов gate — JUnit с ошибкой �
   const broker = cli('broker', 'start');
   assert.notEqual(broker.status, 0);
   assert.match(broker.stderr, /ещё не реализован/);
+});
+
+const green = (extra: Partial<Parameters<typeof fakeApp>[0]> = {}) =>
+  fakeApp({ buttonY: 500, background: noise, log: '', ...extra });
+
+test('Устройство: требования спецификации уходят в hello и сверяются; расхождение — красный прогон', async () => {
+  const device = {
+    model: 'iPhone 16 Pro',
+    runtime: 'iOS 18',
+    appearance: 'light',
+    locale: 'ru-RU',
+  };
+  const ok = workspace({ ...spec, device });
+  const app = green();
+  const passed = await run(ok, app.broker);
+  assert.equal(passed.exitCode, 0, JSON.stringify(passed.failed));
+  assert.deepEqual(app.hellos[0], device);
+  for (const [other, word] of [
+    [{ runtime: 'iOS 17.5' }, /среда iOS 17\.5/],
+    [{ appearance: 'dark' as const }, /оформление dark/],
+    [{ locale: 'en_US' }, /локаль en_US/],
+    [{ model: 'iPhone SE' }, /модель iPhone SE/],
+  ] as const) {
+    const cwd = workspace({ ...spec, device });
+    const result = await run(cwd, green({ device: other }).broker);
+    // Ни одна проверка не зелёная: измерения были бы о другом устройстве.
+    assert.equal(result.exitCode, 75);
+    assert.ok(
+      cases(cwd).every(([, status]) => status !== 'passed'),
+      JSON.stringify(cases(cwd)),
+    );
+    assert.match(xmlOf(cwd), word);
+  }
+  // iOS 18.5 не допускает iOS 18.50.
+  const strict = workspace({ ...spec, device: { runtime: 'iOS 18.5' } });
+  assert.equal(
+    (await run(strict, green({ device: { runtime: 'iOS 18.50' } }).broker)).exitCode,
+    75,
+  );
+});
+
+test('Набор: экран не принял текст — провал продукта; поле пароля сравнивается по длине', async () => {
+  const typing = single(
+    [{ launch: true }, { tap: 'amount-input' }, { type: '1350' }],
+    [{ kind: 'visible', element: 'submit' }],
+  );
+  const capped = workspace(typing);
+  const red = await run(capped, green({ maxLength: 3 }).broker);
+  assert.equal(red.exitCode, 1);
+  assert.deepEqual(reachOf(capped)?.slice(1, 3), ['failure', 'assertion']);
+  assert.match(xmlOf(capped), /шаг 2 \(type\).*после символа 4/);
+  // Обратный случай: то же поле без ограничения.
+  const free = workspace(typing);
+  assert.equal((await run(free, green().broker)).exitCode, 0);
+  // Поле пароля: маска вместо текста, длина растёт — набор принят.
+  const secure = workspace(typing);
+  assert.equal((await run(secure, green({ secure: true }).broker)).exitCode, 0);
+  const secureCapped = workspace(typing);
+  assert.equal((await run(secureCapped, green({ secure: true, maxLength: 2 }).broker)).exitCode, 1);
+  assert.match(xmlOf(secureCapped), /длина поля amount-input 2, ожидалось 3/);
+  assert.doesNotMatch(xmlOf(secureCapped), /1350/);
+  // Нет поля в фокусе: набор без касания поля.
+  const unfocused = workspace(
+    single([{ launch: true }, { type: '1' }], [{ kind: 'visible', element: 'submit' }]),
+  );
+  assert.equal((await run(unfocused, green().broker)).exitCode, 1);
+  assert.match(xmlOf(unfocused), /нет поля в фокусе/);
+});
+
+test('Очистка: в фокусе должна оказаться цель, иначе провал продукта', async () => {
+  const onlyClear = workspace(
+    single([{ launch: true }, { clear: 'amount-input' }], [{ kind: 'visible', element: 'submit' }]),
+  );
+  assert.equal((await run(onlyClear, green({ focusElsewhere: true }).broker)).exitCode, 1);
+  assert.deepEqual(reachOf(onlyClear)?.slice(1, 3), ['failure', 'assertion']);
+  assert.match(
+    xmlOf(onlyClear),
+    /шаг 1 \(clear\): после касания amount-input в фокусе other-input/,
+  );
+  // Обратный случай: касание фокусирует саму цель, текст удаляется.
+  const fine = workspace(
+    single(
+      [{ launch: true }, { tap: 'amount-input' }, { type: '13' }, { clear: 'amount-input' }],
+      [{ kind: 'visible', element: 'submit' }],
+    ),
+  );
+  assert.equal((await run(fine, green().broker)).exitCode, 0);
+});
+
+test('Прокрутка: цель не показана — провал продукта, цели нет — missing с той же целью', async () => {
+  const scrolling = single(
+    [{ launch: true }, { scroll: 'list', to: 'far-item', maxSwipes: 3 }],
+    [{ kind: 'visible', element: 'submit' }],
+  );
+  const stuck = workspace(scrolling);
+  assert.equal(
+    (await run(stuck, green({ list: { scrolls: false, item: true } }).broker)).exitCode,
+    1,
+  );
+  assert.match(xmlOf(stuck), /шаг 1 \(scroll\): прокрутка list: far-item не показан/);
+  const absent = workspace(scrolling);
+  assert.equal(
+    (await run(absent, green({ list: { scrolls: false, item: false } }).broker)).exitCode,
+    1,
+  );
+  assert.match(xmlOf(absent), /шаг 1: цель far-item не найдена на экране/);
+  const noList = workspace(scrolling);
+  assert.equal((await run(noList, green().broker)).exitCode, 1);
+  assert.match(xmlOf(noList), /контейнер прокрутки list не на экране/);
+  // Обратный случай: прокрутка показывает цель.
+  const moves = workspace(scrolling);
+  const ok = await run(moves, green({ list: { scrolls: true, item: true } }).broker);
+  assert.equal(ok.exitCode, 0, JSON.stringify(ok.failed));
+});
+
+test('route открывается после последнего запуска; seed без launch отклоняется', async () => {
+  const routed = single(
+    [{ launch: true }, { wait: 'submit' }],
+    [{ kind: 'visible', element: 'submit' }],
+    { app: { scheme: 'app' }, state: { route: '/form/amount', seed: 'preset-a' } },
+  );
+  const app = green();
+  assert.equal((await run(workspace(routed), app.broker)).exitCode, 0);
+  const order = app.calls.filter((c) => c.startsWith('launch') || c.startsWith('open'));
+  assert.deepEqual(order, ['launch -DevContourSeed preset-a', 'open app://form/amount']);
+  // Без запуска в шагах route открывается сразу.
+  const noLaunch = single([{ wait: 'submit' }], [{ kind: 'visible', element: 'submit' }], {
+    app: { scheme: 'app' },
+    state: { route: '/form/amount' },
+  });
+  const other = green();
+  await run(workspace(noLaunch), other.broker);
+  assert.equal(
+    other.calls.find((c) => c.startsWith('open')),
+    'open app://form/amount',
+  );
+  const seedless = single([{ wait: 'submit' }], [{ kind: 'background' }], {
+    state: { seed: 'x' },
+  });
+  assert.match(JSON.stringify(visualSpecSchema.safeParse(seedless).error?.issues), /добавьте шаг/);
+  const seeded = single([{ launch: true }], [{ kind: 'background' }], { state: { seed: 'x' } });
+  assert.ok(visualSpecSchema.safeParse(seeded).success);
+});
+
+test('Ссылки: каталог наблюдений через symlink наружу отклоняется, подложенный файл не перезаписывается', async () => {
+  const outside = mkdtempSync(join(tmpdir(), 'dc-vrun-outside-'));
+  const escape = workspace();
+  symlinkSync(outside, join(escape, '.reports'));
+  await assert.rejects(run(escape, green().broker), /внутри рабочего дерева/);
+  assert.equal(existsSync(join(outside, 'visual', 'run.json')), false);
+  // Подложенная ссылка с именем наблюдения удаляется, цель ссылки не меняется.
+  const planted = workspace();
+  mkdirSync(join(planted, '.reports', 'visual'), { recursive: true });
+  const victim = join(outside, 'victim.png');
+  writeFileSync(victim, 'keep');
+  symlinkSync(victim, join(planted, '.reports', 'visual', 'UI-form-focused.png'));
+  symlinkSync(victim, join(planted, '.reports', 'visual.xml'));
+  assert.equal((await run(planted, green().broker)).exitCode, 0);
+  assert.equal(readFileSync(victim, 'utf8'), 'keep');
+  assert.ok(
+    !lstatSync(join(planted, '.reports', 'visual', 'UI-form-focused.png')).isSymbolicLink(),
+  );
+  assert.ok(!lstatSync(join(planted, '.reports', 'visual.xml')).isSymbolicLink());
+});
+
+test('Анимация клавиатуры: рамки читаются после того, как клавиатура встала', async () => {
+  // Без ожидания устойчивого снимка кнопка читалась бы на 150 pt выше, до
+  // конца анимации, и visible ложно проходил бы.
+  const red = workspace();
+  const c = clock();
+  const animated = fakeApp({ buttonY: 563, background: noise, log: '', animated: c.now });
+  assert.equal((await run(red, animated.broker, c)).exitCode, 1);
+  assert.match(xmlOf(red), /закрыто 36 из 56 pt/);
+  assert.deepEqual(framesOf(red).keyboard, KEYBOARD);
+  // Обратный случай: кнопка после анимации над клавиатурой.
+  const fine = workspace();
+  const d = clock();
+  assert.equal((await run(fine, green({ animated: d.now }).broker, d)).exitCode, 0);
+});
+
+test('tap-hits: не больше одного в состоянии', () => {
+  const one = single([], [{ kind: 'tap-hits', element: 'a', expect: { visible: 'b' } }]);
+  assert.ok(visualSpecSchema.safeParse(one).success);
+  const two = single(
+    [],
+    [
+      { kind: 'tap-hits', element: 'a', expect: { visible: 'b' } },
+      { kind: 'tap-hits', name: 'second', element: 'c', expect: { visible: 'd' } },
+    ],
+  );
+  assert.match(
+    JSON.stringify(visualSpecSchema.safeParse(two).error?.issues),
+    /Не больше одного tap-hits/,
+  );
+});
+
+test('Релиз и Expo Go: спецификация отклоняется до broker, Expo Go от broker — провал', async () => {
+  const declared = workspace({ ...spec, host: 'expo-go' });
+  const untouched = green({ host: 'expo-go' });
+  const result = await run(declared, untouched.broker, { release: true });
+  assert.equal(result.exitCode, 1);
+  assert.equal(untouched.hellos.length, 0);
+  assert.match(xmlOf(declared), /name="accepted">\s*<failure type="assertion"/);
+  // Спецификация dev-client, broker сообщил Expo Go: провал, а не окружение.
+  const reported = workspace();
+  const expo = await run(reported, green({ host: 'expo-go' }).broker, { release: true });
+  assert.equal(expo.exitCode, 1);
+  assert.match(xmlOf(reported), /name="accepted">\s*<failure type="assertion"/);
+  // Без --release та же пара — расхождение хоста, ошибка окружения.
+  assert.equal((await run(workspace(), green({ host: 'expo-go' }).broker)).exitCode, 75);
+  // Обратный случай: dev-client в релизе проходит.
+  assert.equal((await run(workspace(), green().broker, { release: true })).exitCode, 0);
+});
+
+test('Неверная спецификация удаляет прежние наблюдения', async () => {
+  const cwd = workspace();
+  assert.equal((await run(cwd, green().broker)).exitCode, 0);
+  assert.ok(existsSync(join(cwd, '.reports', 'visual', 'UI-form-focused.png')));
+  writeFileSync(join(cwd, 'contracts', 'ui.json'), '{"version": 2}');
+  assert.equal((await run(cwd, green().broker)).exitCode, 1);
+  assert.ok(!existsSync(join(cwd, '.reports', 'visual', 'UI-form-focused.png')));
+});
+
+test('reach: запись failure — провал продукта, только если совпадает с видом шага', () => {
+  const parsed = visualSpecSchema.parse(
+    single([{ launch: true }, { type: '12' }], [{ kind: 'background' }]),
+  );
+  const state = parsed.states[0];
+  const unreached = (failure: { step: number; kind: 'type' | 'clear' | 'scroll' }) => ({
+    unreached: {
+      version: 1 as const,
+      state: state.id,
+      error: 'x',
+      stepTaps: [],
+      failure: { ...failure, message: 'текст не принят' },
+    },
+  });
+  const product = evaluateReach(state, unreached({ step: 1, kind: 'type' }));
+  assert.equal(product.status, 'failed');
+  assert.match(product.message ?? '', /шаг 1 \(type\): текст не принят/);
+  // Обратный случай: запись не того вида или шага — нарушение договора, окружение.
+  assert.equal(evaluateReach(state, unreached({ step: 1, kind: 'scroll' })).status, 'error');
+  assert.equal(evaluateReach(state, unreached({ step: 0, kind: 'type' })).status, 'error');
+});
+
+test('Broker по HTTP: перенаправление, слишком большой ответ и не-PNG снимок — сбой окружения', async () => {
+  const image = png(4, 4, noise);
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      const { method } = JSON.parse(body) as { method: string };
+      if (method === 'launch') {
+        res.writeHead(302, { location: 'http://example.invalid/rpc' });
+        res.end();
+        return;
+      }
+      if (method === 'frames') {
+        res.setHeader('content-length', String(60 * 1024 * 1024));
+        res.end();
+        return;
+      }
+      const png64 = (method === 'screenshot' ? image : Buffer.from('GIF89a')).toString('base64');
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ result: { png: png64 } }));
+    });
+  });
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  try {
+    const port = (server.address() as { port: number }).port;
+    const broker = httpBroker({ port, token: 't' });
+    assert.deepEqual(await broker.screenshot(), image);
+    await assert.rejects(broker.launch([]), (e) => e instanceof BrokerError);
+    await assert.rejects(broker.frames(), /больше/);
+    const gif = httpBroker(
+      { port, token: 't' },
+      {
+        fetch: (url, init) =>
+          fetch(url, { ...init, body: JSON.stringify({ method: 'gif', params: {} }) }),
+      },
+    );
+    await assert.rejects(gif.screenshot(), /не PNG/);
+  } finally {
+    server.close();
+  }
 });
