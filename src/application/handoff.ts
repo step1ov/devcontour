@@ -101,7 +101,14 @@ export interface HandoffHostNext {
    */
   decision?: 'plan' | 'job';
   /** Задачи, из-за которых план не согласован (`decision: plan`). */
-  plan?: { drafts: string[]; stale: string[] };
+  plan?: {
+    drafts: string[];
+    stale: string[];
+    /** Не разобранные ведущим находки агентов: их разбирают до ревью. */
+    unverified: string[];
+    /** Черновики, которые утверждение отвергнет, и причина: их правят до ревью. */
+    blocked: { id: string; reason: string }[];
+  };
   detail: string;
 }
 
@@ -309,17 +316,35 @@ const PLAN_HINT_IDS = 20;
 function planStep(boardId: string, ctx: HostContext): HandoffHostNext | undefined {
   const found = boardTasks(ctx.state, boardId);
   if (!found || planApproved(ctx.h, found.revision, found.tasks)) return undefined;
-  const plan = unapprovedTasks(ctx.h, found.tasks);
-  const ids = [...plan.drafts, ...plan.stale];
-  const shown =
-    ids.slice(0, PLAN_HINT_IDS).join(',') +
-    (ids.length > PLAN_HINT_IDS ? ` (… ещё ${ids.length - PLAN_HINT_IDS}: host.next.plan)` : '');
+  const plan = unapprovedTasks(ctx.h, ctx.state, found.tasks);
+  // Ревью плана откажет до модели на черновике, который утверждение
+  // отвергнет, и отвергнет не разобранную находку: подсказка называет такие
+  // задачи и не включает их в область ревью, а без других задач ревью не
+  // предлагает вовсе — оно было бы оплачено впустую.
+  const held = new Set([...plan.blocked.map((b) => b.id), ...plan.unverified]);
+  const ids = [...plan.drafts, ...plan.stale].filter((id) => !held.has(id));
+  const list = (xs: string[], field: string, sep = ',') =>
+    xs.slice(0, PLAN_HINT_IDS).join(sep) +
+    (xs.length > PLAN_HINT_IDS ? ` (… ещё ${xs.length - PLAN_HINT_IDS}: host.next.${field})` : '');
+  const unverified = plan.unverified.length
+    ? ` ${plan.unverified.length} draft task(s) are unverified agent findings: the lead triages them before approval — verify the reproduction and priority, merge duplicates, cancel stale or misrouted ones (devcontour cancel --task ID --reason … --by host --workspace …), write testable acceptance and gates (devcontour edit-task --task ID --file FILE --workspace …): ${list(plan.unverified, 'plan.unverified')}.`
+    : '';
+  const blocked = plan.blocked.length
+    ? ` ${plan.blocked.length} draft task(s) fail approval preconditions, and review-plan refuses them before the model call; fix these first (devcontour edit-task --task ID --file FILE --workspace …) or cancel them: ${list(
+        plan.blocked.map((b) => `${b.id} — ${b.reason}`),
+        'plan.blocked',
+        '; ',
+      )}.`
+    : '';
+  const review = ids.length
+    ? ` Review the plan with an explicit scope (devcontour review-plan --board ${boardId} --tasks ${list(ids, 'plan')} --author-runtime codex|claude --workspace …, keeping only the tasks to run), or edit/cancel the tasks first; register workflow_start only for an approved plan.`
+    : ' No task of the plan is ready for review: review-plan only after these are handled; register workflow_start only for an approved plan.';
   return {
     action: 'decide',
     decision: 'plan',
     boardId,
     plan,
-    detail: `The plan of board ${boardId} is not approved (${plan.drafts.length} draft task(s)${plan.stale.length ? `, ${plan.stale.length} approved under another policy` : ''}). workflow_start would send the whole plan to review and run every task once approved: choosing the scope is the lead's or the user's decision. Review the plan with an explicit scope (devcontour review-plan --board ${boardId} --tasks ${shown} --author-runtime codex|claude --workspace …, keeping only the tasks to run), or edit/cancel the tasks first; register workflow_start only for an approved plan.`,
+    detail: `The plan of board ${boardId} is not approved (${plan.drafts.length} draft task(s)${plan.stale.length ? `, ${plan.stale.length} approved under another policy` : ''}).${unverified}${blocked} workflow_start would send the whole plan to review and run every task once approved: choosing the scope is the lead's or the user's decision.${review}`,
   };
 }
 

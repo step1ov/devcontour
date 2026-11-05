@@ -212,6 +212,23 @@ export const taskInput = z.object({
     .optional(),
 });
 export type TaskInput = z.infer<typeof taskInput>;
+/**
+ * Приёмка черновика находки агента до разбора ведущим. Пока она не заменена
+ * проверяемой, находка не разобрана: ревью плана отвергло бы такую задачу.
+ */
+export const FINDING_ACCEPTANCE: readonly string[] = [
+  'Воспроизвести находку и сохранить доказательство до изменения кода.',
+  'После исправления выполнить регрессионный сценарий и обязательные проверки.',
+];
+/**
+ * Находка не разобрана ведущим: не подтверждена (`verification: proposed`) и
+ * сохраняет шаблонную приёмку. Перехода проверки в модели нет, поэтому
+ * разбором считается правка приёмки через `edit-task`.
+ */
+export const unverifiedFinding = (t: Pick<TaskInput, 'finding' | 'acceptance'>) =>
+  t.finding?.verification === 'proposed' &&
+  t.acceptance.length === FINDING_ACCEPTANCE.length &&
+  t.acceptance.every((a, i) => a === FINDING_ACCEPTANCE[i]);
 export const relatedRepositoriesTooMany = `Связанных компонентов не больше ${TASK_LIMITS.relatedRepositories}`;
 /**
  * Новая постановка. `taskInput` читает и уже сохранённые задачи (Git sync,

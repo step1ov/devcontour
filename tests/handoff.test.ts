@@ -1102,6 +1102,72 @@ test('session_handoff: подсказка ревью плана называет
   }
 });
 
+test('session_handoff: решение о плане называет черновики, которые утверждение отвергнет, и неразобранные находки', () => {
+  const f = fixture();
+  try {
+    const board = f.h.createBoard('Board with findings', '', 'main');
+    const source = f.h.addTask(board.id, input('Approved task'));
+    f.h.approve(board.id);
+    f.h.pause(false);
+    const run = f.h.claim('writer')!;
+    assert.equal(run.taskId, source.id);
+    const [found] = f.h.discoveries(run.id, run.token, 'a'.repeat(40), [
+      {
+        kind: 'bug',
+        title: 'Raw finding',
+        path: 'src/a.ts',
+        line: 1,
+        observation: 'Observation text',
+        consequence: 'Consequence',
+        reproduction: 'Reproduction',
+      },
+    ]);
+    const findings = f.store.read().boards.find((b) => b.title === 'Находки агентов')!;
+    // Сырая находка: ведущий разбирает её до ревью, ревью не предлагается.
+    let next = devcontourHandoff(f.h).host.next;
+    assert.equal(next?.decision, 'plan');
+    assert.equal(next?.boardId, findings.id);
+    assert.deepEqual(next?.plan?.unverified, [found]);
+    assert.equal(next?.plan?.blocked.length, 0);
+    assert.match(next.detail, /unverified agent findings/);
+    assert.match(next.detail, /cancel --task ID .*--by host/);
+    assert.doesNotMatch(next.detail, /review-plan --board/, 'ревью сырых находок не предлагается');
+    // Разобранная находка — с проверяемой приёмкой — идёт в область ревью.
+    const t = f.store.read().tasks.find((x) => x.id === found)!;
+    f.h.editTask(
+      found,
+      {
+        repositoryId: t.repositoryId,
+        role: t.role,
+        title: t.title,
+        description: t.description,
+        acceptance: ['Regression test for src/a.ts fails before the fix and passes after it.'],
+      },
+      specDigest(t),
+    );
+    next = devcontourHandoff(f.h).host.next;
+    assert.equal(next?.boardId, findings.id);
+    assert.deepEqual(next?.plan?.unverified, []);
+    assert.match(next.detail, new RegExp(`--tasks ${found} --author-runtime`));
+    // Роль с обязательным контрактом без контракта: ревью плана откажет до
+    // модели, такой черновик в область ревью не входит.
+    const unbound = f.h.addTask(board.id, { ...input('Unbound backend'), role: 'backend' }).id;
+    const ready = f.h.addTask(board.id, input('Ready draft')).id;
+    next = devcontourHandoff(f.h, { boardId: board.id }).host.next;
+    assert.equal(next?.decision, 'plan');
+    assert.deepEqual(
+      next?.plan?.blocked.map((b) => b.id),
+      [unbound],
+    );
+    assert.match(next.plan.blocked[0].reason, /сначала привяжите утверждённый контракт/);
+    assert.match(next.detail, /fail approval preconditions/);
+    assert.match(next.detail, /edit-task --task ID/);
+    assert.match(next.detail, new RegExp(`--tasks ${ready} --author-runtime`));
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('session_handoff: approvalMode operator — задания не идут, шаг оператора', () => {
   const f = fixture();
   try {

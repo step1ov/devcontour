@@ -38,6 +38,7 @@ import {
   taskIngest,
   taskInput,
   discoveryInput,
+  FINDING_ACCEPTANCE,
   type Contract,
   type ContractArtifact,
   type Task,
@@ -1743,10 +1744,7 @@ export class DevContour {
             role: source.role,
             title: finding.title,
             description: `${finding.observation}\nПоследствие: ${finding.consequence}\nВоспроизведение: ${finding.reproduction}\nИсточник: ${finding.path}:${finding.line} @ ${sha}. Находка не подтверждена.`,
-            acceptance: [
-              'Воспроизвести находку и сохранить доказательство до изменения кода.',
-              'После исправления выполнить регрессионный сценарий и обязательные проверки.',
-            ],
+            acceptance: [...FINDING_ACCEPTANCE],
             finding: {
               ...finding,
               fingerprint,
@@ -1763,9 +1761,20 @@ export class DevContour {
           createdAt: now(),
           contractDigests: {},
         };
-        // Находка относится к той же постановке и фиче, что и задача, в которой
-        // её нашли. Без привязки черновик блокировал утверждение всей доски
-        // находок сообщением, которое не называло задачу.
+        // Находка относится к той же постановке, фиче и контрактам, что и задача,
+        // в которой её нашли. Без привязки черновик блокировал утверждение всей
+        // доски находок: постановка — сообщением, которое не называло задачу,
+        // контракт — для роли, которой он обязателен. Контракт берётся текущей
+        // редакцией того же файла; исчезнувший из реестра — отбрасывается.
+        // Digests закрепляет утверждение, черновик их не несёт.
+        t.contracts = [
+          ...new Set(
+            source.contracts.flatMap((id) => {
+              const c = supersededBy(s.contracts, id) ?? s.contracts.find((x) => x.id === id);
+              return c ? [c.id] : [];
+            }),
+          ),
+        ];
         if (source.preparation) {
           try {
             t.preparation = developmentBinding(s, source.preparation.changeId);

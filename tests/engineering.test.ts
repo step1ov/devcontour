@@ -100,6 +100,33 @@ test('Discovered debt becomes a deduplicated draft with provenance; scope and co
   }
 });
 
+test('Находка наследует контракты задачи-источника текущей редакцией и утверждается для роли с контрактом', () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Backend work');
+    const api = f.h.contract('API', 'v1', undefined, undefined, 'docs/contracts/api.md');
+    const events = f.h.contract('Events', 'e1', undefined, undefined, 'docs/contracts/events.md');
+    f.h.addTask(b.id, { ...input(), role: 'backend', contracts: [api.id, events.id] });
+    f.h.approve(b.id);
+    // Новая редакция API после утверждения: находка берёт её, а не прежнюю.
+    const next = f.h.contract('API', 'v2', undefined, undefined, 'docs/contracts/api.md');
+    f.h.pause(false);
+    const run = f.h.claim('writer')!;
+    const [id] = f.h.discoveries(run.id, run.token, 'a'.repeat(40), [finding]);
+    const s = f.store.read();
+    const draft = s.tasks.find((t) => t.id === id)!;
+    assert.equal(draft.role, 'backend');
+    assert.deepEqual(draft.contracts, [next.id, events.id]);
+    assert.deepEqual(draft.contractDigests, {}, 'digests закрепляет утверждение');
+    assert.deepEqual(f.h.approvable(s, draft), {
+      [next.id]: next.digest,
+      [events.id]: events.digest,
+    });
+  } finally {
+    f.cleanup();
+  }
+});
+
 const demos = demoPool(testDemo);
 after(() => demos.close());
 async function runnerFixture() {
