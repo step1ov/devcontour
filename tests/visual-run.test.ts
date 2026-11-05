@@ -105,8 +105,25 @@ function fakeApp(options: {
   animated?: () => number;
   /** Список: `far-item` ниже видимой части; `scrolls` — прокрутка его показывает. */
   list?: { scrolls: boolean; item: boolean };
+  /** Список появляется через `ms` по часам теста. */
+  listAfter?: { now: () => number; ms: number };
+  /** Курсор встаёт в точку касания поля (иначе — в конец текста). */
+  caretAtTap?: boolean;
+  /** Курсор ставит только первое касание после фокуса. */
+  caretStuck?: boolean;
+  /** Начальный текст поля. */
+  prefill?: string;
+  /** Поле в фокусе без id (broker отдаёт element: null). */
+  unnamedFocus?: boolean;
+  /** Рамки «дрожат»: кнопка сдвигается на каждом чтении. */
+  jitter?: boolean;
+  /** Первый символ после фокуса стирает прежний текст (так iOS ведёт себя с паролем). */
+  clearsOnRefocus?: boolean;
 }) {
-  let text = '';
+  let freshFocus = false;
+  let text = options.prefill ?? '';
+  let caret = Array.from(text).length;
+  let framesReads = 0;
   let focused: string | null = null;
   let result = false;
   let launched = false;
@@ -133,10 +150,19 @@ function fakeApp(options: {
     focused ? (stage() < 2 ? { ...KEYBOARD, y: 800 - stage() * 100 } : KEYBOARD) : null;
   const within = (r: BrokerRect, x: number, y: number) =>
     x >= r.x && x <= r.x + r.width && y >= r.y && y <= r.y + r.height;
+  // Набор и удаление — в позиции курсора, как в настоящем поле.
   const accept = (ch: string) => {
-    if (ch === '\b') text = Array.from(text).slice(0, -1).join('');
-    else if (options.maxLength === undefined || Array.from(text).length < options.maxLength)
-      text += ch;
+    const chars = Array.from(text);
+    if (ch === '\b') {
+      if (caret > 0) {
+        chars.splice(caret - 1, 1);
+        caret--;
+      }
+    } else if (options.maxLength === undefined || chars.length < options.maxLength) {
+      chars.splice(caret, 0, ch);
+      caret++;
+    }
+    text = chars.join('');
   };
   const sync: Sync<VisualBroker> = {
     hello: (device) => {
@@ -157,14 +183,17 @@ function fakeApp(options: {
     },
     frames: (): BrokerFrames => {
       calls.push('frames');
+      framesReads++;
+      const listShown =
+        options.list && (!options.listAfter || options.listAfter.now() >= options.listAfter.ms);
       const elements: Record<string, BrokerRect> = launched
         ? {
             'form-screen': WINDOW,
             'amount-input': input,
             'other-input': { x: 26, y: 200, width: 350, height: 44 },
-            submit: button(),
+            submit: options.jitter ? { ...button(), y: button().y + (framesReads % 7) } : button(),
             ...(result ? { result: { x: 26, y: 120, width: 350, height: 40 } } : {}),
-            ...(options.list
+            ...(options.list && listShown
               ? {
                   list: listFrame,
                   ...(options.list.item
@@ -180,7 +209,7 @@ function fakeApp(options: {
         elements,
         focused: focused
           ? {
-              element: focused,
+              element: options.unnamedFocus ? null : focused,
               text: options.secure ? '•'.repeat(Array.from(text).length) : text,
               ...(options.secure ? { secure: true as const } : {}),
             }
@@ -193,7 +222,12 @@ function fakeApp(options: {
       const kb = keyboard();
       if (kb && within(kb, x, y)) accept('2');
       else if (within(input, x, y)) {
+        const first = !focused;
+        freshFocus = true;
         focused = options.focusElsewhere ? 'other-input' : 'amount-input';
+        if (options.caretAtTap && (first || !options.caretStuck))
+          caret = Math.round(((x - input.x) / input.width) * Array.from(text).length);
+        else if (!options.caretAtTap) caret = Array.from(text).length;
         touched();
       } else if (within(button(), x, y)) {
         result = true;
@@ -202,6 +236,11 @@ function fakeApp(options: {
     },
     typeText: (value) => {
       calls.push(`type ${JSON.stringify(value)}`);
+      if (options.clearsOnRefocus && freshFocus && value !== '\b' && !value.startsWith('\b')) {
+        text = '';
+        caret = 0;
+      }
+      freshFocus = false;
       for (const ch of value) accept(ch);
       touched();
     },
@@ -741,7 +780,7 @@ test('Прокрутка: цель не показана — провал про
   assert.match(xmlOf(absent), /шаг 1: цель far-item не найдена на экране/);
   const noList = workspace(scrolling);
   assert.equal((await run(noList, green().broker)).exitCode, 1);
-  assert.match(xmlOf(noList), /контейнер прокрутки list не на экране/);
+  assert.match(xmlOf(noList), /контейнер прокрутки list не появился за время шага/);
   // Обратный случай: прокрутка показывает цель.
   const moves = workspace(scrolling);
   const ok = await run(moves, green({ list: { scrolls: true, item: true } }).broker);
@@ -915,6 +954,190 @@ test('Broker по HTTP: перенаправление, слишком боль�
       },
     );
     await assert.rejects(gif.screenshot(), /не PNG/);
+  } finally {
+    server.close();
+  }
+});
+
+test('Срок прогона: состояния, исчерпавшие бюджеты, всё равно дают JUnit до срока', async () => {
+  const waiting = {
+    version: 1,
+    platform: 'ios',
+    defaults: { settleMs: 0, stateTimeoutMs: 60000 },
+    log: { forbid: ['is deprecated'] },
+    states: ['a', 'b', 'c', 'd', 'e', 'f'].map((n) => ({
+      id: `UI-wait-${n}`,
+      steps: [{ launch: true }, { wait: 'never-shown' }],
+      assert: [{ kind: 'visible', element: 'submit' }],
+    })),
+  };
+  const cwd = workspace(waiting);
+  const c = clock();
+  const start = c.now();
+  const result = await run(cwd, green().broker, { ...c, budgetMs: 100_000 });
+  assert.ok(c.now() - start <= 100_000, `прогон занял ${c.now() - start} мс`);
+  assert.ok(existsSync(join(cwd, '.reports', 'visual.xml')));
+  const xml = xmlOf(cwd);
+  // Первое состояние исчерпало свой бюджет: missing, провал продукта.
+  assert.match(xml, /UI-wait-a" name="reach">\s*<failure type="assertion"/);
+  // Второе урезано сроком прогона: не дефект экрана, а окружение.
+  assert.match(
+    xml,
+    /UI-wait-b" name="reach">\s*<error type="environment" message="[^"]*срок прогона/,
+  );
+  assert.match(xml, /UI-wait-f" name="reach">\s*<error type="environment"/);
+  assert.equal(result.exitCode, 1);
+  // Обратный случай: тот же прогон с достаточным сроком — каждое состояние проваливается само.
+  const roomy = workspace(waiting);
+  await run(roomy, green().broker, { budgetMs: 390_000 });
+  assert.equal((xmlOf(roomy).match(/name="reach">\s*<failure type="assertion"/g) ?? []).length, 6);
+});
+
+test('Прокрутка: контейнер, появившийся позже, ожидается; missing — только после бюджета', async () => {
+  const scrolling = single(
+    [{ launch: true }, { scroll: 'list', to: 'far-item', maxSwipes: 3 }],
+    [{ kind: 'visible', element: 'submit' }],
+  );
+  const late = workspace(scrolling);
+  const c = clock();
+  const app = green({
+    list: { scrolls: true, item: true },
+    listAfter: { now: c.now, ms: c.now() + 3000 },
+  });
+  const ok = await run(late, app.broker, c);
+  assert.equal(ok.exitCode, 0, JSON.stringify(ok.failed));
+  // Обратный случай: контейнер появляется позже бюджета состояния (15 с).
+  const tooLate = workspace(scrolling);
+  const d = clock();
+  const slow = green({
+    list: { scrolls: true, item: true },
+    listAfter: { now: d.now, ms: d.now() + 20_000 },
+  });
+  const started = d.now();
+  assert.equal((await run(tooLate, slow.broker, d)).exitCode, 1);
+  assert.ok(d.now() - started >= 15_000);
+  assert.match(xmlOf(tooLate), /контейнер прокрутки list не появился за время шага/);
+});
+
+test('Очистка: курсор ставится в конец поля; остаток-суффикс — сбой драйвера', async () => {
+  const clearing = single(
+    [{ launch: true }, { tap: 'amount-input' }, { type: '13' }, { clear: 'amount-input' }],
+    [{ kind: 'visible', element: 'submit' }],
+  );
+  // Касание центра ставит курсор посередине: без касания у края осталось бы «3».
+  const caret = workspace(clearing);
+  const result = await run(caret, green({ caretAtTap: true }).broker);
+  assert.equal(result.exitCode, 0, JSON.stringify(result.failed));
+  // Обратный случай: курсор не двигается после первого касания — остаётся конец текста.
+  const stuck = workspace(
+    single([{ launch: true }, { clear: 'amount-input' }], [{ kind: 'visible', element: 'submit' }]),
+  );
+  const env = await run(stuck, green({ caretAtTap: true, caretStuck: true, prefill: '50' }).broker);
+  assert.equal(env.exitCode, 75);
+  assert.match(xmlOf(stuck), /курсор не встал в конец поля, осталось &quot;0&quot;/);
+});
+
+test('Набор: поле без id в фокусе — не «нет фокуса»; текст сверяется с начальным', async () => {
+  const typing = single(
+    [{ launch: true }, { tap: 'amount-input' }, { type: '13' }],
+    [{ kind: 'visible', element: 'submit' }],
+  );
+  const unnamed = workspace(typing);
+  const ok = await run(unnamed, green({ unnamedFocus: true }).broker);
+  assert.equal(ok.exitCode, 0, JSON.stringify(ok.failed));
+  assert.doesNotMatch(xmlOf(unnamed), /нет поля в фокусе/);
+  // Поле с начальным текстом: ожидается «50» + «13».
+  const prefilled = workspace(typing);
+  assert.equal((await run(prefilled, green({ prefill: '50' }).broker)).exitCode, 0);
+  // Обратный случай: курсор в середине — «5130» оканчивается не на набранное начало.
+  const middle = workspace(typing);
+  assert.equal((await run(middle, green({ prefill: '50', caretAtTap: true }).broker)).exitCode, 1);
+  assert.match(xmlOf(middle), /ожидалось &quot;501&quot;/);
+});
+
+test('Поле пароля, очищенное при повторном фокусе, принимается и отмечается', async () => {
+  const typing = single(
+    [{ launch: true }, { tap: 'amount-input' }, { type: 'ab' }],
+    [{ kind: 'visible', element: 'submit' }],
+  );
+  const cwd = workspace(typing);
+  const app = green({ secure: true, prefill: 'xyz', clearsOnRefocus: true });
+  assert.equal((await run(cwd, app.broker)).exitCode, 0);
+  assert.match(
+    readFileSync(join(cwd, '.reports', 'visual', 'run.json'), 'utf8'),
+    /очищено при наборе/,
+  );
+  // Обратный случай: обычное поле, стёршее текст, — провал набора.
+  const plain = workspace(typing);
+  const wiped = green({ prefill: 'xyz', clearsOnRefocus: true });
+  assert.equal((await run(plain, wiped.broker)).exitCode, 1);
+  assert.match(xmlOf(plain), /ожидалось &quot;xyza&quot;/);
+});
+
+test('Каталоги: --out не корень worktree; каталоги вне worktree не создаются', async () => {
+  const cwd = workspace();
+  await assert.rejects(run(cwd, green().broker, { out: '.' }), /внутри рабочего дерева/);
+  // Отчёт в корне worktree допустим.
+  assert.equal((await run(cwd, green().broker, { report: 'visual.xml' })).exitCode, 0);
+  const outside = mkdtempSync(join(tmpdir(), 'dc-vrun-outside-'));
+  const escape = workspace();
+  symlinkSync(outside, join(escape, 'link'));
+  await assert.rejects(run(escape, green().broker, { out: 'link/a/b' }), /внутри рабочего дерева/);
+  assert.equal(existsSync(join(outside, 'a')), false);
+});
+
+test('Неустойчивые рамки записываются в run.json', async () => {
+  const shaky = workspace();
+  await run(shaky, green({ jitter: true }).broker);
+  const notes = (
+    JSON.parse(readFileSync(join(shaky, '.reports', 'visual', 'run.json'), 'utf8')) as {
+      notes: Record<string, string[]>;
+    }
+  ).notes;
+  assert.match(JSON.stringify(notes), /рамки не установились/);
+  const calm = workspace();
+  await run(calm, green().broker);
+  const quiet = (
+    JSON.parse(readFileSync(join(calm, '.reports', 'visual', 'run.json'), 'utf8')) as {
+      notes: Record<string, string[]>;
+    }
+  ).notes;
+  assert.deepEqual(quiet, {});
+});
+
+test('Broker по HTTP: тело chunked без Content-Length ограничено по ходу чтения', async () => {
+  const server = createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      res.setHeader('content-type', 'application/json');
+      res.write('{"result": {"keyboard": null}, "pad": "');
+      let sent = 0;
+      const more = () => {
+        if (sent >= 20) return res.end('"}');
+        sent++;
+        res.write('x'.repeat(500));
+        setImmediate(more);
+      };
+      more();
+    });
+  });
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', done));
+  try {
+    const port = (server.address() as { port: number }).port;
+    await assert.rejects(
+      httpBroker({ port, token: 't' }, { responseLimit: 4000 }).keyboardFrame(),
+      /больше 4000 байт/,
+    );
+    // Обратный случай: под пределом ответ читается (и отклоняется только схемой из-за pad).
+    await assert.rejects(
+      httpBroker({ port, token: 't' }, { responseLimit: 100_000 }).keyboardFrame(),
+      /не по договору/,
+    );
+    // Исчерпанный срок: вызов не начинается.
+    await assert.rejects(
+      httpBroker({ port, token: 't' }, { remaining: () => 0 }).keyboardFrame(),
+      /срок прогона исчерпан/,
+    );
   } finally {
     server.close();
   }

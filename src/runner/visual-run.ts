@@ -1,4 +1,4 @@
-import { mkdir, readdir, realpath, unlink } from 'node:fs/promises';
+import { lstat, mkdir, readdir, realpath, unlink } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
   evaluateVisual,
@@ -48,6 +48,13 @@ const OBSERVATION_FILE =
 const POLL_MS = 250;
 /** Предел кандидатов цели-префикса в записи касания (схема наблюдений). */
 const CANDIDATES_LIMIT = 200;
+/**
+ * Срок прогона по умолчанию: 390 с при timeout gate 420 с. Остальные 30 с —
+ * запуск процесса и запас; gate объявляет timeoutMs не меньше срока + 30 с.
+ */
+export const VISUAL_RUN_DEADLINE_MS = 390_000;
+/** Запас в конце срока: журнал, оценка и JUnit пишутся всегда. */
+export const VISUAL_FINISH_RESERVE_MS = 10_000;
 
 export interface VisualRunInput {
   /** Путь спецификации. */
@@ -60,6 +67,8 @@ export interface VisualRunInput {
   cwd: string;
   /** Проверка уровня релиза: Expo Go не принимается. */
   release?: boolean;
+  /** Срок всего прогона в мс; по умолчанию VISUAL_RUN_DEADLINE_MS. */
+  budgetMs?: number;
   /** Broker или причина, по которой его нет (ошибка окружения). */
   broker: VisualBroker | { error: string };
   platform?: NodeJS.Platform;
@@ -90,6 +99,7 @@ type Snapshot = {
   /** id с ненулевой рамкой, пересекающей окно. */
   visible: string[];
 };
+type Focused = BrokerFrames['focused'];
 type View = { visible: string[]; focused: { element: string; text: string } | null };
 
 function inside(path: string, cwd: string) {
@@ -98,14 +108,36 @@ function inside(path: string, cwd: string) {
 }
 
 /**
- * Каталог внутри рабочего дерева и после разрешения ссылок: символическая
- * ссылка в пути увела бы запись наблюдений за пределы worktree.
+ * Каталог внутри рабочего дерева и после разрешения ссылок. Сначала
+ * проверяется ближайший существующий предок (каталоги вне worktree не
+ * создаются), затем — созданный каталог. Между проверкой и записью
+ * промежуточный каталог могут подменить ссылкой: от этого защищает только
+ * то, что gate — единственный писатель своего worktree; сами файлы
+ * создаются без перехода по ссылкам.
  */
-async function insideReal(path: string, cwd: string, name: string) {
+async function insideReal(path: string, cwd: string, name: string, allowRoot: boolean) {
+  const root = await realpath(cwd);
+  const check = (real: string, of: string) => {
+    if (real === root ? !allowRoot : !inside(real, root))
+      throw new Error(
+        `${name} должен быть внутри рабочего дерева gate${allowRoot ? '' : ', но не его корнем'}: ${path} ведёт в ${of}`,
+      );
+  };
+  let existing = path;
+  for (;;) {
+    const info = await lstat(existing).catch(() => undefined);
+    if (info) break;
+    const parent = dirname(existing);
+    if (parent === existing) break;
+    existing = parent;
+  }
+  const realExisting = await realpath(existing);
+  if (realExisting !== root && !inside(realExisting, root))
+    throw new Error(
+      `${name} должен быть внутри рабочего дерева gate: ${path} ведёт в ${realExisting}`,
+    );
   await mkdir(path, { recursive: true });
-  const [real, root] = await Promise.all([realpath(path), realpath(cwd)]);
-  if (real !== root && !inside(real, root))
-    throw new Error(`${name} должен быть внутри рабочего дерева gate: ${path} ведёт в ${real}`);
+  check(await realpath(path), await realpath(path));
 }
 
 /**
@@ -118,10 +150,19 @@ async function freshDirectory(out: string) {
       await unlink(join(out, entry.name));
 }
 
+/** Поле в фокусе в записи наблюдений: оценщик называет только поля с id. */
 const view = (s: Snapshot): View => ({
   visible: s.visible,
-  focused: s.frames.focused && { element: s.frames.focused.element, text: s.frames.focused.text },
+  focused:
+    s.frames.focused?.element != null
+      ? { element: s.frames.focused.element, text: s.frames.focused.text }
+      : null,
 });
+
+/** То же поле: сравнивается, только если у обоих снимков поле названо. */
+const sameField = (a: NonNullable<Focused>, b: NonNullable<Focused>) =>
+  a.element === null || b.element === null || a.element === b.element;
+const fieldName = (f: NonNullable<Focused>) => f.element ?? 'поле без id';
 
 /**
  * Кто примет касание, по договору драйвера без hit-test: точка в рамке
@@ -151,6 +192,8 @@ const length = (text: string) => Array.from(text).length;
 class StateDriver {
   readonly stepTaps: Record<string, unknown>[] = [];
   missing: { step: number; target: string; visible: string[] } | undefined;
+  /** Замечания для run.json: неустойчивые снимки, очищенное поле пароля. */
+  readonly notes: string[] = [];
 
   constructor(
     private readonly broker: VisualBroker,
@@ -158,15 +201,26 @@ class StateDriver {
     private readonly deadline: number,
     private readonly sleep: (ms: number) => Promise<void>,
     private readonly now: () => number,
+    /** Бюджет состояния урезан сроком прогона: его исчерпание — не дефект экрана. */
+    private readonly cutByRun = false,
   ) {}
+
+  /**
+   * Срок исчерпан из-за срока прогона, а не бюджета состояния: ожидание
+   * прервано раньше, чем экран мог ответить, — ошибка окружения.
+   */
+  private runExpired(what: string) {
+    if (this.cutByRun && this.now() >= this.deadline)
+      throw new Unreached(`срок прогона исчерпан: ${what}`);
+  }
 
   get settle() {
     return this.spec.defaults.settleMs;
   }
 
   /**
-   * Бюджет состояния проверяется после обращений к broker: прогон должен
-   * закончиться отчётом раньше, чем gate снимут по timeout.
+   * Бюджет состояния (не дальше срока прогона минус запас) проверяется
+   * после обращений к broker: прогон заканчивается отчётом раньше timeout gate.
    */
   checkBudget(what: string) {
     if (this.now() > this.deadline) throw new Unreached(`бюджет состояния исчерпан: ${what}`);
@@ -175,20 +229,22 @@ class StateDriver {
   /**
    * Снимок экрана. `stable` — для измерения и касания: клавиатура не
    * меняется два чтения подряд, затем рамки элементов читаются, пока два
-   * снимка подряд не совпадут (не больше трёх чтений). Опрос при ожидании
-   * цели обходится без этого.
+   * снимка подряд не совпадут (не больше трёх чтений). Не установившийся
+   * снимок измеряется, но записывается в замечания run.json. Опрос при
+   * ожидании цели обходится без этого.
    */
-  async snapshot(stable = false): Promise<Snapshot> {
-    let keyboard = stable ? await this.stableKeyboard() : await this.broker.keyboardFrame();
+  async snapshot(stable = false, what = ''): Promise<Snapshot> {
+    let keyboard = stable ? await this.stableKeyboard(what) : await this.broker.keyboardFrame();
     let frames = await this.broker.frames();
     if (stable) {
-      for (let i = 0; i < 2; i++) {
+      let settled = false;
+      for (let i = 0; i < 2 && !settled; i++) {
         await this.sleep(200);
         const next = await this.broker.frames();
-        const same = JSON.stringify(next) === JSON.stringify(frames);
+        settled = JSON.stringify(next) === JSON.stringify(frames);
         frames = next;
-        if (same) break;
       }
+      if (!settled) this.notes.push(`рамки не установились за 3 чтения: ${what}`);
       keyboard = await this.broker.keyboardFrame();
     }
     const visible = Object.entries(frames.elements)
@@ -198,7 +254,7 @@ class StateDriver {
   }
 
   /** Анимация клавиатуры: две одинаковые рамки подряд через 200 мс, не больше пяти чтений. */
-  private async stableKeyboard() {
+  private async stableKeyboard(what: string) {
     let last = await this.broker.keyboardFrame();
     for (let i = 0; i < 4; i++) {
       await this.sleep(200);
@@ -206,6 +262,7 @@ class StateDriver {
       if (JSON.stringify(next) === JSON.stringify(last)) return next;
       last = next;
     }
+    this.notes.push(`клавиатура не установилась за 5 чтений: ${what}`);
     return last;
   }
 
@@ -224,8 +281,18 @@ class StateDriver {
   }
 
   private missingAt(step: number, label: string, s: Snapshot) {
+    this.runExpired(`ожидание ${label} в шаге ${step}`);
     this.missing = { step, target: label, visible: s.visible.slice(0, 200) };
     return new Unreached(`цель шага ${step} ${label} не появилась на экране`);
+  }
+
+  /** Опрос до условия или до `until`; последний снимок возвращается в любом случае. */
+  private async poll(until: number, found: (s: Snapshot) => boolean) {
+    for (;;) {
+      const s = await this.snapshot();
+      if (found(s) || this.now() >= until) return s;
+      await this.sleep(POLL_MS);
+    }
   }
 
   /** Ждать цель до `timeoutMs` или конца бюджета состояния; не появилась — `missing`. */
@@ -235,15 +302,14 @@ class StateDriver {
       timeoutMs === undefined ? Infinity : this.now() + timeoutMs,
     );
     for (;;) {
-      const s = await this.snapshot();
+      const s = await this.poll(until, (x) => !!this.resolve(x, target));
       if (this.resolve(s, target)) {
         // Найдена: измерение и касание — по устойчивому снимку.
-        const settled = await this.snapshot(true);
+        const settled = await this.snapshot(true, `шаг ${step}`);
         const found = this.resolve(settled, target);
         if (found) return { s: settled, found };
       }
       if (this.now() >= until) throw this.missingAt(step, targetLabel(target), s);
-      await this.sleep(POLL_MS);
     }
   }
 
@@ -267,9 +333,9 @@ class StateDriver {
     const hit = hitAt(s, point, new Set(this.spec.decorative));
     await this.broker.tapPoint(point.x, point.y);
     await this.sleep(this.settle);
-    const after = await this.snapshot(true);
+    const after = await this.snapshot(true, `после касания шага ${step}`);
     this.stepTaps.push({ ...base, point, hit, before: view(s), after: view(after) });
-    return { id: found.id, after };
+    return { id: found.id, frame: visibleFrame, after };
   }
 
   private async focused() {
@@ -277,69 +343,101 @@ class StateDriver {
   }
 
   /**
-   * Набор по одному символу с проверкой поля после каждого: симулятор
-   * теряет нажатия под нагрузкой, поэтому одна повторная проверка через
-   * 500 мс. Поле не в фокусе, фокус ушёл или текст не тот — экран не принял
-   * набор: провал шага. У поля пароля (`secure`) платформа отдаёт маску,
-   * поэтому сравнивается длина.
+   * Набор по одному символу. После каждого символа текст поля должен быть
+   * ровно начальным текстом плюс набранное (одна повторная проверка через
+   * 500 мс: симулятор теряет нажатия под нагрузкой). Поле не в фокусе,
+   * фокус ушёл или текст не тот — экран не принял набор: провал шага. У
+   * поля пароля (`secure`) приходит маска, поэтому сравнивается длина; iOS
+   * очищает поле пароля при повторном фокусе, поэтому длина 1 после первого
+   * символа при непустом поле принимается как «очищено и набрано».
+   * Известные ложные провалы: автозамена и автокапитализация, поля с
+   * форматированием (`1 350`) и поля, выделяющие текст при фокусе.
    */
   async type(step: number, text: string) {
     const start = await this.focused();
     if (!start)
       throw productFailure(step, 'type', `набор ${JSON.stringify(text)}: нет поля в фокусе`);
     const chars = Array.from(text);
-    const initial = length(start.text);
+    let base = start.text;
+    let baseLength = length(start.text);
     for (let k = 0; k < chars.length; k++) {
       await this.broker.typeText(chars[k]);
-      const want = chars.slice(0, k + 1).join('');
-      const ok = (f: BrokerFrames['focused']) =>
-        !!f &&
-        f.element === start.element &&
-        (f.secure ? length(f.text) === initial + k + 1 : f.text.endsWith(want));
+      const typed = chars.slice(0, k + 1).join('');
+      const ok = (f: Focused) => {
+        if (!f || !sameField(start, f)) return false;
+        if (!f.secure) return f.text === base + typed;
+        if (length(f.text) === baseLength + k + 1) return true;
+        return k === 0 && baseLength > 0 && length(f.text) === 1;
+      };
       let got = await this.focused();
       if (!ok(got)) {
         await this.sleep(500);
         got = await this.focused();
       }
       if (!ok(got)) {
+        const name = fieldName(start);
         const field = !got
-          ? `поле ${start.element} потеряло фокус`
-          : got.element !== start.element
-            ? `фокус ушёл с ${start.element} на ${got.element}`
+          ? `поле ${name} потеряло фокус`
+          : !sameField(start, got)
+            ? `фокус ушёл с ${name} на ${fieldName(got)}`
             : got.secure
-              ? `длина поля ${start.element} ${length(got.text)}, ожидалось ${initial + k + 1}`
-              : `текст поля ${start.element} ${JSON.stringify(got.text)} не оканчивается на ${JSON.stringify(want)}`;
+              ? `длина поля ${name} ${length(got.text)}, ожидалось ${baseLength + k + 1}`
+              : `текст поля ${name} ${JSON.stringify(got.text)}, ожидалось ${JSON.stringify(base + typed)}`;
         throw productFailure(
           step,
           'type',
           `набор ${JSON.stringify(start.secure ? '•'.repeat(chars.length) : text)}: после символа ${k + 1} ${field}`,
         );
       }
-      this.checkBudget(`набор в ${start.element}`);
+      if (got?.secure && k === 0 && baseLength > 0 && length(got.text) === 1) {
+        this.notes.push(`шаг ${step}: поле пароля ${fieldName(start)} очищено при наборе`);
+        base = '';
+        baseLength = 0;
+      }
+      this.checkBudget(`набор в ${fieldName(start)}`);
     }
   }
 
-  /** Очистка: касание цели, в фокусе должна оказаться она; после удаления поле пусто. */
+  /**
+   * Очистка: касание центра цели (запись для `reach`), в фокусе должна
+   * оказаться она; затем касание у правого края поля — курсор в конец
+   * текста, — и удаление. Если там кнопка очистки поля, она очищает поле
+   * сама. Остаток, который оказался концом прежнего текста, значит, что
+   * курсор не встал в конец: это сбой драйвера, а не дефект экрана.
+   */
   async clear(step: number, target: VisualTarget) {
-    const { id, after } = await this.stepTap(step, target);
+    const { id, frame, after } = await this.stepTap(step, target);
     const field = after.frames.focused;
-    if (!field || field.element !== id)
+    if (!field || (field.element !== null && field.element !== id))
       throw productFailure(
         step,
         'clear',
-        `после касания ${id} в фокусе ${field ? field.element : 'нет поля'}, а не ${id}`,
+        `после касания ${id} в фокусе ${field ? fieldName(field) : 'нет поля'}, а не ${id}`,
       );
-    if (field.text) await this.broker.typeText('\b'.repeat(length(field.text) + 2));
-    await this.sleep(this.settle);
+    const original = field.text;
+    if (original) {
+      await this.broker.tapPoint(
+        frame.x + frame.width - Math.min(4, frame.width / 4),
+        frame.y + frame.height / 2,
+      );
+      await this.sleep(this.settle);
+      const now = await this.focused();
+      await this.broker.typeText('\b'.repeat(length(now?.text ?? original) + 2));
+      await this.sleep(this.settle);
+    }
     const left = await this.focused();
-    if (!left || left.element !== id)
+    if (!left || !sameField(field, left))
       throw productFailure(step, 'clear', `после удаления текста ${id} потерял фокус`);
-    if (left.text)
-      throw productFailure(
-        step,
-        'clear',
-        `очистка ${id}: осталось ${left.secure ? `${length(left.text)} символов` : JSON.stringify(left.text)}`,
+    if (!left.text) return;
+    if (!left.secure && original.endsWith(left.text))
+      throw new Unreached(
+        `очистка ${id}: курсор не встал в конец поля, осталось ${JSON.stringify(left.text)}`,
       );
+    throw productFailure(
+      step,
+      'clear',
+      `очистка ${id}: осталось ${left.secure ? `${length(left.text)} символов` : JSON.stringify(left.text)}`,
+    );
   }
 
   async wait(step: number, target: VisualTarget, timeoutMs?: number) {
@@ -348,18 +446,26 @@ class StateDriver {
 
   /**
    * Прокрутка контейнера жестами до цели в его видимой части или до конца.
-   * `to` — цель или зарезервированный id `end`. Экран, на котором прокрутка
-   * не дошла, — провал шага; цели нет в дереве вовсе — запись `missing` с
-   * той же целью, что называет шаг.
+   * `to` — цель или зарезервированный id `end`. Контейнер сначала ожидается
+   * так же, как цель шага, — весь бюджет состояния. Экран, на котором
+   * прокрутка не дошла, — провал шага; цели нет в дереве вовсе — запись
+   * `missing` с той же целью, что называет шаг.
    */
   async scroll(step: number, container: string, to: VisualTarget, maxSwipes: number) {
+    const first = await this.poll(this.deadline, (s) => !!s.frames.elements[container]);
+    if (!first.frames.elements[container]) {
+      this.runExpired(`ожидание контейнера ${container}`);
+      if (to === 'end') throw this.missingAt(step, container, first);
+      throw productFailure(
+        step,
+        'scroll',
+        `контейнер прокрутки ${container} не появился за время шага`,
+      );
+    }
     for (let n = 0; ; n++) {
-      const s = await this.snapshot(true);
+      const s = await this.snapshot(true, `прокрутка шага ${step}`);
       const frame = s.frames.elements[container];
-      if (!frame) {
-        if (to === 'end') throw this.missingAt(step, container, s);
-        throw productFailure(step, 'scroll', `контейнер прокрутки ${container} не на экране`);
-      }
+      if (!frame) throw productFailure(step, 'scroll', `контейнер прокрутки ${container} исчез`);
       const area = intersect(frame, s.frames.window);
       if (!area) throw productFailure(step, 'scroll', `контейнер прокрутки ${container} вне окна`);
       const bottom = Math.min(area.y + area.height, s.keyboard?.y ?? Infinity);
@@ -392,7 +498,7 @@ class StateDriver {
       await this.broker.drag({ x, y: bottom - 0.2 * height }, { x, y: area.y + 0.2 * height });
       await this.sleep(Math.max(this.settle, 300));
       if (to === 'end') {
-        const next = await this.snapshot(true);
+        const next = await this.snapshot(true, `прокрутка шага ${step}`);
         if (JSON.stringify(next.frames.elements) === JSON.stringify(s.frames.elements)) return;
       }
     }
@@ -411,7 +517,7 @@ class StateDriver {
     const point = centre(visibleFrame);
     const hit = hitAt(s, point, new Set(this.spec.decorative));
     await this.broker.tapPoint(point.x, point.y);
-    const until = this.now() + Math.max(this.settle, 2000);
+    const until = Math.min(this.deadline, this.now() + Math.max(this.settle, 2000));
     let after: Snapshot;
     for (;;) {
       await this.sleep(Math.min(this.settle || POLL_MS, POLL_MS));
@@ -466,9 +572,30 @@ export function deviceProblems(spec: VisualSpec, hello: BrokerHello): string[] {
   return problems;
 }
 
+/**
+ * Broker под сроком прогона: вызов после `limit()` не начинается, а вызов,
+ * закончившийся позже, считается сбоем — оба становятся ошибкой окружения.
+ * Зависший вызов ограничивает тайм-аут HTTP-клиента (`remaining`).
+ */
+function underDeadline(broker: VisualBroker, now: () => number, limit: () => number) {
+  return Object.fromEntries(
+    Object.entries(broker).map(([name, f]) => [
+      name,
+      async (...args: unknown[]) => {
+        if (now() >= limit()) throw new BrokerError(`срок прогона исчерпан до вызова ${name}`);
+        const result: unknown = await (f as (...a: unknown[]) => Promise<unknown>)(...args);
+        if (now() > limit()) throw new BrokerError(`срок прогона исчерпан во время ${name}`);
+        return result;
+      },
+    ]),
+  ) as unknown as VisualBroker;
+}
+
 export async function visualRun(input: VisualRunInput) {
   const sleep = input.sleep ?? realSleep;
   const now = input.now ?? Date.now;
+  const started = now();
+  const runDeadline = started + (input.budgetMs ?? VISUAL_RUN_DEADLINE_MS);
   const out = resolve(input.cwd, input.out);
   const report = resolve(input.cwd, input.report);
   for (const [name, path] of [
@@ -477,16 +604,16 @@ export async function visualRun(input: VisualRunInput) {
   ] as const)
     if (!inside(path, input.cwd))
       throw new Error(`${name} должен быть внутри рабочего дерева gate: ${path}`);
-  await insideReal(out, input.cwd, '--out');
-  await insideReal(dirname(report), input.cwd, '--report');
+  await insideReal(out, input.cwd, '--out', false);
+  await insideReal(dirname(report), input.cwd, '--report', true);
   // Прежние наблюдения удаляются до разбора спецификации: отчёт о неверной
   // спецификации не должен соседствовать со снимками прошлого прогона.
   await freshDirectory(out);
-  const started = now();
   const evidence: Record<string, unknown> = {
     version: 1,
     release: input.release === true,
     startedAt: new Date(started).toISOString(),
+    deadlineMs: runDeadline - started,
   };
   const finish = async (cases: VisualCase[]) => {
     evidence.durationMs = now() - started;
@@ -517,7 +644,9 @@ export async function visualRun(input: VisualRunInput) {
       `iOS-симулятор доступен только на macOS, а gate выполняется на ${platform}: проверка не пропускается и не считается пройденной`,
     );
   if ('error' in input.broker) return environment(input.broker.error);
-  const broker = input.broker;
+  // Состояния и их снимки укладываются в срок минус запас; журнал читается в запасе.
+  let limit = runDeadline - VISUAL_FINISH_RESERVE_MS;
+  const broker = underDeadline(input.broker, now, () => limit);
   let hello: BrokerHello;
   let logStart: number;
   try {
@@ -551,12 +680,21 @@ export async function visualRun(input: VisualRunInput) {
   }
   const host: VisualCase = { ...HOST_CASE, status: 'passed', output };
   const timing: Record<string, number> = {};
+  const notes: Record<string, string[]> = {};
   evidence.timingMs = timing;
+  evidence.notes = notes;
   let dead: string | undefined;
   for (const state of spec.states) {
     const t0 = now();
     const budget = state.timeoutMs ?? spec.defaults.stateTimeoutMs;
-    const driver = new StateDriver(broker, spec, t0 + budget, sleep, now);
+    const driver = new StateDriver(
+      broker,
+      spec,
+      Math.min(t0 + budget, limit),
+      sleep,
+      now,
+      limit < t0 + budget,
+    );
     const file = join(out, `${state.id}.frames.json`);
     let from = 0;
     const window = async () => {
@@ -569,7 +707,7 @@ export async function visualRun(input: VisualRunInput) {
       try {
         log = await window();
       } catch {
-        // broker уже недоступен: окно журнала не известно.
+        // broker недоступен или срок исчерпан: окно журнала не известно.
       }
       await writeFresh(
         file,
@@ -615,7 +753,8 @@ export async function visualRun(input: VisualRunInput) {
         if (!('tap' in step) && !('clear' in step)) await sleep(driver.settle);
         driver.checkBudget(`шаг ${index}`);
       }
-      const s = await driver.snapshot(true);
+      // Снимок экрана — сразу после рамок, по которым меряются visible и background.
+      const s = await driver.snapshot(true, 'измерение состояния');
       await writeFresh(join(out, `${state.id}.png`), await broker.screenshot());
       const taps: Record<string, unknown> = {};
       for (const a of state.assert) {
@@ -647,12 +786,16 @@ export async function visualRun(input: VisualRunInput) {
     } catch (error) {
       if (error instanceof Unreached) await unreached(error.message, error.failure);
       else if (error instanceof BrokerError) {
-        dead = `broker перестал отвечать: ${error.message}`;
+        dead = error.message.startsWith('срок прогона')
+          ? error.message
+          : `broker перестал отвечать: ${error.message}`;
         await unreached(error.message);
       } else throw error;
     }
+    if (driver.notes.length) notes[state.id] = driver.notes;
     timing[state.id] = now() - t0;
   }
+  limit = runDeadline;
   if (spec.log && !dead) {
     try {
       const { data } = await broker.logRead(logStart);

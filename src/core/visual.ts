@@ -20,8 +20,12 @@ export const VISUAL_MAX_STATES = 12;
 /** Бюджет одного состояния по умолчанию и его верхняя граница. */
 export const VISUAL_STATE_TIMEOUT_MS = 15_000;
 export const VISUAL_STATE_TIMEOUT_MAX_MS = 60_000;
-/** Сумма бюджетов состояний не больше времени gate. */
-export const VISUAL_RUN_BUDGET_MS = 420_000;
+/**
+ * Сумма бюджетов состояний: меньше срока прогона `visual run` (390 с по
+ * умолчанию при timeout gate 420 с), чтобы hello, снимки, журнал и JUnit
+ * уложились в оставшееся время.
+ */
+export const VISUAL_RUN_BUDGET_MS = 360_000;
 /** Порог доли «плоских» цветов фона по умолчанию. */
 export const VISUAL_MAX_FLAT_SHARE = 0.5;
 /** testcase достижения состояния: `visual.<stateId>.reach`. */

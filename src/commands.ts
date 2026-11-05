@@ -78,7 +78,7 @@ import { CheckCorpus } from './core/check-store.ts';
 import { propertySeed } from 'devcontour-harness';
 import { evaluateVisualRun } from './runner/visual.ts';
 import { brokerAddress, httpBroker } from './runner/visual-broker.ts';
-import { visualRun } from './runner/visual-run.ts';
+import { VISUAL_RUN_DEADLINE_MS, visualRun } from './runner/visual-run.ts';
 const args = process.argv.slice(2),
   operation = args[0] ?? 'serve';
 const option = (name: string, fallback: string) =>
@@ -136,17 +136,26 @@ async function main() {
             observations: resolve(value('--observations')),
             report: resolve(value('--report')),
           })
-        : await visualRun({
-            spec: value('--spec'),
-            out: value('--out', '.reports/visual'),
-            report: value('--report', '.reports/visual.xml'),
-            cwd: process.cwd(),
-            release: args.includes('--release'),
-            broker: (() => {
-              const address = brokerAddress(process.env, value('--broker', 'visual-broker'));
-              return 'error' in address ? address : httpBroker(address);
-            })(),
-          });
+        : await (async () => {
+            const budgetMs = Number(option('--budget-ms', String(VISUAL_RUN_DEADLINE_MS)));
+            if (!Number.isInteger(budgetMs) || budgetMs < 10_000)
+              throw new Error('--budget-ms: целое число мс не меньше 10000');
+            const deadline = Date.now() + budgetMs;
+            return visualRun({
+              budgetMs,
+              spec: value('--spec'),
+              out: value('--out', '.reports/visual'),
+              report: value('--report', '.reports/visual.xml'),
+              cwd: process.cwd(),
+              release: args.includes('--release'),
+              broker: (() => {
+                const address = brokerAddress(process.env, value('--broker', 'visual-broker'));
+                return 'error' in address
+                  ? address
+                  : httpBroker(address, { remaining: () => deadline - Date.now() });
+              })(),
+            });
+          })();
     console.log(JSON.stringify(result, null, 2));
     process.exitCode = result.exitCode;
     return;

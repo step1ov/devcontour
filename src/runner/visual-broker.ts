@@ -35,7 +35,8 @@ const framesResult = z.strictObject({
   elements: z.record(z.string().max(500), rect),
   focused: z
     .strictObject({
-      element: z.string().max(500),
+      /** id поля в фокусе; null — поле в фокусе есть, но без id. */
+      element: z.string().max(500).nullable(),
       text: z.string().max(10_000),
       /** Поле пароля: платформа отдаёт вместо текста маску, сравнима только длина. */
       secure: z.literal(true).optional(),
@@ -44,11 +45,18 @@ const framesResult = z.strictObject({
 });
 export type BrokerFrames = z.infer<typeof framesResult>;
 const validId = (id: string) => visualElementId.safeParse(id).success;
-/** Только id, которые может назвать спецификация. */
+/**
+ * Только id, которые может назвать спецификация. Поле в фокусе с чужим id
+ * остаётся полем в фокусе, но без имени: «нет фокуса» и «фокус у поля без
+ * id» — разные наблюдения.
+ */
 export const usableFrames = (f: BrokerFrames): BrokerFrames => ({
   ...f,
   elements: Object.fromEntries(Object.entries(f.elements).filter(([id]) => validId(id))),
-  focused: f.focused && validId(f.focused.element) ? f.focused : null,
+  focused: f.focused && {
+    ...f.focused,
+    element: f.focused.element !== null && validId(f.focused.element) ? f.focused.element : null,
+  },
 });
 
 const helloResult = z.strictObject({
@@ -181,16 +189,51 @@ const envelope = z.union([
   z.strictObject({ error: z.strictObject({ message: z.string().max(4000) }) }),
 ]);
 
+/** Тело ответа потоком с текущим пределом: Content-Length может отсутствовать. */
+async function boundedBody(response: Response, limit: number, method: string) {
+  const declared = Number(response.headers.get('content-length') ?? 0);
+  const tooBig = () => new BrokerError(`ответ broker на ${method} больше ${limit} байт`);
+  if (declared > limit) {
+    await response.body?.cancel().catch(() => undefined);
+    throw tooBig();
+  }
+  const reader = response.body?.getReader();
+  if (!reader) return Buffer.alloc(0);
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      await reader.cancel().catch(() => undefined);
+      throw tooBig();
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks);
+}
+
 /** HTTP JSON-RPC к broker на 127.0.0.1: POST /rpc, токен в Authorization. */
 export function httpBroker(
   address: BrokerAddress,
-  options: { timeoutMs?: number; fetch?: typeof fetch } = {},
+  options: {
+    timeoutMs?: number;
+    fetch?: typeof fetch;
+    /** Сколько мс осталось до срока прогона: тайм-аут вызова не дольше. */
+    remaining?: () => number;
+    /** Предел ответа в байтах; по умолчанию BROKER_RESPONSE_LIMIT. */
+    responseLimit?: number;
+  } = {},
 ): VisualBroker {
   const send = options.fetch ?? fetch;
+  const limit = options.responseLimit ?? BROKER_RESPONSE_LIMIT;
   const call = async <M extends BrokerMethod>(
     method: M,
     params: Record<string, unknown> = {},
   ): Promise<z.infer<(typeof brokerMethods)[M]>> => {
+    const left = options.remaining ? options.remaining() : Infinity;
+    if (left <= 0) throw new BrokerError(`срок прогона исчерпан до вызова ${method}`);
     let response: Response;
     try {
       response = await send(`http://127.0.0.1:${address.port}/rpc`, {
@@ -202,7 +245,7 @@ export function httpBroker(
         body: JSON.stringify({ method, params }),
         // Broker отвечает сам: перенаправление увело бы запрос с токеном с localhost.
         redirect: 'error',
-        signal: AbortSignal.timeout(options.timeoutMs ?? 30_000),
+        signal: AbortSignal.timeout(Math.max(1, Math.min(options.timeoutMs ?? 30_000, left))),
       });
     } catch (error) {
       throw new BrokerError(
@@ -210,15 +253,9 @@ export function httpBroker(
           'Его запускает lifecycle.setup командой devcontour visual broker start',
       );
     }
-    const length = Number(response.headers.get('content-length') ?? 0);
-    if (length > BROKER_RESPONSE_LIMIT)
-      throw new BrokerError(`ответ broker на ${method} больше ${BROKER_RESPONSE_LIMIT} байт`);
     let body: unknown;
     try {
-      const bytes = await response.arrayBuffer();
-      if (bytes.byteLength > BROKER_RESPONSE_LIMIT)
-        throw new BrokerError(`ответ broker на ${method} больше ${BROKER_RESPONSE_LIMIT} байт`);
-      body = JSON.parse(Buffer.from(bytes).toString('utf8'));
+      body = JSON.parse((await boundedBody(response, limit, method)).toString('utf8'));
     } catch (error) {
       if (error instanceof BrokerError) throw error;
       throw new BrokerError(`broker ответил на ${method} не JSON (HTTP ${response.status})`);
