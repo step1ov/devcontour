@@ -997,7 +997,7 @@ export class DevContour {
       Object.assign(t, parsed, { preparation: developmentBinding(s) });
       // Правка черновика находки — разбор ведущим: подсказка передачи
       // контекста больше не держит её как непроверенную.
-      if (t.finding) t.finding = { ...t.finding, verification: 'triaged' };
+      if (t.finding) t.triagedAt ??= now();
       // Корпус договора, которого задача больше не касается, не переносится.
       if (t.checkVersion && !t.contracts.includes(t.checkVersion.suite.replace(/^KS-/, '')))
         t.checkVersion = undefined;
@@ -1711,14 +1711,10 @@ export class DevContour {
           path: finding.path,
           observation: finding.observation,
         });
-        if (
-          s.tasks.some(
-            (t) =>
-              t.finding?.fingerprint === fingerprint &&
-              t.status !== 'done' &&
-              t.status !== 'cancelled',
-          )
-        )
+        // Открытая или отменённая находка с тем же отпечатком — та же находка:
+        // отмена — решение разбора ведущего, повтор его не отменяет. После
+        // принятого исправления повторное появление — новый дефект.
+        if (s.tasks.some((t) => t.finding?.fingerprint === fingerprint && t.status !== 'done'))
           continue;
         let inbox = s.boards.find(
           (b) => b.title === 'Находки агентов' && b.revisions.at(-1)?.status === 'active',

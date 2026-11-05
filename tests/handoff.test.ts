@@ -1090,13 +1090,22 @@ test('session_handoff: подсказка ревью плана называет
       { length: 25 },
       (_, i) => f.h.addTask(board.id, input(`Finding ${i}`)).id,
     );
-    const value = devcontourHandoff(f.h, { boardId: board.id });
+    let value = devcontourHandoff(f.h, { boardId: board.id });
     assert.equal(value.host.next?.decision, 'plan');
-    const detail = value.host.next.detail;
+    // Область — весь план: ревью без --tasks, id в подсказке не перечисляются.
+    let detail = value.host.next.detail;
+    assert.match(detail, /the whole plan, 25 tasks: no --tasks needed/);
+    assert.doesNotMatch(detail, /--tasks T/);
+    assert.equal(value.host.next?.plan?.drafts.length, 25, 'полный список — в plan');
+    assert.equal(value.host.next?.plan?.review.length, 20);
+    assert.equal(value.host.next?.plan?.reviewCount, 25);
+    // Область меньше плана и длиннее подсказки: усечение сказано прямо.
+    f.h.addTask(board.id, { ...input('Unbound backend'), role: 'backend' });
+    value = devcontourHandoff(f.h, { boardId: board.id });
+    detail = value.host.next!.detail;
     const named = drafts.filter((id) => detail.includes(id));
     assert.equal(named.length, 20);
-    assert.match(detail, /… ещё 5/);
-    assert.equal(value.host.next?.plan?.drafts.length, 25, 'полный список — в plan');
+    assert.match(detail, /scope truncated: the first 20 of 25 reviewable tasks/);
   } finally {
     f.cleanup();
   }
@@ -1132,7 +1141,10 @@ test('session_handoff: решение о плане называет черно�
     assert.match(next.detail, /unverified agent findings/);
     assert.match(next.detail, /cancel --task ID .*--by host/);
     assert.doesNotMatch(next.detail, /review-plan --board/, 'ревью сырых находок не предлагается');
-    assert.match(next.detail, /replaces the whole task spec.*keep its contracts and dependsOn/);
+    assert.match(
+      next.detail,
+      /fields absent from the file are kept, except repositoryId, scope, dependsOn and contracts.*copy them from the current task/,
+    );
     // Правка черновика — явный разбор: даже с прежней приёмкой находка
     // отмечена triaged и идёт в область ревью.
     const t = f.store.read().tasks.find((x) => x.id === found)!;
@@ -1147,9 +1159,21 @@ test('session_handoff: решение о плане называет черно�
       },
       specDigest(t),
     );
-    assert.equal(
-      f.store.read().tasks.find((x) => x.id === found)?.finding?.verification,
-      'triaged',
+    assert.ok(f.store.read().tasks.find((x) => x.id === found)?.triagedAt);
+    // Повтор разобранной находки нового черновика не создаёт.
+    assert.deepEqual(
+      f.h.discoveries(run.id, run.token, 'b'.repeat(40), [
+        {
+          kind: 'bug',
+          title: 'Raw finding',
+          path: 'src/a.ts',
+          line: 1,
+          observation: 'Observation text',
+          consequence: 'Consequence',
+          reproduction: 'Reproduction',
+        },
+      ]),
+      [],
     );
     next = devcontourHandoff(f.h).host.next;
     assert.equal(next?.boardId, findings.id);
@@ -1163,6 +1187,20 @@ test('session_handoff: решение о плане называет черно�
     }).id;
     next = devcontourHandoff(f.h).host.next;
     assert.deepEqual(next?.plan?.unverified, [manual]);
+    // Список неразобранных ограничен, полный счёт — в unverifiedCount.
+    const more = Array.from(
+      { length: 21 },
+      (_, i) =>
+        f.h.addTask(findings.id, {
+          ...input(`Manual finding ${i}`),
+          finding: { ...t.finding!, fingerprint: `manual-${i}`, verification: 'proposed' },
+        }).id,
+    );
+    next = devcontourHandoff(f.h).host.next;
+    assert.equal(next?.plan?.unverifiedCount, 22);
+    assert.deepEqual(next?.plan?.unverified, [manual, ...more].slice(0, 20));
+    assert.match(next.detail, /… ещё 2: host\.next\.plan\.unverified/);
+    for (const id of more) f.h.cancel(id, 'Duplicate of the manual finding');
     assert.deepEqual(next?.plan?.review, [found]);
     // Роль с обязательным контрактом без контракта: утверждение откажет, такой
     // черновик в область ревью не входит; списки с причинами ограничены.

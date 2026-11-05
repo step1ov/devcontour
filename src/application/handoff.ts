@@ -104,8 +104,9 @@ export interface HandoffHostNext {
   plan?: {
     drafts: string[];
     stale: string[];
-    /** Задачи, которые подсказка предлагает на ревью плана: без `unverified` и `blocked`. */
+    /** Задачи, которые подсказка предлагает на ревью плана (до 20): без `unverified` и `blocked`. */
     review: string[];
+    reviewCount: number;
     /** Не разобранные ведущим находки агентов (до 20): их разбирают до ревью. */
     unverified: string[];
     unverifiedCount: number;
@@ -311,6 +312,8 @@ const OPERATOR_STEP =
 
 /** Сколько id задач называет подсказка ревью плана. */
 const PLAN_HINT_IDS = 20;
+/** Предел причины отказа одного черновика в `host.next.plan.blocked`. */
+const REASON_CHARS = 300;
 
 /**
  * Решение о плане доски, если он не согласован: задание отправило бы его на
@@ -327,21 +330,28 @@ function planStep(boardId: string, ctx: HostContext): HandoffHostNext | undefine
   // вовсе — оно было бы оплачено впустую. Списки с текстом причин ограничены,
   // как подсказка: `host` не растёт с числом черновиков.
   const held = new Set([...why.blocked.map((b) => b.id), ...why.unverified]);
-  const review = [...why.drafts, ...why.stale].filter((id) => !held.has(id));
+  const scope = [...why.drafts, ...why.stale];
+  const review = scope.filter((id) => !held.has(id));
   const plan = {
     drafts: why.drafts,
     stale: why.stale,
-    review,
+    review: review.slice(0, PLAN_HINT_IDS),
+    reviewCount: review.length,
     unverified: why.unverified.slice(0, PLAN_HINT_IDS),
     unverifiedCount: why.unverified.length,
-    blocked: why.blocked.slice(0, PLAN_HINT_IDS),
+    blocked: why.blocked.slice(0, PLAN_HINT_IDS).map((b) => ({
+      id: b.id,
+      reason: b.reason.length > REASON_CHARS ? b.reason.slice(0, REASON_CHARS - 1) + '…' : b.reason,
+    })),
     blockedCount: why.blocked.length,
   };
   const list = (xs: string[], total: number, field: string, sep = ',') =>
     xs.slice(0, PLAN_HINT_IDS).join(sep) +
     (total > PLAN_HINT_IDS ? ` (… ещё ${total - PLAN_HINT_IDS}: host.next.${field})` : '');
+  // Правка черновика сохраняет отсутствующие в файле необязательные поля, но
+  // ключи со значением по умолчанию получают его: их переносят из задачи.
   const edit =
-    'devcontour edit-task --task ID --file FILE --workspace … — the file replaces the whole task spec: start from the current task and keep its contracts and dependsOn';
+    'devcontour edit-task --task ID --file FILE --workspace …; fields absent from the file are kept, except repositoryId, scope, dependsOn and contracts, which fall back to their defaults: copy them from the current task';
   const unverified = plan.unverifiedCount
     ? ` ${plan.unverifiedCount} draft task(s) are unverified agent findings: the lead triages them before approval — verify the reproduction and priority, merge duplicates, cancel stale or misrouted ones (devcontour cancel --task ID --reason … --by host --workspace …), write testable acceptance and gates (${edit}; the edit marks the finding triaged): ${list(plan.unverified, plan.unverifiedCount, 'plan.unverified')}.`
     : '';
@@ -353,8 +363,16 @@ function planStep(boardId: string, ctx: HostContext): HandoffHostNext | undefine
         '; ',
       )}.`
     : '';
+  // Область длиннее подсказки: весь план — ревью без --tasks; иначе область
+  // в подсказке усечена, и это сказано прямо, а не спрятано за «ещё N».
+  const tasks =
+    review.length <= PLAN_HINT_IDS
+      ? `--tasks ${review.join(',')} `
+      : review.length === scope.length
+        ? `(the whole plan, ${review.length} tasks: no --tasks needed) `
+        : `--tasks ${plan.review.join(',')} (scope truncated: the first ${PLAN_HINT_IDS} of ${review.length} reviewable tasks; review the rest in a later round) `;
   const next = review.length
-    ? ` Review the plan with an explicit scope (devcontour review-plan --board ${boardId} --tasks ${list(review, review.length, 'plan.review')} --author-runtime codex|claude --workspace …, keeping only the tasks to run; review-plan also checks INTENT story bindings, which this hint does not), or edit/cancel the tasks first; register workflow_start only for an approved plan.`
+    ? ` Review the plan with an explicit scope (devcontour review-plan --board ${boardId} ${tasks}--author-runtime codex|claude --workspace …, keeping only the tasks to run; review-plan also checks INTENT story bindings, which this hint does not), or edit/cancel the tasks first; register workflow_start only for an approved plan.`
     : ' No task of the plan is ready for review: review-plan only after these are handled; register workflow_start only for an approved plan.';
   return {
     action: 'decide',

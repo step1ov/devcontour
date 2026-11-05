@@ -207,9 +207,7 @@ export const taskInput = z.object({
       sourceTaskId: id,
       sourceRunId: z.string(),
       sourceSha: z.string(),
-      // proposed — записана исполнителем; triaged — ведущий разобрал её
-      // правкой черновика (`editTask`).
-      verification: z.enum(['proposed', 'triaged']),
+      verification: z.literal('proposed'),
     })
     .optional(),
 });
@@ -220,8 +218,8 @@ export const FINDING_ACCEPTANCE: readonly string[] = [
   'После исправления выполнить регрессионный сценарий и обязательные проверки.',
 ];
 /** Находка ещё не разобрана ведущим: ревью плана отвергло бы её как непроверенную. */
-export const unverifiedFinding = (t: Pick<TaskInput, 'finding'>) =>
-  t.finding?.verification === 'proposed';
+export const unverifiedFinding = (t: Pick<Task, 'finding' | 'triagedAt'>) =>
+  !!t.finding && !t.triagedAt;
 export const relatedRepositoriesTooMany = `Связанных компонентов не больше ${TASK_LIMITS.relatedRepositories}`;
 /**
  * Новая постановка. `taskInput` читает и уже сохранённые задачи (Git sync,
@@ -236,6 +234,12 @@ export const taskIngest = taskInput.extend({
 });
 export interface Task extends TaskInput {
   sharedCompletion?: { receipt: CompletionReceipt; sourceCommit: string };
+  /**
+   * Когда ведущий разобрал находку агента правкой черновика (`editTask`).
+   * Вне постановки и вне строгой схемы находки: прежняя версия, читая
+   * задачу нестрогим `taskInput`, поле отбрасывает, а не отказывает.
+   */
+  triagedAt?: string;
   id: string;
   status: TaskStatus;
   /**
