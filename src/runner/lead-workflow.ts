@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import { LeadWorkflow, type WorkflowJob } from '../core/lead-workflow.ts';
-import type { DevContour } from '../core/service.ts';
+import { SERVER_STOPPING, type DevContour } from '../core/service.ts';
+import { DomainError } from '../core/model.ts';
 import { repositories, repository } from '../core/repositories.ts';
 import { Workspace, changeSnapshot, currentJoint } from '../core/workspace.ts';
 import { reviewPlan, acceptBoard } from './agent-control.ts';
@@ -44,11 +45,19 @@ export class LeadRunner {
     }, 1000);
     this.timer.unref();
   }
-  async stop() {
+  /**
+   * Остановить без ожидания: новых стадий нет, идущая прерывается. Сервер
+   * вызывает это в начале остановки, до отметки остановки в базе; `stop`
+   * затем дожидается идущей стадии.
+   */
+  halt() {
     this.stopping = true;
     clearInterval(this.timer);
     this.timer = undefined;
     this.controller?.abort();
+  }
+  async stop() {
+    this.halt();
     await this.pending;
   }
   tick() {
@@ -83,10 +92,22 @@ export class LeadRunner {
           const waiting = await this.execute(job, controller.signal);
           this.workflow.finish(job, waiting);
         } catch (e) {
+          // Отказ снять паузу, пока сервер останавливается, — не провал
+          // стадии: она ждёт доменного состояния (пауза остановки), и задание
+          // возвращается в очередь без расхода попытки, как стадия «жду».
+          // Если и это не записалось — прерывание (тоже снова в очередь).
+          const stopping = e instanceof DomainError && e.message === SERVER_STOPPING;
+          if (stopping)
+            try {
+              this.workflow.finish(job, true);
+              continue;
+            } catch {
+              /* ниже — прерывание */
+            }
           this.workflow.fail(
             job,
             e instanceof Error ? e.message : String(e),
-            controller.signal.aborted,
+            controller.signal.aborted || stopping,
           );
         } finally {
           clearInterval(timer);

@@ -1506,6 +1506,22 @@ export class DevContour {
       return { held: true };
     });
   }
+  /**
+   * Ожидание `base-check`, поставленное `holdForBaseUpdate` (перенос базы в
+   * режиме агента на идущей очереди), снять не удалось: сервер
+   * останавливается. Без диапазона переноса это ожидание никто не снимет —
+   * проверять нечего. До ожидания очередь шла, поэтому оно становится паузой
+   * штатной остановки: её снимает тот же запуск, что и остановку сервера.
+   * Ожидание с диапазоном переноса (проверку базы) не трогается.
+   */
+  yieldBaseHold() {
+    return this.store.change('base.update.hold.yielded', (s) => {
+      if (!s.paused || s.pauseReason !== 'base-check' || s.baseMoves) return { yielded: false };
+      if (s.waits?.some((w) => w.kind === 'base-check')) return { yielded: false };
+      s.pauseReason = 'shutdown';
+      return { yielded: true };
+    });
+  }
   /** Техническое ожидание операции: видно отдельно от паузы и её не трогает. */
   waitFor(kind: 'context-lock', operation: string, detail: string) {
     return this.store.change('wait.started', (s) => {
