@@ -9,7 +9,7 @@ import { complete, config, fixture, input, MERGED } from './helpers.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
 import { Store } from '../src/core/store.ts';
-import { DevContour, specDigest } from '../src/core/service.ts';
+import { DevContour, SERVER_STOPPING, specDigest } from '../src/core/service.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Workspace, changeSnapshot } from '../src/core/workspace.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
@@ -575,6 +575,79 @@ test('base-update в режиме агента: работающая очере�
   }
 });
 
+test('base-update, пока сервер останавливается: ожидание переноса становится паузой остановки, отказ назван; отказ переноса — исходной ошибкой', async () => {
+  const f = await baseCheckFixture();
+  const { root, config, store, h, target, commit } = f;
+  const stoppingServer = () => {
+    h.leader('server');
+    h.markStopping('server', true);
+  };
+  const stopped = () => {
+    executionOf(h).engine.release('server');
+    h.markStopping('server', false);
+  };
+  try {
+    h.pause(false);
+    stoppingServer();
+    // Переносить нечего, но снять поставленное ожидание нельзя: отказ назван,
+    // а ожидание без диапазона переноса не остаётся навсегда.
+    await assert.rejects(
+      baseUpdateOperation(h, root),
+      (e: Error) =>
+        e.message.startsWith('Переносить базу не пришлось, но очередь не продолжена') &&
+        e.message.includes(SERVER_STOPPING),
+    );
+    let state = store.read();
+    assert.equal(state.paused, true);
+    assert.equal(state.pauseReason, 'shutdown', 'ожидание стало паузой остановки');
+    stopped();
+    h.pause(false);
+    assert.equal(store.read().paused, false);
+
+    // Отказ переноса во время остановки — исходной ошибкой, не SERVER_STOPPING.
+    const base = await git(config.repository, 'rev-parse', target);
+    await commit('side', {}, false);
+    await writeFile(join(config.repository, 'base.txt'), 'other');
+    await git(config.repository, 'add', 'base.txt');
+    const tree = await git(config.repository, 'write-tree');
+    await git(config.repository, 'reset', '-q', '--hard', 'HEAD');
+    const other = await git(config.repository, 'commit-tree', tree, '-p', base, '-m', 'Other');
+    await git(config.repository, 'update-ref', target, other);
+    stoppingServer();
+    await assert.rejects(
+      baseUpdateOperation(h, root),
+      (e: Error) => !e.message.includes(SERVER_STOPPING),
+    );
+    state = store.read();
+    assert.equal(state.paused, true);
+    assert.equal(state.pauseReason, 'shutdown');
+    stopped();
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('Запуск планировщика снимает отметку остановки упавшего сервера, но не действующую отметку ведущего', async () => {
+  const f = await baseCheckFixture();
+  const { root, store, h } = f;
+  const marker = () => store.localRecord<{ owner: string } | null>('server', undefined, 'stopping');
+  try {
+    // Действующая: её владелец держит живую роль и останавливается.
+    h.leader('live');
+    h.markStopping('live', true);
+    await new Scheduler(h, root).init();
+    assert.equal(marker()?.owner, 'live');
+    // Сервер упал посреди остановки: срок роли истёк.
+    store.update('test.lease-expired', (d) => {
+      d.leader = { ...d.leader!, leaseUntil: Date.now() - 1 };
+    });
+    await new Scheduler(h, root).init();
+    assert.equal(marker(), null);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test('Operator policy never starts automatic review or resumes a queue', async () => {
   const f = fixture();
   try {
@@ -614,6 +687,37 @@ test('Waiting cycles resume shutdown pauses but preserve explicit user pauses', 
     assert.equal(f.store.read().paused, false);
     assert.equal(flow.get(job.key, 'main').stage, 2);
     assert.equal(flow.get(job.key, 'main').attempts, 0);
+    await runner.stop();
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Пока сервер останавливается, стадия, снимающая паузу остановки, прерывается: задание возвращается в очередь, а не проваливается', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Stopping workflow', '', 'main');
+    f.h.addTask(b.id, input());
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    const runner = new LeadRunner(f.h, f.root);
+    await runner.tick();
+    await runner.tick();
+    f.h.pause(false);
+    f.h.pause(true, 'shutdown');
+    // Сервер, ведущий очередь, начал остановку: снять паузу нельзя.
+    f.h.leader('server');
+    f.h.markStopping('server', true);
+    await runner.tick();
+    const line = flow.get(job.key, 'main');
+    assert.equal(line.status, 'queued', line.error);
+    assert.equal(line.attempts, 0);
+    assert.equal(f.store.read().pauseReason, 'shutdown');
+    // Остановка закончилась: следующая стадия снимает паузу.
+    executionOf(f.h).engine.release('server');
+    await runner.tick();
+    assert.equal(f.store.read().paused, false);
+    assert.equal(flow.get(job.key, 'main').stage, 2);
     await runner.stop();
   } finally {
     f.cleanup();

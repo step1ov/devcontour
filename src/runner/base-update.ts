@@ -2,8 +2,8 @@ import { resolve } from 'node:path';
 import { fencedRefMove, moveBase, type ExecutionView, type RefMove } from 'devcontour-harness';
 import { executionOf } from '../harness/execution.ts';
 import { repositories } from '../core/repositories.ts';
-import type { Config } from '../core/model.ts';
-import type { DevContour } from '../core/service.ts';
+import { DomainError, type Config } from '../core/model.ts';
+import { SERVER_STOPPING, type DevContour } from '../core/service.ts';
 import { policyFromConfig } from '../harness/policy.ts';
 import { checkoutRootFor, checkoutRootOption } from './checkout-root.ts';
 
@@ -133,10 +133,38 @@ export async function baseUpdateOperation(
     // Частичный перенос (сдвиг следующего репозитория отклонён) — как у
     // перемотки диспетчером: сдвинутые базы ждут проверки base-check.
     if (moved.length) h.baseUpdated(moved);
-    else if (held) h.pause(false);
+    else if (held)
+      try {
+        liftHold(h);
+      } catch {
+        // Причина отказа — исходная ошибка переноса.
+      }
     throw error;
   }
   if (base.updated.length) h.baseUpdated(base.updated);
-  else if (held) h.pause(false);
+  else if (held && !liftHold(h))
+    throw new DomainError(
+      'Переносить базу не пришлось, но очередь не продолжена: ' +
+        SERVER_STOPPING +
+        '. Очередь осталась на паузе остановки сервера; её снимет запуск сервера (цикл ведущего в режиме агента) или queue --start',
+      409,
+    );
   return base;
+}
+
+/**
+ * Снять ожидание переноса, поставленное этим `base-update`. Пока сервер
+ * останавливается, снять его нельзя: ожидание становится паузой остановки
+ * (`yieldBaseHold`), иначе без диапазона переноса оно осталось бы навсегда.
+ * `false` — очередь осталась на паузе.
+ */
+function liftHold(h: DevContour) {
+  try {
+    h.pause(false);
+    return true;
+  } catch (error) {
+    if (!(error instanceof DomainError && error.message === SERVER_STOPPING)) throw error;
+    h.yieldBaseHold();
+    return false;
+  }
 }
