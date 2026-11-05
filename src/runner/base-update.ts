@@ -1,4 +1,5 @@
-import { fencedRefMove, moveBase, type RefMove } from 'devcontour-harness';
+import { resolve } from 'node:path';
+import { fencedRefMove, moveBase, type ExecutionView, type RefMove } from 'devcontour-harness';
 import { executionOf } from '../harness/execution.ts';
 import { repositories } from '../core/repositories.ts';
 import type { Config } from '../core/model.ts';
@@ -84,33 +85,55 @@ export async function updateBase(
  * удался, поставленное им ожидание снимается — очередь остаётся такой, какой
  * была. Перенесённая база ждёт проверки (`baseUpdated`).
  */
-export async function baseUpdateOperation(h: DevContour, dataRoot: string) {
+/** Отказы переноса — одни и те же в проверке до переноса и в транзакции сдвига. */
+const NOT_PAUSED = 'Сначала приостановите очередь: queue --pause';
+const ACTIVE = 'Дождитесь завершения попыток перед переносом базы';
+
+export async function baseUpdateOperation(
+  h: DevContour,
+  dataRoot: string,
+  options: {
+    /**
+     * Кто переносит (`base.moved`): `operator` — человек (по умолчанию для
+     * CLI), `host` — ведущий агент, актёр не назван.
+     */
+    by?: 'operator' | 'host';
+    /** Дополнительная проверка в транзакции сдвига каждого репозитория (тесты). */
+    fence?: (view: ExecutionView) => void;
+  } = {},
+) {
   const s = h.store.read();
   const held = !s.paused && h.config.approvalMode === 'agent' && h.holdForBaseUpdate().held;
-  if (!h.store.read().paused) throw new Error('Сначала приостановите очередь: queue --pause');
-  if (h.store.read().runs.some((r) => r.status === 'active'))
-    throw new Error('Дождитесь завершения попыток перед переносом базы');
+  if (!h.store.read().paused) throw new Error(NOT_PAUSED);
+  if (h.store.read().runs.some((r) => r.status === 'active')) throw new Error(ACTIVE);
+  // Сдвиг ref — в транзакции проверки (очередь стоит, попыток нет) и
+  // событием `base.moved` с актёром переноса.
+  const fenced = fencedRefMove(
+    executionOf(h).store,
+    (view) => {
+      if (!view.control().paused) throw new Error(NOT_PAUSED);
+      if (view.attempts().some((a) => a.status === 'active')) throw new Error(ACTIVE);
+      options.fence?.(view);
+    },
+    undefined,
+    options.by ?? 'operator',
+  );
+  // Перенесённые до отказа репозитории: их база уже сдвинута и ждёт проверки.
+  const moved: { repositoryId: string; from: string; to: string }[] = [];
+  const idOf = (path: string) =>
+    repositories(h.config).find((r) => resolve(r.path) === resolve(path))?.id ?? path;
+  const move: RefMove = async (path, target, to, from) => {
+    await fenced(path, target, to, from);
+    moved.push({ repositoryId: idOf(path), from, to });
+  };
   let base;
   try {
-    // Сдвиг ref — в транзакции проверки (очередь стоит, попыток нет) и
-    // событием `base.moved` с актёром `operator`: команда base-update —
-    // действие человека.
-    base = await updateBase(
-      h.config,
-      dataRoot,
-      undefined,
-      fencedRefMove(
-        executionOf(h).store,
-        (view) => {
-          if (!view.control().paused) throw new Error('очередь не остановлена');
-          if (view.attempts().some((a) => a.status === 'active')) throw new Error('идёт попытка');
-        },
-        undefined,
-        'operator',
-      ),
-    );
+    base = await updateBase(h.config, dataRoot, undefined, move);
   } catch (error) {
-    if (held) h.pause(false);
+    // Частичный перенос (сдвиг следующего репозитория отклонён) — как у
+    // перемотки диспетчером: сдвинутые базы ждут проверки base-check.
+    if (moved.length) h.baseUpdated(moved);
+    else if (held) h.pause(false);
     throw error;
   }
   if (base.updated.length) h.baseUpdated(base.updated);

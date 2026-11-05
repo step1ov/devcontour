@@ -18,7 +18,9 @@ import { devcontourValueReport } from '../src/application/value-report.ts';
 import { executionOf } from '../src/harness/execution.ts';
 import { serve } from '../src/server/http.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
-import { command } from '../src/runner/process.ts';
+import { command, git } from '../src/runner/process.ts';
+import { baseUpdateOperation } from '../src/runner/base-update.ts';
+import { repositorySchema } from '../src/core/model.ts';
 
 type Payload = { by?: string; reset?: boolean; hadAttempt?: boolean };
 /** События harness типа `type` с актёром и поручением. */
@@ -42,7 +44,7 @@ function failedBoard(h: DevContour, titles = ['Failing task']) {
   return { board: board.id, ids, failed: run.taskId };
 }
 
-test('actors: CLI retry и cancel — operator', async () => {
+test('actors: CLI retry и cancel — operator по умолчанию, --by host — ведущий агент', async () => {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'dc-actors-')));
   const data = join(root, 'data');
   try {
@@ -61,12 +63,31 @@ test('actors: CLI retry и cancel — operator', async () => {
     const retried = await cli('retry', '--task', ids.failed);
     assert.equal(retried.code, 0, retried.stderr);
     const other = ids.ids.find((id) => id !== ids.failed)!;
-    const cancelled = await cli('cancel', '--task', other, '--reason', 'out of scope now');
+    const wrong = await cli(
+      'cancel',
+      '--task',
+      other,
+      '--reason',
+      'out of scope now',
+      '--by',
+      'lead',
+    );
+    assert.notEqual(wrong.code, 0);
+    assert.match(wrong.stderr, /--by: ожидается operator или host/);
+    const cancelled = await cli(
+      'cancel',
+      '--task',
+      other,
+      '--reason',
+      'out of scope now',
+      '--by',
+      'host',
+    );
     assert.equal(cancelled.code, 0, cancelled.stderr);
     h = new DevContour(new Store(join(data, 'state.sqlite')), c);
     try {
       assert.deepEqual(actors(h, 'work.retried'), [{ workId: ids.failed, by: 'operator' }]);
-      assert.deepEqual(actors(h, 'work.cancelled'), [{ workId: other, by: 'operator' }]);
+      assert.deepEqual(actors(h, 'work.cancelled'), [{ workId: other, by: 'host' }]);
     } finally {
       h.store.close();
     }
@@ -140,5 +161,69 @@ test('actors: восстановление цикла ведущего — recov
     );
   } finally {
     f.cleanup();
+  }
+});
+
+test('actors: base-update — отказ сдвига второго репозитория оставляет первый перенесённым и ждущим проверки', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dc-actors-')));
+  try {
+    const target = 'devcontour/accepted';
+    const repos = [];
+    for (const id of ['one', 'two']) {
+      const path = join(root, id);
+      await mkdir(path);
+      await git(path, 'init', '-q', '-b', 'work');
+      await writeFile(join(path, 'base.txt'), 'base');
+      await git(path, 'add', '.');
+      await git(path, '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'base', '--no-gpg-sign');
+      await git(path, 'branch', target);
+      await writeFile(join(path, 'prep.txt'), 'prepared');
+      await git(path, 'add', '.');
+      await git(path, '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'prep', '--no-gpg-sign');
+      repos.push(repositorySchema.parse({ id, name: id, path, gates: config().gates }));
+    }
+    // Каталог данных контура — отдельно от корня рабочих деревьев.
+    const data = join(root, 'data');
+    await mkdir(data);
+    const h = new DevContour(
+      new Store(join(data, 'state.sqlite')),
+      config({ repositories: repos, checkoutRoot: join(root, 'checkouts') }),
+    );
+    try {
+      assert.equal(h.store.read().paused, true);
+      const head = (id: string) => git(join(root, id), 'rev-parse', target);
+      const before = { one: await head('one'), two: await head('two') };
+      let calls = 0;
+      await assert.rejects(
+        baseUpdateOperation(h, data, {
+          fence: () => {
+            if (++calls === 2) throw new Error('second repository rejected');
+          },
+        }),
+        /second repository rejected/,
+      );
+      const prepared = await git(join(root, 'one'), 'rev-parse', 'work');
+      assert.equal(await head('one'), prepared, 'первый репозиторий перенесён');
+      assert.equal(await head('two'), before.two, 'второй — нет');
+      const state = h.store.read();
+      assert.equal(state.paused, true);
+      assert.equal(state.pauseReason, 'base-check', 'перенесённая база ждёт проверки');
+      assert.deepEqual(state.baseMoves?.bases, [
+        { repositoryId: 'one', from: before.one, to: prepared },
+      ]);
+      assert.deepEqual(actors(h, 'base.moved'), [{ workId: undefined, by: 'operator' }]);
+      // Второй перенос — ведущим агентом: актёр host.
+      await baseUpdateOperation(h, data, { by: 'host' });
+      assert.equal(await head('two'), await git(join(root, 'two'), 'rev-parse', 'work'));
+      assert.deepEqual(
+        actors(h, 'base.moved').map((e) => e.by),
+        ['operator', 'host'],
+      );
+    } finally {
+      h.store.close();
+    }
+  } finally {
+    assert.ok(root.startsWith(await realpath(tmpdir())) && root.includes('dc-actors-'));
+    await rm(root, { recursive: true, force: true });
   }
 });
