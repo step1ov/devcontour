@@ -76,6 +76,9 @@ import { parseOperationalKeys, requestConfigApply } from './runner/reconfigure.t
 import { writeSelfCheck } from './runner/checks.ts';
 import { CheckCorpus } from './core/check-store.ts';
 import { propertySeed } from 'devcontour-harness';
+import { evaluateVisualRun } from './runner/visual.ts';
+import { brokerAddress, httpBroker } from './runner/visual-broker.ts';
+import { VISUAL_RUN_DEADLINE_MS, visualRun } from './runner/visual-run.ts';
 const args = process.argv.slice(2),
   operation = args[0] ?? 'serve';
 const option = (name: string, fallback: string) =>
@@ -108,6 +111,55 @@ const authorRuntime = () => {
   return value;
 };
 async function main() {
+  if (operation === 'visual') {
+    // Без workspace и базы: gate запускает команду в своём рабочем дереве.
+    const sub = args[1];
+    if (sub === 'broker') {
+      // Broker и runner XCUITest — отдельный этап; здесь честный отказ, а не заглушка-успех.
+      throw new Error(
+        'visual broker start|stop ещё не реализован: visual run пока говорит с внешним broker по договору docs/visual-gate.md',
+      );
+    }
+    if (sub !== 'evaluate' && sub !== 'run')
+      throw new Error(
+        'Укажите visual run --spec FILE [--release] или visual evaluate --spec FILE --observations DIR --report FILE',
+      );
+    const value = (name: string, fallback?: string) => {
+      const v = option(name, fallback ?? '');
+      if (!v || v.startsWith('--')) throw new Error(`Укажите ${name}`);
+      return v;
+    };
+    const result =
+      sub === 'evaluate'
+        ? await evaluateVisualRun({
+            spec: resolve(value('--spec')),
+            observations: resolve(value('--observations')),
+            report: resolve(value('--report')),
+          })
+        : await (async () => {
+            const budgetMs = Number(option('--budget-ms', String(VISUAL_RUN_DEADLINE_MS)));
+            if (!Number.isInteger(budgetMs) || budgetMs < 10_000)
+              throw new Error('--budget-ms: целое число мс не меньше 10000');
+            const deadline = Date.now() + budgetMs;
+            return visualRun({
+              budgetMs,
+              spec: value('--spec'),
+              out: value('--out', '.reports/visual'),
+              report: value('--report', '.reports/visual.xml'),
+              cwd: process.cwd(),
+              release: args.includes('--release'),
+              broker: (() => {
+                const address = brokerAddress(process.env, value('--broker', 'visual-broker'));
+                return 'error' in address
+                  ? address
+                  : httpBroker(address, { remaining: () => deadline - Date.now() });
+              })(),
+            });
+          })();
+    console.log(JSON.stringify(result, null, 2));
+    process.exitCode = result.exitCode;
+    return;
+  }
   if (operation === 'eval-compare') {
     if (!args.includes('--baseline') || !args.includes('--candidate'))
       throw new Error('Укажите --baseline и --candidate JSON reports');

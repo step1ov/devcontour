@@ -54,6 +54,7 @@ function gate(g: Gate) {
     ...(g.dependsOn ? { dependsOn: g.dependsOn } : {}),
     ...(g.cwd ? { cwd: g.cwd } : {}),
     ...(g.resources ? { resources: g.resources } : {}),
+    ...(g.artifacts ? { artifacts: g.artifacts } : {}),
   };
 }
 

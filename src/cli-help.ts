@@ -13,6 +13,9 @@ export function printHelp() {
     'devcontour intent-render --file definition.json [--repository-id ID] --workspace ...\ndevcontour intent-snapshot [--repository-id ID] [--story ID] --workspace ...\ndevcontour intent-report --release ID [--repository-id ID] [--require-complete] [--require-accepted] --workspace ...\ndevcontour product-view [--release ID] [--require-accepted] --workspace ...',
   );
   console.log(
+    'devcontour visual run --spec contracts/ui-states/app.json [--out .reports/visual] [--report .reports/visual.xml] [--broker visual-broker] [--budget-ms 390000] [--release] — визуальная приёмка через device broker: наблюдения, снимки PNG и JUnit для test gate (код 1 — провал, 75 — только ошибки окружения)\ndevcontour visual evaluate --spec contracts/ui-states/app.json --observations DIR --report .reports/visual.xml — утверждения визуальной приёмки над записанными наблюдениями',
+  );
+  console.log(
     'devcontour engineering-evals [--live --runtime codex|claude --model ID --reviewer-model ID]\ndevcontour eval-compare --baseline report.json --candidate report.json',
   );
   console.log(
