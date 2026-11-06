@@ -65,8 +65,17 @@ export async function quickFacts(input: {
   const embedded = input.mode === 'embedded';
   const own = embedded && root === workspace;
   const foreign = own ? facts.git.changes.filter((p) => !startOwned.has(p)) : facts.git.changes;
+  // Профили DevContour версию менеджера не закрепляют: требование из
+  // встроенного профиля harness здесь не действует, а packageManager проекта — да.
+  const pinnedByHarness = new Set(
+    facts.tools.filter((t) => t.required?.source.startsWith('profile ')).map((t) => t.name),
+  );
   const diagnostics: QuickDiagnostic[] = facts.diagnostics.filter(
     (d) =>
+      !(
+        d.code === 'tool-version-mismatch' &&
+        [...pinnedByHarness].some((name) => d.message.startsWith(name + ' '))
+      ) &&
       !(d.code === 'dirty-checkout' && own && foreign.length === 0) &&
       !(
         d.code === 'devcontour-owned' &&
