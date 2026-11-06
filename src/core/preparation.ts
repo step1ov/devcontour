@@ -805,7 +805,7 @@ export class Preparation {
             if (v.gates) {
               const parsed = gateList.safeParse(v.gates);
               if (!parsed.success)
-                throw new DomainError('Gates предложения: ' + parsed.error.issues[0]!.message, 400);
+                throw new DomainError('Gates предложения: ' + parsed.error.issues[0].message, 400);
             }
             c.setup ??= [];
             const number = c.setup.length + 1;

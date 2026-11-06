@@ -152,7 +152,7 @@ test('D01-B: повтор поручения возвращает то же из
       assert.equal(again.activeChangeId, first.activeChangeId);
       const state = store.read().preparation!;
       assert.equal(state.changes.length, 1);
-      assert.equal(state.changes[0]!.intake!.actor, 'operator');
+      assert.equal(state.changes[0].intake!.actor, 'operator');
       assert.throws(
         () =>
           operator.execute('preparation_quick', { ...intake(root), criterion: 'другое условие' }),
@@ -160,7 +160,7 @@ test('D01-B: повтор поручения возвращает то же из
       );
       // Ведущий агент вводит своё поручение под своим ключом и своим происхождением.
       new Preparation(store).execute('preparation_quick', intake(root, 'lead-request-1'));
-      assert.equal(store.read().preparation!.changes[1]!.intake!.actor, 'lead');
+      assert.equal(store.read().preparation!.changes[1].intake!.actor, 'lead');
       assert.equal(store.read().preparation!.changes.length, 2);
       return Promise.resolve();
     } finally {
@@ -195,7 +195,7 @@ test('D01: предложение setup — CAS, проверка gates и не�
         gates,
         reason: 'Проверки проекта',
       });
-      const first = store.read().preparation!.changes[0]!.setup![0]!;
+      const first = store.read().preparation!.changes[0].setup![0];
       assert.throws(
         () =>
           p.execute('preparation_setup', {
@@ -212,14 +212,14 @@ test('D01: предложение setup — CAS, проверка gates и не�
         profile: 'npm-project',
         reason: 'Gates профиля',
       });
-      assert.equal(store.read().preparation!.changes[0]!.setup!.length, 2);
+      assert.equal(store.read().preparation!.changes[0].setup!.length, 2);
       // Подмена истории (например, пришедшая синхронизацией) отклоняется проверкой состояния.
       const before = store.read();
       const tampered = structuredClone(before);
-      tampered.preparation!.changes[0]!.intake!.criterion = 'подменено';
+      tampered.preparation!.changes[0].intake!.criterion = 'подменено';
       assert.throws(() => validatePreparation(tampered, before), /неизменяема/);
       const dropped = structuredClone(before);
-      dropped.preparation!.changes[0]!.setup!.shift();
+      dropped.preparation!.changes[0].setup!.shift();
       assert.throws(() => validatePreparation(dropped, before), /setup|неизменяема/);
       // Обычное изменение без поручения не получает предложения setup.
       p.execute('preparation_create', { title: 'Полный маршрут' });
@@ -238,7 +238,7 @@ test('D01: предложение setup — CAS, проверка gates и не�
         changeId,
         reason: 'Нужны два компонента и зависимые задачи',
       });
-      const expanded = store.read().preparation!.changes[0]!;
+      const expanded = store.read().preparation!.changes[0];
       assert.equal(expanded.intake!.criterion, intake(root).criterion);
       assert.equal(expanded.setup!.length, 2);
       assert.match(expanded.expanded!.reason, /два компонента/);
@@ -264,7 +264,7 @@ test('D01: факты embedded без ложной «чужой работы»; 
       facts.profiles.map((x) => x.id),
       ['npm-project'],
     );
-    assert.match(facts.profiles[0]!.digest, /^[0-9a-f]{64}$/);
+    assert.match(facts.profiles[0].digest, /^[0-9a-f]{64}$/);
     assert.deepEqual(facts.facts.checks, ['test', 'lint']);
     // Чужая незакоммиченная правка остаётся предупреждением.
     writeFileSync(join(root, 'src/index.js'), 'export const add = (a, b) => a - b;\n');
@@ -352,8 +352,8 @@ test('D01-C: setup --change отклоняется до согласований
       let changeId: string;
       try {
         assert.equal(store.read().preparation!.changes.length, 1);
-        changeId = store.read().preparation!.changes[0]!.id;
-        assert.equal(store.read().preparation!.changes[0]!.intake!.actor, 'operator');
+        changeId = store.read().preparation!.changes[0].id;
+        assert.equal(store.read().preparation!.changes[0].intake!.actor, 'operator');
         new Preparation(store).execute('preparation_setup', {
           changeId,
           expectedDigest: null,
@@ -410,11 +410,11 @@ test('D01-C: setup --change отклоняется до согласований
       assert.equal(readFileSync(join(root, 'AGENTS.md'), 'utf8'), '# Own rules\nKeep them.\n');
       const config = loadConfig(join(root, '.devcontour-local/config.json'));
       assert.deepEqual(
-        config.repositories[0]!.gates.map((g) => g.id),
+        config.repositories[0].gates.map((g) => g.id),
         ['install', 'unit-tests'],
       );
       assert.ok(config.protectedPaths.includes('pnpm-lock.yaml'));
-      assert.equal(config.packs[0]!.id, 'pnpm-project');
+      assert.equal(config.packs[0].id, 'pnpm-project');
     } finally {
       await app.close();
       rmSync(root, { recursive: true, force: true });
