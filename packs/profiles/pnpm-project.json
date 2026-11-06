@@ -1,0 +1,64 @@
+{
+  "id": "pnpm-project",
+  "version": "0.1.0",
+  "capabilities": [
+    "node",
+    "pnpm",
+    "unit-tests"
+  ],
+  "protectedPaths": [
+    "package.json",
+    "pnpm-lock.yaml"
+  ],
+  "gates": [
+    {
+      "id": "install",
+      "kind": "check",
+      "command": [
+        "pnpm",
+        "install",
+        "--frozen-lockfile"
+      ],
+      "timeoutMs": 600000
+    },
+    {
+      "id": "unit-tests",
+      "kind": "test",
+      "command": [
+        "pnpm",
+        "test"
+      ],
+      "timeoutMs": 240000,
+      "dependsOn": [
+        "install"
+      ],
+      "report": {
+        "type": "junit",
+        "path": ".reports/junit.xml"
+      }
+    }
+  ],
+  "contextPacks": [
+    {
+      "id": "technique-testing",
+      "version": "1.0.0",
+      "roles": [
+        "backend",
+        "engine",
+        "qa",
+        "qa-web",
+        "qa-admin",
+        "qa-mobile",
+        "qa-api"
+      ],
+      "files": [
+        ".agents/context/technique-testing.md"
+      ],
+      "references": [
+        ".agents/context/vendor/matt-pocock/skills--engineering--tdd--SKILL.md",
+        ".agents/context/vendor/matt-pocock/skills--engineering--tdd--tests.md",
+        ".agents/context/vendor/matt-pocock/skills--engineering--tdd--mocking.md"
+      ]
+    }
+  ]
+}

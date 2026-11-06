@@ -57,8 +57,10 @@ import {
   profileLock,
   projectConfig,
   setupProject,
+  planSetup,
   componentProfileConfig,
 } from './runner/setup.ts';
+import { quickFacts } from './runner/quick.ts';
 import { acceptBoard, reviewContract, reviewPlan } from './runner/agent-control.ts';
 import { specDigest } from './core/service.ts';
 import { WorkspaceRunner } from './runner/workspace.ts';
@@ -389,6 +391,60 @@ async function main() {
     console.log(
       JSON.stringify(
         await setupWorkspace(option('--file', ''), args.includes('--data') ? root : undefined),
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+  // Факты репозитория для быстрого изменения: только чтение, без setup.
+  if (operation === 'quick-facts') {
+    if (!workspacePath || !args.includes('--repository'))
+      throw new Error('Укажите --workspace и --repository');
+    console.log(
+      JSON.stringify(
+        await quickFacts({
+          workspace: workspacePath,
+          mode: selectedWorkspaceMode(workspacePath),
+          repository: resolve(option('--repository', '')),
+        }),
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+  // Быстрое изменение: setup применяет ровно последнее предложение ведущего
+  // агента, которое панель показала оператору планом файлов.
+  if (operation === 'setup' && args.includes('--change')) {
+    if (!workspacePath) throw new Error('Быстрое изменение требует --workspace');
+    const store = preparationStore(root);
+    let change;
+    try {
+      change = store.read().preparation?.changes.find((c) => c.id === option('--change', ''));
+    } finally {
+      store.close();
+    }
+    if (!change?.intake) throw new Error('Быстрое изменение не найдено');
+    if (change.expanded)
+      throw new Error('Изменение идёт полным маршрутом: используйте setup --profile');
+    const proposal = change.setup?.at(-1);
+    if (!proposal) throw new Error('Сначала предложите setup операцией preparation_setup');
+    const input = {
+      repository: change.intake.repository,
+      profile: proposal.profile,
+      workspace: workspacePath,
+      quick: true,
+      ...(proposal.gates ? { gates: proposal.gates } : {}),
+      approvalMode: args.includes('--approval-mode')
+        ? configSchema.shape.approvalMode.parse(option('--approval-mode', 'agent'))
+        : undefined,
+    };
+    console.log(
+      JSON.stringify(
+        args.includes('--plan')
+          ? { proposal: proposal.digest, ...(await planSetup(input)) }
+          : { proposal: proposal.digest, ...(await setupProject(input)) },
         null,
         2,
       ),

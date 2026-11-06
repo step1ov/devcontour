@@ -165,6 +165,12 @@ export const descriptions: Record<AgentOperation, string> = {
     'Create a product change. Product and architecture require explicit operator decisions in the web panel before development.',
   preparation_activate:
     'Select the change for subsequent development tasks. Does not approve any stage.',
+  preparation_quick:
+    'Start a quick change to one existing npm or pnpm repository from a short instruction and one observable result. The same requestKey returns the change it created; another payload under it is refused. Product and architecture stay operator-approved revisions (compact ones are fine); nothing is approved by this call.',
+  preparation_setup:
+    'Propose what setup will apply to a quick change: a profile (npm-project or pnpm-project for an existing repository) and, when the repository has its own check commands, the gates that run them (a test gate needs a JUnit report). The panel shows the files setup would create, keep or refuse before anything is written; setup --change applies exactly the latest proposal.',
+  preparation_expand:
+    'Move a quick change to the full route when it needs several components or dependent tasks. Keeps the instruction, criterion and all revisions; explain why.',
   preparation_product:
     'Save a new immutable product draft with optimistic concurrency: personas with goals and pains, releases as the scope boundary, and features whose scenarios name a persona and whose acceptance criteria name a release. Resolve ambiguity the way the relevant persona would. Never approves it; a revision invalidates the prior architecture for new work.',
   preparation_architecture:

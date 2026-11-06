@@ -1,4 +1,14 @@
-import { workspaceDescription } from '../runner/workspace-mode.ts';
+import { selectedWorkspaceMode, workspaceDescription } from '../runner/workspace-mode.ts';
+import { existsSync } from 'node:fs';
+import {
+  LEAD_QUIET_MS,
+  quickFacts,
+  quickResult,
+  quickSetupPlan,
+  quickSteps,
+  type QuickFacts,
+} from '../runner/quick.ts';
+import type { UsageRecord } from '../core/usage.ts';
 import { Preparation } from '../core/preparation.ts';
 import { PreparationAgent } from '../application/preparation-agent.ts';
 import type { Store } from '../core/store.ts';
@@ -112,6 +122,18 @@ export async function serve(
   let connecting: Promise<void> | undefined;
   let startupError: string | undefined;
   let stopping = false;
+  // Факты репозитория — процессы Git и пробы версий: панель опрашивает часто,
+  // а репозиторий меняется редко. Кэш короткий и только в памяти.
+  const factsCache = new Map<string, { at: number; value: Promise<QuickFacts> }>();
+  const cachedFacts = (workspace: string, repository: string) => {
+    const key = JSON.stringify([workspace, repository]);
+    const hit = factsCache.get(key);
+    if (hit && Date.now() - hit.at < 10_000) return hit.value;
+    const value = quickFacts({ workspace, mode: selectedWorkspaceMode(workspace), repository });
+    factsCache.set(key, { at: Date.now(), value });
+    value.catch(() => factsCache.delete(key));
+    return value;
+  };
   const startEngine = () => {
     if (!h || !scheduler) return;
     attachJournal(h);
@@ -225,6 +247,63 @@ export async function serve(
             queue: engine ? queueStopOf(h!, engine) : undefined,
             startupError,
             workspace: root ? workspaceDescription(root) : undefined,
+          });
+          return;
+        }
+        // Поручение быстрого изменения вводит оператор в панели: происхождение
+        // задаёт вход, а не поле запроса. Повтор того же ключа — та же запись.
+        if (req.method === 'POST' && path === '/api/preparation/quick' && preparationStore) {
+          json(
+            res,
+            200,
+            new Preparation(preparationStore, 'operator').execute(
+              'preparation_quick',
+              await body(req),
+            ),
+          );
+          return;
+        }
+        if (req.method === 'GET' && path === '/api/preparation/quick' && preparationStore) {
+          const root = h?.config.workspaceRoot ?? options.bootstrap?.workspace;
+          const state = preparationStore.read();
+          const id = url.searchParams.get('change') ?? state.preparation?.activeChangeId;
+          const change = state.preparation?.changes.find((c) => c.id === id);
+          if (!change?.intake || !root) throw new DomainError('Быстрое изменение не найдено', 404);
+          const view = new Preparation(preparationStore).status(change.id, { content: false });
+          const facts = await cachedFacts(root, change.intake.repository).catch(() => undefined);
+          const plan = h ? undefined : await quickSetupPlan({ workspace: root, change });
+          const tasks = state.tasks.filter((t) => t.preparation?.changeId === change.id);
+          const activity = view.enabled ? view.agentActivity : undefined;
+          const usage = h
+            ? [undefined, ...repositories(h.config).map((r) => r.id)].flatMap((owner) =>
+                Object.values(h!.store.localRecords<UsageRecord>('usage', owner)),
+              )
+            : [];
+          json(res, 200, {
+            changeId: change.id,
+            title: change.title,
+            intake: change.intake,
+            setup: change.setup?.at(-1),
+            expanded: change.expanded,
+            facts,
+            plan,
+            steps: quickSteps({
+              change,
+              developmentReady: Boolean(view.enabled && view.developmentReady),
+              blocker: view.enabled ? view.blocker : '',
+              ...(facts ? { facts } : {}),
+              ...(plan ? { plan } : {}),
+              configured: existsSync(join(root, '.devcontour-local', 'config.json')),
+              engineConnected: Boolean(h),
+              tasks,
+            }),
+            // Присутствие ведущего агента известно только по его журналу:
+            // без свежей записи панель не изображает идущую работу.
+            lead: {
+              lastActivityAt: activity?.at ?? null,
+              present: Boolean(activity && Date.now() - Date.parse(activity.at) < LEAD_QUIET_MS),
+            },
+            result: h ? quickResult(h.store.read(), change.id, usage) : [],
           });
           return;
         }

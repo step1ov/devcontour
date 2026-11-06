@@ -251,6 +251,38 @@ const revision = {
 // A readable, sortable key: the sequence gives order, the slug gives meaning.
 // The UUID stays internal; this is what names folders and files.
 export const changeKey = z.string().regex(/^r-\d{3}\.[a-z0-9][a-z0-9-]{0,48}$/);
+// A quick change to an existing repository starts from a short instruction
+// and one observable result, not from a full product brief. The intake is
+// immutable: the agent's compact product decisions are ordinary revisions
+// that the operator approves, and switching to the full route keeps it.
+const requestKey = z.string().regex(/^[A-Za-z0-9_-]{8,80}$/);
+export const quickIntake = z.strictObject({
+  requestKey,
+  createdAt: z.iso.datetime(),
+  actor: z.enum(['operator', 'lead']),
+  repository: z
+    .string()
+    .min(1)
+    .max(1000)
+    .refine((p) => p.startsWith('/'), 'Нужен абсолютный путь'),
+  brief: z.string().trim().min(10).max(4000),
+  criterion: z.string().trim().min(5).max(1000),
+});
+// What setup will write is proposed by the lead agent and shown to the
+// operator before any file is created; setup applies exactly this proposal.
+// Gates are validated by the configuration schema when they are proposed.
+export const setupProposal = z.strictObject({
+  number: z.number().int().positive(),
+  digest: hash,
+  createdAt: z.iso.datetime(),
+  profile: z.string().trim().min(1).max(200),
+  gates: z.array(z.record(z.string(), z.unknown())).min(1).max(50).optional(),
+  reason: z.string().trim().min(3).max(2000),
+});
+export const routeExpansion = z.strictObject({
+  at: z.iso.datetime(),
+  reason: z.string().trim().min(10).max(2000),
+});
 export const productChange = z.strictObject({
   id,
   key: changeKey,
@@ -275,6 +307,9 @@ export const productChange = z.strictObject({
   activity: z.array(preparationActivity).max(200).default([]),
   questions: z.array(preparationQuestion).max(60).default([]),
   decisions: z.array(preparationRecord).max(100).default([]),
+  intake: quickIntake.optional(),
+  setup: z.array(setupProposal).max(100).optional(),
+  expanded: routeExpansion.optional(),
 });
 export const preparationState = z.strictObject({
   id: z.literal('workspace-preparation'),
@@ -300,6 +335,24 @@ export const preparationInputs = {
       .optional(),
   }),
   preparation_activate: z.strictObject({ changeId: id }),
+  // Repeating the same request key returns the change it created.
+  preparation_quick: z.strictObject({
+    requestKey,
+    title: z.string().trim().min(3).max(180),
+    repository: quickIntake.shape.repository,
+    brief: quickIntake.shape.brief,
+    criterion: quickIntake.shape.criterion,
+  }),
+  preparation_setup: z.strictObject({
+    changeId: id,
+    expectedDigest: hash.nullable(),
+    profile: setupProposal.shape.profile,
+    gates: setupProposal.shape.gates,
+    reason: setupProposal.shape.reason,
+  }),
+  // The agent found several components or dependent tasks: the change goes
+  // the full way and keeps everything entered for the quick one.
+  preparation_expand: z.strictObject({ changeId: id, reason: routeExpansion.shape.reason }),
   preparation_product: z.strictObject({
     changeId: id,
     expectedDigest: hash.nullable(),
@@ -401,6 +454,8 @@ export type PaletteColor = z.infer<typeof paletteColor>;
 export type C4Diagram = z.infer<typeof c4Diagram>;
 export type C4Components = z.infer<typeof c4Components>;
 export type ProductChange = z.infer<typeof productChange>;
+export type QuickIntake = z.infer<typeof quickIntake>;
+export type SetupProposal = z.infer<typeof setupProposal>;
 export type PreparationState = z.infer<typeof preparationState>;
 export type PreparationBinding = z.infer<typeof preparationBinding>;
 export type PreparationOperation = keyof typeof preparationInputs;
