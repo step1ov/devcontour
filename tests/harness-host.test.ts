@@ -89,6 +89,13 @@ test('Конфигурация → политика: dependencyStore компо�
   });
   const without = configSchema.parse({ ...config(), repositories: [component] });
   assert.equal('dependencyStore' in policyFromConfig(without).repositories[0], false);
+  // Отказ от установки зависимостей исполнителю — только явный false; без поля digest политики прежний.
+  assert.equal('writerDependencies' in policyFromConfig(without).repositories[0], false);
+  const optOut = configSchema.parse({
+    ...config(),
+    repositories: [{ ...component, writerDependencies: false }],
+  });
+  assert.equal(policyFromConfig(optOut).repositories[0].writerDependencies, false);
   assert.throws(() =>
     configSchema.parse({
       ...config(),

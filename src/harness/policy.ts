@@ -190,6 +190,7 @@ export function policyFromConfig(
       dependencyBuild: r.dependencyBuild ?? [],
       dependencyArtifacts: r.dependencyArtifacts ?? [],
       ...(r.dependencyStore ? { dependencyStore: r.dependencyStore } : {}),
+      ...(r.writerDependencies === false ? { writerDependencies: false } : {}),
       preflight: r.preflight ?? [],
       ...(r.roles
         ? {
