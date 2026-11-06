@@ -37,7 +37,7 @@ test('AC18: каталог DevContour байтово прежний — catalogD
   assert.equal(c.protocolVersion, 1);
   assert.equal(c.maxInputBytes, 100000);
   assert.equal(c.maxResultBytes, 65536);
-  assert.equal(c.tools.length, 56);
+  assert.equal(c.tools.length, 59); // +3 операции быстрого изменения
   for (const name of sharedOperationNames)
     assert.equal(
       c.tools.some((t) => t.name === name),

@@ -20,5 +20,8 @@
 // операции байтово прежние.
 // Намеренное изменение: описание workflow_status называет поля liveness и
 // operations (попытки и проверки без движения); прочие операции байтово прежние.
-export const CATALOG_DIGEST = 'a8245eaf2f24c08cc0cfe5b1cc70720a3b9a1c27ad53c601a430db9acab5f01d';
+// Намеренное изменение: пишущие операции быстрого изменения preparation_quick,
+// preparation_setup и preparation_expand после preparation_activate; прочие
+// операции байтово прежние.
+export const CATALOG_DIGEST = 'cc2f6ff264a41161565a36146744cc7328f8c51392d9bd52b6b52ef6afed38b9';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

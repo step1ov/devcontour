@@ -19,9 +19,13 @@ import { join } from 'node:path';
 const fixtures = fileURLToPath(new URL('./fixtures/profiles-host/', import.meta.url));
 const repo = fixtures + 'repo';
 const builtinDir = fileURLToPath(new URL('../packs/profiles/', import.meta.url));
+// npm-project и pnpm-project появились после снимка (быстрое изменение
+// существующего репозитория): эталона прежнего резолвера у них нет.
+const added = ['npm-project', 'pnpm-project'];
 const builtin = readdirSync(builtinDir)
   .filter((f) => f.endsWith('.json'))
   .map((f) => f.slice(0, -5))
+  .filter((id) => !added.includes(id))
   .sort();
 type Captured = {
   ref: string;
@@ -50,9 +54,12 @@ test('Adapter output equals the previous DevContour resolver for every builtin a
     assert.equal(JSON.stringify(actual), JSON.stringify(c.profile), c.ref);
     assert.deepEqual(JSON.parse(JSON.stringify(actual)), c.profile, c.ref);
     // Умолчания gates, ролей и contextPacks в конфигурации setup — те же.
+    // Намеренное изменение после снимка: setup защищает и pnpm-lock.yaml.
+    const legacy = structuredClone(c.config) as { protectedPaths: string[] };
+    legacy.protectedPaths.push('pnpm-lock.yaml');
     assert.equal(
       JSON.stringify(projectConfig('/fixture/product', actual)),
-      JSON.stringify(c.config),
+      JSON.stringify(legacy),
       c.ref,
     );
     // Формула digest хоста сохраняется.
