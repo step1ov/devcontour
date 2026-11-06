@@ -266,6 +266,22 @@ test('D01: факты embedded без ложной «чужой работы»; 
     );
     assert.match(facts.profiles[0].digest, /^[0-9a-f]{64}$/);
     assert.deepEqual(facts.facts.checks, ['test', 'lint']);
+    // Версия npm из встроенного профиля harness — не требование DevContour.
+    const binRoot = temp();
+    const bin = join(binRoot, 'bin');
+    mkdirSync(bin);
+    for (const name of ['git', 'node'])
+      symlinkSync(execFileSync('which', [name], { encoding: 'utf8' }).trim(), join(bin, name));
+    writeFileSync(join(bin, 'npm'), '#!/bin/sh\necho 10.0.0\n', { mode: 0o755 });
+    const oldNpm = await quickFacts({
+      workspace: root,
+      mode: 'embedded',
+      repository: root,
+      env: { ...process.env, PATH: bin },
+    });
+    assert.equal(oldNpm.facts.tools.find((t) => t.name === 'npm')?.status, 'mismatch');
+    assert.ok(!oldNpm.diagnostics.some((d) => d.code === 'tool-version-mismatch'));
+    rmSync(binRoot, { recursive: true, force: true });
     // Чужая незакоммиченная правка остаётся предупреждением.
     writeFileSync(join(root, 'src/index.js'), 'export const add = (a, b) => a - b;\n');
     const dirty = await quickFacts({ workspace: root, mode: 'embedded', repository: root });
