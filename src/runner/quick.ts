@@ -54,6 +54,8 @@ export async function quickFacts(input: {
   workspace: string;
   mode: WorkspaceMode | undefined;
   repository: string;
+  /** Ключи изменений подготовки: их проекция в docs/changes — запись DevContour. */
+  changeKeys?: string[];
   env?: NodeJS.ProcessEnv;
 }): Promise<QuickFacts> {
   const facts = await inspectProject({
@@ -66,9 +68,15 @@ export async function quickFacts(input: {
   const own = embedded && root === workspace;
   // В embedded start пишет .gitignore и маркер режима, а подготовка —
   // проекцию изменений в docs/changes: это записи самого DevContour.
+  // Проекция — индекс и каталоги известных изменений, не весь docs/changes.
+  const projected = (p: string) =>
+    p === 'docs/changes/README.md' ||
+    (input.changeKeys ?? []).some((key) => p.startsWith(`docs/changes/${key}/`));
   const foreign = own
-    ? facts.git.changes.filter((p) => !startOwned.has(p) && !p.startsWith('docs/changes/'))
+    ? facts.git.changes.filter((p) => !startOwned.has(p) && !projected(p))
     : facts.git.changes;
+  // Список усечён: непоказанные пути могут быть чужими.
+  const truncated = (facts.git.changeCount ?? 0) > facts.git.changes.length;
   // Профили DevContour версию менеджера не закрепляют: требование из
   // встроенного профиля harness здесь не действует, а packageManager проекта — да.
   const pinnedByHarness = new Set(
@@ -80,7 +88,7 @@ export async function quickFacts(input: {
         d.code === 'tool-version-mismatch' &&
         [...pinnedByHarness].some((name) => d.message.startsWith(name + ' '))
       ) &&
-      !(d.code === 'dirty-checkout' && own && foreign.length === 0) &&
+      !(d.code === 'dirty-checkout' && own && foreign.length === 0 && !truncated) &&
       !(
         d.code === 'devcontour-owned' &&
         own &&
@@ -168,6 +176,8 @@ export function quickSteps(input: {
   developmentReady: boolean;
   blocker: string;
   facts?: QuickFacts;
+  /** Инспекция репозитория не удалась: причина вместо ожидания. */
+  factsError?: string;
   plan?: Awaited<ReturnType<typeof quickSetupPlan>>;
   configured: boolean;
   engineConnected: boolean;
@@ -183,16 +193,18 @@ export function quickSteps(input: {
   steps.push({
     id: 'connection',
     title: 'Подключение',
-    state: connected ? 'done' : input.facts ? 'blocked' : 'current',
+    state: connected ? 'done' : input.facts || input.factsError ? 'blocked' : 'current',
     actor: 'operator',
     detail: connected
       ? `Репозиторий ${input.facts!.facts.git.root} на ${input.facts!.facts.git.baseSha?.slice(0, 12)}`
-      : input.facts
-        ? input.facts.diagnostics
-            .filter((d) => d.severity === 'blocker')
-            .map((d) => `${d.message}. ${d.action}`)
-            .join(' ')
-        : 'Проверяем репозиторий',
+      : input.factsError
+        ? `Репозиторий не удалось проверить: ${input.factsError}. Проверьте путь и доступ к Git`
+        : input.facts
+          ? input.facts.diagnostics
+              .filter((d) => d.severity === 'blocker')
+              .map((d) => `${d.message}. ${d.action}`)
+              .join(' ')
+          : 'Проверяем репозиторий',
   });
   const stages = ['product', 'architecture', 'references', 'concept', 'design'] as const;
   const review = stages.find((s) => change[s]?.at(-1)?.status === 'in-review');

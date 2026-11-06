@@ -286,6 +286,37 @@ test('D01: факты embedded без ложной «чужой работы»; 
     assert.equal(oldNpm.facts.tools.find((t) => t.name === 'npm')?.status, 'mismatch');
     assert.ok(!oldNpm.diagnostics.some((d) => d.code === 'tool-version-mismatch'));
     rmSync(binRoot, { recursive: true, force: true });
+    // Проекция известного изменения — своя запись; чужой файл рядом — нет.
+    mkdirSync(join(root, 'docs/changes/r-001.own'), { recursive: true });
+    writeFileSync(join(root, 'docs/changes/README.md'), '# Changes\n');
+    writeFileSync(join(root, 'docs/changes/r-001.own/product.md'), '# Own\n');
+    const own = await quickFacts({
+      workspace: root,
+      mode: 'embedded',
+      repository: root,
+      changeKeys: ['r-001.own'],
+    });
+    assert.ok(!own.diagnostics.some((d) => d.code === 'dirty-checkout'));
+    writeFileSync(join(root, 'docs/changes/notes.md'), 'user notes\n');
+    const user = await quickFacts({
+      workspace: root,
+      mode: 'embedded',
+      repository: root,
+      changeKeys: ['r-001.own'],
+    });
+    assert.ok(user.diagnostics.some((d) => d.code === 'dirty-checkout'));
+    rmSync(join(root, 'docs/changes/notes.md'));
+    // Список изменений усечён: невидимые пути не считаются своими.
+    for (let i = 0; i < 60; i++)
+      writeFileSync(join(root, `docs/changes/r-001.own/extra-${i}.md`), String(i));
+    const many = await quickFacts({
+      workspace: root,
+      mode: 'embedded',
+      repository: root,
+      changeKeys: ['r-001.own'],
+    });
+    assert.ok(many.diagnostics.some((d) => d.code === 'dirty-checkout'));
+    rmSync(join(root, 'docs'), { recursive: true, force: true });
     // Чужая незакоммиченная правка остаётся предупреждением.
     writeFileSync(join(root, 'src/index.js'), 'export const add = (a, b) => a - b;\n');
     const dirty = await quickFacts({ workspace: root, mode: 'embedded', repository: root });

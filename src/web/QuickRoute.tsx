@@ -94,6 +94,7 @@ export interface QuickView {
   setup?: { number: number; profile: string; gates?: Gate[]; reason: string; digest: string };
   expanded?: { at: string; reason: string };
   facts?: Facts;
+  factsError?: string;
   plan?: {
     proposal: string;
     files: PlanFile[];
@@ -176,7 +177,14 @@ function Block({ title, children }: { title: string; children: React.ReactNode }
   );
 }
 
-function Connection({ facts }: { facts?: Facts }) {
+function Connection({ facts, error }: { facts?: Facts; error?: string }) {
+  if (!facts && error)
+    return (
+      <Alert variant="destructive">
+        <p className="mb-1 leading-none font-medium">Репозиторий не удалось проверить</p>
+        <AlertDescription className="break-words">{error}</AlertDescription>
+      </Alert>
+    );
   if (!facts)
     return (
       <p className="text-muted-foreground" role="status">
@@ -675,7 +683,7 @@ export function QuickRoute({ changeId, workspace }: { changeId: string; workspac
       {view && (
         <>
           <Block title="1. Подключение">
-            <Connection facts={view.facts} />
+            <Connection facts={view.facts} error={view.factsError} />
           </Block>
           <Block title="2. Решения">
             <p className="max-w-[78ch]">

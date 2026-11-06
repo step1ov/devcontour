@@ -125,11 +125,16 @@ export async function serve(
   // Факты репозитория — процессы Git и пробы версий: панель опрашивает часто,
   // а репозиторий меняется редко. Кэш короткий и только в памяти.
   const factsCache = new Map<string, { at: number; value: Promise<QuickFacts> }>();
-  const cachedFacts = (workspace: string, repository: string) => {
-    const key = JSON.stringify([workspace, repository]);
+  const cachedFacts = (workspace: string, repository: string, changeKeys: string[]) => {
+    const key = JSON.stringify([workspace, repository, changeKeys]);
     const hit = factsCache.get(key);
     if (hit && Date.now() - hit.at < 10_000) return hit.value;
-    const value = quickFacts({ workspace, mode: selectedWorkspaceMode(workspace), repository });
+    const value = quickFacts({
+      workspace,
+      mode: selectedWorkspaceMode(workspace),
+      repository,
+      changeKeys,
+    });
     factsCache.set(key, { at: Date.now(), value });
     value.catch(() => factsCache.delete(key));
     return value;
@@ -270,7 +275,16 @@ export async function serve(
           const change = state.preparation?.changes.find((c) => c.id === id);
           if (!change?.intake || !root) throw new DomainError('Быстрое изменение не найдено', 404);
           const view = new Preparation(preparationStore).status(change.id, { content: false });
-          const facts = await cachedFacts(root, change.intake.repository).catch(() => undefined);
+          // Сбой инспекции — причина на экране, а не вечное «Проверяем».
+          let factsError: string | undefined;
+          const facts = await cachedFacts(
+            root,
+            change.intake.repository,
+            (state.preparation?.changes ?? []).map((c) => c.key),
+          ).catch((error: unknown) => {
+            factsError = error instanceof Error ? error.message : String(error);
+            return undefined;
+          });
           const plan = h ? undefined : await quickSetupPlan({ workspace: root, change });
           const tasks = state.tasks.filter((t) => t.preparation?.changeId === change.id);
           const activity = view.enabled ? view.agentActivity : undefined;
@@ -286,12 +300,14 @@ export async function serve(
             setup: change.setup?.at(-1),
             expanded: change.expanded,
             facts,
+            ...(factsError ? { factsError } : {}),
             plan,
             steps: quickSteps({
               change,
               developmentReady: Boolean(view.enabled && view.developmentReady),
               blocker: view.enabled ? view.blocker : '',
               ...(facts ? { facts } : {}),
+              ...(factsError ? { factsError } : {}),
               ...(plan ? { plan } : {}),
               configured: existsSync(join(root, '.devcontour-local', 'config.json')),
               engineConnected: Boolean(h),
