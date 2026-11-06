@@ -96,7 +96,7 @@ export interface QuickView {
   facts?: Facts;
   plan?: {
     proposal: string;
-    files: { path: string; action: 'create' | 'preserve' | 'conflict'; conflict?: string }[];
+    files: PlanFile[];
     refusal?: string;
   };
   steps: QuickStep[];
@@ -371,39 +371,25 @@ function Preparation({ view }: { view: QuickView }) {
             изменений: {plan.files.filter((f) => f.action === 'preserve').length} · конфликтов:{' '}
             {plan.files.filter((f) => f.action === 'conflict').length}
           </p>
-          <table className="w-full text-left text-sm" aria-label="План файлов setup">
-            <thead>
-              <tr className="border-b">
-                <th scope="col" className="py-2 pr-3 font-semibold">
-                  Файл
-                </th>
-                <th scope="col" className="py-2 pr-3 font-semibold">
-                  Что будет
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {[...plan.files]
-                .sort((x, y) => fileOrder[x.action] - fileOrder[y.action])
-                .map((file) => (
-                  <tr key={file.path} className="border-b">
-                    <td className="py-2 pr-3 align-top">
-                      <code className="font-mono text-xs break-all">
-                        {relative(file.path, root)}
-                      </code>
-                    </td>
-                    <td className="py-2 pr-3 align-top">
-                      <Badge variant={fileActions[file.action].tone}>
-                        {fileActions[file.action].label}
-                      </Badge>
-                      {file.conflict && (
-                        <span className="text-muted-foreground ml-2 text-xs">{file.conflict}</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-            </tbody>
-          </table>
+          {/* Сохраняемые файлы и конфликты решают, можно ли применять план, —
+              они видны сразу; новые файлы setup раскрываются по запросу. */}
+          <FileTable
+            label="План файлов setup"
+            files={plan.files.filter((f) => f.action !== 'create')}
+            root={root}
+          />
+          {plan.files.some((f) => f.action === 'create') && (
+            <details className="mt-3">
+              <summary className="cursor-pointer text-sm font-medium">
+                Новые файлы ({plan.files.filter((f) => f.action === 'create').length})
+              </summary>
+              <FileTable
+                label="Новые файлы setup"
+                files={plan.files.filter((f) => f.action === 'create')}
+                root={root}
+              />
+            </details>
+          )}
         </div>
       )}
       {!plan && (
@@ -877,5 +863,46 @@ export function QuickForm({
         {busy ? 'Отправляем…' : 'Начать быстрое изменение'}
       </Button>
     </form>
+  );
+}
+
+type PlanFile = { path: string; action: 'create' | 'preserve' | 'conflict'; conflict?: string };
+
+function FileTable(props: { label: string; files: PlanFile[]; root: string }) {
+  if (!props.files.length) return null;
+  return (
+    <table className="w-full text-left text-sm" aria-label={props.label}>
+      <thead>
+        <tr className="border-b">
+          <th scope="col" className="py-2 pr-3 font-semibold">
+            Файл
+          </th>
+          <th scope="col" className="py-2 pr-3 font-semibold">
+            Что будет
+          </th>
+        </tr>
+      </thead>
+      <tbody>
+        {[...props.files]
+          .sort((x, y) => fileOrder[x.action] - fileOrder[y.action])
+          .map((file) => (
+            <tr key={file.path} className="border-b">
+              <td className="py-2 pr-3 align-top">
+                <code className="font-mono text-xs break-all">
+                  {relative(file.path, props.root)}
+                </code>
+              </td>
+              <td className="py-2 pr-3 align-top">
+                <Badge variant={fileActions[file.action].tone}>
+                  {fileActions[file.action].label}
+                </Badge>
+                {file.conflict && (
+                  <span className="text-muted-foreground ml-2 text-xs">{file.conflict}</span>
+                )}
+              </td>
+            </tr>
+          ))}
+      </tbody>
+    </table>
   );
 }

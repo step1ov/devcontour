@@ -190,7 +190,9 @@ test('Quick change: one change per request key, five steps, facts, setup plan, r
     await expect(plan.getByRole('row').filter({ hasText: 'AGENTS.md' })).toContainText(
       'сохранится',
     );
-    await expect(plan.getByRole('row').filter({ hasText: 'config.json' })).toContainText(
+    await route.getByText(/^Новые файлы \(\d+\)$/).click();
+    const created = route.getByRole('table', { name: 'Новые файлы setup' });
+    await expect(created.getByRole('row').filter({ hasText: 'config.json' })).toContainText(
       'создастся',
     );
     await expect(route.getByText('npm ci')).toBeVisible();
