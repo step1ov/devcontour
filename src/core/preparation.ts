@@ -568,8 +568,10 @@ export class Preparation {
         blocker = (error as Error).message;
       }
     const tasks = s.tasks.filter((t) => Boolean(c) && t.preparation?.changeId === c?.id);
-    // Находки исполнителя — отдельная работа, не задачи изменения.
-    const live = tasks.filter((t) => t.status !== 'cancelled' && !t.finding);
+    const live = tasks.filter((t) => t.status !== 'cancelled');
+    // Находки исполнителя — долг фичи, но не задачи изменения: готовность
+    // изменения их не ждёт.
+    const work = live.filter((t) => !t.finding);
     // The newest note of any change tells the operator the session is alive even
     // before the first revision exists.
     const latest = p.changes
@@ -690,24 +692,24 @@ export class Preparation {
       // за собой прежние задачи, и считать их значит показывать «0 из 70» там,
       // где живых задач одна. Доска без живых задач — тоже история.
       delivery: {
-        total: live.length,
-        done: live.filter((t) => t.status === 'done').length,
-        failed: live.filter((t) => t.status === 'failed').length,
+        total: work.length,
+        done: work.filter((t) => t.status === 'done').length,
+        failed: work.filter((t) => t.status === 'failed').length,
         // Задачи без фичи карта продукта не учитывает; число держит расхождение
         // на виду, пока их не привяжут.
-        unbound: live.filter((t) => !t.featureId).length,
+        unbound: work.filter((t) => !t.featureId).length,
         // Счётчик сбоев без причины отправляет оператора искать её в журнале.
         // Сама причина — самое важное на экране: она объясняет, почему работа
         // не движется, и говорит, что делать.
-        failures: live
+        failures: work
           .filter((t) => t.status === 'failed' && t.failure)
           .slice(-3)
           .map((t) => ({ id: t.id, title: t.title, reason: t.failure! })),
         boards: s.boards
           .filter((b) =>
-            b.revisions.some((r) => r.taskIds.some((id) => live.some((t) => t.id === id))),
+            b.revisions.some((r) => r.taskIds.some((id) => work.some((t) => t.id === id))),
           )
-          .map((b) => ({ id: b.id, title: b.title, phase: boardPhase(b, live) })),
+          .map((b) => ({ id: b.id, title: b.title, phase: boardPhase(b, work) })),
       },
     };
   }
