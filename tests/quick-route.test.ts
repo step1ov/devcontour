@@ -19,8 +19,8 @@ import { join, resolve } from 'node:path';
 import { Preparation, validatePreparation } from '../src/core/preparation.ts';
 import { preparationStore, startWorkspace } from '../src/runner/start.ts';
 import { chooseWorkspaceMode } from '../src/runner/workspace-mode.ts';
-import { planSetup, setupProject } from '../src/runner/setup.ts';
-import { quickFacts, quickSteps } from '../src/runner/quick.ts';
+import { planSetup } from '../src/runner/setup.ts';
+import { quickFacts, quickSteps, type QuickFacts, type QuickStep } from '../src/runner/quick.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { architecture, approveStage, product } from './preparation-fixture.ts';
 import { withTestHome } from './helpers.ts';
@@ -364,12 +364,22 @@ test('D01-C: setup --change отклоняется до согласований
       } finally {
         store.close();
       }
-      const view = await (
+      const view = (await (
         await fetch(app.url + '/api/preparation/quick?change=' + changeId)
-      ).json();
+      ).json()) as {
+        facts: QuickFacts;
+        steps: QuickStep[];
+        plan: { refusal?: string };
+        lead: { present: boolean };
+      };
       assert.equal(view.facts.ready, true, JSON.stringify(view.facts.diagnostics));
+      // Проекция изменения в docs/changes и файлы start — свои записи, не чужая работа.
       assert.deepEqual(
-        view.steps.map((s: { id: string; state: string }) => [s.id, s.state]),
+        view.facts.diagnostics.map((d) => d.code),
+        [],
+      );
+      assert.deepEqual(
+        view.steps.map((s) => [s.id, s.state]),
         [
           ['connection', 'done'],
           ['decisions', 'current'],
@@ -400,11 +410,11 @@ test('D01-C: setup --change отклоняется до согласований
       }
       const planned = setup('--plan');
       assert.equal(planned.status, 0, planned.stderr);
-      assert.equal(JSON.parse(planned.stdout).status, 'plan');
+      assert.equal((JSON.parse(planned.stdout) as { status: string }).status, 'plan');
       assert.equal(existsSync(join(root, '.devcontour-local/config.json')), false);
       const applied = setup();
       assert.equal(applied.status, 0, applied.stderr);
-      const result = JSON.parse(applied.stdout);
+      const result = JSON.parse(applied.stdout) as { status: string; preserved: string[] };
       assert.equal(result.status, 'needs-agent-bootstrap');
       assert.ok(result.preserved.includes(join(root, 'AGENTS.md')));
       assert.equal(readFileSync(join(root, 'AGENTS.md'), 'utf8'), '# Own rules\nKeep them.\n');
@@ -436,10 +446,9 @@ test('D01-E: шаги — проекция; без ведущего агента
     questions: [],
     decisions: [],
     intake: {
-      requestKey: 'quick-request-1',
+      ...intake('/tmp/x'),
       createdAt: new Date().toISOString(),
       actor: 'operator' as const,
-      ...intake('/tmp/x'),
     },
   };
   const steps = quickSteps({

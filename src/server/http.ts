@@ -836,7 +836,11 @@ export async function serve(
       await scheduler?.stop();
       if (options.bootstrap && h) h.store.close();
       await vite?.close();
-      await new Promise<void>((r) => server.close(() => r()));
+      const closed = new Promise<void>((r) => server.close(() => r()));
+      // Открытая панель опрашивает сервер и держит keep-alive соединения
+      // занятыми: без их закрытия остановка ждала бы, пока закроют вкладку.
+      server.closeAllConnections();
+      await closed;
     },
   };
 }

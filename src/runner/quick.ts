@@ -64,7 +64,11 @@ export async function quickFacts(input: {
   const root = facts.git.root;
   const embedded = input.mode === 'embedded';
   const own = embedded && root === workspace;
-  const foreign = own ? facts.git.changes.filter((p) => !startOwned.has(p)) : facts.git.changes;
+  // В embedded start пишет .gitignore и маркер режима, а подготовка —
+  // проекцию изменений в docs/changes: это записи самого DevContour.
+  const foreign = own
+    ? facts.git.changes.filter((p) => !startOwned.has(p) && !p.startsWith('docs/changes/'))
+    : facts.git.changes;
   // Профили DevContour версию менеджера не закрепляют: требование из
   // встроенного профиля harness здесь не действует, а packageManager проекта — да.
   const pinnedByHarness = new Set(
