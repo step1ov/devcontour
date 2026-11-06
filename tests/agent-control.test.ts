@@ -1219,8 +1219,10 @@ test('Ревью плана не тратит вызов, пока подгот�
     g('commit', '-qm', 'app');
     g('branch', f.h.config.targetBranch);
     // Bootstrap контура на рабочей ветке, база прогонов осталась прежней.
-    await mkdir(join(repo, '.devcontour'), { recursive: true });
-    await writeFile(join(repo, '.devcontour/rules.md'), 'rules\n');
+    await mkdir(join(repo, '.agents/roles'), { recursive: true });
+    await writeFile(join(repo, '.agents/roles/developer.md'), 'rules\n');
+    await mkdir(join(repo, 'docs/changes/r-001.quick'), { recursive: true });
+    await writeFile(join(repo, 'docs/changes/r-001.quick/product.md'), 'product\n');
     g('add', '-A');
     g('commit', '-qm', 'bootstrap');
     f.h.config.mode = 'local';
@@ -1237,7 +1239,7 @@ test('Ревью плана не тратит вызов, пока подгот�
         'claude',
         runtimes(() => called++),
       ),
-      /отстаёт от рабочей ветки.*\.devcontour\/rules\.md.*base-update/,
+      /отстаёт от рабочей ветки.*\.agents\/roles\/developer\.md.*docs\/changes.*base-update/,
     );
     assert.equal(called, 0);
     // Перенос сделан — ревью идёт.
