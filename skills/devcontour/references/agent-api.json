@@ -65,6 +65,129 @@
       }
     },
     {
+      "name": "preparation_quick",
+      "description": "Start a quick change to one existing npm or pnpm repository from a short instruction and one observable result. The same requestKey returns the change it created; another payload under it is refused. Product and architecture stay operator-approved revisions (compact ones are fine); nothing is approved by this call.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "requestKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{8,80}$"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 180
+          },
+          "repository": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          },
+          "brief": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 4000
+          },
+          "criterion": {
+            "type": "string",
+            "minLength": 5,
+            "maxLength": 1000
+          }
+        },
+        "required": [
+          "requestKey",
+          "title",
+          "repository",
+          "brief",
+          "criterion"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "preparation_setup",
+      "description": "Propose what setup will apply to a quick change: a profile (npm-project or pnpm-project for an existing repository) and, when the repository has its own check commands, the gates that run them (a test gate needs a JUnit report). The panel shows the files setup would create, keep or refuse before anything is written; setup --change applies exactly the latest proposal.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "changeId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "expectedDigest": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "profile": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "gates": {
+            "minItems": 1,
+            "maxItems": 50,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            }
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "changeId",
+          "expectedDigest",
+          "profile",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "preparation_expand",
+      "description": "Move a quick change to the full route when it needs several components or dependent tasks. Keeps the instruction, criterion and all revisions; explain why.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "changeId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "changeId",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "preparation_product",
       "description": "Save a new immutable product draft with optimistic concurrency: personas with goals and pains, releases as the scope boundary, and features whose scenarios name a persona and whose acceptance criteria name a release. Resolve ambiguity the way the relevant persona would. Never approves it; a revision invalidates the prior architecture for new work.",
       "readOnly": false,
