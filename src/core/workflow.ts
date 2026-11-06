@@ -110,6 +110,17 @@ export function validateWorkflow(config: Config) {
       );
   }
   for (const repo of repos) {
+    // Учебный режим обещает «без вызовов моделей»: живой runtime в нём — в том
+    // числе из роли компонента — нарушил бы это обещание молча.
+    if (config.mode === 'demo')
+      for (const role of declaredRoles(config, repo.id)) {
+        const writer = roleBinding(config, role, repo.id),
+          reviewer = reviewerBinding(config, role, repo.id);
+        if (writer.runtime !== 'demo' || reviewer.runtime !== 'demo')
+          throw new DomainError(
+            `В demo mode допустим только demo adapter: роль ${role} компонента ${repo.id} назначает ${writer.runtime}/${reviewer.runtime}`,
+          );
+      }
     if (config.mode !== 'demo')
       for (const role of declaredRoles(config, repo.id)) {
         const writer = roleBinding(config, role, repo.id),
