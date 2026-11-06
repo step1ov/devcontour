@@ -34,6 +34,7 @@ interface Page {
   version: number;
   messages: DiscussionMessage[];
   nextCursor?: string;
+  previousCursor?: string;
   storage: 'local';
 }
 
@@ -70,6 +71,8 @@ class HttpError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    /** Код причины отказа сервера (`version-conflict`, `idempotency-conflict`). */
+    readonly code?: string,
   ) {
     super(message);
   }
@@ -86,9 +89,13 @@ async function call<T>(path: string, body?: unknown): Promise<T> {
         },
   );
   const data = (await response.json().catch(() => undefined)) as
-    (T & { error?: string }) | undefined;
+    (T & { error?: string; code?: string }) | undefined;
   if (!response.ok || data === undefined)
-    throw new HttpError(data?.error ?? `сервер ответил ${response.status}`, response.status);
+    throw new HttpError(
+      data?.error ?? `сервер ответил ${response.status}`,
+      response.status,
+      data?.code,
+    );
   return data;
 }
 
@@ -147,6 +154,8 @@ export function TaskDiscussion({
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [shown, setShown] = useState(SHOWN);
+  // Cursor страницы перед самой ранней загруженной записью; нет — загружено всё.
+  const [older, setOlder] = useState<string | undefined>(undefined);
   const [draft, setDraftState] = useState<Draft>(() => loadDraft(taskId));
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
@@ -162,14 +171,23 @@ export function TaskDiscussion({
     saveDraft(taskId, next);
   };
 
-  // Чтение страницами по cursor: первый раз — весь тред, дальше — только
-  // записи после последней известной. Записи сливаются по id.
+  // Первое чтение — последняя страница треда (ранние — по «Показать ранние»),
+  // дальше — только записи после последней известной. Записи сливаются по id.
   const refresh = useCallback(
     async (after = lastSeq.current) => {
       let cursor = after ? String(after) : undefined;
       const fresh: DiscussionMessage[] = [];
       let latest = 0;
-      for (;;) {
+      if (!after) {
+        const page = await call<Page>(
+          `tasks/${encodeURIComponent(taskId)}/discussion?latest=1&limit=${SHOWN}`,
+        );
+        fresh.push(...page.messages);
+        latest = page.version;
+        setOlder(page.previousCursor);
+        cursor = undefined;
+      }
+      for (; after;) {
         const page = await call<Page>(
           `tasks/${encodeURIComponent(taskId)}/discussion?limit=50` +
             (cursor ? `&cursor=${cursor}` : ''),
@@ -282,7 +300,7 @@ export function TaskDiscussion({
       const failure = e as Error;
       if (failure instanceof HttpError && failure.status === 409) {
         // Ключ занят другим текстом — это уже другое сообщение: новый ключ.
-        if (/Ключ запроса/.test(failure.message)) setDraft({ ...pending, key: '' });
+        if (failure.code === 'idempotency-conflict') setDraft({ ...pending, key: '' });
         await refresh(before).catch(() => undefined);
         setNotice(CONFLICT_TEXT);
       } else setError(failure.message);
@@ -321,14 +339,33 @@ export function TaskDiscussion({
       {loaded && !messages.length && (
         <p className="text-muted-foreground m-0 mb-2 text-sm">Сообщений пока нет.</p>
       )}
-      {start > 0 && (
+      {(start > 0 || older) && (
         <Button
           variant="outline"
           size="sm"
           className="mb-2"
-          onClick={() => setShown((s) => s + SHOWN)}
+          onClick={() => {
+            if (start > 0 || !older) {
+              setShown((s) => s + SHOWN);
+              return;
+            }
+            void call<Page>(
+              `tasks/${encodeURIComponent(taskId)}/discussion?before=${older}&limit=${SHOWN}`,
+            ).then(
+              (page) => {
+                setMessages((current) => {
+                  const all = new Map(current.map((m) => [m.id, m]));
+                  for (const m of page.messages) all.set(m.id, m);
+                  return [...all.values()].sort((a, b) => a.seq - b.seq);
+                });
+                setOlder(page.previousCursor);
+                setShown((s) => s + SHOWN);
+              },
+              (e: Error) => setLoadError(e.message),
+            );
+          }}
         >
-          Показать ранние ({start})
+          Показать ранние{start > 0 ? ` (${start})` : ''}
         </Button>
       )}
       {visible.length > 0 && (

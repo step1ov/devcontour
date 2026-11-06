@@ -1205,6 +1205,8 @@ export class DomainError extends Error {
   constructor(
     message: string,
     readonly status = 409,
+    /** Машиночитаемые подробности отказа: код причины, актуальная версия. */
+    readonly details?: Record<string, unknown>,
   ) {
     super(message);
   }

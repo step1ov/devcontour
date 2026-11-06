@@ -552,6 +552,8 @@ export async function serve(
           result = new DiscussionService(h).read({
             taskId: decodeURIComponent(parts[2]),
             ...(url.searchParams.get('cursor') ? { cursor: url.searchParams.get('cursor') } : {}),
+            ...(url.searchParams.get('before') ? { before: url.searchParams.get('before') } : {}),
+            ...(url.searchParams.get('latest') === '1' ? { latest: true } : {}),
             ...(url.searchParams.get('limit')
               ? { limit: Number(url.searchParams.get('limit')) }
               : {}),
@@ -859,6 +861,7 @@ export async function serve(
             : error instanceof Error
               ? error.message
               : String(error),
+        ...(error instanceof DomainError && error.details ? error.details : {}),
       });
     }
   };

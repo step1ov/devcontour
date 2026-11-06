@@ -35,8 +35,8 @@ test('D02-A: повтор, две вкладки и повтор после time
     // Вторая вкладка с устаревшей версией — конфликт, текст на клиенте не теряется.
     assert.throws(
       () => w.d.post({ ...note, text: 'Из второй вкладки', idempotencyKey: key(2) }, 'operator'),
-      (e: Error & { status?: number; version?: number }) =>
-        e.status === 409 && e.version === first.version,
+      (e: Error & { status?: number; details?: { version?: number } }) =>
+        e.status === 409 && e.details?.version === first.version,
     );
     const second = w.d.post(
       {
@@ -326,6 +326,57 @@ test('D02: агентские операции — автор lead, чтение
     };
     assert.equal(page.messages.length, 1);
     assert.equal(page.storage, 'local');
+  } finally {
+    w.cleanup();
+  }
+});
+
+test('D02-D: тред открывается с последних сообщений и листается назад без пропусков; 409 несёт код и версию', () => {
+  const w = world();
+  try {
+    let version = 0;
+    for (let i = 1; i <= 25; i++)
+      version = w.d.post(
+        {
+          taskId: w.task.id,
+          kind: 'note',
+          text: 'Заметка ' + i,
+          idempotencyKey: key(i),
+          expectedVersion: version,
+        },
+        'operator',
+      ).version;
+    const latest = w.d.read({ taskId: w.task.id, latest: true, limit: 10 });
+    assert.deepEqual(
+      latest.messages.map((m) => m.text),
+      Array.from({ length: 10 }, (_, i) => 'Заметка ' + (16 + i)),
+    );
+    const seen = [...latest.messages.map((m) => m.text)];
+    let before = latest.previousCursor;
+    while (before) {
+      const page = w.d.read({ taskId: w.task.id, before, limit: 10 });
+      seen.unshift(...page.messages.map((m) => m.text));
+      before = page.previousCursor;
+    }
+    assert.deepEqual(
+      seen,
+      Array.from({ length: 25 }, (_, i) => 'Заметка ' + (i + 1)),
+    );
+    assert.throws(
+      () =>
+        w.d.post(
+          {
+            taskId: w.task.id,
+            kind: 'note',
+            text: 'x',
+            idempotencyKey: key(99),
+            expectedVersion: 0,
+          },
+          'operator',
+        ),
+      (e: Error & { details?: { code?: string; version?: number } }) =>
+        e.details?.code === 'version-conflict' && e.details.version === version,
+    );
   } finally {
     w.cleanup();
   }

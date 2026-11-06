@@ -858,6 +858,16 @@ export class Store {
       limit,
     );
   }
+  /** Страница треда задачи перед seq `before`, от новых к старым. */
+  discussionPageBefore(owner: string | undefined, taskId: string, before: number, limit: number) {
+    return this.discussionRows(
+      'SELECT seq,data FROM $schema.discussion WHERE task_id=? AND seq<? ORDER BY seq DESC LIMIT ?',
+      owner,
+      taskId,
+      Number.isFinite(before) ? before : Number.MAX_SAFE_INTEGER,
+      limit,
+    );
+  }
   /** Последний seq треда; 0 — тред пуст. */
   discussionVersion(owner: string | undefined, taskId: string): number {
     const schema = this.syncSchema(owner);

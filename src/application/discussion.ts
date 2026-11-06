@@ -38,24 +38,39 @@ export class DiscussionService {
     const state = this.h.store.read();
     const task = this.task(state, v.taskId);
     const owner = taskOwner(task);
+    // Чтение с конца: `latest` — последняя страница, `before` — страница
+    // перед seq; ответ по возрастанию и `previousCursor`, если есть раньше.
+    const backward = v.latest || v.before !== undefined;
     const after = Number(v.cursor ?? 0);
-    const rows = this.h.store.discussionPage(owner, task.id, after, v.limit);
+    const rows = backward
+      ? this.h.store
+          .discussionPageBefore(owner, task.id, v.before ? Number(v.before) : Infinity, v.limit)
+          .reverse()
+      : this.h.store.discussionPage(owner, task.id, after, v.limit);
     const items: DiscussionMessage[] = [];
     for (const row of rows) {
       const message = discussionMessage.parse(row);
-      if (!checkJsonBytes([...items, message], maxBytes).within) {
-        if (!items.length) throw new DomainError('Запись больше страницы', 413);
-        break;
-      }
+      if (!checkJsonBytes([message], maxBytes).within)
+        throw new DomainError('Запись больше страницы', 413);
+      // Вперёд страница режется с нового края, назад — со старого (ниже).
+      if (!backward && !checkJsonBytes([...items, message], maxBytes).within) break;
       items.push(message);
     }
     const version = this.h.store.discussionVersion(owner, task.id);
+    if (backward) {
+      // С конца страница режется со старшего края: последние записи — всегда.
+      while (items.length > 1 && !checkJsonBytes(items, maxBytes).within) items.shift();
+    }
     const last = items.at(-1)?.seq ?? after;
+    const first = items[0]?.seq;
+    const older =
+      first !== undefined && this.h.store.discussionPageBefore(owner, task.id, first, 1).length > 0;
     return {
       taskId: task.id,
       version,
       messages: items,
       ...(last < version ? { nextCursor: String(last) } : {}),
+      ...(older ? { previousCursor: String(first) } : {}),
       // Граница хранения: история — у владельца задачи, Git sync её не переносит.
       storage: 'local' as const,
     };
@@ -197,12 +212,15 @@ export class DiscussionService {
       if (same) {
         const existing = discussionMessage.parse(same);
         if (existing.payloadDigest !== payloadDigest)
-          throw new DomainError('Ключ запроса уже использован другим сообщением', 409);
+          throw new DomainError('Ключ запроса уже использован другим сообщением', 409, {
+            code: 'idempotency-conflict',
+          });
         return { message: existing, version: this.h.store.discussionVersion(owner, taskId) };
       }
       const version = this.h.store.discussionVersion(owner, taskId);
       if (version !== input.expectedVersion)
-        throw Object.assign(new DomainError('Обсуждение изменилось; перечитайте его', 409), {
+        throw new DomainError('Обсуждение изменилось; перечитайте его', 409, {
+          code: 'version-conflict',
           version,
         });
       for (const ref of [input.replyTo, input.supersedes]) {

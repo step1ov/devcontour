@@ -65,6 +65,13 @@ export const discussionInputs = {
       .string()
       .regex(/^\d{1,15}$/)
       .optional(),
+    /** Страница перед этим seq (чтение назад). */
+    before: z
+      .string()
+      .regex(/^\d{1,15}$/)
+      .optional(),
+    /** Последняя страница треда. */
+    latest: z.boolean().optional(),
     limit: z.number().int().min(1).max(DISCUSSION_PAGE_ITEMS).default(20),
   }),
   discussion_post: z.strictObject({
