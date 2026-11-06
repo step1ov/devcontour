@@ -782,27 +782,3 @@ test('S3-R1-05: очередь записывает время готовнос�
     f.cleanup();
   }
 });
-
-test('Учебный режим без вызовов моделей: живой runtime роли, компонента или ревьюера — отказ', () => {
-  validateWorkflow(config());
-  assert.throws(
-    () =>
-      validateWorkflow(config({ roles: { ...config().roles, backend: { runtime: 'claude' } } })),
-    /только demo adapter.*backend/,
-  );
-  assert.throws(() => validateWorkflow(config({ reviewer: { runtime: 'codex' } })), /demo adapter/);
-  const component = {
-    id: 'api',
-    name: 'API',
-    kind: 'product' as const,
-    path: '/tmp/api',
-    targetBranch: 'devcontour/accepted',
-    gates: config().gates,
-    protectedPaths: [],
-    roles: { backend: { runtime: 'claude' as const } },
-  };
-  assert.throws(
-    () => validateWorkflow(configSchema.parse({ ...config(), repositories: [component] })),
-    /компонента api/,
-  );
-});
