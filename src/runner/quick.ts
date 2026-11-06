@@ -399,3 +399,25 @@ export async function quickDiff(repository: string, base: string, head: string) 
     files: files.slice(0, 200),
   };
 }
+
+/**
+ * Последняя запись ведущего агента по изменению: журнал, ревизии этапов,
+ * вопросы и решения, предложения setup, задачи изменения. Чтение следов не
+ * оставляет, поэтому присутствие — по записям, а не по обращениям.
+ */
+export function leadActivityAt(
+  change: ProductChange,
+  tasks: { createdAt?: string }[],
+): string | null {
+  const stamps = [
+    ...(change.activity ?? []).map((a) => a.at),
+    ...(['product', 'architecture', 'references', 'concept', 'design'] as const).flatMap((s) =>
+      (change[s] ?? []).map((r) => r.createdAt),
+    ),
+    ...(change.questions ?? []).map((q) => q.createdAt),
+    ...(change.decisions ?? []).map((d) => d.createdAt),
+    ...(change.setup ?? []).map((p) => p.createdAt),
+    ...tasks.flatMap((t) => (t.createdAt ? [t.createdAt] : [])),
+  ];
+  return stamps.sort().at(-1) ?? null;
+}

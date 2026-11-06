@@ -20,7 +20,13 @@ import { Preparation, validatePreparation } from '../src/core/preparation.ts';
 import { preparationStore, startWorkspace } from '../src/runner/start.ts';
 import { chooseWorkspaceMode } from '../src/runner/workspace-mode.ts';
 import { planSetup } from '../src/runner/setup.ts';
-import { quickFacts, quickSteps, type QuickFacts, type QuickStep } from '../src/runner/quick.ts';
+import {
+  leadActivityAt,
+  quickFacts,
+  quickSteps,
+  type QuickFacts,
+  type QuickStep,
+} from '../src/runner/quick.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { approvePreparation, architecture, approveStage, product } from './preparation-fixture.ts';
 import { withTestHome } from './helpers.ts';
@@ -440,7 +446,8 @@ test('D01-C: setup --change отклоняется до согласований
         ],
       );
       assert.equal(view.plan.refusal, undefined);
-      assert.equal(view.lead.present, false);
+      // Предложение setup только что записал ведущий: он присутствует.
+      assert.equal(view.lead.present, true);
 
       const setup = (...extra: string[]) =>
         spawnSync(
@@ -717,3 +724,39 @@ test('D01-C: setup --change — неактивное изменение и но�
       rmSync(root, { recursive: true, force: true });
     }
   }));
+
+test('D01-E: присутствие ведущего — по его записям, не только по журналу', () => {
+  const base = {
+    id: 'PC-3',
+    key: 'r-003.quick',
+    title: 'Быстрое',
+    createdAt: '2026-11-06T10:00:00.000Z',
+    product: [],
+    architecture: [],
+    references: [],
+    concept: [],
+    design: [],
+    activity: [],
+    questions: [],
+    decisions: [],
+  };
+  assert.equal(leadActivityAt(base, []), null);
+  const withSetup = {
+    ...base,
+    activity: [{ at: '2026-11-06T10:01:00.000Z', stage: 'product' as const, note: 'Начал' }],
+    setup: [
+      {
+        number: 1,
+        digest: 'a'.repeat(64),
+        createdAt: '2026-11-06T10:05:00.000Z',
+        profile: 'npm-project',
+        reason: 'Проверки проекта',
+      },
+    ],
+  };
+  assert.equal(leadActivityAt(withSetup, []), '2026-11-06T10:05:00.000Z');
+  assert.equal(
+    leadActivityAt(withSetup, [{ createdAt: '2026-11-06T10:09:00.000Z' }]),
+    '2026-11-06T10:09:00.000Z',
+  );
+});

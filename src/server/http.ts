@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import {
   LEAD_QUIET_MS,
   quickFacts,
+  leadActivityAt,
   quickDiff,
   quickResult,
   quickSetupPlan,
@@ -294,7 +295,7 @@ export async function serve(
           const findings = bound
             .filter((t) => t.finding)
             .map((t) => ({ taskId: t.id, title: t.title, status: t.status }));
-          const activity = view.enabled ? view.agentActivity : undefined;
+          const leadAt = leadActivityAt(change, bound);
           const usage = h
             ? [undefined, ...repositories(h.config).map((r) => r.id)].flatMap((owner) =>
                 Object.values(h!.store.localRecords<UsageRecord>('usage', owner)),
@@ -328,8 +329,8 @@ export async function serve(
             // Присутствие ведущего агента известно только по его журналу:
             // без свежей записи панель не изображает идущую работу.
             lead: {
-              lastActivityAt: activity?.at ?? null,
-              present: Boolean(activity && Date.now() - Date.parse(activity.at) < LEAD_QUIET_MS),
+              lastActivityAt: leadAt,
+              present: Boolean(leadAt && Date.now() - Date.parse(leadAt) < LEAD_QUIET_MS),
             },
             result: h
               ? await Promise.all(
