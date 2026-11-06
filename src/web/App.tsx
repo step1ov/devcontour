@@ -1747,9 +1747,11 @@ export function App() {
           {data.config.name}
         </p>
         <p className="text-muted-foreground m-0 px-2 pb-3 text-xs max-[760px]:hidden">
-          {data.config.mode === 'demo'
-            ? 'Учебный режим · без вызовов моделей'
-            : 'Локальный runtime'}
+          {data.config.mode !== 'demo'
+            ? 'Локальный runtime'
+            : data.config.modelRuntimes?.length
+              ? `Учебный режим · вызовы моделей: ${data.config.modelRuntimes.join(', ')}`
+              : 'Учебный режим · без вызовов моделей'}
         </p>
         <nav
           aria-label="Workspace"

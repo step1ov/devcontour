@@ -49,7 +49,7 @@ import { DomainError } from '../core/model.ts';
 import { blockers, readyTasks } from '../core/graph.ts';
 import { Scheduler } from '../runner/scheduler.ts';
 import { acceptBoard } from '../runner/agent-control.ts';
-import { repositories } from '../core/repositories.ts';
+import { modelRuntimes, repositories } from '../core/repositories.ts';
 import { WorkspaceRunner } from '../runner/workspace.ts';
 import { IntentService } from '../runner/intent.ts';
 import { attachJournal, renderJournal } from '../runner/journal.ts';
@@ -584,6 +584,8 @@ export async function serve(
               repositories: repositories(h.config),
               workspaceGates: h.config.workspaceGates,
               mode: h.config.mode,
+              // Метка «без вызовов моделей» — только если их правда нет.
+              modelRuntimes: modelRuntimes(h.config),
               approvalMode: h.config.approvalMode,
               completionMode: h.config.completionMode,
               storage: h.config.storage,

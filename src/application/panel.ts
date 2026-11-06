@@ -14,7 +14,7 @@ import {
 import type { Delivery } from '../core/integrations.ts';
 import { clipDeep, type PropertyRecovery } from 'devcontour-harness';
 import { blockers, readyTasks } from '../core/graph.ts';
-import { repositories } from '../core/repositories.ts';
+import { modelRuntimes, repositories } from '../core/repositories.ts';
 import { boardPhase, runLiveness, type RunLiveness } from '../core/work-status.ts';
 import { queueStopOf, quietOperations } from './queue-stop.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
@@ -557,6 +557,8 @@ function buildSummary(
       repositories: repositories(h.config),
       workspaceGates: h.config.workspaceGates,
       mode: h.config.mode,
+      // Метка «без вызовов моделей» — только если их правда нет.
+      modelRuntimes: modelRuntimes(h.config),
       approvalMode: h.config.approvalMode,
       completionMode: h.config.completionMode,
       storage: h.config.storage,
