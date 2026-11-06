@@ -8,7 +8,7 @@ import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { git } from '../src/runner/process.ts';
 import { reapprove } from './helpers.ts';
-import { quickResult } from '../src/runner/quick.ts';
+import { quickDiff, quickResult } from '../src/runner/quick.ts';
 import type { DevContourState } from '../src/core/model.ts';
 
 const demos = demoPool(testDemo);
@@ -77,6 +77,22 @@ test('D01-F: результат показывает настоящие дока
       run.integrationSha,
       f.scheduler.target,
     );
+    // Принятая задача — ещё не принятая доска: следующий шаг из состояния.
+    // Демо принимает доску само (approvalMode agent): шаг называет поставку, а не публикацию.
+    assert.equal(result.board?.state, 'accepted');
+    assert.equal(
+      state.boards.find((b) => b.id === result.board!.id)!.revisions.at(-1)!.status,
+      'accepted',
+    );
+    assert.match(result.next ?? '', /ChangeSet/);
+    assert.match(result.next ?? '', /вручную/);
+    // До приёмки доски тот же результат называет её следующим шагом.
+    const unaccepted = bound(state, [task.id]);
+    for (const b of unaccepted.boards) for (const r of b.revisions) r.status = 'active';
+    assert.match(quickResult(unaccepted, 'PC-quick', [])[0].next ?? '', /принимает доску/);
+    const diff = await quickDiff(f.config.repository, run.baseSha!, run.integrationSha);
+    assert.ok(diff.count > 0);
+    assert.ok(diff.files.every((x) => x.path && (x.added === null || x.added >= 0)));
     assert.equal(result.usage.calls, 0);
     assert.equal(result.usage.complete, false);
   } finally {
@@ -100,6 +116,7 @@ test('D01-F: проваленный gate не доходит до приняти
     assert.equal(result.run!.integrationSha, null);
     assert.deepEqual(result.run!.integration, []);
     assert.ok(result.run!.candidate.some((e) => !e.passed));
+    assert.equal(result.next, null);
     assert.equal(await git(f.config.repository, 'rev-parse', f.scheduler.target), before);
   } finally {
     await f.cleanup();

@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import {
   LEAD_QUIET_MS,
   quickFacts,
+  quickDiff,
   quickResult,
   quickSetupPlan,
   quickSteps,
@@ -323,7 +324,19 @@ export async function serve(
               lastActivityAt: activity?.at ?? null,
               present: Boolean(activity && Date.now() - Date.parse(activity.at) < LEAD_QUIET_MS),
             },
-            result: h ? quickResult(h.store.read(), change.id, usage) : [],
+            result: h
+              ? await Promise.all(
+                  quickResult(h.store.read(), change.id, usage).map(async (r) => {
+                    const repo = repositories(h!.config).find((x) => x.id === r.repositoryId);
+                    const head = r.run?.integrationSha ?? r.run?.candidateSha;
+                    const diff =
+                      repo && r.run?.baseSha && head
+                        ? await quickDiff(repo.path, r.run.baseSha, head).catch(() => null)
+                        : null;
+                    return { ...r, diff };
+                  }),
+                )
+              : [],
           });
           return;
         }

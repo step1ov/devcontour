@@ -86,6 +86,13 @@ interface QuickResult {
     complete: boolean;
     unknownCalls: number;
   };
+  board: { id: string; title: string; state: 'active' | 'accepted' | null } | null;
+  changeSet: { id: string; title: string; accepted: boolean } | null;
+  next: string | null;
+  diff: {
+    count: number;
+    files: { path: string; added: number | null; removed: number | null }[];
+  } | null;
 }
 export interface QuickView {
   changeId: string;
@@ -490,6 +497,41 @@ function Result({ view }: { view: QuickView }) {
                       : `известно $${u.knownCostUsd.toFixed(2)}, неизвестно ${u.unknownCalls} вызов(ов)`}
                 </Fact>
               </dl>
+              {task.diff && task.diff.count > 0 && (
+                <details>
+                  <summary className="cursor-pointer text-sm font-medium">
+                    Изменение: {task.diff.count} файл(ов), +
+                    {task.diff.files.reduce((n, f) => n + (f.added ?? 0), 0)} / −
+                    {task.diff.files.reduce((n, f) => n + (f.removed ?? 0), 0)}
+                  </summary>
+                  <ul className="mt-2 grid gap-1 text-sm">
+                    {task.diff.files.map((f) => (
+                      <li key={f.path} className="flex flex-wrap gap-x-3">
+                        <code className="font-mono text-xs break-all">{f.path}</code>
+                        <span className="text-muted-foreground text-xs">
+                          {f.added === null ? 'двоичный' : `+${f.added} −${f.removed}`}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+              {(task.board || task.changeSet || task.next) && (
+                <dl className="grid gap-2">
+                  {task.board && (
+                    <Fact term="Доска">
+                      {task.board.title}:{' '}
+                      {task.board.state === 'accepted' ? 'принята' : 'не принята'}
+                    </Fact>
+                  )}
+                  {task.changeSet && (
+                    <Fact term="ChangeSet">
+                      {task.changeSet.title}: {task.changeSet.accepted ? 'принят' : 'не принят'}
+                    </Fact>
+                  )}
+                  {task.next && <Fact term="Следующий шаг">{task.next}</Fact>}
+                </dl>
+              )}
               {task.run && (
                 <div className="grid gap-3">
                   <Checks label="Candidate: проверки и ревью" entries={task.run.candidate} />

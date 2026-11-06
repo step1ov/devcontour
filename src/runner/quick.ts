@@ -6,6 +6,7 @@ import type { ProductChange } from '../core/preparation-model.ts';
 import { usageTotals, type UsageRecord } from '../core/usage.ts';
 import { profile, profilePin } from './packs.ts';
 import { planSetup } from './setup.ts';
+import { git } from './process.ts';
 import type { WorkspaceMode } from './workspace-mode.ts';
 
 // Быстрый маршрут: одно существующее npm/pnpm-репозиторий, короткое поручение
@@ -323,6 +324,28 @@ export function quickResult(state: DevContourState, changeId: string, usage: Usa
           summary: e.summary.slice(0, 300),
         }));
     const ids = new Set(runs.map((r) => r.id));
+    const board = state.boards.find((b) => b.revisions.some((r) => r.taskIds.includes(task.id)));
+    const revision = board?.revisions.find((r) => r.taskIds.includes(task.id));
+    const changeSet = board
+      ? state.changeSets.filter((c) => c.boardIds.includes(board.id)).at(-1)
+      : undefined;
+    const boardState = !board
+      ? null
+      : revision?.status === 'accepted'
+        ? ('accepted' as const)
+        : ('active' as const);
+    // Следующий шаг — из состояния: задача, доска, ChangeSet. Принятая задача —
+    // ещё не принятая доска, принятая доска — ещё не публикация.
+    const next =
+      task.status !== 'done'
+        ? null
+        : boardState === 'active'
+          ? 'Ведущий агент принимает доску: приёмка проверяет итоговый SHA всех задач доски'
+          : changeSet?.acceptance
+            ? 'ChangeSet принят; публикация (push, PR, merge) — вручную по handoff'
+            : changeSet
+              ? 'ChangeSet создан: ведущий агент проводит его проверку и приёмку'
+              : 'Доска принята; для поставки ведущий агент создаёт ChangeSet и handoff — публикация вручную';
     return {
       taskId: task.id,
       title: task.title,
@@ -343,6 +366,29 @@ export function quickResult(state: DevContourState, changeId: string, usage: Usa
           }
         : null,
       usage: usageTotals(usage.filter((u) => u.runId && ids.has(u.runId))),
+      repositoryId: task.repositoryId,
+      board: board ? { id: board.id, title: board.title, state: boardState } : null,
+      changeSet: changeSet
+        ? { id: changeSet.id, title: changeSet.title, accepted: Boolean(changeSet.acceptance) }
+        : null,
+      next,
     };
   });
+}
+
+/** Изменённые файлы между base и итоговым SHA попытки: numstat, не больше 200 файлов. */
+export async function quickDiff(repository: string, base: string, head: string) {
+  const out = await git(repository, 'diff', '--numstat', '-z', '--no-renames', base, head);
+  const files = out
+    .split('\0')
+    .filter(Boolean)
+    .map((line) => {
+      const [added, removed, ...path] = line.split('\t');
+      return {
+        path: path.join('\t'),
+        added: added === '-' ? null : Number(added),
+        removed: removed === '-' ? null : Number(removed),
+      };
+    });
+  return { count: files.length, files: files.slice(0, 200) };
 }
