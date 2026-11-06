@@ -775,16 +775,19 @@ export function QuickForm({
     setError('');
     try {
       const title = draft.title.trim() || titleFrom(draft.brief);
-      const next = await send<{ enabled: boolean; activeChangeId?: string }>('preparation/quick', {
-        requestKey,
-        title,
-        repository: draft.repository.trim(),
-        brief: draft.brief.trim(),
-        criterion: draft.criterion.trim(),
-      });
+      const next = await send<{ enabled: boolean; activeChangeId?: string; changeId?: string }>(
+        'preparation/quick',
+        {
+          requestKey,
+          title,
+          repository: draft.repository.trim(),
+          brief: draft.brief.trim(),
+          criterion: draft.criterion.trim(),
+        },
+      );
       saveDraft(undefined);
       setDraft({ ...emptyDraft, repository: workspace?.mode === 'embedded' ? workspace.path : '' });
-      if (next.activeChangeId) onCreated(next.activeChangeId);
+      if (next.changeId) onCreated(next.changeId);
     } catch (e) {
       setError((e as Error).message);
     } finally {

@@ -713,25 +713,34 @@ export class Preparation {
   execute(operation: PreparationOperation, input: unknown) {
     if (operation === 'preparation_quick') {
       const v = preparationInputs[operation].parse(input);
-      const same = this.store
-        .read()
-        .preparation?.changes.find((c) => c.intake?.requestKey === v.requestKey);
-      // A repeated request (double click, retry after a timeout) returns the
-      // change it created; the same key with another payload is a conflict.
-      if (same) {
-        const i = same.intake!;
-        if (
-          same.title !== v.title ||
-          i.repository !== v.repository ||
-          i.brief !== v.brief ||
-          i.criterion !== v.criterion
-        )
-          throw new DomainError('Ключ запроса уже использован другим поручением', 409);
-        return this.status(same.id, { content: false });
-      }
+      // Проверка повтора и создание — в одной транзакции записи: два процесса
+      // (панель и CLI/MCP) с тем же ключом не создают два изменения.
+      return this.store.atomic(() => {
+        const same = this.store
+          .read()
+          .preparation?.changes.find((c) => c.intake?.requestKey === v.requestKey);
+        // A repeated request (double click, retry after a timeout) returns the
+        // change it created; the same key with another payload is a conflict.
+        if (same) {
+          const i = same.intake!;
+          if (
+            same.title !== v.title ||
+            i.repository !== v.repository ||
+            i.brief !== v.brief ||
+            i.criterion !== v.criterion
+          )
+            throw new DomainError('Ключ запроса уже использован другим поручением', 409);
+          return { ...this.status(same.id, { content: false }), changeId: same.id };
+        }
+        const view = this.apply(operation, input);
+        return { ...view, changeId: view.enabled ? view.activeChangeId! : '' };
+      });
     }
     if (operation === 'preparation_status')
       return this.status(preparationInputs[operation].parse(input).changeId, { content: false });
+    return this.apply(operation, input);
+  }
+  private apply(operation: PreparationOperation, input: unknown) {
     preparationInputs[operation].parse(input);
     return this.store.atomic(() => {
       this.enable();

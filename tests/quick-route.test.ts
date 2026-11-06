@@ -150,6 +150,7 @@ test('D01-B: повтор поручения возвращает то же из
       const again = operator.execute('preparation_quick', intake(root));
       assert.ok(first.enabled && again.enabled);
       assert.equal(again.activeChangeId, first.activeChangeId);
+      assert.equal((again as { changeId?: string }).changeId, first.activeChangeId);
       const state = store.read().preparation!;
       assert.equal(state.changes.length, 1);
       assert.equal(state.changes[0].intake!.actor, 'operator');
@@ -162,6 +163,9 @@ test('D01-B: повтор поручения возвращает то же из
       new Preparation(store).execute('preparation_quick', intake(root, 'lead-request-1'));
       assert.equal(store.read().preparation!.changes[1].intake!.actor, 'lead');
       assert.equal(store.read().preparation!.changes.length, 2);
+      // Повтор после переключения активного изменения называет своё изменение.
+      const replay = operator.execute('preparation_quick', intake(root)) as { changeId?: string };
+      assert.equal(replay.changeId, state.changes[0].id);
       return Promise.resolve();
     } finally {
       store.close();
