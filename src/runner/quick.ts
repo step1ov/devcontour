@@ -172,6 +172,10 @@ export function quickSteps(input: {
   configured: boolean;
   engineConnected: boolean;
   tasks: { status: string }[];
+  /** Активные попытки задач изменения. */
+  activeRuns: number;
+  /** Выдача задач на паузе. */
+  paused: boolean;
 }): QuickStep[] {
   const { change } = input;
   const steps: QuickStep[] = [];
@@ -234,19 +238,38 @@ export function quickSteps(input: {
   });
   const done = live.length > 0 && live.every((t) => t.status === 'done');
   const failed = live.some((t) => t.status === 'failed');
-  steps.push({
-    id: 'execution',
-    title: 'Выполнение',
-    state: done ? 'done' : !prepared ? 'waiting' : failed ? 'blocked' : 'current',
-    ...(done || !prepared ? {} : { actor: 'lead' as const }),
-    detail: done
-      ? 'Задача принята по проверкам и ревью'
+  const working =
+    input.activeRuns > 0 ||
+    live.some((t) => ['running', 'verifying', 'reviewing', 'integrating'].includes(t.status));
+  const drafts = live.length > 0 && live.every((t) => t.status === 'draft' || t.status === 'done');
+  // Индикатор работы — только по фактам: идущая попытка или задача в работе.
+  // Черновик и пауза — дело ведущего агента, а не «исполнитель работает».
+  const execution: Pick<QuickStep, 'state' | 'actor' | 'detail'> = done
+    ? { state: 'done', detail: 'Задача принята по проверкам и ревью' }
+    : !prepared
+      ? { state: 'waiting', detail: 'Ждёт подготовки' }
       : failed
-        ? 'Попытка не прошла; ведущий агент разбирает причину'
-        : prepared
-          ? 'Исполнитель работает; проверки и ревью идут штатно'
-          : 'Ждёт подготовки',
-  });
+        ? {
+            state: 'blocked',
+            actor: 'lead',
+            detail: 'Попытка не прошла; ведущий агент разбирает причину',
+          }
+        : working
+          ? { state: 'current', detail: 'Исполнитель работает; проверки и ревью идут штатно' }
+          : drafts
+            ? {
+                state: 'current',
+                actor: 'lead',
+                detail: 'Задача в черновике: ведущий агент проводит review плана и запускает её',
+              }
+            : input.paused
+              ? {
+                  state: 'current',
+                  actor: 'lead',
+                  detail: 'Очередь на паузе: ведущий агент запускает выполнение',
+                }
+              : { state: 'current', detail: 'Задача в очереди, исполнитель ещё не взял её' };
+  steps.push({ id: 'execution', title: 'Выполнение', ...execution });
   steps.push({
     id: 'result',
     title: 'Результат',

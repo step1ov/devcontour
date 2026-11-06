@@ -296,6 +296,10 @@ export async function serve(
               configured: existsSync(join(root, '.devcontour-local', 'config.json')),
               engineConnected: Boolean(h),
               tasks,
+              activeRuns: state.runs.filter(
+                (r) => r.status === 'active' && tasks.some((t) => t.id === r.taskId),
+              ).length,
+              paused: state.paused,
             }),
             // Присутствие ведущего агента известно только по его журналу:
             // без свежей записи панель не изображает идущую работу.

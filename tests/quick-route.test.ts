@@ -483,6 +483,8 @@ test('D01-E: шаги — проекция; без ведущего агента
     configured: false,
     engineConnected: false,
     tasks: [],
+    activeRuns: 0,
+    paused: true,
   });
   assert.deepEqual(
     steps.map((s) => [s.id, s.state, s.actor ?? null]),
@@ -501,6 +503,8 @@ test('D01-E: шаги — проекция; без ведущего агента
     configured: false,
     engineConnected: false,
     tasks: [],
+    activeRuns: 0,
+    paused: true,
   });
   assert.ok(expanded.every((s) => s.state === 'waiting' && /полным маршрутом/.test(s.detail)));
 });
@@ -557,3 +561,50 @@ test('D01-C: setup --change проверяет согласования назв
       rmSync(root, { recursive: true, force: true });
     }
   }));
+
+test('D01-E: «исполнитель работает» — только при идущей попытке; черновик и пауза — ход ведущего агента', () => {
+  const change = {
+    id: 'PC-2',
+    key: 'r-002.quick',
+    title: 'Быстрое',
+    createdAt: new Date().toISOString(),
+    product: [],
+    architecture: [],
+    references: [],
+    concept: [],
+    design: [],
+    activity: [],
+    questions: [],
+    decisions: [],
+    intake: {
+      ...intake('/tmp/x'),
+      createdAt: new Date().toISOString(),
+      actor: 'operator' as const,
+    },
+  };
+  const execution = (tasks: { status: string }[], activeRuns: number, paused: boolean) =>
+    quickSteps({
+      change,
+      developmentReady: true,
+      blocker: '',
+      configured: true,
+      engineConnected: true,
+      tasks,
+      activeRuns,
+      paused,
+    }).find((s) => s.id === 'execution')!;
+  const draft = execution([{ status: 'draft' }], 0, true);
+  assert.equal(draft.actor, 'lead');
+  assert.doesNotMatch(draft.detail, /работает/);
+  const paused = execution([{ status: 'ready' }], 0, true);
+  assert.equal(paused.actor, 'lead');
+  assert.match(paused.detail, /пауз/);
+  const queued = execution([{ status: 'ready' }], 0, false);
+  assert.equal(queued.actor, undefined);
+  assert.doesNotMatch(queued.detail, /работает/);
+  const running = execution([{ status: 'running' }], 1, false);
+  assert.match(running.detail, /работает/);
+  assert.equal(running.actor, undefined);
+  assert.equal(execution([{ status: 'failed' }], 0, false).state, 'blocked');
+  assert.equal(execution([{ status: 'done' }], 0, false).state, 'done');
+});
