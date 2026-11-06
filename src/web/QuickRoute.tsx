@@ -91,6 +91,8 @@ interface QuickResult {
   next: string | null;
   diff: {
     count: number;
+    added: number;
+    removed: number;
     files: { path: string; added: number | null; removed: number | null }[];
   } | null;
 }
@@ -500,9 +502,7 @@ function Result({ view }: { view: QuickView }) {
               {task.diff && task.diff.count > 0 && (
                 <details>
                   <summary className="cursor-pointer text-sm font-medium">
-                    Изменение: {task.diff.count} файл(ов), +
-                    {task.diff.files.reduce((n, f) => n + (f.added ?? 0), 0)} / −
-                    {task.diff.files.reduce((n, f) => n + (f.removed ?? 0), 0)}
+                    Изменение: {task.diff.count} файл(ов), +{task.diff.added} / −{task.diff.removed}
                   </summary>
                   <ul className="mt-2 grid gap-1 text-sm">
                     {task.diff.files.map((f) => (

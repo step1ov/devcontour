@@ -390,5 +390,12 @@ export async function quickDiff(repository: string, base: string, head: string) 
         removed: removed === '-' ? null : Number(removed),
       };
     });
-  return { count: files.length, files: files.slice(0, 200) };
+  // Итоги — по всем файлам; список ограничен 200.
+  const sum = (key: 'added' | 'removed') => files.reduce((n, f) => n + (f[key] ?? 0), 0);
+  return {
+    count: files.length,
+    added: sum('added'),
+    removed: sum('removed'),
+    files: files.slice(0, 200),
+  };
 }

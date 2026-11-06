@@ -412,6 +412,7 @@ async function main() {
           workspace: workspacePath,
           mode: selectedWorkspaceMode(workspacePath),
           repository: resolve(option('--repository', '')),
+          changeKeys: await changeKeysOf(root),
         }),
         null,
         2,
@@ -450,6 +451,7 @@ async function main() {
       workspace: workspacePath,
       mode: selectedWorkspaceMode(workspacePath),
       repository: change.intake.repository,
+      changeKeys: await changeKeysOf(root),
     });
     if (!facts.ready)
       throw new Error(
@@ -1341,3 +1343,14 @@ main().catch((error) => {
     );
   process.exitCode = 1;
 });
+
+/** Ключи изменений подготовки: их проекция в docs/changes — запись DevContour. */
+async function changeKeysOf(root: string) {
+  if (!(await exists(join(root, 'state.sqlite')))) return [];
+  const store = preparationStore(root);
+  try {
+    return (store.read().preparation?.changes ?? []).map((c) => c.key);
+  } finally {
+    store.close();
+  }
+}

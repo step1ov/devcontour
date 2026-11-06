@@ -92,6 +92,10 @@ test('D01-F: результат показывает настоящие дока
     assert.match(quickResult(unaccepted, 'PC-quick', [])[0].next ?? '', /принимает доску/);
     const diff = await quickDiff(f.config.repository, run.baseSha!, run.integrationSha);
     assert.ok(diff.count > 0);
+    assert.equal(
+      diff.added,
+      diff.files.reduce((n, x) => n + (x.added ?? 0), 0),
+    );
     assert.ok(diff.files.every((x) => x.path && (x.added === null || x.added >= 0)));
     assert.equal(result.usage.calls, 0);
     assert.equal(result.usage.complete, false);

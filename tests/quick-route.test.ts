@@ -648,3 +648,69 @@ test('D01-E: «исполнитель работает» — только при
   assert.equal(execution([{ status: 'failed' }], 0, false).state, 'blocked');
   assert.equal(execution([{ status: 'done' }], 0, false).state, 'done');
 });
+
+test('D01-C: setup --change — неактивное изменение и новый блокер репозитория отклоняются без записи', () =>
+  withTestHome(async () => {
+    const root = temp();
+    repository(root);
+    const app = await startWorkspace(root, { port: 0, workspaceMode: 'embedded' });
+    try {
+      const store = preparationStore(join(root, '.devcontour-local'));
+      let quick: string, digest: string;
+      try {
+        const p = new Preparation(store);
+        p.execute('preparation_quick', intake(root));
+        quick = store.read().preparation!.activeChangeId!;
+        approveQuick(p, quick);
+        p.execute('preparation_setup', {
+          changeId: quick,
+          expectedDigest: null,
+          profile: 'npm-project',
+          gates,
+          reason: 'Проверки проекта',
+        });
+        digest = store.read().preparation!.changes[0].setup![0].digest;
+        p.execute('preparation_create', { title: 'Другое изменение' });
+      } finally {
+        store.close();
+      }
+      const run = () =>
+        spawnSync(
+          process.execPath,
+          [
+            '--import',
+            'tsx',
+            cli,
+            'setup',
+            '--change',
+            quick,
+            '--proposal',
+            digest,
+            '--workspace',
+            root,
+          ],
+          { encoding: 'utf8', env: process.env },
+        );
+      // Согласовано, но активно другое изменение.
+      const inactive = run();
+      assert.notEqual(inactive.status, 0);
+      assert.match(inactive.stderr, /активным/);
+      const back = preparationStore(join(root, '.devcontour-local'));
+      try {
+        new Preparation(back).execute('preparation_activate', { changeId: quick });
+      } finally {
+        back.close();
+      }
+      // Второй lockfile после показа плана — блокер, перепроверенный при записи.
+      writeFileSync(join(root, 'pnpm-lock.yaml'), "lockfileVersion: '9.0'\n");
+      git(root, 'add', 'pnpm-lock.yaml');
+      git(root, 'commit', '-qm', 'second lockfile');
+      const blocked = run();
+      assert.notEqual(blocked.status, 0);
+      assert.match(blocked.stderr, /Репозиторий не готов.*lockfile/);
+      assert.equal(existsSync(join(root, '.devcontour-local/config.json')), false);
+    } finally {
+      await app.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }));
