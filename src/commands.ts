@@ -379,7 +379,12 @@ async function main() {
       });
     return;
   }
-  if (workspacePath && ['setup', 'init', 'workspace-init'].includes(operation))
+  // Быстрое изменение проверяет согласования названного изменения, а не активного.
+  if (
+    workspacePath &&
+    ['setup', 'init', 'workspace-init'].includes(operation) &&
+    !(operation === 'setup' && args.includes('--change'))
+  )
     requirePreparation(root);
   if (operation === 'workspace-init') {
     if (!args.includes('--file')) throw new Error('Укажите --file workspace.json');
@@ -419,17 +424,41 @@ async function main() {
   if (operation === 'setup' && args.includes('--change')) {
     if (!workspacePath) throw new Error('Быстрое изменение требует --workspace');
     const store = preparationStore(root);
-    let change;
+    let change, activeChange;
     try {
-      change = store.read().preparation?.changes.find((c) => c.id === option('--change', ''));
+      const preparation = store.read().preparation;
+      change = preparation?.changes.find((c) => c.id === option('--change', ''));
+      activeChange = preparation?.activeChangeId;
     } finally {
       store.close();
     }
     if (!change?.intake) throw new Error('Быстрое изменение не найдено');
+    requirePreparation(root, change.id);
+    if (activeChange !== change.id)
+      throw new Error('Сделайте изменение активным (preparation_activate) перед setup');
     if (change.expanded)
       throw new Error('Изменение идёт полным маршрутом: используйте setup --profile');
     const proposal = change.setup?.at(-1);
     if (!proposal) throw new Error('Сначала предложите setup операцией preparation_setup');
+    // Применяется ровно то предложение, план которого видел пользователь.
+    if (!args.includes('--plan') && option('--proposal', '') !== proposal.digest)
+      throw new Error(
+        `Укажите --proposal ${proposal.digest}: digest предложения, план которого показан в панели`,
+      );
+    // Блокирующие факты репозитория проверяются заново на момент записи.
+    const facts = await quickFacts({
+      workspace: workspacePath,
+      mode: selectedWorkspaceMode(workspacePath),
+      repository: change.intake.repository,
+    });
+    if (!facts.ready)
+      throw new Error(
+        'Репозиторий не готов: ' +
+          facts.diagnostics
+            .filter((d) => d.severity === 'blocker')
+            .map((d) => `${d.message}. ${d.action}`)
+            .join(' '),
+      );
     const input = {
       repository: change.intake.repository,
       profile: proposal.profile,

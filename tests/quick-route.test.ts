@@ -22,7 +22,7 @@ import { chooseWorkspaceMode } from '../src/runner/workspace-mode.ts';
 import { planSetup } from '../src/runner/setup.ts';
 import { quickFacts, quickSteps, type QuickFacts, type QuickStep } from '../src/runner/quick.ts';
 import { loadConfig } from '../src/runner/config.ts';
-import { architecture, approveStage, product } from './preparation-fixture.ts';
+import { approvePreparation, architecture, approveStage, product } from './preparation-fixture.ts';
 import { withTestHome } from './helpers.ts';
 
 const cli = resolve('src/cli.ts');
@@ -428,7 +428,16 @@ test('D01-C: setup --change отклоняется до согласований
       assert.equal(planned.status, 0, planned.stderr);
       assert.equal((JSON.parse(planned.stdout) as { status: string }).status, 'plan');
       assert.equal(existsSync(join(root, '.devcontour-local/config.json')), false);
-      const applied = setup();
+      // Без digest показанного предложения или с чужим — отказ без записи.
+      const blind = setup();
+      assert.notEqual(blind.status, 0);
+      assert.match(blind.stderr, /--proposal/);
+      assert.notEqual(setup('--proposal', 'f'.repeat(64)).status, 0);
+      assert.equal(existsSync(join(root, '.devcontour-local/config.json')), false);
+      const applied = setup(
+        '--proposal',
+        (JSON.parse(planned.stdout) as { proposal: string }).proposal,
+      );
       assert.equal(applied.status, 0, applied.stderr);
       const result = JSON.parse(applied.stdout) as { status: string; preserved: string[] };
       assert.equal(result.status, 'needs-agent-bootstrap');
@@ -495,3 +504,56 @@ test('D01-E: шаги — проекция; без ведущего агента
   });
   assert.ok(expanded.every((s) => s.state === 'waiting' && /полным маршрутом/.test(s.detail)));
 });
+
+test('D01-C: setup --change проверяет согласования названного изменения, а не активного', () =>
+  withTestHome(async () => {
+    const root = temp();
+    repository(root);
+    const app = await startWorkspace(root, { port: 0, workspaceMode: 'embedded' });
+    try {
+      const store = preparationStore(join(root, '.devcontour-local'));
+      let approved: string, quick: string, digest: string;
+      try {
+        const p = new Preparation(store);
+        approved = approvePreparation(p);
+        p.execute('preparation_quick', intake(root));
+        quick = store.read().preparation!.activeChangeId!;
+        p.execute('preparation_setup', {
+          changeId: quick,
+          expectedDigest: null,
+          profile: 'npm-project',
+          gates,
+          reason: 'Проверки проекта',
+        });
+        digest = store.read().preparation!.changes.find((c) => c.id === quick)!.setup![0].digest;
+        // Активным становится согласованное изменение; быстрое не согласовано.
+        p.execute('preparation_activate', { changeId: approved });
+      } finally {
+        store.close();
+      }
+      const run = () =>
+        spawnSync(
+          process.execPath,
+          [
+            '--import',
+            'tsx',
+            cli,
+            'setup',
+            '--change',
+            quick,
+            '--proposal',
+            digest,
+            '--workspace',
+            root,
+          ],
+          { encoding: 'utf8', env: process.env },
+        );
+      const refused = run();
+      assert.notEqual(refused.status, 0, refused.stdout);
+      assert.match(refused.stderr, /утверд|согласу|продукт/i);
+      assert.equal(existsSync(join(root, '.devcontour-local/config.json')), false);
+    } finally {
+      await app.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }));

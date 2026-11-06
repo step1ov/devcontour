@@ -35,7 +35,7 @@ export function preparationStore(root: string) {
   }
   return store;
 }
-export function requirePreparation(root: string) {
+export function requirePreparation(root: string, changeId?: string) {
   if (!existsSync(join(root, 'state.sqlite')))
     throw new Error(
       'Сначала запустите start --workspace и согласуйте продукт, архитектуру и стек в панели',
@@ -44,7 +44,7 @@ export function requirePreparation(root: string) {
   try {
     if (!store.read().preparation)
       throw new Error('Сначала включите продуктовый процесс командой start --workspace');
-    return developmentBinding(store.read());
+    return developmentBinding(store.read(), changeId);
   } finally {
     store.close();
   }

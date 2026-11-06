@@ -23,7 +23,7 @@ Pass `--workspace /absolute/path` to every project CLI command. One MCP process 
 
 ## Quick change to an existing repository
 
-When the active change has an intake (`preparation_quick`, or the operator's «Быстрое изменение» form), follow START.md «Быстрое изменение»: `devcontour quick-facts --repository ... --workspace ...`, compact product/architecture/references revisions approved by the user, `preparation_setup` with the profile (`npm-project`/`pnpm-project`) and the project's real gates, then `devcontour setup --change <id> --workspace ...` (applies exactly the latest proposal; `--plan` previews files). Several components or dependent tasks → `preparation_expand` with the reason, then the full route.
+When the active change has an intake (`preparation_quick`, or the operator's «Быстрое изменение» form), follow START.md «Быстрое изменение»: `devcontour quick-facts --repository ... --workspace ...`, compact product/architecture/references revisions approved by the user, `preparation_setup` with the profile (`npm-project`/`pnpm-project`) and the project's real gates, then `devcontour setup --change <id> --proposal <digest> --workspace ...` (applies exactly that proposal, which must be the latest; `--plan` previews files and prints the digest; the change must be active and approved). Several components or dependent tasks → `preparation_expand` with the reason, then the full route.
 
 ## Start from a specification
 
