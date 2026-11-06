@@ -1,5 +1,6 @@
 import { selectedWorkspaceMode, workspaceDescription } from '../runner/workspace-mode.ts';
 import { existsSync } from 'node:fs';
+import { BASE_HELD_DETAIL } from '../runner/base-check.ts';
 import {
   LEAD_QUIET_MS,
   quickFacts,
@@ -327,6 +328,17 @@ export async function serve(
               ).length,
               paused: state.paused,
               ...(state.pauseReason ? { pauseReason: state.pauseReason } : {}),
+              ...(() => {
+                const wait = state.waits?.find((w) => w.kind === 'base-check');
+                if (!wait) return {};
+                // Человек снимает удержание переноса контура, ожидание без
+                // диапазона и любое ожидание в режиме оператора.
+                const needsOperator =
+                  wait.detail.startsWith(BASE_HELD_DETAIL) ||
+                  !state.baseMoves ||
+                  (h?.config.approvalMode ?? 'agent') === 'operator';
+                return { baseWait: { needsOperator, detail: wait.detail } };
+              })(),
             }),
             // Присутствие ведущего агента известно только по его журналу:
             // без свежей записи панель не изображает идущую работу.

@@ -659,10 +659,29 @@ test('D01-E: «исполнитель работает» — только при
     activeRuns: 0,
     paused: true,
     pauseReason: 'base-check',
+    baseWait: {
+      needsOperator: true,
+      detail: 'Перенос меняет AGENTS.md, .agents/roles/developer.md',
+    },
   }).find((s) => s.id === 'execution')!;
+  // Обычная проверка базы — дело контура: без кнопки и без «вашего подтверждения».
+  const checking = quickSteps({
+    change,
+    developmentReady: true,
+    blocker: '',
+    configured: true,
+    engineConnected: true,
+    tasks: [{ status: 'ready' }],
+    activeRuns: 0,
+    paused: true,
+    pauseReason: 'base-check',
+    baseWait: { needsOperator: false, detail: 'Проверка базы' },
+  }).find((s) => s.id === 'execution')!;
+  assert.equal(checking.actor, undefined);
+  assert.equal(checking.action, undefined);
   // Перенос контура в базу подтверждает человек, не ведущий агент.
   assert.equal(held.actor, 'operator');
-  assert.match(held.detail, /подтверждени/);
+  assert.match(held.detail, /подтверждени.*AGENTS\.md/);
   assert.equal(held.action, 'start-queue');
   const queued = execution([{ status: 'ready' }], 0, false);
   assert.equal(queued.actor, undefined);
