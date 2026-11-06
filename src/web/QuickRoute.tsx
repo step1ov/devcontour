@@ -22,6 +22,7 @@ interface QuickStep {
   state: StepState;
   actor?: 'operator' | 'lead';
   detail: string;
+  action?: 'start-queue';
 }
 interface Diagnostic {
   code: string;
@@ -718,6 +719,7 @@ export function QuickRoute({ changeId, workspace }: { changeId: string; workspac
               <span className="text-muted-foreground text-sm [overflow-wrap:anywhere]">
                 {step.detail}
               </span>
+              {step.action === 'start-queue' && <StartQueue />}
             </li>
           ))}
         </ol>
@@ -966,5 +968,38 @@ function FileTable(props: { label: string; files: PlanFile[]; root: string }) {
           ))}
       </tbody>
     </table>
+  );
+}
+
+/** Решение оператора из шага: штатный запуск очереди (тот же, что в панели). */
+function StartQueue() {
+  const [state, setState] = useState<'idle' | 'busy' | 'done'>('idle');
+  const [error, setError] = useState('');
+  return (
+    <span className="grid gap-1">
+      <Button
+        type="button"
+        size="sm"
+        disabled={state !== 'idle'}
+        onClick={() => {
+          setState('busy');
+          setError('');
+          send('scheduler', { start: true }).then(
+            () => setState('done'),
+            (e: unknown) => {
+              setState('idle');
+              setError(e instanceof Error ? e.message : String(e));
+            },
+          );
+        }}
+      >
+        {state === 'done' ? 'Очередь запущена' : 'Подтвердить и запустить очередь'}
+      </Button>
+      {error && (
+        <span role="alert" className="text-destructive text-sm">
+          {error}
+        </span>
+      )}
+    </span>
   );
 }

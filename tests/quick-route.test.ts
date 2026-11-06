@@ -649,6 +649,21 @@ test('D01-E: «исполнитель работает» — только при
   const paused = execution([{ status: 'ready' }], 0, true);
   assert.equal(paused.actor, 'lead');
   assert.match(paused.detail, /пауз/);
+  const held = quickSteps({
+    change,
+    developmentReady: true,
+    blocker: '',
+    configured: true,
+    engineConnected: true,
+    tasks: [{ status: 'ready' }],
+    activeRuns: 0,
+    paused: true,
+    pauseReason: 'base-check',
+  }).find((s) => s.id === 'execution')!;
+  // Перенос контура в базу подтверждает человек, не ведущий агент.
+  assert.equal(held.actor, 'operator');
+  assert.match(held.detail, /подтверждени/);
+  assert.equal(held.action, 'start-queue');
   const queued = execution([{ status: 'ready' }], 0, false);
   assert.equal(queued.actor, undefined);
   assert.doesNotMatch(queued.detail, /работает/);

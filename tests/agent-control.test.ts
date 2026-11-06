@@ -1197,3 +1197,61 @@ test('Contract impact takes the document and artifacts from one commit even if H
     f.cleanup();
   }
 });
+
+test('Ревью плана не тратит вызов, пока подготовка контура не перенесена в базу прогонов', async () => {
+  const f = fixture();
+  const repo = await mkdtemp(join(tmpdir(), 'devcontour-stale-base-'));
+  const g = (...args: string[]) =>
+    execFileSync('git', ['-C', repo, ...args], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: 't',
+        GIT_AUTHOR_EMAIL: 't@t',
+        GIT_COMMITTER_NAME: 't',
+        GIT_COMMITTER_EMAIL: 't@t',
+      },
+    }).trim();
+  try {
+    g('init', '-q', '-b', 'main');
+    await writeFile(join(repo, 'README.md'), '# app\n');
+    g('add', '-A');
+    g('commit', '-qm', 'app');
+    g('branch', f.h.config.targetBranch);
+    // Bootstrap контура на рабочей ветке, база прогонов осталась прежней.
+    await mkdir(join(repo, '.devcontour'), { recursive: true });
+    await writeFile(join(repo, '.devcontour/rules.md'), 'rules\n');
+    g('add', '-A');
+    g('commit', '-qm', 'bootstrap');
+    f.h.config.mode = 'local';
+    f.h.config.repository = repo;
+    for (const r of f.h.config.repositories) r.path = repo;
+    const b = f.h.createBoard('Stale base');
+    f.h.addTask(b.id, input());
+    let called = 0;
+    await assert.rejects(
+      reviewPlan(
+        f.h,
+        f.root,
+        b.id,
+        'claude',
+        runtimes(() => called++),
+      ),
+      /отстаёт от рабочей ветки.*\.devcontour\/rules\.md.*base-update/,
+    );
+    assert.equal(called, 0);
+    // Перенос сделан — ревью идёт.
+    g('branch', '-f', f.h.config.targetBranch, 'HEAD');
+    await reviewPlan(
+      f.h,
+      f.root,
+      b.id,
+      'claude',
+      runtimes(() => called++),
+    );
+    assert.ok(called > 0);
+  } finally {
+    f.cleanup();
+    await rm(repo, { recursive: true, force: true });
+  }
+});

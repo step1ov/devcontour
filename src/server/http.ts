@@ -326,6 +326,7 @@ export async function serve(
                 (r) => r.status === 'active' && tasks.some((t) => t.id === r.taskId),
               ).length,
               paused: state.paused,
+              ...(state.pauseReason ? { pauseReason: state.pauseReason } : {}),
             }),
             // Присутствие ведущего агента известно только по его журналу:
             // без свежей записи панель не изображает идущую работу.

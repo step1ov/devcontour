@@ -154,6 +154,8 @@ export interface QuickStep {
   /** Кто действует на текущем шаге. */
   actor?: 'operator' | 'lead';
   detail: string;
+  /** Действие оператора прямо из шага: штатный запуск очереди. */
+  action?: 'start-queue';
 }
 
 const stageTitles = {
@@ -187,6 +189,8 @@ export function quickSteps(input: {
   activeRuns: number;
   /** Выдача задач на паузе. */
   paused: boolean;
+  /** Причина паузы: base-check и operator снимает человек. */
+  pauseReason?: string;
 }): QuickStep[] {
   const { change } = input;
   const steps: QuickStep[] = [];
@@ -257,7 +261,7 @@ export function quickSteps(input: {
   const drafts = live.length > 0 && live.every((t) => t.status === 'draft' || t.status === 'done');
   // Индикатор работы — только по фактам: идущая попытка или задача в работе.
   // Черновик и пауза — дело ведущего агента, а не «исполнитель работает».
-  const execution: Pick<QuickStep, 'state' | 'actor' | 'detail'> = done
+  const execution: Pick<QuickStep, 'state' | 'actor' | 'detail' | 'action'> = done
     ? { state: 'done', detail: 'Задача принята по проверкам и ревью' }
     : !prepared
       ? { state: 'waiting', detail: 'Ждёт подготовки' }
@@ -275,13 +279,28 @@ export function quickSteps(input: {
                 actor: 'lead',
                 detail: 'Задача в черновике: ведущий агент проводит review плана и запускает её',
               }
-            : input.paused
+            : input.paused && input.pauseReason === 'base-check'
               ? {
                   state: 'current',
-                  actor: 'lead',
-                  detail: 'Очередь на паузе: ведущий агент запускает выполнение',
+                  actor: 'operator',
+                  detail:
+                    'Подготовка контура перенесена в базу прогонов и ждёт вашего подтверждения: проверьте перенесённые файлы и запустите очередь',
+                  action: 'start-queue',
                 }
-              : { state: 'current', detail: 'Задача в очереди, исполнитель ещё не взял её' };
+              : input.paused && input.pauseReason === 'operator'
+                ? {
+                    state: 'current',
+                    actor: 'operator',
+                    detail: 'Очередь остановлена оператором: запустите её, когда будете готовы',
+                    action: 'start-queue',
+                  }
+                : input.paused
+                  ? {
+                      state: 'current',
+                      actor: 'lead',
+                      detail: 'Очередь на паузе: ведущий агент запускает выполнение',
+                    }
+                  : { state: 'current', detail: 'Задача в очереди, исполнитель ещё не взял её' };
   steps.push({ id: 'execution', title: 'Выполнение', ...execution });
   steps.push({
     id: 'result',

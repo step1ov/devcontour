@@ -1,3 +1,4 @@
+import { sensitiveBasePaths } from './sensitive-paths.ts';
 import { technicalReview } from 'devcontour-harness';
 import { reviewExecutionOf, toDomain } from '../harness/execution.ts';
 import { runtimeAdapters } from '../harness/adapters.ts';
@@ -801,6 +802,29 @@ export async function reviewPlan(
   // Связь с историей INTENT — то же предусловие утверждения (`approve`):
   // отказ здесь не тратит ревью на план, который утверждение отклонит.
   h.assertStoryBindings(drafts.filter((t) => t.status === 'draft'));
+  // Ревьюер читает базу прогонов. Подготовка контура (bootstrap: правила,
+  // роли, контекст), ещё не перенесённая в неё, ревьюеру не видна, и ревью
+  // плана по такому дереву — потраченный вызов модели.
+  for (const repositoryId of new Set(drafts.map((t) => t.repositoryId))) {
+    const repo = repository(h.config, repositoryId);
+    // Без Git или без ветки базы сравнивать нечего: отказ даст само исполнение.
+    const [base, head] = await Promise.all([
+      git(repo.path, 'rev-parse', 'refs/heads/' + repo.targetBranch).catch(() => ''),
+      git(repo.path, 'rev-parse', 'HEAD').catch(() => ''),
+    ]);
+    if (!base || !head || base === head) continue;
+    const ahead = await git(repo.path, 'merge-base', '--is-ancestor', base, head).then(
+      () => true,
+      () => false,
+    );
+    if (!ahead) continue;
+    const pending = await sensitiveBasePaths(h, root, state, repositoryId, base, head);
+    if (pending.length)
+      throw new DomainError(
+        `База прогонов ${repo.targetBranch} отстаёт от рабочей ветки на подготовку контура (${pending.slice(0, 5).join(', ')}${pending.length > 5 ? '…' : ''}): ревьюер её не увидит. Сначала base-update и подтверждение переноса оператором`,
+        409,
+      );
+  }
   const contractIds = new Set(tasks.flatMap((t) => t.contracts));
   // Зависимости вне предложения ревьюер проверить не может: база контура
   // ему закрыта. Это задачи других досок и невыбранные черновики своей —
