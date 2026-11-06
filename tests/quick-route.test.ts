@@ -485,6 +485,11 @@ test('D01-C: setup --change отклоняется до согласований
       );
       assert.ok(config.protectedPaths.includes('pnpm-lock.yaml'));
       assert.equal(config.packs[0].id, 'pnpm-project');
+      // Правила и справка каждого пакета конфигурации уже в дереве: context-lock
+      // после bootstrap закрепляет их по файлам.
+      for (const pack of config.contextPacks)
+        for (const file of [...pack.files, ...(pack.references ?? [])])
+          assert.ok(existsSync(join(root, file)), file);
     } finally {
       await app.close();
       rmSync(root, { recursive: true, force: true });

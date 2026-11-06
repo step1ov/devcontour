@@ -31,6 +31,7 @@ export const slowTests = {
   ],
   'autonomous-loop': true,
   'quick-result': true,
+  'quick-route-e2e': true,
   'board-coverage': [
     'Приёмка доски выполняет непокрытые gates один раз на итоговом SHA и принимает',
     'Провал непокрытого gate на итоговом SHA доски — отказ приёмки с названным gate;',

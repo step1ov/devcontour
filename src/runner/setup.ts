@@ -253,8 +253,24 @@ async function runSetup(options: {
   // Инструкции стека приезжают из библиотеки DevContour по объявлению профиля,
   // а не лежат в каждом проекте заранее: подтвердили мобильное приложение —
   // приехали мобильные инструкции, и только они.
-  for (const pack of selected.contextPacks)
-    for (const file of pack.files) {
+  // Пакеты конфигурации — умолчания ролей и пакеты профиля; тот же список
+  // уходит в config.json. Их правила и справка приезжают сейчас, в том же
+  // create-only плане: context-lock после bootstrap закрепляет файлы дерева.
+  const configuredPacks = [
+    ...new Map(
+      [
+        ...defaultContextPacks(
+          'main',
+          Object.keys(projectConfig(repository, selected, options.approvalMode).roles),
+        ),
+        ...selected.contextPacks,
+      ].map((pack) => [pack.id, pack]),
+    ).values(),
+  ];
+  const references = (pack: object) =>
+    'references' in pack && Array.isArray(pack.references) ? (pack.references as string[]) : [];
+  for (const pack of configuredPacks)
+    for (const file of [...pack.files, ...references(pack)]) {
       const source = join(libraryRoot, file);
       if (files.has(join(repository, file))) continue;
       try {
@@ -331,18 +347,8 @@ async function runSetup(options: {
           : projectConfig(repository, selected, options.approvalMode)),
         // Пакеты строятся по объявленным ролям: роль без своей инструкции
         // осталась бы с одним общим контекстом и не знала бы своего дела.
-        contextPacks: [
-          ...new Map(
-            [
-              ...defaultContextPacks(
-                'main',
-                Object.keys(projectConfig(repository, selected, options.approvalMode).roles),
-              ),
-              // Пакеты профиля приезжают вместе со стеком и уточняют умолчания.
-              ...selected.contextPacks,
-            ].map((pack) => [pack.id, pack]),
-          ).values(),
-        ],
+        // Пакеты профиля приезжают вместе со стеком и уточняют умолчания.
+        contextPacks: configuredPacks,
       },
       null,
       2,
