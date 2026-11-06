@@ -308,6 +308,7 @@ export async function serve(
             setup: change.setup?.at(-1),
             expanded: change.expanded,
             findings,
+            setupApplied: existsSync(join(root, '.devcontour-local', 'config.json')),
             facts,
             ...(factsError ? { factsError } : {}),
             plan,

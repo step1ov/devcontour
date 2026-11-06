@@ -686,6 +686,11 @@ export function PreparationPanel() {
   const conceptCurrent = refs?.status === 'approved' && con?.referencesDigest === refs.digest;
   const designCurrent = con?.status === 'approved' && d?.conceptDigest === con.digest;
   // How far the design stage has got: used by the stepper and the sub-nav.
+  // Референсы с applicable: false — утверждённое решение «дизайн не нужен»:
+  // концепт и дизайн-система не требуются, шаги 2–3 не ждут.
+  const designNotApplicable = Boolean(
+    referencesCurrent && refs?.status === 'approved' && refs.content?.applicable === false,
+  );
   const designApproved = [
     referencesCurrent && refs?.status === 'approved',
     conceptCurrent && con?.status === 'approved',
@@ -883,7 +888,9 @@ export function PreparationPanel() {
                               ? 'После согласования архитектуры'
                               : designApproved === 3
                                 ? 'Утверждено'
-                                : 'Шаг ' + (designApproved + 1) + ' из 3'
+                                : designNotApplicable
+                                  ? 'Не требуется (утверждено)'
+                                  : 'Шаг ' + (designApproved + 1) + ' из 3'
                             : view.developmentReady
                               ? 'Разрешена'
                               : 'Ожидает согласований'}

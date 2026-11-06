@@ -103,6 +103,7 @@ export interface QuickView {
   setup?: { number: number; profile: string; gates?: Gate[]; reason: string; digest: string };
   expanded?: { at: string; reason: string };
   findings: { taskId: string; title: string; status: string }[];
+  setupApplied: boolean;
   facts?: Facts;
   factsError?: string;
   plan?: {
@@ -341,8 +342,9 @@ function Preparation({ view }: { view: QuickView }) {
     <div className="grid gap-4">
       <Alert variant="info">
         <AlertDescription>
-          Это план, а не выполненная настройка: файлы не записаны. Их создаст ведущий агент, когда
-          запустит setup по этому предложению после ваших решений.
+          {view.setupApplied
+            ? 'Setup применён: файлы записаны по этому предложению. Дальше ведущий агент делает bootstrap-коммит и ставит задачу.'
+            : 'Это план, а не выполненная настройка: файлы не записаны. Их создаст ведущий агент, когда запустит setup по этому предложению после ваших решений.'}
         </AlertDescription>
       </Alert>
       <dl className="grid gap-2" aria-label="Предложение setup">
