@@ -308,7 +308,7 @@ export function quickSteps(input: {
  * последней попытки, расход с долей неизвестного. Только чтение состояния.
  */
 export function quickResult(state: DevContourState, changeId: string, usage: UsageRecord[]) {
-  const tasks = state.tasks.filter((t) => t.preparation?.changeId === changeId);
+  const tasks = state.tasks.filter((t) => t.preparation?.changeId === changeId && !t.finding);
   return tasks.map((task) => {
     const runs = state.runs.filter((r) => r.taskId === task.id);
     const run = runs.at(-1);

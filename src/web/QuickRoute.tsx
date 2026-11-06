@@ -102,6 +102,7 @@ export interface QuickView {
   intake: { repository: string; brief: string; criterion: string; actor: 'operator' | 'lead' };
   setup?: { number: number; profile: string; gates?: Gate[]; reason: string; digest: string };
   expanded?: { at: string; reason: string };
+  findings: { taskId: string; title: string; status: string }[];
   facts?: Facts;
   factsError?: string;
   plan?: {
@@ -738,6 +739,12 @@ export function QuickRoute({ changeId, workspace }: { changeId: string; workspac
           </Block>
           <Block title="4–5. Выполнение и результат">
             <Result view={view} />
+            {view.findings.length > 0 && (
+              <p className="text-muted-foreground mt-3 text-sm">
+                Находки исполнителя (отдельная работа, не часть этого изменения):{' '}
+                {view.findings.map((f) => f.title).join('; ')}
+              </p>
+            )}
           </Block>
         </>
       )}

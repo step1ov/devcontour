@@ -287,7 +287,13 @@ export async function serve(
             return undefined;
           });
           const plan = h ? undefined : await quickSetupPlan({ workspace: root, change });
-          const tasks = state.tasks.filter((t) => t.preparation?.changeId === change.id);
+          // Находки исполнителя наследуют привязку к изменению, но это не
+          // работа маршрута: они показаны отдельно и не держат шаги.
+          const bound = state.tasks.filter((t) => t.preparation?.changeId === change.id);
+          const tasks = bound.filter((t) => !t.finding);
+          const findings = bound
+            .filter((t) => t.finding)
+            .map((t) => ({ taskId: t.id, title: t.title, status: t.status }));
           const activity = view.enabled ? view.agentActivity : undefined;
           const usage = h
             ? [undefined, ...repositories(h.config).map((r) => r.id)].flatMap((owner) =>
@@ -300,6 +306,7 @@ export async function serve(
             intake: change.intake,
             setup: change.setup?.at(-1),
             expanded: change.expanded,
+            findings,
             facts,
             ...(factsError ? { factsError } : {}),
             plan,

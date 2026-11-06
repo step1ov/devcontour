@@ -55,6 +55,18 @@ test('D01-F: результат показывает настоящие дока
     await f.scheduler.drain();
     const state = f.store.read();
     const task = state.tasks.find((t) => t.status === 'done')!;
+    // Находка исполнителя наследует привязку, но не входит в результат маршрута.
+    const withFinding = bound(state, [task.id]);
+    withFinding.tasks.push({
+      ...structuredClone(withFinding.tasks.find((t) => t.id === task.id)!),
+      id: 'T-finding',
+      status: 'draft',
+      finding: { title: 'Долг', description: 'Старый долг', severity: 'low' } as never,
+    });
+    assert.deepEqual(
+      quickResult(withFinding, 'PC-quick', []).map((r) => r.taskId),
+      [task.id],
+    );
     const [result] = quickResult(bound(state, [task.id]), 'PC-quick', []);
     assert.equal(result.status, 'done');
     assert.equal(result.resultSha, task.resultSha);
