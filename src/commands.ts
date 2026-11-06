@@ -60,7 +60,7 @@ import {
   planSetup,
   componentProfileConfig,
 } from './runner/setup.ts';
-import { quickFacts } from './runner/quick.ts';
+import { QUICK_SETUP_MARKER, quickFacts } from './runner/quick.ts';
 import { acceptBoard, reviewContract, reviewPlan } from './runner/agent-control.ts';
 import { specDigest } from './core/service.ts';
 import { WorkspaceRunner } from './runner/workspace.ts';
@@ -68,6 +68,7 @@ import { setupWorkspace } from './runner/workspace-setup.ts';
 import { Workspace } from './core/workspace.ts';
 import { attachJournal } from './runner/journal.ts';
 import { commandScope } from './runner/scope.ts';
+import { modelRuntimes } from './core/repositories.ts';
 import { syncGit, syncPreparation } from './runner/git-sync.ts';
 import { setupDemo, exists } from './demo.ts';
 import { restoreBackup } from './runner/backup.ts';
@@ -475,7 +476,10 @@ async function main() {
       JSON.stringify(
         args.includes('--plan')
           ? { proposal: proposal.digest, ...(await planSetup(input)) }
-          : { proposal: proposal.digest, ...(await setupProject(input)) },
+          : {
+              proposal: proposal.digest,
+              ...(await appliedQuickSetup(root, change.id, proposal.digest, input)),
+            },
         null,
         2,
       ),
@@ -1301,7 +1305,7 @@ async function main() {
     throw new Error('Некорректный port');
   const app = await serve(h, scheduler, { port, dev: args.includes('--dev') });
   console.log(
-    `DevContour: ${app.url}\n${config.mode === 'demo' ? 'Учебный режим: модели не вызываются.' : 'Локальный режим: запуск использует настроенные CLI и их авторизацию.'}`,
+    `DevContour: ${app.url}\n${config.mode !== 'demo' ? 'Локальный режим: запуск использует настроенные CLI и их авторизацию.' : modelRuntimes(config).length ? 'Учебный режим, но роли вызывают модели: ' + modelRuntimes(config).join(', ') + '.' : 'Учебный режим: модели не вызываются.'}`,
   );
   let closing = false;
   // Первый сигнал — штатная остановка; второй — немедленный выход (130),
@@ -1353,4 +1357,23 @@ async function changeKeysOf(root: string) {
   } finally {
     store.close();
   }
+}
+
+/**
+ * Setup быстрого изменения и отметка, какое предложение какого изменения
+ * применено: панель второго изменения в том же workspace не выдаёт чужой
+ * setup за свой.
+ */
+async function appliedQuickSetup(
+  root: string,
+  changeId: string,
+  proposal: string,
+  input: Parameters<typeof setupProject>[0],
+) {
+  const result = await setupProject(input);
+  await writeFile(
+    join(root, QUICK_SETUP_MARKER),
+    JSON.stringify({ changeId, proposal, at: new Date().toISOString() }, null, 2) + '\n',
+  );
+  return result;
 }

@@ -568,7 +568,8 @@ export class Preparation {
         blocker = (error as Error).message;
       }
     const tasks = s.tasks.filter((t) => Boolean(c) && t.preparation?.changeId === c?.id);
-    const live = tasks.filter((t) => t.status !== 'cancelled');
+    // Находки исполнителя — отдельная работа, не задачи изменения.
+    const live = tasks.filter((t) => t.status !== 'cancelled' && !t.finding);
     // The newest note of any change tells the operator the session is alive even
     // before the first revision exists.
     const latest = p.changes

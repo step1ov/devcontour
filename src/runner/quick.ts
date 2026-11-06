@@ -1,5 +1,5 @@
-import { realpathSync } from 'node:fs';
-import { sep } from 'node:path';
+import { readFileSync, realpathSync } from 'node:fs';
+import { join, sep } from 'node:path';
 import { inspectProject, type ProjectFacts } from 'devcontour-harness';
 import type { DevContourState } from '../core/model.ts';
 import type { ProductChange } from '../core/preparation-model.ts';
@@ -14,6 +14,9 @@ import type { WorkspaceMode } from './workspace-mode.ts';
 // inspectProject плюс правила размещения DevContour), план setup по
 // предложению ведущего агента и проекция шагов «Подключение → Решения →
 // Подготовка → Выполнение → Результат» из уже существующих записей.
+
+/** Отметка применённого setup быстрого изменения в каталоге данных. */
+export const QUICK_SETUP_MARKER = 'quick-setup.json';
 
 /** Профили DevContour для существующего репозитория по менеджеру пакетов. */
 export const quickProfiles = { npm: 'npm-project', pnpm: 'pnpm-project' } as const;
@@ -435,7 +438,7 @@ export async function quickDiff(repository: string, base: string, head: string) 
  */
 export function leadActivityAt(
   change: ProductChange,
-  tasks: { createdAt?: string }[],
+  tasks: { createdAt?: string; approvedAt?: string }[],
 ): string | null {
   const stamps = [
     ...(change.activity ?? []).map((a) => a.at),
@@ -445,7 +448,19 @@ export function leadActivityAt(
     ...(change.questions ?? []).map((q) => q.createdAt),
     ...(change.decisions ?? []).map((d) => d.createdAt),
     ...(change.setup ?? []).map((p) => p.createdAt),
-    ...tasks.flatMap((t) => (t.createdAt ? [t.createdAt] : [])),
+    ...tasks.flatMap((t) => [t.createdAt, t.approvedAt].filter((x): x is string => Boolean(x))),
   ];
   return stamps.sort().at(-1) ?? null;
+}
+
+/** Применён ли setup именно этого изменения (отметка `setup --change`). */
+export function quickSetupApplied(dataRoot: string, changeId: string) {
+  try {
+    const marker = JSON.parse(readFileSync(join(dataRoot, QUICK_SETUP_MARKER), 'utf8')) as {
+      changeId?: string;
+    };
+    return marker.changeId === changeId;
+  } catch {
+    return false;
+  }
 }

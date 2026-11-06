@@ -6,6 +6,7 @@ import {
   quickFacts,
   leadActivityAt,
   quickDiff,
+  quickSetupApplied,
   quickResult,
   quickSetupPlan,
   quickSteps,
@@ -296,7 +297,7 @@ export async function serve(
           const findings = bound
             .filter((t) => t.finding)
             .map((t) => ({ taskId: t.id, title: t.title, status: t.status }));
-          const leadAt = leadActivityAt(change, bound);
+          const leadAt = leadActivityAt(change, tasks);
           const usage = h
             ? [undefined, ...repositories(h.config).map((r) => r.id)].flatMap((owner) =>
                 Object.values(h!.store.localRecords<UsageRecord>('usage', owner)),
@@ -309,7 +310,7 @@ export async function serve(
             setup: change.setup?.at(-1),
             expanded: change.expanded,
             findings,
-            setupApplied: existsSync(join(root, '.devcontour-local', 'config.json')),
+            setupApplied: quickSetupApplied(join(root, '.devcontour-local'), change.id),
             facts,
             ...(factsError ? { factsError } : {}),
             plan,

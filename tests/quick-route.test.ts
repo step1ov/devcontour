@@ -421,6 +421,17 @@ test('D01-C: setup --change отклоняется до согласований
       } finally {
         store.close();
       }
+      // CLI quick-facts знает проекцию изменения: свои файлы не «чужая работа».
+      const cliFacts = spawnSync(
+        process.execPath,
+        ['--import', 'tsx', cli, 'quick-facts', '--repository', root, '--workspace', root],
+        { encoding: 'utf8', env: process.env },
+      );
+      assert.equal(cliFacts.status, 0, cliFacts.stderr);
+      assert.deepEqual(
+        (JSON.parse(cliFacts.stdout) as QuickFacts).diagnostics.map((d) => d.code),
+        [],
+      );
       const view = (await (
         await fetch(app.url + '/api/preparation/quick?change=' + changeId)
       ).json()) as {
@@ -492,6 +503,15 @@ test('D01-C: setup --change отклоняется до согласований
       );
       assert.ok(config.protectedPaths.includes('pnpm-lock.yaml'));
       assert.equal(config.packs[0].id, 'pnpm-project');
+      // Отметка применённого setup — этого изменения.
+      assert.equal(
+        (
+          JSON.parse(readFileSync(join(root, '.devcontour-local/quick-setup.json'), 'utf8')) as {
+            changeId: string;
+          }
+        ).changeId,
+        changeId,
+      );
       // Одна задача быстрого изменения: роль без обязательного контракта.
       assert.deepEqual(Object.keys(config.roles), ['developer']);
       assert.notEqual(config.roles.developer.requiresContract, true);
@@ -793,4 +813,39 @@ test('D01-E: присутствие ведущего — по его запис�
     leadActivityAt(withSetup, [{ createdAt: '2026-11-06T10:09:00.000Z' }]),
     '2026-11-06T10:09:00.000Z',
   );
+});
+
+test('D01-E: сбой инспекции репозитория — причина в шаге, а не вечная проверка', () => {
+  const change = {
+    id: 'PC-4',
+    key: 'r-004.quick',
+    title: 'Быстрое',
+    createdAt: new Date().toISOString(),
+    product: [],
+    architecture: [],
+    references: [],
+    concept: [],
+    design: [],
+    activity: [],
+    questions: [],
+    decisions: [],
+    intake: {
+      ...intake('/tmp/x'),
+      createdAt: new Date().toISOString(),
+      actor: 'operator' as const,
+    },
+  };
+  const [connection] = quickSteps({
+    change,
+    developmentReady: false,
+    blocker: '',
+    factsError: 'git не найден',
+    configured: false,
+    engineConnected: false,
+    tasks: [],
+    activeRuns: 0,
+    paused: true,
+  });
+  assert.equal(connection.state, 'blocked');
+  assert.match(connection.detail, /не удалось проверить: git не найден/);
 });
