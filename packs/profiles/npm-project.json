@@ -37,6 +37,15 @@
       }
     }
   ],
+  "roles": {
+    "developer": {
+      "runtime": "claude",
+      "title": "Разработчик",
+      "reviewer": {
+        "runtime": "codex"
+      }
+    }
+  },
   "contextPacks": [
     {
       "id": "technique-testing",
@@ -48,7 +57,8 @@
         "qa-web",
         "qa-admin",
         "qa-mobile",
-        "qa-api"
+        "qa-api",
+        "developer"
       ],
       "files": [
         ".agents/context/technique-testing.md"

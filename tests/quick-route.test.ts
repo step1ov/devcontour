@@ -485,6 +485,9 @@ test('D01-C: setup --change отклоняется до согласований
       );
       assert.ok(config.protectedPaths.includes('pnpm-lock.yaml'));
       assert.equal(config.packs[0].id, 'pnpm-project');
+      // Одна задача быстрого изменения: роль без обязательного контракта.
+      assert.deepEqual(Object.keys(config.roles), ['developer']);
+      assert.notEqual(config.roles.developer.requiresContract, true);
       // Правила и справка каждого пакета конфигурации уже в дереве: context-lock
       // после bootstrap закрепляет их по файлам.
       for (const pack of config.contextPacks)

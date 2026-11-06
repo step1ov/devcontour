@@ -509,7 +509,7 @@ async function route(manager: Manager, root: string, guard: { called: () => stri
       task: {
         title: 'Сложение отрицательных чисел',
         description: 'add() корректно складывает отрицательные числа.',
-        role: 'architect',
+        role: 'developer',
         acceptance: [intake(root).criterion],
         featureId: 'negative-sum',
       },
