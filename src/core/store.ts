@@ -789,6 +789,105 @@ export class Store {
       .run(namespace, owner ?? '@workspace', key, JSON.stringify(value));
     this.bump('data');
   }
+  /**
+   * Обсуждения задач — локальная таблица владельца задачи: не документ
+   * состояния, не журнал синхронизации. Порядок — серверная последовательность.
+   */
+  private discussionTable(schema: string, create: boolean) {
+    if (create)
+      this.db.exec(
+        `CREATE TABLE IF NOT EXISTS ${schema}.discussion (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, task_id TEXT NOT NULL, author TEXT NOT NULL, idem TEXT NOT NULL, kind TEXT NOT NULL, reply_to TEXT, data TEXT NOT NULL, UNIQUE(task_id, author, idem));` +
+          `CREATE INDEX IF NOT EXISTS ${schema}.discussion_task ON discussion(task_id, seq);`,
+      );
+    return Boolean(
+      this.db
+        .prepare(
+          `SELECT name FROM ${schema}.sqlite_master WHERE type='table' AND name='discussion'`,
+        )
+        .get(),
+    );
+  }
+  private discussionRows(sql: string, owner: string | undefined, ...args: (string | number)[]) {
+    const schema = this.syncSchema(owner);
+    if (!this.discussionTable(schema, false)) return [];
+    const rows = this.db.prepare(sql.replaceAll('$schema', schema)).all(...args) as {
+      seq: number;
+      data: string;
+    }[];
+    return rows.map((r) => ({ ...(JSON.parse(r.data) as object), seq: r.seq }));
+  }
+  /** Новая запись обсуждения; возвращает её seq. Только в транзакции. */
+  discussionInsert(
+    owner: string | undefined,
+    row: {
+      id: string;
+      taskId: string;
+      author: string;
+      idempotencyKey: string;
+      kind: string;
+      replyTo?: string;
+    },
+    data: unknown,
+  ): number {
+    if (!this.transaction) throw new Error('Discussion writes require an atomic transaction');
+    const schema = this.syncSchema(owner);
+    this.discussionTable(schema, true);
+    const inserted = this.db
+      .prepare(
+        `INSERT INTO ${schema}.discussion(id,task_id,author,idem,kind,reply_to,data) VALUES(?,?,?,?,?,?,?)`,
+      )
+      .run(
+        row.id,
+        row.taskId,
+        row.author,
+        row.idempotencyKey,
+        row.kind,
+        row.replyTo ?? null,
+        JSON.stringify(data),
+      );
+    this.bump('data');
+    return Number(inserted.lastInsertRowid);
+  }
+  /** Страница треда задачи после seq `after`, по возрастанию. */
+  discussionPage(owner: string | undefined, taskId: string, after: number, limit: number) {
+    return this.discussionRows(
+      'SELECT seq,data FROM $schema.discussion WHERE task_id=? AND seq>? ORDER BY seq LIMIT ?',
+      owner,
+      taskId,
+      after,
+      limit,
+    );
+  }
+  /** Последний seq треда; 0 — тред пуст. */
+  discussionVersion(owner: string | undefined, taskId: string): number {
+    const schema = this.syncSchema(owner);
+    if (!this.discussionTable(schema, false)) return 0;
+    const row = this.db
+      .prepare(`SELECT max(seq) AS n FROM ${schema}.discussion WHERE task_id=?`)
+      .get(taskId) as { n: number | null };
+    return row.n ?? 0;
+  }
+  discussionById(owner: string | undefined, id: string) {
+    return this.discussionRows('SELECT seq,data FROM $schema.discussion WHERE id=?', owner, id)[0];
+  }
+  discussionByKey(owner: string | undefined, taskId: string, author: string, key: string) {
+    return this.discussionRows(
+      'SELECT seq,data FROM $schema.discussion WHERE task_id=? AND author=? AND idem=?',
+      owner,
+      taskId,
+      author,
+      key,
+    )[0];
+  }
+  /** Обращения к ведущему без записи обработки, по возрастанию seq после `after`. */
+  discussionPending(owner: string | undefined, after: number, limit: number) {
+    return this.discussionRows(
+      "SELECT seq,data FROM $schema.discussion d WHERE kind='change-request' AND seq>? AND NOT EXISTS (SELECT 1 FROM $schema.discussion r WHERE r.kind='disposition' AND r.reply_to=d.id) ORDER BY seq LIMIT ?",
+      owner,
+      after,
+      limit,
+    );
+  }
   private bump(kind: 'data' | 'lease') {
     this.db
       .prepare(`UPDATE main.revision SET ${kind === 'data' ? 'n=n+1' : 'lease=lease+1'} WHERE id=1`)

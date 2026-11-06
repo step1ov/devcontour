@@ -5,6 +5,7 @@
 //
 // Это не handoff публикации ChangeSet (`devcontour handoff --changeset`):
 // тот готовит результат к push/PR человеком.
+import { DiscussionService } from './discussion.ts';
 import {
   HANDOFF_MAX_BYTES,
   HANDOFF_MIN_BYTES,
@@ -124,6 +125,15 @@ export interface DevContourHandoff {
     next?: HandoffHostNext;
     /** Доски с действующим заданием ведущего (его очередь продолжает сервер). */
     liveBoards: string[];
+    /**
+     * Необработанные обращения к ведущему из обсуждений задач: первые пять,
+     * текст кратко и через редактор секретов; остальное — `discussion_inbox`
+     * с курсором.
+     */
+    discussion?: {
+      requests: { id: string; taskId: string; createdAt: string; text: string }[];
+      nextCursor?: string;
+    };
   };
 }
 
@@ -671,7 +681,23 @@ export function devcontourHandoffWithin(
           return typeof bound === 'string' ? bound : undefined;
         },
       });
-      const host = { ...(next ? { next } : {}), liveBoards };
+      const inbox = new DiscussionService(h).inbox({ limit: 5 }, 8000);
+      const discussion = inbox.requests.length
+        ? {
+            requests: inbox.requests.map((m) => ({
+              id: m.id,
+              taskId: m.taskId,
+              createdAt: m.createdAt,
+              text: options.redact(m.text).slice(0, 300),
+            })),
+            ...(inbox.nextCursor ? { nextCursor: inbox.nextCursor } : {}),
+          }
+        : undefined;
+      const host = {
+        ...(next ? { next } : {}),
+        liveBoards,
+        ...(discussion ? { discussion } : {}),
+      };
       if (!limit) return { value: { pack, host }, trimmed: false };
       const size = (p: HandoffPack) => bytes(handoffResponse({ pack: p, host }, limit.format));
       if (size(pack) <= limit.bytes) return { value: { pack, host }, trimmed: false };
@@ -757,6 +783,13 @@ function hostMarkdown(host: DevContourHandoff['host']) {
     '',
     ...(host.next ? [`- **Следующий шаг: ${host.next.action}** — ${host.next.detail}`] : []),
     `- Действующие задания досок: ${host.liveBoards.length ? host.liveBoards.join(', ') : 'нет'}`,
+    ...(host.discussion
+      ? [
+          `- Обращения к ведущему без обработки: ${host.discussion.requests
+            .map((r) => `${r.taskId} (${r.id})`)
+            .join(', ')}${host.discussion.nextCursor ? ' и ещё — discussion_inbox' : ''}`,
+        ]
+      : []),
     ...Object.entries(handoffHostCommands).map(([k, v]) => `- \`${k}\` — ${v}`),
     '',
   ].join('\n');
