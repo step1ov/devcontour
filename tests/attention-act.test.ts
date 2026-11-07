@@ -354,3 +354,73 @@ test('Заметка в треде после показа вопроса опе
     f.cleanup();
   }
 });
+
+test('Подтверждение переноса базы с карточки запускает очередь; возврат редакции на доработку требует текста', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    f.store.change('fixture.base-wait', (s) => {
+      s.paused = true;
+      s.pauseReason = 'base-check';
+      s.waits = [
+        {
+          kind: 'base-check',
+          detail: 'Перенос меняет приёмку или настройку контура: AGENTS.md',
+          at: new Date().toISOString(),
+        },
+      ];
+    });
+    const service = new AttentionService(f.store, f.h);
+    const wait = byKey((await service.active()).items, 'wait:base-check')!;
+    let ticks = 0;
+    await assert.rejects(
+      service.act(act(wait, 'resume'), { stopping: () => true }),
+      (e: unknown) => e instanceof DomainError && e.status === 409,
+    );
+    assert.equal(f.store.read().paused, true);
+    const done = await service.act(act(wait, 'resume'), { tick: () => Promise.resolve(++ticks) });
+    assert.equal(f.store.read().paused, false);
+    assert.equal(ticks, 1);
+    assert.equal(done.resolved, true);
+    await assert.rejects(service.act(act(wait, 'resume')), refusal('attention-resolved'));
+  } finally {
+    f.cleanup();
+  }
+  const p = preparationFixture();
+  try {
+    p.p.execute('preparation_product', {
+      changeId: p.changeId,
+      expectedDigest: null,
+      reason: 'Постановка',
+      content: product,
+    });
+    const view = p.p.status(p.changeId);
+    if (!view.enabled) throw new Error('preparation');
+    p.p.execute('preparation_submit', {
+      changeId: p.changeId,
+      stage: 'product',
+      expectedDigest: view.current!.product!.digest,
+    });
+    const service = new AttentionService(p.store, undefined);
+    const stage = byKey((await service.active()).items, `prep:stage:${p.changeId}:product`)!;
+    await assert.rejects(
+      service.act(act(stage, 'request-changes')),
+      (e: unknown) => e instanceof DomainError && e.status === 400,
+    );
+    const done = await service.act(
+      act(stage, 'request-changes', { input: { comment: 'Добавьте ночной режим' } }),
+    );
+    assert.equal(done.resolved, true);
+    const revision = p.store.read().preparation!.changes[0].product.at(-1)!;
+    assert.equal(revision.status, 'changes-requested');
+    assert.equal(revision.decision!.comment, 'Добавьте ночной режим');
+    await assert.rejects(
+      service.act(act(stage, 'request-changes', { input: { comment: 'Ещё раз' } })),
+      refusal('attention-resolved'),
+    );
+  } finally {
+    p.cleanup();
+  }
+});

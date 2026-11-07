@@ -1108,3 +1108,167 @@ test('Карточка ведущего несёт передачу контек
     f.cleanup();
   }
 });
+
+/* ------------------------------------------------------------------ */
+/* Недостающие фазы: S16, S8, S13, S14                                 */
+/* ------------------------------------------------------------------ */
+
+test('S16 пять фаз: повтор, выкладка в preview — версия, новая проверка — появление, приёмка снимает', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    const change = new Workspace(f.h).create({
+      title: 'Каталог',
+      description: 'Поиск по каталогу',
+      boardIds: [b.id],
+    });
+    f.h.config.preview = {
+      compose: 'main/c.yml',
+      service: 'web',
+      port: 45998,
+      health: { path: '/health', timeoutMs: 1000 },
+    };
+    const manifest = { main: { sha: 'a'.repeat(40), tree: 'b'.repeat(40) } };
+    const verify = () => {
+      const id = randomUUID();
+      f.store.change('fixture.verified', (s) => {
+        const cs = s.changeSets.find((x) => x.id === change.id)!;
+        cs.verifications.push({
+          id,
+          token: randomUUID(),
+          leaseUntil: 0,
+          startedAt: new Date().toISOString(),
+          status: 'passed',
+          finishedAt: new Date().toISOString(),
+          policyDigest: new Workspace(f.h).policyDigest(),
+          specDigest: snapshotDigest(changeSnapshot(s, cs)),
+          tasks: [],
+          boards: [],
+          manifest,
+          manifestDigest: digest(manifest),
+          evidence: [],
+        });
+      });
+      return id;
+    };
+    const v1 = verify();
+    const key = `changeset:${change.id}`;
+    const card = byKey(await engineItems(f), key)!;
+    const repeat = byKey(await engineItems(f, Date.now() + 60_000), key)!;
+    assert.deepEqual([repeat.id, repeat.sourceVersion], [card.id, card.sourceVersion]);
+    // Та же проверка выложена в preview: приёмка без выкладки — версия.
+    f.store.change('fixture.preview', (s) => {
+      s.previews = [
+        {
+          id: 'PV-1',
+          changeSetId: change.id,
+          verificationId: v1,
+          manifestDigest: digest(manifest),
+          policyDigest: 'p',
+          release: 'r1',
+          project: 'dc-r1',
+          token: 't',
+          leaseUntil: 0,
+          status: 'unconfirmed',
+          active: false,
+          startedAt: new Date().toISOString(),
+          url: 'http://127.0.0.1:45998',
+        },
+      ];
+    });
+    const onPreview = byKey(await engineItems(f), key)!;
+    assert.equal(onPreview.id, card.id);
+    assert.notEqual(onPreview.sourceVersion, card.sourceVersion);
+    assert.equal(
+      onPreview.actions.some((a) => a.id === 'deploy-preview'),
+      false,
+    );
+    const v2 = verify();
+    assert.equal(byKey(await engineItems(f), key)!.occurrenceId, v2);
+    new Workspace(f.h).accept(change.id, { actor: 'operator' });
+    assert.equal(byKey(await engineItems(f), key), undefined);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('S8, S13, S14: существенное обновление при том же появлении', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const t = f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    // S8: заметка в треде меняет версию вопроса оператору, не появление.
+    const discussion = new DiscussionService(f.h);
+    const version = () => f.store.discussionVersion(undefined, t.id);
+    const request = discussion.post(
+      {
+        taskId: t.id,
+        kind: 'change-request',
+        text: 'Нужен ночной режим',
+        idempotencyKey: 'attention-phase-1',
+        expectedVersion: version(),
+      },
+      'operator',
+    ).message;
+    discussion.resolve({
+      requestId: request.id,
+      outcome: 'needs-answer',
+      reason: 'Какой режим по умолчанию?',
+      idempotencyKey: 'attention-phase-2',
+      expectedVersion: version(),
+    });
+    const na = `discussion:na:${request.id}`;
+    const asked = byKey(await engineItems(f), na)!;
+    discussion.post(
+      {
+        taskId: t.id,
+        kind: 'note',
+        text: 'Уточнение ведущего',
+        idempotencyKey: 'attention-phase-3',
+        expectedVersion: version(),
+      },
+      'lead',
+    );
+    const asked2 = byKey(await engineItems(f), na)!;
+    assert.equal(asked2.id, asked.id);
+    assert.notEqual(asked2.sourceVersion, asked.sourceVersion);
+    // S13: упавшая операция сохранена заново (версия записи) без новой остановки.
+    const op = 'CC-' + randomUUID();
+    const record = (version: number) => ({
+      id: op,
+      key: 'main:openapi',
+      owner: 'main',
+      status: 'failed',
+      version,
+      error: 'review rejected',
+      held: [],
+      startedAt: '2026-01-01T00:00:00.000Z',
+      history: [{ at: '2026-01-01T00:01:00.000Z', step: 'review', event: 'failed' }],
+    });
+    const save = (value: unknown) =>
+      f.store.atomic(() => f.store.saveLocal('contract-change', 'main', op, value));
+    save(record(3));
+    const cc = byKey(await engineItems(f), `contract-change:${op}`)!;
+    save(record(4));
+    const cc2 = byKey(await engineItems(f), `contract-change:${op}`)!;
+    assert.equal(cc2.id, cc.id);
+    assert.notEqual(cc2.sourceVersion, cc.sourceVersion);
+    // S14: подробность ожидания изменилась при том же моменте ожидания.
+    const at = new Date().toISOString();
+    const setWait = (detail: string) =>
+      f.store.change('fixture.wait', (s) => {
+        s.waits = [{ kind: 'context-lock', detail, at, operation: 'op-1' }];
+      });
+    setWait('Контекст закреплён операцией A');
+    const lock = byKey(await engineItems(f), 'wait:context-lock')!;
+    setWait('Контекст закреплён операцией A; ждёт снятия');
+    const lock2 = byKey(await engineItems(f), 'wait:context-lock')!;
+    assert.equal(lock2.id, lock.id);
+    assert.notEqual(lock2.sourceVersion, lock.sourceVersion);
+  } finally {
+    f.cleanup();
+  }
+});

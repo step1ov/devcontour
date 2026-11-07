@@ -179,3 +179,46 @@ test('История обращений: обработка решает оче�
     f.cleanup();
   }
 });
+
+test('История задач: сбой, решённый отменой, — в истории; сбой, который сам повторился, — нет', () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const t = f.h.addTask(b.id, input('Cancelled later'));
+    const u = f.h.addTask(b.id, input('Retried quietly'));
+    f.h.approve(b.id);
+    const service = new AttentionService(f.store, f.h);
+    const fail = (taskId: string) => {
+      f.h.pause(false);
+      const run = f.h.claim('test')!;
+      assert.equal(run.taskId, taskId);
+      f.h.fail(run.id, run.token, 'unit tests failed', false, 'gate');
+      f.h.pause(true);
+      return run;
+    };
+    const first = fail(t.id);
+    // Корректировка отменяет упавшую задачу без новой попытки.
+    f.h.cancel(t.id, 'replanned by a correction', 'operator');
+    const resolved = service.history().items.filter((i) => i.sourceKey === `work:${t.id}`);
+    assert.deepEqual(
+      resolved.map((i) => i.occurrenceId),
+      [first.id],
+    );
+    assert.ok(resolved[0].resolvedAt);
+    // Сбой без отметки, после которого задача повторена и принята: в истории
+    // только последний сбой перед принятием.
+    const quiet = fail(u.id);
+    f.h.retry(u.id);
+    const lastFailure = fail(u.id);
+    f.h.retry(u.id);
+    complete(f.h, u.id);
+    const own = service.history().items.filter((i) => i.sourceKey === `work:${u.id}`);
+    assert.deepEqual(
+      own.map((i) => i.occurrenceId),
+      [lastFailure.id],
+    );
+    assert.notEqual(quiet.id, lastFailure.id);
+  } finally {
+    f.cleanup();
+  }
+});

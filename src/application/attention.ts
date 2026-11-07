@@ -1693,6 +1693,13 @@ const HISTORY_RUNS = 50;
  */
 workSource.history = (ctx) => {
   const runs = ctx.state.runs.slice(-HISTORY_RUNS);
+  const marks = ctx.store.localRecords<AttentionMark>(ATTENTION_NAMESPACE, undefined);
+  // Отмена — запись журнала (`task.cancelled`), у поручения своего времени нет.
+  const cancelledAt = new Map<string, string>();
+  for (const e of ctx.store.latestEvents(['task.cancelled'], 500)) {
+    const taskId = (e.data as { taskId?: string } | null)?.taskId;
+    if (taskId && !cancelledAt.has(taskId)) cancelledAt.set(taskId, e.at);
+  }
   return runs.flatMap((run): Resolved[] => {
     if (run.status !== 'failed') return [];
     const task = ctx.state.tasks.find((t) => t.id === run.taskId);
@@ -1702,18 +1709,29 @@ workSource.history = (ctx) => {
       task.status === 'done'
         ? ctx.state.runs.findLast((r) => r.taskId === task.id && r.status === 'succeeded')
         : undefined;
-    const resolvedAt = next?.startedAt ?? accepted?.finishedAt;
+    // Задача, отменённая корректировкой после сбоя без новой попытки: сбой
+    // решён отменой.
+    const cancelled = !next && task.status === 'cancelled' ? cancelledAt.get(task.id) : undefined;
+    const resolvedAt = next?.startedAt ?? accepted?.finishedAt ?? cancelled;
     if (!resolvedAt) return [];
+    // В историю — только сбои, которые были карточками: отмеченные
+    // оператором или последний сбой перед решением задачи (принятием или
+    // отменой). Сбой, который контур сам повторил, карточкой не был.
+    const mark = marks[`work:${task.id}`];
+    const marked = mark?.occurrenceId === run.id;
+    const last =
+      ctx.state.runs.findLast((r) => r.taskId === task.id && r.status === 'failed')?.id === run.id;
+    if (!marked && !(last && (accepted || cancelled))) return [];
     return [
       {
         sourceKey: `work:${task.id}`,
         occurrenceId: run.id,
         sourceVersion: d({ kind: run.failureKind ?? null }),
         source: 'work',
-        category: 'technical',
-        actor: 'lead',
-        title: `Задача «${task.title}» не прошла`,
-        reason: ctx.redact(run.error ?? 'Причина не записана'),
+        category: (marked && mark.category) || 'technical',
+        actor: marked && mark.category === 'access' ? 'operator' : 'lead',
+        title: (marked && mark.title) || `Задача «${task.title}» не прошла`,
+        reason: run.error ?? 'Причина не записана',
         since: run.finishedAt ?? run.startedAt,
         subject: { kind: 'task', id: task.id, href: hrefs.task(task.id) },
         resolvedAt,

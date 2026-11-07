@@ -1,12 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DiscussionService } from '../src/application/discussion.ts';
+import { Store } from '../src/core/store.ts';
+import { DevContour } from '../src/core/service.ts';
+import { repositorySchema } from '../src/core/model.ts';
+import { Scheduler } from '../src/runner/scheduler.ts';
+import { serve } from '../src/server/http.ts';
 import { AttentionService } from '../src/application/attention.ts';
 import { adapters } from '../src/runner/adapters.ts';
 import { AgentService } from '../src/application/agent.ts';
 import { PreparationAgent } from '../src/application/preparation-agent.ts';
 import { dumpDatabase, fileStamps, preparationFixture } from './attention-fixture.ts';
-import { fixture, input } from './helpers.ts';
+import { config, fixture, input } from './helpers.ts';
 
 // D04-E: чтение центра внимания не пишет ни строк, ни событий, ни ревизии.
 
@@ -137,6 +145,126 @@ test('attention_list: карточки ведущего без отметок о
       () => agent.execute({ operation: 'attention_list', input: { limit: 51 } }),
       /limit/,
     );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Чистота чтения: обсуждение, бюджет, компонентное хранение и HTTP GET после setup', async () => {
+  // Компонентное хранение: обращения и сбои в базах компонентов.
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-attention-component-'));
+  const workspace = join(root, 'workspace');
+  mkdirSync(workspace);
+  const repos = ['product', 'library'].map((id) => {
+    const path = join(root, id);
+    mkdirSync(path);
+    return repositorySchema.parse({ id, name: id, path, gates: config().gates });
+  });
+  const store = new Store(join(workspace, 'state.sqlite'), repos);
+  const sqlite = () => {
+    const out: string[] = [];
+    const walk = (dir: string) => {
+      for (const name of readdirSync(dir, { withFileTypes: true })) {
+        const path = join(dir, name.name);
+        if (name.isDirectory()) walk(path);
+        else if (name.name.endsWith('.sqlite')) out.push(path);
+      }
+    };
+    walk(root);
+    return out.sort();
+  };
+  try {
+    const h = new DevContour(
+      store,
+      config({ storage: 'component', workspaceRoot: workspace, repositories: repos }),
+    );
+    h.config.budgets = { workspace: { usd: 0.01 }, onUnknown: 'stop' };
+    const tasks = repos.map((r) => {
+      const board = h.createBoard(`Board of ${r.id}`, '', r.id);
+      const id = h.addTask(board.id, { ...input(`Task of ${r.id}`), repositoryId: r.id }).id;
+      h.approve(board.id);
+      return id;
+    });
+    const discussion = new DiscussionService(h);
+    discussion.post(
+      {
+        taskId: tasks[1],
+        kind: 'change-request',
+        text: 'Нужен ночной режим',
+        idempotencyKey: 'attention-pure-1',
+        expectedVersion: 0,
+      },
+      'operator',
+    );
+    store.atomic(() =>
+      store.saveLocal('usage', undefined, 'U1', {
+        id: 'U1',
+        stage: 'implementation',
+        runtime: 'codex',
+        model: 'fixture-model',
+        runtimeVersion: null,
+        startedAt: new Date().toISOString(),
+        outcome: 'returned',
+        promptBytes: 1,
+        promptDigest: 'd'.repeat(64),
+        usage: {
+          inputTokens: 1,
+          outputTokens: 1,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          reportedUsd: 1,
+          complete: true,
+          source: 'fixture',
+        },
+        costUsd: 1,
+        costSource: 'provider-reported',
+      }),
+    );
+    const files = sqlite();
+    assert.ok(files.length >= 2, 'компонентные базы созданы');
+    const before = dumpDatabase(...files);
+    const revision = store.revision();
+    const view = await new AttentionService(store, h).active();
+    new AttentionService(store, h).history();
+    new AttentionService(store, h).agentList({});
+    assert.equal(dumpDatabase(...files), before);
+    assert.equal(store.revision(), revision);
+    const sources = new Set(view.items.map((i) => i.source));
+    assert.ok(sources.has('discussion-request'));
+    assert.ok(sources.has('budget'));
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  // HTTP GET после setup: работающий сервер, данные и журнал не меняются.
+  const f = fixture();
+  const scheduler = new Scheduler(f.h, f.root);
+  try {
+    const b = f.h.createBoard('Board');
+    f.h.addTask(b.id, input('Root task'));
+    f.h.approve(b.id);
+    f.h.pause(false);
+    const run = f.h.claim('test')!;
+    f.h.fail(run.id, run.token, 'fixture failure', false, 'gate');
+    f.h.pause(true);
+    const app = await serve(f.h, scheduler, { port: 0 });
+    try {
+      // Запуск сервера пишет свою роль; сравнивается установившееся состояние.
+      await new Promise((r) => setTimeout(r, 300));
+      const revision = f.store.revision();
+      const events = f.store.lastEventId();
+      const state = JSON.stringify(f.store.read().tasks);
+      for (const query of ['', '?view=history', '?actor=lead']) {
+        const response = await fetch(app.url + '/api/attention' + query);
+        assert.equal(response.status, 200);
+      }
+      assert.equal(f.store.revision(), revision);
+      assert.equal(f.store.lastEventId(), events);
+      assert.equal(JSON.stringify(f.store.read().tasks), state);
+    } finally {
+      await app.close();
+    }
   } finally {
     f.cleanup();
   }

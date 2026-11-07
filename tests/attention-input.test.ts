@@ -5,6 +5,9 @@ import assert from 'node:assert/strict';
 import { AttentionService } from '../src/application/attention.ts';
 import { controlled, inputDemos, inputFixture, prepared, untilQuestion } from './input-fixture.ts';
 import { DomainError } from '../src/core/model.ts';
+import { join } from 'node:path';
+import { executionOf } from '../src/harness/execution.ts';
+import { dumpDatabase } from './attention-fixture.ts';
 import { byKey } from './attention-fixture.ts';
 
 after(() => inputDemos.close());
@@ -32,10 +35,32 @@ test('S15 вопрос исполнителя: забирает задачу, о
     assert.equal(byKey(first, `work:${taskId}`), undefined);
     const repeat = byKey(await items(), key)!;
     assert.deepEqual([repeat.id, repeat.sourceVersion], [card.id, card.sourceVersion]);
-    // Ответ сохранён: та же карточка, новая версия, дальше действует ведущий.
-    f.service.answer(
-      { requestId: request.requestId, text: 'Use JSON as now.', expectedVersion: request.version },
-      'operator',
+    // Чтение при ожидающем вопросе ничего не пишет.
+    const before = dumpDatabase(join(f.root, 'state.sqlite'));
+    await items();
+    assert.equal(dumpDatabase(join(f.root, 'state.sqlite')), before);
+    // Ответ с карточки (правило D03: сообщение обсуждения со ссылкой на версию
+    // ответа); повтор с тем же ключом — прежнее сообщение, без второго ответа.
+    const service = new AttentionService(f.store, f.h, { root: f.root });
+    const body = {
+      sourceKey: card.sourceKey,
+      occurrenceId: card.occurrenceId,
+      expectedVersion: card.sourceVersion,
+      action: 'answer',
+      input: { text: 'Use JSON as now.' },
+      idempotencyKey: 'attention-input-answer-1',
+    };
+    await service.act(body);
+    const revisions = () => executionOf(f.h).engine.inputRequest(request.requestId).answers.length;
+    assert.equal(revisions(), 1);
+    const replay = await service.act(body);
+    assert.equal((replay.result as { replayed: boolean }).replayed, true);
+    assert.equal(revisions(), 1);
+    // Без ключа старая карточка устарела: версия запроса другая.
+    await assert.rejects(
+      service.act({ ...body, idempotencyKey: undefined }),
+      (e: unknown) =>
+        e instanceof DomainError && e.status === 409 && e.details?.code === 'attention-stale',
     );
     const answered = byKey(await items(), key)!;
     assert.equal(answered.id, card.id);
