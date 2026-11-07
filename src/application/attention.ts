@@ -21,7 +21,7 @@ import { boardTasks, planApproved, unapprovedTasks } from '../runner/lead-outloo
 import { boardStep, handoffRedactor, harnessOf, hostContext } from './handoff.ts';
 import { pendingAcceptances, previewProblems, stoppedWorkflows } from './overview.ts';
 import { budgetBlocks, budgetHint } from './context.ts';
-import { inputHolds } from './input.ts';
+import { InputService, inputHolds } from './input.ts';
 import { DiscussionService } from './discussion.ts';
 import { taskOwner } from '../core/sync-state.ts';
 import { baseWaitOf, queueStopOf, quietAttempts, quietOperations } from './queue-stop.ts';
@@ -423,6 +423,90 @@ const handoff: AttentionAction = {
   id: 'handoff',
   kind: 'handoff',
   command: 'session_handoff (devcontour handoff --workspace …)',
+};
+
+/** Состояния вопроса исполнителя, в которых кто-то должен действовать. */
+const inputActionable = new Set([
+  'awaiting-answer',
+  'answer-saved',
+  'stale',
+  'context-review',
+  'ready-to-apply',
+]);
+
+/**
+ * S15. Вопрос исполнителя (`InputService.list`: состояние и кто действует).
+ * Предмет и появление — запрос: новая попытка задаёт новый запрос. Раунд
+ * ревью ответа версию запроса не меняет, поэтому состояние и раунд — в
+ * версии. Блокирующий вопрос забирает задачу первым: отказ ожидания ответа
+ * не становится карточкой задачи.
+ */
+const inputSource: AttentionSourceRule = {
+  id: 'input',
+  engine: true,
+  collect: (ctx) => {
+    const { h } = engineOf(ctx);
+    const { engine } = executionOf(h);
+    const operatorMode = h.config.approvalMode === 'operator';
+    return new InputService(h, ctx.root)
+      .list()
+      .requests.filter((r) => inputActionable.has(r.state))
+      .map((r): Candidate => {
+        const operator = r.actor === 'operator';
+        const title = taskTitle(ctx, r.taskId);
+        let question = '';
+        try {
+          question = engine.inputRequest(r.requestId).question.question;
+        } catch {
+          /* Запрос не найден: карточка остаётся по сводке. */
+        }
+        const answer = operator && r.state === 'awaiting-answer';
+        const apply = operator && operatorMode && r.state === 'ready-to-apply';
+        return {
+          sourceKey: `input:${r.requestId}`,
+          occurrenceId: r.requestId,
+          sourceVersion: `${r.version}:${r.state}:${r.round ?? 0}`,
+          source: 'input',
+          category: operator ? 'question' : 'technical',
+          actor: operator ? 'operator' : 'lead',
+          title: !r.blocking
+            ? `Решение исполнителя по задаче «${title}» ждёт ведущего`
+            : answer
+              ? `Исполнитель спрашивает по задаче «${title}»`
+              : apply
+                ? `Ответ по задаче «${title}» готов к применению`
+                : `Вопрос исполнителя по задаче «${title}»: ${r.state}`,
+          reason: ctx.redact(question ? `${question} — ${r.next}` : r.next),
+          since: r.createdAt,
+          subject: { kind: 'request', id: r.requestId, href: hrefs.task(r.taskId) + '#input' },
+          actions: [
+            ...(answer
+              ? [
+                  {
+                    id: 'answer',
+                    kind: 'domain' as const,
+                    label: 'Ответить',
+                    input: 'text+option' as const,
+                  },
+                ]
+              : []),
+            ...(apply
+              ? [
+                  {
+                    id: 'apply',
+                    kind: 'domain' as const,
+                    label: 'Применить ответ',
+                    input: 'confirm' as const,
+                  },
+                ]
+              : []),
+            ...(operator ? [] : [handoff]),
+          ],
+          covered: r.blocking ? unclaimed(ctx, [r.taskId]) : [],
+          basis: { taskId: r.taskId, requestId: r.requestId, expectedVersion: r.version },
+        };
+      });
+  },
 };
 
 /**
@@ -1207,10 +1291,12 @@ const discussionNeedsAnswerSource: AttentionSourceRule = {
 };
 
 /**
- * Источники движка в порядке владения корнями: удержание операцией, бюджет,
+ * Источники движка в порядке владения корнями: вопрос исполнителя,
+ * удержание операцией, бюджет,
  * пауза (свёртка отказов провайдера), ожидания, задача, доска, план.
  */
 export const engineSources: AttentionSourceRule[] = [
+  inputSource,
   contractChangeSource,
   budgetSource,
   queueSource,
