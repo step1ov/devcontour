@@ -785,6 +785,75 @@ test('Explicit storage migration relocates historical local task bodies and pres
   }
 });
 
+test('Explicit storage migration refuses up front when the component database already has a clashing discussion', async () => {
+  const f = await fixture(false);
+  let reopened: Store | undefined;
+  try {
+    const b = f.h.createBoard('Library board', '', 'library');
+    const task = f.h.addTask(b.id, { ...input(), repositoryId: 'library' });
+    new DiscussionService(f.h).post(
+      {
+        taskId: task.id,
+        kind: 'note',
+        text: 'OWN_NOTE',
+        idempotencyKey: 'own-note-1',
+        expectedVersion: 0,
+      },
+      'operator',
+    );
+    const thread = f.store.discussionPage('library', task.id, 0, 50);
+    assert.equal(thread.length, 1);
+    const before = f.store.read(),
+      events = f.store.allEvents();
+    await f.scheduler.stop();
+    f.store.close();
+    // База компонента без задач, но с чужим тредом: та же последовательность.
+    const library = f.c.repositories.find((r) => r.id === 'library')!;
+    const componentDb = join(library.path, '.devcontour-local', 'state.sqlite');
+    await mkdir(join(library.path, '.devcontour-local'), { recursive: true });
+    const foreign = new DatabaseSync(componentDb);
+    foreign.exec(
+      'CREATE TABLE discussion (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, task_id TEXT NOT NULL, author TEXT NOT NULL, idem TEXT NOT NULL, kind TEXT NOT NULL, reply_to TEXT, data TEXT NOT NULL, UNIQUE(task_id, author, idem))',
+    );
+    foreign
+      .prepare('INSERT INTO discussion VALUES(?,?,?,?,?,?,?,?)')
+      .run(thread[0].seq, 'M-foreign', 'T-foreign', 'operator', 'foreign', 'note', null, '{}');
+    foreign.close();
+    assert.throws(
+      () => new Store(join(f.data, 'state.sqlite'), f.c.repositories, true),
+      (e: Error) =>
+        /^Миграция хранения остановлена: в базе компонента library уже есть обсуждения/.test(
+          e.message,
+        ) && !/SQLITE|constraint/i.test(e.message),
+    );
+    // Отказ до записи: coordinator и тред прежние, чужая запись на месте.
+    const central = new Store(join(f.data, 'state.sqlite'));
+    try {
+      assert.deepEqual(central.read(), before);
+      assert.deepEqual(central.allEvents(), events);
+      assert.deepEqual(central.discussionPage(undefined, task.id, 0, 50), thread);
+    } finally {
+      central.close();
+    }
+    const check = new DatabaseSync(componentDb);
+    assert.deepEqual(
+      check
+        .prepare('SELECT seq,id FROM discussion')
+        .all()
+        .map((r) => ({ ...r })),
+      [{ seq: thread[0].seq, id: 'M-foreign' }],
+    );
+    // Чужая таблица убрана — миграция проходит, тред сохраняет seq.
+    check.exec('DROP TABLE discussion');
+    check.close();
+    reopened = new Store(join(f.data, 'state.sqlite'), f.c.repositories, true);
+    assert.deepEqual(reopened.discussionPage('library', task.id, 0, 50), thread);
+  } finally {
+    reopened?.close();
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
 test('Killed writer is recovered through SQLite rollback journals without losing graph consistency', async () => {
   const f = await fixture();
   let closed = false;

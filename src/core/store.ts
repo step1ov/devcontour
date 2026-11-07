@@ -386,10 +386,30 @@ export class Store {
                   reply_to: string | null;
                   data: string;
                 }[];
-                for (const row of rows) {
+                // Задачи workspace и владельцы вне компонентов остаются.
+                const moves = rows.flatMap((row) => {
                   const owner = owners.get(row.task_id);
-                  // Задачи workspace и владельцы вне компонентов остаются.
-                  if (!owner || !locations.some((l) => l.id === owner)) continue;
+                  return owner && locations.some((l) => l.id === owner) ? [{ row, owner }] : [];
+                });
+                // Seq — версия треда, id — ссылки ответов: перенос их не меняет.
+                // Записи с тем же seq, id или задачей в базе компонента — чужая
+                // история; слияние изменило бы версии или порядок тредов,
+                // поэтому миграция отказывает до записи и называет компонент.
+                for (const owner of new Set(moves.map((m) => m.owner))) {
+                  const schema = this.components.schema(owner);
+                  if (!this.discussionTable(schema, false)) continue;
+                  const clash = this.db.prepare(
+                    `SELECT 1 FROM ${schema}.discussion WHERE seq=? OR id=? OR task_id=? LIMIT 1`,
+                  );
+                  const clashes = moves.filter(
+                    (m) => m.owner === owner && clash.get(m.row.seq, m.row.id, m.row.task_id),
+                  ).length;
+                  if (clashes)
+                    throw new Error(
+                      `Миграция хранения остановлена: в базе компонента ${owner} уже есть обсуждения с теми же номерами, идентификаторами или задачами (${clashes} из переносимых записей). Перенос изменил бы версии или порядок тредов. Сохраните таблицу discussion базы компонента ${owner} отдельно, уберите её и повторите миграцию`,
+                    );
+                }
+                for (const { row, owner } of moves) {
                   const schema = this.components.schema(owner);
                   this.discussionTable(schema, true);
                   this.db
