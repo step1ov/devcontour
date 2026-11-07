@@ -1,3 +1,4 @@
+import { DiscussionService } from '../src/application/discussion.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
@@ -734,11 +735,26 @@ test('Explicit storage migration relocates historical local task bodies and pres
   let reopened: Store | undefined;
   try {
     const b = f.h.createBoard('Old library board', 'LEGACY_LOCAL_BOARD', 'library');
-    f.h.addTask(b.id, {
+    const task = f.h.addTask(b.id, {
       ...input(),
       repositoryId: 'library',
       description: 'LEGACY_LOCAL_SPECIFICATION',
     });
+    // Обсуждение задачи компонента до миграции: две записи треда.
+    const discussion = new DiscussionService(f.h);
+    for (const [n, text] of ['LEGACY_NOTE_ONE', 'LEGACY_NOTE_TWO'].entries())
+      discussion.post(
+        {
+          taskId: task.id,
+          kind: 'note',
+          text,
+          idempotencyKey: `legacy-note-${n}`,
+          expectedVersion: n,
+        },
+        'operator',
+      );
+    const thread = f.store.discussionPage('library', task.id, 0, 50);
+    assert.equal(thread.length, 2);
     // Локальная запись компонента (вызов модели) до миграции.
     f.store.atomic(() =>
       f.store.saveLocal('usage', 'library', 'U-legacy', { id: 'U-legacy', note: 'LEGACY_USAGE' }),
@@ -754,7 +770,12 @@ test('Explicit storage migration relocates historical local task bodies and pres
     assert.deepEqual(reopened.localRecords('usage', 'library'), {
       'U-legacy': { id: 'U-legacy', note: 'LEGACY_USAGE' },
     });
+    // Тред переезжает в базу компонента с той же последовательностью: версия
+    // треда и ответы по ключу повтора прежние.
+    assert.deepEqual(reopened.discussionPage('library', task.id, 0, 50), thread);
+    assert.equal(reopened.discussionVersion('library', task.id), thread[1].seq);
     const bytes = await readFile(join(f.data, 'state.sqlite'));
+    assert.equal(bytes.includes(Buffer.from('LEGACY_NOTE_ONE')), false);
     assert.equal(bytes.includes(Buffer.from('LEGACY_LOCAL_SPECIFICATION')), false);
     assert.equal(bytes.includes(Buffer.from('LEGACY_LOCAL_BOARD')), false);
     assert.equal(bytes.includes(Buffer.from('LEGACY_USAGE')), false);
