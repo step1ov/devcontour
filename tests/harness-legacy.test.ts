@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
-import { WORKSPACE_OWNER, digestOf } from 'devcontour-harness';
+import { WORKSPACE_OWNER, digestOf, executionDigest } from 'devcontour-harness';
 import { configSchema, type Config } from '../src/core/model.ts';
 import { canonical, type CompletionReceipt } from '../src/core/sync-model.ts';
 import type { UsageRecord } from '../src/core/usage.ts';
@@ -37,6 +37,10 @@ import { repositories } from '../src/core/repositories.ts';
 import { DevContourExecutionStore } from '../src/harness/store.ts';
 import { executionOf } from '../src/harness/execution.ts';
 import { dataDoctor } from '../src/runner/doctor.ts';
+import { InputService, inputHolds } from '../src/application/input.ts';
+import { devcontourHandoff } from '../src/application/handoff.ts';
+import { AgentService } from '../src/application/agent.ts';
+import { approvalPolicyDigest, policyFromConfig } from '../src/harness/policy.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { syncGit } from '../src/runner/git-sync.ts';
@@ -594,6 +598,64 @@ for (const kind of ['central', 'component'] as const) {
       s = store.read();
       assert.equal(s.tasks.find((t) => t.id === property.id)!.status, 'ready');
 
+      await scheduler.stop();
+      store.close();
+    }));
+
+  test(`D03-G ${kind}: база без вопросов исполнителя читается как прежде; первая новая выдача закрепляет порог без снимка`, () =>
+    withLegacy(kind, async (c) => {
+      const before = c.files.map(dump);
+      const raw = new DevContourExecutionStore(openStore(c), options);
+      assert.deepEqual(
+        raw.read((v) => v.locals('input-requests')),
+        [],
+      );
+      assert.deepEqual(
+        raw.read((v) => v.locals('input-requests', 'app')),
+        [],
+      );
+      assert.equal(
+        raw.read((v) => v.local('input-requests', 'app', 'IR-' + '0'.repeat(24))),
+        undefined,
+      );
+      raw.close();
+      const { store, h, config, scheduler } = workspace(c);
+      // Пути чтения: список, карточка, пакет передачи, агентский список.
+      assert.deepEqual(new InputService(h).list().requests, []);
+      assert.equal(inputHolds(h).size, 0);
+      const handoff = devcontourHandoff(h, {});
+      assert.equal(handoff.pack.inputs?.length ?? 0, 0);
+      assert.ok(handoff.pack.works.every((w) => !('input' in w)));
+      assert.ok(
+        !['answer-input', 'apply-input', 'close-follow-up'].includes(
+          handoff.host.next?.action ?? '',
+        ),
+      );
+      assert.deepEqual(
+        new AgentService(h, c.data).execute({ operation: 'input_list', input: {} }),
+        { requests: [] },
+      );
+      // Порог вопросов не входит в утверждаемую политику и digest исполнения.
+      const tuned = { ...config, inputPolicy: { threshold: 3 } };
+      assert.equal(approvalPolicyDigest(tuned), approvalPolicyDigest(config));
+      assert.equal(
+        executionDigest(policyFromConfig(tuned)),
+        executionDigest(policyFromConfig(config)),
+      );
+      // Workspace прежней версии на месте (`workspace()` дописывает только
+      // корень рабочих деревьев в config.json, как другие тесты T35).
+      assert.deepEqual(c.files.map(dump), before, 'чтение не записало ничего');
+      assert.equal(dataDoctor(configOf(c), c.data).compatible, true);
+      // Первая выдача новой версии пишет закреплённый порог, без снимка.
+      await scheduler.init();
+      await scheduler.tick();
+      h.pause(false);
+      const run = h.claim(scheduler.owner);
+      assert.ok(run, 'ожидающая задача прежней версии выдаётся');
+      const stored = store.read().runs.find((r) => r.id === run.id)!;
+      assert.deepEqual(stored.inputPolicy, { threshold: 7, criticalPaths: [] });
+      assert.equal(stored.pinned?.contextDigest, undefined);
+      assert.equal(store.read().tasks.find((t) => t.id === run.taskId)!.inputContext, undefined);
       await scheduler.stop();
       store.close();
     }));
