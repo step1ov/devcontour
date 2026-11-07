@@ -27,7 +27,7 @@ When the active change has an intake (`preparation_quick`, or the operator's «�
 
 ## Task discussions
 
-Each task has a local discussion (notes, change requests to the lead, dispositions) that never changes the task, approvals, queue or attempts and is not carried by Git sync. Unhandled change requests come with `session_handoff` and `discussion_inbox`; reading one is not handling it — record `discussion_resolve` (accepted with refs to the new board revision or tasks, rejected with a reason, or needs-answer). Post with `discussion_post` using `idempotencyKey` and the `expectedVersion` you read.
+Each task has a local discussion (notes, change requests to the lead, dispositions) that never changes the task, approvals, queue or attempts and is not carried by Git sync. Unhandled change requests come with `session_handoff` and `discussion_inbox` as bounded excerpts with the text size and the thread `version`; read the full text with `discussion_read`. Reading one is not handling it — record `discussion_resolve` with that `version` as `expectedVersion` (accepted with refs to the new board revision or tasks, rejected with a reason, or needs-answer). After needs-answer the user replies in the panel and the request returns to the inbox marked `reopened` until your next disposition; a corrected request appears only in its latest version. Post with `discussion_post` using `idempotencyKey` and the `expectedVersion` you read.
 
 ## Start from a specification
 
