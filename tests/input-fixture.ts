@@ -1,12 +1,13 @@
 // Общая обстановка тестов вопросов исполнителя: demo-workspace, задача с
 // demo-вопросом и управляемый reviewer ответа. Модели не вызываются.
-import { readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { demoPool, testDemo } from './demo-pool.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
+import { repositories } from '../src/core/repositories.ts';
 import { DEMO_ASK, adapters, type AgentAdapter } from '../src/runner/adapters.ts';
 import { InputService } from '../src/application/input.ts';
 
@@ -19,19 +20,33 @@ export async function inputFixture(
     approvalMode?: 'agent' | 'operator';
     /** Правка config.json demo до загрузки (порог, окружение, бюджет восстановлений). */
     edit?: (raw: Record<string, unknown>) => void;
+    /**
+     * `component` — demo переведён в компонентное хранение тем же переносом,
+     * что `storage-migrate`: задачи, попытки и локальные записи — в базе
+     * репозитория (её каталог исключён из Git репозитория, как в проекте).
+     */
+    storage?: 'central' | 'component';
   } = {},
 ) {
   const seed = await inputDemos.acquire();
   const root = seed.root;
-  const store = new Store(join(root, 'state.sqlite'));
   const path = join(root, 'config.json');
-  if (options.approvalMode || options.edit) {
+  if (options.approvalMode || options.edit || options.storage === 'component') {
     const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
     if (options.approvalMode) raw.approvalMode = options.approvalMode;
+    if (options.storage === 'component') raw.storage = 'component';
     options.edit?.(raw);
     writeFileSync(path, JSON.stringify(raw, null, 2) + '\n');
   }
-  const h = new DevContour(store, loadConfig(path));
+  const config = loadConfig(path);
+  const components = config.storage === 'component' ? repositories(config) : undefined;
+  if (components) {
+    for (const r of components)
+      appendFileSync(join(r.path, '.git', 'info', 'exclude'), '.devcontour-local/\n');
+    new Store(join(root, 'state.sqlite'), components, true).close();
+  }
+  const store = new Store(join(root, 'state.sqlite'), components);
+  const h = new DevContour(store, config);
   const scheduler = new Scheduler(h, root, runtimes);
   await scheduler.init();
   const role = store.read().tasks[0].role;

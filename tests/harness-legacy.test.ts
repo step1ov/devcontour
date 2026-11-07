@@ -36,12 +36,12 @@ import { Workspace } from '../src/core/workspace.ts';
 import { repositories } from '../src/core/repositories.ts';
 import { DevContourExecutionStore } from '../src/harness/store.ts';
 import { executionOf } from '../src/harness/execution.ts';
-import { dataDoctor } from '../src/runner/doctor.ts';
+import { dataDoctor, newStateCheck } from '../src/runner/doctor.ts';
+import { ATTENTION_NAMESPACE, AttentionService } from '../src/application/attention.ts';
+import { DiscussionService } from '../src/application/discussion.ts';
 import { InputService, inputHolds } from '../src/application/input.ts';
 import { devcontourHandoff } from '../src/application/handoff.ts';
 import { AgentService } from '../src/application/agent.ts';
-import { DiscussionService } from '../src/application/discussion.ts';
-import { AttentionService } from '../src/application/attention.ts';
 import { approvalPolicyDigest, policyFromConfig } from '../src/harness/policy.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
@@ -704,6 +704,68 @@ for (const kind of ['central', 'component'] as const) {
         ['Первая заметка после обновления'],
       );
       reopened.store.close();
+    }));
+
+  test(`D02-G/D04-G ${kind}: база без обсуждений и отметок внимания читается пустой и не меняется`, () =>
+    withLegacy(kind, async (c) => {
+      const before = c.files.map(dump);
+      const { store, h } = workspace(c);
+      const agent = new AgentService(h, c.data);
+      const read = <T>(operation: string, input: unknown) =>
+        agent.execute({ operation, input }) as T;
+      // Таблицы обсуждений и пространства `attention` в базах прежней версии нет.
+      for (const file of c.files) {
+        const db = new DatabaseSync(file, { readOnly: true });
+        const tables = db
+          .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='discussion'")
+          .all();
+        db.close();
+        assert.deepEqual(tables, [], `${file}: таблица discussion есть до чтения`);
+      }
+      // Обсуждение каждой задачи прежней версии — пустой тред версии 0.
+      const tasks = store.read().tasks;
+      assert.ok(tasks.length > 0);
+      for (const task of tasks) {
+        const thread = read<{ version: number; messages: unknown[] }>('discussion_read', {
+          taskId: task.id,
+        });
+        assert.equal(thread.version, 0, task.title);
+        assert.deepEqual(thread.messages, [], task.title);
+      }
+      const inbox = read<{ requests: unknown[]; nextCursor?: string }>('discussion_inbox', {});
+      assert.deepEqual(inbox.requests, []);
+      assert.equal(inbox.nextCursor, undefined);
+      assert.deepEqual(new DiscussionService(h).awaitingOperator(20), []);
+      // Центр внимания: агентский список без обращений обсуждения, отметок
+      // нет — ни одна карточка панели не прочитана и не подтверждена.
+      const listed = read<{ items: { source: string }[] }>('attention_list', {});
+      assert.ok(listed.items.every((i) => !i.source.startsWith('discussion')));
+      const attention = new AttentionService(store, h);
+      const panel = await attention.active();
+      assert.ok(panel.items.length > 0, 'карточки прежней версии видны');
+      assert.ok(panel.items.every((i) => !i.source.startsWith('discussion')));
+      assert.ok(panel.items.every((i) => !i.state.read && !i.state.acknowledged));
+      assert.deepEqual(attention.marks(), {});
+      assert.deepEqual(store.localEntries(ATTENTION_NAMESPACE), []);
+      // Опись doctor: записей новых версий нет.
+      const inventory = dataDoctor(configOf(c), c.data).checks.find(
+        (x) => x.id === 'compat:new-state',
+      );
+      assert.deepEqual(
+        inventory,
+        newStateCheck({
+          quickIntakes: 0,
+          setupProposals: 0,
+          expansions: 0,
+          discussions: 0,
+          attentionMarks: 0,
+          inputRequests: 0,
+          openInputRequests: 0,
+          quickSetupMarks: 0,
+        }),
+      );
+      store.close();
+      assert.deepEqual(c.files.map(dump), before, 'чтение не записало ничего');
     }));
 }
 

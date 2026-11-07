@@ -362,6 +362,53 @@ export class Store {
                     .run(row.namespace, row.owner, row.key);
                 }
               }
+              // Обсуждения задач компонента — локальная таблица владельца
+              // задачи: после миграции она читается из базы компонента.
+              // Последовательность (версия треда) сохраняется.
+              if (this.discussionTable('main', false)) {
+                // Владелец — как `taskOwner`: задачи workspace — в общей базе.
+                const owners = new Map<string, string | undefined>(
+                  (
+                    raw as { tasks: { id: string; scope?: string; repositoryId?: string }[] }
+                  ).tasks.map((t) => [t.id, t.scope === 'workspace' ? undefined : t.repositoryId]),
+                );
+                const rows = this.db
+                  .prepare(
+                    'SELECT seq,id,task_id,author,idem,kind,reply_to,data FROM main.discussion ORDER BY seq',
+                  )
+                  .all() as {
+                  seq: number;
+                  id: string;
+                  task_id: string;
+                  author: string;
+                  idem: string;
+                  kind: string;
+                  reply_to: string | null;
+                  data: string;
+                }[];
+                for (const row of rows) {
+                  const owner = owners.get(row.task_id);
+                  // Задачи workspace и владельцы вне компонентов остаются.
+                  if (!owner || !locations.some((l) => l.id === owner)) continue;
+                  const schema = this.components.schema(owner);
+                  this.discussionTable(schema, true);
+                  this.db
+                    .prepare(
+                      `INSERT INTO ${schema}.discussion(seq,id,task_id,author,idem,kind,reply_to,data) VALUES(?,?,?,?,?,?,?,?)`,
+                    )
+                    .run(
+                      row.seq,
+                      row.id,
+                      row.task_id,
+                      row.author,
+                      row.idem,
+                      row.kind,
+                      row.reply_to,
+                      row.data,
+                    );
+                  this.db.prepare('DELETE FROM main.discussion WHERE seq=?').run(row.seq);
+                }
+              }
             }
             this.db.exec('COMMIT');
           } catch (e) {
@@ -809,6 +856,20 @@ export class Store {
         )
         .get(),
     );
+  }
+  /**
+   * Число сообщений обсуждений у всех владельцев: coordinator и базы
+   * компонентов. Только чтение; базы без таблицы дают 0.
+   */
+  discussionCount(): number {
+    const schemas = ['main', ...(this.components?.locations.map((l) => l.schema) ?? [])];
+    let count = 0;
+    for (const schema of schemas)
+      if (this.discussionTable(schema, false))
+        count += (
+          this.db.prepare(`SELECT count(*) AS n FROM ${schema}.discussion`).get() as { n: number }
+        ).n;
+    return count;
   }
   private discussionRows(sql: string, owner: string | undefined, ...args: (string | number)[]) {
     const schema = this.syncSchema(owner);

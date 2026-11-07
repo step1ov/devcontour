@@ -2,6 +2,9 @@
 // снимок с ответом, ревью, применение и доставка — без вызова моделей.
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { implementationOutputSchema } from 'devcontour-harness';
 import { controlled, inputDemos, inputFixture, prepared, untilQuestion } from './input-fixture.ts';
 import { fixture, input } from './helpers.ts';
@@ -17,6 +20,7 @@ import {
 import { InputService, inputHolds } from '../src/application/input.ts';
 import { executionOf } from '../src/harness/execution.ts';
 import { technicalReviewer } from '../src/harness/policy.ts';
+import { repositories } from '../src/core/repositories.ts';
 
 after(() => inputDemos.close());
 
@@ -137,99 +141,126 @@ test('The demo [demo:ask] writer is a marked fixture and stops the attempt with 
   }
 });
 
-test('Answer → snapshot → review → target → apply: the next attempt pins the snapshot and the answer is delivered', async () => {
-  const f = await inputFixture();
-  const prompts: string[] = [];
-  const runtimes = controlled({ prompts });
-  try {
-    const { taskId, boardId } = f.askingTask();
-    f.h.approve(boardId);
-    f.h.pause(false);
-    const scheduler = new Scheduler(f.h, f.root, runtimes);
-    await scheduler.init();
-    await scheduler.drain();
-    const service = new InputService(f.h, f.root, runtimes);
-    const [listed] = service.list({ taskId }).requests;
-    assert.equal(listed.state, 'awaiting-answer');
-    assert.equal(
-      listed.actor,
-      'lead',
-      'вопрос без минимумов в режиме agent ведущий может ответить',
-    );
-    const answered = service.answer(
-      {
+for (const storage of ['central', 'component'] as const)
+  test(`Answer → snapshot → review → target → apply (${storage} storage): the next attempt pins the snapshot and the answer is delivered`, async () => {
+    const f = await inputFixture(adapters, { storage });
+    const prompts: string[] = [];
+    const runtimes = controlled({ prompts });
+    try {
+      const { taskId, boardId } = f.askingTask();
+      f.h.approve(boardId);
+      f.h.pause(false);
+      const scheduler = new Scheduler(f.h, f.root, runtimes);
+      await scheduler.init();
+      await scheduler.drain();
+      const service = new InputService(f.h, f.root, runtimes);
+      const [listed] = service.list({ taskId }).requests;
+      assert.equal(listed.state, 'awaiting-answer');
+      assert.equal(
+        listed.actor,
+        'lead',
+        'вопрос без минимумов в режиме agent ведущий может ответить',
+      );
+      const answered = service.answer(
+        {
+          requestId: listed.requestId,
+          text: 'Use JSON as now.',
+          optionId: 'json',
+          expectedVersion: 1,
+        },
+        'operator',
+      );
+      assert.equal(answered.revision, 1);
+      assert.equal(service.list({ taskId }).requests[0].state, 'answer-saved');
+      const context = await service.context({ requestId: listed.requestId });
+      // Повтор — тот же снимок.
+      assert.equal(
+        (await service.context({ requestId: listed.requestId })).contextDigest,
+        context.contextDigest,
+      );
+      // Применение без ревью отказывает до активации.
+      const early = service.target({
         requestId: listed.requestId,
-        text: 'Use JSON as now.',
-        optionId: 'json',
-        expectedVersion: 1,
-      },
-      'operator',
-    );
-    assert.equal(answered.revision, 1);
-    assert.equal(service.list({ taskId }).requests[0].state, 'answer-saved');
-    const context = await service.context({ requestId: listed.requestId });
-    // Повтор — тот же снимок.
-    assert.equal(
-      (await service.context({ requestId: listed.requestId })).contextDigest,
-      context.contextDigest,
-    );
-    // Применение без ревью отказывает до активации.
-    const early = service.target({
-      requestId: listed.requestId,
-      contextDigest: context.contextDigest,
-    });
-    assert.ok(
-      early.problems.some((p) => /input_review/.test(p)),
-      JSON.stringify(early.problems),
-    );
-    const review = await service.review({
-      requestId: listed.requestId,
-      contextDigest: context.contextDigest,
-      authorRuntime: 'codex',
-    });
-    assert.equal(review.approved, true);
-    assert.equal(service.list({ taskId }).requests[0].state, 'ready-to-apply');
-    const target = service.target({
-      requestId: listed.requestId,
-      contextDigest: context.contextDigest,
-    });
-    assert.deepEqual(target.problems, []);
-    const apply = {
-      requestId: listed.requestId,
-      answerDigest: answered.answerDigest,
-      expectedVersion: target.version,
-      contextDigest: context.contextDigest,
-      targetDigest: target.targetDigest!,
-    };
-    const applied = service.apply(apply, 'lead');
-    assert.equal(applied.applied, true);
-    // Повтор применения — без второй попытки и без изменений.
-    assert.equal(service.apply(apply, 'lead').changed, false);
-    const task = f.store.read().tasks.find((t) => t.id === taskId)!;
-    assert.equal(task.status, 'ready');
-    assert.equal(task.inputContext?.digest, context.contextDigest);
-    assert.equal(service.list({ taskId }).requests[0].state, 'applied-awaiting-claim');
-    prompts.length = 0;
-    await scheduler.drain();
-    await scheduler.stop();
-    const done = f.store.read().tasks.find((t) => t.id === taskId)!;
-    assert.equal(done.status, 'done', done.failure);
-    const run = f.store.read().runs.findLast((r) => r.taskId === taskId)!;
-    assert.equal(run.pinned?.contextDigest, context.contextDigest);
-    assert.equal(run.input?.requestId, listed.requestId);
-    // Writer и оба reviewer видели файл ответа.
-    const marker = `### input/${listed.requestId}.md`;
-    assert.ok(prompts.filter((p) => p.startsWith('writer:')).every((p) => p.includes(marker)));
-    const reviews = prompts.filter((p) => p.startsWith('review:'));
-    assert.equal(reviews.length, 2);
-    assert.ok(reviews.every((p) => p.includes(marker)));
-    const [after] = service.list({ taskId }).requests;
-    assert.equal(after.state, 'delivered');
-    assert.equal(after.lifecycle, 'applied');
-  } finally {
-    await f.cleanup();
-  }
-});
+        contextDigest: context.contextDigest,
+      });
+      assert.ok(
+        early.problems.some((p) => /input_review/.test(p)),
+        JSON.stringify(early.problems),
+      );
+      const review = await service.review({
+        requestId: listed.requestId,
+        contextDigest: context.contextDigest,
+        authorRuntime: 'codex',
+      });
+      assert.equal(review.approved, true);
+      assert.equal(service.list({ taskId }).requests[0].state, 'ready-to-apply');
+      const target = service.target({
+        requestId: listed.requestId,
+        contextDigest: context.contextDigest,
+      });
+      assert.deepEqual(target.problems, []);
+      const apply = {
+        requestId: listed.requestId,
+        answerDigest: answered.answerDigest,
+        expectedVersion: target.version,
+        contextDigest: context.contextDigest,
+        targetDigest: target.targetDigest!,
+      };
+      const applied = service.apply(apply, 'lead');
+      assert.equal(applied.applied, true);
+      // Повтор применения — без второй попытки и без изменений.
+      assert.equal(service.apply(apply, 'lead').changed, false);
+      const task = f.store.read().tasks.find((t) => t.id === taskId)!;
+      assert.equal(task.status, 'ready');
+      assert.equal(task.inputContext?.digest, context.contextDigest);
+      assert.equal(service.list({ taskId }).requests[0].state, 'applied-awaiting-claim');
+      prompts.length = 0;
+      await scheduler.drain();
+      await scheduler.stop();
+      const done = f.store.read().tasks.find((t) => t.id === taskId)!;
+      assert.equal(done.status, 'done', done.failure);
+      const run = f.store.read().runs.findLast((r) => r.taskId === taskId)!;
+      assert.equal(run.pinned?.contextDigest, context.contextDigest);
+      assert.equal(run.input?.requestId, listed.requestId);
+      // Writer и оба reviewer видели файл ответа.
+      const marker = `### input/${listed.requestId}.md`;
+      assert.ok(prompts.filter((p) => p.startsWith('writer:')).every((p) => p.includes(marker)));
+      const reviews = prompts.filter((p) => p.startsWith('review:'));
+      assert.equal(reviews.length, 2);
+      assert.ok(reviews.every((p) => p.includes(marker)));
+      const [after] = service.list({ taskId }).requests;
+      assert.equal(after.state, 'delivered');
+      assert.equal(after.lifecycle, 'applied');
+      // Запрос хранится у владельца задачи: в компонентном хранении — в базе
+      // репозитория, центральная база его не содержит.
+      const requests = (file: string) => {
+        const db = new DatabaseSync(file, { readOnly: true });
+        try {
+          return db
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='local_workflow'")
+            .get()
+            ? (
+                db
+                  .prepare(
+                    "SELECT count(*) AS n FROM local_workflow WHERE namespace='input-requests'",
+                  )
+                  .get() as { n: number }
+              ).n
+            : 0;
+        } finally {
+          db.close();
+        }
+      };
+      const [repo] = repositories(f.h.config);
+      const component = join(repo.path, '.devcontour-local', 'state.sqlite');
+      assert.deepEqual(
+        [requests(join(f.root, 'state.sqlite')), existsSync(component) ? requests(component) : 0],
+        storage === 'component' ? [0, 1] : [1, 0],
+      );
+    } finally {
+      await f.cleanup();
+    }
+  });
 
 test('reopen keeps the open question; after re-approval of the same spec the answer applies as usual', async () => {
   const runtimes = controlled();
