@@ -126,11 +126,14 @@ export function AttentionCenter({
   // Ответ относится к своему компоненту: при смене фильтра прежний не
   // показывается; запрос ограничен по времени, отказ назван.
   const [filtered, setFiltered] = useState<{ component: string; view: AttentionView }>();
-  const [filterError, setFilterError] = useState('');
+  // Ошибка тоже относится к своему компоненту: при выборе другого прежняя
+  // не показывается, пока он не ответит.
+  const [failed, setFailed] = useState<{ component: string; error: string }>();
+  const filterError = component && failed?.component === component ? failed.error : '';
   useEffect(() => {
     if (!component) {
       setFiltered(undefined);
-      setFilterError('');
+      setFailed(undefined);
       return;
     }
     const abort = new AbortController();
@@ -141,13 +144,15 @@ export function AttentionCenter({
       .then((r) => {
         if (r.ok && r.body) {
           setFiltered({ component, view: r.body });
-          setFilterError('');
+          setFailed(undefined);
         } else
-          setFilterError(
-            r.status === 0
-              ? 'сервер не отвечает или не ответил за 10 с'
-              : (r.body?.error ?? `сервер ответил ${r.status}`),
-          );
+          setFailed({
+            component,
+            error:
+              r.status === 0
+                ? 'сервер не отвечает или не ответил за 10 с'
+                : (r.body?.error ?? `сервер ответил ${r.status}`),
+          });
       })
       .catch(() => undefined);
     return () => abort.abort();
@@ -200,11 +205,14 @@ export function AttentionCenter({
   const drafts = useDrafts();
   const draftsNow = useRef(drafts);
   draftsNow.current = drafts;
-  // Пустые черновики исчезнувших появлений не копятся.
+  // Пустые черновики исчезнувших появлений не копятся. Сверка — с тем
+  // списком, что показан (ответ фильтра компонента может опережать общий
+  // опрос); пока ответа фильтра нет, сверять не с чем.
+  const shownLoaded = !!attention.view && (!component || filtered?.component === component);
   useEffect(() => {
-    if (!attention.view) return;
-    for (const key of emptyGoneDrafts(drafts, attention.items)) removeDraft(key);
-  }, [drafts, attention.items, attention.view]);
+    if (!shownLoaded) return;
+    for (const key of emptyGoneDrafts(drafts, source)) removeDraft(key);
+  }, [drafts, source, shownLoaded]);
   const list = useRef<HTMLDivElement>(null);
   const operatorHeading = useRef<HTMLHeadingElement>(null);
   const leadHeading = useRef<HTMLElement>(null);
@@ -236,9 +244,12 @@ export function AttentionCenter({
     }
     if (now.titles.has(key)) {
       // Карточка перешла в другую группу (ответ сохранён — дальше ведущий):
-      // элемент перемонтирован, фокус возвращается к нему же.
+      // элемент перемонтирован, фокус возвращается к нему же. Новое
+      // появление под пустой формой закрыло её: фокус — на карточку
+      // нового появления, а не на body.
       const moved = prev.operator.includes(key) !== now.operator.includes(key);
-      if (!moved || (document.activeElement && document.activeElement !== document.body)) return;
+      const replaced = !!wasId && !!nowId && wasId !== nowId;
+      if ((!moved && !replaced) || !lostFocus) return;
       if (now.lead.includes(key)) setLeadOpen(true);
       requestAnimationFrame(() => document.getElementById(cardDomId(key))?.focus());
       return;
