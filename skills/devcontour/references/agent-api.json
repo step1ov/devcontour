@@ -2312,6 +2312,181 @@
       }
     },
     {
+      "name": "discussion_read",
+      "description": "Read a task discussion page in seq order: forward from cursor (the last seq returned; follow nextCursor), or backward with latest: true or before: <seq> (follow previousCursor). version is the thread version for writes. Notes, change requests and their dispositions are local history of the task owner: they never change the task, its approvals, queue or attempts, and Git sync does not carry them.",
+      "readOnly": true,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "taskId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "cursor": {
+            "type": "string",
+            "pattern": "^\\d{1,15}$"
+          },
+          "before": {
+            "type": "string",
+            "pattern": "^\\d{1,15}$"
+          },
+          "latest": {
+            "type": "boolean"
+          },
+          "limit": {
+            "default": 20,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50
+          }
+        },
+        "required": [
+          "taskId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "discussion_post",
+      "description": "Post a note or a change request to a task discussion as the lead. Needs idempotencyKey (a repeat returns the same message, another payload under it is refused) and expectedVersion (the thread version you read; a mismatch is 409 — re-read). Text: up to 16 KiB UTF-8, no control characters other than newline and tab; the reply carries an excerpt of long text. supersedes corrects your own latest version of a message. A change request does not alter an approved or accepted task: apply it through a new revision.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "taskId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "note",
+              "change-request"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "replyTo": {
+            "type": "string",
+            "pattern": "^DM-[0-9a-f-]{36}$"
+          },
+          "supersedes": {
+            "type": "string",
+            "pattern": "^DM-[0-9a-f-]{36}$"
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{8,80}$"
+          },
+          "expectedVersion": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "taskId",
+          "kind",
+          "text",
+          "idempotencyKey",
+          "expectedVersion"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "discussion_resolve",
+      "description": "Record how a change request was handled: accepted (refs to the new board revision or tasks created for it), rejected with a reason, or needs-answer (the operator answers in the panel and the request returns to discussion_inbox). Only the latest version of a request is handled; accepted and rejected are final. expectedVersion is the thread version from discussion_inbox. Reading a request is not handling it.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "pattern": "^DM-[0-9a-f-]{36}$"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "rejected",
+              "needs-answer"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "refs": {
+            "default": {},
+            "type": "object",
+            "properties": {
+              "boardId": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,80}$"
+              },
+              "revision": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "taskIds": {
+                "maxItems": 20,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{8,80}$"
+          },
+          "expectedVersion": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "requestId",
+          "outcome",
+          "reason",
+          "idempotencyKey",
+          "expectedVersion"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "discussion_inbox",
+      "description": "List change requests waiting for the lead across tasks, oldest event first: the latest version of each request without a disposition, or answered by the operator after needs-answer (reopened). Each entry is bounded: an excerpt, textBytes, truncated and the thread version for discussion_resolve; read the full text with discussion_read. Follow nextCursor.",
+      "readOnly": true,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "limit": {
+            "default": 20,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "usage_report",
       "description": "Read paginated owner-local invocation costs, versions and telemetry coverage; never evidence.",
       "readOnly": true,

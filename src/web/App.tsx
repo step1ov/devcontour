@@ -82,6 +82,7 @@ import { roleLabel, currentRoles, setRoleSource } from './roles.ts';
 import { Phases, engine, elapsed } from './Workers.tsx';
 import { useNow } from './now.ts';
 import { AttemptTimeline, LiveWork, LivenessNote, livenessNow } from './LiveWork.tsx';
+import { TaskDiscussion } from './TaskDiscussion.tsx';
 import {
   boardPhaseLabels,
   chainBlockers,
@@ -3303,6 +3304,21 @@ export function App() {
                         Ранние попытки ({full.runs.total - taskRuns.length})
                       </Button>
                     )}
+                    <TaskDiscussion
+                      key={task.id}
+                      taskId={task.id}
+                      closed={['done', 'cancelled'].includes(task.status)}
+                      onOpenTask={(id) => {
+                        if (tasks.some((t) => t.id === id)) setSelected(id);
+                        else {
+                          const b = data.tasks.find((t) => t.id === id)?.boardId;
+                          if (b) {
+                            switchBoard(b);
+                            setSelected(id);
+                          }
+                        }
+                      }}
+                    />
                     {/* Отмена — разрушительное действие: внизу карточки, отдельно от
                           следующего шага. */}
                     {!['done', 'cancelled'].includes(task.status) && (

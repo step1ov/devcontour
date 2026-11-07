@@ -23,5 +23,12 @@
 // Намеренное изменение: пишущие операции быстрого изменения preparation_quick,
 // preparation_setup и preparation_expand после preparation_activate; прочие
 // операции байтово прежние.
-export const CATALOG_DIGEST = 'cc2f6ff264a41161565a36146744cc7328f8c51392d9bd52b6b52ef6afed38b9';
+// Намеренное изменение: операции обсуждения задачи discussion_read,
+// discussion_post, discussion_resolve и discussion_inbox после memory_recall;
+// прочие операции байтово прежние.
+// Намеренное изменение: описания discussion_read, discussion_post,
+// discussion_resolve и discussion_inbox называют чтение назад, выдержки
+// текста, цикл needs-answer и версию треда в очереди; курсор
+// discussion_inbox — до 2000 символов; прочие операции байтово прежние.
+export const CATALOG_DIGEST = '71ec177499a2b700381fde1248a09f9f9803128edd78005385c6b3b331bf5172';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

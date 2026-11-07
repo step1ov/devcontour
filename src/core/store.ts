@@ -789,6 +789,181 @@ export class Store {
       .run(namespace, owner ?? '@workspace', key, JSON.stringify(value));
     this.bump('data');
   }
+  /**
+   * Обсуждения задач — локальная таблица владельца задачи: не документ
+   * состояния, не журнал синхронизации. Порядок — серверная последовательность.
+   */
+  private discussionTable(schema: string, create: boolean) {
+    if (create)
+      this.db.exec(
+        `CREATE TABLE IF NOT EXISTS ${schema}.discussion (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, task_id TEXT NOT NULL, author TEXT NOT NULL, idem TEXT NOT NULL, kind TEXT NOT NULL, reply_to TEXT, data TEXT NOT NULL, UNIQUE(task_id, author, idem));` +
+          `CREATE INDEX IF NOT EXISTS ${schema}.discussion_task ON discussion(task_id, seq);` +
+          `CREATE INDEX IF NOT EXISTS ${schema}.discussion_kind ON discussion(kind, seq);` +
+          `CREATE INDEX IF NOT EXISTS ${schema}.discussion_reply ON discussion(reply_to, seq);` +
+          `CREATE INDEX IF NOT EXISTS ${schema}.discussion_supersedes ON discussion(json_extract(data,'$.supersedes'));`,
+      );
+    return Boolean(
+      this.db
+        .prepare(
+          `SELECT name FROM ${schema}.sqlite_master WHERE type='table' AND name='discussion'`,
+        )
+        .get(),
+    );
+  }
+  private discussionRows(sql: string, owner: string | undefined, ...args: (string | number)[]) {
+    const schema = this.syncSchema(owner);
+    if (!this.discussionTable(schema, false)) return [];
+    const rows = this.db.prepare(sql.replaceAll('$schema', schema)).all(...args) as {
+      seq: number;
+      data: string;
+    }[];
+    return rows.map((r) => ({ ...(JSON.parse(r.data) as object), seq: r.seq }));
+  }
+  /** Новая запись обсуждения; возвращает её seq. Только в транзакции. */
+  discussionInsert(
+    owner: string | undefined,
+    row: {
+      id: string;
+      taskId: string;
+      author: string;
+      idempotencyKey: string;
+      kind: string;
+      replyTo?: string;
+    },
+    data: unknown,
+  ): number {
+    if (!this.transaction) throw new Error('Discussion writes require an atomic transaction');
+    const schema = this.syncSchema(owner);
+    this.discussionTable(schema, true);
+    const inserted = this.db
+      .prepare(
+        `INSERT INTO ${schema}.discussion(id,task_id,author,idem,kind,reply_to,data) VALUES(?,?,?,?,?,?,?)`,
+      )
+      .run(
+        row.id,
+        row.taskId,
+        row.author,
+        row.idempotencyKey,
+        row.kind,
+        row.replyTo ?? null,
+        JSON.stringify(data),
+      );
+    this.bump('data');
+    return Number(inserted.lastInsertRowid);
+  }
+  /** Страница треда задачи после seq `after`, по возрастанию. */
+  discussionPage(owner: string | undefined, taskId: string, after: number, limit: number) {
+    return this.discussionRows(
+      'SELECT seq,data FROM $schema.discussion WHERE task_id=? AND seq>? ORDER BY seq LIMIT ?',
+      owner,
+      taskId,
+      after,
+      limit,
+    );
+  }
+  /** Страница треда задачи перед seq `before`, от новых к старым. */
+  discussionPageBefore(owner: string | undefined, taskId: string, before: number, limit: number) {
+    return this.discussionRows(
+      'SELECT seq,data FROM $schema.discussion WHERE task_id=? AND seq<? ORDER BY seq DESC LIMIT ?',
+      owner,
+      taskId,
+      Number.isFinite(before) ? before : Number.MAX_SAFE_INTEGER,
+      limit,
+    );
+  }
+  /** Последний seq треда; 0 — тред пуст. */
+  discussionVersion(owner: string | undefined, taskId: string): number {
+    const schema = this.syncSchema(owner);
+    if (!this.discussionTable(schema, false)) return 0;
+    const row = this.db
+      .prepare(`SELECT max(seq) AS n FROM ${schema}.discussion WHERE task_id=?`)
+      .get(taskId) as { n: number | null };
+    return row.n ?? 0;
+  }
+  discussionById(owner: string | undefined, id: string) {
+    return this.discussionRows('SELECT seq,data FROM $schema.discussion WHERE id=?', owner, id)[0];
+  }
+  discussionByKey(owner: string | undefined, taskId: string, author: string, key: string) {
+    return this.discussionRows(
+      'SELECT seq,data FROM $schema.discussion WHERE task_id=? AND author=? AND idem=?',
+      owner,
+      taskId,
+      author,
+      key,
+    )[0];
+  }
+  /**
+   * Схема хранения обсуждений владельца: в центральном хранилище у всех
+   * владельцев одна таблица, у компонентного — своя у каждого компонента.
+   */
+  discussionSchema(owner: string | undefined) {
+    return this.syncSchema(owner);
+  }
+  /** Запись, исправляющая сообщение `id`, если есть. */
+  discussionSupersededBy(owner: string | undefined, id: string) {
+    return this.discussionRows(
+      "SELECT seq,data FROM $schema.discussion WHERE json_extract(data,'$.supersedes')=? ORDER BY seq LIMIT 1",
+      owner,
+      id,
+    )[0];
+  }
+  /** Последняя обработка обращения `id`, если есть. */
+  discussionLatestDisposition(owner: string | undefined, id: string) {
+    return this.discussionRows(
+      "SELECT seq,data FROM $schema.discussion WHERE kind='disposition' AND reply_to=? ORDER BY seq DESC LIMIT 1",
+      owner,
+      id,
+    )[0];
+  }
+  /**
+   * Очередь ведущего в схеме владельца: последние версии обращений (без
+   * исправления), у которых нет обработки или последняя обработка —
+   * «нужен ответ», на которую оператор уже ответил. Позиция записи очереди —
+   * seq её последнего события (обращения или ответа оператора): ответ
+   * возвращает обращение в конец очереди. По возрастанию позиции после `after`.
+   */
+  discussionInbox(owner: string | undefined, after: number, limit: number) {
+    const schema = this.syncSchema(owner);
+    if (!this.discussionTable(schema, false)) return [];
+    const rows = this.db
+      .prepare(
+        `WITH req AS (
+           SELECT d.seq, d.id, d.data,
+             (SELECT r.id FROM ${schema}.discussion r WHERE r.kind='disposition' AND r.reply_to=d.id ORDER BY r.seq DESC LIMIT 1) AS disp
+           FROM ${schema}.discussion d
+           WHERE d.kind='change-request'
+             AND NOT EXISTS (SELECT 1 FROM ${schema}.discussion s WHERE json_extract(s.data,'$.supersedes')=d.id)
+         ), st AS (
+           SELECT req.*,
+             (SELECT json_extract(x.data,'$.disposition.outcome') FROM ${schema}.discussion x WHERE x.id=req.disp) AS outcome,
+             (SELECT a.seq FROM ${schema}.discussion a WHERE req.disp IS NOT NULL AND a.reply_to=req.disp AND a.author='operator' ORDER BY a.seq DESC LIMIT 1) AS answer
+           FROM req
+         )
+         SELECT st.seq, st.data, st.disp, COALESCE(st.answer, st.seq) AS position,
+           (SELECT a.id FROM ${schema}.discussion a WHERE a.seq=st.answer) AS answer_id,
+           (SELECT json_extract(a.data,'$.createdAt') FROM ${schema}.discussion a WHERE a.seq=COALESCE(st.answer, st.seq)) AS at
+         FROM st
+         WHERE (st.disp IS NULL OR (st.outcome='needs-answer' AND st.answer IS NOT NULL))
+           AND COALESCE(st.answer, st.seq) > ?
+         ORDER BY position LIMIT ?`,
+      )
+      .all(after, limit) as {
+      seq: number;
+      data: string;
+      disp: string | null;
+      position: number;
+      answer_id: string | null;
+      at: string;
+    }[];
+    return rows.map((r) => ({
+      message: { ...(JSON.parse(r.data) as object), seq: r.seq },
+      position: r.position,
+      at: r.at,
+      ...(r.disp && r.answer_id
+        ? { reopened: { dispositionId: r.disp, answerId: r.answer_id } }
+        : {}),
+    }));
+  }
   private bump(kind: 'data' | 'lease') {
     this.db
       .prepare(`UPDATE main.revision SET ${kind === 'data' ? 'n=n+1' : 'lease=lease+1'} WHERE id=1`)

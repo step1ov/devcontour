@@ -1,4 +1,5 @@
 import { selectedWorkspaceMode, workspaceDescription } from '../runner/workspace-mode.ts';
+import { DiscussionService } from '../application/discussion.ts';
 import { existsSync } from 'node:fs';
 import {
   LEAD_QUIET_MS,
@@ -547,6 +548,16 @@ export async function serve(
             decodeURIComponent(parts[2]),
             Object.fromEntries(url.searchParams),
           );
+        } else if (req.method === 'GET' && parts[1] === 'tasks' && parts[3] === 'discussion') {
+          result = new DiscussionService(h).read({
+            taskId: decodeURIComponent(parts[2]),
+            ...(url.searchParams.get('cursor') ? { cursor: url.searchParams.get('cursor') } : {}),
+            ...(url.searchParams.get('before') ? { before: url.searchParams.get('before') } : {}),
+            ...(url.searchParams.get('latest') === '1' ? { latest: true } : {}),
+            ...(url.searchParams.get('limit')
+              ? { limit: Number(url.searchParams.get('limit')) }
+              : {}),
+          });
         } else if (req.method === 'GET' && parts[1] === 'tasks' && parts[3] === 'runs') {
           result = panelRuns(h, decodeURIComponent(parts[2]), Object.fromEntries(url.searchParams));
         } else if (req.method === 'GET' && parts[1] === 'runs' && parts[2] && !parts[3]) {
@@ -790,7 +801,13 @@ export async function serve(
             result = new CheckCorpus(h).approveAdoption(parts[2], parts[4]).pending;
           } else if (parts[1] === 'tasks') {
             // Кнопки панели — действие человека (`operator`).
-            if (parts[3] === 'retry') result = h.retry(parts[2], undefined, 'operator');
+            if (parts[3] === 'discussion')
+              // Автор — оператор: его задаёт вход панели, а не поле запроса.
+              result = new DiscussionService(h).post(
+                { ...input, taskId: decodeURIComponent(parts[2]) },
+                'operator',
+              );
+            else if (parts[3] === 'retry') result = h.retry(parts[2], undefined, 'operator');
             else if (parts[3] === 'cancel') result = h.cancel(parts[2], undefined, 'operator');
             else if (req.method === 'PATCH')
               result = h.editTask(parts[2], input, z.string().parse(input.expectedDigest));
@@ -844,6 +861,7 @@ export async function serve(
             : error instanceof Error
               ? error.message
               : String(error),
+        ...(error instanceof DomainError && error.details ? error.details : {}),
       });
     }
   };

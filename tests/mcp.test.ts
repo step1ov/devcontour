@@ -88,6 +88,21 @@ test('Real MCP clients negotiate tools, keep independent workspaces and enforce 
     });
     assert.equal(stale.isError, true);
     assert.equal(left.store.read().tasks[0].title, 'Changed task');
+    // Отказ по версии обсуждения несёт код причины и актуальную версию, как HTTP.
+    const note = (text: string, idempotencyKey: string) =>
+      a!.callTool({
+        name: 'discussion_post',
+        arguments: { taskId, kind: 'note', text, idempotencyKey, expectedVersion: 0 },
+      });
+    assert.equal((await note('Первая', 'mcp-note-0001')).isError, undefined);
+    const conflict = await note('Вторая', 'mcp-note-0002');
+    assert.equal(conflict.isError, true);
+    const refusal = JSON.parse((conflict.content as { text: string }[])[0].text) as {
+      status: number;
+      code?: string;
+      version?: number;
+    };
+    assert.deepEqual([refusal.status, refusal.code, refusal.version], [409, 'version-conflict', 1]);
     const forged = await a.callTool({
       name: 'project_context',
       arguments: { workspace: right.root },
