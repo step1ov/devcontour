@@ -198,3 +198,34 @@ test('D04-D: после перезапуска список и отметки т
     removeTestCheckoutRoot(f.h.config.checkoutRoot!);
   }
 });
+
+test('Отметка активной карточки старше 30 дней не удаляется при записи других отметок', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const t = f.h.addTask(b.id, input('Root task'));
+    f.h.approve(b.id);
+    f.h.pause(false);
+    const run = f.h.claim('test')!;
+    assert.equal(run.taskId, t.id);
+    f.h.fail(run.id, run.token, 'fixture failure', false, 'gate');
+    f.h.pause(true);
+    const service = new AttentionService(f.store, f.h);
+    const queue = byKey((await service.active()).items, 'queue')!;
+    await service.mark({ marks: [mark(queue, 'ack')] });
+    // Через 31 день карточка паузы всё ещё активна; отмечается другая карточка.
+    const later = new AttentionService(f.store, f.h, {
+      now: () => Date.now() + 31 * 24 * 60 * 60_000,
+    });
+    const work = byKey((await later.active()).items, `work:${t.id}`)!;
+    await later.mark({ marks: [mark(work, 'read')] });
+    assert.ok(
+      Object.keys(f.store.localRecords(ATTENTION_NAMESPACE, undefined)).includes('queue'),
+      'отметка активной карточки осталась',
+    );
+    const after = byKey((await later.active()).items, 'queue')!;
+    assert.deepEqual(after.state, { read: true, acknowledged: true, unread: false });
+  } finally {
+    f.cleanup();
+  }
+});

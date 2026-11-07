@@ -2305,12 +2305,25 @@ export class AttentionService {
     const needed = new Set(
       marks.map((m) => sourceOfKey(m.sourceKey)).filter((x): x is AttentionSource => !!x),
     );
+    // Удаляются только отметки отсутствующих предметов (решение 9): для
+    // старых отметок их источники тоже пересчитываются — в том же снимке
+    // чтения, вне блокировки. На пределе строк — все источники.
+    const cutoff = new Date(now - ATTENTION_LIMITS.markRetentionMs).toISOString();
+    const existing = this.store.snapshot(() => this.marks());
+    const keys = Object.keys(existing);
+    if (keys.length >= ATTENTION_LIMITS.markRows) for (const r of this.sources) needed.add(r.id);
+    else
+      for (const key of keys) {
+        const source = sourceOfKey(key);
+        if (source && lastMark(existing[key]) < cutoff) needed.add(source);
+      }
     const quick = needed.has('quick')
       ? await this.prerequisites()
       : new Map<string, QuickPrerequisites>();
     // Появления сверяются в снимке чтения, без блокировки записи: отметки
     // инертны, и худшая гонка — отметка только что решённого появления,
-    // которую `markState` не применит к новому.
+    // которую `markState` не применит к новому, или удаление отметки
+    // предмета, который только что вернулся.
     const present = this.store.snapshot(
       () =>
         new Map(
@@ -2359,7 +2372,7 @@ export class AttentionService {
         stored[m.sourceKey] = row;
         marked.push({ sourceKey: m.sourceKey, occurrenceId: m.occurrenceId });
       }
-      this.prune(stored, new Set(marked.map((m) => m.sourceKey)), now);
+      this.prune(stored, new Set(marked.map((m) => m.sourceKey)), new Set(present.keys()), now);
       return { marked, ignored };
     });
   }
@@ -2488,23 +2501,36 @@ export class AttentionService {
   }
 
   /**
-   * Удаление по возрасту и пределу строк (решение 9), без пересчёта
-   * источников: отметка старше 30 дней удаляется, даже если её карточка всё
-   * ещё активна (тогда она снова не прочитана). `keep` — только что
-   * отмеченные ключи.
+   * Удаление отметок (решение 9): старше 30 дней — только у предметов,
+   * которых нет в списке (`present`), так что отметка активной карточки
+   * возрастом не теряется. На пределе 2000 строк сначала удаляются
+   * отсутствующие предметы, самые старые первыми, и лишь затем, если строк
+   * всё ещё больше, — присутствующие. `keep` — только что отмеченные ключи.
    */
-  private prune(stored: Record<string, AttentionMark>, keep: Set<string>, now: number) {
+  private prune(
+    stored: Record<string, AttentionMark>,
+    keep: Set<string>,
+    present: Set<string>,
+    now: number,
+  ) {
     const last = lastMark;
     const cutoff = new Date(now - ATTENTION_LIMITS.markRetentionMs).toISOString();
     const keys = Object.keys(stored);
-    const removed = new Set(keys.filter((key) => !keep.has(key) && last(stored[key]) < cutoff));
+    const removed = new Set(
+      keys.filter((key) => !keep.has(key) && !present.has(key) && last(stored[key]) < cutoff),
+    );
     const left = keys.filter((key) => !removed.has(key));
-    if (left.length > ATTENTION_LIMITS.markRows)
-      left
-        .filter((key) => !keep.has(key))
-        .sort((a, b) => (last(stored[a]) < last(stored[b]) ? -1 : 1))
-        .slice(0, left.length - ATTENTION_LIMITS.markRows)
-        .forEach((key) => removed.add(key));
+    const oldest = (a: string, b: string) => (last(stored[a]) < last(stored[b]) ? -1 : 1);
+    let excess = left.length - ATTENTION_LIMITS.markRows;
+    for (const group of [
+      left.filter((key) => !keep.has(key) && !present.has(key)),
+      left.filter((key) => !keep.has(key) && present.has(key)),
+    ])
+      for (const key of group.sort(oldest)) {
+        if (excess <= 0) break;
+        removed.add(key);
+        excess--;
+      }
     for (const key of removed) this.store.deleteLocal(ATTENTION_NAMESPACE, undefined, key);
   }
 
