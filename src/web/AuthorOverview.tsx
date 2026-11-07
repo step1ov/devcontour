@@ -11,6 +11,7 @@ import { AttentionCard, type ActOutcome } from './AttentionCard.tsx';
 import { useAttention } from './AttentionProvider.tsx';
 import { staleLine } from './AttentionCenter.tsx';
 import { navigate } from './navigation.ts';
+import { orphanDrafts, useDrafts } from './attention-drafts.ts';
 
 // Главный экран автора продукта: что можно попробовать, какое решение нужно,
 // что изменилось, сколько потрачено и что делает система. Внутренние
@@ -72,6 +73,7 @@ function DecisionHead({
   onStatus: (text: string) => void;
 }) {
   const attention = useAttention();
+  const drafts = useDrafts();
   if (attention.loading)
     return (
       <p className="m-0" role="status" aria-busy="true">
@@ -101,6 +103,8 @@ function DecisionHead({
     </a>
   );
   const outcome = (_: AttentionItem, o: ActOutcome) => onStatus(o.status);
+  // Текст формы, чья карточка исчезла или сменилась, — на экране внимания.
+  const unsent = orphanDrafts(drafts, attention.items).length;
   return (
     <>
       {attention.stale && (
@@ -118,6 +122,11 @@ function DecisionHead({
         </ul>
       ) : (
         <p className="m-0">Сейчас от вас ничего не требуется.</p>
+      )}
+      {unsent > 0 && (
+        <p className="text-warning m-0" role="status">
+          Есть неотправленный текст ответа: {link(undefined, 'открыть в центре внимания')}.
+        </p>
       )}
       <p className="m-0 flex flex-wrap gap-x-4 gap-y-1">
         {link(undefined, `Все действия (${all})`)}
