@@ -31,6 +31,8 @@ import { focusHash, navigate } from './navigation.ts';
 
 /** Опрос, пока вкладка видна: проекция тяжелее сводки, поэтому 3 с, а не 2. */
 export const POLL_MS = 3000;
+/** Запрос, не ответивший за это время, — сбой: данные устарели, очередь не копится. */
+export const REQUEST_TIMEOUT_MS = 10_000;
 const MARKS_PER_CALL = 100;
 
 export interface AttentionState {
@@ -44,9 +46,12 @@ export interface AttentionState {
   error: string;
   /** Данные есть, последнее обновление не удалось: действия заблокированы. */
   stale: boolean;
+  /** Причина устаревания: нет связи (или ответа за 10 с) либо отказ сервера. */
+  failure?: { offline: boolean; error: string };
   lastOkAt?: string;
   refresh: () => Promise<void>;
-  mark: (items: readonly AttentionItem[], kind: 'read' | 'ack') => Promise<void>;
+  /** `false` — отметка (часть) не сохранена: сервер не ответил или отказал. */
+  mark: (items: readonly AttentionItem[], kind: 'read' | 'ack') => Promise<boolean>;
   /** Экран внимания показан: вместо уведомления — объявление на экране. */
   onScreen: (shown: boolean) => void;
   /** Новые карточки, пришедшие при открытом экране (для живой области). */
@@ -66,13 +71,16 @@ export function useAttention() {
 }
 
 const failure = (status: number, error?: string) =>
-  status === 0 ? 'сервер не отвечает' : (error ?? `сервер ответил ${status}`);
+  status === 0
+    ? 'сервер не отвечает или не ответил за 10 с'
+    : (error ?? `сервер ответил ${status}`);
 
 export function AttentionProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<{
     view?: AttentionView;
     error: string;
     stale: boolean;
+    failure?: { offline: boolean; error: string };
     lastOkAt?: string;
   }>({ error: '', stale: false });
   const [optimistic, setOptimistic] = useState<Optimistic>(() => new Map());
@@ -119,7 +127,10 @@ export function AttentionProvider({ children }: { children: ReactNode }) {
     controller.current = abort;
     void (async () => {
       try {
-        const response = await getAttention({}, abort.signal);
+        const response = await getAttention(
+          {},
+          AbortSignal.any([abort.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
+        );
         if (disposed.current) return;
         if (!response.ok || !response.body) {
           const error = failure(response.status, response.body?.error);
@@ -127,6 +138,7 @@ export function AttentionProvider({ children }: { children: ReactNode }) {
             ...s,
             error,
             stale: !!s.view,
+            failure: { offline: response.status === 0, error },
             lastOkAt: lastOk.current ?? s.lastOkAt,
           }));
           return;
@@ -140,11 +152,13 @@ export function AttentionProvider({ children }: { children: ReactNode }) {
         if (next === signature.current)
           // Тот же ответ (heartbeat): без перерисовки, только снять устаревание.
           setState((s) =>
-            s.stale || s.error ? { ...s, error: '', stale: false, lastOkAt: at } : s,
+            s.stale || s.error
+              ? { ...s, error: '', stale: false, failure: undefined, lastOkAt: at }
+              : s,
           );
         else {
           signature.current = next;
-          setState({ view, error: '', stale: false, lastOkAt: at });
+          setState({ view, error: '', stale: false, failure: undefined, lastOkAt: at });
         }
         notify(step.fresh);
       } catch {
@@ -190,7 +204,7 @@ export function AttentionProvider({ children }: { children: ReactNode }) {
 
   const mark = useCallback(
     async (items: readonly AttentionItem[], kind: 'read' | 'ack') => {
-      if (!items.length) return;
+      if (!items.length) return true;
       // Отметка — показанной версии: обновление, пришедшее после показа,
       // остаётся непрочитанным.
       const keys = items.map(markKey);
@@ -206,8 +220,9 @@ export function AttentionProvider({ children }: { children: ReactNode }) {
         }
         return next;
       });
-      for (let at = 0; at < items.length; at += MARKS_PER_CALL)
-        await postMarks(
+      let ok = true;
+      for (let at = 0; at < items.length; at += MARKS_PER_CALL) {
+        const r = await postMarks(
           items.slice(at, at + MARKS_PER_CALL).map((i) => ({
             sourceKey: i.sourceKey,
             occurrenceId: i.occurrenceId,
@@ -215,12 +230,15 @@ export function AttentionProvider({ children }: { children: ReactNode }) {
             kind,
           })),
         );
+        ok &&= r.ok;
+      }
       await refresh();
       setOptimistic((o) => {
         const next = new Map(o);
         for (const key of keys) next.delete(key);
         return next;
       });
+      return ok;
     },
     [refresh],
   );
@@ -245,6 +263,7 @@ export function AttentionProvider({ children }: { children: ReactNode }) {
       loading: !state.view && !state.error,
       error: state.view ? '' : state.error,
       stale: state.stale,
+      failure: state.failure,
       lastOkAt: state.lastOkAt,
       refresh,
       mark,
