@@ -57,6 +57,8 @@ export const ATTENTION_LIMITS = {
   history: 100,
   marksPerCall: 100,
   markRows: 2000,
+  /** До скольких строк удаляет запись, перешедшая предел. */
+  markRowsLow: 1900,
   /** Отметки исчезнувших карточек живут столько, затем удаляются при записи отметок. */
   markRetentionMs: 30 * 24 * 60 * 60_000,
   agentLimit: 50,

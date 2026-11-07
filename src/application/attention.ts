@@ -2328,7 +2328,11 @@ export class AttentionService {
     const cutoff = new Date(now - ATTENTION_LIMITS.markRetentionMs).toISOString();
     const existing = this.store.snapshot(() => this.marks());
     const keys = Object.keys(existing);
-    if (keys.length >= ATTENTION_LIMITS.markRows) for (const r of this.sources) needed.add(r.id);
+    // Строки после этой записи: новые ключи считаются сразу, иначе вызов,
+    // переходящий предел, удалял бы отметки непересчитанных источников.
+    const fresh = new Set(marks.map((m) => m.sourceKey).filter((key) => !existing[key])).size;
+    if (keys.length + fresh > ATTENTION_LIMITS.markRows)
+      for (const r of this.sources) needed.add(r.id);
     else
       for (const key of keys) {
         const source = sourceOfKey(key);
@@ -2538,7 +2542,10 @@ export class AttentionService {
     );
     const left = keys.filter((key) => !removed.has(key));
     const oldest = (a: string, b: string) => (last(stored[a]) < last(stored[b]) ? -1 : 1);
-    let excess = left.length - ATTENTION_LIMITS.markRows;
+    // Сверх предела удаляется до нижней отметки: полный пересчёт источников
+    // нужен изредка, а не при каждой записи на пределе.
+    let excess =
+      left.length > ATTENTION_LIMITS.markRows ? left.length - ATTENTION_LIMITS.markRowsLow : 0;
     for (const group of [
       left.filter((key) => !keep.has(key) && !present.has(key)),
       left.filter((key) => !keep.has(key) && present.has(key)),

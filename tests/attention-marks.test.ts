@@ -229,3 +229,54 @@ test('Отметка активной карточки старше 30 дней 
     f.cleanup();
   }
 });
+
+test('Предел 2000 строк: запись сверх него удаляет сначала отсутствующие предметы до 1900, отметки активных карточек остаются', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const t = f.h.addTask(b.id, input('Root task'));
+    f.h.approve(b.id);
+    f.h.pause(false);
+    const run = f.h.claim('test')!;
+    assert.equal(run.taskId, t.id);
+    f.h.fail(run.id, run.token, 'fixture failure', false, 'gate');
+    f.h.pause(true);
+    let full = 0;
+    const service = new AttentionService(f.store, f.h, {
+      sources: [{ id: 'preview', collect: () => (full++, []) }],
+    });
+    const items = (await service.active()).items;
+    const queue = byKey(items, 'queue')!;
+    const work = byKey(items, `work:${t.id}`)!;
+    await service.mark({ marks: [mark(queue, 'ack')] });
+    // 1999 свежих отметок предметов, которых больше нет: до предела ровно.
+    const at = new Date().toISOString();
+    f.store.atomic(() => {
+      for (let i = 0; i < 1999; i++)
+        f.store.saveLocal(ATTENTION_NAMESPACE, undefined, `prep:q:gone:${i}`, {
+          v: 1,
+          occurrenceId: 'o',
+          readVersion: 'v',
+          readAt: new Date(Date.parse(at) - (2000 - i) * 1000).toISOString(),
+        });
+    });
+    const rows = () => Object.keys(f.store.localRecords(ATTENTION_NAMESPACE, undefined));
+    assert.equal(rows().length, 2000);
+    full = 0;
+    // Новая отметка переходит предел: удаление до 1900, отсутствующие первыми.
+    await service.mark({ marks: [mark(work, 'read')] });
+    const after = rows();
+    assert.equal(after.length, 1900);
+    assert.ok(after.includes('queue'), 'отметка активной карточки осталась');
+    assert.ok(after.includes(work.sourceKey));
+    assert.ok(!after.includes('prep:q:gone:0'), 'самые старые отсутствующие удалены');
+    assert.ok(full > 0, 'на пределе пересчитаны все источники');
+    // Ниже предела следующая запись полного пересчёта не делает.
+    full = 0;
+    await service.mark({ marks: [mark(work, 'ack')] });
+    assert.equal(full, 0);
+    assert.equal(byKey((await service.active()).items, 'queue')!.state.acknowledged, true);
+  } finally {
+    f.cleanup();
+  }
+});
