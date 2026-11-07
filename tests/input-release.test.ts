@@ -63,6 +63,25 @@ test('Agent mode, critical question: the lead cannot cancel the task; the operat
   }
 });
 
+test('Agent mode, critical question answered but not applied: the lead still cannot cancel the task', async () => {
+  const f = await inputFixture(controlled({ critical: true }));
+  try {
+    const q = await question(f);
+    f.service.answer(
+      { requestId: q.requestId, text: 'Keep the API.', expectedVersion: 1 },
+      'operator',
+    );
+    assert.equal(f.service.show({ requestId: q.requestId }).lifecycle, 'answered');
+    assert.equal(
+      await codeOf(() => f.h.cancel(q.taskId, 'Release the task', 'host')),
+      '403:OPERATOR_ANSWERS',
+    );
+    assert.equal(f.service.show({ requestId: q.requestId }).lifecycle, 'answered');
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test('Operator mode: the lead cannot cancel the task held by a floor-free question; the operator can', async () => {
   const f = await inputFixture(controlled(), { approvalMode: 'operator' });
   try {
