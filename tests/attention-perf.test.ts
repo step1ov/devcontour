@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { AttentionService } from '../src/application/attention.ts';
 import { fixture, input } from './helpers.ts';
 import { DomainError } from '../src/core/model.ts';
+import { stopInputsOf } from 'devcontour-harness';
 
 // Регресс стоимости чтения: отменённые задачи без ждущих — история
 // перепланирования, а не решения. Чтение и действие не должны расти с их
@@ -55,15 +56,16 @@ test('400 задач, 200 отменённых: чтение, отметка и 
   }
 });
 
-test('Под блокировкой записи отметка и действие не пересчитывают другие источники', async () => {
+test('Под блокировкой записи отметка не пересчитывает источник отмечаемой карточки, действие — другие', async () => {
   const f = fixture();
   try {
     const b = f.h.createBoard('Board');
     f.h.addTask(b.id, input('One task'));
     f.h.approve(b.id);
     f.h.pause(true);
-    // Считаются только вызовы внутри транзакции записи: карточка ответа
-    // действия строится полной проекцией после неё (влияние как в GET).
+    // Считаются вызовы источника внутри транзакции записи. Источник-шпион
+    // сам даёт карточку, и отмечается именно она: сверка появления должна
+    // пройти в снимке чтения, а не под блокировкой.
     let calls = 0;
     let locked = false;
     const atomic = f.store.atomic.bind(f.store);
@@ -75,17 +77,73 @@ test('Под блокировкой записи отметка и действ�
         locked = false;
       }
     };
+    const card = {
+      sourceKey: 'preview:spy',
+      occurrenceId: 'o-1',
+      sourceVersion: 'v-1',
+      source: 'preview' as const,
+      category: 'technical' as const,
+      actor: 'lead' as const,
+      title: 'Spy card',
+      reason: 'Spy source card',
+      since: new Date(0).toISOString(),
+      subject: { kind: 'preview' as const, id: 'spy', href: '/' },
+    };
     const service = new AttentionService(f.store, f.h, {
-      sources: [{ id: 'preview', collect: () => (locked && calls++, []) }],
+      sources: [{ id: 'preview', collect: () => (locked && calls++, [card]) }],
     });
-    const queue = (await service.active()).items.find((i) => i.sourceKey === 'queue')!;
-    const ref = {
+    const items = (await service.active()).items;
+    const spied = items.find((i) => i.sourceKey === 'preview:spy')!;
+    const result = await service.mark({
+      marks: [
+        {
+          sourceKey: spied.sourceKey,
+          occurrenceId: spied.occurrenceId,
+          version: spied.sourceVersion,
+          kind: 'read',
+        },
+      ],
+    });
+    assert.equal(result.marked.length, 1);
+    assert.equal(calls, 0, 'источник отмечаемой карточки не пересчитывался под блокировкой');
+    const queue = items.find((i) => i.sourceKey === 'queue')!;
+    await service.act({
       sourceKey: queue.sourceKey,
       occurrenceId: queue.occurrenceId,
-    };
-    await service.mark({ marks: [{ ...ref, version: queue.sourceVersion, kind: 'read' }] });
-    await service.act({ ...ref, expectedVersion: queue.sourceVersion, action: 'resume' });
-    assert.equal(calls, 0, 'другие источники не пересчитывались');
+      expectedVersion: queue.sourceVersion,
+      action: 'resume',
+    });
+    assert.equal(calls, 0, 'действие не пересчитывало другие источники под блокировкой');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Диагноз остановок — один пакетный вызов harness на чтение, при любом числе кандидатов', async () => {
+  const f = fixture();
+  try {
+    cancelledRoots(f, 100);
+    f.h.pause(true);
+    let calls = 0;
+    const service = new AttentionService(f.store, f.h, {
+      stopInputsOf: (source, options) => (calls++, stopInputsOf(source, options)),
+    });
+    const view = await service.active();
+    assert.equal(view.items.filter((i) => i.source === 'work').length, 100);
+    assert.equal(calls, 1);
+    const work = view.items.find((i) => i.source === 'work')!;
+    calls = 0;
+    await service.mark({
+      marks: [
+        {
+          sourceKey: work.sourceKey,
+          occurrenceId: work.occurrenceId,
+          version: work.sourceVersion,
+          kind: 'read',
+        },
+      ],
+    });
+    assert.equal(calls, 1, 'отметка карточки задачи — тоже один вызов');
   } finally {
     f.cleanup();
   }

@@ -133,6 +133,8 @@ export interface AttentionContext {
   claimed: Map<string, string>;
   /** Карточки по sourceKey: поздний источник сворачивает свои в раннюю. */
   cards: Map<string, Candidate>;
+  /** Вызов диагноза harness (`AttentionOptions.stopInputsOf`). */
+  stopInputsOf?: typeof stopInputsOf;
 }
 
 export interface AttentionSourceRule {
@@ -873,9 +875,11 @@ export function diagnose(
   source: ReturnType<typeof harnessOf>['source'],
   h: DevContour,
   workIds: readonly string[],
+  /** Вызов harness; тесты подставляют счётчик (один вызов на чтение). */
+  stop: typeof stopInputsOf = stopInputsOf,
 ) {
   if (!workIds.length) return [];
-  return stopInputsOf(source, {
+  return stop(source, {
     maxAttempts: h.config.maxAttempts,
     repairBudget: h.config.repairBudget,
     workIds,
@@ -914,6 +918,7 @@ const workSource: AttentionSourceRule = {
       harness.source,
       h,
       candidates.map((t) => t.id),
+      ctx.stopInputsOf,
     );
     const queue = ctx.cards.get('queue');
     const out: Candidate[] = [];
@@ -2187,6 +2192,8 @@ export interface AttentionOptions {
    * (тесты: расхождение в этом промежутке отклоняет сама операция).
    */
   afterCheck?: (a: ActContext) => ActContext;
+  /** Подмена вызова диагноза harness (тесты: счётчик вызовов). */
+  stopInputsOf?: typeof stopInputsOf;
 }
 
 export interface AttentionHistoryView {
@@ -2262,6 +2269,7 @@ export class AttentionService {
       redact: this.redactor(),
       claimed: new Map(),
       cards: new Map(),
+      ...(this.options.stopInputsOf ? { stopInputsOf: this.options.stopInputsOf } : {}),
     };
   }
 
