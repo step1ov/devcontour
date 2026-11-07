@@ -153,9 +153,7 @@ export function leadPresence(
   tasks: { createdAt?: string; approvedAt?: string }[] | Readonly<DevContourState>,
   now: number,
 ) {
-  const own = Array.isArray(tasks)
-    ? tasks
-    : changeTasks(tasks, change).tasks;
+  const own = Array.isArray(tasks) ? tasks : changeTasks(tasks, change).tasks;
   const leadAt = leadActivityAt(change, own);
   return {
     lastActivityAt: leadAt,

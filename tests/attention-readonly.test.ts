@@ -88,7 +88,7 @@ test('После setup чтение во всех фазах (идёт, сбой
   }
 });
 
-test('attention_list: карточки ведущего без отметок оператора, до setup и после; чтение ничего не пишет', async () => {
+test('attention_list: карточки ведущего без отметок оператора, до setup и после; чтение ничего не пишет', () => {
   const prep = preparationFixture();
   try {
     prep.p.execute('preparation_question', {
