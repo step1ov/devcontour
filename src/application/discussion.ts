@@ -428,6 +428,9 @@ export class DiscussionService {
             409,
             { code: 'answer-applied' },
           );
+        // Поздний ответ — только к снятому или заменённому вопросу; иной отказ
+        // NOT_READY остаётся отказом.
+        if (lifecycle !== 'cancelled' && lifecycle !== 'superseded') throw error;
         input = { requestId: v.requestId, accepted: false, lifecycle };
       }
       const late = 'accepted' in input;
