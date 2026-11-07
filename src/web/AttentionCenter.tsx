@@ -23,7 +23,15 @@ import {
   type AttentionView,
 } from './attention-logic.ts';
 import { AttentionCard, HandoffCommand, UnsentText, type ActOutcome } from './AttentionCard.tsx';
-import { hasText, orphanDrafts, removeDraft, useDrafts } from './attention-drafts.ts';
+import {
+  emptyGoneDrafts,
+  hasText,
+  orphanDrafts,
+  removeDraft,
+  unsentWhy,
+  useDrafts,
+} from './attention-drafts.ts';
+import { REQUEST_TIMEOUT_MS } from './AttentionProvider.tsx';
 import { useAttention } from './AttentionProvider.tsx';
 import { AttentionHistory } from './AttentionHistory.tsx';
 import { forgetAttentionKey, rememberedAttentionKey } from './navigation.ts';
@@ -115,16 +123,31 @@ export function AttentionCenter({
 
   // Фильтр компонента решает сервер по репозиторию задачи: свой запрос на
   // каждом обновлении общего ответа; значок — по-прежнему из общего.
-  const [filtered, setFiltered] = useState<AttentionView>();
+  // Ответ относится к своему компоненту: при смене фильтра прежний не
+  // показывается; запрос ограничен по времени, отказ назван.
+  const [filtered, setFiltered] = useState<{ component: string; view: AttentionView }>();
+  const [filterError, setFilterError] = useState('');
   useEffect(() => {
     if (!component) {
       setFiltered(undefined);
+      setFilterError('');
       return;
     }
     const abort = new AbortController();
-    getAttention({ component }, abort.signal)
+    getAttention(
+      { component },
+      AbortSignal.any([abort.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
+    )
       .then((r) => {
-        if (r.ok && r.body) setFiltered(r.body);
+        if (r.ok && r.body) {
+          setFiltered({ component, view: r.body });
+          setFilterError('');
+        } else
+          setFilterError(
+            r.status === 0
+              ? 'сервер не отвечает или не ответил за 10 с'
+              : (r.body?.error ?? `сервер ответил ${r.status}`),
+          );
       })
       .catch(() => undefined);
     return () => abort.abort();
@@ -135,7 +158,8 @@ export function AttentionCenter({
   }, [arrived]);
 
   const source = useMemo(
-    () => (component ? (filtered?.items ?? []) : attention.items),
+    () =>
+      component ? (filtered?.component === component ? filtered.view.items : []) : attention.items,
     [component, filtered, attention.items],
   );
   const items = useMemo(
@@ -165,6 +189,11 @@ export function AttentionCenter({
   const drafts = useDrafts();
   const draftsNow = useRef(drafts);
   draftsNow.current = drafts;
+  // Пустые черновики исчезнувших появлений не копятся.
+  useEffect(() => {
+    if (!attention.view) return;
+    for (const key of emptyGoneDrafts(drafts, attention.items)) removeDraft(key);
+  }, [drafts, attention.items, attention.view]);
   const list = useRef<HTMLDivElement>(null);
   const operatorHeading = useRef<HTMLHeadingElement>(null);
   const leadHeading = useRef<HTMLElement>(null);
@@ -179,6 +208,20 @@ export function AttentionCenter({
     before.current = now;
     const key = focused.current;
     if (!key || !prev.titles.has(key)) return;
+    // Новое появление того же предмета под формой с текстом: форма прежнего
+    // появления исчезла из карточки, текст — в «Неотправленные ответы».
+    const wasId = prev.ids.get(key);
+    const nowId = now.ids.get(key);
+    const active = document.activeElement;
+    const lostFocus = !active || active === document.body;
+    if (wasId && nowId && wasId !== nowId && hasText(draftsNow.current.get(wasId))) {
+      if (!lostFocus && !document.getElementById(cardDomId(key))?.contains(active)) return;
+      setMessage(
+        `Появилась новая редакция «${now.titles.get(key)}»: ваш текст к прежней не отправлен и сохранён в «Неотправленные ответы».`,
+      );
+      requestAnimationFrame(() => document.getElementById(unsentDomId(wasId))?.focus());
+      return;
+    }
     if (now.titles.has(key)) {
       // Карточка перешла в другую группу (ответ сохранён — дальше ведущий):
       // элемент перемонтирован, фокус возвращается к нему же.
@@ -190,17 +233,18 @@ export function AttentionCenter({
     }
     // Опрос не уводит фокус: только если он был в исчезнувшей карточке
     // (элемент удалён, фокус на body) или карточку решило своё действие.
-    const active = document.activeElement;
     const own = ownAction.current;
-    if (!own && active && active !== document.body) return;
+    if (!own && !lostFocus) return;
     ownAction.current = false;
     // Под исчезнувшей карточкой была форма с текстом: фокус — на
     // неотправленном тексте, а не на следующей карточке.
     const goneId = prev.ids.get(key);
-    if (!own && goneId && hasText(draftsNow.current.get(goneId))) {
+    if (goneId && hasText(draftsNow.current.get(goneId))) {
       focused.current = '';
       setMessage(
-        `Карточка «${prev.titles.get(key)}» решена или снята без вашего ответа. Ваш текст не отправлен и сохранён ниже.`,
+        own
+          ? ownStatus.current
+          : `Карточка «${prev.titles.get(key)}» решена или снята без вашего ответа. Ваш текст не отправлен и сохранён в «Неотправленные ответы».`,
       );
       requestAnimationFrame(() => document.getElementById(unsentDomId(goneId))?.focus());
       return;
@@ -276,8 +320,12 @@ export function AttentionCenter({
     .flatMap((i) => i.actions)
     .find((a): a is Handoff => a.kind === 'handoff')?.command;
   const filtering = !!category || !!component;
-  const pending = !!component && !filtered;
-  const orphans = orphanDrafts(drafts, attention.items);
+  const pending = !!component && filtered?.component !== component && !filterError;
+  // Карточка, скрытая своим действием, уже не держит свой черновик.
+  const orphans = orphanDrafts(
+    drafts,
+    attention.items.filter((i) => !gone.has(i.id)),
+  );
   const unreadShown = groups.operator.filter((i) => i.state.unread);
   const card = (i: AttentionItem) => (
     <li key={i.sourceKey} className="min-w-0">
@@ -420,6 +468,11 @@ export function AttentionCenter({
       <p role="status" aria-live="polite" className="m-0 text-sm">
         {message}
       </p>
+      {filterError && (
+        <p role="alert" className="text-destructive m-0 text-sm">
+          Не удалось загрузить карточки компонента: {filterError}.
+        </p>
+      )}
       {attention.stale && (
         <p id={staleId} role="alert" className="text-destructive m-0 text-sm">
           {staleLine(attention.lastOkAt, attention.failure)}
@@ -490,7 +543,10 @@ export function AttentionCenter({
                   key={id}
                   id={unsentDomId(id)}
                   text={d.text}
-                  why={`Карточка «${d.pin?.title ?? 'без названия'}» решена или снята без вашего ответа. Текст не отправлен.`}
+                  why={unsentWhy(
+                    d,
+                    `Карточка «${d.pin?.title ?? 'без названия'}» решена или снята без вашего ответа. Текст не отправлен.`,
+                  )}
                   onDrop={() => removeDraft(id)}
                 />
               ))}
