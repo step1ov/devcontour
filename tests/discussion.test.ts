@@ -14,6 +14,7 @@ import {
 } from '../src/application/handoff.ts';
 import { DISCUSSION_TEXT_BYTES } from '../src/core/discussion-model.ts';
 import { repositorySchema } from '../src/core/model.ts';
+import { hostNamespace } from '../src/harness/projection.ts';
 import { CANDIDATE, MERGED, complete, config, fixture, input } from './helpers.ts';
 
 const key = (n: number) => 'idem-key-' + String(n).padStart(4, '0');
@@ -830,6 +831,11 @@ test('R01: заметка и обращение во время идущей п�
     const run = w.h.claim('test')!;
     assert.equal(run.taskId, w.task.id);
     const before = w.store.read();
+    const events = w.store.allEvents();
+    // Локальные записи исполнения (вызовы, ревью, ключи попыток, вопросы…).
+    const engineLocals = () =>
+      Object.values(hostNamespace).map((ns) => [ns, w.store.localEntries(ns)]);
+    const locals = engineLocals();
     const note = w.d.post(
       {
         taskId: w.task.id,
@@ -856,6 +862,15 @@ test('R01: заметка и обращение во время идущей п�
     assert.deepEqual(after.boards, before.boards);
     assert.deepEqual(after.leader, before.leader);
     assert.equal(after.paused, before.paused);
+    // Журнал: прежние события на месте, новые — только две записи обсуждения,
+    // ни одного события исполнения; локальные записи исполнения те же.
+    const journal = w.store.allEvents();
+    assert.deepEqual(journal.slice(0, events.length), events);
+    assert.deepEqual(
+      journal.slice(events.length).map((e) => e.type),
+      ['discussion.posted', 'discussion.posted'],
+    );
+    assert.deepEqual(engineLocals(), locals);
     // Попытка продолжается прежним token: запись обсуждения не перехватила
     // и не перезапустила исполнение.
     w.h.heartbeat(run.id, run.token);
