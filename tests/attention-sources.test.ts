@@ -11,6 +11,7 @@ import type { Store } from '../src/core/store.ts';
 import { digest, type DevContour } from '../src/core/service.ts';
 import { Workspace, changeSnapshot, snapshotDigest } from '../src/core/workspace.ts';
 import { fixture, input } from './helpers.ts';
+import { DiscussionService } from '../src/application/discussion.ts';
 import { architecture, product } from './preparation-fixture.ts';
 import { byKey, preparationFixture } from './attention-fixture.ts';
 
@@ -529,6 +530,92 @@ test('Тексты отказов проходят маску секретов �
     assert.doesNotMatch(card.reason, new RegExp(secret));
   } finally {
     delete process.env.ATTENTION_TEST_TOKEN;
+    f.cleanup();
+  }
+});
+
+test('S7/S8 обращение к ведущему: исправление — версия, «нужен ответ» — оператору, ответ — новое появление', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const t = f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    const service = new DiscussionService(f.h);
+    const version = () => f.store.discussionVersion(undefined, t.id);
+    let n = 0;
+    const key = () => `attention-key-${++n}`;
+    const request = service.post(
+      {
+        taskId: t.id,
+        kind: 'change-request',
+        text: 'Добавьте ночной режим',
+        idempotencyKey: key(),
+        expectedVersion: version(),
+      },
+      'operator',
+    ).message;
+    const crKey = `discussion:cr:${request.id}`;
+    const first = byKey(await engineItems(f), crKey)!;
+    assert.equal(first.actor, 'lead');
+    assert.equal(first.occurrenceId, request.id);
+    const repeat = byKey(await engineItems(f), crKey)!;
+    assert.deepEqual([repeat.id, repeat.sourceVersion], [first.id, first.sourceVersion]);
+    // Исправление необработанного обращения — та же карточка, новая версия.
+    const corrected = service.post(
+      {
+        taskId: t.id,
+        kind: 'change-request',
+        text: 'Добавьте ночной и дневной режимы',
+        supersedes: request.id,
+        idempotencyKey: key(),
+        expectedVersion: version(),
+      },
+      'operator',
+    ).message;
+    const updated = byKey(await engineItems(f), crKey)!;
+    assert.equal(updated.id, first.id);
+    assert.notEqual(updated.sourceVersion, first.sourceVersion);
+    // Ведущему нужен ответ: карточка ведущего уходит, у оператора — вопрос.
+    const disposition = service.resolve({
+      requestId: corrected.id,
+      outcome: 'needs-answer',
+      reason: 'Какой режим по умолчанию?',
+      idempotencyKey: key(),
+      expectedVersion: version(),
+    }).message;
+    const asked = await engineItems(f);
+    assert.equal(byKey(asked, crKey), undefined);
+    const question = byKey(asked, `discussion:na:${request.id}`)!;
+    assert.equal(question.actor, 'operator');
+    assert.equal(question.category, 'question');
+    assert.equal(question.occurrenceId, disposition.id);
+    assert.ok(question.actions.some((a) => a.id === 'answer'));
+    // Ответ оператора возвращает обращение ведущему новым появлением.
+    service.post(
+      {
+        taskId: t.id,
+        kind: 'note',
+        text: 'Дневной по умолчанию',
+        replyTo: disposition.id,
+        idempotencyKey: key(),
+        expectedVersion: version(),
+      },
+      'operator',
+    );
+    const reopened = await engineItems(f);
+    assert.equal(byKey(reopened, `discussion:na:${request.id}`), undefined);
+    const back = byKey(reopened, crKey)!;
+    assert.equal(back.occurrenceId, disposition.id);
+    assert.notEqual(back.id, first.id);
+    service.resolve({
+      requestId: corrected.id,
+      outcome: 'rejected',
+      reason: 'Вне объёма этой доски',
+      idempotencyKey: key(),
+      expectedVersion: version(),
+    });
+    assert.equal(byKey(await engineItems(f), crKey), undefined);
+  } finally {
     f.cleanup();
   }
 });

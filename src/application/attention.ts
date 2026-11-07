@@ -22,6 +22,8 @@ import { boardStep, handoffRedactor, harnessOf, hostContext } from './handoff.ts
 import { pendingAcceptances, previewProblems, stoppedWorkflows } from './overview.ts';
 import { budgetBlocks, budgetHint } from './context.ts';
 import { inputHolds } from './input.ts';
+import { DiscussionService } from './discussion.ts';
+import { taskOwner } from '../core/sync-state.ts';
 import { baseWaitOf, queueStopOf, quietAttempts, quietOperations } from './queue-stop.ts';
 import type { DevContour } from '../core/service.ts';
 import type { Store } from '../core/store.ts';
@@ -1103,6 +1105,107 @@ const stallSource: AttentionSourceRule = {
   },
 };
 
+/** Предел записей очереди обращений, которые читает одно чтение центра. */
+const DISCUSSION_ITEMS = 500;
+
+/**
+ * S7. Обращение к ведущему из обсуждения задачи ждёт обработки (очередь
+ * `discussion_inbox`). Предмет — цепочка исправлений обращения (первое
+ * сообщение); появление — последняя обработка любой версии цепочки, а без
+ * неё — само обращение. Исправление необработанного обращения — версия;
+ * ответ оператора на «нужен ответ» или исправление после него — новое
+ * появление.
+ */
+const discussionRequestSource: AttentionSourceRule = {
+  id: 'discussion-request',
+  engine: true,
+  collect: (ctx) => {
+    const { h } = engineOf(ctx);
+    const service = new DiscussionService(h);
+    const out: Candidate[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = service.inbox({ limit: 50, ...(cursor ? { cursor } : {}) }, 1_000_000, {
+        redact: ctx.redact,
+      });
+      for (const entry of page.requests) {
+        if (out.length >= DISCUSSION_ITEMS) break;
+        const task = ctx.state.tasks.find((t) => t.id === entry.taskId);
+        const chain = task ? service.chain(taskOwner(task), entry.id) : undefined;
+        const root = chain?.rootId ?? entry.id;
+        out.push({
+          sourceKey: `discussion:cr:${root}`,
+          occurrenceId: chain?.dispositionId ?? root,
+          sourceVersion: d({ latestId: entry.id, answerId: entry.reopened?.answerId ?? null }),
+          source: 'discussion-request',
+          category: 'technical',
+          actor: 'lead',
+          title: entry.reopened
+            ? `Оператор ответил на вопрос ведущего по задаче «${taskTitle(ctx, entry.taskId)}»`
+            : `Обращение к ведущему по задаче «${taskTitle(ctx, entry.taskId)}»`,
+          reason: entry.excerpt,
+          since: entry.createdAt,
+          subject: { kind: 'task', id: entry.taskId, href: hrefs.task(entry.taskId) },
+          evidence: [{ kind: 'message', id: entry.id }],
+          actions: [
+            {
+              id: 'handoff',
+              kind: 'handoff',
+              command: 'discussion_inbox, then discussion_resolve',
+            },
+          ],
+        });
+      }
+      cursor = out.length < DISCUSSION_ITEMS ? page.nextCursor : undefined;
+    } while (cursor);
+    return out;
+  },
+};
+
+/**
+ * S8. Ведущий ответил на обращение «нужен ответ»: ответ оператора. Появление
+ * и версия — обработка; ответ оператора или исправление обращения снимает.
+ */
+const discussionNeedsAnswerSource: AttentionSourceRule = {
+  id: 'discussion-needs-answer',
+  engine: true,
+  collect: (ctx) => {
+    const { h } = engineOf(ctx);
+    const service = new DiscussionService(h);
+    return service.awaitingOperator(DISCUSSION_ITEMS).map((row): Candidate => {
+      const root = service.chain(row.owner, row.request.id)?.rootId ?? row.request.id;
+      const disposition = h.store.discussionById(row.owner, row.dispositionId) as
+        { text?: string } | undefined;
+      return {
+        sourceKey: `discussion:na:${root}`,
+        occurrenceId: row.dispositionId,
+        sourceVersion: row.dispositionId,
+        source: 'discussion-needs-answer',
+        category: 'question',
+        actor: 'operator',
+        title: `Ведущий просит ответа по задаче «${taskTitle(ctx, row.request.taskId)}»`,
+        reason: ctx.redact(disposition?.text ?? row.request.text),
+        since: row.at,
+        subject: {
+          kind: 'task',
+          id: row.request.taskId,
+          href: hrefs.task(row.request.taskId),
+        },
+        evidence: [
+          { kind: 'message', id: row.request.id },
+          { kind: 'message', id: row.dispositionId },
+        ],
+        actions: [{ id: 'answer', kind: 'domain', label: 'Ответить', input: 'text' }],
+        basis: {
+          taskId: row.request.taskId,
+          dispositionId: row.dispositionId,
+          threadVersion: row.version,
+        },
+      };
+    });
+  },
+};
+
 /**
  * Источники движка в порядке владения корнями: удержание операцией, бюджет,
  * пауза (свёртка отказов провайдера), ожидания, задача, доска, план.
@@ -1115,6 +1218,8 @@ export const engineSources: AttentionSourceRule[] = [
   workSource,
   boardSource,
   planSource,
+  discussionNeedsAnswerSource,
+  discussionRequestSource,
   changesetSource,
   previewSource,
   corpusSource,

@@ -259,12 +259,7 @@ export class DiscussionService {
     // Одна схема — один список; ключ курсора — первый её владелец
     // (`@workspace` или id репозитория): имя схемы зависит от порядка
     // репозиториев в конфигурации, владелец — нет.
-    const schemas = new Map<string, string | undefined>();
-    for (const owner of [undefined, ...repositories(this.h.config).map((r) => r.id)]) {
-      const schema = this.h.store.discussionSchema(owner);
-      if (!schemas.has(schema)) schemas.set(schema, owner);
-    }
-    const lists = [...schemas.values()].map((owner) => ({
+    const lists = this.schemaOwners().map((owner) => ({
       key: owner ?? '@workspace',
       owner,
       at: 0,
@@ -324,6 +319,45 @@ export class DiscussionService {
         ? { nextCursor: Buffer.from(JSON.stringify(next), 'utf8').toString('base64url') }
         : {}),
     };
+  }
+
+  /**
+   * Владелец-представитель каждой схемы хранения: одна схема — один список.
+   * Первый владелец схемы (`@workspace` или id репозитория): имя схемы
+   * зависит от порядка репозиториев в конфигурации, владелец — нет.
+   */
+  private schemaOwners() {
+    const schemas = new Map<string, string | undefined>();
+    for (const owner of [undefined, ...repositories(this.h.config).map((r) => r.id)]) {
+      const schema = this.h.store.discussionSchema(owner);
+      if (!schemas.has(schema)) schemas.set(schema, owner);
+    }
+    return [...schemas.values()];
+  }
+
+  /**
+   * Обращения, по которым ведущий попросил ответа оператора и ответа ещё нет
+   * (дополнение `reopened` очереди ведущего), по всем схемам хранения.
+   */
+  awaitingOperator(limit: number) {
+    return this.schemaOwners().flatMap((owner) =>
+      this.h.store.discussionAwaitingOperator(owner, limit).map((row) => {
+        const request = this.parse(row.message);
+        return {
+          owner,
+          request,
+          dispositionId: row.dispositionId,
+          at: row.at,
+          /** Версия треда — `expectedVersion` ответа оператора. */
+          version: this.h.store.discussionVersion(owner, request.taskId),
+        };
+      }),
+    );
+  }
+
+  /** Цепочка исправлений обращения: первое сообщение и последняя обработка. */
+  chain(owner: string | undefined, id: string) {
+    return this.h.store.discussionChain(owner, id);
   }
 
   /**
