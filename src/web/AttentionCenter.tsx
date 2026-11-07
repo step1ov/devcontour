@@ -298,6 +298,7 @@ export function AttentionCenter({
           {groups.lead.length > 0 && who === '' && (
             <p className="m-0">
               <a
+                className="text-info underline-offset-4 hover:underline"
                 href="?who=lead"
                 onClick={(e) => {
                   e.preventDefault();
@@ -362,7 +363,7 @@ export function AttentionCenter({
       aria-label="Центр внимания"
       className="grid min-w-0 gap-4 text-sm [overflow-wrap:anywhere]"
     >
-      <p role="status" aria-live="polite" className="m-0 min-h-5 text-sm">
+      <p role="status" aria-live="polite" className="m-0 text-sm">
         {message}
       </p>
       {attention.stale && (

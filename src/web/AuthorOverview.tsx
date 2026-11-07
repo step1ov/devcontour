@@ -89,6 +89,7 @@ function DecisionHead({
   const all = attention.view?.counts.byActor.operator.active ?? operator.length;
   const link = (who: 'lead' | undefined, text: string) => (
     <a
+      className="text-info underline-offset-4 hover:underline"
       href={attentionHref(who)}
       onClick={(e) => {
         if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;

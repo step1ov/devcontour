@@ -111,7 +111,7 @@ export function HandoffCommand({
   const [shown, setShown] = useState(false);
   const [copied, setCopied] = useState(false);
   return (
-    <span className="grid min-w-0 gap-1">
+    <span className="grid min-w-0 justify-items-start gap-1">
       <Button
         type="button"
         variant="outline"
@@ -226,7 +226,7 @@ function CardForm({
           ))}
         </fieldset>
       )}
-      <label className="grid min-w-0 gap-1">
+      <label className="mt-0 grid min-w-0 gap-1">
         <span className="text-xs">
           {action.id === 'request-changes' ? 'Что доработать' : 'Ваш ответ'}
           {textOptional ? ' (необязательно)' : ''}
@@ -247,13 +247,16 @@ function CardForm({
         />
       </label>
       {item.source === 'input' && action.id === 'answer' && (
-        <label className="flex items-center gap-2 text-xs">
+        <label className="mt-0 flex min-w-0 flex-row items-start gap-2 text-xs font-normal">
           <input
             type="checkbox"
+            className="mt-0.5 shrink-0"
             checked={kind === 'requirement-change'}
             onChange={(e) => setKind(e.target.checked ? 'requirement-change' : 'clarification')}
           />
-          Ответ меняет требования (корректировка доски, а не продолжение)
+          <span className="min-w-0">
+            Ответ меняет требования (корректировка доски, а не продолжение)
+          </span>
         </label>
       )}
       <div className="flex flex-wrap gap-2">
@@ -390,7 +393,10 @@ export function AttentionCard({
 
   let next: ReactNode;
   if (domain.length)
+    // Кнопка открытой формы скрыта: отправка — в самой форме, под тем же
+    // названием; Esc и «Отмена» возвращают фокус на эту кнопку.
     next = domain.map((a, i) => {
+      if (a.id === open && formAction) return null;
       if (a.input === 'confirm')
         return (
           <Button
