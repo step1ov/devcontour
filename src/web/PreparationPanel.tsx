@@ -794,8 +794,10 @@ export function PreparationPanel() {
                 if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
                 e.preventDefault();
                 showTasks(false);
+                // Уже открыт — эффект не сработает: фокус на заголовок сразу.
+                if (attention) requestAnimationFrame(() => attentionHeading.current?.focus());
+                else focusAttention.current = true;
                 showAttention(true);
-                focusAttention.current = true;
               }}
             >
               Нужно действие
