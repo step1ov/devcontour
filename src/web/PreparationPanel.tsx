@@ -103,6 +103,8 @@ function writeLocation(
   if (state.tab !== 'product') params.set('stage', state.tab);
   if (state.boards) params.set('view', 'boards');
   else if (state.attention) params.set('view', 'attention');
+  // Вид и фильтр центра внимания живут, пока он открыт (у панели разработки — свои).
+  else for (const key of ['attention', 'who']) params.delete(key);
   const search = params.toString();
   const next = window.location.pathname + (search ? '?' + search : '');
   if (next !== window.location.pathname + window.location.search)

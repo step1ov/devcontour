@@ -11,6 +11,7 @@ import {
 import { Alert, AlertDescription } from '@/ui/alert.tsx';
 import { Button } from '@/ui/button.tsx';
 import { Label } from '@/ui/label.tsx';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/ui/tabs.tsx';
 import { humanError } from '@/lib/utils.ts';
 import type { AttentionAction, AttentionCategory } from '../core/attention-model.ts';
 import { getAttention } from './attention-api.ts';
@@ -23,6 +24,7 @@ import {
 } from './attention-logic.ts';
 import { AttentionCard, HandoffCommand, type ActOutcome } from './AttentionCard.tsx';
 import { useAttention } from './AttentionProvider.tsx';
+import { AttentionHistory } from './AttentionHistory.tsx';
 import { forgetAttentionKey, rememberedAttentionKey } from './navigation.ts';
 
 // Экран центра внимания: одна очередь в двух группах — что ждёт решения
@@ -42,6 +44,9 @@ const DEFAULT_HANDOFF = 'devcontour handoff --workspace <путь workspace>';
 export const selectClass =
   'border-input bg-card h-(--control-height) rounded-sm border px-2 text-sm max-[760px]:w-full';
 
+type Sub = 'active' | 'history';
+const readSub = (): Sub =>
+  new URLSearchParams(window.location.search).get('attention') === 'history' ? 'history' : 'active';
 const readWho = (): Who => {
   const who = new URLSearchParams(window.location.search).get('who');
   return who === 'operator' || who === 'lead' ? who : '';
@@ -79,6 +84,7 @@ export function AttentionCenter({
   const baseId = useId();
   const staleId = `${baseId}-stale`;
   const [who, setWho] = useState<Who>(readWho);
+  const [sub, setSub] = useState<Sub>(readSub);
   const [category, setCategory] = useState<'' | AttentionCategory>('');
   const [component, setComponent] = useState('');
   const [message, setMessage] = useState('');
@@ -86,13 +92,20 @@ export function AttentionCenter({
   const [gone, setGone] = useState<Set<string>>(() => new Set());
   const [leadOpen, setLeadOpen] = useState<boolean | null>(null);
   useEffect(() => {
-    const restore = () => setWho(readWho());
+    const restore = () => {
+      setWho(readWho());
+      setSub(readSub());
+    };
     window.addEventListener('popstate', restore);
     return () => window.removeEventListener('popstate', restore);
   }, []);
   const chooseWho = (value: Who) => {
     setWho(value);
     writeParam('who', value);
+  };
+  const chooseSub = (value: Sub) => {
+    setSub(value);
+    writeParam('attention', value === 'history' ? 'history' : '');
   };
 
   // Фильтр компонента решает сервер по репозиторию задачи: свой запрос на
@@ -405,24 +418,43 @@ export function AttentionCenter({
           </div>
         )}
       </div>
-      <div
-        className="grid min-w-0 gap-6"
-        onFocus={(e) => {
-          const key = (e.target as HTMLElement)
-            .closest('[data-attention-key]')
-            ?.getAttribute('data-attention-key');
-          if (key) focused.current = key;
-        }}
-      >
-        {who !== 'lead' && operatorGroup}
-        {who !== 'operator' && leadGroup}
-      </div>
-      {view.truncated && !component && (
-        <p className="text-muted-foreground m-0 text-xs">
-          Показаны первые {view.items.length} из {view.items.length + view.truncated.count}.
-          Остальные появятся по мере решения.
-        </p>
-      )}
+      <Tabs value={sub} onValueChange={(v) => chooseSub(v as Sub)} className="min-w-0">
+        <TabsList aria-label="Вид центра внимания" className="max-[760px]:w-full">
+          <TabsTrigger value="active" className="max-[760px]:flex-1">
+            Нужно действие
+          </TabsTrigger>
+          <TabsTrigger value="history" className="max-[760px]:flex-1">
+            История
+          </TabsTrigger>
+        </TabsList>
+        <TabsContent value="active" className="grid min-w-0 gap-4">
+          <div
+            className="grid min-w-0 gap-6"
+            onFocus={(e) => {
+              const key = (e.target as HTMLElement)
+                .closest('[data-attention-key]')
+                ?.getAttribute('data-attention-key');
+              if (key) focused.current = key;
+            }}
+          >
+            {who !== 'lead' && operatorGroup}
+            {who !== 'operator' && leadGroup}
+          </div>
+          {view.truncated && !component && (
+            <p className="text-muted-foreground m-0 text-xs">
+              Показаны первые {view.items.length} из {view.items.length + view.truncated.count}.
+              Остальные появятся по мере решения.
+            </p>
+          )}
+        </TabsContent>
+        <TabsContent value="history" className="min-w-0">
+          <AttentionHistory
+            revision={view.revision}
+            actor={who || undefined}
+            category={category || undefined}
+          />
+        </TabsContent>
+      </Tabs>
     </section>
   );
 }

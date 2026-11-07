@@ -164,6 +164,14 @@ test('D05-A: from the center to the executor question, an answer, the wait for a
   await page.goto('/?tab=attention');
   await expect(center(page)).toBeVisible();
   await expect(cardOf(page, key)).toHaveCount(0);
+  // История: решённое появление с временем решения.
+  await center(page).getByRole('tab', { name: 'История' }).click();
+  await expect(page).toHaveURL(/attention=history/);
+  const row = center(page)
+    .getByRole('list', { name: 'История центра внимания' })
+    .locator(`[data-attention-history="${key}"]`);
+  await expect(row.first()).toContainText(/Решено \d/);
+  await expect(row.first().getByRole('button')).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 
@@ -212,6 +220,12 @@ test('D05-A before setup: a preparation question in the center, its link and an 
     await card.locator('form').getByRole('button', { name: 'Ответить' }).click();
     await expect(card).toHaveCount(0);
     await expect(page.getByText(/Ответ сохранён\. Ведущий агент превратит/)).toBeVisible();
+    await page.getByRole('tab', { name: 'История' }).click();
+    const row = page
+      .getByRole('list', { name: 'История центра внимания' })
+      .locator(`[data-attention-history^="prep:q:${changeId}:"]`);
+    await expect(row).toContainText('Кто модерирует чат ночью?');
+    await expect(row).toContainText(/Решено \d/);
   } finally {
     await app.close();
     if (root.startsWith(tmpdir())) rmSync(root, { recursive: true, force: true });
@@ -287,6 +301,18 @@ test('D05-B: keyboard only; focus stays on a card that moves and goes to the nex
       center(page).getByRole('heading', { name: 'Сейчас от вас ничего не требуется.' }),
     ).toBeFocused();
   await expect(liveStatus(page)).toContainText('решена');
+
+  // Вкладки «Нужно действие» / «История» — стрелками.
+  const activeTab = center(page).getByRole('tab', { name: 'Нужно действие' });
+  await activeTab.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(center(page).getByRole('tab', { name: 'История' })).toBeFocused();
+  await expect(center(page).getByRole('tab', { name: 'История' })).toHaveAttribute(
+    'aria-selected',
+    'true',
+  );
+  await page.keyboard.press('Home');
+  await expect(activeTab).toHaveAttribute('aria-selected', 'true');
 });
 
 /** Подменный ответ центра: свои карточки поверх формы настоящего ответа. */
