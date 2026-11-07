@@ -319,7 +319,7 @@ Lifecycle требует хотя бы один teardown step; setup/ready мо�
 
 ### Объявление, применение и проверка
 
-**Где задавать.** `budgets` и `prices` можно объявить в `workspace.json` (хранится в Git) той же схемой, что и в `config.json`. Порядок старшинства:
+**Где задавать.** `budgets`, `prices` и `inputPolicy` можно объявить в `workspace.json` (хранится в Git) той же схемой, что и в `config.json`. Порядок старшинства:
 
 1. Ключ объявлен в `workspace.json` — каждый `workspace-init --file` записывает объявление в `config.json`. Объявление сильнее локального значения: отличавшееся значение `config.json` заменяется, и ответ называет его в `operational.replaced` с подсказкой применения.
 2. Правка `config.json` между запусками `workspace-init` — локальное переопределение. Оно действует (после перезапуска или `config-apply`) до следующего `workspace-init`; `doctor` называет расхождение проверкой `budgets:declaration` (`degraded`).

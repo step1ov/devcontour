@@ -11,6 +11,11 @@ import {
   setupWorkspace,
 } from '../src/runner/workspace-setup.ts';
 
+import { DevContour } from '../src/core/service.ts';
+import { Store } from '../src/core/store.ts';
+import { repositories } from '../src/core/repositories.ts';
+import { requestConfigApply, serveReconfigure } from '../src/runner/reconfigure.ts';
+
 const json = (path: string, value: unknown) => writeFile(path, JSON.stringify(value) + '\n');
 
 test('Workspace refuses effort outside codex before it writes any configuration', async () => {
@@ -267,4 +272,80 @@ test('A local config with one invalid operational key reports only that key as r
   assert.deepEqual(current.budgets, budgets);
   // Объявление тех же budgets и любых prices: заменены только невалидные prices.
   assert.deepEqual(operationalDeclaration({ budgets, prices: [] }, current).differs, ['prices']);
+});
+
+test('Workspace declaration carries inputPolicy; the replaced local value reaches a running server by config-apply --keys inputPolicy', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'devcontour-declaration-input-')));
+  let server: DevContour | undefined;
+  try {
+    const repo = join(root, 'product');
+    const control = join(root, 'control');
+    await mkdir(repo);
+    await mkdir(control);
+    await git(repo, 'init', '-b', 'main');
+    const registryPath = join(control, 'workspace.json');
+    const registry = {
+      version: 1,
+      name: 'Input policy',
+      repositories: [{ id: 'product', name: 'Product', path: repo, profile: 'react-vite-admin' }],
+      inputPolicy: { threshold: 4, criticalPaths: ['db/migrations'] },
+    };
+    // Та же схема, что в config.json: порог вне 1..11 — отказ до записи.
+    await json(registryPath, { ...registry, inputPolicy: { threshold: 12 } });
+    await assert.rejects(setupWorkspace(registryPath), /threshold/);
+    assert.deepEqual(await readdir(control), ['workspace.json']);
+
+    await json(registryPath, registry);
+    const created = await setupWorkspace(registryPath);
+    const configPath = created.config;
+    assert.deepEqual(loadConfig(configPath).inputPolicy, registry.inputPolicy);
+    assert.equal((await setupWorkspace(registryPath)).status, 'preserved');
+
+    // Локальная правка порога заменяется объявлением при workspace-init.
+    const stored = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>;
+    await json(configPath, { ...stored, inputPolicy: { threshold: 9 } });
+    const updated = (await setupWorkspace(registryPath)) as {
+      status: string;
+      operational?: { replaced: string[]; note: string };
+    };
+    assert.equal(updated.status, 'declaration-updated');
+    assert.deepEqual(updated.operational?.replaced, ['inputPolicy']);
+    assert.match(updated.operational?.note ?? '', /config-apply --keys inputPolicy/);
+    assert.deepEqual(loadConfig(configPath).inputPolicy, registry.inputPolicy);
+    // Работающий сервер на этой конфигурации; новое объявление порога.
+    const running = loadConfig(configPath);
+    server = new DevContour(
+      new Store(
+        join(created.data, 'state.sqlite'),
+        running.storage === 'component' ? repositories(running) : undefined,
+      ),
+      running,
+    );
+    assert.ok(server.leader('server'));
+    server.recordConfig('server');
+    const declared = { threshold: 3, criticalPaths: [] };
+    await json(registryPath, { ...registry, inputPolicy: declared });
+    const redeclared = (await setupWorkspace(registryPath)) as {
+      operational?: { replaced: string[] };
+    };
+    assert.deepEqual(redeclared.operational?.replaced, ['inputPolicy']);
+    // config-apply --keys inputPolicy: сервер применяет без перезапуска.
+    let done = false;
+    const pending = requestConfigApply(created.data, ['inputPolicy'], { waitMs: 5000 });
+    pending.then(
+      () => (done = true),
+      () => (done = true),
+    );
+    while (!done) {
+      server.leader('server');
+      serveReconfigure(server, configPath, 'server');
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const result = await pending;
+    assert.equal(result.status, 'applied', JSON.stringify(result));
+    assert.deepEqual(server.config.inputPolicy, declared);
+  } finally {
+    server?.store.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
