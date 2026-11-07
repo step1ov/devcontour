@@ -37,6 +37,35 @@ const runsOf = (f: InputFixture, taskId: string) =>
   f.store.read().runs.filter((r) => r.taskId === taskId);
 const writerCalls = (prompts: string[]) => prompts.filter((p) => p.startsWith('writer:')).length;
 
+// Предел бюджета ниже уже записанного расхода: бюджет исчерпан.
+function exhaustBudget(f: InputFixture) {
+  f.h.config.budgets = { workspace: { usd: 0.01 }, onUnknown: 'stop' };
+  f.store.atomic(() =>
+    f.store.saveLocal('usage', undefined, 'U-budget', {
+      id: 'U-budget',
+      stage: 'implementation',
+      runtime: 'codex',
+      model: 'fixture-model',
+      runtimeVersion: null,
+      startedAt: new Date().toISOString(),
+      outcome: 'returned',
+      promptBytes: 1,
+      promptDigest: 'd'.repeat(64),
+      usage: {
+        inputTokens: 1,
+        outputTokens: 1,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reportedUsd: 1,
+        complete: true,
+        source: 'fixture',
+      },
+      costUsd: 1,
+      costSource: 'provider-reported',
+    }),
+  );
+}
+
 test('R01: answer and cancel on the same version — the first wins, the second is a conflict, nothing resumes', async () => {
   const f = await inputFixture(controlled());
   try {
@@ -160,31 +189,7 @@ test('R01: an exhausted budget is not lifted by an answer; the task stays blocke
   try {
     const { taskId, requestId, version } = await question(f);
     const writers = writerCalls(prompts);
-    f.h.config.budgets = { workspace: { usd: 0.01 }, onUnknown: 'stop' };
-    f.store.atomic(() =>
-      f.store.saveLocal('usage', undefined, 'U-budget', {
-        id: 'U-budget',
-        stage: 'implementation',
-        runtime: 'codex',
-        model: 'fixture-model',
-        runtimeVersion: null,
-        startedAt: new Date().toISOString(),
-        outcome: 'returned',
-        promptBytes: 1,
-        promptDigest: 'd'.repeat(64),
-        usage: {
-          inputTokens: 1,
-          outputTokens: 1,
-          cacheReadTokens: 0,
-          cacheWriteTokens: 0,
-          reportedUsd: 1,
-          complete: true,
-          source: 'fixture',
-        },
-        costUsd: 1,
-        costSource: 'provider-reported',
-      }),
-    );
+    exhaustBudget(f);
     // Движок читается заново: правка конфигурации даёт движок с новой политикой.
     const blocked = () => {
       const { engine } = executionOf(f.h);
@@ -226,6 +231,53 @@ test('R01: an exhausted budget is not lifted by an answer; the task stays blocke
     await f.scheduler.drain();
     assert.equal(runsOf(f, taskId).length, runs + 1);
     assert.equal(writerCalls(prompts), writers + 1);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('R01: an answer reviewed before the budget ran out is refused at apply while the budget is exhausted; no writer runs until the limit is raised', async () => {
+  const prompts: string[] = [];
+  const f = await inputFixture(controlled({ prompts }));
+  try {
+    const { taskId, requestId } = await question(f);
+    const writers = writerCalls(prompts);
+    // Ответ отвечен и одобрен, пока бюджет ещё есть.
+    const ready = await prepared(f, requestId);
+    assert.equal(ready.review.approved, true);
+    exhaustBudget(f);
+    const blocked = () => {
+      const { engine } = executionOf(f.h);
+      return engine.read((v) => engine.budgetBlockOf(taskId, v));
+    };
+    assert.ok(blocked(), 'бюджет исчерпан после ревью');
+    // Применение отклоняется мягко: ответ не связан с попыткой, причина — бюджет.
+    const refused = f.service.apply(ready.apply, 'lead');
+    assert.equal(refused.applied, false, 'применение отклонено');
+    assert.equal(refused.changed, false);
+    assert.equal(refused.blocker?.code, 'BUDGET_EXHAUSTED');
+    assert.equal(f.service.show({ requestId }).state, 'ready-to-apply');
+    const runs = runsOf(f, taskId).length;
+    f.h.pause(false);
+    await f.scheduler.drain();
+    assert.equal(runsOf(f, taskId).length, runs, 'новая попытка не добавлена');
+    assert.equal(writerCalls(prompts), writers, 'исполнитель не запускался');
+    assert.ok(blocked(), 'отказ не снимает блокировку бюджета');
+    // Предел поднят оператором: тот же проверенный ответ применяется обычным
+    // путём и уходит ровно в одну попытку.
+    f.h.config.budgets = { workspace: { usd: 5 }, onUnknown: 'continue' };
+    assert.equal(blocked(), undefined);
+    const target = f.service.target({ requestId, contextDigest: ready.context.contextDigest });
+    const applied = f.service.apply(
+      { ...ready.apply, expectedVersion: target.version, targetDigest: target.targetDigest! },
+      'lead',
+    );
+    assert.equal(applied.applied, true);
+    await f.scheduler.drain();
+    const after = runsOf(f, taskId);
+    assert.equal(after.length, runs + 1);
+    assert.equal(writerCalls(prompts), writers + 1);
+    assert.equal(after.at(-1)!.pinned?.contextDigest, ready.context.contextDigest);
   } finally {
     await f.cleanup();
   }
