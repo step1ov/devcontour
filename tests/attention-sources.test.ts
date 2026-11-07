@@ -6,6 +6,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AttentionService } from '../src/application/attention.ts';
 import { quickFactsCache } from '../src/application/quick-view.ts';
+import { randomUUID } from 'node:crypto';
+import type { Store } from '../src/core/store.ts';
+import { digest, type DevContour } from '../src/core/service.ts';
+import { Workspace, changeSnapshot, snapshotDigest } from '../src/core/workspace.ts';
+import { fixture, input } from './helpers.ts';
 import { architecture, product } from './preparation-fixture.ts';
 import { byKey, preparationFixture } from './attention-fixture.ts';
 
@@ -244,5 +249,286 @@ test('S5 быстрый маршрут: подключение стоит, Git �
     f.cleanup();
     rmSync(repository, { recursive: true, force: true });
     rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+/* ------------------------------------------------------------------ */
+/* Источники движка                                                    */
+/* ------------------------------------------------------------------ */
+
+const engineItems = async (f: { store: Store; h: DevContour }, now?: number) =>
+  (await new AttentionService(f.store, f.h, now ? at(now) : {}).active()).items;
+
+/** Выданная попытка задачи падает на gate. */
+function failNext(h: DevContour, taskId: string, kind: 'gate' | 'provider-auth' = 'gate') {
+  h.pause(false);
+  const run = h.claim('test')!;
+  assert.equal(run.taskId, taskId);
+  h.fail(run.id, run.token, `fixture failure (${kind})`, false, kind);
+  return run;
+}
+
+test('S10 задача: появление по попытке, повтор, retry снимает, новая попытка с тем же отказом — новое появление', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const root = f.h.addTask(b.id, input('Root'));
+    f.h.addTask(b.id, input('Dependent', [root.id]));
+    f.h.approve(b.id);
+    const run1 = failNext(f.h, root.id);
+    const key = `work:${root.id}`;
+    const items = await engineItems(f);
+    const card = byKey(items, key)!;
+    assert.equal(card.occurrenceId, run1.id, 'появление — id попытки');
+    assert.equal(card.actor, 'lead');
+    assert.equal(card.impact.tasks, 1);
+    assert.equal(card.impact.waiting, 1);
+    // Зависимая своей карточки не даёт: она — влияние корня.
+    assert.equal(items.filter((i) => i.source === 'work').length, 1);
+    const later = byKey(await engineItems(f, Date.now() + 3_600_000), key)!;
+    assert.deepEqual([later.id, later.sourceVersion], [card.id, card.sourceVersion]);
+    f.h.retry(root.id);
+    assert.equal(byKey(await engineItems(f), key), undefined);
+    const run2 = failNext(f.h, root.id);
+    const again = byKey(await engineItems(f), key)!;
+    assert.equal(again.occurrenceId, run2.id);
+    assert.notEqual(again.id, card.id);
+    assert.equal(
+      again.sourceVersion,
+      card.sourceVersion,
+      'тот же отказ — та же версия, новое появление',
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('S12 пауза: оператор, отказ провайдера сворачивает задачи в одну карточку доступа', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const t1 = f.h.addTask(b.id, input('One'));
+    const t2 = f.h.addTask(b.id, input('Two'));
+    f.h.approve(b.id);
+    f.h.pause(true);
+    const paused = byKey(await engineItems(f), 'queue')!;
+    assert.equal(paused.actor, 'operator');
+    assert.equal(paused.category, 'decision');
+    assert.equal(paused.occurrenceId, f.store.read().pausedAt);
+    assert.ok(paused.actions.some((a) => a.id === 'resume'));
+    f.h.pause(false);
+    assert.equal(byKey(await engineItems(f), 'queue'), undefined);
+    await new Promise((r) => setTimeout(r, 5));
+    f.h.pause(true);
+    const again = byKey(await engineItems(f), 'queue')!;
+    assert.notEqual(again.occurrenceId, paused.occurrenceId, 'новая пауза — новое появление');
+    // Отказ провайдера: обе задачи упали на авторизации, выдача остановлена.
+    failNext(f.h, t1.id, 'provider-auth');
+    failNext(f.h, t2.id, 'provider-auth');
+    f.store.change('fixture.pause', (s) => {
+      s.paused = true;
+      s.pauseReason = 'runtime';
+      s.pauseFailures = ['provider-auth'];
+    });
+    const items = await engineItems(f);
+    const access = byKey(items, 'queue')!;
+    assert.equal(access.category, 'access');
+    assert.notEqual(access.sourceVersion, again.sourceVersion);
+    assert.deepEqual(access.impact.taskIds.sort(), [t1.id, t2.id].sort());
+    assert.equal(items.filter((i) => i.source === 'work').length, 0);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('S6 план в режиме operator: утверждение снимает, новый черновик после утверждения — новое появление', async () => {
+  const f = fixture();
+  try {
+    f.h.config.approvalMode = 'operator';
+    const b = f.h.createBoard('Board');
+    const t1 = f.h.addTask(b.id, input('One'));
+    const key = `plan:${b.id}`;
+    const card = byKey(await engineItems(f), key)!;
+    assert.equal(card.actor, 'operator');
+    assert.equal(card.category, 'decision');
+    assert.deepEqual(card.impact.taskIds, [t1.id]);
+    // Существенное обновление: второй черновик в той же ревизии.
+    const t2 = f.h.addTask(b.id, input('Two'));
+    const updated = byKey(await engineItems(f), key)!;
+    assert.equal(updated.id, card.id);
+    assert.notEqual(updated.sourceVersion, card.sourceVersion);
+    f.h.approve(b.id);
+    assert.equal(byKey(await engineItems(f), key), undefined);
+    f.h.addTask(b.id, input('Three', [t2.id]));
+    const again = byKey(await engineItems(f), key)!;
+    assert.notEqual(again.occurrenceId, card.occurrenceId);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('S13 упавшая операция изменения контракта держит задачи: одна карточка ведущего', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const held = f.h.addTask(b.id, input('Held'));
+    f.h.approve(b.id);
+    const op = 'CC-' + randomUUID();
+    f.h.hold([held.id], op, 'contract change');
+    const record = (status: string, version: number, at: string) => ({
+      id: op,
+      key: 'main:openapi',
+      owner: 'main',
+      status,
+      version,
+      error: 'review rejected',
+      held: [held.id],
+      startedAt: '2026-01-01T00:00:00.000Z',
+      history: [{ at, step: 'review', event: status }],
+    });
+    const save = (value: unknown) =>
+      f.store.atomic(() => f.store.saveLocal('contract-change', 'main', op, value));
+    save(record('failed', 3, '2026-01-01T00:01:00.000Z'));
+    const items = await engineItems(f);
+    const card = byKey(items, `contract-change:${op}`)!;
+    assert.equal(card.actor, 'lead');
+    assert.deepEqual(card.impact.taskIds, [held.id]);
+    assert.equal(items.filter((i) => i.source === 'work').length, 0);
+    save(record('running', 4, '2026-01-01T00:01:00.000Z'));
+    assert.equal(byKey(await engineItems(f), `contract-change:${op}`), undefined);
+    save({
+      ...record('failed', 5, '2026-01-01T00:02:00.000Z'),
+      history: [
+        { at: '2026-01-01T00:01:00.000Z', step: 'review', event: 'failed' },
+        { at: '2026-01-01T00:02:00.000Z', step: 'review', event: 'failed' },
+      ],
+    });
+    const again = byKey(await engineItems(f), `contract-change:${op}`)!;
+    assert.notEqual(again.occurrenceId, card.occurrenceId);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('S14 ожидание блокировки контекста и подтверждения переноса базы', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    f.h.waitFor('context-lock', 'op-1', 'Контекст закреплён другой операцией');
+    const lock = byKey(await engineItems(f), 'wait:context-lock')!;
+    assert.equal(lock.actor, 'lead');
+    f.h.clearWait('context-lock', 'op-1');
+    assert.equal(byKey(await engineItems(f), 'wait:context-lock'), undefined);
+    f.store.change('fixture.base-wait', (s) => {
+      s.paused = true;
+      s.pauseReason = 'base-check';
+      s.waits = [
+        {
+          kind: 'base-check',
+          detail: 'Перенос меняет приёмку или настройку контура: AGENTS.md',
+          at: new Date().toISOString(),
+        },
+      ];
+    });
+    const items = await engineItems(f);
+    const base = byKey(items, 'wait:base-check')!;
+    assert.equal(base.actor, 'operator');
+    assert.ok(base.actions.some((a) => a.id === 'resume'));
+    // Ожидание проверки базы — не пауза S12: без дубликата.
+    assert.equal(byKey(items, 'queue'), undefined);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('S16/S17 проверенное изменение ждёт приёмки; сбой выкладки preview — ведущему', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    const change = new Workspace(f.h).create({
+      title: 'Каталог',
+      description: 'Поиск по каталогу',
+      boardIds: [b.id],
+    });
+    const manifest = { main: { sha: 'a'.repeat(40), tree: 'b'.repeat(40) } };
+    const verify = () => {
+      const id = randomUUID();
+      f.store.change('fixture.verified', (s) => {
+        const cs = s.changeSets.find((x) => x.id === change.id)!;
+        cs.verifications.push({
+          id,
+          token: randomUUID(),
+          leaseUntil: 0,
+          startedAt: new Date().toISOString(),
+          status: 'passed',
+          finishedAt: new Date().toISOString(),
+          policyDigest: new Workspace(f.h).policyDigest(),
+          specDigest: snapshotDigest(changeSnapshot(s, cs)),
+          tasks: [],
+          boards: [],
+          manifest,
+          manifestDigest: digest(manifest),
+          evidence: [],
+        });
+      });
+      return id;
+    };
+    const v1 = verify();
+    const card = byKey(await engineItems(f), `changeset:${change.id}`)!;
+    assert.equal(card.occurrenceId, v1);
+    assert.equal(card.actor, 'operator');
+    assert.ok(card.actions.some((a) => a.id === 'accept'));
+    const v2 = verify();
+    assert.equal(byKey(await engineItems(f), `changeset:${change.id}`)!.occurrenceId, v2);
+    f.store.change('fixture.preview', (s) => {
+      s.previews = [
+        {
+          id: 'PV-1',
+          changeSetId: change.id,
+          verificationId: v2,
+          manifestDigest: digest(manifest),
+          policyDigest: 'p',
+          release: 'r1',
+          project: 'dc-r1',
+          token: 't',
+          leaseUntil: 0,
+          status: 'failed',
+          failure: 'build',
+          error: 'docker build failed',
+          active: false,
+          startedAt: new Date().toISOString(),
+        },
+      ];
+    });
+    const failed = byKey(await engineItems(f), 'preview:failed')!;
+    assert.equal(failed.actor, 'lead');
+    assert.equal(failed.occurrenceId, 'PV-1');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Тексты отказов проходят маску секретов пакета передачи', async () => {
+  const f = fixture();
+  const secret = 'attention-secret-token-value-123';
+  process.env.ATTENTION_TEST_TOKEN = secret;
+  try {
+    (f.h.config as unknown as { forge: unknown }).forge = { tokenEnv: 'ATTENTION_TEST_TOKEN' };
+    const b = f.h.createBoard('Board');
+    const t = f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    f.h.pause(false);
+    const run = f.h.claim('test')!;
+    assert.equal(run.taskId, t.id);
+    f.h.fail(run.id, run.token, `push refused with ${secret}`, false, 'gate');
+    const card = byKey(await engineItems(f), `work:${t.id}`)!;
+    assert.doesNotMatch(card.reason, new RegExp(secret));
+  } finally {
+    delete process.env.ATTENTION_TEST_TOKEN;
+    f.cleanup();
   }
 });

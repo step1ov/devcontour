@@ -11,7 +11,18 @@
 // не меняют ни появление, ни версию. Повторное появление после решения —
 // новый факт источника, поэтому новое появление и снова «не прочитано».
 // Источник без такого факта называет ограничение у своего правила.
-import { digest } from '../core/service.ts';
+import { queuePause, explainStop, stopInputsOf } from 'devcontour-harness';
+import { digest, specDigest } from '../core/service.ts';
+import { LeadWorkflow } from '../core/lead-workflow.ts';
+import { CheckCorpus } from '../core/check-store.ts';
+import { executionOf } from '../harness/execution.ts';
+import { ContractChanges } from '../runner/contract-change.ts';
+import { boardTasks, planApproved, unapprovedTasks } from '../runner/lead-outlook.ts';
+import { boardStep, handoffRedactor, harnessOf, hostContext } from './handoff.ts';
+import { pendingAcceptances, previewProblems, stoppedWorkflows } from './overview.ts';
+import { budgetBlocks, budgetHint } from './context.ts';
+import { inputHolds } from './input.ts';
+import { baseWaitOf, queueStopOf, quietAttempts, quietOperations } from './queue-stop.ts';
 import type { DevContour } from '../core/service.ts';
 import type { Store } from '../core/store.ts';
 import type { DevContourState, Task } from '../core/model.ts';
@@ -115,8 +126,7 @@ const stageTitles: Record<(typeof stages)[number], string> = {
   concept: 'концепт',
   design: 'дизайн',
 };
-const changesOf = (ctx: AttentionContext): ProductChange[] =>
-  (ctx.state.preparation?.changes ?? []);
+const changesOf = (ctx: AttentionContext): ProductChange[] => ctx.state.preparation?.changes ?? [];
 
 /**
  * S1. Открытый вопрос ведущего оператору. Появление — id вопроса: вопрос
@@ -376,6 +386,742 @@ export const preparationSources: AttentionSourceRule[] = [
 ];
 
 /* ------------------------------------------------------------------ */
+/* Движок: после setup                                                 */
+/* ------------------------------------------------------------------ */
+
+/** Общие чтения движка одного снимка: считаются один раз на чтение. */
+interface EngineReads {
+  h: DevContour;
+  harness: ReturnType<typeof harnessOf>;
+  holds: Map<string, string>;
+  jobs: ReturnType<LeadWorkflow['view']>;
+  boardByTask: Map<string, string>;
+}
+const engineCache = new WeakMap<AttentionContext, EngineReads>();
+function engineOf(ctx: AttentionContext): EngineReads {
+  let reads = engineCache.get(ctx);
+  if (!reads) {
+    const h = ctx.h!;
+    reads = {
+      h,
+      harness: harnessOf(h),
+      holds: inputHolds(h),
+      jobs: new LeadWorkflow(h).view(),
+      boardByTask: boardsOf(ctx.state),
+    };
+    engineCache.set(ctx, reads);
+  }
+  return reads;
+}
+const taskTitle = (ctx: AttentionContext, id: string) =>
+  ctx.state.tasks.find((t) => t.id === id)?.title ?? id;
+const unclaimed = (ctx: AttentionContext, ids: readonly string[]) =>
+  ids.filter((id) => !ctx.claimed.has(id));
+const handoff: AttentionAction = {
+  id: 'handoff',
+  kind: 'handoff',
+  command: 'session_handoff (devcontour handoff --workspace …)',
+};
+
+/**
+ * S13. Операция изменения контракта упала или устарела: её удержанные
+ * задачи ждут ведущего. Появление — операция и момент перехода в этот
+ * статус (возобновлённая и снова упавшая операция — новое появление).
+ */
+const contractChangeSource: AttentionSourceRule = {
+  id: 'contract-change',
+  engine: true,
+  collect: (ctx) => {
+    const { h } = engineOf(ctx);
+    return new ContractChanges(h, ctx.root ?? '')
+      .list()
+      .filter((op) => op.status === 'failed' || op.status === 'stale')
+      .map((op): Candidate => {
+        const entered = op.history.findLast((e) => e.event === op.status)?.at ?? op.startedAt;
+        const held = [
+          ...new Set([
+            ...op.held,
+            ...ctx.state.tasks.filter((t) => t.hold?.operation === op.id).map((t) => t.id),
+          ]),
+        ].filter((id) => ctx.state.tasks.some((t) => t.id === id && open(t)));
+        return {
+          sourceKey: `contract-change:${op.id}`,
+          occurrenceId: `${op.id}@${entered}`,
+          sourceVersion: String(op.version ?? 0),
+          source: 'contract-change',
+          category: 'technical',
+          actor: 'lead',
+          title:
+            op.status === 'failed'
+              ? `Изменение контракта ${op.key} остановлено`
+              : `Изменение контракта ${op.key} устарело`,
+          reason: ctx.redact(op.error ?? 'Причина не записана'),
+          since: entered,
+          subject: { kind: 'operation', id: op.id, href: hrefs.contracts() },
+          actions: [handoff],
+          covered: unclaimed(ctx, held),
+        };
+      });
+  },
+};
+
+/**
+ * S11. Бюджет исчерпан или не определён и держит готовые задачи. Расход
+ * монотонен: при том же пределе исчерпанный бюджет снимает только новая
+ * конфигурация, поэтому появление — предел и `onUnknown`.
+ */
+const budgetSource: AttentionSourceRule = {
+  id: 'budget',
+  engine: true,
+  collect: (ctx) => {
+    const { h } = engineOf(ctx);
+    const blocks = budgetBlocks(h, ctx.state);
+    if (!blocks.size) return [];
+    const overview = executionOf(h).engine.budgets();
+    if (!overview) return [];
+    return overview.budgets.flatMap((b): Candidate[] => {
+      if ((b.state !== 'exceeded' && b.state !== 'undetermined') || !b.reason) return [];
+      const covered = unclaimed(
+        ctx,
+        [...blocks].filter(([, reason]) => reason === b.reason).map(([id]) => id),
+      );
+      if (!covered.length) return [];
+      const scope = `${b.scope.kind}:${b.scope.id ?? '*'}`;
+      return [
+        {
+          sourceKey: `budget:${scope}`,
+          occurrenceId: d({ limit: b.limit, onUnknown: overview.onUnknown }),
+          sourceVersion: d({ state: b.state, limit: b.limit, onUnknown: overview.onUnknown }),
+          source: 'budget',
+          category: 'budget',
+          actor: 'operator',
+          title:
+            b.state === 'exceeded' ? 'Бюджет исчерпан: задачи не выдаются' : 'Бюджет не определён',
+          reason: `${b.reason}. ${budgetHint(b.reason)}`,
+          since:
+            ctx.state.tasks
+              .filter((t) => covered.includes(t.id))
+              .map((t) => t.budgetBlock?.at)
+              .filter((x): x is string => !!x)
+              .sort()[0] ??
+            ctx.state.pausedAt ??
+            new Date(0).toISOString(),
+          subject: { kind: 'budget', id: scope, href: hrefs.overview() },
+          covered,
+        },
+      ];
+    });
+  },
+};
+
+/** Классы отказа, которые чинит доступ: учётная запись или среда. */
+const accessFailures = new Set(['provider-auth', 'environment']);
+
+/**
+ * S12. Выдача на паузе, и снимет её человек или ведущий (`queuePause`), пока
+ * есть открытая работа. Появление — момент паузы. Отказ провайдера по
+ * задачам сворачивается сюда: одна учётная запись чинит их все.
+ */
+const queueSource: AttentionSourceRule = {
+  id: 'queue',
+  engine: true,
+  collect: (ctx) => {
+    const { h } = engineOf(ctx);
+    const s = ctx.state;
+    if (!s.paused || s.pauseReason === 'base-check' || !s.tasks.some(open)) return [];
+    const pause = queuePause({
+      paused: s.paused,
+      ...(s.pauseReason ? { pauseReason: s.pauseReason } : {}),
+      ...(s.pauseFailures ? { pauseFailures: s.pauseFailures } : {}),
+    });
+    if (!pause || (pause.actor !== 'user' && pause.actor !== 'lead')) return [];
+    const view = queueStopOf(h, s, h.store.latestEvents(['scheduler.error'], 50));
+    const access = (s.pauseFailures ?? []).some((f) => accessFailures.has(f));
+    const operator = pause.actor === 'user';
+    return [
+      {
+        sourceKey: 'queue',
+        occurrenceId: s.pausedAt ?? 'initial',
+        sourceVersion: d({
+          reason: s.pauseReason ?? null,
+          failures: s.pauseFailures ?? [],
+          waits: (s.waits ?? []).map((w) => w.kind),
+        }),
+        source: 'queue',
+        category: access ? 'access' : operator ? 'decision' : 'technical',
+        actor: operator ? 'operator' : 'lead',
+        title: access
+          ? 'Выдача остановлена: нужен доступ'
+          : s.pauseReason === 'operator'
+            ? 'Выдача задач остановлена оператором'
+            : 'Выдача задач на паузе',
+        reason: ctx.redact([view.stopReason, view.action].filter(Boolean).join('. ')),
+        since: s.pausedAt ?? new Date(0).toISOString(),
+        subject: { kind: 'queue', id: 'queue', href: hrefs.overview() },
+        actions: operator
+          ? [{ id: 'resume', kind: 'domain', label: 'Запустить очередь', input: 'confirm' }]
+          : [handoff],
+        covered: [],
+      },
+    ];
+  },
+};
+
+/**
+ * S14. Ожидание проверки базы, которое снимет человек или ведущий, и
+ * ожидание блокировки контекста. Появление — момент ожидания.
+ */
+const waitSource: AttentionSourceRule = {
+  id: 'wait',
+  engine: true,
+  collect: (ctx) => {
+    const { h } = engineOf(ctx);
+    const s = ctx.state;
+    return (s.waits ?? []).flatMap((w): Candidate[] => {
+      const base = {
+        sourceKey: `wait:${w.kind}`,
+        occurrenceId: w.at,
+        source: 'wait' as const,
+        since: w.at,
+        subject: { kind: 'queue' as const, id: w.kind, href: hrefs.overview() },
+      };
+      if (w.kind === 'context-lock')
+        return [
+          {
+            ...base,
+            sourceVersion: d({ detail: w.detail }),
+            category: 'technical',
+            actor: 'lead',
+            title: 'Выдача ждёт блокировки контекста',
+            reason: w.detail,
+            actions: [handoff],
+          },
+        ];
+      const wait = baseWaitOf(h, s);
+      if (!wait?.needsOperator) return [];
+      const failed = wait.detail.startsWith('Проверка базы не пройдена');
+      return [
+        {
+          ...base,
+          sourceVersion: d({ detail: wait.detail, needsOperator: wait.needsOperator, failed }),
+          category: failed ? 'technical' : 'decision',
+          actor: failed ? 'lead' : 'operator',
+          title: failed
+            ? 'Проверка перенесённой базы не пройдена'
+            : 'Перенос базы ждёт подтверждения',
+          reason: wait.detail,
+          actions: failed
+            ? [handoff]
+            : [
+                {
+                  id: 'resume',
+                  kind: 'domain',
+                  label: 'Подтвердить и запустить',
+                  input: 'confirm',
+                },
+              ],
+        },
+      ];
+    });
+  },
+};
+
+/** Действия диагноза, которые не требуют человека или ведущего здесь. */
+const quietActions = new Set([
+  'none',
+  'wait',
+  'resume-queue',
+  'raise-budget',
+  'review-plan',
+  'answer-input',
+  'apply-input',
+]);
+const workTitles: Record<string, (title: string) => string> = {
+  'diagnose-failure': (t) => `Задача «${t}» не прошла`,
+  retry: (t) => `Задачу «${t}» нужно повторить`,
+  'reset-attempts': (t) => `Попытки задачи «${t}» исчерпаны`,
+  'replan-dependents': (t) => `Отменённая задача «${t}» держит зависимые`,
+  'recovery-decision': (t) => `Разбор свойства задачи «${t}»`,
+  'user-decision': (t) => `Нужно решение по задаче «${t}»`,
+  'fix-environment': (t) => `Окружение не дало выполнить «${t}»`,
+  'fix-access': (t) => `Нужен доступ для задачи «${t}»`,
+};
+const accessActions = new Set(['fix-access', 'fix-environment']);
+
+/**
+ * S10. Остановка задачи по диагнозу harness (`stopInputsOf` → `explainStop`):
+ * класс отказа, план восстановления, исчерпанные попытки, отменённые корни.
+ * Работа, которую контур повторит сам, карточки не даёт. Появление —
+ * попытка (`runId`): тот же отказ в новой попытке — новое появление.
+ */
+const workSource: AttentionSourceRule = {
+  id: 'work',
+  engine: true,
+  collect: (ctx) => {
+    const { h, harness, holds } = engineOf(ctx);
+    // Диагноз считается только для задач, которые могут остановиться сами:
+    // упавших, отменённых, готовых с исчерпанными попытками или с эпизодом
+    // восстановления. Остальные идут, ждут или ещё не утверждены — их
+    // диагноз карточки не даёт, а расчёт по всем задачам дорог.
+    const candidates = ctx.state.tasks.filter(
+      (t) =>
+        t.status === 'failed' ||
+        t.status === 'cancelled' ||
+        !!t.recovery ||
+        (t.status === 'ready' && !t.activeRunId && t.attempt >= h.config.maxAttempts),
+    );
+    const inputs = candidates.flatMap((t) =>
+      stopInputsOf(harness.source, {
+        maxAttempts: h.config.maxAttempts,
+        repairBudget: h.config.repairBudget,
+        workId: t.id,
+      }),
+    );
+    const queue = ctx.cards.get('queue');
+    const out: Candidate[] = [];
+    for (const input of inputs) {
+      if (input.kind !== 'work') continue;
+      const w = input.work;
+      if (ctx.claimed.has(w.id) || holds.has(w.id) || w.hold) continue;
+      // Зависимая, которая ждёт предпосылок, — влияние их карточки, не своя.
+      if (w.waitingOn?.length) continue;
+      const dx = explainStop(input);
+      if (dx.actor !== 'lead' && dx.actor !== 'user') continue;
+      if (quietActions.has(dx.action)) continue;
+      // Отказ провайдера при паузе выдачи — одна карточка доступа на все задачи.
+      if (dx.cause === 'provider-auth' && queue) {
+        queue.covered = [...(queue.covered ?? []), w.id];
+        ctx.claimed.set(w.id, queue.sourceKey);
+        continue;
+      }
+      const title = taskTitle(ctx, w.id);
+      const operator = dx.actor === 'user';
+      out.push({
+        sourceKey: `work:${w.id}`,
+        occurrenceId:
+          dx.runId ??
+          input.runId ??
+          (w.status === 'cancelled' ? `cancelled:a${w.attempt}` : `a${w.attempt}`),
+        sourceVersion: d({
+          cause: dx.cause,
+          action: dx.action,
+          actor: dx.actor,
+          kind: w.failureKind ?? null,
+          phase: dx.phase,
+        }),
+        source: 'work',
+        category:
+          accessActions.has(dx.action) || accessFailures.has(dx.cause)
+            ? 'access'
+            : operator && dx.action === 'user-decision'
+              ? 'decision'
+              : 'technical',
+        actor: operator ? 'operator' : 'lead',
+        title: (workTitles[dx.action] ?? ((t: string) => `Задача «${t}» остановлена`))(title),
+        reason: ctx.redact(dx.message),
+        since:
+          ctx.state.runs.find((r) => r.id === (dx.runId ?? input.runId))?.finishedAt ??
+          ctx.state.runs.findLast((r) => r.taskId === w.id)?.finishedAt ??
+          ctx.state.tasks.find((t) => t.id === w.id)?.createdAt ??
+          new Date(0).toISOString(),
+        subject: { kind: 'task', id: w.id, href: hrefs.task(w.id) },
+        evidence: dx.evidence.slice(0, ATTENTION_LIMITS.evidence).map((e) => ({
+          kind: 'evidence' as const,
+          id: String((e as { id?: string }).id ?? (e as { ref?: string }).ref ?? dx.runId ?? w.id),
+        })),
+        actions: [handoff],
+        covered: [w.id],
+      });
+    }
+    return out;
+  },
+};
+
+/** Последняя отметка утверждения задач доски: решение — факт источника. */
+const approvedAnchor = (tasks: readonly Task[]) =>
+  tasks
+    .map((t) => t.approvedAt)
+    .filter((x): x is string => !!x)
+    .sort()
+    .at(-1) ?? 'none';
+
+/**
+ * S9. Решение по заданию ведущего на доске (агентский режим): цикл
+ * остановится, задание упало и повтор поможет, вход задания не построить,
+ * план не согласован. Шаг — `boardStep` пакета передачи. Если задание стоит
+ * на задаче, у которой уже есть карточка задачи, отдельной карточки нет.
+ * Упавшие задания ChangeSet — `stoppedWorkflows` сводки.
+ */
+const packNotNeeded = new Error('attention: workflow_start step is not shown');
+const boardSource: AttentionSourceRule = {
+  id: 'board',
+  engine: true,
+  collect: (ctx) => {
+    const { h, harness, jobs } = engineOf(ctx);
+    const out: Candidate[] = [];
+    if (h.config.approvalMode === 'agent') {
+      const { store } = executionOf(h);
+      store.read((v) => {
+        const state = store.stateOf(v);
+        // Пакет нужен шагу только для `workflow_start` (идёт ли попытка без
+        // задания), а такой шаг центр внимания не показывает: вместо сборки
+        // всего пакета шаг прерывается и пропускается.
+        const host = hostContext(h, harness, v, state, () => {
+          throw packNotNeeded;
+        });
+        for (const board of state.boards) {
+          const revision = board.revisions.at(-1);
+          if (!revision) continue;
+          const tasks = state.tasks.filter((t) => revision.taskIds.includes(t.id));
+          if (!tasks.some(open)) continue;
+          let step: ReturnType<typeof boardStep>;
+          try {
+            step = boardStep(board.id, host);
+          } catch (error) {
+            if (error === packNotNeeded) continue;
+            throw error;
+          }
+          if (!step || !['decide', 'fix-input', 'workflow_retry'].includes(step.action)) continue;
+          const stopped = step.loop && 'taskId' in step.loop ? step.loop.taskId : undefined;
+          const work = stopped ? ctx.cards.get(`work:${stopped}`) : undefined;
+          if (work) {
+            // Свёртка: задание стоит на задаче, у которой уже есть карточка.
+            work.boards = [...new Set([...(work.boards ?? []), board.id])];
+            continue;
+          }
+          const occurrenceId =
+            step.decision === 'plan'
+              ? `plan:r${revision.number}:${approvedAnchor(tasks)}`
+              : step.job
+                ? `job:${step.job.key}:${step.job.attempts}`
+                : `input:r${revision.number}:${d(step.detail).slice(0, 12)}`;
+          const drafts = step.plan?.drafts ?? [];
+          out.push({
+            sourceKey: `board:${board.id}`,
+            occurrenceId,
+            sourceVersion: d({
+              action: step.action,
+              decision: step.decision ?? null,
+              loop: step.loop ?? null,
+              drafts,
+              blocked: step.plan?.blocked.map((b) => b.id) ?? [],
+            }),
+            source: 'board',
+            category: 'technical',
+            actor: 'lead',
+            title:
+              step.decision === 'plan'
+                ? `План доски «${board.title}» не согласован`
+                : step.action === 'fix-input'
+                  ? `Задание доски «${board.title}» не построить`
+                  : step.action === 'workflow_retry'
+                    ? `Задание доски «${board.title}» упало`
+                    : `Задание доски «${board.title}» требует решения`,
+            reason: ctx.redact(step.detail),
+            since: step.job
+              ? (jobs.find((j) => j.key === step.job!.key)?.history.at(-1)?.at ??
+                revision.createdAt)
+              : revision.createdAt,
+            subject: { kind: 'board', id: board.id, href: hrefs.board(board.id) },
+            actions: [handoff],
+            covered: unclaimed(ctx, drafts),
+            boards: [board.id],
+          });
+        }
+      });
+    }
+    for (const w of stoppedWorkflows(ctx.state as DevContourState, jobs))
+      if (w.kind === 'changeset')
+        out.push({
+          sourceKey: `workflow:changeset:${w.id}`,
+          occurrenceId: `${w.key}:${w.attempts}`,
+          sourceVersion: d(w.error ?? ''),
+          source: 'board',
+          category: 'technical',
+          actor: 'lead',
+          title: 'Автоматическое восстановление ChangeSet остановлено',
+          reason: ctx.redact(w.error ?? ''),
+          since: w.history.at(-1)?.at ?? w.startedAt,
+          subject: { kind: 'changeset', id: w.id, href: hrefs.changesets() },
+          actions: [handoff],
+        });
+    return out;
+  },
+};
+
+/**
+ * S6. План доски не согласован в режиме `approvalMode: operator`: решение
+ * оператора. Действие — утверждение с CAS ревью (`expected`): правка задачи
+ * между показом и решением отклоняется самим `approve`. Появление — ревизия
+ * и последнее утверждение её задач (новый черновик после утверждения —
+ * новое появление).
+ */
+const planSource: AttentionSourceRule = {
+  id: 'plan',
+  engine: true,
+  collect: (ctx) => {
+    const { h } = engineOf(ctx);
+    if (h.config.approvalMode !== 'operator') return [];
+    const s = ctx.state as DevContourState;
+    return s.boards.flatMap((board): Candidate[] => {
+      const found = boardTasks(s, board.id);
+      if (!found || found.revision.status !== 'active') return [];
+      if (planApproved(h, found.revision, found.tasks)) return [];
+      const why = unapprovedTasks(h, s, found.tasks);
+      const held = new Set([...why.blocked.map((b) => b.id), ...why.unverified]);
+      const approvable = [...why.drafts.filter((id) => !held.has(id)), ...why.stale];
+      if (!approvable.length && !why.drafts.length) return [];
+      const byId = new Map(found.tasks.map((t) => [t.id, t]));
+      const shown = Object.fromEntries(approvable.map((id) => [id, specDigest(byId.get(id)!)]));
+      const blocked = why.blocked.map((b) => `${b.id} — ${b.reason}`);
+      const base = {
+        sourceKey: `plan:${board.id}`,
+        occurrenceId: `r${found.revision.number}:${approvedAnchor(found.tasks)}`,
+        sourceVersion: d({
+          taskIds: found.revision.taskIds,
+          drafts: why.drafts.map((id) => [id, specDigest(byId.get(id)!)]),
+          stale: why.stale,
+          blocked: why.blocked.map((b) => b.id),
+          unverified: why.unverified,
+        }),
+        source: 'plan' as const,
+        since: found.revision.createdAt,
+        subject: { kind: 'board' as const, id: board.id, href: hrefs.board(board.id) },
+        covered: unclaimed(ctx, why.drafts),
+        boards: [board.id],
+      };
+      if (!approvable.length)
+        return [
+          {
+            ...base,
+            category: 'technical',
+            actor: 'lead',
+            title: `Черновики доски «${board.title}» не готовы к утверждению`,
+            reason: blocked.join('; ') || `Неразобранные находки: ${why.unverified.join(', ')}`,
+            actions: [handoff],
+          },
+        ];
+      return [
+        {
+          ...base,
+          category: 'decision',
+          actor: 'operator',
+          title: `Утвердите план доски «${board.title}»`,
+          reason:
+            `Черновиков: ${why.drafts.length}` +
+            (why.stale.length ? `, утверждённых при другой политике: ${why.stale.length}` : '') +
+            (blocked.length ? `. Не пройдут утверждение: ${blocked.join('; ')}` : ''),
+          actions: [{ id: 'approve', kind: 'domain', label: 'Утвердить план', input: 'confirm' }],
+          basis: {
+            boardId: board.id,
+            approvable,
+            expected: {
+              revision: found.revision.number,
+              taskIds: found.revision.taskIds,
+              tasks: shown,
+              reason: found.revision.reason,
+            },
+          },
+        },
+      ];
+    });
+  },
+};
+
+/**
+ * S16. Проверенное изменение ждёт приёмки (`pendingAcceptances` сводки).
+ * Появление — текущая совместная проверка.
+ */
+const changesetSource: AttentionSourceRule = {
+  id: 'changeset',
+  engine: true,
+  collect: (ctx) => {
+    const { h } = engineOf(ctx);
+    return pendingAcceptances(h, ctx.state as DevContourState).map(
+      ({ changeSet: c, verification: v, onPreview }): Candidate => {
+        const deploy = !onPreview && !!h.config.preview;
+        return {
+          sourceKey: `changeset:${c.id}`,
+          occurrenceId: v.id,
+          sourceVersion: d({ manifest: v.manifestDigest, onPreview, deploy }),
+          source: 'changeset',
+          category: 'decision',
+          actor: 'operator',
+          title: `Примите «${c.title}»`,
+          reason: onPreview
+            ? 'Изменение прошло совместную проверку и работает в preview: попробуйте и примите.'
+            : deploy
+              ? 'Изменение прошло совместную проверку. Можно выложить его в preview и попробовать до приёмки.'
+              : 'Изменение прошло совместную проверку.',
+          since: v.finishedAt ?? v.startedAt,
+          subject: { kind: 'changeset', id: c.id, href: hrefs.changesets() },
+          evidence: [{ kind: 'evidence', id: v.id }],
+          actions: [
+            ...(deploy
+              ? [
+                  {
+                    id: 'deploy-preview',
+                    kind: 'domain' as const,
+                    label: 'Выложить в preview',
+                    input: 'confirm' as const,
+                  },
+                ]
+              : []),
+            { id: 'accept', kind: 'domain', label: 'Принять', input: 'confirm' },
+          ],
+          basis: { changeSetId: c.id, verificationId: v.id },
+        };
+      },
+    );
+  },
+};
+
+/**
+ * S17. Неисправность preview (`previewProblems` сводки): нет Docker —
+ * доступ оператора; сбой выкладки или потерянная версия — ведущий.
+ * Появление — запись выкладки.
+ */
+const previewSource: AttentionSourceRule = {
+  id: 'preview',
+  engine: true,
+  collect: (ctx) => {
+    const { failure, lost } = previewProblems(ctx.state);
+    const out: Candidate[] = [];
+    if (failure) {
+      const docker = failure.failure === 'docker-unavailable';
+      out.push({
+        sourceKey: docker ? 'preview:docker' : 'preview:failed',
+        occurrenceId: failure.id,
+        sourceVersion: d({
+          status: failure.status,
+          failure: failure.failure ?? null,
+          rolledBack: !!failure.rolledBack,
+        }),
+        source: 'preview',
+        category: docker ? 'access' : 'technical',
+        actor: docker ? 'operator' : 'lead',
+        title: docker ? 'Нужен Docker для preview' : 'Preview не выложен',
+        reason: docker
+          ? 'Preview собирается и запускается в Docker. Запустите Docker и повторите выкладку.'
+          : ctx.redact(
+              (failure.rolledBack ? 'Возвращена прежняя версия. ' : '') +
+                (failure.error ?? 'Причина не записана'),
+            ),
+        since: failure.finishedAt ?? failure.startedAt,
+        subject: { kind: 'preview', id: failure.id, href: hrefs.changesets() },
+        ...(docker ? {} : { actions: [handoff] }),
+      });
+    }
+    if (lost)
+      out.push({
+        sourceKey: 'preview:lost',
+        occurrenceId: lost.id,
+        sourceVersion: d({ status: lost.status, lost: lost.lost ?? null }),
+        source: 'preview',
+        category: 'technical',
+        actor: 'lead',
+        title: 'Версия в preview не отвечает',
+        reason: ctx.redact(lost.lost ?? ''),
+        since: lost.checkedAt ?? lost.healthyAt ?? lost.startedAt,
+        subject: { kind: 'preview', id: lost.id, href: hrefs.changesets() },
+        actions: [handoff],
+      });
+    return out;
+  },
+};
+
+/** S18. Новая версия корпуса проверок ждёт подтверждения оператора. */
+const corpusSource: AttentionSourceRule = {
+  id: 'corpus',
+  engine: true,
+  collect: (ctx) => {
+    const { h } = engineOf(ctx);
+    return new CheckCorpus(h).all().flatMap((suite) =>
+      suite.pending
+        .filter((p) => p.status === 'waiting' && p.awaitingOperator)
+        .map((p): Candidate => ({
+          sourceKey: `corpus:${suite.id}:${p.id}`,
+          occurrenceId: p.id,
+          sourceVersion: p.digest ?? `v${p.version}`,
+          source: 'corpus',
+          category: 'decision',
+          actor: 'operator',
+          title: 'Принятие версии корпуса проверок ждёт подтверждения',
+          reason: one(p.reason),
+          since: (p as { at?: string }).at ?? new Date(0).toISOString(),
+          subject: { kind: 'suite', id: suite.id, href: hrefs.contracts() },
+          actions: [{ id: 'approve', kind: 'domain', label: 'Подтвердить', input: 'confirm' }],
+          covered: unclaimed(ctx, p.tasks),
+          basis: { suiteId: suite.id, pendingId: p.id },
+        })),
+    );
+  },
+};
+
+/**
+ * S19. Зависшая попытка или проверка, когда обход зависаний только сообщает
+ * (`stallSweep.action: report`): нужен человек. Версия — состояние живости,
+ * никогда не время простоя. Появление — попытка и последнее движение
+ * (движение и новое зависание — новое появление).
+ */
+const stallSource: AttentionSourceRule = {
+  id: 'stall',
+  engine: true,
+  collect: (ctx) => {
+    const { h } = engineOf(ctx);
+    const s = ctx.state as DevContourState;
+    const runs = quietAttempts(s, ctx.now)
+      .filter((a) => a.attention)
+      .map((a): Candidate => ({
+        sourceKey: `stall:${a.runId}`,
+        occurrenceId: `${a.runId}@${a.lastMovementAt}`,
+        sourceVersion: a.state,
+        source: 'stall',
+        category: 'access',
+        actor: 'operator',
+        title: `Попытка задачи «${a.title}» не двигается`,
+        reason: `${a.text}. ${a.next}`,
+        since: a.since,
+        subject: { kind: 'run', id: a.runId, href: hrefs.task(a.taskId) },
+        covered: unclaimed(ctx, [a.taskId]),
+      }));
+    const operations = quietOperations(h, s, ctx.now, 'panel')
+      .filter((o) => o.attention)
+      .map((o): Candidate => ({
+        sourceKey: `stall-op:${o.kind}:${o.id}`,
+        occurrenceId: `${o.id}@${o.lastMovementAt}`,
+        sourceVersion: o.state,
+        source: 'stall',
+        category: 'access',
+        actor: 'operator',
+        title: `${o.title}: проверка не двигается`,
+        reason: `${o.text}. ${o.next}`,
+        since: o.since,
+        subject: { kind: 'operation', id: o.id, href: hrefs.overview() },
+      }));
+    return [...runs, ...operations];
+  },
+};
+
+/**
+ * Источники движка в порядке владения корнями: удержание операцией, бюджет,
+ * пауза (свёртка отказов провайдера), ожидания, задача, доска, план.
+ */
+export const engineSources: AttentionSourceRule[] = [
+  contractChangeSource,
+  budgetSource,
+  queueSource,
+  waitSource,
+  workSource,
+  boardSource,
+  planSource,
+  changesetSource,
+  previewSource,
+  corpusSource,
+  stallSource,
+];
+
+/* ------------------------------------------------------------------ */
 /* Сборка: влияние, отметки, порядок                                   */
 /* ------------------------------------------------------------------ */
 
@@ -501,7 +1247,7 @@ export class AttentionService {
   ) {}
 
   private get sources(): AttentionSourceRule[] {
-    return [...preparationSources, ...(this.options.sources ?? [])];
+    return [...preparationSources, ...engineSources, ...(this.options.sources ?? [])];
   }
 
   /** Асинхронные предпосылки до снимка: факты Git быстрого маршрута (только чтение). */
@@ -536,7 +1282,9 @@ export class AttentionService {
       root: this.options.root,
       now,
       quick,
-      redact: (text) => text,
+      redact: this.h
+        ? handoffRedactor(this.h.config, executionOf(this.h).engine.policy)
+        : (text) => text,
       claimed: new Map(),
       cards: new Map(),
     };
