@@ -14,7 +14,7 @@ import {
 } from '../src/application/handoff.ts';
 import { DISCUSSION_TEXT_BYTES } from '../src/core/discussion-model.ts';
 import { repositorySchema } from '../src/core/model.ts';
-import { config, fixture, input } from './helpers.ts';
+import { CANDIDATE, MERGED, complete, config, fixture, input } from './helpers.ts';
 
 const key = (n: number) => 'idem-key-' + String(n).padStart(4, '0');
 
@@ -817,6 +817,132 @@ test('D02: некорректный курсор очереди — 400; дли�
         }),
       (e: Error & { status?: number }) => e.status === 400,
     );
+  } finally {
+    w.cleanup();
+  }
+});
+
+test('R01: заметка и обращение во время идущей попытки не меняют попытку, её token, задачу и очередь', () => {
+  const w = world();
+  try {
+    w.h.approve(w.board.id);
+    w.h.pause(false);
+    const run = w.h.claim('test')!;
+    assert.equal(run.taskId, w.task.id);
+    const before = w.store.read();
+    const note = w.d.post(
+      {
+        taskId: w.task.id,
+        kind: 'note',
+        text: 'Заметка, пока исполнитель работает',
+        idempotencyKey: key(1),
+        expectedVersion: 0,
+      },
+      'operator',
+    );
+    w.d.post(
+      {
+        taskId: w.task.id,
+        kind: 'change-request',
+        text: 'Добавьте ещё один случай в критерий',
+        idempotencyKey: key(2),
+        expectedVersion: note.version,
+      },
+      'operator',
+    );
+    const after = w.store.read();
+    assert.deepEqual(after.tasks, before.tasks);
+    assert.deepEqual(after.runs, before.runs);
+    assert.deepEqual(after.boards, before.boards);
+    assert.deepEqual(after.leader, before.leader);
+    assert.equal(after.paused, before.paused);
+    // Попытка продолжается прежним token: запись обсуждения не перехватила
+    // и не перезапустила исполнение.
+    w.h.heartbeat(run.id, run.token);
+    w.h.phase(run.id, run.token, 'integrating', {
+      candidateSha: CANDIDATE,
+      integrationSha: MERGED,
+    });
+    assert.equal(w.store.read().runs.length, 1);
+    assert.equal(w.store.read().runs[0].id, run.id);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test('R01: изменение AC по обращению — обычная корректировка; прежние ревизия, результат и доказательства сохранены', async () => {
+  const w = world();
+  try {
+    w.h.approve(w.board.id);
+    const run = complete(w.h, w.task.id);
+    w.h.accept(w.board.id, MERGED);
+    const before = w.store.read();
+    const revision = structuredClone(before.boards[0].revisions[0]);
+    const doneTask = structuredClone(before.tasks.find((t) => t.id === w.task.id)!);
+    const doneRun = structuredClone(before.runs.find((r) => r.id === run.id)!);
+    assert.ok(doneRun.evidence.length > 0);
+    const request = w.d.post(
+      {
+        taskId: w.task.id,
+        kind: 'change-request',
+        text: 'Критерий: результат проверяется и для пустого ввода',
+        idempotencyKey: key(1),
+        expectedVersion: 0,
+      },
+      'operator',
+    );
+    // Обращение само ничего не меняет: ни задачи, ни ревизии.
+    assert.deepEqual(w.store.read().tasks, before.tasks);
+    assert.deepEqual(w.store.read().boards, before.boards);
+    // Ведущий вносит изменение обычной корректировкой доски.
+    await new Promise((r) => setTimeout(r, 5));
+    const corrected = w.h.correct(w.board.id, [w.task.id], 'Критерий дополнен пустым вводом');
+    const replacementId = corrected.replacements[w.task.id];
+    const draft = w.store.read().tasks.find((t) => t.id === replacementId)!;
+    w.h.editTask(
+      replacementId,
+      {
+        title: draft.title,
+        description: draft.description,
+        role: draft.role,
+        dependsOn: draft.dependsOn,
+        acceptance: [...draft.acceptance, 'Пустой ввод тоже проверен.'],
+      },
+      specDigest(draft),
+    );
+    const done = w.d.resolve({
+      requestId: request.message.id,
+      outcome: 'accepted',
+      reason: 'Внесено ревизией 2',
+      refs: { boardId: w.board.id, revision: 2 },
+      idempotencyKey: key(2),
+      expectedVersion: request.version,
+    });
+    assert.deepEqual(done.message.disposition, {
+      outcome: 'accepted',
+      refs: { boardId: w.board.id, revision: 2 },
+    });
+    assert.deepEqual(w.d.inbox({}).requests, []);
+    const after = w.store.read();
+    // Прежняя принятая ревизия, задача, попытка и её доказательства не тронуты.
+    assert.deepEqual(after.boards[0].revisions[0], revision);
+    assert.equal(after.boards[0].revisions[1].number, 2);
+    assert.deepEqual(
+      after.tasks.find((t) => t.id === w.task.id),
+      doneTask,
+    );
+    assert.deepEqual(
+      after.runs.find((r) => r.id === run.id),
+      doneRun,
+    );
+    assert.equal(after.runs.length, 1, 'обращение и корректировка не запускают попыток');
+    const replacement = after.tasks.find((t) => t.id === replacementId)!;
+    assert.equal(replacement.supersedes, w.task.id);
+    assert.equal(replacement.status, 'draft');
+    assert.deepEqual(replacement.acceptance, [
+      ...doneTask.acceptance,
+      'Пустой ввод тоже проверен.',
+    ]);
   } finally {
     w.cleanup();
   }
