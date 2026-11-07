@@ -39,6 +39,8 @@ import { ContractChanges } from '../runner/contract-change.ts';
 import { contractProposal, limitsMessage, proposalLimitIssues } from '../runner/agent-control.ts';
 import { queueStopOf, quietAttempts, quietOperations } from './queue-stop.ts';
 import { InputService, inputOperationInputs } from './input.ts';
+import { AttentionService } from './attention.ts';
+import { attentionInputs } from '../core/attention-model.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 export { SERVER_STOPPING };
@@ -146,6 +148,7 @@ export const agentInputs = {
     proposal: contractProposal.optional(),
   }),
   ...inputOperationInputs,
+  attention_list: attentionInputs.agent,
 };
 /**
  * Операции, которые запускают внешние процессы: эксперимент, подтверждение
@@ -306,6 +309,8 @@ export const descriptions: Record<AgentOperation, string> = {
     'Cancel a writer question with the expected version and a reason; also closes follow-ups (assumption accepted). A blocking question follows the answer rule: floored or approvalMode operator questions are cancelled by the operator.',
   input_supersede:
     'Supersede a writer question once the spec of its task has changed: reopen and respecify the task (draft or re-approved), then supersede with the same task and carry the answer (input_context, input_review, input_target, input_apply). Refused with 409 SPEC_UNCHANGED while the spec is unchanged; a blocking question the lead may not answer is superseded by the operator (403 OPERATOR_ANSWERS). The old task is not resumed by a requirement change without carry. A non-blocking follow-up may also be superseded by a newer task of the same board, for example the replacement created by board_correct.',
+  attention_list:
+    'List the attention center: one ordered list of current items that need someone to act, from the same source rules as the panel (preparation questions and stage reviews, writer questions, stopped tasks, lead job decisions, discussion requests, pauses, waits, budgets, contract changes, ChangeSet acceptance, preview problems, stalls). Default actor lead; each item has sourceKey, occurrenceId, sourceVersion, category, actor, reason, impact (covered tasks and the tasks waiting on them), subject and since. A cascade is one root item. Reading is not handling: act through the source operation (preparation_*, discussion_*, input_*, task_retry, workflow_*). Read-only; operator read marks are not included. Available before setup.',
   preview_status:
     'Read the local preview: which verified release serves the URL, its states (built, deployed, healthy, confirmed or unconfirmed), and past deployments with their errors. Deploying and rolling back are separate controlled actions through the CLI or panel.',
 };
@@ -340,6 +345,7 @@ export const readOnly = (name: AgentOperation) =>
     'input_list',
     'input_show',
     'input_target',
+    'attention_list',
   ].includes(name);
 /**
  * Каталог операций DevContour — общий построитель harness (`operationCatalog`)
@@ -705,6 +711,10 @@ export class AgentService {
             .id,
         };
       // Вопросы исполнителя: актёр — ведущий агент (транспорт), не вход операции.
+      case 'attention_list':
+        return new AttentionService(h.store, h, this.root ? { root: this.root } : {}).agentList(
+          input,
+        );
       case 'input_list':
         return new InputService(h, this.root).list(input);
       case 'input_show':

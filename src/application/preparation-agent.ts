@@ -10,6 +10,7 @@ import { loadConfig } from '../runner/config.ts';
 import { DevContour } from '../core/service.ts';
 import { AgentService } from './agent.ts';
 import { checkJsonBytes } from 'devcontour-harness';
+import { AttentionService } from './attention.ts';
 
 // The early workspace has no repository, stack, fake gates or model configuration.
 export class PreparationAgent {
@@ -17,6 +18,9 @@ export class PreparationAgent {
   execute(raw: unknown): Record<string, unknown> {
     if (!checkJsonBytes(raw, 100000).within) throw new DomainError('Слишком большой запрос', 413);
     const { operation, input } = agentRequest.parse(raw);
+    // Центр внимания работает до setup: вопросы и согласования подготовки.
+    if (operation === 'attention_list')
+      return new AttentionService(this.store, undefined).agentList(input ?? {});
     if (!(operation in preparationInputs))
       throw new DomainError(
         'Пока доступна проработка продукта и архитектуры. Техническая конфигурация ещё не подключена',

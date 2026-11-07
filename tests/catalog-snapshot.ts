@@ -46,5 +46,8 @@
 // Намеренное изменение: описание input_supersede называет замену
 // неблокирующего follow-up новой задачей той же доски (например, заменой из
 // board_correct); прочие операции байтово прежние.
-export const CATALOG_DIGEST = '1b82ad084444706a3fcb90ab3c2035f8cce0a19e1b4a51b7ac66dadec012fbe4';
+// Намеренное изменение: операция только чтения attention_list (центр
+// внимания: упорядоченный список актуальных действий ведущего и оператора)
+// после input_supersede; прочие операции байтово прежние.
+export const CATALOG_DIGEST = '1fc9b3ba053fe7d4edeaa017538b18ffcbba5c3ffa5966ecf3218cf672e31fd0';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

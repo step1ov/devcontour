@@ -2077,8 +2077,41 @@ export class AttentionService {
    * на чтение, и запись внутри него упала бы, а не закоммитилась.
    */
   async active(raw: AttentionListInput = {}): Promise<AttentionView> {
+    return this.view(raw, await this.prerequisites());
+  }
+
+  /**
+   * Список ведущего агента (`attention_list`): те же правила источников, что
+   * у панели, без отметок оператора (они его локальное состояние). Операция
+   * синхронная и не запускает Git: шаги быстрого маршрута ведущий видит в
+   * `preparation_status` и панели быстрого изменения.
+   */
+  agentList(raw: unknown = {}) {
+    const input = attentionInputs.agent.parse(raw);
+    const view = this.view(
+      { actor: input.actor, ...(input.category ? { category: input.category } : {}) },
+      new Map(),
+    );
+    const items = view.items.slice(0, input.limit).map(({ state, ...item }) => (void state, item));
+    return {
+      items,
+      counts: {
+        active: view.counts.active,
+        byActor: {
+          operator: { active: view.counts.byActor.operator.active },
+          lead: { active: view.counts.byActor.lead.active },
+        },
+      },
+      lead: view.lead,
+      ...(view.counts.active > items.length
+        ? { truncated: { count: view.counts.active - items.length } }
+        : {}),
+    };
+  }
+
+  /** Активный список по уже полученным асинхронным фактам — один снимок. */
+  view(raw: AttentionListInput, quick: Map<string, QuickPrerequisites>): AttentionView {
     const filter = attentionInputs.list.parse(raw);
-    const quick = await this.prerequisites();
     const now = (this.options.now ?? Date.now)();
     return this.store.snapshot(() => {
       const ctx = this.context(quick, now);
