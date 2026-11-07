@@ -48,6 +48,8 @@ export function createMcpServer(service: Pick<AgentService, 'run'>) {
                 text: JSON.stringify({
                   status,
                   error: error instanceof Error ? error.message : String(error),
+                  // Код причины и актуальная версия — как в ответе HTTP.
+                  ...(error instanceof DomainError && error.details ? error.details : {}),
                 }),
               },
             ],
