@@ -1394,3 +1394,22 @@ test('Карточки ведущего по подготовке тоже не�
     e.cleanup();
   }
 });
+
+test('S10 отменённый корень: утверждение ждущей-черновика сдвигает появление (названное ограничение)', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const root = f.h.addTask(b.id, input('Root task'));
+    f.h.approve(b.id);
+    f.h.cancel(root.id, 'replanned', 'operator');
+    f.h.addTask(b.id, input('Draft dependent task', [root.id]));
+    const key = `work:${root.id}`;
+    const draft = byKey(await engineItems(f), key)!;
+    await new Promise((r) => setTimeout(r, 5));
+    f.h.approve(b.id);
+    const approved = byKey(await engineItems(f), key)!;
+    assert.notEqual(approved.occurrenceId, draft.occurrenceId);
+  } finally {
+    f.cleanup();
+  }
+});
