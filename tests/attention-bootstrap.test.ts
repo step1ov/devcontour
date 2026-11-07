@@ -120,6 +120,25 @@ test('D04-F: до setup GET /api/attention показывает вопрос, с
       assert.equal(marked.status, 200);
       const seen = (await get()).items.find((i) => i.id === question.id)!;
       assert.deepEqual(seen.state, { read: true, acknowledged: true, unread: false });
+      // Ответ с карточки до setup; повтор — карточка уже решена (409).
+      const answer = () =>
+        fetch(app.url + '/api/attention/act', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-devcontour-request': '1' },
+          body: JSON.stringify({
+            sourceKey: question.sourceKey,
+            occurrenceId: question.occurrenceId,
+            expectedVersion: question.sourceVersion,
+            action: 'answer',
+            input: { text: 'Дежурный модератор' },
+          }),
+        });
+      const first = await answer();
+      assert.equal(first.status, 200);
+      assert.equal(((await first.json()) as { resolved?: boolean }).resolved, true);
+      const repeat = await answer();
+      assert.equal(repeat.status, 409);
+      assert.equal(((await repeat.json()) as { code?: string }).code, 'attention-resolved');
     } finally {
       await app.close();
       rmSync(workspace, { recursive: true, force: true });

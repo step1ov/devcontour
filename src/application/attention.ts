@@ -12,7 +12,11 @@
 // новый факт источника, поэтому новое появление и снова «не прочитано».
 // Источник без такого факта называет ограничение у своего правила.
 import { queuePause, explainStop, stopInputsOf } from 'devcontour-harness';
-import { digest, specDigest } from '../core/service.ts';
+import { randomUUID } from 'node:crypto';
+import { SERVER_STOPPING, digest, specDigest } from '../core/service.ts';
+import { repositories } from '../core/repositories.ts';
+import { Workspace } from '../core/workspace.ts';
+import { IntentService } from '../runner/intent.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { CheckCorpus } from '../core/check-store.ts';
 import { executionOf } from '../harness/execution.ts';
@@ -30,7 +34,7 @@ import type { Store } from '../core/store.ts';
 import type { DevContourState, Task } from '../core/model.ts';
 import { DomainError } from '../core/model.ts';
 import { descendants } from '../core/graph.ts';
-import { assertStageUpstream } from '../core/preparation.ts';
+import { Preparation, assertStageUpstream } from '../core/preparation.ts';
 import type { ProductChange } from '../core/preparation-model.ts';
 import {
   ATTENTION_LIMITS,
@@ -1314,6 +1318,163 @@ export const engineSources: AttentionSourceRule[] = [
 ];
 
 /* ------------------------------------------------------------------ */
+/* Действия с карточек: существующие доменные операции                 */
+/* ------------------------------------------------------------------ */
+
+/** Зависимости действий, которые есть только у работающего сервера. */
+export interface AttentionActDeps {
+  /** Такт очереди после её запуска (`/api/scheduler`). */
+  tick?: () => Promise<unknown>;
+  /** Выкладка preview (`PreviewRunner.deploy`), идёт минутами. */
+  deploy?: (changeSetId: string) => Promise<unknown>;
+  /** Сервер останавливается: запуск очереди отклоняется. */
+  stopping?: () => boolean;
+}
+interface ActOutcome {
+  result?: unknown;
+  /** Продолжение после транзакции: такт очереди, начало выкладки. */
+  after?: () => Promise<unknown>;
+}
+interface ActContext {
+  ctx: AttentionContext;
+  item: Candidate;
+  input: {
+    text?: string;
+    optionId?: string;
+    comment?: string;
+    kind?: 'clarification' | 'requirement-change';
+  };
+  key: string | undefined;
+  deps: AttentionActDeps;
+  root: string | undefined;
+}
+const basisOf = <T>(item: Candidate) => item.basis as T;
+const textOf = (input: ActContext['input']) => {
+  const text = (input.text ?? input.comment ?? '').trim();
+  if (!text) throw new DomainError('Введите текст', 400);
+  return text;
+};
+/** Запуск очереди с карточки — тот же путь, что `/api/scheduler {start: true}`. */
+const resume = ({ ctx, deps }: ActContext): ActOutcome => {
+  if (deps.stopping?.()) throw new DomainError(SERVER_STOPPING, 409);
+  const result = ctx.h!.pause(false);
+  return {
+    result,
+    ...(deps.tick ? { after: async () => (await deps.tick!(), result) } : {}),
+  };
+};
+
+const actionHandlers: Record<string, (a: ActContext) => ActOutcome> = {
+  'prep-question/answer': ({ ctx, item, input }) => {
+    const b = basisOf<{ changeId: string; questionId: string; options: string[] }>(item);
+    const option = input.optionId !== undefined ? b.options[Number(input.optionId)] : undefined;
+    const text = input.text?.trim() || option;
+    if (!text) throw new DomainError('Введите ответ или выберите вариант', 400);
+    new Preparation(ctx.store, 'operator').answer({
+      changeId: b.changeId,
+      questionId: b.questionId,
+      text,
+    });
+    return { result: { changeId: b.changeId, questionId: b.questionId } };
+  },
+  'prep-stage/approve': ({ ctx, item, input }) => {
+    const b = basisOf<{ changeId: string; stage: string; expectedDigest: string }>(item);
+    new Preparation(ctx.store, 'operator').decide({
+      ...b,
+      decision: 'approve',
+      comment: (input.comment ?? input.text ?? '').trim(),
+    });
+    return { result: { ...b, decision: 'approve' } };
+  },
+  'prep-stage/request-changes': ({ ctx, item, input }) => {
+    const b = basisOf<{ changeId: string; stage: string; expectedDigest: string }>(item);
+    new Preparation(ctx.store, 'operator').decide({
+      ...b,
+      decision: 'request-changes',
+      comment: textOf(input),
+    });
+    return { result: { ...b, decision: 'request-changes' } };
+  },
+  'plan/approve': ({ ctx, item }) => {
+    const b = basisOf<{
+      boardId: string;
+      approvable: string[];
+      expected: {
+        revision: number;
+        taskIds: string[];
+        tasks: Record<string, string>;
+        reason: string;
+      };
+    }>(item);
+    return {
+      result: ctx.h!.approve(b.boardId, b.approvable, { actor: 'operator' }, b.expected),
+    };
+  },
+  'discussion-needs-answer/answer': ({ ctx, item, input, key }) => {
+    const b = basisOf<{ taskId: string; dispositionId: string; threadVersion: number }>(item);
+    const posted = new DiscussionService(ctx.h!).post(
+      {
+        taskId: b.taskId,
+        kind: 'note',
+        text: textOf(input),
+        replyTo: b.dispositionId,
+        expectedVersion: b.threadVersion,
+        idempotencyKey: key ?? 'attention-' + randomUUID(),
+      },
+      'operator',
+    );
+    return { result: { messageId: posted.message.id, version: posted.version } };
+  },
+  'queue/resume': resume,
+  'wait/resume': resume,
+  'input/answer': ({ ctx, item, input, key, root }) => {
+    const b = basisOf<{ taskId: string; requestId: string; expectedVersion: number }>(item);
+    return {
+      result: new InputService(ctx.h!, root).answerInTask(b.taskId, b.requestId, {
+        text: textOf(input),
+        ...(input.optionId ? { optionId: input.optionId } : {}),
+        ...(input.kind ? { kind: input.kind } : {}),
+        expectedVersion: b.expectedVersion,
+        ...(key ? { idempotencyKey: key } : {}),
+      }),
+    };
+  },
+  'input/apply': ({ ctx, item, root }) => {
+    const b = basisOf<{ taskId: string; requestId: string; expectedVersion: number }>(item);
+    return {
+      result: new InputService(ctx.h!, root).applyInTask(b.taskId, b.requestId, {
+        expectedVersion: b.expectedVersion,
+      }),
+    };
+  },
+  'changeset/accept': ({ ctx, item }) => {
+    const b = basisOf<{ changeSetId: string }>(item);
+    return {
+      result: new Workspace(ctx.h!, new IntentService(ctx.h!)).accept(b.changeSetId, {
+        actor: 'operator',
+      }),
+    };
+  },
+  'changeset/deploy-preview': ({ item, deps }) => {
+    const b = basisOf<{ changeSetId: string }>(item);
+    if (!deps.deploy) throw new DomainError('Выкладка preview доступна в работающей панели', 409);
+    return {
+      after: () => {
+        // Выкладка идёт минутами: итог записывает PreviewRunner, ответ — «начата».
+        void deps.deploy!(b.changeSetId).catch(() => {
+          /* Failure is persisted by PreviewRunner. */
+        });
+        return Promise.resolve({ status: 'started', changeSetId: b.changeSetId });
+      },
+    };
+  },
+  'corpus/approve': ({ ctx, item }) => {
+    const b = basisOf<{ suiteId: string; pendingId: string }>(item);
+    return { result: new CheckCorpus(ctx.h!).approveAdoption(b.suiteId, b.pendingId).pending };
+  },
+};
+
+/* ------------------------------------------------------------------ */
 /* Сборка: влияние, отметки, порядок                                   */
 /* ------------------------------------------------------------------ */
 
@@ -1554,6 +1715,88 @@ export class AttentionService {
       this.prune(stored, new Set(present.keys()), now);
       return { marked, ignored };
     });
+  }
+
+  /**
+   * Действие с карточки. Карточка пересчитывается из проекции, появление и
+   * версия сверяются с показанными (иначе 409 `attention-stale` с текущей
+   * карточкой или `attention-resolved`), затем исполняется существующая
+   * доменная операция со своими CAS-полями из пересчитанной карточки.
+   * Синхронные операции и проверка основания — одна транзакция; выкладка
+   * preview и такт очереди начинаются после неё. Повтор с тем же ключом
+   * идемпотентности возвращает прежнюю запись (`replayed`), без повторного
+   * эффекта.
+   */
+  async act(raw: unknown, deps: AttentionActDeps = {}) {
+    const v = attentionInputs.act.parse(raw);
+    const quick = await this.prerequisites();
+    const now = (this.options.now ?? Date.now)();
+    const outcome = this.store.atomic((): ActOutcome => {
+      const ctx = this.context(quick, now);
+      const replayed = this.replayOf(v);
+      if (replayed) return { result: { replayed: true, message: replayed } };
+      const item = this.candidates(ctx).find((c) => c.sourceKey === v.sourceKey);
+      if (!item)
+        throw new DomainError('Карточка уже решена исходной сущностью', 409, {
+          code: 'attention-resolved',
+        });
+      if (item.occurrenceId !== v.occurrenceId || item.sourceVersion !== v.expectedVersion)
+        throw new DomainError('Карточка изменилась: решение принято по прежней версии', 409, {
+          code: 'attention-stale',
+          item: toItem(item, ctx.state, boardsOf(ctx.state), this.marks()),
+        });
+      const action = (item.actor === 'operator' ? (item.actions ?? []) : []).find(
+        (a) => a.kind === 'domain' && a.id === v.action,
+      );
+      const handler = actionHandlers[`${item.source}/${v.action}`];
+      if (!action || !handler)
+        throw new DomainError(`Действие ${v.action} не предлагается этой карточкой`, 400, {
+          code: 'attention-action',
+        });
+      return handler({
+        ctx,
+        item,
+        input: v.input ?? {},
+        key: v.idempotencyKey,
+        deps,
+        root: this.options.root,
+      });
+    });
+    const result = outcome.after ? await outcome.after() : outcome.result;
+    const current = (await this.active()).items.find((i) => i.sourceKey === v.sourceKey);
+    return current ? { result, item: current } : { result, resolved: true as const };
+  }
+
+  /**
+   * Прежняя запись под ключом идемпотентности текстового действия (ответ в
+   * обсуждении или на вопрос исполнителя): повтор после обрыва связи — не
+   * ошибка и не второе сообщение.
+   */
+  private replayOf(v: { sourceKey: string; idempotencyKey?: string }) {
+    const h = this.h;
+    if (!h || !v.idempotencyKey) return undefined;
+    const owners = [undefined, ...repositories(h.config).map((r) => r.id)];
+    let taskId: string | undefined;
+    if (v.sourceKey.startsWith('input:'))
+      try {
+        taskId = executionOf(h).engine.inputRequest(v.sourceKey.slice('input:'.length)).workId;
+      } catch {
+        return undefined;
+      }
+    else if (v.sourceKey.startsWith('discussion:na:')) {
+      const root = v.sourceKey.slice('discussion:na:'.length);
+      for (const owner of owners) {
+        const row = h.store.discussionById(owner, root) as { taskId?: string } | undefined;
+        if (row?.taskId) {
+          taskId = row.taskId;
+          break;
+        }
+      }
+    }
+    const task = taskId ? h.store.read().tasks.find((t) => t.id === taskId) : undefined;
+    if (!task) return undefined;
+    return h.store.discussionByKey(taskOwner(task), task.id, 'operator', v.idempotencyKey) as
+      Record<string, unknown> | undefined;
   }
 
   /**

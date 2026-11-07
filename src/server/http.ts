@@ -318,6 +318,20 @@ export async function serve(
           json(res, 200, await attentionOf(preparationStore).mark(await body(req)));
           return;
         }
+        // Действие с карточки центра внимания: проверка показанной версии и
+        // существующая доменная операция. До setup — только действия подготовки.
+        if (req.method === 'POST' && path === '/api/attention/act' && preparationStore) {
+          json(
+            res,
+            200,
+            await attentionOf(preparationStore).act(await body(req), {
+              ...(scheduler ? { tick: () => scheduler!.tick() } : {}),
+              ...(previewRunner ? { deploy: (id: string) => previewRunner!.deploy(id) } : {}),
+              stopping: () => stopping || Boolean(scheduler?.stopping),
+            }),
+          );
+          return;
+        }
         if (req.method === 'POST' && path === '/api/preparation/decision' && preparationStore) {
           json(res, 200, new Preparation(preparationStore).decide(await body(req)));
           return;
