@@ -97,6 +97,12 @@ test('Ответ оператора в обсуждении: повтор с т�
     const again = await service.act(body);
     assert.deepEqual((again.result as { replayed: boolean }).replayed, true);
     assert.equal(f.store.discussionVersion(undefined, t.id), version, 'второго сообщения нет');
+    // Тот же ключ с другим текстом — не повтор, а конфликт, как у прямой записи.
+    await assert.rejects(
+      service.act({ ...body, input: { text: 'Ночной по умолчанию' } }),
+      refusal('idempotency-conflict'),
+    );
+    assert.equal(f.store.discussionVersion(undefined, t.id), version, 'конфликт ничего не пишет');
     // Без ключа повтор — карточка уже решена.
     await assert.rejects(
       service.act({ ...body, idempotencyKey: undefined }),

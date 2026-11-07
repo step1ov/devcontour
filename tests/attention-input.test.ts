@@ -74,6 +74,13 @@ test('S15 вопрос исполнителя: забирает задачу, о
     const replay = await service.act(body);
     assert.equal((replay.result as { replayed: boolean }).replayed, true);
     assert.equal(revisions(), 1);
+    // Тот же ключ с другим ответом — конфликт без новой версии ответа.
+    await assert.rejects(
+      service.act({ ...body, input: { text: 'Другой ответ' } }),
+      (e: unknown) =>
+        e instanceof DomainError && e.status === 409 && e.details?.code === 'idempotency-conflict',
+    );
+    assert.equal(revisions(), 1);
     // Без ключа старая карточка устарела: версия запроса другая.
     await assert.rejects(
       service.act({ ...body, idempotencyKey: undefined }),

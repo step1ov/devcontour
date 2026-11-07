@@ -1497,6 +1497,12 @@ export interface AttentionActDeps {
   /** Сервер останавливается: запуск очереди отклоняется. */
   stopping?: () => boolean;
 }
+/** Запись обсуждения под ключом повтора: поля основания для сверки отпечатка. */
+type ReplayedMessage = Record<string, unknown> & {
+  replyTo?: string;
+  supersedes?: string;
+  input?: { requestId: string };
+};
 interface ActOutcome {
   result?: unknown;
   /** Продолжение после транзакции: такт очереди, начало выкладки. */
@@ -2423,7 +2429,13 @@ export class AttentionService {
       source === 'quick' ? await this.prerequisites() : new Map<string, QuickPrerequisites>();
     const only = new Set<AttentionSource>(source ? [source] : []);
     const replayed = this.store.snapshot(() => this.replayOf(v));
-    if (replayed) return { result: { replayed: true, message: replayed }, resolved: true as const };
+    if (replayed) {
+      this.sameReplay({ ...v, idempotencyKey: v.idempotencyKey! }, replayed);
+      return {
+        result: { replayed: true, message: replayed.message },
+        resolved: true as const,
+      };
+    }
     const check = (): ActContext => {
       const ctx = this.context(quick, now);
       const item = this.candidates(ctx, only).find((c) => c.sourceKey === v.sourceKey);
@@ -2524,8 +2536,66 @@ export class AttentionService {
     }
     const task = taskId ? h.store.read().tasks.find((t) => t.id === taskId) : undefined;
     if (!task) return undefined;
-    return h.store.discussionByKey(taskOwner(task), task.id, 'operator', v.idempotencyKey) as
-      Record<string, unknown> | undefined;
+    const message = h.store.discussionByKey(
+      taskOwner(task),
+      task.id,
+      'operator',
+      v.idempotencyKey,
+    ) as ReplayedMessage | undefined;
+    return message ? { taskId: task.id, message } : undefined;
+  }
+
+  /**
+   * Повтор под тем же ключом — тот же запрос: сверку отпечатка делает
+   * служба обсуждения, как при прямой записи. Тот же payload возвращает
+   * прежнюю запись без новой, другой — 409 `idempotency-conflict`. Основание
+   * (на что отвечали) берётся из сохранённой записи: карточка уже решена.
+   */
+  private sameReplay(
+    v: { sourceKey: string; idempotencyKey: string; input?: ActContext['input'] },
+    replayed: { taskId: string; message: ReplayedMessage },
+  ) {
+    const h = this.h!;
+    const { taskId, message } = replayed;
+    const input = v.input ?? {};
+    const discussion = new DiscussionService(h);
+    if (v.sourceKey.startsWith('input:')) {
+      const requestId = message.input?.requestId ?? v.sourceKey.slice('input:'.length);
+      let option: string | undefined;
+      try {
+        option = executionOf(h)
+          .engine.inputRequest(requestId)
+          .question.options.find((o) => o.id === input.optionId)?.label;
+      } catch {
+        option = undefined;
+      }
+      discussion.answer(
+        {
+          taskId,
+          requestId,
+          text: input.text?.trim() || option || '',
+          idempotencyKey: v.idempotencyKey,
+          expectedVersion: 0,
+          ...(input.optionId ? { optionId: input.optionId } : {}),
+          ...(input.kind ? { kind: input.kind } : {}),
+          ...(message.replyTo ? { replyTo: message.replyTo } : {}),
+          ...(message.supersedes ? { supersedes: message.supersedes } : {}),
+        },
+        'operator',
+      );
+      return;
+    }
+    discussion.post(
+      {
+        taskId,
+        kind: 'note',
+        text: textOf(input),
+        idempotencyKey: v.idempotencyKey,
+        expectedVersion: 0,
+        ...(message.replyTo ? { replyTo: message.replyTo } : {}),
+      },
+      'operator',
+    );
   }
 
   /**
