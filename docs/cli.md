@@ -27,16 +27,18 @@ CLI не задаёт интерактивный вопрос о workspace: эт
 
 ## Подготовка
 
-| Команда            | Параметры                                                                                           | Результат / эффект                                                                                                                              |
-| ------------------ | --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `setup`            | `--repository ABS --profile ID`, опционально `--brief docs/spec.md --approval-mode agent\|operator` | Копирует недостающие правила/документы и конфигурацию; возвращает `needs-agent-bootstrap`; существующие файлы сохраняются                       |
-| `init`             | `--repository ABS`, опционально `--profile ID --approval-mode ...`                                  | Низкоуровневая конфигурация существующего Git-репозитория; не переносит полный набор правил                                                     |
-| `workspace-init`   | `--file ABS/workspace.json`                                                                         | Создаёт общий config по registry; workspace определяется папкой файла; повтор сохраняет имеющееся состояние                                     |
-| `doctor`           | опционально `--probe`                                                                               | Проверяет готовность; probe дополнительно вызывает каждый runtime в окружении прогона, запускает настроенный preflight и read-only forge-доступ |
-| `context-lock`     | опционально `--ref HEAD`                                                                            | Закрепляет Git revision/digest пакетов инструкций, меняет config; требует паузу и отсутствие активных работ                                     |
-| `context-show`     | `--task T12`                                                                                        | Показывает выбранный контекст задачи                                                                                                            |
-| `knowledge-import` | `--source ABS --files README.md,docs/api.md`, опционально `--ref HEAD`                              | Копирует выбранные committed документы как непроверенные знания с происхождением/digest                                                         |
-| `storage-migrate`  | выбранный workspace/data                                                                            | Мигрирует central storage в component; требует остановки работы и резервной копии                                                               |
+| Команда            | Параметры                                                                                           | Результат / эффект                                                                                                                                                                                            |
+| ------------------ | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `setup`            | `--repository ABS --profile ID`, опционально `--brief docs/spec.md --approval-mode agent\|operator` | Копирует недостающие правила/документы и конфигурацию; возвращает `needs-agent-bootstrap`; существующие файлы сохраняются                                                                                     |
+| `init`             | `--repository ABS`, опционально `--profile ID --approval-mode ...`                                  | Низкоуровневая конфигурация существующего Git-репозитория; не переносит полный набор правил                                                                                                                   |
+| `workspace-init`   | `--file ABS/workspace.json`                                                                         | Создаёт общий config по registry; workspace определяется папкой файла; повтор сохраняет имеющееся состояние                                                                                                   |
+| `doctor`           | опционально `--probe`                                                                               | Проверяет готовность; probe дополнительно вызывает каждый runtime в окружении прогона, запускает настроенный preflight и read-only forge-доступ                                                               |
+| `context-lock`     | опционально `--ref HEAD`                                                                            | Закрепляет Git revision/digest пакетов инструкций, меняет config; требует паузу и отсутствие активных работ                                                                                                   |
+| `context-show`     | `--task T12`                                                                                        | Показывает выбранный контекст задачи                                                                                                                                                                          |
+| `knowledge-import` | `--source ABS --files README.md,docs/api.md`, опционально `--ref HEAD`                              | Копирует выбранные committed документы как непроверенные знания с происхождением/digest                                                                                                                       |
+| `storage-migrate`  | выбранный workspace/data                                                                            | Мигрирует central storage в component; требует остановки работы и резервной копии                                                                                                                             |
+| `quick-facts`      | `--repository ABS`                                                                                  | Быстрое изменение: факты репозитория (Git-корень, base SHA, lockfile, профиль, scripts проверок) без записи; блокирующие причины в `diagnostics`                                                              |
+| `setup --change`   | `--change PC-... --proposal DIGEST` либо `--plan`, опционально `--approval-mode ...`                | Быстрое изменение: применяет ровно последнее предложение `preparation_setup` (digest из панели или вывода `--plan`); изменение должно быть активным, факты перепроверяются; `--plan` — план файлов без записи |
 
 `--brief` у setup — Markdown внутри docs продукта. У `plan` это путь читаемого файла относительно cwd команды либо абсолютный путь. Не путайте эти правила разрешения путей.
 
@@ -129,7 +131,23 @@ Plan содержит `title`, `description`, `tasks` (1–30), у каждой 
 
 `accept`/`changeset-accept` не создают ещё один LLM-review готового отчёта. Они применяют доменные условия к уже полученным доказательствам. При `approvalMode: operator` агентский вызов возвращает `awaiting-operator`; оператор подтверждает в UI. Статус такого ответа нужно обработать, а не читать любой exit 0 как приёмку.
 
-`--by` у `retry`, `cancel` и `base-update` называет актёра события harness: `operator` (по умолчанию) — человек, `host` — ведущий агент, выполняющий подсказку контура. Отчёт об эффекте относит к действиям человека только `operator` ([метрики](metrics.md)).
+`--by` у `retry`, `cancel`, `base-update` и команд `input-*` называет актёра события harness: `operator` (по умолчанию) — человек, `host` — ведущий агент, выполняющий подсказку контура. Отчёт об эффекте относит к действиям человека только `operator` ([метрики](metrics.md)).
+
+## Вопросы исполнителя
+
+Остановку исполнителя вопросом (`needs-input`) и путь ответа описывает [контекст агента](agent-interface.md#вопросы-исполнителя). CLI — действие человека (`operator`); ведущий агент передаёт `--by host` и подчиняется правилу ведущего. `--version` — ожидаемая версия запроса.
+
+| Команда           | Параметры                                                                                                                                               | Результат / эффект                                                                                                    |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `input-list`      | опционально `--task ID --state S`                                                                                                                       | Вопросы без текста: состояние, серьёзность, пороги, версия                                                            |
+| `input-show`      | `--request IR-...`                                                                                                                                      | Вопрос целиком: варианты, ответы, раунды ревью, цель и доставка                                                       |
+| `input-answer`    | `--request IR-... --text T --version N` [`--option ID`] [`--kind clarification\|requirement-change`] [`--by operator\|host`]                            | Сохраняет ответ (без `--kind` — `clarification`); задачу не продолжает                                                |
+| `input-context`   | `--request IR-...`                                                                                                                                      | Снимок контекста с последним ответом по digest; не активирует                                                         |
+| `input-review`    | `--request IR-... --context-digest H --author-runtime codex\|claude`                                                                                    | Ревью снимка планировщиком-ревьюером; вызывает модель                                                                 |
+| `input-target`    | `--request IR-... --context-digest H`                                                                                                                   | Только читает: цель продолжения и причины, по которым применение сейчас откажет                                       |
+| `input-apply`     | `--request IR-... --answer H --version N --context-digest H --target H` [`--reset --reason ...`] [`--confirm-rejected-round R`] [`--by operator\|host`] | Одной транзакцией активирует снимок и возвращает задачу в очередь; при занятых попытках — `applied: false` с причиной |
+| `input-cancel`    | `--request IR-... --version N --reason ...` [`--by operator\|host`]                                                                                     | Отменяет вопрос; закрывает follow-up (допущение принято)                                                              |
+| `input-supersede` | `--request IR-... --version N --reason ... --successor T2` [`--by operator\|host`]                                                                      | Заменяет вопрос после новой постановки задачи (та же задача и перенос ответа; для follow-up — и новая задача доски)   |
 
 ## Требования, продолжение этапов и измерения
 
@@ -145,7 +163,7 @@ Plan содержит `title`, `description`, `tasks` (1–30), у каждой 
 
 Первые четыре команды, `report` и `session-handoff` требуют `--workspace` или `--data`. `report` описан в [метриках](metrics.md#отчёт-об-эффекте). `session-handoff` печатает полный пакет (до 256 КБ) той же сборки и того же вида (`{format, pack, host, commands}`), что операция `session_handoff` агентского API; намерение, начинающееся с `--`, передаётся как `--intent=TEXT`. Как и `report`, команда открывает базу только для чтения рядом с работающим serve. Новая сессия ведущего агента начинается с него; `handoff --changeset` — другая команда, подготовка публикации ChangeSet. Live-eval отдельно включается флагами `--live --runtime codex|claude --model MODEL`; его ограничения и интерпретация — в [evals](agent-evals.md).
 
-`workflow_start`, `workflow_status`, `workflow_retry`, `signal_ingest` и `signal_status` вызываются через MCP, HTTP `/api/agent` или CLI `agent --file request.json --workspace ...`. Файл содержит `{ "operation": "workflow_status", "input": { "repositoryId": "main" } }`. Форматы входа берутся из `capabilities`; процедура описана в [workflow](lead-workflow.md) и [сигналах](external-signals.md). Регистрация workflow не запускает отдельный daemon: его продвигает работающий `serve`.
+`workflow_start`, `workflow_status`, `workflow_retry`, `signal_ingest` и `signal_status`, а также операции быстрого изменения (`preparation_quick`, `preparation_setup`, `preparation_expand`), обсуждений задач (`discussion_*`), вопросов исполнителя (`input_*`) и центра внимания (`attention_list`) вызываются через MCP, HTTP `/api/agent` или CLI `agent --file request.json --workspace ...`. Файл содержит `{ "operation": "workflow_status", "input": { "repositoryId": "main" } }`. Форматы входа берутся из `capabilities`; процедура описана в [workflow](lead-workflow.md) и [сигналах](external-signals.md). Регистрация workflow не запускает отдельный daemon: его продвигает работающий `serve`.
 
 ## Публикация и обслуживание
 
@@ -178,38 +196,48 @@ Plan содержит `title`, `description`, `tasks` (1–30), у каждой 
 
 Предпочтительный интерфейс ведущего агента — CLI. HTTP нужен UI и локальным интеграциям. Сервер слушает loopback; публикация в интернет не поддерживается без отдельного слоя аутентификации. Для mutating-запросов обязательны `Content-Type: application/json` и `X-DevContour-Request: 1`, Host/Origin проходят проверку.
 
-| Метод и путь                                                   | Назначение                                                                                    |
-| -------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `GET /api/summary?board=ID&boardRevision=N&task=ID&revision=N` | Ограниченная сводка для опроса панели; при той же ревизии — только номер                      |
-| `GET /api/tasks/:id?limit`, `/api/tasks/:id/runs?before=ID`    | Задача целиком и страницы попыток (новые сначала, ≤ 50, курсор по id, хвосты логов)           |
-| `GET /api/tasks?q=&limit&cursor`                               | Поиск задач компактными строками                                                              |
-| `GET /api/runs/:id`, `/api/contracts/:id`                      | Попытка с хвостами логов; текст контракта                                                     |
-| `GET /api/changesets/:id?limit&before&verification=ID`         | ChangeSet: проверки страницами (стабильный курсор `before`); снимок задач проверки            |
-| `GET /api/queue?limit&cursor`                                  | Очередь всех досок: незавершённые задачи страницами, с незакрытыми зависимостями (`blockers`) |
-| `GET /api/contract-attempts?limit&cursor`                      | Попытки ревью контрактов и планов страницами: первые 20 находок и их число                    |
-| `GET /api/contract-attempts/:id/findings?limit&cursor`         | Остальные находки одной попытки ревью страницами                                              |
-| `GET /api/tasks/:id/recovery-history?limit&before&episode`     | История текущего эпизода восстановления страницами; другой `episode` — 409                    |
-| `GET /api/boards/:id/revisions?limit&before`                   | Ревизии доски страницами, новые сначала (стабильный курсор `before`)                          |
-| `GET /api/boards/:id/revisions/:number`                        | Ревизия доски с полной причиной, без копий задач снимка                                       |
-| `GET /api/events?before=ID&limit`                              | Журнал событий страницами по ≤ 50; данные событий без тел                                     |
-| `GET /api/state`                                               | Всё состояние для доверенной консоли и CLI; панель его не опрашивает                          |
-| `GET /api/boards/:id/impact?roots=T1,T2`                       | Влияние корректировки                                                                         |
-| `GET /api/evidence/:id`                                        | Сохранённое доказательство и ограниченный по размеру текст лога                               |
-| `GET /api/changesets/:id/journal`                              | Текст общего дневника                                                                         |
-| `GET /api/changesets/:id/evidence?verification=ID&gate=ID`     | Лог общей проверки                                                                            |
-| `POST /api/boards`                                             | Создать доску: title, description, опциональный repositoryId                                  |
-| `POST /api/boards/:id/tasks`                                   | Добавить TaskInput                                                                            |
-| `PATCH /api/tasks/:id`                                         | Изменить черновик: поля постановки и expectedDigest                                           |
-| `POST /api/contracts`                                          | Ручное утверждение title/content и опционального repositoryId                                 |
-| `POST /api/boards/:id/approve`                                 | Ручное утверждение плана; опциональный taskIds                                                |
-| `POST /api/boards/:id/accept`                                  | Ручная приёмка ревизии                                                                        |
-| `POST /api/boards/:id/correct`                                 | Корректировка: roots и reason                                                                 |
-| `POST /api/tasks/:id/retry`, `/cancel`                         | Повтор или отмена                                                                             |
-| `POST /api/scheduler`                                          | `{ "start": true }` либо false                                                                |
-| `POST /api/changesets`                                         | Создание общего результата                                                                    |
-| `POST /api/changesets/:id/verify`                              | Запустить асинхронную Verification; started не означает PASS                                  |
-| `POST /api/changesets/:id/accept`                              | Ручная приёмка ChangeSet                                                                      |
-| `POST /api/changesets/:id/handoff`, `/remote-check`            | Подготовка/наблюдение публикации                                                              |
+| Метод и путь                                                       | Назначение                                                                                                                   |
+| ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/summary?board=ID&boardRevision=N&task=ID&revision=N`     | Ограниченная сводка для опроса панели; при той же ревизии — только номер                                                     |
+| `GET /api/tasks/:id?limit`, `/api/tasks/:id/runs?before=ID`        | Задача целиком и страницы попыток (новые сначала, ≤ 50, курсор по id, хвосты логов)                                          |
+| `GET /api/tasks?q=&limit&cursor`                                   | Поиск задач компактными строками                                                                                             |
+| `GET /api/runs/:id`, `/api/contracts/:id`                          | Попытка с хвостами логов; текст контракта                                                                                    |
+| `GET /api/changesets/:id?limit&before&verification=ID`             | ChangeSet: проверки страницами (стабильный курсор `before`); снимок задач проверки                                           |
+| `GET /api/queue?limit&cursor`                                      | Очередь всех досок: незавершённые задачи страницами, с незакрытыми зависимостями (`blockers`)                                |
+| `GET /api/contract-attempts?limit&cursor`                          | Попытки ревью контрактов и планов страницами: первые 20 находок и их число                                                   |
+| `GET /api/contract-attempts/:id/findings?limit&cursor`             | Остальные находки одной попытки ревью страницами                                                                             |
+| `GET /api/tasks/:id/recovery-history?limit&before&episode`         | История текущего эпизода восстановления страницами; другой `episode` — 409                                                   |
+| `GET /api/boards/:id/revisions?limit&before`                       | Ревизии доски страницами, новые сначала (стабильный курсор `before`)                                                         |
+| `GET /api/boards/:id/revisions/:number`                            | Ревизия доски с полной причиной, без копий задач снимка                                                                      |
+| `GET /api/events?before=ID&limit`                                  | Журнал событий страницами по ≤ 50; данные событий без тел                                                                    |
+| `GET /api/state`                                                   | Всё состояние для доверенной консоли и CLI; панель его не опрашивает                                                         |
+| `GET /api/boards/:id/impact?roots=T1,T2`                           | Влияние корректировки                                                                                                        |
+| `GET /api/evidence/:id`                                            | Сохранённое доказательство и ограниченный по размеру текст лога                                                              |
+| `GET /api/changesets/:id/journal`                                  | Текст общего дневника                                                                                                        |
+| `GET /api/changesets/:id/evidence?verification=ID&gate=ID`         | Лог общей проверки                                                                                                           |
+| `POST /api/boards`                                                 | Создать доску: title, description, опциональный repositoryId                                                                 |
+| `POST /api/boards/:id/tasks`                                       | Добавить TaskInput                                                                                                           |
+| `PATCH /api/tasks/:id`                                             | Изменить черновик: поля постановки и expectedDigest                                                                          |
+| `POST /api/contracts`                                              | Ручное утверждение title/content и опционального repositoryId                                                                |
+| `POST /api/boards/:id/approve`                                     | Ручное утверждение плана; опциональный taskIds                                                                               |
+| `POST /api/boards/:id/accept`                                      | Ручная приёмка ревизии                                                                                                       |
+| `POST /api/boards/:id/correct`                                     | Корректировка: roots и reason                                                                                                |
+| `POST /api/tasks/:id/retry`, `/cancel`                             | Повтор или отмена                                                                                                            |
+| `POST /api/scheduler`                                              | `{ "start": true }` либо false                                                                                               |
+| `POST /api/changesets`                                             | Создание общего результата                                                                                                   |
+| `POST /api/changesets/:id/verify`                                  | Запустить асинхронную Verification; started не означает PASS                                                                 |
+| `POST /api/changesets/:id/accept`                                  | Ручная приёмка ChangeSet                                                                                                     |
+| `POST /api/changesets/:id/handoff`, `/remote-check`                | Подготовка/наблюдение публикации                                                                                             |
+| `POST /api/preparation/quick`                                      | Поручение быстрого изменения от оператора (вход `preparation_quick`; повтор `requestKey` — та же запись)                     |
+| `GET /api/preparation/quick?change=ID`                             | Быстрое изменение (по умолчанию активное): поручение, предложение setup, факты, план файлов, шаги и результат                |
+| `GET /api/attention`, `?view=history`                              | Центр внимания: активные карточки или история ([данные](attention.md#чтение)); работает и до setup                           |
+| `POST /api/attention/marks`                                        | Отметки «прочитано» и «увидел» оператора — локальные, не решение                                                             |
+| `POST /api/attention/act`                                          | Действие оператора с карточки: проверка показанной версии и доменная операция ([действие](attention.md#действие-с-карточки)) |
+| `GET /api/tasks/:id/discussion?cursor&before&latest=1&limit`       | Тред обсуждения задачи ([обсуждения](agent-interface.md#обсуждения-задач))                                                   |
+| `POST /api/tasks/:id/discussion`                                   | Сообщение оператора в обсуждение задачи (вход `discussion_post`)                                                             |
+| `GET /api/tasks/:id/input`                                         | Вопросы исполнителя задачи для панели                                                                                        |
+| `POST /api/tasks/:id/input/:requestId/answer`, `/apply`, `/cancel` | Ответ, применение и отмена вопроса оператором ([вопросы](agent-interface.md#вопросы-исполнителя))                            |
+| `POST /api/config/input-policy`                                    | Изменить порог вопросов `inputPolicy` с ожидаемым digest конфигурации ([конфигурация](configuration.md))                     |
 
 Операторские endpoints записывают ручное действие. Автоматический ведущий агент использует команды независимого review, а не выдаёт себя за оператора через HTTP для обхода процесса. В local single-user MVP это договор workflow; полноценной авторизации по ролям ещё нет.
 
@@ -234,4 +262,4 @@ Plan содержит `title`, `description`, `tasks` (1–30), у каждой 
 
 `contract-evals` проверяет суждение ревьюера о выполнимости обязательств контракта на неизменном корпусе обезличенных постановок: выполнимых, невыполнимых и без однозначного ответа. Балл считается только по выполнимости: ложные отказы (`falseRejections`) и пропуски (`missed`) — отдельно; постановки без однозначного ответа записывают вердикт без балла. Без модели это фикстура, которая отвечает ожидаемым вердиктом и проверяет только протокол: `judgementMeasured: false`. Live требует `--live --runtime codex|claude` (автор) и `--reviewer-model ID`; ревьюер — runtime другого вендора или явно названный `--reviewer-runtime codex|claude` (тот же вендор — только так), число вызовов ограничено `--max-calls` (по умолчанию — размер корпуса).
 
-Для memory_retain/recall, usage_report, decision_report и strategy_replay используйте общий `agent --file request.json --workspace ...`; точные схемы показывает capabilities.
+Для memory_retain/recall, usage_report, decision_report, strategy_replay, а также preparation__, discussion__, input_* и attention_list без отдельной команды используйте общий `agent --file request.json --workspace ...`; точные схемы показывает capabilities.
