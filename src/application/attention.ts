@@ -833,8 +833,20 @@ function dependentsAnchor(ctx: AttentionContext, id: string) {
       .at(-1) ?? 'none'
   );
 }
-/** До стольких кандидатов диагноз считается по одному поручению. */
-const WORK_SINGLE_CALLS = 20;
+/**
+ * Диагноз остановки задач-кандидатов (harness `stopInputsOf`) — единственное
+ * место вызова: переход на пакетный вызов harness по набору поручений —
+ * замена здесь. Пока — по одному вызову на поручение: полный вызов по всему
+ * виду на сотнях задач стоит секунды (обход ждущих транзитивен).
+ */
+export function diagnose(
+  source: ReturnType<typeof harnessOf>['source'],
+  h: DevContour,
+  workIds: readonly string[],
+) {
+  const options = { maxAttempts: h.config.maxAttempts, repairBudget: h.config.repairBudget };
+  return workIds.flatMap((workId) => stopInputsOf(source, { ...options, workId }));
+}
 
 /**
  * S10. Остановка задачи по диагнозу harness (`stopInputsOf` → `explainStop`):
@@ -864,18 +876,11 @@ const workSource: AttentionSourceRule = {
         (!!t.recovery && t.status !== 'done' && t.status !== 'cancelled') ||
         (t.status === 'ready' && !t.activeRunId && t.attempt >= h.config.maxAttempts),
     );
-    const options = { maxAttempts: h.config.maxAttempts, repairBudget: h.config.repairBudget };
-    const wanted = new Set(candidates.map((t) => t.id));
-    // Один вызов по всему виду дорог на глубоких цепочках (обход ждущих
-    // транзитивен), вызов по одному поручению — на числе поручений: немного
-    // кандидатов — по одному, много — одним вызовом по всем.
-    const inputs = !candidates.length
-      ? []
-      : candidates.length <= WORK_SINGLE_CALLS
-        ? candidates.flatMap((t) => stopInputsOf(harness.source, { ...options, workId: t.id }))
-        : stopInputsOf(harness.source, options).filter(
-            (i) => i.kind === 'work' && wanted.has(i.work.id),
-          );
+    const inputs = diagnose(
+      harness.source,
+      h,
+      candidates.map((t) => t.id),
+    );
     const queue = ctx.cards.get('queue');
     const out: Candidate[] = [];
     for (const input of inputs) {
@@ -2262,23 +2267,33 @@ export class AttentionService {
     const { marks } = attentionInputs.marks.parse(raw);
     const now = (this.options.now ?? Date.now)();
     const at = new Date(now).toISOString();
-    const cutoff = new Date(now - ATTENTION_LIMITS.markRetentionMs).toISOString();
     const needed = new Set(
       marks.map((m) => sourceOfKey(m.sourceKey)).filter((x): x is AttentionSource => !!x),
     );
     const quick = needed.has('quick')
       ? await this.prerequisites()
       : new Map<string, QuickPrerequisites>();
+    // Появления сверяются в снимке чтения, без блокировки записи: отметки
+    // инертны, и худшая гонка — отметка только что решённого появления,
+    // которую `markState` не применит к новому.
+    const present = this.store.snapshot(
+      () =>
+        new Map(
+          this.candidates(this.context(quick, now), needed).map((c) => [
+            c.sourceKey,
+            {
+              occurrenceId: c.occurrenceId,
+              sourceVersion: c.sourceVersion,
+              title: c.title,
+              category: c.category,
+            },
+          ]),
+        ),
+    );
+    const redact = this.redactor();
+    // Под блокировкой — только строки отметок.
     return this.store.atomic(() => {
       const stored = this.marks();
-      // Под блокировкой записи перепроверяются только источники отмечаемых
-      // карточек и старых отметок (кандидатов на удаление), не вся проекция.
-      for (const key of Object.keys(stored)) {
-        const source = sourceOfKey(key);
-        if (lastMark(stored[key]) < cutoff && source && source !== 'quick') needed.add(source);
-      }
-      const ctx = this.context(quick, now);
-      const present = new Map(this.candidates(ctx, needed).map((c) => [c.sourceKey, c]));
       const marked: { sourceKey: string; occurrenceId: string }[] = [];
       const ignored: { sourceKey: string; occurrenceId: string }[] = [];
       for (const m of marks) {
@@ -2303,22 +2318,13 @@ export class AttentionService {
           row.ackVersion = m.version;
           row.ackAt = at;
         }
-        row.title = clip(one(ctx.redact(item.title)), ATTENTION_LIMITS.title);
+        row.title = clip(one(redact(item.title)), ATTENTION_LIMITS.title);
         row.category = item.category;
         this.store.saveLocal(ATTENTION_NAMESPACE, undefined, m.sourceKey, attentionMark.parse(row));
         stored[m.sourceKey] = row;
         marked.push({ sourceKey: m.sourceKey, occurrenceId: m.occurrenceId });
       }
-      // Удаляются только старые отметки перепроверенных источников.
-      const checked = (key: string) => {
-        const source = sourceOfKey(key);
-        return !!source && needed.has(source) && source !== 'quick';
-      };
-      this.prune(
-        Object.fromEntries(Object.entries(stored).filter(([key]) => checked(key))),
-        new Set(present.keys()),
-        now,
-      );
+      this.prune(stored, new Set(marked.map((m) => m.sourceKey)), now);
       return { marked, ignored };
     });
   }
@@ -2336,6 +2342,11 @@ export class AttentionService {
   async act(raw: unknown, deps: AttentionActDeps = {}) {
     const v = attentionInputs.act.parse(raw);
     const source = sourceOfKey(v.sourceKey);
+    // Действие, которого у источника нет, отклоняется до любого пересчёта.
+    if (!source || !actionHandlers[`${source}/${v.action}`])
+      throw new DomainError(`Действие ${v.action} не предлагается этой карточкой`, 400, {
+        code: 'attention-action',
+      });
     const now = (this.options.now ?? Date.now)();
     const quick =
       source === 'quick' ? await this.prerequisites() : new Map<string, QuickPrerequisites>();
@@ -2419,18 +2430,20 @@ export class AttentionService {
   }
 
   /**
-   * Удаление отметок исчезнувших карточек старше срока хранения и сверх
-   * предела строк (сначала самые старые). Только при записи отметок.
+   * Удаление по возрасту и пределу строк (решение 9), без пересчёта
+   * источников: отметка старше 30 дней удаляется, даже если её карточка всё
+   * ещё активна (тогда она снова не прочитана). `keep` — только что
+   * отмеченные ключи.
    */
-  private prune(stored: Record<string, AttentionMark>, present: Set<string>, now: number) {
+  private prune(stored: Record<string, AttentionMark>, keep: Set<string>, now: number) {
     const last = lastMark;
     const cutoff = new Date(now - ATTENTION_LIMITS.markRetentionMs).toISOString();
     const keys = Object.keys(stored);
-    const removed = new Set(keys.filter((key) => !present.has(key) && last(stored[key]) < cutoff));
+    const removed = new Set(keys.filter((key) => !keep.has(key) && last(stored[key]) < cutoff));
     const left = keys.filter((key) => !removed.has(key));
     if (left.length > ATTENTION_LIMITS.markRows)
       left
-        .filter((key) => !present.has(key))
+        .filter((key) => !keep.has(key))
         .sort((a, b) => (last(stored[a]) < last(stored[b]) ? -1 : 1))
         .slice(0, left.length - ATTENTION_LIMITS.markRows)
         .forEach((key) => removed.add(key));
