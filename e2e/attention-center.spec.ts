@@ -7,6 +7,10 @@ import { startWorkspace } from '../src/runner/start.ts';
 import { product } from '../tests/preparation-fixture.ts';
 import { useLiveCliGuard } from './live-cli-guard.ts';
 
+// Свой демо-сервер (playwright.config.ts): сценарии центра внимания
+// запускают очередь, и общий демо-проект после них не тот, что ждут другие.
+test.use({ baseURL: 'http://127.0.0.1:4389' });
+
 // Интерфейс центра внимания (D05). Демо-сервер общий для спецификаций:
 // каждый тест создаёт свои доску и задачу и находит свои карточки по
 // `data-attention-key` (ключ предмета из своих id), а не считает все.
