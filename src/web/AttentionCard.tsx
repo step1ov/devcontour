@@ -17,7 +17,16 @@ import {
 } from './attention-logic.ts';
 import { useAttention } from './AttentionProvider.tsx';
 import { navigate } from './navigation.ts';
-import { draftKey, emptyDraft, pinStale, useDraft, type Draft } from './attention-drafts.ts';
+import {
+  draftKey,
+  emptyDraft,
+  openPin,
+  pinOf,
+  pinStale,
+  unsentWhy,
+  useDraft,
+  type Draft,
+} from './attention-drafts.ts';
 
 // Карточка центра внимания: что случилось, что блокирует, кто действует,
 // следующий шаг и где доказательства. Действие называет показанную версию;
@@ -309,15 +318,12 @@ export function AttentionCard({
   // при открытии формы.
   const [draft, setDraft] = useDraft(draftKey(shownItem));
   const { open, text, option, kind, key } = draft;
-  const setText = (value: string) => setDraft({ text: value });
+  // Новый текст — новый ключ повтора: повтор с ключом прежнего текста вернул
+  // бы прежний ответ сервера вместо нового.
+  const setText = (value: string) =>
+    setDraft(value === text ? { text: value } : { text: value, key: crypto.randomUUID() });
   const setOption = (value: string | null) => setDraft({ option: value });
   const setKind = (value: Draft['kind']) => setDraft({ kind: value });
-  const pinTo = (i: AttentionItem) => ({
-    occurrenceId: i.occurrenceId,
-    sourceVersion: i.sourceVersion,
-    title: i.title,
-    reason: i.reason,
-  });
   const [busy, setBusy] = useState(false);
   const [alert, setAlert] = useState<{ tone: 'warning' | 'destructive'; text: string }>();
   const [markNote, setMarkNote] = useState('');
@@ -387,17 +393,37 @@ export function AttentionCard({
       } else if (r.status === 409 && r.body?.code === 'attention-stale' && r.body.item) {
         // Форма остаётся с текстом; предупреждение об изменении карточки
         // и выбор новой версии — ниже (черновик закреплён за прежней).
-        setOverride(r.body.item);
-        if (!textual) {
+        const next = r.body.item;
+        setOverride(next);
+        const still =
+          next.actor === 'operator' &&
+          next.occurrenceId === shown.occurrenceId &&
+          next.actions.some((a) => a.kind === 'domain' && a.id === action.id);
+        if (textual && still)
+          // Форма остаётся: предупреждение с выбором новой версии — её alert.
+          requestAnimationFrame(() => changedRef.current?.focus());
+        else {
+          // Действие больше не предлагается: объявление и фокус — на
+          // предупреждении, неотправленный текст — под ним.
           setAlert({
             tone: 'warning',
             text: 'Карточка изменилась, пока вы её читали: действие не выполнено. Проверьте новое содержание и решите снова.',
           });
           focusAlert();
-        } else requestAnimationFrame(() => (changedRef.current ?? unsentRef.current)?.focus());
+        }
       } else if (r.status === 409 && r.body?.code === 'attention-resolved')
-        onOutcome?.(item, { kind: 'resolved', status: `Уже решено: «${item.title}»` });
+        onOutcome?.(item, {
+          kind: 'resolved',
+          status:
+            `Уже решено: «${item.title}».` +
+            (textual && text.trim()
+              ? ' Ваш текст не отправлен и сохранён в «Неотправленные ответы».'
+              : ''),
+        });
       else if (r.status === 0 || r.status >= 500) {
+        // Исход неизвестен: если карточка потом исчезнет, текст назовётся
+        // «возможно, отправлен».
+        if (textual) setDraft({ attempted: true });
         setAlert({
           tone: 'destructive',
           text: 'Связи нет: неизвестно, выполнено ли действие. Панель проверит это, когда связь вернётся.',
@@ -430,13 +456,18 @@ export function AttentionCard({
       ? text
       : '';
   const formAction = orphan ? undefined : offered;
-  // Действие исчезло из-под открытой формы — фокус на неотправленном тексте.
+  // Действие исчезло из-под открытой формы — фокус на неотправленном тексте,
+  // если он был в этой карточке (опрос не уводит фокус из другого места).
   // Изменение версии объявляет role=alert, не уводя фокус из поля ввода.
   const wasOrphan = useRef(false);
   useEffect(() => {
-    if (orphan && !wasOrphan.current) requestAnimationFrame(() => unsentRef.current?.focus());
+    if (orphan && !wasOrphan.current && !alert) {
+      const active = document.activeElement;
+      if (!active || active === document.body || article.current?.contains(active))
+        requestAnimationFrame(() => unsentRef.current?.focus());
+    }
     wasOrphan.current = !!orphan;
-  }, [orphan]);
+  }, [orphan, alert]);
 
   let next: ReactNode;
   if (domain.length)
@@ -469,7 +500,15 @@ export function AttentionCard({
           aria-describedby={stale ? staleId : undefined}
           aria-expanded={open === a.id}
           onClick={() => {
-            if (open !== a.id) setDraft({ open: a.id, option: null, pin: pinTo(item) });
+            // Черновик с текстом сохраняет прежнюю версию: если карточка
+            // изменилась, повторное открытие покажет «Карточка изменилась»,
+            // и ответить на новую версию можно только явным выбором.
+            if (open !== a.id)
+              setDraft({
+                open: a.id,
+                option: draft.text.trim() ? option : null,
+                pin: openPin(draft, item),
+              });
             else closeForm(a.id);
           }}
         >
@@ -550,7 +589,13 @@ export function AttentionCard({
             size="sm"
             className={cn(actionClass, 'justify-self-start')}
             disabled={blocked}
-            onClick={() => setDraft({ pin: pinTo(item) })}
+            onClick={() => {
+              // Кнопка исчезает вместе с предупреждением: фокус — в поле ответа.
+              setDraft({ pin: pinOf(item) });
+              requestAnimationFrame(() =>
+                article.current?.querySelector<HTMLTextAreaElement>('form textarea')?.focus(),
+              );
+            }}
           >
             Ответить на новую версию
           </Button>
@@ -560,7 +605,10 @@ export function AttentionCard({
         <UnsentText
           ref={unsentRef}
           text={orphan}
-          why="Карточка изменилась: это действие больше не предлагается. Ваш текст не отправлен."
+          why={unsentWhy(
+            draft,
+            'Карточка изменилась: это действие больше не предлагается. Ваш текст не отправлен.',
+          )}
           onDrop={() => setDraft({ open: null, text: '' })}
         />
       )}

@@ -258,3 +258,16 @@ test('A draft names the version shown when its form opened, and outlives its car
   );
   assert.deepEqual(orphanDrafts(all, [{ id: 'prep:stage:C:product#r3' }]), []);
 });
+
+test('Reopening a draft with text keeps the version it was written for', async () => {
+  const { emptyDraft, openPin, pinStale, pinOf } = await import('../src/web/attention-drafts.ts');
+  const v1 = item({ sourceKey: 'discussion:na:M', occurrenceId: 'D', sourceVersion: 'D:3' });
+  const v2 = { ...v1, sourceVersion: 'D:5' };
+  // Текст набран для v1, форма закрыта (Esc); пока она закрыта, пришла v2.
+  const closed = { ...emptyDraft(), open: null, text: 'Ответ для v1', pin: pinOf(v1) };
+  const reopened = { ...closed, open: 'answer', pin: openPin(closed, v2) };
+  assert.equal(reopened.pin.sourceVersion, 'D:3', 'прежняя версия, не новая');
+  assert.equal(pinStale(reopened, v2), true, 'форма показывает «Карточка изменилась»');
+  // Пустой черновик открывается на показанной версии.
+  assert.equal(openPin(emptyDraft(), v2).sourceVersion, 'D:5');
+});
