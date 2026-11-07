@@ -35,5 +35,8 @@
 // input_cancel и input_supersede после contract_change_revise, вместе с
 // операциями обсуждения (input_list,
 // input_show, input_target — только чтение); прочие операции байтово прежние.
-export const CATALOG_DIGEST = 'e4ca95bb249e202262c5939f7a38f4fa1f7e414321598ba98eef5fe04c35182d';
+// Намеренное изменение: discussion_post принимает kind answer с input (ответ
+// на вопрос исполнителя сообщением обсуждения), input_context — messageIds
+// для manifest снимка; прочие операции байтово прежние.
+export const CATALOG_DIGEST = 'b7f27bed2875e668e67acce3703583bfc204f9475979167311f954331423d687';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

@@ -14,6 +14,7 @@ export const DISCUSSION_PAGE_BYTES = 256 * 1024;
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 const messageId = z.string().regex(/^DM-[0-9a-f-]{36}$/);
 const idempotencyKey = z.string().regex(/^[A-Za-z0-9_-]{8,80}$/);
+const inputRequestId = z.string().regex(/^IR-[a-f0-9]{24}$/);
 /** Управляющие символы, кроме перевода строки, возврата каретки и табуляции. */
 const CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
 /**
@@ -84,6 +85,27 @@ export const discussionMessage = z.strictObject({
       }),
     })
     .optional(),
+  /**
+   * Ответ на вопрос исполнителя (`kind: answer`). Принятый ответ — ссылка на
+   * версию ответа в запросе harness: канонический текст хранится там один
+   * раз, а `read()` подставляет его. Поздний ответ (запрос уже снят или
+   * заменён) — история обсуждения со своим текстом, `accepted: false`: задачу
+   * он не возобновляет.
+   */
+  input: z
+    .union([
+      z.strictObject({
+        requestId: inputRequestId,
+        revision: z.number().int().positive(),
+        answerDigest: z.string().regex(/^[a-f0-9]{64}$/),
+      }),
+      z.strictObject({
+        requestId: inputRequestId,
+        accepted: z.literal(false),
+        lifecycle: z.string().min(1).max(40),
+      }),
+    ])
+    .optional(),
 });
 export type DiscussionMessage = z.infer<typeof discussionMessage>;
 
@@ -110,8 +132,21 @@ export const discussionInputs = {
   }),
   discussion_post: z.strictObject({
     taskId: id,
-    kind: z.enum(['note', 'change-request']),
+    kind: z.enum(['note', 'change-request', 'answer']),
     text,
+    /**
+     * Только у `kind: answer` — ответ на вопрос исполнителя: запрос, версия
+     * запроса, которую видел автор (она, а не версия треда, — CAS ответа),
+     * вариант и вид ответа.
+     */
+    input: z
+      .strictObject({
+        requestId: inputRequestId,
+        expectedVersion: z.number().int().positive(),
+        optionId: z.string().max(40).optional(),
+        kind: z.enum(['clarification', 'requirement-change']).optional(),
+      })
+      .optional(),
     replyTo: messageId.optional(),
     supersedes: messageId.optional(),
     ...write,

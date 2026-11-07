@@ -2349,7 +2349,7 @@
     },
     {
       "name": "discussion_post",
-      "description": "Post a note or a change request to a task discussion as the lead. Needs idempotencyKey (a repeat returns the same message, another payload under it is refused) and expectedVersion (the thread version you read; a mismatch is 409 — re-read). Text: up to 16 KiB UTF-8, no control characters other than newline and tab; the reply carries an excerpt of long text. supersedes corrects your own latest version of a message. A change request does not alter an approved or accepted task: apply it through a new revision.",
+      "description": "Post a note or a change request to a task discussion as the lead. Needs idempotencyKey (a repeat returns the same message, another payload under it is refused) and expectedVersion (the thread version you read; a mismatch is 409 — re-read). Text: up to 16 KiB UTF-8, no control characters other than newline and tab; the reply carries an excerpt of long text. supersedes corrects your own latest version of a message. A change request does not alter an approved or accepted task: apply it through a new revision. kind answer answers a writer question: input {requestId, expectedVersion (the request version, which is the check instead of the thread version), optionId?, kind?}; the lead rule of input_answer applies, the answer text lives once in the request and the message links its revision; an answer to a question already cancelled or superseded is kept as discussion history (input.accepted false) and resumes nothing; an applied answer is not corrected (409).",
       "readOnly": false,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2363,11 +2363,42 @@
             "type": "string",
             "enum": [
               "note",
-              "change-request"
+              "change-request",
+              "answer"
             ]
           },
           "text": {
             "type": "string"
+          },
+          "input": {
+            "type": "object",
+            "properties": {
+              "requestId": {
+                "type": "string",
+                "pattern": "^IR-[a-f0-9]{24}$"
+              },
+              "expectedVersion": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "optionId": {
+                "type": "string",
+                "maxLength": 40
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "clarification",
+                  "requirement-change"
+                ]
+              }
+            },
+            "required": [
+              "requestId",
+              "expectedVersion"
+            ],
+            "additionalProperties": false
           },
           "replyTo": {
             "type": "string",
@@ -5195,7 +5226,7 @@
     },
     {
       "name": "input_context",
-      "description": "Build the immutable context snapshot with the latest answer (the effective task snapshot plus input/<id>.md and its manifest) and store it by digest. Not activated; idempotent per digest.",
+      "description": "Build the immutable context snapshot with the latest answer (the effective task snapshot plus input/<id>.md and its manifest) and store it by digest. The manifest lists the discussion messages that recorded the answers and the messageIds you select (id, seq, digest; their text is not added). Not activated; idempotent per digest.",
       "readOnly": false,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -5204,6 +5235,14 @@
           "requestId": {
             "type": "string",
             "pattern": "^IR-[a-f0-9]{24}$"
+          },
+          "messageIds": {
+            "maxItems": 20,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^DM-[0-9a-f-]{36}$"
+            }
           }
         },
         "required": [

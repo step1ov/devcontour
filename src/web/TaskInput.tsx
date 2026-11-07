@@ -54,6 +54,8 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
   const [option, setOption] = useState<string | null>(null);
   const [kind, setKind] = useState<'clarification' | 'requirement-change'>('clarification');
   const [busy, setBusy] = useState(false);
+  // Ключ повтора ответа: двойная отправка той же формы — одно сообщение.
+  const [answerKey, setAnswerKey] = useState(() => crypto.randomUUID());
   const load = useCallback(async () => {
     try {
       const response = await fetch(`/api/tasks/${taskId}/input`);
@@ -179,7 +181,8 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
                 ...(option ? { optionId: option } : {}),
                 kind,
                 expectedVersion: current.version,
-              }),
+                idempotencyKey: answerKey,
+              }).then(() => setAnswerKey(crypto.randomUUID())),
             );
           }}
         >

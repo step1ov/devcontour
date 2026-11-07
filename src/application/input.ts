@@ -42,6 +42,7 @@ import {
 import { runtimeAdapters } from '../harness/adapters.ts';
 import { adapters, type AgentAdapter } from '../runner/adapters.ts';
 import { checkoutRoots } from '../runner/checkout-root.ts';
+import { DiscussionService } from './discussion.ts';
 
 /** Кто действует: ведущий агент (агентский API), оператор (панель) или хост от его имени (CLI `--by host`). */
 export type InputActorKind = 'lead' | 'operator' | 'host';
@@ -78,7 +79,14 @@ export const inputOperationInputs = {
     kind: z.enum(['clarification', 'requirement-change']).default('clarification'),
     expectedVersion: version,
   }),
-  input_context: z.strictObject({ requestId }),
+  input_context: z.strictObject({
+    requestId,
+    /** Сообщения обсуждения задачи, явно включённые в manifest снимка (кроме самих ответов). */
+    messageIds: z
+      .array(z.string().regex(/^DM-[0-9a-f-]{36}$/))
+      .max(20)
+      .optional(),
+  }),
   input_review: z.strictObject({
     requestId,
     contextDigest: digest,
@@ -105,6 +113,22 @@ export const inputOperationInputs = {
     successorTaskId: id,
   }),
 };
+
+/** Ответ оператора из панели (сообщение обсуждения с ключом идемпотентности). */
+const panelAnswer = z.strictObject({
+  text: z.string().trim().min(1).max(INPUT_LIMITS.answer),
+  optionId: z.string().max(40).optional(),
+  kind: z.enum(['clarification', 'requirement-change']).optional(),
+  expectedVersion: version,
+  idempotencyKey: z
+    .string()
+    .regex(/^[A-Za-z0-9_-]{8,80}$/)
+    .optional(),
+  supersedes: z
+    .string()
+    .regex(/^DM-[0-9a-f-]{36}$/)
+    .optional(),
+});
 
 /** Сколько знаков прежних ответов показывает `show` (последний — целиком). */
 const EARLIER_EXCERPT = 500;
@@ -498,8 +522,9 @@ export class InputService {
         `Запрос ${request.id} (${request.kind}, ${request.lifecycle}): снимок с ответом строится для вопроса в answered или заменённого`,
       );
     const task = this.task(request.workId);
+    const messages = options.messages ?? this.manifestMessages(request, input.messageIds ?? []);
     const base = await this.effectiveSnapshot(task);
-    const snapshot = withInput(base, inputContextSource(request, answer, options.messages));
+    const snapshot = withInput(base, inputContextSource(request, answer, messages));
     const issues = contextIssues(snapshot);
     if (issues.length) throw new DomainError('Снимок контекста: ' + issues.join('; '), 400);
     const key = contextDigest(snapshot);
@@ -516,6 +541,36 @@ export class InputService {
       sources: snapshot.sources.map((s) => ({ id: s.id, kind: s.kind, version: s.version })),
       nextStep: 'input_review',
     };
+  }
+
+  /**
+   * Сообщения обсуждения в manifest снимка: сообщения, которыми записаны
+   * ответы запроса (`messageRef`), и явно выбранные сообщения той же задачи —
+   * ID, версия (seq) и digest содержания. Текст сообщений в снимок не входит:
+   * правка обсуждения после снимка — новое сообщение, закреплённые байты прежние.
+   */
+  private manifestMessages(request: InputRequest, selected: string[]): InputMessageRef[] {
+    const discussion = new DiscussionService(this.h);
+    const ids = [
+      ...new Set([
+        ...request.answers.flatMap((a) => (a.messageRef ? [a.messageRef] : [])),
+        ...selected,
+      ]),
+    ];
+    const out: InputMessageRef[] = [];
+    for (const id of ids) {
+      const message = discussion.message(request.workId, id);
+      if (!message) {
+        if (selected.includes(id))
+          throw new DomainError(
+            `Сообщение ${id} не найдено в обсуждении задачи ${request.workId}`,
+            404,
+          );
+        continue;
+      }
+      out.push({ id: message.id, revision: message.seq, digest: message.payloadDigest });
+    }
+    return out.sort((a, b) => a.revision - b.revision);
   }
 
   /** Снимок `digest` несёт ровно последний ответ запроса. */
@@ -749,9 +804,33 @@ export class InputService {
   }
 
   /** Ответ оператора из панели. */
+  /**
+   * Ответ оператора из панели — сообщением обсуждения задачи
+   * (`DiscussionService.answer`): текст хранится в запросе, сообщение
+   * ссылается на версию ответа; поздний ответ остаётся историей.
+   */
   answerInTask(taskId: string, requestId: string, raw: unknown) {
     this.ofTask(taskId, requestId);
-    return this.answer({ ...(raw as object), requestId }, 'operator');
+    const v = panelAnswer.parse(raw);
+    const result = new DiscussionService(this.h).answer(
+      {
+        taskId,
+        requestId,
+        text: v.text,
+        idempotencyKey: v.idempotencyKey ?? 'panel-' + randomUUID(),
+        expectedVersion: v.expectedVersion,
+        ...(v.optionId ? { optionId: v.optionId } : {}),
+        ...(v.kind ? { kind: v.kind } : {}),
+        ...(v.supersedes ? { supersedes: v.supersedes } : {}),
+      },
+      'operator',
+    );
+    return {
+      requestId,
+      delivered: result.delivered,
+      messageId: result.message.id,
+      ...(result.message.input ? { input: result.message.input } : {}),
+    };
   }
 
   /** Отмена оператором из панели. */
