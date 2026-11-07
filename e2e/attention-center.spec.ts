@@ -1,4 +1,5 @@
 import { test, expect, type APIRequestContext, type Page, type Route } from '@playwright/test';
+import AxeBuilder from '@axe-core/playwright';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -559,4 +560,235 @@ test('D05-E: a lead technical blocker is not an operator choice, and reading is 
   });
   await expect(leadGroup.getByText('Нужен ведущий агент: ему есть что разобрать.')).toBeVisible();
   await expect(card).toContainText('сейчас не на связи');
+});
+
+test('D05-C: 390 px, long unbroken texts and accessibility of the queue, history and overview', async ({
+  page,
+}) => {
+  const long = 'x'.repeat(300);
+  const words = 'Очень длинная причина без переносов '.repeat(8) + long;
+  const items = [
+    fakeItem('input:R-long', {
+      source: 'input',
+      category: 'question',
+      title: 'Исполнитель спрашивает ' + long,
+      reason: words,
+      impact: { tasks: 1, waiting: 120, boards: [], taskIds: [] },
+      subject: { kind: 'request', id: 'R-long', href: '/?view=boards&tab=list&task=T-1#input' },
+      evidence: [
+        { kind: 'message', id: 'M-' + long, href: '/?view=boards&tab=list&task=T-1#dm-M' },
+      ],
+      actions: [
+        {
+          id: 'answer',
+          kind: 'domain',
+          label: 'Ответить',
+          input: 'text+option',
+          prompt: words,
+          choices: [
+            { id: 'a', label: 'Вариант ' + long, hint: words, recommended: true },
+            { id: 'b', label: 'Другой ' + long },
+          ],
+        },
+      ],
+    }),
+    fakeItem('changeset:CHG-' + 'y'.repeat(40), {
+      title: 'Примите «' + long + '»',
+      reason: words,
+      actions: [
+        {
+          id: 'deploy-preview',
+          kind: 'domain',
+          label: 'Выложить в preview ' + long,
+          input: 'confirm',
+        },
+        { id: 'accept', kind: 'domain', label: 'Принять', input: 'confirm' },
+      ],
+    }),
+    fakeItem('work:T-' + 'z'.repeat(40), {
+      source: 'work',
+      category: 'technical',
+      actor: 'lead',
+      title: 'Задача «' + long + '» остановлена',
+      reason: words,
+      subject: { kind: 'task', id: 'T-1', href: '/?view=boards&tab=list&task=T-1' },
+      actions: [{ id: 'handoff', kind: 'handoff', command: 'session_handoff ' + long }],
+    }),
+  ];
+  const history = items.map((i, n) => ({
+    ...i,
+    id: i.sourceKey + '#h',
+    actions: [],
+    resolvedAt: n === 1 ? null : '2026-11-07T11:00:00.000Z',
+  }));
+  let offline = false;
+  await page.route(isList, (route) => {
+    if (offline) return route.abort('internetdisconnected');
+    if (route.request().url().includes('view=history'))
+      return route.fulfill({
+        json: {
+          revision: 1,
+          generatedAt: new Date().toISOString(),
+          engineConnected: true,
+          items: history,
+          truncated: { count: 3 },
+        },
+      });
+    return route.fulfill({
+      json: fakeView(items, {
+        lead: { present: false, lastActivityAt: null },
+        truncated: { count: 7 },
+      }),
+    });
+  });
+  const fits = async () => {
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+    ).toBe(true);
+    const overflow = await page
+      .locator('[aria-label="Центр внимания"] article')
+      .evaluateAll((els) => els.filter((e) => e.scrollWidth > e.clientWidth + 1).length);
+    expect(overflow).toBe(0);
+  };
+  const axe = async () =>
+    expect(
+      (await new AxeBuilder({ page }).include('[aria-label="Центр внимания"]').analyze())
+        .violations,
+    ).toEqual([]);
+
+  await page.goto('/?tab=attention');
+  const question = cardOf(page, 'input:R-long');
+  await question.getByRole('button', { name: 'Ответить' }).click();
+  await expect(question.locator('form').getByRole('radio')).toHaveCount(2);
+  await question.getByText('Вопрос полностью').click();
+  await question.getByText('Доказательства и подробности').click();
+  await expect(center(page)).toContainText('Нужен ведущий агент');
+  await expect(center(page)).toContainText('Показаны первые 3 из 10');
+  await axe();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await fits();
+  await axe();
+
+  // Нет связи: строка устаревания тоже переносится.
+  offline = true;
+  await expect(center(page).getByText(/Нет связи с сервером/)).toBeVisible();
+  await fits();
+  await axe();
+  offline = false;
+
+  await center(page).getByRole('tab', { name: 'История' }).click();
+  await expect(center(page).getByRole('list', { name: 'История центра внимания' })).toBeVisible();
+  await expect(center(page)).toContainText('Время решения не записано');
+  await expect(center(page)).toContainText('Показаны последние 100');
+  await fits();
+  await axe();
+
+  // Голова очереди в обзоре — те же карточки, компактно.
+  await page.goto('/');
+  await expect(page.getByRole('list', { name: 'Решения для вас' })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(
+    true,
+  );
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+});
+
+test('D05-D: one toast per new occurrence, none for heartbeats, updates or lead items; a second tab marks read', async ({
+  page,
+  context,
+  request,
+}) => {
+  test.slow();
+  // Счётчик вставленных уведомлений — до загрузки панели.
+  await context.addInitScript(() => {
+    const w = window as unknown as { __toasts: string[] };
+    w.__toasts = [];
+    new MutationObserver((records) => {
+      for (const r of records)
+        for (const node of r.addedNodes)
+          if (node instanceof HTMLElement) {
+            const toasts = node.matches('[data-sonner-toast]')
+              ? [node]
+              : [...node.querySelectorAll<HTMLElement>('[data-sonner-toast]')];
+            for (const t of toasts) w.__toasts.push(t.textContent ?? '');
+          }
+    }).observe(document, { childList: true, subtree: true });
+  });
+  const toasts = (p: Page) =>
+    p.evaluate(() => (window as unknown as { __toasts: string[] }).__toasts);
+  const cycles = (n: number) => page.waitForTimeout(n * 3200);
+
+  // Начальная загрузка с уже существующими карточками и heartbeat — тишина.
+  await page.goto('/');
+  await expect(
+    page.getByRole('heading', { name: 'Нужно ваше решение', exact: true }),
+  ).toBeVisible();
+  await cycles(3);
+  expect(await toasts(page)).toEqual([]);
+
+  // Новое появление карточки оператора — ровно одно уведомление.
+  const own = await askingTask(request, 'Уведомление о новом вопросе');
+  const key = `input:${own.requestId}`;
+  await expect.poll(async () => (await toasts(page)).length, { timeout: 15000 }).toBe(1);
+  expect((await toasts(page))[0]).toMatch(/Нужно действие: |Новых действий: /);
+  await cycles(3);
+  expect((await toasts(page)).length).toBe(1);
+
+  // Вторая вкладка отмечает карточку прочитанной: значок первой падает после
+  // штатного опроса, новых уведомлений нет ни в одной.
+  const badge = page
+    .getByRole('navigation', { name: 'Workspace' })
+    .locator('[data-attention-count]');
+  const before = Number((await badge.getAttribute('data-attention-count')) ?? '0');
+  expect(before).toBeGreaterThan(0);
+  const second = await context.newPage();
+  await second.goto('/?tab=attention');
+  await second
+    .locator(`article[data-attention-key="${key}"]`)
+    .getByRole('button', { name: /^Прочитано: / })
+    .click();
+  await expect(second.locator(`article[data-attention-key="${key}"]`)).not.toContainText('новое');
+  if (before > 1)
+    await expect(badge).toHaveAttribute('data-attention-count', String(before - 1), {
+      timeout: 7000,
+    });
+  else await expect(badge).toHaveCount(0, { timeout: 7000 });
+  expect((await toasts(page)).length).toBe(1);
+  expect(await toasts(second)).toEqual([]);
+
+  // Существенное обновление того же появления (ответ, затем исправление
+  // ответа) и переход карточки к ведущему — без уведомлений.
+  const input = async () =>
+    (await (await request.get(`/api/tasks/${own.task}/input`)).json()) as {
+      current: { version: number; answers: { messageRef?: string }[] };
+    };
+  const first = await request.post(`/api/tasks/${own.task}/input/${own.requestId}/answer`, {
+    headers,
+    data: {
+      text: 'Первый ответ.',
+      optionId: 'json',
+      kind: 'clarification',
+      expectedVersion: (await input()).current.version,
+      idempotencyKey: 'toast-1-' + own.requestId.slice(-12),
+    },
+  });
+  expect(first.ok(), await first.text()).toBe(true);
+  const saved = await input();
+  const corrected = await request.post(`/api/tasks/${own.task}/input/${own.requestId}/answer`, {
+    headers,
+    data: {
+      text: 'Исправленный ответ.',
+      optionId: 'json',
+      kind: 'clarification',
+      expectedVersion: saved.current.version,
+      idempotencyKey: 'toast-2-' + own.requestId.slice(-12),
+      ...(saved.current.answers.at(-1)?.messageRef
+        ? { supersedes: saved.current.answers.at(-1)!.messageRef }
+        : {}),
+    },
+  });
+  expect(corrected.ok(), await corrected.text()).toBe(true);
+  await cycles(3);
+  expect((await toasts(page)).length).toBe(1);
+  expect(await toasts(second)).toEqual([]);
+  await second.close();
 });
