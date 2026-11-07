@@ -865,18 +865,21 @@ function dependentsAnchor(ctx: AttentionContext, id: string) {
   );
 }
 /**
- * Диагноз остановки задач-кандидатов (harness `stopInputsOf`) — единственное
- * место вызова: переход на пакетный вызов harness по набору поручений —
- * замена здесь. Пока — по одному вызову на поручение: полный вызов по всему
- * виду на сотнях задач стоит секунды (обход ждущих транзитивен).
+ * Диагноз остановки задач-кандидатов — единственное место вызова harness
+ * `stopInputsOf`: один пакетный вызов по набору поручений с общей
+ * подготовкой (входы каждого — те же, что у вызова по одному поручению).
  */
 export function diagnose(
   source: ReturnType<typeof harnessOf>['source'],
   h: DevContour,
   workIds: readonly string[],
 ) {
-  const options = { maxAttempts: h.config.maxAttempts, repairBudget: h.config.repairBudget };
-  return workIds.flatMap((workId) => stopInputsOf(source, { ...options, workId }));
+  if (!workIds.length) return [];
+  return stopInputsOf(source, {
+    maxAttempts: h.config.maxAttempts,
+    repairBudget: h.config.repairBudget,
+    workIds,
+  });
 }
 
 /**

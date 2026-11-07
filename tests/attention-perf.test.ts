@@ -194,19 +194,15 @@ test('Цепочка глубиной 100 и 21 отменённый корен�
   }
 });
 
-test(
-  '400 задач, 100 отменённых корней: чтение и отметка в щедром пределе',
-  { todo: 'ждёт пакетного stopInputsOf в harness: по одному вызову на задачу это секунды' },
-  async () => {
-    const f = fixture();
-    try {
-      cancelledRoots(f, 100);
-      await bounded(f, 'B100');
-    } finally {
-      f.cleanup();
-    }
-  },
-);
+test('400 задач, 100 отменённых корней: чтение и отметка в щедром пределе', async () => {
+  const f = fixture();
+  try {
+    cancelledRoots(f, 100);
+    await bounded(f, 'B100');
+  } finally {
+    f.cleanup();
+  }
+});
 
 test('Действие, которого у источника нет, отклоняется до пересчёта источника', async () => {
   const f = fixture();
