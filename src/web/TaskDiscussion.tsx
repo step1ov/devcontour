@@ -567,7 +567,13 @@ export function TaskDiscussion({
                       type="button"
                       className="text-info cursor-pointer underline-offset-2 hover:underline"
                       onClick={() => {
-                        setDraft({ text: m.text, key: '', supersedes: m.id });
+                        // Исправленный ответ на запрос ведущего остаётся ответом.
+                        setDraft({
+                          text: m.text,
+                          key: '',
+                          supersedes: m.id,
+                          ...(m.replyTo ? { replyTo: m.replyTo } : {}),
+                        });
                         setNotice('');
                         textarea.current?.focus();
                       }}
@@ -591,7 +597,7 @@ export function TaskDiscussion({
         }}
       >
         <Label htmlFor={`discussion-text-${taskId}`}>Сообщение</Label>
-        {answering && (
+        {answering && !correcting && (
           <p className="text-muted-foreground m-0 text-xs">
             Ответ на запрос ведущего агента: обращение вернётся ему на обработку.{' '}
             <button

@@ -581,6 +581,9 @@ export class DiscussionService {
         if (!target || target.taskId !== taskId)
           throw new DomainError('Ссылка на сообщение другой задачи или несуществующее', 400);
       }
+      // Исправление сохраняет связь прежней версии: исправленный ответ на
+      // запрос ведущего остаётся ответом на тот же запрос.
+      let replyTo = input.replyTo;
       if (input.supersedes) {
         const target = this.parse(this.h.store.discussionById(owner, input.supersedes));
         if (target.author !== author)
@@ -604,10 +607,18 @@ export class DiscussionService {
               { code: 'request-resolved' },
             );
         }
+        if (target.replyTo) {
+          if (replyTo && replyTo !== target.replyTo)
+            throw new DomainError(
+              'Исправление отвечает на то же сообщение, что и прежняя версия (replyTo)',
+              400,
+            );
+          replyTo = target.replyTo;
+        }
       }
       // Обращение — новый запрос, а не ответ на запрос ведущего.
-      if (input.kind === 'change-request' && input.replyTo) {
-        const target = this.parse(this.h.store.discussionById(owner, input.replyTo));
+      if (input.kind === 'change-request' && replyTo) {
+        const target = this.parse(this.h.store.discussionById(owner, replyTo));
         if (target.kind === 'disposition')
           throw new DomainError(
             'Обращение — новый запрос, а не ответ на обработку: ответ на запрос ведущего — заметка (kind note)',
@@ -625,7 +636,7 @@ export class DiscussionService {
         kind: input.kind,
         text: input.text,
         createdAt: new Date().toISOString(),
-        ...(input.replyTo ? { replyTo: input.replyTo } : {}),
+        ...(replyTo ? { replyTo: replyTo } : {}),
         ...(input.supersedes ? { supersedes: input.supersedes } : {}),
         basis: { specDigest: specDigest(task), ...(latest ? { runId: latest.id } : {}) },
         idempotencyKey: input.idempotencyKey,
@@ -640,7 +651,7 @@ export class DiscussionService {
           author,
           idempotencyKey: input.idempotencyKey,
           kind: input.kind,
-          ...(input.replyTo ? { replyTo: input.replyTo } : {}),
+          ...(replyTo ? { replyTo: replyTo } : {}),
         },
         record,
       );
@@ -651,7 +662,7 @@ export class DiscussionService {
         messageId: id,
         kind: input.kind,
         author,
-        ...(input.replyTo ? { replyTo: input.replyTo } : {}),
+        ...(replyTo ? { replyTo: replyTo } : {}),
       });
       const message = discussionMessage.parse({ ...record, seq });
       return { message, version: seq };

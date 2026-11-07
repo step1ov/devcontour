@@ -31,7 +31,14 @@ async function taskOn(request: APIRequestContext, title: string) {
 }
 async function thread(request: APIRequestContext, taskId: string) {
   const page = (await (await request.get(`/api/tasks/${taskId}/discussion?limit=50`)).json()) as {
-    messages: { text: string; kind: string; author: string; supersedes?: string }[];
+    messages: {
+      id: string;
+      text: string;
+      kind: string;
+      author: string;
+      replyTo?: string;
+      supersedes?: string;
+    }[];
     storage: string;
   };
   return page;
@@ -253,9 +260,22 @@ test('A needs-answer disposition: the operator replies from the card and the req
   await expect(requestItem).toContainText('Ответ передан — ждёт обработки ведущим агентом');
   await expect(ask.getByRole('button', { name: 'Ответить' })).toBeVisible();
 
+  // Исправленный ответ остаётся ответом на тот же запрос ведущего.
+  await answer.getByRole('button', { name: 'Исправить' }).click();
+  await expect(box).toHaveValue('В CSV');
+  await box.fill('В CSV с заголовком');
+  await region.getByRole('button', { name: 'Ответить ведущему' }).click();
+  await expect(region.getByRole('status')).toHaveText('Ответ передан ведущему агенту');
+  await expect(answer).toHaveCount(2);
+  await expect(answer.nth(1)).toContainText('В CSV с заголовком');
+  await expect(answer.nth(1).getByRole('link', { name: 'Ответ на запрос ведущего' })).toBeVisible();
+  const notes = (await thread(request, ids.task)).messages.filter((m) => m.kind === 'note');
+  expect(notes[1].supersedes).toBe(notes[0].id);
+  expect(notes[1].replyTo).toBe(notes[0].replyTo);
+
   const [reopened] = await inboxOf(ids.task);
   expect(reopened?.id).toBe(pending.id);
-  expect(reopened?.reopened?.answerId).toBeTruthy();
+  expect(reopened?.reopened?.answerId).toBe(notes[1].id);
 
   // Пока исход не окончателен, обращение исправляется; после отказа — нет:
   // дальнейшее изменение — новое обращение.

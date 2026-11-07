@@ -867,6 +867,34 @@ test('D02-C: окончательно обработанное обращени�
   }
 });
 
+test('D02-C: исправленный ответ на запрос ведущего остаётся ответом на тот же запрос', () => {
+  const w = world();
+  try {
+    const { request, disposition } = asked(w);
+    const answer = say(w.d, w.task.id, 'Из CVS', { kind: 'note', replyTo: disposition.id });
+    // Исправление без replyTo наследует связь прежней версии.
+    const corrected = say(w.d, w.task.id, 'Из CSV', { kind: 'note', supersedes: answer.id });
+    assert.equal(corrected.replyTo, disposition.id);
+    assert.equal(w.d.message(w.task.id, corrected.id)?.replyTo, disposition.id);
+    const [reopened] = w.d.inbox({}).requests;
+    assert.equal(reopened.id, request.id);
+    assert.deepEqual(reopened.reopened, { dispositionId: disposition.id, answerId: corrected.id });
+    // Другая связь у исправления — отказ.
+    const note = say(w.d, w.task.id, 'Контекст', { kind: 'note' });
+    assert.throws(
+      () =>
+        say(w.d, w.task.id, 'Из TSV', {
+          kind: 'note',
+          supersedes: corrected.id,
+          replyTo: note.id,
+        }),
+      (e: Error & { status?: number }) => e.status === 400 && /replyTo/.test(e.message),
+    );
+  } finally {
+    w.cleanup();
+  }
+});
+
 test('D02: некорректный курсор очереди — 400; длинный текст — 413; ревизия без доски — 400', () => {
   const w = world();
   try {
