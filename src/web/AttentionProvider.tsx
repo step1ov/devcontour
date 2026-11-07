@@ -78,6 +78,8 @@ export function AttentionProvider({ children }: { children: ReactNode }) {
   const [optimistic, setOptimistic] = useState<Optimistic>(() => new Map());
   const [arrived, setArrived] = useState({ seq: 0, titles: [] as string[] });
   const signature = useRef('');
+  // Время последнего успешного ответа: «данные на …» в строке устаревания.
+  const lastOk = useRef<string | undefined>(undefined);
   const seen = useRef<Set<string> | undefined>(undefined);
   const shown = useRef(0);
   const screens = useRef<(() => string)[]>([]);
@@ -119,12 +121,18 @@ export function AttentionProvider({ children }: { children: ReactNode }) {
         if (disposed.current) return;
         if (!response.ok || !response.body) {
           const error = failure(response.status, response.body?.error);
-          setState((s) => ({ ...s, error, stale: !!s.view }));
+          setState((s) => ({
+            ...s,
+            error,
+            stale: !!s.view,
+            lastOkAt: lastOk.current ?? s.lastOkAt,
+          }));
           return;
         }
         const view = response.body;
         const next = signatureOf(view);
         const at = new Date().toISOString();
+        lastOk.current = at;
         const step = freshItems(seen.current, view.items);
         seen.current = step.seen;
         if (next === signature.current)

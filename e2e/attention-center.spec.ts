@@ -507,7 +507,10 @@ test('D05-E: a lead technical blocker is not an operator choice, and reading is 
   const names = await card
     .getByRole('button')
     .evaluateAll((els) => els.map((e) => e.getAttribute('aria-label') ?? e.textContent ?? ''));
-  for (const name of names) expect(name).toMatch(/^(Команда для ведущего|Прочитано: |Увидел: )/);
+  for (const name of names)
+    expect(name).toMatch(
+      /^(Команда для ведущего|Прочитано: |Увидел: |Доказательства и подробности)/,
+    );
   await expect(card.getByRole('link', { name: 'Открыть задачу' })).toBeVisible();
 
   // Чтение — не действие: отметки не меняют тред, задачу и очередь.

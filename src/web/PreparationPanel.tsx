@@ -767,6 +767,7 @@ export function PreparationPanel() {
               onClick={(e) => {
                 if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
                 e.preventDefault();
+                showTasks(false);
                 showAttention(true);
               }}
             >
