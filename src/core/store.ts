@@ -368,9 +368,9 @@ export class Store {
               if (this.discussionTable('main', false)) {
                 // Владелец — как `taskOwner`: задачи workspace — в общей базе.
                 const owners = new Map<string, string | undefined>(
-                  (raw.tasks as { id: string; scope?: string; repositoryId?: string }[]).map(
-                    (t) => [t.id, t.scope === 'workspace' ? undefined : t.repositoryId],
-                  ),
+                  (
+                    raw as { tasks: { id: string; scope?: string; repositoryId?: string }[] }
+                  ).tasks.map((t) => [t.id, t.scope === 'workspace' ? undefined : t.repositoryId]),
                 );
                 const rows = this.db
                   .prepare(
