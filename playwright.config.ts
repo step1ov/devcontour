@@ -1,6 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
+import { sharedGuardEnv, writeLiveCliGuard } from './e2e/live-cli-guard.ts';
 // Демо-данные — во временном каталоге системы, рабочие деревья попыток —
 // рядом с ними (не внутри каталога состояния: такой корень harness
 // отклоняет) и не в кэше пользователя. Оба — в одном временном каталоге
@@ -8,6 +9,11 @@ import { join } from 'node:path';
 const run = join(tmpdir(), `devcontour-e2e-${Date.now()}`);
 const data = join(run, 'data');
 const checkouts = join(run, 'checkouts');
+// Живые `claude` и `codex` под запретом и у общего сервера: заглушки на PATH
+// отказывают и отмечают вызов. Воркеры наследуют окружение раннера и находят
+// тот же каталог (конфигурация в них вычисляется заново, с другим временем).
+process.env[sharedGuardEnv] ??= join(run, 'cli-guard');
+const guard = writeLiveCliGuard(process.env[sharedGuardEnv]);
 export default defineConfig({
   testDir: 'e2e',
   fullyParallel: false,
@@ -30,6 +36,7 @@ export default defineConfig({
   },
   webServer: {
     env: {
+      PATH: guard.bin + delimiter + (process.env.PATH ?? ''),
       GIT_AUTHOR_NAME: 'DevContour fixture',
       GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
       GIT_COMMITTER_NAME: 'DevContour fixture',

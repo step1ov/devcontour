@@ -5,12 +5,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startWorkspace } from '../src/runner/start.ts';
 import { product } from '../tests/preparation-fixture.ts';
+import { useLiveCliGuard } from './live-cli-guard.ts';
 
 // Интерфейс центра внимания (D05). Демо-сервер общий для спецификаций:
 // каждый тест создаёт свои доску и задачу и находит свои карточки по
 // `data-attention-key` (ключ предмета из своих id), а не считает все.
 // Вопрос исполнителя задаёт demo-исполнитель с маркером `[demo:ask]` —
 // fixture, не модель.
+
+// Живые claude и codex под запретом: вызов из demo-пути роняет тест.
+useLiveCliGuard();
 
 const headers = { 'X-DevContour-Request': '1' };
 

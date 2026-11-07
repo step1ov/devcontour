@@ -1,19 +1,12 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { execFileSync, spawnSync } from 'node:child_process';
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, delimiter, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { startWorkspace } from '../src/runner/start.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { architecture } from '../tests/preparation-fixture.ts';
+import { isolate } from './live-cli-guard.ts';
 
 // Быстрое изменение, обсуждение задачи и центр внимания вместе на настоящем
 // сервере (`startWorkspace`, embedded) без подмены API: поручение из формы,
@@ -182,48 +175,6 @@ function trainingRuntime(root: string, checkouts: string) {
   if (component.reviewer) component.reviewer = { runtime: 'demo' };
   writeFileSync(componentPath, JSON.stringify(component, null, 2) + '\n');
   expect(loadConfig(configPath).mode).toBe('demo');
-}
-
-/** Подменённый домашний каталог, автор Git и запрет живых CLI на время теста. */
-function isolate(home: string) {
-  const bin = join(home, 'bin');
-  const marker = join(home, 'live-runtime-called');
-  mkdirSync(bin);
-  mkdirSync(join(home, 'Library', 'Caches'), { recursive: true });
-  mkdirSync(join(home, '.cache'), { recursive: true });
-  for (const name of ['claude', 'codex'])
-    writeFileSync(
-      join(bin, name),
-      `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "${name} guard"; exit 0; fi\necho "${name} $*" >> '${marker}'\nexit 97\n`,
-      { mode: 0o755 },
-    );
-  const keys = [
-    'HOME',
-    'XDG_CACHE_HOME',
-    'PATH',
-    'GIT_AUTHOR_NAME',
-    'GIT_AUTHOR_EMAIL',
-    'GIT_COMMITTER_NAME',
-    'GIT_COMMITTER_EMAIL',
-  ] as const;
-  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
-  Object.assign(process.env, {
-    HOME: home,
-    XDG_CACHE_HOME: join(home, '.cache'),
-    PATH: bin + delimiter + (saved.PATH ?? ''),
-    GIT_AUTHOR_NAME: 'Flow UI',
-    GIT_AUTHOR_EMAIL: 'flow-ui@example.invalid',
-    GIT_COMMITTER_NAME: 'Flow UI',
-    GIT_COMMITTER_EMAIL: 'flow-ui@example.invalid',
-  });
-  return {
-    called: () => (existsSync(marker) ? readFileSync(marker, 'utf8') : ''),
-    restore() {
-      for (const k of keys)
-        if (saved[k] === undefined) delete process.env[k];
-        else process.env[k] = saved[k];
-    },
-  };
 }
 
 test('Quick start, a discussion note and the attention center together on a real server', async ({
