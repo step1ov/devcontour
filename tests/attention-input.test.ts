@@ -51,6 +51,13 @@ test('S15 вопрос исполнителя: забирает задачу, о
       'operator',
     );
     assert.equal(byKey(await items(), key), undefined);
+    // История: снятый вопрос со временем закрытия из записи запроса.
+    const history = new AttentionService(f.store, f.h, { root: f.root })
+      .history()
+      .items.filter((i) => i.sourceKey === key);
+    assert.equal(history.length, 1);
+    assert.equal(history[0].occurrenceId, request.requestId);
+    assert.ok(history[0].resolvedAt);
   } finally {
     await f.cleanup();
   }

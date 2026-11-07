@@ -1005,6 +1005,35 @@ export class Store {
     if (!row?.root) return undefined;
     return { rootId: row.root, ...(row.disposition ? { dispositionId: row.disposition } : {}) };
   }
+  /**
+   * Обработки обращений схемы, новые первыми: запись обработки, первый ответ
+   * оператора на неё и исправление обработанной версии обращения — факты,
+   * которыми решаются очередь ведущего и вопрос оператору (история).
+   */
+  discussionDispositions(owner: string | undefined, limit: number) {
+    const schema = this.syncSchema(owner);
+    if (!this.discussionTable(schema, false)) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT d.seq, d.data,
+           (SELECT json_extract(a.data,'$.createdAt') FROM ${schema}.discussion a
+              WHERE a.reply_to=d.id AND a.author='operator' ORDER BY a.seq LIMIT 1) AS answered_at,
+           (SELECT json_extract(c.data,'$.createdAt') FROM ${schema}.discussion c
+              WHERE json_extract(c.data,'$.supersedes')=d.reply_to ORDER BY c.seq LIMIT 1) AS corrected_at
+         FROM ${schema}.discussion d WHERE d.kind='disposition' ORDER BY d.seq DESC LIMIT ?`,
+      )
+      .all(limit) as {
+      seq: number;
+      data: string;
+      answered_at: string | null;
+      corrected_at: string | null;
+    }[];
+    return rows.map((r) => ({
+      message: { ...(JSON.parse(r.data) as object), seq: r.seq },
+      answeredAt: r.answered_at,
+      correctedAt: r.corrected_at,
+    }));
+  }
   /** Удалить локальную запись владельца. Только в транзакции. */
   deleteLocal(namespace: string, owner: string | undefined, key: string) {
     if (!this.transaction) throw new Error('Local workflow writes require an atomic transaction');

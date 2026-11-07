@@ -355,6 +355,18 @@ export class DiscussionService {
     );
   }
 
+  /** Обработки обращений по всем схемам хранения (история центра внимания). */
+  dispositions(limit: number) {
+    return this.schemaOwners().flatMap((owner) =>
+      this.h.store.discussionDispositions(owner, limit).map((row) => ({
+        owner,
+        disposition: this.parse(row.message),
+        answeredAt: row.answeredAt,
+        correctedAt: row.correctedAt,
+      })),
+    );
+  }
+
   /** Цепочка исправлений обращения: первое сообщение и последняя обработка. */
   chain(owner: string | undefined, id: string) {
     return this.h.store.discussionChain(owner, id);

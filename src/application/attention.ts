@@ -1691,6 +1691,142 @@ changesetSource.history = (ctx) =>
       : [],
   );
 
+/**
+ * S6: утверждение плана оператором. Каждое утверждение задач ревизии решает
+ * появление, якорь которого — предыдущее утверждение (как у активной
+ * карточки). Восстанавливается по задачам самой ревизии: перенесённые из
+ * прежней ревизии задачи в якорь не входят.
+ */
+planSource.history = (ctx) =>
+  ctx.state.boards.flatMap((board) =>
+    board.revisions.flatMap((r): Resolved[] => {
+      const tasks = ctx.state.tasks.filter(
+        (t) => r.taskIds.includes(t.id) && t.approval?.actor === 'operator' && t.approvedAt,
+      );
+      const times = [...new Set(tasks.map((t) => t.approvedAt!))].sort();
+      return times.map((at, i) => ({
+        sourceKey: `plan:${board.id}`,
+        occurrenceId: `r${r.number}:${times[i - 1] ?? 'none'}`,
+        sourceVersion: d({ revision: r.number, approvedAt: at }),
+        source: 'plan',
+        category: 'decision',
+        actor: 'operator',
+        title: `Утвердите план доски «${board.title}»`,
+        reason: `Утверждено задач: ${tasks.filter((t) => t.approvedAt === at).length}`,
+        since: times[i - 1] ?? r.createdAt,
+        subject: { kind: 'board', id: board.id, href: hrefs.board(board.id) },
+        boards: [board.id],
+        resolvedAt: at,
+      }));
+    }),
+  );
+
+/** Сколько обработок обращений читает история. */
+const HISTORY_DISPOSITIONS = 200;
+
+/**
+ * S7 и S8 по обработкам обращений. S7: обработка решает появление очереди
+ * ведущего (предыдущая обработка цепочки или само обращение). S8: «нужен
+ * ответ» решается ответом оператора или исправлением обращения.
+ */
+function discussionHistory(ctx: AttentionContext, which: 'request' | 'answer'): Resolved[] {
+  const { h } = engineOf(ctx);
+  const service = new DiscussionService(h);
+  const rows = service.dispositions(HISTORY_DISPOSITIONS);
+  const roots = new Map<string, string>();
+  const rootOf = (owner: string | undefined, id: string) => {
+    if (!roots.has(id)) roots.set(id, service.chain(owner, id)?.rootId ?? id);
+    return roots.get(id)!;
+  };
+  const byRoot = new Map<string, typeof rows>();
+  for (const row of rows) {
+    const root = rootOf(row.owner, row.disposition.replyTo ?? row.disposition.id);
+    byRoot.set(root, [...(byRoot.get(root) ?? []), row]);
+  }
+  const out: Resolved[] = [];
+  for (const [root, chain] of byRoot) {
+    const ordered = [...chain].sort((a, b) => a.disposition.seq - b.disposition.seq);
+    ordered.forEach((row, i) => {
+      const d0 = row.disposition;
+      const subject = { kind: 'task' as const, id: d0.taskId, href: hrefs.task(d0.taskId) };
+      const outcome = d0.disposition?.outcome ?? 'accepted';
+      if (which === 'request')
+        out.push({
+          sourceKey: `discussion:cr:${root}`,
+          occurrenceId: ordered[i - 1]?.disposition.id ?? root,
+          sourceVersion: d({ disposition: d0.id }),
+          source: 'discussion-request',
+          category: 'technical',
+          actor: 'lead',
+          title: `Обращение к ведущему по задаче «${taskTitle(ctx, d0.taskId)}»: ${outcome}`,
+          reason: ctx.redact(d0.text),
+          since: ordered[i - 1]?.disposition.createdAt ?? d0.createdAt,
+          subject,
+          evidence: [{ kind: 'message', id: d0.id }],
+          resolvedAt: d0.createdAt,
+        });
+      else if (outcome === 'needs-answer') {
+        const resolvedAt = [row.answeredAt, row.correctedAt]
+          .filter((x): x is string => !!x)
+          .sort()[0];
+        if (resolvedAt)
+          out.push({
+            sourceKey: `discussion:na:${root}`,
+            occurrenceId: d0.id,
+            sourceVersion: d0.id,
+            source: 'discussion-needs-answer',
+            category: 'question',
+            actor: 'operator',
+            title: `Ведущий просит ответа по задаче «${taskTitle(ctx, d0.taskId)}»`,
+            reason: ctx.redact(d0.text),
+            since: d0.createdAt,
+            subject,
+            evidence: [{ kind: 'message', id: d0.id }],
+            resolvedAt,
+          });
+      }
+    });
+  }
+  return out;
+}
+discussionRequestSource.history = (ctx) => discussionHistory(ctx, 'request');
+discussionNeedsAnswerSource.history = (ctx) => discussionHistory(ctx, 'answer');
+
+/**
+ * S15: вопрос исполнителя, который больше не ждёт действия: снят, заменён
+ * или доставлен (момент закрытия или доставки). У применённого, но ещё не
+ * доставленного ответа момента применения в записи нет — `resolvedAt: null`.
+ */
+inputSource.history = (ctx) => {
+  const { h } = engineOf(ctx);
+  const { engine } = executionOf(h);
+  return new InputService(h, ctx.root)
+    .list()
+    .requests.filter((r) => !inputActionable.has(r.state))
+    .map((r): Resolved => {
+      let at: string | null = null;
+      try {
+        const request = engine.inputRequest(r.requestId);
+        at = request.closed?.at ?? request.delivered?.at ?? null;
+      } catch {
+        /* Запрос не найден: время решения неизвестно. */
+      }
+      return {
+        sourceKey: `input:${r.requestId}`,
+        occurrenceId: r.requestId,
+        sourceVersion: `${r.version}:${r.state}`,
+        source: 'input',
+        category: 'question',
+        actor: 'operator',
+        title: `Вопрос исполнителя по задаче «${taskTitle(ctx, r.taskId)}»: ${r.state}`,
+        reason: r.state,
+        since: r.createdAt,
+        subject: { kind: 'request', id: r.requestId, href: hrefs.task(r.taskId) + '#input' },
+        resolvedAt: at,
+      };
+    });
+};
+
 /* ------------------------------------------------------------------ */
 /* Сборка: влияние, отметки, порядок                                   */
 /* ------------------------------------------------------------------ */
