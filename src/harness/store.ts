@@ -62,6 +62,13 @@ const SEQ = 1024;
 
 type LocalNamespace = keyof typeof localSchemas;
 
+/** Пространство `local_workflow` для пространства harness; реестр воспроизведений — в документе. */
+const hostSpace = (namespace: LocalNamespace) => {
+  if (namespace === 'reproductions')
+    throw new HarnessError('INVALID_INPUT', 'Реестр воспроизведений хранится в документе');
+  return hostNamespace[namespace];
+};
+
 /** Транзакция хоста, внутри которой идут транзакции движка (продуктовые поля в той же записи). */
 export interface HostTransaction {
   /** Документ транзакции: продуктовые поля хост меняет прямо в нём. */
@@ -325,7 +332,7 @@ export class DevContourExecutionStore implements ExecutionStore {
       }
       // Одна запись — одним запросом: обход пространства (`locals`) иначе
       // разбирал бы все его записи на каждый ключ.
-      const raw = store.localRecord<unknown>(hostNamespace[namespace], hostOwner(owner), key);
+      const raw = store.localRecord<unknown>(hostSpace(namespace), hostOwner(owner), key);
       if (raw === undefined) return undefined;
       return localSchemas[namespace].parse(
         namespace === 'usage' ? callOf(raw as UsageRecord) : raw,
@@ -371,7 +378,7 @@ export class DevContourExecutionStore implements ExecutionStore {
                 value: reproductionsOf(state(), key)!,
               }));
         const stored = store
-          .localEntries<unknown>(hostNamespace[namespace])
+          .localEntries<unknown>(hostSpace(namespace))
           .map((e) => ({ owner: e.owner ?? WORKSPACE_OWNER, key: e.key }))
           .filter((e) => owner === undefined || e.owner === owner);
         const contracts =
@@ -420,7 +427,7 @@ export class DevContourExecutionStore implements ExecutionStore {
           return;
         }
         store.saveLocal(
-          hostNamespace[namespace],
+          hostSpace(namespace),
           hostOwner(owner || WORKSPACE_OWNER),
           key,
           namespace === 'usage' ? usageOf(parsed as never) : parsed,

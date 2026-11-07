@@ -18,11 +18,15 @@ const temp = () => realpathSync(mkdtempSync(join(tmpdir(), 'devcontour-harness-s
 // Центральная база: один файл SQLite.
 const central = (dir: string) =>
   new DevContourExecutionStore(new Store(join(dir, 'state.sqlite')), options);
-// Хранение по компонентам: coordinator и база компонента `app` в его каталоге.
+// Хранение по компонентам: coordinator и базы компонентов `app` и `lib` в их
+// каталогах (договор хранит запросы исполнителя у двух владельцев).
 const component = (dir: string) => {
-  mkdirSync(join(dir, 'app'), { recursive: true });
+  for (const id of ['app', 'lib']) mkdirSync(join(dir, id), { recursive: true });
   return new DevContourExecutionStore(
-    new Store(join(dir, 'coordinator.sqlite'), [{ id: 'app', path: join(dir, 'app') }]),
+    new Store(join(dir, 'coordinator.sqlite'), [
+      { id: 'app', path: join(dir, 'app') },
+      { id: 'lib', path: join(dir, 'lib') },
+    ]),
     options,
   );
 };
