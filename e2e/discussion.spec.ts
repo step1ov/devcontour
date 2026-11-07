@@ -199,6 +199,24 @@ test('A needs-answer disposition: the operator replies from the card and the req
     expect(response.ok()).toBe(true);
     return (await response.json()) as Record<string, unknown>;
   };
+  /**
+   * Обращения задачи во входящих ведущего, все страницы: демо общее, и
+   * обращения других спецификаций могут занять первую страницу.
+   */
+  const inboxOf = async (taskId: string) => {
+    type Request = { id: string; taskId: string; version: number; reopened?: { answerId: string } };
+    const found: Request[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = (await agent('discussion_inbox', {
+        limit: 50,
+        ...(cursor ? { cursor } : {}),
+      })) as { requests: Request[]; nextCursor?: string };
+      found.push(...page.requests.filter((r) => r.taskId === taskId));
+      cursor = page.nextCursor;
+    } while (cursor);
+    return found;
+  };
   const region = await open(page, ids);
   const box = region.getByLabel('Сообщение', { exact: true });
   await box.fill('Добавить экспорт');
@@ -206,10 +224,7 @@ test('A needs-answer disposition: the operator replies from the card and the req
   const requestItem = page.locator('li[data-message-kind="change-request"]');
   await expect(requestItem).toContainText('Ждёт обработки ведущим агентом');
 
-  const inbox = (await agent('discussion_inbox', {})) as {
-    requests: { id: string; taskId: string; version: number }[];
-  };
-  const pending = inbox.requests.find((r) => r.taskId === ids.task)!;
+  const [pending] = await inboxOf(ids.task);
   await agent('discussion_resolve', {
     requestId: pending.id,
     outcome: 'needs-answer',
@@ -223,11 +238,7 @@ test('A needs-answer disposition: the operator replies from the card and the req
   await expect(ask).toContainText('В каком формате экспорт?');
   await expect(requestItem.getByRole('link', { name: 'Ведущий агент ждёт ответа' })).toBeVisible();
   // Пока ответа нет, обращения во входящих ведущего нет.
-  expect(
-    ((await agent('discussion_inbox', {})) as { requests: { taskId: string }[] }).requests.some(
-      (r) => r.taskId === ids.task,
-    ),
-  ).toBe(false);
+  expect(await inboxOf(ids.task)).toEqual([]);
 
   await ask.getByRole('button', { name: 'Ответить' }).click();
   await expect(region.getByText('обращение вернётся ему на обработку')).toBeVisible();
@@ -242,11 +253,7 @@ test('A needs-answer disposition: the operator replies from the card and the req
   await expect(requestItem).toContainText('Ответ передан — ждёт обработки ведущим агентом');
   await expect(ask.getByRole('button', { name: 'Ответить' })).toBeVisible();
 
-  const reopened = (
-    (await agent('discussion_inbox', {})) as {
-      requests: { id: string; taskId: string; reopened?: { answerId: string } }[];
-    }
-  ).requests.find((r) => r.taskId === ids.task);
+  const [reopened] = await inboxOf(ids.task);
   expect(reopened?.id).toBe(pending.id);
   expect(reopened?.reopened?.answerId).toBeTruthy();
   expect(
