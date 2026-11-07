@@ -40,5 +40,8 @@
 // для manifest снимка; прочие операции байтово прежние.
 // Намеренное изменение: фильтр input_list знает состояние review-rejected
 // (ревью отклонило ответ), описание называет его; прочие операции байтово прежние.
-export const CATALOG_DIGEST = '742dae70ea2402b94ad41ec3ba4e09c4f90c4c2530d2d74c724523aa4ae7b5ee';
+// Намеренное изменение: описания input_answer и input_supersede называют
+// путь изменения требований (новая постановка задачи, замена той же задачей
+// и перенос ответа) и отказ SPEC_UNCHANGED; прочие операции байтово прежние.
+export const CATALOG_DIGEST = 'd86d135bd514f814863e1a6b6777fc90ea52dff05e43a8541091640627ad05a9';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

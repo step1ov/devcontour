@@ -293,7 +293,7 @@ export const descriptions: Record<AgentOperation, string> = {
   input_show:
     'Read one writer question: question, options, recommended option, severity and floors, draft files, the latest answer in full, earlier answers as digest and excerpt, review rounds, target and delivery. Read-only.',
   input_answer:
-    'Answer a writer question with the expected request version. The lead may answer only a question without floors in approvalMode agent; otherwise the operator answers in the panel. A requirement-change answer is not continued: correct the board and supersede the question. Does not resume the task.',
+    'Answer a writer question with the expected request version. The lead may answer only a question without floors in approvalMode agent; otherwise the operator answers in the panel. A requirement-change answer is not continued: reopen and respecify the task, approve it, then input_supersede with the same task and carry the answer. Does not resume the task.',
   input_context:
     'Build the immutable context snapshot with the latest answer (the effective task snapshot plus input/<id>.md and its manifest) and store it by digest. The manifest lists the discussion messages that recorded the answers and the messageIds you select (id, seq, digest; their text is not added). Not activated; idempotent per digest.',
   input_review:
@@ -305,7 +305,7 @@ export const descriptions: Record<AgentOperation, string> = {
   input_cancel:
     'Cancel a writer question with the expected version and a reason; also closes follow-ups (assumption accepted). A blocking question follows the answer rule: floored or approvalMode operator questions are cancelled by the operator.',
   input_supersede:
-    'Supersede a writer question by a successor task of the same board created after the question (board correction or new revision) when the answer changes requirements. The old task is not resumed by the answer.',
+    'Supersede a writer question once the spec of its task has changed: reopen and respecify the task (draft or re-approved), then supersede with the same task and carry the answer (input_context, input_review, input_target, input_apply). Refused with 409 SPEC_UNCHANGED while the spec is unchanged; a blocking question the lead may not answer is superseded by the operator (403 OPERATOR_ANSWERS). The old task is not resumed by a requirement change without carry.',
   preview_status:
     'Read the local preview: which verified release serves the URL, its states (built, deployed, healthy, confirmed or unconfirmed), and past deployments with their errors. Deploying and rolling back are separate controlled actions through the CLI or panel.',
 };

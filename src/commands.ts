@@ -1224,6 +1224,10 @@ async function main() {
               ...(args.includes('--reset') ? { reset: { reason: option('--reason', '') } } : {}),
             },
             actorOf(),
+            // Отклонённое ревью оператор применяет, только назвав раунд, который прочитал.
+            args.includes('--confirm-rejected-round')
+              ? { confirmRejectedRound: Number(option('--confirm-rejected-round', '')) }
+              : {},
           );
         else if (operation === 'input-cancel')
           result = service.cancel(

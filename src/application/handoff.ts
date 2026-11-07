@@ -555,7 +555,7 @@ function inputNext(ctx: HostContext): HandoffHostNext | undefined {
     return {
       action: 'close-follow-up',
       ...base,
-      detail: `Follow-up ${summary.requestId} of task ${taskId} (a decision the writer took itself, severity ${summary.severity}): accept it with input_cancel {"requestId": "${summary.requestId}", "expectedVersion": ${summary.version}, "reason": "assumption accepted"} or replace it with input_supersede after a board correction.`,
+      detail: `Follow-up ${summary.requestId} of task ${taskId} (a decision the writer took itself, severity ${summary.severity}): accept it with input_cancel {"requestId": "${summary.requestId}", "expectedVersion": ${summary.version}, "reason": "assumption accepted"} or, if it changes requirements, reopen and respecify the task and supersede the follow-up.`,
     };
   if (summary.state === 'awaiting-answer')
     return {
@@ -602,7 +602,7 @@ function followUpNext(ctx: HostContext): HandoffHostNext | undefined {
     action: 'close-follow-up',
     ...(open.boardId ? { boardId: open.boardId } : {}),
     input: { requestId: open.requestId, taskId: open.taskId, state: open.state, actor: 'lead' },
-    detail: `Follow-up ${open.requestId} of task ${open.taskId} (a decision the writer took itself, severity ${open.severity}): accept it with input_cancel {"requestId": "${open.requestId}", "expectedVersion": ${open.version}, "reason": "assumption accepted"} or replace it with input_supersede after a board correction.`,
+    detail: `Follow-up ${open.requestId} of task ${open.taskId} (a decision the writer took itself, severity ${open.severity}): accept it with input_cancel {"requestId": "${open.requestId}", "expectedVersion": ${open.version}, "reason": "assumption accepted"} or, if it changes requirements, reopen and respecify the task and supersede the follow-up.`,
   };
 }
 

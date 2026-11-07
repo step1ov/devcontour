@@ -35,7 +35,12 @@ async function question(f: InputFixture) {
 }
 
 /** Ведущий пытается заменить вопрос и повторить задачу: задача остаётся в ожидании ответа. */
-async function bypass(f: InputFixture, q: Awaited<ReturnType<typeof question>>, expected: string) {
+async function bypass(
+  f: InputFixture,
+  q: Awaited<ReturnType<typeof question>>,
+  expected: string,
+  options: { retry?: boolean } = {},
+) {
   const agent = new AgentService(f.h, f.root);
   for (const successorTaskId of [q.taskId, q.newer]) {
     const input = {
@@ -53,6 +58,7 @@ async function bypass(f: InputFixture, q: Awaited<ReturnType<typeof question>>, 
     assert.equal(await codeOf(() => f.service.supersede(input, 'host')), expected, 'CLI host');
   }
   assert.equal(f.service.show({ requestId: q.requestId }).lifecycle, 'pending');
+  if (options.retry === false) return;
   assert.equal(
     await codeOf(() => agent.execute({ operation: 'task_retry', input: { taskId: q.taskId } })),
     '409:INPUT_REQUIRED',
@@ -88,7 +94,7 @@ test('Operator mode: the lead cannot supersede even a floor-free question; the o
           'operator',
         ),
       ),
-      '409:ORIGIN_HOLDS',
+      '409:SPEC_UNCHANGED',
     );
   } finally {
     await f.cleanup();
@@ -99,10 +105,13 @@ test('Agent mode, floor-free question: supersede is refused while the spec is un
   const f = await inputFixture(controlled());
   try {
     const q = await question(f);
-    await bypass(f, q, '409:ORIGIN_HOLDS');
-    // Новая постановка задачи: исходная остановка не держится — замена разрешена.
+    await bypass(f, q, '409:SPEC_UNCHANGED');
+    // Черновик без новой постановки — по-прежнему отказ: замена молча сняла
+    // бы вопрос, а после того же утверждения ответ не перенести.
     f.h.pause(true);
     f.h.reopen(q.taskId, 'The question shows the spec must change');
+    await bypass(f, q, '409:SPEC_UNCHANGED', { retry: false });
+    // Новая постановка задачи — замена разрешена.
     const draft = f.store.read().tasks.find((t) => t.id === q.taskId)!;
     f.h.editTask(
       q.taskId,

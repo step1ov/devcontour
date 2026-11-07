@@ -285,15 +285,20 @@ export class InputService {
               next: `apply in the panel: /tasks/${request.workId}#input`,
             };
       case 'review-rejected':
-        return agent
+        return agent && lead
           ? {
               actor: 'lead' as const,
               next: 'the reviewer rejected the answer: read the findings (input_show); correct the answer, or reopen and respecify the task',
             }
-          : {
-              actor: 'operator' as const,
-              next: `the reviewer rejected the answer: read the findings in the panel (/tasks/${request.workId}#input); correct the answer, or apply only with explicit confirmation`,
-            };
+          : agent
+            ? {
+                actor: 'operator' as const,
+                next: `the reviewer rejected the answer to a question the lead may not decide: the operator reads the findings and corrects the answer in the panel (/tasks/${request.workId}#input)`,
+              }
+            : {
+                actor: 'operator' as const,
+                next: `the reviewer rejected the answer: read the findings in the panel (/tasks/${request.workId}#input); correct the answer, or apply only with explicit confirmation`,
+              };
       case 'applied-awaiting-claim':
         return { actor: 'lead' as const, next: 'wait for the next attempt of the task' };
       default:
@@ -437,7 +442,7 @@ export class InputService {
         ...(result.answer.kind === 'requirement-change'
           ? {
               nextStep:
-                'requirement change: correct the board (board_correct), then input_supersede with the successor task',
+                'requirement change: reopen and respecify the task (devcontour reopen, task_edit), approve it, then input_supersede with the same task and carry the answer (input_context, input_review, input_target, input_apply)',
             }
           : { nextStep: 'input_context' }),
       };
@@ -501,10 +506,10 @@ export class InputService {
     // Пока исходная остановка держится (постановка задачи прежняя, задача на
     // попытке вопроса), продолжение — только ответ и applyInput. Замена
     // освободила бы задачу для повтора без ответа.
-    if (open && request.blocking && this.originHolds(request))
+    if (open && request.blocking && !this.specChanged(request))
       throw refuse(
-        'ORIGIN_HOLDS',
-        `Постановка задачи ${request.workId} не менялась после вопроса ${request.id}: ответьте и примените ответ, снимите вопрос (оператор) или верните задачу в черновик и измените постановку, затем замените вопрос`,
+        'SPEC_UNCHANGED',
+        `Постановка задачи ${request.workId} не изменилась после вопроса ${request.id} (в том числе в черновике): ответьте и примените ответ, снимите вопрос (оператор) или верните задачу в черновик, измените постановку и затем замените вопрос той же задачей`,
         409,
       );
     const sameTask = successor.id === request.workId;
@@ -535,12 +540,12 @@ export class InputService {
   }
 
   /**
-   * Исходная остановка запроса держится — правило движка: перенос
-   * уточнения разрешён ровно тогда, когда остановка уже не держится
-   * (`carryAllowed`); для проверки берётся сам запрос как заменённый с
-   * ответом-уточнением.
+   * Постановка задачи изменилась после вопроса — правило движка: перенос
+   * изменения требований разрешён ровно тогда, когда изменилось содержание
+   * постановки самой задачи (`carryAllowed`); для проверки берётся сам
+   * запрос как заменённый с ответом вида «изменение требований».
    */
-  private originHolds(request: InputRequest) {
+  private specChanged(request: InputRequest) {
     const { engine } = executionOf(this.h);
     const probe: InputRequest = {
       ...request,
@@ -550,14 +555,14 @@ export class InputService {
           revision: 1,
           text: 'probe',
           optionId: null,
-          kind: 'clarification',
+          kind: 'requirement-change',
           actor: { kind: 'host' },
           digest: '0'.repeat(64),
           at: request.createdAt,
         },
       ],
     };
-    return engine.read((view) => !engine.carryAllowed(view, probe));
+    return engine.read((view) => engine.carryAllowed(view, probe));
   }
 
   /* -------------------------------------------------------------- */
@@ -760,7 +765,7 @@ export class InputService {
         nextStep:
           record.approved || this.h.config.approvalMode === 'operator'
             ? 'input_target'
-            : 'the answer changes the approved spec: board_correct and input_supersede',
+            : 'the answer changes the approved spec: reopen and respecify the task, approve it, then input_supersede with the same task',
       };
     } catch (error) {
       throw toDomain(error);
@@ -795,7 +800,12 @@ export class InputService {
    * транзакцией движка. Актёр — режим согласования: в `agent` применяет
    * ведущий, в `operator` — оператор в панели.
    */
-  apply(raw: unknown, actor: InputActorKind) {
+  apply(
+    raw: unknown,
+    actor: InputActorKind,
+    /** Раунд отклонённого ревью, который оператор видел и подтвердил (панель, CLI). */
+    options: { confirmRejectedRound?: number } = {},
+  ) {
     const input = inputOperationInputs.input_apply.parse(raw);
     const mode = this.h.config.approvalMode;
     if (actor !== 'operator' && mode === 'operator')
@@ -809,6 +819,20 @@ export class InputService {
         'В approvalMode agent ответ применяет ведущий агент: input_target, затем input_apply',
       );
     const request = this.request(input.requestId);
+    // Оператор применяет отклонённый ответ только осознанно: подтверждение
+    // называет тот раунд, который он видел; новый раунд — новое подтверждение.
+    if (actor === 'operator') {
+      const last = executionOf(this.h).engine.read((v) =>
+        inputReviewRounds(v, input.requestId).at(-1),
+      );
+      if (last && !last.approved && options.confirmRejectedRound !== last.round)
+        throw refuse(
+          'REVIEW_REJECTED',
+          options.confirmRejectedRound === undefined
+            ? `Ревью ответа на запрос ${input.requestId} (раунд ${last.round}) отклонило его: ${last.summary.slice(0, 300)}. Применение — только с явным подтверждением этого раунда`
+            : `Подтверждён раунд ${options.confirmRejectedRound}, а последний раунд ревью — ${last.round}: прочитайте его находки и подтвердите заново`,
+        );
+    }
     const approval = actor === 'operator' ? ('operator' as const) : ('agent' as const);
     const { store, engine } = executionOf(this.h);
     try {
@@ -929,8 +953,11 @@ export class InputService {
    */
   applyInTask(taskId: string, requestId: string, raw: unknown) {
     const request = this.ofTask(taskId, requestId);
-    const { expectedVersion, confirmRejected } = z
-      .strictObject({ expectedVersion: version, confirmRejected: z.boolean().optional() })
+    const { expectedVersion, confirmRejectedRound } = z
+      .strictObject({
+        expectedVersion: version,
+        confirmRejectedRound: z.number().int().positive().optional(),
+      })
       .parse(raw);
     if (this.h.config.approvalMode === 'agent')
       throw refuse(
@@ -944,11 +971,6 @@ export class InputService {
         'APPROVAL_REQUIRED',
         `Ответ на запрос ${requestId} ещё не прошёл подготовку и ревью контекста: ведущий выполняет input_context и input_review`,
       );
-    if (!last.approved && confirmRejected !== true)
-      throw refuse(
-        'REVIEW_REJECTED',
-        `Ревью ответа на запрос ${requestId} (раунд ${last.round}) отклонило его: ${last.summary.slice(0, 300)}. Применение — только с явным подтверждением`,
-      );
     const proposed = this.target({ requestId, contextDigest: last.contextDigest });
     if (proposed.problems.length || !proposed.targetDigest)
       throw new DomainError('Применить нельзя: ' + proposed.problems.join('; '), 409);
@@ -961,6 +983,7 @@ export class InputService {
         targetDigest: proposed.targetDigest,
       },
       'operator',
+      confirmRejectedRound === undefined ? {} : { confirmRejectedRound },
     );
   }
 }

@@ -97,9 +97,40 @@ test('Operator mode: an approved round is ready to apply; a rejected round has i
       '409:REVIEW_REJECTED',
     );
     assert.equal(f.service.show({ requestId }).lifecycle, 'answered');
+    const seen = (rejected.reviews.at(-1) as { round: number }).round;
+    // Пока оператор читал раунд, ведущий провёл ещё один (тоже отклонён):
+    // подтверждение прежнего раунда не применяет новый.
+    const context = await f.service.context({ requestId });
+    const again = await f.service.review({
+      requestId,
+      contextDigest: context.contextDigest,
+      authorRuntime: 'codex',
+    });
+    assert.equal(again.round, seen + 1);
+    assert.equal(
+      await codeOf(() =>
+        f.service.applyInTask(taskId, requestId, { expectedVersion, confirmRejectedRound: seen }),
+      ),
+      '409:REVIEW_REJECTED',
+    );
+    // CLI оператора — то же правило: без подтверждения раунда отказ.
+    const target = f.service.target({ requestId, contextDigest: context.contextDigest });
+    const raw = {
+      requestId,
+      answerDigest: context.answerDigest,
+      expectedVersion,
+      contextDigest: context.contextDigest,
+      targetDigest: target.targetDigest!,
+    };
+    assert.equal(await codeOf(() => f.service.apply(raw, 'operator')), '409:REVIEW_REJECTED');
+    assert.equal(
+      await codeOf(() => f.service.apply(raw, 'operator', { confirmRejectedRound: seen })),
+      '409:REVIEW_REJECTED',
+    );
+    assert.equal(f.service.show({ requestId }).lifecycle, 'answered');
     const applied = f.service.applyInTask(taskId, requestId, {
       expectedVersion,
-      confirmRejected: true,
+      confirmRejectedRound: again.round,
     });
     assert.equal(applied.applied, true);
   } finally {
@@ -114,6 +145,19 @@ test('Agent mode: a rejected round is review-rejected, not "needs preparation"',
     const rejected = await reviewed(f, requestId, 'Produce YAML instead.');
     assert.equal(rejected.state, 'review-rejected');
     assert.equal(rejected.actor, 'lead');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('Agent mode, critical question: after a rejected review the next actor is the operator', async () => {
+  const f = await inputFixture(controlled({ verdict: { approve: false }, critical: true }));
+  try {
+    const { requestId } = await question(f);
+    const rejected = await reviewed(f, requestId, 'Produce YAML instead.');
+    assert.equal(rejected.state, 'review-rejected');
+    assert.equal(rejected.actor, 'operator');
+    assert.match(rejected.next, /operator/);
   } finally {
     await f.cleanup();
   }

@@ -221,7 +221,10 @@ test('A requirement-change answer is not applied; supersede waits for a new spec
       },
       'operator',
     );
-    assert.match(answered.nextStep, /board_correct/);
+    assert.match(
+      answered.nextStep,
+      /reopen and respecify the task.*input_supersede with the same task/,
+    );
     const context = await f.service.context({ requestId });
     const target = f.service.target({ requestId, contextDigest: context.contextDigest });
     assert.ok(target.problems.some((p) => /изменение требований/.test(p)));
@@ -259,7 +262,7 @@ test('A requirement-change answer is not applied; supersede waits for a new spec
     for (const successorTaskId of [older, newer, taskId])
       assert.equal(
         await codeOf(() => f.service.supersede({ ...supersede, successorTaskId }, 'lead')),
-        '409:ORIGIN_HOLDS',
+        '409:SPEC_UNCHANGED',
       );
     assert.equal(f.service.show({ requestId }).lifecycle, 'answered');
     // Изменение требований — новая постановка самой задачи: черновик,

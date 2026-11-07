@@ -40,7 +40,8 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
   const [option, setOption] = useState<string | null>(null);
   const [kind, setKind] = useState<'clarification' | 'requirement-change'>('clarification');
   const [busy, setBusy] = useState(false);
-  const [confirmRejected, setConfirmRejected] = useState(false);
+  // Подтверждение отклонённого ревью — раунда, который оператор видел.
+  const [confirmedRound, setConfirmedRound] = useState<number | null>(null);
   // Ключ повтора ответа: двойная отправка той же формы — одно сообщение.
   const [answerKey, setAnswerKey] = useState(() => crypto.randomUUID());
   const load = useCallback(async () => {
@@ -263,8 +264,8 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
             <label className="flex items-center gap-2 text-xs">
               <input
                 type="checkbox"
-                checked={confirmRejected}
-                onChange={(e) => setConfirmRejected(e.target.checked)}
+                checked={confirmedRound === lastReview?.round}
+                onChange={(e) => setConfirmedRound(e.target.checked ? (lastReview?.round ?? null) : null)}
               />
               Применить вопреки отклонённому ревью (находки выше прочитаны)
             </label>
@@ -272,12 +273,12 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
           <Button
             size="sm"
             className="justify-self-start"
-            disabled={busy || (rejected && !confirmRejected)}
+            disabled={busy || (rejected && confirmedRound !== lastReview?.round)}
             onClick={() =>
               void act(() =>
                 post(`tasks/${taskId}/input/${current.requestId}/apply`, {
                   expectedVersion: current.version,
-                  ...(rejected ? { confirmRejected: true } : {}),
+                  ...(rejected && lastReview ? { confirmRejectedRound: lastReview.round } : {}),
                 }),
               )
             }
