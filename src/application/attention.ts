@@ -23,7 +23,13 @@ import { executionOf } from '../harness/execution.ts';
 import { ContractChanges } from '../runner/contract-change.ts';
 import { boardTasks, planApproved, unapprovedTasks } from '../runner/lead-outlook.ts';
 import { boardStep, handoffRedactor, harnessOf, hostContext } from './handoff.ts';
-import { pendingAcceptances, previewProblems, stoppedWorkflows } from './overview.ts';
+import {
+  pendingAcceptances,
+  previewFailureTitle,
+  previewProblems,
+  stoppedWorkflows,
+} from './overview.ts';
+import { inputStateLabels } from '../core/input-labels.ts';
 import { budgetBlocks, budgetHint } from './context.ts';
 import { InputService, inputHolds } from './input.ts';
 import { inputReviewRounds } from '../harness/input-host.ts';
@@ -554,7 +560,7 @@ const inputSource: AttentionSourceRule = {
               ? `Исполнитель спрашивает по задаче «${title}»`
               : apply
                 ? `Ответ по задаче «${title}» готов к применению`
-                : `Вопрос исполнителя по задаче «${title}»: ${r.state}`,
+                : `Вопрос исполнителя по задаче «${title}»: ${inputStateLabels[r.state] ?? r.state}`,
           reason: ctx.redact(
             (rejected ? `Ревью отклонило ответ (раунд ${r.round}): ${findings} — ` : '') +
               (question ? `${question} — ${r.next}` : r.next),
@@ -1232,7 +1238,7 @@ const previewSource: AttentionSourceRule = {
         source: 'preview',
         category: docker ? 'access' : 'technical',
         actor: docker ? 'operator' : 'lead',
-        title: docker ? 'Нужен Docker для preview' : 'Preview не выложен',
+        title: docker ? 'Нужен Docker для preview' : previewFailureTitle(failure.failure),
         reason: docker
           ? 'Preview собирается и запускается в Docker. Запустите Docker и повторите выкладку.'
           : ctx.redact(
@@ -2029,8 +2035,8 @@ inputSource.history = (ctx) => {
         source: 'input',
         category: 'question',
         actor: 'operator',
-        title: `Вопрос исполнителя по задаче «${taskTitle(ctx, r.taskId)}»: ${r.state}`,
-        reason: r.state,
+        title: `Вопрос исполнителя по задаче «${taskTitle(ctx, r.taskId)}»: ${inputStateLabels[r.state] ?? r.state}`,
+        reason: inputStateLabels[r.state] ?? r.state,
         since: r.createdAt,
         subject: { kind: 'request', id: r.requestId, href: hrefs.task(r.taskId) + '#input' },
         resolvedAt: at,

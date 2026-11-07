@@ -8,6 +8,7 @@ import { DomainError } from '../src/core/model.ts';
 import { join } from 'node:path';
 import { executionOf } from '../src/harness/execution.ts';
 import { dumpDatabase } from './attention-fixture.ts';
+import { inputStateLabels } from '../src/core/input-labels.ts';
 import { byKey } from './attention-fixture.ts';
 
 after(() => inputDemos.close());
@@ -83,6 +84,9 @@ test('S15 вопрос исполнителя: забирает задачу, о
     assert.equal(answered.id, card.id);
     assert.notEqual(answered.sourceVersion, card.sourceVersion);
     assert.equal(answered.actor, 'lead');
+    // Состояние словами оператора (подписи карточки задачи), не код.
+    assert.doesNotMatch(answered.title, /answer-saved/);
+    assert.ok(answered.title.endsWith(inputStateLabels['answer-saved']), answered.title);
     const current = f.service.list({ taskId }).requests[0];
     f.service.cancel(
       {

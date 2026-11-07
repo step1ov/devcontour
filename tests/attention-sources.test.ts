@@ -509,6 +509,8 @@ test('S16/S17 проверенное изменение ждёт приёмки;
     });
     const failed = byKey(await engineItems(f), 'preview:failed')!;
     assert.equal(failed.actor, 'lead');
+    // Сбой сборки назван сборкой, как в сводке автора.
+    assert.equal(failed.title, 'Preview не собрался');
     assert.equal(failed.occurrenceId, 'PV-1');
   } finally {
     f.cleanup();

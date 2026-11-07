@@ -181,6 +181,15 @@ export function stoppedWorkflows<
   return jobs.filter((w) => w.status === 'failed' && w.error && !superseded(w));
 }
 
+/** Заголовок отказа выкладки preview по его классу: сборка — не выкладка. */
+export function previewFailureTitle(failure: Preview['failure']) {
+  return failure === 'compose-policy'
+    ? 'Preview не выложен: Compose выходит за границы preview'
+    : failure === 'build'
+      ? 'Preview не собрался'
+      : 'Preview не выложен';
+}
+
 export function authorOverview(h: DevContour): AuthorOverview {
   const s = h.store.read();
   const tasks = s.tasks.filter((t: Task) => t.status !== 'cancelled');
@@ -268,12 +277,7 @@ export function authorOverview(h: DevContour): AuthorOverview {
   if (failure && failure.failure !== 'docker-unavailable')
     decisions.push({
       kind: 'technical',
-      title:
-        failure.failure === 'compose-policy'
-          ? 'Preview не выложен: Compose выходит за границы preview'
-          : failure.failure === 'build'
-            ? 'Preview не собрался'
-            : 'Preview не выложен',
+      title: previewFailureTitle(failure.failure),
       detail:
         (failure.rolledBack ? 'Возвращена прежняя версия. ' : '') +
         (failure.error ?? 'Причина не записана'),
