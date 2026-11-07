@@ -101,14 +101,7 @@ export function quickView(input: {
   const { change, state, root, h } = input;
   const { facts, factsError, plan } = input.prerequisites;
   const view = new Preparation(input.store).status(change.id, { content: false });
-  // Находки исполнителя наследуют привязку к изменению, но это не
-  // работа маршрута: они показаны отдельно и не держат шаги.
-  const bound = state.tasks.filter((t) => t.preparation?.changeId === change.id);
-  const tasks = bound.filter((t) => !t.finding);
-  const findings = bound
-    .filter((t) => t.finding)
-    .map((t) => ({ taskId: t.id, title: t.title, status: t.status }));
-  const leadAt = leadActivityAt(change, tasks);
+  const { tasks, findings } = changeTasks(state, change);
   const steps = quickSteps({
     change,
     developmentReady: Boolean(view.enabled && view.developmentReady),
@@ -133,11 +126,39 @@ export function quickView(input: {
     tasks,
     findings,
     steps,
-    // Присутствие ведущего агента известно только по его журналу:
-    // без свежей записи панель не изображает идущую работу.
-    lead: {
-      lastActivityAt: leadAt,
-      present: Boolean(leadAt && input.now - Date.parse(leadAt) < LEAD_QUIET_MS),
-    },
+    lead: leadPresence(change, tasks, input.now),
+  };
+}
+
+/** Задачи изменения и находки исполнителя, привязанные к нему отдельно. */
+function changeTasks(state: Readonly<DevContourState>, change: ProductChange) {
+  // Находки исполнителя наследуют привязку к изменению, но это не
+  // работа маршрута: они показаны отдельно и не держат шаги.
+  const bound = state.tasks.filter((t) => t.preparation?.changeId === change.id);
+  return {
+    tasks: bound.filter((t) => !t.finding),
+    findings: bound
+      .filter((t) => t.finding)
+      .map((t) => ({ taskId: t.id, title: t.title, status: t.status })),
+  };
+}
+
+/**
+ * Присутствие ведущего агента известно только по его журналу: без свежей
+ * записи панель не изображает идущую работу. `tasks` — задачи изменения
+ * (по умолчанию — из состояния).
+ */
+export function leadPresence(
+  change: ProductChange,
+  tasks: { createdAt?: string; approvedAt?: string }[] | Readonly<DevContourState>,
+  now: number,
+) {
+  const own = Array.isArray(tasks)
+    ? tasks
+    : changeTasks(tasks, change).tasks;
+  const leadAt = leadActivityAt(change, own);
+  return {
+    lastActivityAt: leadAt,
+    present: Boolean(leadAt && now - Date.parse(leadAt) < LEAD_QUIET_MS),
   };
 }

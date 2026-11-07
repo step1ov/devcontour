@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import type { z } from 'zod';
 import { DomainError, gateList, type DevContourState, type Task } from './model.ts';
 import type { Store } from './store.ts';
 import { boardPhase } from './work-status.ts';
@@ -83,6 +84,27 @@ function conceptReady(c: ProductChange) {
   if (!concept || concept.status !== 'approved' || concept.referencesDigest !== references.digest)
     throw new DomainError('Сначала пользователь должен утвердить концепт и эскизы', 409);
   return concept;
+}
+/**
+ * Последняя редакция этапа относится к утверждённой редакции предыдущего
+ * этапа; иначе отказ согласования с причиной. Правило решения оператора
+ * (`decide`) и центра внимания: кнопка не предлагается, если её отклонят.
+ */
+export function assertStageUpstream(
+  c: ProductChange,
+  stage: z.infer<typeof preparationDecision>['stage'],
+) {
+  if (stage === 'architecture' && c.architecture.at(-1)!.productDigest !== productReady(c).digest)
+    throw new DomainError('Архитектура относится к прежней постановке');
+  if (
+    stage === 'references' &&
+    c.references.at(-1)!.architectureDigest !== architectureReady(c).digest
+  )
+    throw new DomainError('Референсы относятся к прежней архитектуре');
+  if (stage === 'concept' && c.concept.at(-1)!.referencesDigest !== referencesReady(c).digest)
+    throw new DomainError('Концепт относится к прежним референсам');
+  if (stage === 'design' && c.design.at(-1)!.conceptDigest !== conceptReady(c).digest)
+    throw new DomainError('Дизайн относится к прежнему концепту');
 }
 export function developmentBinding(
   s: DevContourState,
@@ -1051,20 +1073,7 @@ export class Preparation {
       editable(s, c.id);
       if (!r || r.digest !== v.expectedDigest || r.status !== 'in-review')
         throw new DomainError('Версия изменилась или не ожидает согласования', 409);
-      if (
-        v.stage === 'architecture' &&
-        c.architecture.at(-1)!.productDigest !== productReady(c).digest
-      )
-        throw new DomainError('Архитектура относится к прежней постановке');
-      if (
-        v.stage === 'references' &&
-        c.references.at(-1)!.architectureDigest !== architectureReady(c).digest
-      )
-        throw new DomainError('Референсы относятся к прежней архитектуре');
-      if (v.stage === 'concept' && c.concept.at(-1)!.referencesDigest !== referencesReady(c).digest)
-        throw new DomainError('Концепт относится к прежним референсам');
-      if (v.stage === 'design' && c.design.at(-1)!.conceptDigest !== conceptReady(c).digest)
-        throw new DomainError('Дизайн относится к прежнему концепту');
+      assertStageUpstream(c, v.stage);
       if (v.decision === 'request-changes' && v.comment.length < 3)
         throw new DomainError('Опишите необходимые изменения');
       r.status = v.decision === 'approve' ? 'approved' : 'changes-requested';

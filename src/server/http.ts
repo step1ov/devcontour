@@ -2,6 +2,7 @@ import { workspaceDescription } from '../runner/workspace-mode.ts';
 import { DiscussionService } from '../application/discussion.ts';
 import { quickDiff, quickSetupApplied, quickResult } from '../runner/quick.ts';
 import { quickFactsCache, quickPrerequisites, quickView } from '../application/quick-view.ts';
+import { AttentionService } from '../application/attention.ts';
 import type { UsageRecord } from '../core/usage.ts';
 import { Preparation } from '../core/preparation.ts';
 import { PreparationAgent } from '../application/preparation-agent.ts';
@@ -120,6 +121,11 @@ export async function serve(
   let stopping = false;
   // Факты репозитория — процессы Git: общий короткий кэш панели и центра внимания.
   const cachedFacts = quickFactsCache();
+  const attentionOf = (store: Store) =>
+    new AttentionService(store, h, {
+      root: h?.config.workspaceRoot ?? options.bootstrap?.workspace,
+      cachedFacts,
+    });
   const startEngine = () => {
     if (!h || !scheduler) return;
     attachJournal(h);
@@ -298,6 +304,13 @@ export async function serve(
                 )
               : [],
           });
+          return;
+        }
+        // Центр внимания — до setup и после него на том же адресе и той же
+        // базе. Чтение ничего не пишет и моделей не вызывает.
+        if (req.method === 'GET' && path === '/api/attention' && preparationStore) {
+          const service = attentionOf(preparationStore);
+          json(res, 200, await service.active(Object.fromEntries(url.searchParams)));
           return;
         }
         if (req.method === 'POST' && path === '/api/preparation/decision' && preparationStore) {
