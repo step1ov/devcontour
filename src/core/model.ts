@@ -625,6 +625,14 @@ export interface Run {
   dependencies?: DependencySnapshot[];
   /** Свежесть снимка зависимостей на момент завершения: голова ветки и совпадение. */
   dependencyFreshness?: { repositoryId: string; snapshot: string; head: string; fresh: boolean }[];
+  /** Политика вопросов исполнителя, закреплённая при выдаче (движок). */
+  inputPolicy?: AttemptState['inputPolicy'];
+  /** Решения, которые исполнитель принял сам, с оценкой controller (движок). */
+  assumptions?: AttemptState['assumptions'];
+  /** Ответ на вопрос, с которым выдана попытка (движок). */
+  input?: AttemptState['input'];
+  /** Основания, закреплённые при выдаче, в том числе снимок контекста с ответом (движок). */
+  pinned?: AttemptState['pinned'];
 }
 // Ревью контракта — работа с попытками: отклонение оставляет находки, которые
 // стоили вызова модели. Без записи в состоянии они живут только файлами на
