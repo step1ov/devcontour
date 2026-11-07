@@ -200,11 +200,14 @@ export function AttentionCenter({
   const drafts = useDrafts();
   const draftsNow = useRef(drafts);
   draftsNow.current = drafts;
-  // Пустые черновики исчезнувших появлений не копятся.
+  // Пустые черновики исчезнувших появлений не копятся. Сверка — с тем
+  // списком, что показан (ответ фильтра компонента может опережать общий
+  // опрос); пока ответа фильтра нет, сверять не с чем.
+  const shownLoaded = !!attention.view && (!component || filtered?.component === component);
   useEffect(() => {
-    if (!attention.view) return;
-    for (const key of emptyGoneDrafts(drafts, attention.items)) removeDraft(key);
-  }, [drafts, attention.items, attention.view]);
+    if (!shownLoaded) return;
+    for (const key of emptyGoneDrafts(drafts, source)) removeDraft(key);
+  }, [drafts, source, shownLoaded]);
   const list = useRef<HTMLDivElement>(null);
   const operatorHeading = useRef<HTMLHeadingElement>(null);
   const leadHeading = useRef<HTMLElement>(null);

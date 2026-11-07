@@ -1210,3 +1210,58 @@ test('M4: deep links reach the discussion message and the change', async ({ page
     .click();
   await expect(page.locator(`[id="changeset-${change.id}"]`)).toBeFocused();
 });
+
+// Карточка с текстовым действием (форма с полем «Что доработать»).
+const textItem = (key: string, over: Record<string, unknown> = {}) =>
+  fakeItem(key, {
+    actions: [
+      { id: 'request-changes', kind: 'domain', label: 'Вернуть на доработку', input: 'text' },
+      { id: 'open', kind: 'navigate', href: '/?view=boards&tab=changesets' },
+    ],
+    ...over,
+  });
+
+/** Второй репозиторий в сводке: на экране внимания появляется фильтр компонента. */
+async function withSecondComponent(page: Page) {
+  await page.route(
+    (url) => url.pathname === '/api/summary',
+    async (route) => {
+      const response = await route.fetch();
+      const body = (await response.json()) as {
+        config?: { repositories: Record<string, unknown>[] };
+      };
+      if (body.config && body.config.repositories.length === 1)
+        body.config.repositories.push({
+          ...body.config.repositories[0],
+          id: 'second',
+          name: 'Второй компонент',
+        });
+      await route.fulfill({ response, json: body });
+    },
+  );
+}
+
+test('Filter: an empty form opened on a card the component filter saw first stays open', async ({
+  page,
+}) => {
+  await withSecondComponent(page);
+  // Ответ фильтра опережает общий опрос: в общем списке карточки ещё нет.
+  await page.route(isList, (route) =>
+    route.fulfill({
+      json: fakeView(
+        new URL(route.request().url()).searchParams.get('component') === 'second'
+          ? [textItem('changeset:CHG-F1')]
+          : [],
+      ),
+    }),
+  );
+  await page.goto('/?tab=attention');
+  await center(page).getByLabel('Компонент').selectOption('second');
+  const card = cardOf(page, 'changeset:CHG-F1');
+  await card.getByRole('button', { name: 'Вернуть на доработку' }).click();
+  const field = card.locator('form').getByLabel(/Что доработать/);
+  await expect(field).toBeFocused();
+  // Следующий опрос не закрывает пустую форму показанной карточки.
+  await page.waitForTimeout(3500);
+  await expect(field).toBeFocused();
+});
