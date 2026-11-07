@@ -530,7 +530,10 @@ test('The operator changes inputPolicy in the panel: expected digest, validation
     const result = (await ok.json()) as { status: string; operation: string };
     assert.equal(result.status, 'requested');
     assert.match(result.operation, /^config-apply:inputPolicy:/);
-    assert.deepEqual(JSON.parse(readFileSync(s.path, 'utf8')).inputPolicy, { threshold: 5 });
+    assert.deepEqual(
+      (JSON.parse(readFileSync(s.path, 'utf8')) as { inputPolicy?: unknown }).inputPolicy,
+      { threshold: 5 },
+    );
     // Такт сервера применяет запрос тем же правилом, что config-apply.
     s.server.leader('server');
     serveReconfigure(s.server, s.path, 'server');
