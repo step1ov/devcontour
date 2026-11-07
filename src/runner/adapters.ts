@@ -629,6 +629,25 @@ export const demoAdapter: AgentAdapter = {
   reviewProtocol: 1,
   async execute(r) {
     if (r.signal.aborted) throw new Error('Отменено');
+    // Ревью без задачи (план, ответ на вопрос исполнителя) — детерминированное
+    // одобрение demo, не AI-review: demo-проект не проверяет планы моделью.
+    if (r.review && !r.task?.id)
+      return {
+        data: {
+          execution: { commands: [], noCommandsReason: 'Demo fixture review without a model' },
+          approved: true,
+          summary: 'Детерминированное demo-ревью без модели; это не AI-review.',
+          discoveries: [],
+          findings: [],
+          previous: (r.findings?.open ?? []).map((f) => ({
+            id: f.id,
+            status: 'closed' as const,
+            basis: 'demo fixture',
+          })),
+        },
+        log: 'Demo fixture plan review; no model invoked',
+        command: ['internal:demo-plan-review'],
+      };
     if (r.review) {
       const value = JSON.parse(
         await readFile(join(r.cwd, 'deliverables', `${r.task.id}.json`), 'utf8'),
