@@ -43,6 +43,7 @@ import type { Task, Run } from '../core/model.ts';
 import { Alert, AlertDescription } from '@/ui/alert.tsx';
 import { Badge } from '@/ui/badge.tsx';
 import { TaskInput } from './TaskInput.tsx';
+import { heldByInput } from './input-labels.ts';
 import { Button } from '@/ui/button.tsx';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/ui/dialog.tsx';
 import { Input } from '@/ui/input.tsx';
@@ -229,7 +230,7 @@ function TaskLive({
     );
   // Вопрос исполнителя держит задачу и после устаревшего применения (ready):
   // строка называет ожидание ответа, а не зависимость.
-  if (task.blockers.some((id) => id.startsWith('input:')))
+  if (heldByInput(task))
     return (
       <small className="mt-1 block" data-input-waiting>
         <Badge variant="destructive">Ждёт ответа</Badge>
@@ -2996,24 +2997,23 @@ export function App() {
                           </>
                         )}
                         {/* Задачу с вопросом держит вопрос: повтор отказал бы, продолжение — ответ. */}
-                        {['failed', 'cancelled'].includes(task.status) &&
-                          task.failureKind !== 'needs-input' && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              disabled={busy}
-                              onClick={() =>
-                                void act(
-                                  () => api(`tasks/${task.id}/retry`, {}),
-                                  'Новая попытка поставлена в очередь',
-                                  false,
-                                )
-                              }
-                            >
-                              <RotateCcw />
-                              Повторить
-                            </Button>
-                          )}
+                        {['failed', 'cancelled'].includes(task.status) && !heldByInput(task) && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={busy}
+                            onClick={() =>
+                              void act(
+                                () => api(`tasks/${task.id}/retry`, {}),
+                                'Новая попытка поставлена в очередь',
+                                false,
+                              )
+                            }
+                          >
+                            <RotateCcw />
+                            Повторить
+                          </Button>
+                        )}
                       </div>
                     )}
                     <section aria-label="Доказательства на коммите" className="mt-5">
