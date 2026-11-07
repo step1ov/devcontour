@@ -44,6 +44,7 @@ import {
   type AttentionAction,
   type AttentionActor,
   type AttentionCategory,
+  type AttentionHistoryItem,
   type AttentionItem,
   type AttentionListInput,
   type AttentionMark,
@@ -119,7 +120,14 @@ export interface AttentionSourceRule {
   /** Нужен подключённый движок (после setup). */
   engine?: boolean;
   collect(ctx: AttentionContext): Candidate[];
+  /**
+   * Решённые появления по долговечному факту решения источника (история).
+   * Источник без такого факта истории не даёт.
+   */
+  history?(ctx: AttentionContext): Resolved[];
 }
+/** Решённое появление: карточка, какой она была, и момент решения. */
+export type Resolved = Candidate & { resolvedAt: string | null };
 
 /* ------------------------------------------------------------------ */
 /* Подготовка: работает до setup и после него на той же базе           */
@@ -1475,6 +1483,192 @@ const actionHandlers: Record<string, (a: ActContext) => ActOutcome> = {
 };
 
 /* ------------------------------------------------------------------ */
+/* История: решённые появления по фактам решения источников            */
+/* ------------------------------------------------------------------ */
+
+/** S1: ответ на вопрос (снятый вопрос времени снятия не хранит). */
+prepQuestion.history = (ctx) =>
+  changesOf(ctx).flatMap((c) =>
+    c.questions
+      .filter((q) => q.status !== 'open')
+      .map((q): Resolved => ({
+        sourceKey: `prep:q:${c.id}:${q.id}`,
+        occurrenceId: q.id,
+        sourceVersion: d({ text: q.text, why: q.why, options: q.options }),
+        source: 'prep-question',
+        category: 'question',
+        actor: 'operator',
+        title: `Вопрос ведущего агента по «${c.title}»`,
+        reason: one(q.text),
+        since: q.createdAt,
+        subject: { kind: 'change', id: c.id, href: hrefs.preparation(c.id) },
+        resolvedAt: q.answer?.at ?? null,
+      })),
+  );
+
+/** S2: решение ведущего по ответу оператора. */
+prepAnswerPending.history = (ctx) =>
+  changesOf(ctx).flatMap((c) =>
+    c.questions.flatMap((q): Resolved[] => {
+      if (q.status !== 'answered' || !q.answer) return [];
+      const record = c.decisions.find((r) => r.questionId === q.id && !r.withdrawn);
+      if (!record) return [];
+      const withdrawn = c.decisions
+        .filter((r) => r.questionId === q.id && r.withdrawn && r.withdrawn.at < record.createdAt)
+        .map((r) => r.withdrawn!.at)
+        .sort()
+        .at(-1);
+      return [
+        {
+          sourceKey: `prep:qa:${c.id}:${q.id}`,
+          occurrenceId: withdrawn ? `w:${withdrawn}` : `a:${q.answer.at}`,
+          sourceVersion: d(q.answer.text),
+          source: 'prep-answer-pending',
+          category: 'technical',
+          actor: 'lead',
+          title: `Ответ оператора ждёт решения ведущего по «${c.title}»`,
+          reason: one(record.statement),
+          since: withdrawn ?? q.answer.at,
+          subject: { kind: 'change', id: c.id, href: hrefs.preparation(c.id) },
+          resolvedAt: record.createdAt,
+        },
+      ];
+    }),
+  );
+
+/** S3/S4: решение оператора по редакции или новая редакция после неё. */
+const stageHistory = (ctx: AttentionContext): Resolved[] =>
+  changesOf(ctx).flatMap((c) =>
+    stages.flatMap((stage) =>
+      c[stage].flatMap((r, i, all): Resolved[] => {
+        const next = all[i + 1];
+        const out: Resolved[] = [];
+        const subject = { kind: 'change' as const, id: c.id, href: hrefs.preparation(c.id) };
+        // Согласование: редакция была на ревью и решена или вытеснена новой.
+        if (r.decision || (next && r.status === 'in-review'))
+          out.push({
+            sourceKey: `prep:stage:${c.id}:${stage}`,
+            occurrenceId: `r${r.number}`,
+            sourceVersion: d({ digest: r.digest }),
+            source: 'prep-stage',
+            category: 'decision',
+            actor: 'operator',
+            title: `Утвердите ${stageTitles[stage]} «${c.title}»`,
+            reason: one(r.decision?.comment || r.reason),
+            since: r.createdAt,
+            subject,
+            resolvedAt: r.decision?.at ?? next?.createdAt ?? null,
+          });
+        // Доработка: возвращённая редакция и новая редакция после неё.
+        if (r.status === 'changes-requested' && next)
+          out.push({
+            sourceKey: `prep:rework:${c.id}:${stage}`,
+            occurrenceId: `r${r.number}`,
+            sourceVersion: d(r.decision?.comment ?? ''),
+            source: 'prep-rework',
+            category: 'technical',
+            actor: 'lead',
+            title: `Оператор вернул ${stageTitles[stage]} «${c.title}» на доработку`,
+            reason: one(r.decision?.comment || r.reason),
+            since: r.decision?.at ?? r.createdAt,
+            subject,
+            resolvedAt: next.createdAt,
+          });
+        return out;
+      }),
+    ),
+  );
+prepStage.history = stageHistory;
+
+/** Сколько последних попыток читает история задач. */
+const HISTORY_RUNS = 50;
+
+/**
+ * S10: упавшая попытка задачи, после которой началась новая попытка, или
+ * задача принята. Момент решения — начало следующей попытки или конец
+ * принявшей.
+ */
+workSource.history = (ctx) => {
+  const runs = ctx.state.runs.slice(-HISTORY_RUNS);
+  return runs.flatMap((run): Resolved[] => {
+    if (run.status !== 'failed') return [];
+    const task = ctx.state.tasks.find((t) => t.id === run.taskId);
+    if (!task) return [];
+    const next = ctx.state.runs.find((r) => r.taskId === run.taskId && r.attempt > run.attempt);
+    const accepted =
+      task.status === 'done'
+        ? ctx.state.runs.findLast((r) => r.taskId === task.id && r.status === 'succeeded')
+        : undefined;
+    const resolvedAt = next?.startedAt ?? accepted?.finishedAt;
+    if (!resolvedAt) return [];
+    return [
+      {
+        sourceKey: `work:${task.id}`,
+        occurrenceId: run.id,
+        sourceVersion: d({ kind: run.failureKind ?? null }),
+        source: 'work',
+        category: 'technical',
+        actor: 'lead',
+        title: `Задача «${task.title}» не прошла`,
+        reason: ctx.redact(run.error ?? 'Причина не записана'),
+        since: run.finishedAt ?? run.startedAt,
+        subject: { kind: 'task', id: task.id, href: hrefs.task(task.id) },
+        resolvedAt,
+      },
+    ];
+  });
+};
+
+/** S13: операция, которая падала или устаревала, завершена, заменена или снята. */
+contractChangeSource.history = (ctx) =>
+  new ContractChanges(engineOf(ctx).h, ctx.root ?? '')
+    .list()
+    .filter((op) => ['completed', 'superseded', 'abandoned'].includes(op.status) && op.finishedAt)
+    .flatMap((op): Resolved[] => {
+      const stop = op.history.findLast((e) => e.event === 'failed' || e.event === 'stale');
+      if (!stop) return [];
+      return [
+        {
+          sourceKey: `contract-change:${op.id}`,
+          occurrenceId: `${op.id}@${stop.at}`,
+          sourceVersion: String(op.version ?? 0),
+          source: 'contract-change',
+          category: 'technical',
+          actor: 'lead',
+          title: `Изменение контракта ${op.key}: ${op.status}`,
+          reason: ctx.redact(op.error ?? stop.detail ?? ''),
+          since: stop.at,
+          subject: { kind: 'operation', id: op.id, href: hrefs.contracts() },
+          resolvedAt: op.finishedAt!,
+        },
+      ];
+    });
+
+/** S16: приёмка изменения по проверке. */
+changesetSource.history = (ctx) =>
+  ctx.state.changeSets.flatMap((c): Resolved[] =>
+    c.acceptance
+      ? [
+          {
+            sourceKey: `changeset:${c.id}`,
+            occurrenceId: c.acceptance.verificationId,
+            sourceVersion: c.acceptance.digest,
+            source: 'changeset',
+            category: 'decision',
+            actor: 'operator',
+            title: `Примите «${c.title}»`,
+            reason: 'Изменение принято.',
+            since:
+              c.verifications.find((v) => v.id === c.acceptance!.verificationId)?.finishedAt ??
+              c.acceptance.at,
+            subject: { kind: 'changeset', id: c.id, href: hrefs.changesets() },
+            resolvedAt: c.acceptance.at,
+          },
+        ]
+      : [],
+  );
+
+/* ------------------------------------------------------------------ */
 /* Сборка: влияние, отметки, порядок                                   */
 /* ------------------------------------------------------------------ */
 
@@ -1571,6 +1765,14 @@ export interface AttentionOptions {
   now?: () => number;
   /** Дополнительные источники (тесты структурной защиты чтения). */
   sources?: AttentionSourceRule[];
+}
+
+export interface AttentionHistoryView {
+  revision: number;
+  generatedAt: string;
+  engineConnected: boolean;
+  items: AttentionHistoryItem[];
+  truncated?: { count: number };
 }
 
 export interface AttentionView {
@@ -1820,6 +2022,54 @@ export class AttentionService {
         .slice(0, left.length - ATTENTION_LIMITS.markRows)
         .forEach((key) => removed.add(key));
     for (const key of removed) this.store.deleteLocal(ATTENTION_NAMESPACE, undefined, key);
+  }
+
+  /**
+   * История: решённые появления по долговечным фактам решения источников,
+   * новые первыми, не больше 100. Действий у записей истории нет. Чтение,
+   * как и активный список, ничего не пишет.
+   */
+  history(raw: AttentionListInput = {}): AttentionHistoryView {
+    const filter = attentionInputs.list.parse(raw);
+    const now = (this.options.now ?? Date.now)();
+    return this.store.snapshot(() => {
+      const ctx = this.context(new Map(), now);
+      const boardByTask = boardsOf(ctx.state);
+      const marks = this.marks();
+      const all = this.sources
+        .filter((source) => source.history && (!source.engine || ctx.h))
+        .flatMap((source) => source.history!(ctx))
+        .filter(
+          (r) =>
+            (!filter.actor || r.actor === filter.actor) &&
+            (!filter.category || r.category === filter.category),
+        )
+        .sort(
+          (a, b) =>
+            (b.resolvedAt ?? '').localeCompare(a.resolvedAt ?? '') ||
+            (a.sourceKey < b.sourceKey ? -1 : a.sourceKey > b.sourceKey ? 1 : 0),
+        );
+      const items = all.slice(0, ATTENTION_LIMITS.history).map((r): AttentionHistoryItem => {
+        // Версия решённого появления восстановлена по фактам: отметка
+        // относится к появлению, какой бы версии она ни была.
+        const mark = marks[r.sourceKey];
+        const same = mark?.occurrenceId === r.occurrenceId;
+        const read = same && !!mark.readVersion;
+        return {
+          ...toItem(r, ctx.state, boardByTask, marks),
+          actions: [],
+          state: { read, acknowledged: same && !!mark.ackVersion, unread: !read },
+          resolvedAt: r.resolvedAt,
+        };
+      });
+      return {
+        revision: this.store.revision(),
+        generatedAt: new Date(now).toISOString(),
+        engineConnected: Boolean(this.h),
+        items,
+        ...(all.length > items.length ? { truncated: { count: all.length - items.length } } : {}),
+      };
+    });
   }
 
   /**

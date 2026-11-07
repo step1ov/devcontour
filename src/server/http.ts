@@ -310,7 +310,12 @@ export async function serve(
         // базе. Чтение ничего не пишет и моделей не вызывает.
         if (req.method === 'GET' && path === '/api/attention' && preparationStore) {
           const service = attentionOf(preparationStore);
-          json(res, 200, await service.active(Object.fromEntries(url.searchParams)));
+          const query = Object.fromEntries(url.searchParams);
+          json(
+            res,
+            200,
+            query.view === 'history' ? service.history(query) : await service.active(query),
+          );
           return;
         }
         // Отметки «прочитано» и «увидел» — локальные записи оператора, не решение.

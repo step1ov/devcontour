@@ -58,6 +58,7 @@ test('После setup чтение во всех фазах (идёт, сбой
       const stamps = fileStamps(f.root);
       const view = await new AttentionService(f.store, f.h).active();
       await new AttentionService(f.store, f.h).active({ actor: 'lead' });
+      new AttentionService(f.store, f.h).history();
       assert.equal(dumpDatabase(path), before, phase);
       assert.equal(f.store.revision(), revision, phase);
       assert.equal(f.store.lastEventId(), events, phase);
