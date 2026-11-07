@@ -3,7 +3,8 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AttentionService } from '../src/application/attention.ts';
-import { inputDemos, inputFixture, untilQuestion } from './input-fixture.ts';
+import { controlled, inputDemos, inputFixture, prepared, untilQuestion } from './input-fixture.ts';
+import { DomainError } from '../src/core/model.ts';
 import { byKey } from './attention-fixture.ts';
 
 after(() => inputDemos.close());
@@ -50,6 +51,58 @@ test('S15 вопрос исполнителя: забирает задачу, о
       'operator',
     );
     assert.equal(byKey(await items(), key), undefined);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('Применение ответа с карточки: отклонённое ревью — только с подтверждением, в режиме agent оператору не предлагается', async () => {
+  const f = await inputFixture(controlled({ verdict: { approve: false } }), {
+    approvalMode: 'operator',
+  });
+  try {
+    const { boardId, taskId } = f.askingTask('Asking task');
+    await untilQuestion(f, boardId);
+    const [request] = f.service.list({ taskId }).requests;
+    await prepared(f, request.requestId);
+    const service = new AttentionService(f.store, f.h, { root: f.root });
+    const key = `input:${request.requestId}`;
+    const card = byKey((await service.active()).items, key)!;
+    assert.equal(card.actor, 'operator');
+    const apply = card.actions.find((a) => a.id === 'apply')!;
+    assert.match((apply as { label: string }).label, /отклонённому ревью/);
+    const body = {
+      sourceKey: card.sourceKey,
+      occurrenceId: card.occurrenceId,
+      expectedVersion: card.sourceVersion,
+      action: 'apply',
+    };
+    const lifecycle = () => f.service.list({ taskId }).requests[0].lifecycle;
+    const before = lifecycle();
+    await assert.rejects(
+      service.act(body),
+      (e: unknown) =>
+        e instanceof DomainError && e.status === 409 && e.details?.code === 'confirmation-required',
+    );
+    assert.equal(lifecycle(), before);
+    // В режиме agent применяет ведущий: оператору действие не предлагается.
+    f.h.config.approvalMode = 'agent';
+    const agentCard = byKey((await service.active()).items, key)!;
+    assert.equal(agentCard.actor, 'lead');
+    assert.equal(
+      agentCard.actions.some((a) => a.kind === 'domain'),
+      false,
+    );
+    await assert.rejects(
+      service.act({ ...body, expectedVersion: agentCard.sourceVersion }),
+      (e: unknown) => e instanceof DomainError && e.status === 400,
+    );
+    assert.equal(lifecycle(), before);
+    f.h.config.approvalMode = 'operator';
+    const done = await service.act({ ...body, input: { confirm: true } });
+    assert.equal((done.result as { applied: boolean }).applied, true);
+    assert.equal(lifecycle(), 'applied');
+    assert.equal(done.resolved, true);
   } finally {
     await f.cleanup();
   }

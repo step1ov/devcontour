@@ -4,7 +4,9 @@ import { join } from 'node:path';
 import { AttentionService } from '../src/application/attention.ts';
 import { DiscussionService } from '../src/application/discussion.ts';
 import { DomainError } from '../src/core/model.ts';
-import { specDigest } from '../src/core/service.ts';
+import { digest, specDigest } from '../src/core/service.ts';
+import { Workspace, changeSnapshot, snapshotDigest } from '../src/core/workspace.ts';
+import { randomUUID } from 'node:crypto';
 import { Preparation } from '../src/core/preparation.ts';
 import { Store } from '../src/core/store.ts';
 import type { AttentionItem } from '../src/core/attention-model.ts';
@@ -195,6 +197,78 @@ test('До setup: ответ на вопрос и согласование с к
       }),
       refusal('attention-resolved'),
     );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('ChangeSet: выкладка preview и приёмка с карточки; новая проверка делает старую карточку устаревшей', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    const change = new Workspace(f.h).create({
+      title: 'Каталог',
+      description: 'Поиск по каталогу',
+      boardIds: [b.id],
+    });
+    f.h.config.preview = {
+      compose: 'main/c.yml',
+      service: 'web',
+      port: 45998,
+      health: { path: '/health', timeoutMs: 1000 },
+    };
+    const manifest = { main: { sha: 'a'.repeat(40), tree: 'b'.repeat(40) } };
+    const verify = () =>
+      f.store.change('fixture.verified', (s) => {
+        const cs = s.changeSets.find((x) => x.id === change.id)!;
+        cs.verifications.push({
+          id: randomUUID(),
+          token: randomUUID(),
+          leaseUntil: 0,
+          startedAt: new Date().toISOString(),
+          status: 'passed',
+          finishedAt: new Date().toISOString(),
+          policyDigest: new Workspace(f.h).policyDigest(),
+          specDigest: snapshotDigest(changeSnapshot(s, cs)),
+          tasks: [],
+          boards: [],
+          manifest,
+          manifestDigest: digest(manifest),
+          evidence: [],
+        });
+      });
+    verify();
+    const service = new AttentionService(f.store, f.h);
+    const key = `changeset:${change.id}`;
+    const card = byKey((await service.active()).items, key)!;
+    assert.deepEqual(
+      card.actions.filter((a) => a.kind === 'domain').map((a) => a.id),
+      ['deploy-preview', 'accept'],
+    );
+    // Выкладка: без работающего раннера — отказ; с ним — начата один раз.
+    await assert.rejects(
+      service.act(act(card, 'deploy-preview')),
+      (e: unknown) => e instanceof DomainError && e.status === 409,
+    );
+    const deployed: string[] = [];
+    const started = await service.act(act(card, 'deploy-preview'), {
+      deploy: (id) => (deployed.push(id), Promise.resolve()),
+    });
+    assert.deepEqual(started.result, { status: 'started', changeSetId: change.id });
+    assert.deepEqual(deployed, [change.id]);
+    // Повторная проверка: показанная карточка устарела, приёмка по ней не идёт.
+    verify();
+    await assert.rejects(service.act(act(card, 'accept')), refusal('attention-stale'));
+    assert.equal(f.store.read().changeSets[0].acceptance, undefined);
+    const current = byKey((await service.active()).items, key)!;
+    const accepted = await service.act(act(current, 'accept'));
+    assert.equal(accepted.resolved, true);
+    const acceptance = f.store.read().changeSets[0].acceptance!;
+    assert.equal(acceptance.approval.actor, 'operator');
+    assert.equal(acceptance.verificationId, current.occurrenceId);
+    await assert.rejects(service.act(act(current, 'accept')), refusal('attention-resolved'));
   } finally {
     f.cleanup();
   }

@@ -475,6 +475,9 @@ const inputSource: AttentionSourceRule = {
         }
         const answer = operator && r.state === 'awaiting-answer';
         const apply = operator && operatorMode && r.state === 'ready-to-apply';
+        // Последний раунд ревью ответа отклонил его: режим operator позволяет
+        // применить (D03), но только явным подтверждением оператора.
+        const rejected = apply && r.approved === false;
         return {
           sourceKey: `input:${r.requestId}`,
           occurrenceId: r.requestId,
@@ -489,7 +492,10 @@ const inputSource: AttentionSourceRule = {
               : apply
                 ? `Ответ по задаче «${title}» готов к применению`
                 : `Вопрос исполнителя по задаче «${title}»: ${r.state}`,
-          reason: ctx.redact(question ? `${question} — ${r.next}` : r.next),
+          reason: ctx.redact(
+            (rejected ? 'Ревью ответа отклонило его. ' : '') +
+              (question ? `${question} — ${r.next}` : r.next),
+          ),
           since: r.createdAt,
           subject: { kind: 'request', id: r.requestId, href: hrefs.task(r.taskId) + '#input' },
           actions: [
@@ -508,7 +514,7 @@ const inputSource: AttentionSourceRule = {
                   {
                     id: 'apply',
                     kind: 'domain' as const,
-                    label: 'Применить ответ',
+                    label: rejected ? 'Применить вопреки отклонённому ревью' : 'Применить ответ',
                     input: 'confirm' as const,
                   },
                 ]
@@ -516,7 +522,12 @@ const inputSource: AttentionSourceRule = {
             ...(operator ? [] : [handoff]),
           ],
           covered: r.blocking ? unclaimed(ctx, [r.taskId]) : [],
-          basis: { taskId: r.taskId, requestId: r.requestId, expectedVersion: r.version },
+          basis: {
+            taskId: r.taskId,
+            requestId: r.requestId,
+            expectedVersion: r.version,
+            ...(rejected ? { rejected: true } : {}),
+          },
         };
       });
   },
@@ -1351,6 +1362,7 @@ interface ActContext {
     optionId?: string;
     comment?: string;
     kind?: 'clarification' | 'requirement-change';
+    confirm?: true;
   };
   key: string | undefined;
   deps: AttentionActDeps;
@@ -1447,8 +1459,19 @@ const actionHandlers: Record<string, (a: ActContext) => ActOutcome> = {
       }),
     };
   },
-  'input/apply': ({ ctx, item, root }) => {
-    const b = basisOf<{ taskId: string; requestId: string; expectedVersion: number }>(item);
+  'input/apply': ({ ctx, item, input, root }) => {
+    const b = basisOf<{
+      taskId: string;
+      requestId: string;
+      expectedVersion: number;
+      rejected?: boolean;
+    }>(item);
+    if (b.rejected && input.confirm !== true)
+      throw new DomainError(
+        'Ревью ответа отклонило его: применение — только с явным подтверждением (input.confirm)',
+        409,
+        { code: 'confirmation-required' },
+      );
     return {
       result: new InputService(ctx.h!, root).applyInTask(b.taskId, b.requestId, {
         expectedVersion: b.expectedVersion,

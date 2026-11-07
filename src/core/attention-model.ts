@@ -168,6 +168,8 @@ export const attentionInputs = {
         optionId: z.string().max(40).optional(),
         comment: z.string().max(3000).optional(),
         kind: z.enum(['clarification', 'requirement-change']).optional(),
+        /** Явное подтверждение действия вопреки отклонённому ревью. */
+        confirm: z.literal(true).optional(),
       })
       .optional(),
     idempotencyKey: z
