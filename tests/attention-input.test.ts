@@ -28,7 +28,19 @@ test('S15 вопрос исполнителя: забирает задачу, о
     assert.equal(card.actor, 'operator');
     assert.equal(card.category, 'question');
     assert.equal(card.occurrenceId, request.requestId);
-    assert.ok(card.actions.some((a) => a.id === 'answer'));
+    const answerAction = card.actions.find((a) => a.id === 'answer') as {
+      prompt?: string;
+      choices?: { id: string; label: string; recommended?: boolean }[];
+    };
+    const asked = f.service.show({ requestId: request.requestId }) as unknown as {
+      question: { question: string; options: { id: string }[] };
+    };
+    assert.equal(answerAction.prompt, asked.question.question);
+    assert.deepEqual(
+      answerAction.choices!.map((c) => c.id),
+      asked.question.options.map((o) => o.id),
+    );
+    assert.equal(card.subject.href, `/?view=boards&tab=list&task=${taskId}#input`);
     assert.deepEqual(card.impact.taskIds, [taskId]);
     assert.equal(card.impact.waiting, 1, `${dependent} waits for the asking task`);
     // Задача, которую держит вопрос, своей карточки не даёт.

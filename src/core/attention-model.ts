@@ -60,6 +60,10 @@ export const ATTENTION_LIMITS = {
   /** Отметки исчезнувших карточек живут столько, затем удаляются при записи отметок. */
   markRetentionMs: 30 * 24 * 60 * 60_000,
   agentLimit: 50,
+  prompt: 2000,
+  choices: 10,
+  choiceLabel: 200,
+  choiceHint: 300,
 } as const;
 
 export const sourceKeyPattern = /^[a-z-]+(:[A-Za-z0-9:._#@-]+)?$/;
@@ -81,7 +85,16 @@ export type AttentionSubjectKind =
   | 'run';
 
 export type AttentionAction =
-  | { id: string; kind: 'domain'; label: string; input?: 'text' | 'text+option' | 'confirm' }
+  | {
+      id: string;
+      kind: 'domain';
+      label: string;
+      input?: 'text' | 'text+option' | 'confirm';
+      /** Полный текст вопроса (до 2000 знаков, под маской); `reason` — выдержка. */
+      prompt?: string;
+      /** Варианты ответа (до 10): `id` уходит в `input.optionId`. */
+      choices?: { id: string; label: string; hint?: string; recommended?: boolean }[];
+    }
   | { id: 'open'; kind: 'navigate'; href: string }
   | { id: 'handoff'; kind: 'handoff'; command: string };
 

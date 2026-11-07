@@ -1272,3 +1272,72 @@ test('S8, S13, S14: существенное обновление при том 
     f.cleanup();
   }
 });
+
+test('Ссылки карточек ведут к предмету; у вопроса подготовки — полный текст и варианты под маской', async () => {
+  const f = preparationFixture();
+  try {
+    f.p.execute('preparation_question', {
+      changeId: f.changeId,
+      stage: 'architecture',
+      add: [
+        {
+          text: 'Где хранить историю? Зеркало https://u:s3cr3t@git.example.test/x.git тоже возможно.',
+          why: 'Влияет на стоимость',
+          options: ['Postgres', 'Файлы https://u:s3cr3t@files.example.test'],
+        },
+      ],
+    });
+    const items = (await new AttentionService(f.store, undefined).active()).items;
+    const q = items.find((i) => i.source === 'prep-question')!;
+    assert.match(q.subject.href, /stage=architecture#questions-architecture$/);
+    const answer = q.actions.find((a) => a.id === 'answer') as {
+      prompt?: string;
+      choices?: { id: string; label: string }[];
+    };
+    assert.match(answer.prompt!, /Где хранить историю\?.*\n\nВлияет на стоимость/s);
+    assert.doesNotMatch(JSON.stringify(answer), /s3cr3t/);
+    assert.deepEqual(
+      answer.choices!.map((c) => c.id),
+      ['0', '1'],
+    );
+    assert.equal(answer.choices![0].label, 'Postgres');
+  } finally {
+    f.cleanup();
+  }
+  const e = fixture();
+  try {
+    const b = e.h.createBoard('Board');
+    const t = e.h.addTask(b.id, input());
+    e.h.approve(b.id);
+    failNext(e.h, t.id);
+    const discussion = new DiscussionService(e.h);
+    const request = discussion.post(
+      {
+        taskId: t.id,
+        kind: 'change-request',
+        text: 'Нужен ночной режим',
+        idempotencyKey: 'attention-link-1',
+        expectedVersion: 0,
+      },
+      'operator',
+    ).message;
+    const items = await engineItems(e);
+    const work = byKey(items, `work:${t.id}`)!;
+    assert.equal(work.subject.href, `/?view=boards&tab=list&task=${t.id}`);
+    const cr = byKey(items, `discussion:cr:${request.id}`)!;
+    assert.equal(cr.subject.href, `/?view=boards&tab=list&task=${t.id}#dm-${request.id}`);
+    assert.equal(cr.evidence[0].href, `/?view=boards&tab=list&task=${t.id}#dm-${request.id}`);
+    const disposition = discussion.resolve({
+      requestId: request.id,
+      outcome: 'needs-answer',
+      reason: 'Какой режим?',
+      idempotencyKey: 'attention-link-2',
+      expectedVersion: e.store.discussionVersion(undefined, t.id),
+    }).message;
+    const na = byKey(await engineItems(e), `discussion:na:${request.id}`)!;
+    assert.match(na.subject.href, new RegExp(`#dm-${disposition.id}$`));
+    assert.ok(na.evidence.every((ev) => ev.href?.includes('#dm-')));
+  } finally {
+    e.cleanup();
+  }
+});

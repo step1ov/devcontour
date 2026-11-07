@@ -72,11 +72,21 @@ const one = (text: string) => text.replace(/\s+/g, ' ').trim();
 
 /** Ссылки панели: вид задаётся параметрами адреса. */
 export const hrefs = {
-  preparation: (changeId?: string) => (changeId ? `/?change=${encodeURIComponent(changeId)}` : '/'),
-  task: (taskId: string) => `/?task=${encodeURIComponent(taskId)}`,
-  board: (boardId: string) => `/?tab=graph&board=${encodeURIComponent(boardId)}`,
-  changesets: () => '/?tab=changesets',
-  contracts: () => '/?tab=contracts',
+  /** Изменение подготовки; этап и якорь ведут к его вопросам. */
+  preparation: (changeId?: string, stage?: string, anchor?: string) =>
+    (changeId
+      ? `/?change=${encodeURIComponent(changeId)}` +
+        (stage ? `&stage=${encodeURIComponent(stage)}` : '')
+      : '/') + (anchor ? `#${anchor}` : ''),
+  // Панель разработки внутри оболочки подготовки показывается с view=boards;
+  // без подготовки параметр безвреден.
+  task: (taskId: string) => `/?view=boards&tab=list&task=${encodeURIComponent(taskId)}`,
+  /** Сообщение обсуждения задачи (якорь `dm-<id>`). */
+  message: (taskId: string, messageId: string) =>
+    `/?view=boards&tab=list&task=${encodeURIComponent(taskId)}#dm-${messageId}`,
+  board: (boardId: string) => `/?view=boards&tab=graph&board=${encodeURIComponent(boardId)}`,
+  changesets: () => '/?view=boards&tab=changesets',
+  contracts: () => '/?view=boards&tab=contracts',
   overview: () => '/',
 };
 
@@ -166,13 +176,21 @@ const prepQuestion: AttentionSourceRule = {
           title: `Вопрос ведущего агента по «${c.title}»`,
           reason: one(q.text) + (q.why ? ` — ${one(q.why)}` : ''),
           since: q.createdAt,
-          subject: { kind: 'change', id: c.id, href: hrefs.preparation(c.id) },
+          subject: {
+            kind: 'change',
+            id: c.id,
+            href: hrefs.preparation(c.id, q.stage, `questions-${q.stage}`),
+          },
           actions: [
             {
               id: 'answer',
               kind: 'domain',
               label: 'Ответить',
               input: q.options.length ? 'text+option' : 'text',
+              prompt: q.text + (q.why ? `\n\n${q.why}` : ''),
+              ...(q.options.length
+                ? { choices: q.options.map((label, i) => ({ id: String(i), label })) }
+                : {}),
             },
           ],
           basis: { changeId: c.id, questionId: q.id, options: q.options },
@@ -208,7 +226,11 @@ const prepAnswerPending: AttentionSourceRule = {
             title: `Ответ оператора ждёт решения ведущего по «${c.title}»`,
             reason: `Вопрос: ${one(q.text)} Ответ: ${one(q.answer.text)}`,
             since: withdrawn ?? q.answer.at,
-            subject: { kind: 'change', id: c.id, href: hrefs.preparation(c.id) },
+            subject: {
+              kind: 'change',
+              id: c.id,
+              href: hrefs.preparation(c.id, q.stage, `questions-${q.stage}`),
+            },
           },
         ];
       }),
@@ -256,7 +278,7 @@ const prepStage: AttentionSourceRule = {
           source: 'prep-stage' as const,
           category: 'decision' as const,
           since: r.createdAt,
-          subject: { kind: 'change' as const, id: c.id, href: hrefs.preparation(c.id) },
+          subject: { kind: 'change' as const, id: c.id, href: hrefs.preparation(c.id, stage) },
         };
         if (refusal)
           return [
@@ -309,7 +331,7 @@ const prepRework: AttentionSourceRule = {
             title: `Оператор вернул ${stageTitles[stage]} «${c.title}» на доработку`,
             reason: one(r.decision?.comment || r.reason),
             since: r.decision?.at ?? r.createdAt,
-            subject: { kind: 'change', id: c.id, href: hrefs.preparation(c.id) },
+            subject: { kind: 'change', id: c.id, href: hrefs.preparation(c.id, stage) },
           },
         ];
       }),
@@ -471,8 +493,13 @@ const inputSource: AttentionSourceRule = {
         const operator = r.actor === 'operator';
         const title = taskTitle(ctx, r.taskId);
         let question = '';
+        let options: { id: string; label: string; consequence: string | null }[] = [];
+        let recommended: string | null = null;
         try {
-          question = engine.inputRequest(r.requestId).question.question;
+          const asked = engine.inputRequest(r.requestId).question;
+          question = asked.question;
+          options = asked.options;
+          recommended = asked.recommended;
         } catch {
           /* Запрос не найден: карточка остаётся по сводке. */
         }
@@ -509,6 +536,17 @@ const inputSource: AttentionSourceRule = {
                     kind: 'domain' as const,
                     label: 'Ответить',
                     input: 'text+option' as const,
+                    ...(question ? { prompt: question } : {}),
+                    ...(options.length
+                      ? {
+                          choices: options.map((o) => ({
+                            id: o.id,
+                            label: o.label,
+                            ...(o.consequence ? { hint: o.consequence } : {}),
+                            ...(o.id === recommended ? { recommended: true } : {}),
+                          })),
+                        }
+                      : {}),
                   },
                 ]
               : []),
@@ -1288,8 +1326,10 @@ const discussionRequestSource: AttentionSourceRule = {
             : `Обращение к ведущему по задаче «${taskTitle(ctx, entry.taskId)}»`,
           reason: entry.excerpt,
           since: entry.createdAt,
-          subject: { kind: 'task', id: entry.taskId, href: hrefs.task(entry.taskId) },
-          evidence: [{ kind: 'message', id: entry.id }],
+          subject: { kind: 'task', id: entry.taskId, href: hrefs.message(entry.taskId, entry.id) },
+          evidence: [
+            { kind: 'message', id: entry.id, href: hrefs.message(entry.taskId, entry.id) },
+          ],
           actions: [
             {
               id: 'handoff',
@@ -1332,11 +1372,19 @@ const discussionNeedsAnswerSource: AttentionSourceRule = {
         subject: {
           kind: 'task',
           id: row.request.taskId,
-          href: hrefs.task(row.request.taskId),
+          href: hrefs.message(row.request.taskId, row.dispositionId),
         },
         evidence: [
-          { kind: 'message', id: row.request.id },
-          { kind: 'message', id: row.dispositionId },
+          {
+            kind: 'message',
+            id: row.request.id,
+            href: hrefs.message(row.request.taskId, row.request.id),
+          },
+          {
+            kind: 'message',
+            id: row.dispositionId,
+            href: hrefs.message(row.request.taskId, row.dispositionId),
+          },
         ],
         actions: [{ id: 'answer', kind: 'domain', label: 'Ответить', input: 'text' }],
         basis: {
@@ -1607,7 +1655,11 @@ prepQuestion.history = (ctx) =>
         title: `Вопрос ведущего агента по «${c.title}»`,
         reason: one(q.text),
         since: q.createdAt,
-        subject: { kind: 'change', id: c.id, href: hrefs.preparation(c.id) },
+        subject: {
+          kind: 'change',
+          id: c.id,
+          href: hrefs.preparation(c.id, q.stage, `questions-${q.stage}`),
+        },
         resolvedAt: q.answer?.at ?? null,
       })),
   );
@@ -1649,7 +1701,7 @@ const stageHistory = (ctx: AttentionContext): Resolved[] =>
       c[stage].flatMap((r, i, all): Resolved[] => {
         const next = all[i + 1];
         const out: Resolved[] = [];
-        const subject = { kind: 'change' as const, id: c.id, href: hrefs.preparation(c.id) };
+        const subject = { kind: 'change' as const, id: c.id, href: hrefs.preparation(c.id, stage) };
         // Согласование: редакция была на ревью и решена или вытеснена новой.
         if (r.decision || (next && r.status === 'in-review'))
           out.push({
@@ -1849,7 +1901,11 @@ function discussionHistory(ctx: AttentionContext, which: 'request' | 'answer'): 
     const ordered = [...chain].sort((a, b) => a.disposition.seq - b.disposition.seq);
     ordered.forEach((row, i) => {
       const d0 = row.disposition;
-      const subject = { kind: 'task' as const, id: d0.taskId, href: hrefs.task(d0.taskId) };
+      const subject = {
+        kind: 'task' as const,
+        id: d0.taskId,
+        href: hrefs.message(d0.taskId, d0.id),
+      };
       const outcome = d0.disposition?.outcome ?? 'accepted';
       if (which === 'request')
         out.push({
@@ -1945,6 +2001,27 @@ function boardsOf(state: Readonly<DevContourState>) {
 export const maskUrlCredentials = (text: string) =>
   text.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#@]+@/gi, '$1[REDACTED]@');
 
+/** Полный вопрос и варианты действия — под маской и в пределах договора. */
+function boundedAction(
+  a: Extract<AttentionAction, { kind: 'domain' }>,
+  redact: (text: string) => string,
+): AttentionAction {
+  const L = ATTENTION_LIMITS;
+  return {
+    ...a,
+    ...(a.prompt !== undefined ? { prompt: clip(redact(a.prompt), L.prompt) } : {}),
+    ...(a.choices
+      ? {
+          choices: a.choices.slice(0, L.choices).map((c) => ({
+            ...c,
+            label: clip(redact(c.label), L.choiceLabel),
+            ...(c.hint !== undefined ? { hint: clip(redact(c.hint), L.choiceHint) } : {}),
+          })),
+        }
+      : {}),
+  };
+}
+
 /** Время последней отметки строки. */
 const lastMark = (m: AttentionMark) =>
   [m.readAt, m.ackAt]
@@ -2015,7 +2092,9 @@ export function toItem(
     actions: [
       // Доменные действия — только у карточек оператора; передача контекста
       // ведущему — у карточек ведущего.
-      ...(c.actions ?? []).filter((a) => a.kind !== 'domain' || c.actor === 'operator'),
+      ...(c.actions ?? [])
+        .filter((a) => a.kind !== 'domain' || c.actor === 'operator')
+        .map((a) => (a.kind === 'domain' ? boundedAction(a, redact) : a)),
       { id: 'open', kind: 'navigate', href: c.subject.href },
     ],
     state: markState(marks[c.sourceKey], c.occurrenceId, c.sourceVersion),
