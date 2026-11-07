@@ -1036,3 +1036,52 @@ test('S9 вход задания не построить: ограничение
     f.cleanup();
   }
 });
+
+test('Маска секретов для любого источника: вопрос ведущего, сбой инспекции Git, ожидание', async () => {
+  const leaked = 'https://deploy:s3cr3t-token@git.example.test/app.git';
+  const f = preparationFixture();
+  try {
+    f.p.execute('preparation_question', {
+      changeId: f.changeId,
+      add: [{ text: `Можно ли использовать ${leaked} для зеркала?` }],
+    });
+    f.p.execute('preparation_quick', {
+      requestKey: 'attention-mask-1',
+      title: 'Быстрая правка',
+      repository: '/nonexistent/attention-mask',
+      brief: 'Исправить сложение отрицательных чисел',
+      criterion: 'add(-2, -3) возвращает -5',
+    });
+    const view = await new AttentionService(f.store, undefined, {
+      root: f.root,
+      cachedFacts: () => Promise.reject(new Error(`fatal: could not read ${leaked}`)),
+    }).active();
+    const question = view.items.find((i) => i.source === 'prep-question')!;
+    const connection = view.items.find((i) => i.sourceKey.endsWith(':connection'))!;
+    for (const item of [question, connection]) {
+      assert.doesNotMatch(item.reason + item.title, /s3cr3t-token/);
+      assert.match(item.reason, /\[REDACTED\]@git\.example\.test/);
+    }
+    // Агентский список ведущего — та же маска.
+    const agent = new AttentionService(f.store, undefined).agentList({ actor: 'operator' });
+    assert.doesNotMatch(JSON.stringify(agent), /s3cr3t-token/);
+  } finally {
+    f.cleanup();
+  }
+  const e = fixture();
+  const token = 'attention-config-secret-value-42';
+  process.env.ATTENTION_MASK_TOKEN = token;
+  try {
+    (e.h.config as unknown as { forge: unknown }).forge = { tokenEnv: 'ATTENTION_MASK_TOKEN' };
+    const b = e.h.createBoard('Board');
+    e.h.addTask(b.id, input());
+    e.h.approve(b.id);
+    e.h.waitFor('context-lock', 'op-1', `Контекст закреплён: ${leaked} и ${token}`);
+    const wait = byKey(await engineItems(e), 'wait:context-lock')!;
+    assert.doesNotMatch(wait.reason, /s3cr3t-token/);
+    assert.doesNotMatch(wait.reason, new RegExp(token));
+  } finally {
+    delete process.env.ATTENTION_MASK_TOKEN;
+    e.cleanup();
+  }
+});

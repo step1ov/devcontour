@@ -1920,6 +1920,10 @@ function boardsOf(state: Readonly<DevContourState>) {
   return byTask;
 }
 
+/** Учётные данные в URL (`scheme://user:secret@host`) — маска до показа. */
+export const maskUrlCredentials = (text: string) =>
+  text.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#@]+@/gi, '$1[REDACTED]@');
+
 /** Время последней отметки строки. */
 const lastMark = (m: AttentionMark) =>
   [m.readAt, m.ackAt]
@@ -1969,6 +1973,8 @@ export function toItem(
   state: Readonly<DevContourState>,
   boardByTask: Map<string, string>,
   marks: Record<string, AttentionMark>,
+  /** Маска секретов: заголовок и причина любого источника проходят её здесь. */
+  redact: (text: string) => string = maskUrlCredentials,
 ): AttentionItem {
   return {
     id: `${c.sourceKey}#${c.occurrenceId}`,
@@ -1978,8 +1984,8 @@ export function toItem(
     source: c.source,
     category: c.category,
     actor: c.actor,
-    title: clip(one(c.title), ATTENTION_LIMITS.title),
-    reason: clip(one(c.reason), ATTENTION_LIMITS.reason),
+    title: clip(one(redact(c.title)), ATTENTION_LIMITS.title),
+    reason: clip(one(redact(c.reason)), ATTENTION_LIMITS.reason),
     impact: impactOf(c, state, boardByTask),
     since: c.since,
     ...(c.updatedAt ? { updatedAt: c.updatedAt } : {}),
@@ -2090,12 +2096,21 @@ export class AttentionService {
       root: this.options.root,
       now,
       quick,
-      redact: this.h
-        ? handoffRedactor(this.h.config, executionOf(this.h).engine.policy)
-        : (text) => text,
+      redact: this.redactor(),
       claimed: new Map(),
       cards: new Map(),
     };
+  }
+
+  /**
+   * Маска текстов карточек: учётные данные в URL — всегда (до setup тоже:
+   * вопросы и причины пишет ведущий агент, ошибки Git повторяют адрес
+   * репозитория), известные секреты конфигурации — маской пакета передачи.
+   */
+  private redactor(): (text: string) => string {
+    if (!this.h) return maskUrlCredentials;
+    const known = handoffRedactor(this.h.config, executionOf(this.h).engine.policy);
+    return (text) => maskUrlCredentials(known(text));
   }
 
   /** Карточки-кандидаты в порядке источников, внутри снимка. */
@@ -2174,7 +2189,7 @@ export class AttentionService {
           row.ackVersion = m.version;
           row.ackAt = at;
         }
-        row.title = clip(one(item.title), ATTENTION_LIMITS.title);
+        row.title = clip(one(ctx.redact(item.title)), ATTENTION_LIMITS.title);
         row.category = item.category;
         this.store.saveLocal(ATTENTION_NAMESPACE, undefined, m.sourceKey, attentionMark.parse(row));
         stored[m.sourceKey] = row;
@@ -2223,7 +2238,7 @@ export class AttentionService {
       if (item.occurrenceId !== v.occurrenceId || item.sourceVersion !== v.expectedVersion)
         throw new DomainError('Карточка изменилась: решение принято по прежней версии', 409, {
           code: 'attention-stale',
-          item: toItem(item, ctx.state, boardsOf(ctx.state), this.marks()),
+          item: toItem(item, ctx.state, boardsOf(ctx.state), this.marks(), ctx.redact),
         });
       const action = (item.actor === 'operator' ? (item.actions ?? []) : []).find(
         (a) => a.kind === 'domain' && a.id === v.action,
@@ -2250,7 +2265,9 @@ export class AttentionService {
     const current = this.store.snapshot(() => {
       const ctx = this.context(quick, now);
       const item = this.candidates(ctx, only).find((c) => c.sourceKey === v.sourceKey);
-      return item ? toItem(item, ctx.state, boardsOf(ctx.state), this.marks()) : undefined;
+      return item
+        ? toItem(item, ctx.state, boardsOf(ctx.state), this.marks(), ctx.redact)
+        : undefined;
     });
     return current ? { result, item: current } : { result, resolved: true as const };
   }
@@ -2338,7 +2355,7 @@ export class AttentionService {
         const same = mark?.occurrenceId === r.occurrenceId;
         const read = same && !!mark.readVersion;
         return {
-          ...toItem(r, ctx.state, boardByTask, marks),
+          ...toItem(r, ctx.state, boardByTask, marks, ctx.redact),
           actions: [],
           state: { read, acknowledged: same && !!mark.ackVersion, unread: !read },
           resolvedAt: r.resolvedAt,
@@ -2400,7 +2417,7 @@ export class AttentionService {
       const boardByTask = boardsOf(ctx.state);
       const marks = this.marks();
       const all = this.candidates(ctx)
-        .map((c) => toItem(c, ctx.state, boardByTask, marks))
+        .map((c) => toItem(c, ctx.state, boardByTask, marks, ctx.redact))
         .sort(compareItems);
       const filtered = all.filter(
         (i) =>
