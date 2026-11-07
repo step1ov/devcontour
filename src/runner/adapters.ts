@@ -36,12 +36,17 @@ import {
   FINDING_ID_PATTERN,
   REVIEW_ITEMS_LIMIT,
   findingStatuses,
+  implementationOutputSchema,
   type ReviewRequestFindings,
 } from 'devcontour-harness';
 export const implementationResult = z.object({
   completed: z.boolean(),
   summary: z.string(),
   discoveries: z.array(discoveryInput).max(20).default([]),
+  // Вопрос и решения исполнителя разбирает и приводит к схеме controller
+  // (вопрос вне схемы нормализуется, а не теряется): здесь — только форма.
+  inputRequest: z.record(z.string(), z.unknown()).nullable().optional(),
+  assumptions: z.array(z.unknown()).optional(),
 });
 // Отказ runtime объясняет сам runtime: «Not logged in», исчерпанный лимит,
 // недоступная модель. Код выхода про это не говорит ничего, поэтому короткую
@@ -113,19 +118,21 @@ export const reviewResult = z.object({
     }),
   ),
 });
-const implementationSchema = {
-  type: 'object',
-  additionalProperties: false,
+/**
+ * Wire-схема ответа writer: схема harness (`implementationOutputSchema`) —
+ * вопрос `inputRequest` и решения `assumptions` ровно её; находки — с
+ * пределами DevContour (`discoveryInput`).
+ */
+export const implementationSchema = {
+  ...implementationOutputSchema,
   properties: {
-    completed: { type: 'boolean' },
-    summary: { type: 'string' },
+    ...implementationOutputSchema.properties,
     discoveries: {
       type: 'array',
       maxItems: 20,
       items: z.toJSONSchema(discoveryInput, { target: 'draft-7' }),
     },
   },
-  required: ['completed', 'summary', 'discoveries'],
 };
 export const reviewSchema = {
   type: 'object',
@@ -614,6 +621,8 @@ export function reviewTransitions(
     basis,
   }));
 }
+/** Маркер описания задачи: demo-исполнитель задаёт вопрос (fixture, не модель). */
+export const DEMO_ASK = '[demo:ask]';
 // Deterministic fixture only. Never claim these outputs were produced by a model.
 export const demoAdapter: AgentAdapter = {
   name: 'demo',
@@ -658,6 +667,31 @@ export const demoAdapter: AgentAdapter = {
         command: ['internal:demo-review'],
       };
     }
+    // Fixture-поведение для обучения и e2e: задача с маркером `[demo:ask]`
+    // останавливается вопросом исполнителя, пока в закреплённом контексте нет
+    // ответа (`input/<id>.md`). Это не вопрос модели.
+    if (r.task.description?.includes(DEMO_ASK) && !/### input\/IR-[a-f0-9]{24}\.md/.test(r.prompt))
+      return {
+        data: {
+          completed: false,
+          summary: 'Demo fixture: нужен ответ на вопрос исполнителя; это не вопрос модели.',
+          discoveries: [],
+          inputRequest: {
+            question: `Demo fixture: какой формат артефакта задачи ${r.task.id} выбрать?`,
+            options: [
+              { id: 'json', label: 'JSON', consequence: 'Артефакт читают проверки как сейчас' },
+              { id: 'yaml', label: 'YAML', consequence: 'Проверки придётся менять' },
+            ],
+            recommended: 'json',
+            severity: 8,
+            rationale: 'Формат артефакта виден проверкам задачи',
+            affects: [],
+          },
+          assumptions: [],
+        },
+        log: 'Demo fixture writer asked for input; no model invoked',
+        command: ['internal:demo-writer-ask'],
+      };
     await mkdir(join(r.cwd, 'deliverables'), { recursive: true });
     await writeFile(
       join(r.cwd, 'deliverables', `${r.task.id}.json`),
