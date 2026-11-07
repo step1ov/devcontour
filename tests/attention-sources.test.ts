@@ -940,7 +940,12 @@ test('S10 отменённый корень: зависимые сняты — �
         },
       ],
     });
+    // Ещё одна ждущая, пока карточка активна: то же появление.
+    await new Promise((r) => setTimeout(r, 5));
+    const extra = f.h.addTask(b.id, input('Another dependent task', [root.id]));
+    assert.equal(byKey((await service.active()).items, key)!.occurrenceId, card.occurrenceId);
     f.h.cancel(dep.id, 'replanned', 'operator');
+    f.h.cancel(extra.id, 'replanned', 'operator');
     assert.equal(byKey((await service.active()).items, key), undefined);
     await new Promise((r) => setTimeout(r, 5));
     f.h.addTask(b.id, input('New dependent task', [root.id]));

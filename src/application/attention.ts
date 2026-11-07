@@ -842,14 +842,19 @@ const workTitles: Record<string, (title: string) => string> = {
   'fix-access': (t) => `Нужен доступ для задачи «${t}»`,
 };
 const accessActions = new Set(['fix-access', 'fix-environment']);
-/** Последняя открытая задача, прямо ждущая `id`: создание или утверждение. */
+/**
+ * Якорь появления отменённого корня — самая ранняя открытая задача, прямо
+ * ждущая его (создание или утверждение): новая ждущая рядом с прежними
+ * появление не меняет, а после решения (ждущих не осталось) новая ждущая —
+ * новое появление. Сдвигается, только если ранняя ждущая сама ушла, пока
+ * другие ещё ждут.
+ */
 function dependentsAnchor(ctx: AttentionContext, id: string) {
   return (
     ctx.state.tasks
       .filter((t) => t.dependsOn.includes(id) && t.status !== 'done' && t.status !== 'cancelled')
       .map((t) => t.approvedAt ?? t.createdAt ?? '')
-      .sort()
-      .at(-1) ?? 'none'
+      .sort()[0] ?? 'none'
   );
 }
 /**
