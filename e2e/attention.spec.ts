@@ -33,7 +33,7 @@ test('Attention API before setup: list, marks, stale and resolved acts, history 
       data: { operation, input },
     });
     expect(response.ok(), await response.text()).toBeTruthy();
-    return response.json();
+    return (await response.json()) as Record<string, unknown>;
   };
   const list = async (query = '') => {
     const response = await request.get(app.url + '/api/attention' + query);
@@ -47,18 +47,18 @@ test('Attention API before setup: list, marks, stale and resolved acts, history 
   try {
     await agent('preparation_create', { title: 'Модерация чата' });
     const status = await agent('preparation_status');
-    const changeId = status.activeChangeId as string;
+    const changeId = String(status.activeChangeId);
     await agent('preparation_question', {
       changeId,
       stage: 'architecture',
       add: [{ text: 'Кто модерирует чат ночью?', options: ['Бот', 'Дежурный'] }],
     });
-    const draft = await agent('preparation_product', {
+    const draft = (await agent('preparation_product', {
       changeId,
       expectedDigest: null,
       reason: 'Постановка',
       content: product,
-    });
+    })) as { current: { product: { digest: string } } };
     await agent('preparation_submit', {
       changeId,
       stage: 'product',
@@ -103,7 +103,7 @@ test('Attention API before setup: list, marks, stale and resolved acts, history 
       },
     });
     expect(stale.status()).toBe(409);
-    expect((await stale.json()).code).toBe('attention-stale');
+    expect(((await stale.json()) as { code: string }).code).toBe('attention-stale');
 
     const act = (item: Item, action: string, input?: unknown) =>
       request.post(app.url + '/api/attention/act', {
@@ -118,15 +118,15 @@ test('Attention API before setup: list, marks, stale and resolved acts, history 
       });
     const answered = await act(question, 'answer', { text: 'Дежурный модератор' });
     expect(answered.ok(), await answered.text()).toBeTruthy();
-    expect((await answered.json()).resolved).toBe(true);
+    expect(((await answered.json()) as { resolved: boolean }).resolved).toBe(true);
     const again = await act(question, 'answer', { text: 'Дежурный модератор' });
     expect(again.status()).toBe(409);
-    expect((await again.json()).code).toBe('attention-resolved');
+    expect(((await again.json()) as { code: string }).code).toBe('attention-resolved');
 
-    const history = await (await request.get(app.url + '/api/attention?view=history')).json();
-    const resolved = (history.items as (Item & { resolvedAt: string | null })[]).find(
-      (i) => i.id === question.id,
-    )!;
+    const history = (await (await request.get(app.url + '/api/attention?view=history')).json()) as {
+      items: (Item & { resolvedAt: string | null })[];
+    };
+    const resolved = history.items.find((i) => i.id === question.id)!;
     expect(resolved.resolvedAt).toBeTruthy();
     expect(resolved.actions).toEqual([]);
 
