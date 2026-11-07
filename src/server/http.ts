@@ -51,6 +51,8 @@ import { DevContour, specDigest } from '../core/service.ts';
 import { DomainError } from '../core/model.ts';
 import { blockers, readyTasks } from '../core/graph.ts';
 import { Scheduler } from '../runner/scheduler.ts';
+import { requestInputPolicy } from '../runner/reconfigure.ts';
+import { InputService, inputHolds } from '../application/input.ts';
 import { acceptBoard } from '../runner/agent-control.ts';
 import { modelRuntimes, repositories } from '../core/repositories.ts';
 import { WorkspaceRunner } from '../runner/workspace.ts';
@@ -558,6 +560,13 @@ export async function serve(
               ? { limit: Number(url.searchParams.get('limit')) }
               : {}),
           });
+        } else if (
+          req.method === 'GET' &&
+          parts[1] === 'tasks' &&
+          parts[3] === 'input' &&
+          !parts[4]
+        ) {
+          result = new InputService(h, scheduler.root).taskView(decodeURIComponent(parts[2]));
         } else if (req.method === 'GET' && parts[1] === 'tasks' && parts[3] === 'runs') {
           result = panelRuns(h, decodeURIComponent(parts[2]), Object.fromEntries(url.searchParams));
         } else if (req.method === 'GET' && parts[1] === 'runs' && parts[2] && !parts[3]) {
@@ -575,6 +584,7 @@ export async function serve(
           const events = h.store.events();
           // Один момент на весь ответ: lease-причины задач не расходятся.
           const now = Date.now();
+          const inputs = inputHolds(h);
           result = {
             ...state,
             // `paused` и `pauseReason` не объясняли остановку: причину и
@@ -599,7 +609,7 @@ export async function serve(
             tasks: state.tasks.map((t) => ({
               ...t,
               specDigest: specDigest(t),
-              blockers: blockers(t, state),
+              blockers: blockers(t, state, inputs),
               progress: taskProgress(h!, state, t, now),
               checks: checksSummary(t),
             })),
@@ -607,7 +617,7 @@ export async function serve(
             journalError: h.store.projectionError,
             workflows: new LeadWorkflow(h).view(),
             dataRoot: resolve(scheduler.root),
-            ready: readyTasks(state).map((t) => t.id),
+            ready: readyTasks(state, inputs).map((t) => t.id),
             config: {
               name: h.config.name,
               workspaceRoot: h.config.workspaceRoot,
@@ -618,6 +628,10 @@ export async function serve(
               // Метка «без вызовов моделей» — только если их правда нет.
               modelRuntimes: modelRuntimes(h.config),
               approvalMode: h.config.approvalMode,
+              // Порог вопросов исполнителя и digest действующей конфигурации:
+              // панель меняет порог с ожидаемым digest.
+              inputPolicy: h.config.inputPolicy ?? null,
+              configDigest: h.configDigest,
               completionMode: h.config.completionMode,
               storage: h.config.storage,
               concurrency: h.config.concurrency,
@@ -751,6 +765,9 @@ export async function serve(
               { actor: 'operator' },
               z.string().optional().parse(input.repositoryId),
             );
+          else if (path === '/api/config/input-policy')
+            // Порог вопросов исполнителя — выбор оператора: не операция агента.
+            result = requestInputPolicy(h, scheduler.root, input);
           else if (path === '/api/scheduler') {
             const start = z.boolean().parse(input.start);
             // Сервер останавливается: запуск очереди снял бы паузу остановки,
@@ -799,6 +816,17 @@ export async function serve(
           } else if (parts[1] === 'checks' && parts[3] === 'pending' && parts[5] === 'approve') {
             // Подтверждение оператора из панели: тот же доменный метод, что CLI.
             result = new CheckCorpus(h).approveAdoption(parts[2], parts[4]).pending;
+          } else if (parts[1] === 'tasks' && parts[3] === 'input' && parts[4] && parts[5]) {
+            // Вопрос исполнителя — действие оператора в панели.
+            const input2 = new InputService(h, scheduler.root);
+            const [taskId, requestId] = [
+              decodeURIComponent(parts[2]),
+              decodeURIComponent(parts[4]),
+            ];
+            if (parts[5] === 'answer') result = input2.answerInTask(taskId, requestId, input);
+            else if (parts[5] === 'apply') result = input2.applyInTask(taskId, requestId, input);
+            else if (parts[5] === 'cancel') result = input2.cancelInTask(taskId, requestId, input);
+            else throw new DomainError('Команда не найдена', 404);
           } else if (parts[1] === 'tasks') {
             // Кнопки панели — действие человека (`operator`).
             if (parts[3] === 'discussion')

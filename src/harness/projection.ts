@@ -26,6 +26,7 @@ import {
   type ControllerLease,
   type GraphState,
   type JointVerificationState,
+  type LocalNamespace,
   type WorkOrder,
   type WorkState,
 } from 'devcontour-harness';
@@ -579,8 +580,15 @@ export function putVerification(
 /* Локальные записи                                                    */
 /* ------------------------------------------------------------------ */
 
-/** Пространство harness → пространство `local_workflow` DevContour. */
-export const hostNamespace: Record<string, string> = {
+/**
+ * Пространство harness → пространство `local_workflow` DevContour. Ключи —
+ * все пространства договора, кроме реестра воспроизведений (он живёт в
+ * документе): новое пространство harness без записи здесь не компилируется.
+ */
+export const hostNamespace: Record<
+  Exclude<LocalNamespace, 'reproductions'>,
+  string
+> = {
   usage: 'usage',
   'check-suites': 'check-suites',
   'workflow-jobs': 'lead',
@@ -590,6 +598,7 @@ export const hostNamespace: Record<string, string> = {
   delivery: 'delivery',
   reviews: 'reviews',
   'contract-documents': 'contract-documents',
+  'input-requests': 'input-requests',
 };
 
 /** Учёт вызова: `taskId` ↔ `workId`, `boardId` ↔ `groupId`, `taskIds` ↔ `workIds`. */

@@ -298,6 +298,26 @@ export interface Task extends TaskInput {
   /** Незасчитанные отказы окружения после начала работы (счётчик движка). */
   neutralFailures?: number;
   approval?: Approval;
+  /**
+   * Снимок контекста с ответами на вопросы исполнителя, активированный
+   * `applyInput`/`carryInput` (порт `InputHost`): claim закрепляет его, пока
+   * утверждение задачи то же (`approvedDigest`). Локальная запись: в Git не
+   * переносится. Нет поля — контекст задачи живой, из закреплённых пакетов.
+   */
+  inputContext?: TaskInputContext;
+}
+/** Активированный снимок контекста с ответами (`Task.inputContext`). */
+export interface TaskInputContext {
+  /** Digest снимка (`contextDigest`), закреплённого в `context-snapshots`. */
+  digest: string;
+  /** Утверждение задачи, к которому привязан снимок: другое — снимок не действует. */
+  approvedDigest?: string;
+  /** Запросы, ответы которых несёт снимок, по порядку активации. */
+  requestIds: string[];
+  /** Digest основания продолжения последней активации. */
+  targetDigest: string;
+  actor: 'agent' | 'operator';
+  activatedAt: string;
 }
 export interface Approval {
   actor: 'operator' | 'agent';
@@ -625,6 +645,14 @@ export interface Run {
   dependencies?: DependencySnapshot[];
   /** Свежесть снимка зависимостей на момент завершения: голова ветки и совпадение. */
   dependencyFreshness?: { repositoryId: string; snapshot: string; head: string; fresh: boolean }[];
+  /** Политика вопросов исполнителя, закреплённая при выдаче (движок). */
+  inputPolicy?: AttemptState['inputPolicy'];
+  /** Решения, которые исполнитель принял сам, с оценкой controller (движок). */
+  assumptions?: AttemptState['assumptions'];
+  /** Ответ на вопрос, с которым выдана попытка (движок). */
+  input?: AttemptState['input'];
+  /** Основания, закреплённые при выдаче, в том числе снимок контекста с ответом (движок). */
+  pinned?: AttemptState['pinned'];
 }
 // Ревью контракта — работа с попытками: отклонение оставляет находки, которые
 // стоили вызова модели. Без записи в состоянии они живут только файлами на
@@ -1112,6 +1140,20 @@ export const configSchema = z.object({
    * план не переутверждается, digest исполнения не меняется.
    */
   stallSweep: stallSweepConfigSchema.optional(),
+  /**
+   * Вопросы исполнителя (`inputPolicy` политики harness): порог серьёзности
+   * 1–10, с которого writer останавливается и спрашивает, 11 — автономный
+   * режим без остановок; `criticalPaths` — пути, изменение которых делает
+   * вопрос критическим. Нет поля — умолчание harness (7, без путей), digest
+   * конфигурации прежний. Эксплуатационный ключ: план не переутверждается,
+   * порог закрепляется в попытке при выдаче и действует со следующей.
+   */
+  inputPolicy: z
+    .strictObject({
+      threshold: z.number().int().min(1).max(11),
+      criticalPaths: z.array(relativePath).max(50).optional(),
+    })
+    .optional(),
   // Проверки, которые ревьюер запускает сам: предел одной команды, общий
   // бюджет и резерв срока ревью на заключение. Бюджет и резерв сверх того
   // ограничены сроком фазы (см. probeLimits).

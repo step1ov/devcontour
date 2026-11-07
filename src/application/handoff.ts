@@ -6,6 +6,7 @@
 // Это не handoff публикации ChangeSet (`devcontour handoff --changeset`):
 // тот готовит результат к push/PR человеком.
 import { DiscussionService, type InboxRequest } from './discussion.ts';
+import { InputService } from './input.ts';
 import {
   HANDOFF_MAX_BYTES,
   HANDOFF_MIN_BYTES,
@@ -82,7 +83,10 @@ export interface HandoffHostNext {
     | 'queue_set'
     | 'decide'
     | 'fix-input'
-    | 'operator';
+    | 'operator'
+    | 'answer-input'
+    | 'apply-input'
+    | 'close-follow-up';
   boardId?: string;
   /** Задание ведущего, к которому относится шаг. */
   job?: {
@@ -115,6 +119,8 @@ export interface HandoffHostNext {
     blocked: { id: string; reason: string }[];
     blockedCount: number;
   };
+  /** Вопрос исполнителя, к которому относится шаг (`answer-input`, `apply-input`, `close-follow-up`). */
+  input?: { requestId: string; taskId: string; state: string; actor: 'lead' | 'operator' };
   detail: string;
 }
 
@@ -503,6 +509,9 @@ const urgency: Record<HandoffHostNext['action'], number> = {
   decide: 0,
   'fix-input': 0,
   operator: 0,
+  'answer-input': 0,
+  'apply-input': 0,
+  'close-follow-up': 1,
   queue_set: 1,
   workflow_retry: 1,
   workflow_start: 2,
@@ -517,9 +526,95 @@ const rank = (x: HandoffHostNext) => (x.decision === 'plan' ? 4 : urgency[x.acti
  * команды не называет, хотя исходную паузу и паузу остановки снимает только
  * цикл задания доски.
  */
+/**
+ * Шаг по вопросу исполнителя, когда его называет пакет (`INPUT_REQUIRED`):
+ * ответ — оператор в панели (ведущий — только вопрос без минимумов в режиме
+ * agent), применение — цепочка ведущего, follow-up — его закрытие. Шага
+ * очереди не придумывает: вопрос выдачу не держит.
+ */
+function inputNext(ctx: HostContext): HandoffHostNext | undefined {
+  const { pack, view, h } = ctx;
+  if (pack.next.code !== 'INPUT_REQUIRED' || !pack.next.workId) return undefined;
+  const taskId = pack.next.workId;
+  const service = new InputService(h);
+  const summary = service
+    .list({ taskId })
+    .requests.filter((r) => !['cancelled', 'superseded', 'delivered'].includes(r.state))
+    .sort((a, b) => Number(b.blocking) - Number(a.blocking))[0];
+  if (!summary) return undefined;
+  const boardId = view.work(taskId)?.graphId;
+  const ref = {
+    requestId: summary.requestId,
+    taskId,
+    state: summary.state,
+    actor: summary.actor,
+  };
+  const base = { ...(boardId ? { boardId } : {}), input: ref };
+  const operator = h.config.approvalMode === 'operator';
+  if (!summary.blocking)
+    return {
+      action: 'close-follow-up',
+      ...base,
+      detail: `Follow-up ${summary.requestId} of task ${taskId} (a decision the writer took itself, severity ${summary.severity}): accept it with input_cancel {"requestId": "${summary.requestId}", "expectedVersion": ${summary.version}, "reason": "assumption accepted"} or, if it changes requirements, correct the board (board_correct) and input_supersede with the replacement task (a task without an accepted result: reopen, respecify and supersede with the same task).`,
+    };
+  if (summary.state === 'awaiting-answer')
+    return {
+      action: 'answer-input',
+      ...base,
+      detail:
+        summary.actor === 'lead'
+          ? `Task ${taskId} waits for an answer to ${summary.requestId} (no floors, approvalMode agent): answer with input_answer {"requestId": "${summary.requestId}", "expectedVersion": ${summary.version}, …} after input_show, or let the operator answer in the panel (/tasks/${taskId}#input). The answer does not resume the task by itself.`
+          : `Task ${taskId} waits for the operator's answer to ${summary.requestId} in the panel (/tasks/${taskId}#input)${summary.floors.length ? `: the question is critical (${summary.floors.join(', ')})` : ''}. Wait: the lead does not answer it and no queue step helps.`,
+    };
+  const chain = operator
+    ? `input_context, input_review --author-runtime; then the operator applies in the panel (/tasks/${taskId}#input)`
+    : 'input_context, input_review --author-runtime, input_target, input_apply';
+  return {
+    action: 'apply-input',
+    ...base,
+    detail:
+      summary.state === 'stale'
+        ? `The applied answer to ${summary.requestId} went stale before the next attempt (${summary.stale?.reason ?? 'context'}): rebuild it — ${chain}.`
+        : summary.state === 'review-rejected'
+          ? `The reviewer rejected the answer to ${summary.requestId} (input_show names the findings): correct the answer, or reopen and respecify the task${operator ? '; the operator may apply it only with explicit confirmation' : ''}.`
+          : summary.state === 'applied-awaiting-claim'
+            ? `The answer to ${summary.requestId} is applied; task ${taskId} waits for its next attempt.`
+            : `The answer to ${summary.requestId} is saved but not applied (${summary.state}): ${chain}.`,
+  };
+}
+
+/**
+ * Открытый follow-up (решение исполнителя в автономном режиме), когда
+ * других шагов нет: работа может быть уже принята, а решение ждёт ведущего.
+ */
+function followUpNext(ctx: HostContext): HandoffHostNext | undefined {
+  const { pack, h } = ctx;
+  const open = new InputService(h)
+    .list()
+    .requests.find(
+      (r) =>
+        r.kind === 'follow-up' &&
+        r.state === 'awaiting-answer' &&
+        (!pack.graphId || r.boardId === pack.graphId),
+    );
+  if (!open) return undefined;
+  return {
+    action: 'close-follow-up',
+    ...(open.boardId ? { boardId: open.boardId } : {}),
+    input: { requestId: open.requestId, taskId: open.taskId, state: open.state, actor: 'lead' },
+    detail: `Follow-up ${open.requestId} of task ${open.taskId} (a decision the writer took itself, severity ${open.severity}): accept it with input_cancel {"requestId": "${open.requestId}", "expectedVersion": ${open.version}, "reason": "assumption accepted"} or, if it changes requirements, correct the board (board_correct) and input_supersede with the replacement task (a task without an accepted result: reopen, respecify and supersede with the same task).`,
+  };
+}
+
 function hostNext(ctx: HostContext): HandoffHostNext | undefined {
+  return hostStep(ctx) ?? followUpNext(ctx);
+}
+
+function hostStep(ctx: HostContext): HandoffHostNext | undefined {
   const { pack, view, state, h } = ctx;
   if (!pack.summary.open) return undefined;
+  const input = inputNext(ctx);
+  if (input) return input;
   if (h.config.approvalMode === 'operator') return { action: 'operator', detail: OPERATOR_STEP };
   const workId = pack.next.workId;
   const next = (workId ? view.work(workId)?.graphId : undefined) ?? pack.graphId;

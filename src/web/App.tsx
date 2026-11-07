@@ -42,6 +42,8 @@ import {
 import type { Task, Run } from '../core/model.ts';
 import { Alert, AlertDescription } from '@/ui/alert.tsx';
 import { Badge } from '@/ui/badge.tsx';
+import { TaskInput } from './TaskInput.tsx';
+import { heldByInput } from './input-labels.ts';
 import { Button } from '@/ui/button.tsx';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/ui/dialog.tsx';
 import { Input } from '@/ui/input.tsx';
@@ -225,6 +227,14 @@ function TaskLive({
         </span>
         <GateChips run={run} />
       </div>
+    );
+  // Вопрос исполнителя держит задачу и после устаревшего применения (ready):
+  // строка называет ожидание ответа, а не зависимость.
+  if (heldByInput(task))
+    return (
+      <small className="mt-1 block" data-input-waiting>
+        <Badge variant="destructive">Ждёт ответа</Badge>
+      </small>
     );
   if (task.status === 'ready' && task.blockers.length)
     return hideWaiting ? null : (
@@ -2945,6 +2955,10 @@ export function App() {
                         Задача доступна для выдачи исполнителю.
                       </p>
                     )}
+                    <TaskInput
+                      taskId={task.id}
+                      revision={[task.status, task.attempt, task.failureKind ?? ''].join(':')}
+                    />
                     {task.failure && (
                       <p className="bg-destructive-foreground text-destructive mt-3 mb-0 rounded-md p-3 break-words [overflow-wrap:anywhere]">
                         {stalledFailure && !/завис/i.test(task.failure) && (
@@ -2982,7 +2996,8 @@ export function App() {
                             </Button>
                           </>
                         )}
-                        {['failed', 'cancelled'].includes(task.status) && (
+                        {/* Задачу с вопросом держит вопрос: повтор отказал бы, продолжение — ответ. */}
+                        {['failed', 'cancelled'].includes(task.status) && !heldByInput(task) && (
                           <Button
                             variant="outline"
                             size="sm"

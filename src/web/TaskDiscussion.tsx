@@ -28,6 +28,10 @@ export interface DiscussionMessage {
     outcome: Outcome;
     refs: { boardId?: string; revision?: number; taskIds?: string[] };
   };
+  /** Ответ на вопрос исполнителя: версия ответа или поздний ответ без продолжения. */
+  input?:
+    | { requestId: string; revision: number; answerDigest: string }
+    | { requestId: string; accepted: false; lifecycle: string };
 }
 interface Page {
   taskId: string;
@@ -415,6 +419,12 @@ export function TaskDiscussion({
                   ) : (
                     <Badge variant={m.kind === 'change-request' ? 'ready' : 'secondary'}>
                       {kindNames[m.kind as Exclude<Kind, 'disposition'>] ?? m.kind}
+                      {m.input && 'revision' in m.input ? ` на вопрос, r${m.input.revision}` : ''}
+                    </Badge>
+                  )}
+                  {m.input && 'accepted' in m.input && (
+                    <Badge variant="outline" data-late-answer>
+                      не принят: вопрос уже {m.input.lifecycle === 'cancelled' ? 'снят' : 'заменён'}
                     </Badge>
                   )}
                   <time

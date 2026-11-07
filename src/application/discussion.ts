@@ -4,6 +4,8 @@ import { DomainError, type DevContourState, type Task } from '../core/model.ts';
 import { digest, specDigest, type DevContour } from '../core/service.ts';
 import { repositories } from '../core/repositories.ts';
 import { taskOwner } from '../core/sync-state.ts';
+import { executionOf } from '../harness/execution.ts';
+import { InputService } from './input.ts';
 import {
   DISCUSSION_PAGE_BYTES,
   DISCUSSION_TEXT_BYTES,
@@ -95,7 +97,7 @@ export class DiscussionService {
       : this.h.store.discussionPage(owner, task.id, after, v.limit);
     const items: DiscussionMessage[] = [];
     for (const row of rows) {
-      const message = discussionMessage.parse(row);
+      const message = this.parse(row);
       if (!checkJsonBytes([message], maxBytes).within)
         throw new DomainError('Запись больше страницы', 413);
       // Вперёд страница режется с нового края, назад — со старого (ниже).
@@ -122,10 +124,59 @@ export class DiscussionService {
     };
   }
 
-  /** Заметка или обращение к ведущему от `author`. */
+  /**
+   * Запись хранилища в форме сообщения. У принятого ответа на вопрос
+   * исполнителя текста в записи нет: он берётся из запроса harness по версии
+   * ответа (канонический текст хранится один раз).
+   */
+  private parse(row: unknown): DiscussionMessage {
+    const value = row as { text?: unknown; input?: { requestId: string; revision?: number } };
+    if (value.text === undefined && value.input?.revision !== undefined) {
+      let text = '(ответ не найден в запросе исполнителя)';
+      try {
+        const request = executionOf(this.h).engine.inputRequest(value.input.requestId);
+        text = request.answers.find((a) => a.revision === value.input!.revision)?.text ?? text;
+      } catch {
+        /* Запрос не найден: сообщение остаётся читаемым. */
+      }
+      return discussionMessage.parse({ ...value, text });
+    }
+    return discussionMessage.parse(row);
+  }
+
+  /** Сообщение задачи по ID (ссылка ответа, выбор для снимка с ответом). */
+  message(taskId: string, id: string) {
+    const task = this.task(this.h.store.read(), taskId);
+    const row = this.h.store.discussionById(taskOwner(task), id);
+    if (!row) return undefined;
+    const message = this.parse(row);
+    return message.taskId === taskId ? message : undefined;
+  }
+
+  /** Заметка, обращение к ведущему или ответ на вопрос исполнителя от `author`. */
   post(raw: unknown, author: Exclude<Author, 'runtime'>) {
     tooLong(raw);
     const v = discussionInputs.discussion_post.parse(raw);
+    if (v.kind === 'answer') {
+      if (!v.input)
+        throw new DomainError('Ответ на вопрос исполнителя называет запрос (input.requestId)', 400);
+      return this.answer(
+        {
+          taskId: v.taskId,
+          text: v.text,
+          idempotencyKey: v.idempotencyKey,
+          ...v.input,
+          ...(v.supersedes ? { supersedes: v.supersedes } : {}),
+          ...(v.replyTo ? { replyTo: v.replyTo } : {}),
+        },
+        author,
+      );
+    }
+    if (v.input)
+      throw new DomainError(
+        'Поле input — только у ответа на вопрос исполнителя (kind answer)',
+        400,
+      );
     return this.append(v.taskId, author, {
       kind: v.kind,
       text: v.text,
@@ -184,7 +235,7 @@ export class DiscussionService {
             code: 'request-superseded',
           });
         const last = this.h.store.discussionLatestDisposition(owner, request.id);
-        const outcome = last && discussionMessage.parse(last).disposition?.outcome;
+        const outcome = last && this.parse(last).disposition?.outcome;
         if (outcome && outcome !== 'needs-answer')
           throw new DomainError('Обращение уже обработано', 409, { code: 'already-resolved' });
       },
@@ -225,7 +276,7 @@ export class DiscussionService {
       row: (typeof lists)[number]['rows'][number],
       bytes: number,
     ): InboxRequest => {
-      const message = discussionMessage.parse(row.message);
+      const message = this.parse(row.message);
       const text = options.redact ? options.redact(message.text) : message.text;
       const { excerpt, truncated } = clipText(text, bytes);
       return {
@@ -275,11 +326,160 @@ export class DiscussionService {
     };
   }
 
+  /**
+   * Ответ на вопрос исполнителя сообщением обсуждения. Одна транзакция:
+   * повтор по ключу — прежнее сообщение; ответ записывается в запрос harness
+   * (`InputService.answer`, правило актёра — там же) со ссылкой на это
+   * сообщение (`messageRef`), а сообщение хранит ссылку на версию ответа без
+   * текста. CAS — версия запроса, а не треда. Поздний ответ (запрос снят
+   * или заменён) сохраняется историей обсуждения с текстом и
+   * `accepted: false` и задачу не возобновляет; применённый ответ не
+   * исправляется (409: изменение — обращением к ведущему).
+   */
+  answer(
+    v: {
+      taskId: string;
+      requestId: string;
+      text: string;
+      idempotencyKey: string;
+      expectedVersion: number;
+      optionId?: string;
+      kind?: 'clarification' | 'requirement-change';
+      supersedes?: string;
+      replyTo?: string;
+    },
+    author: Exclude<Author, 'runtime'>,
+  ) {
+    const payloadDigest = digest({
+      taskId: v.taskId,
+      author,
+      kind: 'answer',
+      text: v.text,
+      requestId: v.requestId,
+      optionId: v.optionId ?? null,
+      answerKind: v.kind ?? 'clarification',
+      replyTo: v.replyTo ?? null,
+      supersedes: v.supersedes ?? null,
+    });
+    const inputs = new InputService(this.h);
+    return this.h.store.atomic(() => {
+      const state = this.h.store.read();
+      const task = this.task(state, v.taskId);
+      const owner = taskOwner(task);
+      const same = this.h.store.discussionByKey(owner, v.taskId, author, v.idempotencyKey);
+      if (same) {
+        const existing = this.parse(same);
+        if (existing.payloadDigest !== payloadDigest)
+          throw new DomainError('Ключ запроса уже использован другим сообщением', 409, {
+            code: 'idempotency-conflict',
+          });
+        return {
+          message: existing,
+          version: this.h.store.discussionVersion(owner, v.taskId),
+          delivered: !!existing.input && !('accepted' in existing.input),
+        };
+      }
+      const request = inputs.show({ requestId: v.requestId });
+      if (request.taskId !== v.taskId)
+        throw new DomainError(`Запрос ${v.requestId} не относится к задаче ${v.taskId}`, 404);
+      for (const ref of [v.replyTo, v.supersedes]) {
+        if (!ref) continue;
+        const target = this.h.store.discussionById(owner, ref) as { taskId?: string } | undefined;
+        if (!target || target.taskId !== v.taskId)
+          throw new DomainError('Ссылка на сообщение другой задачи или несуществующее', 400);
+      }
+      if (v.supersedes) {
+        const target = this.parse(this.h.store.discussionById(owner, v.supersedes));
+        if (target.author !== author || target.kind !== 'answer')
+          throw new DomainError('Исправить можно только свой ответ', 403);
+        if (target.input?.requestId !== v.requestId)
+          throw new DomainError('Исправление ответа — ответ на тот же вопрос', 400);
+        if (this.h.store.discussionSupersededBy(owner, v.supersedes))
+          throw new DomainError('Ответ уже исправлен: исправьте его новую версию', 409, {
+            code: 'already-superseded',
+          });
+      }
+      const id = 'DM-' + randomUUID();
+      let input: NonNullable<DiscussionMessage['input']>;
+      try {
+        const saved = inputs.answer(
+          {
+            requestId: v.requestId,
+            text: v.text,
+            ...(v.optionId ? { optionId: v.optionId } : {}),
+            ...(v.kind ? { kind: v.kind } : {}),
+            expectedVersion: v.expectedVersion,
+          },
+          author,
+          { messageRef: id },
+        );
+        input = {
+          requestId: v.requestId,
+          revision: saved.revision,
+          answerDigest: saved.answerDigest,
+        };
+      } catch (error) {
+        const code = (error as { code?: string }).code;
+        if (code !== 'NOT_READY') throw error;
+        const lifecycle = inputs.show({ requestId: v.requestId }).lifecycle;
+        if (lifecycle === 'applied')
+          throw new DomainError(
+            `Ответ на запрос ${v.requestId} уже применён: изменение — обращение к ведущему (change-request)`,
+            409,
+            { code: 'answer-applied' },
+          );
+        // Поздний ответ — только к снятому или заменённому вопросу; иной отказ
+        // NOT_READY остаётся отказом.
+        if (lifecycle !== 'cancelled' && lifecycle !== 'superseded') throw error;
+        input = { requestId: v.requestId, accepted: false, lifecycle };
+      }
+      const late = 'accepted' in input;
+      const latest = state.runs.filter((r) => r.taskId === v.taskId).at(-1);
+      const record = {
+        id,
+        taskId: v.taskId,
+        threadId: v.taskId,
+        author,
+        kind: 'answer' as const,
+        // Принятый ответ — текст в запросе harness; поздний — только здесь.
+        ...(late ? { text: v.text } : {}),
+        createdAt: new Date().toISOString(),
+        ...(v.replyTo ? { replyTo: v.replyTo } : {}),
+        ...(v.supersedes ? { supersedes: v.supersedes } : {}),
+        basis: { specDigest: specDigest(task), ...(latest ? { runId: latest.id } : {}) },
+        idempotencyKey: v.idempotencyKey,
+        payloadDigest,
+        input,
+      };
+      const seq = this.h.store.discussionInsert(
+        owner,
+        {
+          id,
+          taskId: v.taskId,
+          author,
+          idempotencyKey: v.idempotencyKey,
+          kind: 'answer',
+          ...(v.replyTo ? { replyTo: v.replyTo } : {}),
+        },
+        record,
+      );
+      this.h.store.appendEvent('discussion.posted', {
+        taskId: v.taskId,
+        messageId: id,
+        kind: 'answer',
+        author,
+        requestId: v.requestId,
+        accepted: !late,
+      });
+      return { message: this.parse({ ...record, seq }), version: seq, delivered: !late };
+    });
+  }
+
   private find(id: string) {
     const owners = [undefined, ...repositories(this.h.config).map((r) => r.id)];
     for (const owner of owners) {
       const row = this.h.store.discussionById(owner, id);
-      if (row) return discussionMessage.parse(row);
+      if (row) return this.parse(row);
     }
     return undefined;
   }
@@ -316,7 +516,7 @@ export class DiscussionService {
       // timeout) возвращает прежнюю запись; другой payload под ключом — отказ.
       const same = this.h.store.discussionByKey(owner, taskId, author, input.idempotencyKey);
       if (same) {
-        const existing = discussionMessage.parse(same);
+        const existing = this.parse(same);
         if (existing.payloadDigest !== payloadDigest)
           throw new DomainError('Ключ запроса уже использован другим сообщением', 409, {
             code: 'idempotency-conflict',
@@ -336,9 +536,7 @@ export class DiscussionService {
           throw new DomainError('Ссылка на сообщение другой задачи или несуществующее', 400);
       }
       if (input.supersedes) {
-        const target = discussionMessage.parse(
-          this.h.store.discussionById(owner, input.supersedes),
-        );
+        const target = this.parse(this.h.store.discussionById(owner, input.supersedes));
         if (target.author !== author)
           throw new DomainError('Исправить можно только своё сообщение', 403);
         if (target.kind === 'disposition')

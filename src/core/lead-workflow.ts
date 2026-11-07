@@ -1,7 +1,13 @@
 import { developmentBinding, assertTaskPreparation } from './preparation.ts';
 import { carriedTaskIds } from './work-status.ts';
 import { z } from 'zod';
-import { HarnessError, WorkflowQueue, type WorkflowJob as HarnessJob } from 'devcontour-harness';
+import {
+  HarnessError,
+  WORKSPACE_OWNER,
+  WorkflowQueue,
+  blocksWork,
+  type WorkflowJob as HarnessJob,
+} from 'devcontour-harness';
 import { domain, executionOf } from '../harness/execution.ts';
 import type { DevContourState } from './model.ts';
 import { DevContour, digest, scopeGaps } from './service.ts';
@@ -10,6 +16,44 @@ import { boardOwner } from './sync-state.ts';
 import { Workspace } from './workspace.ts';
 import { repositories } from './repositories.ts';
 import { technicalReviewer } from '../harness/policy.ts';
+
+/** Событие истории задания: стадия ждёт ответов на вопросы исполнителя. */
+export const WAITING_INPUT = 'waiting:input';
+
+/**
+ * Стадия доски ждёт только ответов: попыток задач нет, а каждая
+ * незавершённая задача держится вопросом исполнителя или зависит (через
+ * незавершённые) от такой. Тогда задание не падает и не чинит задачи — оно
+ * ждёт `applyInput`, который вернёт задачу в очередь. Независимые задачи,
+ * которые ещё можно выдать, ожиданием ответа не считаются.
+ */
+export function inputWaiting(
+  h: DevContour,
+  s: DevContourState,
+  taskIds: readonly string[],
+): { kind: 'input'; requestIds: string[] } | undefined {
+  const ids = new Set(taskIds);
+  if (s.runs.some((r) => r.status === 'active' && ids.has(r.taskId))) return undefined;
+  const open = s.tasks.filter(
+    (t) => ids.has(t.id) && t.status !== 'done' && t.status !== 'cancelled',
+  );
+  if (!open.length) return undefined;
+  const held = new Map<string, string>();
+  for (const r of executionOf(h).engine.inputRequests())
+    if (ids.has(r.workId) && blocksWork(r)) held.set(r.workId, r.id);
+  if (!held.size) return undefined;
+  const byId = new Map(open.map((t) => [t.id, t]));
+  const waits = (id: string, seen = new Set<string>()): boolean => {
+    if (held.has(id)) return true;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    const task = byId.get(id);
+    return !!task && task.dependsOn.some((d) => byId.has(d) && waits(d, seen));
+  };
+  return open.every((t) => waits(t.id))
+    ? { kind: 'input', requestIds: [...new Set(held.values())] }
+    : undefined;
+}
 
 export const workflowInput = z.strictObject({
   kind: z.enum(['board', 'changeset']),
@@ -141,7 +185,38 @@ export class LeadWorkflow {
         repairs: job.repairs ?? 0,
         repairBudget: this.h.config.repairBudget,
         history: job.history.slice(-20),
+        ...(job.kind === 'board' && ['queued', 'running'].includes(job.status)
+          ? (() => {
+              const waiting = this.waitingOf(job);
+              return waiting ? { waiting } : {};
+            })()
+          : {}),
       })),
+    );
+  }
+  /** Ожидание ответов на вопросы исполнителя стадией доски (чтение, без записи). */
+  waitingOf(job: Pick<WorkflowJob, 'kind' | 'id' | 'stage'>, s = this.h.store.read()) {
+    if (job.kind !== 'board' || job.stage < 1) return undefined;
+    const revision = s.boards.find((b) => b.id === job.id)?.revisions.at(-1);
+    return revision ? inputWaiting(this.h, s, revision.taskIds) : undefined;
+  }
+  /**
+   * Отметить ожидание ответов в истории задания один раз: повторный такт,
+   * который снова ждёт, второй записи не добавляет (захват стадии `running`
+   * между ними не считается).
+   */
+  noteWaiting(job: WorkflowJob, event = WAITING_INPUT) {
+    const { engine } = executionOf(this.h);
+    domain(() =>
+      engine.host.store.transact('workflow.updated', (tx) => {
+        const current = this.queue().guard(job, tx) as WorkflowJob;
+        const last = current.history.filter((h) => h.event !== 'running').at(-1);
+        if (last?.event === event) return;
+        tx.putLocal('workflow-jobs', job.owner ?? WORKSPACE_OWNER, job.key, {
+          ...current,
+          history: [...current.history, { at: new Date().toISOString(), stage: job.stage, event }],
+        });
+      }),
     );
   }
   /**

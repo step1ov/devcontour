@@ -9,9 +9,15 @@ import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { budgetOverview } from '../src/harness/budget.ts';
+import { approvalPolicyDigest, policyFromConfig } from '../src/harness/policy.ts';
+import { workspacePolicyDigest } from '../src/core/workspace.ts';
+import { executionDigest } from 'devcontour-harness';
+import { serve } from '../src/server/http.ts';
+import { Scheduler } from '../src/runner/scheduler.ts';
 import {
   parseOperationalKeys,
   requestConfigApply,
+  requestInputPolicy,
   serveReconfigure,
 } from '../src/runner/reconfigure.ts';
 
@@ -185,18 +191,110 @@ test('config-apply waits for work under the previous configuration; without a se
   }
 });
 
-test('--keys accepts only budgets, prices and stallSweep', () => {
-  // Без флага — прежний состав запроса: сервер без stallSweep его понимает.
+test('--keys accepts only budgets, prices, stallSweep and inputPolicy', () => {
+  // Без флага — прежний состав запроса: сервер без stallSweep и inputPolicy его понимает.
   assert.deepEqual(parseOperationalKeys(), ['budgets', 'prices']);
   assert.deepEqual(parseOperationalKeys('prices,budgets'), ['budgets', 'prices']);
   assert.deepEqual(parseOperationalKeys('stallSweep'), ['stallSweep']);
   assert.deepEqual(parseOperationalKeys('stallSweep,budgets'), ['budgets', 'stallSweep']);
+  assert.deepEqual(parseOperationalKeys('inputPolicy'), ['inputPolicy']);
   assert.throws(
     () => parseOperationalKeys('budgets,concurrency'),
     /не поддерживается: concurrency/,
   );
-  assert.throws(() => parseOperationalKeys(''), /только budgets, prices, stallSweep/);
+  assert.throws(() => parseOperationalKeys(''), /только budgets, prices, stallSweep, inputPolicy/);
 });
+
+test('inputPolicy applies without restart: the attempt keeps its pinned threshold, the next claim pins the new one', async () => {
+  const s = served();
+  try {
+    s.server.pause(false);
+    const board = s.server.createBoard('Board');
+    s.server.addTask(board.id, input('First'));
+    s.server.addTask(board.id, input('Second'));
+    s.server.approve(board.id);
+    const before = approvalDigests(s.server);
+    const first = s.server.claim('server');
+    assert.ok(first);
+    // Без поля — умолчание harness, закреплённое в попытке.
+    assert.deepEqual(s.server.store.read().runs.find((r) => r.id === first.id)?.inputPolicy, {
+      threshold: 7,
+      criticalPaths: [],
+    });
+    s.edit((raw) => (raw.inputPolicy = { threshold: 4, criticalPaths: ['db/migrations'] }));
+    // Запрос без --keys inputPolicy не отправляет: файл отличается не только budgets/prices.
+    const implicit = await s.request(undefined, 300);
+    assert.notEqual(implicit.status, 'applied', JSON.stringify(implicit));
+    assert.equal(s.server.config.inputPolicy, undefined);
+    s.server.store.change('test.clear', (st) => {
+      st.reconfigure = undefined;
+    });
+    s.server.store.change('test.lease-expired', (st) => {
+      st.runs.find((r) => r.id === first.id)!.leaseUntil = 0;
+    });
+    const applied = await s.request(['inputPolicy']);
+    assert.equal(applied.status, 'applied', JSON.stringify(applied));
+    assert.deepEqual(s.server.config.inputPolicy, {
+      threshold: 4,
+      criticalPaths: ['db/migrations'],
+    });
+    // Ни одно из оснований утверждения и исполнения не сдвинулось.
+    assert.deepEqual(approvalDigests(s.server), before);
+    const second = s.server.claim('server');
+    assert.ok(second);
+    const runs = s.server.store.read().runs;
+    assert.deepEqual(runs.find((r) => r.id === second.id)?.inputPolicy, {
+      threshold: 4,
+      criticalPaths: ['db/migrations'],
+    });
+    assert.equal(runs.find((r) => r.id === first.id)?.inputPolicy?.threshold, 7);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('inputPolicy bounds 1..11; absent leaves the policy and config digest as before', () => {
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-input-policy-'));
+  try {
+    const path = join(root, 'config.json');
+    const write = (extra: Record<string, unknown>) =>
+      writeFileSync(path, JSON.stringify({ ...config({ repository: root }), ...extra }));
+    for (const threshold of [0, 12, 3.5])
+      assert.throws(() => (write({ inputPolicy: { threshold } }), loadConfig(path)), /inputPolicy/);
+    assert.throws(
+      () => (write({ inputPolicy: { threshold: 5, extra: 1 } }), loadConfig(path)),
+      /inputPolicy/,
+    );
+    write({});
+    const plain = loadConfig(path);
+    assert.equal('inputPolicy' in policyFromConfig(plain), false);
+    write({ inputPolicy: { threshold: 11 } });
+    const autonomous = loadConfig(path);
+    assert.deepEqual(policyFromConfig(autonomous).inputPolicy, {
+      threshold: 11,
+      criticalPaths: [],
+    });
+    assert.equal(
+      executionDigest(policyFromConfig(autonomous)),
+      executionDigest(policyFromConfig(plain)),
+    );
+    assert.equal(approvalPolicyDigest(autonomous), approvalPolicyDigest(plain));
+    assert.equal(workspacePolicyDigest(autonomous), workspacePolicyDigest(plain));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** Основания утверждения и исполнения, которые порог вопросов не должен менять. */
+function approvalDigests(h: DevContour) {
+  const task = h.store.read().tasks[0];
+  return {
+    execution: executionDigest(policyFromConfig(h.config)),
+    approval: approvalPolicyDigest(h.config),
+    task: h.taskPolicyDigest(task),
+    workspace: workspacePolicyDigest(h.config),
+  };
+}
 
 /** Завершённый вызов модели с известной стоимостью: расход общего бюджета. */
 function spend(store: Store, id: string, costUsd: number | null) {
@@ -403,6 +501,78 @@ test('config-apply --keys stallSweep against a server that refuses without clear
     const [event] = s.events('config.apply-refused');
     assert.equal((event.data as { clearedBy?: string }).clearedBy, 'config-apply');
     assert.equal(s.server.config.stallSweep, undefined, 'действующая конфигурация прежняя');
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('The operator changes inputPolicy in the panel: expected digest, validation, applied by the server tick', async () => {
+  const s = served();
+  const app = await serve(s.server, new Scheduler(s.server, s.root), { port: 0 });
+  try {
+    const post = (body: unknown) =>
+      fetch(app.url + '/api/config/input-policy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-DevContour-Request': '1' },
+        body: JSON.stringify(body),
+      });
+    const state = (await (await fetch(app.url + '/api/state')).json()) as {
+      config: { inputPolicy: unknown; configDigest: string };
+    };
+    assert.equal(state.config.inputPolicy, null);
+    const before = readFileSync(s.path, 'utf8');
+    // Чужой digest — отказ без записи файла.
+    const stale = await post({ threshold: 5, expectedConfigDigest: 'a'.repeat(64) });
+    assert.equal(stale.status, 409);
+    assert.equal(readFileSync(s.path, 'utf8'), before);
+    // Вне границ — отказ схемы без записи.
+    const bad = await post({ threshold: 12, expectedConfigDigest: state.config.configDigest });
+    assert.equal(bad.status, 400);
+    assert.equal(readFileSync(s.path, 'utf8'), before);
+    const ok = await post({ threshold: 5, expectedConfigDigest: state.config.configDigest });
+    assert.equal(ok.status, 200, await ok.clone().text());
+    const result = (await ok.json()) as { status: string; operation: string };
+    assert.equal(result.status, 'requested');
+    assert.match(result.operation, /^config-apply:inputPolicy:/);
+    assert.deepEqual(
+      (JSON.parse(readFileSync(s.path, 'utf8')) as { inputPolicy?: unknown }).inputPolicy,
+      { threshold: 5 },
+    );
+    // Такт сервера применяет запрос тем же правилом, что config-apply.
+    s.server.leader('server');
+    serveReconfigure(s.server, s.path, 'server');
+    assert.deepEqual(s.server.config.inputPolicy, { threshold: 5 });
+    assert.equal(s.events('config.applied').length, 1);
+    // Агентский API такой операции не знает: автономность — выбор оператора.
+    const agent = await fetch(app.url + '/api/agent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-DevContour-Request': '1' },
+      body: JSON.stringify({ operation: 'input_policy', input: { threshold: 11 } }),
+    });
+    assert.notEqual(agent.status, 200);
+  } finally {
+    await app.close();
+    s.cleanup();
+  }
+});
+
+test('The panel input policy change leaves config.json unchanged when the apply request cannot be written', () => {
+  const s = served();
+  try {
+    const before = readFileSync(s.path, 'utf8');
+    s.server.requestReconfigure = () => {
+      throw new Error('request not written');
+    };
+    assert.throws(
+      () =>
+        requestInputPolicy(s.server, s.root, {
+          threshold: 5,
+          expectedConfigDigest: s.server.configDigest,
+        }),
+      /request not written/,
+    );
+    assert.equal(readFileSync(s.path, 'utf8'), before, 'файл возвращён к прежнему тексту');
+    assert.equal(s.server.store.read().reconfigure, undefined);
   } finally {
     s.cleanup();
   }

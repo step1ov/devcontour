@@ -61,6 +61,7 @@ import {
   componentProfileConfig,
 } from './runner/setup.ts';
 import { markQuickSetup, quickFacts } from './runner/quick.ts';
+import { InputService } from './application/input.ts';
 import { acceptBoard, reviewContract, reviewPlan } from './runner/agent-control.ts';
 import { specDigest } from './core/service.ts';
 import { WorkspaceRunner } from './runner/workspace.ts';
@@ -577,6 +578,15 @@ async function main() {
     'queue',
     'retry',
     'reopen',
+    'input-list',
+    'input-show',
+    'input-answer',
+    'input-context',
+    'input-review',
+    'input-target',
+    'input-apply',
+    'input-cancel',
+    'input-supersede',
     'edit-task',
     'edit-board',
     'task-feature',
@@ -1167,6 +1177,74 @@ async function main() {
           result = await startQueue(h);
           if ((result as { paused: boolean }).paused) process.exitCode = 1;
         }
+      } else if (operation.startsWith('input-')) {
+        // Вопросы исполнителя: CLI — действие человека (`operator`); ведущий
+        // агент передаёт `--by host` и подчиняется правилу ведущего.
+        const service = new InputService(h, root);
+        const request = option('--request', '');
+        const expectedVersion = Number(option('--version', '0'));
+        if (operation === 'input-list')
+          result = service.list({
+            ...(args.includes('--task') ? { taskId: option('--task', '') } : {}),
+            ...(args.includes('--state') ? { state: option('--state', '') } : {}),
+          });
+        else if (operation === 'input-show') result = service.show({ requestId: request });
+        else if (operation === 'input-answer')
+          result = service.answer(
+            {
+              requestId: request,
+              text: option('--text', ''),
+              ...(args.includes('--option') ? { optionId: option('--option', '') } : {}),
+              ...(args.includes('--kind') ? { kind: option('--kind', '') } : {}),
+              expectedVersion,
+            },
+            actorOf(),
+          );
+        else if (operation === 'input-context')
+          result = await service.context({ requestId: request });
+        else if (operation === 'input-review')
+          result = await service.review({
+            requestId: request,
+            contextDigest: option('--context-digest', ''),
+            authorRuntime: authorRuntime(),
+          });
+        else if (operation === 'input-target')
+          result = service.target({
+            requestId: request,
+            contextDigest: option('--context-digest', ''),
+          });
+        else if (operation === 'input-apply')
+          result = service.apply(
+            {
+              requestId: request,
+              answerDigest: option('--answer', ''),
+              expectedVersion,
+              contextDigest: option('--context-digest', ''),
+              targetDigest: option('--target', ''),
+              ...(args.includes('--reset') ? { reset: { reason: option('--reason', '') } } : {}),
+            },
+            actorOf(),
+            // Отклонённое ревью оператор применяет, только назвав раунд, который прочитал.
+            args.includes('--confirm-rejected-round')
+              ? { confirmRejectedRound: Number(option('--confirm-rejected-round', '')) }
+              : {},
+          );
+        else if (operation === 'input-cancel')
+          result = service.cancel(
+            { requestId: request, expectedVersion, reason: option('--reason', '') },
+            actorOf(),
+          );
+        else if (operation === 'input-supersede')
+          result = service.supersede(
+            {
+              requestId: request,
+              expectedVersion,
+              reason: option('--reason', ''),
+              successorTaskId: option('--successor', ''),
+            },
+            actorOf(),
+          );
+        else throw new Error('Неизвестная команда: ' + operation);
       } else if (operation === 'reopen')
         result = h.reopen(option('--task', ''), option('--reason', ''));
       else if (operation === 'retry')

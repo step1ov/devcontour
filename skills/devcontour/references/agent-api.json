@@ -2349,7 +2349,7 @@
     },
     {
       "name": "discussion_post",
-      "description": "Post a note or a change request to a task discussion as the lead. Needs idempotencyKey (a repeat returns the same message, another payload under it is refused) and expectedVersion (the thread version you read; a mismatch is 409 — re-read). Text: up to 16 KiB UTF-8, no control characters other than newline and tab; the reply carries an excerpt of long text. supersedes corrects your own latest version of a message. A change request does not alter an approved or accepted task: apply it through a new revision.",
+      "description": "Post a note or a change request to a task discussion as the lead. Needs idempotencyKey (a repeat returns the same message, another payload under it is refused) and expectedVersion (the thread version you read; a mismatch is 409 — re-read). Text: up to 16 KiB UTF-8, no control characters other than newline and tab; the reply carries an excerpt of long text. supersedes corrects your own latest version of a message. A change request does not alter an approved or accepted task: apply it through a new revision. kind answer answers a writer question: input {requestId, expectedVersion (the request version, which is the check instead of the thread version), optionId?, kind?}; the lead rule of input_answer applies, the answer text lives once in the request and the message links its revision; an answer to a question already cancelled or superseded is kept as discussion history (input.accepted false) and resumes nothing; an applied answer is not corrected (409).",
       "readOnly": false,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2363,11 +2363,42 @@
             "type": "string",
             "enum": [
               "note",
-              "change-request"
+              "change-request",
+              "answer"
             ]
           },
           "text": {
             "type": "string"
+          },
+          "input": {
+            "type": "object",
+            "properties": {
+              "requestId": {
+                "type": "string",
+                "pattern": "^IR-[a-f0-9]{24}$"
+              },
+              "expectedVersion": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "optionId": {
+                "type": "string",
+                "maxLength": 40
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "clarification",
+                  "requirement-change"
+                ]
+              }
+            },
+            "required": [
+              "requestId",
+              "expectedVersion"
+            ],
+            "additionalProperties": false
           },
           "replyTo": {
             "type": "string",
@@ -5093,6 +5124,307 @@
         "required": [
           "id",
           "expectedVersion"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "input_list",
+      "description": "List writer questions (input requests) with state, severity, floors, version and who acts next: awaiting-answer, answer-saved, context-review, review-rejected (the reviewer rejected the answer), ready-to-apply, applied-awaiting-claim, delivered (only after the writer call with the answer started), stale, cancelled, superseded. No question or answer text. Read-only.",
+      "readOnly": true,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "taskId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "repositoryId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "awaiting-answer",
+              "answer-saved",
+              "context-review",
+              "review-rejected",
+              "ready-to-apply",
+              "applied-awaiting-claim",
+              "delivered",
+              "stale",
+              "cancelled",
+              "superseded"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "input_show",
+      "description": "Read one writer question: question, options, recommended option, severity and floors, draft files, the latest answer in full, earlier answers as digest and excerpt, review rounds, target and delivery. Read-only.",
+      "readOnly": true,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "pattern": "^IR-[a-f0-9]{24}$"
+          }
+        },
+        "required": [
+          "requestId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "input_answer",
+      "description": "Answer a writer question with the expected request version. The lead may answer only a question without floors in approvalMode agent; otherwise the operator answers in the panel. A requirement-change answer is not continued: reopen and respecify the task, approve it, then input_supersede with the same task and carry the answer. Does not resume the task.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "pattern": "^IR-[a-f0-9]{24}$"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 3000
+          },
+          "optionId": {
+            "type": "string",
+            "maxLength": 40
+          },
+          "kind": {
+            "default": "clarification",
+            "type": "string",
+            "enum": [
+              "clarification",
+              "requirement-change"
+            ]
+          },
+          "expectedVersion": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": [
+          "requestId",
+          "text",
+          "expectedVersion"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "input_context",
+      "description": "Build the immutable context snapshot with the latest answer (the effective task snapshot plus input/<id>.md and its manifest) and store it by digest. The manifest lists the discussion messages that recorded the answers and the messageIds you select (id, seq, digest; their text is not added). Not activated; idempotent per digest.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "pattern": "^IR-[a-f0-9]{24}$"
+          },
+          "messageIds": {
+            "maxItems": 20,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^DM-[0-9a-f-]{36}$"
+            }
+          }
+        },
+        "required": [
+          "requestId"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "input_review",
+      "description": "Review the answer snapshot with the plan reviewer (round subject input-<id>): approve only if the answer clarifies without changing the approved spec. Refused before the model call when the snapshot is missing or does not carry the latest answer. Approval does not activate anything.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "pattern": "^IR-[a-f0-9]{24}$"
+          },
+          "contextDigest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "authorRuntime": {
+            "type": "string",
+            "enum": [
+              "codex",
+              "claude"
+            ]
+          }
+        },
+        "required": [
+          "requestId",
+          "contextDigest",
+          "authorRuntime"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "input_target",
+      "description": "Propose the continuation target for a reviewed answer snapshot (or the carry target of a superseded question) and list why applying would be refused now. Read-only.",
+      "readOnly": true,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "pattern": "^IR-[a-f0-9]{24}$"
+          },
+          "contextDigest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "required": [
+          "requestId",
+          "contextDigest"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "input_apply",
+      "description": "Apply the answer in one transaction with the exact request version, answer digest, snapshot and target digest: activates the snapshot for the task and requeues it. In approvalMode operator the operator applies in the panel. Busy graph attempts or exhausted limits return applied=false with the reason; the answer stays.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "pattern": "^IR-[a-f0-9]{24}$"
+          },
+          "answerDigest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "expectedVersion": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "contextDigest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "targetDigest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "reset": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "type": "string",
+                "minLength": 10,
+                "maxLength": 2000
+              }
+            },
+            "required": [
+              "reason"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "requestId",
+          "answerDigest",
+          "expectedVersion",
+          "contextDigest",
+          "targetDigest"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "input_cancel",
+      "description": "Cancel a writer question with the expected version and a reason; also closes follow-ups (assumption accepted). A blocking question follows the answer rule: floored or approvalMode operator questions are cancelled by the operator.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "pattern": "^IR-[a-f0-9]{24}$"
+          },
+          "expectedVersion": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 1000
+          }
+        },
+        "required": [
+          "requestId",
+          "expectedVersion",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "input_supersede",
+      "description": "Supersede a writer question once the spec of its task has changed: reopen and respecify the task (draft or re-approved), then supersede with the same task and carry the answer (input_context, input_review, input_target, input_apply). Refused with 409 SPEC_UNCHANGED while the spec is unchanged; a blocking question the lead may not answer is superseded by the operator (403 OPERATOR_ANSWERS). The old task is not resumed by a requirement change without carry. A non-blocking follow-up may also be superseded by a newer task of the same board, for example the replacement created by board_correct.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "requestId": {
+            "type": "string",
+            "pattern": "^IR-[a-f0-9]{24}$"
+          },
+          "expectedVersion": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 9007199254740991
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 1000
+          },
+          "successorTaskId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          }
+        },
+        "required": [
+          "requestId",
+          "expectedVersion",
+          "reason",
+          "successorTaskId"
         ],
         "additionalProperties": false
       }

@@ -20,6 +20,8 @@ import {
   uncoveredGates as harnessUncoveredGates,
   gatePrerequisites,
   standaloneScope,
+  blocksWork,
+  requestsOf,
   type CancelActor,
   type CodedIssue,
   type PropertyRecovery,
@@ -54,7 +56,7 @@ import {
  * `config-apply` без перезапуска: в digest утверждения плана они не входят
  * (`approvalPolicyDigest`), и попытки по ним не устаревают.
  */
-export const operationalKeys = ['budgets', 'prices', 'stallSweep'] as const;
+export const operationalKeys = ['budgets', 'prices', 'stallSweep', 'inputPolicy'] as const;
 export type OperationalKey = (typeof operationalKeys)[number];
 export const digest = (value: unknown) =>
   createHash('sha256')
@@ -1849,6 +1851,27 @@ export class DevContour {
         const t = task(ht.state, id);
         if (t.status === 'done')
           throw new DomainError('Принятый результат нельзя отменить; создайте корректировку');
+        // Отмена задачи закрывает её открытые вопросы исполнителя. Вопрос,
+        // который ведущий не вправе решить сам (критический или режим
+        // оператора), снимает только оператор — и задачей тоже: иначе отмена
+        // и повтор обошли бы правило ответа.
+        if (by !== 'operator') {
+          const work = ht.tx.work(id);
+          const held = work
+            ? requestsOf(ht.tx, work).find(
+                (r) =>
+                  blocksWork(r) && (r.floors.length > 0 || this.config.approvalMode === 'operator'),
+              )
+            : undefined;
+          if (held) {
+            const error = new DomainError(
+              `Задачу ${id} держит вопрос исполнителя ${held.id}, который решает оператор: вопрос или задачу отменяет оператор`,
+              403,
+            );
+            (error as DomainError & { code?: string }).code = 'OPERATOR_ANSWERS';
+            throw error;
+          }
+        }
         engine.cancel(id, reason, by);
         const data = reason ? { taskId: id, reason } : { taskId: id };
         ht.journal(data);
@@ -1886,6 +1909,10 @@ export class DevContour {
         throw new DomainError('Задача дала принятый результат; нужна корректировка доски');
       if (t.activeRunId) throw new DomainError('Дождитесь завершения текущей попытки');
       assertNotAccepted(s, t);
+      // Открытый вопрос исполнителя не снимается: черновик не выдаётся, а
+      // после нового утверждения той же постановки ответ применяется обычным
+      // applyInput (исходная остановка держится). Изменённая постановка —
+      // выход supersede (преемник — та же задача) и перенос ответа.
       // Черновик тоже возвращается: снятое утверждение могло оставить за собой
       // digest контрактов, и задача продолжала бы закреплять одну редакцию,
       // ссылаясь на другую. Операция идемпотентна.

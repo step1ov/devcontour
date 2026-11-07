@@ -30,5 +30,21 @@
 // discussion_resolve и discussion_inbox называют чтение назад, выдержки
 // текста, цикл needs-answer и версию треда в очереди; курсор
 // discussion_inbox — до 2000 символов; прочие операции байтово прежние.
-export const CATALOG_DIGEST = '71ec177499a2b700381fde1248a09f9f9803128edd78005385c6b3b331bf5172';
+// Намеренное изменение: операции вопросов исполнителя input_list, input_show,
+// input_answer, input_context, input_review, input_target, input_apply,
+// input_cancel и input_supersede после contract_change_revise, вместе с
+// операциями обсуждения (input_list,
+// input_show, input_target — только чтение); прочие операции байтово прежние.
+// Намеренное изменение: discussion_post принимает kind answer с input (ответ
+// на вопрос исполнителя сообщением обсуждения), input_context — messageIds
+// для manifest снимка; прочие операции байтово прежние.
+// Намеренное изменение: фильтр input_list знает состояние review-rejected
+// (ревью отклонило ответ), описание называет его; прочие операции байтово прежние.
+// Намеренное изменение: описания input_answer и input_supersede называют
+// путь изменения требований (новая постановка задачи, замена той же задачей
+// и перенос ответа) и отказ SPEC_UNCHANGED; прочие операции байтово прежние.
+// Намеренное изменение: описание input_supersede называет замену
+// неблокирующего follow-up новой задачей той же доски (например, заменой из
+// board_correct); прочие операции байтово прежние.
+export const CATALOG_DIGEST = '1b82ad084444706a3fcb90ab3c2035f8cce0a19e1b4a51b7ac66dadec012fbe4';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

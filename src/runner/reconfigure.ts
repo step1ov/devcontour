@@ -1,9 +1,9 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { ZodError } from 'zod';
+import { ZodError, z } from 'zod';
 import { DevContour, loadedDigest, operationalKeys, type OperationalKey } from '../core/service.ts';
-import type { Config } from '../core/model.ts';
+import { DomainError, type Config } from '../core/model.ts';
 import { Store } from '../core/store.ts';
 import { repositories } from '../core/repositories.ts';
 import { executionOf } from '../harness/execution.ts';
@@ -139,7 +139,11 @@ export function configApplyKeys(operation: string): OperationalKey[] | undefined
  */
 export const defaultOperationalKeys = ['budgets', 'prices'] as const satisfies OperationalKey[];
 
-/** Ключи `--keys`: подмножество `budgets,prices,stallSweep`; без флага — `budgets,prices`. */
+/**
+ * Ключи `--keys`: подмножество `budgets,prices,stallSweep,inputPolicy`; без
+ * флага — `budgets,prices`. `inputPolicy`, как и `stallSweep`, — только
+ * названным явно: прежний сервер этого ключа не знает.
+ */
 export function parseOperationalKeys(value?: string): OperationalKey[] {
   if (value === undefined) return [...defaultOperationalKeys];
   const keys = [...new Set(value.split(',').map((k) => k.trim()))].filter(Boolean);
@@ -325,4 +329,77 @@ export async function requestConfigApply(
   } finally {
     store.close();
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* Порог вопросов исполнителя из панели                                */
+/* ------------------------------------------------------------------ */
+
+export const inputPolicyRequest = z.strictObject({
+  threshold: z.number().int().min(1).max(11),
+  criticalPaths: z.array(z.string()).max(50).optional(),
+  /** Digest config.json, который видел оператор: файл сдвинулся — отказ без записи. */
+  expectedConfigDigest: z.string().regex(/^[a-f0-9]{64}$/),
+});
+
+/**
+ * Изменить `inputPolicy` оператором (панель, без ручной правки JSON): файл
+ * перечитывается и сверяется с digest, который видел оператор, новая
+ * конфигурация проверяется тем же загрузчиком, записывается атомарно, и
+ * пишется запрос применения `config-apply:inputPolicy` — его применяет такт
+ * сервера тем же правилом, что и `devcontour config-apply --keys inputPolicy`.
+ * Только оператор: автономность — выбор пользователя, не операция агента.
+ */
+export function requestInputPolicy(h: DevContour, root: string, raw: unknown) {
+  const input = inputPolicyRequest.parse(raw);
+  const path = join(root, 'config.json');
+  const text = readFileSync(path, 'utf8');
+  const current = loadConfig(path, text);
+  if (loadedDigest(current) !== input.expectedConfigDigest)
+    throw new DomainError(
+      'config.json изменился после того, как его прочитала панель: обновите страницу и повторите',
+      409,
+    );
+  const file = JSON.parse(text) as Record<string, unknown>;
+  file.inputPolicy = {
+    threshold: input.threshold,
+    ...(input.criticalPaths ? { criticalPaths: input.criticalPaths } : {}),
+  };
+  const nextText = JSON.stringify(file, null, 2) + '\n';
+  let next: Config;
+  try {
+    next = loadConfig(path, nextText);
+  } catch (error) {
+    throw new DomainError(`inputPolicy не принят: ${failure(error)}`, 400);
+  }
+  const digest = loadedDigest(next);
+  const operation = `${configApplyPrefix}inputPolicy:${randomUUID().slice(0, 8)}`;
+  // Файл и запрос применения — вместе: если запись запроса (или её
+  // фиксация) не удалась, файл возвращается к прежнему тексту, иначе
+  // изменение молча применил бы следующий config-apply или перезапуск.
+  const mode = statSync(path).mode & 0o777;
+  const replace = (content: string) => {
+    const temp = `${path}.${randomUUID().slice(0, 8)}.tmp`;
+    writeFileSync(temp, content, { mode });
+    renameSync(temp, path);
+  };
+  let written = false;
+  try {
+    h.store.atomic(() => {
+      const busy = h.store.read().reconfigure;
+      if (busy && !(configApplyKeys(busy.operation) && (busy.appliedAt || busy.error)))
+        throw new DomainError(
+          `Конфигурацию сейчас применяет операция ${busy.operation}: дождитесь её и повторите`,
+          409,
+        );
+      if (busy) h.clearReconfigure(busy.operation);
+      replace(nextText);
+      written = true;
+      h.requestReconfigure(operation, digest);
+    });
+  } catch (error) {
+    if (written) replace(text);
+    throw error;
+  }
+  return { status: 'requested' as const, operation, digest, inputPolicy: next.inputPolicy };
 }

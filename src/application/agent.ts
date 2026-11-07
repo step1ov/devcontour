@@ -38,6 +38,7 @@ import { applyCases } from '../runner/recovery.ts';
 import { ContractChanges } from '../runner/contract-change.ts';
 import { contractProposal, limitsMessage, proposalLimitIssues } from '../runner/agent-control.ts';
 import { queueStopOf, quietAttempts, quietOperations } from './queue-stop.ts';
+import { InputService, inputOperationInputs } from './input.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 export { SERVER_STOPPING };
@@ -144,6 +145,7 @@ export const agentInputs = {
      */
     proposal: contractProposal.optional(),
   }),
+  ...inputOperationInputs,
 };
 /**
  * Операции, которые запускают внешние процессы: эксперимент, подтверждение
@@ -155,6 +157,8 @@ export const asyncOperations = new Set<string>([
   'checks_case_submit',
   'recovery_decide',
   'contract_change_revise',
+  'input_context',
+  'input_review',
 ]);
 export type AgentOperation = keyof typeof agentInputs;
 export const agentOperations = Object.keys(agentInputs) as AgentOperation[];
@@ -279,11 +283,29 @@ export const descriptions: Record<AgentOperation, string> = {
   discussion_read:
     'Read a task discussion page in seq order: forward from cursor (the last seq returned; follow nextCursor), or backward with latest: true or before: <seq> (follow previousCursor). version is the thread version for writes. Notes, change requests and their dispositions are local history of the task owner: they never change the task, its approvals, queue or attempts, and Git sync does not carry them.',
   discussion_post:
-    'Post a note or a change request to a task discussion as the lead. Needs idempotencyKey (a repeat returns the same message, another payload under it is refused) and expectedVersion (the thread version you read; a mismatch is 409 — re-read). Text: up to 16 KiB UTF-8, no control characters other than newline and tab; the reply carries an excerpt of long text. supersedes corrects your own latest version of a message. A change request does not alter an approved or accepted task: apply it through a new revision.',
+    'Post a note or a change request to a task discussion as the lead. Needs idempotencyKey (a repeat returns the same message, another payload under it is refused) and expectedVersion (the thread version you read; a mismatch is 409 — re-read). Text: up to 16 KiB UTF-8, no control characters other than newline and tab; the reply carries an excerpt of long text. supersedes corrects your own latest version of a message. A change request does not alter an approved or accepted task: apply it through a new revision. kind answer answers a writer question: input {requestId, expectedVersion (the request version, which is the check instead of the thread version), optionId?, kind?}; the lead rule of input_answer applies, the answer text lives once in the request and the message links its revision; an answer to a question already cancelled or superseded is kept as discussion history (input.accepted false) and resumes nothing; an applied answer is not corrected (409).',
   discussion_resolve:
     'Record how a change request was handled: accepted (refs to the new board revision or tasks created for it), rejected with a reason, or needs-answer (the operator answers in the panel and the request returns to discussion_inbox). Only the latest version of a request is handled; accepted and rejected are final. expectedVersion is the thread version from discussion_inbox. Reading a request is not handling it.',
   discussion_inbox:
     'List change requests waiting for the lead across tasks, oldest event first: the latest version of each request without a disposition, or answered by the operator after needs-answer (reopened). Each entry is bounded: an excerpt, textBytes, truncated and the thread version for discussion_resolve; read the full text with discussion_read. Follow nextCursor.',
+  input_list:
+    'List writer questions (input requests) with state, severity, floors, version and who acts next: awaiting-answer, answer-saved, context-review, review-rejected (the reviewer rejected the answer), ready-to-apply, applied-awaiting-claim, delivered (only after the writer call with the answer started), stale, cancelled, superseded. No question or answer text. Read-only.',
+  input_show:
+    'Read one writer question: question, options, recommended option, severity and floors, draft files, the latest answer in full, earlier answers as digest and excerpt, review rounds, target and delivery. Read-only.',
+  input_answer:
+    'Answer a writer question with the expected request version. The lead may answer only a question without floors in approvalMode agent; otherwise the operator answers in the panel. A requirement-change answer is not continued: reopen and respecify the task, approve it, then input_supersede with the same task and carry the answer. Does not resume the task.',
+  input_context:
+    'Build the immutable context snapshot with the latest answer (the effective task snapshot plus input/<id>.md and its manifest) and store it by digest. The manifest lists the discussion messages that recorded the answers and the messageIds you select (id, seq, digest; their text is not added). Not activated; idempotent per digest.',
+  input_review:
+    'Review the answer snapshot with the plan reviewer (round subject input-<id>): approve only if the answer clarifies without changing the approved spec. Refused before the model call when the snapshot is missing or does not carry the latest answer. Approval does not activate anything.',
+  input_target:
+    'Propose the continuation target for a reviewed answer snapshot (or the carry target of a superseded question) and list why applying would be refused now. Read-only.',
+  input_apply:
+    'Apply the answer in one transaction with the exact request version, answer digest, snapshot and target digest: activates the snapshot for the task and requeues it. In approvalMode operator the operator applies in the panel. Busy graph attempts or exhausted limits return applied=false with the reason; the answer stays.',
+  input_cancel:
+    'Cancel a writer question with the expected version and a reason; also closes follow-ups (assumption accepted). A blocking question follows the answer rule: floored or approvalMode operator questions are cancelled by the operator.',
+  input_supersede:
+    'Supersede a writer question once the spec of its task has changed: reopen and respecify the task (draft or re-approved), then supersede with the same task and carry the answer (input_context, input_review, input_target, input_apply). Refused with 409 SPEC_UNCHANGED while the spec is unchanged; a blocking question the lead may not answer is superseded by the operator (403 OPERATOR_ANSWERS). The old task is not resumed by a requirement change without carry. A non-blocking follow-up may also be superseded by a newer task of the same board, for example the replacement created by board_correct.',
   preview_status:
     'Read the local preview: which verified release serves the URL, its states (built, deployed, healthy, confirmed or unconfirmed), and past deployments with their errors. Deploying and rolling back are separate controlled actions through the CLI or panel.',
 };
@@ -315,6 +337,9 @@ export const readOnly = (name: AgentOperation) =>
     'feasibility_spikes',
     'checks_view',
     'contract_change_status',
+    'input_list',
+    'input_show',
+    'input_target',
   ].includes(name);
 /**
  * Каталог операций DevContour — общий построитель harness (`operationCatalog`)
@@ -481,6 +506,10 @@ export class AgentService {
           ),
         );
       }
+      case 'input_context':
+        return this.bounded(await new InputService(this.h, this.root).context(input));
+      case 'input_review':
+        return this.bounded(await new InputService(this.h, this.root).review(input));
       default:
         throw new DomainError('Неизвестная операция', 400);
     }
@@ -575,7 +604,16 @@ export class AgentService {
         const state = h.store.read();
         const now = Date.now();
         return {
-          jobs: new LeadWorkflow(h).list(owner).map((j) => this.workflowView(j)),
+          jobs: (() => {
+            const workflow = new LeadWorkflow(h);
+            return workflow.list(owner).map((j) => {
+              // Стадия ждёт только ответов на вопросы исполнителя: «ждёт ответа», не сбой.
+              const waiting = ['queued', 'running'].includes(j.status)
+                ? workflow.waitingOf(j, state)
+                : undefined;
+              return { ...this.workflowView(j), ...(waiting ? { waiting } : {}) };
+            });
+          })(),
           operatorBlocked: h.config.approvalMode === 'operator',
           // Стадии ждут выдачи: остановленная очередь и её причина — рядом.
           queue: queueStopOf(h, state),
@@ -666,6 +704,21 @@ export class AgentService {
           changeSetId: new Workspace(h).create(agentInputs.changeset_create.parse(input).changeSet)
             .id,
         };
+      // Вопросы исполнителя: актёр — ведущий агент (транспорт), не вход операции.
+      case 'input_list':
+        return new InputService(h, this.root).list(input);
+      case 'input_show':
+        return new InputService(h, this.root).show(input);
+      case 'input_answer':
+        return new InputService(h, this.root).answer(input, 'lead');
+      case 'input_target':
+        return new InputService(h, this.root).target(input);
+      case 'input_apply':
+        return new InputService(h, this.root).apply(input, 'lead');
+      case 'input_cancel':
+        return new InputService(h, this.root).cancel(input, 'lead');
+      case 'input_supersede':
+        return new InputService(h, this.root).supersede(input, 'lead');
       case 'preview_status': {
         const s = h.store.read();
         const serving = servingPreview(s);

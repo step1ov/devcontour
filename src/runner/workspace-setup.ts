@@ -57,40 +57,47 @@ const registrySchema = z.object({
   // необъявленный остаётся только локальным значением config.json.
   budgets: budgetsSchema.optional(),
   prices: pricesSchema.optional(),
+  // Порог вопросов исполнителя — тоже эксплуатационный ключ (config-apply).
+  inputPolicy: configSchema.shape.inputPolicy,
 });
 
+/** Эксплуатационные ключи, которые объявляет workspace.json. */
+const declaredOperational = ['budgets', 'prices', 'inputPolicy'] as const;
+type DeclaredOperational = (typeof declaredOperational)[number];
+
 /**
- * Объявленные в реестре `budgets`/`prices` и ключи, где config.json с ними
- * расходится. Порядок: объявление workspace.json → config.json при каждом
- * workspace-init; правка config.json между запусками — локальное
- * переопределение до следующего workspace-init (его называет doctor).
+ * Объявленные в реестре `budgets`/`prices`/`inputPolicy` и ключи, где
+ * config.json с ними расходится. Порядок: объявление workspace.json →
+ * config.json при каждом workspace-init; правка config.json между запусками —
+ * локальное переопределение до следующего workspace-init (его называет doctor).
  */
 export function operationalDeclaration(
-  declared: { budgets?: Config['budgets']; prices?: Config['prices'] },
-  current?: Pick<Config, 'budgets' | 'prices'>,
+  declared: Partial<Pick<Config, DeclaredOperational>>,
+  current?: Partial<Pick<Config, DeclaredOperational>>,
 ) {
-  const values: Partial<Pick<Config, 'budgets' | 'prices'>> = {};
-  if (declared.budgets !== undefined) values.budgets = declared.budgets;
-  if (declared.prices !== undefined) values.prices = declared.prices;
-  const differs = (Object.keys(values) as ('budgets' | 'prices')[]).filter(
+  const values: Partial<Pick<Config, DeclaredOperational>> = {};
+  for (const k of declaredOperational)
+    if (declared[k] !== undefined) (values as Record<string, unknown>)[k] = declared[k];
+  const differs = (Object.keys(values) as DeclaredOperational[]).filter(
     (k) => JSON.stringify(current?.[k] ?? null) !== JSON.stringify(values[k]),
   );
   return { values, differs };
 }
 /**
- * Прежние `budgets`/`prices` файла — по каждому ключу отдельно: невалидный
- * один ключ не делает «заменёнными» оба. Невалидное значение сравнивается как
- * есть — объявление его и правда заменило.
+ * Прежние эксплуатационные ключи файла — по каждому отдельно: невалидный
+ * один ключ не делает «заменёнными» остальные. Невалидное значение
+ * сравнивается как есть — объявление его и правда заменило.
  */
 export function operationalCurrent(raw: Record<string, unknown>) {
-  const value = <K extends 'budgets' | 'prices'>(k: K) => {
+  const value = <K extends DeclaredOperational>(k: K) => {
     const parsed = configSchema.shape[k].safeParse(raw[k]);
     return parsed.success ? parsed.data : raw[k];
   };
-  return { budgets: value('budgets'), prices: value('prices') } as Pick<
-    Config,
-    'budgets' | 'prices'
-  >;
+  return {
+    budgets: value('budgets'),
+    prices: value('prices'),
+    inputPolicy: value('inputPolicy'),
+  } as Partial<Pick<Config, DeclaredOperational>>;
 }
 const operationalNote = (replaced: string[]) =>
   replaced.length
