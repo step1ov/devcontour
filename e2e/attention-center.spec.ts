@@ -1265,3 +1265,25 @@ test('Filter: an empty form opened on a card the component filter saw first stay
   await page.waitForTimeout(3500);
   await expect(field).toBeFocused();
 });
+
+test('Focus: a new occurrence under an open empty form focuses the new card', async ({ page }) => {
+  let occurrence = 'o1';
+  await page.route(isList, (route) =>
+    route.fulfill({
+      json: fakeView([
+        textItem('changeset:CHG-N1', {
+          id: `changeset:CHG-N1#${occurrence}`,
+          occurrenceId: occurrence,
+        }),
+        fakeItem('changeset:CHG-N2'),
+      ]),
+    }),
+  );
+  await page.goto('/?tab=attention');
+  const card = cardOf(page, 'changeset:CHG-N1');
+  await card.getByRole('button', { name: 'Вернуть на доработку' }).click();
+  await expect(card.locator('form').getByLabel(/Что доработать/)).toBeFocused();
+  occurrence = 'o2';
+  await expect(card.locator('form')).toHaveCount(0, { timeout: 10000 });
+  await expect(card).toBeFocused();
+});

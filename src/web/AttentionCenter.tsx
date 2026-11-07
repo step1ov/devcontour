@@ -239,9 +239,12 @@ export function AttentionCenter({
     }
     if (now.titles.has(key)) {
       // Карточка перешла в другую группу (ответ сохранён — дальше ведущий):
-      // элемент перемонтирован, фокус возвращается к нему же.
+      // элемент перемонтирован, фокус возвращается к нему же. Новое
+      // появление под пустой формой закрыло её: фокус — на карточку
+      // нового появления, а не на body.
       const moved = prev.operator.includes(key) !== now.operator.includes(key);
-      if (!moved || (document.activeElement && document.activeElement !== document.body)) return;
+      const replaced = !!wasId && !!nowId && wasId !== nowId;
+      if ((!moved && !replaced) || !lostFocus) return;
       if (now.lead.includes(key)) setLeadOpen(true);
       requestAnimationFrame(() => document.getElementById(cardDomId(key))?.focus());
       return;
