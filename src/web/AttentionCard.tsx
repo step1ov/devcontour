@@ -389,7 +389,7 @@ export function AttentionCard({
   const orphan = open !== null && !formAction && !unsent && text.trim() ? text : '';
 
   let next: ReactNode;
-  if (operator && domain.length)
+  if (domain.length)
     next = domain.map((a, i) => {
       if (a.input === 'confirm')
         return (

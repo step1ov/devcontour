@@ -478,6 +478,33 @@ test('D05-B: an already resolved card is removed and focus moves to the next car
   await expect(liveStatus(page)).toContainText('Уже решено');
 });
 
+test('D05-E: a lead item never shows a domain button, even if one reaches the panel', async ({
+  page,
+}) => {
+  // Сервер снимает доменные действия с карточек ведущего; панель — второй
+  // рубеж: подменный ответ с действием у карточки ведущего не даёт кнопки.
+  await page.route(isList, (route) =>
+    route.fulfill({
+      json: fakeView([
+        fakeItem('workflow:changeset:CHG-L', {
+          actor: 'lead',
+          category: 'technical',
+          title: 'Восстановление изменения остановлено',
+          actions: [
+            { id: 'accept', kind: 'domain', label: 'Принять', input: 'confirm' },
+            { id: 'handoff', kind: 'handoff', command: 'session_handoff' },
+          ],
+        }),
+      ]),
+    }),
+  );
+  await page.goto('/?tab=attention&who=lead');
+  const card = cardOf(page, 'workflow:changeset:CHG-L');
+  await expect(card).toContainText('Ведущий агент · техническое');
+  await expect(card.getByRole('button', { name: 'Принять', exact: true })).toHaveCount(0);
+  await expect(card.getByRole('button', { name: 'Команда для ведущего' })).toBeVisible();
+});
+
 test('D05-E: a lead technical blocker is not an operator choice, and reading is not acting', async ({
   page,
   request,
