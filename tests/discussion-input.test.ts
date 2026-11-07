@@ -17,6 +17,7 @@ import { serve } from '../src/server/http.ts';
 import { executionOf } from '../src/harness/execution.ts';
 import { inputManifestOf, inputSourceId } from 'devcontour-harness';
 import { taskOwner } from '../src/core/sync-state.ts';
+import { command } from '../src/runner/process.ts';
 
 after(() => inputDemos.close());
 
@@ -291,6 +292,61 @@ test('D03-K: the snapshot manifest lists the answer message and selected message
       ),
       '404:-',
     );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('CLI input-context --messages passes the selected discussion messages to the snapshot manifest', async () => {
+  const f = await inputFixture(controlled());
+  try {
+    const { taskId, requestId, version } = await question(f);
+    const discussion = new DiscussionService(f.h);
+    const note = discussion.post(
+      {
+        taskId,
+        kind: 'note',
+        text: 'Context: the consumer reads JSON only.',
+        idempotencyKey: 'cli-note-key-01',
+        expectedVersion: 0,
+      },
+      'operator',
+    );
+    discussion.post(
+      {
+        taskId,
+        kind: 'answer',
+        text: 'Use JSON as now.',
+        input: { requestId, expectedVersion: version },
+        idempotencyKey: 'cli-answer-key-02',
+        expectedVersion: 0,
+      },
+      'operator',
+    );
+    const cli = (...extra: string[]) =>
+      command(
+        ['node', '--import', 'tsx', 'src/cli.ts', 'input-context', '--request', requestId]
+          .concat(extra)
+          .concat(['--data', f.root]),
+        process.cwd(),
+      );
+    const selected = await cli('--messages', note.message.id);
+    assert.equal(selected.code, 0, selected.stderr);
+    const viaCli = JSON.parse(selected.stdout) as { contextDigest: string };
+    // Тот же снимок, что у операции с messageIds, и другой, чем без выбора.
+    const withNote = await f.service.context({ requestId, messageIds: [note.message.id] });
+    const plain = await f.service.context({ requestId });
+    assert.equal(viaCli.contextDigest, withNote.contextDigest);
+    assert.notEqual(viaCli.contextDigest, plain.contextDigest);
+    const manifest = inputManifestOf(
+      executionOf(f.h)
+        .store.read((v) => v.local('context-snapshots', '@workspace', viaCli.contextDigest))!
+        .sources.find((s) => s.id === inputSourceId(requestId))!,
+    )!;
+    assert.ok(manifest.messages.some((m) => m.id === note.message.id));
+    // Неверный ID отклоняется схемой операции.
+    const bad = await cli('--messages', 'DM-nope');
+    assert.notEqual(bad.code, 0);
   } finally {
     await f.cleanup();
   }

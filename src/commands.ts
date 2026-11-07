@@ -1209,7 +1209,19 @@ async function main() {
             actorOf(),
           );
         else if (operation === 'input-context')
-          result = await service.context({ requestId: request });
+          result = await service.context({
+            requestId: request,
+            // Сообщения обсуждения задачи для manifest снимка (как messageIds
+            // агентской операции input_context).
+            ...(args.includes('--messages')
+              ? {
+                  messageIds: option('--messages', '')
+                    .split(',')
+                    .map((id) => id.trim())
+                    .filter(Boolean),
+                }
+              : {}),
+          });
         else if (operation === 'input-review')
           result = await service.review({
             requestId: request,
