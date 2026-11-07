@@ -52,5 +52,9 @@
 // Намеренное изменение: описание attention_list называет ссылки карточек на
 // предмет и полный вопрос с вариантами ответа у действий оператора; прочие
 // операции байтово прежние.
-export const CATALOG_DIGEST = 'a8a4a42f8d9b036b25b76dfe1b95a52dcefb7229cb43807888cb210e3f21c951';
+// Намеренное изменение: описание session_handoff называет шаги вопросов
+// исполнителя (answer-input, apply-input, close-follow-up) и блок
+// host.discussion с необработанными обращениями; прочие операции байтово
+// прежние.
+export const CATALOG_DIGEST = 'c9f86e7788f5b66157491674cf319de65d586e04ac50fa8c84f2a6eec20016a0';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';
