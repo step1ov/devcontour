@@ -606,6 +606,15 @@ export function PreparationPanel() {
   const [tasks, showTasks] = useState(() => readLocation().boards);
   // Центр внимания в оболочке подготовки — вместо содержимого этапа.
   const [attention, showAttention] = useState(() => readLocation().attention);
+  // Открытие из шапки переносит фокус к заголовку «Внимание», как навигация
+  // панели разработки — к заголовку экрана.
+  const focusAttention = useRef(false);
+  const attentionHeading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    if (!attention || !focusAttention.current) return;
+    focusAttention.current = false;
+    attentionHeading.current?.focus();
+  }, [attention]);
   useAttentionScreen(() => {
     if (view && !view.enabled) return '/?tab=attention';
     const params = new URLSearchParams(window.location.search);
@@ -747,7 +756,15 @@ export function PreparationPanel() {
     return (
       <>
         <div className="flex items-center gap-4 p-3">
-          <Button variant="outline" size="sm" onClick={() => showTasks(false)}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              // Назад — к этапам, а не к центру внимания, с которого пришли.
+              showAttention(false);
+              showTasks(false);
+            }}
+          >
             ← Продукт и архитектура
           </Button>
           <span>{c?.title}</span>
@@ -778,6 +795,7 @@ export function PreparationPanel() {
                 e.preventDefault();
                 showTasks(false);
                 showAttention(true);
+                focusAttention.current = true;
               }}
             >
               Нужно действие
@@ -808,6 +826,7 @@ export function PreparationPanel() {
                   change.id === c?.id && 'border-primary bg-accent',
                 )}
                 onClick={() => {
+                  showAttention(false);
                   setSelected(change.id);
                   setTab('product');
                   setComment('');
@@ -834,6 +853,7 @@ export function PreparationPanel() {
                   input: { title },
                 });
                 if (next.enabled) {
+                  showAttention(false);
                   setSelected(next.activeChangeId ?? '');
                   setTab('product');
                 }
@@ -858,6 +878,7 @@ export function PreparationPanel() {
           <QuickForm
             workspace={view.workspace}
             onCreated={(changeId) => {
+              showAttention(false);
               setSelected(changeId);
               setTab('product');
               setComment('');
@@ -887,6 +908,13 @@ export function PreparationPanel() {
               >
                 ← К этапам
               </Button>
+              <h2
+                ref={attentionHeading}
+                tabIndex={-1}
+                className="m-0 text-lg font-semibold outline-offset-2"
+              >
+                Внимание
+              </h2>
               <AttentionCenter />
             </div>
           ) : (
@@ -926,6 +954,7 @@ export function PreparationPanel() {
                         )}
                         onClick={() => {
                           // Entering design lands on the first step still open.
+                          showAttention(false);
                           setTab(
                             step === 'design'
                               ? !referencesCurrent || refs?.status !== 'approved'
