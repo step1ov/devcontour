@@ -1,17 +1,7 @@
-import { selectedWorkspaceMode, workspaceDescription } from '../runner/workspace-mode.ts';
+import { workspaceDescription } from '../runner/workspace-mode.ts';
 import { DiscussionService } from '../application/discussion.ts';
-import { existsSync } from 'node:fs';
-import {
-  LEAD_QUIET_MS,
-  quickFacts,
-  leadActivityAt,
-  quickDiff,
-  quickSetupApplied,
-  quickResult,
-  quickSetupPlan,
-  quickSteps,
-  type QuickFacts,
-} from '../runner/quick.ts';
+import { quickDiff, quickSetupApplied, quickResult } from '../runner/quick.ts';
+import { quickFactsCache, quickPrerequisites, quickView } from '../application/quick-view.ts';
 import type { UsageRecord } from '../core/usage.ts';
 import { Preparation } from '../core/preparation.ts';
 import { PreparationAgent } from '../application/preparation-agent.ts';
@@ -60,12 +50,7 @@ import { IntentService } from '../runner/intent.ts';
 import { attachJournal, renderJournal } from '../runner/journal.ts';
 import { runActivity } from '../runner/activity.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
-import {
-  baseWaitOf,
-  queueStopOf,
-  quietAttempts,
-  quietOperations,
-} from '../application/queue-stop.ts';
+import { queueStopOf, quietAttempts, quietOperations } from '../application/queue-stop.ts';
 import {
   cachedValueReport,
   parseReportFormat,
@@ -133,23 +118,8 @@ export async function serve(
   let connecting: Promise<void> | undefined;
   let startupError: string | undefined;
   let stopping = false;
-  // Факты репозитория — процессы Git и пробы версий: панель опрашивает часто,
-  // а репозиторий меняется редко. Кэш короткий и только в памяти.
-  const factsCache = new Map<string, { at: number; value: Promise<QuickFacts> }>();
-  const cachedFacts = (workspace: string, repository: string, changeKeys: string[]) => {
-    const key = JSON.stringify([workspace, repository, changeKeys]);
-    const hit = factsCache.get(key);
-    if (hit && Date.now() - hit.at < 10_000) return hit.value;
-    const value = quickFacts({
-      workspace,
-      mode: selectedWorkspaceMode(workspace),
-      repository,
-      changeKeys,
-    });
-    factsCache.set(key, { at: Date.now(), value });
-    value.catch(() => factsCache.delete(key));
-    return value;
-  };
+  // Факты репозитория — процессы Git: общий короткий кэш панели и центра внимания.
+  const cachedFacts = quickFactsCache();
   const startEngine = () => {
     if (!h || !scheduler) return;
     attachJournal(h);
@@ -285,26 +255,17 @@ export async function serve(
           const id = url.searchParams.get('change') ?? state.preparation?.activeChangeId;
           const change = state.preparation?.changes.find((c) => c.id === id);
           if (!change?.intake || !root) throw new DomainError('Быстрое изменение не найдено', 404);
-          const view = new Preparation(preparationStore).status(change.id, { content: false });
-          // Сбой инспекции — причина на экране, а не вечное «Проверяем».
-          let factsError: string | undefined;
-          const facts = await cachedFacts(
+          const prerequisites = await quickPrerequisites({ h, root, state, change, cachedFacts });
+          const { facts, factsError, plan } = prerequisites;
+          const quick = quickView({
+            store: preparationStore,
+            h,
             root,
-            change.intake.repository,
-            (state.preparation?.changes ?? []).map((c) => c.key),
-          ).catch((error: unknown) => {
-            factsError = error instanceof Error ? error.message : String(error);
-            return undefined;
+            state,
+            change,
+            prerequisites,
+            now: Date.now(),
           });
-          const plan = h ? undefined : await quickSetupPlan({ workspace: root, change });
-          // Находки исполнителя наследуют привязку к изменению, но это не
-          // работа маршрута: они показаны отдельно и не держат шаги.
-          const bound = state.tasks.filter((t) => t.preparation?.changeId === change.id);
-          const tasks = bound.filter((t) => !t.finding);
-          const findings = bound
-            .filter((t) => t.finding)
-            .map((t) => ({ taskId: t.id, title: t.title, status: t.status }));
-          const leadAt = leadActivityAt(change, tasks);
           const usage = h
             ? [undefined, ...repositories(h.config).map((r) => r.id)].flatMap((owner) =>
                 Object.values(h!.store.localRecords<UsageRecord>('usage', owner)),
@@ -316,37 +277,13 @@ export async function serve(
             intake: change.intake,
             setup: change.setup?.at(-1),
             expanded: change.expanded,
-            findings,
+            findings: quick.findings,
             setupApplied: quickSetupApplied(join(root, '.devcontour-local'), change.id),
             facts,
             ...(factsError ? { factsError } : {}),
             plan,
-            steps: quickSteps({
-              change,
-              developmentReady: Boolean(view.enabled && view.developmentReady),
-              blocker: view.enabled ? view.blocker : '',
-              ...(facts ? { facts } : {}),
-              ...(factsError ? { factsError } : {}),
-              ...(plan ? { plan } : {}),
-              configured: existsSync(join(root, '.devcontour-local', 'config.json')),
-              engineConnected: Boolean(h),
-              tasks,
-              activeRuns: state.runs.filter(
-                (r) => r.status === 'active' && tasks.some((t) => t.id === r.taskId),
-              ).length,
-              paused: state.paused,
-              ...(state.pauseReason ? { pauseReason: state.pauseReason } : {}),
-              ...(() => {
-                const baseWait = baseWaitOf(h, state);
-                return baseWait ? { baseWait } : {};
-              })(),
-            }),
-            // Присутствие ведущего агента известно только по его журналу:
-            // без свежей записи панель не изображает идущую работу.
-            lead: {
-              lastActivityAt: leadAt,
-              present: Boolean(leadAt && Date.now() - Date.parse(leadAt) < LEAD_QUIET_MS),
-            },
+            steps: quick.steps,
+            lead: quick.lead,
             result: h
               ? await Promise.all(
                   quickResult(h.store.read(), change.id, usage).map(async (r) => {

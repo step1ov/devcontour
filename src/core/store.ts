@@ -927,18 +927,7 @@ export class Store {
     if (!this.discussionTable(schema, false)) return [];
     const rows = this.db
       .prepare(
-        `WITH req AS (
-           SELECT d.seq, d.id, d.data,
-             (SELECT r.id FROM ${schema}.discussion r WHERE r.kind='disposition' AND r.reply_to=d.id ORDER BY r.seq DESC LIMIT 1) AS disp
-           FROM ${schema}.discussion d
-           WHERE d.kind='change-request'
-             AND NOT EXISTS (SELECT 1 FROM ${schema}.discussion s WHERE json_extract(s.data,'$.supersedes')=d.id)
-         ), st AS (
-           SELECT req.*,
-             (SELECT json_extract(x.data,'$.disposition.outcome') FROM ${schema}.discussion x WHERE x.id=req.disp) AS outcome,
-             (SELECT a.seq FROM ${schema}.discussion a WHERE req.disp IS NOT NULL AND a.reply_to=req.disp AND a.author='operator' ORDER BY a.seq DESC LIMIT 1) AS answer
-           FROM req
-         )
+        `${requestStates(schema)}
          SELECT st.seq, st.data, st.disp, COALESCE(st.answer, st.seq) AS position,
            (SELECT a.id FROM ${schema}.discussion a WHERE a.seq=st.answer) AS answer_id,
            (SELECT json_extract(a.data,'$.createdAt') FROM ${schema}.discussion a WHERE a.seq=COALESCE(st.answer, st.seq)) AS at
@@ -963,6 +952,75 @@ export class Store {
         ? { reopened: { dispositionId: r.disp, answerId: r.answer_id } }
         : {}),
     }));
+  }
+  /**
+   * Обращения, ждущие ответа оператора: последняя обработка последней версии
+   * обращения — «нужен ответ», и оператор на неё ещё не ответил. Дополнение
+   * условия `reopened` очереди ведущего (`discussionInbox`) по тем же
+   * состояниям обращений. По возрастанию seq обработки, не больше `limit`.
+   */
+  discussionAwaitingOperator(owner: string | undefined, limit: number) {
+    const schema = this.syncSchema(owner);
+    if (!this.discussionTable(schema, false)) return [];
+    const rows = this.db
+      .prepare(
+        `${requestStates(schema)}
+         SELECT st.seq, st.data, st.disp,
+           (SELECT x.seq FROM ${schema}.discussion x WHERE x.id=st.disp) AS disp_seq,
+           (SELECT json_extract(x.data,'$.createdAt') FROM ${schema}.discussion x WHERE x.id=st.disp) AS at
+         FROM st
+         WHERE st.outcome='needs-answer' AND st.answer IS NULL
+         ORDER BY disp_seq LIMIT ?`,
+      )
+      .all(limit) as { seq: number; data: string; disp: string; disp_seq: number; at: string }[];
+    return rows.map((r) => ({
+      message: { ...(JSON.parse(r.data) as object), seq: r.seq },
+      dispositionId: r.disp,
+      dispositionSeq: r.disp_seq,
+      at: r.at,
+    }));
+  }
+  /**
+   * Цепочка исправлений сообщения `id`: первое сообщение цепочки
+   * (`supersedes` назад до начала) и последняя обработка любой её версии.
+   */
+  discussionChain(owner: string | undefined, id: string) {
+    const schema = this.syncSchema(owner);
+    if (!this.discussionTable(schema, false)) return undefined;
+    const row = this.db
+      .prepare(
+        `WITH RECURSIVE up(id, sup, depth) AS (
+           SELECT id, json_extract(data,'$.supersedes'), 0 FROM ${schema}.discussion WHERE id=?
+           UNION ALL
+           SELECT d.id, json_extract(d.data,'$.supersedes'), up.depth + 1
+           FROM ${schema}.discussion d JOIN up ON d.id=up.sup
+           WHERE up.depth < 1000
+         )
+         SELECT (SELECT id FROM up ORDER BY depth DESC LIMIT 1) AS root,
+           (SELECT r.id FROM ${schema}.discussion r
+              WHERE r.kind='disposition' AND r.reply_to IN (SELECT id FROM up)
+              ORDER BY r.seq DESC LIMIT 1) AS disposition`,
+      )
+      .get(id) as { root: string | null; disposition: string | null } | undefined;
+    if (!row?.root) return undefined;
+    return { rootId: row.root, ...(row.disposition ? { dispositionId: row.disposition } : {}) };
+  }
+  /** Удалить локальную запись владельца. Только в транзакции. */
+  deleteLocal(namespace: string, owner: string | undefined, key: string) {
+    if (!this.transaction) throw new Error('Local workflow writes require an atomic transaction');
+    const schema = this.syncSchema(owner);
+    if (
+      !this.db
+        .prepare(
+          `SELECT name FROM ${schema}.sqlite_master WHERE type='table' AND name='local_workflow'`,
+        )
+        .get()
+    )
+      return;
+    const removed = this.db
+      .prepare(`DELETE FROM ${schema}.local_workflow WHERE namespace=? AND owner=? AND key=?`)
+      .run(namespace, owner ?? '@workspace', key);
+    if (removed.changes) this.bump('data');
   }
   private bump(kind: 'data' | 'lease') {
     this.db
@@ -1177,6 +1235,25 @@ export class Store {
       .run(owner ?? '@workspace', JSON.stringify(value));
   }
 }
+
+/**
+ * Состояния обращений схемы (`st`): последние версии обращений без
+ * исправления, их последняя обработка (`disp`), её исход (`outcome`) и
+ * последний ответ оператора на неё (`answer`, seq). Общая часть очереди
+ * ведущего и списка ожидающих ответа оператора: правило одно.
+ */
+const requestStates = (schema: string) => `WITH req AS (
+           SELECT d.seq, d.id, d.data,
+             (SELECT r.id FROM ${schema}.discussion r WHERE r.kind='disposition' AND r.reply_to=d.id ORDER BY r.seq DESC LIMIT 1) AS disp
+           FROM ${schema}.discussion d
+           WHERE d.kind='change-request'
+             AND NOT EXISTS (SELECT 1 FROM ${schema}.discussion s WHERE json_extract(s.data,'$.supersedes')=d.id)
+         ), st AS (
+           SELECT req.*,
+             (SELECT json_extract(x.data,'$.disposition.outcome') FROM ${schema}.discussion x WHERE x.id=req.disp) AS outcome,
+             (SELECT a.seq FROM ${schema}.discussion a WHERE req.disp IS NOT NULL AND a.reply_to=req.disp AND a.author='operator' ORDER BY a.seq DESC LIMIT 1) AS answer
+           FROM req
+         )`;
 
 function deepFreeze<T>(value: T): T {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {

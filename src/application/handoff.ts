@@ -195,7 +195,7 @@ function boardInputs(h: DevContour) {
  * действующие задания первыми, затем задания по текущему входу доски, затем
  * новые первыми.
  */
-function harnessOf(h: DevContour) {
+export function harnessOf(h: DevContour) {
   const { engine, store } = executionOf(h);
   const queue = new LeadWorkflow(h).queue();
   const owners = ownersOf(h.config);
@@ -312,7 +312,7 @@ function loopText(o: LoopOutlook) {
 const STOP_REMEDY =
   'Diagnose it; fix or retry the task by hand (MCP task_retry, or devcontour retry --task ID --by host [--reset --reason TEXT]; a property episode — recovery_decide) or ask the user. Retrying the job (workflow_retry) before that fails again.';
 
-interface HostContext {
+export interface HostContext {
   h: DevContour;
   pack: HandoffPack;
   view: ExecutionView;
@@ -323,6 +323,37 @@ interface HostContext {
   current: (job: HarnessJob) => boolean;
   /** Причина, по которой вход доски не построить, или `undefined`. */
   inputError: (boardId: string) => string | undefined;
+}
+
+/**
+ * Контекст шага хоста над одним снимком движка. Пакет строится только когда
+ * шагу он нужен (`pack`): решения досок (`boardStep` с остановкой, повтором
+ * или входом) его не читают.
+ */
+export function hostContext(
+  h: DevContour,
+  harness: ReturnType<typeof harnessOf>,
+  view: ExecutionView,
+  state: State,
+  pack: () => HandoffPack,
+): HostContext {
+  const reconfigure = { reconfigureApplies: harness.engine.reconfigureApplies(view) };
+  let built: HandoffPack | undefined;
+  return {
+    h,
+    get pack() {
+      return (built ??= pack());
+    },
+    view,
+    state,
+    jobs: harness.workflows.list(),
+    live: (job) => harness.workflows.continues(job, view, reconfigure),
+    current: (job) => harness.current(job, state),
+    inputError: (id) => {
+      const bound = harness.inputOf(id, state);
+      return typeof bound === 'string' ? bound : undefined;
+    },
+  };
 }
 
 const OPERATOR_STEP =
@@ -338,7 +369,7 @@ const REASON_CHARS = 300;
  * ревью и, одобренный, выпустило бы все задачи доски — это решение об
  * объёме, а не шаг очереди.
  */
-function planStep(boardId: string, ctx: HostContext): HandoffHostNext | undefined {
+export function planStep(boardId: string, ctx: HostContext): HandoffHostNext | undefined {
   const found = boardTasks(ctx.state, boardId);
   if (!found || planApproved(ctx.h, found.revision, found.tasks)) return undefined;
   const why = unapprovedTasks(ctx.h, ctx.state, found.tasks);
@@ -406,7 +437,7 @@ const acts = (loop: LoopOutlook | undefined) =>
   !!loop && loop.step !== 'wait' && loop.step !== 'none';
 
 /** Шаг по заданиям одной доски: ждать, повторить, начать, исправить вход или решить. */
-function boardStep(boardId: string, ctx: HostContext): HandoffHostNext | undefined {
+export function boardStep(boardId: string, ctx: HostContext): HandoffHostNext | undefined {
   const { h, state } = ctx;
   // Принятая ревизия без открытых задач: заданию доски делать нечего.
   const done = boardTasks(state, boardId);
@@ -740,7 +771,8 @@ export function devcontourHandoffWithin(
       400,
     );
   const request = parsed.data;
-  const { source, workflows, engine, current, inputOf } = harnessOf(h);
+  const harness = harnessOf(h);
+  const { source, engine } = harness;
   const { store } = executionOf(h);
   const { boardId } = request;
   try {
@@ -761,23 +793,9 @@ export function devcontourHandoffWithin(
         redact: handoffRedactor(h.config, engine.policy),
       };
       const pack = handoffPack(source, options);
-      const reconfigure = { reconfigureApplies: engine.reconfigureApplies(v) };
-      const jobs = workflows.list();
-      const live = (job: HarnessJob) => workflows.continues(job, v, reconfigure);
-      const liveBoards = [...new Set(jobs.filter(live).map((j) => j.id))];
-      const next = hostNext({
-        h,
-        pack,
-        view: v,
-        state,
-        jobs,
-        live,
-        current: (job) => current(job, state),
-        inputError: (id) => {
-          const bound = inputOf(id, state);
-          return typeof bound === 'string' ? bound : undefined;
-        },
-      });
+      const ctx = hostContext(h, harness, v, state, () => pack);
+      const liveBoards = [...new Set(ctx.jobs.filter(ctx.live).map((j) => j.id))];
+      const next = hostNext(ctx);
       // Обращения — в своём байтовом бюджете: выдержки после редактора
       // секретов, полный текст — `discussion_read`. Бюджет — доля предела
       // ответа; если ответ всё же больше предела, он уменьшается ниже.

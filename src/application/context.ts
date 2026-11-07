@@ -215,7 +215,7 @@ function responseFacts(h: DevContour, s: DevContourState, now: number) {
  * `budgetBlock`, по пределам процесса, когда они совпадают с применёнными.
  * Бюджеты выключены — блоков нет, даже если в задаче остался записанный кэш.
  */
-function budgetBlocks(h: DevContour, s: DevContourState) {
+export function budgetBlocks(h: DevContour, s: DevContourState) {
   const blocks = new Map<string, string>();
   const ready = s.tasks.filter((t) => t.status === 'ready');
   // Процесс не на применённой конфигурации (MCP или agent, загруженный до
@@ -241,7 +241,7 @@ function budgetBlocks(h: DevContour, s: DevContourState) {
  * неизвестна) снимает не предел, а `onUnknown: "continue"` в `budgets`; тариф
  * в `prices` прошлые вызовы не переоценивает. Исчерпанный — более высокий предел.
  */
-function budgetHint(reason: string) {
+export function budgetHint(reason: string) {
   return /не определён/.test(reason)
     ? 'Стоимость части вызовов неизвестна, и предел её не снимет: задайте onUnknown: "continue" в budgets (тариф модели в prices оценит только новые вызовы) и примените: devcontour config-apply --keys budgets,prices'
     : 'Поднимите предел в budgets и примените: devcontour config-apply --keys budgets';

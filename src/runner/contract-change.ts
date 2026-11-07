@@ -177,13 +177,14 @@ export class ContractChanges {
     /** Точка после шага: тест моделирует в ней сбой процесса. */
     readonly afterStep: (step: Step) => void = () => {},
   ) {}
-  private all() {
+  /** Операции всех компонентов; чтение без lease и без записи. */
+  list() {
     return repositories(this.h.config).flatMap((r) =>
       Object.values(this.h.store.localRecords<ContractChange>(KIND, r.id)),
     );
   }
   get(id: string) {
-    const op = this.all().find((x) => x.id === id);
+    const op = this.list().find((x) => x.id === id);
     if (!op) throw new DomainError('Операция изменения контракта не найдена', 404);
     return op;
   }
@@ -236,7 +237,7 @@ export class ContractChanges {
     const owner = impact.repositoryId;
     const key = digest({ owner, source: proposal.file ?? `title:${proposal.title}` });
     return this.h.store.atomic(() => {
-      const existing = this.all().find((x) => x.key === key && active(x));
+      const existing = this.list().find((x) => x.key === key && active(x));
       if (existing) {
         if (existing.expected.proposedDigest !== impact.proposed.digest)
           throw new DomainError(
