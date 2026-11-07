@@ -157,6 +157,15 @@ export function policyFromConfig(
     // неявным «противоположным runtime»: при авторе claude берётся codex,
     // при авторе codex — claude.
     if (kind !== 'code' && !reviewer && !config.review?.[kind]?.reviewer) {
+      // Учебный режим (demo mode) с учебным ревьюером: живой CLI не
+      // вызывается. Ревью ответа на вопрос demo-ревьюер одобряет
+      // детерминированно, прочие предметы отклоняет. Только политика ревью
+      // (`purpose: 'review'`): политика исполнения и её digest прежние.
+      if (forReview && config.mode === 'demo' && config.reviewer.runtime === 'demo')
+        return {
+          reviewer: binding(config, config.reviewer, true),
+          vendor: vendor ?? 'same-vendor-allowed',
+        };
       const live = (runtime: 'codex' | 'claude') =>
         binding(config, config.reviewer.runtime === runtime ? config.reviewer : { runtime }, true);
       return {

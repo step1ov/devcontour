@@ -9,12 +9,14 @@ import { blockers, readyTasks } from '../src/core/graph.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import {
   adapters,
+  type AgentAdapter,
   cliArguments,
   implementationResult,
   implementationSchema,
 } from '../src/runner/adapters.ts';
 import { InputService, inputHolds } from '../src/application/input.ts';
 import { executionOf } from '../src/harness/execution.ts';
+import { technicalReviewer } from '../src/harness/policy.ts';
 
 after(() => inputDemos.close());
 
@@ -55,6 +57,31 @@ test('The writer wire schema carries the harness question and assumptions exactl
   });
   assert.deepEqual(parsed.inputRequest, { question: 'q' });
   assert.equal(parsed.assumptions?.length, 1);
+});
+
+test('Training mode: the answer review is the demo fixture review; codex and claude are never called', async () => {
+  const called: string[] = [];
+  const refuse = (name: 'codex' | 'claude'): AgentAdapter => ({
+    name,
+    execute: () => {
+      called.push(name);
+      return Promise.reject(new Error(`${name} must not be called in training mode`));
+    },
+  });
+  const f = await inputFixture({ ...adapters, codex: refuse('codex'), claude: refuse('claude') });
+  try {
+    assert.equal(f.h.config.mode, 'demo');
+    assert.equal(technicalReviewer(f.h.config, 'plan', 'codex')?.runtime, 'demo');
+    const { taskId, boardId } = f.askingTask();
+    await untilQuestion(f, boardId);
+    const [request] = f.service.list({ taskId }).requests;
+    const ready = await prepared(f, request.requestId);
+    assert.deepEqual(called, []);
+    assert.equal(ready.review.approved, true);
+    assert.match(ready.review.summary, /не AI-review/);
+  } finally {
+    await f.cleanup();
+  }
 });
 
 test('The demo [demo:ask] writer is a marked fixture and stops the attempt with needs-input', async () => {
