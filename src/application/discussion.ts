@@ -592,6 +592,18 @@ export class DiscussionService {
           throw new DomainError('Сообщение уже исправлено: исправьте его новую версию', 409, {
             code: 'already-superseded',
           });
+        // Исход accepted/rejected окончателен: исправление вернуло бы
+        // обращение в очередь. Дальнейшее изменение — новое обращение.
+        if (target.kind === 'change-request') {
+          const last = this.h.store.discussionLatestDisposition(owner, target.id);
+          const outcome = last && this.parse(last).disposition?.outcome;
+          if (outcome && outcome !== 'needs-answer')
+            throw new DomainError(
+              'Обращение уже обработано и не исправляется: дальнейшее изменение — новое обращение',
+              409,
+              { code: 'request-resolved' },
+            );
+        }
       }
       // Обращение — новый запрос, а не ответ на запрос ведущего.
       if (input.kind === 'change-request' && input.replyTo) {

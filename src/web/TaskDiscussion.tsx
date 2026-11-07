@@ -413,6 +413,11 @@ export function TaskDiscussion({
             const request = m.replyTo ? byId.get(m.replyTo) : undefined;
             const own =
               m.author === 'operator' && (m.kind === 'note' || m.kind === 'change-request');
+            // Исход accepted/rejected окончателен: изменение — новое обращение.
+            const final =
+              m.kind === 'change-request' &&
+              !!handled?.disposition &&
+              handled.disposition.outcome !== 'needs-answer';
             return (
               <li
                 key={m.id}
@@ -557,7 +562,7 @@ export function TaskDiscussion({
                       Ответить
                     </button>
                   )}
-                  {own && !correction && (
+                  {own && !correction && !final && (
                     <button
                       type="button"
                       className="text-info cursor-pointer underline-offset-2 hover:underline"

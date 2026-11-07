@@ -256,6 +256,21 @@ test('A needs-answer disposition: the operator replies from the card and the req
   const [reopened] = await inboxOf(ids.task);
   expect(reopened?.id).toBe(pending.id);
   expect(reopened?.reopened?.answerId).toBeTruthy();
+
+  // Пока исход не окончателен, обращение исправляется; после отказа — нет:
+  // дальнейшее изменение — новое обращение.
+  await expect(requestItem.getByRole('button', { name: 'Исправить' })).toBeVisible();
+  await agent('discussion_resolve', {
+    requestId: pending.id,
+    outcome: 'rejected',
+    reason: 'Экспорт — отдельной задачей',
+    idempotencyKey: 'e2e-needs-answer-2',
+    expectedVersion: reopened.version,
+  });
+  await page.reload();
+  await expect(requestItem).toContainText('Обработано: отклонено');
+  await expect(requestItem.getByRole('button', { name: 'Исправить' })).toHaveCount(0);
+
   expect(
     (await new AxeBuilder({ page }).include('section[aria-labelledby^="discussion-"]').analyze())
       .violations,

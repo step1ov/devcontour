@@ -830,6 +830,43 @@ test('D02-C: ответ на запрос ведущего — заметка; �
   }
 });
 
+test('D02-C: окончательно обработанное обращение не исправляется — 409; после «нужен ответ» — можно', () => {
+  const w = world();
+  try {
+    // Ожидающее ответа обращение исправляется: ведущий обработает новую версию.
+    const { request } = asked(w);
+    const corrected = say(w.d, w.task.id, 'Сделать импорт из CSV', { supersedes: request.id });
+    assert.deepEqual(
+      w.d.inbox({}).requests.map((r) => r.id),
+      [corrected.id],
+    );
+    w.d.resolve({
+      requestId: corrected.id,
+      outcome: 'rejected',
+      reason: 'Не в этой задаче',
+      idempotencyKey: key(++counter),
+      expectedVersion: w.d.read({ taskId: w.task.id, latest: true, limit: 1 }).version,
+    });
+    const version = w.d.read({ taskId: w.task.id, latest: true, limit: 1 }).version;
+    for (const kind of ['change-request', 'note'] as const)
+      assert.throws(
+        () => say(w.d, w.task.id, 'Всё же сделать', { kind, supersedes: corrected.id }),
+        (e: Error & { status?: number; details?: { code?: string } }) =>
+          e.status === 409 && e.details?.code === 'request-resolved',
+      );
+    // Ничего не записано, очередь пуста; дальнейшее изменение — новое обращение.
+    assert.equal(w.d.read({ taskId: w.task.id, latest: true, limit: 1 }).version, version);
+    assert.deepEqual(w.d.inbox({}).requests, []);
+    const next = say(w.d, w.task.id, 'Сделать импорт в следующей задаче');
+    assert.deepEqual(
+      w.d.inbox({}).requests.map((r) => r.id),
+      [next.id],
+    );
+  } finally {
+    w.cleanup();
+  }
+});
+
 test('D02: некорректный курсор очереди — 400; длинный текст — 413; ревизия без доски — 400', () => {
   const w = world();
   try {
