@@ -14,7 +14,7 @@ import { repository, repositories } from '../core/repositories.ts';
 import { validateWorkflow } from '../core/workflow.ts';
 import { TaskFailure } from '../core/failure.ts';
 import { executionOf, type Execution } from '../harness/execution.ts';
-import { devcontourContextSource, taskPacks } from '../harness/host.ts';
+import { devcontourContextSource, pinnedSnapshot, taskPacks } from '../harness/host.ts';
 import { runtimeAdapters } from '../harness/adapters.ts';
 import { devcontourHooks } from '../harness/hooks.ts';
 import { adapters } from './adapters.ts';
@@ -82,8 +82,15 @@ export class Scheduler {
       stateDirFor: (repositoryId) => this.runRoot(repositoryId),
       baseDir: this.root,
       adapters: runtimeAdapters(this.h, execution.engine.policy, this.runtimes),
-      // Снимок контекста — закреплённые context packs задачи (те же байты, прежний digest пакета).
-      context: (work) => {
+      // Снимок контекста — закреплённые context packs задачи (те же байты,
+      // прежний digest пакета). Попытка, выданная со снимком ответа на вопрос
+      // исполнителя (`pinned.contextDigest`), получает ровно его: writer и оба
+      // reviewer видят одни и те же байты. Не найденный снимок — `undefined`:
+      // runner держит эту задачу (needs-lead) до платного вызова.
+      context: (work, attempt) => {
+        const pin = attempt.pinned?.contextDigest;
+        if (typeof pin === 'string') return pinnedSnapshot(execution.store, pin);
+        if (pin === null) return undefined;
         const task = this.h.store.view().tasks.find((t) => t.id === work.id);
         return task && taskPacks(this.h, task).length ? context.forTask(work.id) : undefined;
       },

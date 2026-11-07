@@ -298,6 +298,26 @@ export interface Task extends TaskInput {
   /** Незасчитанные отказы окружения после начала работы (счётчик движка). */
   neutralFailures?: number;
   approval?: Approval;
+  /**
+   * Снимок контекста с ответами на вопросы исполнителя, активированный
+   * `applyInput`/`carryInput` (порт `InputHost`): claim закрепляет его, пока
+   * утверждение задачи то же (`approvedDigest`). Локальная запись: в Git не
+   * переносится. Нет поля — контекст задачи живой, из закреплённых пакетов.
+   */
+  inputContext?: TaskInputContext;
+}
+/** Активированный снимок контекста с ответами (`Task.inputContext`). */
+export interface TaskInputContext {
+  /** Digest снимка (`contextDigest`), закреплённого в `context-snapshots`. */
+  digest: string;
+  /** Утверждение задачи, к которому привязан снимок: другое — снимок не действует. */
+  approvedDigest?: string;
+  /** Запросы, ответы которых несёт снимок, по порядку активации. */
+  requestIds: string[];
+  /** Digest основания продолжения последней активации. */
+  targetDigest: string;
+  actor: 'agent' | 'operator';
+  activatedAt: string;
 }
 export interface Approval {
   actor: 'operator' | 'agent';

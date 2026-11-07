@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs';
 import {
   API_VERSION,
   HarnessError,
+  WORKSPACE_OWNER,
   contextDigest,
   executionDigest,
   resultProblems,
@@ -64,6 +65,19 @@ const releaseGuard = (h: DevContour): ProductReleaseGuard => new IntentService(h
  */
 export const storyGuard = (h: DevContour): StoryBindingGuard => new IntentService(h);
 import type { DevContourExecutionStore } from './store.ts';
+import { activeInputContext, devcontourInputHost } from './input-host.ts';
+
+/**
+ * Снимок контекста, закреплённый по digest (`context-snapshots` у
+ * workspace): найденный и с тем же digest, иначе `undefined`.
+ */
+export function pinnedSnapshot(
+  store: DevContourExecutionStore,
+  digest: string,
+): ContextSnapshot | undefined {
+  const snapshot = store.read((v) => v.local('context-snapshots', WORKSPACE_OWNER, digest));
+  return snapshot && contextDigest(snapshot) === digest ? snapshot : undefined;
+}
 
 const refusal = (code: NonNullable<HostRefusal>['code'], message: string): HostRefusal => ({
   code,
@@ -138,6 +152,9 @@ export function devcontourHost(h: DevContour, store: DevContourExecutionStore): 
   return {
     store,
     consumerVersion: CONSUMER_VERSION,
+    // Продолжение после ответа на вопрос исполнителя: снимок с ответом
+    // активируется в задаче, а не в согласовании графа (DevContour согласует сам).
+    input: devcontourInputHost(h, store),
     // Готовность задачи: согласована и дождалась зависимостей — успешной
     // попытки этого clone или receipt другого (прежнее правило выдачи).
     readyAt: (work, view) => {
@@ -457,9 +474,11 @@ export async function receiverContext(
   const options = projectionOptions(h);
   const board = s.boards.find((b) => activeRevision(b)?.taskIds.includes(task.id));
   const packs = taskPacks(h, task);
-  const snapshot = packs.length
-    ? await devcontourContextSource(h, store).forTask(task.id)
-    : undefined;
+  // Действующий снимок с ответами на вопросы исполнителя — тот, что закрепила
+  // попытка; иначе — снимок закреплённых пакетов.
+  const input = activeInputContext(task);
+  const snapshot =
+    input || !packs.length ? undefined : await devcontourContextSource(h, store).forTask(task.id);
   return {
     order: orderOf(task, options),
     graphId: board?.id ?? 'devcontour-unassigned',
@@ -468,7 +487,7 @@ export async function receiverContext(
       .filter((c): c is NonNullable<typeof c> => !!c)
       .map(contractDocumentOf),
     policy: policyFromConfig(h.config),
-    contextDigest: snapshot ? contextDigest(snapshot) : null,
+    contextDigest: input ? input.digest : snapshot ? contextDigest(snapshot) : null,
     specDigest: specDigest(task),
     checkVersion: task.checkVersion ?? null,
     // Корпус получателя — копия этой установки (общий Store).
