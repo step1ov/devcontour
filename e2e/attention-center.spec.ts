@@ -172,7 +172,7 @@ test('D05-A: from the center to the executor question, an answer, the wait for a
   const row = center(page)
     .getByRole('list', { name: 'История центра внимания' })
     .locator(`[data-attention-history="${key}"]`);
-  await expect(row.first()).toContainText(/Решено \d/);
+  await expect(row.first()).toContainText(/Закрыто \d/);
   await expect(row.first().getByRole('button')).toHaveCount(0);
   expect(errors).toEqual([]);
 });
@@ -228,7 +228,7 @@ test('D05-A before setup: a preparation question in the center, its link and an 
       .getByRole('list', { name: 'История центра внимания' })
       .locator(`[data-attention-history^="prep:q:${changeId}:"]`);
     await expect(row).toContainText('Кто модерирует чат ночью?');
-    await expect(row).toContainText(/Решено \d/);
+    await expect(row).toContainText(/Закрыто \d/);
   } finally {
     await app.close();
     if (root.startsWith(tmpdir())) rmSync(root, { recursive: true, force: true });
@@ -712,7 +712,7 @@ test('D05-C: 390 px, long unbroken texts and accessibility of the queue, history
 
   await center(page).getByRole('tab', { name: 'История' }).click();
   await expect(center(page).getByRole('list', { name: 'История центра внимания' })).toBeVisible();
-  await expect(center(page)).toContainText('Время решения не записано');
+  await expect(center(page)).toContainText('Время закрытия не записано');
   await expect(center(page)).toContainText('Показаны последние 100');
   await fits();
   await axe();
@@ -835,4 +835,284 @@ test('D05-D: one toast per new occurrence, none for heartbeats, updates or lead 
   expect((await ours(page)).length).toBe(1);
   expect(await ours(second)).toEqual([]);
   await second.close();
+});
+
+/* ------------------------------------------------------------------ */
+/* Round 1: версия под открытой формой, исчезнувшая карточка, фокус     */
+/* после отметок, «Открыть» уведомления, «Отметить всё», глубокие ссылки */
+/* ------------------------------------------------------------------ */
+
+/** Своя задача, обращение оператора и «нужен ответ» ведущего: карточка оператора S8. */
+async function needsAnswer(request: APIRequestContext, title: string) {
+  const ids = await ownTask(request, title, 'Наблюдаемый результат для обращения.');
+  const posted = (await (
+    await request.post(`/api/tasks/${ids.task}/discussion`, {
+      headers,
+      data: {
+        kind: 'change-request',
+        text: 'Добавьте экспорт отчёта.',
+        expectedVersion: 0,
+        idempotencyKey: 'na-cr-' + ids.task.slice(-12),
+      },
+    })
+  ).json()) as { message: { id: string } };
+  const inbox = (await agent(request, 'discussion_inbox', {})) as {
+    requests: { id: string; taskId: string; version: number }[];
+  };
+  const pending = inbox.requests.find((r) => r.taskId === ids.task)!;
+  await agent(request, 'discussion_resolve', {
+    requestId: pending.id,
+    outcome: 'needs-answer',
+    reason: 'В каком формате экспорт?',
+    idempotencyKey: 'na-res-' + ids.task.slice(-12),
+    expectedVersion: pending.version,
+  });
+  return { ...ids, key: `discussion:na:${posted.message.id}`, title };
+}
+async function threadOf(request: APIRequestContext, taskId: string) {
+  return (await (await request.get(`/api/tasks/${taskId}/discussion?limit=50`)).json()) as {
+    version: number;
+    messages: { author: string; kind: string; text: string }[];
+  };
+}
+/** Ведущий дополняет обсуждение: версия карточки «нужен ответ» меняется, она остаётся у оператора. */
+async function leadNote(request: APIRequestContext, taskId: string, text: string, n: number) {
+  await agent(request, 'discussion_post', {
+    taskId,
+    kind: 'note',
+    text,
+    idempotencyKey: `lead-note-${n}-` + taskId.slice(-12),
+    expectedVersion: (await threadOf(request, taskId)).version,
+  });
+}
+
+test('B1/M4: a poll that changes the card under an open form never retargets it; toast «Открыть»; keyboard marks; a material update stays silent', async ({
+  page,
+  context,
+  request,
+}) => {
+  test.slow();
+  await context.addInitScript(() => {
+    const w = window as unknown as { __toasts: string[] };
+    w.__toasts = [];
+    new MutationObserver((records) => {
+      for (const r of records)
+        for (const node of r.addedNodes)
+          if (node instanceof HTMLElement) {
+            const toasts = node.matches('[data-sonner-toast]')
+              ? [node]
+              : [...node.querySelectorAll<HTMLElement>('[data-sonner-toast]')];
+            for (const t of toasts) w.__toasts.push(t.textContent ?? '');
+          }
+    }).observe(document, { childList: true, subtree: true });
+  });
+  const title = 'Версия под открытой формой';
+  const ours = async () =>
+    (await page.evaluate(() => (window as unknown as { __toasts: string[] }).__toasts)).filter(
+      (t) => t.includes(title),
+    );
+  await page.goto('/');
+  await expect(
+    page.getByRole('heading', { name: 'Нужно ваше решение', exact: true }),
+  ).toBeVisible();
+  await page.waitForTimeout(3500);
+  const own = await needsAnswer(request, title);
+
+  // Новое появление вне экрана внимания — одно уведомление; «Открыть» ведёт к карточке.
+  await expect.poll(async () => (await ours()).length, { timeout: 15000 }).toBe(1);
+  await page
+    .locator('[data-sonner-toast]')
+    .filter({ hasText: title })
+    .getByRole('button', { name: 'Открыть' })
+    .click();
+  await expect(page).toHaveURL(/tab=attention/);
+  const card = cardOf(page, own.key);
+  await expect(card).toBeFocused();
+  await expect(card).toContainText('новое');
+
+  // Отметки с клавиатуры: фокус не падает на body.
+  await card.getByRole('button', { name: /^Прочитано: / }).focus();
+  await page.keyboard.press('Enter');
+  await expect(card.getByRole('button', { name: /^Увидел: / })).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(card).toBeFocused();
+  await expect(card).toContainText('вы видели');
+
+  // Существенное обновление вне экрана: карточка остаётся у оператора,
+  // снова «новое», уведомления нет.
+  await page
+    .getByRole('navigation', { name: 'Workspace' })
+    .getByRole('link', { name: 'Обзор' })
+    .click();
+  await leadNote(request, own.task, 'Уточнение ведущего: экспорт нужен ежедневно.', 1);
+  await page.waitForTimeout(3 * 3200);
+  expect((await ours()).length).toBe(1);
+  await page
+    .getByRole('navigation', { name: 'Workspace' })
+    .getByRole('link', { name: /Внимание/ })
+    .click();
+  await expect(card).toContainText('новое');
+  await expect(card).toHaveAttribute('data-attention-actor', 'operator');
+
+  // Форма открыта, текст набран; ведущий снова дополняет обсуждение — опрос
+  // (не заморожен) приносит новую версию. Форма не отправляется под ней.
+  await card.getByRole('button', { name: 'Ответить' }).click();
+  const form = card.locator('form');
+  await form.getByLabel(/Ваш ответ/).fill('Ответ на первую версию.');
+  await leadNote(request, own.task, 'Ещё уточнение ведущего.', 2);
+  const changed = card.locator('[data-attention-changed]');
+  await expect(changed).toContainText('Карточка изменилась, пока вы писали', { timeout: 10000 });
+  await expect(form.getByRole('button', { name: 'Ответить' })).toBeDisabled();
+  await expect(form.getByLabel(/Ваш ответ/)).toHaveValue('Ответ на первую версию.');
+  const operatorNotes = async () =>
+    (await threadOf(request, own.task)).messages.filter(
+      (m) => m.author === 'operator' && m.kind === 'note',
+    );
+  expect(await operatorNotes()).toEqual([]);
+  // Явный выбор новой версии — затем отправка.
+  await changed.getByRole('button', { name: 'Ответить на новую версию' }).click();
+  await form.getByRole('button', { name: 'Ответить' }).click();
+  await expect(liveStatus(page)).toContainText('Ответ отправлен ведущему агенту');
+  expect((await operatorNotes()).map((m) => m.text)).toEqual(['Ответ на первую версию.']);
+});
+
+test('M1: a card removed by a poll under an open form keeps the text read-only, with focus on it', async ({
+  page,
+  request,
+}) => {
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-ui-attention-unsent-'));
+  const app = await startWorkspace(join(root, 'workspace'), { port: 0, workspaceMode: 'embedded' });
+  try {
+    await agent(request, 'preparation_create', { title: 'Неотправленный ответ' }, app.url);
+    const changeId = String(
+      (await agent(request, 'preparation_status', {}, app.url)).activeChangeId,
+    );
+    await agent(
+      request,
+      'preparation_question',
+      { changeId, stage: 'product', add: [{ text: 'Кто получает отчёт?', options: [] }] },
+      app.url,
+    );
+    await page.goto(app.url + '/?view=attention');
+    const card = page.locator(`article[data-attention-key^="prep:q:${changeId}:"]`);
+    await card.getByRole('button', { name: 'Ответить' }).click();
+    await card
+      .locator('form')
+      .getByLabel(/Ваш ответ/)
+      .fill('Руководитель отдела продаж.');
+    // Ответ из другой вкладки решает вопрос; опрос убирает карточку.
+    const items = (
+      (await (await request.get(app.url + '/api/attention')).json()) as {
+        items: { sourceKey: string; occurrenceId: string; sourceVersion: string }[];
+      }
+    ).items;
+    const q = items.find((i) => i.sourceKey.startsWith(`prep:q:${changeId}:`))!;
+    const answered = await request.post(app.url + '/api/attention/act', {
+      headers,
+      data: {
+        sourceKey: q.sourceKey,
+        occurrenceId: q.occurrenceId,
+        expectedVersion: q.sourceVersion,
+        action: 'answer',
+        input: { text: 'Ответ из другой вкладки.' },
+      },
+    });
+    expect(answered.ok(), await answered.text()).toBe(true);
+    await expect(card).toHaveCount(0, { timeout: 10000 });
+    const unsent = page.getByRole('group', { name: 'Ваш неотправленный текст' });
+    await expect(unsent).toBeFocused();
+    await expect(unsent).toContainText('решена или снята без вашего ответа');
+    await expect(unsent.locator('[data-attention-unsent]')).toHaveText(
+      'Руководитель отдела продаж.',
+    );
+    await unsent.getByRole('button', { name: 'Убрать текст' }).click();
+    await expect(unsent).toHaveCount(0);
+
+    // M3: выбор изменения в боковой навигации закрывает центр внимания.
+    await page.getByRole('link', { name: /Нужно действие/ }).click();
+    await expect(page.getByRole('heading', { name: 'Внимание', exact: true })).toBeFocused();
+    await page
+      .getByRole('navigation', { name: 'Изменения продукта' })
+      .getByRole('button', { name: /Неотправленный ответ/ })
+      .click();
+    await expect(page.locator('[aria-label="Центр внимания"]')).toHaveCount(0);
+    await expect(page).not.toHaveURL(/view=attention/);
+    await expect(page.getByRole('list', { name: 'Этапы изменения' })).toBeVisible();
+  } finally {
+    await app.close();
+    if (root.startsWith(tmpdir())) rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('M2: «Отметить всё прочитанным» marks only the shown operator items and focuses the group heading', async ({
+  page,
+}) => {
+  const items = [
+    fakeItem('changeset:CHG-M1'),
+    fakeItem('changeset:CHG-M2'),
+    fakeItem('work:T-LEAD', { actor: 'lead', category: 'technical', actions: [] }),
+  ];
+  const sent: { sourceKey: string }[] = [];
+  await page.route(isList, (route) => route.fulfill({ json: fakeView(items) }));
+  await page.route('**/api/attention/marks', async (route) => {
+    const body = route.request().postDataJSON() as { marks: { sourceKey: string }[] };
+    sent.push(...body.marks);
+    for (const m of body.marks) {
+      const i = items.find((x) => x.sourceKey === m.sourceKey)!;
+      i.state = { read: true, acknowledged: false, unread: false };
+    }
+    await route.fulfill({
+      json: { marked: body.marks, ignored: [] },
+    });
+  });
+  await page.goto('/?tab=attention');
+  const markAll = center(page).getByRole('button', { name: 'Отметить всё прочитанным' });
+  await markAll.focus();
+  await page.keyboard.press('Enter');
+  await expect(center(page).getByRole('heading', { name: /Нужно ваше действие/ })).toBeFocused();
+  await expect(markAll).toHaveCount(0);
+  expect(sent.map((m) => m.sourceKey).sort()).toEqual(['changeset:CHG-M1', 'changeset:CHG-M2']);
+});
+
+test('M4: deep links reach the discussion message and the change', async ({ page, request }) => {
+  const ids = await ownTask(request, 'Глубокие ссылки', 'Наблюдаемый результат для ссылок.');
+  const posted = (await (
+    await request.post(`/api/tasks/${ids.task}/discussion`, {
+      headers,
+      data: {
+        kind: 'change-request',
+        text: 'Сообщение для ссылки.',
+        expectedVersion: 0,
+        idempotencyKey: 'deep-link-' + ids.task.slice(-12),
+      },
+    })
+  ).json()) as { message: { id: string } };
+  await page.goto('/?tab=attention&who=lead');
+  await cardOf(page, `discussion:cr:${posted.message.id}`)
+    .getByRole('link', { name: 'Открыть задачу' })
+    .click();
+  await expect(page.locator(`#dm-${posted.message.id}`)).toBeFocused();
+
+  // Карточка изменения ведёт к его записи на экране изменений.
+  const change = (await (
+    await request.post('/api/changesets', {
+      headers,
+      data: { title: 'Глубокая ссылка', description: 'Проверка ссылки', boardIds: [ids.board] },
+    })
+  ).json()) as { id: string };
+  const href = `/?view=boards&tab=changesets#changeset-${change.id}`;
+  await page.route(isList, (route) =>
+    route.fulfill({
+      json: fakeView([
+        fakeItem(`changeset:${change.id}`, {
+          subject: { kind: 'changeset', id: change.id, href },
+        }),
+      ]),
+    }),
+  );
+  await page.goto('/?tab=attention');
+  await cardOf(page, `changeset:${change.id}`)
+    .getByRole('link', { name: 'Открыть изменения' })
+    .click();
+  await expect(page.locator(`[id="changeset-${change.id}"]`)).toBeFocused();
 });
