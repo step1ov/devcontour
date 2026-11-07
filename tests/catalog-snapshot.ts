@@ -43,5 +43,8 @@
 // Намеренное изменение: описания input_answer и input_supersede называют
 // путь изменения требований (новая постановка задачи, замена той же задачей
 // и перенос ответа) и отказ SPEC_UNCHANGED; прочие операции байтово прежние.
-export const CATALOG_DIGEST = 'd86d135bd514f814863e1a6b6777fc90ea52dff05e43a8541091640627ad05a9';
+// Намеренное изменение: описание input_supersede называет замену
+// неблокирующего follow-up новой задачей той же доски (например, заменой из
+// board_correct); прочие операции байтово прежние.
+export const CATALOG_DIGEST = '1b82ad084444706a3fcb90ab3c2035f8cce0a19e1b4a51b7ac66dadec012fbe4';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

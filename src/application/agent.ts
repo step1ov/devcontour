@@ -305,7 +305,7 @@ export const descriptions: Record<AgentOperation, string> = {
   input_cancel:
     'Cancel a writer question with the expected version and a reason; also closes follow-ups (assumption accepted). A blocking question follows the answer rule: floored or approvalMode operator questions are cancelled by the operator.',
   input_supersede:
-    'Supersede a writer question once the spec of its task has changed: reopen and respecify the task (draft or re-approved), then supersede with the same task and carry the answer (input_context, input_review, input_target, input_apply). Refused with 409 SPEC_UNCHANGED while the spec is unchanged; a blocking question the lead may not answer is superseded by the operator (403 OPERATOR_ANSWERS). The old task is not resumed by a requirement change without carry.',
+    'Supersede a writer question once the spec of its task has changed: reopen and respecify the task (draft or re-approved), then supersede with the same task and carry the answer (input_context, input_review, input_target, input_apply). Refused with 409 SPEC_UNCHANGED while the spec is unchanged; a blocking question the lead may not answer is superseded by the operator (403 OPERATOR_ANSWERS). The old task is not resumed by a requirement change without carry. A non-blocking follow-up may also be superseded by a newer task of the same board, for example the replacement created by board_correct.',
   preview_status:
     'Read the local preview: which verified release serves the URL, its states (built, deployed, healthy, confirmed or unconfirmed), and past deployments with their errors. Deploying and rolling back are separate controlled actions through the CLI or panel.',
 };

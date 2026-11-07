@@ -190,6 +190,8 @@ test('Autonomous threshold 11: a critical writer decision becomes a follow-up; h
     const next = devcontourHandoff(f.h, {}).host.next;
     assert.equal(next?.action, 'close-follow-up', JSON.stringify(next));
     assert.match(next.detail, /input_cancel/);
+    // Задача follow-up обычно уже дала результат: изменение требований — корректировка доски.
+    assert.match(next.detail, /board_correct.*input_supersede with the replacement task/);
     // Демо выполнило и свои задачи: follow-up есть у каждой. Ведущий
     // закрывает их сам — решение принято.
     const open = f.service
