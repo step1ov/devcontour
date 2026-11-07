@@ -4,6 +4,7 @@ import { Button } from '@/ui/button.tsx';
 import { Textarea } from '@/ui/textarea.tsx';
 import type { InputService } from '../application/input.ts';
 import { inputStateLabels } from './input-labels.ts';
+import { discussionChanged } from './discussion-events.ts';
 
 export { inputStateLabels };
 
@@ -76,6 +77,8 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
     try {
       await fn();
       setText('');
+      // Ответ — сообщение обсуждения задачи: тред читает его сразу.
+      discussionChanged(taskId);
       await load();
     } catch (e) {
       // Текст ответа остаётся в форме: конфликт версии не теряет набранное.
@@ -265,7 +268,9 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
               <input
                 type="checkbox"
                 checked={confirmedRound === lastReview?.round}
-                onChange={(e) => setConfirmedRound(e.target.checked ? (lastReview?.round ?? null) : null)}
+                onChange={(e) =>
+                  setConfirmedRound(e.target.checked ? (lastReview?.round ?? null) : null)
+                }
               />
               Применить вопреки отклонённому ревью (находки выше прочитаны)
             </label>
