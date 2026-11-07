@@ -60,7 +60,7 @@ import {
   planSetup,
   componentProfileConfig,
 } from './runner/setup.ts';
-import { QUICK_SETUP_MARKER, quickFacts } from './runner/quick.ts';
+import { markQuickSetup, quickFacts } from './runner/quick.ts';
 import { acceptBoard, reviewContract, reviewPlan } from './runner/agent-control.ts';
 import { specDigest } from './core/service.ts';
 import { WorkspaceRunner } from './runner/workspace.ts';
@@ -1351,7 +1351,8 @@ main().catch((error) => {
 /** Ключи изменений подготовки: их проекция в docs/changes — запись DevContour. */
 async function changeKeysOf(root: string) {
   if (!(await exists(join(root, 'state.sqlite')))) return [];
-  const store = preparationStore(root);
+  // quick-facts документирован как команда без записи: только чтение.
+  const store = preparationStore(root, true);
   try {
     return (store.read().preparation?.changes ?? []).map((c) => c.key);
   } finally {
@@ -1371,9 +1372,6 @@ async function appliedQuickSetup(
   input: Parameters<typeof setupProject>[0],
 ) {
   const result = await setupProject(input);
-  await writeFile(
-    join(root, QUICK_SETUP_MARKER),
-    JSON.stringify({ changeId, proposal, at: new Date().toISOString() }, null, 2) + '\n',
-  );
+  markQuickSetup(root, changeId, proposal);
   return result;
 }

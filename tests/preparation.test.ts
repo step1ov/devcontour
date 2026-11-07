@@ -982,6 +982,14 @@ test('План выпускается в работу только с фичей
     assert.ok(after.enabled);
     // Живые задачи фичи — исходная и её находка; отменённая не считается.
     assert.equal(after.current?.features.find((x) => x.id === 'moderation-log')?.tasks, 2);
+    // Объём изменения находку не считает: готовность изменения её не ждёт.
+    const changeTasks = f.store
+      .read()
+      .tasks.filter(
+        (t) => t.preparation?.changeId === after.current?.id && t.status !== 'cancelled',
+      );
+    assert.ok(changeTasks.some((t) => t.finding));
+    assert.equal(after.delivery.total, changeTasks.filter((t) => !t.finding).length);
   } finally {
     f.cleanup();
   }

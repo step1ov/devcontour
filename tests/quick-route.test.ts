@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -22,7 +23,9 @@ import { chooseWorkspaceMode } from '../src/runner/workspace-mode.ts';
 import { planSetup } from '../src/runner/setup.ts';
 import {
   leadActivityAt,
+  markQuickSetup,
   quickFacts,
+  quickSetupApplied,
   quickSteps,
   type QuickFacts,
   type QuickStep,
@@ -422,12 +425,21 @@ test('D01-C: setup --change отклоняется до согласований
         store.close();
       }
       // CLI quick-facts знает проекцию изменения: свои файлы не «чужая работа».
+      // Команда без записи: база состояния побайтно прежняя.
+      const stateBefore = readFileSync(join(root, '.devcontour-local', 'state.sqlite'));
+      // Файл базы без права записи: команда, открывающая базу на запись, падает.
+      chmodSync(join(root, '.devcontour-local', 'state.sqlite'), 0o444);
       const cliFacts = spawnSync(
         process.execPath,
         ['--import', 'tsx', cli, 'quick-facts', '--repository', root, '--workspace', root],
         { encoding: 'utf8', env: process.env },
       );
       assert.equal(cliFacts.status, 0, cliFacts.stderr);
+      chmodSync(join(root, '.devcontour-local', 'state.sqlite'), 0o644);
+      assert.ok(
+        readFileSync(join(root, '.devcontour-local', 'state.sqlite')).equals(stateBefore),
+        'quick-facts не пишет в базу',
+      );
       assert.deepEqual(
         (JSON.parse(cliFacts.stdout) as QuickFacts).diagnostics.map((d) => d.code),
         [],
@@ -504,14 +516,7 @@ test('D01-C: setup --change отклоняется до согласований
       assert.ok(config.protectedPaths.includes('pnpm-lock.yaml'));
       assert.equal(config.packs[0].id, 'pnpm-project');
       // Отметка применённого setup — этого изменения.
-      assert.equal(
-        (
-          JSON.parse(readFileSync(join(root, '.devcontour-local/quick-setup.json'), 'utf8')) as {
-            changeId: string;
-          }
-        ).changeId,
-        changeId,
-      );
+      assert.equal(quickSetupApplied(join(root, '.devcontour-local'), changeId), true);
       // Одна задача быстрого изменения: роль без обязательного контракта.
       assert.deepEqual(Object.keys(config.roles), ['developer']);
       assert.notEqual(config.roles.developer.requiresContract, true);
@@ -813,6 +818,13 @@ test('D01-E: присутствие ведущего — по его запис�
     leadActivityAt(withSetup, [{ createdAt: '2026-11-06T10:09:00.000Z' }]),
     '2026-11-06T10:09:00.000Z',
   );
+  // Утверждение плана ведущим — тоже его действие.
+  assert.equal(
+    leadActivityAt(withSetup, [
+      { createdAt: '2026-11-06T10:09:00.000Z', approvedAt: '2026-11-06T10:20:00.000Z' },
+    ]),
+    '2026-11-06T10:20:00.000Z',
+  );
 });
 
 test('D01-E: сбой инспекции репозитория — причина в шаге, а не вечная проверка', () => {
@@ -848,4 +860,23 @@ test('D01-E: сбой инспекции репозитория — причин
   });
   assert.equal(connection.state, 'blocked');
   assert.match(connection.detail, /не удалось проверить: git не найден/);
+});
+
+test('R4-m4: отметка setup у каждого изменения своя; прежняя отметка читается', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dc-quick-mark-'));
+  try {
+    assert.equal(quickSetupApplied(dir, 'C-1'), false);
+    writeFileSync(
+      join(dir, 'quick-setup.json'),
+      JSON.stringify({ changeId: 'C-1', proposal: 'a'.repeat(64), at: '2026-11-06T00:00:00.000Z' }),
+    );
+    assert.equal(quickSetupApplied(dir, 'C-1'), true);
+    markQuickSetup(dir, 'C-2', 'b'.repeat(64));
+    assert.equal(quickSetupApplied(dir, 'C-1'), true, 'setup второго изменения не стирает первое');
+    assert.equal(quickSetupApplied(dir, 'C-2'), true);
+    assert.equal(quickSetupApplied(dir, 'C-3'), false);
+  } finally {
+    assert.ok(dir.includes('dc-quick-mark-'));
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

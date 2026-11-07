@@ -1,4 +1,4 @@
-import { readFileSync, realpathSync } from 'node:fs';
+import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { inspectProject, type ProjectFacts } from 'devcontour-harness';
 import type { DevContourState } from '../core/model.ts';
@@ -453,14 +453,34 @@ export function leadActivityAt(
   return stamps.sort().at(-1) ?? null;
 }
 
-/** Применён ли setup именно этого изменения (отметка `setup --change`). */
-export function quickSetupApplied(dataRoot: string, changeId: string) {
+/** Отметки `setup --change` по изменениям; прежний формат — одна отметка. */
+export function quickSetupMarks(
+  dataRoot: string,
+): Record<string, { proposal: string; at: string }> {
   try {
     const marker = JSON.parse(readFileSync(join(dataRoot, QUICK_SETUP_MARKER), 'utf8')) as {
+      changes?: Record<string, { proposal: string; at: string }>;
       changeId?: string;
+      proposal?: string;
+      at?: string;
     };
-    return marker.changeId === changeId;
+    if (marker.changes) return { ...marker.changes };
+    return marker.changeId
+      ? { [marker.changeId]: { proposal: marker.proposal ?? '', at: marker.at ?? '' } }
+      : {};
   } catch {
-    return false;
+    return {};
   }
+}
+
+/** Отметка применённого setup изменения; отметки других изменений остаются. */
+export function markQuickSetup(dataRoot: string, changeId: string, proposal: string) {
+  const changes = quickSetupMarks(dataRoot);
+  changes[changeId] = { proposal, at: new Date().toISOString() };
+  writeFileSync(join(dataRoot, QUICK_SETUP_MARKER), JSON.stringify({ changes }, null, 2) + '\n');
+}
+
+/** Применён ли setup именно этого изменения (отметка `setup --change`). */
+export function quickSetupApplied(dataRoot: string, changeId: string) {
+  return Object.hasOwn(quickSetupMarks(dataRoot), changeId);
 }
