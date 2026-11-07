@@ -28,6 +28,19 @@ export const emptyDraft = (): Draft => ({
   pin: null,
 });
 
+/**
+ * Правка ответа: другой текст, вариант или вид — новый ключ повтора. Сервер
+ * отклоняет другой ответ под прежним ключом (409 `idempotency-conflict`), а
+ * повтор того же ответа с прежним ключом возвращает уже сохранённый.
+ */
+export const answerEdit = (
+  d: Pick<Draft, 'text' | 'option' | 'kind'>,
+  patch: Partial<Pick<Draft, 'text' | 'option' | 'kind'>>,
+): Partial<Draft> =>
+  (Object.keys(patch) as (keyof typeof patch)[]).some((k) => patch[k] !== d[k])
+    ? { ...patch, key: crypto.randomUUID() }
+    : patch;
+
 /** Ключ черновика — появление карточки (как `id` карточки). */
 export const draftKey = (i: Pick<AttentionItem, 'sourceKey' | 'occurrenceId'>) =>
   `${i.sourceKey}#${i.occurrenceId}`;

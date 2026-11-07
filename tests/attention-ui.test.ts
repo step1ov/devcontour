@@ -271,3 +271,18 @@ test('Reopening a draft with text keeps the version it was written for', async (
   // Пустой черновик открывается на показанной версии.
   assert.equal(openPin(emptyDraft(), v2).sourceVersion, 'D:5');
 });
+
+test('Changing the text, option or kind of an answer takes a new retry key; the same answer keeps it', async () => {
+  const { emptyDraft, answerEdit } = await import('../src/web/attention-drafts.ts');
+  const d = { ...emptyDraft(), text: 'Ответ', option: '0' };
+  for (const patch of [
+    { text: 'Другой ответ' },
+    { option: '1' },
+    { kind: 'requirement-change' as const },
+  ]) {
+    const next = answerEdit(d, patch);
+    assert.ok(next.key && next.key !== d.key, `новый ключ для ${JSON.stringify(patch)}`);
+  }
+  assert.equal(answerEdit(d, { text: 'Ответ' }).key, undefined, 'тот же текст — прежний ключ');
+  assert.equal(answerEdit(d, { option: '0' }).key, undefined, 'тот же вариант — прежний ключ');
+});

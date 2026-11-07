@@ -154,13 +154,18 @@ export function AttentionCenter({
   }, [component, attention.view]);
 
   // Новое появление под формой с текстом уже объявлено своим сообщением
-  // (ниже): общее «Новая карточка» его не перекрывает.
+  // (ниже): общее «Новая карточка» его не перекрывает, а другие новые
+  // карточки того же опроса дописываются к нему. Ключ — id появления:
+  // необъявленная запись не скроет следующее появление того же предмета.
   const announced = useRef(new Set<string>());
   useEffect(() => {
     if (!arrived.seq) return;
-    const titles = arrived.titles.filter((_, i) => !announced.current.has(arrived.keys[i]));
+    const own = arrived.ids.filter((id) => announced.current.has(id));
     announced.current.clear();
-    if (titles.length) setMessage(`Новая карточка: ${titles.join('; ')}`);
+    const titles = arrived.titles.filter((_, i) => !own.includes(arrived.ids[i]));
+    if (!titles.length) return;
+    const text = `Новая карточка: ${titles.join('; ')}`;
+    setMessage((m) => (own.length ? `${m} ${text}` : text));
   }, [arrived]);
 
   const source = useMemo(
@@ -222,7 +227,7 @@ export function AttentionCenter({
     const lostFocus = !active || active === document.body;
     if (wasId && nowId && wasId !== nowId && hasText(draftsNow.current.get(wasId))) {
       if (!lostFocus && !document.getElementById(cardDomId(key))?.contains(active)) return;
-      announced.current.add(key);
+      announced.current.add(nowId);
       setMessage(
         `Появилась новая редакция «${now.titles.get(key)}»: ваш текст к прежней не отправлен и сохранён в «Неотправленные ответы».`,
       );

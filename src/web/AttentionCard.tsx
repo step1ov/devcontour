@@ -21,6 +21,7 @@ import {
   draftKey,
   emptyDraft,
   openPin,
+  answerEdit,
   pinOf,
   pinStale,
   unsentWhy,
@@ -318,12 +319,9 @@ export function AttentionCard({
   // при открытии формы.
   const [draft, setDraft] = useDraft(draftKey(shownItem));
   const { open, text, option, kind, key } = draft;
-  // Новый текст — новый ключ повтора: повтор с ключом прежнего текста вернул
-  // бы прежний ответ сервера вместо нового.
-  const setText = (value: string) =>
-    setDraft(value === text ? { text: value } : { text: value, key: crypto.randomUUID() });
-  const setOption = (value: string | null) => setDraft({ option: value });
-  const setKind = (value: Draft['kind']) => setDraft({ kind: value });
+  const setText = (value: string) => setDraft(answerEdit(draft, { text: value }));
+  const setOption = (value: string | null) => setDraft(answerEdit(draft, { option: value }));
+  const setKind = (value: Draft['kind']) => setDraft(answerEdit(draft, { kind: value }));
   const [busy, setBusy] = useState(false);
   const [alert, setAlert] = useState<{ tone: 'warning' | 'destructive'; text: string }>();
   const [markNote, setMarkNote] = useState('');
