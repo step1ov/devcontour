@@ -4,6 +4,7 @@ import { AttentionService } from '../src/application/attention.ts';
 import { fixture, input } from './helpers.ts';
 import { DomainError } from '../src/core/model.ts';
 import { stopInputsOf } from 'devcontour-harness';
+import { executionOf } from '../src/harness/execution.ts';
 
 // Регресс стоимости чтения: отменённые задачи без ждущих — история
 // перепланирования, а не решения. Чтение и действие не должны расти с их
@@ -279,6 +280,88 @@ test('Действие, которого у источника нет, откл�
       (e: unknown) => e instanceof DomainError && e.status === 400,
     );
     assert.equal(calls, 0);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Бюджеты включены, 400 готовых задач: один пакетный расчёт блоков на чтение, без расчёта по задаче', async () => {
+  const f = fixture();
+  try {
+    f.h.config.budgets = { workspace: { usd: 0.01 }, onUnknown: 'stop' };
+    const board = f.h.createBoard('Board');
+    for (let i = 0; i < 400; i++) f.h.addTask(board.id, input(`Task ${i}`));
+    f.h.approve(board.id);
+    f.store.atomic(() =>
+      f.store.saveLocal('usage', undefined, 'U1', {
+        id: 'U1',
+        stage: 'implementation',
+        runtime: 'codex',
+        model: 'fixture-model',
+        runtimeVersion: null,
+        startedAt: new Date().toISOString(),
+        outcome: 'returned',
+        promptBytes: 1,
+        promptDigest: 'd'.repeat(64),
+        usage: {
+          inputTokens: 1,
+          outputTokens: 1,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          reportedUsd: 1,
+          complete: true,
+          source: 'fixture',
+        },
+        costUsd: 1,
+        costSource: 'provider-reported',
+      }),
+    );
+    f.h.pause(true);
+    const { engine } = executionOf(f.h);
+    let single = 0;
+    let batched = 0;
+    const blockOf = engine.budgetBlockOf.bind(engine);
+    const blocksOf = engine.budgetBlocksOf.bind(engine);
+    engine.budgetBlockOf = (...args) => (single++, blockOf(...args));
+    engine.budgetBlocksOf = (...args) => (batched++, blocksOf(...args));
+    const service = new AttentionService(f.store, f.h);
+    await service.active();
+    single = 0;
+    batched = 0;
+    const started = performance.now();
+    const view = await service.active();
+    const read = performance.now() - started;
+    const budget = view.items.find((i) => i.source === 'budget')!;
+    assert.equal(budget.impact.tasks, 400);
+    assert.equal(batched, 1, 'один пакетный расчёт');
+    assert.equal(single, 0, 'без расчёта по каждой задаче');
+    assert.ok(read < 1500, `active() took ${read.toFixed(0)} ms`);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Ответ решённого действия не строит полную проекцию', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    f.h.addTask(b.id, input('One task'));
+    f.h.approve(b.id);
+    f.h.pause(true);
+    let calls = 0;
+    const service = new AttentionService(f.store, f.h, {
+      sources: [{ id: 'preview', collect: () => (calls++, []) }],
+    });
+    const queue = (await service.active()).items.find((i) => i.sourceKey === 'queue')!;
+    calls = 0;
+    const done = await service.act({
+      sourceKey: queue.sourceKey,
+      occurrenceId: queue.occurrenceId,
+      expectedVersion: queue.sourceVersion,
+      action: 'resume',
+    });
+    assert.equal(done.resolved, true);
+    assert.equal(calls, 0, 'другие источники не пересчитывались');
   } finally {
     f.cleanup();
   }

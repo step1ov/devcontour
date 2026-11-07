@@ -211,7 +211,7 @@ function responseFacts(h: DevContour, s: DevContourState, now: number) {
 }
 /**
  * Бюджетные блоки готовых задач ответа — одно чтение движка на ответ:
- * `budgetBlockOf` — тот же расчёт, которым claim ставит и снимает
+ * `budgetBlocksOf` — тот же расчёт, которым claim ставит и снимает
  * `budgetBlock`, по пределам процесса, когда они совпадают с применёнными.
  * Бюджеты выключены — блоков нет, даже если в задаче остался записанный кэш.
  */
@@ -228,11 +228,14 @@ export function budgetBlocks(h: DevContour, s: DevContourState) {
   }
   const { engine } = executionOf(h);
   if (!ready.length || !engine.policy.budgets) return blocks;
+  // Один проход по записям вызовов на все готовые задачи (не расчёт на каждую):
+  // каждое значение равно `budgetBlockOf` этой задачи.
   engine.read((v) => {
-    for (const t of ready) {
-      const reason = engine.budgetBlockOf(t.id, v);
-      if (reason) blocks.set(t.id, reason);
-    }
+    for (const [id, reason] of engine.budgetBlocksOf(
+      ready.map((t) => t.id),
+      v,
+    ))
+      if (reason) blocks.set(id, reason);
   });
   return blocks;
 }

@@ -2465,6 +2465,11 @@ export class AttentionService {
     // один раз на ответ.
     const shown = () =>
       this.store.snapshot(() => {
+        // Карточка решена — полная проекция не нужна: сначала только её источник.
+        if (
+          !this.candidates(this.context(quick, now), only).some((c) => c.sourceKey === v.sourceKey)
+        )
+          return undefined;
         const ctx = this.context(quick, now);
         const item = this.candidates(ctx).find((c) => c.sourceKey === v.sourceKey);
         return item
