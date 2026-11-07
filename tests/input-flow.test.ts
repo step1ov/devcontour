@@ -3,7 +3,7 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { implementationOutputSchema } from 'devcontour-harness';
-import { controlled, inputDemos, inputFixture, untilQuestion } from './input-fixture.ts';
+import { controlled, inputDemos, inputFixture, prepared, untilQuestion } from './input-fixture.ts';
 import { fixture, input } from './helpers.ts';
 import { blockers, readyTasks } from '../src/core/graph.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
@@ -188,8 +188,9 @@ test('Answer → snapshot → review → target → apply: the next attempt pins
   }
 });
 
-test('reopen supersedes the open question with the same task; the question stops holding it', async () => {
-  const f = await inputFixture();
+test('reopen keeps the open question; after re-approval of the same spec the answer applies as usual', async () => {
+  const runtimes = controlled();
+  const f = await inputFixture(runtimes);
   try {
     const { taskId, boardId } = f.askingTask();
     await untilQuestion(f, boardId);
@@ -204,17 +205,24 @@ test('reopen supersedes the open question with the same task; the question stops
       ),
       ['input:' + request.requestId],
     );
-    f.h.reopen(taskId, 'The question shows the spec is incomplete');
-    const after = f.service.show({ requestId: request.requestId });
-    assert.equal(after.lifecycle, 'superseded');
-    assert.equal(after.closed?.successor, taskId);
-    assert.equal(after.closed?.by, 'host');
-    assert.equal(inputHolds(f.h).size, 0);
+    f.h.pause(true);
+    f.h.reopen(taskId, 'The question shows the spec needs a second look');
     assert.equal(f.store.read().tasks.find((t) => t.id === taskId)!.status, 'draft');
-    const event = f.store.events().findLast((e) => e.type === 'task.reopened')!;
-    assert.deepEqual((event.data as { inputRequests?: string[] }).inputRequests, [
-      request.requestId,
-    ]);
+    // Вопрос не снят: снятый вопрос при той же постановке нельзя ни применить,
+    // ни перенести (исходная остановка держится) — ответ был бы потерян.
+    assert.equal(f.service.show({ requestId: request.requestId }).lifecycle, 'pending');
+    f.h.approve(boardId, [taskId]);
+    assert.equal(
+      readyTasks(f.store.read(), inputHolds(f.h)).some((t) => t.id === taskId),
+      false,
+    );
+    const p = await prepared(f, request.requestId, 'lead');
+    assert.deepEqual(p.target.problems, []);
+    assert.equal(f.service.apply(p.apply, 'lead').applied, true);
+    f.h.pause(false);
+    await f.scheduler.drain();
+    assert.equal(f.store.read().tasks.find((t) => t.id === taskId)!.status, 'done');
+    assert.equal(f.service.show({ requestId: request.requestId }).state, 'delivered');
   } finally {
     await f.cleanup();
   }
