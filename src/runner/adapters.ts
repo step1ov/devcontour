@@ -623,6 +623,11 @@ export function reviewTransitions(
 }
 /** Маркер описания задачи: demo-исполнитель задаёт вопрос (fixture, не модель). */
 export const DEMO_ASK = '[demo:ask]';
+/**
+ * Тот же вопрос, задевающий продуктовую область (`affects: product`): у него
+ * объявленный порог критичности, и отвечает оператор, а не ведущий.
+ */
+export const DEMO_ASK_PRODUCT = '[demo:ask-product]';
 // Deterministic fixture only. Never claim these outputs were produced by a model.
 export const demoAdapter: AgentAdapter = {
   name: 'demo',
@@ -690,7 +695,11 @@ export const demoAdapter: AgentAdapter = {
     // Fixture-поведение для обучения и e2e: задача с маркером `[demo:ask]`
     // останавливается вопросом исполнителя, пока в закреплённом контексте нет
     // ответа (`input/<id>.md`). Это не вопрос модели.
-    if (r.task.description?.includes(DEMO_ASK) && !/### input\/IR-[a-f0-9]{24}\.md/.test(r.prompt))
+    const askProduct = !!r.task.description?.includes(DEMO_ASK_PRODUCT);
+    if (
+      (askProduct || r.task.description?.includes(DEMO_ASK)) &&
+      !/### input\/IR-[a-f0-9]{24}\.md/.test(r.prompt)
+    )
       return {
         data: {
           completed: false,
@@ -705,7 +714,7 @@ export const demoAdapter: AgentAdapter = {
             recommended: 'json',
             severity: 8,
             rationale: 'Формат артефакта виден проверкам задачи',
-            affects: [],
+            affects: askProduct ? ['product'] : [],
           },
           assumptions: [],
         },

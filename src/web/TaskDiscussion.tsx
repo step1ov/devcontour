@@ -348,7 +348,13 @@ export function TaskDiscussion({
   const counterId = `discussion-size-${taskId}`;
 
   return (
-    <section aria-labelledby={headingId} className="mt-5 min-w-0">
+    // Запасная цель ссылки на сообщение, которого нет на загруженной странице.
+    <section
+      id="discussion"
+      tabIndex={-1}
+      aria-labelledby={headingId}
+      className="mt-5 min-w-0 outline-offset-2"
+    >
       <h3 id={headingId} className="text-muted-foreground mt-0 mb-1 text-xs font-medium">
         Обсуждение
       </h3>

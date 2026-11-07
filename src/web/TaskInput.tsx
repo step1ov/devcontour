@@ -113,8 +113,10 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
   return (
     <section
       id="input"
+      // Цель ссылки центра внимания (`#input`): фокус переходит к вопросу.
+      tabIndex={-1}
       aria-label="Вопрос исполнителя"
-      className="border-border mt-3 rounded-md border p-3 text-sm"
+      className="border-border mt-3 rounded-md border p-3 text-sm outline-offset-2"
       data-input-state={current.state}
     >
       <div className="flex flex-wrap items-center gap-2">

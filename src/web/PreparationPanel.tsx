@@ -32,6 +32,8 @@ import { cn } from '@/lib/utils.ts';
 import { boardPhaseLabels, type BoardPhase, type QueueStopView } from '../core/work-status.ts';
 import { QueueStopBanner } from './QueueStopBanner.tsx';
 import { QuickForm, QuickRoute } from './QuickRoute.tsx';
+import { AttentionCount, useAttentionScreen } from './AttentionProvider.tsx';
+import { AttentionCenter } from './AttentionCenter.tsx';
 
 const Development = lazy(() => import('./App.tsx').then((m) => ({ default: m.App })));
 type View = ReturnType<Preparation['status']> & {
@@ -86,9 +88,13 @@ function readLocation() {
     change: params.get('change') ?? '',
     tab: (stages.includes(stage as Stage) ? stage : 'product') as Stage,
     boards: params.get('view') === 'boards',
+    attention: params.get('view') === 'attention',
   };
 }
-function writeLocation(state: { change: string; tab: Stage; boards: boolean }, replace = false) {
+function writeLocation(
+  state: { change: string; tab: Stage; boards: boolean; attention: boolean },
+  replace = false,
+) {
   // Параметры панели разработки (вид, доска, задача) принадлежат ей и
   // сохраняются: иначе ссылка на задачу терялась при открытии.
   const params = new URLSearchParams(window.location.search);
@@ -96,10 +102,19 @@ function writeLocation(state: { change: string; tab: Stage; boards: boolean }, r
   if (state.change) params.set('change', state.change);
   if (state.tab !== 'product') params.set('stage', state.tab);
   if (state.boards) params.set('view', 'boards');
+  else if (state.attention) params.set('view', 'attention');
   const search = params.toString();
   const next = window.location.pathname + (search ? '?' + search : '');
-  if (next !== window.location.pathname + window.location.search)
-    window.history[replace ? 'replaceState' : 'pushState'](null, '', next);
+  // Тот же набор параметров в другом порядке — тот же адрес: панель
+  // разработки пишет свои параметры сама, и перестановка не должна
+  // добавлять запись истории.
+  const same = (a: URLSearchParams) => [...a].map(String).sort().join('&');
+  if (same(params) === same(new URLSearchParams(window.location.search))) return;
+  // Замена сохраняет состояние записи (глубину панели, карточку центра
+  // внимания, к которой вернёт «Назад»).
+  if (replace)
+    window.history.replaceState(window.history.state as unknown, '', next + window.location.hash);
+  else window.history.pushState(null, '', next);
 }
 type RevisionStatus = 'draft' | 'in-review' | 'approved' | 'changes-requested';
 const names: Record<RevisionStatus, string> = {
@@ -187,7 +202,7 @@ function Foldable({
           </span>
         </Button>
       </h3>
-      <div id={id} hidden={!open} className="mt-3">
+      <div id={id} hidden={!open} tabIndex={-1} className="mt-3 outline-offset-2">
         {children}
       </div>
     </section>
@@ -589,6 +604,24 @@ export function PreparationPanel() {
   const [title, setTitle] = useState('');
   const [busy, setBusy] = useState(false);
   const [tasks, showTasks] = useState(() => readLocation().boards);
+  // Центр внимания в оболочке подготовки — вместо содержимого этапа.
+  const [attention, showAttention] = useState(() => readLocation().attention);
+  // Открытие из шапки переносит фокус к заголовку «Внимание», как навигация
+  // панели разработки — к заголовку экрана.
+  const focusAttention = useRef(false);
+  const attentionHeading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    if (!attention || !focusAttention.current) return;
+    focusAttention.current = false;
+    attentionHeading.current?.focus();
+  }, [attention]);
+  useAttentionScreen(() => {
+    if (view && !view.enabled) return '/?tab=attention';
+    const params = new URLSearchParams(window.location.search);
+    for (const key of ['view', 'tab', 'board', 'task', 'attention', 'who']) params.delete(key);
+    params.set('view', 'attention');
+    return window.location.pathname + '?' + params.toString();
+  });
   const [historyOpen, setHistoryOpen] = useState(false);
   // Адрес без этапа открывал «Продукт» и во время разработки: вернувшийся
   // человек видел постановку трёхдневной давности вместо того, что идёт сейчас.
@@ -606,15 +639,19 @@ export function PreparationPanel() {
     }
   }, [view]);
   useEffect(() => {
-    writeLocation({ change: selected, tab, boards: tasks }, replaceLocation.current);
+    writeLocation({ change: selected, tab, boards: tasks, attention }, replaceLocation.current);
     replaceLocation.current = false;
-  }, [selected, tab, tasks]);
+  }, [selected, tab, tasks, attention]);
   useEffect(() => {
     const restore = () => {
       const state = readLocation();
+      // Адрес уже в истории («Назад», переход центра внимания): запись
+      // нормализуется на месте, и эффект адреса не добавляет её вперёд.
+      writeLocation(state, true);
       setSelected(state.change);
       setTab(state.tab);
       showTasks(state.boards);
+      showAttention(state.attention);
     };
     window.addEventListener('popstate', restore);
     return () => window.removeEventListener('popstate', restore);
@@ -719,7 +756,15 @@ export function PreparationPanel() {
     return (
       <>
         <div className="flex items-center gap-4 p-3">
-          <Button variant="outline" size="sm" onClick={() => showTasks(false)}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              // Назад — к этапам, а не к центру внимания, с которого пришли.
+              showAttention(false);
+              showTasks(false);
+            }}
+          >
             ← Продукт и архитектура
           </Button>
           <span>{c?.title}</span>
@@ -741,6 +786,24 @@ export function PreparationPanel() {
         </div>
         <div className="grid gap-1 text-sm">
           <span className="text-success whitespace-nowrap">Панель подключена</span>
+          <Button asChild variant="link" className="h-auto justify-start gap-2 px-0">
+            <a
+              href="?view=attention"
+              aria-current={attention ? 'page' : undefined}
+              onClick={(e) => {
+                if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+                e.preventDefault();
+                showTasks(false);
+                // Уже открыт — эффект не сработает: фокус на заголовок сразу.
+                if (attention) requestAnimationFrame(() => attentionHeading.current?.focus());
+                else focusAttention.current = true;
+                showAttention(true);
+              }}
+            >
+              Нужно действие
+              <AttentionCount />
+            </a>
+          </Button>
           {view.workspace && (
             <>
               <strong>
@@ -765,6 +828,7 @@ export function PreparationPanel() {
                   change.id === c?.id && 'border-primary bg-accent',
                 )}
                 onClick={() => {
+                  showAttention(false);
                   setSelected(change.id);
                   setTab('product');
                   setComment('');
@@ -791,6 +855,7 @@ export function PreparationPanel() {
                   input: { title },
                 });
                 if (next.enabled) {
+                  showAttention(false);
                   setSelected(next.activeChangeId ?? '');
                   setTab('product');
                 }
@@ -815,6 +880,7 @@ export function PreparationPanel() {
           <QuickForm
             workspace={view.workspace}
             onCreated={(changeId) => {
+              showAttention(false);
               setSelected(changeId);
               setTab('product');
               setComment('');
@@ -823,515 +889,550 @@ export function PreparationPanel() {
           />
         </aside>
         <article className="min-w-0">
-          {/* Остановка очереди видна на каждом этапе, а не только на экране
-              разработки: подготовка идёт, пока выдача стоит. */}
-          <QueueStopBanner queue={view.queue} />
-          {error && (
-            <Alert variant="destructive" role="alert" className="mb-4">
-              <AlertDescription>{error}</AlertDescription>
-            </Alert>
-          )}
-          {view.startupError && (
-            <Alert variant="destructive" role="alert" className="mb-4">
-              <AlertDescription>
-                Не удалось подключить разработку: {view.startupError}
-              </AlertDescription>
-            </Alert>
-          )}
-          {/* Быстрое изменение показывает свой путь над этапами: решения
-              по-прежнему утверждаются в этапах ниже. */}
-          {c?.intake && <QuickRoute changeId={c.id} workspace={view.workspace?.path} />}
-          <ol
-            className="mb-8 grid list-none grid-cols-1 gap-3 p-0 sm:grid-cols-2 lg:grid-cols-4"
-            aria-label="Этапы изменения"
-          >
-            {topStages.map((step, i) => {
-              const active = step === 'design' ? isDesignStep(tab) : tab === step;
-              return (
-                <li key={step}>
-                  <Button
-                    variant="outline"
-                    aria-current={active ? 'step' : undefined}
-                    className={cn(
-                      'grid h-full w-full justify-items-start gap-1 p-4 text-left whitespace-normal',
-                      active && 'border-primary bg-accent',
-                    )}
-                    onClick={() => {
-                      // Entering design lands on the first step still open.
-                      setTab(
-                        step === 'design'
-                          ? !referencesCurrent || refs?.status !== 'approved'
-                            ? 'references'
-                            : !conceptCurrent || con?.status !== 'approved'
-                              ? 'concept'
-                              : 'design'
-                          : step,
-                      );
-                      setComment('');
-                    }}
-                  >
-                    <span className="text-primary text-lg">{i + 1}</span>
-                    <strong>{topStageNames[i]}</strong>
-                    <small className="text-muted-foreground">
-                      {step === 'product'
-                        ? p
-                          ? names[p.status]
-                          : 'Нужна постановка'
-                        : step === 'architecture'
-                          ? p?.status !== 'approved'
-                            ? 'После согласования продукта'
-                            : architectureCurrent && a
-                              ? names[a.status]
-                              : 'Нужна актуальная архитектура'
-                          : step === 'design'
-                            ? a?.status !== 'approved'
-                              ? 'После согласования архитектуры'
-                              : designApproved === 3
-                                ? 'Утверждено'
-                                : designNotApplicable
-                                  ? 'Не требуется (утверждено)'
-                                  : 'Шаг ' + (designApproved + 1) + ' из 3'
-                            : view.developmentReady
-                              ? 'Разрешена'
-                              : 'Ожидает согласований'}
-                    </small>
-                  </Button>
-                </li>
-              );
-            })}
-          </ol>
-          {c ? (
+          {attention ? (
+            <div className="grid min-w-0 gap-4">
+              <Button
+                variant="outline"
+                size="sm"
+                className="justify-self-start"
+                onClick={() => {
+                  // Вид и фильтр центра внимания живут, пока он открыт.
+                  const params = new URLSearchParams(window.location.search);
+                  for (const key of ['attention', 'who']) params.delete(key);
+                  const search = params.toString();
+                  window.history.replaceState(
+                    window.history.state as unknown,
+                    '',
+                    window.location.pathname + (search ? '?' + search : ''),
+                  );
+                  showAttention(false);
+                }}
+              >
+                ← К этапам
+              </Button>
+              <h2
+                ref={attentionHeading}
+                tabIndex={-1}
+                className="m-0 text-lg font-semibold outline-offset-2"
+              >
+                Внимание
+              </h2>
+              <AttentionCenter />
+            </div>
+          ) : (
             <>
-              <div className="flex flex-wrap items-start justify-between gap-4">
-                <h2 className="text-lg font-semibold">{c.title}</h2>
-                {view.activeChangeId !== c.id && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={busy}
-                    onClick={() => {
-                      void run(() =>
-                        request('agent', {
-                          operation: 'preparation_activate',
-                          input: { changeId: c.id },
-                        }),
-                      );
-                    }}
-                  >
-                    Выбрать для новых задач
-                  </Button>
-                )}
-              </div>
-              <Separator className="my-4" />
-              {/* Во время разработки записи подготовки старые, и «последняя запись
-                  агента» трёхдневной давности над карточками работающих
-                  исполнителей читалась как «никто ничего не делает». */}
-              <AgentWork
-                activity={c.activity}
-                latest={view.agentActivity ?? c.activity[0]}
-                label={tab === 'development' ? 'Последняя запись подготовки' : undefined}
-              />
-              {tab === 'development' ? (
-                <Section
-                  title={
-                    view.developmentReady
-                      ? 'Постановка и архитектура утверждены'
-                      : 'Разработка ещё не разрешена'
-                  }
-                >
-                  <p className="max-w-[78ch]">
-                    {view.developmentReady
-                      ? view.engineConnected
-                        ? 'Агент может декомпозировать работу и запустить технический workflow. Тесты, независимое ревью и приёмка остаются обязательными.'
-                        : 'Агент готовит репозитории, профили и настоящие проверки. Панель подключит технический workflow автоматически.'
-                      : view.blocker}
-                  </p>
-                  <SetupProgress setup={view.setup} tasks={view.delivery.total} />
-                  <p className="mt-4">
-                    Принято задач: {view.delivery.done} из {view.delivery.total}. Сбоев:{' '}
-                    {view.delivery.failed}.
-                  </p>
-                  {view.delivery.unbound ? (
-                    <p className="text-muted-foreground mt-1 text-sm">
-                      Без фичи: {view.delivery.unbound} — карта продукта эту работу не видит.
-                    </p>
-                  ) : null}
-                  {/* Счёт сбоев без причины отправляет читателя в журнал, хотя
-                      причина — самое важное на экране: она объясняет, почему
-                      работа стоит. */}
-                  {view.delivery.failures?.length ? (
-                    <ul className="text-destructive mt-2 grid gap-1 text-sm">
-                      {view.delivery.failures.map((f) => (
-                        <li key={f.id} className="break-words">
-                          <strong className="font-medium">{f.title}</strong>: {f.reason}
-                        </li>
-                      ))}
-                    </ul>
-                  ) : null}
-                  {/* Причину и подсказку называет баннер в шапке экрана. */}
-                  {view.queue?.paused && (
-                    <p className="text-muted-foreground mt-4 flex items-start gap-2 text-sm break-words">
-                      <PauseCircle aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
-                      <span>Очередь на паузе</span>
-                    </p>
-                  )}
-                  <Workers workers={view.workers ?? []} concurrency={view.setup?.concurrency} />
-                  {/* Принятые доски — история релиза. В общем списке они
-                      выглядели параллельными потоками рядом с текущей работой. */}
-                  {view.delivery.boards.some((b) => b.phase !== 'accepted') && (
-                    <BoardPhases
-                      label="Доски разработки"
-                      boards={view.delivery.boards.filter((b) => b.phase !== 'accepted')}
-                    />
-                  )}
-                  {view.delivery.boards.some((b) => b.phase === 'accepted') && (
-                    <details className="mt-2">
-                      <summary className="text-muted-foreground cursor-pointer text-sm">
-                        Принятые доски (
-                        {view.delivery.boards.filter((b) => b.phase === 'accepted').length})
-                      </summary>
-                      <BoardPhases
-                        label="Принятые доски"
-                        boards={view.delivery.boards.filter((b) => b.phase === 'accepted')}
-                      />
-                    </details>
-                  )}
-                  {view.engineConnected && (
-                    <Button className="mt-4" onClick={() => showTasks(true)}>
-                      Открыть доски разработки
-                    </Button>
-                  )}
-                  <p className="text-muted-foreground mt-3">
-                    Готовность задач не означает публикацию или продуктовую приёмку релиза.
-                  </p>
-                </Section>
-              ) : (
+              {/* Остановка очереди видна на каждом этапе, а не только на экране
+              разработки: подготовка идёт, пока выдача стоит. */}
+              <QueueStopBanner queue={view.queue} />
+              {error && (
+                <Alert variant="destructive" role="alert" className="mb-4">
+                  <AlertDescription>{error}</AlertDescription>
+                </Alert>
+              )}
+              {view.startupError && (
+                <Alert variant="destructive" role="alert" className="mb-4">
+                  <AlertDescription>
+                    Не удалось подключить разработку: {view.startupError}
+                  </AlertDescription>
+                </Alert>
+              )}
+              {/* Быстрое изменение показывает свой путь над этапами: решения
+              по-прежнему утверждаются в этапах ниже. */}
+              {c?.intake && <QuickRoute changeId={c.id} workspace={view.workspace?.path} />}
+              <ol
+                className="mb-8 grid list-none grid-cols-1 gap-3 p-0 sm:grid-cols-2 lg:grid-cols-4"
+                aria-label="Этапы изменения"
+              >
+                {topStages.map((step, i) => {
+                  const active = step === 'design' ? isDesignStep(tab) : tab === step;
+                  return (
+                    <li key={step}>
+                      <Button
+                        variant="outline"
+                        aria-current={active ? 'step' : undefined}
+                        className={cn(
+                          'grid h-full w-full justify-items-start gap-1 p-4 text-left whitespace-normal',
+                          active && 'border-primary bg-accent',
+                        )}
+                        onClick={() => {
+                          // Entering design lands on the first step still open.
+                          showAttention(false);
+                          setTab(
+                            step === 'design'
+                              ? !referencesCurrent || refs?.status !== 'approved'
+                                ? 'references'
+                                : !conceptCurrent || con?.status !== 'approved'
+                                  ? 'concept'
+                                  : 'design'
+                              : step,
+                          );
+                          setComment('');
+                        }}
+                      >
+                        <span className="text-primary text-lg">{i + 1}</span>
+                        <strong>{topStageNames[i]}</strong>
+                        <small className="text-muted-foreground">
+                          {step === 'product'
+                            ? p
+                              ? names[p.status]
+                              : 'Нужна постановка'
+                            : step === 'architecture'
+                              ? p?.status !== 'approved'
+                                ? 'После согласования продукта'
+                                : architectureCurrent && a
+                                  ? names[a.status]
+                                  : 'Нужна актуальная архитектура'
+                              : step === 'design'
+                                ? a?.status !== 'approved'
+                                  ? 'После согласования архитектуры'
+                                  : designApproved === 3
+                                    ? 'Утверждено'
+                                    : designNotApplicable
+                                      ? 'Не требуется (утверждено)'
+                                      : 'Шаг ' + (designApproved + 1) + ' из 3'
+                                : view.developmentReady
+                                  ? 'Разрешена'
+                                  : 'Ожидает согласований'}
+                        </small>
+                      </Button>
+                    </li>
+                  );
+                })}
+              </ol>
+              {c ? (
                 <>
-                  {isDesignStep(tab) && (
-                    <nav
-                      aria-label="Шаги дизайна"
-                      className="mb-4 flex flex-wrap gap-2 border-b pb-4"
-                    >
-                      {designSteps.map((step, i) => {
-                        const revision = { references: refs, concept: con, design: d }[step];
-                        const reached = designApproved >= i;
-                        return (
-                          <Button
-                            key={step}
-                            variant="outline"
-                            size="sm"
-                            aria-current={tab === step ? 'step' : undefined}
-                            className={cn(
-                              'h-auto gap-2 py-2',
-                              tab === step && 'border-primary bg-accent',
-                              !reached && 'opacity-60',
-                            )}
-                            onClick={() => {
-                              setTab(step);
-                              setComment('');
-                            }}
-                          >
-                            <span className="text-primary">{i + 1}</span>
-                            <span>{designStepNames[step]}</span>
-                            <Badge variant={revision ? tone[revision.status] : 'secondary'}>
-                              {revision ? names[revision.status] : 'Не начат'}
-                            </Badge>
-                          </Button>
-                        );
-                      })}
-                    </nav>
-                  )}
-                  {current && (
-                    <div className="flex flex-wrap items-center gap-3 border-b pb-4">
-                      <strong>Версия {current.number}</strong>
-                      <Badge variant={tone[current.status]}>{names[current.status]}</Badge>
-                      <span className="text-muted-foreground">{current.reason}</span>
-                      {current.status === 'draft' && (
-                        <Button
-                          size="sm"
-                          className="ml-auto"
-                          disabled={busy}
-                          onClick={() => {
-                            void run(() =>
-                              request('agent', {
-                                operation: 'preparation_submit',
-                                input: {
-                                  changeId: c.id,
-                                  stage: tab,
-                                  expectedDigest: current.digest,
-                                },
-                              }),
-                            );
-                          }}
-                        >
-                          <Send aria-hidden="true" />
-                          Отправить на утверждение
-                        </Button>
-                      )}
-                    </div>
-                  )}
-                  {current?.status === 'draft' && c.history.length > 1 && (
-                    <Alert variant="info" className="mt-4">
-                      <AlertDescription>
-                        Правка создала новую версию. Она снова черновик: отправьте её на
-                        утверждение, когда закончите.
-                      </AlertDescription>
-                    </Alert>
-                  )}
-                  {!stageCurrent && current && tab !== 'product' && (
-                    <Alert variant="warning" className="mt-4">
-                      <AlertDescription>
-                        Эта версия относится к прежнему предыдущему этапу. Агент должен подготовить
-                        новую.
-                      </AlertDescription>
-                    </Alert>
-                  )}
-                  <StageBoundary stage={tab}>
-                    {tab === 'product' ? (
-                      p ? (
-                        <ProductBriefView
-                          content={p.content}
-                          readiness={c.features}
-                          releaseReadiness={c.releases}
-                          busy={busy}
-                          onSave={(next, reason) =>
-                            void run(() =>
-                              request('agent', {
-                                operation: 'preparation_product',
-                                input: {
-                                  changeId: c.id,
-                                  expectedDigest: p.digest,
-                                  reason,
-                                  content: next,
-                                },
-                              }),
-                            )
-                          }
-                        />
-                      ) : (
-                        <Alert className="max-w-[78ch] border-dashed">
-                          <AlertDescription>
-                            Поручите ведущему агенту изучить ТЗ и заполнить постановку. Здесь
-                            появятся сценарии, границы и критерии приёмки. Проект и стек пока не
-                            нужны.
-                          </AlertDescription>
-                        </Alert>
-                      )
-                    ) : tab === 'architecture' ? (
-                      a ? (
-                        <ArchitectureBriefView
-                          content={a.content}
-                          busy={busy}
-                          onSave={(next, reason) =>
-                            void run(() =>
-                              request('agent', {
-                                operation: 'preparation_architecture',
-                                input: {
-                                  changeId: c.id,
-                                  expectedDigest: a.digest,
-                                  reason,
-                                  content: next,
-                                },
-                              }),
-                            )
-                          }
-                        />
-                      ) : (
-                        <Alert className="max-w-[78ch] border-dashed">
-                          <AlertDescription>
-                            {p?.status === 'approved'
-                              ? 'Агент готовит архитектуру, сравнение стеков и диаграммы C1/C2.'
-                              : 'Архитектура будет прорабатываться после вашего утверждения продуктовой части.'}
-                          </AlertDescription>
-                        </Alert>
-                      )
-                    ) : tab === 'references' ? (
-                      refs ? (
-                        <ReferencesBriefView
-                          content={refs.content}
-                          busy={busy}
-                          onSave={(next, reason) =>
-                            void run(() =>
-                              request('agent', {
-                                operation: 'preparation_references',
-                                input: {
-                                  changeId: c.id,
-                                  expectedDigest: refs.digest,
-                                  reason,
-                                  content: next,
-                                },
-                              }),
-                            )
-                          }
-                        />
-                      ) : (
-                        <Waiting
-                          previous={a}
-                          working="Агент ищет референсы и описывает, что берёт из каждого. Вы принимаете или отклоняете каждый."
-                          blocked="Референсы собираются после вашего утверждения архитектуры — она ждёт вашего решения."
-                          onGo={() => setTab('architecture')}
-                        />
-                      )
-                    ) : tab === 'concept' ? (
-                      con ? (
-                        <ConceptBriefView
-                          content={con.content}
-                          busy={busy}
-                          onSave={(next, reason) =>
-                            void run(() =>
-                              request('agent', {
-                                operation: 'preparation_concept',
-                                input: {
-                                  changeId: c.id,
-                                  expectedDigest: con.digest,
-                                  reason,
-                                  content: next,
-                                },
-                              }),
-                            )
-                          }
-                        />
-                      ) : (
-                        <Waiting
-                          previous={refs}
-                          working="Агент формулирует концепцию и готовит эскизы, между которыми вы выберете."
-                          blocked="Концепт нельзя сохранить, пока не утверждены референсы — они ждут вашего решения."
-                          onGo={() => setTab('references')}
-                        />
-                      )
-                    ) : d ? (
-                      <DesignBriefView
-                        content={d.content}
-                        channels={p?.content.channels ?? []}
-                        busy={busy}
-                        onSave={(next, reason) =>
+                  <div className="flex flex-wrap items-start justify-between gap-4">
+                    <h2 className="text-lg font-semibold">{c.title}</h2>
+                    {view.activeChangeId !== c.id && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={busy}
+                        onClick={() => {
                           void run(() =>
                             request('agent', {
-                              operation: 'preparation_design',
-                              input: {
-                                changeId: c.id,
-                                expectedDigest: d.digest,
-                                reason,
-                                content: next,
-                              },
+                              operation: 'preparation_activate',
+                              input: { changeId: c.id },
                             }),
+                          );
+                        }}
+                      >
+                        Выбрать для новых задач
+                      </Button>
+                    )}
+                  </div>
+                  <Separator className="my-4" />
+                  {/* Во время разработки записи подготовки старые, и «последняя запись
+                  агента» трёхдневной давности над карточками работающих
+                  исполнителей читалась как «никто ничего не делает». */}
+                  <AgentWork
+                    activity={c.activity}
+                    latest={view.agentActivity ?? c.activity[0]}
+                    label={tab === 'development' ? 'Последняя запись подготовки' : undefined}
+                  />
+                  {tab === 'development' ? (
+                    <Section
+                      title={
+                        view.developmentReady
+                          ? 'Постановка и архитектура утверждены'
+                          : 'Разработка ещё не разрешена'
+                      }
+                    >
+                      <p className="max-w-[78ch]">
+                        {view.developmentReady
+                          ? view.engineConnected
+                            ? 'Агент может декомпозировать работу и запустить технический workflow. Тесты, независимое ревью и приёмка остаются обязательными.'
+                            : 'Агент готовит репозитории, профили и настоящие проверки. Панель подключит технический workflow автоматически.'
+                          : view.blocker}
+                      </p>
+                      <SetupProgress setup={view.setup} tasks={view.delivery.total} />
+                      <p className="mt-4">
+                        Принято задач: {view.delivery.done} из {view.delivery.total}. Сбоев:{' '}
+                        {view.delivery.failed}.
+                      </p>
+                      {view.delivery.unbound ? (
+                        <p className="text-muted-foreground mt-1 text-sm">
+                          Без фичи: {view.delivery.unbound} — карта продукта эту работу не видит.
+                        </p>
+                      ) : null}
+                      {/* Счёт сбоев без причины отправляет читателя в журнал, хотя
+                      причина — самое важное на экране: она объясняет, почему
+                      работа стоит. */}
+                      {view.delivery.failures?.length ? (
+                        <ul className="text-destructive mt-2 grid gap-1 text-sm">
+                          {view.delivery.failures.map((f) => (
+                            <li key={f.id} className="break-words">
+                              <strong className="font-medium">{f.title}</strong>: {f.reason}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : null}
+                      {/* Причину и подсказку называет баннер в шапке экрана. */}
+                      {view.queue?.paused && (
+                        <p className="text-muted-foreground mt-4 flex items-start gap-2 text-sm break-words">
+                          <PauseCircle aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
+                          <span>Очередь на паузе</span>
+                        </p>
+                      )}
+                      <Workers workers={view.workers ?? []} concurrency={view.setup?.concurrency} />
+                      {/* Принятые доски — история релиза. В общем списке они
+                      выглядели параллельными потоками рядом с текущей работой. */}
+                      {view.delivery.boards.some((b) => b.phase !== 'accepted') && (
+                        <BoardPhases
+                          label="Доски разработки"
+                          boards={view.delivery.boards.filter((b) => b.phase !== 'accepted')}
+                        />
+                      )}
+                      {view.delivery.boards.some((b) => b.phase === 'accepted') && (
+                        <details className="mt-2">
+                          <summary className="text-muted-foreground cursor-pointer text-sm">
+                            Принятые доски (
+                            {view.delivery.boards.filter((b) => b.phase === 'accepted').length})
+                          </summary>
+                          <BoardPhases
+                            label="Принятые доски"
+                            boards={view.delivery.boards.filter((b) => b.phase === 'accepted')}
+                          />
+                        </details>
+                      )}
+                      {view.engineConnected && (
+                        <Button className="mt-4" onClick={() => showTasks(true)}>
+                          Открыть доски разработки
+                        </Button>
+                      )}
+                      <p className="text-muted-foreground mt-3">
+                        Готовность задач не означает публикацию или продуктовую приёмку релиза.
+                      </p>
+                    </Section>
+                  ) : (
+                    <>
+                      {isDesignStep(tab) && (
+                        <nav
+                          aria-label="Шаги дизайна"
+                          className="mb-4 flex flex-wrap gap-2 border-b pb-4"
+                        >
+                          {designSteps.map((step, i) => {
+                            const revision = { references: refs, concept: con, design: d }[step];
+                            const reached = designApproved >= i;
+                            return (
+                              <Button
+                                key={step}
+                                variant="outline"
+                                size="sm"
+                                aria-current={tab === step ? 'step' : undefined}
+                                className={cn(
+                                  'h-auto gap-2 py-2',
+                                  tab === step && 'border-primary bg-accent',
+                                  !reached && 'opacity-60',
+                                )}
+                                onClick={() => {
+                                  setTab(step);
+                                  setComment('');
+                                }}
+                              >
+                                <span className="text-primary">{i + 1}</span>
+                                <span>{designStepNames[step]}</span>
+                                <Badge variant={revision ? tone[revision.status] : 'secondary'}>
+                                  {revision ? names[revision.status] : 'Не начат'}
+                                </Badge>
+                              </Button>
+                            );
+                          })}
+                        </nav>
+                      )}
+                      {current && (
+                        <div className="flex flex-wrap items-center gap-3 border-b pb-4">
+                          <strong>Версия {current.number}</strong>
+                          <Badge variant={tone[current.status]}>{names[current.status]}</Badge>
+                          <span className="text-muted-foreground">{current.reason}</span>
+                          {current.status === 'draft' && (
+                            <Button
+                              size="sm"
+                              className="ml-auto"
+                              disabled={busy}
+                              onClick={() => {
+                                void run(() =>
+                                  request('agent', {
+                                    operation: 'preparation_submit',
+                                    input: {
+                                      changeId: c.id,
+                                      stage: tab,
+                                      expectedDigest: current.digest,
+                                    },
+                                  }),
+                                );
+                              }}
+                            >
+                              <Send aria-hidden="true" />
+                              Отправить на утверждение
+                            </Button>
+                          )}
+                        </div>
+                      )}
+                      {current?.status === 'draft' && c.history.length > 1 && (
+                        <Alert variant="info" className="mt-4">
+                          <AlertDescription>
+                            Правка создала новую версию. Она снова черновик: отправьте её на
+                            утверждение, когда закончите.
+                          </AlertDescription>
+                        </Alert>
+                      )}
+                      {!stageCurrent && current && tab !== 'product' && (
+                        <Alert variant="warning" className="mt-4">
+                          <AlertDescription>
+                            Эта версия относится к прежнему предыдущему этапу. Агент должен
+                            подготовить новую.
+                          </AlertDescription>
+                        </Alert>
+                      )}
+                      <StageBoundary stage={tab}>
+                        {tab === 'product' ? (
+                          p ? (
+                            <ProductBriefView
+                              content={p.content}
+                              readiness={c.features}
+                              releaseReadiness={c.releases}
+                              busy={busy}
+                              onSave={(next, reason) =>
+                                void run(() =>
+                                  request('agent', {
+                                    operation: 'preparation_product',
+                                    input: {
+                                      changeId: c.id,
+                                      expectedDigest: p.digest,
+                                      reason,
+                                      content: next,
+                                    },
+                                  }),
+                                )
+                              }
+                            />
+                          ) : (
+                            <Alert className="max-w-[78ch] border-dashed">
+                              <AlertDescription>
+                                Поручите ведущему агенту изучить ТЗ и заполнить постановку. Здесь
+                                появятся сценарии, границы и критерии приёмки. Проект и стек пока не
+                                нужны.
+                              </AlertDescription>
+                            </Alert>
+                          )
+                        ) : tab === 'architecture' ? (
+                          a ? (
+                            <ArchitectureBriefView
+                              content={a.content}
+                              busy={busy}
+                              onSave={(next, reason) =>
+                                void run(() =>
+                                  request('agent', {
+                                    operation: 'preparation_architecture',
+                                    input: {
+                                      changeId: c.id,
+                                      expectedDigest: a.digest,
+                                      reason,
+                                      content: next,
+                                    },
+                                  }),
+                                )
+                              }
+                            />
+                          ) : (
+                            <Alert className="max-w-[78ch] border-dashed">
+                              <AlertDescription>
+                                {p?.status === 'approved'
+                                  ? 'Агент готовит архитектуру, сравнение стеков и диаграммы C1/C2.'
+                                  : 'Архитектура будет прорабатываться после вашего утверждения продуктовой части.'}
+                              </AlertDescription>
+                            </Alert>
+                          )
+                        ) : tab === 'references' ? (
+                          refs ? (
+                            <ReferencesBriefView
+                              content={refs.content}
+                              busy={busy}
+                              onSave={(next, reason) =>
+                                void run(() =>
+                                  request('agent', {
+                                    operation: 'preparation_references',
+                                    input: {
+                                      changeId: c.id,
+                                      expectedDigest: refs.digest,
+                                      reason,
+                                      content: next,
+                                    },
+                                  }),
+                                )
+                              }
+                            />
+                          ) : (
+                            <Waiting
+                              previous={a}
+                              working="Агент ищет референсы и описывает, что берёт из каждого. Вы принимаете или отклоняете каждый."
+                              blocked="Референсы собираются после вашего утверждения архитектуры — она ждёт вашего решения."
+                              onGo={() => setTab('architecture')}
+                            />
+                          )
+                        ) : tab === 'concept' ? (
+                          con ? (
+                            <ConceptBriefView
+                              content={con.content}
+                              busy={busy}
+                              onSave={(next, reason) =>
+                                void run(() =>
+                                  request('agent', {
+                                    operation: 'preparation_concept',
+                                    input: {
+                                      changeId: c.id,
+                                      expectedDigest: con.digest,
+                                      reason,
+                                      content: next,
+                                    },
+                                  }),
+                                )
+                              }
+                            />
+                          ) : (
+                            <Waiting
+                              previous={refs}
+                              working="Агент формулирует концепцию и готовит эскизы, между которыми вы выберете."
+                              blocked="Концепт нельзя сохранить, пока не утверждены референсы — они ждут вашего решения."
+                              onGo={() => setTab('references')}
+                            />
+                          )
+                        ) : d ? (
+                          <DesignBriefView
+                            content={d.content}
+                            channels={p?.content.channels ?? []}
+                            busy={busy}
+                            onSave={(next, reason) =>
+                              void run(() =>
+                                request('agent', {
+                                  operation: 'preparation_design',
+                                  input: {
+                                    changeId: c.id,
+                                    expectedDigest: d.digest,
+                                    reason,
+                                    content: next,
+                                  },
+                                }),
+                              )
+                            }
+                          />
+                        ) : (
+                          <Waiting
+                            previous={con}
+                            working="Агент собирает палитру, токены, guidelines и разбор по каналам."
+                            blocked="Дизайн-система готовится после вашего утверждения концепта — он ждёт вашего решения."
+                            onGo={() => setTab('concept')}
+                          />
+                        )}
+                      </StageBoundary>
+                      {current?.decision && (
+                        <div className="bg-secondary border-primary mt-6 border-l-[3px] p-4">
+                          <strong>
+                            Решение пользователя ·{' '}
+                            {new Date(current.decision.at).toLocaleString('ru-RU')}
+                          </strong>
+                          <p className="mt-2 break-words whitespace-pre-wrap">
+                            {current.decision.comment || 'Версия утверждена без замечаний.'}
+                          </p>
+                        </div>
+                      )}
+                      {current?.status === 'in-review' &&
+                        (tab === 'product' || architectureCurrent) && (
+                          <form
+                            className="border-primary bg-accent mt-8 rounded-md border p-6"
+                            onSubmit={(e) => {
+                              e.preventDefault();
+                              void decide('approve');
+                            }}
+                          >
+                            <h3 className="text-md mb-2 font-semibold">{approvalTitles[tab]}</h3>
+                            <p className="max-w-[78ch]">
+                              {tab === 'design'
+                                ? 'После утверждения агент сможет настроить проект и начать разработку по этой версии.'
+                                : 'После утверждения откроется следующий этап. Разработка останется заблокированной.'}
+                            </p>
+                            <Label htmlFor="decision-comment" className="mt-4 block">
+                              Комментарий к решению
+                            </Label>
+                            <Textarea
+                              id="decision-comment"
+                              value={comment}
+                              onChange={(e) => setComment(e.target.value)}
+                              maxLength={3000}
+                              rows={3}
+                              className="my-3"
+                            />
+                            <div className="flex flex-wrap gap-3">
+                              <Button type="submit" disabled={busy}>
+                                Утвердить версию {current.number}
+                              </Button>
+                              <Button
+                                type="button"
+                                variant="outline"
+                                disabled={busy || comment.trim().length < 3}
+                                onClick={() => {
+                                  void decide('request-changes');
+                                }}
+                              >
+                                Вернуть на доработку
+                              </Button>
+                            </div>
+                          </form>
+                        )}
+                      <Questions
+                        stage={tab}
+                        questions={c.questions}
+                        busy={busy}
+                        onAnswer={(questionId, text) =>
+                          void run(() =>
+                            request('preparation/answer', { changeId: c.id, questionId, text }),
                           )
                         }
                       />
-                    ) : (
-                      <Waiting
-                        previous={con}
-                        working="Агент собирает палитру, токены, guidelines и разбор по каналам."
-                        blocked="Дизайн-система готовится после вашего утверждения концепта — он ждёт вашего решения."
-                        onGo={() => setTab('concept')}
-                      />
-                    )}
-                  </StageBoundary>
-                  {current?.decision && (
-                    <div className="bg-secondary border-primary mt-6 border-l-[3px] p-4">
-                      <strong>
-                        Решение пользователя ·{' '}
-                        {new Date(current.decision.at).toLocaleString('ru-RU')}
-                      </strong>
-                      <p className="mt-2 break-words whitespace-pre-wrap">
-                        {current.decision.comment || 'Версия утверждена без замечаний.'}
-                      </p>
-                    </div>
+                      <Decisions stage={tab} decisions={c.decisions} questions={c.questions} />
+                    </>
                   )}
-                  {current?.status === 'in-review' &&
-                    (tab === 'product' || architectureCurrent) && (
-                      <form
-                        className="border-primary bg-accent mt-8 rounded-md border p-6"
-                        onSubmit={(e) => {
-                          e.preventDefault();
-                          void decide('approve');
-                        }}
-                      >
-                        <h3 className="text-md mb-2 font-semibold">{approvalTitles[tab]}</h3>
-                        <p className="max-w-[78ch]">
-                          {tab === 'design'
-                            ? 'После утверждения агент сможет настроить проект и начать разработку по этой версии.'
-                            : 'После утверждения откроется следующий этап. Разработка останется заблокированной.'}
-                        </p>
-                        <Label htmlFor="decision-comment" className="mt-4 block">
-                          Комментарий к решению
-                        </Label>
-                        <Textarea
-                          id="decision-comment"
-                          value={comment}
-                          onChange={(e) => setComment(e.target.value)}
-                          maxLength={3000}
-                          rows={3}
-                          className="my-3"
-                        />
-                        <div className="flex flex-wrap gap-3">
-                          <Button type="submit" disabled={busy}>
-                            Утвердить версию {current.number}
-                          </Button>
-                          <Button
-                            type="button"
-                            variant="outline"
-                            disabled={busy || comment.trim().length < 3}
-                            onClick={() => {
-                              void decide('request-changes');
-                            }}
-                          >
-                            Вернуть на доработку
-                          </Button>
-                        </div>
-                      </form>
+                  <div className="my-8">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      aria-expanded={historyOpen}
+                      onClick={() => setHistoryOpen(!historyOpen)}
+                    >
+                      <History aria-hidden="true" />
+                      История версий и решений ({c.history.length})
+                    </Button>
+                    {historyOpen && (
+                      <ol className="mt-3 grid gap-3">
+                        {c.history.map((r) => (
+                          <li key={r.stage + r.number} className="border-b py-3">
+                            <strong>
+                              {r.stage === 'product' ? 'Продукт' : 'Архитектура'} · v{r.number} ·{' '}
+                              {names[r.status]}
+                            </strong>
+                            <p className="mt-1 break-words whitespace-pre-wrap">{r.reason}</p>
+                            {r.decision && (
+                              <p className="text-muted-foreground mt-1">
+                                Пользователь: {r.decision.comment || 'Утверждено без замечаний'}
+                              </p>
+                            )}
+                          </li>
+                        ))}
+                      </ol>
                     )}
-                  <Questions
-                    stage={tab}
-                    questions={c.questions}
-                    busy={busy}
-                    onAnswer={(questionId, text) =>
-                      void run(() =>
-                        request('preparation/answer', { changeId: c.id, questionId, text }),
-                      )
-                    }
-                  />
-                  <Decisions stage={tab} decisions={c.decisions} questions={c.questions} />
+                  </div>
                 </>
+              ) : (
+                <Alert className="max-w-[78ch] border-dashed">
+                  <AlertTitle>Workspace открыт</AlertTitle>
+                  <AlertDescription>
+                    Создайте первое изменение или поручите это агенту. Проработка продукта уже будет
+                    видна на этой странице.
+                  </AlertDescription>
+                </Alert>
               )}
-              <div className="my-8">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  aria-expanded={historyOpen}
-                  onClick={() => setHistoryOpen(!historyOpen)}
-                >
-                  <History aria-hidden="true" />
-                  История версий и решений ({c.history.length})
-                </Button>
-                {historyOpen && (
-                  <ol className="mt-3 grid gap-3">
-                    {c.history.map((r) => (
-                      <li key={r.stage + r.number} className="border-b py-3">
-                        <strong>
-                          {r.stage === 'product' ? 'Продукт' : 'Архитектура'} · v{r.number} ·{' '}
-                          {names[r.status]}
-                        </strong>
-                        <p className="mt-1 break-words whitespace-pre-wrap">{r.reason}</p>
-                        {r.decision && (
-                          <p className="text-muted-foreground mt-1">
-                            Пользователь: {r.decision.comment || 'Утверждено без замечаний'}
-                          </p>
-                        )}
-                      </li>
-                    ))}
-                  </ol>
-                )}
-              </div>
             </>
-          ) : (
-            <Alert className="max-w-[78ch] border-dashed">
-              <AlertTitle>Workspace открыт</AlertTitle>
-              <AlertDescription>
-                Создайте первое изменение или поручите это агенту. Проработка продукта уже будет
-                видна на этой странице.
-              </AlertDescription>
-            </Alert>
           )}
         </article>
       </div>

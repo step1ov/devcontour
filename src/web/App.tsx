@@ -31,6 +31,7 @@ import {
   Loader2,
   Copy,
   LayoutDashboard,
+  BellDot,
   Map as MapIcon,
   Network,
   GitPullRequestArrow,
@@ -48,7 +49,7 @@ import { Button } from '@/ui/button.tsx';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/ui/dialog.tsx';
 import { Input } from '@/ui/input.tsx';
 import { Textarea } from '@/ui/textarea.tsx';
-import { cn } from '@/lib/utils.ts';
+import { cn, humanError, plural } from '@/lib/utils.ts';
 import { levels } from '../core/graph.ts';
 import type { taskProgress } from '../application/context.ts';
 import type { PanelEvidence, PanelRun, PanelSummary } from '../application/panel.ts';
@@ -85,6 +86,8 @@ import { Phases, engine, elapsed } from './Workers.tsx';
 import { useNow } from './now.ts';
 import { AttemptTimeline, LiveWork, LivenessNote, livenessNow } from './LiveWork.tsx';
 import { TaskDiscussion } from './TaskDiscussion.tsx';
+import { AttentionCount, useAttentionScreen } from './AttentionProvider.tsx';
+import { AttentionCenter } from './AttentionCenter.tsx';
 import {
   boardPhaseLabels,
   chainBlockers,
@@ -94,8 +97,7 @@ import {
   stalledFailureText,
 } from '../core/work-status.ts';
 import { statusKey, statusNames, statusOfKey, taskStatus, flashOf } from './status.ts';
-import { Toaster, toast } from 'sonner';
-import { createPortal } from 'react-dom';
+import { toast } from 'sonner';
 
 const waitingReasons: Record<string, string> = {
   product_approval_required:
@@ -730,13 +732,6 @@ async function api(path: string, input?: unknown, method = 'POST') {
     );
   return data;
 }
-// Сетевой отказ fetch — английское «Failed to fetch»: для человека это
-// «сервер не отвечает», с адресом, который он открыл.
-function humanError(message: string) {
-  return /failed to fetch|networkerror|load failed/i.test(message)
-    ? `Сервер DevContour не отвечает по адресу ${window.location.host}. Проверьте, что devcontour serve запущен.`
-    : message;
-}
 // Экраны workspace — в боковой навигации; у доски свои вкладки. Вид, доска и
 // задача — в адресе: ссылка ведёт к доказательству, «Назад» возвращает вид.
 const boardTabs = [
@@ -748,6 +743,7 @@ const boardTabs = [
 ] as const;
 const workspaceScreens = [
   { key: 'overview', label: 'Обзор', icon: LayoutDashboard },
+  { key: 'attention', label: 'Внимание', icon: BellDot },
   { key: 'product', label: 'Карта продукта', icon: MapIcon },
   { key: 'workspace', label: 'Общий граф', icon: Network },
   { key: 'changesets', label: 'Изменения', icon: GitPullRequestArrow },
@@ -764,9 +760,11 @@ function readAppLocation() {
     task: params.get('task') ?? '',
   };
 }
+// Параметры экрана внимания (история, кто действует) живут, пока он открыт.
+const screenKeys = ['tab', 'board', 'task', 'attention', 'who'];
 function appHref(tab: string) {
   const params = new URLSearchParams(window.location.search);
-  for (const key of ['tab', 'board', 'task']) params.delete(key);
+  for (const key of screenKeys) params.delete(key);
   if (tab !== 'overview') params.set('tab', tab);
   const search = params.toString();
   return window.location.pathname + (search ? '?' + search : '');
@@ -798,15 +796,6 @@ function holdingTask(tasks: UITask[]) {
   }
   return best;
 }
-const plural = (n: number, one: string, few: string, many: string) => {
-  const mod10 = n % 10,
-    mod100 = n % 100;
-  return mod10 === 1 && mod100 !== 11
-    ? one
-    : mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)
-      ? few
-      : many;
-};
 function Modal({
   title,
   children,
@@ -842,6 +831,8 @@ function Modal({
 // Подзаголовок экрана workspace: что на нём и для чего.
 const workspaceNotes: Record<string, string> = {
   overview: 'Что можно попробовать, какое решение нужно и что делает система.',
+  attention:
+    'Что ждёт вашего решения и что разбирает ведущий агент. Прочитано и «увидел» не решают вопрос.',
   product: 'Пользовательские возможности, приложения и проверенный результат.',
   workspace: 'Задачи всех досок и связи между ними.',
   changesets:
@@ -896,6 +887,8 @@ export function App() {
   // board exists, what the operator needs to see is how the contour is set up.
   // Автор продукта начинает с обзора: что попробовать и какое решение нужно.
   const [tab, setTab] = useState(() => readAppLocation().tab);
+  // Уведомление «Открыть» ведёт на экран внимания этой оболочки.
+  useAttentionScreen(() => appHref('attention'));
   // Экран доски — одна из её вкладок; остальное — экраны всего workspace.
   const boardScreen = isBoardTab(tab);
   // Выбор доски из workspace открывает её последнюю вкладку (сначала —
@@ -918,6 +911,7 @@ export function App() {
     const params = new URLSearchParams(window.location.search);
     const before = new URLSearchParams(params);
     for (const key of ['tab', 'board', 'task']) params.delete(key);
+    if (tab !== 'attention') for (const key of ['attention', 'who']) params.delete(key);
     if (tab !== 'overview') params.set('tab', tab);
     if (boardScreen && boardId) params.set('board', boardId);
     if ((boardScreen || tab === 'workspace') && selected) params.set('task', selected);
@@ -967,22 +961,14 @@ export function App() {
         setRevisionNumber(null);
         setQuery('');
       }
+      // Задача из адреса (переход по ссылке центра внимания, «Назад») — как
+      // задача из начальной ссылки: её не заменяет первая задача доски.
+      linkedTask.current = place.task;
       setSelected(place.task);
     };
     window.addEventListener('popstate', restore);
     return () => window.removeEventListener('popstate', restore);
   }, []);
-  // Переход из обзора к проверке изменения: фокус и прокрутка к его карточке.
-  const [focusChange, setFocusChange] = useState('');
-  useEffect(() => {
-    if (!focusChange || tab !== 'changesets') return;
-    const element = document.getElementById('changeset-' + focusChange);
-    if (!element) return;
-    element.scrollIntoView({ block: 'start' });
-    element.focus();
-    setFocusChange('');
-    // Карточка появляется после отрисовки вкладки и очередного опроса.
-  }, [focusChange, tab, data]);
   const [query, setQuery] = useState('');
   // Отменённые задачи — история перепланирования. На пилоте их было 70 из
   // 83, и граф из них не давал увидеть живую работу; показываются по запросу.
@@ -1786,6 +1772,7 @@ export function App() {
             >
               <s.icon aria-hidden="true" className="text-muted-foreground size-4 shrink-0" />
               {s.label}
+              {s.key === 'attention' && <AttentionCount />}
             </a>
           ))}
         </nav>
@@ -2235,13 +2222,20 @@ export function App() {
                     />
                   </div>
                 )}
+                {tab === 'attention' && (
+                  <div className="min-w-0 px-8 pt-4 pb-6 max-[760px]:px-4">
+                    <AttentionCenter
+                      components={data.config.repositories.map((r) => ({
+                        id: r.id,
+                        label: r.name,
+                      }))}
+                    />
+                  </div>
+                )}
                 {tab === 'overview' && (
                   <div className="min-w-0 px-8 pt-4 pb-6 max-[760px]:px-4">
                     <AuthorOverviewPanel
-                      onOpenChange={(id) => {
-                        setTab('changesets');
-                        setFocusChange(id);
-                      }}
+                      attentionHref={(who) => appHref('attention') + (who ? '&who=' + who : '')}
                     />
                   </div>
                 )}
@@ -3606,11 +3600,6 @@ export function App() {
         <Modal error={error} title={log.title} onClose={() => setLog(undefined)}>
           <pre className="max-h-[65dvh] overflow-auto">{log.content}</pre>
         </Modal>
-      )}
-      {/* Уведомления — в портале поверх экрана, вне сетки каркаса. */}
-      {createPortal(
-        <Toaster position="bottom-right" visibleToasts={3} toastOptions={{ duration: 4000 }} />,
-        document.body,
       )}
     </div>
   );

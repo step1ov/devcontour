@@ -93,6 +93,9 @@ export const hrefs = {
     `/?view=boards&tab=list&task=${encodeURIComponent(taskId)}#dm-${messageId}`,
   board: (boardId: string) => `/?view=boards&tab=graph&board=${encodeURIComponent(boardId)}`,
   changesets: () => '/?view=boards&tab=changesets',
+  /** Карточка изменения на экране изменений (якорь `changeset-<id>`). */
+  changeset: (changeSetId: string) =>
+    `/?view=boards&tab=changesets#changeset-${encodeURIComponent(changeSetId)}`,
   contracts: () => '/?view=boards&tab=contracts',
   overview: () => '/',
 };
@@ -1202,7 +1205,7 @@ const changesetSource: AttentionSourceRule = {
               ? 'Изменение прошло совместную проверку. Можно выложить его в preview и попробовать до приёмки.'
               : 'Изменение прошло совместную проверку.',
           since: v.finishedAt ?? v.startedAt,
-          subject: { kind: 'changeset', id: c.id, href: hrefs.changesets() },
+          subject: { kind: 'changeset', id: c.id, href: hrefs.changeset(c.id) },
           evidence: [{ kind: 'evidence', id: v.id }],
           actions: [
             ...(deploy
@@ -1913,7 +1916,7 @@ changesetSource.history = (ctx) =>
             since:
               c.verifications.find((v) => v.id === c.acceptance!.verificationId)?.finishedAt ??
               c.acceptance.at,
-            subject: { kind: 'changeset', id: c.id, href: hrefs.changesets() },
+            subject: { kind: 'changeset', id: c.id, href: hrefs.changeset(c.id) },
             resolvedAt: c.acceptance.at,
           },
         ]

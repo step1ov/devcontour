@@ -1,6 +1,5 @@
 import type { DevContour } from '../core/service.ts';
 import type { ChangeSet, DevContourState, Task } from '../core/model.ts';
-import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { boardPhase } from '../core/work-status.ts';
 import { repositories } from '../core/repositories.ts';
 import { servingPreview, type Preview } from '../core/preview.ts';
@@ -13,40 +12,15 @@ import { budgetOverview } from '../harness/budget.ts';
  *
  * Автор идеи не должен разбирать leases, Run, ChangeSet и UUID зависимостей,
  * чтобы понять, что с его продуктом. Сводка отвечает на его вопросы: что
- * можно попробовать и где; что изменилось; какое решение нужно от него;
- * сколько потрачено; почему работа стоит и что делает система. Технические
- * подробности остаются доступны по ссылкам, но не в первой строке.
+ * можно попробовать и где; что изменилось; сколько потрачено; почему работа
+ * стоит и что делает система. Технические подробности остаются доступны по
+ * ссылкам, но не в первой строке.
  *
- * Решения разделены по природе, потому что их принимают разные люди и
- * по-разному: продуктовый выбор — автор; техническое исправление — ведущий
- * агент; внешний доступ — тот, у кого есть учётная запись.
+ * Решения, которые ждут автора или ведущего агента, — карточки центра
+ * внимания (`AttentionService`): одна очередь вместо второго списка здесь.
+ * Правила приёмки, неисправностей preview и остановленных workflow
+ * экспортируются отсюда и служат его источникам.
  */
-export type DecisionKind = 'product' | 'technical' | 'access';
-export interface Decision {
-  kind: DecisionKind;
-  title: string;
-  detail: string;
-  action?:
-    | { type: 'accept-changeset'; changeSetId: string }
-    | { type: 'deploy-preview'; changeSetId: string }
-    | { type: 'resume-queue' };
-  /** Технические идентификаторы — для раскрытия, не для первой строки. */
-  refs?: string[];
-  /** Доказательства решения: проверка и выкладка, которые автор может открыть. */
-  evidence?: Evidence;
-}
-export interface Evidence {
-  changeSetId: string;
-  verifiedAt?: string;
-  manifestDigest?: string;
-  preview?: {
-    release: string;
-    artifactDigest?: string;
-    checkedAt?: string;
-    scenario: 'confirmed' | 'unconfirmed';
-    smoke?: string;
-  };
-}
 export interface AuthorOverview {
   headline: string;
   /** Что можно открыть и попробовать прямо сейчас. */
@@ -74,7 +48,6 @@ export interface AuthorOverview {
     status: 'accepted' | 'verified' | 'in-progress' | 'planned';
     at?: string;
   }[];
-  decisions: Decision[];
   spend: {
     calls: number;
     knownCostUsd: number;
@@ -202,108 +175,6 @@ export function authorOverview(h: DevContour): AuthorOverview {
   const serving = servingPreview(s);
   const deploying = s.previews?.find((p) => p.active && p.leaseUntil > Date.now());
   const { failure, lost } = previewProblems(s);
-  const evidence = (c: ChangeSet): Evidence => {
-    const v = c.verifications.at(-1);
-    const deployed =
-      serving && v && serving.manifestDigest === v.manifestDigest ? serving : undefined;
-    return {
-      changeSetId: c.id,
-      verifiedAt: v?.finishedAt,
-      manifestDigest: v?.manifestDigest,
-      preview: deployed
-        ? {
-            release: deployed.release,
-            artifactDigest: deployed.artifactDigest,
-            checkedAt: deployed.checkedAt,
-            scenario: deployed.status === 'confirmed' ? 'confirmed' : 'unconfirmed',
-            smoke: deployed.smoke
-              ? `${deployed.smoke.summary}: ${deployed.smoke.log.slice(-400)}`
-              : undefined,
-          }
-        : undefined,
-    };
-  };
-
-  const decisions: Decision[] = [];
-  // Внешний доступ: выдача остановлена отказом провайдера — ни повтор, ни
-  // агент этого не исправят, нужен человек с учётной записью.
-  if (s.paused && s.pauseReason === 'runtime' && s.pauseFailures?.includes('provider-auth'))
-    decisions.push({
-      kind: 'access',
-      title: 'Нужен доступ к провайдеру моделей',
-      detail:
-        'Исполнитель не авторизован или закончился баланс. Авторизуйте CLI исполнителя или пополните баланс, затем продолжите выдачу.',
-      action: { type: 'resume-queue' },
-    });
-  if (failure?.failure === 'docker-unavailable')
-    decisions.push({
-      kind: 'access',
-      title: 'Нужен Docker для preview',
-      detail: 'Preview собирается и запускается в Docker. Запустите Docker и повторите выкладку.',
-    });
-  // Продуктовые решения: проверенное изменение ждёт приёмки автора.
-  for (const { changeSet: c, onPreview } of pendingAcceptances(h, s)) {
-    decisions.push({
-      kind: 'product',
-      title: `Принять «${c.title}»`,
-      detail: onPreview
-        ? 'Изменение прошло совместную проверку и работает в preview: попробуйте и примите.'
-        : 'Изменение прошло совместную проверку. Можно выложить его в preview и попробовать до приёмки.',
-      action: onPreview
-        ? { type: 'accept-changeset', changeSetId: c.id }
-        : h.config.preview
-          ? { type: 'deploy-preview', changeSetId: c.id }
-          : { type: 'accept-changeset', changeSetId: c.id },
-      refs: [c.id],
-      evidence: evidence(c),
-    });
-  }
-  // Технические исправления: восстановление остановлено — дальше нужен
-  // ведущий агент, автору достаточно знать почему (`stoppedWorkflows`).
-  for (const w of stoppedWorkflows(s, new LeadWorkflow(h).view()))
-    decisions.push({
-      kind: 'technical',
-      title: 'Автоматическое восстановление остановлено',
-      detail: w.error!,
-      refs: [w.id],
-    });
-  if (lost)
-    decisions.push({
-      kind: 'technical',
-      title: 'Версия в preview не отвечает',
-      detail: lost.lost!,
-      refs: [lost.changeSetId],
-    });
-  if (failure && failure.failure !== 'docker-unavailable')
-    decisions.push({
-      kind: 'technical',
-      title: previewFailureTitle(failure.failure),
-      detail:
-        (failure.rolledBack ? 'Возвращена прежняя версия. ' : '') +
-        (failure.error ?? 'Причина не записана'),
-      refs: [failure.changeSetId],
-    });
-
-  // Упавшая задача без действующего восстановления — тоже остановка, даже
-  // если записи ведущего цикла нет. Зависимые от неё задачи ждут.
-  const workflows = new LeadWorkflow(h).view();
-  const covered = new Set(
-    workflows.filter((w) => ['failed', 'queued', 'running'].includes(w.status)).map((w) => w.id),
-  );
-  for (const t of tasks.filter((t) => t.status === 'failed')) {
-    const board = s.boards.find((b) => b.revisions.at(-1)?.taskIds.includes(t.id));
-    if (board && covered.has(board.id)) continue;
-    const waiting = tasks.filter((x) => x.dependsOn.includes(t.id) && x.status !== 'done').length;
-    decisions.push({
-      kind: 'technical',
-      title: `Задача «${t.title}» не прошла`,
-      detail:
-        (t.failure ?? 'Причина не записана') +
-        (waiting ? ` Ждут её результата: ${waiting}.` : '') +
-        ' Автоматическое восстановление для неё не запущено.',
-      refs: [t.id],
-    });
-  }
   const running = tasks.filter((t) => t.activeRunId).map((t) => t.title);
   const verifying = s.changeSets.some((c) => c.verifications.some((v) => v.status === 'active'));
   const doing = deploying
@@ -377,20 +248,16 @@ export function authorOverview(h: DevContour): AuthorOverview {
         checkedAt: serving.checkedAt,
       }
     : undefined;
+  // Решения автора и ведущего — в центре внимания; заголовок сводки без
+  // них, панель дополняет его карточками центра.
   const headline =
     !counts.tasks && !counts.cancelled && !s.changeSets.length
       ? 'Разработка ещё не началась: задач пока нет.'
       : !counts.tasks && counts.cancelled
         ? `Работа отменена: отменено задач — ${counts.cancelled}.`
-        : decisions.some((d) => d.kind === 'access')
-          ? 'Работа стоит: нужен внешний доступ.'
-          : decisions.some((d) => d.kind === 'product')
-            ? 'Нужно ваше решение по готовому изменению.'
-            : tryNow
-              ? 'Проверенную версию можно попробовать.'
-              : decisions.some((d) => d.kind === 'technical')
-                ? 'Работа остановилась на технической проблеме — нужен разбор.'
-                : doing + '.';
+        : tryNow
+          ? 'Проверенную версию можно попробовать.'
+          : doing + '.';
 
   return {
     headline,
@@ -412,7 +279,6 @@ export function authorOverview(h: DevContour): AuthorOverview {
       canRollback: !!serving?.previous,
     },
     changes,
-    decisions,
     spend: {
       calls: totals.calls,
       knownCostUsd: totals.knownCostUsd,
