@@ -160,6 +160,32 @@ test('doctor names a divergence of config.json from the workspace.json declarati
   }
 });
 
+test('doctor names a divergence of inputPolicy from the workspace.json declaration', () => {
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-budget-doctor-'));
+  try {
+    writeFileSync(
+      join(root, 'workspace.json'),
+      JSON.stringify({ inputPolicy: { threshold: 9, criticalPaths: ['db/migrations'] } }),
+    );
+    const declared = workspaceDeclaration(codex({ workspaceRoot: root }));
+    const inputPolicy = { threshold: 9, criticalPaths: ['db/migrations'] };
+    assert.deepEqual(declared, { inputPolicy });
+    const same = byId(budgetChecks(codex({ inputPolicy }), [], declared, now));
+    assert.equal(same['budgets:declaration'], undefined);
+    const local = byId(budgetChecks(codex({ inputPolicy: { threshold: 3 } }), [], declared, now));
+    assert.equal(local['budgets:declaration'].status, 'degraded');
+    assert.match(
+      local['budgets:declaration'].detail,
+      /расходится с объявлением workspace\.json: inputPolicy/,
+    );
+    // Локальный файл без порога при объявленном — тоже расхождение.
+    const absent = byId(budgetChecks(codex(), [], declared, now));
+    assert.match(absent['budgets:declaration'].detail, /inputPolicy/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('doctorState reads call records for the price check without a writer', () => {
   const root = mkdtempSync(join(tmpdir(), 'devcontour-budget-doctor-'));
   try {

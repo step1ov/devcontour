@@ -2,7 +2,13 @@
 // разойдётся с ожиданием оператора. Без чтения базы: вызовы передаёт doctor.
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { budgetsSchema, pricesSchema, type Config, type DevContourState } from '../core/model.ts';
+import {
+  budgetsSchema,
+  configSchema,
+  pricesSchema,
+  type Config,
+  type DevContourState,
+} from '../core/model.ts';
 import { loadedDigest } from '../core/service.ts';
 import type { Price, UsageRecord } from '../core/usage.ts';
 import { declaredRoles, repositories, reviewerBinding, roleBinding } from '../core/repositories.ts';
@@ -39,30 +45,56 @@ const priced = (config: Config, runtime: string, model: string | null | undefine
     (p) => p.runtime === runtime && p.model === model && Date.parse(p.effectiveAt) <= now,
   );
 
-/**
- * Объявление `budgets`/`prices` в `<workspace>/workspace.json`, если оно есть
- * и читается. Нечитаемый реестр — не повод для отказа doctor: расхождение
- * тогда не проверяется.
- */
-export function workspaceDeclaration(config: Config) {
+/** Эксплуатационные ключи, которые может объявить `workspace.json`. */
+export type WorkspaceDeclaration = Partial<Pick<Config, 'budgets' | 'prices' | 'inputPolicy'>>;
+
+/** Разобранный `<workspace>/workspace.json` или undefined (нет файла, нечитаем). */
+function registry(config: Config) {
   if (!config.workspaceRoot) return undefined;
   const file = join(config.workspaceRoot, 'workspace.json');
   if (!existsSync(file)) return undefined;
   try {
-    const raw = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+    const raw = JSON.parse(readFileSync(file, 'utf8')) as unknown;
+    return raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Объявление `budgets`/`prices`/`inputPolicy` в `<workspace>/workspace.json`,
+ * если оно есть и читается. Нечитаемый реестр — не повод для отказа doctor:
+ * расхождение тогда не проверяется.
+ */
+export function workspaceDeclaration(config: Config): WorkspaceDeclaration | undefined {
+  const raw = registry(config);
+  if (!raw) return undefined;
+  try {
     return {
       ...(raw.budgets !== undefined ? { budgets: budgetsSchema.parse(raw.budgets) } : {}),
       ...(raw.prices !== undefined ? { prices: pricesSchema.parse(raw.prices) } : {}),
+      ...(raw.inputPolicy !== undefined
+        ? { inputPolicy: configSchema.shape.inputPolicy.parse(raw.inputPolicy) }
+        : {}),
     };
   } catch {
     return undefined;
   }
 }
 
+/**
+ * Объявляет ли реестр ключ — как есть, без проверки значения: правку,
+ * которую заменит следующий `workspace-init`, видно и при неверном
+ * объявлении (его отклонит сам `workspace-init`).
+ */
+export function workspaceDeclares(config: Config, key: keyof WorkspaceDeclaration) {
+  return registry(config)?.[key] !== undefined;
+}
+
 export function budgetChecks(
   config: Config,
   calls: DoctorCall[] = [],
-  declaration?: { budgets?: Config['budgets']; prices?: Config['prices'] },
+  declaration?: WorkspaceDeclaration,
   now = Date.now(),
 ): Check[] {
   const checks: Check[] = [];
@@ -163,7 +195,7 @@ export function budgetChecks(
   }
 
   if (declaration) {
-    const differs = (['budgets', 'prices'] as const).filter(
+    const differs = (['budgets', 'prices', 'inputPolicy'] as const).filter(
       (k) =>
         declaration[k] !== undefined &&
         JSON.stringify(declaration[k]) !== JSON.stringify(config[k] ?? null),
