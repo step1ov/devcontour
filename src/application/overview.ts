@@ -109,17 +109,25 @@ function verified(h: DevContour, s: DevContourState, c: ChangeSet) {
   }
 }
 
-export function authorOverview(h: DevContour): AuthorOverview {
-  const s = h.store.read();
-  const tasks = s.tasks.filter((t: Task) => t.status !== 'cancelled');
-  const counts = {
-    tasks: tasks.length,
-    done: tasks.filter((t) => t.status === 'done').length,
-    failed: tasks.filter((t) => t.status === 'failed').length,
-    cancelled: s.tasks.length - tasks.length,
-  };
+/** Проверенное непринятое изменение и работает ли та же версия в preview. */
+export function pendingAcceptances(h: DevContour, s: DevContourState) {
   const serving = servingPreview(s);
-  const deploying = s.previews?.find((p) => p.active && p.leaseUntil > Date.now());
+  return s.changeSets.flatMap((c) => {
+    const v = !c.acceptance ? verified(h, s, c) : undefined;
+    if (!v) return [];
+    // В preview работает та же версия, если совпадает manifest: повторная
+    // проверка того же кода или другой ChangeSet с тем же кодом не требуют
+    // новой выкладки.
+    const onPreview = !!serving && serving.manifestDigest === v.manifestDigest;
+    return [{ changeSet: c, verification: v, onPreview }];
+  });
+}
+
+/**
+ * Неисправности preview сейчас: последняя выкладка упала (`failure`) или
+ * версия, занимающая URL, перестала отвечать (`lost`).
+ */
+export function previewProblems(s: DevContourState) {
   const lastPreview = s.previews?.at(-1);
   const failure = lastPreview?.status === 'failed' ? lastPreview : undefined;
   // Неисправность — свойство того, кто занимает URL сейчас, а не истории.
@@ -133,6 +141,67 @@ export function authorOverview(h: DevContour): AuthorOverview {
       !p.active,
   );
   const lost = occupant?.lost ? occupant : undefined;
+  return { failure, lost };
+}
+
+/**
+ * Упавшие workflow ведущего, которые ещё требуют решения: не вытеснены
+ * новым workflow того же предмета, доска не принята и не отменена целиком,
+ * ChangeSet не принят.
+ */
+export function stoppedWorkflows<
+  W extends {
+    id: string;
+    key: string;
+    kind: string;
+    status: string;
+    error?: string;
+    startedAt: string;
+  },
+>(s: DevContourState, jobs: readonly W[]): W[] {
+  const tasks = s.tasks.filter((t: Task) => t.status !== 'cancelled');
+  // Упавший workflow, чья работа ушла дальше, решения не требует: доска
+  // принята или вся её работа отменена, либо по тому же входу запущен новый
+  // workflow. На пилоте три таких записи после перепланирования держали
+  // заголовок «нужен разбор», пока исполнители работали.
+  const superseded = (w: W) => {
+    // Решение относится к последнему workflow доски или ChangeSet: прежний,
+    // упавший раньше, — история, даже если упал и новый. Иначе панель
+    // показывала устаревший отказ рядом с актуальным.
+    if (jobs.some((x) => x.id === w.id && x.key !== w.key && x.startedAt > w.startedAt))
+      return true;
+    if (w.kind === 'board') {
+      const board = s.boards.find((b) => b.id === w.id);
+      const r = board?.revisions.at(-1);
+      if (!board || !r || r.status === 'accepted') return true;
+      return !tasks.some((t) => r.taskIds.includes(t.id) && t.status !== 'cancelled');
+    }
+    return !!s.changeSets.find((c) => c.id === w.id)?.acceptance;
+  };
+  return jobs.filter((w) => w.status === 'failed' && w.error && !superseded(w));
+}
+
+/** Заголовок отказа выкладки preview по его классу: сборка — не выкладка. */
+export function previewFailureTitle(failure: Preview['failure']) {
+  return failure === 'compose-policy'
+    ? 'Preview не выложен: Compose выходит за границы preview'
+    : failure === 'build'
+      ? 'Preview не собрался'
+      : 'Preview не выложен';
+}
+
+export function authorOverview(h: DevContour): AuthorOverview {
+  const s = h.store.read();
+  const tasks = s.tasks.filter((t: Task) => t.status !== 'cancelled');
+  const counts = {
+    tasks: tasks.length,
+    done: tasks.filter((t) => t.status === 'done').length,
+    failed: tasks.filter((t) => t.status === 'failed').length,
+    cancelled: s.tasks.length - tasks.length,
+  };
+  const serving = servingPreview(s);
+  const deploying = s.previews?.find((p) => p.active && p.leaseUntil > Date.now());
+  const { failure, lost } = previewProblems(s);
   const evidence = (c: ChangeSet): Evidence => {
     const v = c.verifications.at(-1);
     const deployed =
@@ -173,13 +242,7 @@ export function authorOverview(h: DevContour): AuthorOverview {
       detail: 'Preview собирается и запускается в Docker. Запустите Docker и повторите выкладку.',
     });
   // Продуктовые решения: проверенное изменение ждёт приёмки автора.
-  for (const c of s.changeSets) {
-    const v = !c.acceptance ? verified(h, s, c) : undefined;
-    if (!v) continue;
-    // В preview работает та же версия, если совпадает manifest: повторная
-    // проверка того же кода или другой ChangeSet с тем же кодом не требуют
-    // новой выкладки.
-    const onPreview = !!serving && serving.manifestDigest === v.manifestDigest;
+  for (const { changeSet: c, onPreview } of pendingAcceptances(h, s)) {
     decisions.push({
       kind: 'product',
       title: `Принять «${c.title}»`,
@@ -196,34 +259,14 @@ export function authorOverview(h: DevContour): AuthorOverview {
     });
   }
   // Технические исправления: восстановление остановлено — дальше нужен
-  // ведущий агент, автору достаточно знать почему.
-  // Упавший workflow, чья работа ушла дальше, решения не требует: доска
-  // принята или вся её работа отменена, либо по тому же входу запущен новый
-  // workflow. На пилоте три таких записи после перепланирования держали
-  // заголовок «нужен разбор», пока исполнители работали.
-  const jobs = new LeadWorkflow(h).view();
-  const superseded = (w: (typeof jobs)[number]) => {
-    // Решение относится к последнему workflow доски или ChangeSet: прежний,
-    // упавший раньше, — история, даже если упал и новый. Иначе панель
-    // показывала устаревший отказ рядом с актуальным.
-    if (jobs.some((x) => x.id === w.id && x.key !== w.key && x.startedAt > w.startedAt))
-      return true;
-    if (w.kind === 'board') {
-      const board = s.boards.find((b) => b.id === w.id);
-      const r = board?.revisions.at(-1);
-      if (!board || !r || r.status === 'accepted') return true;
-      return !tasks.some((t) => r.taskIds.includes(t.id) && t.status !== 'cancelled');
-    }
-    return !!s.changeSets.find((c) => c.id === w.id)?.acceptance;
-  };
-  for (const w of jobs)
-    if (w.status === 'failed' && w.error && !superseded(w))
-      decisions.push({
-        kind: 'technical',
-        title: 'Автоматическое восстановление остановлено',
-        detail: w.error,
-        refs: [w.id],
-      });
+  // ведущий агент, автору достаточно знать почему (`stoppedWorkflows`).
+  for (const w of stoppedWorkflows(s, new LeadWorkflow(h).view()))
+    decisions.push({
+      kind: 'technical',
+      title: 'Автоматическое восстановление остановлено',
+      detail: w.error!,
+      refs: [w.id],
+    });
   if (lost)
     decisions.push({
       kind: 'technical',
@@ -234,12 +277,7 @@ export function authorOverview(h: DevContour): AuthorOverview {
   if (failure && failure.failure !== 'docker-unavailable')
     decisions.push({
       kind: 'technical',
-      title:
-        failure.failure === 'compose-policy'
-          ? 'Preview не выложен: Compose выходит за границы preview'
-          : failure.failure === 'build'
-            ? 'Preview не собрался'
-            : 'Preview не выложен',
+      title: previewFailureTitle(failure.failure),
       detail:
         (failure.rolledBack ? 'Возвращена прежняя версия. ' : '') +
         (failure.error ?? 'Причина не записана'),

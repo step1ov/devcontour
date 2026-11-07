@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { onDiscussionChanged } from './discussion-events.ts';
 import { Alert, AlertDescription } from '@/ui/alert.tsx';
 import { Badge } from '@/ui/badge.tsx';
 import { Button } from '@/ui/button.tsx';
@@ -225,11 +226,15 @@ export function TaskDiscussion({
     const timer = window.setInterval(() => {
       if (document.visibilityState === 'visible') tick();
     }, POLL_MS);
+    // Действие этой вкладки, записавшее сообщение (ответ на вопрос
+    // исполнителя), — сразу, без ожидания опроса.
+    const unsubscribe = onDiscussionChanged(taskId, tick);
     return () => {
       alive = false;
       window.clearInterval(timer);
+      unsubscribe();
     };
-  }, [refresh]);
+  }, [refresh, taskId]);
 
   // Переход по ссылке на сообщение: раскрыть ранние, если цель среди них, и
   // перевести фокус на него после отрисовки.

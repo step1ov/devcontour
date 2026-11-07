@@ -87,6 +87,7 @@ const operations = [
   'input_apply',
   'input_cancel',
   'input_supersede',
+  'attention_list',
 ];
 const readOnlyOperations = [
   'preparation_status',
@@ -118,6 +119,7 @@ const readOnlyOperations = [
   'input_list',
   'input_show',
   'input_target',
+  'attention_list',
 ];
 
 test('Baseline catalog: host capabilities keep protocolVersion 1, limits, names and readOnly flags', () => {

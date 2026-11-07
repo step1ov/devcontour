@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { get } from 'node:http';
 import {
   chmodSync,
   existsSync,
@@ -45,6 +46,34 @@ const env = {
 const git = (root: string, ...args: string[]) =>
   execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', env }).trim();
 const temp = () => realpathSync(mkdtempSync(join(tmpdir(), 'devcontour-quick-')));
+/**
+ * GET JSON по новому соединению без keep-alive. Нужен после `spawnSync`:
+ * сервер работает в процессе теста, и синхронный дочерний процесс блокирует
+ * его цикл событий вместе с клиентом. Под нагрузкой CLI идёт дольше
+ * keep-alive сервера (5 с): после разблокировки `fetch` берёт из пула
+ * прежний сокет, а просроченный таймер сервера закрывает его уже с
+ * запросом внутри — `fetch failed`, `read ECONNRESET`. Новое соединение
+ * не зависит от состояния пула.
+ */
+const getFresh = (url: string) =>
+  new Promise<unknown>((resolveBody, reject) => {
+    get(url, { agent: false }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk: string) => (body += chunk));
+      res.on('end', () => {
+        if (res.statusCode !== 200) reject(new Error(`GET ${url}: ${res.statusCode} ${body}`));
+        else {
+          try {
+            resolveBody(JSON.parse(body));
+          } catch (error) {
+            reject(error instanceof Error ? error : new Error(String(error)));
+          }
+        }
+      });
+      res.on('error', reject);
+    }).on('error', reject);
+  });
 
 /** Существующий npm- или pnpm-репозиторий с собственными проверками и коммитом. */
 function repository(root: string, manager: 'npm' | 'pnpm' = 'npm') {
@@ -444,9 +473,8 @@ test('D01-C: setup --change отклоняется до согласований
         (JSON.parse(cliFacts.stdout) as QuickFacts).diagnostics.map((d) => d.code),
         [],
       );
-      const view = (await (
-        await fetch(app.url + '/api/preparation/quick?change=' + changeId)
-      ).json()) as {
+      // CLI выше заблокировал цикл событий сервера — запрос по новому соединению.
+      const view = (await getFresh(app.url + '/api/preparation/quick?change=' + changeId)) as {
         facts: QuickFacts;
         steps: QuickStep[];
         plan: { refusal?: string };

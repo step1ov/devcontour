@@ -5428,6 +5428,42 @@
         ],
         "additionalProperties": false
       }
+    },
+    {
+      "name": "attention_list",
+      "description": "List the attention center: one ordered list of current items that need someone to act, from the same source rules as the panel (preparation questions and stage reviews, writer questions, stopped tasks, lead job decisions, discussion requests, pauses, waits, budgets, contract changes, ChangeSet acceptance, preview problems, stalls). Default actor lead; each item has sourceKey, occurrenceId, sourceVersion, category, actor, reason, impact (covered tasks and the tasks waiting on them), subject and since. A cascade is one root item. Links open the panel at the subject (task list, the stage of the question, the discussion message). Operator domain actions carry the full question (prompt) and answer choices. Reading is not handling: act through the source operation (preparation_*, discussion_*, input_*, task_retry, workflow_*). Read-only; operator read marks are not included. Available before setup.",
+      "readOnly": true,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "actor": {
+            "default": "lead",
+            "type": "string",
+            "enum": [
+              "operator",
+              "lead"
+            ]
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "access",
+              "budget",
+              "question",
+              "decision",
+              "technical"
+            ]
+          },
+          "limit": {
+            "default": 20,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50
+          }
+        },
+        "additionalProperties": false
+      }
     }
   ]
 }
