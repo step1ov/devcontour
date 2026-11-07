@@ -3,7 +3,12 @@ import assert from 'node:assert/strict';
 import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { AttentionService, ATTENTION_NAMESPACE } from '../src/application/attention.ts';
+import {
+  AttentionService,
+  ATTENTION_NAMESPACE,
+  markState,
+  withOccurrence,
+} from '../src/application/attention.ts';
 import { DiscussionService } from '../src/application/discussion.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
@@ -279,4 +284,83 @@ test('Предел 2000 строк: запись сверх него удаля�
   } finally {
     f.cleanup();
   }
+});
+
+test('История двух появлений: отметки прежнего появления сохраняются после отметки нового', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const t = f.h.addTask(b.id, input('Flaky'));
+    f.h.approve(b.id);
+    const service = new AttentionService(f.store, f.h);
+    const key = `work:${t.id}`;
+    const fail = () => {
+      f.h.pause(false);
+      const run = f.h.claim('test')!;
+      assert.equal(run.taskId, t.id);
+      f.h.fail(run.id, run.token, 'fixture failure', false, 'gate');
+      return run;
+    };
+    const run1 = fail();
+    // Строка прежнего вида — одно появление без `earlier` — читается.
+    const first = byKey((await service.active()).items, key)!;
+    f.store.atomic(() =>
+      f.store.saveLocal(ATTENTION_NAMESPACE, undefined, key, {
+        v: 1,
+        occurrenceId: run1.id,
+        readVersion: first.sourceVersion,
+        readAt: new Date().toISOString(),
+      }),
+    );
+    assert.equal(byKey((await service.active()).items, key)!.state.read, true);
+    f.h.retry(t.id);
+    const run2 = fail();
+    const second = byKey((await service.active()).items, key)!;
+    assert.equal(second.occurrenceId, run2.id);
+    assert.equal(second.state.unread, true, 'новое появление не прочитано');
+    await service.mark({ marks: [mark(second, 'ack')] });
+    f.h.retry(t.id);
+    fail();
+    const history = service.history().items.filter((i) => i.sourceKey === key);
+    const byRun = new Map(history.map((i) => [i.occurrenceId, i.state]));
+    assert.deepEqual(byRun.get(run1.id), { read: true, acknowledged: false, unread: false });
+    assert.deepEqual(byRun.get(run2.id), { read: true, acknowledged: true, unread: false });
+    // Одна строка на предмет: прежние появления — внутри неё, в пределе.
+    const rows = f.store.localRecords<{ earlier?: { occurrenceId: string }[] }>(
+      ATTENTION_NAMESPACE,
+      undefined,
+    );
+    assert.deepEqual(
+      rows[key].earlier?.map((e) => e.occurrenceId),
+      [run1.id],
+    );
+    for (let i = 0; i < 6; i++) {
+      await service.mark({ marks: [mark(byKey((await service.active()).items, key)!, 'read')] });
+      f.h.retry(t.id, { reason: 'fixture: next occurrence' });
+      fail();
+    }
+    assert.equal(
+      f.store.localRecords<{ earlier?: unknown[] }>(ATTENTION_NAMESPACE, undefined)[key].earlier
+        ?.length,
+      4,
+      'хранятся последние 5 появлений',
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Вернувшееся прежнее появление продолжает свою отметку', () => {
+  let row = withOccurrence(undefined, 'a');
+  row.readVersion = 'va';
+  row = withOccurrence(row, 'b');
+  row.readVersion = 'vb';
+  row = withOccurrence(row, 'a');
+  assert.equal(row.occurrenceId, 'a');
+  assert.deepEqual(markState(row, 'a', 'va'), { read: true, acknowledged: false, unread: false });
+  assert.deepEqual(markState(row, 'b', 'vb'), { read: true, acknowledged: false, unread: false });
+  assert.deepEqual(
+    row.earlier?.map((e) => e.occurrenceId),
+    ['b'],
+  );
 });
