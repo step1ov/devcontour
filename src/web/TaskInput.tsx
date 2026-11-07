@@ -3,26 +3,12 @@ import { Badge } from '@/ui/badge.tsx';
 import { Button } from '@/ui/button.tsx';
 import { Textarea } from '@/ui/textarea.tsx';
 import type { InputService } from '../application/input.ts';
+import { inputStateLabels } from './input-labels.ts';
+
+export { inputStateLabels };
 
 type View = ReturnType<InputService['taskView']>;
 type Current = NonNullable<View['current']>;
-
-/**
- * Состояние вопроса словами оператора. «Передано в новую попытку» — только
- * после начала вызова исполнителя с ответом (`delivered`), а не после
- * применения: «агент прочитал» панель не утверждает.
- */
-export const inputStateLabels: Record<string, string> = {
-  'awaiting-answer': 'Нужен ответ',
-  'answer-saved': 'Ответ сохранён',
-  'context-review': 'Нужна подготовка и проверка контекста',
-  'ready-to-apply': 'Контекст с ответом проверен',
-  'applied-awaiting-claim': 'Ответ применён, ждёт попытки',
-  delivered: 'Передано в новую попытку',
-  stale: 'Ответ устарел: нужен новый контекст',
-  cancelled: 'Вопрос снят',
-  superseded: 'Вопрос заменён',
-};
 
 const kindLabels: Record<string, string> = {
   clarification: 'уточнение',
@@ -54,6 +40,7 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
   const [option, setOption] = useState<string | null>(null);
   const [kind, setKind] = useState<'clarification' | 'requirement-change'>('clarification');
   const [busy, setBusy] = useState(false);
+  const [confirmRejected, setConfirmRejected] = useState(false);
   // Ключ повтора ответа: двойная отправка той же формы — одно сообщение.
   const [answerKey, setAnswerKey] = useState(() => crypto.randomUUID());
   const load = useCallback(async () => {
@@ -79,6 +66,7 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
     kind: string;
     optionId: string | null;
     actor: { kind: string };
+    messageRef?: string;
   }[];
   const latest = answers.at(-1);
   const act = async (fn: () => Promise<unknown>) => {
@@ -96,10 +84,28 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
     }
   };
   const q = current.question;
-  const answerable = current.state === 'awaiting-answer' || current.state === 'answer-saved';
+  // Ответ можно дать или исправить, пока он не применён (в том числе после
+  // отклонённого ревью).
+  const answerable = [
+    'awaiting-answer',
+    'answer-saved',
+    'review-rejected',
+    'context-review',
+    'ready-to-apply',
+    'stale',
+  ].includes(current.state);
   const operatorApplies =
     view.approvalMode === 'operator' &&
-    (current.state === 'context-review' || current.state === 'ready-to-apply');
+    ['context-review', 'ready-to-apply', 'review-rejected'].includes(current.state);
+  const rejected = current.state === 'review-rejected';
+  const lastReview = (
+    current.reviews as {
+      round: number;
+      approved: boolean;
+      summary: string;
+      findings?: { severity: string; message: string }[];
+    }[]
+  ).at(-1);
   return (
     <section
       id="input"
@@ -160,6 +166,26 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
           <span className="whitespace-pre-wrap">{latest.text ?? latest.excerpt}</span>
         </p>
       )}
+      {lastReview && (
+        <div className="mt-2 text-xs" data-input-review>
+          <Badge variant={lastReview.approved ? 'secondary' : 'destructive'}>
+            Ревью ответа, раунд {lastReview.round}: {lastReview.approved ? 'одобрено' : 'отклонено'}
+          </Badge>
+          <p className="mt-1 mb-0 whitespace-pre-wrap [overflow-wrap:anywhere]">
+            {lastReview.summary}
+          </p>
+          {lastReview.findings && lastReview.findings.length > 0 && (
+            <ul className="mt-1 mb-0 pl-4" aria-label="Находки ревью ответа">
+              {lastReview.findings.map((f, i) => (
+                <li key={i}>
+                  {f.severity === 'blocking' ? 'Блокирующая: ' : 'Замечание: '}
+                  {f.message}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
       {current.state === 'stale' && (
         <p className="text-muted-foreground mt-2 mb-0 text-xs">
           Применённый ответ устарел до попытки: ведущий строит контекст заново.
@@ -182,6 +208,11 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
                 kind,
                 expectedVersion: current.version,
                 idempotencyKey: answerKey,
+                // Исправление — цепочка в обсуждении: новый ответ заменяет своё
+                // прежнее сообщение-ответ оператора.
+                ...(latest?.actor.kind === 'operator' && latest.messageRef
+                  ? { supersedes: latest.messageRef }
+                  : {}),
               }).then(() => setAnswerKey(crypto.randomUUID())),
             );
           }}
@@ -227,20 +258,33 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
         </form>
       )}
       {operatorApplies && (
-        <Button
-          className="mt-2"
-          size="sm"
-          disabled={busy}
-          onClick={() =>
-            void act(() =>
-              post(`tasks/${taskId}/input/${current.requestId}/apply`, {
-                expectedVersion: current.version,
-              }),
-            )
-          }
-        >
-          Применить ответ
-        </Button>
+        <div className="mt-2 grid gap-2">
+          {rejected && (
+            <label className="flex items-center gap-2 text-xs">
+              <input
+                type="checkbox"
+                checked={confirmRejected}
+                onChange={(e) => setConfirmRejected(e.target.checked)}
+              />
+              Применить вопреки отклонённому ревью (находки выше прочитаны)
+            </label>
+          )}
+          <Button
+            size="sm"
+            className="justify-self-start"
+            disabled={busy || (rejected && !confirmRejected)}
+            onClick={() =>
+              void act(() =>
+                post(`tasks/${taskId}/input/${current.requestId}/apply`, {
+                  expectedVersion: current.version,
+                  ...(rejected ? { confirmRejected: true } : {}),
+                }),
+              )
+            }
+          >
+            Применить ответ
+          </Button>
+        </div>
       )}
       {error && (
         <p role="alert" className="text-destructive mt-2 mb-0 text-xs">

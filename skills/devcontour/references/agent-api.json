@@ -5130,7 +5130,7 @@
     },
     {
       "name": "input_list",
-      "description": "List writer questions (input requests) with state, severity, floors, version and who acts next: awaiting-answer, answer-saved, context-review, ready-to-apply, applied-awaiting-claim, delivered (only after the writer call with the answer started), stale, cancelled, superseded. No question or answer text. Read-only.",
+      "description": "List writer questions (input requests) with state, severity, floors, version and who acts next: awaiting-answer, answer-saved, context-review, review-rejected (the reviewer rejected the answer), ready-to-apply, applied-awaiting-claim, delivered (only after the writer call with the answer started), stale, cancelled, superseded. No question or answer text. Read-only.",
       "readOnly": true,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -5150,6 +5150,7 @@
               "awaiting-answer",
               "answer-saved",
               "context-review",
+              "review-rejected",
               "ready-to-apply",
               "applied-awaiting-claim",
               "delivered",

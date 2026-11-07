@@ -289,7 +289,7 @@ export const descriptions: Record<AgentOperation, string> = {
   discussion_inbox:
     'List change requests waiting for the lead across tasks, oldest event first: the latest version of each request without a disposition, or answered by the operator after needs-answer (reopened). Each entry is bounded: an excerpt, textBytes, truncated and the thread version for discussion_resolve; read the full text with discussion_read. Follow nextCursor.',
   input_list:
-    'List writer questions (input requests) with state, severity, floors, version and who acts next: awaiting-answer, answer-saved, context-review, ready-to-apply, applied-awaiting-claim, delivered (only after the writer call with the answer started), stale, cancelled, superseded. No question or answer text. Read-only.',
+    'List writer questions (input requests) with state, severity, floors, version and who acts next: awaiting-answer, answer-saved, context-review, review-rejected (the reviewer rejected the answer), ready-to-apply, applied-awaiting-claim, delivered (only after the writer call with the answer started), stale, cancelled, superseded. No question or answer text. Read-only.',
   input_show:
     'Read one writer question: question, options, recommended option, severity and floors, draft files, the latest answer in full, earlier answers as digest and excerpt, review rounds, target and delivery. Read-only.',
   input_answer:

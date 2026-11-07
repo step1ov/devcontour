@@ -38,5 +38,7 @@
 // Намеренное изменение: discussion_post принимает kind answer с input (ответ
 // на вопрос исполнителя сообщением обсуждения), input_context — messageIds
 // для manifest снимка; прочие операции байтово прежние.
-export const CATALOG_DIGEST = 'b7f27bed2875e668e67acce3703583bfc204f9475979167311f954331423d687';
+// Намеренное изменение: фильтр input_list знает состояние review-rejected
+// (ревью отклонило ответ), описание называет его; прочие операции байтово прежние.
+export const CATALOG_DIGEST = '742dae70ea2402b94ad41ec3ba4e09c4f90c4c2530d2d74c724523aa4ae7b5ee';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

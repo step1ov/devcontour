@@ -575,9 +575,11 @@ function inputNext(ctx: HostContext): HandoffHostNext | undefined {
     detail:
       summary.state === 'stale'
         ? `The applied answer to ${summary.requestId} went stale before the next attempt (${summary.stale?.reason ?? 'context'}): rebuild it — ${chain}.`
-        : summary.state === 'applied-awaiting-claim'
-          ? `The answer to ${summary.requestId} is applied; task ${taskId} waits for its next attempt.`
-          : `The answer to ${summary.requestId} is saved but not applied (${summary.state}): ${chain}.`,
+        : summary.state === 'review-rejected'
+          ? `The reviewer rejected the answer to ${summary.requestId} (input_show names the findings): correct the answer, or reopen and respecify the task${operator ? '; the operator may apply it only with explicit confirmation' : ''}.`
+          : summary.state === 'applied-awaiting-claim'
+            ? `The answer to ${summary.requestId} is applied; task ${taskId} waits for its next attempt.`
+            : `The answer to ${summary.requestId} is saved but not applied (${summary.state}): ${chain}.`,
   };
 }
 

@@ -56,6 +56,7 @@ export const inputStates = [
   'awaiting-answer',
   'answer-saved',
   'context-review',
+  'review-rejected',
   'ready-to-apply',
   'applied-awaiting-claim',
   'delivered',
@@ -129,6 +130,9 @@ const panelAnswer = z.strictObject({
     .regex(/^DM-[0-9a-f-]{36}$/)
     .optional(),
 });
+
+/** Сколько последних раундов ревью ответа показывает `show`. */
+const REVIEW_ROUNDS_SHOWN = 5;
 
 /** Сколько знаков прежних ответов показывает `show` (последний — целиком). */
 const EARLIER_EXCERPT = 500;
@@ -221,18 +225,29 @@ export class InputService {
       last.digest !== inputReviewDigest(this.h, task, request.id, answer.digest)
     )
       return { state: 'answer-saved' };
-    if (last.approved || this.h.config.approvalMode === 'operator') {
-      const proposed = this.engine.proposeTarget(request.id, last.contextDigest ?? null);
-      if (!proposed.problems.length)
-        return { state: 'ready-to-apply', approved: last.approved, round: last.round };
+    // Отклонённое ревью — своё состояние: в режиме оператора применить его
+    // можно, но только осознанно (вердикт и находки видны, нужно подтверждение).
+    if (!last.approved) {
+      const proposed =
+        this.h.config.approvalMode === 'operator'
+          ? this.engine.proposeTarget(request.id, last.contextDigest ?? null).problems
+          : [];
       return {
-        state: 'context-review',
-        approved: last.approved,
+        state: 'review-rejected',
+        approved: false,
         round: last.round,
-        problems: proposed.problems,
+        ...(proposed.length ? { problems: proposed } : {}),
       };
     }
-    return { state: 'context-review', approved: last.approved, round: last.round };
+    const proposed = this.engine.proposeTarget(request.id, last.contextDigest ?? null);
+    if (!proposed.problems.length)
+      return { state: 'ready-to-apply', approved: true, round: last.round };
+    return {
+      state: 'context-review',
+      approved: true,
+      round: last.round,
+      problems: proposed.problems,
+    };
   }
 
   /** Кто действует следующим и что делает. */
@@ -268,6 +283,16 @@ export class InputService {
           : {
               actor: 'operator' as const,
               next: `apply in the panel: /tasks/${request.workId}#input`,
+            };
+      case 'review-rejected':
+        return agent
+          ? {
+              actor: 'lead' as const,
+              next: 'the reviewer rejected the answer: read the findings (input_show); correct the answer, or reopen and respecify the task',
+            }
+          : {
+              actor: 'operator' as const,
+              next: `the reviewer rejected the answer: read the findings in the panel (/tasks/${request.workId}#input); correct the answer, or apply only with explicit confirmation`,
             };
       case 'applied-awaiting-claim':
         return { actor: 'lead' as const, next: 'wait for the next attempt of the task' };
@@ -349,13 +374,25 @@ export class InputService {
                 clipped: a.text.length > EARLIER_EXCERPT,
               },
         ),
-        reviews: inputReviewRounds(view, rid).map((r) => ({
-          round: r.round,
-          approved: r.approved,
-          contextDigest: r.contextDigest ?? null,
-          summary: r.summary.slice(0, 1000),
-          at: r.at,
-        })),
+        // Последние раунды (не больше пяти): вердикт, итог и открытые находки
+        // последнего — ответ остаётся в пределе агентского API.
+        reviews: inputReviewRounds(view, rid)
+          .slice(-REVIEW_ROUNDS_SHOWN)
+          .map((r, i, all) => ({
+            round: r.round,
+            approved: r.approved,
+            contextDigest: r.contextDigest ?? null,
+            summary: r.summary.slice(0, 1000),
+            at: r.at,
+            ...(i === all.length - 1
+              ? {
+                  findings: r.findings
+                    .filter((f) => f.status === 'open')
+                    .slice(0, 10)
+                    .map((f) => ({ severity: f.severity, message: f.message.slice(0, 500) })),
+                }
+              : {}),
+          })),
         ...(request.target ? { target: request.target } : {}),
         ...(request.delivered ? { delivered: request.delivered } : {}),
         ...(request.closed ? { closed: request.closed } : {}),
@@ -892,7 +929,9 @@ export class InputService {
    */
   applyInTask(taskId: string, requestId: string, raw: unknown) {
     const request = this.ofTask(taskId, requestId);
-    const { expectedVersion } = z.strictObject({ expectedVersion: version }).parse(raw);
+    const { expectedVersion, confirmRejected } = z
+      .strictObject({ expectedVersion: version, confirmRejected: z.boolean().optional() })
+      .parse(raw);
     if (this.h.config.approvalMode === 'agent')
       throw refuse(
         'APPROVAL_REQUIRED',
@@ -904,6 +943,11 @@ export class InputService {
       throw refuse(
         'APPROVAL_REQUIRED',
         `Ответ на запрос ${requestId} ещё не прошёл подготовку и ревью контекста: ведущий выполняет input_context и input_review`,
+      );
+    if (!last.approved && confirmRejected !== true)
+      throw refuse(
+        'REVIEW_REJECTED',
+        `Ревью ответа на запрос ${requestId} (раунд ${last.round}) отклонило его: ${last.summary.slice(0, 300)}. Применение — только с явным подтверждением`,
       );
     const proposed = this.target({ requestId, contextDigest: last.contextDigest });
     if (proposed.problems.length || !proposed.targetDigest)
