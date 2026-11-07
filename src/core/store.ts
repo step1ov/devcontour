@@ -845,7 +845,18 @@ export class Store {
       .get(namespace, owner ?? '@workspace', key) as { data: string } | undefined;
     return row ? (JSON.parse(row.data) as T) : undefined;
   }
-  saveLocal(namespace: string, owner: string | undefined, key: string, value: unknown) {
+  /**
+   * Локальная запись владельца. `revision: 'lease'` — продление срока
+   * локальной аренды: видимые данные не меняются, растёт счётчик сроков, как
+   * у heartbeat.
+   */
+  saveLocal(
+    namespace: string,
+    owner: string | undefined,
+    key: string,
+    value: unknown,
+    revision: 'data' | 'lease' = 'data',
+  ) {
     if (!this.transaction) throw new Error('Local workflow writes require an atomic transaction');
     const schema = this.syncSchema(owner);
     this.db.exec(
@@ -854,7 +865,7 @@ export class Store {
     this.db
       .prepare(`INSERT OR REPLACE INTO ${schema}.local_workflow VALUES(?,?,?,?)`)
       .run(namespace, owner ?? '@workspace', key, JSON.stringify(value));
-    this.bump('data');
+    this.bump(revision);
   }
   /**
    * Обсуждения задач — локальная таблица владельца задачи: не документ

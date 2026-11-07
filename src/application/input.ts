@@ -755,11 +755,16 @@ export class InputService {
     const heartbeat = setInterval(
       () => {
         try {
+          // Продление — счётчик сроков, не ревизия данных: опросы по
+          // ревизии не видят изменений, которых нет.
           owned((lease) =>
-            store.saveLocal(REVIEW_LEASE, undefined, requestId, {
-              ...lease,
-              leaseUntil: Date.now() + leaseMs,
-            }),
+            store.saveLocal(
+              REVIEW_LEASE,
+              undefined,
+              requestId,
+              { ...lease, leaseUntil: Date.now() + leaseMs },
+              'lease',
+            ),
           );
         } catch {
           /* Хранилище занято или закрыто: срок аренды истечёт сам. */

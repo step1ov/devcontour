@@ -362,3 +362,76 @@ test('R01: two concurrent answer reviews of one request — one reviewer call; t
     await f.cleanup();
   }
 });
+
+test('R01: the review lease is renewed while the reviewer runs without a data revision bump; release keeps a lease taken with another token', async () => {
+  // Reviewer ответа держит вызов до сигнала теста.
+  let reviewerCalls = 0;
+  let open!: () => void;
+  const gate = new Promise<void>((resolve) => (open = resolve));
+  const base = controlled();
+  const gated = (adapter: AgentAdapter): AgentAdapter => ({
+    ...adapter,
+    execute: async (request) => {
+      if (request.review && !request.task?.id) {
+        reviewerCalls++;
+        await gate;
+      }
+      return adapter.execute(request);
+    },
+  });
+  const runtimes = {
+    ...base,
+    demo: gated(base.demo),
+    codex: gated(base.codex),
+    claude: gated(base.claude),
+  };
+  const f = await inputFixture(runtimes);
+  type Lease = { token: string; startedAt: string; leaseUntil: number };
+  const leaseOf = (requestId: string) =>
+    f.store.localRecord<Lease>('input-review-lease', undefined, requestId);
+  try {
+    const { requestId, version } = await question(f);
+    f.service.answer(
+      { requestId, text: 'Use JSON as now.', optionId: 'json', expectedVersion: version },
+      'operator',
+    );
+    const context = await f.service.context({ requestId });
+    // Короткий срок: heartbeat — каждую треть срока, не реже раза в секунду.
+    f.h.config.leaseMs = 5000;
+    let foreign: Lease | undefined;
+    const first = f.service.review({
+      requestId,
+      contextDigest: context.contextDigest,
+      authorRuntime: 'codex',
+    });
+    try {
+      for (let i = 0; i < 100 && reviewerCalls === 0; i++)
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(reviewerCalls, 1);
+      const taken = leaseOf(requestId)!;
+      const before = f.store.version();
+      // Дольше одного интервала продления (5000 / 3 мс).
+      await new Promise((resolve) => setTimeout(resolve, 2200));
+      const renewed = leaseOf(requestId)!;
+      assert.equal(renewed.token, taken.token);
+      assert.ok(renewed.leaseUntil > taken.leaseUntil, 'heartbeat продлевает срок аренды');
+      const now = f.store.version();
+      assert.equal(now.revision, before.revision, 'продление не меняет ревизию данных');
+      assert.ok(now.lease > before.lease, 'продление растит счётчик сроков');
+      // Аренду перехватил другой процесс (срок первой будто истёк): снятие
+      // первой её не трогает.
+      foreign = {
+        token: 'other',
+        startedAt: new Date().toISOString(),
+        leaseUntil: Date.now() + 60_000,
+      };
+      f.store.atomic(() => f.store.saveLocal('input-review-lease', undefined, requestId, foreign));
+    } finally {
+      open();
+    }
+    assert.equal((await first).approved, true);
+    assert.deepEqual(leaseOf(requestId), foreign);
+  } finally {
+    await f.cleanup();
+  }
+});
