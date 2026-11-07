@@ -56,5 +56,8 @@
 // исполнителя (answer-input, apply-input, close-follow-up) и блок
 // host.discussion с необработанными обращениями; прочие операции байтово
 // прежние.
-export const CATALOG_DIGEST = 'c9f86e7788f5b66157491674cf319de65d586e04ac50fa8c84f2a6eec20016a0';
+// Намеренное изменение: описание discussion_inbox говорит, что каждый новый
+// ответ оператора — новое событие и обращение может появиться снова, даже на
+// следующей странице того же прохода; прочие операции байтово прежние.
+export const CATALOG_DIGEST = 'e854b33114fd09d06e54411a1bb77e16a65cc6ff6dd0505a8107fa1445551214';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

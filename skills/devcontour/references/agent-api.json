@@ -2497,7 +2497,7 @@
     },
     {
       "name": "discussion_inbox",
-      "description": "List change requests waiting for the lead across tasks, oldest event first: the latest version of each request without a disposition, or answered by the operator after needs-answer (reopened). Each entry is bounded: an excerpt, textBytes, truncated and the thread version for discussion_resolve; read the full text with discussion_read. Follow nextCursor.",
+      "description": "List change requests waiting for the lead across tasks, oldest event first: the latest version of each request without a disposition, or answered by the operator after needs-answer (reopened). Each new operator answer is a new event: the request may appear again, later in the order, even on a later page of the same pass. Each entry is bounded: an excerpt, textBytes, truncated and the thread version for discussion_resolve; read the full text with discussion_read. Follow nextCursor.",
       "readOnly": true,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

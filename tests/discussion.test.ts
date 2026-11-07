@@ -786,6 +786,115 @@ test('D02-C: «нужен ответ» — цикл: ответ оператор
   }
 });
 
+/** Обращение и запрос ведущего «нужен ответ» по нему. */
+function asked(w: ReturnType<typeof world>, text = 'Сделать импорт') {
+  const request = say(w.d, w.task.id, text);
+  const disposition = w.d.resolve({
+    requestId: request.id,
+    outcome: 'needs-answer',
+    reason: 'Из какого источника?',
+    idempotencyKey: key(++counter),
+    expectedVersion: w.d.read({ taskId: w.task.id, latest: true, limit: 1 }).version,
+  }).message;
+  return { request, disposition };
+}
+
+test('D02-C: ответ на запрос ведущего — заметка; обращение в ответ на обработку — 400', () => {
+  const w = world();
+  try {
+    const { request, disposition } = asked(w);
+    assert.throws(
+      () => say(w.d, w.task.id, 'Из CSV, и ещё добавить экспорт', { replyTo: disposition.id }),
+      (e: Error & { status?: number }) => e.status === 400 && /новый запрос/.test(e.message),
+    );
+    // Ничего не записано: обращение не вернулось ведущему и нового нет.
+    assert.deepEqual(w.d.inbox({}).requests, []);
+    // Обращение в ответ на заметку — допустимо.
+    const note = say(w.d, w.task.id, 'Контекст', { kind: 'note' });
+    const linked = say(w.d, w.task.id, 'Добавить экспорт', { replyTo: note.id });
+    assert.deepEqual(
+      w.d.inbox({}).requests.map((r) => r.id),
+      [linked.id],
+    );
+    // Ответ заметкой возвращает обращение.
+    say(w.d, w.task.id, 'Из CSV', { kind: 'note', replyTo: disposition.id });
+    assert.deepEqual(
+      w.d
+        .inbox({})
+        .requests.map((r) => r.id)
+        .sort(),
+      [linked.id, request.id].sort(),
+    );
+  } finally {
+    w.cleanup();
+  }
+});
+
+test('D02-C: окончательно обработанное обращение не исправляется — 409; после «нужен ответ» — можно', () => {
+  const w = world();
+  try {
+    // Ожидающее ответа обращение исправляется: ведущий обработает новую версию.
+    const { request } = asked(w);
+    const corrected = say(w.d, w.task.id, 'Сделать импорт из CSV', { supersedes: request.id });
+    assert.deepEqual(
+      w.d.inbox({}).requests.map((r) => r.id),
+      [corrected.id],
+    );
+    w.d.resolve({
+      requestId: corrected.id,
+      outcome: 'rejected',
+      reason: 'Не в этой задаче',
+      idempotencyKey: key(++counter),
+      expectedVersion: w.d.read({ taskId: w.task.id, latest: true, limit: 1 }).version,
+    });
+    const version = w.d.read({ taskId: w.task.id, latest: true, limit: 1 }).version;
+    for (const kind of ['change-request', 'note'] as const)
+      assert.throws(
+        () => say(w.d, w.task.id, 'Всё же сделать', { kind, supersedes: corrected.id }),
+        (e: Error & { status?: number; details?: { code?: string } }) =>
+          e.status === 409 && e.details?.code === 'request-resolved',
+      );
+    // Ничего не записано, очередь пуста; дальнейшее изменение — новое обращение.
+    assert.equal(w.d.read({ taskId: w.task.id, latest: true, limit: 1 }).version, version);
+    assert.deepEqual(w.d.inbox({}).requests, []);
+    const next = say(w.d, w.task.id, 'Сделать импорт в следующей задаче');
+    assert.deepEqual(
+      w.d.inbox({}).requests.map((r) => r.id),
+      [next.id],
+    );
+  } finally {
+    w.cleanup();
+  }
+});
+
+test('D02-C: исправленный ответ на запрос ведущего остаётся ответом на тот же запрос', () => {
+  const w = world();
+  try {
+    const { request, disposition } = asked(w);
+    const answer = say(w.d, w.task.id, 'Из CVS', { kind: 'note', replyTo: disposition.id });
+    // Исправление без replyTo наследует связь прежней версии.
+    const corrected = say(w.d, w.task.id, 'Из CSV', { kind: 'note', supersedes: answer.id });
+    assert.equal(corrected.replyTo, disposition.id);
+    assert.equal(w.d.message(w.task.id, corrected.id)?.replyTo, disposition.id);
+    const [reopened] = w.d.inbox({}).requests;
+    assert.equal(reopened.id, request.id);
+    assert.deepEqual(reopened.reopened, { dispositionId: disposition.id, answerId: corrected.id });
+    // Другая связь у исправления — отказ.
+    const note = say(w.d, w.task.id, 'Контекст', { kind: 'note' });
+    assert.throws(
+      () =>
+        say(w.d, w.task.id, 'Из TSV', {
+          kind: 'note',
+          supersedes: corrected.id,
+          replyTo: note.id,
+        }),
+      (e: Error & { status?: number }) => e.status === 400 && /replyTo/.test(e.message),
+    );
+  } finally {
+    w.cleanup();
+  }
+});
+
 test('D02: некорректный курсор очереди — 400; длинный текст — 413; ревизия без доски — 400', () => {
   const w = world();
   try {
