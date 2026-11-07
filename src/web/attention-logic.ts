@@ -194,3 +194,26 @@ export function groupByActor<T extends Pick<AttentionItem, 'actor'>>(items: read
     lead: items.filter((i) => i.actor === 'lead'),
   };
 }
+
+/**
+ * Заголовок обзора: сводка сервера без решений, дополненная карточками
+ * центра внимания. Прежний порядок: доступ и бюджет, решение по готовому
+ * изменению, другие решения оператора, затем «можно попробовать», затем
+ * техника ведущего. Пока задач нет, говорит сводка.
+ */
+export function headlineOf(
+  overview: { headline: string; tryNow?: unknown; counts: { tasks: number } },
+  items: readonly Pick<AttentionItem, 'actor' | 'category' | 'source'>[],
+) {
+  if (!overview.counts.tasks) return overview.headline;
+  const operator = items.filter((i) => i.actor === 'operator');
+  if (operator.some((i) => i.category === 'access' || i.category === 'budget'))
+    return 'Работа стоит: нужен внешний доступ или бюджет.';
+  if (operator.some((i) => i.source === 'changeset'))
+    return 'Нужно ваше решение по готовому изменению.';
+  if (operator.length) return 'Нужно ваше решение.';
+  if (overview.tryNow) return overview.headline;
+  if (items.some((i) => i.actor === 'lead'))
+    return 'Работа остановилась на технической проблеме — разбирает ведущий агент.';
+  return overview.headline;
+}

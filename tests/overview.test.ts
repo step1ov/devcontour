@@ -5,15 +5,31 @@ import { fixture, input } from './helpers.ts';
 import { digest } from '../src/core/service.ts';
 import { Workspace, changeSnapshot, snapshotDigest } from '../src/core/workspace.ts';
 import { authorOverview } from '../src/application/overview.ts';
+import { AttentionService } from '../src/application/attention.ts';
+import { headlineOf } from '../src/web/attention-logic.ts';
+import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 
 // Сводка для автора: вопросы автора продукта, а не сущности контроллера.
+// Решения автора и ведущего — карточки центра внимания: сводка их больше не
+// перечисляет, панель показывает голову очереди и дополняет заголовок.
 
-test('Пустой workspace говорит, что разработка не началась, и ничего не требует', () => {
+type Fixture = ReturnType<typeof fixture>;
+const attention = async (f: Fixture) => (await new AttentionService(f.store, f.h).active()).items;
+const domainIds = (item: { actions: { kind: string; id: string }[] } | undefined) =>
+  (item?.actions ?? []).filter((a) => a.kind === 'domain').map((a) => a.id);
+
+test('Пустой workspace говорит, что разработка не началась, и ничего не требует', async () => {
   const f = fixture();
   try {
     const o = authorOverview(f.h);
     assert.match(o.headline, /не началась/);
-    assert.deepEqual(o.decisions, []);
+    assert.equal('decisions' in o, false, 'решения — в центре внимания');
+    const items = await attention(f);
+    assert.deepEqual(
+      items.filter((i) => i.actor === 'operator'),
+      [],
+    );
+    assert.match(headlineOf(o, items), /не началась/);
     assert.equal(o.tryNow, undefined);
     assert.equal(o.preview.configured, false);
   } finally {
@@ -21,7 +37,7 @@ test('Пустой workspace говорит, что разработка не н
   }
 });
 
-test('Отказ провайдера — внешний доступ, и он первым в заголовке', () => {
+test('Отказ провайдера — внешний доступ, и он первым в заголовке', async () => {
   const f = fixture();
   try {
     const b = f.h.createBoard('Board');
@@ -33,17 +49,19 @@ test('Отказ провайдера — внешний доступ, и он �
       s.pauseFailures = ['provider-auth'];
     });
     const o = authorOverview(f.h);
-    assert.match(o.headline, /внешний доступ/);
-    const access = o.decisions.find((d) => d.kind === 'access')!;
-    assert.match(access.title, /провайдер/);
-    assert.deepEqual(access.action, { type: 'resume-queue' });
+    const items = await attention(f);
+    assert.match(headlineOf(o, items), /внешний доступ/);
+    const access = items.find((i) => i.category === 'access')!;
+    assert.equal(access.actor, 'operator');
+    assert.match(access.title, /доступ/);
+    assert.deepEqual(domainIds(access), ['resume']);
     assert.match(o.activity.doing, /остановлена системой/);
   } finally {
     f.cleanup();
   }
 });
 
-test('Проверенное изменение: сначала попробовать в preview, затем принять', () => {
+test('Проверенное изменение: сначала попробовать в preview, затем принять', async () => {
   const f = fixture();
   try {
     const b = f.h.createBoard('Board');
@@ -81,9 +99,12 @@ test('Проверенное изменение: сначала попробов
       });
     });
     let o = authorOverview(f.h);
-    let product = o.decisions.find((d) => d.kind === 'product')!;
+    let items = await attention(f);
+    let product = items.find((i) => i.sourceKey === `changeset:${change.id}`)!;
     assert.match(product.title, /Каталог/);
-    assert.deepEqual(product.action, { type: 'deploy-preview', changeSetId: change.id });
+    assert.equal(product.actor, 'operator');
+    assert.deepEqual(domainIds(product), ['deploy-preview', 'accept']);
+    assert.match(product.subject.href, new RegExp(`#changeset-${change.id}$`));
     assert.equal(o.tryNow, undefined);
     assert.equal(o.changes.find((c) => c.kind === 'changeset')!.status, 'verified');
 
@@ -121,9 +142,11 @@ test('Проверенное изменение: сначала попробов
     o = authorOverview(f.h);
     assert.equal(o.tryNow?.url, 'http://127.0.0.1:45998');
     assert.equal(o.tryNow?.scenario, 'unconfirmed', 'сценарий не подтверждён — так и сказано');
-    product = o.decisions.find((d) => d.kind === 'product')!;
-    assert.deepEqual(product.action, { type: 'accept-changeset', changeSetId: change.id });
-    assert.match(o.headline, /ваше решение/);
+    items = await attention(f);
+    product = items.find((i) => i.sourceKey === `changeset:${change.id}`)!;
+    assert.deepEqual(domainIds(product), ['accept']);
+    assert.match(o.headline, /попробовать/, 'сводка без решений');
+    assert.match(headlineOf(o, items), /ваше решение по готовому изменению/);
     assert.equal(o.spend.unknownCalls, 1);
     assert.equal(o.spend.complete, false);
   } finally {
@@ -131,39 +154,32 @@ test('Проверенное изменение: сначала попробов
   }
 });
 
-test('Остановленное восстановление — техническое исправление, а не вопрос автору', () => {
+test('Остановленное восстановление — техническое исправление, а не вопрос автору', async () => {
   const f = fixture();
   try {
     const b = f.h.createBoard('Board');
     f.h.addTask(b.id, input());
     f.h.approve(b.id);
-    f.store.atomic(() =>
-      f.store.saveLocal('lead', undefined, 'a'.repeat(64), {
-        key: 'a'.repeat(64),
-        kind: 'board',
-        id: b.id,
-        authorRuntime: 'codex',
-        inputDigest: 'b'.repeat(64),
-        startedAt: new Date().toISOString(),
-        stage: 1,
-        status: 'failed',
-        error: 'исчерпан бюджет автоматических восстановлений доски',
-        attempts: 1,
-        maxAttempts: 3,
-        history: [],
-      }),
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex', maxAttempts: 3 });
+    flow.fail(
+      flow.claim(job.key, job.owner)!,
+      'исчерпан бюджет автоматических восстановлений доски',
     );
     const o = authorOverview(f.h);
-    const technical = o.decisions.find((d) => d.kind === 'technical')!;
-    assert.match(technical.detail, /бюджет/);
-    assert.equal(technical.action, undefined, 'автору не предлагают чинить самому');
-    assert.match(o.headline, /технической проблеме/);
+    const items = await attention(f);
+    const technical = items.find((i) => i.sourceKey === `board:${b.id}`)!;
+    assert.equal(technical.actor, 'lead');
+    assert.equal(technical.category, 'technical');
+    assert.deepEqual(domainIds(technical), [], 'автору не предлагают чинить самому');
+    assert.ok(technical.actions.some((a) => a.kind === 'handoff'));
+    assert.match(headlineOf(o, [technical]), /технической проблеме — разбирает ведущий агент/);
   } finally {
     f.cleanup();
   }
 });
 
-test('Повторная проверка того же кода не запирает автора на выкладке', () => {
+test('Повторная проверка того же кода не запирает автора на выкладке', async () => {
   // Выкладка переиспользуется по manifest, и обзор должен узнавать её по нему
   // же — иначе после повторной проверки кнопка «выложить» не сменялась на
   // «принять», сколько её ни нажимай.
@@ -226,15 +242,15 @@ test('Повторная проверка того же кода не запир
       ];
     });
     verification();
-    const product = authorOverview(f.h).decisions.find((d) => d.kind === 'product')!;
-    assert.deepEqual(product.action, { type: 'accept-changeset', changeSetId: change.id });
-    assert.equal(product.evidence?.preview?.release, 'r1');
+    const product = (await attention(f)).find((i) => i.sourceKey === `changeset:${change.id}`)!;
+    assert.deepEqual(domainIds(product), ['accept']);
+    assert.match(product.reason, /работает в preview/);
   } finally {
     f.cleanup();
   }
 });
 
-test('Упавшая задача без восстановления объяснена, отмена показана как отмена', () => {
+test('Упавшая задача без восстановления объяснена, отмена показана как отмена', async () => {
   const f = fixture();
   try {
     const b = f.h.createBoard('Board');
@@ -245,10 +261,14 @@ test('Упавшая задача без восстановления объяс
     const run = f.h.claim('w')!;
     f.h.fail(run.id, run.token, 'candidate/test: Код выхода 1', false, 'gate');
     let o = authorOverview(f.h);
-    const technical = o.decisions.find((d) => d.kind === 'technical')!;
+    // Упавшая задача — карточка задачи с прогнозом восстановления (S10):
+    // одна карточка, зависимая задача — её влияние, а не своя карточка.
+    const items = await attention(f);
+    const technical = items.find((i) => i.sourceKey === `work:${failing.id}`)!;
     assert.match(technical.title, /Сломанная задача/);
-    assert.match(technical.detail, /Код выхода 1/);
-    assert.match(technical.detail, /Ждут её результата: 1/);
+    assert.match(technical.reason, /Код выхода 1/);
+    assert.equal(technical.impact.waiting, 1);
+    assert.equal(items.filter((i) => i.title.includes('Зависимая')).length, 0);
     assert.doesNotMatch(o.headline, /ведущий агент/, 'не утверждает работу, которой не видно');
 
     const other = f.h.createBoard('Cancelled board');
@@ -265,50 +285,45 @@ test('Упавшая задача без восстановления объяс
   }
 });
 
-test('Упавший workflow, чья работа ушла дальше, не держит «нужен разбор»', () => {
+test('Упавший workflow, чья работа ушла дальше, не держит «нужен разбор»', async () => {
   const f = fixture();
   try {
-    const job = (key: string, id: string, status: string, startedAt: string) =>
-      f.store.atomic(() =>
-        f.store.saveLocal('lead', undefined, key.repeat(64), {
-          key: key.repeat(64),
-          kind: 'board',
-          id,
-          authorRuntime: 'codex',
-          inputDigest: 'b'.repeat(64),
-          stage: 0,
-          status,
-          error:
-            status === 'failed'
-              ? 'Независимое ревью отклонено: план требует исправлений'
-              : undefined,
-          attempts: 1,
-          maxAttempts: 3,
-          startedAt,
-          history: [],
-        }),
-      );
+    const flow = new LeadWorkflow(f.h);
+    const failed = (id: string, error: string) => {
+      const job = flow.start({ kind: 'board', id, authorRuntime: 'codex', maxAttempts: 3 });
+      flow.fail(flow.claim(job.key, job.owner)!, error);
+      return job;
+    };
     // План перепланирован: вся работа прежней доски отменена.
     const old = f.h.createBoard('Прежний план');
     const dropped = f.h.addTask(old.id, input('Отменённая'));
     f.h.cancel(dropped.id);
-    job('a', old.id, 'failed', '2026-09-26T08:00:00.000Z');
-    // Та же доска получила новый workflow после исправления плана.
+    failed(old.id, 'Независимое ревью отклонено: план требует исправлений');
+    // Та же доска получила новое задание после исправления плана.
     const current = f.h.createBoard('Текущий план');
     f.h.addTask(current.id, input('Живая'));
-    job('b', current.id, 'failed', '2026-09-26T08:10:00.000Z');
-    job('c', current.id, 'running', '2026-09-26T08:20:00.000Z');
-    let o = authorOverview(f.h);
-    assert.equal(o.decisions.filter((d) => d.kind === 'technical').length, 0);
-    assert.doesNotMatch(o.headline, /технической проблеме/);
-    // Упавший последним — по-прежнему решение.
-    job('d', current.id, 'failed', '2026-09-26T08:30:00.000Z');
-    o = authorOverview(f.h);
-    assert.equal(o.decisions.filter((d) => d.kind === 'technical').length, 1);
-    // Упал и следующий — решение одно, по последнему; прежний отказ — история.
-    job('e', current.id, 'failed', '2026-09-26T08:40:00.000Z');
-    o = authorOverview(f.h);
-    assert.equal(o.decisions.filter((d) => d.kind === 'technical').length, 1);
+    const job = failed(current.id, 'Независимое ревью отклонено: план требует исправлений');
+    flow.retry(job.key, job.owner);
+    const boardCards = async () =>
+      (await attention(f)).filter((i) => i.sourceKey.startsWith('board:'));
+    assert.deepEqual(await boardCards(), []);
+    assert.doesNotMatch(
+      headlineOf(authorOverview(f.h), await attention(f)),
+      /технической проблеме/,
+    );
+    // Упавший последним — по-прежнему решение ведущего.
+    flow.fail(flow.claim(job.key, job.owner)!, 'Независимое ревью отклонено снова');
+    const one = await boardCards();
+    assert.deepEqual(
+      one.map((i) => [i.sourceKey, i.actor]),
+      [[`board:${current.id}`, 'lead']],
+    );
+    // Упал и следующий — карточка одна, по последнему; прежний отказ — история.
+    flow.retry(job.key, job.owner);
+    flow.fail(flow.claim(job.key, job.owner)!, 'И ещё раз');
+    const again = await boardCards();
+    assert.equal(again.length, 1);
+    assert.notEqual(again[0].occurrenceId, one[0].occurrenceId);
   } finally {
     f.cleanup();
   }

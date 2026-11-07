@@ -1,25 +1,22 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { ArrowUpRight, RotateCcw } from 'lucide-react';
-import type { AuthorOverview, Decision, DecisionKind, Evidence } from '../application/overview.ts';
+import type { AuthorOverview } from '../application/overview.ts';
 import { Alert, AlertDescription } from '@/ui/alert.tsx';
 import { Badge } from '@/ui/badge.tsx';
 import { Button } from '@/ui/button.tsx';
 import { Card, CardContent, CardHeader, CardTitle } from '@/ui/card.tsx';
+import { humanError } from '@/lib/utils.ts';
+import { headlineOf, type AttentionItem } from './attention-logic.ts';
+import { AttentionCard, type ActOutcome } from './AttentionCard.tsx';
+import { useAttention } from './AttentionProvider.tsx';
+import { staleLine } from './AttentionCenter.tsx';
+import { navigate } from './navigation.ts';
 
 // Главный экран автора продукта: что можно попробовать, какое решение нужно,
 // что изменилось, сколько потрачено и что делает система. Внутренние
-// сущности контроллера — только в раскрываемых подробностях.
+// сущности контроллера — только в раскрываемых подробностях. Решения —
+// голова очереди центра внимания: тот же ответ, что у значка и экрана.
 
-const kinds: Record<DecisionKind, string> = {
-  product: 'Продуктовый выбор',
-  technical: 'Техническое исправление',
-  access: 'Нужен внешний доступ',
-};
-const kindTone: Record<DecisionKind, 'default' | 'warning' | 'destructive'> = {
-  product: 'default',
-  technical: 'warning',
-  access: 'destructive',
-};
 const changeStatus = {
   accepted: 'Принято',
   verified: 'Проверено, ждёт приёмки',
@@ -59,48 +56,84 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
 const action = 'h-auto max-w-full justify-start whitespace-normal text-left';
 const when = (at?: string) => (at ? new Date(at).toLocaleString('ru-RU') : 'неизвестно');
 
-function EvidenceDetails({
-  evidence,
-  onOpen,
+/** Сколько карточек оператора показывает обзор; остальные — на экране внимания. */
+const HEAD = 5;
+
+/**
+ * «Нужно ваше решение»: первые карточки оператора из общего опроса центра.
+ * Карточки ведущего агента не выдаются за решения автора — только их число
+ * со ссылкой на экран внимания.
+ */
+function DecisionHead({
+  attentionHref,
+  onStatus,
 }: {
-  evidence: Evidence;
-  onOpen?: (changeSetId: string) => void;
+  attentionHref: (who?: 'lead') => string;
+  onStatus: (text: string) => void;
 }) {
-  const preview = evidence.preview;
+  const attention = useAttention();
+  if (attention.loading)
+    return (
+      <p className="m-0" role="status" aria-busy="true">
+        Загружаем действия…
+      </p>
+    );
+  if (attention.error)
+    return (
+      <p className="text-destructive m-0" role="alert">
+        Не удалось загрузить действия: {humanError(attention.error)}
+      </p>
+    );
+  const operator = attention.items.filter((i) => i.actor === 'operator');
+  const lead = attention.items.filter((i) => i.actor === 'lead');
+  const all = attention.view?.counts.byActor.operator.active ?? operator.length;
+  const link = (who: 'lead' | undefined, text: string) => (
+    <a
+      href={attentionHref(who)}
+      onClick={(e) => {
+        if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+        e.preventDefault();
+        navigate(attentionHref(who));
+      }}
+    >
+      {text}
+    </a>
+  );
+  const outcome = (_: AttentionItem, o: ActOutcome) => onStatus(o.status);
   return (
-    <details>
-      <summary className="text-muted-foreground cursor-pointer">Доказательства</summary>
-      <dl className="my-2 grid grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-1 text-xs">
-        <dt>Совместная проверка</dt>
-        <dd className="m-0">{when(evidence.verifiedAt)}</dd>
-        <dt>Manifest</dt>
-        <dd className="m-0 font-mono">{evidence.manifestDigest?.slice(0, 16) ?? '—'}</dd>
-        {preview && (
-          <>
-            <dt>Версия в preview</dt>
-            <dd className="m-0 font-mono">{preview.release}</dd>
-            <dt>Артефакт</dt>
-            <dd className="m-0 font-mono">{preview.artifactDigest?.slice(0, 16) ?? '—'}</dd>
-            <dt>Здоровье проверено</dt>
-            <dd className="m-0">{when(preview.checkedAt)}</dd>
-            <dt>Сценарий</dt>
-            <dd className="m-0">
-              {preview.scenario === 'confirmed' ? 'Прошёл' : 'Не подтверждён'}
-              {preview.smoke ? ` — ${preview.smoke}` : ''}
-            </dd>
-          </>
-        )}
-      </dl>
-      {onOpen && (
-        <Button variant="outline" className={action} onClick={() => onOpen(evidence.changeSetId)}>
-          Открыть проверку
-        </Button>
+    <>
+      {attention.stale && (
+        <p className="text-destructive m-0" role="alert">
+          {staleLine(attention.lastOkAt)}
+        </p>
       )}
-    </details>
+      {operator.length ? (
+        <ul className="m-0 grid list-none gap-3 p-0" aria-label="Решения для вас">
+          {operator.slice(0, HEAD).map((i) => (
+            <li key={i.sourceKey} className="min-w-0">
+              <AttentionCard item={i} compact onOutcome={outcome} />
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="m-0">Сейчас от вас ничего не требуется.</p>
+      )}
+      <p className="m-0 flex flex-wrap gap-x-4 gap-y-1">
+        {link(undefined, `Все действия (${all})`)}
+        {lead.length > 0 &&
+          link('lead', `Ведущий агент разбирает технических вопросов: ${lead.length}`)}
+      </p>
+    </>
   );
 }
 
-export function AuthorOverviewPanel({ onOpenChange }: { onOpenChange?: (id: string) => void }) {
+export function AuthorOverviewPanel({
+  attentionHref,
+}: {
+  /** Адрес экрана внимания этой оболочки (с фильтром «кто действует»). */
+  attentionHref: (who?: 'lead') => string;
+}) {
+  const attention = useAttention();
   const [overview, setOverview] = useState<AuthorOverview>();
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -142,44 +175,6 @@ export function AuthorOverviewPanel({ onOpenChange }: { onOpenChange?: (id: stri
       status.current?.focus();
     }
   };
-  const decide = (d: Decision) => {
-    const a = d.action;
-    if (!a) return undefined;
-    if (a.type === 'accept-changeset')
-      return (
-        <Button
-          className={action}
-          disabled={busy}
-          onClick={() =>
-            void act('Изменение принято', () => post(`changesets/${a.changeSetId}/accept`))
-          }
-        >
-          Принять изменение
-        </Button>
-      );
-    if (a.type === 'deploy-preview')
-      return (
-        <Button
-          className={action}
-          disabled={busy}
-          onClick={() =>
-            void act('Выкладка preview начата', () => post(`changesets/${a.changeSetId}/preview`))
-          }
-        >
-          Выложить в preview
-        </Button>
-      );
-    return (
-      <Button
-        className={action}
-        disabled={busy}
-        onClick={() => void act('Выдача продолжена', () => post('scheduler', { start: true }))}
-      >
-        Продолжить выдачу
-      </Button>
-    );
-  };
-
   if (error && !overview)
     return (
       <Alert variant="destructive" role="alert">
@@ -198,15 +193,16 @@ export function AuthorOverviewPanel({ onOpenChange }: { onOpenChange?: (id: stri
       </p>
     );
   const o = overview;
+  const headline = headlineOf(o, attention.items);
   return (
     <div
       className="grid min-w-0 gap-4 [overflow-wrap:anywhere]"
       aria-label="Обзор для автора продукта"
     >
       <header className="grid gap-1">
-        <h2 className="m-0 text-lg font-semibold">{o.headline}</h2>
+        <h2 className="m-0 text-lg font-semibold">{headline}</h2>
         {/* Подпись не повторяет заголовок слово в слово. */}
-        {o.activity.doing.replace(/[.!…]+$/, '') !== o.headline.replace(/[.!…]+$/, '') && (
+        {o.activity.doing.replace(/[.!…]+$/, '') !== headline.replace(/[.!…]+$/, '') && (
           <p className="text-muted-foreground m-0 text-sm">{o.activity.doing}</p>
         )}
         {error && (
@@ -280,29 +276,13 @@ export function AuthorOverviewPanel({ onOpenChange }: { onOpenChange?: (id: stri
       </Section>
 
       <Section title="Нужно ваше решение">
-        {o.decisions.length ? (
-          <ul className="m-0 grid list-none gap-3 p-0">
-            {o.decisions.map((d, i) => (
-              <li key={i} className="grid min-w-0 gap-2 rounded-md border p-3">
-                <div className="flex min-w-0 flex-wrap items-center gap-2">
-                  <Badge variant={kindTone[d.kind]}>{kinds[d.kind]}</Badge>
-                  <strong className="min-w-0">{d.title}</strong>
-                </div>
-                <p className="m-0">{d.detail}</p>
-                {d.kind !== 'technical' && decide(d)}
-                {d.evidence && <EvidenceDetails evidence={d.evidence} onOpen={onOpenChange} />}
-                {!!d.refs?.length && (
-                  <details>
-                    <summary className="text-muted-foreground cursor-pointer">Подробности</summary>
-                    <p className="m-0 font-mono text-xs break-all">{d.refs.join(', ')}</p>
-                  </details>
-                )}
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p className="m-0">Сейчас от вас ничего не требуется.</p>
-        )}
+        <DecisionHead
+          attentionHref={attentionHref}
+          onStatus={(text) => {
+            setNotice(text);
+            status.current?.focus();
+          }}
+        />
       </Section>
 
       <Section title="Что изменилось">

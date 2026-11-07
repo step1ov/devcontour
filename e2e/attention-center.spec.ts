@@ -541,6 +541,17 @@ test('D05-E: a lead technical blocker is not an operator choice, and reading is 
   };
   expect(after).toEqual(before);
 
+  // Обзор не выдаёт карточку ведущего за решение автора, но считает её.
+  await page.goto('/');
+  await expect(
+    page.getByRole('heading', { name: 'Нужно ваше решение', exact: true }),
+  ).toBeVisible();
+  await expect(page.locator(`[data-attention-key="${key}"]`)).toHaveCount(0);
+  await expect(
+    page.getByRole('link', { name: /Ведущий агент разбирает технических вопросов: \d+/ }),
+  ).toBeVisible();
+  await page.goto('/?tab=attention&who=lead');
+
   // Ведущего нет на связи: предупреждение с командой передачи.
   await page.route(isList, async (route) => {
     const real = (await (await route.fetch()).json()) as Record<string, unknown>;

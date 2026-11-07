@@ -9,6 +9,7 @@ import type { AttentionView } from '../src/application/attention.ts';
 import {
   categoryLabel,
   freshItems,
+  headlineOf,
   impactLine,
   nextFocusKey,
   openLabel,
@@ -202,4 +203,29 @@ test('Focus after a card disappears goes to the next card, then the previous one
   assert.equal(nextFocusKey(['a'], [], 'a'), undefined);
   // Следующая тоже исчезла — ближайшая оставшаяся.
   assert.equal(nextFocusKey(['a', 'b', 'c', 'd'], ['a', 'd'], 'b'), 'd');
+});
+
+test('The overview headline keeps the old priority and never calls a lead item the author’s decision', () => {
+  const o = { headline: 'Исполнители работают над задачами: 1.', counts: { tasks: 3 } };
+  const op = (category: AttentionItem['category'], source: AttentionItem['source'] = 'input') => ({
+    actor: 'operator' as const,
+    category,
+    source,
+  });
+  const lead = { actor: 'lead' as const, category: 'technical' as const, source: 'work' as const };
+  assert.equal(headlineOf(o, []), o.headline);
+  assert.match(
+    headlineOf(o, [op('decision', 'changeset'), op('access', 'queue')]),
+    /нужен внешний доступ или бюджет/,
+  );
+  assert.match(headlineOf(o, [op('budget', 'budget')]), /нужен внешний доступ или бюджет/);
+  assert.match(headlineOf(o, [lead, op('decision', 'changeset')]), /по готовому изменению/);
+  assert.equal(headlineOf(o, [op('question')]), 'Нужно ваше решение.');
+  // Можно попробовать — важнее техники ведущего.
+  assert.equal(headlineOf({ ...o, tryNow: {} }, [lead]), o.headline);
+  assert.match(headlineOf(o, [lead]), /разбирает ведущий агент/);
+  assert.doesNotMatch(headlineOf(o, [lead]), /ваше решение/i);
+  // Пока задач нет, говорит сводка.
+  const empty = { headline: 'Разработка ещё не началась: задач пока нет.', counts: { tasks: 0 } };
+  assert.equal(headlineOf(empty, [op('question', 'prep-question')]), empty.headline);
 });

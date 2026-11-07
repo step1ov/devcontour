@@ -969,17 +969,6 @@ export function App() {
     window.addEventListener('popstate', restore);
     return () => window.removeEventListener('popstate', restore);
   }, []);
-  // Переход из обзора к проверке изменения: фокус и прокрутка к его карточке.
-  const [focusChange, setFocusChange] = useState('');
-  useEffect(() => {
-    if (!focusChange || tab !== 'changesets') return;
-    const element = document.getElementById('changeset-' + focusChange);
-    if (!element) return;
-    element.scrollIntoView({ block: 'start' });
-    element.focus();
-    setFocusChange('');
-    // Карточка появляется после отрисовки вкладки и очередного опроса.
-  }, [focusChange, tab, data]);
   const [query, setQuery] = useState('');
   // Отменённые задачи — история перепланирования. На пилоте их было 70 из
   // 83, и граф из них не давал увидеть живую работу; показываются по запросу.
@@ -2246,10 +2235,7 @@ export function App() {
                 {tab === 'overview' && (
                   <div className="min-w-0 px-8 pt-4 pb-6 max-[760px]:px-4">
                     <AuthorOverviewPanel
-                      onOpenChange={(id) => {
-                        setTab('changesets');
-                        setFocusChange(id);
-                      }}
+                      attentionHref={(who) => appHref('attention') + (who ? '&who=' + who : '')}
                     />
                   </div>
                 )}

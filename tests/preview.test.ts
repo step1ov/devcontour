@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { config, input, fixture } from './helpers.ts';
 import { Previews, servingPreview } from '../src/core/preview.ts';
 import { AgentService } from '../src/application/agent.ts';
-import { authorOverview } from '../src/application/overview.ts';
+import { AttentionService } from '../src/application/attention.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour, digest } from '../src/core/service.ts';
 import { Workspace, changeSnapshot, snapshotDigest } from '../src/core/workspace.ts';
@@ -382,14 +382,15 @@ test('Preview не обходит границы: настройки, Compose, �
     await f.verify();
     await assert.rejects(f.runner.deploy(f.change.id));
     assert.equal(f.store.read().previews!.at(-1)!.failure, 'build');
-    const overview = authorOverview(f.h);
+    // Центр внимания: сбой сборки разбирает ведущий, доступ автору не нужен.
+    const items = (await new AttentionService(f.store, f.h).active()).items;
     assert.equal(
-      overview.decisions.some((d) => d.kind === 'access'),
+      items.some((i) => i.sourceKey === 'preview:docker'),
       false,
     );
-    assert.ok(
-      overview.decisions.some((d) => d.kind === 'technical' && /не собрался/.test(d.title)),
-    );
+    const failedPreview = items.find((i) => i.sourceKey === 'preview:failed');
+    assert.equal(failedPreview?.actor, 'lead');
+    assert.equal(failedPreview?.category, 'technical');
 
     // Сценарий, который не запустился, — «не подтверждено», без отката здоровой выкладки.
     // Файл окружения внутри manifest разрешён и доходит до контейнера.
@@ -552,10 +553,11 @@ test('Автор пробует проверенную версию в брау�
     );
     await version.close();
 
-    // Доказательства доступны по раскрытию и ведут к проверке изменения.
-    await page.getByText('Доказательства').click();
-    await page.getByText(release).waitFor();
-    await page.getByRole('button', { name: 'Открыть проверку' }).click();
+    // Карточка решения ведёт к проверке изменения на экране изменений.
+    await page
+      .getByRole('list', { name: 'Решения для вас' })
+      .getByRole('link', { name: 'Открыть изменения' })
+      .click();
     await page.waitForFunction(
       (id) => document.activeElement?.id === 'changeset-' + id,
       f.change.id,
@@ -566,7 +568,9 @@ test('Автор пробует проверенную версию в брау�
       .click();
 
     // Попробовав, автор принимает изменение; фокус остаётся на сообщении об итоге.
-    const accept = page.getByRole('button', { name: 'Принять изменение' });
+    const accept = page
+      .getByRole('list', { name: 'Решения для вас' })
+      .getByRole('button', { name: 'Принять' });
     await accept.focus();
     await page.keyboard.press('Enter');
     await page.getByText('Изменение принято').waitFor();
@@ -844,7 +848,7 @@ test('Потерявшая владение операция не трогает
   }
 });
 
-test('Обзор называет неисправность текущей выкладки, а не последнюю из истории', () => {
+test('Центр внимания называет неисправность текущей выкладки, а не последнюю из истории', async () => {
   const f = fixture();
   try {
     f.h.config.preview = {
@@ -901,8 +905,10 @@ test('Обзор называет неисправность текущей вы
       state.healthy(token, p.id);
       return state.finish(token, p.id);
     };
-    const outage = () =>
-      authorOverview(f.h).decisions.find((d) => d.title === 'Версия в preview не отвечает');
+    const outage = async () =>
+      (await new AttentionService(f.store, f.h).active()).items.find(
+        (i) => i.sourceKey === 'preview:lost',
+      );
     const markLost = (id: string, reason: string) => {
       const claim = state.start(change.id);
       state.lost(claim.token, id, reason);
@@ -912,24 +918,24 @@ test('Обзор называет неисправность текущей вы
     // Текущая выкладка потеряна и её никто не сменил — это текущий отказ.
     const a = finish();
     markLost(a.id, 'контейнер A пропал');
-    assert.equal(outage()?.detail, 'контейнер A пропал');
+    assert.equal((await outage())?.reason, 'контейнер A пропал');
 
     // A потеряна, затем B выложена успешно: B обслуживает URL, отказа нет;
     // потеря A осталась в истории.
     const b = finish();
     assert.equal(servingPreview(f.store.read())?.id, b.id);
-    assert.equal(outage(), undefined, 'старая потеря не выдаётся за текущую');
+    assert.equal(await outage(), undefined, 'старая потеря не выдаётся за текущую');
     assert.equal(f.store.read().previews!.find((x) => x.id === a.id)?.lost, 'контейнер A пропал');
 
     // C не выложилась, B возвращена: URL у B, отказа «не отвечает» нет.
     const { token, p: c } = begin();
     state.fail(token, c.id, { error: 'сборка упала', failure: 'build', restored: true });
     assert.equal(servingPreview(f.store.read())?.id, b.id);
-    assert.equal(outage(), undefined);
+    assert.equal(await outage(), undefined);
 
     // Теперь потеряна сама B — отказ снова текущий, с её причиной.
     markLost(b.id, 'контейнер B пропал');
-    assert.equal(outage()?.detail, 'контейнер B пропал');
+    assert.equal((await outage())?.reason, 'контейнер B пропал');
   } finally {
     f.cleanup();
   }
