@@ -1318,3 +1318,26 @@ test('Filter: an error of the previous component is not shown after choosing ano
   release();
   await expect(cardOf(page, 'changeset:CHG-E1')).toBeVisible();
 });
+
+test('Overview: «Уже решено» with typed text points to the attention center, not a center section', async ({
+  page,
+}) => {
+  await page.route(isList, (route) =>
+    route.fulfill({ json: fakeView([textItem('changeset:CHG-O1')]) }),
+  );
+  await page.route('**/api/attention/act', (route) =>
+    route.fulfill({
+      status: 409,
+      json: { error: 'Карточка уже решена исходной сущностью', code: 'attention-resolved' },
+    }),
+  );
+  await page.goto('/');
+  const card = cardOf(page, 'changeset:CHG-O1');
+  await card.getByRole('button', { name: 'Вернуть на доработку' }).click();
+  const form = card.locator('form');
+  await form.getByLabel(/Что доработать/).fill('Уточните описание.');
+  await form.getByRole('button', { name: 'Вернуть на доработку' }).click();
+  const status = page.getByRole('status').filter({ hasText: 'Уже решено' });
+  await expect(status).toContainText('Ваш текст не отправлен и сохранён в центре внимания.');
+  await expect(status).not.toContainText('Неотправленные ответы');
+});
