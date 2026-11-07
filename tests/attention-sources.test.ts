@@ -446,6 +446,64 @@ test('S14 ожидание блокировки контекста и подтв
   }
 });
 
+test('S12/S14 пауза оператора и ожидание переноса базы: одна карточка запуска очереди', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    f.h.pause(true);
+    const detail = 'Перенос меняет приёмку или настройку контура: AGENTS.md';
+    f.store.change('fixture.base-wait', (s) => {
+      s.waits = [{ kind: 'base-check', detail, at: new Date().toISOString() }];
+    });
+    const items = await engineItems(f);
+    const starts = items.filter(
+      (i) => i.actor === 'operator' && i.actions.some((a) => a.id === 'resume'),
+    );
+    assert.deepEqual(
+      starts.map((i) => i.sourceKey),
+      ['queue'],
+      'ожидание базы свёрнуто в паузу',
+    );
+    assert.equal(byKey(items, 'wait:base-check'), undefined);
+    assert.match(starts[0].reason, /перенос базы/);
+    assert.ok(starts[0].reason.includes('AGENTS.md'), 'причина называет перенос');
+    // Проваленная проверка — не действие оператора: остаётся у ведущего.
+    f.store.change('fixture.base-failed', (s) => {
+      s.waits = [
+        {
+          kind: 'base-check',
+          detail: 'Проверка базы не пройдена: lint',
+          at: new Date().toISOString(),
+        },
+      ];
+    });
+    const failed = await engineItems(f);
+    assert.equal(byKey(failed, 'wait:base-check')?.actor, 'lead');
+    assert.doesNotMatch(byKey(failed, 'queue')!.reason, /перенос базы/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('S12 пауза при одних черновиках плана карточки не даёт', async () => {
+  const f = fixture();
+  try {
+    f.h.config.approvalMode = 'operator';
+    const b = f.h.createBoard('Board');
+    f.h.addTask(b.id, input('Draft'));
+    f.h.pause(true);
+    const items = await engineItems(f);
+    assert.ok(byKey(items, `plan:${b.id}`), 'утверждение плана — своя карточка');
+    assert.equal(byKey(items, 'queue'), undefined, 'черновики не открытая работа для паузы');
+    f.h.approve(b.id);
+    assert.ok(byKey(await engineItems(f), 'queue'), 'утверждённая задача — открытая работа');
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('S16/S17 проверенное изменение ждёт приёмки; сбой выкладки preview — ведущему', async () => {
   const f = fixture();
   try {

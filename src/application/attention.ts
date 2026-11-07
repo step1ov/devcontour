@@ -729,22 +729,47 @@ const accessFailures = new Set(['provider-auth', 'environment']);
  * есть открытая работа. Появление — момент паузы. Отказ провайдера по
  * задачам сворачивается сюда: одна учётная запись чинит их все.
  */
+/**
+ * Пауза выдачи, которую снимет человек или ведущий, пока есть открытая
+ * работа. Черновики плана открытой работой здесь не считаются: их держит
+ * утверждение плана, а не пауза, и запуск очереди их не выдаст.
+ */
+function queuePauseOf(s: AttentionContext['state']) {
+  if (!s.paused || s.pauseReason === 'base-check') return undefined;
+  if (!s.tasks.some((t) => open(t) && t.status !== 'draft')) return undefined;
+  const pause = queuePause({
+    paused: s.paused,
+    ...(s.pauseReason ? { pauseReason: s.pauseReason } : {}),
+    ...(s.pauseFailures ? { pauseFailures: s.pauseFailures } : {}),
+  });
+  return pause && (pause.actor === 'user' || pause.actor === 'lead') ? pause : undefined;
+}
+
+/**
+ * Ожидание проверки базы, которое снимет оператор, под паузой оператора:
+ * оба снимает один запуск очереди, поэтому ожидание сворачивается в карточку
+ * паузы (её причина называет перенос), а не даёт вторую карточку с тем же
+ * действием. Проваленная проверка остаётся отдельной карточкой ведущего.
+ */
+function foldedBaseWait(h: DevContour, s: AttentionContext['state']) {
+  if (queuePauseOf(s)?.actor !== 'user') return undefined;
+  const wait = baseWaitOf(h, s);
+  if (!wait?.needsOperator || wait.detail.startsWith('Проверка базы не пройдена')) return undefined;
+  return wait;
+}
+
 const queueSource: AttentionSourceRule = {
   id: 'queue',
   engine: true,
   collect: (ctx) => {
     const { h } = engineOf(ctx);
     const s = ctx.state;
-    if (!s.paused || s.pauseReason === 'base-check' || !s.tasks.some(open)) return [];
-    const pause = queuePause({
-      paused: s.paused,
-      ...(s.pauseReason ? { pauseReason: s.pauseReason } : {}),
-      ...(s.pauseFailures ? { pauseFailures: s.pauseFailures } : {}),
-    });
-    if (!pause || (pause.actor !== 'user' && pause.actor !== 'lead')) return [];
+    const pause = queuePauseOf(s);
+    if (!pause) return [];
     const view = queueStopOf(h, s, h.store.latestEvents(['scheduler.error'], 50));
     const access = (s.pauseFailures ?? []).some((f) => accessFailures.has(f));
     const operator = pause.actor === 'user';
+    const base = foldedBaseWait(h, s);
     return [
       {
         sourceKey: 'queue',
@@ -753,6 +778,7 @@ const queueSource: AttentionSourceRule = {
           reason: s.pauseReason ?? null,
           failures: s.pauseFailures ?? [],
           waits: (s.waits ?? []).map((w) => w.kind),
+          ...(base ? { base: base.detail } : {}),
         }),
         source: 'queue',
         category: access ? 'access' : operator ? 'decision' : 'technical',
@@ -762,7 +788,15 @@ const queueSource: AttentionSourceRule = {
           : s.pauseReason === 'operator'
             ? 'Выдача задач остановлена оператором'
             : 'Выдача задач на паузе',
-        reason: ctx.redact([view.stopReason, view.action].filter(Boolean).join('. ')),
+        reason: ctx.redact(
+          [
+            view.stopReason,
+            view.action,
+            base && `Запуск очереди подтвердит и перенос базы: ${base.detail}`,
+          ]
+            .filter(Boolean)
+            .join('. '),
+        ),
         since: s.pausedAt ?? new Date(0).toISOString(),
         subject: { kind: 'queue', id: 'queue', href: hrefs.overview() },
         actions: operator
@@ -805,7 +839,7 @@ const waitSource: AttentionSourceRule = {
           },
         ];
       const wait = baseWaitOf(h, s);
-      if (!wait?.needsOperator) return [];
+      if (!wait?.needsOperator || foldedBaseWait(h, s)) return [];
       const failed = wait.detail.startsWith('Проверка базы не пройдена');
       return [
         {
