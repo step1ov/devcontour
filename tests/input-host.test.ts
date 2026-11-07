@@ -220,3 +220,23 @@ test('A pinned snapshot that is missing or altered holds only its task (needs-le
     await f.cleanup();
   }
 });
+
+test('R7-4: approving another task of the board leaves the answered stop and its target valid (order content, not graph)', async () => {
+  const { f, taskId, requestId, apply, context } = await answered();
+  try {
+    const boardId = f.store
+      .read()
+      .boards.find((b) => b.revisions.some((r) => r.taskIds.includes(taskId)))!.id;
+    const sibling = f.plainTask(boardId, 'Follow-up sibling');
+    f.h.approve(boardId, [sibling]);
+    // Граф доски сменился, постановка задачи вопроса — нет: остановка
+    // держится, применение не требует замены вопроса (digest цели называет
+    // новый граф — его предлагают заново).
+    const target = f.service.target({ requestId, contextDigest: context.contextDigest });
+    assert.deepEqual(target.problems, []);
+    const applied = f.service.apply({ ...apply, targetDigest: target.targetDigest! }, 'lead');
+    assert.equal(applied.applied, true);
+  } finally {
+    await f.cleanup();
+  }
+});
