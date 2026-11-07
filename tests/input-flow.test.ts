@@ -89,18 +89,22 @@ test('The demo [demo:ask] writer is a marked fixture and stops the attempt with 
     });
     assert.match(reply.log, /fixture/i);
     assert.deepEqual(reply.command, ['internal:demo-writer-ask']);
-    // Ревью без задачи (ответ, план) у demo — детерминированное одобрение, не модель.
-    const review = await adapters.demo.execute({
-      cwd: f.root,
-      artifactDir: f.root,
-      prompt: 'review the answer',
-      review: true,
-      task: {} as typeof task,
-      signal: new AbortController().signal,
-      timeoutMs: 1000,
-    });
+    // Ревью ответа на вопрос у demo — детерминированное одобрение, не модель;
+    // ревью плана доски этим путём не одобряется.
+    const reviewOf = (subject: string) =>
+      adapters.demo.execute({
+        cwd: f.root,
+        artifactDir: f.root,
+        prompt: `Subject: plan ${subject}, digest x, round 1. Author: codex.`,
+        review: true,
+        task: {} as typeof task,
+        signal: new AbortController().signal,
+        timeoutMs: 1000,
+      });
+    const review = await reviewOf('input-IR-' + '0'.repeat(24));
     assert.equal((review.data as { approved: boolean }).approved, true);
-    assert.deepEqual(review.command, ['internal:demo-plan-review']);
+    assert.deepEqual(review.command, ['internal:demo-input-review']);
+    await assert.rejects(reviewOf('B-board'));
   } finally {
     await f.cleanup();
   }
