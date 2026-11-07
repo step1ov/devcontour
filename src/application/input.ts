@@ -450,6 +450,26 @@ export class InputService {
     const state = this.h.store.read();
     const successor = state.tasks.find((t) => t.id === input.successorTaskId);
     if (!successor) throw new DomainError('Преемник не найден: ' + input.successorTaskId, 404);
+    const open = request.lifecycle === 'pending' || request.lifecycle === 'answered';
+    // Замена снимает блокировку так же, как отмена: то же право, что ответить
+    // (R7-1). Иначе ведущий обошёл бы правило оператора заменой и task_retry.
+    if (open && actor !== 'operator' && request.blocking && !this.leadMayDecide(request))
+      throw refuse(
+        'OPERATOR_ANSWERS',
+        `Вопрос ${request.id} заменяет оператор: ${
+          request.floors.length ? 'вопрос критический' : 'approvalMode operator'
+        }`,
+        403,
+      );
+    // Пока исходная остановка держится (постановка задачи прежняя, задача на
+    // попытке вопроса), продолжение — только ответ и applyInput. Замена
+    // освободила бы задачу для повтора без ответа.
+    if (open && request.blocking && this.originHolds(request))
+      throw refuse(
+        'ORIGIN_HOLDS',
+        `Постановка задачи ${request.workId} не менялась после вопроса ${request.id}: ответьте и примените ответ, снимите вопрос (оператор) или верните задачу в черновик и измените постановку, затем замените вопрос`,
+        409,
+      );
     const sameTask = successor.id === request.workId;
     const board = this.boardOf(request.workId);
     const onBoard = board?.revisions.some((r) => r.taskIds.includes(successor.id));
@@ -475,6 +495,32 @@ export class InputService {
     } catch (error) {
       throw toDomain(error);
     }
+  }
+
+  /**
+   * Исходная остановка запроса держится — правило движка: перенос
+   * уточнения разрешён ровно тогда, когда остановка уже не держится
+   * (`carryAllowed`); для проверки берётся сам запрос как заменённый с
+   * ответом-уточнением.
+   */
+  private originHolds(request: InputRequest) {
+    const { engine } = executionOf(this.h);
+    const probe: InputRequest = {
+      ...request,
+      lifecycle: 'superseded',
+      answers: [
+        {
+          revision: 1,
+          text: 'probe',
+          optionId: null,
+          kind: 'clarification',
+          actor: { kind: 'host' },
+          digest: '0'.repeat(64),
+          at: request.createdAt,
+        },
+      ],
+    };
+    return engine.read((view) => !engine.carryAllowed(view, probe));
   }
 
   /* -------------------------------------------------------------- */

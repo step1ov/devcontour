@@ -12,6 +12,7 @@ import {
   type InputFixture,
 } from './input-fixture.ts';
 import { AgentService } from '../src/application/agent.ts';
+import { specDigest } from '../src/core/service.ts';
 import { serve } from '../src/server/http.ts';
 import { devcontourHandoff } from '../src/application/handoff.ts';
 import { queueStopOf } from '../src/application/queue-stop.ts';
@@ -207,7 +208,7 @@ test('Operator mode: the lead reviews, the lead apply is refused, the operator a
   }
 });
 
-test('A requirement-change answer is not applied; supersede needs a newer task of the same board; a late answer is refused and resumes nothing', async () => {
+test('A requirement-change answer is not applied; supersede waits for a new spec of the task; a late answer is refused', async () => {
   const f = await inputFixture(controlled());
   try {
     const { taskId, boardId, requestId, version } = await question(f);
@@ -248,20 +249,40 @@ test('A requirement-change answer is not applied; supersede needs a newer task o
       await codeOf(() => f.service.supersede({ ...supersede, successorTaskId: 'T-NOPE' }, 'lead')),
       '404:-',
     );
-    // Задача той же доски, но созданная до вопроса, — не преемник.
+    // Пока постановка прежняя, замена не освобождает задачу — ни преемником
+    // той же доски (старше или новее вопроса), ни самой задачей.
     const older = f.plainTask(boardId, 'Older sibling');
     f.store.change('test.older', (s) => {
       s.tasks.find((t) => t.id === older)!.createdAt = '2000-01-01T00:00:00.000Z';
     });
-    assert.equal(
-      await codeOf(() => f.service.supersede({ ...supersede, successorTaskId: older }, 'lead')),
-      '409:-',
+    const newer = f.plainTask(boardId, 'Successor with YAML');
+    for (const successorTaskId of [older, newer, taskId])
+      assert.equal(
+        await codeOf(() => f.service.supersede({ ...supersede, successorTaskId }, 'lead')),
+        '409:ORIGIN_HOLDS',
+      );
+    assert.equal(f.service.show({ requestId }).lifecycle, 'answered');
+    // Изменение требований — новая постановка самой задачи: черновик,
+    // правка, утверждение; тогда вопрос заменяется (ответ можно перенести).
+    f.h.pause(true);
+    f.h.reopen(taskId, 'The answer changes the acceptance of this task');
+    const draft = f.store.read().tasks.find((t) => t.id === taskId)!;
+    f.h.editTask(
+      taskId,
+      {
+        title: draft.title,
+        description: draft.description + ' Produce YAML.',
+        role: draft.role,
+        acceptance: draft.acceptance,
+        dependsOn: draft.dependsOn,
+      },
+      specDigest(draft),
     );
-    const successor = f.plainTask(boardId, 'Successor with YAML');
-    const closed = f.service.supersede({ ...supersede, successorTaskId: successor }, 'lead');
+    f.h.approve(boardId, [taskId]);
+    const closed = f.service.supersede({ ...supersede, successorTaskId: taskId }, 'lead');
     assert.equal(closed.lifecycle, 'superseded');
-    const runs = f.store.read().runs.filter((r) => r.taskId === taskId).length;
-    // Поздний ответ после замены не принимается и задачу не возобновляет.
+    assert.equal(closed.carry, true);
+    // Поздний ответ после замены не принимается.
     assert.equal(
       await codeOf(() =>
         f.service.answer(
@@ -271,9 +292,6 @@ test('A requirement-change answer is not applied; supersede needs a newer task o
       ),
       '409:NOT_READY',
     );
-    await f.scheduler.drain();
-    assert.equal(f.store.read().runs.filter((r) => r.taskId === taskId).length, runs);
-    assert.equal(f.store.read().tasks.find((t) => t.id === taskId)!.status, 'failed');
   } finally {
     await f.cleanup();
   }
