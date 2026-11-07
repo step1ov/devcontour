@@ -144,7 +144,7 @@ test('A stale applied answer holds the task, host.next says rebuild, and the reb
     const next = devcontourHandoff(f.h, {}).host.next;
     assert.equal(next?.action, 'apply-input', JSON.stringify(next));
     assert.equal(next?.input?.state, 'stale');
-    assert.match(next!.detail, /went stale.*rebuild/);
+    assert.match(next.detail, /went stale.*rebuild/);
     // Новый снимок, ревью и применение — ответ доходит до исполнителя.
     const context = await f.service.context({ requestId });
     await f.service.review({
@@ -189,7 +189,7 @@ test('Autonomous threshold 11: a critical writer decision becomes a follow-up; h
     assert.equal(followUp.blocking, false);
     const next = devcontourHandoff(f.h, {}).host.next;
     assert.equal(next?.action, 'close-follow-up', JSON.stringify(next));
-    assert.match(next!.detail, /input_cancel/);
+    assert.match(next.detail, /input_cancel/);
     // Демо выполнило и свои задачи: follow-up есть у каждой. Ведущий
     // закрывает их сам — решение принято.
     const open = f.service
