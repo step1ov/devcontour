@@ -1085,3 +1085,26 @@ test('Маска секретов для любого источника: воп
     e.cleanup();
   }
 });
+
+test('Карточка ведущего несёт передачу контекста и переход, доменных действий у неё нет', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const t = f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    failNext(f.h, t.id);
+    f.h.waitFor('context-lock', 'op-1', 'Контекст закреплён другой операцией');
+    const items = await engineItems(f);
+    const lead = items.filter((i) => i.actor === 'lead');
+    assert.ok(lead.length >= 2);
+    for (const item of lead) {
+      assert.deepEqual(item.actions.map((a) => a.kind).sort(), ['handoff', 'navigate'], item.id);
+      assert.equal(
+        item.actions.some((a) => a.kind === 'domain'),
+        false,
+      );
+    }
+  } finally {
+    f.cleanup();
+  }
+});
