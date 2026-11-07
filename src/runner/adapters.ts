@@ -654,6 +654,12 @@ export const demoAdapter: AgentAdapter = {
         log: 'Demo fixture input review; no model invoked',
         command: ['internal:demo-input-review'],
       };
+    // Ревью плана доски или контракта demo не одобряет: до проверки
+    // артефакта задачи такой запрос отклоняется явно, а не ошибкой типа.
+    if (r.review && !r.task?.id)
+      throw new Error(
+        'Demo-ревью без задачи не поддерживается: план доски и контракт demo не проверяет, нужен настоящий reviewer',
+      );
     if (r.review) {
       const value = JSON.parse(
         await readFile(join(r.cwd, 'deliverables', `${r.task.id}.json`), 'utf8'),
