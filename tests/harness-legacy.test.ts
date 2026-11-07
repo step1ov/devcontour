@@ -40,6 +40,8 @@ import { dataDoctor } from '../src/runner/doctor.ts';
 import { InputService, inputHolds } from '../src/application/input.ts';
 import { devcontourHandoff } from '../src/application/handoff.ts';
 import { AgentService } from '../src/application/agent.ts';
+import { DiscussionService } from '../src/application/discussion.ts';
+import { AttentionService } from '../src/application/attention.ts';
 import { approvalPolicyDigest, policyFromConfig } from '../src/harness/policy.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
@@ -658,6 +660,50 @@ for (const kind of ['central', 'component'] as const) {
       assert.equal(store.read().tasks.find((t) => t.id === run.taskId)!.inputContext, undefined);
       await scheduler.stop();
       store.close();
+    }));
+
+  test(`R01 ${kind}: база прежней версии — обсуждение и внимание читаются без записи; первая заметка пишет только обсуждение`, () =>
+    withLegacy(kind, async (c) => {
+      const before = c.files.map(dump);
+      const { store, h } = workspace(c);
+      const state = store.read();
+      const task = state.tasks.find((t) => t.status !== 'cancelled') ?? state.tasks[0];
+      const discussion = new DiscussionService(h);
+      assert.deepEqual(discussion.read({ taskId: task.id }).messages, []);
+      assert.deepEqual(discussion.inbox({}).requests, []);
+      const attention = await new AttentionService(store, h).active();
+      assert.ok(Array.isArray(attention.items));
+      assert.deepEqual(
+        c.files.map(dump),
+        before,
+        'чтение обсуждения и внимания не записало ничего',
+      );
+      assert.equal(dataDoctor(configOf(c), c.data).compatible, true);
+      // Первая запись обсуждения — только своя запись: задачи, попытки и
+      // доски прежней версии остаются как были записаны.
+      discussion.post(
+        {
+          taskId: task.id,
+          kind: 'note',
+          text: 'Первая заметка после обновления',
+          idempotencyKey: 'legacy-note-0001',
+          expectedVersion: 0,
+        },
+        'operator',
+      );
+      const after = store.read();
+      assert.deepEqual(after.tasks, state.tasks);
+      assert.deepEqual(after.runs, state.runs);
+      assert.deepEqual(after.boards, state.boards);
+      store.close();
+      assert.equal(dataDoctor(configOf(c), c.data).compatible, true);
+      // Заметка переживает повторное открытие той же базы.
+      const reopened = workspace(c);
+      assert.deepEqual(
+        new DiscussionService(reopened.h).read({ taskId: task.id }).messages.map((m) => m.text),
+        ['Первая заметка после обновления'],
+      );
+      reopened.store.close();
     }));
 }
 
