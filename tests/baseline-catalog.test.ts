@@ -86,6 +86,8 @@ const readOnlyOperations = [
   'intent_report',
   'product_view',
   'memory_recall',
+  'discussion_read',
+  'discussion_inbox',
   'usage_report',
   'decision_report',
   'strategy_replay',
