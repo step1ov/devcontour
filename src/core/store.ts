@@ -857,6 +857,20 @@ export class Store {
         .get(),
     );
   }
+  /**
+   * Число сообщений обсуждений у всех владельцев: coordinator и базы
+   * компонентов. Только чтение; базы без таблицы дают 0.
+   */
+  discussionCount(): number {
+    const schemas = ['main', ...(this.components?.locations.map((l) => l.schema) ?? [])];
+    let count = 0;
+    for (const schema of schemas)
+      if (this.discussionTable(schema, false))
+        count += (
+          this.db.prepare(`SELECT count(*) AS n FROM ${schema}.discussion`).get() as { n: number }
+        ).n;
+    return count;
+  }
   private discussionRows(sql: string, owner: string | undefined, ...args: (string | number)[]) {
     const schema = this.syncSchema(owner);
     if (!this.discussionTable(schema, false)) return [];
