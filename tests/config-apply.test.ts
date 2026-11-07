@@ -17,6 +17,7 @@ import { Scheduler } from '../src/runner/scheduler.ts';
 import {
   parseOperationalKeys,
   requestConfigApply,
+  requestInputPolicy,
   serveReconfigure,
 } from '../src/runner/reconfigure.ts';
 
@@ -269,7 +270,10 @@ test('inputPolicy bounds 1..11; absent leaves the policy and config digest as be
     assert.equal('inputPolicy' in policyFromConfig(plain), false);
     write({ inputPolicy: { threshold: 11 } });
     const autonomous = loadConfig(path);
-    assert.deepEqual(policyFromConfig(autonomous).inputPolicy, { threshold: 11, criticalPaths: [] });
+    assert.deepEqual(policyFromConfig(autonomous).inputPolicy, {
+      threshold: 11,
+      criticalPaths: [],
+    });
     assert.equal(
       executionDigest(policyFromConfig(autonomous)),
       executionDigest(policyFromConfig(plain)),
@@ -548,6 +552,28 @@ test('The operator changes inputPolicy in the panel: expected digest, validation
     assert.notEqual(agent.status, 200);
   } finally {
     await app.close();
+    s.cleanup();
+  }
+});
+
+test('The panel input policy change leaves config.json unchanged when the apply request cannot be written', async () => {
+  const s = served();
+  try {
+    const before = readFileSync(s.path, 'utf8');
+    s.server.requestReconfigure = () => {
+      throw new Error('request not written');
+    };
+    assert.throws(
+      () =>
+        requestInputPolicy(s.server, s.root, {
+          threshold: 5,
+          expectedConfigDigest: s.server.configDigest,
+        }),
+      /request not written/,
+    );
+    assert.equal(readFileSync(s.path, 'utf8'), before, 'файл возвращён к прежнему тексту');
+    assert.equal(s.server.store.read().reconfigure, undefined);
+  } finally {
     s.cleanup();
   }
 });

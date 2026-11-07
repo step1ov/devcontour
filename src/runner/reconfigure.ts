@@ -374,18 +374,32 @@ export function requestInputPolicy(h: DevContour, root: string, raw: unknown) {
   }
   const digest = loadedDigest(next);
   const operation = `${configApplyPrefix}inputPolicy:${randomUUID().slice(0, 8)}`;
-  h.store.atomic(() => {
-    const busy = h.store.read().reconfigure;
-    if (busy && !(configApplyKeys(busy.operation) && (busy.appliedAt || busy.error)))
-      throw new DomainError(
-        `Конфигурацию сейчас применяет операция ${busy.operation}: дождитесь её и повторите`,
-        409,
-      );
-    if (busy) h.clearReconfigure(busy.operation);
+  // Файл и запрос применения — вместе: если запись запроса (или её
+  // фиксация) не удалась, файл возвращается к прежнему тексту, иначе
+  // изменение молча применил бы следующий config-apply или перезапуск.
+  const mode = statSync(path).mode & 0o777;
+  const replace = (content: string) => {
     const temp = `${path}.${randomUUID().slice(0, 8)}.tmp`;
-    writeFileSync(temp, nextText, { mode: statSync(path).mode & 0o777 });
+    writeFileSync(temp, content, { mode });
     renameSync(temp, path);
-    h.requestReconfigure(operation, digest);
-  });
+  };
+  let written = false;
+  try {
+    h.store.atomic(() => {
+      const busy = h.store.read().reconfigure;
+      if (busy && !(configApplyKeys(busy.operation) && (busy.appliedAt || busy.error)))
+        throw new DomainError(
+          `Конфигурацию сейчас применяет операция ${busy.operation}: дождитесь её и повторите`,
+          409,
+        );
+      if (busy) h.clearReconfigure(busy.operation);
+      replace(nextText);
+      written = true;
+      h.requestReconfigure(operation, digest);
+    });
+  } catch (error) {
+    if (written) replace(text);
+    throw error;
+  }
   return { status: 'requested' as const, operation, digest, inputPolicy: next.inputPolicy };
 }
