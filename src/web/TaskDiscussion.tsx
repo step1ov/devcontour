@@ -100,7 +100,8 @@ async function call<T>(path: string, body?: unknown): Promise<T> {
 }
 
 // Черновик живёт в sessionStorage вкладки. Ключ запроса создаётся при первой
-// отправке и привязан к тексту, виду и исправляемому сообщению: повтор после
+// отправке и привязан к тексту, виду, исправляемому сообщению и запросу
+// ведущего, на который это ответ: повтор после
 // сбоя и двойной щелчок отправляют тот же ключ, и сервер вернёт ту же запись.
 // Любая правка — другое сообщение и другой ключ.
 interface Draft {
@@ -108,6 +109,8 @@ interface Draft {
   key: string;
   kind?: 'note' | 'change-request';
   supersedes?: string;
+  /** Ответ на запрос ведущего «нужен ответ»: обращение вернётся ему. */
+  replyTo?: string;
 }
 const draftKey = (taskId: string) => 'devcontour.discussion-draft.' + taskId;
 function loadDraft(taskId: string): Draft {
@@ -121,7 +124,7 @@ function loadDraft(taskId: string): Draft {
 }
 function saveDraft(taskId: string, draft: Draft) {
   try {
-    if (draft.text || draft.supersedes)
+    if (draft.text || draft.supersedes || draft.replyTo)
       window.sessionStorage.setItem(draftKey(taskId), JSON.stringify(draft));
     else window.sessionStorage.removeItem(draftKey(taskId));
   } catch {
@@ -250,18 +253,30 @@ export function TaskDiscussion({
   const byId = new Map(messages.map((m) => [m.id, m]));
   const correctedBy = new Map<string, DiscussionMessage>();
   const dispositions = new Map<string, DiscussionMessage>();
+  // Ответы оператора на запросы ведущего «нужен ответ», по id обработки.
+  const answers = new Map<string, DiscussionMessage>();
   for (const m of messages) {
     if (m.supersedes) correctedBy.set(m.supersedes, m);
     if (m.kind === 'disposition' && m.replyTo) dispositions.set(m.replyTo, m);
+    if (m.author === 'operator' && m.replyTo) answers.set(m.replyTo, m);
   }
+  /** Обработка — последняя «нужен ответ» по последней версии обращения. */
+  const asksAnswer = (m: DiscussionMessage) =>
+    m.kind === 'disposition' &&
+    m.disposition?.outcome === 'needs-answer' &&
+    !!m.replyTo &&
+    dispositions.get(m.replyTo)?.id === m.id &&
+    !correctedBy.has(m.replyTo);
   const start = Math.max(0, messages.length - shown);
   const visible = messages.slice(start);
 
   const text = draft.text;
-  const bytes = new TextEncoder().encode(text.trim()).length;
+  // Сервер хранит текст как есть: предел — по всему тексту.
+  const bytes = new TextEncoder().encode(text).length;
   const tooLong = bytes > TEXT_BYTES;
   const empty = !text.trim();
   const correcting = draft.supersedes ? byId.get(draft.supersedes) : undefined;
+  const answering = draft.replyTo ? byId.get(draft.replyTo) : undefined;
 
   const send = async (kind: 'note' | 'change-request') => {
     if (inFlight.current || empty || tooLong) return;
@@ -283,6 +298,7 @@ export function TaskDiscussion({
           idempotencyKey: key,
           expectedVersion: version,
           ...(pending.supersedes ? { supersedes: pending.supersedes } : {}),
+          ...(pending.replyTo ? { replyTo: pending.replyTo } : {}),
         },
       );
       setMessages((current) =>
@@ -292,7 +308,13 @@ export function TaskDiscussion({
       );
       setVersion((v) => Math.max(v, result.version));
       setDraft({ text: '', key: '' });
-      setSent(kind === 'note' ? 'Заметка сохранена' : 'Обращение передано ведущему агенту');
+      setSent(
+        pending.replyTo
+          ? 'Ответ передан ведущему агенту'
+          : kind === 'note'
+            ? 'Заметка сохранена'
+            : 'Обращение передано ведущему агенту',
+      );
       // Записи между прежней версией и отправленной (повтор с тем же ключом
       // возвращает прежнюю запись) — дочитываем с прежнего места.
       await refresh(before).catch(() => undefined);
@@ -454,7 +476,22 @@ export function TaskDiscussion({
                   )}
                   {m.kind === 'change-request' &&
                     !correction &&
-                    (handled?.disposition ? (
+                    (handled?.disposition?.outcome === 'needs-answer' ? (
+                      answers.has(handled.id) ? (
+                        <span>Ответ передан — ждёт обработки ведущим агентом</span>
+                      ) : (
+                        <a
+                          href={'#' + anchor(handled.id)}
+                          className="text-info underline-offset-2 hover:underline"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            jump(handled.id);
+                          }}
+                        >
+                          Ведущий агент ждёт ответа
+                        </a>
+                      )
+                    ) : handled?.disposition ? (
                       <a
                         href={'#' + anchor(handled.id)}
                         className="text-info underline-offset-2 hover:underline"
@@ -468,6 +505,37 @@ export function TaskDiscussion({
                     ) : (
                       <span>Ждёт обработки ведущим агентом</span>
                     ))}
+                  {m.author === 'operator' &&
+                    m.replyTo &&
+                    byId.get(m.replyTo)?.kind === 'disposition' && (
+                      <a
+                        href={'#' + anchor(m.replyTo)}
+                        className="text-info underline-offset-2 hover:underline"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          jump(m.replyTo!);
+                        }}
+                      >
+                        Ответ на запрос ведущего
+                      </a>
+                    )}
+                  {asksAnswer(m) && (
+                    <button
+                      type="button"
+                      className="text-info cursor-pointer underline-offset-2 hover:underline"
+                      onClick={() => {
+                        setDraft({
+                          text: draft.supersedes ? '' : draft.text,
+                          key: '',
+                          replyTo: m.id,
+                        });
+                        setNotice('');
+                        textarea.current?.focus();
+                      }}
+                    >
+                      Ответить
+                    </button>
+                  )}
                   {own && !correction && (
                     <button
                       type="button"
@@ -497,6 +565,21 @@ export function TaskDiscussion({
         }}
       >
         <Label htmlFor={`discussion-text-${taskId}`}>Сообщение</Label>
+        {answering && (
+          <p className="text-muted-foreground m-0 text-xs">
+            Ответ на запрос ведущего агента: обращение вернётся ему на обработку.{' '}
+            <button
+              type="button"
+              className="text-info cursor-pointer underline-offset-2 hover:underline"
+              onClick={() => {
+                setDraft({ text: draft.text, key: '' });
+                textarea.current?.focus();
+              }}
+            >
+              Отменить ответ
+            </button>
+          </p>
+        )}
         {correcting && (
           <p className="text-muted-foreground m-0 text-xs">
             Исправление создаст новую запись; прежняя останется в истории зачёркнутой.{' '}
@@ -546,40 +629,53 @@ export function TaskDiscussion({
             </AlertDescription>
           </Alert>
         )}
-        <div className="grid gap-2 min-[420px]:grid-cols-2">
-          <div className="grid content-start gap-1">
-            <Button
-              type="button"
-              variant="outline"
-              disabled={empty || tooLong}
-              aria-busy={busy || undefined}
-              aria-describedby={noteHint}
-              onClick={() => void send('note')}
-            >
-              Заметка
-            </Button>
-            <p id={noteHint} className="text-muted-foreground m-0 text-xs">
-              Сохраняется в истории: не меняет задачу и не запускает работу.
-            </p>
+        {answering ? (
+          <Button
+            type="button"
+            variant="outline"
+            className="justify-self-start"
+            disabled={empty || tooLong}
+            aria-busy={busy || undefined}
+            onClick={() => void send('note')}
+          >
+            Ответить ведущему
+          </Button>
+        ) : (
+          <div className="grid gap-2 min-[420px]:grid-cols-2">
+            <div className="grid content-start gap-1">
+              <Button
+                type="button"
+                variant="outline"
+                disabled={empty || tooLong}
+                aria-busy={busy || undefined}
+                aria-describedby={noteHint}
+                onClick={() => void send('note')}
+              >
+                Заметка
+              </Button>
+              <p id={noteHint} className="text-muted-foreground m-0 text-xs">
+                Сохраняется в истории: не меняет задачу и не запускает работу.
+              </p>
+            </div>
+            <div className="grid content-start gap-1">
+              <Button
+                type="button"
+                variant="outline"
+                disabled={empty || tooLong}
+                aria-busy={busy || undefined}
+                aria-describedby={changeHint}
+                onClick={() => void send('change-request')}
+              >
+                Предложить изменение
+              </Button>
+              <p id={changeHint} className="text-muted-foreground m-0 text-xs">
+                Обращение к ведущему агенту. Утверждённая задача меняется только новой ревизией,
+                которую оформит ведущий
+                {closed ? '; для закрытой задачи это будет новая работа' : ''}.
+              </p>
+            </div>
           </div>
-          <div className="grid content-start gap-1">
-            <Button
-              type="button"
-              variant="outline"
-              disabled={empty || tooLong}
-              aria-busy={busy || undefined}
-              aria-describedby={changeHint}
-              onClick={() => void send('change-request')}
-            >
-              Предложить изменение
-            </Button>
-            <p id={changeHint} className="text-muted-foreground m-0 text-xs">
-              Обращение к ведущему агенту. Утверждённая задача меняется только новой ревизией,
-              которую оформит ведущий
-              {closed ? '; для закрытой задачи это будет новая работа' : ''}.
-            </p>
-          </div>
-        </div>
+        )}
         <p role="status" className="text-muted-foreground m-0 min-h-4 text-xs">
           {busy ? 'Отправка…' : sent}
         </p>

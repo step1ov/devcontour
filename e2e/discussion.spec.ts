@@ -186,3 +186,72 @@ test('A message from a second tab: the conflict re-reads the thread and keeps th
   ]);
   await other.close();
 });
+
+test('A needs-answer disposition: the operator replies from the card and the request returns to the lead', async ({
+  page,
+  request,
+}) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  const ids = await taskOn(request, 'Нужен ответ');
+  const agent = async (operation: string, input: Record<string, unknown>) => {
+    const response = await request.post('/api/agent', { headers, data: { operation, input } });
+    expect(response.ok()).toBe(true);
+    return (await response.json()) as Record<string, unknown>;
+  };
+  const region = await open(page, ids);
+  const box = region.getByLabel('Сообщение', { exact: true });
+  await box.fill('Добавить экспорт');
+  await region.getByRole('button', { name: 'Предложить изменение' }).click();
+  const requestItem = page.locator('li[data-message-kind="change-request"]');
+  await expect(requestItem).toContainText('Ждёт обработки ведущим агентом');
+
+  const inbox = (await agent('discussion_inbox', {})) as {
+    requests: { id: string; taskId: string; version: number }[];
+  };
+  const pending = inbox.requests.find((r) => r.taskId === ids.task)!;
+  await agent('discussion_resolve', {
+    requestId: pending.id,
+    outcome: 'needs-answer',
+    reason: 'В каком формате экспорт?',
+    idempotencyKey: 'e2e-needs-answer-1',
+    expectedVersion: pending.version,
+  });
+  const ask = page.locator('li[data-message-kind="disposition"]');
+  await page.reload();
+  await expect(ask).toContainText('обработка: нужен ответ');
+  await expect(ask).toContainText('В каком формате экспорт?');
+  await expect(requestItem.getByRole('link', { name: 'Ведущий агент ждёт ответа' })).toBeVisible();
+  // Пока ответа нет, обращения во входящих ведущего нет.
+  expect(
+    ((await agent('discussion_inbox', {})) as { requests: { taskId: string }[] }).requests.some(
+      (r) => r.taskId === ids.task,
+    ),
+  ).toBe(false);
+
+  await ask.getByRole('button', { name: 'Ответить' }).click();
+  await expect(region.getByText('обращение вернётся ему на обработку')).toBeVisible();
+  await expect(region.getByRole('button', { name: 'Предложить изменение' })).toHaveCount(0);
+  await expect(box).toBeFocused();
+  await box.fill('В CSV');
+  await region.getByRole('button', { name: 'Ответить ведущему' }).click();
+  await expect(region.getByRole('status')).toHaveText('Ответ передан ведущему агенту');
+  const answer = page.locator('li[data-message-kind="note"]');
+  await expect(answer).toContainText('В CSV');
+  await expect(answer.getByRole('link', { name: 'Ответ на запрос ведущего' })).toBeVisible();
+  await expect(requestItem).toContainText('Ответ передан — ждёт обработки ведущим агентом');
+  await expect(ask.getByRole('button', { name: 'Ответить' })).toBeVisible();
+
+  const reopened = (
+    (await agent('discussion_inbox', {})) as {
+      requests: { id: string; taskId: string; reopened?: { answerId: string } }[];
+    }
+  ).requests.find((r) => r.taskId === ids.task);
+  expect(reopened?.id).toBe(pending.id);
+  expect(reopened?.reopened?.answerId).toBeTruthy();
+  expect(
+    (await new AxeBuilder({ page }).include('section[aria-labelledby^="discussion-"]').analyze())
+      .violations,
+  ).toEqual([]);
+  expect(errors).toEqual([]);
+});
