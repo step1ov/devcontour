@@ -100,7 +100,7 @@ test('S15 вопрос исполнителя: забирает задачу, о
   }
 });
 
-test('Применение ответа с карточки: отклонённое ревью — только с подтверждением, в режиме agent оператору не предлагается', async () => {
+test('Применение ответа с карточки: отклонённый раунд — только подтверждением этого раунда (правило D03), в режиме agent оператору не предлагается', async () => {
   const f = await inputFixture(controlled({ verdict: { approve: false } }), {
     approvalMode: 'operator',
   });
@@ -114,7 +114,15 @@ test('Применение ответа с карточки: отклонённ�
     const card = byKey((await service.active()).items, key)!;
     assert.equal(card.actor, 'operator');
     const apply = card.actions.find((a) => a.id === 'apply')!;
-    assert.match((apply as { label: string }).label, /отклонённому ревью/);
+    const round = (apply as { round?: number }).round!;
+    const summary = f.service.list({ taskId }).requests[0];
+    assert.equal(summary.state, 'review-rejected');
+    assert.equal(round, summary.round);
+    assert.match(
+      (apply as { label: string }).label,
+      new RegExp(`вопреки ревью \\(раунд ${round}\\)`),
+    );
+    assert.match(card.reason, /Fixture: the answer changes the spec/);
     const body = {
       sourceKey: card.sourceKey,
       occurrenceId: card.occurrenceId,
@@ -125,8 +133,7 @@ test('Применение ответа с карточки: отклонённ�
     const before = lifecycle();
     await assert.rejects(
       service.act(body),
-      (e: unknown) =>
-        e instanceof DomainError && e.status === 409 && e.details?.code === 'confirmation-required',
+      (e: unknown) => e instanceof DomainError && e.status === 409 && /раунд/.test(e.message),
     );
     assert.equal(lifecycle(), before);
     // В режиме agent применяет ведущий: оператору действие не предлагается.
@@ -143,7 +150,14 @@ test('Применение ответа с карточки: отклонённ�
     );
     assert.equal(lifecycle(), before);
     f.h.config.approvalMode = 'operator';
-    const done = await service.act({ ...body, input: { confirm: true } });
+    // Подтверждён не показанный раунд — отказ правила D03 в транзакции применения.
+    await assert.rejects(
+      service.act({ ...body, input: { confirmRejectedRound: round + 1 } }),
+      (e: unknown) =>
+        e instanceof DomainError && e.status === 409 && /Подтверждён раунд/.test(e.message),
+    );
+    assert.equal(lifecycle(), before);
+    const done = await service.act({ ...body, input: { confirmRejectedRound: round } });
     assert.equal((done.result as { applied: boolean }).applied, true);
     assert.equal(lifecycle(), 'applied');
     assert.equal(done.resolved, true);

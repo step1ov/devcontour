@@ -26,6 +26,7 @@ import { boardStep, handoffRedactor, harnessOf, hostContext } from './handoff.ts
 import { pendingAcceptances, previewProblems, stoppedWorkflows } from './overview.ts';
 import { budgetBlocks, budgetHint } from './context.ts';
 import { InputService, inputHolds } from './input.ts';
+import { inputReviewRounds } from '../harness/input-host.ts';
 import { DiscussionService } from './discussion.ts';
 import { taskOwner } from '../core/sync-state.ts';
 import { baseWaitOf, queueStopOf, quietAttempts, quietOperations } from './queue-stop.ts';
@@ -467,6 +468,7 @@ const handoff: AttentionAction = {
 const inputActionable = new Set([
   'awaiting-answer',
   'answer-saved',
+  'review-rejected',
   'stale',
   'context-review',
   'ready-to-apply',
@@ -503,11 +505,23 @@ const inputSource: AttentionSourceRule = {
         } catch {
           /* Запрос не найден: карточка остаётся по сводке. */
         }
-        const answer = operator && r.state === 'awaiting-answer';
-        const apply = operator && operatorMode && r.state === 'ready-to-apply';
-        // Последний раунд ревью ответа отклонил его: режим operator позволяет
-        // применить (D03), но только явным подтверждением оператора.
-        const rejected = apply && r.approved === false;
+        // Оператор отвечает на ожидающий вопрос и исправляет ответ, который
+        // отклонило ревью (как в карточке задачи).
+        const answer = operator && (r.state === 'awaiting-answer' || r.state === 'review-rejected');
+        // Отклонённое ревью (D03 `review-rejected`): в режиме operator ответ
+        // применяют только подтверждением показанного раунда — то же правило
+        // `InputService.apply`, что у панели; его находки — в карточке.
+        const rejected = r.state === 'review-rejected';
+        const apply =
+          operator &&
+          operatorMode &&
+          (r.state === 'ready-to-apply' || (rejected && !r.problems?.length));
+        let findings = '';
+        if (rejected)
+          engine.read((v) => {
+            const last = inputReviewRounds(v, r.requestId).at(-1);
+            findings = last ? last.summary : '';
+          });
         return {
           sourceKey: `input:${r.requestId}`,
           occurrenceId: r.requestId,
@@ -523,7 +537,7 @@ const inputSource: AttentionSourceRule = {
                 ? `Ответ по задаче «${title}» готов к применению`
                 : `Вопрос исполнителя по задаче «${title}»: ${r.state}`,
           reason: ctx.redact(
-            (rejected ? 'Ревью ответа отклонило его. ' : '') +
+            (rejected ? `Ревью отклонило ответ (раунд ${r.round}): ${findings} — ` : '') +
               (question ? `${question} — ${r.next}` : r.next),
           ),
           since: r.createdAt,
@@ -555,8 +569,13 @@ const inputSource: AttentionSourceRule = {
                   {
                     id: 'apply',
                     kind: 'domain' as const,
-                    label: rejected ? 'Применить вопреки отклонённому ревью' : 'Применить ответ',
+                    label: rejected
+                      ? `Применить вопреки ревью (раунд ${r.round})`
+                      : 'Применить ответ',
                     input: 'confirm' as const,
+                    ...(rejected && r.round !== undefined
+                      ? { round: r.round, prompt: findings }
+                      : {}),
                   },
                 ]
               : []),
@@ -567,7 +586,7 @@ const inputSource: AttentionSourceRule = {
             taskId: r.taskId,
             requestId: r.requestId,
             expectedVersion: r.version,
-            ...(rejected ? { rejected: true } : {}),
+            ...(rejected && r.round !== undefined ? { rejectedRound: r.round } : {}),
           },
         };
       });
@@ -1445,7 +1464,7 @@ export interface ActContext {
     optionId?: string;
     comment?: string;
     kind?: 'clarification' | 'requirement-change';
-    confirm?: true;
+    confirmRejectedRound?: number;
   };
   key: string | undefined;
   deps: AttentionActDeps;
@@ -1591,21 +1610,16 @@ const actionHandlers: Record<string, (a: ActContext) => ActOutcome> = {
     };
   },
   'input/apply': ({ ctx, item, input, root }) => {
-    const b = basisOf<{
-      taskId: string;
-      requestId: string;
-      expectedVersion: number;
-      rejected?: boolean;
-    }>(item);
-    if (b.rejected && input.confirm !== true)
-      throw new DomainError(
-        'Ревью ответа отклонило его: применение — только с явным подтверждением (input.confirm)',
-        409,
-        { code: 'confirmation-required' },
-      );
+    const b = basisOf<{ taskId: string; requestId: string; expectedVersion: number }>(item);
+    // Правило D03 одно для панели и центра: отклонённый раунд применяется
+    // только с подтверждением именно этого раунда, сверка — в транзакции
+    // применения (`InputService.apply`).
     return {
       result: new InputService(ctx.h!, root).applyInTask(b.taskId, b.requestId, {
         expectedVersion: b.expectedVersion,
+        ...(input.confirmRejectedRound !== undefined
+          ? { confirmRejectedRound: input.confirmRejectedRound }
+          : {}),
       }),
     };
   },

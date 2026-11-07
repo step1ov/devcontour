@@ -94,6 +94,8 @@ export type AttentionAction =
       prompt?: string;
       /** Варианты ответа (до 10): `id` уходит в `input.optionId`. */
       choices?: { id: string; label: string; hint?: string; recommended?: boolean }[];
+      /** Раунд отклонённого ревью, который подтверждает действие (`input.confirmRejectedRound`). */
+      round?: number;
     }
   | { id: 'open'; kind: 'navigate'; href: string }
   | { id: 'handoff'; kind: 'handoff'; command: string };
@@ -181,8 +183,8 @@ export const attentionInputs = {
         optionId: z.string().max(40).optional(),
         comment: z.string().max(3000).optional(),
         kind: z.enum(['clarification', 'requirement-change']).optional(),
-        /** Явное подтверждение действия вопреки отклонённому ревью. */
-        confirm: z.literal(true).optional(),
+        /** Раунд отклонённого ревью, который оператор видел и подтверждает (правило D03). */
+        confirmRejectedRound: z.number().int().positive().optional(),
       })
       .optional(),
     idempotencyKey: z
