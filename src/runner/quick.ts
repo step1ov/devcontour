@@ -187,7 +187,12 @@ export function quickSteps(input: {
   plan?: Awaited<ReturnType<typeof quickSetupPlan>>;
   configured: boolean;
   engineConnected: boolean;
-  tasks: { status: string }[];
+  tasks: { id?: string; status: string }[];
+  /**
+   * Вопросы исполнителя, держащие задачи изменения: кто действует следующим
+   * по задаче (`InputService`). Такая остановка — ожидание ответа, а не сбой.
+   */
+  questions?: Record<string, 'operator' | 'lead'>;
   /** Активные попытки задач изменения. */
   activeRuns: number;
   /** Выдача задач на паузе. */
@@ -260,6 +265,17 @@ export function quickSteps(input: {
   });
   const done = live.length > 0 && live.every((t) => t.status === 'done');
   const failed = live.some((t) => t.status === 'failed');
+  // Задачу держит вопрос исполнителя: ход того, кто отвечает или применяет
+  // ответ, а не разбор сбоя ведущим агентом.
+  const asking = live
+    .filter((t) => t.status === 'failed')
+    .map((t) => (t.id ? input.questions?.[t.id] : undefined));
+  const question =
+    asking.length > 0 && asking.every(Boolean)
+      ? asking.includes('operator')
+        ? ('operator' as const)
+        : ('lead' as const)
+      : undefined;
   const working =
     input.activeRuns > 0 ||
     live.some((t) => ['running', 'verifying', 'reviewing', 'integrating'].includes(t.status));
@@ -270,49 +286,68 @@ export function quickSteps(input: {
     ? { state: 'done', detail: 'Задача принята по проверкам и ревью' }
     : !prepared
       ? { state: 'waiting', detail: 'Ждёт подготовки' }
-      : failed
+      : question === 'operator'
         ? {
-            state: 'blocked',
-            actor: 'lead',
-            detail: 'Попытка не прошла; ведущий агент разбирает причину',
+            state: 'current',
+            actor: 'operator',
+            detail: 'Исполнитель ждёт решения: ответьте на вопрос в центре внимания',
           }
-        : working
-          ? { state: 'current', detail: 'Исполнитель работает; проверки и ревью идут штатно' }
-          : drafts
+        : question === 'lead'
+          ? {
+              state: 'current',
+              actor: 'lead',
+              detail: 'Исполнитель ждёт ответа: ведущий агент отвечает или применяет ответ',
+            }
+          : failed
             ? {
-                state: 'current',
+                state: 'blocked',
                 actor: 'lead',
-                detail: 'Задача в черновике: ведущий агент проводит review плана и запускает её',
+                detail: 'Попытка не прошла; ведущий агент разбирает причину',
               }
-            : input.paused && input.pauseReason === 'base-check' && input.baseWait?.needsOperator
-              ? {
-                  state: 'current',
-                  actor: 'operator',
-                  // Решение человека — с тем, что именно перенесено.
-                  detail: `Перенос базы прогонов ждёт вашего подтверждения. ${input.baseWait.detail}`,
-                  action: 'start-queue',
-                }
-              : input.paused && input.pauseReason === 'base-check'
+            : working
+              ? { state: 'current', detail: 'Исполнитель работает; проверки и ревью идут штатно' }
+              : drafts
                 ? {
                     state: 'current',
-                    // Обычную проверку базы снимает сам контур после её gates.
+                    actor: 'lead',
                     detail:
-                      'Контур проверяет перенесённую базу прогонов её gates; очередь продолжится сама',
+                      'Задача в черновике: ведущий агент проводит review плана и запускает её',
                   }
-                : input.paused && input.pauseReason === 'operator'
+                : input.paused &&
+                    input.pauseReason === 'base-check' &&
+                    input.baseWait?.needsOperator
                   ? {
                       state: 'current',
                       actor: 'operator',
-                      detail: 'Очередь остановлена оператором: запустите её, когда будете готовы',
+                      // Решение человека — с тем, что именно перенесено.
+                      detail: `Перенос базы прогонов ждёт вашего подтверждения. ${input.baseWait.detail}`,
                       action: 'start-queue',
                     }
-                  : input.paused
+                  : input.paused && input.pauseReason === 'base-check'
                     ? {
                         state: 'current',
-                        actor: 'lead',
-                        detail: 'Очередь на паузе: ведущий агент запускает выполнение',
+                        // Обычную проверку базы снимает сам контур после её gates.
+                        detail:
+                          'Контур проверяет перенесённую базу прогонов её gates; очередь продолжится сама',
                       }
-                    : { state: 'current', detail: 'Задача в очереди, исполнитель ещё не взял её' };
+                    : input.paused && input.pauseReason === 'operator'
+                      ? {
+                          state: 'current',
+                          actor: 'operator',
+                          detail:
+                            'Очередь остановлена оператором: запустите её, когда будете готовы',
+                          action: 'start-queue',
+                        }
+                      : input.paused
+                        ? {
+                            state: 'current',
+                            actor: 'lead',
+                            detail: 'Очередь на паузе: ведущий агент запускает выполнение',
+                          }
+                        : {
+                            state: 'current',
+                            detail: 'Задача в очереди, исполнитель ещё не взял её',
+                          };
   steps.push({ id: 'execution', title: 'Выполнение', ...execution });
   steps.push({
     id: 'result',
