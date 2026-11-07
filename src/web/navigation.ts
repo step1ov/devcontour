@@ -81,3 +81,12 @@ export function focusHash(id: string, timeoutMs = FOCUS_TIMEOUT_MS) {
 /** Карточка центра внимания, с которой ушли по ссылке этой записи истории. */
 export const rememberedAttentionKey = () =>
   (window.history.state as DepthState)?.attentionKey ?? '';
+
+/** Забыть карточку записи истории: возвращение к ней — однократное. */
+export function forgetAttentionKey() {
+  const state = window.history.state as DepthState;
+  if (!state?.attentionKey) return;
+  const rest = { ...state };
+  delete rest.attentionKey;
+  window.history.replaceState(rest, '');
+}

@@ -2235,7 +2235,12 @@ export function App() {
                 )}
                 {tab === 'attention' && (
                   <div className="min-w-0 px-8 pt-4 pb-6 max-[760px]:px-4">
-                    <AttentionCenter />
+                    <AttentionCenter
+                      components={data.config.repositories.map((r) => ({
+                        id: r.id,
+                        label: r.name,
+                      }))}
+                    />
                   </div>
                 )}
                 {tab === 'overview' && (

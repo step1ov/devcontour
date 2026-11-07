@@ -1,0 +1,525 @@
+import { test, expect, type APIRequestContext, type Page, type Route } from '@playwright/test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { startWorkspace } from '../src/runner/start.ts';
+
+// Интерфейс центра внимания (D05). Демо-сервер общий для спецификаций:
+// каждый тест создаёт свои доску и задачу и находит свои карточки по
+// `data-attention-key` (ключ предмета из своих id), а не считает все.
+// Вопрос исполнителя задаёт demo-исполнитель с маркером `[demo:ask]` —
+// fixture, не модель.
+
+const headers = { 'X-DevContour-Request': '1' };
+
+async function agent(request: APIRequestContext, operation: string, input: unknown, base = '') {
+  const response = await request.post(base + '/api/agent', {
+    headers,
+    data: { operation, input },
+  });
+  const body = (await response.json()) as Record<string, unknown>;
+  expect(response.ok(), JSON.stringify(body)).toBe(true);
+  return body;
+}
+
+async function taskState(request: APIRequestContext, id: string) {
+  const state = (await (await request.get('/api/state')).json()) as {
+    paused: boolean;
+    tasks: { id: string; status: string; failureKind?: string }[];
+  };
+  return state.tasks.find((t) => t.id === id);
+}
+
+async function ownTask(request: APIRequestContext, title: string, description: string) {
+  const board = (await (
+    await request.post('/api/boards', { headers, data: { title } })
+  ).json()) as { id: string };
+  const task = (await (
+    await request.post(`/api/boards/${board.id}/tasks`, {
+      headers,
+      data: {
+        title,
+        description,
+        role: 'qa',
+        repositoryId: 'main',
+        acceptance: ['Результат проходит независимую проверку.'],
+        dependsOn: [],
+        contracts: [],
+      },
+    })
+  ).json()) as { id: string };
+  return { board: board.id, task: task.id };
+}
+
+/** Своя задача, demo-исполнитель которой спрашивает; ждёт остановки вопросом. */
+async function askingTask(request: APIRequestContext, title: string) {
+  const ids = await ownTask(
+    request,
+    title,
+    'Наблюдаемый результат, для которого нужно решение [demo:ask].',
+  );
+  const approved = await request.post(`/api/boards/${ids.board}/approve`, { headers, data: {} });
+  expect(approved.ok(), await approved.text()).toBe(true);
+  expect((await request.post('/api/scheduler', { headers, data: { start: true } })).ok()).toBe(
+    true,
+  );
+  await expect
+    .poll(async () => (await taskState(request, ids.task))?.failureKind, { timeout: 60000 })
+    .toBe('needs-input');
+  const { requests } = (await agent(request, 'input_list', { taskId: ids.task })) as {
+    requests: { requestId: string }[];
+  };
+  return { ...ids, requestId: requests[0].requestId };
+}
+
+const center = (page: Page) => page.locator('[aria-label="Центр внимания"]');
+const cardOf = (page: Page, key: string) => page.locator(`article[data-attention-key="${key}"]`);
+const liveStatus = (page: Page) => center(page).locator('[role="status"]').first();
+
+/** Ведущий готовит, проверяет и применяет ответ через агентский API (как input.spec). */
+async function leadApplies(request: APIRequestContext, requestId: string) {
+  const context = (await agent(request, 'input_context', { requestId })) as {
+    contextDigest: string;
+    answerDigest: string;
+  };
+  const review = await agent(request, 'input_review', {
+    requestId,
+    contextDigest: context.contextDigest,
+    authorRuntime: 'codex',
+  });
+  expect(review.approved).toBe(true);
+  const target = (await agent(request, 'input_target', {
+    requestId,
+    contextDigest: context.contextDigest,
+  })) as { version: number; targetDigest: string; problems: string[] };
+  expect(target.problems).toEqual([]);
+  const applied = await agent(request, 'input_apply', {
+    requestId,
+    answerDigest: context.answerDigest,
+    expectedVersion: target.version,
+    contextDigest: context.contextDigest,
+    targetDigest: target.targetDigest,
+  });
+  expect(applied.applied).toBe(true);
+}
+
+test('D05-A: from the center to the executor question, an answer, the wait for apply and the new attempt', async ({
+  page,
+  request,
+}) => {
+  test.slow();
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  const own = await askingTask(request, 'Центр внимания: вопрос исполнителя');
+  const key = `input:${own.requestId}`;
+  await page.goto('/?tab=attention');
+  await expect(page.getByRole('heading', { level: 1, name: 'Внимание' })).toBeVisible();
+  const operatorGroup = center(page).getByRole('region', { name: /Нужно ваше действие/ });
+  const card = operatorGroup.locator(`article[data-attention-key="${key}"]`);
+  await expect(card).toBeVisible();
+  await expect(card).toContainText('Вопрос к вам');
+  await expect(card).toContainText('Кто действует: Вы');
+  await expect(card).toContainText('новое');
+
+  // Ссылка ведёт к вопросу в карточке задачи; фокус — на вопросе.
+  await card.getByRole('link', { name: 'Открыть вопрос' }).click();
+  await expect(page).toHaveURL(new RegExp(`task=${own.task}`));
+  const question = page
+    .getByRole('complementary', { name: 'Детали задачи' })
+    .getByRole('region', { name: 'Вопрос исполнителя' });
+  await expect(question).toBeFocused();
+  // «Назад» — на экран внимания, фокус на той же карточке; переход прочитал её.
+  await page.goBack();
+  await expect(cardOf(page, key)).toBeFocused();
+  await expect(cardOf(page, key)).not.toContainText('новое');
+
+  // Ответ в карточке: вариант и текст.
+  await cardOf(page, key).getByRole('button', { name: 'Ответить' }).click();
+  const form = cardOf(page, key).locator('form');
+  await form.getByLabel('JSON').check();
+  await form.getByLabel(/Ваш ответ/).fill('Оставьте JSON, как сейчас.');
+  await form.getByRole('button', { name: 'Ответить' }).click();
+  await expect(liveStatus(page)).toContainText('Ответ сохранён');
+  // Дальше — ведущий: карточка в группе ведущего, без кнопок решения.
+  const moved = cardOf(page, key);
+  await expect(moved).toHaveAttribute('data-attention-actor', 'lead');
+  await expect(moved).toContainText('Ведущий агент разберёт это сам');
+  await expect(moved.getByRole('button', { name: 'Ответить' })).toHaveCount(0);
+
+  // Ожидание применения видно в задаче; затем новая попытка.
+  expect((await request.post('/api/scheduler', { headers, data: { start: false } })).ok()).toBe(
+    true,
+  );
+  await leadApplies(request, own.requestId);
+  await moved.getByRole('link', { name: 'Открыть вопрос' }).click();
+  await expect(question).toContainText('Ответ применён, ждёт попытки');
+  expect((await request.post('/api/scheduler', { headers, data: { start: true } })).ok()).toBe(
+    true,
+  );
+  await expect
+    .poll(async () => (await taskState(request, own.task))?.status, { timeout: 60000 })
+    .toBe('done');
+  await expect(question).toContainText('Передано в новую попытку');
+  // Подтверждённое устранение убирает карточку из активного списка.
+  await page.goto('/?tab=attention');
+  await expect(center(page)).toBeVisible();
+  await expect(cardOf(page, key)).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test('D05-A before setup: a preparation question in the center, its link and an inline answer', async ({
+  page,
+  request,
+}) => {
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-ui-attention-center-'));
+  const app = await startWorkspace(join(root, 'workspace'), { port: 0, workspaceMode: 'embedded' });
+  try {
+    await agent(request, 'preparation_create', { title: 'Модерация чата' }, app.url);
+    const status = await agent(request, 'preparation_status', {}, app.url);
+    const changeId = String(status.activeChangeId);
+    await agent(
+      request,
+      'preparation_question',
+      {
+        changeId,
+        stage: 'product',
+        add: [{ text: 'Кто модерирует чат ночью?', options: ['Бот', 'Дежурный'] }],
+      },
+      app.url,
+    );
+    await page.goto(app.url + '/');
+    const link = page.getByRole('link', { name: /Нужно действие/ });
+    await expect(link.locator('[data-attention-count]')).toHaveAttribute(
+      'data-attention-count',
+      '1',
+    );
+    await link.click();
+    await expect(page).toHaveURL(/view=attention/);
+    const card = page.locator(`article[data-attention-key^="prep:q:${changeId}:"]`);
+    await expect(card).toContainText('Вопрос к вам');
+    await expect(card).toContainText('Кто модерирует чат ночью?');
+
+    await card.getByRole('link', { name: 'Открыть вопрос' }).click();
+    await expect(page).toHaveURL(new RegExp(`change=${changeId}`));
+    await expect(page).toHaveURL(/stage=product/);
+    await expect(page.locator('#questions-product')).toBeFocused();
+
+    await page.goBack();
+    await expect(page).toHaveURL(/view=attention/);
+    await card.getByRole('button', { name: 'Ответить' }).click();
+    // Вариант без текста — достаточно для вопроса подготовки.
+    await card.locator('form').getByLabel('Дежурный').check();
+    await card.locator('form').getByRole('button', { name: 'Ответить' }).click();
+    await expect(card).toHaveCount(0);
+    await expect(page.getByText(/Ответ сохранён\. Ведущий агент превратит/)).toBeVisible();
+  } finally {
+    await app.close();
+    if (root.startsWith(tmpdir())) rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('D05-B: keyboard only; focus stays on a card that moves and goes to the next one when a card resolves', async ({
+  page,
+  request,
+}) => {
+  test.slow();
+  const first = await askingTask(request, 'Клавиатура: первая');
+  const second = await askingTask(request, 'Клавиатура: вторая');
+  const keyA = `input:${first.requestId}`;
+  const keyB = `input:${second.requestId}`;
+  await page.goto('/');
+  // Навигация — с клавиатуры: фокус на заголовке экрана.
+  await page
+    .getByRole('navigation', { name: 'Workspace' })
+    .getByRole('link', { name: /Внимание/ })
+    .focus();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('heading', { level: 1, name: 'Внимание' })).toBeFocused();
+
+  // Форма открывается Enter, первый вариант в фокусе; Esc закрывает её и
+  // возвращает фокус на кнопку.
+  const answer = cardOf(page, keyB).getByRole('button', { name: 'Ответить' });
+  await answer.focus();
+  await page.keyboard.press('Enter');
+  const form = cardOf(page, keyB).locator('form');
+  await expect(form.getByRole('radio').first()).toBeFocused();
+  // Enter в группе вариантов не отправляет форму.
+  await page.keyboard.press('Space');
+  await page.keyboard.press('Enter');
+  await expect(form).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(form).toHaveCount(0);
+  await expect(answer).toBeFocused();
+
+  // Ответ целиком с клавиатуры: Ctrl+Enter отправляет. Карточка переходит
+  // к ведущему и сохраняет фокус.
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('Space');
+  await page.keyboard.press('Tab');
+  await expect(form.getByLabel(/Ваш ответ/)).toBeFocused();
+  await page.keyboard.type('Ответ с клавиатуры.');
+  await page.keyboard.press('Control+Enter');
+  await expect(cardOf(page, keyB)).toHaveAttribute('data-attention-actor', 'lead');
+  await expect(cardOf(page, keyB)).toBeFocused();
+
+  // Карточка, решённая в другом месте, пока фокус в ней: фокус переходит к
+  // следующей карточке группы, опрос не теряет его на body.
+  const order = await center(page)
+    .getByRole('region', { name: /Нужно ваше действие/ })
+    .locator('article[data-attention-key]')
+    .evaluateAll((els) => els.map((e) => e.getAttribute('data-attention-key')!));
+  const index = order.indexOf(keyA);
+  expect(index).toBeGreaterThanOrEqual(0);
+  const expected = order[index + 1] ?? order[index - 1];
+  await cardOf(page, keyA).focus();
+  const view = (await (await request.get(`/api/tasks/${first.task}/input`)).json()) as {
+    current: { version: number };
+  };
+  const cancelled = await request.post(`/api/tasks/${first.task}/input/${first.requestId}/cancel`, {
+    headers,
+    data: { expectedVersion: view.current.version, reason: 'Снят в тесте' },
+  });
+  expect(cancelled.ok(), await cancelled.text()).toBe(true);
+  await expect(cardOf(page, keyA)).toHaveCount(0);
+  if (expected) await expect(cardOf(page, expected)).toBeFocused();
+  else
+    await expect(
+      center(page).getByRole('heading', { name: 'Сейчас от вас ничего не требуется.' }),
+    ).toBeFocused();
+  await expect(liveStatus(page)).toContainText('решена');
+});
+
+/** Подменный ответ центра: свои карточки поверх формы настоящего ответа. */
+function fakeView(items: Record<string, unknown>[], over: Record<string, unknown> = {}) {
+  return {
+    revision: 1,
+    generatedAt: new Date().toISOString(),
+    engineConnected: true,
+    lead: { present: true, lastActivityAt: null },
+    counts: {
+      active: items.length,
+      unread: items.filter((i) => i.actor === 'operator').length,
+      byActor: { operator: { active: 0, unread: 0 }, lead: { active: 0, unread: 0 } },
+    },
+    items,
+    ...over,
+  };
+}
+function fakeItem(key: string, over: Record<string, unknown> = {}) {
+  return {
+    id: `${key}#o1`,
+    sourceKey: key,
+    occurrenceId: 'o1',
+    sourceVersion: 'v1',
+    source: 'changeset',
+    category: 'decision',
+    actor: 'operator',
+    title: 'Принять изменение ' + key,
+    reason: 'Изменение прошло совместную проверку.',
+    impact: { tasks: 0, waiting: 0, boards: [], taskIds: [] },
+    since: '2026-11-07T10:00:00.000Z',
+    subject: { kind: 'changeset', id: key, href: '/?view=boards&tab=changesets' },
+    evidence: [],
+    actions: [
+      { id: 'accept', kind: 'domain', label: 'Принять', input: 'confirm' },
+      { id: 'open', kind: 'navigate', href: '/?view=boards&tab=changesets' },
+    ],
+    state: { read: false, acknowledged: false, unread: true },
+    ...over,
+  };
+}
+const isList = (url: URL) => url.pathname === '/api/attention';
+
+test('D05-B: loading, error with retry, empty list and a lost connection that blocks actions', async ({
+  page,
+}) => {
+  let mode: 'slow' | 'error' | 'empty' | 'items' | 'offline' = 'slow';
+  let release!: () => void;
+  const slow = new Promise<void>((resolve) => (release = resolve));
+  await page.route(isList, async (route: Route) => {
+    if (mode === 'slow') {
+      await slow;
+      return route.fulfill({ status: 500, json: { error: 'Сервер недоступен' } });
+    }
+    if (mode === 'error')
+      return route.fulfill({ status: 500, json: { error: 'Сервер недоступен' } });
+    if (mode === 'offline') return route.abort('internetdisconnected');
+    return route.fulfill({
+      json: fakeView(mode === 'empty' ? [] : [fakeItem('changeset:CHG-A')]),
+    });
+  });
+  await page.goto('/?tab=attention');
+  await expect(page.getByText('Загружаем действия…')).toBeVisible();
+  mode = 'error';
+  release();
+  await expect(
+    page.getByRole('alert').filter({ hasText: 'Не удалось загрузить действия' }),
+  ).toContainText('Сервер недоступен');
+  mode = 'empty';
+  await page.getByRole('button', { name: 'Повторить' }).click();
+  await expect(
+    page.getByRole('heading', { name: 'Сейчас от вас ничего не требуется.' }),
+  ).toBeVisible();
+
+  mode = 'items';
+  const card = cardOf(page, 'changeset:CHG-A');
+  await expect(card).toBeVisible();
+  await expect(card.getByRole('button', { name: 'Принять' })).toBeEnabled();
+  mode = 'offline';
+  await expect(center(page).getByRole('alert')).toContainText('Нет связи с сервером');
+  await expect(card.getByRole('button', { name: 'Принять' })).toBeDisabled();
+  await expect(card.getByRole('button', { name: /^Прочитано/ })).toBeDisabled();
+  await expect(card.getByRole('link', { name: 'Открыть изменения' })).toBeVisible();
+  await expect(card.getByRole('link', { name: 'Открыть изменения' })).toHaveAttribute(
+    'href',
+    '/?view=boards&tab=changesets',
+  );
+  mode = 'items';
+  await expect(card.getByRole('button', { name: 'Принять' })).toBeEnabled();
+  await expect(center(page).getByText('Нет связи с сервером')).toHaveCount(0);
+});
+
+test('D05-B / D04-C: a version conflict replaces the card, keeps the typed text and acts once', async ({
+  page,
+  request,
+}) => {
+  test.slow();
+  const own = await askingTask(request, 'Конфликт версии');
+  const key = `input:${own.requestId}`;
+  await page.goto('/?tab=attention');
+  await expect(cardOf(page, key)).toBeVisible();
+  // Вкладка «застыла» на показанной версии: опрос возвращает прежний ответ.
+  const frozen = (await (await request.get('/api/attention')).json()) as unknown;
+  await page.route(isList, (route) => route.fulfill({ json: frozen }));
+  await cardOf(page, key).getByRole('button', { name: 'Ответить' }).click();
+  const form = cardOf(page, key).locator('form');
+  await form.getByLabel('JSON').check();
+  await form.getByLabel(/Ваш ответ/).fill('Ответ из устаревшей вкладки.');
+  // Тем временем ответ дан из другой вкладки.
+  const view = (await (await request.get(`/api/tasks/${own.task}/input`)).json()) as {
+    current: { version: number };
+  };
+  const answered = await request.post(`/api/tasks/${own.task}/input/${own.requestId}/answer`, {
+    headers,
+    data: {
+      text: 'Ответ из другой вкладки.',
+      optionId: 'json',
+      kind: 'clarification',
+      expectedVersion: view.current.version,
+      idempotencyKey: 'other-tab-' + own.requestId.slice(-12),
+    },
+  });
+  expect(answered.ok(), await answered.text()).toBe(true);
+  await form.getByRole('button', { name: 'Ответить' }).click();
+  const alert = cardOf(page, key).getByRole('alert');
+  await expect(alert).toContainText('Карточка изменилась, пока вы её читали');
+  await expect(alert).toBeFocused();
+  await expect(cardOf(page, key)).toHaveAttribute('data-attention-actor', 'lead');
+  await expect(cardOf(page, key).locator('[data-attention-unsent]')).toContainText(
+    'Ответ из устаревшей вкладки.',
+  );
+  // В обсуждении ровно один ответ — из другой вкладки.
+  const thread = (await (
+    await request.get(`/api/tasks/${own.task}/discussion?limit=50`)
+  ).json()) as {
+    messages: { kind: string; text: string }[];
+  };
+  const answers = thread.messages.filter((m) => m.kind === 'answer');
+  expect(answers.map((m) => m.text)).toEqual(['Ответ из другой вкладки.']);
+});
+
+test('D05-B: an already resolved card is removed and focus moves to the next card', async ({
+  page,
+}) => {
+  await page.route(isList, (route) =>
+    route.fulfill({ json: fakeView([fakeItem('changeset:CHG-1'), fakeItem('changeset:CHG-2')]) }),
+  );
+  await page.route('**/api/attention/act', (route) =>
+    route.fulfill({
+      status: 409,
+      json: { error: 'Карточка уже решена исходной сущностью', code: 'attention-resolved' },
+    }),
+  );
+  await page.goto('/?tab=attention');
+  await cardOf(page, 'changeset:CHG-1').getByRole('button', { name: 'Принять' }).click();
+  await expect(cardOf(page, 'changeset:CHG-1')).toHaveCount(0);
+  await expect(cardOf(page, 'changeset:CHG-2')).toBeFocused();
+  await expect(liveStatus(page)).toContainText('Уже решено');
+});
+
+test('D05-E: a lead technical blocker is not an operator choice, and reading is not acting', async ({
+  page,
+  request,
+}) => {
+  const ids = await ownTask(
+    request,
+    'Обращение к ведущему',
+    'Наблюдаемый результат для обращения.',
+  );
+  const posted = (await (
+    await request.post(`/api/tasks/${ids.task}/discussion`, {
+      headers,
+      data: {
+        kind: 'change-request',
+        text: 'Поменяйте порядок полей в отчёте.',
+        expectedVersion: 0,
+        idempotencyKey: 'attention-e-' + ids.task.slice(-12),
+      },
+    })
+  ).json()) as { message: { id: string } };
+  const key = `discussion:cr:${posted.message.id}`;
+  await page.goto('/?tab=attention&who=lead');
+  const leadGroup = center(page).getByRole('region', { name: /Разбирает ведущий агент/ });
+  const card = leadGroup.locator(`article[data-attention-key="${key}"]`);
+  await expect(card).toBeVisible();
+  await expect(card).toContainText('Ведущий агент · техническое');
+  await expect(card).toContainText('Ведущий агент разберёт это сам');
+  await expect(card).not.toContainText('Ваше решение');
+  await expect(card).not.toContainText('Вопрос к вам');
+  // Только переход, команда передачи и отметки: никакой скрытой кнопки решения.
+  const names = await card
+    .getByRole('button')
+    .evaluateAll((els) => els.map((e) => e.getAttribute('aria-label') ?? e.textContent ?? ''));
+  for (const name of names) expect(name).toMatch(/^(Команда для ведущего|Прочитано: |Увидел: )/);
+  await expect(card.getByRole('link', { name: 'Открыть задачу' })).toBeVisible();
+
+  // Чтение — не действие: отметки не меняют тред, задачу и очередь.
+  const before = {
+    thread: (
+      (await (await request.get(`/api/tasks/${ids.task}/discussion?limit=50`)).json()) as {
+        version: number;
+      }
+    ).version,
+    task: (await taskState(request, ids.task))?.status,
+    paused: ((await (await request.get('/api/state')).json()) as { paused: boolean }).paused,
+  };
+  const writes: string[] = [];
+  page.on('request', (r) => {
+    if (r.method() !== 'GET') writes.push(new URL(r.url()).pathname);
+  });
+  await card.getByRole('button', { name: /^Прочитано: / }).click();
+  await expect(card).not.toContainText('новое');
+  await card.getByRole('button', { name: /^Увидел: / }).click();
+  await expect(card).toContainText('вы видели');
+  await page.waitForTimeout(3500);
+  await expect(card).toBeVisible();
+  expect(new Set(writes)).toEqual(new Set(['/api/attention/marks']));
+  const after = {
+    thread: (
+      (await (await request.get(`/api/tasks/${ids.task}/discussion?limit=50`)).json()) as {
+        version: number;
+      }
+    ).version,
+    task: (await taskState(request, ids.task))?.status,
+    paused: ((await (await request.get('/api/state')).json()) as { paused: boolean }).paused,
+  };
+  expect(after).toEqual(before);
+
+  // Ведущего нет на связи: предупреждение с командой передачи.
+  await page.route(isList, async (route) => {
+    const real = (await (await route.fetch()).json()) as Record<string, unknown>;
+    await route.fulfill({ json: { ...real, lead: { present: false, lastActivityAt: null } } });
+  });
+  await expect(leadGroup.getByText('Нужен ведущий агент: ему есть что разобрать.')).toBeVisible();
+  await expect(card).toContainText('сейчас не на связи');
+});
