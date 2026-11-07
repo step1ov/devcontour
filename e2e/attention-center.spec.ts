@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startWorkspace } from '../src/runner/start.ts';
+import { product } from '../tests/preparation-fixture.ts';
 
 // Интерфейс центра внимания (D05). Демо-сервер общий для спецификаций:
 // каждый тест создаёт свои доску и задачу и находит свои карточки по
@@ -969,11 +970,96 @@ test('B1/M4: a poll that changes the card under an open form never retargets it;
       (m) => m.author === 'operator' && m.kind === 'note',
     );
   expect(await operatorNotes()).toEqual([]);
-  // Явный выбор новой версии — затем отправка.
-  await changed.getByRole('button', { name: 'Ответить на новую версию' }).click();
-  await form.getByRole('button', { name: 'Ответить' }).click();
+  // Esc и повторное открытие не обходят выбор: версия, пришедшая, пока
+  // форма закрыта, снова показывает «Карточка изменилась».
+  await form.getByLabel(/Ваш ответ/).focus();
+  await page.keyboard.press('Escape');
+  await expect(form).toHaveCount(0);
+  const versionOf = async () =>
+    (
+      (await (await request.get('/api/attention')).json()) as {
+        items: { sourceKey: string; sourceVersion: string }[];
+      }
+    ).items.find((i) => i.sourceKey === own.key)?.sourceVersion;
+  const before = await versionOf();
+  await leadNote(request, own.task, 'Третье уточнение ведущего.', 3);
+  await expect.poll(versionOf).not.toBe(before);
+  await page.waitForTimeout(3500);
+  await card.getByRole('button', { name: 'Ответить' }).click();
+  await expect(changed).toBeVisible();
+  await expect(form.getByRole('button', { name: 'Ответить' })).toBeDisabled();
+  await expect(form.getByLabel(/Ваш ответ/)).toHaveValue('Ответ на первую версию.');
+  expect(await operatorNotes()).toEqual([]);
+  // Явный выбор новой версии с клавиатуры: фокус — в поле ответа, затем отправка.
+  await changed.getByRole('button', { name: 'Ответить на новую версию' }).focus();
+  await page.keyboard.press('Enter');
+  await expect(form.getByLabel(/Ваш ответ/)).toBeFocused();
+  await page.keyboard.press('Control+Enter');
   await expect(liveStatus(page)).toContainText('Ответ отправлен ведущему агенту');
   expect((await operatorNotes()).map((m) => m.text)).toEqual(['Ответ на первую версию.']);
+});
+
+test('M1 (r2): a new occurrence under an open form keeps the text, focuses it and says why', async ({
+  page,
+  request,
+}) => {
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-ui-attention-occurrence-'));
+  const app = await startWorkspace(join(root, 'workspace'), { port: 0, workspaceMode: 'embedded' });
+  try {
+    await agent(request, 'preparation_create', { title: 'Новая редакция под формой' }, app.url);
+    const changeId = String(
+      (await agent(request, 'preparation_status', {}, app.url)).activeChangeId,
+    );
+    const revise = async (expectedDigest: string | null, content: unknown) =>
+      (await agent(
+        request,
+        'preparation_product',
+        { changeId, expectedDigest, reason: 'Постановка', content },
+        app.url,
+      )) as { current: { product: { digest: string } } };
+    const first = await revise(null, product);
+    await agent(
+      request,
+      'preparation_submit',
+      { changeId, stage: 'product', expectedDigest: first.current.product.digest },
+      app.url,
+    );
+    const key = `prep:stage:${changeId}:product`;
+    await page.goto(app.url + '/?view=attention');
+    const card = cardOf(page, key);
+    await card.getByRole('button', { name: 'Вернуть на доработку' }).click();
+    await card
+      .locator('form')
+      .getByLabel(/Что доработать/)
+      .fill('Уточните сценарий модерации.');
+    // Новая редакция и её отправка — между двумя опросами (опрос на это
+    // время отдаёт прежний ответ), затем опрос снова живой.
+    const frozen = (await (await request.get(app.url + '/api/attention')).json()) as unknown;
+    await page.route(isList, (route) => route.fulfill({ json: frozen }));
+    const second = await revise(first.current.product.digest, {
+      ...product,
+      outcome: `${String(product.outcome)} Уточнено.`,
+    });
+    await agent(
+      request,
+      'preparation_submit',
+      { changeId, stage: 'product', expectedDigest: second.current.product.digest },
+      app.url,
+    );
+    await page.unroute(isList);
+    const unsent = page.getByRole('group', { name: 'Ваш неотправленный текст' });
+    await expect(unsent).toBeFocused({ timeout: 10000 });
+    await expect(unsent.locator('[data-attention-unsent]')).toHaveText(
+      'Уточните сценарий модерации.',
+    );
+    await expect(liveStatus(page)).toContainText('Появилась новая редакция');
+    // Карточка новой редакции — без формы прежней.
+    await expect(card.locator('form')).toHaveCount(0);
+    await expect(card.getByRole('button', { name: 'Вернуть на доработку' })).toBeVisible();
+  } finally {
+    await app.close();
+    if (root.startsWith(tmpdir())) rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('M1: a card removed by a poll under an open form keeps the text read-only, with focus on it', async ({
