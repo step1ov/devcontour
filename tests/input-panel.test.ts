@@ -13,6 +13,7 @@ import {
 import { heldByInput, inputStateLabels, inputStateOrder } from '../src/web/input-labels.ts';
 import { panelTask } from '../src/application/panel.ts';
 import { devcontourHandoff } from '../src/application/handoff.ts';
+import { executionOf } from '../src/harness/execution.ts';
 
 after(() => inputDemos.close());
 
@@ -127,10 +128,51 @@ test('Operator mode: an approved round is ready to apply; a rejected round has i
       await codeOf(() => f.service.apply(raw, 'operator', { confirmRejectedRound: seen })),
       '409:REVIEW_REJECTED',
     );
+    // Раунд «из будущего» — тоже не подтверждение показанного.
+    assert.equal(
+      await codeOf(() =>
+        f.service.applyInTask(taskId, requestId, {
+          expectedVersion,
+          confirmRejectedRound: again.round + 1,
+        }),
+      ),
+      '409:REVIEW_REJECTED',
+    );
+    // Другой процесс записал новый отклонённый раунд в момент применения:
+    // проверка в транзакции видит его и отказывает.
+    const { store } = executionOf(f.h);
+    const host = store.host.bind(store);
+    let raced = false;
+    store.host = ((kind: string, fn: Parameters<typeof host>[1]) => {
+      if (kind === 'input.applied' && !raced) {
+        raced = true;
+        const [entry] = store
+          .read((v) => v.locals('reviews'))
+          .filter((r) => r.value.subject === 'input-' + requestId && r.value.round === again.round);
+        f.store.atomic(() =>
+          f.store.saveLocal('reviews', undefined, entry.key + '-next', {
+            ...entry.value,
+            id: entry.value.id + '-next',
+            round: again.round + 1,
+          }),
+        );
+      }
+      return host(kind, fn);
+    }) as typeof store.host;
+    assert.equal(
+      await codeOf(() =>
+        f.service.applyInTask(taskId, requestId, {
+          expectedVersion,
+          confirmRejectedRound: again.round,
+        }),
+      ),
+      '409:REVIEW_REJECTED',
+    );
+    store.host = host;
     assert.equal(f.service.show({ requestId }).lifecycle, 'answered');
     const applied = f.service.applyInTask(taskId, requestId, {
       expectedVersion,
-      confirmRejectedRound: again.round,
+      confirmRejectedRound: again.round + 1,
     });
     assert.equal(applied.applied, true);
   } finally {

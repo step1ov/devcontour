@@ -819,25 +819,25 @@ export class InputService {
         'В approvalMode agent ответ применяет ведущий агент: input_target, затем input_apply',
       );
     const request = this.request(input.requestId);
-    // Оператор применяет отклонённый ответ только осознанно: подтверждение
-    // называет тот раунд, который он видел; новый раунд — новое подтверждение.
-    if (actor === 'operator') {
-      const last = executionOf(this.h).engine.read((v) =>
-        inputReviewRounds(v, input.requestId).at(-1),
-      );
-      if (last && !last.approved && options.confirmRejectedRound !== last.round)
-        throw refuse(
-          'REVIEW_REJECTED',
-          options.confirmRejectedRound === undefined
-            ? `Ревью ответа на запрос ${input.requestId} (раунд ${last.round}) отклонило его: ${last.summary.slice(0, 300)}. Применение — только с явным подтверждением этого раунда`
-            : `Подтверждён раунд ${options.confirmRejectedRound}, а последний раунд ревью — ${last.round}: прочитайте его находки и подтвердите заново`,
-        );
-    }
     const approval = actor === 'operator' ? ('operator' as const) : ('agent' as const);
     const { store, engine } = executionOf(this.h);
     try {
       return store.host('input.applied', (ht) => {
         ht.journal({ taskId: request.workId, requestId: request.id });
+        // Оператор применяет отклонённый ответ только осознанно: подтверждение
+        // называет тот раунд, который он видел; новый раунд — новое
+        // подтверждение. Проверка — в транзакции применения: раунд, записанный
+        // другим процессом между чтением и записью, не применится без него.
+        if (actor === 'operator') {
+          const last = inputReviewRounds(ht.tx, input.requestId).at(-1);
+          if (last && !last.approved && options.confirmRejectedRound !== last.round)
+            throw refuse(
+              'REVIEW_REJECTED',
+              options.confirmRejectedRound === undefined
+                ? `Ревью ответа на запрос ${input.requestId} (раунд ${last.round}) отклонило его: ${last.summary.slice(0, 300)}. Применение — только с явным подтверждением этого раунда`
+                : `Подтверждён раунд ${options.confirmRejectedRound}, а последний раунд ревью — ${last.round}: прочитайте его находки и подтвердите заново`,
+            );
+        }
         if (request.lifecycle === 'superseded') {
           const carried = engine.carryInput(request.id, {
             contextDigest: input.contextDigest,
