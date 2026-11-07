@@ -12,6 +12,8 @@ import { budgetOverview } from '../src/harness/budget.ts';
 import { approvalPolicyDigest, policyFromConfig } from '../src/harness/policy.ts';
 import { workspacePolicyDigest } from '../src/core/workspace.ts';
 import { executionDigest } from 'devcontour-harness';
+import { serve } from '../src/server/http.ts';
+import { Scheduler } from '../src/runner/scheduler.ts';
 import {
   parseOperationalKeys,
   requestConfigApply,
@@ -496,6 +498,53 @@ test('config-apply --keys stallSweep against a server that refuses without clear
     assert.equal((event.data as { clearedBy?: string }).clearedBy, 'config-apply');
     assert.equal(s.server.config.stallSweep, undefined, 'действующая конфигурация прежняя');
   } finally {
+    s.cleanup();
+  }
+});
+
+test('The operator changes inputPolicy in the panel: expected digest, validation, applied by the server tick', async () => {
+  const s = served();
+  const app = await serve(s.server, new Scheduler(s.server, s.root), { port: 0 });
+  try {
+    const post = (body: unknown) =>
+      fetch(app.url + '/api/config/input-policy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-DevContour-Request': '1' },
+        body: JSON.stringify(body),
+      });
+    const state = (await (await fetch(app.url + '/api/state')).json()) as {
+      config: { inputPolicy: unknown; configDigest: string };
+    };
+    assert.equal(state.config.inputPolicy, null);
+    const before = readFileSync(s.path, 'utf8');
+    // Чужой digest — отказ без записи файла.
+    const stale = await post({ threshold: 5, expectedConfigDigest: 'a'.repeat(64) });
+    assert.equal(stale.status, 409);
+    assert.equal(readFileSync(s.path, 'utf8'), before);
+    // Вне границ — отказ схемы без записи.
+    const bad = await post({ threshold: 12, expectedConfigDigest: state.config.configDigest });
+    assert.equal(bad.status, 400);
+    assert.equal(readFileSync(s.path, 'utf8'), before);
+    const ok = await post({ threshold: 5, expectedConfigDigest: state.config.configDigest });
+    assert.equal(ok.status, 200, await ok.clone().text());
+    const result = (await ok.json()) as { status: string; operation: string };
+    assert.equal(result.status, 'requested');
+    assert.match(result.operation, /^config-apply:inputPolicy:/);
+    assert.deepEqual(JSON.parse(readFileSync(s.path, 'utf8')).inputPolicy, { threshold: 5 });
+    // Такт сервера применяет запрос тем же правилом, что config-apply.
+    s.server.leader('server');
+    serveReconfigure(s.server, s.path, 'server');
+    assert.deepEqual(s.server.config.inputPolicy, { threshold: 5 });
+    assert.equal(s.events('config.applied').length, 1);
+    // Агентский API такой операции не знает: автономность — выбор оператора.
+    const agent = await fetch(app.url + '/api/agent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-DevContour-Request': '1' },
+      body: JSON.stringify({ operation: 'input_policy', input: { threshold: 11 } }),
+    });
+    assert.notEqual(agent.status, 200);
+  } finally {
+    await app.close();
     s.cleanup();
   }
 });

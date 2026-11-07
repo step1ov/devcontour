@@ -51,6 +51,7 @@ import { DevContour, specDigest } from '../core/service.ts';
 import { DomainError } from '../core/model.ts';
 import { blockers, readyTasks } from '../core/graph.ts';
 import { Scheduler } from '../runner/scheduler.ts';
+import { requestInputPolicy } from '../runner/reconfigure.ts';
 import { acceptBoard } from '../runner/agent-control.ts';
 import { modelRuntimes, repositories } from '../core/repositories.ts';
 import { WorkspaceRunner } from '../runner/workspace.ts';
@@ -618,6 +619,10 @@ export async function serve(
               // Метка «без вызовов моделей» — только если их правда нет.
               modelRuntimes: modelRuntimes(h.config),
               approvalMode: h.config.approvalMode,
+              // Порог вопросов исполнителя и digest действующей конфигурации:
+              // панель меняет порог с ожидаемым digest.
+              inputPolicy: h.config.inputPolicy ?? null,
+              configDigest: h.configDigest,
               completionMode: h.config.completionMode,
               storage: h.config.storage,
               concurrency: h.config.concurrency,
@@ -751,6 +756,9 @@ export async function serve(
               { actor: 'operator' },
               z.string().optional().parse(input.repositoryId),
             );
+          else if (path === '/api/config/input-policy')
+            // Порог вопросов исполнителя — выбор оператора: не операция агента.
+            result = requestInputPolicy(h, scheduler.root, input);
           else if (path === '/api/scheduler') {
             const start = z.boolean().parse(input.start);
             // Сервер останавливается: запуск очереди снял бы паузу остановки,
