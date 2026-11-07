@@ -52,12 +52,13 @@ async function ownTask(request: APIRequestContext, title: string, description: s
   return { board: board.id, task: task.id };
 }
 
-/** Своя задача, demo-исполнитель которой спрашивает; ждёт остановки вопросом. */
+/** Своя задача, demo-исполнитель которой спрашивает оператора; ждёт остановки вопросом. */
 async function askingTask(request: APIRequestContext, title: string) {
   const ids = await ownTask(
     request,
     title,
-    'Наблюдаемый результат, для которого нужно решение [demo:ask].',
+    // Вопрос в продуктовой области: отвечает оператор (порог критичности).
+    'Наблюдаемый результат, для которого нужно решение [demo:ask-product].',
   );
   const approved = await request.post(`/api/boards/${ids.board}/approve`, { headers, data: {} });
   expect(approved.ok(), await approved.text()).toBe(true);
@@ -209,8 +210,9 @@ test('D05-A before setup: a preparation question in the center, its link and an 
     await expect(card).toContainText('Кто модерирует чат ночью?');
 
     await card.getByRole('link', { name: 'Открыть вопрос' }).click();
+    // Этап «Продукт» — этап по умолчанию: адрес его не называет.
     await expect(page).toHaveURL(new RegExp(`change=${changeId}`));
-    await expect(page).toHaveURL(/stage=product/);
+    await expect(page).not.toHaveURL(/view=attention/);
     await expect(page.locator('#questions-product')).toBeFocused();
 
     await page.goBack();
@@ -391,10 +393,10 @@ test('D05-B: loading, error with retry, empty list and a lost connection that bl
   mode = 'items';
   const card = cardOf(page, 'changeset:CHG-A');
   await expect(card).toBeVisible();
-  await expect(card.getByRole('button', { name: 'Принять' })).toBeEnabled();
+  await expect(card.getByRole('button', { name: 'Принять', exact: true })).toBeEnabled();
   mode = 'offline';
   await expect(center(page).getByRole('alert')).toContainText('Нет связи с сервером');
-  await expect(card.getByRole('button', { name: 'Принять' })).toBeDisabled();
+  await expect(card.getByRole('button', { name: 'Принять', exact: true })).toBeDisabled();
   await expect(card.getByRole('button', { name: /^Прочитано/ })).toBeDisabled();
   await expect(card.getByRole('link', { name: 'Открыть изменения' })).toBeVisible();
   await expect(card.getByRole('link', { name: 'Открыть изменения' })).toHaveAttribute(
@@ -402,7 +404,7 @@ test('D05-B: loading, error with retry, empty list and a lost connection that bl
     '/?view=boards&tab=changesets',
   );
   mode = 'items';
-  await expect(card.getByRole('button', { name: 'Принять' })).toBeEnabled();
+  await expect(card.getByRole('button', { name: 'Принять', exact: true })).toBeEnabled();
   await expect(center(page).getByText('Нет связи с сервером')).toHaveCount(0);
 });
 
@@ -468,7 +470,9 @@ test('D05-B: an already resolved card is removed and focus moves to the next car
     }),
   );
   await page.goto('/?tab=attention');
-  await cardOf(page, 'changeset:CHG-1').getByRole('button', { name: 'Принять' }).click();
+  await cardOf(page, 'changeset:CHG-1')
+    .getByRole('button', { name: 'Принять', exact: true })
+    .click();
   await expect(cardOf(page, 'changeset:CHG-1')).toHaveCount(0);
   await expect(cardOf(page, 'changeset:CHG-2')).toBeFocused();
   await expect(liveStatus(page)).toContainText('Уже решено');
@@ -720,21 +724,31 @@ test('D05-D: one toast per new occurrence, none for heartbeats, updates or lead 
     p.evaluate(() => (window as unknown as { __toasts: string[] }).__toasts);
   const cycles = (n: number) => page.waitForTimeout(n * 3200);
 
-  // Начальная загрузка с уже существующими карточками и heartbeat — тишина.
+  // Начальная загрузка с уже существующими карточками и heartbeat — тишина
+  // о них (демо общее: новая чужая карточка за это время может уведомить).
+  const existing = (
+    (await (await request.get('/api/attention')).json()) as { items: { title: string }[] }
+  ).items.map((i) => i.title);
+  expect(existing.length).toBeGreaterThan(0);
   await page.goto('/');
   await expect(
     page.getByRole('heading', { name: 'Нужно ваше решение', exact: true }),
   ).toBeVisible();
   await cycles(3);
-  expect(await toasts(page)).toEqual([]);
+  for (const text of await toasts(page))
+    for (const old of existing) expect(text).not.toContain(old);
 
   // Новое появление карточки оператора — ровно одно уведомление.
   const own = await askingTask(request, 'Уведомление о новом вопросе');
   const key = `input:${own.requestId}`;
-  await expect.poll(async () => (await toasts(page)).length, { timeout: 15000 }).toBe(1);
-  expect((await toasts(page))[0]).toMatch(/Нужно действие: |Новых действий: /);
+  // Демо общее: считаются уведомления, которые называют свою карточку
+  // (несколько новых карточек — одно уведомление с их названиями).
+  const title = 'Уведомление о новом вопросе';
+  const ours = async (p: Page) => (await toasts(p)).filter((t) => t.includes(title));
+  await expect.poll(async () => (await ours(page)).length, { timeout: 15000 }).toBe(1);
+  expect((await ours(page))[0]).toMatch(/Нужно действие: |Новых действий: /);
   await cycles(3);
-  expect((await toasts(page)).length).toBe(1);
+  expect((await ours(page)).length).toBe(1);
 
   // Вторая вкладка отмечает карточку прочитанной: значок первой падает после
   // штатного опроса, новых уведомлений нет ни в одной.
@@ -755,8 +769,8 @@ test('D05-D: one toast per new occurrence, none for heartbeats, updates or lead 
       timeout: 7000,
     });
   else await expect(badge).toHaveCount(0, { timeout: 7000 });
-  expect((await toasts(page)).length).toBe(1);
-  expect(await toasts(second)).toEqual([]);
+  expect((await ours(page)).length).toBe(1);
+  expect(await ours(second)).toEqual([]);
 
   // Существенное обновление того же появления (ответ, затем исправление
   // ответа) и переход карточки к ведущему — без уведомлений.
@@ -791,7 +805,7 @@ test('D05-D: one toast per new occurrence, none for heartbeats, updates or lead 
   });
   expect(corrected.ok(), await corrected.text()).toBe(true);
   await cycles(3);
-  expect((await toasts(page)).length).toBe(1);
-  expect(await toasts(second)).toEqual([]);
+  expect((await ours(page)).length).toBe(1);
+  expect(await ours(second)).toEqual([]);
   await second.close();
 });

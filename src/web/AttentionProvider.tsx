@@ -103,6 +103,8 @@ export function AttentionProvider({ children }: { children: ReactNode }) {
         return;
       }
       toast(toastText(fresh), {
+        // Несколько новых карточек — их названия, а не только число.
+        ...(fresh.length > 1 ? { description: fresh.map((i) => i.title).join('; ') } : {}),
         action: { label: 'Открыть', onClick: () => openScreen(fresh[0].sourceKey) },
       });
     },

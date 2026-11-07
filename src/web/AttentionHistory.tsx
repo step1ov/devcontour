@@ -96,6 +96,7 @@ export function AttentionHistory({
     );
   return (
     <div className="grid min-w-0 gap-3">
+      <h2 className="sr-only">Решённые карточки</h2>
       {error && (
         <p role="alert" className="text-destructive m-0 text-sm">
           История не обновилась: {humanError(error)}

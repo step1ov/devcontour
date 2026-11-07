@@ -260,14 +260,14 @@ export function AttentionCenter({
       {groups.operator.length ? (
         <>
           <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <h3
+            <h2
               id={`${baseId}-operator`}
               ref={operatorHeading}
               tabIndex={-1}
               className={headingClass}
             >
               Нужно ваше действие ({groups.operator.length})
-            </h3>
+            </h2>
             {unreadShown.length > 0 && (
               <Button
                 variant="ghost"
@@ -287,14 +287,14 @@ export function AttentionCenter({
         </>
       ) : (
         <>
-          <h3
+          <h2
             id={`${baseId}-operator`}
             ref={operatorHeading}
             tabIndex={-1}
             className={headingClass}
           >
             Сейчас от вас ничего не требуется.
-          </h3>
+          </h2>
           {groups.lead.length > 0 && who === '' && (
             <p className="m-0">
               <a
@@ -334,14 +334,14 @@ export function AttentionCenter({
   const leadGroup =
     who === 'lead' ? (
       <section aria-labelledby={`${baseId}-lead`} className="grid min-w-0 gap-2">
-        <h3
+        <h2
           id={`${baseId}-lead`}
           ref={leadHeading as RefObject<HTMLHeadingElement>}
           tabIndex={-1}
           className={headingClass}
         >
           {leadTitle}
-        </h3>
+        </h2>
         {leadBody}
       </section>
     ) : groups.lead.length ? (
@@ -350,8 +350,8 @@ export function AttentionCenter({
         onToggle={(e) => setLeadOpen(e.currentTarget.open)}
         className="min-w-0"
       >
-        <summary ref={leadHeading} className="cursor-pointer text-base font-semibold">
-          {leadTitle}
+        <summary ref={leadHeading} className="cursor-pointer">
+          <h2 className="m-0 inline text-base font-semibold">{leadTitle}</h2>
         </summary>
         <div className="mt-2">{leadBody}</div>
       </details>

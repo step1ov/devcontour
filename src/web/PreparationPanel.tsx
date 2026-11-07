@@ -103,12 +103,18 @@ function writeLocation(
   if (state.tab !== 'product') params.set('stage', state.tab);
   if (state.boards) params.set('view', 'boards');
   else if (state.attention) params.set('view', 'attention');
-  // Вид и фильтр центра внимания живут, пока он открыт (у панели разработки — свои).
-  else for (const key of ['attention', 'who']) params.delete(key);
   const search = params.toString();
   const next = window.location.pathname + (search ? '?' + search : '');
-  if (next !== window.location.pathname + window.location.search)
-    window.history[replace ? 'replaceState' : 'pushState'](null, '', next);
+  // Тот же набор параметров в другом порядке — тот же адрес: панель
+  // разработки пишет свои параметры сама, и перестановка не должна
+  // добавлять запись истории.
+  const same = (a: URLSearchParams) => [...a].map(String).sort().join('&');
+  if (same(params) === same(new URLSearchParams(window.location.search))) return;
+  // Замена сохраняет состояние записи (глубину панели, карточку центра
+  // внимания, к которой вернёт «Назад»).
+  if (replace)
+    window.history.replaceState(window.history.state as unknown, '', next + window.location.hash);
+  else window.history.pushState(null, '', next);
 }
 type RevisionStatus = 'draft' | 'in-review' | 'approved' | 'changes-requested';
 const names: Record<RevisionStatus, string> = {
@@ -630,6 +636,9 @@ export function PreparationPanel() {
   useEffect(() => {
     const restore = () => {
       const state = readLocation();
+      // Адрес уже в истории («Назад», переход центра внимания): запись
+      // нормализуется на месте, и эффект адреса не добавляет её вперёд.
+      writeLocation(state, true);
       setSelected(state.change);
       setTab(state.tab);
       showTasks(state.boards);
@@ -863,7 +872,18 @@ export function PreparationPanel() {
                 variant="outline"
                 size="sm"
                 className="justify-self-start"
-                onClick={() => showAttention(false)}
+                onClick={() => {
+                  // Вид и фильтр центра внимания живут, пока он открыт.
+                  const params = new URLSearchParams(window.location.search);
+                  for (const key of ['attention', 'who']) params.delete(key);
+                  const search = params.toString();
+                  window.history.replaceState(
+                    window.history.state as unknown,
+                    '',
+                    window.location.pathname + (search ? '?' + search : ''),
+                  );
+                  showAttention(false);
+                }}
               >
                 ← К этапам
               </Button>
