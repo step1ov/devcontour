@@ -33,6 +33,28 @@ export function queueStopOf(
   });
 }
 
+/**
+ * Ожидание проверки базы и кто его снимет. Контур сам проверяет базу, только
+ * если доску ведёт workflow в режиме агента, перенос не удержан и проверка не
+ * провалена — те же правила, что у `queueStopView`. Иначе ожидание висит до
+ * действия человека: на ручном маршруте его не снимет никто другой.
+ */
+export function baseWaitOf(h: DevContour | undefined, state: DevContourState) {
+  const wait = state.waits?.find((w) => w.kind === 'base-check');
+  if (!wait) return undefined;
+  const held = /меняет приёмку или настройку контура/.test(wait.detail);
+  const failed = wait.detail.startsWith('Проверка базы не пройдена');
+  const byEngine =
+    Boolean(h) &&
+    (h!.config.approvalMode ?? 'agent') === 'agent' &&
+    state.pauseReason === 'base-check' &&
+    Boolean(state.baseMoves) &&
+    !held &&
+    !failed &&
+    workflowActive(h!);
+  return { needsOperator: !byEngine, detail: wait.detail };
+}
+
 /** Есть ли работа ведущего, которую продвинет цикл `serve` (queued/running). */
 function workflowActive(h: DevContour) {
   const workflow = new LeadWorkflow(h);

@@ -10,6 +10,10 @@ import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { AgentService } from '../src/application/agent.ts';
+import { baseWaitOf } from '../src/application/queue-stop.ts';
+import { baseUpdateOperation } from '../src/runner/base-update.ts';
+import { repositorySchema } from '../src/core/model.ts';
+import { realpath } from 'node:fs/promises';
 import { devcontourHooks } from '../src/harness/hooks.ts';
 import { git, command } from '../src/runner/process.ts';
 import { queueStopView, type QueueStopView } from '../src/core/work-status.ts';
@@ -377,5 +381,74 @@ test('CLI queue без флага печатает причину и подск�
   } finally {
     if (root.startsWith(tmpdir()) && root.includes('devcontour-queue-stop-'))
       await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('R4-M1: ожидание после base-update без workflow ждёт человека; с workflow — контур, кроме удержания и провала', async () => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'dc-basewait-')));
+  try {
+    const path = join(root, 'repo');
+    await mkdir(path);
+    await git(path, 'init', '-q', '-b', 'work');
+    await writeFile(join(path, 'base.txt'), 'base');
+    await git(path, 'add', '.');
+    await git(path, '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'base', '--no-gpg-sign');
+    await git(path, 'branch', 'devcontour/accepted');
+    await writeFile(join(path, 'prep.txt'), 'prepared');
+    await git(path, 'add', '.');
+    await git(path, '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'prep', '--no-gpg-sign');
+    const data = join(root, 'data');
+    await mkdir(data);
+    const h = new DevContour(
+      new Store(join(data, 'state.sqlite')),
+      config({
+        repositories: [
+          repositorySchema.parse({ id: 'main', name: 'main', path, gates: config().gates }),
+        ],
+        checkoutRoot: join(root, 'checkouts'),
+      }),
+    );
+    try {
+      assert.equal(h.config.approvalMode ?? 'agent', 'agent');
+      // Ручной маршрут: ведущий переносит базу, workflow не зарегистрирован.
+      await baseUpdateOperation(h, data, { by: 'host' });
+      const state = h.store.read();
+      assert.equal(state.pauseReason, 'base-check');
+      assert.ok(state.baseMoves);
+      assert.equal(
+        baseWaitOf(h, state)?.needsOperator,
+        true,
+        'без workflow ожидание не снимет никто, кроме человека',
+      );
+      // Workflow ведёт доску — обычную проверку базы выполнит цикл ведущего.
+      const b = h.createBoard('Доска');
+      h.addTask(b.id, input('Задача'));
+      new LeadWorkflow(h).start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+      assert.equal(baseWaitOf(h, h.store.read())?.needsOperator, false);
+      // Удержание переноса контура и провал проверки — снова человек.
+      const withDetail = (detail: string) => {
+        const s = h.store.read();
+        return {
+          ...s,
+          waits: s.waits!.map((w) => (w.kind === 'base-check' ? { ...w, detail } : w)),
+        };
+      };
+      assert.equal(
+        baseWaitOf(h, withDetail('Перенос базы меняет приёмку или настройку контура: AGENTS.md'))
+          ?.needsOperator,
+        true,
+      );
+      assert.equal(
+        baseWaitOf(h, withDetail('Проверка базы не пройдена: unit-tests'))?.needsOperator,
+        true,
+      );
+      h.config.approvalMode = 'operator';
+      assert.equal(baseWaitOf(h, h.store.read())?.needsOperator, true);
+    } finally {
+      h.store.close();
+    }
+  } finally {
+    assert.ok(root.startsWith(await realpath(tmpdir())) && root.includes('dc-basewait-'));
+    await rm(root, { recursive: true, force: true });
   }
 });

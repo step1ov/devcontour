@@ -1,6 +1,5 @@
 import { selectedWorkspaceMode, workspaceDescription } from '../runner/workspace-mode.ts';
 import { existsSync } from 'node:fs';
-import { BASE_HELD_DETAIL } from '../runner/base-check.ts';
 import {
   LEAD_QUIET_MS,
   quickFacts,
@@ -58,7 +57,12 @@ import { IntentService } from '../runner/intent.ts';
 import { attachJournal, renderJournal } from '../runner/journal.ts';
 import { runActivity } from '../runner/activity.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
-import { queueStopOf, quietAttempts, quietOperations } from '../application/queue-stop.ts';
+import {
+  baseWaitOf,
+  queueStopOf,
+  quietAttempts,
+  quietOperations,
+} from '../application/queue-stop.ts';
 import {
   cachedValueReport,
   parseReportFormat,
@@ -330,15 +334,8 @@ export async function serve(
               paused: state.paused,
               ...(state.pauseReason ? { pauseReason: state.pauseReason } : {}),
               ...(() => {
-                const wait = state.waits?.find((w) => w.kind === 'base-check');
-                if (!wait) return {};
-                // Человек снимает удержание переноса контура, ожидание без
-                // диапазона и любое ожидание в режиме оператора.
-                const needsOperator =
-                  wait.detail.startsWith(BASE_HELD_DETAIL) ||
-                  !state.baseMoves ||
-                  (h?.config.approvalMode ?? 'agent') === 'operator';
-                return { baseWait: { needsOperator, detail: wait.detail } };
+                const baseWait = baseWaitOf(h, state);
+                return baseWait ? { baseWait } : {};
               })(),
             }),
             // Присутствие ведущего агента известно только по его журналу:
