@@ -55,7 +55,7 @@ export interface AttentionState {
   /** Экран внимания показан: вместо уведомления — объявление на экране. */
   onScreen: (shown: boolean) => void;
   /** Новые карточки, пришедшие при открытом экране (для живой области). */
-  arrived: { seq: number; titles: string[] };
+  arrived: { seq: number; titles: string[]; keys: string[] };
   /** Перейти к экрану внимания (и к карточке). */
   openScreen: (focusKey?: string) => void;
   /** Оболочка сообщает адрес своего экрана внимания, пока показана. */
@@ -84,7 +84,7 @@ export function AttentionProvider({ children }: { children: ReactNode }) {
     lastOkAt?: string;
   }>({ error: '', stale: false });
   const [optimistic, setOptimistic] = useState<Optimistic>(() => new Map());
-  const [arrived, setArrived] = useState({ seq: 0, titles: [] as string[] });
+  const [arrived, setArrived] = useState({ seq: 0, titles: [] as string[], keys: [] as string[] });
   const signature = useRef('');
   // Время последнего успешного ответа: «данные на …» в строке устаревания.
   const lastOk = useRef<string | undefined>(undefined);
@@ -107,7 +107,11 @@ export function AttentionProvider({ children }: { children: ReactNode }) {
     (fresh: AttentionItem[]) => {
       if (!fresh.length) return;
       if (shown.current > 0) {
-        setArrived((a) => ({ seq: a.seq + 1, titles: fresh.map((i) => i.title) }));
+        setArrived((a) => ({
+          seq: a.seq + 1,
+          titles: fresh.map((i) => i.title),
+          keys: fresh.map((i) => i.sourceKey),
+        }));
         return;
       }
       toast(toastText(fresh), {

@@ -153,8 +153,14 @@ export function AttentionCenter({
     return () => abort.abort();
   }, [component, attention.view]);
 
+  // Новое появление под формой с текстом уже объявлено своим сообщением
+  // (ниже): общее «Новая карточка» его не перекрывает.
+  const announced = useRef(new Set<string>());
   useEffect(() => {
-    if (arrived.seq) setMessage(`Новая карточка: ${arrived.titles.join('; ')}`);
+    if (!arrived.seq) return;
+    const titles = arrived.titles.filter((_, i) => !announced.current.has(arrived.keys[i]));
+    announced.current.clear();
+    if (titles.length) setMessage(`Новая карточка: ${titles.join('; ')}`);
   }, [arrived]);
 
   const source = useMemo(
@@ -216,6 +222,7 @@ export function AttentionCenter({
     const lostFocus = !active || active === document.body;
     if (wasId && nowId && wasId !== nowId && hasText(draftsNow.current.get(wasId))) {
       if (!lostFocus && !document.getElementById(cardDomId(key))?.contains(active)) return;
+      announced.current.add(key);
       setMessage(
         `Появилась новая редакция «${now.titles.get(key)}»: ваш текст к прежней не отправлен и сохранён в «Неотправленные ответы».`,
       );
