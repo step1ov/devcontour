@@ -348,6 +348,7 @@ devcontour config-apply --keys inputPolicy --workspace /absolute/workspace
 - `budgets:on-unknown` — денежный бюджет с `onUnknown: "stop"` при ролях без тарифа: первый их вызов сделает бюджет неопределённым и остановит выдачу в его области;
 - `budgets:prices` — денежный бюджет с `onUnknown: "continue"`, а у runtime ролей или недавних вызовов нет ни одного тарифа: расход считается по нижней границе;
 - `budgets:declaration` — `budgets`, `prices` или `inputPolicy` в `config.json` расходятся с объявлением `workspace.json`.
+- `budgets:declaration-invalid` — `workspace.json` объявляет `budgets`, `prices` или `inputPolicy` значением, которое схема не принимает. Остальные объявленные ключи сравниваются как обычно; `workspace-init` такой реестр отклонит.
 
 ### Preview
 

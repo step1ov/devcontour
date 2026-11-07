@@ -755,9 +755,10 @@ digest доказательства продуктового релиза нов
   `workspace.json`.
 - **`doctor` показывает тарифы и бюджеты.** Новые проверки `prices` и
   `budgets` перечисляют действующие значения; `prices:roles`,
-  `prices:calls`, `budgets:on-unknown`, `budgets:prices` и
-  `budgets:declaration` — предупреждения `degraded`, готовность они не
-  снимают.
+  `prices:calls`, `budgets:on-unknown`, `budgets:prices`,
+  `budgets:declaration` и `budgets:declaration-invalid` (неверный ключ
+  `workspace.json` не отключает сравнение остальных) — предупреждения
+  `degraded`, готовность они не снимают.
 - **Причина бюджета на карточке задачи.** `progress.reasons` получил код
   `budget_blocked`, `progress.budgetBlock` — `reason`, `at` (если блок
   записан выдачей), `hint`; блок считается по действующим пределам;

@@ -64,22 +64,28 @@ function registry(config: Config) {
 /**
  * Объявление `budgets`/`prices`/`inputPolicy` в `<workspace>/workspace.json`,
  * если оно есть и читается. Нечитаемый реестр — не повод для отказа doctor:
- * расхождение тогда не проверяется.
+ * расхождение тогда не проверяется. Каждый ключ разбирается отдельно:
+ * неверный ключ не отключает сравнение остальных, а назван в `invalid`.
  */
-export function workspaceDeclaration(config: Config): WorkspaceDeclaration | undefined {
+export function workspaceDeclaration(
+  config: Config,
+): (WorkspaceDeclaration & { invalid?: (keyof WorkspaceDeclaration)[] }) | undefined {
   const raw = registry(config);
   if (!raw) return undefined;
-  try {
-    return {
-      ...(raw.budgets !== undefined ? { budgets: budgetsSchema.parse(raw.budgets) } : {}),
-      ...(raw.prices !== undefined ? { prices: pricesSchema.parse(raw.prices) } : {}),
-      ...(raw.inputPolicy !== undefined
-        ? { inputPolicy: configSchema.shape.inputPolicy.parse(raw.inputPolicy) }
-        : {}),
-    };
-  } catch {
-    return undefined;
+  const schemas = {
+    budgets: budgetsSchema,
+    prices: pricesSchema,
+    inputPolicy: configSchema.shape.inputPolicy,
+  };
+  const declared: WorkspaceDeclaration = {};
+  const invalid: (keyof WorkspaceDeclaration)[] = [];
+  for (const key of ['budgets', 'prices', 'inputPolicy'] as const) {
+    if (raw[key] === undefined) continue;
+    const parsed = schemas[key].safeParse(raw[key]);
+    if (parsed.success) Object.assign(declared, { [key]: parsed.data });
+    else invalid.push(key);
   }
+  return { ...declared, ...(invalid.length ? { invalid } : {}) };
 }
 
 /**
@@ -94,7 +100,7 @@ export function workspaceDeclares(config: Config, key: keyof WorkspaceDeclaratio
 export function budgetChecks(
   config: Config,
   calls: DoctorCall[] = [],
-  declaration?: WorkspaceDeclaration,
+  declaration?: WorkspaceDeclaration & { invalid?: (keyof WorkspaceDeclaration)[] },
   now = Date.now(),
 ): Check[] {
   const checks: Check[] = [];
@@ -205,6 +211,12 @@ export function budgetChecks(
         id: 'budgets:declaration',
         status: 'degraded',
         detail: `config.json расходится с объявлением workspace.json: ${differs.join(', ')}. Действует значение config.json (локальное переопределение) до следующего workspace-init, который вернёт объявление.`,
+      });
+    if (declaration.invalid?.length)
+      checks.push({
+        id: 'budgets:declaration-invalid',
+        status: 'degraded',
+        detail: `workspace.json объявляет неверное значение: ${declaration.invalid.join(', ')}. Этот ключ с config.json не сравнивается, и workspace-init отклонит такой реестр; исправьте объявление.`,
       });
   }
   return checks;
