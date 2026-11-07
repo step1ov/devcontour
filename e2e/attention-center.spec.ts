@@ -1287,3 +1287,34 @@ test('Focus: a new occurrence under an open empty form focuses the new card', as
   await expect(card.locator('form')).toHaveCount(0, { timeout: 10000 });
   await expect(card).toBeFocused();
 });
+
+test('Filter: an error of the previous component is not shown after choosing another one', async ({
+  page,
+}) => {
+  await withSecondComponent(page);
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  await page.route(isList, async (route) => {
+    const component = new URL(route.request().url()).searchParams.get('component');
+    if (component === 'main')
+      return route.fulfill({ status: 500, json: { error: 'Сбой компонента main' } });
+    if (component === 'second') await held;
+    return route.fulfill({ json: fakeView([fakeItem('changeset:CHG-E1')]) });
+  });
+  await page.goto('/?tab=attention');
+  const select = center(page).getByLabel('Компонент');
+  await select.selectOption('main');
+  const error = center(page).getByRole('alert').filter({ hasText: 'Сбой компонента main' });
+  await expect(error).toBeVisible();
+  await select.selectOption('second');
+  // Ответ второго компонента задержан; проверка — раньше его тайм-аута (10 с),
+  // который сам заменил бы текст ошибки.
+  await expect(
+    center(page).getByRole('heading', { name: 'Загружаем карточки компонента…' }),
+  ).toBeVisible({ timeout: 3000 });
+  await expect(
+    center(page).getByRole('alert').filter({ hasText: 'Не удалось загрузить карточки компонента' }),
+  ).toHaveCount(0, { timeout: 3000 });
+  release();
+  await expect(cardOf(page, 'changeset:CHG-E1')).toBeVisible();
+});
