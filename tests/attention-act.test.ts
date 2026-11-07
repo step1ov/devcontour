@@ -273,3 +273,84 @@ test('ChangeSet: выкладка preview и приёмка с карточки;
     f.cleanup();
   }
 });
+
+test('Расхождение между проверкой карточки и утверждением ловит сам approve; блокировка записи в промежутке не держится', async () => {
+  const f = fixture();
+  try {
+    f.h.config.approvalMode = 'operator';
+    const b = f.h.createBoard('Board');
+    const one = f.h.addTask(b.id, input('One task'));
+    let wrote = false;
+    const service = new AttentionService(f.store, f.h, {
+      afterCheck: (a) => {
+        // Другой процесс пишет в базу между проверкой и операцией: блокировки нет.
+        const other = new Store(join(f.root, 'state.sqlite'));
+        try {
+          other.atomic(() => other.saveLocal('fixture', undefined, 'probe', { v: 1 }));
+          wrote = true;
+        } finally {
+          other.close();
+        }
+        // И правит черновик: показанные поля ревью больше не совпадают.
+        f.h.editTask(
+          one.id,
+          { ...input('One task, edited'), description: 'An edited observable outcome.' },
+          specDigest(f.store.read().tasks.find((t) => t.id === one.id)!),
+        );
+        return a;
+      },
+    });
+    const card = byKey((await service.active()).items, `plan:${b.id}`)!;
+    await assert.rejects(service.act(act(card, 'approve')), /План изменился во время ревью/);
+    assert.equal(wrote, true);
+    assert.equal(f.store.read().tasks.find((t) => t.id === one.id)!.status, 'draft');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Заметка в треде после показа вопроса оператору делает карточку устаревшей', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const t = f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    const discussion = new DiscussionService(f.h);
+    const version = () => f.store.discussionVersion(undefined, t.id);
+    const request = discussion.post(
+      {
+        taskId: t.id,
+        kind: 'change-request',
+        text: 'Нужен ночной режим',
+        idempotencyKey: 'attention-drift-1',
+        expectedVersion: version(),
+      },
+      'operator',
+    ).message;
+    discussion.resolve({
+      requestId: request.id,
+      outcome: 'needs-answer',
+      reason: 'Какой режим по умолчанию?',
+      idempotencyKey: 'attention-drift-2',
+      expectedVersion: version(),
+    });
+    const service = new AttentionService(f.store, f.h);
+    const card = byKey((await service.active()).items, `discussion:na:${request.id}`)!;
+    discussion.post(
+      {
+        taskId: t.id,
+        kind: 'note',
+        text: 'Уточнение ведущего: режим влияет на тему',
+        idempotencyKey: 'attention-drift-3',
+        expectedVersion: version(),
+      },
+      'lead',
+    );
+    await assert.rejects(
+      service.act(act(card, 'answer', { input: { text: 'Дневной' } })),
+      refusal('attention-stale'),
+    );
+  } finally {
+    f.cleanup();
+  }
+});

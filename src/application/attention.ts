@@ -757,6 +757,8 @@ const workTitles: Record<string, (title: string) => string> = {
   'fix-access': (t) => `Нужен доступ для задачи «${t}»`,
 };
 const accessActions = new Set(['fix-access', 'fix-environment']);
+/** До стольких кандидатов диагноз считается по одному поручению. */
+const WORK_SINGLE_CALLS = 20;
 
 /**
  * S10. Остановка задачи по диагнозу harness (`stopInputsOf` → `explainStop`):
@@ -773,20 +775,31 @@ const workSource: AttentionSourceRule = {
     // упавших, отменённых, готовых с исчерпанными попытками или с эпизодом
     // восстановления. Остальные идут, ждут или ещё не утверждены — их
     // диагноз карточки не даёт, а расчёт по всем задачам дорог.
+    const awaited = new Set(
+      ctx.state.tasks
+        .filter((t) => t.status !== 'done' && t.status !== 'cancelled')
+        .flatMap((t) => t.dependsOn),
+    );
     const candidates = ctx.state.tasks.filter(
       (t) =>
         t.status === 'failed' ||
-        t.status === 'cancelled' ||
-        !!t.recovery ||
+        // Отменённая — решение, только пока её прямо ждут открытые задачи.
+        (t.status === 'cancelled' && awaited.has(t.id)) ||
+        (!!t.recovery && t.status !== 'done' && t.status !== 'cancelled') ||
         (t.status === 'ready' && !t.activeRunId && t.attempt >= h.config.maxAttempts),
     );
-    const inputs = candidates.flatMap((t) =>
-      stopInputsOf(harness.source, {
-        maxAttempts: h.config.maxAttempts,
-        repairBudget: h.config.repairBudget,
-        workId: t.id,
-      }),
-    );
+    const options = { maxAttempts: h.config.maxAttempts, repairBudget: h.config.repairBudget };
+    const wanted = new Set(candidates.map((t) => t.id));
+    // Один вызов по всему виду дорог на глубоких цепочках (обход ждущих
+    // транзитивен), вызов по одному поручению — на числе поручений: немного
+    // кандидатов — по одному, много — одним вызовом по всем.
+    const inputs = !candidates.length
+      ? []
+      : candidates.length <= WORK_SINGLE_CALLS
+        ? candidates.flatMap((t) => stopInputsOf(harness.source, { ...options, workId: t.id }))
+        : stopInputsOf(harness.source, options).filter(
+            (i) => i.kind === 'work' && wanted.has(i.work.id),
+          );
     const queue = ctx.cards.get('queue');
     const out: Candidate[] = [];
     for (const input of inputs) {
@@ -1287,7 +1300,7 @@ const discussionNeedsAnswerSource: AttentionSourceRule = {
       return {
         sourceKey: `discussion:na:${root}`,
         occurrenceId: row.dispositionId,
-        sourceVersion: row.dispositionId,
+        sourceVersion: `${row.dispositionId}:${row.version}`,
         source: 'discussion-needs-answer',
         category: 'question',
         actor: 'operator',
@@ -1354,7 +1367,7 @@ interface ActOutcome {
   /** Продолжение после транзакции: такт очереди, начало выкладки. */
   after?: () => Promise<unknown>;
 }
-interface ActContext {
+export interface ActContext {
   ctx: AttentionContext;
   item: Candidate;
   input: {
@@ -1383,6 +1396,54 @@ const resume = ({ ctx, deps }: ActContext): ActOutcome => {
     ...(deps.tick ? { after: async () => (await deps.tick!(), result) } : {}),
   };
 };
+
+/**
+ * Действия, доменная операция которых сама сверяет показанное основание
+ * (digest редакции, поля ревью плана, версия треда или запроса, id ожидания):
+ * они исполняются после проверки карточки, вне её транзакции, с полями
+ * проверенной версии — расхождение между проверкой и операцией отклонит
+ * сама операция. Остальные (запуск очереди, приёмка ChangeSet) проверяют
+ * карточку и исполняются в одной транзакции.
+ */
+const ownCas = new Set([
+  'prep-question/answer',
+  'prep-stage/approve',
+  'prep-stage/request-changes',
+  'plan/approve',
+  'discussion-needs-answer/answer',
+  'input/answer',
+  'input/apply',
+  'corpus/approve',
+  'changeset/deploy-preview',
+]);
+
+/** Источник по ключу карточки: перепроверка одной карточки без всей проекции. */
+export function sourceOfKey(key: string): AttentionSource | undefined {
+  const prefixes: [string, AttentionSource][] = [
+    ['prep:qa:', 'prep-answer-pending'],
+    ['prep:q:', 'prep-question'],
+    ['prep:stage:', 'prep-stage'],
+    ['prep:rework:', 'prep-rework'],
+    ['quick:', 'quick'],
+    ['plan:', 'plan'],
+    ['discussion:cr:', 'discussion-request'],
+    ['discussion:na:', 'discussion-needs-answer'],
+    ['board:', 'board'],
+    ['workflow:', 'board'],
+    ['work:', 'work'],
+    ['budget:', 'budget'],
+    ['contract-change:', 'contract-change'],
+    ['wait:', 'wait'],
+    ['input:', 'input'],
+    ['changeset:', 'changeset'],
+    ['preview:', 'preview'],
+    ['corpus:', 'corpus'],
+    ['stall-op:', 'stall'],
+    ['stall:', 'stall'],
+  ];
+  if (key === 'queue') return 'queue';
+  return prefixes.find(([prefix]) => key.startsWith(prefix))?.[1];
+}
 
 const actionHandlers: Record<string, (a: ActContext) => ActOutcome> = {
   'prep-question/answer': ({ ctx, item, input }) => {
@@ -1840,6 +1901,13 @@ function boardsOf(state: Readonly<DevContourState>) {
   return byTask;
 }
 
+/** Время последней отметки строки. */
+const lastMark = (m: AttentionMark) =>
+  [m.readAt, m.ackAt]
+    .filter((x): x is string => !!x)
+    .sort()
+    .at(-1) ?? '';
+
 /** Состояние отметок карточки: прочитано и «увидел» — по появлению и версии. */
 export function markState(mark: AttentionMark | undefined, occurrenceId: string, version: string) {
   const same = mark?.occurrenceId === occurrenceId;
@@ -1926,6 +1994,11 @@ export interface AttentionOptions {
   now?: () => number;
   /** Дополнительные источники (тесты структурной защиты чтения). */
   sources?: AttentionSourceRule[];
+  /**
+   * Точка между проверкой карточки и доменной операцией со своей сверкой
+   * (тесты: расхождение в этом промежутке отклоняет сама операция).
+   */
+  afterCheck?: (a: ActContext) => ActContext;
 }
 
 export interface AttentionHistoryView {
@@ -2007,10 +2080,11 @@ export class AttentionService {
   }
 
   /** Карточки-кандидаты в порядке источников, внутри снимка. */
-  candidates(ctx: AttentionContext): Candidate[] {
+  candidates(ctx: AttentionContext, only?: Set<AttentionSource>): Candidate[] {
     const out: Candidate[] = [];
     for (const source of this.sources) {
       if (source.engine && !ctx.h) continue;
+      if (only && !only.has(source.id)) continue;
       for (const c of source.collect(ctx)) {
         // Один предмет — одна карточка: повтор ключа (свёртка) не дублирует.
         if (ctx.cards.has(c.sourceKey)) continue;
@@ -2038,13 +2112,25 @@ export class AttentionService {
    */
   async mark(raw: unknown) {
     const { marks } = attentionInputs.marks.parse(raw);
-    const quick = await this.prerequisites();
     const now = (this.options.now ?? Date.now)();
     const at = new Date(now).toISOString();
+    const cutoff = new Date(now - ATTENTION_LIMITS.markRetentionMs).toISOString();
+    const needed = new Set(
+      marks.map((m) => sourceOfKey(m.sourceKey)).filter((x): x is AttentionSource => !!x),
+    );
+    const quick = needed.has('quick')
+      ? await this.prerequisites()
+      : new Map<string, QuickPrerequisites>();
     return this.store.atomic(() => {
-      const ctx = this.context(quick, now);
-      const present = new Map(this.candidates(ctx).map((c) => [c.sourceKey, c]));
       const stored = this.marks();
+      // Под блокировкой записи перепроверяются только источники отмечаемых
+      // карточек и старых отметок (кандидатов на удаление), не вся проекция.
+      for (const key of Object.keys(stored)) {
+        const source = sourceOfKey(key);
+        if (lastMark(stored[key]) < cutoff && source && source !== 'quick') needed.add(source);
+      }
+      const ctx = this.context(quick, now);
+      const present = new Map(this.candidates(ctx, needed).map((c) => [c.sourceKey, c]));
       const marked: { sourceKey: string; occurrenceId: string }[] = [];
       const ignored: { sourceKey: string; occurrenceId: string }[] = [];
       for (const m of marks) {
@@ -2075,30 +2161,42 @@ export class AttentionService {
         stored[m.sourceKey] = row;
         marked.push({ sourceKey: m.sourceKey, occurrenceId: m.occurrenceId });
       }
-      this.prune(stored, new Set(present.keys()), now);
+      // Удаляются только старые отметки перепроверенных источников.
+      const checked = (key: string) => {
+        const source = sourceOfKey(key);
+        return !!source && needed.has(source) && source !== 'quick';
+      };
+      this.prune(
+        Object.fromEntries(Object.entries(stored).filter(([key]) => checked(key))),
+        new Set(present.keys()),
+        now,
+      );
       return { marked, ignored };
     });
   }
 
   /**
-   * Действие с карточки. Карточка пересчитывается из проекции, появление и
-   * версия сверяются с показанными (иначе 409 `attention-stale` с текущей
-   * карточкой или `attention-resolved`), затем исполняется существующая
-   * доменная операция со своими CAS-полями из пересчитанной карточки.
-   * Синхронные операции и проверка основания — одна транзакция; выкладка
-   * preview и такт очереди начинаются после неё. Повтор с тем же ключом
-   * идемпотентности возвращает прежнюю запись (`replayed`), без повторного
-   * эффекта.
+   * Действие с карточки. Пересчитывается только источник карточки: появление
+   * и версия сверяются с показанными (иначе 409 `attention-stale` с текущей
+   * карточкой или `attention-resolved`). Операция, которая сама сверяет
+   * основание (`ownCas`), исполняется после проверки с полями проверенной
+   * версии: расхождение между проверкой и операцией отклоняет она сама, и
+   * Git (карты INTENT утверждения плана) не читается под блокировкой
+   * записи. Остальные проверяют карточку и исполняются одной транзакцией.
+   * Повтор с тем же ключом идемпотентности возвращает прежнюю запись.
    */
   async act(raw: unknown, deps: AttentionActDeps = {}) {
     const v = attentionInputs.act.parse(raw);
-    const quick = await this.prerequisites();
+    const source = sourceOfKey(v.sourceKey);
     const now = (this.options.now ?? Date.now)();
-    const outcome = this.store.atomic((): ActOutcome => {
+    const quick =
+      source === 'quick' ? await this.prerequisites() : new Map<string, QuickPrerequisites>();
+    const only = new Set<AttentionSource>(source ? [source] : []);
+    const replayed = this.store.snapshot(() => this.replayOf(v));
+    if (replayed) return { result: { replayed: true, message: replayed }, resolved: true as const };
+    const check = (): ActContext => {
       const ctx = this.context(quick, now);
-      const replayed = this.replayOf(v);
-      if (replayed) return { result: { replayed: true, message: replayed } };
-      const item = this.candidates(ctx).find((c) => c.sourceKey === v.sourceKey);
+      const item = this.candidates(ctx, only).find((c) => c.sourceKey === v.sourceKey);
       if (!item)
         throw new DomainError('Карточка уже решена исходной сущностью', 409, {
           code: 'attention-resolved',
@@ -2111,22 +2209,30 @@ export class AttentionService {
       const action = (item.actor === 'operator' ? (item.actions ?? []) : []).find(
         (a) => a.kind === 'domain' && a.id === v.action,
       );
-      const handler = actionHandlers[`${item.source}/${v.action}`];
-      if (!action || !handler)
+      if (!action || !actionHandlers[`${item.source}/${v.action}`])
         throw new DomainError(`Действие ${v.action} не предлагается этой карточкой`, 400, {
           code: 'attention-action',
         });
-      return handler({
+      return {
         ctx,
         item,
         input: v.input ?? {},
         key: v.idempotencyKey,
         deps,
         root: this.options.root,
-      });
-    });
+      };
+    };
+    const run = (a: ActContext) => actionHandlers[`${a.item.source}/${v.action}`](a);
+    const afterCheck = this.options.afterCheck ?? ((a: ActContext) => a);
+    const outcome = ownCas.has(`${source}/${v.action}`)
+      ? run(afterCheck(this.store.snapshot(check)))
+      : this.store.atomic(() => run(check()));
     const result = outcome.after ? await outcome.after() : outcome.result;
-    const current = (await this.active()).items.find((i) => i.sourceKey === v.sourceKey);
+    const current = this.store.snapshot(() => {
+      const ctx = this.context(quick, now);
+      const item = this.candidates(ctx, only).find((c) => c.sourceKey === v.sourceKey);
+      return item ? toItem(item, ctx.state, boardsOf(ctx.state), this.marks()) : undefined;
+    });
     return current ? { result, item: current } : { result, resolved: true as const };
   }
 
@@ -2167,11 +2273,7 @@ export class AttentionService {
    * предела строк (сначала самые старые). Только при записи отметок.
    */
   private prune(stored: Record<string, AttentionMark>, present: Set<string>, now: number) {
-    const last = (m: AttentionMark) =>
-      [m.readAt, m.ackAt]
-        .filter((x): x is string => !!x)
-        .sort()
-        .at(-1) ?? '';
+    const last = lastMark;
     const cutoff = new Date(now - ATTENTION_LIMITS.markRetentionMs).toISOString();
     const keys = Object.keys(stored);
     const removed = new Set(keys.filter((key) => !present.has(key) && last(stored[key]) < cutoff));
