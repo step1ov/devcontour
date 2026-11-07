@@ -55,6 +55,7 @@ import {
   type AttentionItem,
   type AttentionListInput,
   type AttentionMark,
+  type OccurrenceMark,
   type AttentionSource,
   type AttentionSubjectKind,
 } from '../core/attention-model.ts';
@@ -1885,8 +1886,8 @@ workSource.history = (ctx) => {
     // В историю — только сбои, которые были карточками: отмеченные
     // оператором или последний сбой перед решением задачи (принятием или
     // отменой). Сбой, который контур сам повторил, карточкой не был.
-    const mark = marks[`work:${task.id}`];
-    const marked = mark?.occurrenceId === run.id;
+    const mark = occurrenceMarkOf(marks[`work:${task.id}`], run.id);
+    const marked = !!mark;
     const last =
       ctx.state.runs.findLast((r) => r.taskId === task.id && r.status === 'failed')?.id === run.id;
     if (!marked && !(last && (accepted || cancelled))) return [];
@@ -2142,11 +2143,44 @@ const lastMark = (m: AttentionMark) =>
     .sort()
     .at(-1) ?? '';
 
+/** Отметка появления в строке предмета: текущее или одно из прежних. */
+export function occurrenceMarkOf(
+  mark: AttentionMark | undefined,
+  occurrenceId: string,
+): OccurrenceMark | undefined {
+  if (!mark) return undefined;
+  if (mark.occurrenceId === occurrenceId) return mark;
+  return mark.earlier?.find((e) => e.occurrenceId === occurrenceId);
+}
+
+/**
+ * Строка после отметки появления `occurrenceId`: прежнее текущее появление
+ * уходит в `earlier` (новые первыми), лишние старые отбрасываются. Отметка
+ * вернувшегося прежнего появления продолжает его запись.
+ */
+export function withOccurrence(
+  previous: AttentionMark | undefined,
+  occurrenceId: string,
+): AttentionMark {
+  if (!previous) return { v: 1, occurrenceId };
+  if (previous.occurrenceId === occurrenceId) return { ...previous };
+  const { earlier = [], ...rest } = previous;
+  const current: OccurrenceMark = { ...rest };
+  delete (current as Partial<AttentionMark>).v;
+  const own = earlier.find((e) => e.occurrenceId === occurrenceId);
+  const older = [current, ...earlier.filter((e) => e !== own)];
+  return {
+    v: 1,
+    ...(own ?? { occurrenceId }),
+    earlier: older.slice(0, ATTENTION_LIMITS.markOccurrences - 1),
+  };
+}
+
 /** Состояние отметок карточки: прочитано и «увидел» — по появлению и версии. */
 export function markState(mark: AttentionMark | undefined, occurrenceId: string, version: string) {
-  const same = mark?.occurrenceId === occurrenceId;
-  const read = same && mark.readVersion === version;
-  const acknowledged = same && mark.ackVersion === version;
+  const own = occurrenceMarkOf(mark, occurrenceId);
+  const read = own?.readVersion === version;
+  const acknowledged = own?.ackVersion === version;
   return { read, acknowledged, unread: !read };
 }
 
@@ -2416,11 +2450,7 @@ export class AttentionService {
           ignored.push({ sourceKey: m.sourceKey, occurrenceId: m.occurrenceId });
           continue;
         }
-        const previous = stored[m.sourceKey];
-        const row: AttentionMark =
-          previous?.occurrenceId === m.occurrenceId
-            ? { ...previous }
-            : { v: 1, occurrenceId: m.occurrenceId };
+        const row = withOccurrence(stored[m.sourceKey], m.occurrenceId);
         // Отметка старой версии не отменяет отметку текущей.
         const keeps = (version: string | undefined) =>
           version === item.sourceVersion && m.version !== item.sourceVersion;
@@ -2681,13 +2711,12 @@ export class AttentionService {
   ): AttentionHistoryItem {
     // Версия решённого появления восстановлена по фактам: отметка
     // относится к появлению, какой бы версии она ни была.
-    const mark = marks[r.sourceKey];
-    const same = mark?.occurrenceId === r.occurrenceId;
-    const read = same && !!mark.readVersion;
+    const mark = occurrenceMarkOf(marks[r.sourceKey], r.occurrenceId);
+    const read = !!mark?.readVersion;
     return {
       ...toItem(r, ctx.state, boardByTask, marks, ctx.redact),
       actions: [],
-      state: { read, acknowledged: same && !!mark.ackVersion, unread: !read },
+      state: { read, acknowledged: !!mark?.ackVersion, unread: !read },
       resolvedAt: r.resolvedAt,
     };
   }

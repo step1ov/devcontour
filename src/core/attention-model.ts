@@ -59,6 +59,8 @@ export const ATTENTION_LIMITS = {
   markRows: 2000,
   /** До скольких строк удаляет запись, перешедшая предел. */
   markRowsLow: 1900,
+  /** Сколько последних появлений предмета хранит строка отметок (текущее и прежние). */
+  markOccurrences: 5,
   /** Отметки исчезнувших карточек живут столько, затем удаляются при записи отметок. */
   markRetentionMs: 30 * 24 * 60 * 60_000,
   agentLimit: 50,
@@ -131,9 +133,8 @@ export type AttentionHistoryItem = Omit<AttentionItem, 'actions'> & {
   resolvedAt: string | null;
 };
 
-/** Локальная отметка оператора по ключу источника (одна строка на ключ). */
-export const attentionMark = z.strictObject({
-  v: z.literal(1),
+/** Отметка одного появления предмета. */
+const occurrenceMark = z.strictObject({
   occurrenceId,
   readVersion: version.optional(),
   readAt: z.iso.datetime().optional(),
@@ -142,6 +143,22 @@ export const attentionMark = z.strictObject({
   /** Снимок для подписи истории после исчезновения предмета. */
   title: z.string().max(ATTENTION_LIMITS.title).optional(),
   category: z.enum(attentionCategories).optional(),
+});
+export type OccurrenceMark = z.infer<typeof occurrenceMark>;
+
+/**
+ * Локальная отметка оператора по ключу источника (одна строка на ключ).
+ * Поля верхнего уровня — последнее отмеченное появление; `earlier` —
+ * прежние появления, новые первыми, всего с текущим не больше
+ * `markOccurrences`. Строки без `earlier` (до хранения нескольких
+ * появлений) читаются как строки с одним появлением.
+ */
+export const attentionMark = occurrenceMark.extend({
+  v: z.literal(1),
+  earlier: z
+    .array(occurrenceMark)
+    .max(ATTENTION_LIMITS.markOccurrences - 1)
+    .optional(),
 });
 export type AttentionMark = z.infer<typeof attentionMark>;
 
