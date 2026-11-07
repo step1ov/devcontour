@@ -40,6 +40,7 @@ import {
   inputReviewSubject,
 } from '../harness/input-host.ts';
 import { runtimeAdapters } from '../harness/adapters.ts';
+import { boardOf, UNASSIGNED_GRAPH } from '../harness/projection.ts';
 import { adapters, type AgentAdapter } from '../runner/adapters.ts';
 import { checkoutRoots } from '../runner/checkout-root.ts';
 import { DiscussionService } from './discussion.ts';
@@ -757,6 +758,7 @@ export class InputService {
             : AbortSignal.timeout(this.h.config.runTimeoutMs),
         },
       );
+      const active = this.activeInGraph(task.id);
       return {
         requestId: request.id,
         round: record.round,
@@ -770,10 +772,29 @@ export class InputService {
           record.approved || this.h.config.approvalMode === 'operator'
             ? 'input_target'
             : 'the answer changes the approved spec: reopen and respecify the task, approve it, then input_supersede with the same task',
+        ...(active.length
+          ? {
+              activeAttempts: active,
+              warning: `В графе задачи (доска) идут попытки: ${active.map((a) => `${a.id} (${a.taskId})`).join(', ')}. Применение ответа подождёт их окончания: до того input_apply ответит applied: false с active`,
+            }
+          : {}),
       };
     } catch (error) {
       throw toDomain(error);
     }
+  }
+
+  /**
+   * Идущие попытки графа задачи (её доски) — то, чего ждёт применение ответа
+   * движком (`{applied: false, active}`). Сведение для ведущего, не отказ.
+   */
+  private activeInGraph(taskId: string) {
+    const state = this.h.store.read();
+    const graph = (id: string) => boardOf(state, id)?.id ?? UNASSIGNED_GRAPH;
+    const own = graph(taskId);
+    return state.runs
+      .filter((r) => r.status === 'active' && graph(r.taskId) === own)
+      .map((r) => ({ id: r.id, taskId: r.taskId }));
   }
 
   /** Основание продолжения (или переноса заменённого запроса) и причины отказа сейчас. */

@@ -347,3 +347,38 @@ test('Operator mode handoff: a floor-free question is still answered by the oper
     await f.cleanup();
   }
 });
+
+test('input_review warns when attempts of the task graph are running: apply will wait for them', async () => {
+  const f = await inputFixture(controlled());
+  try {
+    const { boardId, requestId } = await question(f);
+    const p = await prepared(f, requestId, 'lead');
+    assert.equal(p.review.approved, true);
+    assert.equal('warning' in p.review, false, 'в графе ничего не идёт — без предупреждения');
+    // Другая задача той же доски выдана и идёт.
+    const other = f.plainTask(boardId, 'Running neighbour');
+    f.h.approve(boardId);
+    // Выдача — от контура, который ведёт очередь, без её выполнения.
+    const run = f.h.claim(f.scheduler.owner);
+    assert.equal(run?.taskId, other);
+    const again = (await new AgentService(f.h, f.root).run({
+      operation: 'input_review',
+      input: { requestId, contextDigest: p.context.contextDigest, authorRuntime: 'codex' },
+    })) as { round: number; activeAttempts?: unknown; warning: string };
+    // Повтор того же снимка — тот же раунд без вызова модели, но с предупреждением.
+    assert.equal(again.round, p.review.round);
+    assert.deepEqual(again.activeAttempts, [{ id: run.id, taskId: other }]);
+    assert.match(again.warning, /идут попытки/);
+    assert.match(again.warning, new RegExp(run.id));
+    // Предупреждение верно: применение ждёт идущую попытку графа.
+    const target = f.service.target({ requestId, contextDigest: p.context.contextDigest });
+    const applied = new AgentService(f.h, f.root).execute({
+      operation: 'input_apply',
+      input: { ...p.apply, expectedVersion: target.version, targetDigest: target.targetDigest },
+    });
+    assert.equal(applied.applied, false);
+    assert.deepEqual(applied.active, [{ id: run.id, workId: other }]);
+  } finally {
+    await f.cleanup();
+  }
+});

@@ -300,7 +300,7 @@ export const descriptions: Record<AgentOperation, string> = {
   input_context:
     'Build the immutable context snapshot with the latest answer (the effective task snapshot plus input/<id>.md and its manifest) and store it by digest. The manifest lists the discussion messages that recorded the answers and the messageIds you select (id, seq, digest; their text is not added). Not activated; idempotent per digest.',
   input_review:
-    'Review the answer snapshot with the plan reviewer (round subject input-<id>): approve only if the answer clarifies without changing the approved spec. Refused before the model call when the snapshot is missing or does not carry the latest answer. Approval does not activate anything.',
+    'Review the answer snapshot with the plan reviewer (round subject input-<id>): approve only if the answer clarifies without changing the approved spec. Refused before the model call when the snapshot is missing or does not carry the latest answer. Approval does not activate anything. When attempts of the task board are running, the result carries warning and activeAttempts: input_apply waits for them (applied: false with active).',
   input_target:
     'Propose the continuation target for a reviewed answer snapshot (or the carry target of a superseded question) and list why applying would be refused now. Read-only.',
   input_apply:
