@@ -593,6 +593,15 @@ export class DiscussionService {
             code: 'already-superseded',
           });
       }
+      // Обращение — новый запрос, а не ответ на запрос ведущего.
+      if (input.kind === 'change-request' && input.replyTo) {
+        const target = this.parse(this.h.store.discussionById(owner, input.replyTo));
+        if (target.kind === 'disposition')
+          throw new DomainError(
+            'Обращение — новый запрос, а не ответ на обработку: ответ на запрос ведущего — заметка (kind note)',
+            400,
+          );
+      }
       input.check?.(owner);
       const latest = state.runs.filter((r) => r.taskId === taskId).at(-1);
       const id = 'DM-' + randomUUID();

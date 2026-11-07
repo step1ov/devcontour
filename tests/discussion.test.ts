@@ -786,6 +786,50 @@ test('D02-C: «нужен ответ» — цикл: ответ оператор
   }
 });
 
+/** Обращение и запрос ведущего «нужен ответ» по нему. */
+function asked(w: ReturnType<typeof world>, text = 'Сделать импорт') {
+  const request = say(w.d, w.task.id, text);
+  const disposition = w.d.resolve({
+    requestId: request.id,
+    outcome: 'needs-answer',
+    reason: 'Из какого источника?',
+    idempotencyKey: key(++counter),
+    expectedVersion: w.d.read({ taskId: w.task.id, latest: true, limit: 1 }).version,
+  }).message;
+  return { request, disposition };
+}
+
+test('D02-C: ответ на запрос ведущего — заметка; обращение в ответ на обработку — 400', () => {
+  const w = world();
+  try {
+    const { request, disposition } = asked(w);
+    assert.throws(
+      () => say(w.d, w.task.id, 'Из CSV, и ещё добавить экспорт', { replyTo: disposition.id }),
+      (e: Error & { status?: number }) => e.status === 400 && /новый запрос/.test(e.message),
+    );
+    // Ничего не записано: обращение не вернулось ведущему и нового нет.
+    assert.deepEqual(w.d.inbox({}).requests, []);
+    // Обращение в ответ на заметку — допустимо.
+    const note = say(w.d, w.task.id, 'Контекст', { kind: 'note' });
+    const linked = say(w.d, w.task.id, 'Добавить экспорт', { replyTo: note.id });
+    assert.deepEqual(
+      w.d.inbox({}).requests.map((r) => r.id),
+      [linked.id],
+    );
+    // Ответ заметкой возвращает обращение.
+    say(w.d, w.task.id, 'Из CSV', { kind: 'note', replyTo: disposition.id });
+    assert.deepEqual(
+      w.d
+        .inbox({})
+        .requests.map((r) => r.id)
+        .sort(),
+      [linked.id, request.id].sort(),
+    );
+  } finally {
+    w.cleanup();
+  }
+});
+
 test('D02: некорректный курсор очереди — 400; длинный текст — 413; ревизия без доски — 400', () => {
   const w = world();
   try {
