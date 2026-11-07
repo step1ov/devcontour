@@ -229,3 +229,32 @@ test('The overview headline keeps the old priority and never calls a lead item t
   const empty = { headline: 'Разработка ещё не началась: задач пока нет.', counts: { tasks: 0 } };
   assert.equal(headlineOf(empty, [op('question', 'prep-question')]), empty.headline);
 });
+
+test('A draft names the version shown when its form opened, and outlives its card', async () => {
+  const { emptyDraft, pinStale, orphanDrafts, draftKey } =
+    await import('../src/web/attention-drafts.ts');
+  const a = item({ sourceKey: 'prep:stage:C:product', occurrenceId: 'r3', id: 'x#r3' });
+  const draft = {
+    ...emptyDraft(),
+    open: 'request-changes',
+    text: 'Поправьте сценарий r3',
+    pin: { occurrenceId: 'r3', sourceVersion: 'v1', title: a.title, reason: a.reason },
+  };
+  assert.equal(draftKey(a), 'prep:stage:C:product#r3');
+  assert.equal(pinStale(draft, a), false);
+  // Опрос принёс новую версию того же появления — форма не отправляется молча.
+  assert.equal(pinStale(draft, { ...a, sourceVersion: 'v2' }), true);
+  // Новое появление того же предмета — тоже не та версия.
+  assert.equal(pinStale(draft, { ...a, occurrenceId: 'r4' }), true);
+  assert.equal(pinStale({ ...draft, open: null }, { ...a, sourceVersion: 'v2' }), false);
+  // Появление исчезло — черновик с текстом показывается отдельно; пустой — нет.
+  const all = new Map([
+    ['prep:stage:C:product#r3', draft],
+    ['input:IR-1#IR-1', { ...emptyDraft(), open: 'answer', text: '  ' }],
+  ]);
+  assert.deepEqual(
+    orphanDrafts(all, [{ id: 'prep:stage:C:product#r4' }]).map(([k]) => k),
+    ['prep:stage:C:product#r3'],
+  );
+  assert.deepEqual(orphanDrafts(all, [{ id: 'prep:stage:C:product#r3' }]), []);
+});

@@ -22,7 +22,8 @@ import {
   type AttentionItem,
   type AttentionView,
 } from './attention-logic.ts';
-import { AttentionCard, HandoffCommand, type ActOutcome } from './AttentionCard.tsx';
+import { AttentionCard, HandoffCommand, UnsentText, type ActOutcome } from './AttentionCard.tsx';
+import { hasText, orphanDrafts, removeDraft, useDrafts } from './attention-drafts.ts';
 import { useAttention } from './AttentionProvider.tsx';
 import { AttentionHistory } from './AttentionHistory.tsx';
 import { forgetAttentionKey, rememberedAttentionKey } from './navigation.ts';
@@ -40,7 +41,6 @@ const categories: { value: '' | AttentionCategory; label: string }[] = [
   { value: 'decision', label: 'Решения' },
   { value: 'technical', label: 'Технические' },
 ];
-const DEFAULT_HANDOFF = 'devcontour handoff --workspace <путь workspace>';
 export const selectClass =
   'border-input bg-card h-(--control-height) rounded-sm border px-2 text-sm max-[760px]:w-full';
 
@@ -64,8 +64,13 @@ export function writeParam(key: string, value: string) {
   );
 }
 
-export const staleLine = (at?: string) =>
-  `Нет связи с сервером: данные на ${at ? new Date(at).toLocaleTimeString('ru-RU') : '—'} могут быть устаревшими. Действия станут доступны после обновления.`;
+/** Строка устаревания: нет связи или сервер отказал — сказано по-разному. */
+export const staleLine = (at?: string, failure?: { offline: boolean; error: string }) =>
+  (failure && !failure.offline
+    ? `Сервер не смог обновить список (${failure.error})`
+    : 'Нет связи с сервером') +
+  `: данные на ${at ? new Date(at).toLocaleTimeString('ru-RU') : '—'} могут быть устаревшими. Действия станут доступны после обновления.`;
+export const unsentDomId = (id: string) => 'attention-unsent-' + id;
 
 type Handoff = Extract<AttentionAction, { kind: 'handoff' }>;
 
@@ -155,7 +160,12 @@ export function AttentionCenter({
     operator: [] as string[],
     lead: [] as string[],
     titles: new Map<string, string>(),
+    ids: new Map<string, string>(),
   });
+  const drafts = useDrafts();
+  const draftsNow = useRef(drafts);
+  draftsNow.current = drafts;
+  const list = useRef<HTMLDivElement>(null);
   const operatorHeading = useRef<HTMLHeadingElement>(null);
   const leadHeading = useRef<HTMLElement>(null);
   useLayoutEffect(() => {
@@ -164,6 +174,7 @@ export function AttentionCenter({
       operator: groups.operator.map((i) => i.sourceKey),
       lead: groups.lead.map((i) => i.sourceKey),
       titles: new Map(items.map((i) => [i.sourceKey, i.title])),
+      ids: new Map(items.map((i) => [i.sourceKey, i.id])),
     };
     before.current = now;
     const key = focused.current;
@@ -183,6 +194,17 @@ export function AttentionCenter({
     const own = ownAction.current;
     if (!own && active && active !== document.body) return;
     ownAction.current = false;
+    // Под исчезнувшей карточкой была форма с текстом: фокус — на
+    // неотправленном тексте, а не на следующей карточке.
+    const goneId = prev.ids.get(key);
+    if (!own && goneId && hasText(draftsNow.current.get(goneId))) {
+      focused.current = '';
+      setMessage(
+        `Карточка «${prev.titles.get(key)}» решена или снята без вашего ответа. Ваш текст не отправлен и сохранён ниже.`,
+      );
+      requestAnimationFrame(() => document.getElementById(unsentDomId(goneId))?.focus());
+      return;
+    }
     const group = prev.operator.includes(key) ? 'operator' : 'lead';
     const target = nextFocusKey(prev[group], now[group], key);
     const nextTitle = target ? now.titles.get(target) : undefined;
@@ -209,8 +231,12 @@ export function AttentionCenter({
     forgetAttentionKey();
     const active = document.activeElement;
     if (active && active !== document.body) return;
-    requestAnimationFrame(() => document.getElementById(cardDomId(key))?.focus());
-  }, [attention.view]);
+    // Карточка ведущего в свёрнутой группе: сначала раскрыть группу.
+    if (attention.items.some((i) => i.sourceKey === key && i.actor === 'lead')) setLeadOpen(true);
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => document.getElementById(cardDomId(key))?.focus()),
+    );
+  }, [attention.view, attention.items]);
 
   const onOutcome = useCallback((item: AttentionItem, outcome: ActOutcome) => {
     setMessage(outcome.status);
@@ -245,9 +271,13 @@ export function AttentionCenter({
     );
   const view = attention.view;
   const leadAbsent = groups.lead.length > 0 && !view.lead.present;
-  const handoffCommand =
-    groups.lead.flatMap((i) => i.actions).find((a): a is Handoff => a.kind === 'handoff')
-      ?.command ?? DEFAULT_HANDOFF;
+  // Команда — только серверная: своей подстановки у панели нет.
+  const handoffCommand = groups.lead
+    .flatMap((i) => i.actions)
+    .find((a): a is Handoff => a.kind === 'handoff')?.command;
+  const filtering = !!category || !!component;
+  const pending = !!component && !filtered;
+  const orphans = orphanDrafts(drafts, attention.items);
   const unreadShown = groups.operator.filter((i) => i.state.unread);
   const card = (i: AttentionItem) => (
     <li key={i.sourceKey} className="min-w-0">
@@ -274,7 +304,14 @@ export function AttentionCenter({
                 size="sm"
                 disabled={attention.stale}
                 className="ml-auto"
-                onClick={() => void attention.mark(unreadShown, 'read')}
+                onClick={() => {
+                  // Кнопка исчезает вместе с непрочитанными: фокус — на заголовке группы.
+                  requestAnimationFrame(() => operatorHeading.current?.focus());
+                  void attention.mark(unreadShown, 'read').then((ok) => {
+                    if (!ok)
+                      setMessage('Отметки не сохранены: сервер не ответил. Повторите позже.');
+                  });
+                }}
               >
                 Отметить всё прочитанным
               </Button>
@@ -293,9 +330,26 @@ export function AttentionCenter({
             tabIndex={-1}
             className={headingClass}
           >
-            Сейчас от вас ничего не требуется.
+            {pending
+              ? 'Загружаем карточки компонента…'
+              : filtering
+                ? 'Нет карточек по выбранным фильтрам.'
+                : 'Сейчас от вас ничего не требуется.'}
           </h2>
-          {groups.lead.length > 0 && who === '' && (
+          {filtering && !pending && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="justify-self-start"
+              onClick={() => {
+                setCategory('');
+                setComponent('');
+              }}
+            >
+              Сбросить фильтры
+            </Button>
+          )}
+          {!filtering && groups.lead.length > 0 && who === '' && (
             <p className="m-0">
               <a
                 className="text-info underline-offset-4 hover:underline"
@@ -321,7 +375,7 @@ export function AttentionCenter({
             Нужен ведущий агент: ему есть что разобрать. Запустите сессию ведущего с командой
             передачи.
           </AlertDescription>
-          <HandoffCommand command={handoffCommand} />
+          {handoffCommand && <HandoffCommand command={handoffCommand} />}
         </Alert>
       )}
       {groups.lead.length ? (
@@ -368,7 +422,7 @@ export function AttentionCenter({
       </p>
       {attention.stale && (
         <p id={staleId} role="alert" className="text-destructive m-0 text-sm">
-          {staleLine(attention.lastOkAt)}
+          {staleLine(attention.lastOkAt, attention.failure)}
         </p>
       )}
       <div className="flex min-w-0 flex-wrap items-end gap-2">
@@ -429,13 +483,38 @@ export function AttentionCenter({
           </TabsTrigger>
         </TabsList>
         <TabsContent value="active" className="grid min-w-0 gap-4">
+          {orphans.length > 0 && (
+            <section aria-label="Неотправленные ответы" className="grid min-w-0 gap-2">
+              {orphans.map(([id, d]) => (
+                <UnsentText
+                  key={id}
+                  id={unsentDomId(id)}
+                  text={d.text}
+                  why={`Карточка «${d.pin?.title ?? 'без названия'}» решена или снята без вашего ответа. Текст не отправлен.`}
+                  onDrop={() => removeDraft(id)}
+                />
+              ))}
+            </section>
+          )}
           <div
+            ref={list}
             className="grid min-w-0 gap-6"
             onFocus={(e) => {
               const key = (e.target as HTMLElement)
                 .closest('[data-attention-key]')
                 ?.getAttribute('data-attention-key');
               if (key) focused.current = key;
+            }}
+            onBlur={(e) => {
+              // Фокус ушёл из списка (щелчок по пустому месту, фильтр): опрос
+              // потом не должен переводить его. Удалённый элемент — не уход.
+              const left = e.target;
+              const to = e.relatedTarget as Node | null;
+              if (to && list.current?.contains(to)) return;
+              requestAnimationFrame(() => {
+                if (left.isConnected && !list.current?.contains(document.activeElement))
+                  focused.current = '';
+              });
             }}
           >
             {who !== 'lead' && operatorGroup}

@@ -17,6 +17,7 @@ import {
 } from './attention-logic.ts';
 import { useAttention } from './AttentionProvider.tsx';
 import { navigate } from './navigation.ts';
+import { draftKey, emptyDraft, pinStale, useDraft, type Draft } from './attention-drafts.ts';
 
 // Карточка центра внимания: что случилось, что блокирует, кто действует,
 // следующий шаг и где доказательства. Действие называет показанную версию;
@@ -40,38 +41,49 @@ const evidenceNames: Record<AttentionItem['evidence'][number]['kind'], string> =
 };
 const shortId = (id: string) => (id.length > 12 ? id.slice(0, 12) + '…' : id);
 
-type Draft = {
-  open: string | null;
-  text: string;
-  option: string | null;
-  kind: 'clarification' | 'requirement-change';
-  /** Ключ повтора открытой формы: повтор после обрыва — без второго эффекта. */
-  key: string;
-};
-const emptyDraft = (): Draft => ({
-  open: null,
-  text: '',
-  option: null,
-  kind: 'clarification',
-  key: crypto.randomUUID(),
-});
-// Черновики форм — по предмету карточки, вне компонента: карточка, перешедшая
-// в другую группу, перемонтируется, а набранный текст остаётся.
-const drafts = new Map<string, Draft>();
-function useDraft(sourceKey: string): [Draft, (patch: Partial<Draft>) => void] {
-  const [draft, setState] = useState<Draft>(() => drafts.get(sourceKey) ?? emptyDraft());
-  const update = (patch: Partial<Draft>) =>
-    setState((d) => {
-      const next = { ...d, ...patch };
-      if (next.open === null && !next.text) drafts.delete(sourceKey);
-      else drafts.set(sourceKey, next);
-      return next;
-    });
-  return [draft, update];
-}
-
 /** Итог действия для живой области и для решения списка о фокусе. */
 export type ActOutcome = { kind: 'updated'; status: string } | { kind: 'resolved'; status: string };
+
+/**
+ * Неотправленный текст формы, только для чтения: объяснение, копирование и
+ * «Убрать». Цель фокуса, когда карточка под формой изменилась или исчезла.
+ */
+export function UnsentText({
+  text,
+  why,
+  onDrop,
+  ref,
+  id,
+}: {
+  text: string;
+  why: string;
+  onDrop: () => void;
+  ref?: React.Ref<HTMLDivElement>;
+  id?: string;
+}) {
+  return (
+    <div
+      ref={ref}
+      id={id}
+      tabIndex={-1}
+      role="group"
+      aria-label="Ваш неотправленный текст"
+      className="border-warning/30 bg-warning-foreground grid min-w-0 gap-1 rounded-md border p-2 outline-offset-2"
+    >
+      <p className="text-warning m-0 text-xs">{why}</p>
+      <span className="text-xs font-medium">Ваш неотправленный текст</span>
+      <p className="bg-card m-0 rounded-sm p-2 whitespace-pre-wrap" data-attention-unsent>
+        {text}
+      </p>
+      <div className="flex flex-wrap gap-2">
+        <HandoffCommand command={text} label="Скопировать" />
+        <Button type="button" variant="ghost" size="sm" onClick={onDrop}>
+          Убрать текст
+        </Button>
+      </div>
+    </div>
+  );
+}
 
 /** Ссылка «Открыть»: настоящая ссылка; обычный щелчок — переход внутри панели. */
 export function OpenLink({
@@ -173,9 +185,9 @@ function CardForm({
     first.current?.focus();
   }, []);
   const choices = action.input === 'text+option' ? (action.choices ?? []) : [];
-  // Вопрос подготовки принимает вариант без текста; вопрос исполнителя —
-  // только с текстом ответа.
-  const textOptional = item.source === 'prep-question' && option !== null;
+  // Выбранный вариант без текста — ответ этим вариантом (вопрос подготовки и
+  // вопрос исполнителя, как на сервере).
+  const textOptional = option !== null;
   const ready = textOptional || !!text.trim();
   const escape = (e: KeyboardEvent) => {
     if (e.key !== 'Escape') return;
@@ -278,7 +290,7 @@ export function AttentionCard({
   onOutcome,
 }: {
   item: AttentionItem;
-  /** Обзор: без доказательств и отметок. */
+  /** Обзор: без доказательств и отметок, заголовок на уровень ниже раздела. */
   compact?: boolean;
   /** Id строки «нет связи»: заблокированные действия ссылаются на неё. */
   staleId?: string;
@@ -292,16 +304,27 @@ export function AttentionCard({
   // Новое появление или версия из опроса заменяет карточку из ответа.
   useEffect(() => setOverride(undefined), [shownItem.occurrenceId, shownItem.sourceVersion]);
   const titleId = useId();
-  const [draft, setDraft] = useDraft(shownItem.sourceKey);
+  const Title = compact ? 'h4' : 'h3';
+  // Черновик — этого появления; версия, которую он называет, закреплена
+  // при открытии формы.
+  const [draft, setDraft] = useDraft(draftKey(shownItem));
   const { open, text, option, kind, key } = draft;
-  const setOpen = (value: string | null) => setDraft({ open: value });
   const setText = (value: string) => setDraft({ text: value });
   const setOption = (value: string | null) => setDraft({ option: value });
   const setKind = (value: Draft['kind']) => setDraft({ kind: value });
+  const pinTo = (i: AttentionItem) => ({
+    occurrenceId: i.occurrenceId,
+    sourceVersion: i.sourceVersion,
+    title: i.title,
+    reason: i.reason,
+  });
   const [busy, setBusy] = useState(false);
   const [alert, setAlert] = useState<{ tone: 'warning' | 'destructive'; text: string }>();
-  const [unsent, setUnsent] = useState('');
+  const [markNote, setMarkNote] = useState('');
   const alertRef = useRef<HTMLDivElement>(null);
+  const changedRef = useRef<HTMLDivElement>(null);
+  const unsentRef = useRef<HTMLDivElement>(null);
+  const ackRef = useRef<HTMLButtonElement>(null);
   const openers = useRef(new Map<string, HTMLButtonElement | null>());
   const article = useRef<HTMLElement>(null);
   const operator = item.actor === 'operator';
@@ -312,16 +335,27 @@ export function AttentionCard({
   const focusAlert = () => requestAnimationFrame(() => alertRef.current?.focus());
 
   const closeForm = (id: string) => {
-    setOpen(null);
+    setDraft({ open: null });
     requestAnimationFrame(() => openers.current.get(id)?.focus());
+  };
+  // Отметки убирают свои кнопки: фокус — на следующей отметке или на карточке,
+  // а не на body.
+  const markCard = async (kind: 'read' | 'ack') => {
+    setMarkNote('');
+    requestAnimationFrame(() =>
+      (kind === 'read' && ackRef.current ? ackRef.current : article.current)?.focus(),
+    );
+    const ok = await attention.mark([item], kind);
+    if (!ok) setMarkNote('Отметка не сохранена: сервер не ответил. Повторите позже.');
   };
 
   const act = async (action: Domain) => {
     if (stale) return;
     setBusy(true);
     setAlert(undefined);
-    setUnsent('');
     const textual = action.input === 'text' || action.input === 'text+option';
+    // Текстовое действие называет версию, закреплённую при открытии формы.
+    const shown = textual && draft.pin ? draft.pin : item;
     const input = textual
       ? {
           ...(text.trim() ? { text: text.trim() } : {}),
@@ -334,8 +368,8 @@ export function AttentionCard({
     try {
       const r = await postAct({
         sourceKey: item.sourceKey,
-        occurrenceId: item.occurrenceId,
-        expectedVersion: item.sourceVersion,
+        occurrenceId: shown.occurrenceId,
+        expectedVersion: shown.sourceVersion,
         action: action.id,
         ...(input ? { input } : {}),
         ...(textual ? { idempotencyKey: key } : {}),
@@ -344,27 +378,23 @@ export function AttentionCard({
         const status = r.body.result?.replayed
           ? 'Ответ уже был сохранён.'
           : statusText(item.source, action.id);
-        setDraft(emptyDraft());
+        setDraft({ ...emptyDraft(), open: null, text: '' });
         if (r.body.item) {
           setOverride(r.body.item);
           onOutcome?.(item, { kind: 'updated', status });
           requestAnimationFrame(() => article.current?.focus());
         } else onOutcome?.(item, { kind: 'resolved', status });
       } else if (r.status === 409 && r.body?.code === 'attention-stale' && r.body.item) {
-        const next = r.body.item;
-        setOverride(next);
-        setAlert({
-          tone: 'warning',
-          text: 'Карточка изменилась, пока вы её читали: действие не выполнено. Проверьте новое содержание и решите снова.',
-        });
-        const still =
-          next.actor === 'operator' &&
-          next.actions.some((a) => a.kind === 'domain' && a.id === action.id);
-        if (!still) {
-          if (textual && text.trim()) setUnsent(text);
-          setDraft({ open: null, text: '' });
-        }
-        focusAlert();
+        // Форма остаётся с текстом; предупреждение об изменении карточки
+        // и выбор новой версии — ниже (черновик закреплён за прежней).
+        setOverride(r.body.item);
+        if (!textual) {
+          setAlert({
+            tone: 'warning',
+            text: 'Карточка изменилась, пока вы её читали: действие не выполнено. Проверьте новое содержание и решите снова.',
+          });
+          focusAlert();
+        } else requestAnimationFrame(() => (changedRef.current ?? unsentRef.current)?.focus());
       } else if (r.status === 409 && r.body?.code === 'attention-resolved')
         onOutcome?.(item, { kind: 'resolved', status: `Уже решено: «${item.title}»` });
       else if (r.status === 0 || r.status >= 500) {
@@ -386,10 +416,27 @@ export function AttentionCard({
   const impact = impactLine(item.impact);
   const label = categoryLabel(item);
   const leadAbsent = !operator && view?.lead.present === false;
-  const formAction = domain.find((a) => a.id === open);
-  // Опрос убрал действие открытой формы (ответ дан в другой вкладке):
-  // набранный текст не пропадает молча.
-  const orphan = open !== null && !formAction && !unsent && text.trim() ? text : '';
+  const offered = domain.find((a) => a.id === open);
+  // Карточка изменилась после открытия формы (новая версия того же
+  // появления): форма не отправляется молча под новой версией.
+  const changed =
+    !!offered && pinStale(draft, item) && draft.pin?.occurrenceId === item.occurrenceId;
+  // Действие больше не предлагается или появление сменилось: текст — только
+  // для чтения, с копированием.
+  const orphan =
+    open !== null &&
+    text.trim() &&
+    (!offered || (!!draft.pin && draft.pin.occurrenceId !== item.occurrenceId))
+      ? text
+      : '';
+  const formAction = orphan ? undefined : offered;
+  // Действие исчезло из-под открытой формы — фокус на неотправленном тексте.
+  // Изменение версии объявляет role=alert, не уводя фокус из поля ввода.
+  const wasOrphan = useRef(false);
+  useEffect(() => {
+    if (orphan && !wasOrphan.current) requestAnimationFrame(() => unsentRef.current?.focus());
+    wasOrphan.current = !!orphan;
+  }, [orphan]);
 
   let next: ReactNode;
   if (domain.length)
@@ -422,10 +469,8 @@ export function AttentionCard({
           aria-describedby={stale ? staleId : undefined}
           aria-expanded={open === a.id}
           onClick={() => {
-            if (open !== a.id) {
-              setOpen(a.id);
-              setOption(null);
-            } else closeForm(a.id);
+            if (open !== a.id) setDraft({ open: a.id, option: null, pin: pinTo(item) });
+            else closeForm(a.id);
           }}
         >
           {a.label}
@@ -446,9 +491,9 @@ export function AttentionCard({
     >
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         <Badge variant={label.variant}>{label.text}</Badge>
-        <h3 id={titleId} className="m-0 min-w-0 text-sm font-semibold">
+        <Title id={titleId} className="m-0 min-w-0 text-sm font-semibold">
           {item.title}
-        </h3>
+        </Title>
         {item.state.unread ? (
           <Badge variant="ready">новое</Badge>
         ) : item.state.acknowledged ? (
@@ -486,38 +531,44 @@ export function AttentionCard({
           <AlertDescription>{alert.text}</AlertDescription>
         </Alert>
       )}
-      {(unsent || orphan) && (
-        <div className="grid min-w-0 gap-1">
-          {orphan && (
-            <p className="text-warning m-0 text-xs">
-              Карточка изменилась: это действие больше не предлагается.
-            </p>
-          )}
-          <span className="text-xs font-medium">Ваш неотправленный текст</span>
-          <p className="bg-raised m-0 rounded-sm p-2 whitespace-pre-wrap" data-attention-unsent>
-            {unsent || orphan}
-          </p>
-          <div className="flex flex-wrap gap-2">
-            <HandoffCommand command={unsent || orphan} label="Скопировать" />
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                setUnsent('');
-                setDraft(emptyDraft());
-              }}
-            >
-              Убрать текст
-            </Button>
-          </div>
-        </div>
+      {changed && (
+        <Alert
+          ref={changedRef}
+          tabIndex={-1}
+          role="alert"
+          variant="warning"
+          className="grid gap-2 outline-offset-2"
+          data-attention-changed
+        >
+          <AlertDescription>
+            Карточка изменилась, пока вы писали: выше — новое содержание. Ваш текст сохранён и не
+            отправлен. Отправьте его, только если он подходит к новой версии.
+          </AlertDescription>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className={cn(actionClass, 'justify-self-start')}
+            disabled={blocked}
+            onClick={() => setDraft({ pin: pinTo(item) })}
+          >
+            Ответить на новую версию
+          </Button>
+        </Alert>
+      )}
+      {orphan && (
+        <UnsentText
+          ref={unsentRef}
+          text={orphan}
+          why="Карточка изменилась: это действие больше не предлагается. Ваш текст не отправлен."
+          onDrop={() => setDraft({ open: null, text: '' })}
+        />
       )}
       {formAction && (
         <CardForm
           item={item}
           action={formAction}
-          disabled={blocked}
+          disabled={blocked || changed}
           describedBy={stale ? staleId : undefined}
           text={text}
           setText={setText}
@@ -535,7 +586,7 @@ export function AttentionCard({
           item={item}
           onOpen={() => {
             // Переход по ссылке — чтение карточки: отметка показанной версии.
-            if (!compact && item.state.unread && !stale) void attention.mark([item], 'read');
+            if (item.state.unread && !stale) void attention.mark([item], 'read');
           }}
         />
         {!operator && handoff && <HandoffCommand command={handoff.command} />}
@@ -548,19 +599,20 @@ export function AttentionCard({
                 size="sm"
                 disabled={stale}
                 aria-label={`Прочитано: ${item.title}`}
-                onClick={() => void attention.mark([item], 'read')}
+                onClick={() => void markCard('read')}
               >
                 Прочитано
               </Button>
             )}
             {!item.state.acknowledged && (
               <Button
+                ref={ackRef}
                 variant="ghost"
                 size="sm"
                 disabled={stale}
                 aria-label={`Увидел: ${item.title}`}
                 title="Отметить, что вы знаете о карточке. Вопрос останется в списке, пока не решён."
-                onClick={() => void attention.mark([item], 'ack')}
+                onClick={() => void markCard('ack')}
               >
                 Увидел
               </Button>
@@ -568,6 +620,11 @@ export function AttentionCard({
           </>
         )}
       </div>
+      {markNote && (
+        <p role="status" className="text-destructive m-0 text-xs">
+          {markNote}
+        </p>
+      )}
       {!compact && (
         <details className="text-sm">
           <summary className="text-muted-foreground cursor-pointer">

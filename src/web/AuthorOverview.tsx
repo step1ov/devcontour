@@ -105,7 +105,7 @@ function DecisionHead({
     <>
       {attention.stale && (
         <p className="text-destructive m-0" role="alert">
-          {staleLine(attention.lastOkAt)}
+          {staleLine(attention.lastOkAt, attention.failure)}
         </p>
       )}
       {operator.length ? (
