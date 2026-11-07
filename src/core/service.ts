@@ -20,6 +20,8 @@ import {
   uncoveredGates as harnessUncoveredGates,
   gatePrerequisites,
   standaloneScope,
+  blocksWork,
+  requestsOf,
   type CancelActor,
   type CodedIssue,
   type PropertyRecovery,
@@ -1849,6 +1851,27 @@ export class DevContour {
         const t = task(ht.state, id);
         if (t.status === 'done')
           throw new DomainError('Принятый результат нельзя отменить; создайте корректировку');
+        // Отмена задачи закрывает её открытые вопросы исполнителя. Вопрос,
+        // который ведущий не вправе решить сам (критический или режим
+        // оператора), снимает только оператор — и задачей тоже: иначе отмена
+        // и повтор обошли бы правило ответа.
+        if (by !== 'operator') {
+          const work = ht.tx.work(id);
+          const held = work
+            ? requestsOf(ht.tx, work).find(
+                (r) =>
+                  blocksWork(r) && (r.floors.length > 0 || this.config.approvalMode === 'operator'),
+              )
+            : undefined;
+          if (held) {
+            const error = new DomainError(
+              `Задачу ${id} держит вопрос исполнителя ${held.id}, который решает оператор: вопрос или задачу отменяет оператор`,
+              403,
+            );
+            (error as DomainError & { code?: string }).code = 'OPERATOR_ANSWERS';
+            throw error;
+          }
+        }
         engine.cancel(id, reason, by);
         const data = reason ? { taskId: id, reason } : { taskId: id };
         ht.journal(data);
