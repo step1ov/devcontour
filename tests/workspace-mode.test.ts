@@ -102,6 +102,18 @@ test('Workspace placement is explicit before first launch, persisted on restart 
     const again = await startWorkspace(repo, { port: 0 });
     await again.close();
     assert.equal(readFileSync(join(repo, '.gitignore'), 'utf8'), ignore);
+    // Строка проекта после правила без исключения не дублирует правило.
+    writeFileSync(join(repo, '.gitignore'), ignore + '.reports/\n');
+    await (await startWorkspace(repo, { port: 0 })).close();
+    assert.equal(readFileSync(join(repo, '.gitignore'), 'utf8'), ignore + '.reports/\n');
+    // Исключение после правила могло бы открыть каталог: правило снова последнее.
+    writeFileSync(join(repo, '.gitignore'), ignore + '!.devcontour-local/\n');
+    await (await startWorkspace(repo, { port: 0 })).close();
+    assert.match(
+      readFileSync(join(repo, '.gitignore'), 'utf8'),
+      /!\.devcontour-local\/\n\/\.devcontour-local\/\n$/,
+    );
+    writeFileSync(join(repo, '.gitignore'), ignore);
     await assert.rejects(
       startWorkspace(repo, { port: 0, workspaceMode: 'separate' }),
       /уже выбран/,

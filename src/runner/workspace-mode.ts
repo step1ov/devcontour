@@ -93,11 +93,11 @@ export function chooseWorkspaceMode(workspace: string, requested?: WorkspaceMode
   if (ignoreStat && !ignoreStat.isFile())
     throw new Error('Для локальной памяти нужен обычный файл .gitignore');
   const ignore = existsSync(ignorePath) ? readFileSync(ignorePath, 'utf8') : '';
-  // Keep the rule last so preceding project negations cannot include the runtime directory.
-  if (
-    !ignore.trimEnd().endsWith('\n/.devcontour-local/') &&
-    ignore.trim() !== '/.devcontour-local/'
-  )
+  // The rule must follow every project negation so none can re-include the
+  // runtime directory; lines after it without a negation keep it effective.
+  const lines = ignore.split('\n').map((l) => l.trim());
+  const rule = lines.lastIndexOf('/.devcontour-local/');
+  if (rule < 0 || lines.slice(rule + 1).some((l) => l.startsWith('!')))
     writeFileSync(
       ignorePath,
       (ignore && !ignore.endsWith('\n') ? '\n' : '') + '/.devcontour-local/\n',

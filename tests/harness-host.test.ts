@@ -23,6 +23,7 @@ import { config, fixture, input } from './helpers.ts';
 import { configSchema, type Config } from '../src/core/model.ts';
 import { DevContour, loadedDigest, specDigest } from '../src/core/service.ts';
 import { validateWorkflow } from '../src/core/workflow.ts';
+import { modelRuntimes } from '../src/core/repositories.ts';
 import { DevContourExecutionStore } from '../src/harness/store.ts';
 import {
   devcontourContextSource,
@@ -89,6 +90,13 @@ test('Конфигурация → политика: dependencyStore компо�
   });
   const without = configSchema.parse({ ...config(), repositories: [component] });
   assert.equal('dependencyStore' in policyFromConfig(without).repositories[0], false);
+  // Отказ от установки зависимостей исполнителю — только явный false; без поля digest политики прежний.
+  assert.equal('writerDependencies' in policyFromConfig(without).repositories[0], false);
+  const optOut = configSchema.parse({
+    ...config(),
+    repositories: [{ ...component, writerDependencies: false }],
+  });
+  assert.equal(policyFromConfig(optOut).repositories[0].writerDependencies, false);
   assert.throws(() =>
     configSchema.parse({
       ...config(),
@@ -774,4 +782,25 @@ test('S3-R1-05: очередь записывает время готовнос�
   } finally {
     f.cleanup();
   }
+});
+
+test('Метка учебного режима: живые runtime ролей, компонентов и правил ревью перечислены', () => {
+  assert.deepEqual(modelRuntimes(config()), []);
+  const component = {
+    id: 'api',
+    name: 'API',
+    kind: 'product' as const,
+    path: '/tmp/api',
+    targetBranch: 'devcontour/accepted',
+    gates: config().gates,
+    protectedPaths: [],
+    roles: { backend: { runtime: 'claude' as const } },
+  };
+  assert.deepEqual(modelRuntimes(configSchema.parse({ ...config(), repositories: [component] })), [
+    'claude',
+  ]);
+  assert.deepEqual(
+    modelRuntimes(config({ review: { code: { reviewer: { runtime: 'codex' } } } })),
+    ['codex'],
+  );
 });

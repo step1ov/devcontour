@@ -30,6 +30,8 @@ export const slowTests = {
     'Политика после утверждения плана: смена gate и правила вендора ревью держат',
   ],
   'autonomous-loop': true,
+  'quick-result': true,
+  'quick-route-e2e': true,
   'board-coverage': [
     'Приёмка доски выполняет непокрытые gates один раз на итоговом SHA и принимает',
     'Провал непокрытого gate на итоговом SHA доски — отказ приёмки с названным gate;',

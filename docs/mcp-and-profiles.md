@@ -19,12 +19,14 @@ DevContour разделяет четыре выбора: стек продукт
 
 Дополнительные стартовые наборы:
 
-| Профиль        | Что включает                                             | Что готовит агент                                                                                                                                               |
-| -------------- | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `python-api`   | `uv sync --locked`, Ruff и pytest с JUnit                | Закреплённые зависимости в pyproject.toml/uv.lock, Python, реальные API/DB-тесты. Для другого менеджера или проверок — локальный профиль.                       |
-| `nest-api`     | `node-checks`, сборка, отдельные integration-тесты       | Scripts typecheck, build, test:devcontour и test:devcontour:integration; JUnit в `.reports/junit.xml` и `.reports/integration.xml`, тестовое окружение сервиса. |
-| `react-native` | `node-checks` и `mobile-maestro`                         | Unit-тесты, сборка и установка текущего SHA, устройство, mobile flows и cleanup.                                                                                |
-| `expo-mobile`  | `react-native` с метаданными Expo и защитой конфигурации | Совместимые с SDK зависимости, фактический способ сборки/установки и проверки приложения.                                                                       |
+| Профиль        | Что включает                                                            | Что готовит агент                                                                                                                                               |
+| -------------- | ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `python-api`   | `uv sync --locked`, Ruff и pytest с JUnit                               | Закреплённые зависимости в pyproject.toml/uv.lock, Python, реальные API/DB-тесты. Для другого менеджера или проверок — локальный профиль.                       |
+| `nest-api`     | `node-checks`, сборка, отдельные integration-тесты                      | Scripts typecheck, build, test:devcontour и test:devcontour:integration; JUnit в `.reports/junit.xml` и `.reports/integration.xml`, тестовое окружение сервиса. |
+| `react-native` | `node-checks` и `mobile-maestro`                                        | Unit-тесты, сборка и установка текущего SHA, устройство, mobile flows и cleanup.                                                                                |
+| `expo-mobile`  | `react-native` с метаданными Expo и защитой конфигурации                | Совместимые с SDK зависимости, фактический способ сборки/установки и проверки приложения.                                                                       |
+| `npm-project`  | `npm ci` и `npm test` с JUnit, защита package.json и lockfile           | Быстрое изменение существующего npm-репозитория: роль `developer` без обязательного контракта; реальные gates проекта задаются предложением preparation_setup.  |
+| `pnpm-project` | `pnpm install --frozen-lockfile` и `pnpm test` с JUnit, защита lockfile | То же для pnpm.                                                                                                                                                 |
 
 `node-checks` содержит npm ci, typecheck и test:devcontour; это переиспользуемая часть, а не полноценная приёмка любого продукта. Для прежних Node-профилей дополнительно нужен build. Scripts должны выдавать реальные отчёты, а не заглушки. Для Go требуется согласованная версия runner, формирующего JUnit. Maestro задаёт способ E2E-проверки и сочетается с React Native/Expo. `mobile:devcontour:prepare` обязан установить проверяемую сборку; наличие Expo Go или старой сборки не подтверждает текущий SHA. Автоматического EAS build, публикации и управления устройствами профиль не добавляет.
 

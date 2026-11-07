@@ -133,3 +133,20 @@ export function codeReviewVendor(
     'different-vendor'
   );
 }
+/**
+ * Runtime, которые вызовут модель: исполнители и ревьюеры всех ролей всех
+ * компонентов и правило ревью кода, кроме demo. Пустой список — контур
+ * действительно работает без вызовов моделей.
+ */
+export function modelRuntimes(config: Config): string[] {
+  const used = new Set<string>();
+  for (const repo of repositories(config))
+    for (const role of declaredRoles(config, repo.id)) {
+      used.add(roleBinding(config, role, repo.id).runtime);
+      used.add(reviewerBinding(config, role, repo.id).runtime);
+    }
+  for (const rule of [config.review?.code, config.review?.plan, config.review?.contract])
+    if (rule?.reviewer) used.add(rule.reviewer.runtime);
+  used.delete('demo');
+  return [...used].sort();
+}

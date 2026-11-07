@@ -12,6 +12,8 @@ import { sensitiveBasePaths } from './sensitive-paths.ts';
 
 /** Локальная запись проверки базы: компонент, SHA базы, договор и исход. */
 export const BASE_CHECK = 'base-check';
+/** Начало причины удержания переноса, который подтверждает только человек. */
+export const BASE_HELD_DETAIL = 'Перенос базы меняет приёмку или настройку контура';
 export interface BaseCheck {
   repositoryId: string;
   sha: string;
@@ -120,7 +122,7 @@ export async function checkBase(
   if (touched.length)
     return hold(
       'base.check.held',
-      `Перенос базы меняет приёмку или настройку контура (${touched.slice(0, 20).join(', ')}): gates этой базы его не подтверждают. Проверьте перенос и выполните queue --start; изменение приёмки — через contract-change`,
+      `${BASE_HELD_DETAIL} (${touched.slice(0, 20).join(', ')}): gates этой базы его не подтверждают. Проверьте перенос и выполните queue --start; изменение приёмки — через contract-change`,
       { paths: touched.slice(0, 20) },
     );
   const { engine } = executionOf(h);

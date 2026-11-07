@@ -1,3 +1,4 @@
+import { BASE_HELD_DETAIL } from '../src/runner/base-check.ts';
 import { executionOf } from '../src/harness/execution.ts';
 import { test } from 'node:test';
 import { testDemo } from './demo-pool.ts';
@@ -383,6 +384,13 @@ test('В режиме агента workflow доски сам проверяет
       'gates чувствительного переноса не исполнялись',
     );
     assert.equal(events('base.check.held').length, 1);
+    // Удержание помечено как решение человека — панель не выдаёт его за техническое.
+    assert.ok(
+      store
+        .read()
+        .waits?.find((w) => w.kind === 'base-check')
+        ?.detail.startsWith(BASE_HELD_DETAIL),
+    );
     await lead.tick();
     assert.equal(events('base.check.held').length, 1, 'та же причина — без нового события');
     // Решение человека или ведущего после проверки переноса — queue --start.

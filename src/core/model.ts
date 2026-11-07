@@ -891,6 +891,11 @@ export const repositorySchema = z.object({
   dependencyBuild: z.array(stepSchema).optional(),
   dependencyArtifacts: z.array(relativePath).optional(),
   dependencyStore: dependencyStoreSchema.optional(),
+  /**
+   * false — не ставить зависимости в worktree исполнителя до его работы
+   * (по умолчанию контроллер ставит их install-gates под изоляцией gates).
+   */
+  writerDependencies: z.boolean().optional(),
   preflight: z.array(stepSchema).optional(),
   forge: forgeSchema.optional(),
   name: z.string().min(1),

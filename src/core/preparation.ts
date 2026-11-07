@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { DomainError, type DevContourState, type Task } from './model.ts';
+import { DomainError, gateList, type DevContourState, type Task } from './model.ts';
 import type { Store } from './store.ts';
 import { boardPhase } from './work-status.ts';
 import {
@@ -380,6 +380,32 @@ function validateDesign(d: DesignBrief, channels: string[]) {
   const colors = d.palette.map((c) => c.name);
   if (new Set(colors).size !== colors.length) throw new DomainError('Повтор имени цвета палитры');
 }
+// The intake and every setup proposal are history: a later call may add a
+// proposal or mark the route as expanded, never rewrite what was entered.
+function validateQuick(c: ProductChange, previous?: ProductChange) {
+  for (const [index, r] of (c.setup ?? []).entries()) {
+    const expected = hash({
+      changeId: c.id,
+      stage: 'setup',
+      number: r.number,
+      profile: r.profile,
+      gates: r.gates ?? null,
+    });
+    if (r.number !== index + 1 || r.digest !== expected)
+      throw new DomainError('Некорректное предложение setup: ' + c.id);
+    if (r.gates) gateList.parse(r.gates);
+  }
+  if ((c.setup?.length || c.expanded) && !c.intake)
+    throw new DomainError('Предложение setup и расширение относятся к быстрому изменению');
+  if (!previous) return;
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  if (
+    (previous.intake && !same(previous.intake, c.intake)) ||
+    (previous.expanded && !same(previous.expanded, c.expanded)) ||
+    !same(previous.setup ?? [], (c.setup ?? []).slice(0, previous.setup?.length ?? 0))
+  )
+    throw new DomainError('История быстрого изменения неизменяема: ' + c.id);
+}
 export function validatePreparation(s: DevContourState, previous?: DevContourState) {
   if (!s.preparation) {
     if (previous?.preparation)
@@ -396,6 +422,10 @@ export function validatePreparation(s: DevContourState, previous?: DevContourSta
     throw new DomainError('Некорректный реестр продуктовых изменений');
   for (const c of p.changes) {
     validateJournal(c);
+    validateQuick(
+      c,
+      previous?.preparation?.changes.find((o) => o.id === c.id),
+    );
     c.design ??= [];
     for (const stage of ['product', 'architecture', 'references', 'concept', 'design'] as const)
       for (const [index, r] of (c[stage] ?? []).entries()) {
@@ -497,7 +527,12 @@ export function validatePreparation(s: DevContourState, previous?: DevContourSta
   }
 }
 export class Preparation {
-  constructor(readonly store: Store) {}
+  // Who enters a quick change is set by the entry point (panel or agent), not
+  // by a field of the payload.
+  constructor(
+    readonly store: Store,
+    readonly actor: 'operator' | 'lead' = 'lead',
+  ) {}
   enable() {
     this.store.change('preparation.enabled', (s) => {
       if (s.preparation) return;
@@ -534,6 +569,9 @@ export class Preparation {
       }
     const tasks = s.tasks.filter((t) => Boolean(c) && t.preparation?.changeId === c?.id);
     const live = tasks.filter((t) => t.status !== 'cancelled');
+    // Находки исполнителя — долг фичи, но не задачи изменения: готовность
+    // изменения их не ждёт.
+    const work = live.filter((t) => !t.finding);
     // The newest note of any change tells the operator the session is alive even
     // before the first revision exists.
     const latest = p.changes
@@ -562,6 +600,9 @@ export class Preparation {
             concept: strip(concept),
             design: strip(design),
             source: 'docs/changes/' + c.key,
+            intake: c.intake,
+            setup: c.setup?.at(-1),
+            expanded: c.expanded,
             activity: [...(c.activity ?? [])].reverse().slice(0, 40),
             questions: c.questions ?? [],
             decisions: [...(c.decisions ?? [])].reverse(),
@@ -651,30 +692,58 @@ export class Preparation {
       // за собой прежние задачи, и считать их значит показывать «0 из 70» там,
       // где живых задач одна. Доска без живых задач — тоже история.
       delivery: {
-        total: live.length,
-        done: live.filter((t) => t.status === 'done').length,
-        failed: live.filter((t) => t.status === 'failed').length,
+        total: work.length,
+        done: work.filter((t) => t.status === 'done').length,
+        failed: work.filter((t) => t.status === 'failed').length,
         // Задачи без фичи карта продукта не учитывает; число держит расхождение
         // на виду, пока их не привяжут.
-        unbound: live.filter((t) => !t.featureId).length,
+        unbound: work.filter((t) => !t.featureId).length,
         // Счётчик сбоев без причины отправляет оператора искать её в журнале.
         // Сама причина — самое важное на экране: она объясняет, почему работа
         // не движется, и говорит, что делать.
-        failures: live
+        failures: work
           .filter((t) => t.status === 'failed' && t.failure)
           .slice(-3)
           .map((t) => ({ id: t.id, title: t.title, reason: t.failure! })),
         boards: s.boards
           .filter((b) =>
-            b.revisions.some((r) => r.taskIds.some((id) => live.some((t) => t.id === id))),
+            b.revisions.some((r) => r.taskIds.some((id) => work.some((t) => t.id === id))),
           )
-          .map((b) => ({ id: b.id, title: b.title, phase: boardPhase(b, live) })),
+          .map((b) => ({ id: b.id, title: b.title, phase: boardPhase(b, work) })),
       },
     };
   }
   execute(operation: PreparationOperation, input: unknown) {
+    if (operation === 'preparation_quick') {
+      const v = preparationInputs[operation].parse(input);
+      // Проверка повтора и создание — в одной транзакции записи: два процесса
+      // (панель и CLI/MCP) с тем же ключом не создают два изменения.
+      return this.store.atomic(() => {
+        const same = this.store
+          .read()
+          .preparation?.changes.find((c) => c.intake?.requestKey === v.requestKey);
+        // A repeated request (double click, retry after a timeout) returns the
+        // change it created; the same key with another payload is a conflict.
+        if (same) {
+          const i = same.intake!;
+          if (
+            same.title !== v.title ||
+            i.repository !== v.repository ||
+            i.brief !== v.brief ||
+            i.criterion !== v.criterion
+          )
+            throw new DomainError('Ключ запроса уже использован другим поручением', 409);
+          return { ...this.status(same.id, { content: false }), changeId: same.id };
+        }
+        const view = this.apply(operation, input);
+        return { ...view, changeId: view.enabled ? view.activeChangeId! : '' };
+      });
+    }
     if (operation === 'preparation_status')
       return this.status(preparationInputs[operation].parse(input).changeId, { content: false });
+    return this.apply(operation, input);
+  }
+  private apply(operation: PreparationOperation, input: unknown) {
     preparationInputs[operation].parse(input);
     return this.store.atomic(() => {
       this.enable();
@@ -682,7 +751,33 @@ export class Preparation {
       this.store.change(operation, (s) => {
         const before = structuredClone(s),
           p = s.preparation!;
-        if (operation === 'preparation_create') {
+        if (operation === 'preparation_quick') {
+          const v = preparationInputs[operation].parse(input);
+          selected = 'PC-' + randomUUID();
+          p.changes.push({
+            id: selected,
+            key: changeKeyOf(p.changes.length + 1, slugify(v.title)),
+            title: v.title,
+            createdAt: now(),
+            product: [],
+            architecture: [],
+            references: [],
+            concept: [],
+            design: [],
+            activity: [],
+            questions: [],
+            decisions: [],
+            intake: {
+              requestKey: v.requestKey,
+              createdAt: now(),
+              actor: this.actor,
+              repository: v.repository,
+              brief: v.brief,
+              criterion: v.criterion,
+            },
+          });
+          p.activeChangeId = selected;
+        } else if (operation === 'preparation_create') {
           const v = preparationInputs[operation].parse(input);
           selected = 'PC-' + randomUUID();
           p.changes.push({
@@ -713,7 +808,38 @@ export class Preparation {
           )
             editable(s, c.id);
           if (operation === 'preparation_activate') p.activeChangeId = c.id;
-          else if (operation === 'preparation_product') {
+          else if (operation === 'preparation_setup') {
+            const v = preparationInputs[operation].parse(input);
+            if (!c.intake || c.expanded)
+              throw new DomainError('Предложение setup — шаг быстрого изменения', 409);
+            if ((c.setup?.at(-1)?.digest ?? null) !== v.expectedDigest)
+              throw new DomainError('Предложение setup изменилось; перечитайте его', 409);
+            if (v.gates) {
+              const parsed = gateList.safeParse(v.gates);
+              if (!parsed.success)
+                throw new DomainError('Gates предложения: ' + parsed.error.issues[0].message, 400);
+            }
+            c.setup ??= [];
+            const number = c.setup.length + 1;
+            c.setup.push({
+              number,
+              digest: hash({
+                changeId: c.id,
+                stage: 'setup',
+                number,
+                profile: v.profile,
+                gates: v.gates ?? null,
+              }),
+              createdAt: now(),
+              profile: v.profile,
+              ...(v.gates ? { gates: v.gates } : {}),
+              reason: v.reason,
+            });
+          } else if (operation === 'preparation_expand') {
+            const v = preparationInputs[operation].parse(input);
+            if (!c.intake) throw new DomainError('Изменение уже идёт полным маршрутом', 409);
+            if (!c.expanded) c.expanded = { at: now(), reason: v.reason };
+          } else if (operation === 'preparation_product') {
             const v = preparationInputs[operation].parse(input);
             if ((c.product.at(-1)?.digest ?? null) !== v.expectedDigest)
               throw new DomainError('Продуктовая постановка изменилась; перечитайте её', 409);

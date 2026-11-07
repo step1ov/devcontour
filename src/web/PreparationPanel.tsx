@@ -31,6 +31,7 @@ import { Textarea } from '@/ui/textarea.tsx';
 import { cn } from '@/lib/utils.ts';
 import { boardPhaseLabels, type BoardPhase, type QueueStopView } from '../core/work-status.ts';
 import { QueueStopBanner } from './QueueStopBanner.tsx';
+import { QuickForm, QuickRoute } from './QuickRoute.tsx';
 
 const Development = lazy(() => import('./App.tsx').then((m) => ({ default: m.App })));
 type View = ReturnType<Preparation['status']> & {
@@ -685,6 +686,11 @@ export function PreparationPanel() {
   const conceptCurrent = refs?.status === 'approved' && con?.referencesDigest === refs.digest;
   const designCurrent = con?.status === 'approved' && d?.conceptDigest === con.digest;
   // How far the design stage has got: used by the stepper and the sub-nav.
+  // Референсы с applicable: false — утверждённое решение «дизайн не нужен»:
+  // концепт и дизайн-система не требуются, шаги 2–3 не ждут.
+  const designNotApplicable = Boolean(
+    referencesCurrent && refs?.status === 'approved' && refs.content?.applicable === false,
+  );
   const designApproved = [
     referencesCurrent && refs?.status === 'approved',
     conceptCurrent && con?.status === 'approved',
@@ -806,6 +812,15 @@ export function PreparationPanel() {
               Создать изменение
             </Button>
           </form>
+          <QuickForm
+            workspace={view.workspace}
+            onCreated={(changeId) => {
+              setSelected(changeId);
+              setTab('product');
+              setComment('');
+              void reload();
+            }}
+          />
         </aside>
         <article className="min-w-0">
           {/* Остановка очереди видна на каждом этапе, а не только на экране
@@ -823,6 +838,9 @@ export function PreparationPanel() {
               </AlertDescription>
             </Alert>
           )}
+          {/* Быстрое изменение показывает свой путь над этапами: решения
+              по-прежнему утверждаются в этапах ниже. */}
+          {c?.intake && <QuickRoute changeId={c.id} workspace={view.workspace?.path} />}
           <ol
             className="mb-8 grid list-none grid-cols-1 gap-3 p-0 sm:grid-cols-2 lg:grid-cols-4"
             aria-label="Этапы изменения"
@@ -870,7 +888,9 @@ export function PreparationPanel() {
                               ? 'После согласования архитектуры'
                               : designApproved === 3
                                 ? 'Утверждено'
-                                : 'Шаг ' + (designApproved + 1) + ' из 3'
+                                : designNotApplicable
+                                  ? 'Не требуется (утверждено)'
+                                  : 'Шаг ' + (designApproved + 1) + ' из 3'
                             : view.developmentReady
                               ? 'Разрешена'
                               : 'Ожидает согласований'}

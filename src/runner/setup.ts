@@ -12,7 +12,7 @@ import {
   type FileIntent,
   type FilePlanEntry,
 } from 'devcontour-harness';
-import { configSchema, roles } from '../core/model.ts';
+import { configSchema, gateList, roles } from '../core/model.ts';
 const builtinTitles: Record<string, string> = {
   architect: 'Архитектор',
   backend: 'Разработчик бэкенда',
@@ -123,6 +123,7 @@ export function projectConfig(
       '.devcontour/',
       'package.json',
       'package-lock.json',
+      'pnpm-lock.yaml',
     ],
     packs: [profileMetadata(selected)],
   });
@@ -170,29 +171,43 @@ const conflictText = (entry: FilePlanEntry) => {
   }
 };
 
-export async function setupProject(options: {
+async function runSetup(options: {
   repository: string;
   profile: string;
   brief?: string;
   data?: string;
   workspace?: string;
   approvalMode?: ApprovalMode;
+  /**
+   * Быстрое изменение существующего репозитория: поручение и критерий живут в
+   * подготовке workspace, поэтому `docs/spec.md` не требуется.
+   */
+  quick?: boolean;
+  /** Gates предложения ведущего агента вместо gates профиля. */
+  gates?: unknown[];
+  /** Только план: какие файлы будут созданы, сохранены или отклонены. */
+  plan?: boolean;
 }) {
   const repository = await realpath(resolve(options.repository));
   if (repository === (await realpath(devcontourRoot)))
     throw new Error('Укажите отдельный каталог продукта, а не исходники DevContour');
-  const docs = await realpath(join(repository, 'docs'));
-  if (docs !== join(repository, 'docs')) throw new Error('docs должен быть внутри продукта');
-  const brief = await realpath(resolve(repository, options.brief ?? 'docs/spec.md'));
-  const briefRelative = relative(docs, brief);
-  if (
-    isAbsolute(briefRelative) ||
-    briefRelative.startsWith('..' + sep) ||
-    briefRelative === '..' ||
-    !brief.endsWith('.md')
-  )
-    throw new Error('ТЗ должно быть Markdown-файлом внутри docs продукта');
-  if (!(await readFile(brief, 'utf8')).trim()) throw new Error('ТЗ пустое');
+  let brief: string | undefined;
+  if (!options.quick || (await inspectPath(join(repository, 'docs')))) {
+    const docs = await realpath(join(repository, 'docs'));
+    if (docs !== join(repository, 'docs')) throw new Error('docs должен быть внутри продукта');
+    if (!options.quick) {
+      brief = await realpath(resolve(repository, options.brief ?? 'docs/spec.md'));
+      const briefRelative = relative(docs, brief);
+      if (
+        isAbsolute(briefRelative) ||
+        briefRelative.startsWith('..' + sep) ||
+        briefRelative === '..' ||
+        !brief.endsWith('.md')
+      )
+        throw new Error('ТЗ должно быть Markdown-файлом внутри docs продукта');
+      if (!(await readFile(brief, 'utf8')).trim()) throw new Error('ТЗ пустое');
+    }
+  }
   let gitRoot: string | undefined;
   try {
     gitRoot = await git(repository, 'rev-parse', '--show-toplevel');
@@ -202,7 +217,9 @@ export async function setupProject(options: {
   if (gitRoot && (await realpath(gitRoot)) !== repository)
     throw new Error('Продукт находится внутри другого Git-репозитория; выберите его корень');
 
-  const selected = await profile(options.profile, repository);
+  const pinned = await profile(options.profile, repository);
+  // Профиль закрепляется как есть; gates предложения заменяют только gates конфигурации.
+  const selected = options.gates ? { ...pinned, gates: gateList.parse(options.gates) } : pinned;
   if (options.workspace && options.data) throw new Error('Используйте workspace или data, не оба');
   let workspaceRoot: string | undefined;
   if (options.workspace) {
@@ -236,8 +253,24 @@ export async function setupProject(options: {
   // Инструкции стека приезжают из библиотеки DevContour по объявлению профиля,
   // а не лежат в каждом проекте заранее: подтвердили мобильное приложение —
   // приехали мобильные инструкции, и только они.
-  for (const pack of selected.contextPacks)
-    for (const file of pack.files) {
+  // Пакеты конфигурации — умолчания ролей и пакеты профиля; тот же список
+  // уходит в config.json. Их правила и справка приезжают сейчас, в том же
+  // create-only плане: context-lock после bootstrap закрепляет файлы дерева.
+  const configuredPacks = [
+    ...new Map(
+      [
+        ...defaultContextPacks(
+          'main',
+          Object.keys(projectConfig(repository, selected, options.approvalMode).roles),
+        ),
+        ...selected.contextPacks,
+      ].map((pack) => [pack.id, pack]),
+    ).values(),
+  ];
+  const references = (pack: object) =>
+    'references' in pack && Array.isArray(pack.references) ? (pack.references as string[]) : [];
+  for (const pack of configuredPacks)
+    for (const file of [...pack.files, ...references(pack)]) {
       const source = join(libraryRoot, file);
       if (files.has(join(repository, file))) continue;
       try {
@@ -297,7 +330,7 @@ export async function setupProject(options: {
     );
     files.set(join(repository, 'docs', destination), rewritten);
   }
-  files.set(join(data, 'packs.lock.json'), JSON.stringify(profileLock(selected), null, 2) + '\n');
+  files.set(join(data, 'packs.lock.json'), JSON.stringify(profileLock(pinned), null, 2) + '\n');
   const profilePath = join(data, 'profiles', selected.id + '.json');
   const profileContent = selected.raw;
   files.set(profilePath, profileContent);
@@ -314,18 +347,8 @@ export async function setupProject(options: {
           : projectConfig(repository, selected, options.approvalMode)),
         // Пакеты строятся по объявленным ролям: роль без своей инструкции
         // осталась бы с одним общим контекстом и не знала бы своего дела.
-        contextPacks: [
-          ...new Map(
-            [
-              ...defaultContextPacks(
-                'main',
-                Object.keys(projectConfig(repository, selected, options.approvalMode).roles),
-              ),
-              // Пакеты профиля приезжают вместе со стеком и уточняют умолчания.
-              ...selected.contextPacks,
-            ].map((pack) => [pack.id, pack]),
-          ).values(),
-        ],
+        // Пакеты профиля приезжают вместе со стеком и уточняют умолчания.
+        contextPacks: configuredPacks,
       },
       null,
       2,
@@ -337,34 +360,61 @@ export async function setupProject(options: {
   const intents: FileIntent[] = [...files].map(([path, content]) =>
     path === profilePath ? { path, content, onExisting: 'require-identical' } : { path, content },
   );
+  // Отказы применения; план называет их данными, а не бросает.
+  const refusals = async (plan: Awaited<ReturnType<typeof planFileWrites>>) => {
+    const unsafe = plan.entries.find(
+      (e) => e.action === 'conflict' && e.conflict !== 'content-differs',
+    );
+    if (unsafe)
+      throw new HarnessError('PATH_CONFLICT', conflictText(unsafe), [
+        { path: [unsafe.conflictPath ?? unsafe.path], message: unsafe.conflict! },
+      ]);
+    let approvalMode = options.approvalMode ?? 'agent';
+    if (await inspectPath(join(data, 'config.json'))) {
+      const existing = loadConfig(join(data, 'config.json'));
+      if (
+        (workspaceRoot && existing.workspaceRoot !== workspaceRoot) ||
+        existing.repository !== repository ||
+        existing.mode !== 'local' ||
+        !existing.packs.some((p) => packKey(p) === packKey(selected))
+      )
+        throw new Error('Существующая конфигурация относится к другому продукту или профилю');
+      if (options.approvalMode && existing.approvalMode !== options.approvalMode)
+        throw new Error('Setup не меняет установленный режим согласования; измените его явно');
+      approvalMode = existing.approvalMode;
+    } else if (await inspectPath(join(data, 'packs.lock.json'))) {
+      const existing = JSON.parse(await readFile(join(data, 'packs.lock.json'), 'utf8'));
+      if (JSON.stringify(existing) !== JSON.stringify(profileLock(pinned)))
+        throw new Error('Существующий packs.lock.json не соответствует выбранному профилю');
+    }
+    if (plan.conflicts)
+      throw new Error('Сохранённый профиль изменён; требуется явная сверка версии');
+    return approvalMode;
+  };
   const plan = await planFileWrites({ files: intents });
-  const unsafe = plan.entries.find(
-    (e) => e.action === 'conflict' && e.conflict !== 'content-differs',
-  );
-  if (unsafe)
-    throw new HarnessError('PATH_CONFLICT', conflictText(unsafe), [
-      { path: [unsafe.conflictPath ?? unsafe.path], message: unsafe.conflict! },
-    ]);
-  let approvalMode = options.approvalMode ?? 'agent';
-  if (await inspectPath(join(data, 'config.json'))) {
-    const existing = loadConfig(join(data, 'config.json'));
-    if (
-      (workspaceRoot && existing.workspaceRoot !== workspaceRoot) ||
-      existing.repository !== repository ||
-      existing.mode !== 'local' ||
-      !existing.packs.some((p) => packKey(p) === packKey(selected))
-    )
-      throw new Error('Существующая конфигурация относится к другому продукту или профилю');
-    if (options.approvalMode && existing.approvalMode !== options.approvalMode)
-      throw new Error('Setup не меняет установленный режим согласования; измените его явно');
-    approvalMode = existing.approvalMode;
-  } else if (await inspectPath(join(data, 'packs.lock.json'))) {
-    const existing = JSON.parse(await readFile(join(data, 'packs.lock.json'), 'utf8'));
-    if (JSON.stringify(existing) !== JSON.stringify(profileLock(selected)))
-      throw new Error('Существующий packs.lock.json не соответствует выбранному профилю');
+  if (options.plan) {
+    let refusal: string | undefined;
+    try {
+      await refusals(plan);
+    } catch (error) {
+      refusal = (error as Error).message;
+    }
+    return {
+      status: 'plan' as const,
+      repository,
+      workspace: workspaceRoot,
+      data,
+      profile: pinned.id,
+      files: plan.entries.map((e) => ({
+        path: e.path,
+        action: e.action,
+        ...(e.conflict ? { conflict: e.conflict } : {}),
+      })),
+      conflicts: plan.conflicts,
+      ...(refusal ? { refusal } : {}),
+    };
   }
-  if (plan.conflicts) throw new Error('Сохранённый профиль изменён; требуется явная сверка версии');
-
+  const approvalMode = await refusals(plan);
   const { created, preserved } = await applyFileWrites(plan, intents);
   if (workspaceRoot) {
     const configPath = join(data, 'config.json');
@@ -373,7 +423,7 @@ export async function setupProject(options: {
       await writeFile(configPath, JSON.stringify(scopedConfig(config), null, 2) + '\n');
   }
   return {
-    status: 'needs-agent-bootstrap',
+    status: 'needs-agent-bootstrap' as const,
     repository,
     brief,
     workspace: workspaceRoot,
@@ -390,4 +440,16 @@ export async function setupProject(options: {
       'После запуска ведущий агент разбирает сбои, ведёт следующие этапы и принимает только проверенные доски.',
     ],
   };
+}
+
+type SetupOptions = Omit<Parameters<typeof runSetup>[0], 'plan'>;
+type SetupOutcome = Awaited<ReturnType<typeof runSetup>>;
+
+export async function setupProject(options: SetupOptions) {
+  return (await runSetup(options)) as Exclude<SetupOutcome, { status: 'plan' }>;
+}
+
+/** План setup без записи: файлы с действием и отказ, которым закончилось бы применение. */
+export async function planSetup(options: SetupOptions) {
+  return (await runSetup({ ...options, plan: true })) as Extract<SetupOutcome, { status: 'plan' }>;
 }

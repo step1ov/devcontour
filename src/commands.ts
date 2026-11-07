@@ -57,8 +57,10 @@ import {
   profileLock,
   projectConfig,
   setupProject,
+  planSetup,
   componentProfileConfig,
 } from './runner/setup.ts';
+import { markQuickSetup, quickFacts } from './runner/quick.ts';
 import { acceptBoard, reviewContract, reviewPlan } from './runner/agent-control.ts';
 import { specDigest } from './core/service.ts';
 import { WorkspaceRunner } from './runner/workspace.ts';
@@ -66,6 +68,7 @@ import { setupWorkspace } from './runner/workspace-setup.ts';
 import { Workspace } from './core/workspace.ts';
 import { attachJournal } from './runner/journal.ts';
 import { commandScope } from './runner/scope.ts';
+import { modelRuntimes } from './core/repositories.ts';
 import { syncGit, syncPreparation } from './runner/git-sync.ts';
 import { setupDemo, exists } from './demo.ts';
 import { restoreBackup } from './runner/backup.ts';
@@ -377,7 +380,12 @@ async function main() {
       });
     return;
   }
-  if (workspacePath && ['setup', 'init', 'workspace-init'].includes(operation))
+  // Быстрое изменение проверяет согласования названного изменения, а не активного.
+  if (
+    workspacePath &&
+    ['setup', 'init', 'workspace-init'].includes(operation) &&
+    !(operation === 'setup' && args.includes('--change'))
+  )
     requirePreparation(root);
   if (operation === 'workspace-init') {
     if (!args.includes('--file')) throw new Error('Укажите --file workspace.json');
@@ -389,6 +397,89 @@ async function main() {
     console.log(
       JSON.stringify(
         await setupWorkspace(option('--file', ''), args.includes('--data') ? root : undefined),
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+  // Факты репозитория для быстрого изменения: только чтение, без setup.
+  if (operation === 'quick-facts') {
+    if (!workspacePath || !args.includes('--repository'))
+      throw new Error('Укажите --workspace и --repository');
+    console.log(
+      JSON.stringify(
+        await quickFacts({
+          workspace: workspacePath,
+          mode: selectedWorkspaceMode(workspacePath),
+          repository: resolve(option('--repository', '')),
+          changeKeys: await changeKeysOf(root),
+        }),
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+  // Быстрое изменение: setup применяет ровно последнее предложение ведущего
+  // агента, которое панель показала оператору планом файлов.
+  if (operation === 'setup' && args.includes('--change')) {
+    if (!workspacePath) throw new Error('Быстрое изменение требует --workspace');
+    const store = preparationStore(root);
+    let change, activeChange;
+    try {
+      const preparation = store.read().preparation;
+      change = preparation?.changes.find((c) => c.id === option('--change', ''));
+      activeChange = preparation?.activeChangeId;
+    } finally {
+      store.close();
+    }
+    if (!change?.intake) throw new Error('Быстрое изменение не найдено');
+    requirePreparation(root, change.id);
+    if (activeChange !== change.id)
+      throw new Error('Сделайте изменение активным (preparation_activate) перед setup');
+    if (change.expanded)
+      throw new Error('Изменение идёт полным маршрутом: используйте setup --profile');
+    const proposal = change.setup?.at(-1);
+    if (!proposal) throw new Error('Сначала предложите setup операцией preparation_setup');
+    // Применяется ровно то предложение, план которого видел пользователь.
+    if (!args.includes('--plan') && option('--proposal', '') !== proposal.digest)
+      throw new Error(
+        `Укажите --proposal ${proposal.digest}: digest предложения, план которого показан в панели`,
+      );
+    // Блокирующие факты репозитория проверяются заново на момент записи.
+    const facts = await quickFacts({
+      workspace: workspacePath,
+      mode: selectedWorkspaceMode(workspacePath),
+      repository: change.intake.repository,
+      changeKeys: await changeKeysOf(root),
+    });
+    if (!facts.ready)
+      throw new Error(
+        'Репозиторий не готов: ' +
+          facts.diagnostics
+            .filter((d) => d.severity === 'blocker')
+            .map((d) => `${d.message}. ${d.action}`)
+            .join(' '),
+      );
+    const input = {
+      repository: change.intake.repository,
+      profile: proposal.profile,
+      workspace: workspacePath,
+      quick: true,
+      ...(proposal.gates ? { gates: proposal.gates } : {}),
+      approvalMode: args.includes('--approval-mode')
+        ? configSchema.shape.approvalMode.parse(option('--approval-mode', 'agent'))
+        : undefined,
+    };
+    console.log(
+      JSON.stringify(
+        args.includes('--plan')
+          ? { proposal: proposal.digest, ...(await planSetup(input)) }
+          : {
+              proposal: proposal.digest,
+              ...(await appliedQuickSetup(root, change.id, proposal.digest, input)),
+            },
         null,
         2,
       ),
@@ -1214,7 +1305,7 @@ async function main() {
     throw new Error('Некорректный port');
   const app = await serve(h, scheduler, { port, dev: args.includes('--dev') });
   console.log(
-    `DevContour: ${app.url}\n${config.mode === 'demo' ? 'Учебный режим: модели не вызываются.' : 'Локальный режим: запуск использует настроенные CLI и их авторизацию.'}`,
+    `DevContour: ${app.url}\n${config.mode !== 'demo' ? 'Локальный режим: запуск использует настроенные CLI и их авторизацию.' : modelRuntimes(config).length ? 'Учебный режим, но роли вызывают модели: ' + modelRuntimes(config).join(', ') + '.' : 'Учебный режим: модели не вызываются.'}`,
   );
   let closing = false;
   // Первый сигнал — штатная остановка; второй — немедленный выход (130),
@@ -1256,3 +1347,31 @@ main().catch((error) => {
     );
   process.exitCode = 1;
 });
+
+/** Ключи изменений подготовки: их проекция в docs/changes — запись DevContour. */
+async function changeKeysOf(root: string) {
+  if (!(await exists(join(root, 'state.sqlite')))) return [];
+  // quick-facts документирован как команда без записи: только чтение.
+  const store = preparationStore(root, true);
+  try {
+    return (store.read().preparation?.changes ?? []).map((c) => c.key);
+  } finally {
+    store.close();
+  }
+}
+
+/**
+ * Setup быстрого изменения и отметка, какое предложение какого изменения
+ * применено: панель второго изменения в том же workspace не выдаёт чужой
+ * setup за свой.
+ */
+async function appliedQuickSetup(
+  root: string,
+  changeId: string,
+  proposal: string,
+  input: Parameters<typeof setupProject>[0],
+) {
+  const result = await setupProject(input);
+  markQuickSetup(root, changeId, proposal);
+  return result;
+}

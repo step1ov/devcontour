@@ -801,6 +801,38 @@ export async function reviewPlan(
   // Связь с историей INTENT — то же предусловие утверждения (`approve`):
   // отказ здесь не тратит ревью на план, который утверждение отклонит.
   h.assertStoryBindings(drafts.filter((t) => t.status === 'draft'));
+  // Ревьюер читает базу прогонов. Подготовка контура (bootstrap: правила,
+  // роли, контекст), ещё не перенесённая в неё, ревьюеру не видна, и ревью
+  // плана по такому дереву — потраченный вызов модели.
+  for (const repositoryId of new Set(drafts.map((t) => t.repositoryId))) {
+    const repo = repository(h.config, repositoryId);
+    // Без Git или без ветки базы сравнивать нечего: отказ даст само исполнение.
+    const [base, head] = await Promise.all([
+      git(repo.path, 'rev-parse', 'refs/heads/' + repo.targetBranch).catch(() => ''),
+      git(repo.path, 'rev-parse', 'HEAD').catch(() => ''),
+    ]);
+    if (!base || !head || base === head) continue;
+    // Что рабочая ветка добавила после общей точки с базой (и после интеграций).
+    const since = await git(repo.path, 'merge-base', base, head).catch(() => '');
+    if (!since || since === head) continue;
+    const changed = (await git(repo.path, 'diff', '--name-only', '--no-renames', since, head))
+      .split('\n')
+      .filter(Boolean);
+    // Только то, без чего ревьюер слеп к контуру: правила агентов и описание
+    // изменения. Документы контрактов сюда не входят — ревью плана при смене
+    // контракта законно идёт до переноса базы и получает их в предложении.
+    const pending = changed.filter(
+      (p) =>
+        ['AGENTS.md', 'CLAUDE.md'].includes(p) ||
+        p.startsWith('.agents/') ||
+        p.startsWith('docs/changes/'),
+    );
+    if (pending.length)
+      throw new DomainError(
+        `База прогонов ${repo.targetBranch} отстаёт от рабочей ветки на подготовку контура (${pending.slice(0, 5).join(', ')}${pending.length > 5 ? '…' : ''}): ревьюер её не увидит. Сначала base-update и подтверждение переноса оператором`,
+        409,
+      );
+  }
   const contractIds = new Set(tasks.flatMap((t) => t.contracts));
   // Зависимости вне предложения ревьюер проверить не может: база контура
   // ему закрыта. Это задачи других досок и невыбранные черновики своей —

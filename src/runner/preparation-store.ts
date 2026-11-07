@@ -7,7 +7,8 @@ import { repositories } from '../core/repositories.ts';
 import { loadConfig } from './config.ts';
 import { attachProductProjection } from './journal.ts';
 
-export function preparationStore(root: string) {
+/** `readOnly` — соединение только для чтения, без проекции брифа: для команд без записи. */
+export function preparationStore(root: string, readOnly = false) {
   const workspace = dirname(root);
   if (selectedWorkspaceMode(workspace)) assertControllerCheckout(workspace);
   const path = join(root, 'config.json');
@@ -24,7 +25,9 @@ export function preparationStore(root: string) {
     config ? repositories(config) : undefined,
     false,
     'DELETE',
+    readOnly,
   );
+  if (readOnly) return store;
   // Every process that opens the preparation store projects the brief: the CLI
   // writes revisions just as often as the panel does.
   try {
@@ -35,7 +38,7 @@ export function preparationStore(root: string) {
   }
   return store;
 }
-export function requirePreparation(root: string) {
+export function requirePreparation(root: string, changeId?: string) {
   if (!existsSync(join(root, 'state.sqlite')))
     throw new Error(
       'Сначала запустите start --workspace и согласуйте продукт, архитектуру и стек в панели',
@@ -44,7 +47,7 @@ export function requirePreparation(root: string) {
   try {
     if (!store.read().preparation)
       throw new Error('Сначала включите продуктовый процесс командой start --workspace');
-    return developmentBinding(store.read());
+    return developmentBinding(store.read(), changeId);
   } finally {
     store.close();
   }
