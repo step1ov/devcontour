@@ -453,7 +453,9 @@ test('S12/S14 пауза оператора и ожидание переноса
     f.h.addTask(b.id, input());
     f.h.approve(b.id);
     f.h.pause(true);
-    const detail = 'Перенос меняет приёмку или настройку контура: AGENTS.md';
+    // Длинный перечень файлов: причина длиннее предела карточки.
+    const files = Array.from({ length: 30 }, (_, i) => `docs/guide-${i}.md`).join(', ');
+    const detail = `Перенос меняет приёмку или настройку контура: AGENTS.md, ${files}`;
     f.store.change('fixture.base-wait', (s) => {
       s.waits = [{ kind: 'base-check', detail, at: new Date().toISOString() }];
     });
@@ -467,8 +469,33 @@ test('S12/S14 пауза оператора и ожидание переноса
       'ожидание базы свёрнуто в паузу',
     );
     assert.equal(byKey(items, 'wait:base-check'), undefined);
-    assert.match(starts[0].reason, /перенос базы/);
+    // Перенос — в начале причины: предел длины режет конец, а не его.
+    assert.ok(
+      starts[0].reason.startsWith(
+        'Запуск очереди подтвердит и перенос базы: Перенос меняет приёмку',
+      ),
+      starts[0].reason,
+    );
     assert.ok(starts[0].reason.includes('AGENTS.md'), 'причина называет перенос');
+    // Один запуск очереди с карточки снимает и паузу, и ожидание переноса.
+    const done = await new AttentionService(f.store, f.h).act({
+      sourceKey: 'queue',
+      occurrenceId: starts[0].occurrenceId,
+      expectedVersion: starts[0].sourceVersion,
+      action: 'resume',
+    });
+    assert.equal(done.resolved, true);
+    const resumed = f.store.read();
+    assert.equal(resumed.paused, false);
+    assert.equal(
+      (resumed.waits ?? []).some((w) => w.kind === 'base-check'),
+      false,
+      'ожидание переноса снято',
+    );
+    const cleared = await engineItems(f);
+    assert.equal(byKey(cleared, 'queue'), undefined);
+    assert.equal(byKey(cleared, 'wait:base-check'), undefined);
+    f.h.pause(true);
     // Проваленная проверка — не действие оператора: остаётся у ведущего.
     f.store.change('fixture.base-failed', (s) => {
       s.waits = [
