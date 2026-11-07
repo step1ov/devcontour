@@ -11,7 +11,12 @@
  *                 попытку B прежней версии не продолжает; после истечения
  *                 попытка завершается явно (задача ждёт повтора), явный
  *                 повтор — новая попытка с новым владением; A не меняется.
- * crash         — версия «после» оставляет живую роль (аварийная остановка).
+ *                 Новая версия пишет по одной записи нового вида: поручение
+ *                 быстрого маршрута, вопрос исполнителя (неблокирующий запрос
+ *                 ведущему от новой попытки), заметку обсуждения и отметку
+ *                 центра внимания.
+ * crash         — версия «после» оставляет живую роль (аварийная остановка);
+ *                 записи нового вида и журнал до них не изменились.
  * old-refuses   — версия «до» над состоянием с ролью новой версии: отказ до
  *                 записи или (движок, знающий версию роли) роль не перенята и
  *                 ничего не выдано; база не меняется.
@@ -23,8 +28,12 @@ import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { configSchema } from '../src/core/model.ts';
+import { Preparation } from '../src/core/preparation.ts';
 import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
+import { AttentionService } from '../src/application/attention.ts';
+import { DiscussionService } from '../src/application/discussion.ts';
+import { executionOf } from '../src/harness/execution.ts';
 
 const [step, dir] = process.argv.slice(2);
 if (!step || !dir) {
@@ -41,6 +50,7 @@ const harnessVersion = (
 ).version;
 const database = join(dir, 'state.sqlite');
 const snapshotFile = join(dir, 'snapshot.json');
+const seededFile = join(dir, 'seeded.json');
 // Срок роли и попытки: с запасом на запуск шага «после», но короткий.
 const LEASE_MS = 20_000;
 const SHA_CANDIDATE = 'c'.repeat(40);
@@ -87,6 +97,12 @@ const out = (value: unknown) =>
 function accept(h: DevContour, owner: string, id: string) {
   const run = h.claim(owner);
   assert.equal(run?.taskId, id);
+  complete(h, run);
+  return run;
+}
+
+/** Обе фазы с прошедшими проверками и принятие выданной попытки. */
+function complete(h: DevContour, run: { id: string; token: string }) {
   h.phase(run.id, run.token, 'integrating', {
     candidateSha: SHA_CANDIDATE,
     integrationSha: SHA_MERGED,
@@ -106,7 +122,21 @@ function accept(h: DevContour, owner: string, id: string) {
         summary: 'Upgrade fixture',
       });
   h.finish(run.id, run.token, SHA_MERGED);
-  return run;
+}
+
+/**
+ * Записи нового вида и журнал: по ним шаг «crash» видит, что новая версия
+ * при следующем открытии ничего из записанного не потеряла и не переписала.
+ */
+function newRecords(store: Store, h: DevContour, accepted: string) {
+  const change = store.read().preparation?.changes.find((c) => c.intake);
+  return {
+    quick: change && { id: change.id, intake: change.intake },
+    discussion: new DiscussionService(h).read({ taskId: accepted }).messages,
+    attention: new AttentionService(store, h).marks(),
+    input: executionOf(h).engine.inputRequests(),
+    events: store.allEvents(),
+  };
 }
 
 if (step === 'before') {
@@ -175,8 +205,83 @@ if (step === 'before') {
     before.a,
     'принятая задача изменена обновлением',
   );
+  // Новая попытка оставляет неблокирующий запрос ведущему (без модели: тот же
+  // вызов движка, что и после ответа исполнителя), оператор пишет заметку к
+  // принятой задаче и отмечает первую карточку центра внимания прочитанной.
+  executionOf(h).engine.recordAssumptions(next.id, next.token, {
+    assumptions: [],
+    followUps: [
+      {
+        question: {
+          question: 'Which name should the footer link use?',
+          options: [],
+          recommended: null,
+          severity: 3,
+          rationale: 'Upgrade fixture follow-up',
+          affects: [],
+        },
+        effectiveSeverity: 3,
+        floors: [],
+      },
+    ],
+    criticalHits: [],
+    callId: null,
+  });
+  // Новая попытка доходит до принятия: неблокирующий запрос её не держит.
+  complete(h, next);
+  assert.equal(store.read().tasks.find((t) => t.id === before.b.id)!.status, 'done');
+  // Поручение быстрого маршрута — после работы очереди: оно включает
+  // подготовку, а включение требует, чтобы активных попыток не было.
+  new Preparation(store, 'operator').execute('preparation_quick', {
+    requestKey: 'upgrade-quick-1',
+    title: 'Quick change after the upgrade',
+    repository: dir,
+    brief: 'Add a footer link to the docs page.',
+    criterion: 'The footer shows the link.',
+  });
+  const acceptedId = (before.a.task as { id: string }).id;
+  new DiscussionService(h).post(
+    {
+      taskId: acceptedId,
+      kind: 'note',
+      text: 'Accepted before the upgrade; checked after it.',
+      idempotencyKey: 'upgrade-note-1',
+      expectedVersion: 0,
+    },
+    'operator',
+  );
+  const attention = new AttentionService(store, h);
+  const [card] = (await attention.active()).items;
+  assert.ok(card, 'центр внимания без карточек');
+  const marked = await attention.mark({
+    marks: [
+      {
+        sourceKey: card.sourceKey,
+        occurrenceId: card.occurrenceId,
+        version: card.sourceVersion,
+        kind: 'read',
+      },
+    ],
+  });
+  assert.equal(marked.marked.length, 1, 'отметка центра внимания не записана');
+  const seeded = newRecords(store, h, acceptedId);
+  assert.ok(seeded.quick, 'поручение быстрого маршрута не записано');
+  assert.equal(seeded.discussion.length, 1, 'заметка обсуждения не записана');
+  assert.equal(Object.keys(seeded.attention).length, 1, 'отметка центра внимания не записана');
+  assert.deepEqual(
+    seeded.input.map((r) => [r.kind, r.blocking, r.workId, r.lifecycle]),
+    [['follow-up', false, before.b.id, 'pending']],
+    'запрос ведущему не записан',
+  );
   store.close();
+  writeFileSync(seededFile, JSON.stringify({ accepted: acceptedId, ...seeded }));
   out({
+    seeded: {
+      quick: seeded.quick?.id,
+      discussion: seeded.discussion.map((m) => m.id),
+      attention: Object.keys(seeded.attention),
+      input: seeded.input.map((r) => r.id),
+    },
     liveRefused: live,
     previousAttempt: { id: old.id, status: old.status, task: stopped.status },
     newAttempt: { id: fresh.id, engineVersion: engineOf(fresh) },
@@ -188,8 +293,25 @@ if (step === 'before') {
   assert.equal(h.leader('controller-2'), true);
   const s = store.read();
   assert.equal(engineOf(s.leader), harnessVersion);
+  // Записи нового вида пережили повторное открытие: те же, журнал до них
+  // прежний (продление роли событий не пишет — допускаются только новые).
+  const seeded = JSON.parse(readFileSync(seededFile, 'utf8')) as ReturnType<typeof newRecords> & {
+    accepted: string;
+  };
+  const now = JSON.parse(JSON.stringify(newRecords(store, h, seeded.accepted))) as ReturnType<
+    typeof newRecords
+  >;
   store.close();
-  out({ leader: s.leader });
+  assert.deepEqual(now.quick, seeded.quick, 'поручение быстрого маршрута изменилось');
+  assert.deepEqual(now.discussion, seeded.discussion, 'обсуждение изменилось');
+  assert.deepEqual(now.attention, seeded.attention, 'отметки центра внимания изменились');
+  assert.deepEqual(now.input, seeded.input, 'запрос ведущему изменился');
+  assert.deepEqual(
+    now.events.slice(0, seeded.events.length),
+    seeded.events,
+    'журнал до записей нового вида изменился',
+  );
+  out({ leader: s.leader, newRecords: 'unchanged' });
 } else if (step === 'old-refuses') {
   const hash = sha256(database);
   // Версия «до» над живой ролью новой версии: либо отказ до записи (движок,
