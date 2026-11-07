@@ -602,6 +602,7 @@ const inputSource: AttentionSourceRule = {
           ],
           covered: r.blocking ? unclaimed(ctx, [r.taskId]) : [],
           basis: {
+            options: options.map((o) => ({ id: o.id, label: o.label })),
             taskId: r.taskId,
             requestId: r.requestId,
             expectedVersion: r.version,
@@ -1627,10 +1628,20 @@ const actionHandlers: Record<string, (a: ActContext) => ActOutcome> = {
   'queue/resume': resume,
   'wait/resume': resume,
   'input/answer': ({ ctx, item, input, key, root }) => {
-    const b = basisOf<{ taskId: string; requestId: string; expectedVersion: number }>(item);
+    const b = basisOf<{
+      taskId: string;
+      requestId: string;
+      expectedVersion: number;
+      options?: { id: string; label: string }[];
+    }>(item);
+    // Выбранный вариант без текста — ответ этим вариантом (как у вопроса
+    // подготовки): правило D03 хранит текст ответа, им становится вариант.
+    const option = b.options?.find((o) => o.id === input.optionId)?.label;
+    const text = input.text?.trim() || option;
+    if (!text) throw new DomainError('Введите ответ или выберите вариант', 400);
     return {
       result: new InputService(ctx.h!, root).answerInTask(b.taskId, b.requestId, {
-        text: textOf(input),
+        text,
         ...(input.optionId ? { optionId: input.optionId } : {}),
         ...(input.kind ? { kind: input.kind } : {}),
         expectedVersion: b.expectedVersion,
@@ -2380,14 +2391,20 @@ export class AttentionService {
     const check = (): ActContext => {
       const ctx = this.context(quick, now);
       const item = this.candidates(ctx, only).find((c) => c.sourceKey === v.sourceKey);
-      if (!item)
+      if (!item) {
+        // Решённое появление — из истории своего источника, если она есть.
+        const rule = this.sources.find((r) => r.id === source && r.history && (!r.engine || ctx.h));
+        const resolved = rule?.history!(ctx).find(
+          (r) => r.sourceKey === v.sourceKey && r.occurrenceId === v.occurrenceId,
+        );
         throw new DomainError('Карточка уже решена исходной сущностью', 409, {
           code: 'attention-resolved',
+          ...(resolved ? { history: this.historyItem(ctx, resolved, this.marks()) } : {}),
         });
+      }
       if (item.occurrenceId !== v.occurrenceId || item.sourceVersion !== v.expectedVersion)
         throw new DomainError('Карточка изменилась: решение принято по прежней версии', 409, {
           code: 'attention-stale',
-          item: toItem(item, ctx.state, boardsOf(ctx.state), this.marks(), ctx.redact),
         });
       const action = (item.actor === 'operator' ? (item.actions ?? []) : []).find(
         (a) => a.kind === 'domain' && a.id === v.action,
@@ -2407,17 +2424,34 @@ export class AttentionService {
     };
     const run = (a: ActContext) => actionHandlers[`${a.item.source}/${v.action}`](a);
     const afterCheck = this.options.afterCheck ?? ((a: ActContext) => a);
-    const outcome = ownCas.has(`${source}/${v.action}`)
-      ? run(afterCheck(this.store.snapshot(check)))
-      : this.store.atomic(() => run(check()));
+    // Карточка ответа — как в GET: влияние зависит от захватов и свёрток
+    // других источников, поэтому проекция полная. Вне транзакции действия и
+    // один раз на ответ.
+    const shown = () =>
+      this.store.snapshot(() => {
+        const ctx = this.context(quick, now);
+        const item = this.candidates(ctx).find((c) => c.sourceKey === v.sourceKey);
+        return item
+          ? toItem(item, ctx.state, boardsOf(ctx.state), this.marks(), ctx.redact)
+          : undefined;
+      });
+    let outcome: ActOutcome;
+    try {
+      outcome = ownCas.has(`${source}/${v.action}`)
+        ? run(afterCheck(this.store.snapshot(check)))
+        : this.store.atomic(() => run(check()));
+    } catch (error) {
+      if (error instanceof DomainError && error.details?.code === 'attention-stale') {
+        const item = shown();
+        throw new DomainError(error.message, 409, {
+          code: 'attention-stale',
+          ...(item ? { item } : {}),
+        });
+      }
+      throw error;
+    }
     const result = outcome.after ? await outcome.after() : outcome.result;
-    const current = this.store.snapshot(() => {
-      const ctx = this.context(quick, now);
-      const item = this.candidates(ctx, only).find((c) => c.sourceKey === v.sourceKey);
-      return item
-        ? toItem(item, ctx.state, boardsOf(ctx.state), this.marks(), ctx.redact)
-        : undefined;
-    });
+    const current = shown();
     return current ? { result, item: current } : { result, resolved: true as const };
   }
 
@@ -2474,6 +2508,26 @@ export class AttentionService {
     for (const key of removed) this.store.deleteLocal(ATTENTION_NAMESPACE, undefined, key);
   }
 
+  /** Запись истории: карточка решённого появления с отметкой и временем решения. */
+  private historyItem(
+    ctx: AttentionContext,
+    r: Resolved,
+    marks: Record<string, AttentionMark>,
+    boardByTask = boardsOf(ctx.state),
+  ): AttentionHistoryItem {
+    // Версия решённого появления восстановлена по фактам: отметка
+    // относится к появлению, какой бы версии она ни была.
+    const mark = marks[r.sourceKey];
+    const same = mark?.occurrenceId === r.occurrenceId;
+    const read = same && !!mark.readVersion;
+    return {
+      ...toItem(r, ctx.state, boardByTask, marks, ctx.redact),
+      actions: [],
+      state: { read, acknowledged: same && !!mark.ackVersion, unread: !read },
+      resolvedAt: r.resolvedAt,
+    };
+  }
+
   /**
    * История: решённые появления по долговечным фактам решения источников,
    * новые первыми, не больше 100. Действий у записей истории нет. Чтение,
@@ -2499,19 +2553,9 @@ export class AttentionService {
             (b.resolvedAt ?? '').localeCompare(a.resolvedAt ?? '') ||
             (a.sourceKey < b.sourceKey ? -1 : a.sourceKey > b.sourceKey ? 1 : 0),
         );
-      const items = all.slice(0, ATTENTION_LIMITS.history).map((r): AttentionHistoryItem => {
-        // Версия решённого появления восстановлена по фактам: отметка
-        // относится к появлению, какой бы версии она ни была.
-        const mark = marks[r.sourceKey];
-        const same = mark?.occurrenceId === r.occurrenceId;
-        const read = same && !!mark.readVersion;
-        return {
-          ...toItem(r, ctx.state, boardByTask, marks, ctx.redact),
-          actions: [],
-          state: { read, acknowledged: same && !!mark.ackVersion, unread: !read },
-          resolvedAt: r.resolvedAt,
-        };
-      });
+      const items = all
+        .slice(0, ATTENTION_LIMITS.history)
+        .map((r) => this.historyItem(ctx, r, marks, boardByTask));
       return {
         revision: this.store.revision(),
         generatedAt: new Date(now).toISOString(),

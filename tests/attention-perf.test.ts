@@ -55,20 +55,30 @@ test('400 задач, 200 отменённых: чтение, отметка и 
   }
 });
 
-test('Отметка и действие перепроверяют только источник своей карточки, не всю проекцию', async () => {
+test('Под блокировкой записи отметка и действие не пересчитывают другие источники', async () => {
   const f = fixture();
   try {
     const b = f.h.createBoard('Board');
     f.h.addTask(b.id, input('One task'));
     f.h.approve(b.id);
     f.h.pause(true);
+    // Считаются только вызовы внутри транзакции записи: карточка ответа
+    // действия строится полной проекцией после неё (влияние как в GET).
     let calls = 0;
+    let locked = false;
+    const atomic = f.store.atomic.bind(f.store);
+    f.store.atomic = <T>(action: () => T): T => {
+      locked = true;
+      try {
+        return atomic(action);
+      } finally {
+        locked = false;
+      }
+    };
     const service = new AttentionService(f.store, f.h, {
-      sources: [{ id: 'preview', collect: () => (calls++, []) }],
+      sources: [{ id: 'preview', collect: () => (locked && calls++, []) }],
     });
     const queue = (await service.active()).items.find((i) => i.sourceKey === 'queue')!;
-    assert.equal(calls, 1);
-    calls = 0;
     const ref = {
       sourceKey: queue.sourceKey,
       occurrenceId: queue.occurrenceId,

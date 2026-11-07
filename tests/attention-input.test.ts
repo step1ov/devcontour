@@ -59,12 +59,17 @@ test('S15 вопрос исполнителя: забирает задачу, о
       occurrenceId: card.occurrenceId,
       expectedVersion: card.sourceVersion,
       action: 'answer',
-      input: { text: 'Use JSON as now.' },
+      // Только вариант, без текста: ответом становится вариант.
+      input: { optionId: answerAction.choices![0].id },
       idempotencyKey: 'attention-input-answer-1',
     };
     await service.act(body);
     const revisions = () => executionOf(f.h).engine.inputRequest(request.requestId).answers.length;
     assert.equal(revisions(), 1);
+    assert.equal(
+      executionOf(f.h).engine.inputRequest(request.requestId).answers[0].text,
+      answerAction.choices![0].label,
+    );
     const replay = await service.act(body);
     assert.equal((replay.result as { replayed: boolean }).replayed, true);
     assert.equal(revisions(), 1);

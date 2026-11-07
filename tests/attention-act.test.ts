@@ -169,6 +169,21 @@ test('До setup: ответ на вопрос и согласование с к
     const answered = await service.act(act(question, 'answer', { input: { optionId: '1' } }));
     assert.equal(answered.resolved, true);
     assert.equal(f.store.read().preparation!.changes[0].questions[0].answer!.text, 'Дежурный');
+    // Повтор по решённой карточке: 409 с записью истории решённого появления.
+    let resolved: unknown;
+    await assert.rejects(
+      service.act(act(question, 'answer', { input: { optionId: '1' } })),
+      (e) => {
+        resolved = e;
+        return refusal('attention-resolved')(e);
+      },
+    );
+    const history = (resolved as DomainError).details!.history as {
+      id: string;
+      resolvedAt: string;
+    };
+    assert.equal(history.id, question.id);
+    assert.ok(history.resolvedAt);
     // Решение из второго процесса раньше карточки: карточка отклоняется.
     const stage = byKey(items, `prep:stage:${f.changeId}:product`)!;
     const other = new Store(join(f.root, 'state.sqlite'));
@@ -422,5 +437,37 @@ test('Подтверждение переноса базы с карточки �
     );
   } finally {
     p.cleanup();
+  }
+});
+
+test('Карточка в ответе действия — с тем же влиянием, что в GET (свёртка отказов провайдера)', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const ids = [f.h.addTask(b.id, input('One task')).id, f.h.addTask(b.id, input('Two task')).id];
+    f.h.approve(b.id);
+    for (const id of ids) {
+      f.h.pause(false);
+      const run = f.h.claim('test')!;
+      assert.equal(run.taskId, id);
+      f.h.fail(run.id, run.token, 'provider refused', false, 'provider-auth');
+    }
+    f.store.change('fixture.pause', (s) => {
+      s.paused = true;
+      s.pauseReason = 'runtime';
+      s.pauseFailures = ['provider-auth'];
+    });
+    const service = new AttentionService(f.store, f.h);
+    const queue = byKey((await service.active()).items, 'queue')!;
+    assert.equal(queue.impact.tasks, 2);
+    let stale: unknown;
+    await assert.rejects(service.act({ ...act(queue, 'resume'), expectedVersion: 'old' }), (e) => {
+      stale = e;
+      return refusal('attention-stale')(e);
+    });
+    const item = (stale as DomainError).details!.item as AttentionItem;
+    assert.deepEqual(item.impact, queue.impact);
+  } finally {
+    f.cleanup();
   }
 });
