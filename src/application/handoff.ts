@@ -581,7 +581,34 @@ function inputNext(ctx: HostContext): HandoffHostNext | undefined {
   };
 }
 
+/**
+ * Открытый follow-up (решение исполнителя в автономном режиме), когда
+ * других шагов нет: работа может быть уже принята, а решение ждёт ведущего.
+ */
+function followUpNext(ctx: HostContext): HandoffHostNext | undefined {
+  const { pack, h } = ctx;
+  const open = new InputService(h)
+    .list()
+    .requests.find(
+      (r) =>
+        r.kind === 'follow-up' &&
+        r.state === 'awaiting-answer' &&
+        (!pack.graphId || r.boardId === pack.graphId),
+    );
+  if (!open) return undefined;
+  return {
+    action: 'close-follow-up',
+    ...(open.boardId ? { boardId: open.boardId } : {}),
+    input: { requestId: open.requestId, taskId: open.taskId, state: open.state, actor: 'lead' },
+    detail: `Follow-up ${open.requestId} of task ${open.taskId} (a decision the writer took itself, severity ${open.severity}): accept it with input_cancel {"requestId": "${open.requestId}", "expectedVersion": ${open.version}, "reason": "assumption accepted"} or replace it with input_supersede after a board correction.`,
+  };
+}
+
 function hostNext(ctx: HostContext): HandoffHostNext | undefined {
+  return hostStep(ctx) ?? followUpNext(ctx);
+}
+
+function hostStep(ctx: HostContext): HandoffHostNext | undefined {
   const { pack, view, state, h } = ctx;
   if (!pack.summary.open) return undefined;
   const input = inputNext(ctx);
