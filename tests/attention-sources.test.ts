@@ -195,10 +195,7 @@ test('S3/S4 согласование этапа: редакция, дорабо�
     assert.equal(stale.id, arch.id, 'та же редакция — то же появление');
     assert.notEqual(stale.sourceVersion, arch.sourceVersion);
     assert.equal(stale.actor, 'lead');
-    assert.deepEqual(
-      stale.actions.map((a) => a.kind),
-      ['navigate'],
-    );
+    assert.deepEqual(stale.actions.map((a) => a.kind).sort(), ['handoff', 'navigate']);
   } finally {
     f.cleanup();
   }
