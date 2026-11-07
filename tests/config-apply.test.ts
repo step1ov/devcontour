@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { config, fixture, input, removeTestCheckoutRoot, testCheckoutRoot } from './helpers.ts';
 import { taskProgress } from '../src/application/context.ts';
-import { DevContour } from '../src/core/service.ts';
+import { DevContour, loadedDigest } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { budgetOverview } from '../src/harness/budget.ts';
@@ -574,6 +574,41 @@ test('The panel input policy change leaves config.json unchanged when the apply 
     assert.equal(readFileSync(s.path, 'utf8'), before, 'файл возвращён к прежнему тексту');
     assert.equal(s.server.store.read().reconfigure, undefined);
   } finally {
+    s.cleanup();
+  }
+});
+
+test('The panel refuses an inputPolicy change when workspace.json declares inputPolicy', async () => {
+  const s = served();
+  const registry = mkdtempSync(join(s.root, 'workspace-'));
+  s.edit((raw) => (raw.workspaceRoot = registry));
+  const app = await serve(s.server, new Scheduler(s.server, s.root), { port: 0 });
+  try {
+    const digest = () => loadedDigest(loadConfig(s.path));
+    const post = (body: unknown) =>
+      fetch(app.url + '/api/config/input-policy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-DevContour-Request': '1' },
+        body: JSON.stringify(body),
+      });
+    writeFileSync(
+      join(registry, 'workspace.json'),
+      JSON.stringify({ inputPolicy: { threshold: 9 } }),
+    );
+    const before = readFileSync(s.path, 'utf8');
+    const refused = await post({ threshold: 5, expectedConfigDigest: digest() });
+    assert.equal(refused.status, 409);
+    const { error } = (await refused.json()) as { error: string };
+    assert.match(error, /inputPolicy объявлен в workspace\.json/);
+    assert.match(error, /workspace-init/);
+    assert.equal(readFileSync(s.path, 'utf8'), before, 'config.json не изменён');
+    assert.equal(s.server.store.read().reconfigure, undefined, 'запрос применения не записан');
+    // Реестр без inputPolicy порогом не управляет: правка проходит.
+    writeFileSync(join(registry, 'workspace.json'), JSON.stringify({ budgets: {} }));
+    const ok = await post({ threshold: 5, expectedConfigDigest: digest() });
+    assert.equal(ok.status, 200, await ok.clone().text());
+  } finally {
+    await app.close();
     s.cleanup();
   }
 });

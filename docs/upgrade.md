@@ -747,6 +747,12 @@ digest доказательства продуктового релиза нов
   заменяет отличавшееся локальное значение (ответ называет его в
   `operational.replaced`). Необъявленные ключи реестр не трогает: workspace
   без них ведёт себя как прежде.
+- **Объявленный в `workspace.json` `inputPolicy` и правка из панели.**
+  `doctor` (`budgets:declaration`) сравнивает с объявлением реестра и
+  `inputPolicy`, а маршрут `POST /api/config/input-policy` при объявленном
+  ключе отказывает с 409 без записи `config.json`: следующий
+  `workspace-init` вернул бы объявление. Порог такого workspace меняют в
+  `workspace.json`.
 - **`doctor` показывает тарифы и бюджеты.** Новые проверки `prices` и
   `budgets` перечисляют действующие значения; `prices:roles`,
   `prices:calls`, `budgets:on-unknown`, `budgets:prices` и

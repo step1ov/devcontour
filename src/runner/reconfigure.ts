@@ -8,6 +8,7 @@ import { Store } from '../core/store.ts';
 import { repositories } from '../core/repositories.ts';
 import { executionOf } from '../harness/execution.ts';
 import { loadConfig } from './config.ts';
+import { workspaceDeclares } from './budget-doctor.ts';
 
 /**
  * Применение конфигурации — только по запросу операции изменения контракта
@@ -355,6 +356,14 @@ export function requestInputPolicy(h: DevContour, root: string, raw: unknown) {
   const path = join(root, 'config.json');
   const text = readFileSync(path, 'utf8');
   const current = loadConfig(path, text);
+  // Объявление реестра сильнее локального значения: следующий workspace-init
+  // молча вернул бы его, и правка оператора пропала бы. Порог такого
+  // workspace меняют в workspace.json.
+  if (workspaceDeclares(current, 'inputPolicy'))
+    throw new DomainError(
+      'inputPolicy объявлен в workspace.json: следующий workspace-init заменил бы правку config.json объявлением. Измените inputPolicy в workspace.json, выполните devcontour workspace-init --file <workspace.json> и devcontour config-apply --keys inputPolicy',
+      409,
+    );
   if (loadedDigest(current) !== input.expectedConfigDigest)
     throw new DomainError(
       'config.json изменился после того, как его прочитала панель: обновите страницу и повторите',
