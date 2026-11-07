@@ -556,7 +556,7 @@ test('The operator changes inputPolicy in the panel: expected digest, validation
   }
 });
 
-test('The panel input policy change leaves config.json unchanged when the apply request cannot be written', async () => {
+test('The panel input policy change leaves config.json unchanged when the apply request cannot be written', () => {
   const s = served();
   try {
     const before = readFileSync(s.path, 'utf8');
