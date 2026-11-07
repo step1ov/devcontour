@@ -13,8 +13,10 @@ import { OpenLink } from './AttentionCard.tsx';
 // новые первыми. Не опрашивается сама: читается при открытии вкладки и при
 // каждой новой ревизии данных общего опроса. Карточки истории не отмечаются.
 
+// Отметка одна на предмет: отметка более позднего появления не переносится
+// на прежние, поэтому «отметок нет», а не «не открывали».
 const markState = (s: AttentionHistoryItem['state']) =>
-  s.acknowledged ? 'вы видели' : s.read ? 'вы прочитали' : 'не открывали';
+  s.acknowledged ? 'вы видели' : s.read ? 'вы прочитали' : 'отметок нет';
 
 function HistoryRow({ item }: { item: AttentionHistoryItem }) {
   const titleId = useId();
@@ -33,11 +35,12 @@ function HistoryRow({ item }: { item: AttentionHistoryItem }) {
       </div>
       <p className="m-0 whitespace-pre-wrap">{item.reason}</p>
       <p className="text-muted-foreground m-0">
+        {/* Закрыто — не обязательно «решено»: вопрос могли снять или заменить. */}
         {item.resolvedAt
-          ? `Решено ${new Date(item.resolvedAt).toLocaleString('ru-RU')}`
-          : 'Время решения не записано'}
+          ? `Закрыто ${new Date(item.resolvedAt).toLocaleString('ru-RU')}`
+          : 'Время закрытия не записано'}
         {' · '}
-        Кто действовал: {actorLabel(item.actor)}
+        Ждала действия от: {actorLabel(item.actor)}
         {item.actor === 'operator' ? ` · ${markState(item.state)}` : ''}
       </p>
       <div className="flex flex-wrap gap-2">
