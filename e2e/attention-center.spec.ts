@@ -1266,6 +1266,35 @@ test('Filter: an empty form opened on a card the component filter saw first stay
   await expect(field).toBeFocused();
 });
 
+test('Filter: switching the component filter keeps an empty form open on a card of another component', async ({
+  page,
+}) => {
+  await withSecondComponent(page);
+  // Карточка A — компонента main (есть в общем списке), B — компонента second.
+  await page.route(isList, (route) => {
+    const component = new URL(route.request().url()).searchParams.get('component');
+    return route.fulfill({
+      json: fakeView(
+        component === 'second' ? [textItem('changeset:CHG-C2')] : [textItem('changeset:CHG-C1')],
+      ),
+    });
+  });
+  await page.goto('/?tab=attention');
+  const card = cardOf(page, 'changeset:CHG-C1');
+  await card.getByRole('button', { name: 'Вернуть на доработку' }).click();
+  await expect(card.locator('form').getByLabel(/Что доработать/)).toBeFocused();
+  // Под фильтром другого компонента карточки A нет в показанном списке, но
+  // она не исчезла: пустая форма не закрывается.
+  const select = center(page).getByLabel('Компонент');
+  await select.selectOption('second');
+  await expect(cardOf(page, 'changeset:CHG-C2')).toBeVisible();
+  await expect(card).toHaveCount(0);
+  // Сверка черновиков идёт и на следующем опросе.
+  await page.waitForTimeout(3500);
+  await select.selectOption('');
+  await expect(card.locator('form').getByLabel(/Что доработать/)).toBeVisible();
+});
+
 test('Focus: a new occurrence under an open empty form focuses the new card', async ({ page }) => {
   let occurrence = 'o1';
   await page.route(isList, (route) =>
