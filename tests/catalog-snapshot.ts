@@ -30,5 +30,10 @@
 // discussion_resolve и discussion_inbox называют чтение назад, выдержки
 // текста, цикл needs-answer и версию треда в очереди; курсор
 // discussion_inbox — до 2000 символов; прочие операции байтово прежние.
-export const CATALOG_DIGEST = '71ec177499a2b700381fde1248a09f9f9803128edd78005385c6b3b331bf5172';
+// Намеренное изменение: операции вопросов исполнителя input_list, input_show,
+// input_answer, input_context, input_review, input_target, input_apply,
+// input_cancel и input_supersede после contract_change_revise, вместе с
+// операциями обсуждения (input_list,
+// input_show, input_target — только чтение); прочие операции байтово прежние.
+export const CATALOG_DIGEST = 'e4ca95bb249e202262c5939f7a38f4fa1f7e414321598ba98eef5fe04c35182d';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

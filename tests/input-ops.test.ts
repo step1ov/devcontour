@@ -1,0 +1,278 @@
+// Вопросы исполнителя через агентский API, CLI-актёров и маршруты панели:
+// кто вправе ответить, снять и применить; повторы; изменение требований.
+// Модели не вызываются: demo-исполнитель и управляемый reviewer ответа.
+import { after, test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  controlled,
+  inputDemos,
+  inputFixture,
+  prepared,
+  untilQuestion,
+  type InputFixture,
+} from './input-fixture.ts';
+import { AgentService } from '../src/application/agent.ts';
+import { serve } from '../src/server/http.ts';
+
+after(() => inputDemos.close());
+
+const codeOf = async (fn: () => unknown) => {
+  try {
+    await fn();
+    return 'ok';
+  } catch (error) {
+    const e = error as { code?: string; status?: number };
+    return `${e.status ?? '-'}:${e.code ?? '-'}`;
+  }
+};
+
+async function question(f: InputFixture) {
+  const { taskId, boardId } = f.askingTask();
+  await untilQuestion(f, boardId);
+  const [request] = f.service.list({ taskId }).requests;
+  return { taskId, boardId, requestId: request.requestId, version: request.version };
+}
+
+test('A critical question is answered and cancelled only by the operator; the lead and CLI --by host are refused', async () => {
+  const f = await inputFixture(controlled({ critical: true }));
+  try {
+    const { requestId, version } = await question(f);
+    const shown = f.service.show({ requestId });
+    assert.deepEqual(shown.floors, ['declared']);
+    assert.equal(shown.actor, 'operator');
+    const agent = new AgentService(f.h, f.root);
+    const answer = { requestId, text: 'Keep the API as is.', expectedVersion: version };
+    assert.equal(
+      await codeOf(() => agent.execute({ operation: 'input_answer', input: answer })),
+      '403:OPERATOR_ANSWERS',
+    );
+    assert.equal(await codeOf(() => f.service.answer(answer, 'host')), '403:OPERATOR_ANSWERS');
+    // R7-1: снять критический вопрос — то же право, что ответить.
+    const cancel = { requestId, expectedVersion: version, reason: 'Not needed' };
+    assert.equal(
+      await codeOf(() => agent.execute({ operation: 'input_cancel', input: cancel })),
+      '403:OPERATOR_ANSWERS',
+    );
+    assert.equal(await codeOf(() => f.service.cancel(cancel, 'host')), '403:OPERATOR_ANSWERS');
+    // Актёр задаёт транспорт: поле actor во входе агентского API не принимается.
+    assert.equal(
+      await codeOf(() =>
+        agent.execute({ operation: 'input_answer', input: { ...answer, actor: 'operator' } }),
+      ),
+      '400:-',
+    );
+    const saved = f.service.answer(answer, 'operator');
+    assert.equal(saved.revision, 1);
+    // Повтор того же ответа — тот же ответ, без новой версии.
+    const again = f.service.answer({ ...answer, expectedVersion: saved.version }, 'operator');
+    assert.equal(again.changed, false);
+    assert.equal(again.revision, 1);
+    assert.equal(f.service.show({ requestId }).answers.length, 1);
+    assert.equal(
+      (f.service.show({ requestId }).answers[0] as { actor: { kind: string } }).actor.kind,
+      'operator',
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('Agent mode: the lead answers a floor-free question and applies; the panel apply is refused; a repeated review is one round', async () => {
+  const f = await inputFixture(controlled());
+  const app = await serve(f.h, f.scheduler, { port: 0 });
+  try {
+    const { taskId, requestId } = await question(f);
+    const p = await prepared(f, requestId, 'lead');
+    // Повтор ревью того же снимка — тот же раунд без вызова модели.
+    const again = await f.service.review({
+      requestId,
+      contextDigest: p.context.contextDigest,
+      authorRuntime: 'codex',
+    });
+    assert.equal(again.round, p.review.round);
+    const post = (path: string, body: unknown) =>
+      fetch(app.url + path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-DevContour-Request': '1' },
+        body: JSON.stringify(body),
+      });
+    const panel = await post(`/api/tasks/${taskId}/input/${requestId}/apply`, {
+      expectedVersion: p.target.version,
+    });
+    assert.equal(panel.status, 409);
+    assert.match(((await panel.json()) as { error: string }).error, /ведущий агент/);
+    // Чужая задача — 404.
+    assert.equal(
+      (
+        await post(`/api/tasks/OTHER/input/${requestId}/cancel`, {
+          expectedVersion: 1,
+          reason: 'x x',
+        })
+      ).status,
+      404,
+    );
+    const agent = new AgentService(f.h, f.root);
+    const applied = agent.execute({ operation: 'input_apply', input: p.apply });
+    assert.equal(applied.applied, true);
+    const view = (await (await fetch(app.url + `/api/tasks/${taskId}/input`)).json()) as {
+      current: { state: string; question: { question: string } };
+    };
+    assert.equal(view.current.state, 'applied-awaiting-claim');
+    assert.match(view.current.question.question, /Demo fixture/);
+    // Список без текста вопроса и ответа.
+    const listed = JSON.stringify(agent.execute({ operation: 'input_list', input: { taskId } }));
+    assert.equal(listed.includes('Demo fixture'), false);
+    assert.equal(listed.includes('Use JSON as now'), false);
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
+test('Operator mode: the lead reviews, the lead apply is refused, the operator applies in the panel', async () => {
+  const f = await inputFixture(controlled(), { approvalMode: 'operator' });
+  const app = await serve(f.h, f.scheduler, { port: 0 });
+  try {
+    const { taskId, requestId, version } = await question(f);
+    assert.equal(f.service.show({ requestId }).actor, 'operator');
+    const agent = new AgentService(f.h, f.root);
+    // В режиме оператора ведущий не отвечает и на вопрос без минимумов.
+    assert.equal(
+      await codeOf(() =>
+        agent.execute({
+          operation: 'input_answer',
+          input: { requestId, text: 'Use JSON as now.', expectedVersion: version },
+        }),
+      ),
+      '403:OPERATOR_ANSWERS',
+    );
+    const post = (path: string, body: unknown) =>
+      fetch(app.url + path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-DevContour-Request': '1' },
+        body: JSON.stringify(body),
+      });
+    const answered = await post(`/api/tasks/${taskId}/input/${requestId}/answer`, {
+      text: 'Use JSON as now.',
+      optionId: 'json',
+      expectedVersion: version,
+    });
+    assert.equal(answered.status, 200, await answered.clone().text());
+    // Без ревью снимка панель применить не может.
+    const early = await post(`/api/tasks/${taskId}/input/${requestId}/apply`, {
+      expectedVersion: version + 1,
+    });
+    assert.equal(early.status, 409);
+    const context = await agent.run({ operation: 'input_context', input: { requestId } });
+    await new (await import('../src/application/input.ts')).InputService(
+      f.h,
+      f.root,
+      controlled(),
+    ).review({
+      requestId,
+      contextDigest: context.contextDigest as string,
+      authorRuntime: 'codex',
+    });
+    const target = agent.execute({
+      operation: 'input_target',
+      input: { requestId, contextDigest: context.contextDigest },
+    }) as { version: number; targetDigest: string; answerDigest: string; problems: string[] };
+    assert.deepEqual(target.problems, []);
+    assert.equal(
+      await codeOf(() =>
+        agent.execute({
+          operation: 'input_apply',
+          input: {
+            requestId,
+            answerDigest: target.answerDigest,
+            expectedVersion: target.version,
+            contextDigest: context.contextDigest,
+            targetDigest: target.targetDigest,
+          },
+        }),
+      ),
+      '409:APPROVAL_REQUIRED',
+    );
+    const applied = await post(`/api/tasks/${taskId}/input/${requestId}/apply`, {
+      expectedVersion: target.version,
+    });
+    assert.equal(applied.status, 200, await applied.clone().text());
+    assert.equal(((await applied.json()) as { applied: boolean }).applied, true);
+    assert.equal(f.store.read().tasks.find((t) => t.id === taskId)!.status, 'ready');
+  } finally {
+    await app.close();
+    await f.cleanup();
+  }
+});
+
+test('A requirement-change answer is not applied; supersede needs a newer task of the same board; a late answer is refused and resumes nothing', async () => {
+  const f = await inputFixture(controlled());
+  try {
+    const { taskId, boardId, requestId, version } = await question(f);
+    const answered = f.service.answer(
+      {
+        requestId,
+        text: 'Change the acceptance: produce YAML.',
+        kind: 'requirement-change',
+        expectedVersion: version,
+      },
+      'operator',
+    );
+    assert.match(answered.nextStep, /board_correct/);
+    const context = await f.service.context({ requestId });
+    const target = f.service.target({ requestId, contextDigest: context.contextDigest });
+    assert.ok(target.problems.some((p) => /изменение требований/.test(p)));
+    assert.equal(
+      await codeOf(() =>
+        f.service.apply(
+          {
+            requestId,
+            answerDigest: answered.answerDigest,
+            expectedVersion: answered.version,
+            contextDigest: context.contextDigest,
+            targetDigest: target.targetDigest!,
+          },
+          'lead',
+        ),
+      ),
+      '400:INVALID_INPUT',
+    );
+    const supersede = {
+      requestId,
+      expectedVersion: answered.version,
+      reason: 'Requirement changed',
+    };
+    assert.equal(
+      await codeOf(() => f.service.supersede({ ...supersede, successorTaskId: 'T-NOPE' }, 'lead')),
+      '404:-',
+    );
+    // Задача той же доски, но созданная до вопроса, — не преемник.
+    const older = f.plainTask(boardId, 'Older sibling');
+    f.store.change('test.older', (s) => {
+      s.tasks.find((t) => t.id === older)!.createdAt = '2000-01-01T00:00:00.000Z';
+    });
+    assert.equal(
+      await codeOf(() => f.service.supersede({ ...supersede, successorTaskId: older }, 'lead')),
+      '409:-',
+    );
+    const successor = f.plainTask(boardId, 'Successor with YAML');
+    const closed = f.service.supersede({ ...supersede, successorTaskId: successor }, 'lead');
+    assert.equal(closed.lifecycle, 'superseded');
+    const runs = f.store.read().runs.filter((r) => r.taskId === taskId).length;
+    // Поздний ответ после замены не принимается и задачу не возобновляет.
+    assert.equal(
+      await codeOf(() =>
+        f.service.answer(
+          { requestId, text: 'Late answer', expectedVersion: closed.version },
+          'operator',
+        ),
+      ),
+      '409:NOT_READY',
+    );
+    await f.scheduler.drain();
+    assert.equal(f.store.read().runs.filter((r) => r.taskId === taskId).length, runs);
+    assert.equal(f.store.read().tasks.find((t) => t.id === taskId)!.status, 'failed');
+  } finally {
+    await f.cleanup();
+  }
+});

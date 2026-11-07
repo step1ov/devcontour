@@ -78,6 +78,15 @@ const operations = [
   'recovery_decide',
   'contract_change_status',
   'contract_change_revise',
+  'input_list',
+  'input_show',
+  'input_answer',
+  'input_context',
+  'input_review',
+  'input_target',
+  'input_apply',
+  'input_cancel',
+  'input_supersede',
 ];
 const readOnlyOperations = [
   'preparation_status',
@@ -106,6 +115,9 @@ const readOnlyOperations = [
   'feasibility_spikes',
   'checks_view',
   'contract_change_status',
+  'input_list',
+  'input_show',
+  'input_target',
 ];
 
 test('Baseline catalog: host capabilities keep protocolVersion 1, limits, names and readOnly flags', () => {

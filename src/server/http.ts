@@ -52,7 +52,7 @@ import { DomainError } from '../core/model.ts';
 import { blockers, readyTasks } from '../core/graph.ts';
 import { Scheduler } from '../runner/scheduler.ts';
 import { requestInputPolicy } from '../runner/reconfigure.ts';
-import { inputHolds } from '../application/input.ts';
+import { InputService, inputHolds } from '../application/input.ts';
 import { acceptBoard } from '../runner/agent-control.ts';
 import { modelRuntimes, repositories } from '../core/repositories.ts';
 import { WorkspaceRunner } from '../runner/workspace.ts';
@@ -560,6 +560,13 @@ export async function serve(
               ? { limit: Number(url.searchParams.get('limit')) }
               : {}),
           });
+        } else if (
+          req.method === 'GET' &&
+          parts[1] === 'tasks' &&
+          parts[3] === 'input' &&
+          !parts[4]
+        ) {
+          result = new InputService(h, scheduler.root).taskView(decodeURIComponent(parts[2]));
         } else if (req.method === 'GET' && parts[1] === 'tasks' && parts[3] === 'runs') {
           result = panelRuns(h, decodeURIComponent(parts[2]), Object.fromEntries(url.searchParams));
         } else if (req.method === 'GET' && parts[1] === 'runs' && parts[2] && !parts[3]) {
@@ -809,6 +816,17 @@ export async function serve(
           } else if (parts[1] === 'checks' && parts[3] === 'pending' && parts[5] === 'approve') {
             // Подтверждение оператора из панели: тот же доменный метод, что CLI.
             result = new CheckCorpus(h).approveAdoption(parts[2], parts[4]).pending;
+          } else if (parts[1] === 'tasks' && parts[3] === 'input' && parts[4] && parts[5]) {
+            // Вопрос исполнителя — действие оператора в панели.
+            const input2 = new InputService(h, scheduler.root);
+            const [taskId, requestId] = [
+              decodeURIComponent(parts[2]),
+              decodeURIComponent(parts[4]),
+            ];
+            if (parts[5] === 'answer') result = input2.answerInTask(taskId, requestId, input);
+            else if (parts[5] === 'apply') result = input2.applyInTask(taskId, requestId, input);
+            else if (parts[5] === 'cancel') result = input2.cancelInTask(taskId, requestId, input);
+            else throw new DomainError('Команда не найдена', 404);
           } else if (parts[1] === 'tasks') {
             // Кнопки панели — действие человека (`operator`).
             if (parts[3] === 'discussion')

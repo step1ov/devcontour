@@ -156,7 +156,10 @@ export class InputService {
       .boards.find((b) => b.revisions.some((r) => r.taskIds.includes(taskId)));
   }
 
-  /** Ведущий отвечает и снимает вопрос сам, только если вопрос без минимумов и режим `agent` (Q7, R7-1). */
+  /**
+   * Ведущий (агентский API или CLI `--by host`) отвечает и снимает вопрос
+   * сам, только если вопрос без минимумов и режим `agent` (Q7, R7-1).
+   */
   leadMayDecide(request: Pick<InputRequest, 'floors'>) {
     return request.floors.length === 0 && this.h.config.approvalMode === 'agent';
   }
@@ -343,7 +346,7 @@ export class InputService {
   answer(raw: unknown, actor: InputActorKind, link: { messageRef?: string } = {}) {
     const input = inputOperationInputs.input_answer.parse(raw);
     const request = this.request(input.requestId);
-    if (actor === 'lead' && !this.leadMayDecide(request))
+    if (actor !== 'operator' && !this.leadMayDecide(request))
       throw refuse(
         'OPERATOR_ANSWERS',
         request.floors.length
@@ -387,7 +390,7 @@ export class InputService {
     const request = this.request(input.requestId);
     // R7-1: снять блокирующий вопрос — то же право, что ответить на него.
     // Неблокирующий запрос ведущему (follow-up) ведущий закрывает сам.
-    if (actor === 'lead' && request.blocking && !this.leadMayDecide(request))
+    if (actor !== 'operator' && request.blocking && !this.leadMayDecide(request))
       throw refuse(
         'OPERATOR_ANSWERS',
         `Вопрос ${request.id} снимает оператор в панели: ${
@@ -715,5 +718,80 @@ export class InputService {
       if (error instanceof HarnessError) throw toDomain(error);
       throw error;
     }
+  }
+
+  /* -------------------------------------------------------------- */
+  /* Панель                                                           */
+  /* -------------------------------------------------------------- */
+
+  /** Запрос задачи: чужой ID — 404, а не действие над другой задачей. */
+  private ofTask(taskId: string, requestId: string) {
+    const request = this.request(requestId);
+    if (request.workId !== taskId)
+      throw new DomainError(`Запрос ${requestId} не относится к задаче ${taskId}`, 404);
+    return request;
+  }
+
+  /** Вопросы задачи для карточки: список и текущий (держащий или последний) целиком. */
+  taskView(taskId: string) {
+    this.task(taskId);
+    const { requests } = this.list({ taskId });
+    const current =
+      requests.find(
+        (r) => r.blocking && !['cancelled', 'superseded', 'delivered'].includes(r.state),
+      ) ?? requests.at(-1);
+    return {
+      taskId,
+      approvalMode: this.h.config.approvalMode,
+      requests,
+      current: current ? this.show({ requestId: current.requestId }) : null,
+    };
+  }
+
+  /** Ответ оператора из панели. */
+  answerInTask(taskId: string, requestId: string, raw: unknown) {
+    this.ofTask(taskId, requestId);
+    return this.answer({ ...(raw as object), requestId }, 'operator');
+  }
+
+  /** Отмена оператором из панели. */
+  cancelInTask(taskId: string, requestId: string, raw: unknown) {
+    this.ofTask(taskId, requestId);
+    return this.cancel({ ...(raw as object), requestId }, 'operator');
+  }
+
+  /**
+   * Применение оператором из панели по последнему раунду ревью ответа:
+   * снимок и цель вычисляет сервер, оператор называет версию запроса,
+   * которую видел. Причины отказа — 409 с перечнем.
+   */
+  applyInTask(taskId: string, requestId: string, raw: unknown) {
+    const request = this.ofTask(taskId, requestId);
+    const { expectedVersion } = z.strictObject({ expectedVersion: version }).parse(raw);
+    if (this.h.config.approvalMode === 'agent')
+      throw refuse(
+        'APPROVAL_REQUIRED',
+        'В approvalMode agent ответ применяет ведущий агент (input_target, затем input_apply); панель только показывает состояние',
+      );
+    const last = executionOf(this.h).engine.read((v) => inputReviewRounds(v, requestId).at(-1));
+    const answer = latestAnswer(request);
+    if (!last?.contextDigest || !answer)
+      throw refuse(
+        'APPROVAL_REQUIRED',
+        `Ответ на запрос ${requestId} ещё не прошёл подготовку и ревью контекста: ведущий выполняет input_context и input_review`,
+      );
+    const proposed = this.target({ requestId, contextDigest: last.contextDigest });
+    if (proposed.problems.length || !proposed.targetDigest)
+      throw new DomainError('Применить нельзя: ' + proposed.problems.join('; '), 409);
+    return this.apply(
+      {
+        requestId,
+        answerDigest: answer.digest,
+        expectedVersion,
+        contextDigest: last.contextDigest,
+        targetDigest: proposed.targetDigest,
+      },
+      'operator',
+    );
   }
 }

@@ -1,5 +1,6 @@
 // Общая обстановка тестов вопросов исполнителя: demo-workspace, задача с
 // demo-вопросом и управляемый reviewer ответа. Модели не вызываются.
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { demoPool, testDemo } from './demo-pool.ts';
 import { loadConfig } from '../src/runner/config.ts';
@@ -12,11 +13,20 @@ import { InputService } from '../src/application/input.ts';
 /** Пул demo-workspace; файл теста закрывает его в `after`. */
 export const inputDemos = demoPool(testDemo);
 
-export async function inputFixture(runtimes: Record<string, AgentAdapter> = adapters) {
+export async function inputFixture(
+  runtimes: Record<string, AgentAdapter> = adapters,
+  options: { approvalMode?: 'agent' | 'operator' } = {},
+) {
   const seed = await inputDemos.acquire();
   const root = seed.root;
   const store = new Store(join(root, 'state.sqlite'));
-  const h = new DevContour(store, loadConfig(join(root, 'config.json')));
+  const path = join(root, 'config.json');
+  if (options.approvalMode) {
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+    raw.approvalMode = options.approvalMode;
+    writeFileSync(path, JSON.stringify(raw, null, 2) + '\n');
+  }
+  const h = new DevContour(store, loadConfig(path));
   const scheduler = new Scheduler(h, root, runtimes);
   await scheduler.init();
   const role = store.read().tasks[0].role;
@@ -59,7 +69,12 @@ export type InputFixture = Awaited<ReturnType<typeof inputFixture>>;
 
 /** Ответ reviewer без модели: ревью ответа одобряется или отклоняется по флагу. */
 export function controlled(
-  options: { verdict?: { approve: boolean }; prompts?: string[] } = {},
+  options: {
+    verdict?: { approve: boolean };
+    prompts?: string[];
+    /** Вопрос demo-исполнителя называет критическую область (минимум `declared`). */
+    critical?: boolean;
+  } = {},
 ): Record<string, AgentAdapter> {
   const verdict = options.verdict ?? { approve: true };
   const planReview: AgentAdapter['execute'] = () =>
@@ -85,7 +100,13 @@ export function controlled(
       options.prompts?.push((request.review ? 'review:' : 'writer:') + request.prompt);
       // Ревью плана (ответа) идёт без задачи: demo-ревьюер артефакта его не умеет.
       if (request.review && !request.task?.id) return planReview(request);
-      return adapters.demo.execute(request);
+      const result = adapters.demo.execute(request);
+      if (!options.critical || request.review) return result;
+      return result.then((r) => {
+        const data = r.data as { inputRequest?: { affects: string[] } | null };
+        if (data.inputRequest) data.inputRequest.affects = ['api'];
+        return r;
+      });
     },
   };
   return {
