@@ -19,8 +19,11 @@ export class PreparationAgent {
     if (!checkJsonBytes(raw, 100000).within) throw new DomainError('Слишком большой запрос', 413);
     const { operation, input } = agentRequest.parse(raw);
     // Центр внимания работает до setup: вопросы и согласования подготовки.
-    if (operation === 'attention_list')
-      return new AttentionService(this.store, undefined).agentList(input ?? {});
+    if (operation === 'attention_list') {
+      const list = new AttentionService(this.store, undefined).agentList(input ?? {});
+      if (!checkJsonBytes(list, 65536).within) throw new DomainError('Ответ превышает 64 KiB', 413);
+      return list;
+    }
     if (!(operation in preparationInputs))
       throw new DomainError(
         'Пока доступна проработка продукта и архитектуры. Техническая конфигурация ещё не подключена',

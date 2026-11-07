@@ -11,7 +11,7 @@
 // не меняют ни появление, ни версию. Повторное появление после решения —
 // новый факт источника, поэтому новое появление и снова «не прочитано».
 // Источник без такого факта называет ограничение у своего правила.
-import { queuePause, explainStop, stopInputsOf } from 'devcontour-harness';
+import { checkJsonBytes, queuePause, explainStop, stopInputsOf } from 'devcontour-harness';
 import { randomUUID } from 'node:crypto';
 import { SERVER_STOPPING, digest, specDigest } from '../core/service.ts';
 import { repositories } from '../core/repositories.ts';
@@ -58,6 +58,9 @@ import {
   type CachedFacts,
   type QuickPrerequisites,
 } from './quick-view.ts';
+
+/** Бюджет списка `attention_list` в ответе агентского API (предел ответа 64 KiB). */
+const AGENT_LIST_BYTES = 56_000;
 
 /** Пространство локальных отметок оператора: не исполняемое состояние, не Git sync. */
 export const ATTENTION_NAMESPACE = 'attention';
@@ -2410,6 +2413,9 @@ export class AttentionService {
       new Map(),
     );
     const items = view.items.slice(0, input.limit).map(({ state, ...item }) => (void state, item));
+    // Ответ агентского API — до 64 KiB: список режется с конца, отрезанное
+    // названо в `truncated`, а не отказом 413.
+    while (items.length > 1 && !checkJsonBytes(items, AGENT_LIST_BYTES).within) items.pop();
     return {
       items,
       counts: {

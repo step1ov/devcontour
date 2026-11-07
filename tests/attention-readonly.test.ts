@@ -269,3 +269,37 @@ test('Чистота чтения: обсуждение, бюджет, комп�
     f.cleanup();
   }
 });
+
+test('attention_list укладывается в 64 KiB: длинный список режется с конца и назван в truncated', () => {
+  const f = fixture();
+  try {
+    const long = 'Очень длинная причина карточки ведущего агента. '.repeat(10);
+    const service = new AttentionService(f.store, f.h, {
+      sources: [
+        {
+          id: 'board',
+          collect: () =>
+            Array.from({ length: 50 }, (_, i) => ({
+              sourceKey: `board:B-${i}`,
+              occurrenceId: 'o',
+              sourceVersion: 'v',
+              source: 'board' as const,
+              category: 'technical' as const,
+              actor: 'lead' as const,
+              title: long,
+              reason: long,
+              since: new Date(0).toISOString(),
+              subject: { kind: 'board' as const, id: `B-${i}`, href: '/' },
+              covered: Array.from({ length: 20 }, (_, n) => `T-${i}-${n}-`.padEnd(80, 'x')),
+            })),
+        },
+      ],
+    });
+    const result = service.agentList({ limit: 50 });
+    assert.ok(Buffer.byteLength(JSON.stringify(result)) <= 65536);
+    assert.ok(result.items.length > 0 && result.items.length < 50);
+    assert.equal(result.truncated?.count, result.counts.active - result.items.length);
+  } finally {
+    f.cleanup();
+  }
+});
