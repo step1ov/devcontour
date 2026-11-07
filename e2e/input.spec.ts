@@ -71,6 +71,10 @@ test('The operator answers the writer question in the panel; the answer reaches 
   await card.getByRole('button', { name: 'Сохранить ответ' }).click();
   await expect(card).toContainText('Ответ сохранён');
   await expect(card.locator('[data-input-answer]')).toContainText('Оставьте JSON');
+  // Ответ оператора — сообщение обсуждения задачи со ссылкой на версию ответа.
+  const thread = inspector.getByRole('list', { name: 'Сообщения обсуждения' });
+  await expect(thread).toContainText('ответ на вопрос, r1');
+  await expect(thread).toContainText('Оставьте JSON, как сейчас.');
   // Режим agent: применять в панели нечего, следующий шаг — ведущего.
   await expect(card.getByRole('button', { name: 'Применить ответ' })).toHaveCount(0);
   await expect(card.locator('[data-input-next]')).toContainText('ведущий');
