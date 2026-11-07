@@ -31,6 +31,7 @@ import {
   Loader2,
   Copy,
   LayoutDashboard,
+  BellDot,
   Map as MapIcon,
   Network,
   GitPullRequestArrow,
@@ -85,6 +86,8 @@ import { Phases, engine, elapsed } from './Workers.tsx';
 import { useNow } from './now.ts';
 import { AttemptTimeline, LiveWork, LivenessNote, livenessNow } from './LiveWork.tsx';
 import { TaskDiscussion } from './TaskDiscussion.tsx';
+import { AttentionCount, useAttentionScreen } from './AttentionProvider.tsx';
+import { AttentionCenter } from './AttentionCenter.tsx';
 import {
   boardPhaseLabels,
   chainBlockers,
@@ -740,6 +743,7 @@ const boardTabs = [
 ] as const;
 const workspaceScreens = [
   { key: 'overview', label: 'Обзор', icon: LayoutDashboard },
+  { key: 'attention', label: 'Внимание', icon: BellDot },
   { key: 'product', label: 'Карта продукта', icon: MapIcon },
   { key: 'workspace', label: 'Общий граф', icon: Network },
   { key: 'changesets', label: 'Изменения', icon: GitPullRequestArrow },
@@ -756,9 +760,11 @@ function readAppLocation() {
     task: params.get('task') ?? '',
   };
 }
+// Параметры экрана внимания (история, кто действует) живут, пока он открыт.
+const screenKeys = ['tab', 'board', 'task', 'attention', 'who'];
 function appHref(tab: string) {
   const params = new URLSearchParams(window.location.search);
-  for (const key of ['tab', 'board', 'task']) params.delete(key);
+  for (const key of screenKeys) params.delete(key);
   if (tab !== 'overview') params.set('tab', tab);
   const search = params.toString();
   return window.location.pathname + (search ? '?' + search : '');
@@ -825,6 +831,8 @@ function Modal({
 // Подзаголовок экрана workspace: что на нём и для чего.
 const workspaceNotes: Record<string, string> = {
   overview: 'Что можно попробовать, какое решение нужно и что делает система.',
+  attention:
+    'Что ждёт вашего решения и что разбирает ведущий агент. Прочитано и «увидел» не решают вопрос.',
   product: 'Пользовательские возможности, приложения и проверенный результат.',
   workspace: 'Задачи всех досок и связи между ними.',
   changesets:
@@ -879,6 +887,8 @@ export function App() {
   // board exists, what the operator needs to see is how the contour is set up.
   // Автор продукта начинает с обзора: что попробовать и какое решение нужно.
   const [tab, setTab] = useState(() => readAppLocation().tab);
+  // Уведомление «Открыть» ведёт на экран внимания этой оболочки.
+  useAttentionScreen(() => appHref('attention'));
   // Экран доски — одна из её вкладок; остальное — экраны всего workspace.
   const boardScreen = isBoardTab(tab);
   // Выбор доски из workspace открывает её последнюю вкладку (сначала —
@@ -901,6 +911,7 @@ export function App() {
     const params = new URLSearchParams(window.location.search);
     const before = new URLSearchParams(params);
     for (const key of ['tab', 'board', 'task']) params.delete(key);
+    if (tab !== 'attention') for (const key of ['attention', 'who']) params.delete(key);
     if (tab !== 'overview') params.set('tab', tab);
     if (boardScreen && boardId) params.set('board', boardId);
     if ((boardScreen || tab === 'workspace') && selected) params.set('task', selected);
@@ -1772,6 +1783,7 @@ export function App() {
             >
               <s.icon aria-hidden="true" className="text-muted-foreground size-4 shrink-0" />
               {s.label}
+              {s.key === 'attention' && <AttentionCount />}
             </a>
           ))}
         </nav>
@@ -2219,6 +2231,11 @@ export function App() {
                         setTab('list');
                       }}
                     />
+                  </div>
+                )}
+                {tab === 'attention' && (
+                  <div className="min-w-0 px-8 pt-4 pb-6 max-[760px]:px-4">
+                    <AttentionCenter />
                   </div>
                 )}
                 {tab === 'overview' && (
