@@ -1,10 +1,14 @@
 import { test, expect } from '@playwright/test';
+import { useLiveCliGuard } from './live-cli-guard.ts';
 
 // Вопрос исполнителя в панели: demo-исполнитель задачи с маркером
 // `[demo:ask]` останавливается вопросом (fixture, не модель); оператор
 // отвечает в карточке; ведущий готовит и применяет ответ через агентский
 // API; панель показывает раздельные состояния, «передано» — только после
 // попытки с ответом; задача принимается.
+
+// Живые claude и codex под запретом: вызов из demo-пути роняет тест.
+useLiveCliGuard();
 
 const headers = { 'X-DevContour-Request': '1' };
 type Request = import('@playwright/test').APIRequestContext;

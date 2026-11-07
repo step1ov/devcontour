@@ -744,6 +744,39 @@ test('D01-E: «исполнитель работает» — только при
   assert.equal(running.actor, undefined);
   assert.equal(execution([{ status: 'failed' }], 0, false).state, 'blocked');
   assert.equal(execution([{ status: 'done' }], 0, false).state, 'done');
+  // Задачу держит вопрос исполнителя: это ожидание ответа того, кто
+  // действует по вопросу, а не сбой, который разбирает ведущий агент.
+  const asked = (
+    questions: Record<string, 'operator' | 'lead'>,
+    tasks = [{ id: 'T-1', status: 'failed' }],
+  ) =>
+    quickSteps({
+      change,
+      developmentReady: true,
+      blocker: '',
+      configured: true,
+      engineConnected: true,
+      tasks,
+      questions,
+      activeRuns: 0,
+      paused: false,
+    }).find((s) => s.id === 'execution')!;
+  const operator = asked({ 'T-1': 'operator' });
+  assert.equal(operator.state, 'current');
+  assert.equal(operator.actor, 'operator');
+  assert.match(operator.detail, /вопрос/);
+  assert.doesNotMatch(operator.detail, /не прошла/);
+  const lead = asked({ 'T-1': 'lead' });
+  assert.equal(lead.state, 'current');
+  assert.equal(lead.actor, 'lead');
+  assert.match(lead.detail, /ответ/);
+  // Рядом настоящий сбой другой задачи — разбор сбоя ведущим.
+  const mixed = asked({ 'T-1': 'operator' }, [
+    { id: 'T-1', status: 'failed' },
+    { id: 'T-2', status: 'failed' },
+  ]);
+  assert.equal(mixed.state, 'blocked');
+  assert.equal(mixed.actor, 'lead');
 });
 
 test('D01-C: setup --change — неактивное изменение и новый блокер репозитория отклоняются без записи', () =>

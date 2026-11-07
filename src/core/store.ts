@@ -362,6 +362,73 @@ export class Store {
                     .run(row.namespace, row.owner, row.key);
                 }
               }
+              // Обсуждения задач компонента — локальная таблица владельца
+              // задачи: после миграции она читается из базы компонента.
+              // Последовательность (версия треда) сохраняется.
+              if (this.discussionTable('main', false)) {
+                // Владелец — как `taskOwner`: задачи workspace — в общей базе.
+                const owners = new Map<string, string | undefined>(
+                  (
+                    raw as { tasks: { id: string; scope?: string; repositoryId?: string }[] }
+                  ).tasks.map((t) => [t.id, t.scope === 'workspace' ? undefined : t.repositoryId]),
+                );
+                const rows = this.db
+                  .prepare(
+                    'SELECT seq,id,task_id,author,idem,kind,reply_to,data FROM main.discussion ORDER BY seq',
+                  )
+                  .all() as {
+                  seq: number;
+                  id: string;
+                  task_id: string;
+                  author: string;
+                  idem: string;
+                  kind: string;
+                  reply_to: string | null;
+                  data: string;
+                }[];
+                // Задачи workspace и владельцы вне компонентов остаются.
+                const moves = rows.flatMap((row) => {
+                  const owner = owners.get(row.task_id);
+                  return owner && locations.some((l) => l.id === owner) ? [{ row, owner }] : [];
+                });
+                // Seq — версия треда, id — ссылки ответов: перенос их не меняет.
+                // Записи с тем же seq, id или задачей в базе компонента — чужая
+                // история; слияние изменило бы версии или порядок тредов,
+                // поэтому миграция отказывает до записи и называет компонент.
+                for (const owner of new Set(moves.map((m) => m.owner))) {
+                  const schema = this.components.schema(owner);
+                  if (!this.discussionTable(schema, false)) continue;
+                  const clash = this.db.prepare(
+                    `SELECT 1 FROM ${schema}.discussion WHERE seq=? OR id=? OR task_id=? LIMIT 1`,
+                  );
+                  const clashes = moves.filter(
+                    (m) => m.owner === owner && clash.get(m.row.seq, m.row.id, m.row.task_id),
+                  ).length;
+                  if (clashes)
+                    throw new Error(
+                      `Миграция хранения остановлена: в базе компонента ${owner} уже есть обсуждения с теми же номерами, идентификаторами или задачами (${clashes} из переносимых записей). Перенос изменил бы версии или порядок тредов. Сохраните таблицу discussion базы компонента ${owner} отдельно, уберите её и повторите миграцию`,
+                    );
+                }
+                for (const { row, owner } of moves) {
+                  const schema = this.components.schema(owner);
+                  this.discussionTable(schema, true);
+                  this.db
+                    .prepare(
+                      `INSERT INTO ${schema}.discussion(seq,id,task_id,author,idem,kind,reply_to,data) VALUES(?,?,?,?,?,?,?,?)`,
+                    )
+                    .run(
+                      row.seq,
+                      row.id,
+                      row.task_id,
+                      row.author,
+                      row.idem,
+                      row.kind,
+                      row.reply_to,
+                      row.data,
+                    );
+                  this.db.prepare('DELETE FROM main.discussion WHERE seq=?').run(row.seq);
+                }
+              }
             }
             this.db.exec('COMMIT');
           } catch (e) {
@@ -809,6 +876,20 @@ export class Store {
         )
         .get(),
     );
+  }
+  /**
+   * Число сообщений обсуждений у всех владельцев: coordinator и базы
+   * компонентов. Только чтение; базы без таблицы дают 0.
+   */
+  discussionCount(): number {
+    const schemas = ['main', ...(this.components?.locations.map((l) => l.schema) ?? [])];
+    let count = 0;
+    for (const schema of schemas)
+      if (this.discussionTable(schema, false))
+        count += (
+          this.db.prepare(`SELECT count(*) AS n FROM ${schema}.discussion`).get() as { n: number }
+        ).n;
+    return count;
   }
   private discussionRows(sql: string, owner: string | undefined, ...args: (string | number)[]) {
     const schema = this.syncSchema(owner);

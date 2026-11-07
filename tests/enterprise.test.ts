@@ -1,3 +1,4 @@
+import { DiscussionService } from '../src/application/discussion.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
@@ -734,11 +735,26 @@ test('Explicit storage migration relocates historical local task bodies and pres
   let reopened: Store | undefined;
   try {
     const b = f.h.createBoard('Old library board', 'LEGACY_LOCAL_BOARD', 'library');
-    f.h.addTask(b.id, {
+    const task = f.h.addTask(b.id, {
       ...input(),
       repositoryId: 'library',
       description: 'LEGACY_LOCAL_SPECIFICATION',
     });
+    // Обсуждение задачи компонента до миграции: две записи треда.
+    const discussion = new DiscussionService(f.h);
+    for (const [n, text] of ['LEGACY_NOTE_ONE', 'LEGACY_NOTE_TWO'].entries())
+      discussion.post(
+        {
+          taskId: task.id,
+          kind: 'note',
+          text,
+          idempotencyKey: `legacy-note-${n}`,
+          expectedVersion: n,
+        },
+        'operator',
+      );
+    const thread = f.store.discussionPage('library', task.id, 0, 50);
+    assert.equal(thread.length, 2);
     // Локальная запись компонента (вызов модели) до миграции.
     f.store.atomic(() =>
       f.store.saveLocal('usage', 'library', 'U-legacy', { id: 'U-legacy', note: 'LEGACY_USAGE' }),
@@ -754,10 +770,84 @@ test('Explicit storage migration relocates historical local task bodies and pres
     assert.deepEqual(reopened.localRecords('usage', 'library'), {
       'U-legacy': { id: 'U-legacy', note: 'LEGACY_USAGE' },
     });
+    // Тред переезжает в базу компонента с той же последовательностью: версия
+    // треда и ответы по ключу повтора прежние.
+    assert.deepEqual(reopened.discussionPage('library', task.id, 0, 50), thread);
+    assert.equal(reopened.discussionVersion('library', task.id), thread[1].seq);
     const bytes = await readFile(join(f.data, 'state.sqlite'));
+    assert.equal(bytes.includes(Buffer.from('LEGACY_NOTE_ONE')), false);
     assert.equal(bytes.includes(Buffer.from('LEGACY_LOCAL_SPECIFICATION')), false);
     assert.equal(bytes.includes(Buffer.from('LEGACY_LOCAL_BOARD')), false);
     assert.equal(bytes.includes(Buffer.from('LEGACY_USAGE')), false);
+  } finally {
+    reopened?.close();
+    await rm(f.root, { recursive: true, force: true });
+  }
+});
+
+test('Explicit storage migration refuses up front when the component database already has a clashing discussion', async () => {
+  const f = await fixture(false);
+  let reopened: Store | undefined;
+  try {
+    const b = f.h.createBoard('Library board', '', 'library');
+    const task = f.h.addTask(b.id, { ...input(), repositoryId: 'library' });
+    new DiscussionService(f.h).post(
+      {
+        taskId: task.id,
+        kind: 'note',
+        text: 'OWN_NOTE',
+        idempotencyKey: 'own-note-1',
+        expectedVersion: 0,
+      },
+      'operator',
+    );
+    const thread = f.store.discussionPage('library', task.id, 0, 50);
+    assert.equal(thread.length, 1);
+    const before = f.store.read(),
+      events = f.store.allEvents();
+    await f.scheduler.stop();
+    f.store.close();
+    // База компонента без задач, но с чужим тредом: та же последовательность.
+    const library = f.c.repositories.find((r) => r.id === 'library')!;
+    const componentDb = join(library.path, '.devcontour-local', 'state.sqlite');
+    await mkdir(join(library.path, '.devcontour-local'), { recursive: true });
+    const foreign = new DatabaseSync(componentDb);
+    foreign.exec(
+      'CREATE TABLE discussion (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, task_id TEXT NOT NULL, author TEXT NOT NULL, idem TEXT NOT NULL, kind TEXT NOT NULL, reply_to TEXT, data TEXT NOT NULL, UNIQUE(task_id, author, idem))',
+    );
+    foreign
+      .prepare('INSERT INTO discussion VALUES(?,?,?,?,?,?,?,?)')
+      .run(thread[0].seq, 'M-foreign', 'T-foreign', 'operator', 'foreign', 'note', null, '{}');
+    foreign.close();
+    assert.throws(
+      () => new Store(join(f.data, 'state.sqlite'), f.c.repositories, true),
+      (e: Error) =>
+        /^Миграция хранения остановлена: в базе компонента library уже есть обсуждения/.test(
+          e.message,
+        ) && !/SQLITE|constraint/i.test(e.message),
+    );
+    // Отказ до записи: coordinator и тред прежние, чужая запись на месте.
+    const central = new Store(join(f.data, 'state.sqlite'));
+    try {
+      assert.deepEqual(central.read(), before);
+      assert.deepEqual(central.allEvents(), events);
+      assert.deepEqual(central.discussionPage(undefined, task.id, 0, 50), thread);
+    } finally {
+      central.close();
+    }
+    const check = new DatabaseSync(componentDb);
+    assert.deepEqual(
+      check
+        .prepare('SELECT seq,id FROM discussion')
+        .all()
+        .map((r) => ({ ...r })),
+      [{ seq: thread[0].seq, id: 'M-foreign' }],
+    );
+    // Чужая таблица убрана — миграция проходит, тред сохраняет seq.
+    check.exec('DROP TABLE discussion');
+    check.close();
+    reopened = new Store(join(f.data, 'state.sqlite'), f.c.repositories, true);
+    assert.deepEqual(reopened.discussionPage('library', task.id, 0, 50), thread);
   } finally {
     reopened?.close();
     await rm(f.root, { recursive: true, force: true });

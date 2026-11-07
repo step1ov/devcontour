@@ -322,7 +322,7 @@ Lifecycle требует хотя бы один teardown step; setup/ready мо�
 **Где задавать.** `budgets`, `prices` и `inputPolicy` можно объявить в `workspace.json` (хранится в Git) той же схемой, что и в `config.json`. Порядок старшинства:
 
 1. Ключ объявлен в `workspace.json` — каждый `workspace-init --file` записывает объявление в `config.json`. Объявление сильнее локального значения: отличавшееся значение `config.json` заменяется, и ответ называет его в `operational.replaced` с подсказкой применения.
-2. Правка `config.json` между запусками `workspace-init` — локальное переопределение. Оно действует (после перезапуска или `config-apply`) до следующего `workspace-init`; `doctor` называет расхождение проверкой `budgets:declaration` (`degraded`).
+2. Правка `config.json` между запусками `workspace-init` — локальное переопределение. Оно действует (после перезапуска или `config-apply`) до следующего `workspace-init`; `doctor` называет расхождение `budgets` и `prices` проверкой `budgets:declaration` (`degraded`). Расхождение `inputPolicy` с объявлением `doctor` пока не сообщает.
 3. Ключ не объявлен в `workspace.json` — реестр им не управляет, действует только `config.json`, как прежде.
 
 Неверное объявление отклоняется до записи, `config.json` остаётся прежним.
@@ -347,7 +347,7 @@ devcontour config-apply --keys inputPolicy --workspace /absolute/workspace
 - `prices:calls` — завершённые за 30 дней вызовы с неизвестной стоимостью, для модели которых тарифа нет и сейчас (вызовы без сообщённой модели названы отдельно: их оценить нельзя);
 - `budgets:on-unknown` — денежный бюджет с `onUnknown: "stop"` при ролях без тарифа: первый их вызов сделает бюджет неопределённым и остановит выдачу в его области;
 - `budgets:prices` — денежный бюджет с `onUnknown: "continue"`, а у runtime ролей или недавних вызовов нет ни одного тарифа: расход считается по нижней границе;
-- `budgets:declaration` — `config.json` расходится с объявлением `workspace.json`.
+- `budgets:declaration` — `budgets` или `prices` в `config.json` расходятся с объявлением `workspace.json` (`inputPolicy` эта проверка не сравнивает).
 
 ### Preview
 

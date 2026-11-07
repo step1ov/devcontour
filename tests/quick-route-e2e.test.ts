@@ -311,8 +311,8 @@ const toTraining = (roles: Record<string, Binding> | undefined) => {
  * компонента (`devcontour.component.json`): роли embedded-компонента живут
  * там, и без правки он исполнял бы задачи живыми CLI.
  */
-function trainingRuntime(root: string) {
-  const configPath = join(root, '.devcontour-local/config.json');
+function trainingRuntime(workspace: string, repo: string) {
+  const configPath = join(workspace, '.devcontour-local/config.json');
   const config = JSON.parse(readFileSync(configPath, 'utf8')) as {
     mode: string;
     checkoutRoot?: string;
@@ -330,7 +330,7 @@ function trainingRuntime(root: string) {
     if (repo.reviewer) repo.reviewer = { runtime: 'demo' };
   }
   writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
-  const componentPath = join(root, 'devcontour.component.json');
+  const componentPath = join(repo, 'devcontour.component.json');
   const component = JSON.parse(readFileSync(componentPath, 'utf8')) as {
     roles?: Record<string, Binding>;
     reviewer?: Binding;
@@ -370,11 +370,18 @@ const connected = (app: App) =>
  * preparation_setup, `setup --change`, обычные шаги ведущего агента и
  * исполнение учебным runtime через gates и review обеих фаз.
  */
-async function route(manager: Manager, root: string, guard: { called: () => string }) {
+async function route(
+  manager: Manager,
+  root: string,
+  guard: { called: () => string },
+  mode: 'embedded' | 'separate' = 'embedded',
+  /** Separate: каталог workspace вне репозитория; embedded — сам репозиторий. */
+  workspace = root,
+) {
   repository(root, manager);
   const servers: App[] = [];
   const start = async () => {
-    const app = await startWorkspace(root, { port: 0, workspaceMode: 'embedded' });
+    const app = await startWorkspace(workspace, { port: 0, workspaceMode: mode });
     servers.push(app);
     return app;
   };
@@ -447,14 +454,14 @@ async function route(manager: Manager, root: string, guard: { called: () => stri
     await stop(app);
 
     // 4. setup --change с digest предложения, который показала панель.
-    const plan = await cliRun(root, 'setup', '--change', changeId, '--plan');
+    const plan = await cliRun(workspace, 'setup', '--change', changeId, '--plan');
     assert.equal(plan.status, 0, plan.stderr);
     assert.equal(
       (JSON.parse(plan.stdout) as { proposal: string }).proposal,
       proposed.setup!.digest,
     );
     const applied = await cliRun(
-      root,
+      workspace,
       'setup',
       '--change',
       changeId,
@@ -466,16 +473,23 @@ async function route(manager: Manager, root: string, guard: { called: () => stri
       (JSON.parse(applied.stdout) as { status: string }).status,
       'needs-agent-bootstrap',
     );
-    trainingRuntime(root);
+    trainingRuntime(workspace, root);
+    // Режим размещения — выбранный: separate держит конфигурацию в workspace.
+    assert.equal(loadConfig(join(workspace, '.devcontour-local/config.json')).workspaceMode, mode);
 
     // 5. Bootstrap-коммит файлов setup.
     git(root, 'add', '-A');
     git(root, 'commit', '-qm', 'DevContour bootstrap');
+    // Separate: файлы setup workspace — в его собственном Git-репозитории.
+    if (workspace !== root && existsSync(join(workspace, '.git'))) {
+      git(workspace, 'add', '-A');
+      git(workspace, 'commit', '-qm', 'DevContour workspace bootstrap');
+    }
     assert.equal(git(root, 'status', '--porcelain'), '');
     const bootstrap = git(root, 'rev-parse', 'HEAD');
     // 6. context-lock и doctor (без сети и без вызовов моделей). До
     // закрепления doctor называет блокировкой только незакреплённый контекст.
-    const early = await cliRun(root, 'doctor');
+    const early = await cliRun(workspace, 'doctor');
     assert.notEqual(early.status, 0);
     assert.deepEqual(
       (JSON.parse(early.stdout) as { checks: { id: string; status: string }[] }).checks
@@ -483,9 +497,9 @@ async function route(manager: Manager, root: string, guard: { called: () => stri
         .map((c) => c.id),
       ['context'],
     );
-    const locked = await cliRun(root, 'context-lock');
+    const locked = await cliRun(workspace, 'context-lock');
     assert.equal(locked.status, 0, locked.stderr);
-    const doctor = await cliRun(root, 'doctor');
+    const doctor = await cliRun(workspace, 'doctor');
     assert.equal(doctor.status, 0, doctor.stdout + doctor.stderr);
     assert.equal((JSON.parse(doctor.stdout) as { ready: boolean }).ready, true);
 
@@ -522,7 +536,7 @@ async function route(manager: Manager, root: string, guard: { called: () => stri
     // 8. review-plan — AI-согласование только в local mode; в учебном режиме
     // план утверждает оператор кнопкой панели.
     const review = await cliRun(
-      root,
+      workspace,
       'review-plan',
       '--board',
       boardId,
@@ -533,7 +547,7 @@ async function route(manager: Manager, root: string, guard: { called: () => stri
     assert.match(review.stderr, /только для local mode/);
     await call(app.url, `/api/boards/${boardId}/approve`, {});
     // 9. Запуск очереди.
-    const queue = await cliRun(root, 'queue', '--start');
+    const queue = await cliRun(workspace, 'queue', '--start');
     assert.equal(queue.status, 0, queue.stderr);
 
     const done = await until(
@@ -551,17 +565,24 @@ async function route(manager: Manager, root: string, guard: { called: () => stri
   }
 }
 
-for (const manager of ['npm', 'pnpm'] as const)
+// Первый запуск в обоих режимах размещения: embedded (npm и pnpm) и
+// separate (npm) — workspace вне репозитория со своим состоянием.
+for (const [manager, mode] of [
+  ['npm', 'embedded'],
+  ['pnpm', 'embedded'],
+  ['npm', 'separate'],
+] as const)
   test(
-    `D01-A: быстрый маршрут ${manager} на настоящем сервере — от поручения до результата двух фаз учебным runtime`,
+    `D01-A: быстрый маршрут ${manager}${mode === 'separate' ? ' (separate)' : ''} на настоящем сервере — от поручения до результата двух фаз учебным runtime`,
     { skip: manager === 'pnpm' ? pnpmOffline() : undefined },
     () =>
       withTestHome(async () => {
         const root = temp();
+        const workspace = mode === 'separate' ? temp() : root;
         const guard = guardLiveRuntimes();
         let app: App | undefined;
         try {
-          const r = await route(manager, root, guard);
+          const r = await route(manager, root, guard, mode, workspace);
           app = r.app;
           // Шаги: подключение..выполнение пройдены, результат ждёт проверки оператора.
           assert.deepEqual(
@@ -660,6 +681,7 @@ for (const manager of ['npm', 'pnpm'] as const)
           await app?.close();
           guard.restore();
           remove(root);
+          if (workspace !== root) remove(workspace);
         }
       }),
   );

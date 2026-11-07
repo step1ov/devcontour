@@ -15,6 +15,8 @@ import { projectionOptions } from '../harness/host.ts';
 import { technicalReviewer } from '../harness/policy.ts';
 import { checkoutPath } from 'devcontour-harness';
 import { isolationSupport } from './isolation.ts';
+import { quickSetupMarks } from './quick.ts';
+import { ATTENTION_NAMESPACE } from '../application/attention.ts';
 import { ignoredComponentCopies } from './config.ts';
 import { CheckoutRootError, checkoutRootFor } from './checkout-root.ts';
 import { installProbe } from './install-probe.ts';
@@ -113,6 +115,92 @@ export function engineCheck(
   return { id: 'engine', status: 'passed', detail };
 }
 
+/** Записи, которых не знает выпуск 0.4.0-alpha.17 — последний перед быстрым маршрутом. */
+export interface NewStateInventory {
+  quickIntakes: number;
+  setupProposals: number;
+  expansions: number;
+  discussions: number;
+  attentionMarks: number;
+  inputRequests: number;
+  openInputRequests: number;
+  quickSetupMarks: number;
+}
+
+/** Опись записей новых версий: только чтение базы и файла отметки setup. */
+export function newStateInventory(
+  store: Store,
+  state: Pick<DevContourState, 'preparation'>,
+  root: string,
+): NewStateInventory {
+  const changes = state.preparation?.changes ?? [];
+  const requests = store.localEntries<{ lifecycle?: string }>('input-requests');
+  return {
+    quickIntakes: changes.filter((c) => c.intake).length,
+    setupProposals: changes.reduce((n, c) => n + (c.setup?.length ?? 0), 0),
+    expansions: changes.filter((c) => c.expanded).length,
+    discussions: store.discussionCount(),
+    attentionMarks: store.localEntries(ATTENTION_NAMESPACE).length,
+    inputRequests: requests.length,
+    openInputRequests: requests.filter(
+      (r) => r.value.lifecycle === 'pending' || r.value.lifecycle === 'answered',
+    ).length,
+    quickSetupMarks: Object.keys(quickSetupMarks(root)).length,
+  };
+}
+
+const ROLLBACK =
+  'Откат к 0.4.0-alpha.17 — восстановлением копии всех баз и каталога данных, снятой до обновления, вместе с прежней версией (docs/upgrade.md, «Откат»)';
+
+/**
+ * Какие записи новых версий есть в состоянии, какая версия их читает и как
+ * откатиться. Только сведения: проверка не блокирует, откат решает оператор.
+ */
+export function newStateCheck(inventory: NewStateInventory): Check {
+  const i = inventory;
+  const parts: string[] = [];
+  if (i.quickIntakes || i.setupProposals || i.expansions)
+    parts.push(
+      `быстрый маршрут: поручений ${i.quickIntakes}, предложений setup ${i.setupProposals}, переходов на полный маршрут ${i.expansions} — читает DevContour после 0.4.0-alpha.17 с движком 0.1.0-alpha.36 и новее; 0.4.0-alpha.17 строгой схемой отклоняет запись состояния, Git sync записи подготовки у участника этой версии останавливается`,
+    );
+  if (i.discussions)
+    parts.push(
+      `обсуждения задач: сообщений ${i.discussions} — читает DevContour после 0.4.0-alpha.17 с движком 0.1.0-alpha.36 и новее; 0.4.0-alpha.17 таблицу не читает: после отката обсуждения не видны, после повторного обновления видны снова`,
+    );
+  if (i.attentionMarks)
+    parts.push(
+      `отметки центра внимания: ${i.attentionMarks} — читает DevContour после 0.4.0-alpha.17 с движком 0.1.0-alpha.37; 0.4.0-alpha.17 их не читает, на работу они не влияют`,
+    );
+  if (i.inputRequests)
+    parts.push(
+      `вопросы исполнителя: запросов ${i.inputRequests}, открытых ${i.openInputRequests} — читает DevContour после 0.4.0-alpha.17 с движком 0.1.0-alpha.37; 0.4.0-alpha.17 записи не читает, а попытки и задачи с полями вопросов отклоняет строгой схемой`,
+    );
+  if (i.quickSetupMarks)
+    parts.push(
+      `отметка quick-setup.json каталога данных: изменений ${i.quickSetupMarks} — читает DevContour после 0.4.0-alpha.17; файл вне базы и в backup не входит: копируйте его вместе с базами`,
+    );
+  return {
+    id: 'compat:new-state',
+    status: 'passed',
+    detail: parts.length
+      ? `${parts.join('; ')}. ${ROLLBACK}`
+      : 'Записей быстрого маршрута, обсуждений задач, отметок центра внимания, вопросов исполнителя и отметки quick-setup.json нет',
+  };
+}
+
+/** Опись новых записей без отказа: сбой чтения — `not-checked`, готовность не снимается. */
+function newStateOf(store: Store, state: DevContourState, root: string): Check {
+  try {
+    return newStateCheck(newStateInventory(store, state, root));
+  } catch (e) {
+    return {
+      id: 'compat:new-state',
+      status: 'not-checked',
+      detail: `Опись записей новых версий не прочитана: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+}
+
 /**
  * Проверка совместимости данных: только хранение и формат. Каждая база
  * (центральная или coordinator и базы компонентов) открывается соединением
@@ -198,6 +286,7 @@ export function dataDoctor(config: Config, root: string) {
     )
       return result();
     checks.push(engineCheck(state!));
+    checks.push(newStateOf(store!, state!, root));
     check('execution-state', () => {
       const h = new DevContour(store!, config);
       const execution = new DevContourExecutionStore(h.store, projectionOptions(h));
@@ -242,6 +331,8 @@ export function doctorState(
   check?: Check;
   /** Записи вызовов моделей всех владельцев — для проверки тарифов. */
   calls?: DoctorCall[];
+  /** Опись записей новых версий (`compat:new-state`). */
+  newState?: Check;
 } {
   const file = join(root, 'state.sqlite');
   if (!existsSync(file)) return { state: emptyState() };
@@ -330,8 +421,10 @@ export function doctorState(
   } = settledRead(() => {
     const store = new Store(file, components, false, undefined, true);
     try {
+      const state = store.read();
       return {
-        state: store.read(),
+        state,
+        newState: newStateOf(store, state, root),
         calls: store
           .localEntries<UsageRecord>('usage')
           .map(({ value: { runtime, model, startedAt, costSource, outcome } }) => ({
@@ -364,10 +457,12 @@ export async function doctor(
     Partial<Pick<DevContourState, 'contracts' | 'appliedConfig'>>,
   stateCheck?: Check,
   calls?: DoctorCall[],
+  newState?: Check,
 ) {
   const checks: Check[] = [];
   if (stateCheck) checks.push(stateCheck);
   if (state) checks.push(engineCheck(state));
+  if (newState) checks.push(newState);
   const check = async (id: string, action: () => Promise<string>) => {
     try {
       checks.push({ id, status: 'passed', detail: await action() });

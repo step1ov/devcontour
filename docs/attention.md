@@ -60,7 +60,7 @@
 
 ## Действие с карточки
 
-`POST /api/attention/act {sourceKey, occurrenceId, expectedVersion, action, input?, idempotencyKey?}` — только для доменных действий карточек оператора. Сервер пересчитывает карточку и сверяет появление и версию с показанными:
+`POST /api/attention/act {sourceKey, occurrenceId, expectedVersion, action, input?, idempotencyKey?}` — только для доменных действий карточек оператора. `POST /api/attention/act` и `POST /api/attention/marks` — маршруты HTTP только для оператора (панель): в каталог агентских операций они не входят, у ведущего агента есть лишь чтение `attention_list`, а действует он операцией источника. Сервер пересчитывает карточку и сверяет появление и версию с показанными:
 
 - карточки нет — 409 `attention-resolved`;
 - появление или версия другие — 409 `attention-stale` с текущей карточкой: решение из старой вкладки не исполняется;

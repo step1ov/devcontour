@@ -30,3 +30,23 @@ test('The demo writer asks the product-area question only for [demo:ask-product]
   const plain = await ask(`Result ${DEMO_ASK}.`);
   assert.deepEqual(plain?.affects, []);
 });
+
+test('A demo review with no task outside the input review is refused with a clear error', async () => {
+  const review = (prompt: string) =>
+    demoAdapter.execute({
+      signal: new AbortController().signal,
+      review: true,
+      cwd: '/nonexistent',
+      prompt,
+    } as unknown as Request);
+  await assert.rejects(review('Subject: plan B-board\nReview the board plan.'), (e: Error) => {
+    assert.ok(!(e instanceof TypeError), e.message);
+    assert.match(e.message, /^Demo-ревью без задачи не поддерживается/);
+    return true;
+  });
+  // Ревью ответа на вопрос исполнителя без задачи по-прежнему одобряется.
+  const input = (await review('Subject: plan input-IR-' + 'a'.repeat(24) + '\n')) as {
+    data: { approved: boolean };
+  };
+  assert.equal(input.data.approved, true);
+});

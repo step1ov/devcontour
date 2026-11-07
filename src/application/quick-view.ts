@@ -15,6 +15,7 @@ import {
 } from '../runner/quick.ts';
 import { selectedWorkspaceMode } from '../runner/workspace-mode.ts';
 import { baseWaitOf } from './queue-stop.ts';
+import { InputService, inputHolds } from './input.ts';
 
 // Проекция шагов быстрого маршрута для панели и центра внимания: одни и те же
 // факты, одно правило. Только чтение: факты репозитория — процессы Git без
@@ -112,6 +113,10 @@ export function quickView(input: {
     configured: existsSync(join(root, '.devcontour-local', 'config.json')),
     engineConnected: Boolean(h),
     tasks,
+    ...(() => {
+      const questions = questionActors(h, tasks);
+      return questions ? { questions } : {};
+    })(),
     activeRuns: state.runs.filter(
       (r) => r.status === 'active' && tasks.some((t) => t.id === r.taskId),
     ).length,
@@ -128,6 +133,25 @@ export function quickView(input: {
     steps,
     lead: leadPresence(change, tasks, input.now),
   };
+}
+
+/** Кто действует по вопросу исполнителя, держащему остановленную задачу изменения. */
+function questionActors(
+  h: DevContour | undefined,
+  tasks: readonly { id: string; status: string }[],
+) {
+  const failed = tasks.filter((t) => t.status === 'failed');
+  if (!h || !failed.length) return undefined;
+  const holds = inputHolds(h);
+  const service = new InputService(h);
+  const out: Record<string, 'operator' | 'lead'> = {};
+  for (const t of failed) {
+    const requestId = holds.get(t.id);
+    const request =
+      requestId && service.list({ taskId: t.id }).requests.find((r) => r.requestId === requestId);
+    if (request) out[t.id] = request.actor;
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 /** Задачи изменения и находки исполнителя, привязанные к нему отдельно. */
