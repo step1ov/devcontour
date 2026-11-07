@@ -102,6 +102,24 @@ test('D04-F: до setup GET /api/attention показывает вопрос, с
         (await get()).items.map((i) => [i.id, i.sourceVersion]),
         view.items.map((i) => [i.id, i.sourceVersion]),
       );
+      // Отметки пишутся и до setup.
+      const marked = await fetch(app.url + '/api/attention/marks', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-devcontour-request': '1' },
+        body: JSON.stringify({
+          marks: [
+            {
+              sourceKey: question.sourceKey,
+              occurrenceId: question.occurrenceId,
+              version: question.sourceVersion,
+              kind: 'ack',
+            },
+          ],
+        }),
+      });
+      assert.equal(marked.status, 200);
+      const seen = (await get()).items.find((i) => i.id === question.id)!;
+      assert.deepEqual(seen.state, { read: true, acknowledged: true, unread: false });
     } finally {
       await app.close();
       rmSync(workspace, { recursive: true, force: true });
@@ -109,7 +127,7 @@ test('D04-F: до setup GET /api/attention показывает вопрос, с
     }
   }));
 
-test('D04-F: после подключения движка к той же базе ключи и появления карточек подготовки те же', async () => {
+test('D04-F: после подключения движка к той же базе ключи, появления и отметки карточек подготовки те же', async () => {
   const root = temp();
   try {
     const path = join(root, 'state.sqlite');
@@ -124,7 +142,17 @@ test('D04-F: после подключения движка к той же ба�
         changeId: status.activeChangeId!,
         add: [{ text: 'Нужна ли история?' }],
       });
-      before = (await new AttentionService(bootstrap, undefined).active()).items.map((i) => i.id);
+      const service = new AttentionService(bootstrap, undefined);
+      const shown = (await service.active()).items;
+      await service.mark({
+        marks: shown.map((i) => ({
+          sourceKey: i.sourceKey,
+          occurrenceId: i.occurrenceId,
+          version: i.sourceVersion,
+          kind: 'read' as const,
+        })),
+      });
+      before = (await service.active()).items.map((i) => `${i.id}:${i.state.read}`);
     } finally {
       bootstrap.close();
     }
@@ -133,7 +161,7 @@ test('D04-F: после подключения движка к той же ба�
       const h = new DevContour(store, config());
       const after = (await new AttentionService(store, h).active()).items
         .filter((i) => i.source.startsWith('prep-'))
-        .map((i) => i.id);
+        .map((i) => `${i.id}:${i.state.read}`);
       assert.deepEqual(after, before);
       assert.equal(before.length, 1);
     } finally {

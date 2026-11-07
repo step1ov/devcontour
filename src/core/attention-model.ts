@@ -62,7 +62,7 @@ export const ATTENTION_LIMITS = {
   agentLimit: 50,
 } as const;
 
-export const sourceKeyPattern = /^[a-z-]+:[A-Za-z0-9:._#@-]+$/;
+export const sourceKeyPattern = /^[a-z-]+(:[A-Za-z0-9:._#@-]+)?$/;
 const sourceKey = z.string().max(ATTENTION_LIMITS.sourceKey).regex(sourceKeyPattern);
 const occurrenceId = z.string().min(1).max(ATTENTION_LIMITS.occurrence);
 const version = z.string().min(1).max(200);

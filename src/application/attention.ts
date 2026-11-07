@@ -35,6 +35,7 @@ import type { ProductChange } from '../core/preparation-model.ts';
 import {
   ATTENTION_LIMITS,
   attentionInputs,
+  attentionMark,
   categoryRank,
   type AttentionAction,
   type AttentionActor,
@@ -1501,6 +1502,81 @@ export class AttentionService {
   /** Отметки оператора по ключам источников. */
   marks(): Record<string, AttentionMark> {
     return this.store.localRecords<AttentionMark>(ATTENTION_NAMESPACE, undefined);
+  }
+
+  /**
+   * Отметки «прочитано» и «увидел» показанной версии. Пишет только локальные
+   * записи пространства `attention`: ни задача, ни вопрос, ни согласование,
+   * ни очередь от отметки не меняются (увидел — не значит решил). Отметка
+   * исчезнувшего появления не хранится (`ignored`). Отметка старой версии
+   * не затирает отметку текущей. Событий журнала нет: вторая вкладка видит
+   * отметку по ревизии данных.
+   */
+  async mark(raw: unknown) {
+    const { marks } = attentionInputs.marks.parse(raw);
+    const quick = await this.prerequisites();
+    const now = (this.options.now ?? Date.now)();
+    const at = new Date(now).toISOString();
+    return this.store.atomic(() => {
+      const ctx = this.context(quick, now);
+      const present = new Map(this.candidates(ctx).map((c) => [c.sourceKey, c]));
+      const stored = this.marks();
+      const marked: { sourceKey: string; occurrenceId: string }[] = [];
+      const ignored: { sourceKey: string; occurrenceId: string }[] = [];
+      for (const m of marks) {
+        const item = present.get(m.sourceKey);
+        if (!item || item.occurrenceId !== m.occurrenceId) {
+          ignored.push({ sourceKey: m.sourceKey, occurrenceId: m.occurrenceId });
+          continue;
+        }
+        const previous = stored[m.sourceKey];
+        const row: AttentionMark =
+          previous?.occurrenceId === m.occurrenceId
+            ? { ...previous }
+            : { v: 1, occurrenceId: m.occurrenceId };
+        // Отметка старой версии не отменяет отметку текущей.
+        const keeps = (version: string | undefined) =>
+          version === item.sourceVersion && m.version !== item.sourceVersion;
+        if (!keeps(row.readVersion)) {
+          row.readVersion = m.version;
+          row.readAt = at;
+        }
+        if (m.kind === 'ack' && !keeps(row.ackVersion)) {
+          row.ackVersion = m.version;
+          row.ackAt = at;
+        }
+        row.title = clip(one(item.title), ATTENTION_LIMITS.title);
+        row.category = item.category;
+        this.store.saveLocal(ATTENTION_NAMESPACE, undefined, m.sourceKey, attentionMark.parse(row));
+        stored[m.sourceKey] = row;
+        marked.push({ sourceKey: m.sourceKey, occurrenceId: m.occurrenceId });
+      }
+      this.prune(stored, new Set(present.keys()), now);
+      return { marked, ignored };
+    });
+  }
+
+  /**
+   * Удаление отметок исчезнувших карточек старше срока хранения и сверх
+   * предела строк (сначала самые старые). Только при записи отметок.
+   */
+  private prune(stored: Record<string, AttentionMark>, present: Set<string>, now: number) {
+    const last = (m: AttentionMark) =>
+      [m.readAt, m.ackAt]
+        .filter((x): x is string => !!x)
+        .sort()
+        .at(-1) ?? '';
+    const cutoff = new Date(now - ATTENTION_LIMITS.markRetentionMs).toISOString();
+    const keys = Object.keys(stored);
+    const removed = new Set(keys.filter((key) => !present.has(key) && last(stored[key]) < cutoff));
+    const left = keys.filter((key) => !removed.has(key));
+    if (left.length > ATTENTION_LIMITS.markRows)
+      left
+        .filter((key) => !present.has(key))
+        .sort((a, b) => (last(stored[a]) < last(stored[b]) ? -1 : 1))
+        .slice(0, left.length - ATTENTION_LIMITS.markRows)
+        .forEach((key) => removed.add(key));
+    for (const key of removed) this.store.deleteLocal(ATTENTION_NAMESPACE, undefined, key);
   }
 
   /**

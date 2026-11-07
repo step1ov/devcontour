@@ -313,6 +313,11 @@ export async function serve(
           json(res, 200, await service.active(Object.fromEntries(url.searchParams)));
           return;
         }
+        // Отметки «прочитано» и «увидел» — локальные записи оператора, не решение.
+        if (req.method === 'POST' && path === '/api/attention/marks' && preparationStore) {
+          json(res, 200, await attentionOf(preparationStore).mark(await body(req)));
+          return;
+        }
         if (req.method === 'POST' && path === '/api/preparation/decision' && preparationStore) {
           json(res, 200, new Preparation(preparationStore).decide(await body(req)));
           return;
