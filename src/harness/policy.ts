@@ -229,6 +229,14 @@ export function policyFromConfig(
     leaseMs: config.leaseMs,
     runTimeoutMs: config.runTimeoutMs,
     ...(config.stallSweep ? { stallSweep: config.stallSweep } : {}),
+    ...(config.inputPolicy
+      ? {
+          inputPolicy: {
+            threshold: config.inputPolicy.threshold,
+            criticalPaths: config.inputPolicy.criticalPaths ?? [],
+          },
+        }
+      : {}),
     reviewProbes: config.reviewProbes,
     maxAttempts: config.maxAttempts,
     repairBudget: config.repairBudget,
@@ -304,6 +312,9 @@ const operational = new Set([
   'leaseMs',
   'runTimeoutMs',
   'stallSweep',
+  // Порог вопросов исполнителя закрепляется в попытке и действует со
+  // следующей: план он не меняет.
+  'inputPolicy',
   'reviewProbes',
   'maxAttempts',
   'repairBudget',

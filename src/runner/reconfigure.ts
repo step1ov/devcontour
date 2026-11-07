@@ -139,7 +139,11 @@ export function configApplyKeys(operation: string): OperationalKey[] | undefined
  */
 export const defaultOperationalKeys = ['budgets', 'prices'] as const satisfies OperationalKey[];
 
-/** Ключи `--keys`: подмножество `budgets,prices,stallSweep`; без флага — `budgets,prices`. */
+/**
+ * Ключи `--keys`: подмножество `budgets,prices,stallSweep,inputPolicy`; без
+ * флага — `budgets,prices`. `inputPolicy`, как и `stallSweep`, — только
+ * названным явно: прежний сервер этого ключа не знает.
+ */
 export function parseOperationalKeys(value?: string): OperationalKey[] {
   if (value === undefined) return [...defaultOperationalKeys];
   const keys = [...new Set(value.split(',').map((k) => k.trim()))].filter(Boolean);

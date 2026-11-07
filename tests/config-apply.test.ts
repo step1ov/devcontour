@@ -9,6 +9,9 @@ import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { budgetOverview } from '../src/harness/budget.ts';
+import { approvalPolicyDigest, policyFromConfig } from '../src/harness/policy.ts';
+import { workspacePolicyDigest } from '../src/core/workspace.ts';
+import { executionDigest } from 'devcontour-harness';
 import {
   parseOperationalKeys,
   requestConfigApply,
@@ -185,18 +188,107 @@ test('config-apply waits for work under the previous configuration; without a se
   }
 });
 
-test('--keys accepts only budgets, prices and stallSweep', () => {
-  // Без флага — прежний состав запроса: сервер без stallSweep его понимает.
+test('--keys accepts only budgets, prices, stallSweep and inputPolicy', () => {
+  // Без флага — прежний состав запроса: сервер без stallSweep и inputPolicy его понимает.
   assert.deepEqual(parseOperationalKeys(), ['budgets', 'prices']);
   assert.deepEqual(parseOperationalKeys('prices,budgets'), ['budgets', 'prices']);
   assert.deepEqual(parseOperationalKeys('stallSweep'), ['stallSweep']);
   assert.deepEqual(parseOperationalKeys('stallSweep,budgets'), ['budgets', 'stallSweep']);
+  assert.deepEqual(parseOperationalKeys('inputPolicy'), ['inputPolicy']);
   assert.throws(
     () => parseOperationalKeys('budgets,concurrency'),
     /не поддерживается: concurrency/,
   );
-  assert.throws(() => parseOperationalKeys(''), /только budgets, prices, stallSweep/);
+  assert.throws(() => parseOperationalKeys(''), /только budgets, prices, stallSweep, inputPolicy/);
 });
+
+test('inputPolicy applies without restart: the attempt keeps its pinned threshold, the next claim pins the new one', async () => {
+  const s = served();
+  try {
+    s.server.pause(false);
+    const board = s.server.createBoard('Board');
+    s.server.addTask(board.id, input('First'));
+    s.server.addTask(board.id, input('Second'));
+    s.server.approve(board.id);
+    const before = approvalDigests(s.server);
+    const first = s.server.claim('server');
+    assert.ok(first);
+    // Без поля — умолчание harness, закреплённое в попытке.
+    assert.deepEqual(s.server.store.read().runs.find((r) => r.id === first.id)?.inputPolicy, {
+      threshold: 7,
+      criticalPaths: [],
+    });
+    s.edit((raw) => (raw.inputPolicy = { threshold: 4, criticalPaths: ['db/migrations'] }));
+    // Запрос без --keys inputPolicy не отправляет: файл отличается не только budgets/prices.
+    const implicit = await s.request(undefined, 300);
+    assert.notEqual(implicit.status, 'applied', JSON.stringify(implicit));
+    assert.equal(s.server.config.inputPolicy, undefined);
+    s.server.store.change('test.clear', (st) => {
+      st.reconfigure = undefined;
+    });
+    s.server.store.change('test.lease-expired', (st) => {
+      st.runs.find((r) => r.id === first.id)!.leaseUntil = 0;
+    });
+    const applied = await s.request(['inputPolicy']);
+    assert.equal(applied.status, 'applied', JSON.stringify(applied));
+    assert.deepEqual(s.server.config.inputPolicy, {
+      threshold: 4,
+      criticalPaths: ['db/migrations'],
+    });
+    // Ни одно из оснований утверждения и исполнения не сдвинулось.
+    assert.deepEqual(approvalDigests(s.server), before);
+    const second = s.server.claim('server');
+    assert.ok(second);
+    const runs = s.server.store.read().runs;
+    assert.deepEqual(runs.find((r) => r.id === second.id)?.inputPolicy, {
+      threshold: 4,
+      criticalPaths: ['db/migrations'],
+    });
+    assert.equal(runs.find((r) => r.id === first.id)?.inputPolicy?.threshold, 7);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('inputPolicy bounds 1..11; absent leaves the policy and config digest as before', () => {
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-input-policy-'));
+  try {
+    const path = join(root, 'config.json');
+    const write = (extra: Record<string, unknown>) =>
+      writeFileSync(path, JSON.stringify({ ...config({ repository: root }), ...extra }));
+    for (const threshold of [0, 12, 3.5])
+      assert.throws(() => (write({ inputPolicy: { threshold } }), loadConfig(path)), /inputPolicy/);
+    assert.throws(
+      () => (write({ inputPolicy: { threshold: 5, extra: 1 } }), loadConfig(path)),
+      /inputPolicy/,
+    );
+    write({});
+    const plain = loadConfig(path);
+    assert.equal('inputPolicy' in policyFromConfig(plain), false);
+    write({ inputPolicy: { threshold: 11 } });
+    const autonomous = loadConfig(path);
+    assert.deepEqual(policyFromConfig(autonomous).inputPolicy, { threshold: 11, criticalPaths: [] });
+    assert.equal(
+      executionDigest(policyFromConfig(autonomous)),
+      executionDigest(policyFromConfig(plain)),
+    );
+    assert.equal(approvalPolicyDigest(autonomous), approvalPolicyDigest(plain));
+    assert.equal(workspacePolicyDigest(autonomous), workspacePolicyDigest(plain));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/** Основания утверждения и исполнения, которые порог вопросов не должен менять. */
+function approvalDigests(h: DevContour) {
+  const task = h.store.read().tasks[0];
+  return {
+    execution: executionDigest(policyFromConfig(h.config)),
+    approval: approvalPolicyDigest(h.config),
+    task: h.taskPolicyDigest(task),
+    workspace: workspacePolicyDigest(h.config),
+  };
+}
 
 /** Завершённый вызов модели с известной стоимостью: расход общего бюджета. */
 function spend(store: Store, id: string, costUsd: number | null) {
