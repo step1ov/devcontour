@@ -48,7 +48,7 @@ import { Button } from '@/ui/button.tsx';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/ui/dialog.tsx';
 import { Input } from '@/ui/input.tsx';
 import { Textarea } from '@/ui/textarea.tsx';
-import { cn } from '@/lib/utils.ts';
+import { cn, humanError, plural } from '@/lib/utils.ts';
 import { levels } from '../core/graph.ts';
 import type { taskProgress } from '../application/context.ts';
 import type { PanelEvidence, PanelRun, PanelSummary } from '../application/panel.ts';
@@ -94,8 +94,7 @@ import {
   stalledFailureText,
 } from '../core/work-status.ts';
 import { statusKey, statusNames, statusOfKey, taskStatus, flashOf } from './status.ts';
-import { Toaster, toast } from 'sonner';
-import { createPortal } from 'react-dom';
+import { toast } from 'sonner';
 
 const waitingReasons: Record<string, string> = {
   product_approval_required:
@@ -730,13 +729,6 @@ async function api(path: string, input?: unknown, method = 'POST') {
     );
   return data;
 }
-// Сетевой отказ fetch — английское «Failed to fetch»: для человека это
-// «сервер не отвечает», с адресом, который он открыл.
-function humanError(message: string) {
-  return /failed to fetch|networkerror|load failed/i.test(message)
-    ? `Сервер DevContour не отвечает по адресу ${window.location.host}. Проверьте, что devcontour serve запущен.`
-    : message;
-}
 // Экраны workspace — в боковой навигации; у доски свои вкладки. Вид, доска и
 // задача — в адресе: ссылка ведёт к доказательству, «Назад» возвращает вид.
 const boardTabs = [
@@ -798,15 +790,6 @@ function holdingTask(tasks: UITask[]) {
   }
   return best;
 }
-const plural = (n: number, one: string, few: string, many: string) => {
-  const mod10 = n % 10,
-    mod100 = n % 100;
-  return mod10 === 1 && mod100 !== 11
-    ? one
-    : mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)
-      ? few
-      : many;
-};
 function Modal({
   title,
   children,
@@ -967,6 +950,9 @@ export function App() {
         setRevisionNumber(null);
         setQuery('');
       }
+      // Задача из адреса (переход по ссылке центра внимания, «Назад») — как
+      // задача из начальной ссылки: её не заменяет первая задача доски.
+      linkedTask.current = place.task;
       setSelected(place.task);
     };
     window.addEventListener('popstate', restore);
@@ -3606,11 +3592,6 @@ export function App() {
         <Modal error={error} title={log.title} onClose={() => setLog(undefined)}>
           <pre className="max-h-[65dvh] overflow-auto">{log.content}</pre>
         </Modal>
-      )}
-      {/* Уведомления — в портале поверх экрана, вне сетки каркаса. */}
-      {createPortal(
-        <Toaster position="bottom-right" visibleToasts={3} toastOptions={{ duration: 4000 }} />,
-        document.body,
       )}
     </div>
   );

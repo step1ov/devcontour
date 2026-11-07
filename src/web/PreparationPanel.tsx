@@ -187,7 +187,7 @@ function Foldable({
           </span>
         </Button>
       </h3>
-      <div id={id} hidden={!open} className="mt-3">
+      <div id={id} hidden={!open} tabIndex={-1} className="mt-3 outline-offset-2">
         {children}
       </div>
     </section>
