@@ -6,12 +6,58 @@ import { repositories } from '../core/repositories.ts';
 import { taskOwner } from '../core/sync-state.ts';
 import {
   DISCUSSION_PAGE_BYTES,
+  DISCUSSION_TEXT_BYTES,
+  clipText,
   discussionInputs,
   discussionMessage,
+  textTooLong,
   type DiscussionMessage,
 } from '../core/discussion-model.ts';
 
 type Author = DiscussionMessage['author'];
+
+/** Байт JSON-вида выдержки текста в очереди ведущего: полный текст — `discussion_read`. */
+export const INBOX_EXCERPT_BYTES = 1000;
+
+/**
+ * Запись очереди ведущего — ограниченная проекция обращения: выдержка
+ * текста, его длина и версия треда для `discussion_resolve`. Размер записи
+ * не зависит от длины текста, поэтому страница очереди всегда продвигается.
+ */
+export interface InboxRequest {
+  id: string;
+  taskId: string;
+  createdAt: string;
+  /** Обращение исправляет прежнее: в очереди — только последняя версия. */
+  supersedes?: string;
+  excerpt: string;
+  truncated: boolean;
+  /** Длина полного текста в байтах UTF-8. */
+  textBytes: number;
+  /** Версия треда задачи — `expectedVersion` для `discussion_resolve`. */
+  version: number;
+  /** Ведущий просил ответа, и оператор ответил: обращение снова ждёт обработки. */
+  reopened?: { dispositionId: string; answerId: string };
+}
+
+/** Курсор очереди: позиция последней выданной записи в каждой схеме хранения (по её владельцу). */
+function parseInboxCursor(cursor: string | undefined): Record<string, number> {
+  if (!cursor) return {};
+  let value: unknown;
+  try {
+    value = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+  } catch {
+    value = undefined;
+  }
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    Array.isArray(value) ||
+    !Object.values(value).every((n) => Number.isSafeInteger(n) && (n as number) >= 0)
+  )
+    throw new DomainError('Некорректный cursor', 400);
+  return value as Record<string, number>;
+}
 
 /**
  * Обсуждение задачи: заметки, обращения к ведущему агенту и их обработка.
@@ -78,6 +124,7 @@ export class DiscussionService {
 
   /** Заметка или обращение к ведущему от `author`. */
   post(raw: unknown, author: Exclude<Author, 'runtime'>) {
+    tooLong(raw);
     const v = discussionInputs.discussion_post.parse(raw);
     return this.append(v.taskId, author, {
       kind: v.kind,
@@ -94,29 +141,33 @@ export class DiscussionService {
    * причиной или нужен ответ. Чтение обращения обработкой не является.
    */
   resolve(raw: unknown) {
+    tooLong(raw);
     const v = discussionInputs.discussion_resolve.parse(raw);
     const request = this.find(v.requestId);
     if (!request || request.kind !== 'change-request')
       throw new DomainError('Обращение не найдено', 404);
     const state = this.h.store.read();
-    if (v.outcome === 'accepted') {
-      // Принятие ссылается на настоящую новую работу: ревизию доски или
-      // задачи, созданные после обращения.
-      if (!v.refs.boardId && !v.refs.taskIds?.length)
-        throw new DomainError('Принятое обращение ссылается на ревизию доски или задачи', 400);
-      if (v.refs.boardId) {
-        const board = state.boards.find((b) => b.id === v.refs.boardId);
-        const revision = board?.revisions[(v.refs.revision ?? board.revisions.length) - 1];
-        if (!revision) throw new DomainError('Ревизия доски не найдена', 404);
-        if (revision.createdAt <= request.createdAt)
-          throw new DomainError('Ревизия старше обращения: изменение ещё не внесено', 409);
-      }
-      for (const id of v.refs.taskIds ?? []) {
-        const t = state.tasks.find((x) => x.id === id);
-        if (!t) throw new DomainError('Задача не найдена: ' + id, 404);
-        if (t.createdAt <= request.createdAt)
-          throw new DomainError('Задача старше обращения: изменение ещё не внесено: ' + id, 409);
-      }
+    if (v.refs.revision !== undefined && !v.refs.boardId)
+      throw new DomainError('Ревизия указывается вместе с доской (refs.boardId)', 400);
+    // Ссылки любой обработки — на существующую работу; принятие — на
+    // настоящую новую: ревизию доски или задачи, созданные после обращения.
+    if (v.outcome === 'accepted' && !v.refs.boardId && !v.refs.taskIds?.length)
+      throw new DomainError('Принятое обращение ссылается на ревизию доски или задачи', 400);
+    if (v.refs.boardId) {
+      const board = state.boards.find((b) => b.id === v.refs.boardId);
+      const revision =
+        v.refs.revision === undefined
+          ? board?.revisions.at(-1)
+          : board?.revisions.find((r) => r.number === v.refs.revision);
+      if (!revision) throw new DomainError('Ревизия доски не найдена', 404);
+      if (v.outcome === 'accepted' && revision.createdAt <= request.createdAt)
+        throw new DomainError('Ревизия старше обращения: изменение ещё не внесено', 409);
+    }
+    for (const id of v.refs.taskIds ?? []) {
+      const t = state.tasks.find((x) => x.id === id);
+      if (!t) throw new DomainError('Задача не найдена: ' + id, 404);
+      if (v.outcome === 'accepted' && t.createdAt <= request.createdAt)
+        throw new DomainError('Задача старше обращения: изменение ещё не внесено: ' + id, 409);
     }
     return this.append(request.taskId, 'lead', {
       kind: 'disposition',
@@ -125,45 +176,99 @@ export class DiscussionService {
       idempotencyKey: v.idempotencyKey,
       expectedVersion: v.expectedVersion,
       disposition: { outcome: v.outcome, refs: v.refs },
+      // В транзакции записи, после проверки повтора: повтор той же обработки
+      // возвращает прежнюю запись, а не отказ.
+      check: (owner) => {
+        if (this.h.store.discussionSupersededBy(owner, request.id))
+          throw new DomainError('Обращение исправлено: обработайте его новую версию', 409, {
+            code: 'request-superseded',
+          });
+        const last = this.h.store.discussionLatestDisposition(owner, request.id);
+        const outcome = last && discussionMessage.parse(last).disposition?.outcome;
+        if (outcome && outcome !== 'needs-answer')
+          throw new DomainError('Обращение уже обработано', 409, { code: 'already-resolved' });
+      },
     });
   }
 
-  /** Необработанные обращения к ведущему по всем задачам, старые первыми. */
-  inbox(raw: unknown, maxBytes = DISCUSSION_PAGE_BYTES) {
+  /**
+   * Необработанные обращения к ведущему по всем задачам, старые первыми.
+   * Схемы хранения читаются по одной (в центральном хранилище владельцы
+   * делят таблицу), каждая — с запасом в одну запись, чтобы знать, есть ли
+   * продолжение; страница — слияние схем по времени события с позицией
+   * каждой схемы в курсоре. `redact` применяется к полному тексту до выдержки.
+   */
+  inbox(
+    raw: unknown,
+    maxBytes = DISCUSSION_PAGE_BYTES,
+    options: { redact?: (text: string) => string; excerptBytes?: number } = {},
+  ) {
     const v = discussionInputs.discussion_inbox.parse(raw);
-    // Cursor — seq последней выданной записи у каждого владельца.
-    let positions: Record<string, number> = {};
-    if (v.cursor)
-      try {
-        positions = JSON.parse(Buffer.from(v.cursor, 'base64url').toString('utf8')) as Record<
-          string,
-          number
-        >;
-      } catch {
-        throw new DomainError('Некорректный cursor', 409);
-      }
-    const owners = [undefined, ...repositories(this.h.config).map((r) => r.id)];
-    const keyOf = (owner?: string) => owner ?? '@workspace';
-    const candidates = owners
-      .flatMap((owner) =>
-        this.h.store
-          .discussionPending(owner, positions[keyOf(owner)] ?? 0, v.limit)
-          .map((row) => ({ owner, message: discussionMessage.parse(row) })),
-      )
-      // В центральном хранилище владельцы делят одну таблицу: запись — один раз.
-      .filter((c, i, all) => all.findIndex((x) => x.message.id === c.message.id) === i)
-      .sort((a, b) => a.message.createdAt.localeCompare(b.message.createdAt));
-    const items: { owner?: string; message: DiscussionMessage }[] = [];
-    for (const c of candidates.slice(0, v.limit)) {
-      if (!checkJsonBytes([...items, c], maxBytes).within) break;
-      items.push(c);
+    const positions = parseInboxCursor(v.cursor);
+    // Одна схема — один список; ключ курсора — первый её владелец
+    // (`@workspace` или id репозитория): имя схемы зависит от порядка
+    // репозиториев в конфигурации, владелец — нет.
+    const schemas = new Map<string, string | undefined>();
+    for (const owner of [undefined, ...repositories(this.h.config).map((r) => r.id)]) {
+      const schema = this.h.store.discussionSchema(owner);
+      if (!schemas.has(schema)) schemas.set(schema, owner);
     }
+    const lists = [...schemas.values()].map((owner) => ({
+      key: owner ?? '@workspace',
+      owner,
+      at: 0,
+      rows: this.h.store.discussionInbox(owner, positions[owner ?? '@workspace'] ?? 0, v.limit + 1),
+    }));
+    const excerptBytes = options.excerptBytes ?? INBOX_EXCERPT_BYTES;
+    const project = (
+      owner: string | undefined,
+      row: (typeof lists)[number]['rows'][number],
+      bytes: number,
+    ): InboxRequest => {
+      const message = discussionMessage.parse(row.message);
+      const text = options.redact ? options.redact(message.text) : message.text;
+      const { excerpt, truncated } = clipText(text, bytes);
+      return {
+        id: message.id,
+        taskId: message.taskId,
+        createdAt: message.createdAt,
+        ...(message.supersedes ? { supersedes: message.supersedes } : {}),
+        excerpt,
+        truncated,
+        textBytes: Buffer.byteLength(message.text, 'utf8'),
+        version: this.h.store.discussionVersion(owner, message.taskId),
+        ...(row.reopened ? { reopened: row.reopened } : {}),
+      };
+    };
+    const items: InboxRequest[] = [];
     const next = { ...positions };
-    for (const { owner, message } of items)
-      next[keyOf(owner)] = Math.max(next[keyOf(owner)] ?? 0, message.seq);
-    const more = items.length < candidates.length;
+    while (items.length < v.limit) {
+      const heads = lists.filter((l) => l.at < l.rows.length);
+      if (!heads.length) break;
+      const list = heads.reduce((a, b) =>
+        b.rows[b.at].at < a.rows[a.at].at || (b.rows[b.at].at === a.rows[a.at].at && b.key < a.key)
+          ? b
+          : a,
+      );
+      const row = list.rows[list.at];
+      let item = project(list.owner, row, excerptBytes);
+      if (!checkJsonBytes([...items, item], maxBytes).within) {
+        if (items.length) break;
+        // Первая запись страницы выдаётся всегда — с выдержкой короче, а
+        // если и без выдержки не помещается, предел меньше записи очереди.
+        for (let bytes = excerptBytes >> 1; ; bytes >>= 1) {
+          item = project(list.owner, row, bytes);
+          if (checkJsonBytes([item], maxBytes).within) break;
+          if (!bytes) throw new DomainError('Предел страницы меньше записи очереди обращений', 413);
+        }
+      }
+      items.push(item);
+      next[list.key] = row.position;
+      list.at++;
+    }
+    const more = lists.some((l) => l.at < l.rows.length);
     return {
-      requests: items.map((i) => i.message),
+      requests: items,
       ...(more
         ? { nextCursor: Buffer.from(JSON.stringify(next), 'utf8').toString('base64url') }
         : {}),
@@ -190,6 +295,7 @@ export class DiscussionService {
       replyTo?: string;
       supersedes?: string;
       disposition?: DiscussionMessage['disposition'];
+      check?: (owner: string | undefined) => void;
     },
   ) {
     const payload = {
@@ -235,7 +341,15 @@ export class DiscussionService {
         );
         if (target.author !== author)
           throw new DomainError('Исправить можно только своё сообщение', 403);
+        if (target.kind === 'disposition')
+          throw new DomainError('Обработка обращения не исправляется: запишите новую', 400);
+        // История линейна: исправляется только последняя версия сообщения.
+        if (this.h.store.discussionSupersededBy(owner, input.supersedes))
+          throw new DomainError('Сообщение уже исправлено: исправьте его новую версию', 409, {
+            code: 'already-superseded',
+          });
       }
+      input.check?.(owner);
       const latest = state.runs.filter((r) => r.taskId === taskId).at(-1);
       const id = 'DM-' + randomUUID();
       const record = {
@@ -278,4 +392,29 @@ export class DiscussionService {
       return { message, version: seq };
     });
   }
+}
+
+/** Текст длиннее предела — явный 413, как обещает договор, а не ошибка схемы. */
+function tooLong(raw: unknown) {
+  if (textTooLong(raw))
+    throw new DomainError(`Сообщение больше ${DISCUSSION_TEXT_BYTES} байт UTF-8`, 413);
+}
+
+/** Байт JSON-вида текста в ответе агентской записи: полный текст ведущий прислал сам. */
+export const WRITE_REPLY_TEXT_BYTES = 2000;
+
+/**
+ * Ответ записи в агентском API ограничен независимо от длины текста: запись
+ * уже зафиксирована, и предел ответа не должен превращать её в ошибку.
+ * Полный текст — `discussion_read`.
+ */
+export function boundedWrite(result: { message: DiscussionMessage; version: number }) {
+  const { excerpt, truncated } = clipText(result.message.text, WRITE_REPLY_TEXT_BYTES);
+  return {
+    message: { ...result.message, text: excerpt },
+    ...(truncated
+      ? { textTruncated: true, textBytes: Buffer.byteLength(result.message.text, 'utf8') }
+      : {}),
+    version: result.version,
+  };
 }

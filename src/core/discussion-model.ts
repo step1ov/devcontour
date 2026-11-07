@@ -14,14 +14,48 @@ export const DISCUSSION_PAGE_BYTES = 256 * 1024;
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 const messageId = z.string().regex(/^DM-[0-9a-f-]{36}$/);
 const idempotencyKey = z.string().regex(/^[A-Za-z0-9_-]{8,80}$/);
+/** Управляющие символы, кроме перевода строки, возврата каретки и табуляции. */
+const CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
+/**
+ * Текст на входе хранится как есть, без обрезания пробелов. Управляющие
+ * символы отклоняются: в JSON каждый — шесть байт, и запись в 16 KiB текста
+ * перестала бы помещаться в страницу агентского API. Без них JSON-вид
+ * текста не больше вдвое длиннее UTF-8, и одна запись всегда меньше страницы.
+ */
 const text = z
   .string()
-  .trim()
-  .min(1)
+  .refine((t) => t.trim().length > 0, 'Сообщение пустое')
+  .refine((t) => !CONTROL.test(t), 'Сообщение содержит управляющие символы')
   .refine(
     (t) => Buffer.byteLength(t, 'utf8') <= DISCUSSION_TEXT_BYTES,
     `Сообщение больше ${DISCUSSION_TEXT_BYTES} байт UTF-8`,
   );
+/** Сохранённый текст читается без входных проверок: запись не должна блокировать чтение. */
+const storedText = z.string().min(1);
+
+/** Текст длиннее предела — явный отказ 413 до разбора схемы. */
+export function textTooLong(raw: unknown): boolean {
+  const value = (raw as { text?: unknown; reason?: unknown } | null) ?? {};
+  return [value.text, value.reason].some(
+    (t) => typeof t === 'string' && Buffer.byteLength(t, 'utf8') > DISCUSSION_TEXT_BYTES,
+  );
+}
+
+/**
+ * Начало текста, JSON-вид которого не больше `maxBytes`: граница — по
+ * кодовым точкам, суррогатная пара не разрывается.
+ */
+export function clipText(value: string, maxBytes: number) {
+  let used = 0;
+  let end = 0;
+  for (const point of value) {
+    const size = Buffer.byteLength(JSON.stringify(point)) - 2;
+    if (used + size > maxBytes) return { excerpt: value.slice(0, end), truncated: true };
+    used += size;
+    end += point.length;
+  }
+  return { excerpt: value, truncated: false };
+}
 
 export const dispositionOutcome = z.enum(['accepted', 'rejected', 'needs-answer']);
 export const discussionMessage = z.strictObject({
@@ -32,7 +66,7 @@ export const discussionMessage = z.strictObject({
   threadId: id,
   author: z.enum(['operator', 'lead', 'runtime']),
   kind: z.enum(['note', 'change-request', 'answer', 'disposition']),
-  text,
+  text: storedText,
   createdAt: z.iso.datetime(),
   replyTo: messageId.optional(),
   supersedes: messageId.optional(),
@@ -96,7 +130,7 @@ export const discussionInputs = {
     ...write,
   }),
   discussion_inbox: z.strictObject({
-    cursor: z.string().max(200).optional(),
+    cursor: z.string().max(2000).optional(),
     limit: z.number().int().min(1).max(DISCUSSION_PAGE_ITEMS).default(20),
   }),
 };

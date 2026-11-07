@@ -8,7 +8,7 @@ import {
 } from '../runner/intent.ts';
 import { Observability, observabilityInputs } from './observability.ts';
 import { ProjectMemory, memoryInputs } from './memory.ts';
-import { DiscussionService } from './discussion.ts';
+import { DiscussionService, boundedWrite } from './discussion.ts';
 import { discussionInputs } from '../core/discussion-model.ts';
 import { SignalInbox, signalInput } from '../core/signals.ts';
 import { LeadWorkflow, workflowInput } from '../core/lead-workflow.ts';
@@ -277,13 +277,13 @@ export const descriptions: Record<AgentOperation, string> = {
   contract_change_revise:
     'Revise a failed, stale or waiting contract change to the current committed redaction with the expected record version. An optional proposal replaces the stored one for the same contract (same file or inline title, repositoryId and component) — new text, artifacts, checks, underTest — after the start pre-checks (artifact pinning, import closure, check declaration) and before any model call. Before side effects the same operation is re-reviewed with its holds and history kept; after them a linked successor takes the holds over. Effects are never rolled back.',
   discussion_read:
-    'Read a task discussion page (oldest first; cursor is the last seq returned). Notes, change requests and their dispositions are local history of the task owner: they never change the task, its approvals, queue or attempts, and Git sync does not carry them.',
+    'Read a task discussion page in seq order: forward from cursor (the last seq returned; follow nextCursor), or backward with latest: true or before: <seq> (follow previousCursor). version is the thread version for writes. Notes, change requests and their dispositions are local history of the task owner: they never change the task, its approvals, queue or attempts, and Git sync does not carry them.',
   discussion_post:
-    'Post a note or a change request to a task discussion as the lead. Needs idempotencyKey (a repeat returns the same message, another payload under it is refused) and expectedVersion (the thread version you read; a mismatch is 409 — re-read). A change request does not alter an approved or accepted task: apply it through a new revision.',
+    'Post a note or a change request to a task discussion as the lead. Needs idempotencyKey (a repeat returns the same message, another payload under it is refused) and expectedVersion (the thread version you read; a mismatch is 409 — re-read). Text: up to 16 KiB UTF-8, no control characters other than newline and tab; the reply carries an excerpt of long text. supersedes corrects your own latest version of a message. A change request does not alter an approved or accepted task: apply it through a new revision.',
   discussion_resolve:
-    'Record how a change request was handled: accepted (refs to the new board revision or tasks created for it), rejected with a reason, or needs-answer. Reading a request is not handling it.',
+    'Record how a change request was handled: accepted (refs to the new board revision or tasks created for it), rejected with a reason, or needs-answer (the operator answers in the panel and the request returns to discussion_inbox). Only the latest version of a request is handled; accepted and rejected are final. expectedVersion is the thread version from discussion_inbox. Reading a request is not handling it.',
   discussion_inbox:
-    'List change requests to the lead that have no disposition yet, oldest first, across tasks, with a cursor.',
+    'List change requests waiting for the lead across tasks, oldest event first: the latest version of each request without a disposition, or answered by the operator after needs-answer (reopened). Each entry is bounded: an excerpt, textBytes, truncated and the thread version for discussion_resolve; read the full text with discussion_read. Follow nextCursor.',
   preview_status:
     'Read the local preview: which verified release serves the URL, its states (built, deployed, healthy, confirmed or unconfirmed), and past deployments with their errors. Deploying and rolling back are separate controlled actions through the CLI or panel.',
 };
@@ -540,9 +540,9 @@ export class AgentService {
         // Ответ агентского API ограничен 64 KiB: страница — с запасом под конверт.
         return new DiscussionService(h).read(input, 60000);
       case 'discussion_post':
-        return new DiscussionService(h).post(input, 'lead');
+        return boundedWrite(new DiscussionService(h).post(input, 'lead'));
       case 'discussion_resolve':
-        return new DiscussionService(h).resolve(input);
+        return boundedWrite(new DiscussionService(h).resolve(input));
       case 'discussion_inbox':
         return new DiscussionService(h).inbox(input, 60000);
       case 'usage_report':

@@ -5,7 +5,7 @@
 //
 // Это не handoff публикации ChangeSet (`devcontour handoff --changeset`):
 // тот готовит результат к push/PR человеком.
-import { DiscussionService } from './discussion.ts';
+import { DiscussionService, type InboxRequest } from './discussion.ts';
 import {
   HANDOFF_MAX_BYTES,
   HANDOFF_MIN_BYTES,
@@ -126,13 +126,15 @@ export interface DevContourHandoff {
     /** Доски с действующим заданием ведущего (его очередь продолжает сервер). */
     liveBoards: string[];
     /**
-     * Необработанные обращения к ведущему из обсуждений задач: первые пять,
-     * текст кратко и через редактор секретов; остальное — `discussion_inbox`
-     * с курсором.
+     * Необработанные обращения к ведущему из обсуждений задач: до пяти,
+     * выдержка текста после редактора секретов; остальное — `discussion_inbox`
+     * с курсором, полный текст — `discussion_read`. `omitted` — обращения
+     * есть, но в предел ответа не поместились.
      */
     discussion?: {
-      requests: { id: string; taskId: string; createdAt: string; text: string }[];
+      requests: InboxRequest[];
       nextCursor?: string;
+      omitted?: true;
     };
   };
 }
@@ -681,23 +683,36 @@ export function devcontourHandoffWithin(
           return typeof bound === 'string' ? bound : undefined;
         },
       });
-      const inbox = new DiscussionService(h).inbox({ limit: 5 }, 8000);
-      const discussion = inbox.requests.length
-        ? {
-            requests: inbox.requests.map((m) => ({
-              id: m.id,
-              taskId: m.taskId,
-              createdAt: m.createdAt,
-              text: options.redact(m.text).slice(0, 300),
-            })),
+      // Обращения — в своём байтовом бюджете: выдержки после редактора
+      // секретов, полный текст — `discussion_read`. Бюджет — доля предела
+      // ответа; если ответ всё же больше предела, он уменьшается ниже.
+      const discussionOf = (budget: number): DevContourHandoff['host']['discussion'] => {
+        const service = new DiscussionService(h);
+        try {
+          const inbox = service.inbox({ limit: HANDOFF_DISCUSSION_ITEMS }, budget, {
+            redact: options.redact,
+            excerptBytes: HANDOFF_DISCUSSION_EXCERPT,
+          });
+          if (!inbox.requests.length) return undefined;
+          return {
+            requests: inbox.requests,
             ...(inbox.nextCursor ? { nextCursor: inbox.nextCursor } : {}),
-          }
-        : undefined;
-      const host = {
+          };
+        } catch (error) {
+          if (error instanceof DomainError && error.status === 413)
+            return { requests: [], omitted: true };
+          throw error;
+        }
+      };
+      const withDiscussion = (discussion: DevContourHandoff['host']['discussion']) => ({
         ...(next ? { next } : {}),
         liveBoards,
         ...(discussion ? { discussion } : {}),
-      };
+      });
+      let budget = limit
+        ? Math.min(HANDOFF_DISCUSSION_BYTES, Math.floor(limit.bytes / 4))
+        : HANDOFF_DISCUSSION_BYTES;
+      let host = withDiscussion(discussionOf(budget));
       if (!limit) return { value: { pack, host }, trimmed: false };
       const size = (p: HandoffPack) => bytes(handoffResponse({ pack: p, host }, limit.format));
       if (size(pack) <= limit.bytes) return { value: { pack, host }, trimmed: false };
@@ -749,6 +764,16 @@ export function devcontourHandoffWithin(
         }
       }
       const fitted = best?.pack ?? last;
+      // Пакет не ужимается ниже `HANDOFF_MIN_BYTES`: остаток предела
+      // освобождают обращения — меньше записей, затем только отметка о них.
+      for (let i = 0; i < 4 && host.discussion?.requests.length; i++) {
+        const over = bytes(handoffResponse({ pack: fitted, host }, limit.format)) - limit.bytes;
+        if (over <= 0) break;
+        budget -= over;
+        host = withDiscussion(
+          budget > 0 && i < 3 ? discussionOf(budget) : { requests: [], omitted: true },
+        );
+      }
       return {
         value: { pack: fitted, host },
         trimmed: droppedOf(fitted.truncated) > droppedOf(pack.truncated),
@@ -785,9 +810,11 @@ function hostMarkdown(host: DevContourHandoff['host']) {
     `- Действующие задания досок: ${host.liveBoards.length ? host.liveBoards.join(', ') : 'нет'}`,
     ...(host.discussion
       ? [
-          `- Обращения к ведущему без обработки: ${host.discussion.requests
-            .map((r) => `${r.taskId} (${r.id})`)
-            .join(', ')}${host.discussion.nextCursor ? ' и ещё — discussion_inbox' : ''}`,
+          host.discussion.requests.length
+            ? `- Обращения к ведущему без обработки: ${host.discussion.requests
+                .map((r) => `${r.taskId} (${r.id}${r.reopened ? ', есть ответ оператора' : ''})`)
+                .join(', ')}${host.discussion.nextCursor ? ' и ещё — discussion_inbox' : ''}`
+            : '- Есть обращения к ведущему без обработки — discussion_inbox',
         ]
       : []),
     ...Object.entries(handoffHostCommands).map(([k, v]) => `- \`${k}\` — ${v}`),
@@ -807,6 +834,11 @@ export const parseHandoffFormat = (format: string | undefined): HandoffFormat =>
     throw new DomainError('format: ожидается json или md', 400);
   return format as HandoffFormat;
 };
+
+/** Обращений к ведущему в пакете, байт их блока и байт выдержки каждого. */
+const HANDOFF_DISCUSSION_ITEMS = 5;
+const HANDOFF_DISCUSSION_BYTES = 8000;
+const HANDOFF_DISCUSSION_EXCERPT = 600;
 
 /** Предел ответа операции: каталог обещает не больше 64 KiB. */
 export const AGENT_HANDOFF_BYTES = 60_000;

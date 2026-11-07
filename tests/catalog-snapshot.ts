@@ -26,5 +26,9 @@
 // Намеренное изменение: операции обсуждения задачи discussion_read,
 // discussion_post, discussion_resolve и discussion_inbox после memory_recall;
 // прочие операции байтово прежние.
-export const CATALOG_DIGEST = 'f6d28840f05cb0a61adb953a30d0df26dd795b26d697a408b2c857ee4467a907';
+// Намеренное изменение: описания discussion_read, discussion_post,
+// discussion_resolve и discussion_inbox называют чтение назад, выдержки
+// текста, цикл needs-answer и версию треда в очереди; курсор
+// discussion_inbox — до 2000 символов; прочие операции байтово прежние.
+export const CATALOG_DIGEST = '71ec177499a2b700381fde1248a09f9f9803128edd78005385c6b3b331bf5172';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';
