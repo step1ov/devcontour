@@ -13,6 +13,8 @@ import {
 } from './input-fixture.ts';
 import { AgentService } from '../src/application/agent.ts';
 import { serve } from '../src/server/http.ts';
+import { devcontourHandoff } from '../src/application/handoff.ts';
+import { queueStopOf } from '../src/application/queue-stop.ts';
 
 after(() => inputDemos.close());
 
@@ -272,6 +274,54 @@ test('A requirement-change answer is not applied; supersede needs a newer task o
     await f.scheduler.drain();
     assert.equal(f.store.read().runs.filter((r) => r.taskId === taskId).length, runs);
     assert.equal(f.store.read().tasks.find((t) => t.id === taskId)!.status, 'failed');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('Handoff and queue: host.next names who answers and the apply chain; the full answer never reaches the report, events or handoff', async () => {
+  const f = await inputFixture(controlled());
+  try {
+    const { taskId, requestId, version } = await question(f);
+    const handoff = () => devcontourHandoff(f.h, {});
+    const pending = handoff();
+    assert.equal(pending.host.next?.action, 'answer-input', JSON.stringify(pending.host.next));
+    assert.equal(pending.host.next?.input?.requestId, requestId);
+    assert.match(pending.host.next.detail, /input_answer/);
+    assert.ok(pending.pack.inputs?.some((i) => i.requestId === requestId));
+    assert.equal(queueStopOf(f.h).inputsWaiting, 1);
+    const tail = 'UNIQUE-TAIL-' + 'z'.repeat(20);
+    const text = 'Use JSON as now. ' + 'x'.repeat(600) + tail;
+    f.service.answer({ requestId, text, optionId: 'json', expectedVersion: version }, 'operator');
+    const answered = handoff();
+    assert.equal(answered.host.next?.action, 'apply-input', JSON.stringify(answered.host.next));
+    assert.match(answered.host.next.detail, /input_context, input_review/);
+    // Ответ целиком — только в show; пакет, отчёт и журнал — без него.
+    assert.equal(JSON.stringify(answered).includes(tail), false);
+    assert.equal(JSON.stringify(f.store.allEvents()).includes(tail), false);
+    const report = new AgentService(f.h, f.root).execute({ operation: 'value_report', input: {} });
+    assert.equal(JSON.stringify(report).includes(tail), false);
+    assert.equal(
+      (f.service.show({ requestId }).answers.at(-1) as { text: string }).text.endsWith(tail),
+      true,
+    );
+    void taskId;
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('Operator mode handoff: a floor-free question is still answered by the operator; after the answer the lead prepares and the operator applies', async () => {
+  const f = await inputFixture(controlled(), { approvalMode: 'operator' });
+  try {
+    const { requestId, version } = await question(f);
+    const pending = devcontourHandoff(f.h, {});
+    assert.equal(pending.host.next?.action, 'answer-input');
+    assert.match(pending.host.next.detail, /operator's answer/);
+    f.service.answer({ requestId, text: 'Use JSON.', expectedVersion: version }, 'operator');
+    const answered = devcontourHandoff(f.h, {});
+    assert.equal(answered.host.next?.action, 'apply-input');
+    assert.match(answered.host.next.detail, /operator applies in the panel/);
   } finally {
     await f.cleanup();
   }

@@ -58,6 +58,8 @@ export async function inputFixture(
         dependsOn,
       }).id;
     },
+    /** Снять копию demo (хранилище и планировщик закрыты вызывающим). */
+    release: () => seed.release(),
     cleanup: async () => {
       await scheduler.stop();
       store.close();

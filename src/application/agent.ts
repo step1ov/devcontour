@@ -604,7 +604,16 @@ export class AgentService {
         const state = h.store.read();
         const now = Date.now();
         return {
-          jobs: new LeadWorkflow(h).list(owner).map((j) => this.workflowView(j)),
+          jobs: (() => {
+            const workflow = new LeadWorkflow(h);
+            return workflow.list(owner).map((j) => {
+              // Стадия ждёт только ответов на вопросы исполнителя: «ждёт ответа», не сбой.
+              const waiting = ['queued', 'running'].includes(j.status)
+                ? workflow.waitingOf(j, state)
+                : undefined;
+              return { ...this.workflowView(j), ...(waiting ? { waiting } : {}) };
+            });
+          })(),
           operatorBlocked: h.config.approvalMode === 'operator',
           // Стадии ждут выдачи: остановленная очередь и её причина — рядом.
           queue: queueStopOf(h, state),

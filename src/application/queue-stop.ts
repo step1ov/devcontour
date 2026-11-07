@@ -1,4 +1,5 @@
 import type { DevContour } from '../core/service.ts';
+import { inputHolds } from './input.ts';
 import type { AuditEvent, DevContourState } from '../core/model.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { repositories } from '../core/repositories.ts';
@@ -26,11 +27,18 @@ export function queueStopOf(
   state: DevContourState = h.store.read(),
   events: AuditEvent[] = h.store.events(),
 ) {
-  return queueStopView(state, events, {
+  const view = queueStopView(state, events, {
     approvalMode: h.config.approvalMode,
     // Работа ведущего нужна только для подсказки остановленной очереди.
     workflowActive: state.paused && workflowActive(h),
   });
+  // Вопрос исполнителя очередь не останавливает (`needs-input` не держит
+  // выдачу): рядом с её состоянием — сколько задач ждут ответа.
+  const waiting = inputHolds(h).size;
+  const out: typeof view & { inputsWaiting?: number; inputsText?: string } = view;
+  return waiting
+    ? { ...out, inputsWaiting: waiting, inputsText: `${waiting} task(s) wait for answers` }
+    : out;
 }
 
 /**
