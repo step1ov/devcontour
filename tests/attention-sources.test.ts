@@ -12,6 +12,11 @@ import { digest, type DevContour } from '../src/core/service.ts';
 import { Workspace, changeSnapshot, snapshotDigest } from '../src/core/workspace.ts';
 import { fixture, input } from './helpers.ts';
 import { DiscussionService } from '../src/application/discussion.ts';
+import { AgentService } from '../src/application/agent.ts';
+import { LeadWorkflow } from '../src/core/lead-workflow.ts';
+import { executionOf } from '../src/harness/execution.ts';
+import { CheckCorpus, canonicalJson, sha256 } from '../src/core/check-store.ts';
+import { declaration, propertyGate } from './check-fixture.ts';
 import { architecture, product } from './preparation-fixture.ts';
 import { byKey, preparationFixture } from './attention-fixture.ts';
 
@@ -615,6 +620,266 @@ test('S7/S8 обращение к ведущему: исправление — �
       expectedVersion: version(),
     });
     assert.equal(byKey(await engineItems(f), crKey), undefined);
+  } finally {
+    f.cleanup();
+  }
+});
+
+/* ------------------------------------------------------------------ */
+/* S9, S17 (варианты), S18, S19                                        */
+/* ------------------------------------------------------------------ */
+
+test('S9 задание ведущего: упало — карточка, обновление плана — версия, повтор снимает, новый сбой — новое появление', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    f.h.addTask(b.id, input('Task one'));
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex', maxAttempts: 3 });
+    const key = `board:${b.id}`;
+    assert.equal(byKey(await engineItems(f), key), undefined, 'живое задание — карточки нет');
+    flow.fail(flow.claim(job.key, job.owner)!, 'review failed');
+    const card = byKey(await engineItems(f), key)!;
+    assert.equal(card.actor, 'lead');
+    assert.equal(card.occurrenceId, `job:${job.key}:1`);
+    assert.ok(card.actions.some((a) => a.kind === 'handoff'));
+    const repeat = byKey(await engineItems(f, Date.now() + 3_600_000), key)!;
+    assert.deepEqual([repeat.id, repeat.sourceVersion], [card.id, card.sourceVersion]);
+    // План утверждён: цикл повтора сделает другое — то же появление, новая версия.
+    f.h.approve(b.id);
+    const updated = byKey(await engineItems(f), key)!;
+    assert.equal(updated.id, card.id);
+    assert.notEqual(updated.sourceVersion, card.sourceVersion);
+    flow.retry(job.key, job.owner);
+    assert.equal(byKey(await engineItems(f), key), undefined);
+    flow.fail(flow.claim(job.key, job.owner)!, 'review failed again');
+    const again = byKey(await engineItems(f), key)!;
+    assert.equal(again.occurrenceId, `job:${job.key}:2`);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('S9 свёртка: задание стоит на упавшей задаче — одна карточка задачи с доской', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const t = f.h.addTask(b.id, input('Task one'));
+    f.h.approve(b.id);
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex', maxAttempts: 3 });
+    failNext(f.h, t.id);
+    flow.fail(flow.claim(job.key, job.owner)!, 'task failed');
+    const items = await engineItems(f);
+    assert.equal(byKey(items, `board:${b.id}`), undefined);
+    const work = byKey(items, `work:${t.id}`)!;
+    assert.deepEqual(work.impact.boards, [b.id]);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('S17 preview: нет Docker — доступ оператора; потерянная версия — ведущему; новая выкладка снимает', async () => {
+  const f = fixture();
+  try {
+    const record = (id: string, extra: Record<string, unknown>) => ({
+      id,
+      changeSetId: 'CS-1',
+      verificationId: 'V-1',
+      manifestDigest: 'm',
+      policyDigest: 'p',
+      release: 'r-' + id,
+      project: 'dc-' + id,
+      token: 't',
+      leaseUntil: 0,
+      active: false,
+      startedAt: new Date().toISOString(),
+      ...extra,
+    });
+    const set = (previews: unknown[]) =>
+      f.store.change('fixture.preview', (s) => {
+        s.previews = previews as typeof s.previews;
+      });
+    set([record('PV-1', { status: 'failed', failure: 'docker-unavailable', error: 'no docker' })]);
+    const docker = byKey(await engineItems(f), 'preview:docker')!;
+    assert.equal(docker.actor, 'operator');
+    assert.equal(docker.category, 'access');
+    assert.equal(docker.occurrenceId, 'PV-1');
+    const repeat = byKey(await engineItems(f, Date.now() + 60_000), 'preview:docker')!;
+    assert.deepEqual([repeat.id, repeat.sourceVersion], [docker.id, docker.sourceVersion]);
+    // Healthy выкладка снимает отказ; потом она перестаёт отвечать.
+    const healthy = record('PV-2', { status: 'healthy', url: 'http://127.0.0.1:1' });
+    set([record('PV-1', { status: 'failed', failure: 'docker-unavailable' }), healthy]);
+    const items = await engineItems(f);
+    assert.equal(byKey(items, 'preview:docker'), undefined);
+    assert.equal(byKey(items, 'preview:lost'), undefined);
+    set([{ ...healthy, lost: 'health check timed out' }]);
+    const lost = byKey(await engineItems(f), 'preview:lost')!;
+    assert.equal(lost.actor, 'lead');
+    assert.equal(lost.occurrenceId, 'PV-2');
+    // Существенное обновление потерянной версии: другая причина.
+    set([{ ...healthy, lost: 'container exited' }]);
+    const updated = byKey(await engineItems(f), 'preview:lost')!;
+    assert.equal(updated.id, lost.id);
+    assert.notEqual(updated.sourceVersion, lost.sourceVersion);
+    // Новая здоровая выкладка — потерянная уходит; потеря новой — новое появление.
+    const next = record('PV-3', { status: 'healthy', url: 'http://127.0.0.1:1' });
+    set([{ ...healthy, lost: 'container exited' }, next]);
+    assert.equal(byKey(await engineItems(f), 'preview:lost'), undefined);
+    set([
+      { ...healthy, lost: 'container exited' },
+      { ...next, lost: 'timeout' },
+    ]);
+    assert.equal(byKey(await engineItems(f), 'preview:lost')!.occurrenceId, 'PV-3');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('S19 зависшая попытка при report: время простоя не меняет версию, движение снимает, новое зависание — новое появление', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const t = f.h.addTask(b.id, input('Long migration'));
+    f.h.approve(b.id);
+    f.h.pause(false);
+    const run = f.h.claim('test')!;
+    assert.equal(run.taskId, t.id);
+    const { engine } = executionOf(f.h);
+    const move = (state: 'active' | 'quiet' | 'stalled', previous: string, idleMs: number) => {
+      const now = Date.now();
+      const lastMovementAt = new Date(now - idleMs).toISOString();
+      const activity = { kind: 'gate' as const, label: 'unit' };
+      engine.liveness(
+        run.id,
+        run.token,
+        {
+          state,
+          at: new Date(now).toISOString(),
+          lastMovementAt,
+          ...(state === 'active' ? {} : { activity, action: 'report' as const }),
+        },
+        {
+          state,
+          previous: previous as 'active',
+          lastMovementAt,
+          idleMs,
+          ...(state === 'active' ? {} : { activity, action: 'report' as const }),
+        },
+      );
+    };
+    const key = `stall:${run.id}`;
+    move('quiet', 'active', 4 * 60_000);
+    assert.equal(byKey(await engineItems(f), key), undefined, 'тишина без report — не карточка');
+    move('stalled', 'quiet', 12 * 60_000);
+    const card = byKey(await engineItems(f), key)!;
+    assert.equal(card.actor, 'operator');
+    assert.equal(card.sourceVersion, 'stalled');
+    const later = byKey(await engineItems(f, Date.now() + 3_600_000), key)!;
+    assert.deepEqual([later.id, later.sourceVersion], [card.id, card.sourceVersion]);
+    move('active', 'stalled', 0);
+    assert.equal(byKey(await engineItems(f), key), undefined);
+    await new Promise((r) => setTimeout(r, 5));
+    move('stalled', 'active', 13 * 60_000);
+    const again = byKey(await engineItems(f), key)!;
+    assert.notEqual(again.occurrenceId, card.occurrenceId);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('S18 версия корпуса ждёт оператора: карточка держит задачу, подтверждение снимает, новый запрос — новое появление', async () => {
+  const f = fixture();
+  try {
+    f.h.config.gates = [propertyGate()];
+    f.h.config.maxAttempts = 8;
+    const corpus = new CheckCorpus(f.h);
+    const c = f.h.contract(
+      'Check contract',
+      'Pinned independent check fixture.',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      declaration(),
+    );
+    const add = (title: string) => {
+      const b = f.h.createBoard(title);
+      const t = f.h.addTask(b.id, {
+        ...input(title),
+        contracts: [c.id],
+        properties: ['knapsack-optimal'],
+      });
+      f.h.approve(b.id);
+      return t.id;
+    };
+    const t1 = add('Corpus seed task');
+    const ref = corpus.suiteFor(
+      f.store.read().tasks.find((t) => t.id === t1)!,
+      'knapsack-optimal',
+    );
+    const key = 'attention-corpus-case-1';
+    const begun = corpus.begin(ref, key);
+    const text = canonicalJson({ items: [{ w: 0, v: 5 }], cap: 0 });
+    const recorded = corpus.record(
+      corpus.get(ref.suite.id),
+      key,
+      begun.token!,
+      {
+        property: 'knapsack-optimal',
+        input: text,
+        inputHash: sha256(text),
+        outcome: 'confirmed',
+        reason: 'Deterministic confirmed fixture',
+        source: { sha: 'a'.repeat(40), taskId: t1 },
+        observed: { expected: '5', actual: '0', equal: false, repeats: 2, durationsMs: [1, 1] },
+        origin: { kind: 'agent' },
+      },
+      () => 'b'.repeat(40),
+      { tasks: [], actor: 'agent' },
+    );
+    if (recorded.pending) corpus.adopt(recorded.suite.id, recorded.pending.id);
+    const suite = corpus.get(recorded.suite.id);
+    f.h.config.approvalMode = 'operator';
+    const request = async (taskId: string) =>
+      (await new AgentService(f.h, f.root).run({
+        operation: 'checks_adopt',
+        input: {
+          suiteId: suite.id,
+          digest: suite.versions[0].digest,
+          tasks: [taskId],
+          reason: 'Агент запрашивает принятие в operator mode.',
+        },
+      })) as { pendingId: string; awaitingOperator: boolean };
+    const t2 = add('Corpus adopting task');
+    const first = await request(t2);
+    assert.equal(first.awaitingOperator, true);
+    const cardKey = `corpus:${suite.id}:${first.pendingId}`;
+    const card = byKey(await engineItems(f), cardKey)!;
+    assert.equal(card.actor, 'operator');
+    assert.equal(card.occurrenceId, first.pendingId);
+    assert.deepEqual(card.impact.taskIds, [t2]);
+    assert.equal(byKey(await engineItems(f), `work:${t2}`), undefined);
+    const repeat = byKey(await engineItems(f, Date.now() + 60_000), cardKey)!;
+    assert.deepEqual([repeat.id, repeat.sourceVersion], [card.id, card.sourceVersion]);
+    // Действие с карточки — то же подтверждение оператора, что CLI и панель.
+    const service = new AttentionService(f.store, f.h);
+    const done = await service.act({
+      sourceKey: card.sourceKey,
+      occurrenceId: card.occurrenceId,
+      expectedVersion: card.sourceVersion,
+      action: 'approve',
+    });
+    assert.equal(done.resolved, true);
+    assert.equal(
+      f.store.read().tasks.find((t) => t.id === t2)!.checkVersion?.digest,
+      suite.versions[0].digest,
+    );
+    // Новый запрос принятия — новый предмет и появление (запрос неизменяем).
+    const t3 = add('Corpus second task');
+    const second = await request(t3);
+    assert.notEqual(second.pendingId, first.pendingId);
+    assert.ok(byKey(await engineItems(f), `corpus:${suite.id}:${second.pendingId}`));
   } finally {
     f.cleanup();
   }

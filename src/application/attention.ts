@@ -1740,7 +1740,9 @@ export function toItem(
     subject: c.subject,
     evidence: (c.evidence ?? []).slice(0, ATTENTION_LIMITS.evidence),
     actions: [
-      ...(c.actor === 'operator' ? (c.actions ?? []) : []),
+      // Доменные действия — только у карточек оператора; передача контекста
+      // ведущему — у карточек ведущего.
+      ...(c.actions ?? []).filter((a) => a.kind !== 'domain' || c.actor === 'operator'),
       { id: 'open', kind: 'navigate', href: c.subject.href },
     ],
     state: markState(marks[c.sourceKey], c.occurrenceId, c.sourceVersion),
