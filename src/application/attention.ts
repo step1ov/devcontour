@@ -600,7 +600,13 @@ const budgetSource: AttentionSourceRule = {
       return [
         {
           sourceKey: `budget:${scope}`,
-          occurrenceId: d({ limit: b.limit, onUnknown: overview.onUnknown }),
+          // Предел исчерпан снова после решения: снятие и возврат предела идут
+          // через применение конфигурации, его момент и есть новый факт.
+          occurrenceId: d({
+            limit: b.limit,
+            onUnknown: overview.onUnknown,
+            applied: ctx.state.appliedConfig?.at ?? null,
+          }),
           sourceVersion: d({ state: b.state, limit: b.limit, onUnknown: overview.onUnknown }),
           source: 'budget',
           category: 'budget',
@@ -757,6 +763,16 @@ const workTitles: Record<string, (title: string) => string> = {
   'fix-access': (t) => `Нужен доступ для задачи «${t}»`,
 };
 const accessActions = new Set(['fix-access', 'fix-environment']);
+/** Последняя открытая задача, прямо ждущая `id`: создание или утверждение. */
+function dependentsAnchor(ctx: AttentionContext, id: string) {
+  return (
+    ctx.state.tasks
+      .filter((t) => t.dependsOn.includes(id) && t.status !== 'done' && t.status !== 'cancelled')
+      .map((t) => t.approvedAt ?? t.createdAt ?? '')
+      .sort()
+      .at(-1) ?? 'none'
+  );
+}
 /** До стольких кандидатов диагноз считается по одному поручению. */
 const WORK_SINGLE_CALLS = 20;
 
@@ -821,10 +837,13 @@ const workSource: AttentionSourceRule = {
       const operator = dx.actor === 'user';
       out.push({
         sourceKey: `work:${w.id}`,
+        // Отменённый корень решается, когда его перестают ждать, и возникает
+        // снова, когда появляется новая ждущая задача: появление — последняя
+        // ждущая (её создание или утверждение), а не прежняя попытка.
         occurrenceId:
-          dx.runId ??
-          input.runId ??
-          (w.status === 'cancelled' ? `cancelled:a${w.attempt}` : `a${w.attempt}`),
+          w.status === 'cancelled'
+            ? `cancelled:${dependentsAnchor(ctx, w.id)}`
+            : (dx.runId ?? input.runId ?? `a${w.attempt}`),
         sourceVersion: d({
           cause: dx.cause,
           action: dx.action,

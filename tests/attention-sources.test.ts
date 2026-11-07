@@ -916,3 +916,123 @@ test('S10 существенное обновление: исчерпание п
     f.cleanup();
   }
 });
+
+/* ------------------------------------------------------------------ */
+/* Решение 8: повторное появление — новый факт источника               */
+/* ------------------------------------------------------------------ */
+
+test('S10 отменённый корень: зависимые сняты — решено; новая зависимая — новое появление', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const root = f.h.addTask(b.id, input('Root task'));
+    const dep = f.h.addTask(b.id, input('Dependent task', [root.id]));
+    f.h.approve(b.id);
+    f.h.cancel(root.id, 'replanned', 'operator');
+    const key = `work:${root.id}`;
+    const service = new AttentionService(f.store, f.h);
+    const card = byKey((await service.active()).items, key)!;
+    assert.match(card.occurrenceId, /^cancelled:/);
+    await service.mark({
+      marks: [
+        {
+          sourceKey: key,
+          occurrenceId: card.occurrenceId,
+          version: card.sourceVersion,
+          kind: 'ack',
+        },
+      ],
+    });
+    f.h.cancel(dep.id, 'replanned', 'operator');
+    assert.equal(byKey((await service.active()).items, key), undefined);
+    await new Promise((r) => setTimeout(r, 5));
+    f.h.addTask(b.id, input('New dependent task', [root.id]));
+    const again = byKey((await service.active()).items, key)!;
+    assert.notEqual(again.occurrenceId, card.occurrenceId);
+    assert.equal(again.state.unread, true);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('S11 бюджет: предел поднят и возвращён тем же применением конфигурации — новое появление', async () => {
+  const f = fixture();
+  try {
+    f.h.config.budgets = { workspace: { usd: 0.01 }, onUnknown: 'stop' };
+    const b = f.h.createBoard('Board');
+    f.h.addTask(b.id, input('Budget task'));
+    f.h.approve(b.id);
+    f.store.atomic(() =>
+      f.store.saveLocal('usage', undefined, 'U1', {
+        id: 'U1',
+        stage: 'implementation',
+        runtime: 'codex',
+        model: 'fixture-model',
+        runtimeVersion: null,
+        startedAt: new Date().toISOString(),
+        outcome: 'returned',
+        promptBytes: 1,
+        promptDigest: 'd'.repeat(64),
+        usage: {
+          inputTokens: 1,
+          outputTokens: 1,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          reportedUsd: 1,
+          complete: true,
+          source: 'fixture',
+        },
+        costUsd: 1,
+        costSource: 'provider-reported',
+      }),
+    );
+    const apply = (at: string) =>
+      f.store.change('fixture.config-applied', (s) => {
+        s.appliedConfig = { digest: f.h.configDigest, at, by: 'fixture' };
+      });
+    apply('2026-01-01T00:00:00.000Z');
+    const budget = async () =>
+      (await new AttentionService(f.store, f.h).active()).items.find((i) => i.source === 'budget');
+    const first = (await budget())!;
+    const repeat = (await budget())!;
+    assert.deepEqual([repeat.id, repeat.sourceVersion], [first.id, first.sourceVersion]);
+    f.h.config.budgets = { workspace: { usd: 5 }, onUnknown: 'stop' };
+    apply('2026-01-01T00:01:00.000Z');
+    assert.equal(await budget(), undefined);
+    // Откат к прежнему пределу: тот же предел, новый факт применения.
+    f.h.config.budgets = { workspace: { usd: 0.01 }, onUnknown: 'stop' };
+    apply('2026-01-01T00:02:00.000Z');
+    const again = (await budget())!;
+    assert.notEqual(again.occurrenceId, first.occurrenceId);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('S9 вход задания не построить: ограничение — тот же отказ в той же ревизии остаётся прежним появлением', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    f.h.addTask(b.id, input('Task one'));
+    f.h.approve(b.id);
+    const key = `board:${b.id}`;
+    const enable = () =>
+      f.store.change('fixture.prep', (s) => {
+        s.preparation = { id: 'workspace-preparation', changes: [] };
+      });
+    enable();
+    const card = byKey(await engineItems(f), key)!;
+    assert.match(card.reason, /would be refused/);
+    assert.match(card.occurrenceId, /^input:r1:/);
+    f.store.change('fixture.prep-off', (s) => {
+      delete s.preparation;
+    });
+    assert.equal(byKey(await engineItems(f), key), undefined);
+    // У отказа входа нет своего факта в журнале: тот же текст в той же ревизии
+    // — прежнее появление (ограничение источника, названо в docs/attention.md).
+    enable();
+    assert.equal(byKey(await engineItems(f), key)!.occurrenceId, card.occurrenceId);
+  } finally {
+    f.cleanup();
+  }
+});
