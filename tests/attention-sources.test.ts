@@ -884,3 +884,35 @@ test('S18 версия корпуса ждёт оператора: карточ�
     f.cleanup();
   }
 });
+
+test('S10 существенное обновление: исчерпание попыток меняет действие той же попытки — версия, не появление', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const t = f.h.addTask(b.id, input('Root'));
+    f.h.approve(b.id);
+    const run = failNext(f.h, t.id);
+    const key = `work:${t.id}`;
+    const service = new AttentionService(f.store, f.h);
+    const card = byKey((await service.active()).items, key)!;
+    await service.mark({
+      marks: [
+        {
+          sourceKey: key,
+          occurrenceId: card.occurrenceId,
+          version: card.sourceVersion,
+          kind: 'ack',
+        },
+      ],
+    });
+    // Предел попыток понижен до сделанных: повтор больше не план, нужен сброс.
+    f.h.config.maxAttempts = 1;
+    const updated = byKey((await service.active()).items, key)!;
+    assert.equal(updated.occurrenceId, run.id);
+    assert.equal(updated.id, card.id);
+    assert.notEqual(updated.sourceVersion, card.sourceVersion);
+    assert.deepEqual(updated.state, { read: false, acknowledged: false, unread: true });
+  } finally {
+    f.cleanup();
+  }
+});
