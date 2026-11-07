@@ -1341,3 +1341,52 @@ test('Ссылки карточек ведут к предмету; у вопр�
     e.cleanup();
   }
 });
+
+test('Карточки ведущего по подготовке тоже несут передачу, команда — настоящая', async () => {
+  const f = preparationFixture();
+  try {
+    f.p.execute('preparation_product', {
+      changeId: f.changeId,
+      expectedDigest: null,
+      reason: 'Постановка',
+      content: product,
+    });
+    const view = f.p.status(f.changeId);
+    if (!view.enabled) throw new Error('preparation');
+    const digest = view.current!.product!.digest;
+    f.p.execute('preparation_submit', {
+      changeId: f.changeId,
+      stage: 'product',
+      expectedDigest: digest,
+    });
+    f.p.decide({
+      changeId: f.changeId,
+      stage: 'product',
+      expectedDigest: digest,
+      decision: 'request-changes',
+      comment: 'Добавьте ночную модерацию',
+    });
+    const items = (await new AttentionService(f.store, undefined, { root: f.root }).active()).items;
+    const rework = byKey(items, `prep:rework:${f.changeId}:product`)!;
+    assert.deepEqual(rework.actions.map((a) => a.kind).sort(), ['handoff', 'navigate']);
+    const command = (rework.actions.find((a) => a.kind === 'handoff') as { command: string })
+      .command;
+    assert.match(command, /preparation_status/);
+    assert.ok(command.includes(f.root), 'команда называет workspace');
+  } finally {
+    f.cleanup();
+  }
+  const e = fixture();
+  try {
+    const b = e.h.createBoard('Board');
+    const t = e.h.addTask(b.id, input());
+    e.h.approve(b.id);
+    failNext(e.h, t.id);
+    const work = byKey(await engineItems(e), `work:${t.id}`)!;
+    const command = (work.actions.find((a) => a.kind === 'handoff') as { command: string }).command;
+    assert.match(command, /devcontour session-handoff --workspace \S+/);
+    assert.doesNotMatch(command, /…/);
+  } finally {
+    e.cleanup();
+  }
+});

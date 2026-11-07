@@ -226,6 +226,7 @@ const prepAnswerPending: AttentionSourceRule = {
             actor: 'lead',
             title: `Ответ оператора ждёт решения ведущего по «${c.title}»`,
             reason: `Вопрос: ${one(q.text)} Ответ: ${one(q.answer.text)}`,
+            actions: [preparationHandoff(ctx)],
             since: withdrawn ?? q.answer.at,
             subject: {
               kind: 'change',
@@ -289,6 +290,7 @@ const prepStage: AttentionSourceRule = {
               category: 'technical',
               title: `Редакция «${stageTitles[stage]}» относится к прежней постановке`,
               reason: `${refusal}: ведущий отправляет новую редакцию`,
+              actions: [preparationHandoff(ctx)],
             },
           ];
         return [
@@ -331,6 +333,7 @@ const prepRework: AttentionSourceRule = {
             actor: 'lead',
             title: `Оператор вернул ${stageTitles[stage]} «${c.title}» на доработку`,
             reason: one(r.decision?.comment || r.reason),
+            actions: [preparationHandoff(ctx)],
             since: r.decision?.at ?? r.createdAt,
             subject: { kind: 'change', id: c.id, href: hrefs.preparation(c.id, stage) },
           },
@@ -407,6 +410,7 @@ const quickSource: AttentionSourceRule = {
           category: 'technical',
           actor: 'lead',
           title: 'Setup быстрого изменения не применить',
+          actions: [preparationHandoff(ctx)],
           reason: one(step.detail),
           since: proposal?.createdAt ?? change.intake.createdAt,
           subject: { kind: 'change', id: change.id, href: hrefs.preparation(change.id) },
@@ -458,11 +462,26 @@ const taskTitle = (ctx: AttentionContext, id: string) =>
   ctx.state.tasks.find((t) => t.id === id)?.title ?? id;
 const unclaimed = (ctx: AttentionContext, ids: readonly string[]) =>
   ids.filter((id) => !ctx.claimed.has(id));
-const handoff: AttentionAction = {
-  id: 'handoff',
-  kind: 'handoff',
-  command: 'session_handoff (devcontour handoff --workspace …)',
-};
+/** Каталог workspace для команд передачи: из параметров сервиса или конфигурации. */
+function workspaceOf(ctx: AttentionContext) {
+  return ctx.root ?? ctx.h?.config.workspaceRoot ?? '<workspace>';
+}
+/** Передача ведущему после setup: пакет новой сессии (MCP или CLI). */
+function handoffOf(ctx: AttentionContext): AttentionAction {
+  return {
+    id: 'handoff',
+    kind: 'handoff',
+    command: `session_handoff (MCP) или devcontour session-handoff --workspace ${workspaceOf(ctx)}`,
+  };
+}
+/** Передача ведущему по подготовке: состояние этапов, вопросов и решений. */
+function preparationHandoff(ctx: AttentionContext): AttentionAction {
+  return {
+    id: 'handoff',
+    kind: 'handoff',
+    command: `preparation_status (MCP) или devcontour agent --file request.json --workspace ${workspaceOf(ctx)} с {"operation": "preparation_status"}`,
+  };
+}
 
 /** Состояния вопроса исполнителя, в которых кто-то должен действовать. */
 const inputActionable = new Set([
@@ -579,7 +598,7 @@ const inputSource: AttentionSourceRule = {
                   },
                 ]
               : []),
-            ...(operator ? [] : [handoff]),
+            ...(operator ? [] : [handoffOf(ctx)]),
           ],
           covered: r.blocking ? unclaimed(ctx, [r.taskId]) : [],
           basis: {
@@ -628,7 +647,7 @@ const contractChangeSource: AttentionSourceRule = {
           reason: ctx.redact(op.error ?? 'Причина не записана'),
           since: entered,
           subject: { kind: 'operation', id: op.id, href: hrefs.contracts() },
-          actions: [handoff],
+          actions: [handoffOf(ctx)],
           covered: unclaimed(ctx, held),
         };
       });
@@ -736,7 +755,7 @@ const queueSource: AttentionSourceRule = {
         subject: { kind: 'queue', id: 'queue', href: hrefs.overview() },
         actions: operator
           ? [{ id: 'resume', kind: 'domain', label: 'Запустить очередь', input: 'confirm' }]
-          : [handoff],
+          : [handoffOf(ctx)],
         covered: [],
       },
     ];
@@ -770,7 +789,7 @@ const waitSource: AttentionSourceRule = {
             actor: 'lead',
             title: 'Выдача ждёт блокировки контекста',
             reason: w.detail,
-            actions: [handoff],
+            actions: [handoffOf(ctx)],
           },
         ];
       const wait = baseWaitOf(h, s);
@@ -787,7 +806,7 @@ const waitSource: AttentionSourceRule = {
             : 'Перенос базы ждёт подтверждения',
           reason: wait.detail,
           actions: failed
-            ? [handoff]
+            ? [handoffOf(ctx)]
             : [
                 {
                   id: 'resume',
@@ -936,7 +955,7 @@ const workSource: AttentionSourceRule = {
           kind: 'evidence' as const,
           id: String((e as { id?: string }).id ?? (e as { ref?: string }).ref ?? dx.runId ?? w.id),
         })),
-        actions: [handoff],
+        actions: [handoffOf(ctx)],
         covered: [w.id],
       });
     }
@@ -1030,7 +1049,7 @@ const boardSource: AttentionSourceRule = {
                 revision.createdAt)
               : revision.createdAt,
             subject: { kind: 'board', id: board.id, href: hrefs.board(board.id) },
-            actions: [handoff],
+            actions: [handoffOf(ctx)],
             covered: unclaimed(ctx, drafts),
             boards: [board.id],
           });
@@ -1050,7 +1069,7 @@ const boardSource: AttentionSourceRule = {
           reason: ctx.redact(w.error ?? ''),
           since: w.history.at(-1)?.at ?? w.startedAt,
           subject: { kind: 'changeset', id: w.id, href: hrefs.changesets() },
-          actions: [handoff],
+          actions: [handoffOf(ctx)],
         });
     return out;
   },
@@ -1105,7 +1124,7 @@ const planSource: AttentionSourceRule = {
             actor: 'lead',
             title: `Черновики доски «${board.title}» не готовы к утверждению`,
             reason: blocked.join('; ') || `Неразобранные находки: ${why.unverified.join(', ')}`,
-            actions: [handoff],
+            actions: [handoffOf(ctx)],
           },
         ];
       return [
@@ -1216,7 +1235,7 @@ const previewSource: AttentionSourceRule = {
             ),
         since: failure.finishedAt ?? failure.startedAt,
         subject: { kind: 'preview', id: failure.id, href: hrefs.changesets() },
-        ...(docker ? {} : { actions: [handoff] }),
+        ...(docker ? {} : { actions: [handoffOf(ctx)] }),
       });
     }
     if (lost)
@@ -1231,7 +1250,7 @@ const previewSource: AttentionSourceRule = {
         reason: ctx.redact(lost.lost ?? ''),
         since: lost.checkedAt ?? lost.healthyAt ?? lost.startedAt,
         subject: { kind: 'preview', id: lost.id, href: hrefs.changesets() },
-        actions: [handoff],
+        actions: [handoffOf(ctx)],
       });
     return out;
   },
