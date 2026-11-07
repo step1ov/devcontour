@@ -3,7 +3,12 @@ import assert from 'node:assert/strict';
 import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { AttentionService, ATTENTION_NAMESPACE } from '../src/application/attention.ts';
+import {
+  AttentionService,
+  ATTENTION_NAMESPACE,
+  markState,
+  withOccurrence,
+} from '../src/application/attention.ts';
 import { DiscussionService } from '../src/application/discussion.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour } from '../src/core/service.ts';
@@ -343,4 +348,19 @@ test('История двух появлений: отметки прежнег�
   } finally {
     f.cleanup();
   }
+});
+
+test('Вернувшееся прежнее появление продолжает свою отметку', () => {
+  let row = withOccurrence(undefined, 'a');
+  row.readVersion = 'va';
+  row = withOccurrence(row, 'b');
+  row.readVersion = 'vb';
+  row = withOccurrence(row, 'a');
+  assert.equal(row.occurrenceId, 'a');
+  assert.deepEqual(markState(row, 'a', 'va'), { read: true, acknowledged: false, unread: false });
+  assert.deepEqual(markState(row, 'b', 'vb'), { read: true, acknowledged: false, unread: false });
+  assert.deepEqual(
+    row.earlier?.map((e) => e.occurrenceId),
+    ['b'],
+  );
 });
