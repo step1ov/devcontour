@@ -3,7 +3,9 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { implementationOutputSchema } from 'devcontour-harness';
-import { controlled, inputDemos, inputFixture } from './input-fixture.ts';
+import { controlled, inputDemos, inputFixture, untilQuestion } from './input-fixture.ts';
+import { fixture, input } from './helpers.ts';
+import { blockers, readyTasks } from '../src/core/graph.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import {
   adapters,
@@ -11,7 +13,7 @@ import {
   implementationResult,
   implementationSchema,
 } from '../src/runner/adapters.ts';
-import { InputService } from '../src/application/input.ts';
+import { InputService, inputHolds } from '../src/application/input.ts';
 import { executionOf } from '../src/harness/execution.ts';
 
 after(() => inputDemos.close());
@@ -183,5 +185,67 @@ test('Answer → snapshot → review → target → apply: the next attempt pins
     assert.equal(after.lifecycle, 'applied');
   } finally {
     await f.cleanup();
+  }
+});
+
+test('reopen supersedes the open question with the same task; the question stops holding it', async () => {
+  const f = await inputFixture();
+  try {
+    const { taskId, boardId } = f.askingTask();
+    await untilQuestion(f, boardId);
+    const [request] = f.service.list({ taskId }).requests;
+    assert.deepEqual([...inputHolds(f.h)], [[taskId, request.requestId]]);
+    const state = f.store.read();
+    assert.deepEqual(
+      blockers(
+        state.tasks.find((t) => t.id === taskId)!,
+        state,
+        inputHolds(f.h),
+      ),
+      ['input:' + request.requestId],
+    );
+    f.h.reopen(taskId, 'The question shows the spec is incomplete');
+    const after = f.service.show({ requestId: request.requestId });
+    assert.equal(after.lifecycle, 'superseded');
+    assert.equal(after.closed?.successor, taskId);
+    assert.equal(after.closed?.by, 'host');
+    assert.equal(inputHolds(f.h).size, 0);
+    assert.equal(f.store.read().tasks.find((t) => t.id === taskId)!.status, 'draft');
+    const event = f.store.events().findLast((e) => e.type === 'task.reopened')!;
+    assert.deepEqual((event.data as { inputRequests?: string[] }).inputRequests, [
+      request.requestId,
+    ]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('readyTasks and blockers leave out a ready task held by a question', () => {
+  const f = fixture();
+  try {
+    const board = f.h.createBoard('Board');
+    const a = f.h.addTask(board.id, input('Held task')).id;
+    const b = f.h.addTask(board.id, input('Free task')).id;
+    f.h.approve(board.id);
+    const state = f.store.read();
+    const holds = new Map([[a, 'IR-' + '0'.repeat(24)]]);
+    assert.deepEqual(
+      readyTasks(state).map((t) => t.id),
+      [a, b],
+    );
+    assert.deepEqual(
+      readyTasks(state, holds).map((t) => t.id),
+      [b],
+    );
+    assert.deepEqual(
+      blockers(
+        state.tasks.find((t) => t.id === a)!,
+        state,
+        holds,
+      ),
+      ['input:IR-' + '0'.repeat(24)],
+    );
+  } finally {
+    f.cleanup();
   }
 });

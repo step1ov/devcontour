@@ -1880,27 +1880,58 @@ export class DevContour {
   reopen(id: string, reason: string) {
     if (reason.trim().length < 10 || reason.length > 5000)
       throw new DomainError('Опишите причину возврата: от 10 до 5000 символов', 400);
-    return this.store.change('task.reopened', (s) => {
-      const t = task(s, id);
-      if (t.resultSha)
-        throw new DomainError('Задача дала принятый результат; нужна корректировка доски');
-      if (t.activeRunId) throw new DomainError('Дождитесь завершения текущей попытки');
-      assertNotAccepted(s, t);
-      // Черновик тоже возвращается: снятое утверждение могло оставить за собой
-      // digest контрактов, и задача продолжала бы закреплять одну редакцию,
-      // ссылаясь на другую. Операция идемпотентна.
-      const approved = t.approvedDigest;
-      t.status = 'draft';
-      t.approvedDigest = undefined;
-      t.approvedScope = undefined;
-      t.approval = undefined;
-      // Digest контрактов принадлежит снятому утверждению. Оставить его значит
-      // сказать, что задача закрепляет одну редакцию контракта, а ссылается на
-      // другую: исполнитель получил бы противоречащие обязательства.
-      t.contractDigests = {};
-      t.failure = undefined;
-      return { taskId: id, reason: reason.trim(), wasApproved: Boolean(approved) };
-    });
+    const { store, engine } = executionOf(this);
+    return domain(() =>
+      store.host('task.reopened', (ht) => {
+        const s = ht.state;
+        const t = task(s, id);
+        if (t.resultSha)
+          throw new DomainError('Задача дала принятый результат; нужна корректировка доски');
+        if (t.activeRunId) throw new DomainError('Дождитесь завершения текущей попытки');
+        assertNotAccepted(s, t);
+        // Открытый вопрос исполнителя не остаётся сиротой: после нового
+        // утверждения прежняя остановка уже не держится. Вопрос заменяется той
+        // же задачей в новой редакции (ответ можно перенести — carryInput).
+        const superseded: string[] = [];
+        for (const request of engine.inputRequests({ workId: id }))
+          if (
+            request.blocking &&
+            (request.lifecycle === 'pending' || request.lifecycle === 'answered')
+          ) {
+            engine.supersedeInput(
+              request.id,
+              {
+                by: 'host',
+                reason: 'Задача возвращена в черновик: ' + reason.trim().slice(0, 900),
+                successor: id,
+              },
+              request.version,
+            );
+            superseded.push(request.id);
+          }
+        // Черновик тоже возвращается: снятое утверждение могло оставить за собой
+        // digest контрактов, и задача продолжала бы закреплять одну редакцию,
+        // ссылаясь на другую. Операция идемпотентна.
+        const approved = t.approvedDigest;
+        t.status = 'draft';
+        t.approvedDigest = undefined;
+        t.approvedScope = undefined;
+        t.approval = undefined;
+        // Digest контрактов принадлежит снятому утверждению. Оставить его значит
+        // сказать, что задача закрепляет одну редакцию контракта, а ссылается на
+        // другую: исполнитель получил бы противоречащие обязательства.
+        t.contractDigests = {};
+        t.failure = undefined;
+        const data = {
+          taskId: id,
+          reason: reason.trim(),
+          wasApproved: Boolean(approved),
+          ...(superseded.length ? { inputRequests: superseded } : {}),
+        };
+        ht.journal(data);
+        return data;
+      }),
+    );
   }
   /**
    * Удержать задачи от выдачи на время изменения их контракта. Задача,

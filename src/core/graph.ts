@@ -29,17 +29,38 @@ export function descendants(tasks: Task[], roots: string[]): string[] {
   }
   return [...seen];
 }
-export function blockers(task: Task, state: DevContourState): string[] {
-  return task.dependsOn.filter((id) => state.tasks.find((t) => t.id === id)?.status !== 'done');
+/**
+ * Что держит задачу: незакрытые зависимости и вопрос исполнителя без
+ * применённого ответа (`input:<requestId>`). `inputs` — задача → ID
+ * блокирующего запроса (`inputHolds`); без него — только зависимости.
+ */
+export function blockers(
+  task: Task,
+  state: DevContourState,
+  inputs?: ReadonlyMap<string, string>,
+): string[] {
+  const input = inputs?.get(task.id);
+  return [
+    ...task.dependsOn.filter((id) => state.tasks.find((t) => t.id === id)?.status !== 'done'),
+    ...(input ? ['input:' + input] : []),
+  ];
 }
-export function readyTasks(state: DevContourState) {
+/**
+ * Готовые к выдаче задачи. Задача, которую держит вопрос исполнителя
+ * (после устаревшего применения она `ready`), в готовые не входит.
+ */
+export function readyTasks(state: DevContourState, inputs?: ReadonlyMap<string, string>) {
   const visible = new Set(
     state.boards.flatMap((b) =>
       b.revisions.filter((r) => r.status === 'active').flatMap((r) => r.taskIds),
     ),
   );
   return state.tasks.filter(
-    (t) => visible.has(t.id) && t.status === 'ready' && !t.hold && blockers(t, state).length === 0,
+    (t) =>
+      visible.has(t.id) &&
+      t.status === 'ready' &&
+      !t.hold &&
+      blockers(t, state, inputs).length === 0,
   );
 }
 export function levels(tasks: Task[]): Map<string, number> {

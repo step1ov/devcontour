@@ -1,4 +1,5 @@
 import { resolve } from 'node:path';
+import { inputHolds } from './input.ts';
 import { z } from 'zod';
 import type { DevContour } from '../core/service.ts';
 import { specDigest } from '../core/service.ts';
@@ -141,7 +142,13 @@ function runLine(run: Run, boardId: string | undefined, now: number): PanelRun {
  * (название, описание, приёмка) — целиком: по ним редактируют задачу, и их
  * объём задаёт план, а не история. Диагностика отказа — ограничена.
  */
-function uiTask(h: DevContour, state: DevContourState, t: Task, now: number) {
+function uiTask(
+  h: DevContour,
+  state: DevContourState,
+  t: Task,
+  now: number,
+  inputs: ReadonlyMap<string, string> = inputHolds(h),
+) {
   const { recoveryHistory: _history, sharedCompletion, failure, hold, recovery, ...rest } = t;
   return {
     ...rest,
@@ -169,7 +176,7 @@ function uiTask(h: DevContour, state: DevContourState, t: Task, now: number) {
       : {}),
     recoveryCount: _history?.length ?? 0,
     specDigest: specDigest(t),
-    blockers: blockers(t, state),
+    blockers: blockers(t, state, inputs),
     progress: taskProgress(h, state, t, now),
     checks: clip(checksSummary(t)),
   };
@@ -428,7 +435,8 @@ function buildSummary(
   const board = state.boards.find((b) => b.id === boardId);
   const boardOf = new Map<string, string>();
   for (const b of state.boards) for (const id of boardTasks(b)) boardOf.set(id, b.id);
-  const ready = readyTasks(state).map((t) => t.id);
+  const inputs = inputHolds(h);
+  const ready = readyTasks(state, inputs).map((t) => t.id);
   const byId = new Map(state.tasks.map((t) => [t.id, t]));
   // Задачи сводки: выбранная доска, их зависимости, выбранная задача, занятые,
   // готовые и ждущие решения. Остальные доски — компактными строками.
@@ -471,7 +479,7 @@ function buildSummary(
   }
   const tasks = state.tasks
     .filter((t) => include.has(t.id))
-    .map((t) => ({ ...uiTask(h, state, t, now), boardId: boardOf.get(t.id) }));
+    .map((t) => ({ ...uiTask(h, state, t, now, inputs), boardId: boardOf.get(t.id) }));
   const lastRun = new Map<string, Run>();
   for (const r of state.runs) if (include.has(r.taskId)) lastRun.set(r.taskId, r);
   const runs = [
@@ -715,7 +723,7 @@ export function panelTask(h: DevContour, id: string, query: Record<string, strin
             }
           : {}),
         specDigest: specDigest(task),
-        blockers: blockers(task, state),
+        blockers: blockers(task, state, inputHolds(h)),
         progress: taskProgress(h, state, task, now),
         checks: clip(checksSummary(task)),
       },

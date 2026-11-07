@@ -52,6 +52,7 @@ import { DomainError } from '../core/model.ts';
 import { blockers, readyTasks } from '../core/graph.ts';
 import { Scheduler } from '../runner/scheduler.ts';
 import { requestInputPolicy } from '../runner/reconfigure.ts';
+import { inputHolds } from '../application/input.ts';
 import { acceptBoard } from '../runner/agent-control.ts';
 import { modelRuntimes, repositories } from '../core/repositories.ts';
 import { WorkspaceRunner } from '../runner/workspace.ts';
@@ -576,6 +577,7 @@ export async function serve(
           const events = h.store.events();
           // Один момент на весь ответ: lease-причины задач не расходятся.
           const now = Date.now();
+          const inputs = inputHolds(h);
           result = {
             ...state,
             // `paused` и `pauseReason` не объясняли остановку: причину и
@@ -600,7 +602,7 @@ export async function serve(
             tasks: state.tasks.map((t) => ({
               ...t,
               specDigest: specDigest(t),
-              blockers: blockers(t, state),
+              blockers: blockers(t, state, inputs),
               progress: taskProgress(h!, state, t, now),
               checks: checksSummary(t),
             })),
@@ -608,7 +610,7 @@ export async function serve(
             journalError: h.store.projectionError,
             workflows: new LeadWorkflow(h).view(),
             dataRoot: resolve(scheduler.root),
-            ready: readyTasks(state).map((t) => t.id),
+            ready: readyTasks(state, inputs).map((t) => t.id),
             config: {
               name: h.config.name,
               workspaceRoot: h.config.workspaceRoot,
