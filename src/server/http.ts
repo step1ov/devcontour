@@ -106,6 +106,8 @@ export async function serve(
   options: {
     port: number;
     dev?: boolean;
+    /** Идентификатор экземпляра: `GET /api/server` подтверждает им процесс для `stop`. */
+    instance?: string;
     bootstrap?: {
       store: Store;
       workspace?: string;
@@ -185,6 +187,12 @@ export async function serve(
             !req.headers['content-type']?.startsWith('application/json'))
         )
           throw new DomainError('Отсутствует заголовок локального клиента', 403);
+        // Подтверждение процесса для `devcontour stop`: pid и экземпляр,
+        // записанные в server.json, должны совпасть с ответом.
+        if (req.method === 'GET' && path === '/api/server') {
+          json(res, 200, { pid: process.pid, instance: options.instance ?? null });
+          return;
+        }
         const preparationStore = h?.store ?? options.bootstrap?.store;
         if (req.method === 'GET' && path === '/api/preparation' && preparationStore) {
           const view = new Preparation(preparationStore).status(

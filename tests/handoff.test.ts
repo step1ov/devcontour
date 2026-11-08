@@ -236,10 +236,23 @@ test('session_handoff: boardId — граф harness той же доски; не
       () => agent.execute({ operation: 'session_handoff', input: { boardId: 'missing' } }),
       (e) => status(e) === 404,
     );
-    assert.throws(
-      () => agent.execute({ operation: 'session_handoff', input: { boardId: ids.draft } }),
-      (e) => status(e) === 409 && /не выпущена/.test((e as Error).message),
-    );
+    // Черновая доска: отказ называет черновики и следующий шаг, а не только «не выпущена».
+    const refusal = (boardId: string) => {
+      try {
+        agent.execute({ operation: 'session_handoff', input: { boardId } });
+      } catch (e) {
+        assert.equal(status(e), 409);
+        return (e as Error).message;
+      }
+      assert.fail('ожидался отказ');
+    };
+    const draft = refusal(ids.draft);
+    assert.match(draft, /не выпущена: черновиков задач — 1, утверждённых или выпущенных нет/);
+    assert.match(draft, /session_handoff без boardId, в CLI — без --board/);
+    assert.match(draft, /после утверждения плана \(review-plan\)/);
+    const empty = refusal(f.h.createBoard('Empty board', '', 'main').id);
+    assert.match(empty, /задач в работе нет/);
+    assert.match(empty, /task_create или plan_import/);
   } finally {
     f.cleanup();
   }

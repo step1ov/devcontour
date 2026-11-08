@@ -449,3 +449,66 @@ else {
     f.cleanup();
   }
 });
+
+test('usage_report without repositoryId: embedded reads the workspace and its component, each call labelled by owner', () => {
+  const f = fixture();
+  try {
+    const call = (id: string, stage: string, startedAt: string) => ({
+      id,
+      stage,
+      runtime: 'claude',
+      model: null,
+      runtimeVersion: null,
+      startedAt,
+      outcome: 'returned',
+      promptBytes: 1,
+      promptDigest: 'd',
+      usage: {},
+      costUsd: null,
+      costSource: 'unknown',
+    });
+    f.store.atomic(() => {
+      // Разбор ответа на вопрос исполнителя — вызов общего контура.
+      f.store.saveLocal(
+        'usage',
+        undefined,
+        'w1',
+        call('w1', 'input-review', '2026-11-08T00:00:02Z'),
+      );
+      f.store.saveLocal(
+        'usage',
+        'main',
+        'm1',
+        call('m1', 'implementation', '2026-11-08T00:00:01Z'),
+      );
+    });
+    const reports = new Observability(f.h);
+    type Page = { scope: { owners: string[] }; records: { id: string; owner: string }[] };
+    // Отдельный workspace: без repositoryId — только общий контур, и это названо.
+    const separate = reports.usage({}) as Page;
+    assert.deepEqual(separate.scope, { owners: ['@workspace'] });
+    assert.deepEqual(
+      separate.records.map((r) => [r.id, r.owner]),
+      [['w1', '@workspace']],
+    );
+    const main = reports.usage({ repositoryId: 'main' }) as Page;
+    assert.deepEqual(main.scope, { owners: ['main'] });
+    assert.deepEqual(
+      main.records.map((r) => [r.id, r.owner]),
+      [['m1', 'main']],
+    );
+    // Embedded: общий контур и компонент — один проект, итог одним запросом.
+    f.h.config.workspaceMode = 'embedded';
+    const embedded = reports.usage({}) as Page;
+    assert.deepEqual(embedded.scope, { owners: ['@workspace', 'main'] });
+    assert.deepEqual(
+      embedded.records.map((r) => [r.id, r.owner]),
+      [
+        ['m1', 'main'],
+        ['w1', '@workspace'],
+      ],
+    );
+  } finally {
+    f.cleanup();
+  }
+});

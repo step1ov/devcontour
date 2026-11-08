@@ -44,10 +44,28 @@
 ## 4. Мелочи эксплуатации
 
 - START: перед коммитом обновлённого контекста перемотать основную ветку к
-  `devcontour/accepted`.
-- Команда остановки сервера workspace.
+  `devcontour/accepted`. Выполнено: шаг `merge --ff-only devcontour/accepted`
+  перед коммитом правок, `context-lock` и `base-update`; тест
+  `tests/start-context-commit.test.ts`.
+- Команда остановки сервера workspace. Выполнено: `stop --workspace` по
+  записи `.devcontour-local/server.json`; сигнал — только серверу, который
+  подтвердил pid и экземпляр через `GET /api/server`; описано в `docs/cli.md`,
+  тест `tests/server-stop.test.ts`.
 - `doctor` не сообщает `budgets:applied` после одного `context-lock`.
+  Выполнено: ложное «не применено» — doctor сравнивал файл целиком. Сервер
+  запоминает digest ключей применённой конфигурации; `budgets:applied` —
+  только при отличии `budgets`/`prices`, иначе `config:applied` с ключами;
+  тест `tests/budget-doctor.test.ts`.
 - `usage_report` в embedded без `repositoryId` показывает все вызовы
-  workspace, включая ревью ответа.
-- `session-handoff --board` для невыпущенной доски.
+  workspace, включая ревью ответа. Выполнено: без `repositoryId` — общий
+  контур, в embedded вместе с единственным компонентом (итог одним запросом);
+  ответ называет `scope.owners`, запись — `owner`; описано в `docs/metrics.md`,
+  тест `tests/usage.test.ts`.
+- `session-handoff --board` для невыпущенной доски. Выполнено: у черновой
+  доски пакета движка нет, отказ 409 называет число черновиков и шаг (пакет
+  без `--board`, затем `review-plan`); описано в `docs/cli.md`, тест
+  `tests/handoff.test.ts`.
 - Очередь в панели показывает задачу с открытым вопросом значком сбоя.
+  Выполнено: `GET /api/queue` отдаёт блокер `input:<requestId>` и состояние
+  вопроса; очередь «Хода работ» показывает значок ожидания, «Ждёт ответа» и
+  следующий шаг; тесты `tests/input-progress.test.ts`, `e2e/input.spec.ts`.

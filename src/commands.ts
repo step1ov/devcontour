@@ -69,6 +69,12 @@ import { setupWorkspace } from './runner/workspace-setup.ts';
 import { Workspace } from './core/workspace.ts';
 import { attachJournal } from './runner/journal.ts';
 import { commandScope } from './runner/scope.ts';
+import {
+  clearServerRecord,
+  serverInstance,
+  stopServer,
+  writeServerRecord,
+} from './runner/server-record.ts';
 import { modelRuntimes } from './core/repositories.ts';
 import { syncGit, syncPreparation } from './runner/git-sync.ts';
 import { setupDemo, exists } from './demo.ts';
@@ -305,6 +311,15 @@ async function main() {
     return;
   }
   ({ data: root, workspace: workspacePath } = commandScope(args, operation));
+  // Остановка сервера не открывает базу и не читает конфигурацию: только
+  // запись server.json и подтверждение самого сервера.
+  if (operation === 'stop') {
+    const timeout = Number(option('--timeout-ms', '60000'));
+    if (!Number.isFinite(timeout) || timeout < 0)
+      throw new Error('--timeout-ms — неотрицательное число миллисекунд');
+    console.log(JSON.stringify(await stopServer(root, { timeoutMs: timeout }), null, 2));
+    return;
+  }
   if (
     operation === 'start' ||
     (operation === 'serve' && workspacePath && !(await exists(join(root, 'config.json'))))
@@ -315,10 +330,18 @@ async function main() {
     const mode = args.includes('--workspace-mode')
       ? workspaceMode.parse(option('--workspace-mode', ''))
       : undefined;
+    const instance = serverInstance();
     const app = await startWorkspace(workspacePath, {
       port,
       dev: args.includes('--dev'),
       workspaceMode: mode,
+      instance,
+    });
+    writeServerRecord(root, {
+      pid: process.pid,
+      url: app.url,
+      instance,
+      startedAt: new Date().toISOString(),
     });
     console.log(
       `DevContour: ${app.url}\nWorkspace: ${workspacePath} · ${selectedWorkspaceMode(workspacePath)}\nПродукт → согласование → архитектура и стек → согласование → разработка.`,
@@ -329,10 +352,13 @@ async function main() {
     const close = () => {
       if (closing) process.exit(130);
       closing = true;
-      app.close().catch((error: unknown) => {
-        console.error(error instanceof Error ? error.message : String(error));
-        process.exit(1);
-      });
+      app
+        .close()
+        .then(() => clearServerRecord(root, instance))
+        .catch((error: unknown) => {
+          console.error(error instanceof Error ? error.message : String(error));
+          process.exit(1);
+        });
     };
     process.on('SIGINT', close);
     process.on('SIGTERM', close);
@@ -638,7 +664,7 @@ async function main() {
   // Полный doctor тоже только читает базу: он не writer и не создаёт таблиц
   // и строк, которых нет в базе прежней версии (их создаст первый writer).
   if (operation === 'doctor') {
-    const { state: s, engine, check, calls, newState } = doctorState(config, root);
+    const { state: s, engine, check, calls, newState, appliedKeys } = doctorState(config, root);
     if (
       args.includes('--probe') &&
       (!s ||
@@ -659,7 +685,7 @@ async function main() {
       config,
       root,
       args.includes('--probe'),
-      s ?? engine,
+      s ? { ...s, appliedKeys } : engine,
       check,
       calls,
       newState,
@@ -1407,7 +1433,14 @@ async function main() {
   const port = Number(option('--port', process.env.PORT ?? '4317'));
   if (!Number.isInteger(port) || (port !== 0 && port < 1024) || port > 65535)
     throw new Error('Некорректный port');
-  const app = await serve(h, scheduler, { port, dev: args.includes('--dev') });
+  const instance = serverInstance();
+  const app = await serve(h, scheduler, { port, dev: args.includes('--dev'), instance });
+  writeServerRecord(root, {
+    pid: process.pid,
+    url: app.url,
+    instance,
+    startedAt: new Date().toISOString(),
+  });
   console.log(
     `DevContour: ${app.url}\n${config.mode !== 'demo' ? 'Локальный режим: запуск использует настроенные CLI и их авторизацию.' : modelRuntimes(config).length ? 'Учебный режим, но роли вызывают модели: ' + modelRuntimes(config).join(', ') + '.' : 'Учебный режим: модели не вызываются.'}`,
   );
@@ -1430,6 +1463,7 @@ async function main() {
       .close()
       .then(() => {
         store.close();
+        clearServerRecord(root, instance);
         process.exit(0);
       })
       .catch((error: unknown) => {

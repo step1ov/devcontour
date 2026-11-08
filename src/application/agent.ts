@@ -209,7 +209,7 @@ export const descriptions: Record<AgentOperation, string> = {
   product_view:
     'Read the committed product/application/component map and computed feature progress for a release. Includes explicit deferred/not-applicable scope and joint verification. No writes or model calls.',
   usage_report:
-    'Read paginated owner-local invocation costs, versions and telemetry coverage; never evidence.',
+    'Read paginated owner-local invocation costs, versions and telemetry coverage; never evidence. With repositoryId: that component. Without it: the workspace contour (planning, answer review); in an embedded workspace also its component. scope.owners names the owners read; each record carries owner (@workspace for the contour).',
   decision_report:
     'Read recorded dispatch inputs and observed outcomes. Other component tasks appear only as dependency IDs.',
   strategy_replay:

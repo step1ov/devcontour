@@ -236,6 +236,18 @@ test('A cancelled question leaves a retryable task: the retry button returns aft
   };
   expect(before.requests).toHaveLength(1);
   const attempt = (await taskState(request, task))!.attempt;
+  // Очередь «Хода работ»: задача с открытым вопросом ждёт ответа, а не в сбое.
+  await page.goto(`/?tab=progress&board=${board}`);
+  const queued = page
+    .locator('[data-slot="card"]')
+    .filter({ has: page.getByRole('heading', { name: /^Очередь \(/ }) })
+    .locator('li')
+    .filter({ hasText: 'Вопрос, который снимут' });
+  await expect(queued).toHaveAttribute('data-input-waiting', '');
+  await expect(queued).toContainText('Ждёт ответа');
+  // Следующий шаг — тот же текст, что в карточке вопроса (inputNextText).
+  await expect(queued).toContainText(/Дальше: (ответьте|ответит ведущий агент)/);
+  await expect(queued).not.toContainText('Сбой');
   await page.goto(`/?tab=list&board=${board}&task=${task}`);
   const inspector = page.getByRole('complementary', { name: 'Детали задачи' });
   const card = inspector.getByRole('region', { name: 'Вопрос исполнителя' });

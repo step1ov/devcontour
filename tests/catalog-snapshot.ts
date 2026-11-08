@@ -69,5 +69,8 @@
 // принятой доски (plan_import с boardId) вместо корректировки, описание
 // plan_import — привязку импортированных задач к активному изменению
 // продукта, как у task_create; прочие операции байтово прежние.
-export const CATALOG_DIGEST = 'fd47f6585c65267d3ec82df37212a90a55f51b8b21f5eebd59575ec01a9f4998';
+// Намеренное изменение: описание usage_report называет область без
+// repositoryId (общий контур, в embedded — и его компонент), scope.owners и
+// owner записи; прочие операции байтово прежние.
+export const CATALOG_DIGEST = 'efabdcf264aa819443cfa9037b2f948324b954b53315e425d0409064d260c25e';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

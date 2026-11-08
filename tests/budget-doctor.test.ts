@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { config } from './helpers.ts';
@@ -10,7 +11,8 @@ import {
   type DoctorCall,
 } from '../src/runner/budget-doctor.ts';
 import { doctor, doctorState } from '../src/runner/doctor.ts';
-import { loadedDigest } from '../src/core/service.ts';
+import { DevContour, loadedDigest } from '../src/core/service.ts';
+import { Scheduler } from '../src/runner/scheduler.ts';
 import { Store } from '../src/core/store.ts';
 import type { Config } from '../src/core/model.ts';
 
@@ -300,6 +302,75 @@ test('doctor itself reports prices, budgets, unpriced calls and a config not yet
     );
     // Контур не запускался — сравнивать не с чем.
     assert.equal((await report())['budgets:applied'], undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('after context-lock doctor names the re-pinned keys instead of budgets:applied', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-budget-doctor-'));
+  try {
+    const repo = join(root, 'repo'),
+      data = join(root, 'data');
+    mkdirSync(repo);
+    mkdirSync(data);
+    execFileSync('git', ['init', '-q', '-b', 'main', repo]);
+    writeFileSync(join(repo, 'guide.md'), 'v1');
+    execFileSync('git', ['-C', repo, 'add', '.']);
+    execFileSync('git', [
+      '-C',
+      repo,
+      '-c',
+      'user.email=t@t',
+      '-c',
+      'user.name=t',
+      'commit',
+      '-qm',
+      'g',
+    ]);
+    const pack = {
+      id: 'guide',
+      version: '1',
+      repositoryId: 'main',
+      roles: ['qa'],
+      files: ['guide.md'],
+      references: [],
+    };
+    const c = config({
+      repository: repo,
+      contextPacks: [pack],
+      budgets: { task: { usd: 25 }, onUnknown: 'continue' },
+    });
+    // Сервер применил конфигурацию и запомнил digest её ключей.
+    const store = new Store(join(data, 'state.sqlite'));
+    const scheduler = new Scheduler(new DevContour(store, c), data);
+    await scheduler.init();
+    await scheduler.tick();
+    await scheduler.stop();
+    store.close();
+    const report = async (next: Config) => {
+      const { state, check, calls, newState, appliedKeys } = doctorState(next, data);
+      assert.ok(state, check?.detail);
+      assert.equal(appliedKeys?.digest, state.appliedConfig?.digest);
+      return byId(
+        (await doctor(next, data, false, { ...state, appliedKeys }, check, calls, newState)).checks,
+      );
+    };
+    // context-lock меняет только contextPacks: бюджеты действуют.
+    const locked = {
+      ...c,
+      contextPacks: [{ ...pack, revision: 'a'.repeat(40), digest: 'b'.repeat(64) }],
+    };
+    let checks = await report(locked);
+    assert.equal(checks['budgets:applied'], undefined);
+    assert.equal(checks['config:applied']?.status, 'passed');
+    assert.match(checks['config:applied'].detail, /ключами contextPacks; prices и budgets те же/);
+    assert.match(checks['config:applied'].detail, /Следующий запуск serve/);
+    // Правка бюджета вместе с перезакреплением — budgets:applied с ключами.
+    checks = await report({ ...locked, budgets: { task: { usd: 50 }, onUnknown: 'continue' } });
+    assert.equal(checks['budgets:applied']?.status, 'degraded');
+    assert.match(checks['budgets:applied'].detail, /\(ключи budgets, contextPacks\)/);
+    assert.equal(checks['config:applied'], undefined);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

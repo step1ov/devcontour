@@ -1,5 +1,5 @@
 import { join, resolve } from 'node:path';
-import { inputHolds } from './input.ts';
+import { InputService, inputHolds } from './input.ts';
 import { z } from 'zod';
 import type { DevContour } from '../core/service.ts';
 import { loadedDigest, specDigest } from '../core/service.ts';
@@ -1006,18 +1006,40 @@ export function panelQueue(h: DevContour, query: Record<string, string | undefin
     state.tasks.filter((t) => !['done', 'cancelled', ...active].includes(t.status)),
     query,
   );
+  // Вопрос исполнителя держит задачу: движок записал остановку отказом, но
+  // очередь называет ожидание ответа и следующий шаг, а не сбой.
+  const holds = inputHolds(h);
+  const inputOf = (taskId: string, requestId: string) => {
+    const r = new InputService(h).list({ taskId }).requests.find((x) => x.requestId === requestId);
+    return r
+      ? {
+          requestId,
+          state: r.state,
+          actor: r.actor,
+          kind: r.kind,
+          operatorMode: h.config.approvalMode === 'operator',
+        }
+      : { requestId };
+  };
   return {
     ...result,
-    items: result.items.map((t) => ({
-      id: t.id,
-      title: t.title,
-      status: t.status,
-      role: t.role,
-      repositoryId: t.repositoryId,
-      // Готовая задача с незакрытыми зависимостями ждёт, а не готова к
-      // выдаче: панель называет её тем же словом, что граф и список.
-      blockers: t.dependsOn.filter((id) => !done.has(id)),
-    })),
+    items: result.items.map((t) => {
+      const held = holds.get(t.id);
+      return {
+        id: t.id,
+        title: t.title,
+        status: t.status,
+        role: t.role,
+        repositoryId: t.repositoryId,
+        // Готовая задача с незакрытыми зависимостями ждёт, а не готова к
+        // выдаче: панель называет её тем же словом, что граф и список.
+        blockers: [
+          ...t.dependsOn.filter((id) => !done.has(id)),
+          ...(held ? ['input:' + held] : []),
+        ],
+        ...(held ? { input: inputOf(t.id, held) } : {}),
+      };
+    }),
   };
 }
 
