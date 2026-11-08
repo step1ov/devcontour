@@ -30,7 +30,7 @@
     "demo": "node --import tsx src/cli.ts demo",
     "typecheck": "tsc --noEmit",
     "build": "npm run build:lib && npm run build:assets",
-    "build:assets": "node scripts/build-skill.mjs && vite build",
+    "build:assets": "node --import tsx scripts/build-skill.mjs && vite build",
     "check:skill": "node scripts/build-skill.mjs --check",
     "check:environment": "node scripts/check-test-environment.mjs && node scripts/check-preview.mjs",
     "prepack": "npm run build",
