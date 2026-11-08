@@ -204,6 +204,8 @@ npm run devcontour -- plan \
 npm run devcontour -- agent --file /absolute/path/to/product-workspace/docs/workflow-start.json --workspace /absolute/path/to/product-workspace
 ```
 
+CLI `agent --file` (и операции подготовки `preparation_*`, и `setup --change … --plan`) работает при запущенном сервере — останавливать его ради этих команд не нужно; тот же объект принимает `POST <адрес панели>/api/agent` с заголовком `X-DevContour-Request: 1`.
+
 Сервер проведёт review плана, включит общую очередь и примет доску после проверок. `workflow_status` читает jobs выбранного владельца: для локальной доски передай `repositoryId`, для общей доски или ChangeSet не передавай его. Повтор `workflow_start` с тем же входом вернёт прежний job. [Договор восстановления](docs/lead-workflow.md) содержит стадии, статусы и ограничения. MCP сам по себе этот цикл не запускает.
 
 Для operator mode либо выбранного ручного маршрута после review/утверждения используй `queue --start --workspace <WORKSPACE>`, затем отдельную приёмку. Не запускай ручной и сохраняемый маршрут одной доски параллельно. Регистрация workflow включает очередь всего workspace, а не только выбранной доски.
