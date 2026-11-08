@@ -930,6 +930,12 @@ SHA-256 `24be97501f6af776e67dbfa4778f6f2dbada696a6fe4066f9492c97c031ea9ed`
   выводит предупреждение `isolation:network` (degraded), если проверка
   установки зависимостей идёт в песочнице, а `isolation.domains` пуст.
   Существующие конфигурации setup не меняет: допишите домен сами.
+- **`stop --pid` для сервера без записи.** Сервер, запущенный до
+  0.4.0-alpha.20 в фоне (`nohup`), записи `server.json` не пишет, и
+  терминала для Ctrl+C у него нет. `devcontour stop --pid <pid> --workspace W`
+  останавливает его SIGTERM после двух проверок: роль controller базы живая,
+  командная строка pid — `devcontour serve`/`start`/`run` этого workspace.
+  Без них — отказ без сигнала. Данные не меняются.
 
 ## Перед обновлением
 
@@ -949,7 +955,11 @@ SHA-256 `24be97501f6af776e67dbfa4778f6f2dbada696a6fe4066f9492c97c031ea9ed`
      (`lsof -nP -iTCP:<порт> -sTCP:LISTEN`, по умолчанию 4317), убедитесь,
      что это `devcontour serve`/`start` именно этого workspace, и остановите
      сами: `kill -TERM <pid>` — штатная остановка, как Ctrl+C (сервер
-     дожидается идущих операций и снимает роль controller). Сервер под
+     дожидается идущих операций и снимает роль controller). Новая установка
+     может сделать это сама: `devcontour stop --pid <pid> --workspace W`
+     посылает SIGTERM, только если роль controller живая, а командная строка
+     pid — `devcontour serve`/`start`/`run` с `--workspace W` (или `--data`
+     его каталога данных); иначе отказ без сигнала. Сервер под
      менеджером процессов останавливайте его средствами, иначе он
      перезапустится. Затем проверьте: `devcontour stop --workspace W`
      должен ответить `not-running`.

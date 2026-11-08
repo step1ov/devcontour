@@ -73,6 +73,7 @@ import {
   clearServerRecord,
   serverInstance,
   stopServer,
+  stopServerByPid,
   writeServerRecord,
 } from './runner/server-record.ts';
 import { modelRuntimes } from './core/repositories.ts';
@@ -317,7 +318,9 @@ async function main() {
     const timeout = Number(option('--timeout-ms', '60000'));
     if (!Number.isFinite(timeout) || timeout < 0)
       throw new Error('--timeout-ms — неотрицательное число миллисекунд');
-    const result = await stopServer(root, { timeoutMs: timeout });
+    const result = args.includes('--pid')
+      ? await stopServerByPid(root, Number(option('--pid', '')), { timeoutMs: timeout })
+      : await stopServer(root, { timeoutMs: timeout });
     console.log(JSON.stringify(result, null, 2));
     // Сервер без записи работает: команда не выполнена, сигнала не было.
     if (result.status === 'running-unrecorded') process.exitCode = 1;

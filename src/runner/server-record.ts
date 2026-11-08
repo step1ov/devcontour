@@ -14,6 +14,7 @@
 // без записи держит workspace, и `stop` отказывает, не посылая сигнала.
 import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { basename, dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { controllerRow, effectiveLeader, readOnlyLocation } from '../core/store.ts';
@@ -68,6 +69,8 @@ export function clearServerRecord(root: string, instance: string) {
 
 export type StopResult =
   | { status: 'stopped'; pid: number; url: string }
+  /** Остановлен по `--pid`: сервер без записи, подтверждённый ролью и командной строкой. */
+  | { status: 'stopped'; pid: number; verified: 'controller-and-command-line'; command: string }
   | { status: 'not-running'; detail: string }
   | {
       status: 'running-unrecorded';
@@ -125,7 +128,8 @@ export function manualStopSteps(root: string): string[] {
     `Найдите pid: ps -ax -o pid,command | grep -F -- ${quoted} | grep -v grep — нужен процесс \`devcontour serve\` или \`devcontour start\` с --workspace ${workspace} (или --data в его .devcontour-local), либо очередь \`run\` этого workspace`,
     "Поиск по пути не найдёт сервер, запущенный с относительным путём (--workspace .), через символическую ссылку (/tmp и /private/tmp) или с --data вне этого workspace: тогда ищите все серверы — ps -ax -o pid,command | grep -E 'devcontour.* (serve|start|run)' | grep -v grep — и сверяйте их пути через realpath, либо по порту панели (по умолчанию 4317): lsof -nP -iTCP:<порт> -sTCP:LISTEN, затем ps -o pid,command -p <pid>",
     'Убедитесь по командной строке, что это сервер именно этого workspace, и остановите его сами: kill -TERM <pid> — это штатная остановка, как Ctrl+C: сервер дожидается идущих операций и снимает роль controller',
-    'Запущенный в терминале сервер остановите Ctrl+C в этом терминале; запущенный в фоне (nohup, &, менеджер процессов) терминала не имеет — только kill -TERM <pid> или средствами его менеджера',
+    'Запущенный в терминале сервер остановите Ctrl+C в этом терминале; запущенный в фоне (nohup, &, менеджер процессов) терминала не имеет — kill -TERM <pid> или средствами его менеджера',
+    `Вместо kill: devcontour stop --pid <pid> --workspace ${workspace} — DevContour сам сверит, что роль controller живая и командная строка pid — devcontour serve/start/run с --workspace этого workspace, и только тогда пошлёт SIGTERM`,
     'Проверьте: devcontour stop --workspace ... должен ответить not-running',
   ];
 }
@@ -146,7 +150,7 @@ function withoutRecord(root: string, detail: string): StopResult {
     status: 'running-unrecorded',
     owner: leader.owner,
     leaseUntil: until,
-    detail: `${detail}, но роль controller базы держит живой процесс (владелец ${leader.owner}, срок до ${until}; pid и хост роль не хранит). Вероятно, это сервер, запущенный версией без записи server.json (до обновления), или очередь \`run\`. DevContour не посылает сигнал процессу, который не подтвердил себя записью: остановите его сами по шагам manualStop (найти pid, проверить командную строку, kill -TERM <pid>; в терминале — Ctrl+C) и повторите stop. Если такого процесса нет, роль истечёт в ${until}`,
+    detail: `${detail}, но роль controller базы держит живой процесс (владелец ${leader.owner}, срок до ${until}; pid и хост роль не хранит). Вероятно, это сервер, запущенный версией без записи server.json (до обновления), или очередь \`run\`. DevContour не посылает сигнал процессу, который не подтвердил себя записью: остановите его сами по шагам manualStop (найти pid, проверить командную строку, затем stop --pid <pid> или kill -TERM <pid>; в терминале — Ctrl+C) и повторите stop. Если такого процесса нет, роль истечёт в ${until}`,
     manualStop: manualStopSteps(root),
   };
 }
@@ -218,4 +222,109 @@ async function confirm(record: ServerRecord, dataRoot: string, timeoutMs: number
   } catch (error) {
     return `сервер не отвечает (${error instanceof Error ? error.message : String(error)})`;
   }
+}
+
+/** Командная строка процесса (`ps -o command=`); нет процесса — undefined. */
+export function processCommandLine(pid: number): string | undefined {
+  try {
+    const out = execFileSync('ps', ['-o', 'command=', '-p', String(pid)], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return out || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Называет ли командная строка сервер DevContour этого каталога данных:
+ * программа `devcontour` перед подкомандой `serve`, `start` или `run`, и
+ * `--workspace W` (W — workspace каталога `.devcontour-local`) либо
+ * `--data <каталог данных>` — путь как передан или его realpath. Сервер,
+ * запущенный с относительным путём или через ссылку, так не подтверждается.
+ */
+export function commandLineNamesServer(command: string, root: string) {
+  const words = command.split(/\s+/);
+  // Программа DevContour — до подкоманды: путь workspace после неё сам может
+  // содержать «devcontour».
+  const sub = words.findIndex((w) => ['serve', 'start', 'run'].includes(w));
+  if (sub < 0 || !words.slice(0, sub).some((w) => /devcontour/i.test(w))) return false;
+  const workspace = basename(root) === '.devcontour-local' ? dirname(root) : undefined;
+  const real = (path: string) => {
+    try {
+      return [path, realpathSync(path), realpathSync.native(path)];
+    } catch {
+      return [path];
+    }
+  };
+  const named = (flag: string, paths: string[]) => {
+    const values = new Set(paths.flatMap((p) => [p, p + '/']));
+    return words.some(
+      (w, i) =>
+        (w === flag && values.has(words[i + 1] ?? '')) ||
+        (w.startsWith(flag + '=') && values.has(w.slice(flag.length + 1))),
+    );
+  };
+  return (
+    (workspace !== undefined && named('--workspace', real(workspace))) ||
+    named('--data', real(root))
+  );
+}
+
+/**
+ * Остановить по pid сервер, запущенный версией без записи `server.json`
+ * (например, в фоне через nohup, где нет терминала для Ctrl+C). Сигнал
+ * уходит, только если роль controller базы держит живой процесс, а
+ * командная строка pid — сервер DevContour этого workspace. Роль не хранит
+ * pid, поэтому командная строка — обязательная вторая проверка; при
+ * сомнении — отказ без сигнала.
+ */
+export async function stopServerByPid(
+  root: string,
+  pid: number,
+  options: {
+    timeoutMs?: number;
+    confirmMs?: number;
+    commandLine?: (pid: number) => string | undefined;
+  } = {},
+): Promise<StopResult> {
+  if (!Number.isInteger(pid) || pid <= 1) throw new Error('--pid — номер процесса больше 1');
+  if (pid === process.pid) throw new Error('--pid называет сам процесс stop');
+  if (!processAlive(pid)) throw new Error(`Процесс pid ${pid} не работает`);
+  const record = readServerRecord(root);
+  if (record && processAlive(record.pid)) {
+    if (record.pid === pid) return stopServer(root, options);
+    throw new Error(
+      `Запись ${serverRecordPath(root)} называет сервер этого workspace pid ${record.pid}, а не ${pid}. Остановите его командой stop без --pid; процесс ${pid} не трогается`,
+    );
+  }
+  let leader: ReturnType<typeof liveController>;
+  try {
+    leader = liveController(root);
+  } catch (error) {
+    throw new Error(
+      `Роль controller в базе не прочитана (${error instanceof Error ? error.message : String(error)}); процесс ${pid} не подтверждён и не останавливается`,
+    );
+  }
+  if (!leader)
+    throw new Error(
+      `Роль controller базы ${root} никто не держит: процесс pid ${pid} не подтверждён как работающий сервер этого workspace, сигнал не послан`,
+    );
+  const command = (options.commandLine ?? processCommandLine)(pid);
+  if (!command || !commandLineNamesServer(command, root))
+    throw new Error(
+      `Командная строка pid ${pid} не похожа на сервер DevContour этого workspace (нужны devcontour, serve/start/run и --workspace ${basename(root) === '.devcontour-local' ? dirname(root) : root} или --data ${root}): ${command ?? 'не прочитана'}. Сигнал не послан; проверьте процесс сами`,
+    );
+  process.kill(pid, 'SIGTERM');
+  const timeoutMs = options.timeoutMs ?? 60000;
+  const deadline = Date.now() + timeoutMs;
+  while (processAlive(pid)) {
+    if (Date.now() > deadline)
+      throw new Error(
+        `Сервер pid ${pid} получил сигнал остановки, но не завершился за ${timeoutMs} мс: он дожидается идущих операций. Повторите stop позже`,
+      );
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return { status: 'stopped', pid, verified: 'controller-and-command-line', command };
 }
