@@ -239,6 +239,8 @@ Plan содержит `title`, `description`, `tasks` (1–30), у каждой 
 | `POST /api/tasks/:id/input/:requestId/answer`, `/apply`, `/cancel` | Ответ, применение и отмена вопроса оператором ([вопросы](agent-interface.md#вопросы-исполнителя))                            |
 | `POST /api/config/input-policy`                                    | Изменить порог вопросов `inputPolicy` с ожидаемым digest конфигурации ([конфигурация](configuration.md))                     |
 
+`config` в `GET /api/summary` и `GET /api/state` несёт данные элемента порога: `inputPolicy` (действующее значение или `null` — порог 7), `inputPolicyDeclared` (`workspace.json` объявляет `inputPolicy`: маршрут ответит 409, панель показывает значение только для чтения), `configDigest` (ожидаемый digest для `POST /api/config/input-policy`) и `configPending` — неприменённый запрос применения конфигурации `{operation, requestedAt, keys?}` или `null`; пока он есть, новая правка порога получает 409.
+
 Операторские endpoints записывают ручное действие. Автоматический ведущий агент использует команды независимого review, а не выдаёт себя за оператора через HTTP для обхода процесса. В local single-user MVP это договор workflow; полноценной авторизации по ролям ещё нет.
 
 Неизвестный маршрут возвращает 404, ошибка JSON/schema — 400, нарушение локальной границы — 403, доменный конфликт обычно — 409. Тело содержит `error`. Точные тела и ограничения находятся в `src/server/http.ts`. Нет endpoint для прямой загрузки PASS или установки `done`.

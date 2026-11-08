@@ -26,6 +26,7 @@ import {
   panelRun,
   panelRuns,
   panelSummary,
+  inputPolicyView,
   panelTask,
   panelTaskSearch,
 } from '../application/panel.ts';
@@ -604,8 +605,7 @@ export async function serve(
               approvalMode: h.config.approvalMode,
               // Порог вопросов исполнителя и digest действующей конфигурации:
               // панель меняет порог с ожидаемым digest.
-              inputPolicy: h.config.inputPolicy ?? null,
-              configDigest: h.configDigest,
+              ...inputPolicyView(h, state),
               completionMode: h.config.completionMode,
               storage: h.config.storage,
               concurrency: h.config.concurrency,

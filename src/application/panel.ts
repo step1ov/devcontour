@@ -22,6 +22,8 @@ import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { taskProgress } from './context.ts';
 import { checksSummary } from './checks.ts';
 import { DIAGNOSTIC, SHORT, clip, short } from './bounded.ts';
+import { workspaceDeclares } from '../runner/budget-doctor.ts';
+import { configApplyKeys } from '../runner/reconfigure.ts';
 
 /**
  * Проекции панели. Периодический опрос получает ограниченную сводку: строки
@@ -323,6 +325,31 @@ function changeSetLine(c: ChangeSet) {
   };
 }
 
+/**
+ * Порог вопросов исполнителя для панели: действующее значение, объявлен ли
+ * он в `workspace.json` (тогда маршрут `POST /api/config/input-policy`
+ * отказывает 409 и панель показывает значение только для чтения), digest
+ * действующей конфигурации — ожидаемый digest правки — и неприменённый
+ * запрос применения конфигурации: пока он есть, новая правка получила бы 409.
+ */
+export function inputPolicyView(h: DevContour, state: Readonly<DevContourState>) {
+  const request = state.reconfigure;
+  const pending = request && !request.appliedAt && !request.error ? request : undefined;
+  return {
+    inputPolicy: h.config.inputPolicy ?? null,
+    inputPolicyDeclared: workspaceDeclares(h.config, 'inputPolicy'),
+    configDigest: h.configDigest,
+    configPending: pending
+      ? {
+          operation: pending.operation,
+          requestedAt: pending.requestedAt,
+          /** Ключи запроса `config-apply`; у запроса операции изменения контракта — нет. */
+          keys: configApplyKeys(pending.operation),
+        }
+      : null,
+  };
+}
+
 const summaryQuery = z.object({
   board: z.string().max(200).optional(),
   boardRevision: z.coerce.number().int().min(1).optional(),
@@ -568,6 +595,9 @@ function buildSummary(
       // Метка «без вызовов моделей» — только если их правда нет.
       modelRuntimes: modelRuntimes(h.config),
       approvalMode: h.config.approvalMode,
+      // Порог вопросов исполнителя: элемент панели меняет его с ожидаемым
+      // digest конфигурации или показывает объявление реестра.
+      ...inputPolicyView(h, state),
       completionMode: h.config.completionMode,
       storage: h.config.storage,
       concurrency: h.config.concurrency,

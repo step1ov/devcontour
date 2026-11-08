@@ -14,6 +14,7 @@ import { workspacePolicyDigest } from '../src/core/workspace.ts';
 import { executionDigest } from 'devcontour-harness';
 import { serve } from '../src/server/http.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
+import { inputPolicyView } from '../src/application/panel.ts';
 import {
   parseOperationalKeys,
   requestConfigApply,
@@ -609,6 +610,72 @@ test('The panel refuses an inputPolicy change when workspace.json declares input
     assert.equal(ok.status, 200, await ok.clone().text());
   } finally {
     await app.close();
+    s.cleanup();
+  }
+});
+
+test('The panel summary carries the inputPolicy view: value, declaration, expected digest and a pending apply', async () => {
+  const s = served();
+  const registry = mkdtempSync(join(s.root, 'workspace-'));
+  s.edit((raw) => (raw.workspaceRoot = registry));
+  // Сервер с workspaceRoot из файла: объявление реестра читается по нему.
+  const server = new DevContour(new Store(join(s.root, 'state.sqlite')), loadConfig(s.path));
+  try {
+    assert.ok(server.leader('server'));
+    server.recordConfig('server');
+    const view = () => inputPolicyView(server, server.store.read());
+    assert.deepEqual(view(), {
+      inputPolicy: null,
+      inputPolicyDeclared: false,
+      configDigest: loadedDigest(loadConfig(s.path)),
+      configPending: null,
+    });
+    // Сводка панели несёт те же поля: элементу панели больше ничего не нужно.
+    const app = await serve(server, new Scheduler(server, s.root), { port: 0 });
+    try {
+      const summary = (await (await fetch(app.url + '/api/summary')).json()) as {
+        config: Record<string, unknown>;
+      };
+      for (const [key, value] of Object.entries(view()))
+        assert.deepEqual(summary.config[key], value, key);
+      const state = (await (await fetch(app.url + '/api/state')).json()) as {
+        config: Record<string, unknown>;
+      };
+      assert.equal(state.config.inputPolicyDeclared, false);
+    } finally {
+      await app.close();
+    }
+    // Запрос записан, но не применён: панель видит его и не шлёт правку,
+    // которую маршрут отклонил бы 409.
+    const requested = requestInputPolicy(server, s.root, {
+      threshold: 11,
+      criticalPaths: ['src/billing/'],
+      expectedConfigDigest: view().configDigest,
+    });
+    assert.deepEqual(view().configPending, {
+      operation: requested.operation,
+      requestedAt: server.store.read().reconfigure!.requestedAt,
+      keys: ['inputPolicy'],
+    });
+    assert.equal(view().inputPolicy, null, 'до применения действует прежний порог');
+    server.leader('server');
+    serveReconfigure(server, s.path, 'server');
+    assert.deepEqual(view(), {
+      inputPolicy: { threshold: 11, criticalPaths: ['src/billing/'] },
+      inputPolicyDeclared: false,
+      configDigest: loadedDigest(loadConfig(s.path)),
+      configPending: null,
+    });
+    const [applied] = server.store.events().filter((e) => e.type === 'config.applied');
+    assert.deepEqual((applied.data as { changed: string[] }).changed, ['inputPolicy']);
+    // Объявление реестра — признак для панели: значение только для чтения.
+    writeFileSync(
+      join(registry, 'workspace.json'),
+      JSON.stringify({ inputPolicy: { threshold: 9 } }),
+    );
+    assert.equal(view().inputPolicyDeclared, true);
+  } finally {
+    server.store.close();
     s.cleanup();
   }
 });
