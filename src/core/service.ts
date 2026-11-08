@@ -260,7 +260,7 @@ export const configKeyDigests = (config: Config): Record<string, string> =>
       .filter(([, value]) => value !== undefined)
       .map(([key, value]) => [key, digest(JSON.stringify(value))]),
   );
-/** Локальная запись: digest ключей применённой конфигурации (`config-keys` в `server`). */
+/** Локальная запись: digest ключей применённой конфигурации (`applied-config-keys` в `server`). */
 export interface AppliedConfigKeys {
   digest: string;
   keys: Record<string, string>;
