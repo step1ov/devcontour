@@ -150,6 +150,7 @@ void test('observability pager — digest-offset, бюджет записей 48
     const obs = new Observability(f.h);
     reset({ page: { revision: 'r', items: ['SPY'], total: 1, hasMore: false, nextCursor: null } });
     assert.deepEqual(obs.usage({ limit: 5 }), {
+      scope: { owners: ['@workspace'] },
       revision: 'r',
       records: ['SPY'],
       nextCursor: null,

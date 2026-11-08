@@ -44,6 +44,9 @@
   только при отличии `budgets`/`prices`, иначе `config:applied` с ключами;
   тест `tests/budget-doctor.test.ts`.
 - `usage_report` в embedded без `repositoryId` показывает все вызовы
-  workspace, включая ревью ответа.
+  workspace, включая ревью ответа. Выполнено: без `repositoryId` — общий
+  контур, в embedded вместе с единственным компонентом (итог одним запросом);
+  ответ называет `scope.owners`, запись — `owner`; описано в `docs/metrics.md`,
+  тест `tests/usage.test.ts`.
 - `session-handoff --board` для невыпущенной доски.
 - Очередь в панели показывает задачу с открытым вопросом значком сбоя.

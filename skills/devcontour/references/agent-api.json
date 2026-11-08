@@ -2519,7 +2519,7 @@
     },
     {
       "name": "usage_report",
-      "description": "Read paginated owner-local invocation costs, versions and telemetry coverage; never evidence.",
+      "description": "Read paginated owner-local invocation costs, versions and telemetry coverage; never evidence. With repositoryId: that component. Without it: the workspace contour (planning, answer review); in an embedded workspace also its component. scope.owners names the owners read; each record carries owner (@workspace for the contour).",
       "readOnly": true,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

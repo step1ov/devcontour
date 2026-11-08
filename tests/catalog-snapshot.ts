@@ -65,5 +65,8 @@
 // Намеренное изменение: описание discussion_resolve говорит, что принятое
 // обращение может ссылаться на черновик, исправленный после обращения (сам
 // или с его непринятой ревизией); прочие операции байтово прежние.
-export const CATALOG_DIGEST = 'c5c47d48802e7fab6e60c0f03fa965d1bc623f21436240387c71f3e66365caa9';
+// Намеренное изменение: описание usage_report называет область без
+// repositoryId (общий контур, в embedded — и его компонент), scope.owners и
+// owner записи; прочие операции байтово прежние.
+export const CATALOG_DIGEST = 'dc8f135b85689a851ecb26e3819165c2ea3e097c279168a96c807be03622dd62';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';
