@@ -21,7 +21,7 @@ import { join, resolve } from 'node:path';
 import { Preparation, validatePreparation } from '../src/core/preparation.ts';
 import { preparationStore, startWorkspace } from '../src/runner/start.ts';
 import { chooseWorkspaceMode } from '../src/runner/workspace-mode.ts';
-import { planSetup } from '../src/runner/setup.ts';
+import { planSetup, setupProject } from '../src/runner/setup.ts';
 import {
   leadActivityAt,
   markQuickSetup,
@@ -417,6 +417,49 @@ test('D01-D: план setup ничего не пишет, сохраняет ф�
     assert.ok(conflicted.files.some((f) => f.action === 'conflict'));
     assert.match(conflicted.refusal ?? '', /symlink/);
     rmSync(root, { recursive: true, force: true });
+  }));
+
+test('D7: setup быстрого изменения не привязывает к developer правила контрактов', () =>
+  withTestHome(async () => {
+    const root = temp();
+    try {
+      repository(root);
+      chooseWorkspaceMode(root, 'embedded');
+      await setupProject({
+        repository: root,
+        workspace: root,
+        profile: 'npm-project',
+        quick: true,
+        gates,
+      });
+      const config = loadConfig(join(root, '.devcontour-local/config.json'));
+      assert.deepEqual(Object.keys(config.roles), ['developer']);
+      const bound = config.contextPacks.filter((pack) => pack.roles.includes('developer'));
+      // Пакеты роли есть: своя инструкция, общий порядок работы и техника тестов.
+      assert.deepEqual(bound.map((pack) => pack.id).sort(), [
+        'developer',
+        'technique-testing',
+        'workflow',
+      ]);
+      const files = bound.flatMap((pack) => [...pack.files, ...(pack.references ?? [])]);
+      assert.ok(files.includes('.agents/roles/developer.md'), files.join(', '));
+      // Правила общих API и versioned контекста библиотек требуют контракт,
+      // которого у задачи роли без контракта нет: к роли они не привязаны.
+      assert.ok(!files.includes('.agents/context/contracts.md'), files.join(', '));
+      for (const file of files)
+        assert.doesNotMatch(
+          readFileSync(join(root, file), 'utf8'),
+          /Каждая библиотека поставляет versioned контекст/,
+          file,
+        );
+      // Инструкция роли прямо говорит, что контракт задачи — её тесты.
+      assert.match(
+        readFileSync(join(root, '.agents/roles/developer.md'), 'utf8'),
+        /контракт задачи — её тесты на критерий/,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   }));
 
 test('D01-C: setup --change отклоняется до согласований и применяет ровно предложение после них', () =>
