@@ -205,7 +205,7 @@ Plan содержит `title`, `description`, `tasks` (1–30), у каждой 
 | `GET /api/tasks?q=&limit&cursor`                                   | Поиск задач компактными строками                                                                                             |
 | `GET /api/runs/:id`, `/api/contracts/:id`                          | Попытка с хвостами логов; текст контракта                                                                                    |
 | `GET /api/changesets/:id?limit&before&verification=ID`             | ChangeSet: проверки страницами (стабильный курсор `before`); снимок задач проверки                                           |
-| `GET /api/queue?limit&cursor`                                      | Очередь всех досок: незавершённые задачи страницами, с незакрытыми зависимостями (`blockers`)                                |
+| `GET /api/queue?limit&cursor`                                      | Незавершённые задачи всех досок; `blockers` — зависимости и `input:<requestId>` открытого вопроса (объект `input`)           |
 | `GET /api/contract-attempts?limit&cursor`                          | Попытки ревью контрактов и планов страницами: первые 20 находок и их число                                                   |
 | `GET /api/contract-attempts/:id/findings?limit&cursor`             | Остальные находки одной попытки ревью страницами                                                                             |
 | `GET /api/tasks/:id/recovery-history?limit&before&episode`         | История текущего эпизода восстановления страницами; другой `episode` — 409                                                   |
