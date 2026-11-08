@@ -45,15 +45,22 @@ export const REPEATED_QUESTION_STOPS = 2;
 /**
  * Остановки вопросом исполнителя по задаче — правило движка harness
  * (0.1.0-alpha.38): первые `maxAttempts` остановок возвращают попытку,
- * каждая следующая засчитывается в предел попыток (`attempt.diagnosed` с
- * `counted: true`). Прерванные штатной остановкой не считаются. `runs` —
- * попытки одной задачи в порядке начала. Движок версий до возврата попытки
- * засчитывал каждую остановку; по попыткам это не различить, проекция
- * следует текущему правилу.
+ * каждая следующая засчитывается в предел попыток. Прерванные штатной
+ * остановкой не считаются. `runs` — попытки одной задачи в порядке начала.
+ *
+ * `count`, `limit` и `exhausted` смотрят вперёд и считаются по текущему
+ * `maxAttempts`. `counted` — история: засчитана ли остановка, движок решил
+ * в момент остановки с тогдашним пределом и записал вердикт в журнал
+ * (`attempt.diagnosed`, поле `counted`). Поэтому вердикт берётся из
+ * `verdicts` (ID попытки → `counted`, см. `questionVerdicts`), и смена
+ * `maxAttempts` позже его не переписывает. Порядок попыток выводит вердикт
+ * только для попыток без такого события (журнал до 0.1.0-alpha.38: движок
+ * тогда засчитывал каждую остановку, по попыткам это не различить).
  */
 export function questionStops(
   runs: readonly { id: string; failureKind?: string; interrupted?: string }[],
   maxAttempts: number,
+  verdicts?: ReadonlyMap<string, boolean>,
 ) {
   const stops = runs.filter((r) => r.failureKind === 'needs-input' && r.interrupted !== 'shutdown');
   return {
@@ -61,7 +68,9 @@ export function questionStops(
     limit: maxAttempts,
     /** Свободные остановки израсходованы: следующая засчитывается в попытки. */
     exhausted: stops.length >= maxAttempts,
-    counted: new Set(stops.slice(maxAttempts).map((r) => r.id)),
+    counted: new Set(
+      stops.filter((r, i) => verdicts?.get(r.id) ?? i >= maxAttempts).map((r) => r.id),
+    ),
   };
 }
 

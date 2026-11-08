@@ -1,5 +1,5 @@
 import { join, resolve } from 'node:path';
-import { InputService, inputHolds } from './input.ts';
+import { InputService, inputHolds, questionVerdicts } from './input.ts';
 import { z } from 'zod';
 import type { DevContour } from '../core/service.ts';
 import { loadedDigest, specDigest } from '../core/service.ts';
@@ -802,7 +802,7 @@ export function panelTask(h: DevContour, id: string, query: Record<string, strin
         const t = state.tasks.find((x) => x.id === d);
         return { id: d, title: t?.title, status: t?.status };
       }),
-      runs: runsPage(state, id, query, h.config.maxAttempts),
+      runs: runsPage(h, state, id, query),
     };
   });
 }
@@ -834,15 +834,16 @@ export function panelRecoveryHistory(
  * попытки (в отличие от смещения).
  */
 function runsPage(
+  h: DevContour,
   state: DevContourState,
   taskId: string,
   query: Record<string, string | undefined>,
-  maxAttempts: number,
 ) {
   const own = state.runs.filter((r) => r.taskId === taskId);
   // Остановка вопросом сверх предела вопросов засчитана в попытки: «Ход
-  // попыток» называет это, а не показывает её как бесплатную.
-  const { counted } = questionStops(own, maxAttempts);
+  // попыток» называет это, а не показывает её как бесплатную. Вердикт —
+  // движка в момент остановки (журнал), а не по текущему `maxAttempts`.
+  const { counted } = questionStops(own, h.config.maxAttempts, questionVerdicts(h));
   const all = [...own].reverse();
   const before = query.before;
   const from = before ? all.findIndex((r) => r.id === before) + 1 : 0;
@@ -865,7 +866,7 @@ export function panelRuns(
   taskId: string,
   query: Record<string, string | undefined>,
 ) {
-  return runsPage(sharedState(h), taskId, query, h.config.maxAttempts);
+  return runsPage(h, sharedState(h), taskId, query);
 }
 
 /**

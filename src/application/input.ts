@@ -158,6 +158,33 @@ export function inputHolds(h: DevContour): Map<string, string> {
   return holds;
 }
 
+/** Прочитанная часть журнала: вердикты по попыткам и последний seq. */
+const verdictCache = new WeakMap<object, { seq: number; counted: Map<string, boolean> }>();
+
+/**
+ * Вердикты движка об остановках вопросом: ID попытки → засчитана ли
+ * остановка в предел попыток (`attempt.diagnosed`, поле `counted`). Движок
+ * решает это в момент остановки с тогдашним `maxAttempts`, поэтому
+ * проекция берёт вердикт, а не выводит его заново по текущему пределу.
+ * Журнал только дописывается: прочитанное хранится по базе, каждое чтение
+ * дочитывает новые события.
+ */
+export function questionVerdicts(h: DevContour): ReadonlyMap<string, boolean> {
+  const { store } = executionOf(h);
+  let entry = verdictCache.get(h.store);
+  if (!entry) verdictCache.set(h.store, (entry = { seq: 0, counted: new Map() }));
+  for (;;) {
+    const page = store.events(entry.seq, 500);
+    if (!page.length) break;
+    for (const e of page) {
+      if (e.type === 'attempt.diagnosed' && e.runId && e.payload.failureKind === 'needs-input')
+        entry.counted.set(e.runId, e.payload.counted);
+      entry.seq = e.seq;
+    }
+  }
+  return entry.counted;
+}
+
 export class InputService {
   constructor(
     readonly h: DevContour,
@@ -313,20 +340,39 @@ export class InputService {
     }
   }
 
-  /** Сводка запроса без текста вопроса и ответов. */
-  private summary(view: ExecutionView, request: InputRequest) {
+  /**
+   * Снимок состояния для сводок: читается один раз на операцию, задачи,
+   * попытки и доска — по задаче (доска — первая, в ревизии которой задача
+   * есть, как у `boardOf`). Список запросов не перечитывает базу и не
+   * фильтрует все попытки на каждый запрос.
+   */
+  private summaryContext() {
     const current = this.h.store.read();
-    const task = current.tasks.find((t) => t.id === request.workId);
+    const tasks = new Map(current.tasks.map((t) => [t.id, t]));
+    const runs = new Map<string, (typeof current.runs)[number][]>();
+    for (const r of current.runs) {
+      const own = runs.get(r.taskId);
+      if (own) own.push(r);
+      else runs.set(r.taskId, [r]);
+    }
+    const boards = new Map<string, string>();
+    for (const b of current.boards)
+      for (const r of b.revisions)
+        for (const id of r.taskIds) if (!boards.has(id)) boards.set(id, b.id);
+    return { tasks, runs, boards };
+  }
+
+  /** Сводка запроса без текста вопроса и ответов. */
+  private summary(view: ExecutionView, request: InputRequest, context = this.summaryContext()) {
+    const task = context.tasks.get(request.workId);
     const state = this.stateOf(view, request, task);
     // Повторные остановки вопросом по задаче: сигнал оператору и ведущему.
-    const stops = questionStops(
-      current.runs.filter((r) => r.taskId === request.workId),
-      this.h.config.maxAttempts,
-    );
+    // Сводка несёт только счёт и предел (вперёд, по текущему `maxAttempts`).
+    const stops = questionStops(context.runs.get(request.workId) ?? [], this.h.config.maxAttempts);
     return {
       requestId: request.id,
       taskId: request.workId,
-      boardId: this.boardOf(request.workId)?.id ?? null,
+      boardId: context.boards.get(request.workId) ?? null,
       repositoryId: task?.repositoryId ?? null,
       kind: request.kind,
       blocking: request.blocking,
@@ -359,7 +405,8 @@ export class InputService {
     try {
       const requests = engine.inputRequests(input.taskId ? { workId: input.taskId } : {});
       return engine.read((view) => {
-        const all = requests.map((r) => this.summary(view, r));
+        const context = this.summaryContext();
+        const all = requests.map((r) => this.summary(view, r, context));
         return {
           requests: all.filter(
             (r) =>
@@ -1018,9 +1065,12 @@ export class InputService {
    */
   private explained<T extends { code: string; message: string }>(blocker: T, taskId: string): T {
     if (blocker.code !== 'ATTEMPTS_EXHAUSTED') return blocker;
+    // Засчитанные остановки — вердикт движка в момент остановки, а не
+    // вывод по текущему пределу (его могли поменять после).
     const stops = questionStops(
       this.h.store.read().runs.filter((r) => r.taskId === taskId),
       this.h.config.maxAttempts,
+      questionVerdicts(this.h),
     );
     if (!stops.counted.size) return blocker;
     return {

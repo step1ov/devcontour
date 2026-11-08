@@ -401,6 +401,59 @@ test('A writer that asks again and again ends with exhausted attempts, not an en
   }
 });
 
+test('Counted question stops follow the engine verdict at stop time, not a maxAttempts changed later', async () => {
+  const f = await inputFixture(controlled({ alwaysAsk: true }), {
+    edit: (raw) => (raw.maxAttempts = 3),
+  });
+  try {
+    const { taskId, boardId } = f.askingTask();
+    await untilQuestion(f, boardId);
+    // Ответ ведущего и новая попытка — она снова останавливается вопросом.
+    const again = async () => {
+      const request = f.service
+        .list({ taskId })
+        .requests.find((r) => r.state === 'awaiting-answer')!;
+      const ready = await prepared(f, request.requestId, 'lead');
+      const applied = f.service.apply(ready.apply, 'lead');
+      assert.ok(applied.applied, JSON.stringify(applied));
+      await f.scheduler.drain();
+    };
+    await again();
+    const diagnosed = () => {
+      const own = f.store.read().runs.filter((r) => r.taskId === taskId);
+      return executionOf(f.h)
+        .store.events(0, 500)
+        .flatMap((e) =>
+          e.type === 'attempt.diagnosed' && own.some((r) => r.id === e.runId)
+            ? [e.payload.counted]
+            : [],
+        );
+    };
+    const marks = () =>
+      (panelTask(f.h, taskId, {}).runs.items as unknown as { counted?: boolean }[])
+        .map((r) => r.counted ?? false)
+        .reverse();
+    // Две остановки при пределе 3 — обе вернули попытку.
+    assert.deepEqual(diagnosed(), [false, false]);
+    // Предел снижен до 1 после них: прежний вывод по текущему пределу
+    // пометил бы вторую засчитанной, хотя движок её вернул.
+    f.h.config.maxAttempts = 1;
+    assert.deepEqual(marks(), [false, false]);
+    // Третья остановка — уже при пределе 1: движок её засчитал.
+    await again();
+    assert.deepEqual(diagnosed(), [false, false, true]);
+    assert.deepEqual(marks(), [false, false, true]);
+    // Предел поднят до 5: засчитанная остановка остаётся засчитанной.
+    f.h.config.maxAttempts = 5;
+    assert.deepEqual(marks(), [false, false, true]);
+    // Сводка запроса считает вперёд по текущему пределу.
+    const open = f.service.list({ taskId }).requests.find((r) => r.state === 'awaiting-answer')!;
+    assert.deepEqual(open.questionStops, { count: 3, limit: 5, exhausted: false });
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test('reopen keeps the open question; after re-approval of the same spec the answer applies as usual', async () => {
   const runtimes = controlled();
   const f = await inputFixture(runtimes);
