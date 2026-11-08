@@ -99,11 +99,14 @@ test('stop terminates the recorded workspace server and refuses a process that i
     // Без записи — не запущен; запись завершившегося процесса — устаревшая.
     const none = await command([...cli, 'stop', '--workspace', workspace], process.cwd());
     assert.equal(none.code, 0, none.stderr);
-    assert.equal(JSON.parse(none.stdout).status, 'not-running');
+    assert.equal((JSON.parse(none.stdout) as { status: string }).status, 'not-running');
     writeFileSync(serverRecordPath(root), JSON.stringify(started));
     const stale = await command([...cli, 'stop', '--workspace', workspace], process.cwd());
     assert.equal(stale.code, 0, stale.stderr);
-    assert.match(JSON.parse(stale.stdout).detail, /уже не работает; устаревшая запись/);
+    assert.match(
+      (JSON.parse(stale.stdout) as { detail: string }).detail,
+      /уже не работает; устаревшая запись/,
+    );
     assert.equal(record(root), undefined);
   } finally {
     for (const child of children) if (child.exitCode === null) child.kill('SIGKILL');
