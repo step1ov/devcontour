@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { complete, config, fixture, input, MERGED } from './helpers.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
+import { loopOutlook } from '../src/runner/lead-outlook.ts';
 import { Store } from '../src/core/store.ts';
 import { DevContour, SERVER_STOPPING, specDigest } from '../src/core/service.ts';
 import { loadConfig } from '../src/runner/config.ts';
@@ -783,14 +784,118 @@ test('Отмена из принятой ревизии не останавли�
     assert.notEqual(state.status, 'failed', String(state.error));
     assert.equal(state.stage, 2);
     assert.equal(f.store.read().tasks.find((t) => t.title === 'Task next')!.status, 'ready');
-    // Отмена в самой ревизии этапа по-прежнему останавливает работу.
-    f.h.cancel(f.store.read().tasks.find((t) => t.title === 'Task next')!.id, 'Не нужна');
+    // Отмена человеком в самой ревизии этапа по-прежнему останавливает работу.
+    f.h.cancel(
+      f.store.read().tasks.find((t) => t.title === 'Task next')!.id,
+      'Не нужна',
+      'operator',
+    );
     const again = new LeadRunner(f.h, f.root);
     await again.tick();
     await again.stop();
-    assert.equal(flow.get(job.key, 'main').status, 'failed');
+    const failed = flow.get(job.key, 'main');
+    assert.equal(failed.status, 'failed');
+    assert.match(String(failed.error), /остановлена человеком/);
   } finally {
     f.cleanup();
+  }
+});
+
+test('Отмена ведущим (--by host) не останавливает задание доски и не называется остановкой человеком', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Scope cut', '', 'main');
+    const dropped = f.h.addTask(b.id, input('Dropped by the lead'));
+    const kept = f.h.addTask(b.id, input('Kept'));
+    f.h.approve(b.id);
+    f.h.cancel(dropped.id, 'Заменена новой задачей', 'host');
+    assert.equal(f.store.read().tasks.find((t) => t.id === dropped.id)!.cancelledBy, 'host');
+    // Повторная отмена другим актёром прежнего актёра не переписывает.
+    f.h.cancel(dropped.id, 'again', 'operator');
+    assert.equal(f.store.read().tasks.find((t) => t.id === dropped.id)!.cancelledBy, 'host');
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    const runner = new LeadRunner(f.h, f.root);
+    for (let i = 0; i < 3; i++) await runner.tick();
+    let state = flow.get(job.key, 'main');
+    assert.notEqual(state.status, 'failed', String(state.error));
+    assert.equal(state.stage, 2);
+    complete(f.h, kept.id);
+    const s = f.store.read();
+    const live = s.tasks.filter((t) => t.status !== 'cancelled');
+    assert.ok(live.every((t) => t.status === 'done'));
+    // Стадия приёмки ведёт доску к приёмке без отменённой задачи.
+    assert.deepEqual(loopOutlook(f.h, s, flow.get(job.key, 'main')), { step: 'accept' });
+    await runner.stop();
+    state = flow.get(job.key, 'main');
+    assert.doesNotMatch(String(state.error ?? ''), /человеком/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Живая задача, зависящая от отменённой ведущим, останавливает задание с этой причиной', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Orphan', '', 'main');
+    const dropped = f.h.addTask(b.id, input('Dropped by the lead'));
+    const orphan = f.h.addTask(b.id, input('Needs the dropped one', [dropped.id]));
+    f.h.approve(b.id);
+    f.h.cancel(dropped.id, 'Не нужна', 'host');
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    const runner = new LeadRunner(f.h, f.root);
+    for (let i = 0; i < 3; i++) await runner.tick();
+    await runner.stop();
+    const state = flow.get(job.key, 'main');
+    assert.equal(state.status, 'failed');
+    assert.match(
+      String(state.error),
+      new RegExp(`${orphan.id}: зависит от задачи ${dropped.id}, отменённой ведущим`),
+    );
+    assert.doesNotMatch(String(state.error), /человеком/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Реальный Git: задание доски с задачей, отменённой ведущим, принимает доску без неё', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'devcontour-lead-cancel-'));
+  await testDemo(root);
+  const config = loadConfig(join(root, 'config.json'));
+  const store = new Store(join(root, 'state.sqlite'));
+  const h = new DevContour(store, config);
+  const lead = new LeadRunner(h, root);
+  let scheduler: Scheduler | undefined;
+  try {
+    store.change('fixture.reset', (s) => {
+      s.tasks = [];
+      s.boards = [];
+      s.runs = [];
+    });
+    const b = h.createBoard('Board with a lead cancel', '', 'main');
+    const dropped = h.addTask(b.id, input('Draft replaced by the lead'));
+    h.addTask(b.id, input('Kept task'));
+    // Черновик отменён ведущим до старта задания, как при замене задачи.
+    h.cancel(dropped.id, 'Заменена новой задачей', 'host');
+    const flow = new LeadWorkflow(h);
+    const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    await lead.tick();
+    await lead.tick();
+    assert.notEqual(flow.get(job.key, 'main').status, 'failed', flow.get(job.key, 'main').error);
+    scheduler = new Scheduler(h, root);
+    await scheduler.init();
+    await scheduler.drain();
+    for (let i = 0; i < 3 && flow.get(job.key, 'main').status !== 'completed'; i++)
+      await lead.tick();
+    const state = flow.get(job.key, 'main');
+    assert.equal(state.status, 'completed', state.error);
+    assert.equal(store.read().boards[0].revisions.at(-1)!.status, 'accepted');
+  } finally {
+    await lead.stop();
+    await scheduler?.stop();
+    store.close();
+    await rm(root, { recursive: true, force: true });
   }
 });
 

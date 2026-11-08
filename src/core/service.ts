@@ -996,7 +996,7 @@ export class DevContour {
         (parsed.repositoryId !== ownerBoard.repositoryId || parsed.scope === 'workspace')
       )
         throw new DomainError('Локальная доска принимает только задачи своего компонента');
-      Object.assign(t, parsed, { preparation: developmentBinding(s) });
+      Object.assign(t, parsed, { preparation: developmentBinding(s), specEditedAt: now() });
       // Правка черновика находки — разбор ведущим: подсказка передачи
       // контекста больше не держит её как непроверенную.
       if (t.finding) t.triagedAt ??= now();
@@ -1872,6 +1872,9 @@ export class DevContour {
             throw error;
           }
         }
+        // Актёр первой отмены: повторная отмена задачу не меняет и актёра
+        // не переписывает (цикл ведущего различает их, `leadScope`).
+        if (t.status !== 'cancelled') t.cancelledBy = by;
         engine.cancel(id, reason, by);
         const data = reason ? { taskId: id, reason } : { taskId: id };
         ht.journal(data);
