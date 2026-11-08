@@ -344,9 +344,15 @@ test('CLI input-context --messages passes the selected discussion messages to th
         .sources.find((s) => s.id === inputSourceId(requestId))!,
     )!;
     assert.ok(manifest.messages.some((m) => m.id === note.message.id));
-    // Неверный ID отклоняется схемой операции.
-    const bad = await cli('--messages', 'DM-nope');
+    // ID верного вида, которого нет в обсуждении: отказ называет его — значит,
+    // --messages разобран и сообщение искали в обсуждении задачи.
+    const absent = 'DM-00000000-0000-4000-8000-000000000000';
+    const bad = await cli('--messages', absent);
     assert.notEqual(bad.code, 0);
+    assert.match(
+      bad.stderr,
+      new RegExp(`Сообщение ${absent} не найдено в обсуждении задачи ${taskId}`),
+    );
   } finally {
     await f.cleanup();
   }
