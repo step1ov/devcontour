@@ -20,7 +20,7 @@ const builtinTitles: Record<string, string> = {
   qa: 'Тестировщик',
 };
 import { repositories } from '../core/repositories.ts';
-import { loadConfig, scopedConfig } from './config.ts';
+import { existingComponentFile, loadConfig, scopedConfig } from './config.ts';
 import { profile, profileMetadata, profilePin, packKey } from './packs.ts';
 import { git } from './process.ts';
 
@@ -171,6 +171,40 @@ export function componentProfileConfig(
   };
 }
 
+/** Файл компонента, который setup сохраняет вместо своей конфигурации компонента. */
+export const componentFileName = 'devcontour.component.json';
+
+type BindingRef = { runtime?: unknown; toolProfile?: unknown; reviewer?: BindingRef };
+/**
+ * Профили инструментов, на которые ссылаются роли сохранённого файла
+ * компонента. Новый config.json начинается без `toolProfiles`, и ссылка роли
+ * на профиль, которого нет, делала конфигурацию неприменимой. Профиль по
+ * умолчанию — только runtime привязки: те же инструменты, что без профиля.
+ * Имя, на которое ссылаются привязки разных runtime, не создаётся: такую
+ * ссылку называет doctor.
+ */
+export function referencedToolProfiles(file: { roles?: unknown; reviewer?: unknown }) {
+  const bindings: BindingRef[] = [];
+  const add = (b: unknown) => {
+    if (!b || typeof b !== 'object') return;
+    const binding = b as BindingRef;
+    bindings.push(binding);
+    add(binding.reviewer);
+  };
+  if (file.roles && typeof file.roles === 'object')
+    for (const role of Object.values(file.roles)) add(role);
+  add(file.reviewer);
+  const runtimes = new Map<string, Set<'claude' | 'codex'>>();
+  for (const b of bindings)
+    if (typeof b.toolProfile === 'string' && (b.runtime === 'claude' || b.runtime === 'codex'))
+      runtimes.set(b.toolProfile, (runtimes.get(b.toolProfile) ?? new Set()).add(b.runtime));
+  return Object.fromEntries(
+    [...runtimes]
+      .filter(([, set]) => set.size === 1)
+      .map(([name, set]) => [name, { runtime: [...set][0] }]),
+  );
+}
+
 // Файловая часть подготовки — общая операция harness: план назначений
 // (symlink и не-каталог на пути, не обычный файл, сверка сохранённого
 // профиля) и create-only применение с продолжением после прерывания. Хост
@@ -265,6 +299,50 @@ async function runSetup(options: {
     : options.data
       ? resolve(options.data)
       : join(repository, '.devcontour-local');
+  // С workspace конфигурация компонента живёт в файле репозитория, а
+  // config.json только ссылается на него. Уже закоммиченный файл setup не
+  // перезаписывает, и его проверки и роли действуют вместо предложения: план
+  // называет это прямо и показывает действующие проверки.
+  const existing = workspaceRoot ? existingComponentFile(repository) : undefined;
+  const componentPath = existing?.path;
+  const componentFile = existing?.state === 'file' ? existing.content : undefined;
+  const componentError =
+    existing?.state === 'invalid'
+      ? `Файл компонента ${existing.path} не читается: ${existing.reason}`
+      : undefined;
+  const gateSummary = (gates: unknown) =>
+    (Array.isArray(gates) ? gates : []).flatMap((g: unknown) => {
+      if (!g || typeof g !== 'object') return [];
+      const gate = g as { id?: unknown; kind?: unknown; command?: unknown };
+      return typeof gate.id === 'string'
+        ? [
+            {
+              id: gate.id,
+              ...(typeof gate.kind === 'string' ? { kind: gate.kind } : {}),
+              ...(Array.isArray(gate.command) ? { command: gate.command.map(String) } : {}),
+            },
+          ]
+        : [];
+    });
+  const component = componentPath
+    ? componentFile
+      ? {
+          path: componentPath,
+          action: 'preserve' as const,
+          precedence: true,
+          gates: gateSummary(componentFile.gates),
+          roles:
+            componentFile.roles && typeof componentFile.roles === 'object'
+              ? Object.keys(componentFile.roles)
+              : [],
+          note: `${componentFileName} уже есть в репозитории и сохраняется без изменений: действуют его проверки и роли, а не проверки и роли этого предложения. Чтобы применить предложение, измените файл компонента отдельным коммитом.`,
+        }
+      : componentError
+        ? undefined
+        : { path: componentPath, action: 'create' as const, precedence: false }
+    : undefined;
+  // Профили инструментов, которые называют роли сохранённого файла компонента.
+  const toolProfiles = componentFile ? referencedToolProfiles(componentFile) : {};
   const files = new Map<string, string>();
   // Инструкции стека приезжают из библиотеки DevContour по объявлению профиля,
   // а не лежат в каждом проекте заранее: подтвердили мобильное приложение —
@@ -361,6 +439,7 @@ async function runSetup(options: {
               workspaceRoot,
             )
           : projectConfig(repository, selected, options.approvalMode)),
+        ...(Object.keys(toolProfiles).length ? { toolProfiles } : {}),
         // Пакеты строятся по объявленным ролям: роль без своей инструкции
         // осталась бы с одним общим контекстом и не знала бы своего дела.
         // Пакеты профиля приезжают вместе со стеком и уточняют умолчания.
@@ -405,9 +484,12 @@ async function runSetup(options: {
     }
     if (plan.conflicts)
       throw new Error('Сохранённый профиль изменён; требуется явная сверка версии');
+    if (componentError) throw new Error(componentError);
     return approvalMode;
   };
   const plan = await planFileWrites({ files: intents });
+  // Проверки, которые будут действовать после setup.
+  const effectiveGates = component?.precedence ? component.gates : gateSummary(selected.gates);
   if (options.plan) {
     let refusal: string | undefined;
     try {
@@ -421,12 +503,19 @@ async function runSetup(options: {
       workspace: workspaceRoot,
       data,
       profile: pinned.id,
-      files: plan.entries.map((e) => ({
-        path: e.path,
-        action: e.action,
-        ...(e.conflict ? { conflict: e.conflict } : {}),
-      })),
+      files: [
+        ...plan.entries.map((e) => ({
+          path: e.path,
+          action: e.action,
+          ...(e.conflict ? { conflict: e.conflict } : {}),
+        })),
+        // Файл компонента пишет не план файлов, а применение конфигурации;
+        // в плане он назван своим действием, чтобы сохранённый файл был виден.
+        ...(component ? [{ path: component.path, action: component.action }] : []),
+      ],
       conflicts: plan.conflicts,
+      gates: effectiveGates,
+      ...(component ? { component } : {}),
       ...(refusal ? { refusal } : {}),
     };
   }
@@ -446,9 +535,11 @@ async function runSetup(options: {
     data,
     profile: selected.id,
     approvalMode,
-    created,
-    preserved,
+    created: component?.action === 'create' ? [...created, component.path] : created,
+    preserved: component?.action === 'preserve' ? [...preserved, component.path] : preserved,
+    ...(component ? { gates: effectiveGates, component } : {}),
     next: [
+      ...(component?.precedence ? [component.note] : []),
       'Ведущий агент продолжает по START.md: каркас, настройки, реальные gates и исходный Git-коммит.',
       'Сохранённые пользовательские AGENTS.md и .gitignore нужно согласовать с новыми правилами без потери данных.',
       'После bootstrap-коммита выполните context-lock: инструкции закрепляются по Git SHA и digest.',

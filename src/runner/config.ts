@@ -262,6 +262,37 @@ export function readComponentConfig(
     configFile: entry.configFile,
   };
 }
+/**
+ * Уже лежащий в репозитории файл компонента — его прочитает `scopedConfig`
+ * вместо записи своего. `absent` — файла нет, и setup его создаст.
+ */
+export function existingComponentFile(
+  repositoryPath: string,
+  file = 'devcontour.component.json',
+):
+  | { state: 'absent'; path: string }
+  | { state: 'file'; path: string; content: Record<string, unknown> }
+  | { state: 'invalid'; path: string; reason: string } {
+  const path = resolve(repositoryPath, file);
+  if (!existsSync(path) && !isSymlink(path)) return { state: 'absent', path };
+  const stat = lstatSync(path);
+  if (!stat.isFile()) return { state: 'invalid', path, reason: 'не обычный файл' };
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
+      return { state: 'invalid', path, reason: 'ожидался JSON-объект' };
+    return { state: 'file', path, content: parsed as Record<string, unknown> };
+  } catch (error) {
+    return { state: 'invalid', path, reason: (error as Error).message };
+  }
+}
+const isSymlink = (path: string) => {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+};
 export function scopedConfig(config: Config) {
   if (config.storage !== 'component' && config.workspaceMode !== 'embedded') return config;
   const refs = repositories(config).map((repo) => {
