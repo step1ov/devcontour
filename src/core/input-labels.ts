@@ -32,3 +32,40 @@ export const inputStateOrder = [
  */
 export const heldByInput = (task: { blockers?: readonly string[] }) =>
   (task.blockers ?? []).some((id) => id.startsWith('input:'));
+
+/**
+ * Следующий шаг по вопросу исполнителя словами оператора. Поле `next` сводки
+ * запроса — указание ведущему агенту (операции агентского API, по-английски);
+ * панель и центр внимания показывают этот текст.
+ */
+export function inputNextText(r: {
+  state: string;
+  actor: 'operator' | 'lead';
+  kind?: string;
+  operatorMode?: boolean;
+}): string {
+  if (r.kind === 'follow-up')
+    return 'ведущий агент принимает решение исполнителя или заменяет вопрос новой постановкой';
+  switch (r.state) {
+    case 'awaiting-answer':
+      return r.actor === 'operator'
+        ? 'ответьте на вопрос в карточке задачи'
+        : 'ответит ведущий агент; ответить можно и в карточке задачи';
+    case 'answer-saved':
+      return 'ведущий агент готовит контекст с ответом, проводит его ревью и применяет ответ';
+    case 'stale':
+      return 'ведущий агент заново готовит контекст с ответом и применяет его';
+    case 'context-review':
+    case 'ready-to-apply':
+      return r.actor === 'operator' ? 'примените ответ' : 'ведущий агент применяет ответ';
+    case 'review-rejected':
+      return r.actor === 'operator'
+        ? 'прочитайте находки ревью и исправьте ответ' +
+            (r.operatorMode ? ' или примените его с подтверждением' : '')
+        : 'ведущий агент читает находки ревью и исправляет ответ или постановку задачи';
+    case 'applied-awaiting-claim':
+      return 'ответ применён, задача ждёт новой попытки';
+    default:
+      return '';
+  }
+}

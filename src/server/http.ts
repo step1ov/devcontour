@@ -278,6 +278,8 @@ export async function serve(
                 Object.values(h!.store.localRecords<UsageRecord>('usage', owner)),
               )
             : [];
+          // Задачу держит вопрос исполнителя: ожидание ответа, а не сбой попытки.
+          const asking = h ? inputHolds(h) : undefined;
           json(res, 200, {
             changeId: change.id,
             title: change.title,
@@ -300,7 +302,7 @@ export async function serve(
                       repo && r.run?.baseSha && head
                         ? await quickDiff(repo.path, r.run.baseSha, head).catch(() => null)
                         : null;
-                    return { ...r, diff };
+                    return { ...r, diff, ...(asking?.has(r.taskId) ? { waitingInput: true } : {}) };
                   }),
                 )
               : [],
