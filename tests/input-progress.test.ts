@@ -66,8 +66,8 @@ test('A question stop reads as waiting for an answer, not as a failure to diagno
     assert.equal(taskStatus(waiting).label, 'Ждёт ответа');
     assert.equal(waiting.input?.requestId, request.requestId);
     assert.equal(waiting.input?.state, 'awaiting-answer');
-    assert.equal(inputNextText(waiting.input!), inputNextText(request));
-    assert.notEqual(inputNextText(waiting.input!), '');
+    assert.equal(inputNextText(waiting.input), inputNextText(request));
+    assert.notEqual(inputNextText(waiting.input), '');
 
     // Корень цепочки зависимой задачи — ожидание ответа, а не «сбой».
     const tasks = f.store.read().tasks.map((t) => ({
