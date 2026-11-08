@@ -151,6 +151,17 @@ test('The operator answers the writer question in the panel; the answer reaches 
     .poll(async () => (await taskState(request, task.id))?.failureKind, { timeout: 60000 })
     .toBe('needs-input');
 
+  // Доска задач: задача с вопросом — в колонке «Ждут ответа», а не в
+  // «В работе» среди разработки и сбоев.
+  await page.goto(`/?tab=kanban&board=${board.id}&task=${task.id}`);
+  const columns = page.getByLabel('Колонки задач');
+  const waitingColumn = columns.getByRole('region', { name: 'Ждут ответа' });
+  await expect(waitingColumn).toContainText('Задача с вопросом исполнителя');
+  await expect(waitingColumn).toContainText('Ждёт ответа');
+  await expect(columns.getByRole('region', { name: 'В работе' })).not.toContainText(
+    'Задача с вопросом исполнителя',
+  );
+
   await page.goto(`/?tab=list&board=${board.id}&task=${task.id}`);
   const inspector = page.getByRole('complementary', { name: 'Детали задачи' });
   const card = inspector.getByRole('region', { name: 'Вопрос исполнителя' });

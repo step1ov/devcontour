@@ -96,7 +96,15 @@ import {
   stalledFailureNext,
   stalledFailureText,
 } from '../core/work-status.ts';
-import { statusKey, statusNames, statusOfKey, taskStatus, flashOf } from './status.ts';
+import {
+  kanbanColumnOf,
+  statusKey,
+  statusNames,
+  statusOfKey,
+  taskStatus,
+  flashOf,
+  type KanbanColumn,
+} from './status.ts';
 import { toast } from 'sonner';
 
 const waitingReasons: Record<string, string> = {
@@ -119,26 +127,19 @@ const waitingReasons: Record<string, string> = {
     'Исполнитель остановился с вопросом: задача ждёт ответа и его применения, это не сбой.',
   attempts_exhausted: 'Лимит попыток исчерпан. Нужна диагностика и пересмотр решения.',
 };
-// Колонки привычной доски задач. Статус задачи и фаза её прогона уже
-// говорят, где она: черновик ждёт утверждения плана, готовая — исполнителя,
-// разработка и сбой — в работе, проверки, ревью и интеграция — на проверке.
-// Сбой остаётся в работе с красной меткой, а не прячется в отдельную колонку.
-const kanbanColumns: { key: string; label: string; hint: string; statuses: string[] }[] = [
-  { key: 'inbox', label: 'Входящие', hint: 'План не утверждён', statuses: ['draft'] },
-  {
-    key: 'todo',
-    label: 'К выполнению',
-    hint: 'Утверждены, ждут исполнителя или зависимостей',
-    statuses: ['ready'],
-  },
-  { key: 'doing', label: 'В работе', hint: 'Разработка и сбои', statuses: ['running', 'failed'] },
-  {
-    key: 'review',
-    label: 'На проверке',
-    hint: 'Проверки, ревью, интеграция',
-    statuses: ['verifying', 'reviewing', 'integrating'],
-  },
-  { key: 'done', label: 'Готово', hint: 'Прошли проверки', statuses: ['done', 'cancelled'] },
+// Колонки привычной доски задач. Показанный статус задачи и фаза её прогона
+// уже говорят, где она: черновик ждёт утверждения плана, готовая —
+// исполнителя, разработка и сбой — в работе, проверки, ревью и интеграция —
+// на проверке. Сбой остаётся в работе с красной меткой, а не прячется в
+// отдельную колонку; задача, остановленная вопросом исполнителя, — не сбой и
+// ждёт ответа в своей колонке.
+const kanbanColumns: { key: KanbanColumn; label: string; hint: string }[] = [
+  { key: 'inbox', label: 'Входящие', hint: 'План не утверждён' },
+  { key: 'todo', label: 'К выполнению', hint: 'Утверждены, ждут исполнителя или зависимостей' },
+  { key: 'doing', label: 'В работе', hint: 'Разработка и сбои' },
+  { key: 'waiting', label: 'Ждут ответа', hint: 'Вопрос исполнителя, это не сбой' },
+  { key: 'review', label: 'На проверке', hint: 'Проверки, ревью, интеграция' },
+  { key: 'done', label: 'Готово', hint: 'Прошли проверки' },
 ];
 const stamp = (value?: string) =>
   value
@@ -2261,7 +2262,7 @@ export function App() {
                     style={{
                       gridTemplateColumns: kanbanColumns
                         .map((c) =>
-                          filtered.some((t) => c.statuses.includes(t.status))
+                          filtered.some((t) => kanbanColumnOf(t) === c.key)
                             ? 'minmax(12rem,1fr)'
                             : 'minmax(7.5rem,0.55fr)',
                         )
@@ -2270,7 +2271,7 @@ export function App() {
                     aria-label="Колонки задач"
                   >
                     {kanbanColumns.map((column) => {
-                      const cards = filtered.filter((t) => column.statuses.includes(t.status));
+                      const cards = filtered.filter((t) => kanbanColumnOf(t) === column.key);
                       return (
                         <section
                           key={column.key}
