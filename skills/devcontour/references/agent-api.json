@@ -3071,7 +3071,7 @@
     },
     {
       "name": "plan_import",
-      "description": "Import a draft task DAG. Without boardId it opens a new board; with boardId of an accepted board it opens the next stage as that board's next revision, so one release stays on one board. This does not approve the plan or execute agents. Do not blindly retry creation after an uncertain response.",
+      "description": "Import a draft task DAG. Without boardId it opens a new board; with boardId of an accepted board it opens the next stage as that board's next revision, so one release stays on one board. In a product change, imported tasks are bound to the active change exactly as task_create binds them. This does not approve the plan or execute agents. Do not blindly retry creation after an uncertain response.",
       "readOnly": false,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -3318,7 +3318,7 @@
     },
     {
       "name": "task_create",
-      "description": "Add a draft task to an active board; DAG and component ownership are validated.",
+      "description": "Add a draft task to an active board; DAG and component ownership are validated. An accepted board takes no tasks: open the next stage with plan_import and its boardId; board_correct only changes accepted results.",
       "readOnly": false,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

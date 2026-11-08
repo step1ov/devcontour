@@ -68,6 +68,8 @@ interface QuickResult {
   taskId: string;
   title: string;
   status: string;
+  /** Ревизия доски, в которой задача появилась: этап изменения. */
+  revision?: number | null;
   boardId: string | null;
   resultSha: string | null;
   attempts: number;
@@ -446,6 +448,53 @@ function Checks({ label, entries }: { label: string; entries: CheckEntry[] }) {
   );
 }
 
+function TaskStatus({ task }: { task: QuickResult }) {
+  return (
+    <Badge
+      variant={
+        task.status === 'done'
+          ? 'success'
+          : task.waitingInput
+            ? 'waiting'
+            : task.status === 'failed'
+              ? 'destructive'
+              : 'ready'
+      }
+    >
+      {task.waitingInput ? 'Ждёт ответа на вопрос' : (taskStatusNames[task.status] ?? task.status)}
+    </Badge>
+  );
+}
+
+/**
+ * Все задачи изменения одним списком со статусом каждой: следующий этап
+ * принятой доски добавляет задачи, и без сводки вторая терялась под
+ * подробной карточкой первой.
+ */
+function TaskSummary({ tasks }: { tasks: QuickResult[] }) {
+  const live = tasks.filter((t) => t.status !== 'cancelled');
+  const done = live.filter((t) => t.status === 'done').length;
+  return (
+    <div className="grid gap-2">
+      <p className="text-sm">
+        Задачи изменения: принято {done} из {live.length}
+        {live.length < tasks.length ? `, отменено ${tasks.length - live.length}` : ''}
+      </p>
+      <ol aria-label="Задачи изменения" className="grid list-none gap-1 p-0 text-sm">
+        {tasks.map((task) => (
+          <li key={task.taskId} className="flex flex-wrap items-baseline gap-2">
+            <TaskStatus task={task} />
+            {task.revision ? (
+              <span className="text-muted-foreground">Этап {task.revision}</span>
+            ) : null}
+            <span className="break-words">{task.title}</span>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
+}
+
 function Result({ view }: { view: QuickView }) {
   if (!view.result.length)
     return (
@@ -456,6 +505,7 @@ function Result({ view }: { view: QuickView }) {
     );
   return (
     <div className="grid gap-4">
+      {view.result.length > 1 && <TaskSummary tasks={view.result} />}
       <ul className="grid gap-4">
         {view.result.map((task) => {
           const params = new URLSearchParams({
@@ -470,21 +520,7 @@ function Result({ view }: { view: QuickView }) {
             <li key={task.taskId} className="bg-secondary grid gap-3 p-4">
               <div className="flex flex-wrap items-baseline justify-between gap-2">
                 <strong className="break-words">{task.title}</strong>
-                <Badge
-                  variant={
-                    task.status === 'done'
-                      ? 'success'
-                      : task.waitingInput
-                        ? 'waiting'
-                        : task.status === 'failed'
-                          ? 'destructive'
-                          : 'ready'
-                  }
-                >
-                  {task.waitingInput
-                    ? 'Ждёт ответа на вопрос'
-                    : (taskStatusNames[task.status] ?? task.status)}
-                </Badge>
+                <TaskStatus task={task} />
               </div>
               <dl className="grid gap-2">
                 <Fact term="Попыток">{task.attempts}</Fact>

@@ -205,6 +205,50 @@ test('Quick change: one change per request key, five steps, facts, setup plan, r
         name: 'План файлов setup',
       }),
     ).toBeVisible();
+
+    // Изменение с задачами двух этапов: сводка показывает каждую со статусом.
+    // Движок в этом сценарии не подключён, поэтому задачи результата
+    // подставлены в настоящий ответ сервера; проекцию проверяет unit-тест.
+    const resultTask = (taskId: string, title: string, status: string, revision: number) => ({
+      taskId,
+      title,
+      status,
+      revision,
+      boardId: 'B-1',
+      resultSha: null,
+      attempts: status === 'draft' ? 0 : 1,
+      run: null,
+      usage: { calls: 0, costUsd: 0, knownCostUsd: 0, complete: true, unknownCalls: 0 },
+      board: { id: 'B-1', title: 'r-001 Доска', state: 'active' },
+      changeSet: null,
+      next: null,
+      diff: null,
+    });
+    await page.route('**/api/preparation/quick?*', async (route) => {
+      const response = await route.fetch();
+      const body = (await response.json()) as Record<string, unknown>;
+      await route.fulfill({
+        response,
+        json: {
+          ...body,
+          result: [
+            resultTask('T-1', 'Первая задача изменения', 'done', 1),
+            resultTask('T-2', 'Задача следующего этапа', 'draft', 2),
+          ],
+        },
+      });
+    });
+    const summary = page
+      .getByRole('region', { name: 'Быстрое изменение' })
+      .getByRole('list', { name: 'Задачи изменения' });
+    await expect(summary.getByRole('listitem')).toHaveCount(2);
+    await expect(summary.getByRole('listitem').nth(0)).toContainText('Этап 1');
+    await expect(summary.getByRole('listitem').nth(0)).toContainText('Первая задача изменения');
+    await expect(summary.getByRole('listitem').nth(1)).toContainText('Этап 2');
+    await expect(summary.getByRole('listitem').nth(1)).toContainText('Задача следующего этапа');
+    await expect(page.getByText('Задачи изменения: принято 1 из 2')).toBeVisible();
+    await page.unroute('**/api/preparation/quick?*');
+
     expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
     await page.screenshot({ path: 'test-results/quick-route.png', fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });

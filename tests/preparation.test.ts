@@ -76,6 +76,7 @@ function approveDesignTrack(
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { Workspace } from '../src/core/workspace.ts';
 import { specDigest } from '../src/core/service.ts';
+import { quickResult, quickSteps } from '../src/runner/quick.ts';
 
 test('Product and architecture require distinct operator decisions; no agent or queue bypass', () => {
   const f = fixture(),
@@ -1076,6 +1077,69 @@ test('Workflow ChangeSet не проверяет привязку отменён
       authorRuntime: 'codex',
     });
     assert.equal(job.kind, 'changeset');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Следующий этап принятой доски: отказ task_create называет plan_import, импорт привязан к изменению, вид изменения показывает все задачи', () => {
+  const f = fixture(),
+    p = new Preparation(f.store);
+  try {
+    const changeId = approvePreparation(p);
+    const plan = (title: string, key: string) => ({
+      title,
+      description: 'Цель: ' + title,
+      tasks: [
+        { ...input('Task ' + key), featureId: 'member-block', key, dependsOn: [], contracts: [] },
+      ],
+    });
+    const { boardId } = f.h.importPlan(plan('Release', 'one'));
+    const one = f.store.read().tasks[0];
+    f.h.approve(boardId);
+    complete(f.h, one.id);
+    f.h.accept(boardId, MERGED);
+    // Задача на принятой доске: отказ ведёт к следующему этапу, а корректировку
+    // оставляет для изменения принятого результата.
+    assert.throws(
+      () => f.h.addTask(boardId, { ...input('Late'), featureId: 'member-block' }),
+      (e: Error) =>
+        e.message.includes(`plan_import с boardId (CLI: import-plan --board ${boardId})`) &&
+        /Изменение принятого результата — корректировка: board_correct/.test(e.message),
+    );
+    // Следующий этап импортом: задача привязана к изменению, как у task_create.
+    const stage = f.h.importPlan(plan('Stage two', 'two'), boardId);
+    assert.equal(stage.revision, 2);
+    const state = f.store.read();
+    const two = state.tasks.find((t) => t.title === 'Task two')!;
+    assert.equal(two.preparation?.changeId, changeId);
+    assert.deepEqual(two.preparation, developmentBinding(state));
+    assert.deepEqual(two.preparation, one.preparation);
+    // Вид изменения: все задачи изменения со статусом и этапом каждой.
+    assert.deepEqual(
+      quickResult(state, changeId, []).map((r) => [r.taskId, r.status, r.revision]),
+      [
+        [one.id, 'done', 1],
+        [two.id, 'draft', 2],
+      ],
+    );
+    const change = state.preparation!.changes.find((c) => c.id === changeId)!;
+    const steps = quickSteps({
+      change,
+      developmentReady: true,
+      blocker: '',
+      configured: true,
+      engineConnected: true,
+      tasks: state.tasks.filter((t) => t.preparation?.changeId === changeId),
+      activeRuns: 0,
+      paused: false,
+    });
+    const step = (id: string) => steps.find((s) => s.id === id)!;
+    assert.match(step('preparation').detail, /задач изменения: 2/);
+    assert.equal(step('execution').state, 'current');
+    assert.match(step('execution').detail, /Принято задач: 1 из 2/);
+    assert.equal(step('result').state, 'waiting');
+    assert.match(step('result').detail, /Принято задач: 1 из 2/);
   } finally {
     f.cleanup();
   }
