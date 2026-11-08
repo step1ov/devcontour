@@ -67,6 +67,32 @@ type Check = {
   detail: string;
 };
 /** Готовность снимает только `blocked`; `degraded` и `not-checked` её не снимают. */
+/**
+ * Установка зависимостей npm/pnpm/yarn идёт в песочнице проверок, а внешняя
+ * сеть там открыта только доменам `isolation.domains`. Пустой список при
+ * gate установки — отказ прокси на первой задаче, а не на doctor.
+ */
+export function installNetworkCheck(config: Config): Check | undefined {
+  if (config.isolation.mode !== 'os' || config.isolation.domains.length) return undefined;
+  const installs = repositories(config).flatMap((repo) =>
+    [...repo.gates, ...(repo.prepare ?? [])]
+      .filter((step) => {
+        const [tool, verb] = (step.command ?? []).map((part) => part.split('/').at(-1));
+        return (
+          (tool === 'npm' && ['ci', 'install', 'i'].includes(verb ?? '')) ||
+          (tool === 'pnpm' && ['install', 'i', 'add'].includes(verb ?? '')) ||
+          (tool === 'yarn' && (verb === undefined || ['install', 'add'].includes(verb)))
+        );
+      })
+      .map((step) => `${repo.id}:${step.id}`),
+  );
+  if (!installs.length) return undefined;
+  return {
+    id: 'isolation:network',
+    status: 'degraded',
+    detail: `Проверки установки зависимостей (${[...new Set(installs)].join(', ')}) идут в песочнице без внешней сети: isolation.domains пуст, и реестр пакетов будет закрыт. Добавьте домен реестра в isolation.domains (например registry.npmjs.org или реестр из .npmrc) и перезапустите сервер.`,
+  };
+}
 export const doctorReady = (checks: Pick<Check, 'status'>[]) =>
   !checks.some((c) => c.status === 'blocked');
 const bindingLabel = (b: { runtime: string; model?: string }) =>
@@ -646,6 +672,8 @@ export async function doctor(
       (support.detail ? `; ${support.detail}` : '')
     );
   });
+  const network = installNetworkCheck(config);
+  if (network) checks.push(network);
   checks.push(checkoutsCheck(config, root));
   // Механизм на месте ещё не значит, что gate установки в нём пройдёт:
   // песочница всегда закрывает часть путей и внутри worktree. Проба ставит

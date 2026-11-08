@@ -5,8 +5,9 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chooseWorkspaceMode } from '../src/runner/workspace-mode.ts';
-import { planSetup, setupProject } from '../src/runner/setup.ts';
+import { packageRegistryDomains, planSetup, setupProject } from '../src/runner/setup.ts';
 import { loadConfig } from '../src/runner/config.ts';
+import { installNetworkCheck } from '../src/runner/doctor.ts';
 import { validateWorkflow } from '../src/core/workflow.ts';
 import { withTestHome } from './helpers.ts';
 
@@ -163,6 +164,66 @@ test('нечитаемый файл компонента — отказ план
       await assert.rejects(setupProject(input), /не читается/);
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  }));
+
+test('pnpm и npm setup открывают песочнице реестр пакетов, в том числе из .npmrc', () =>
+  withTestHome(async () => {
+    const root = temp();
+    try {
+      repository(root);
+      chooseWorkspaceMode(root, 'embedded');
+      await setupProject({
+        repository: root,
+        workspace: root,
+        profile: 'pnpm-project',
+        quick: true,
+      });
+      const config = loadConfig(join(root, '.devcontour-local/config.json'));
+      assert.equal(config.isolation.mode, 'os');
+      assert.deepEqual(config.isolation.domains, ['registry.npmjs.org']);
+      assert.equal(installNetworkCheck(config), undefined);
+      // Конфигурация без доменов: doctor предупреждает о gate установки.
+      const closed = { ...config, isolation: { mode: 'os' as const, domains: [] } };
+      const warning = installNetworkCheck(closed);
+      assert.equal(warning?.status, 'degraded');
+      assert.match(warning?.detail ?? '', /main:install/);
+      assert.match(warning?.detail ?? '', /isolation\.domains/);
+      assert.equal(
+        installNetworkCheck({ ...closed, isolation: { mode: 'none', domains: [] } }),
+        undefined,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+    const mirror = temp();
+    try {
+      writeFileSync(
+        join(mirror, '.npmrc'),
+        'registry=https://npm.example.test/repo/\n@acme:registry=https://acme.example.test\n@env:registry=${PRIVATE_REGISTRY}\n',
+      );
+      assert.deepEqual(
+        await packageRegistryDomains(mirror, {
+          capabilities: ['npm'],
+          gates: [{ command: ['npm', 'ci'] }],
+        }),
+        ['npm.example.test', 'acme.example.test'],
+      );
+      writeFileSync(join(mirror, '.npmrc'), '@acme:registry=https://acme.example.test\n');
+      assert.deepEqual(
+        await packageRegistryDomains(mirror, { gates: [{ command: ['pnpm', 'install'] }] }),
+        ['registry.npmjs.org', 'acme.example.test'],
+      );
+      // Профиль без npm/pnpm сеть не открывает.
+      assert.deepEqual(
+        await packageRegistryDomains(mirror, {
+          capabilities: ['go'],
+          gates: [{ command: ['go'] }],
+        }),
+        [],
+      );
+    } finally {
+      rmSync(mirror, { recursive: true, force: true });
     }
   }));
 

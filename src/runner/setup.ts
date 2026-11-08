@@ -171,6 +171,56 @@ export function componentProfileConfig(
   };
 }
 
+/**
+ * Домены реестра пакетов для песочницы проверок. Песочница закрывает внешнюю
+ * сеть всему, чего нет в `isolation.domains`, и установка зависимостей npm или
+ * pnpm падала отказом прокси, хотя doctor и план setup молчали. Реестр берётся
+ * из `.npmrc` репозитория (`registry=` и `@scope:registry=`); без своего
+ * `registry=` — публичный `registry.npmjs.org`. Адрес с подстановкой
+ * переменной окружения заранее не известен и не добавляется.
+ */
+export async function packageRegistryDomains(
+  repository: string,
+  selected: { capabilities?: string[]; gates: { command?: string[] }[] },
+) {
+  const managers = ['npm', 'pnpm', 'npx'];
+  if (
+    !selected.capabilities?.some((c) => c === 'npm' || c === 'pnpm') &&
+    !selected.gates.some((g) => managers.includes(basename(g.command?.[0] ?? '')))
+  )
+    return [];
+  const host = (value: string) => {
+    if (value.includes('${')) return undefined;
+    try {
+      return new URL(value.trim()).hostname || undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  let text = '';
+  try {
+    text = await readFile(join(repository, '.npmrc'), 'utf8');
+  } catch {
+    /* Нет своего .npmrc — публичный реестр. */
+  }
+  let primary: string | undefined | null = null;
+  const scoped: string[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^\s*(@[^:=\s]+:)?registry\s*=\s*(.+?)\s*$/.exec(line);
+    if (!match) continue;
+    const domain = host(match[2]);
+    if (match[1]) {
+      if (domain) scoped.push(domain);
+    } else primary = domain;
+  }
+  return [
+    ...new Set([
+      ...(primary === null ? ['registry.npmjs.org'] : primary ? [primary] : []),
+      ...scoped,
+    ]),
+  ];
+}
+
 /** Файл компонента, который setup сохраняет вместо своей конфигурации компонента. */
 export const componentFileName = 'devcontour.component.json';
 
@@ -343,6 +393,7 @@ async function runSetup(options: {
     : undefined;
   // Профили инструментов, которые называют роли сохранённого файла компонента.
   const toolProfiles = componentFile ? referencedToolProfiles(componentFile) : {};
+  const registryDomains = await packageRegistryDomains(repository, selected);
   const files = new Map<string, string>();
   // Инструкции стека приезжают из библиотеки DevContour по объявлению профиля,
   // а не лежат в каждом проекте заранее: подтвердили мобильное приложение —
@@ -439,6 +490,7 @@ async function runSetup(options: {
               workspaceRoot,
             )
           : projectConfig(repository, selected, options.approvalMode)),
+        ...(registryDomains.length ? { isolation: { mode: 'os', domains: registryDomains } } : {}),
         ...(Object.keys(toolProfiles).length ? { toolProfiles } : {}),
         // Пакеты строятся по объявленным ролям: роль без своей инструкции
         // осталась бы с одним общим контекстом и не знала бы своего дела.
