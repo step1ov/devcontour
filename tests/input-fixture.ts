@@ -105,6 +105,8 @@ export function controlled(
     leak?: string;
     /** Исполнитель задач с этим словом в заголовке отвечает «готово», ничего не изменив. */
     idleTitle?: string;
+    /** Demo-исполнитель спрашивает снова и после доставленного ответа. */
+    alwaysAsk?: boolean;
   } = {},
 ): Record<string, AgentAdapter> {
   const verdict = options.verdict ?? { approve: true };
@@ -137,7 +139,12 @@ export function controlled(
           log: 'Fixture writer; no model invoked',
           command: ['fixture'],
         });
-      const result = adapters.demo.execute(request);
+      const result = adapters.demo.execute(
+        options.alwaysAsk && !request.review
+          ? // Ответ в контексте скрыт от demo-исполнителя: он спрашивает снова.
+            { ...request, prompt: request.prompt.replace(/### input\//g, '### seen/') }
+          : request,
+      );
       if (request.review) return result;
       return result.then((r) => {
         const data = r.data as {
