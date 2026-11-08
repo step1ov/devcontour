@@ -862,12 +862,13 @@ export function panelRuns(
  */
 function runDetail(run: Run) {
   const { partial, evidence, assumptions, ...rest } = run;
+  const decisions = assumptionLines({ assumptions, inputPolicy: run.inputPolicy });
   return {
     ...clip(rest),
     // Токен владения попыткой — не для панели.
     token: '',
     // Решения исполнителя ниже порога — рядом с результатом попытки.
-    ...(assumptions?.length ? { assumptions: assumptionLines({ assumptions }) } : {}),
+    ...(decisions.length ? { assumptions: decisions } : {}),
     ...(partial ? { partial: clip({ ...partial, patch: undefined }) } : {}),
     evidence: evidence.slice(0, 100).map(({ log, tests, findings, ...e }) => ({
       ...clip(e),
