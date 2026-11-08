@@ -44,7 +44,7 @@ import { DomainError } from '../core/model.ts';
 import { blockers, readyTasks } from '../core/graph.ts';
 import { Scheduler } from '../runner/scheduler.ts';
 import { requestInputPolicy } from '../runner/reconfigure.ts';
-import { InputService, inputHolds } from '../application/input.ts';
+import { InputService, inputHolds, stopQuestions } from '../application/input.ts';
 import { acceptBoard } from '../runner/agent-control.ts';
 import { modelRuntimes, repositories } from '../core/repositories.ts';
 import { WorkspaceRunner } from '../runner/workspace.ts';
@@ -310,7 +310,7 @@ export async function serve(
             lead: quick.lead,
             result: h
               ? await Promise.all(
-                  quickResult(h.store.read(), change.id, usage).map(async (r) => {
+                  quickResult(h.store.read(), change.id, usage, stopQuestions(h)).map(async (r) => {
                     const repo = repositories(h!.config).find((x) => x.id === r.repositoryId);
                     const head = r.run?.integrationSha ?? r.run?.candidateSha;
                     const diff =

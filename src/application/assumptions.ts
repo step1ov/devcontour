@@ -1,3 +1,4 @@
+import type { InputQuestion } from 'devcontour-harness';
 import type { Run } from '../core/model.ts';
 import { DIAGNOSTIC, short } from './bounded.ts';
 
@@ -15,38 +16,48 @@ const LIMIT = 20;
  */
 export function assumptionLines(
   run: Pick<Run, 'assumptions' | 'inputPolicy'> & Partial<Pick<Run, 'failureKind'>>,
+  /** Вопрос блокирующего запроса этой попытки (`stopQuestions`), если он есть. */
+  asked?: InputQuestion,
 ) {
   // Развилка не ниже порога, закреплённого в попытке, — не решение «без
-  // остановки». Если попытка остановилась вопросом, движок делает вопросом
-  // самую серьёзную из них (действующая серьёзность, затем самооценка, затем
-  // порядок записи); её блок решений не показывает — она видна карточкой
-  // вопроса. Остальные развилки не ниже порога остаются в списке с пометкой
-  // `unresolved`: исполнитель их не решил, и без пометки их не было бы видно
-  // нигде. Вопрос, заданный отдельным запросом, а не развилкой, в
-  // `assumptions` не пишется; тогда под это правило попадает самая серьёзная
-  // развилка — её тоже видно карточкой вопроса, где исполнитель спросил.
-  // У попыток без закреплённой политики (прежние версии) порога нет —
-  // показываются все записи как решения.
+  // остановки». Движок делает вопросом самую серьёзную из них (действующая
+  // серьёзность, затем самооценка, затем порядок записи), только когда
+  // исполнитель завершил работу; запрос копирует развилку дословно (вопрос,
+  // единственный вариант — выбранное, основание). Такую развилку блок
+  // решений не показывает — она видна карточкой вопроса. Если исполнитель
+  // спросил сам (незавершённая попытка с запросом), вопрос — его запрос, а
+  // развилки движок только записывает: ни одна не скрыта. Поэтому скрывается
+  // лишь развилка, совпавшая с вопросом запроса попытки; нет совпадения —
+  // не скрывается ничего. Остальные развилки не ниже порога у попытки,
+  // остановленной вопросом, помечены `unresolved`: исполнитель их не решил,
+  // и без пометки их не было бы видно нигде. У попыток, не остановленных
+  // вопросом, движок развилки не оценивал — пометки нет. У попыток без
+  // закреплённой политики (прежние версии) порога нет — показываются все
+  // записи как решения.
   const threshold = run.inputPolicy?.threshold;
   const all = run.assumptions ?? [];
+  const stopped = run.failureKind === 'needs-input';
   const above = (a: (typeof all)[number]) =>
-    threshold !== undefined && a.effectiveSeverity >= threshold;
-  const asked =
-    run.failureKind === 'needs-input'
-      ? all
-          .filter(above)
-          .reduce<(typeof all)[number] | undefined>(
-            (top, a) =>
-              !top ||
-              a.effectiveSeverity > top.effectiveSeverity ||
-              (a.effectiveSeverity === top.effectiveSeverity && a.severity > top.severity)
-                ? a
-                : top,
-            undefined,
-          )
-      : undefined;
+    stopped && threshold !== undefined && a.effectiveSeverity >= threshold;
+  const isQuestion = (a: (typeof all)[number]) =>
+    !!asked &&
+    asked.question === a.question &&
+    asked.rationale === a.rationale &&
+    asked.options.length === 1 &&
+    asked.options[0].label === a.chosen;
+  const hidden = all
+    .filter((a) => above(a) && isQuestion(a))
+    .reduce<(typeof all)[number] | undefined>(
+      (top, a) =>
+        !top ||
+        a.effectiveSeverity > top.effectiveSeverity ||
+        (a.effectiveSeverity === top.effectiveSeverity && a.severity > top.severity)
+          ? a
+          : top,
+      undefined,
+    );
   return all
-    .filter((a) => a !== asked)
+    .filter((a) => a !== hidden)
     .slice(0, LIMIT)
     .map((a) => ({
       question: text(a.question),
