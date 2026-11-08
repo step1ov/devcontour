@@ -1048,3 +1048,54 @@ test('R4-m4: отметка setup у каждого изменения своя;
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('Изменения в репозитории: ключ продолжает закоммиченные папки, индекс сохраняет их строки', () =>
+  withTestHome(() => {
+    const root = temp();
+    // Репозиторий уже несёт изменение прежней базы: папку с change.json и строку индекса.
+    const committed = join(root, 'docs/changes/r-001.earlier-mvp');
+    mkdirSync(committed, { recursive: true });
+    writeFileSync(
+      join(committed, 'change.json'),
+      JSON.stringify({
+        id: 'PC-earlier',
+        key: 'r-001.earlier-mvp',
+        title: 'Прежний MVP',
+        createdAt: '2026-01-02T00:00:00.000Z',
+        product: [{ number: 3, status: 'approved' }],
+        architecture: [{ number: 1, status: 'approved' }],
+        design: [],
+      }) + '\n',
+    );
+    // Папка без change.json тоже занимает номер, но строки индекса не получает.
+    mkdirSync(join(root, 'docs/changes/r-002.notes-only'), { recursive: true });
+    writeFileSync(join(root, 'docs/changes/README.md'), '# old index\n');
+    const store = preparationStore(join(root, '.devcontour-local'));
+    try {
+      const view = new Preparation(store, 'operator').execute('preparation_quick', intake(root));
+      assert.ok(view.enabled);
+      const change = store.read().preparation!.changes[0];
+      assert.equal(change.key, 'r-003.summa-s-otritsatelnymi-chislami');
+      const index = readFileSync(join(root, 'docs/changes/README.md'), 'utf8');
+      assert.match(
+        index,
+        /\[`r-001\.earlier-mvp`\]\(\.\/r-001\.earlier-mvp\/\) \| Прежний MVP \| v3 · утверждено \| v1 · утверждено \| — \| 2026-01-02 \|/,
+      );
+      assert.match(index, /\[`r-003\.summa-s-otritsatelnymi-chislami`\]/);
+      assert.ok(index.indexOf('r-001.earlier-mvp') < index.indexOf('r-003.'));
+      assert.doesNotMatch(index, /r-002\.notes-only/);
+      // Закоммиченная папка не переписывается проекцией.
+      const kept = JSON.parse(readFileSync(join(committed, 'change.json'), 'utf8')) as {
+        id: string;
+      };
+      assert.equal(kept.id, 'PC-earlier');
+      assert.ok(!existsSync(join(committed, 'product.md')));
+      // Следующее изменение продолжает нумерацию дальше.
+      new Preparation(store).execute('preparation_create', { title: 'Второе изменение' });
+      assert.match(store.read().preparation!.changes[1].key, /^r-004\./);
+      return Promise.resolve();
+    } finally {
+      store.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }));

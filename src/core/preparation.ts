@@ -32,6 +32,16 @@ const hash = (value: unknown) =>
 const now = () => new Date().toISOString();
 const changeKeyOf = (number: number, slug: string) =>
   'r-' + String(number).padStart(3, '0') + '.' + slug;
+const keyNumber = (key: string) => Number(/^r-(\d+)\./.exec(key)?.[1] ?? 0);
+/**
+ * Номер следующего изменения: после изменений состояния и папок, уже
+ * лежащих в docs/changes (закоммиченных прежней базой). Иначе свежая база
+ * над таким репозиторием повторяла бы занятый ключ.
+ */
+function nextChangeNumber(store: Store, changes: ProductChange[]) {
+  const keys = [...changes.map((c) => c.key), ...(store.occupiedChangeKeys?.() ?? [])];
+  return Math.max(changes.length, ...keys.map(keyNumber)) + 1;
+}
 // States saved before the journal existed carry no arrays; normalise on access so
 // every caller can append without re-checking.
 function journal(c: ProductChange) {
@@ -778,7 +788,7 @@ export class Preparation {
           selected = 'PC-' + randomUUID();
           p.changes.push({
             id: selected,
-            key: changeKeyOf(p.changes.length + 1, slugify(v.title)),
+            key: changeKeyOf(nextChangeNumber(this.store, p.changes), slugify(v.title)),
             title: v.title,
             createdAt: now(),
             product: [],
@@ -804,7 +814,7 @@ export class Preparation {
           selected = 'PC-' + randomUUID();
           p.changes.push({
             id: selected,
-            key: changeKeyOf(p.changes.length + 1, v.slug ?? slugify(v.title)),
+            key: changeKeyOf(nextChangeNumber(this.store, p.changes), v.slug ?? slugify(v.title)),
             title: v.title,
             createdAt: now(),
             product: [],
