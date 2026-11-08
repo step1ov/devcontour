@@ -16,7 +16,13 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { command } from '../src/runner/process.ts';
 import { processAlive } from '../src/runner/resources.ts';
-import { serverRecordPath, type ServerRecord } from '../src/runner/server-record.ts';
+import {
+  liveController,
+  serverRecordPath,
+  stopServer,
+  type ServerRecord,
+} from '../src/runner/server-record.ts';
+import { fixture } from './helpers.ts';
 
 const cli = ['node', '--import', 'tsx', resolve('src/cli.ts')];
 
@@ -111,5 +117,38 @@ test('stop terminates the recorded workspace server and refuses a process that i
   } finally {
     for (const child of children) if (child.exitCode === null) child.kill('SIGKILL');
     rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test('stop without a record refuses while a live controller lease holds the store (server started before the upgrade)', async () => {
+  // Сервер прежней версии server.json не пишет, но держит роль controller.
+  const f = fixture();
+  try {
+    assert.equal(f.h.leader('pre-upgrade-server'), true);
+    const lease = liveController(f.root);
+    assert.equal(lease?.owner, 'pre-upgrade-server');
+
+    const refused = await command([...cli, 'stop', '--data', f.root], process.cwd());
+    assert.notEqual(refused.code, 0, 'stop не выполнен: сервер работает');
+    const result = JSON.parse(refused.stdout) as { status: string; owner: string; detail: string };
+    assert.equal(result.status, 'running-unrecorded');
+    assert.equal(result.owner, 'pre-upgrade-server');
+    assert.match(result.detail, /остановите его вручную/);
+
+    // Запись завершившегося процесса устарела, но роль живая — тоже отказ.
+    const dead = spawn('true');
+    await once(dead, 'exit');
+    writeFileSync(
+      serverRecordPath(f.root),
+      JSON.stringify({ pid: dead.pid, url: 'http://127.0.0.1:9', instance: 'gone' }),
+    );
+    const stale = await stopServer(f.root);
+    assert.equal(stale.status, 'running-unrecorded');
+    assert.equal(existsSync(serverRecordPath(f.root)), false, 'устаревшая запись удалена');
+
+    // Истёкшая роль — сервер не работает.
+    assert.equal(liveController(f.root, (lease?.leaseUntil ?? 0) + 1), undefined);
+  } finally {
+    f.cleanup();
   }
 });

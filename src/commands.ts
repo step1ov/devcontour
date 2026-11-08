@@ -317,7 +317,10 @@ async function main() {
     const timeout = Number(option('--timeout-ms', '60000'));
     if (!Number.isFinite(timeout) || timeout < 0)
       throw new Error('--timeout-ms — неотрицательное число миллисекунд');
-    console.log(JSON.stringify(await stopServer(root, { timeoutMs: timeout }), null, 2));
+    const result = await stopServer(root, { timeoutMs: timeout });
+    console.log(JSON.stringify(result, null, 2));
+    // Сервер без записи работает: команда не выполнена, сигнала не было.
+    if (result.status === 'running-unrecorded') process.exitCode = 1;
     return;
   }
   if (

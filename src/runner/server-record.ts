@@ -6,9 +6,15 @@
 // тот же pid и тот же экземпляр (`GET /api/server`). Pid, переиспользованный
 // чужим процессом, или чужой сервер на том же порту этого подтверждения не
 // дают — такой процесс не трогается.
+//
+// Сервер версии до появления записи её не пишет. Без записи `stop` читает
+// роль controller из базы (только чтение, как doctor): живая роль — процесс
+// без записи держит workspace, и `stop` отказывает, не посылая сигнала.
 import { randomUUID } from 'node:crypto';
-import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { controllerRow, effectiveLeader, readOnlyLocation } from '../core/store.ts';
 import { processAlive } from './resources.ts';
 
 export interface ServerRecord {
@@ -59,7 +65,54 @@ export function clearServerRecord(root: string, instance: string) {
 }
 
 export type StopResult =
-  { status: 'stopped'; pid: number; url: string } | { status: 'not-running'; detail: string };
+  | { status: 'stopped'; pid: number; url: string }
+  | { status: 'not-running'; detail: string }
+  | { status: 'running-unrecorded'; owner: string; leaseUntil: string; detail: string };
+
+/**
+ * Живая роль controller базы `root`, прочитанная без записи. Базы или
+ * состояния нет — роли нет.
+ */
+export function liveController(root: string, now = Date.now()) {
+  const file = join(root, 'state.sqlite');
+  if (!existsSync(file)) return undefined;
+  const db = new DatabaseSync(readOnlyLocation(file), { readOnly: true });
+  try {
+    const table = db
+      .prepare("SELECT 1 FROM main.sqlite_master WHERE type='table' AND name='state'")
+      .get();
+    const row = table
+      ? (db.prepare('SELECT data FROM main.state WHERE id=1').get() as { data: string } | undefined)
+      : undefined;
+    const document = row
+      ? (JSON.parse(row.data) as { leader?: { owner: string; leaseUntil: number } }).leader
+      : undefined;
+    const leader = effectiveLeader(document, controllerRow(db));
+    return leader && leader.leaseUntil > now ? leader : undefined;
+  } finally {
+    db.close();
+  }
+}
+
+/** Без подтверждённой записи: живая роль controller — сервер без записи работает. */
+function withoutRecord(root: string, detail: string): StopResult {
+  let leader: ReturnType<typeof liveController>;
+  try {
+    leader = liveController(root);
+  } catch (error) {
+    throw new Error(
+      `${detail}; роль controller в базе не прочитана (${error instanceof Error ? error.message : String(error)}). Убедитесь сами, что сервер этого workspace не запущен`,
+    );
+  }
+  if (!leader) return { status: 'not-running', detail };
+  const until = new Date(leader.leaseUntil).toISOString();
+  return {
+    status: 'running-unrecorded',
+    owner: leader.owner,
+    leaseUntil: until,
+    detail: `${detail}, но роль controller базы держит живой процесс (владелец ${leader.owner}, срок до ${until}). Вероятно, это сервер, запущенный версией без записи server.json (до обновления), или очередь \`run\`. DevContour не посылает сигнал процессу, который не подтвердил себя записью: остановите его вручную (Ctrl+C в его терминале) и повторите stop. Если такого процесса нет, роль истечёт в ${until}`,
+  };
+}
 
 /**
  * Остановить сервер workspace по записи `server.json`: SIGTERM — штатная
@@ -74,15 +127,14 @@ export async function stopServer(
   const timeoutMs = options.timeoutMs ?? 60000;
   const path = serverRecordPath(root);
   const record = readServerRecord(root);
-  if (!record)
-    return { status: 'not-running', detail: `Записи о запущенном сервере нет (${path})` };
+  if (!record) return withoutRecord(root, `Записи о запущенном сервере нет (${path})`);
   if (!processAlive(record.pid)) {
     // Процесс записи завершился без штатной остановки: запись устарела.
     clearServerRecord(root, record.instance);
-    return {
-      status: 'not-running',
-      detail: `Сервер pid ${record.pid} уже не работает; устаревшая запись ${path} удалена`,
-    };
+    return withoutRecord(
+      root,
+      `Сервер pid ${record.pid} уже не работает; устаревшая запись ${path} удалена`,
+    );
   }
   const identity = await confirm(record, options.confirmMs ?? 3000);
   if (identity !== 'ours')
