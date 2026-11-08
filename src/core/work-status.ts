@@ -7,6 +7,7 @@ import {
   type ChainRootCode,
 } from 'devcontour-harness/projections';
 import type { AuditEvent, Board, DevContourState, Run, Task } from './model.ts';
+import { heldByInput } from './input-labels.ts';
 
 /**
  * Почему диспетчер сам остановил выдачу работы — общая проекция harness
@@ -275,6 +276,11 @@ const chainTexts: Record<ChainRootCode, (detail?: string) => [string, string]> =
   'attempts-exhausted': () => ['исчерпан бюджет попыток', 'повтор со сбросом бюджета'],
 };
 
+const inputChainTexts: [string, string] = [
+  'ждёт ответа на вопрос исполнителя',
+  'ответить на вопрос и применить ответ',
+];
+
 /**
  * Чего ждёт цепочка, когда исполнители свободны. Счётчик «ждут зависимостей»
  * говорил, что работа стоит, но не почему: на пилоте четыре задачи этапа
@@ -283,13 +289,17 @@ const chainTexts: Record<ChainRootCode, (detail?: string) => [string, string]> =
  * передаёт задачи как работы и называет код корня прежними словами панели.
  */
 export function chainBlockers(
-  tasks: Pick<
+  tasks: (Pick<
     Task,
     'id' | 'title' | 'status' | 'dependsOn' | 'attempt' | 'hold' | 'budgetBlock' | 'activeRunId'
-  >[],
+  > & { blockers?: readonly string[] })[],
   maxAttempts = 3,
 ): ChainBlocker[] {
   const titles = new Map(tasks.map((t) => [t.id, t.title]));
+  // Задачу держит вопрос исполнителя (`input:<id>` в блокерах панели):
+  // движок записал остановку отказом, но корень цепочки ждёт ответа, а не
+  // повтора — повтор отказал бы.
+  const asking = new Set(tasks.filter((t) => heldByInput(t)).map((t) => t.id));
   const works = tasks.map((t) => ({
     id: t.id,
     status: t.status,
@@ -300,7 +310,10 @@ export function chainBlockers(
     ...(t.budgetBlock ? { budgetBlock: { reason: t.budgetBlock.reason } } : {}),
   }));
   return chainRoots(works, maxAttempts).map((root) => {
-    const [reason, next] = chainTexts[root.code](root.detail);
+    const [reason, next] =
+      asking.has(root.workId) && root.code !== 'cancelled'
+        ? inputChainTexts
+        : chainTexts[root.code](root.detail);
     return {
       taskId: root.workId,
       title: titles.get(root.workId)!,

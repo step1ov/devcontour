@@ -25,6 +25,7 @@ import { repositories, repository, roleBinding, reviewerBinding } from '../core/
 import { identitySchema } from '../core/sync-model.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { queueStopOf } from './queue-stop.ts';
+import { inputHolds } from './input.ts';
 import { executionOf } from '../harness/execution.ts';
 import {
   HarnessError,
@@ -134,6 +135,16 @@ export function taskProgress(h: DevContour, s: DevContourState, t: Task, now: nu
     )
       after.push('workspace_operation_active');
   }
+  // Вопрос исполнителя без применённого ответа держит задачу: это ожидание
+  // ответа, а не сбой. Остановку `needs-input` движок записывает отказом
+  // (`failed`), и его общая ветвь назвала бы её сбоем, требующим разбора, —
+  // хост называет ожидание ответа и запрос (продолжение — ответ и его
+  // применение, повтор отказал бы). Держит вопрос и готовую задачу после
+  // устаревшего применения: выдача её не берёт.
+  const inputRequest = !['done', 'cancelled'].includes(t.status)
+    ? facts.inputs.get(t.id)
+    : undefined;
+  if (inputRequest) before.push('input_required');
   const shared = workProgress({
     work: t,
     statusOf: (id) => s.tasks.find((x) => x.id === id)?.status,
@@ -149,7 +160,14 @@ export function taskProgress(h: DevContour, s: DevContourState, t: Task, now: nu
     status: t.status,
     attempt: t.attempt,
     dependencies: shared.dependencies,
-    reasons: [...before, ...shared.reasons.map((r) => sharedReasons[r]), ...after],
+    reasons: [
+      ...before,
+      ...shared.reasons
+        .filter((r) => !(inputRequest && r === 'failure-requires-diagnosis'))
+        .map((r) => sharedReasons[r]),
+      ...after,
+    ],
+    ...(inputRequest ? { input: { requestId: inputRequest } } : {}),
     ...(hold
       ? {
           hold: {
@@ -195,6 +213,8 @@ type Facts = {
   policy: string;
   stale: ReturnType<LeadWorkflow['staleBoards']>;
   budget: Map<string, string>;
+  /** Задачи, которые держит вопрос исполнителя: id задачи → id запроса. */
+  inputs: Map<string, string>;
 };
 const factsCache = new WeakMap<DevContourState, Facts>();
 function responseFacts(h: DevContour, s: DevContourState, now: number) {
@@ -205,6 +225,7 @@ function responseFacts(h: DevContour, s: DevContourState, now: number) {
     policy: h.planPolicyDigest(),
     stale: new LeadWorkflow(h).staleBoards(s),
     budget: budgetBlocks(h, s),
+    inputs: inputHolds(h),
   };
   factsCache.set(s, facts);
   return facts;
