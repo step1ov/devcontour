@@ -628,6 +628,12 @@ export const DEMO_ASK = '[demo:ask]';
  * объявленный порог критичности, и отвечает оператор, а не ведущий.
  */
 export const DEMO_ASK_PRODUCT = '[demo:ask-product]';
+/**
+ * Маркер описания задачи: demo-исполнитель доводит работу до конца и
+ * записывает две развилки, решённые им самим ниже порога вопросов
+ * (`assumptions`). Fixture, не решения модели.
+ */
+export const DEMO_ASSUME = '[demo:assume]';
 // Deterministic fixture only. Never claim these outputs were produced by a model.
 export const demoAdapter: AgentAdapter = {
   name: 'demo',
@@ -742,7 +748,30 @@ export const demoAdapter: AgentAdapter = {
       ) + '\n',
     );
     return {
-      data: { completed: true, summary: 'Создан проверяемый demo-артефакт' },
+      data: {
+        completed: true,
+        summary: 'Создан проверяемый demo-артефакт',
+        ...(r.task.description?.includes(DEMO_ASSUME)
+          ? {
+              assumptions: [
+                {
+                  question: 'Demo fixture: где хранить артефакт задачи?',
+                  chosen: 'deliverables/<id>.json, как у остальных задач',
+                  rationale: 'Так его читает fixture-проверка verify.mjs',
+                  severity: 2,
+                  affects: [],
+                },
+                {
+                  question: 'Demo fixture: нужен ли отступ в JSON?',
+                  chosen: 'Два пробела',
+                  rationale: 'Совпадает с форматированием репозитория',
+                  severity: 1,
+                  affects: [],
+                },
+              ],
+            }
+          : {}),
+      },
       log: 'Demo fixture writer; no model invoked',
       command: ['internal:demo-writer'],
     };
