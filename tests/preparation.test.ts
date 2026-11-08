@@ -1182,3 +1182,68 @@ test('Новое изменение в проработке не делает у
     f.cleanup();
   }
 });
+
+test('Перезапуск, пока активное изменение в проработке, подключает технику по применённой конфигурации', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-restart-')),
+    workspace = join(root, 'workspace');
+  const repo = join(root, 'product');
+  mkdirSync(repo);
+  const git = (...args: string[]) =>
+    execFileSync('git', ['-C', repo, ...args], {
+      stdio: 'pipe',
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: 'Fixture',
+        GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
+        GIT_COMMITTER_NAME: 'Fixture',
+        GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
+      },
+    });
+  git('init', '-b', 'main');
+  writeFileSync(join(repo, 'README.md'), 'Product fixture');
+  git('add', '.');
+  git('commit', '-m', 'initial');
+  mkdirSync(join(workspace, '.devcontour-local'), { recursive: true });
+  // Первое изменение утверждено, конфигурация применена; второе — в проработке и активно.
+  let store = preparationStore(join(workspace, '.devcontour-local'));
+  approvePreparation(new Preparation(store));
+  store.close();
+  writeFileSync(
+    join(workspace, '.devcontour-local/config.json'),
+    JSON.stringify(
+      config({
+        repository: repo,
+        workspaceRoot: realpathSync(workspace),
+        targetBranch: 'devcontour/integration',
+        storage: 'component',
+      }),
+    ),
+  );
+  store = preparationStore(join(workspace, '.devcontour-local'));
+  new Preparation(store).execute('preparation_create', { title: 'Второе изменение' });
+  store.close();
+  const app = await startWorkspace(workspace, { port: 0, workspaceMode: 'separate' });
+  try {
+    const deadline = Date.now() + 20000;
+    let state: { engineConnected?: boolean; developmentReady?: boolean; startupError?: string } =
+      {};
+    while (Date.now() < deadline) {
+      state = (await (await fetch(app.url + '/api/preparation')).json()) as typeof state;
+      if (state.startupError) throw new Error(state.startupError);
+      if (state.engineConnected) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    // Активное изменение не готово, но техника подключена: работа первого доступна.
+    assert.equal(state.developmentReady, false);
+    assert.equal(state.engineConnected, true);
+    const response = await fetch(app.url + '/api/agent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-DevContour-Request': '1' },
+      body: JSON.stringify({ operation: 'board_create', input: { title: 'Работа первого' } }),
+    });
+    assert.equal(response.status, 200, await response.clone().text());
+  } finally {
+    await app.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
