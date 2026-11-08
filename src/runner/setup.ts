@@ -30,12 +30,17 @@ const devcontourRoot = fileURLToPath(new URL('../../', import.meta.url));
 // Чему учить роль, кроме её собственной инструкции: тестировщика — проверкам,
 // тех, кто делает интерфейс, — дизайну, остальных — контрактам. Правило по виду
 // роли, а не по списку имён: `qa-mobile` и `qa-web` — тоже тестировщики.
+// `developer` быстрого изменения контрактом не связан: правила общих API и
+// versioned контекста библиотек противоречили бы его инструкции, и ревьюер
+// плана требовал бы по ним контракт, которого у задачи нет и быть не должно.
 const companionContext = (role: string) =>
-  role.startsWith('qa')
-    ? 'testing'
-    : ['frontend', 'mobile'].includes(role)
-      ? 'design'
-      : 'contracts';
+  role === 'developer'
+    ? undefined
+    : role.startsWith('qa')
+      ? 'testing'
+      : ['frontend', 'mobile'].includes(role)
+        ? 'design'
+        : 'contracts';
 
 export function defaultContextPacks(repositoryId = 'main', declared: string[] = [...roles]) {
   const prefix = repositoryId === 'main' ? '' : repositoryId + '-';
@@ -52,7 +57,10 @@ export function defaultContextPacks(repositoryId = 'main', declared: string[] = 
       version: '1.0.0',
       repositoryId,
       roles: [role],
-      files: [`.agents/roles/${role}.md`, `.agents/context/${companionContext(role)}.md`],
+      files: [
+        `.agents/roles/${role}.md`,
+        ...(companionContext(role) ? [`.agents/context/${companionContext(role)}.md`] : []),
+      ],
     })),
     {
       id: prefix + 'library-contracts',

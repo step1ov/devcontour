@@ -21,7 +21,7 @@ import { join, resolve } from 'node:path';
 import { Preparation, validatePreparation } from '../src/core/preparation.ts';
 import { preparationStore, startWorkspace } from '../src/runner/start.ts';
 import { chooseWorkspaceMode } from '../src/runner/workspace-mode.ts';
-import { planSetup } from '../src/runner/setup.ts';
+import { planSetup, setupProject } from '../src/runner/setup.ts';
 import {
   leadActivityAt,
   markQuickSetup,
@@ -417,6 +417,102 @@ test('D01-D: план setup ничего не пишет, сохраняет ф�
     assert.ok(conflicted.files.some((f) => f.action === 'conflict'));
     assert.match(conflicted.refusal ?? '', /symlink/);
     rmSync(root, { recursive: true, force: true });
+  }));
+
+test('F1: после приёма поручения quick-facts не выдаёт записи DevContour за незакоммиченную работу', () =>
+  withTestHome(async () => {
+    const root = temp();
+    repository(root);
+    const app = await startWorkspace(root, { port: 0, workspaceMode: 'embedded' });
+    try {
+      const response = await fetch(app.url + '/api/preparation/quick', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-devcontour-request': '1' },
+        body: JSON.stringify(intake(root)),
+      });
+      assert.equal(response.status, 200);
+      const cliFacts = () => {
+        const run = spawnSync(
+          process.execPath,
+          ['--import', 'tsx', cli, 'quick-facts', '--repository', root, '--workspace', root],
+          { encoding: 'utf8', env: process.env },
+        );
+        assert.equal(run.status, 0, run.stderr);
+        return JSON.parse(run.stdout) as QuickFacts;
+      };
+      const facts = cliFacts();
+      // Дерево действительно изменено приёмом: .gitignore, маркер режима и
+      // проекция изменения в docs/changes.
+      assert.ok(facts.facts.git.changes.includes('.gitignore'), facts.facts.git.changes.join());
+      assert.ok(facts.facts.git.changes.includes('devcontour.workspace.json'));
+      assert.ok(facts.facts.git.changes.some((p) => /^docs\/changes\/r-001\.[^/]+\//.test(p)));
+      assert.deepEqual(facts.diagnostics, []);
+      // Сырые факты в том же JSON не противоречат итоговым замечаниям.
+      assert.deepEqual(
+        facts.facts.diagnostics.map((d) => d.code),
+        [],
+      );
+      assert.equal(facts.facts.git.dirty, false);
+      // Панель читает те же факты: строка «есть незакоммиченные изменения» не появляется.
+      const view = (await getFresh(app.url + '/api/preparation/quick')) as { facts: QuickFacts };
+      assert.equal(view.facts.facts.git.dirty, false);
+      assert.deepEqual(
+        view.facts.facts.diagnostics.map((d) => d.code),
+        [],
+      );
+      // Чужая правка рядом — снова предупреждение в обоих списках.
+      writeFileSync(join(root, 'src/index.js'), 'export const add = (a, b) => a - b;\n');
+      const dirty = cliFacts();
+      assert.equal(dirty.facts.git.dirty, true);
+      assert.ok(dirty.diagnostics.some((d) => d.code === 'dirty-checkout'));
+      assert.ok(dirty.facts.diagnostics.some((d) => d.code === 'dirty-checkout'));
+    } finally {
+      await app.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }));
+
+test('D7: setup быстрого изменения не привязывает к developer правила контрактов', () =>
+  withTestHome(async () => {
+    const root = temp();
+    try {
+      repository(root);
+      chooseWorkspaceMode(root, 'embedded');
+      await setupProject({
+        repository: root,
+        workspace: root,
+        profile: 'npm-project',
+        quick: true,
+        gates,
+      });
+      const config = loadConfig(join(root, '.devcontour-local/config.json'));
+      assert.deepEqual(Object.keys(config.roles), ['developer']);
+      const bound = config.contextPacks.filter((pack) => pack.roles.includes('developer'));
+      // Пакеты роли есть: своя инструкция, общий порядок работы и техника тестов.
+      assert.deepEqual(bound.map((pack) => pack.id).sort(), [
+        'developer',
+        'technique-testing',
+        'workflow',
+      ]);
+      const files = bound.flatMap((pack) => [...pack.files, ...(pack.references ?? [])]);
+      assert.ok(files.includes('.agents/roles/developer.md'), files.join(', '));
+      // Правила общих API и versioned контекста библиотек требуют контракт,
+      // которого у задачи роли без контракта нет: к роли они не привязаны.
+      assert.ok(!files.includes('.agents/context/contracts.md'), files.join(', '));
+      for (const file of files)
+        assert.doesNotMatch(
+          readFileSync(join(root, file), 'utf8'),
+          /Каждая библиотека поставляет versioned контекст/,
+          file,
+        );
+      // Инструкция роли прямо говорит, что контракт задачи — её тесты.
+      assert.match(
+        readFileSync(join(root, '.agents/roles/developer.md'), 'utf8'),
+        /контракт задачи — её тесты на критерий/,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   }));
 
 test('D01-C: setup --change отклоняется до согласований и применяет ровно предложение после них', () =>

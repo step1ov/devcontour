@@ -81,24 +81,27 @@ export async function quickFacts(input: {
     : facts.git.changes;
   // Список усечён: непоказанные пути могут быть чужими.
   const truncated = (facts.git.changeCount ?? 0) > facts.git.changes.length;
+  // Все изменения дерева — записи самого DevContour.
+  const ownOnly = own && foreign.length === 0 && !truncated;
   // Профили DevContour версию менеджера не закрепляют: требование из
   // встроенного профиля harness здесь не действует, а packageManager проекта — да.
   const pinnedByHarness = new Set(
     facts.tools.filter((t) => t.required?.source.startsWith('profile ')).map((t) => t.name),
   );
-  const diagnostics: QuickDiagnostic[] = facts.diagnostics.filter(
+  const filtered = facts.diagnostics.filter(
     (d) =>
       !(
         d.code === 'tool-version-mismatch' &&
         [...pinnedByHarness].some((name) => d.message.startsWith(name + ' '))
       ) &&
-      !(d.code === 'dirty-checkout' && own && foreign.length === 0 && !truncated) &&
+      !(d.code === 'dirty-checkout' && ownOnly) &&
       !(
         d.code === 'devcontour-owned' &&
         own &&
         facts.markers.devcontour.every((m) => m === '.devcontour-local')
       ),
   );
+  const diagnostics: QuickDiagnostic[] = [...filtered];
   if (root && embedded && root !== workspace)
     diagnostics.push({
       code: 'placement-embedded',
@@ -121,8 +124,15 @@ export async function quickFacts(input: {
     });
   const manager = facts.packageManager.name;
   const profiles = manager && root ? [profilePin(await profile(quickProfiles[manager], root))] : [];
+  // Сырые факты harness тоже без своих записей: иначе JSON quick-facts и
+  // строка панели «есть незакоммиченные изменения» сообщают о чужой работе,
+  // когда итоговые замечания пусты. Список путей остаётся как есть.
   return {
-    facts,
+    facts: {
+      ...facts,
+      git: { ...facts.git, dirty: facts.git.dirty && !ownOnly },
+      diagnostics: filtered,
+    },
     diagnostics,
     profiles: profiles.map((p) => ({ id: p.id, version: p.version, digest: p.digest })),
     ready: !diagnostics.some((d) => d.severity === 'blocker'),

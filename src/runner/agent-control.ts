@@ -23,7 +23,7 @@ import { blobBytes, pinArtifacts } from './contract-artifacts.ts';
 import { assertUnderTest, unguardedDependencies, unguardedMessage } from './artifact-closure.ts';
 import { type Approval, type ContractAttempt, DomainError, relativePath } from '../core/model.ts';
 import { adapters, type AgentAdapter } from './adapters.ts';
-import { repositories, repository } from '../core/repositories.ts';
+import { declaredRoles, repositories, repository, requiresContract } from '../core/repositories.ts';
 import { git } from './process.ts';
 import { assertRequirementProof } from './requirements.ts';
 import {
@@ -355,6 +355,23 @@ async function review(
       ? [underTestReview]
       : []),
     ...(kind === 'plan' ? acceptabilityReview : []),
+    // Роль без обязательного контракта (developer быстрого изменения): без
+    // этого факта ревьюер требовал контракт по общим правилам контекста.
+    ...(kind === 'plan'
+      ? [
+          'Declared roles and whether a task of the role requires an agreed contract: ' +
+            JSON.stringify(
+              repositories(h.config).map((repo) => ({
+                repositoryId: repo.id,
+                roles: declaredRoles(h.config, repo.id).map((role) => ({
+                  role,
+                  requiresContract: requiresContract(h.config, role, repo.id),
+                })),
+              })),
+            ),
+          'A task whose role has requiresContract=false needs no separate contract: its tests on the acceptance criterion, written within its writePaths, are its executable contract. Do not block such a task for lacking a contract, and do not require a library context pack the configuration does not declare.',
+        ]
+      : []),
     'Return approved=false and concrete blocking findings when revision is needed. Routine technical choices within the specification do not need human approval.',
     ...(checkout
       ? [
