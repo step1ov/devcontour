@@ -27,6 +27,7 @@ import {
   type ContextSnapshot,
   type ExecutionView,
   type InputMessageRef,
+  type InputQuestion,
   type InputRequest,
 } from 'devcontour-harness';
 import { DomainError, type Task } from '../core/model.ts';
@@ -183,6 +184,26 @@ export function questionVerdicts(h: DevContour): ReadonlyMap<string, boolean> {
     }
   }
   return entry.counted;
+}
+
+/**
+ * Вопрос, которым остановилась попытка: ID попытки → вопрос её блокирующего
+ * запроса. Он нужен, чтобы отличить развилку, ставшую вопросом, от развилок,
+ * которые движок только записал (`assumptionLines`). Без `workId` — по всем
+ * задачам; неизвестная задача — пустой ответ.
+ */
+export function stopQuestions(h: DevContour, workId?: string): Map<string, InputQuestion> {
+  const questions = new Map<string, InputQuestion>();
+  let requests: InputRequest[];
+  try {
+    requests = executionOf(h).engine.inputRequests(workId ? { workId } : {});
+  } catch (error) {
+    if (error instanceof HarnessError && error.code === 'NOT_FOUND') return questions;
+    throw error;
+  }
+  for (const r of requests)
+    if (r.kind === 'question' && r.blocking) questions.set(r.runId, r.question);
+  return questions;
 }
 
 export class InputService {

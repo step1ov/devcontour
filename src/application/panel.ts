@@ -1,5 +1,5 @@
 import { join, resolve } from 'node:path';
-import { InputService, inputHolds, questionVerdicts } from './input.ts';
+import { InputService, inputHolds, questionVerdicts, stopQuestions } from './input.ts';
 import { z } from 'zod';
 import type { DevContour } from '../core/service.ts';
 import { loadedDigest, specDigest } from '../core/service.ts';
@@ -13,7 +13,7 @@ import {
   type Task,
 } from '../core/model.ts';
 import type { Delivery } from '../core/integrations.ts';
-import { clipDeep, type PropertyRecovery } from 'devcontour-harness';
+import { clipDeep, type InputQuestion, type PropertyRecovery } from 'devcontour-harness';
 import { blockers, readyTasks } from '../core/graph.ts';
 import { modelRuntimes, repositories } from '../core/repositories.ts';
 import { boardPhase, runLiveness, type RunLiveness } from '../core/work-status.ts';
@@ -844,6 +844,7 @@ function runsPage(
   // попыток» называет это, а не показывает её как бесплатную. Вердикт —
   // движка в момент остановки (журнал), а не по текущему `maxAttempts`.
   const { counted } = questionStops(own, h.config.maxAttempts, questionVerdicts(h));
+  const questions = stopQuestions(h, taskId);
   const all = [...own].reverse();
   const before = query.before;
   const from = before ? all.findIndex((r) => r.id === before) + 1 : 0;
@@ -854,7 +855,7 @@ function runsPage(
   return {
     total: all.length,
     items: items.map((run) => ({
-      ...runDetail(run),
+      ...runDetail(run, questions.get(run.id)),
       ...(counted.has(run.id) ? { counted: true } : {}),
     })),
     next: start + limit < all.length ? start + limit : null,
@@ -873,13 +874,12 @@ export function panelRuns(
  * Попытка для деталей: строки диагностики ограничены, лог — хвостом, тесты и
  * находки — первыми записями; patch черновика — только по своей команде.
  */
-function runDetail(run: Run) {
+function runDetail(run: Run, asked?: InputQuestion) {
   const { partial, evidence, assumptions, ...rest } = run;
-  const decisions = assumptionLines({
-    assumptions,
-    inputPolicy: run.inputPolicy,
-    failureKind: run.failureKind,
-  });
+  const decisions = assumptionLines(
+    { assumptions, inputPolicy: run.inputPolicy, failureKind: run.failureKind },
+    asked,
+  );
   return {
     ...clip(rest),
     // Токен владения попыткой — не для панели.
@@ -901,7 +901,7 @@ function runDetail(run: Run) {
 export function panelRun(h: DevContour, id: string) {
   const run = sharedState(h).runs.find((r) => r.id === id);
   if (!run) throw new DomainError('Попытка не найдена', 404);
-  return runDetail(run);
+  return runDetail(run, stopQuestions(h, run.taskId).get(run.id));
 }
 
 /**
