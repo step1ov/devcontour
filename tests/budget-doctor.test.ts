@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { config } from './helpers.ts';
 import {
   budgetChecks,
@@ -15,6 +15,8 @@ import { DevContour, loadedDigest } from '../src/core/service.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { Store } from '../src/core/store.ts';
 import type { Config } from '../src/core/model.ts';
+import { loadConfig } from '../src/runner/config.ts';
+import { command } from '../src/runner/process.ts';
 
 const now = Date.parse('2026-11-01T00:00:00Z');
 const price = (model: string, effectiveAt = '2026-10-01T00:00:00Z') => ({
@@ -372,6 +374,83 @@ test('after context-lock doctor names the re-pinned keys instead of budgets:appl
     assert.match(checks['budgets:applied'].detail, /\(ключи budgets, contextPacks\)/);
     assert.equal(checks['config:applied'], undefined);
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('doctor CLI reads the applied keys the server recorded and names config-apply for operational keys', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-budget-doctor-'));
+  const store: { current?: Store } = {};
+  let scheduler: Scheduler | undefined;
+  try {
+    const repo = join(root, 'repo'),
+      data = join(root, 'data');
+    mkdirSync(repo);
+    mkdirSync(data);
+    execFileSync('git', ['init', '-q', '-b', 'main', repo]);
+    execFileSync('git', [
+      '-C',
+      repo,
+      '-c',
+      'user.email=t@t',
+      '-c',
+      'user.name=t',
+      'commit',
+      '-q',
+      '--allow-empty',
+      '-m',
+      'init',
+    ]);
+    const file = join(data, 'config.json');
+    const base = config({
+      repository: repo,
+      budgets: { task: { usd: 25 }, onUnknown: 'continue' },
+    });
+    writeFileSync(file, JSON.stringify(base));
+    // Работающий сервер: роль controller живая, применённая конфигурация и
+    // digest её ключей записаны самим планировщиком, а не тестом.
+    store.current = new Store(join(data, 'state.sqlite'));
+    scheduler = new Scheduler(new DevContour(store.current, loadConfig(file)), data);
+    await scheduler.init();
+    await scheduler.tick();
+    const doctorCli = async (edit: Record<string, unknown>) => {
+      writeFileSync(file, JSON.stringify({ ...base, ...edit }));
+      const result = await command(
+        ['node', '--import', 'tsx', resolve('src/cli.ts'), 'doctor', '--data', data],
+        process.cwd(),
+      );
+      const checks = byId(
+        (JSON.parse(result.stdout) as { checks: { id: string; status: string; detail: string }[] })
+          .checks,
+      );
+      return checks;
+    };
+    // Только порог вопросов: применяет config-apply, перезапуск не нужен.
+    let checks = await doctorCli({ inputPolicy: { threshold: 5 } });
+    assert.equal(checks['budgets:applied'], undefined, 'CLI передал doctor записанные ключи');
+    assert.equal(checks['config:applied']?.status, 'degraded');
+    assert.match(checks['config:applied'].detail, /ключами inputPolicy;/);
+    assert.match(checks['config:applied'].detail, /config-apply --keys inputPolicy\./);
+    assert.doesNotMatch(checks['config:applied'].detail, /перезапуст/);
+    // Пороги зависания и ключ, который применяет только перезапуск.
+    checks = await doctorCli({
+      stallSweep: { intervalMs: 1000, quietMs: 60000, stalledMs: 120000 },
+      name: 'renamed',
+    });
+    assert.match(
+      checks['config:applied'].detail,
+      /config-apply --keys stallSweep; name применит только перезапуск serve/,
+    );
+    // Бюджеты с порогом вопросов — одна команда config-apply.
+    checks = await doctorCli({
+      budgets: { task: { usd: 50 }, onUnknown: 'continue' },
+      inputPolicy: { threshold: 5 },
+    });
+    assert.equal(checks['budgets:applied']?.status, 'degraded');
+    assert.match(checks['budgets:applied'].detail, /config-apply --keys budgets,inputPolicy\./);
+  } finally {
+    await scheduler?.stop();
+    store.current?.close();
     rmSync(root, { recursive: true, force: true });
   }
 });
