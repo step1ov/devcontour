@@ -186,6 +186,39 @@ test('doctor names a divergence of inputPolicy from the workspace.json declarati
   }
 });
 
+test('an invalid inputPolicy in workspace.json is reported and does not switch off the budgets comparison', () => {
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-budget-doctor-'));
+  try {
+    const budgets = { task: { usd: 25 }, onUnknown: 'continue' as const };
+    writeFileSync(
+      join(root, 'workspace.json'),
+      JSON.stringify({ budgets, inputPolicy: { threshold: 12 } }),
+    );
+    const declared = workspaceDeclaration(codex({ workspaceRoot: root }));
+    assert.deepEqual(declared, { budgets, invalid: ['inputPolicy'] });
+    const checks = byId(
+      budgetChecks(
+        codex({ budgets: { task: { usd: 100 }, onUnknown: 'continue' } }),
+        [],
+        declared,
+        now,
+      ),
+    );
+    assert.match(
+      checks['budgets:declaration'].detail,
+      /расходится с объявлением workspace\.json: budgets\./,
+    );
+    assert.equal(checks['budgets:declaration-invalid'].status, 'degraded');
+    assert.match(checks['budgets:declaration-invalid'].detail, /неверное значение: inputPolicy\./);
+    // Совпадающие budgets: расхождения нет, неверный ключ назван.
+    const same = byId(budgetChecks(codex({ budgets }), [], declared, now));
+    assert.equal(same['budgets:declaration'], undefined);
+    assert.ok(same['budgets:declaration-invalid']);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('doctorState reads call records for the price check without a writer', () => {
   const root = mkdtempSync(join(tmpdir(), 'devcontour-budget-doctor-'));
   try {
