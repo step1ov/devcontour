@@ -92,6 +92,8 @@ export type PanelRun = Pick<
 > & {
   error?: string;
   boardId?: string;
+  /** Попытка выдана с ответом на вопрос исполнителя: продолжение, а не повтор. */
+  input?: { requestId: string };
   /** Последняя отметка стадии: с неё считается «сколько идёт фаза». */
   timings?: Run['timings'];
   /**
@@ -126,6 +128,7 @@ function runLine(run: Run, boardId: string | undefined, now: number): PanelRun {
     blocked: run.blocked,
     reusedFrom: run.reusedFrom,
     failureKind: run.failureKind,
+    ...(run.input ? { input: { requestId: run.input.requestId } } : {}),
     error: short(run.error),
     boardId,
     ...(run.status === 'active' && run.timings ? { timings: run.timings.slice(-1) } : {}),

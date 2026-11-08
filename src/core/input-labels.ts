@@ -16,6 +16,21 @@ export const inputStateLabels: Record<string, string> = {
   superseded: 'Вопрос заменён',
 };
 
+/**
+ * Как попытка связана с вопросом исполнителя. Остановка вопросом возвращает
+ * номер попытки, и продолжение после ответа идёт с тем же номером: без
+ * пометки «попытка 2 из 3» дважды читалась как повтор. Остановленная попытка
+ * — `failureKind: needs-input`, продолжение — выдана с ответом (`input`).
+ */
+export function attemptInputNote(run: {
+  failureKind?: string;
+  input?: { requestId: string };
+}): string | undefined {
+  if (run.input) return 'продолжение после ответа на вопрос';
+  if (run.failureKind === 'needs-input') return 'остановлена вопросом исполнителя';
+  return undefined;
+}
+
 /** Порядок состояний основного пути: подписи следуют ему. */
 export const inputStateOrder = [
   'awaiting-answer',
