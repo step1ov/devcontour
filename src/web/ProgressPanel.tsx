@@ -624,7 +624,9 @@ function Stage({
   workflows?: WorkflowView[];
 }) {
   const { total, done, drafts } = counts;
-  const failed = counts.statuses.failed ?? 0;
+  // Задача с открытым вопросом — ожидание ответа, а не сбой: повтор ей запрещён.
+  const waitingInput = counts.waitingInput ?? 0;
+  const failed = counts.failed ?? (counts.statuses.failed ?? 0) - waitingInput;
   const tasks = { length: total };
   // Остановленный цикл восстановления выглядел как обычное ожидание свободного
   // исполнителя: причина лежала в записи работы и доходила до агентского API,
@@ -663,6 +665,12 @@ function Stage({
               : 'Повтор возможен, пока не исчерпан бюджет попыток.'}
           </p>
         )}
+        {waitingInput > 0 && (
+          <p className="text-muted-foreground m-0 text-sm" data-stage-waiting-input="">
+            Ждут ответа на вопрос исполнителя: {waitingInput}. Повтор не нужен — работа продолжится
+            после ответа.
+          </p>
+        )}
         {stopped && (
           <p className="text-destructive m-0 text-sm break-words">
             Очередь остановилась сама: {stopped}
@@ -693,6 +701,10 @@ export type PanelProgress = {
   total: number;
   done: number;
   drafts: number;
+  /** Упавшие задачи без открытого вопроса (старый сервер поле не отдаёт). */
+  failed?: number;
+  /** Задачи, остановленные вопросом исполнителя. */
+  waitingInput?: number;
   statuses: Record<string, number>;
   blocks: { id: string; done: number; total: number }[];
   gates: { gate: string; passed: number; failed: number; tasks: number; phases: string[] }[];

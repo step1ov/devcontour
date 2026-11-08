@@ -7,7 +7,7 @@ import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { controlled, inputDemos, inputFixture, untilQuestion } from './input-fixture.ts';
 import { AgentContext } from '../src/application/context.ts';
-import { panelQueue, panelTask } from '../src/application/panel.ts';
+import { panelQueue, panelSummary, panelTask } from '../src/application/panel.ts';
 import { inputNextText } from '../src/core/input-labels.ts';
 import { chainBlockers } from '../src/core/work-status.ts';
 import { statusKey, taskStatus } from '../src/web/status.ts';
@@ -69,6 +69,15 @@ test('A question stop reads as waiting for an answer, not as a failure to diagno
     assert.equal(inputNextText(waiting.input), inputNextText(request));
     assert.notEqual(inputNextText(waiting.input), '');
 
+    // Сводка этапа: задача с вопросом — «ждёт ответа», не «задача со сбоем».
+    type Counts = { failed: number; waitingInput: number; statuses: Record<string, number> };
+    const progress = () =>
+      (panelSummary(f.h, f.root, {}) as unknown as { progress: Counts }).progress;
+    const stage = progress();
+    assert.equal(stage.statuses.failed, 1, JSON.stringify(stage));
+    assert.equal(stage.failed, 0);
+    assert.equal(stage.waitingInput, 1);
+
     // Корень цепочки зависимой задачи — ожидание ответа, а не «сбой».
     const tasks = f.store.read().tasks.map((t) => ({
       ...t,
@@ -100,6 +109,10 @@ test('A question stop reads as waiting for an answer, not as a failure to diagno
     assert.deepEqual(failedInQueue.blockers, []);
     assert.equal(failedInQueue.input, undefined);
     assert.equal(statusKey(failedInQueue), 'failed');
+    assert.deepEqual(
+      { failed: progress().failed, waitingInput: progress().waitingInput },
+      { failed: 1, waitingInput: 0 },
+    );
   } finally {
     await f.cleanup();
   }

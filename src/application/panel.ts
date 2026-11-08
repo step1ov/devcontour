@@ -608,7 +608,7 @@ function buildSummary(
       .map((w) => clip({ ...w, history: (w.history ?? []).slice(-5) })),
     dataRoot: resolve(root),
     ready,
-    progress: progressOf(state),
+    progress: progressOf(state, inputs),
     counts: {
       boards: state.boards.length,
       tasks: state.tasks.length,
@@ -647,8 +647,11 @@ export type PanelSummary = ReturnType<typeof buildSummary>;
  * задачи без тестового evidence. Считаются на сервере — клиенту не нужны все
  * попытки.
  */
-function progressOf(state: DevContourState) {
+function progressOf(state: DevContourState, inputs: ReadonlyMap<string, string>) {
   const tasks = state.tasks.filter((t) => t.status !== 'cancelled');
+  // Остановка вопросом записана отказом, но это ожидание ответа: повтор
+  // запрещён, пока вопрос открыт. Сводка «Задач со сбоем» её не считает.
+  const waitingInput = tasks.filter((t) => t.status === 'failed' && inputs.has(t.id)).length;
   const repos = [...new Set(tasks.map((t) => t.repositoryId))].sort();
   const gates = new Map<
     string,
@@ -676,6 +679,10 @@ function progressOf(state: DevContourState) {
     total: tasks.length,
     done: tasks.filter((t) => t.status === 'done').length,
     drafts: tasks.filter((t) => t.status === 'draft').length,
+    /** Упавшие задачи без открытого вопроса: их разбирают и повторяют. */
+    failed: tasks.filter((t) => t.status === 'failed').length - waitingInput,
+    /** Задачи, остановленные вопросом исполнителя и ждущие ответа. */
+    waitingInput,
     statuses: Object.fromEntries(
       [...new Set(tasks.map((t) => t.status))].map((s) => [
         s,
