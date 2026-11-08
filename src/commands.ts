@@ -594,13 +594,19 @@ async function main() {
     'cancel',
     'correct',
   ];
-  if (operation === 'demo')
-    await setupDemo(
-      root,
-      args.includes('--checkout-root')
+  if (operation === 'demo') {
+    const approvalMode = args.includes('--approval-mode')
+      ? option('--approval-mode', '')
+      : undefined;
+    if (approvalMode !== undefined && approvalMode !== 'agent' && approvalMode !== 'operator')
+      throw new Error('--approval-mode: agent или operator');
+    await setupDemo(root, {
+      ...(args.includes('--checkout-root')
         ? { checkoutRoot: resolve(option('--checkout-root', '')) }
-        : {},
-    );
+        : {}),
+      ...(approvalMode ? { approvalMode } : {}),
+    });
+  }
   // Файл проверяется своим сообщением до общей загрузки: невалидный
   // config.json — отказ применения, а не сырой разбор схемы.
   if (operation === 'config-apply') {

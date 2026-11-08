@@ -17,6 +17,7 @@ import {
 } from '../core/work-status.ts';
 import { QueueStopBanner } from './QueueStopBanner.tsx';
 import { useNow } from './now.ts';
+import { WriterDecisions } from './WriterDecisions.tsx';
 
 // «Кто сейчас над чем работает» — первый вопрос, пока идёт разработка. Ответ
 // был на отдельной вкладке хода работ, ниже настроек контура; на графе и в
@@ -490,6 +491,7 @@ function Attempt({ run, number, reset }: { run: Run; number: number; reset: bool
           {run.error.slice(0, 300)}
         </p>
       )}
+      <WriterDecisions items={run.assumptions} />
     </li>
   );
 }

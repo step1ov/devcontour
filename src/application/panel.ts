@@ -22,6 +22,7 @@ import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { taskProgress } from './context.ts';
 import { checksSummary } from './checks.ts';
 import { DIAGNOSTIC, SHORT, clip, short } from './bounded.ts';
+import { assumptionLines } from './assumptions.ts';
 import { workspaceDeclares } from '../runner/budget-doctor.ts';
 import { configApplyKeys, reconfigureSlotBusy } from '../runner/reconfigure.ts';
 import { loadConfig } from '../runner/config.ts';
@@ -853,11 +854,13 @@ export function panelRuns(
  * находки — первыми записями; patch черновика — только по своей команде.
  */
 function runDetail(run: Run) {
-  const { partial, evidence, ...rest } = run;
+  const { partial, evidence, assumptions, ...rest } = run;
   return {
     ...clip(rest),
     // Токен владения попыткой — не для панели.
     token: '',
+    // Решения исполнителя ниже порога — рядом с результатом попытки.
+    ...(assumptions?.length ? { assumptions: assumptionLines({ assumptions }) } : {}),
     ...(partial ? { partial: clip({ ...partial, patch: undefined }) } : {}),
     evidence: evidence.slice(0, 100).map(({ log, tests, findings, ...e }) => ({
       ...clip(e),

@@ -7,6 +7,8 @@ import { Input } from '@/ui/input.tsx';
 import { Label } from '@/ui/label.tsx';
 import { Textarea } from '@/ui/textarea.tsx';
 import { cn } from '@/lib/utils.ts';
+import type { AssumptionLine } from '../application/assumptions.ts';
+import { WriterDecisions } from './WriterDecisions.tsx';
 
 // Заголовок предупреждения — абзац, а не h5 AlertTitle: внутри раздела с h2
 // пропуск уровней ломает порядок заголовков для читалок экрана.
@@ -83,6 +85,8 @@ interface QuickResult {
     integrationSha: string | null;
     candidate: CheckEntry[];
     integration: CheckEntry[];
+    /** Решения исполнителя ниже порога вопросов; у ответов прежних версий поля нет. */
+    assumptions?: AssumptionLine[];
   } | null;
   usage: {
     calls: number;
@@ -582,6 +586,7 @@ function Result({ view }: { view: QuickView }) {
                 <div className="grid gap-3">
                   <Checks label="Candidate: проверки и ревью" entries={task.run.candidate} />
                   <Checks label="Integration: проверки и ревью" entries={task.run.integration} />
+                  <WriterDecisions items={task.run.assumptions} />
                 </div>
               )}
               <p className="flex flex-wrap gap-x-4 gap-y-1 text-sm">

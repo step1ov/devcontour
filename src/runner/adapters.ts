@@ -628,6 +628,18 @@ export const DEMO_ASK = '[demo:ask]';
  * объявленный порог критичности, и отвечает оператор, а не ведущий.
  */
 export const DEMO_ASK_PRODUCT = '[demo:ask-product]';
+/**
+ * Маркер описания задачи: demo-исполнитель доводит работу до конца и
+ * записывает две развилки, решённые им самим ниже порога вопросов
+ * (`assumptions`). Fixture, не решения модели.
+ */
+export const DEMO_ASSUME = '[demo:assume]';
+/**
+ * Маркер описания задачи: demo-ревью ответа на вопрос этой задачи отклоняет
+ * ответ блокирующей находкой в каждом раунде — сценарий применения вопреки
+ * отклонённому ревью с подтверждением раунда. Fixture, не вердикт модели.
+ */
+export const DEMO_REJECT_ANSWER = '[demo:reject-answer]';
 // Deterministic fixture only. Never claim these outputs were produced by a model.
 export const demoAdapter: AgentAdapter = {
   name: 'demo',
@@ -637,6 +649,33 @@ export const demoAdapter: AgentAdapter = {
     // Ревью ответа на вопрос исполнителя (предмет `input-<id>`) —
     // детерминированное одобрение demo, не AI-review. Прочие ревью без задачи
     // (план доски, контракт) этим путём не одобряются.
+    if (
+      r.review &&
+      !r.task?.id &&
+      /Subject: plan input-IR-[a-f0-9]{24}\b/.test(r.prompt) &&
+      r.prompt.includes(DEMO_REJECT_ANSWER)
+    )
+      return {
+        data: {
+          execution: { commands: [], noCommandsReason: 'Demo fixture review without a model' },
+          approved: false,
+          summary:
+            'Детерминированное demo-ревью отклонило ответ: задача помечена [demo:reject-answer]; это не AI-review.',
+          discoveries: [],
+          // Прежняя находка остаётся открытой; новая — только если открытых нет.
+          findings: r.findings?.open.length
+            ? []
+            : [
+                {
+                  severity: 'blocking',
+                  message: 'Demo fixture: ответ меняет утверждённую приёмку',
+                },
+              ],
+          previous: reviewTransitions(r.findings, false, 'demo fixture: ответ не изменился'),
+        },
+        log: 'Demo fixture input review rejected the answer; no model invoked',
+        command: ['internal:demo-input-review'],
+      };
     if (r.review && !r.task?.id && /Subject: plan input-IR-[a-f0-9]{24}\b/.test(r.prompt))
       return {
         data: {
@@ -742,7 +781,30 @@ export const demoAdapter: AgentAdapter = {
       ) + '\n',
     );
     return {
-      data: { completed: true, summary: 'Создан проверяемый demo-артефакт' },
+      data: {
+        completed: true,
+        summary: 'Создан проверяемый demo-артефакт',
+        ...(r.task.description?.includes(DEMO_ASSUME)
+          ? {
+              assumptions: [
+                {
+                  question: 'Demo fixture: где хранить артефакт задачи?',
+                  chosen: 'deliverables/<id>.json, как у остальных задач',
+                  rationale: 'Так его читает fixture-проверка verify.mjs',
+                  severity: 2,
+                  affects: [],
+                },
+                {
+                  question: 'Demo fixture: нужен ли отступ в JSON?',
+                  chosen: 'Два пробела',
+                  rationale: 'Совпадает с форматированием репозитория',
+                  severity: 1,
+                  affects: [],
+                },
+              ],
+            }
+          : {}),
+      },
       log: 'Demo fixture writer; no model invoked',
       command: ['internal:demo-writer'],
     };

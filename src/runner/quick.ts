@@ -4,6 +4,7 @@ import { inspectProject, type ProjectFacts } from 'devcontour-harness';
 import type { DevContourState } from '../core/model.ts';
 import type { ProductChange } from '../core/preparation-model.ts';
 import { usageTotals, type UsageRecord } from '../core/usage.ts';
+import { assumptionLines } from '../application/assumptions.ts';
 import { profile, profilePin } from './packs.ts';
 import { planSetup } from './setup.ts';
 import { git } from './process.ts';
@@ -455,6 +456,8 @@ export function quickResult(state: DevContourState, changeId: string, usage: Usa
             integrationSha: run.integrationSha ?? null,
             candidate: phase('candidate'),
             integration: phase('integration'),
+            // Решения исполнителя ниже порога: оператор видит, на чём построен результат.
+            assumptions: assumptionLines(run),
           }
         : null,
       usage: usageTotals(usage.filter((u) => u.runId && ids.has(u.runId))),
