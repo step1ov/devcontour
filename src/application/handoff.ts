@@ -564,9 +564,14 @@ const rank = (x: HandoffHostNext) => (x.decision === 'plan' ? 4 : urgency[x.acti
  * очереди не придумывает: вопрос выдачу не держит.
  */
 function inputNext(ctx: HostContext): HandoffHostNext | undefined {
-  const { pack, view, h } = ctx;
+  const { pack } = ctx;
   if (pack.next.code !== 'INPUT_REQUIRED' || !pack.next.workId) return undefined;
-  const taskId = pack.next.workId;
+  return inputStep(ctx, pack.next.workId);
+}
+
+/** Шаг по вопросу исполнителя одной задачи (блокирующий запрос — первым). */
+function inputStep(ctx: HostContext, taskId: string): HandoffHostNext | undefined {
+  const { view, h } = ctx;
   const service = new InputService(h);
   const summary = service
     .list({ taskId })
@@ -638,7 +643,52 @@ function followUpNext(ctx: HostContext): HandoffHostNext | undefined {
 }
 
 function hostNext(ctx: HostContext): HandoffHostNext | undefined {
-  return hostStep(ctx) ?? followUpNext(ctx);
+  const step = hostStep(ctx);
+  // Решение о плане — о будущем объёме (например, разбор находок на
+  // неутверждённой доске). Пакет harness называет первую по порядку работ
+  // остановку, и черновик ранней доски заслонял блокеры живой работы: ответ
+  // на вопрос исполнителя, который ждёт применения, и упавшее задание доски.
+  // Они — раньше решения о плане.
+  if (step?.decision === 'plan') return liveBlocker(ctx) ?? step;
+  return step ?? followUpNext(ctx);
+}
+
+/**
+ * Блокер живой работы, который ведущий снимает сам: вопрос исполнителя, на
+ * который ведущий отвечает или ответ на который ждёт подготовки и
+ * применения, затем упавшее задание доски (повтор или решение по нему).
+ * Ожидание ответа оператора и применённого ответа сюда не входит: ведущему
+ * там делать нечего, и решение о плане остаётся его шагом.
+ */
+function liveBlocker(ctx: HostContext): HandoffHostNext | undefined {
+  const { pack, state, h } = ctx;
+  const inScope = (boardId: string | null | undefined) => !pack.graphId || boardId === pack.graphId;
+  const asking = new InputService(h)
+    .list()
+    .requests.filter(
+      (r) =>
+        r.blocking &&
+        inScope(r.boardId) &&
+        !['cancelled', 'superseded', 'delivered', 'applied-awaiting-claim'].includes(r.state),
+    );
+  for (const taskId of [...new Set(asking.map((r) => r.taskId))]) {
+    const step = inputStep(ctx, taskId);
+    if (
+      step?.action === 'apply-input' ||
+      (step?.action === 'answer-input' && step.input?.actor === 'lead')
+    )
+      return step;
+  }
+  const boards = [...new Set(ctx.jobs.map((j) => j.id))].filter(
+    (id) => inScope(id) && state.boards.some((b) => b.id === id),
+  );
+  return boards
+    .map((id) => boardStep(id, ctx))
+    .filter(
+      (x): x is HandoffHostNext =>
+        !!x && (x.action === 'workflow_retry' || (x.action === 'decide' && x.decision === 'job')),
+    )
+    .sort((a, b) => rank(a) - rank(b))[0];
 }
 
 function hostStep(ctx: HostContext): HandoffHostNext | undefined {
