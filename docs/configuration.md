@@ -322,7 +322,7 @@ Lifecycle требует хотя бы один teardown step; setup/ready мо�
 **Где задавать.** `budgets`, `prices` и `inputPolicy` можно объявить в `workspace.json` (хранится в Git) той же схемой, что и в `config.json`. Порядок старшинства:
 
 1. Ключ объявлен в `workspace.json` — каждый `workspace-init --file` записывает объявление в `config.json`. Объявление сильнее локального значения: отличавшееся значение `config.json` заменяется, и ответ называет его в `operational.replaced` с подсказкой применения.
-2. Правка `config.json` между запусками `workspace-init` — локальное переопределение. Оно действует (после перезапуска или `config-apply`) до следующего `workspace-init`; `doctor` называет расхождение `budgets` и `prices` проверкой `budgets:declaration` (`degraded`). Расхождение `inputPolicy` с объявлением `doctor` пока не сообщает.
+2. Правка `config.json` между запусками `workspace-init` — локальное переопределение. Оно действует (после перезапуска или `config-apply`) до следующего `workspace-init`; `doctor` называет расхождение `budgets`, `prices` и `inputPolicy` проверкой `budgets:declaration` (`degraded`). Маршрут панели `POST /api/config/input-policy` такую правку не делает: если `inputPolicy` объявлен в `workspace.json`, он отказывает с 409 без записи файла — порог такого workspace меняют в `workspace.json` и переносят `workspace-init --file`, затем применяют `config-apply --keys inputPolicy`.
 3. Ключ не объявлен в `workspace.json` — реестр им не управляет, действует только `config.json`, как прежде.
 
 Неверное объявление отклоняется до записи, `config.json` остаётся прежним.
@@ -335,7 +335,7 @@ devcontour config-apply --keys stallSweep --workspace /absolute/workspace
 devcontour config-apply --keys inputPolicy --workspace /absolute/workspace
 ```
 
-`inputPolicy` — `{threshold, criticalPaths?}`: порог серьёзности 1–10, с которого исполнитель останавливается и задаёт вопрос, 11 — автономный режим без остановок (решения исполнителя записываются, критические становятся запросами ведущему); `criticalPaths` — до 50 путей, изменение которых делает вопрос критическим. Нет поля — порог 7 без критических путей. Порог закрепляется в попытке при выдаче: идущая попытка работает со своим, новое значение действует со следующей. Оператор меняет его правкой `config.json` и `devcontour config-apply --keys inputPolicy` или маршрутом сервера `POST /api/config/input-policy` (ожидаемый digest конфигурации, файл проверяется и записывается сервером); элемента панели для порога пока нет. Режим согласования (`approvalMode`) от порога не зависит.
+`inputPolicy` — `{threshold, criticalPaths?}`: порог серьёзности 1–10, с которого исполнитель останавливается и задаёт вопрос, 11 — автономный режим без остановок (решения исполнителя записываются, критические становятся запросами ведущему); `criticalPaths` — до 50 путей, изменение которых делает вопрос критическим. Нет поля — порог 7 без критических путей. Порог закрепляется в попытке при выдаче: идущая попытка работает со своим, новое значение действует со следующей. Оператор меняет его правкой `config.json` и `devcontour config-apply --keys inputPolicy` или маршрутом сервера `POST /api/config/input-policy` (ожидаемый digest конфигурации, файл проверяется и записывается сервером; при `inputPolicy`, объявленном в `workspace.json`, — отказ 409, см. выше); элемента панели для порога пока нет. Режим согласования (`approvalMode`) от порога не зависит.
 
 Без `--keys` команда применяет `budgets` и `prices`, как и раньше; `stallSweep` и `inputPolicy` применяются только названными явно. Так запрос без флага понимает и сервер прежней версии. Запрос `--keys stallSweep` такой сервер читает как применение конфигурации операцией, отклоняет и не снимает, а неснятый запрос держит выдачу. Команда, пока ждёт итога (`--wait-ms`), видит отклонённый неснятый запрос, снимает его сама, пишет `config.apply-refused` (`clearedBy: config-apply`) и отвечает `refused`; пороги применит перезапуск обновлённого сервера. Если команда не дождалась (`pending`, малый `--wait-ms`), запрос снимает следующий `config-apply` или `devcontour contract-change --id <operation> --abandon` с именем операции из ответа.
 
@@ -347,7 +347,7 @@ devcontour config-apply --keys inputPolicy --workspace /absolute/workspace
 - `prices:calls` — завершённые за 30 дней вызовы с неизвестной стоимостью, для модели которых тарифа нет и сейчас (вызовы без сообщённой модели названы отдельно: их оценить нельзя);
 - `budgets:on-unknown` — денежный бюджет с `onUnknown: "stop"` при ролях без тарифа: первый их вызов сделает бюджет неопределённым и остановит выдачу в его области;
 - `budgets:prices` — денежный бюджет с `onUnknown: "continue"`, а у runtime ролей или недавних вызовов нет ни одного тарифа: расход считается по нижней границе;
-- `budgets:declaration` — `budgets` или `prices` в `config.json` расходятся с объявлением `workspace.json` (`inputPolicy` эта проверка не сравнивает).
+- `budgets:declaration` — `budgets`, `prices` или `inputPolicy` в `config.json` расходятся с объявлением `workspace.json`.
 
 ### Preview
 

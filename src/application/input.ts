@@ -40,6 +40,7 @@ import {
   inputReviewSubject,
 } from '../harness/input-host.ts';
 import { runtimeAdapters } from '../harness/adapters.ts';
+import { boardOf, UNASSIGNED_GRAPH } from '../harness/projection.ts';
 import { adapters, type AgentAdapter } from '../runner/adapters.ts';
 import { checkoutRoots } from '../runner/checkout-root.ts';
 import { DiscussionService } from './discussion.ts';
@@ -136,6 +137,10 @@ const REVIEW_ROUNDS_SHOWN = 5;
 
 /** Сколько знаков прежних ответов показывает `show` (последний — целиком). */
 const EARLIER_EXCERPT = 500;
+
+/** Локальные записи аренды ревью ответа (`local_workflow`), ключ — ID запроса. */
+const REVIEW_LEASE = 'input-review-lease';
+type InputReviewLease = { token: string; startedAt: string; leaseUntil: number };
 
 const refuse = (code: string, message: string, status = 409) => {
   const error = new DomainError(message, status);
@@ -709,8 +714,82 @@ export class InputService {
     if (!this.root) throw new DomainError('Ревью ответа требует каталога данных контура', 409);
     const task = this.task(request.workId);
     const board = this.boardOf(task.id);
+    const release = this.leaseReview(request.id);
+    try {
+      return await this.reviewUnderLease(request, input, snapshot, task, board, signal);
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * Аренда ревью ответа на запрос: одно ревью за раз на запрос во всех
+   * процессах этой базы. Запись — локальная (`local_workflow`, в Git не
+   * уходит) с токеном и сроком `leaseMs`, продлевается каждую треть срока;
+   * запись упавшего процесса истекает сама. Второй одновременный вызов —
+   * 409 `REVIEW_IN_PROGRESS` до вызова модели: после окончания первого повтор
+   * с тем же одобренным раундом модель не вызывает.
+   */
+  private leaseReview(requestId: string) {
+    const store = this.h.store;
+    const leaseMs = this.h.config.leaseMs;
+    const token = randomUUID();
+    store.atomic(() => {
+      const held = store.localRecord<InputReviewLease>(REVIEW_LEASE, undefined, requestId);
+      if (held && held.leaseUntil > Date.now())
+        throw refuse(
+          'REVIEW_IN_PROGRESS',
+          `Ревью ответа на запрос ${requestId} уже идёт (с ${held.startedAt}): дождитесь его окончания и прочитайте раунд (input_show) или повторите input_review позже`,
+        );
+      store.saveLocal(REVIEW_LEASE, undefined, requestId, {
+        token,
+        startedAt: new Date().toISOString(),
+        leaseUntil: Date.now() + leaseMs,
+      } satisfies InputReviewLease);
+    });
+    const owned = (action: (lease: InputReviewLease) => void) =>
+      store.atomic(() => {
+        const lease = store.localRecord<InputReviewLease>(REVIEW_LEASE, undefined, requestId);
+        if (lease?.token === token) action(lease);
+      });
+    const heartbeat = setInterval(
+      () => {
+        try {
+          owned((lease) =>
+            store.saveLocal(REVIEW_LEASE, undefined, requestId, {
+              ...lease,
+              leaseUntil: Date.now() + leaseMs,
+            }),
+          );
+        } catch {
+          /* Хранилище занято или закрыто: срок аренды истечёт сам. */
+        }
+      },
+      Math.max(1000, leaseMs / 3),
+    );
+    heartbeat.unref();
+    return () => {
+      clearInterval(heartbeat);
+      try {
+        owned(() => store.deleteLocal(REVIEW_LEASE, undefined, requestId));
+      } catch {
+        /* Не снятая аренда истечёт через leaseMs. */
+      }
+    };
+  }
+
+  private async reviewUnderLease(
+    request: InputRequest,
+    input: z.infer<(typeof inputOperationInputs)['input_review']>,
+    snapshot: ContextSnapshot,
+    task: Task,
+    board: ReturnType<InputService['boardOf']>,
+    signal?: AbortSignal,
+  ) {
+    const root = this.root!;
+    const answer = latestAnswer(request)!;
     const { engine } = reviewExecutionOf(this.h);
-    const artifact = join(this.root, 'decisions', randomUUID());
+    const artifact = join(root, 'decisions', randomUUID());
     await mkdir(artifact, { recursive: true });
     const q = request.question;
     const instructions = [
@@ -746,7 +825,7 @@ export class InputService {
           ...(task.repositoryId ? { repositoryId: task.repositoryId } : {}),
           cwd: this.h.config.repository,
           artifactDir: artifact,
-          denied: [this.root, ...checkoutRoots(this.h)],
+          denied: [root, ...checkoutRoots(this.h)],
           meta: {
             subjectKind: 'group',
             stage: 'input-review',
@@ -757,6 +836,7 @@ export class InputService {
             : AbortSignal.timeout(this.h.config.runTimeoutMs),
         },
       );
+      const active = this.activeInGraph(task.id);
       return {
         requestId: request.id,
         round: record.round,
@@ -770,10 +850,29 @@ export class InputService {
           record.approved || this.h.config.approvalMode === 'operator'
             ? 'input_target'
             : 'the answer changes the approved spec: reopen and respecify the task, approve it, then input_supersede with the same task',
+        ...(active.length
+          ? {
+              activeAttempts: active,
+              warning: `В графе задачи (доска) идут попытки: ${active.map((a) => `${a.id} (${a.taskId})`).join(', ')}. Применение ответа подождёт их окончания: до того input_apply ответит applied: false с active`,
+            }
+          : {}),
       };
     } catch (error) {
       throw toDomain(error);
     }
+  }
+
+  /**
+   * Идущие попытки графа задачи (её доски) — то, чего ждёт применение ответа
+   * движком (`{applied: false, active}`). Сведение для ведущего, не отказ.
+   */
+  private activeInGraph(taskId: string) {
+    const state = this.h.store.read();
+    const graph = (id: string) => boardOf(state, id)?.id ?? UNASSIGNED_GRAPH;
+    const own = graph(taskId);
+    return state.runs
+      .filter((r) => r.status === 'active' && graph(r.taskId) === own)
+      .map((r) => ({ id: r.id, taskId: r.taskId }));
   }
 
   /** Основание продолжения (или переноса заменённого запроса) и причины отказа сейчас. */

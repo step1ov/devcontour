@@ -1210,3 +1210,134 @@ test('M4: deep links reach the discussion message and the change', async ({ page
     .click();
   await expect(page.locator(`[id="changeset-${change.id}"]`)).toBeFocused();
 });
+
+// Карточка с текстовым действием (форма с полем «Что доработать»).
+const textItem = (key: string, over: Record<string, unknown> = {}) =>
+  fakeItem(key, {
+    actions: [
+      { id: 'request-changes', kind: 'domain', label: 'Вернуть на доработку', input: 'text' },
+      { id: 'open', kind: 'navigate', href: '/?view=boards&tab=changesets' },
+    ],
+    ...over,
+  });
+
+/** Второй репозиторий в сводке: на экране внимания появляется фильтр компонента. */
+async function withSecondComponent(page: Page) {
+  await page.route(
+    (url) => url.pathname === '/api/summary',
+    async (route) => {
+      const response = await route.fetch();
+      const body = (await response.json()) as {
+        config?: { repositories: Record<string, unknown>[] };
+      };
+      if (body.config && body.config.repositories.length === 1)
+        body.config.repositories.push({
+          ...body.config.repositories[0],
+          id: 'second',
+          name: 'Второй компонент',
+        });
+      await route.fulfill({ response, json: body });
+    },
+  );
+}
+
+test('Filter: an empty form opened on a card the component filter saw first stays open', async ({
+  page,
+}) => {
+  await withSecondComponent(page);
+  // Ответ фильтра опережает общий опрос: в общем списке карточки ещё нет.
+  await page.route(isList, (route) =>
+    route.fulfill({
+      json: fakeView(
+        new URL(route.request().url()).searchParams.get('component') === 'second'
+          ? [textItem('changeset:CHG-F1')]
+          : [],
+      ),
+    }),
+  );
+  await page.goto('/?tab=attention');
+  await center(page).getByLabel('Компонент').selectOption('second');
+  const card = cardOf(page, 'changeset:CHG-F1');
+  await card.getByRole('button', { name: 'Вернуть на доработку' }).click();
+  const field = card.locator('form').getByLabel(/Что доработать/);
+  await expect(field).toBeFocused();
+  // Следующий опрос не закрывает пустую форму показанной карточки.
+  await page.waitForTimeout(3500);
+  await expect(field).toBeFocused();
+});
+
+test('Focus: a new occurrence under an open empty form focuses the new card', async ({ page }) => {
+  let occurrence = 'o1';
+  await page.route(isList, (route) =>
+    route.fulfill({
+      json: fakeView([
+        textItem('changeset:CHG-N1', {
+          id: `changeset:CHG-N1#${occurrence}`,
+          occurrenceId: occurrence,
+        }),
+        fakeItem('changeset:CHG-N2'),
+      ]),
+    }),
+  );
+  await page.goto('/?tab=attention');
+  const card = cardOf(page, 'changeset:CHG-N1');
+  await card.getByRole('button', { name: 'Вернуть на доработку' }).click();
+  await expect(card.locator('form').getByLabel(/Что доработать/)).toBeFocused();
+  occurrence = 'o2';
+  await expect(card.locator('form')).toHaveCount(0, { timeout: 10000 });
+  await expect(card).toBeFocused();
+});
+
+test('Filter: an error of the previous component is not shown after choosing another one', async ({
+  page,
+}) => {
+  await withSecondComponent(page);
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  await page.route(isList, async (route) => {
+    const component = new URL(route.request().url()).searchParams.get('component');
+    if (component === 'main')
+      return route.fulfill({ status: 500, json: { error: 'Сбой компонента main' } });
+    if (component === 'second') await held;
+    return route.fulfill({ json: fakeView([fakeItem('changeset:CHG-E1')]) });
+  });
+  await page.goto('/?tab=attention');
+  const select = center(page).getByLabel('Компонент');
+  await select.selectOption('main');
+  const error = center(page).getByRole('alert').filter({ hasText: 'Сбой компонента main' });
+  await expect(error).toBeVisible();
+  await select.selectOption('second');
+  // Ответ второго компонента задержан; проверка — раньше его тайм-аута (10 с),
+  // который сам заменил бы текст ошибки.
+  await expect(
+    center(page).getByRole('heading', { name: 'Загружаем карточки компонента…' }),
+  ).toBeVisible({ timeout: 3000 });
+  await expect(
+    center(page).getByRole('alert').filter({ hasText: 'Не удалось загрузить карточки компонента' }),
+  ).toHaveCount(0, { timeout: 3000 });
+  release();
+  await expect(cardOf(page, 'changeset:CHG-E1')).toBeVisible();
+});
+
+test('Overview: «Уже решено» with typed text points to the attention center, not a center section', async ({
+  page,
+}) => {
+  await page.route(isList, (route) =>
+    route.fulfill({ json: fakeView([textItem('changeset:CHG-O1')]) }),
+  );
+  await page.route('**/api/attention/act', (route) =>
+    route.fulfill({
+      status: 409,
+      json: { error: 'Карточка уже решена исходной сущностью', code: 'attention-resolved' },
+    }),
+  );
+  await page.goto('/');
+  const card = cardOf(page, 'changeset:CHG-O1');
+  await card.getByRole('button', { name: 'Вернуть на доработку' }).click();
+  const form = card.locator('form');
+  await form.getByLabel(/Что доработать/).fill('Уточните описание.');
+  await form.getByRole('button', { name: 'Вернуть на доработку' }).click();
+  const status = page.getByRole('status').filter({ hasText: 'Уже решено' });
+  await expect(status).toContainText('Ваш текст не отправлен и сохранён в центре внимания.');
+  await expect(status).not.toContainText('Неотправленные ответы');
+});

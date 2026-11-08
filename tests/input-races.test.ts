@@ -4,6 +4,7 @@
 // управляемый reviewer ответа.
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { join } from 'node:path';
 import {
   controlled,
   inputDemos,
@@ -13,6 +14,10 @@ import {
   type InputFixture,
 } from './input-fixture.ts';
 import { executionOf } from '../src/harness/execution.ts';
+import { Store } from '../src/core/store.ts';
+import { DevContour } from '../src/core/service.ts';
+import { InputService } from '../src/application/input.ts';
+import type { AgentAdapter } from '../src/runner/adapters.ts';
 
 after(() => inputDemos.close());
 
@@ -278,6 +283,81 @@ test('R01: an answer reviewed before the budget ran out is refused at apply whil
     assert.equal(after.length, runs + 1);
     assert.equal(writerCalls(prompts), writers + 1);
     assert.equal(after.at(-1)!.pinned?.contextDigest, ready.context.contextDigest);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('R01: two concurrent answer reviews of one request — one reviewer call; the second is REVIEW_IN_PROGRESS, also from another process; an expired lease does not block', async () => {
+  // Reviewer ответа держит первый вызов до сигнала теста и считает вызовы.
+  let reviewerCalls = 0;
+  let open!: () => void;
+  const gate = new Promise<void>((resolve) => (open = resolve));
+  const base = controlled();
+  const gated = (adapter: AgentAdapter): AgentAdapter => ({
+    ...adapter,
+    execute: async (request) => {
+      // Ревью ответа идёт без задачи; исполнитель и ревью попыток — мимо.
+      if (request.review && !request.task?.id) {
+        reviewerCalls++;
+        await gate;
+      }
+      return adapter.execute(request);
+    },
+  });
+  const runtimes = {
+    ...base,
+    demo: gated(base.demo),
+    codex: gated(base.codex),
+    claude: gated(base.claude),
+  };
+  const f = await inputFixture(runtimes);
+  try {
+    const { requestId, version } = await question(f);
+    f.service.answer(
+      { requestId, text: 'Use JSON as now.', optionId: 'json', expectedVersion: version },
+      'operator',
+    );
+    const context = await f.service.context({ requestId });
+    const raw = { requestId, contextDigest: context.contextDigest, authorRuntime: 'codex' };
+    // Отказ второго вызова — сразу; без аренды он ждал бы reviewer.
+    const settled = (p: Promise<unknown>) =>
+      Promise.race([
+        codeOf(() => p),
+        new Promise((resolve) => setTimeout(() => resolve('still waiting for the reviewer'), 5000)),
+      ]);
+    const [first, second] = [f.service.review(raw), f.service.review(raw)];
+    try {
+      assert.equal(await settled(second), '409:REVIEW_IN_PROGRESS');
+      // Другой процесс той же базы видит ту же аренду.
+      const store = new Store(join(f.root, 'state.sqlite'));
+      try {
+        const other = new InputService(new DevContour(store, f.h.config), f.root, runtimes);
+        assert.equal(await settled(other.review(raw)), '409:REVIEW_IN_PROGRESS');
+      } finally {
+        store.close();
+      }
+    } finally {
+      open();
+      await Promise.allSettled([second]);
+    }
+    const reviewed = await first;
+    assert.equal(reviewed.approved, true);
+    assert.equal(reviewerCalls, 1, 'один вызов reviewer на два одновременных ревью');
+    // Аренда снята: повтор с тем же одобренным раундом модель не вызывает.
+    assert.equal(f.store.localRecord('input-review-lease', undefined, requestId), undefined);
+    assert.equal((await f.service.review(raw)).round, reviewed.round);
+    assert.equal(reviewerCalls, 1);
+    // Аренда упавшего процесса с истёкшим сроком ревью не задерживает.
+    f.store.atomic(() =>
+      f.store.saveLocal('input-review-lease', undefined, requestId, {
+        token: 'crashed',
+        startedAt: new Date(0).toISOString(),
+        leaseUntil: Date.now() - 1,
+      }),
+    );
+    assert.equal((await f.service.review(raw)).approved, true);
+    assert.equal(f.store.localRecord('input-review-lease', undefined, requestId), undefined);
   } finally {
     await f.cleanup();
   }

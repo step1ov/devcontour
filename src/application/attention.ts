@@ -55,6 +55,7 @@ import {
   type AttentionItem,
   type AttentionListInput,
   type AttentionMark,
+  type OccurrenceMark,
   type AttentionSource,
   type AttentionSubjectKind,
 } from '../core/attention-model.ts';
@@ -729,22 +730,47 @@ const accessFailures = new Set(['provider-auth', 'environment']);
  * есть открытая работа. Появление — момент паузы. Отказ провайдера по
  * задачам сворачивается сюда: одна учётная запись чинит их все.
  */
+/**
+ * Пауза выдачи, которую снимет человек или ведущий, пока есть открытая
+ * работа. Черновики плана открытой работой здесь не считаются: их держит
+ * утверждение плана, а не пауза, и запуск очереди их не выдаст.
+ */
+function queuePauseOf(s: AttentionContext['state']) {
+  if (!s.paused || s.pauseReason === 'base-check') return undefined;
+  if (!s.tasks.some((t) => open(t) && t.status !== 'draft')) return undefined;
+  const pause = queuePause({
+    paused: s.paused,
+    ...(s.pauseReason ? { pauseReason: s.pauseReason } : {}),
+    ...(s.pauseFailures ? { pauseFailures: s.pauseFailures } : {}),
+  });
+  return pause && (pause.actor === 'user' || pause.actor === 'lead') ? pause : undefined;
+}
+
+/**
+ * Ожидание проверки базы, которое снимет оператор, под паузой оператора:
+ * оба снимает один запуск очереди, поэтому ожидание сворачивается в карточку
+ * паузы (её причина называет перенос), а не даёт вторую карточку с тем же
+ * действием. Проваленная проверка остаётся отдельной карточкой ведущего.
+ */
+function foldedBaseWait(h: DevContour, s: AttentionContext['state']) {
+  if (queuePauseOf(s)?.actor !== 'user') return undefined;
+  const wait = baseWaitOf(h, s);
+  if (!wait?.needsOperator || wait.detail.startsWith('Проверка базы не пройдена')) return undefined;
+  return wait;
+}
+
 const queueSource: AttentionSourceRule = {
   id: 'queue',
   engine: true,
   collect: (ctx) => {
     const { h } = engineOf(ctx);
     const s = ctx.state;
-    if (!s.paused || s.pauseReason === 'base-check' || !s.tasks.some(open)) return [];
-    const pause = queuePause({
-      paused: s.paused,
-      ...(s.pauseReason ? { pauseReason: s.pauseReason } : {}),
-      ...(s.pauseFailures ? { pauseFailures: s.pauseFailures } : {}),
-    });
-    if (!pause || (pause.actor !== 'user' && pause.actor !== 'lead')) return [];
+    const pause = queuePauseOf(s);
+    if (!pause) return [];
     const view = queueStopOf(h, s, h.store.latestEvents(['scheduler.error'], 50));
     const access = (s.pauseFailures ?? []).some((f) => accessFailures.has(f));
     const operator = pause.actor === 'user';
+    const base = foldedBaseWait(h, s);
     return [
       {
         sourceKey: 'queue',
@@ -753,6 +779,7 @@ const queueSource: AttentionSourceRule = {
           reason: s.pauseReason ?? null,
           failures: s.pauseFailures ?? [],
           waits: (s.waits ?? []).map((w) => w.kind),
+          ...(base ? { base: base.detail } : {}),
         }),
         source: 'queue',
         category: access ? 'access' : operator ? 'decision' : 'technical',
@@ -762,7 +789,15 @@ const queueSource: AttentionSourceRule = {
           : s.pauseReason === 'operator'
             ? 'Выдача задач остановлена оператором'
             : 'Выдача задач на паузе',
-        reason: ctx.redact([view.stopReason, view.action].filter(Boolean).join('. ')),
+        reason: ctx.redact(
+          [
+            view.stopReason,
+            view.action,
+            base && `Запуск очереди подтвердит и перенос базы: ${base.detail}`,
+          ]
+            .filter(Boolean)
+            .join('. '),
+        ),
         since: s.pausedAt ?? new Date(0).toISOString(),
         subject: { kind: 'queue', id: 'queue', href: hrefs.overview() },
         actions: operator
@@ -805,7 +840,7 @@ const waitSource: AttentionSourceRule = {
           },
         ];
       const wait = baseWaitOf(h, s);
-      if (!wait?.needsOperator) return [];
+      if (!wait?.needsOperator || foldedBaseWait(h, s)) return [];
       const failed = wait.detail.startsWith('Проверка базы не пройдена');
       return [
         {
@@ -1851,8 +1886,8 @@ workSource.history = (ctx) => {
     // В историю — только сбои, которые были карточками: отмеченные
     // оператором или последний сбой перед решением задачи (принятием или
     // отменой). Сбой, который контур сам повторил, карточкой не был.
-    const mark = marks[`work:${task.id}`];
-    const marked = mark?.occurrenceId === run.id;
+    const mark = occurrenceMarkOf(marks[`work:${task.id}`], run.id);
+    const marked = !!mark;
     const last =
       ctx.state.runs.findLast((r) => r.taskId === task.id && r.status === 'failed')?.id === run.id;
     if (!marked && !(last && (accepted || cancelled))) return [];
@@ -2108,11 +2143,44 @@ const lastMark = (m: AttentionMark) =>
     .sort()
     .at(-1) ?? '';
 
+/** Отметка появления в строке предмета: текущее или одно из прежних. */
+export function occurrenceMarkOf(
+  mark: AttentionMark | undefined,
+  occurrenceId: string,
+): OccurrenceMark | undefined {
+  if (!mark) return undefined;
+  if (mark.occurrenceId === occurrenceId) return mark;
+  return mark.earlier?.find((e) => e.occurrenceId === occurrenceId);
+}
+
+/**
+ * Строка после отметки появления `occurrenceId`: прежнее текущее появление
+ * уходит в `earlier` (новые первыми), лишние старые отбрасываются. Отметка
+ * вернувшегося прежнего появления продолжает его запись.
+ */
+export function withOccurrence(
+  previous: AttentionMark | undefined,
+  occurrenceId: string,
+): AttentionMark {
+  if (!previous) return { v: 1, occurrenceId };
+  if (previous.occurrenceId === occurrenceId) return { ...previous };
+  const { earlier = [], ...rest } = previous;
+  const current: OccurrenceMark = { ...rest };
+  delete (current as Partial<AttentionMark>).v;
+  const own = earlier.find((e) => e.occurrenceId === occurrenceId);
+  const older = [current, ...earlier.filter((e) => e !== own)];
+  return {
+    v: 1,
+    ...(own ?? { occurrenceId }),
+    earlier: older.slice(0, ATTENTION_LIMITS.markOccurrences - 1),
+  };
+}
+
 /** Состояние отметок карточки: прочитано и «увидел» — по появлению и версии. */
 export function markState(mark: AttentionMark | undefined, occurrenceId: string, version: string) {
-  const same = mark?.occurrenceId === occurrenceId;
-  const read = same && mark.readVersion === version;
-  const acknowledged = same && mark.ackVersion === version;
+  const own = occurrenceMarkOf(mark, occurrenceId);
+  const read = own?.readVersion === version;
+  const acknowledged = own?.ackVersion === version;
   return { read, acknowledged, unread: !read };
 }
 
@@ -2382,11 +2450,7 @@ export class AttentionService {
           ignored.push({ sourceKey: m.sourceKey, occurrenceId: m.occurrenceId });
           continue;
         }
-        const previous = stored[m.sourceKey];
-        const row: AttentionMark =
-          previous?.occurrenceId === m.occurrenceId
-            ? { ...previous }
-            : { v: 1, occurrenceId: m.occurrenceId };
+        const row = withOccurrence(stored[m.sourceKey], m.occurrenceId);
         // Отметка старой версии не отменяет отметку текущей.
         const keeps = (version: string | undefined) =>
           version === item.sourceVersion && m.version !== item.sourceVersion;
@@ -2647,13 +2711,12 @@ export class AttentionService {
   ): AttentionHistoryItem {
     // Версия решённого появления восстановлена по фактам: отметка
     // относится к появлению, какой бы версии она ни была.
-    const mark = marks[r.sourceKey];
-    const same = mark?.occurrenceId === r.occurrenceId;
-    const read = same && !!mark.readVersion;
+    const mark = occurrenceMarkOf(marks[r.sourceKey], r.occurrenceId);
+    const read = !!mark?.readVersion;
     return {
       ...toItem(r, ctx.state, boardByTask, marks, ctx.redact),
       actions: [],
-      state: { read, acknowledged: same && !!mark.ackVersion, unread: !read },
+      state: { read, acknowledged: !!mark?.ackVersion, unread: !read },
       resolvedAt: r.resolvedAt,
     };
   }

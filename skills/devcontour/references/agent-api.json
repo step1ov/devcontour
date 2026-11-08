@@ -5254,7 +5254,7 @@
     },
     {
       "name": "input_review",
-      "description": "Review the answer snapshot with the plan reviewer (round subject input-<id>): approve only if the answer clarifies without changing the approved spec. Refused before the model call when the snapshot is missing or does not carry the latest answer. Approval does not activate anything.",
+      "description": "Review the answer snapshot with the plan reviewer (round subject input-<id>): approve only if the answer clarifies without changing the approved spec. Refused before the model call when the snapshot is missing or does not carry the latest answer. Approval does not activate anything. When attempts of the task board are running, the result carries warning and activeAttempts: input_apply waits for them (applied: false with active).",
       "readOnly": false,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
