@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { LINE_LIMIT, parseUsage, usageStream } from '../src/runner/usage.ts';
 import { command } from '../src/runner/process.ts';
@@ -7,11 +7,14 @@ import { priceUsage, usageTotals, type Usage, type UsageRecord } from '../src/co
 import { workflowMetrics } from '../src/application/metrics.ts';
 import { Observability } from '../src/application/observability.ts';
 import { fixture, input, complete } from './helpers.ts';
+import { inputDemos, inputFixture, prepared, untilQuestion } from './input-fixture.ts';
 import type { AgentRequest } from '../src/runner/adapters.ts';
 import { cliAdapter } from '../src/runner/adapters.ts';
 import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { join, delimiter } from 'node:path';
 import { configSchema, type Task } from '../src/core/model.ts';
+
+after(() => inputDemos.close());
 
 test('Documented Codex JSONL telemetry survives unrelated events and exposes incomplete streams', async () => {
   const output = await readFile(new URL('./fixtures/codex-events.jsonl', import.meta.url), 'utf8');
@@ -510,5 +513,37 @@ test('usage_report without repositoryId: embedded reads the workspace and its co
     );
   } finally {
     f.cleanup();
+  }
+});
+
+test('usage_report: the answer review of a writer question is a workspace call, not a component one', async () => {
+  // Запись разбора ответа пишет сам ревью ответа (demo reviewer), а не тест:
+  // вызов общего контура, даже когда задача принадлежит репозиторию.
+  const f = await inputFixture();
+  try {
+    const { boardId, taskId } = f.askingTask();
+    await untilQuestion(f, boardId);
+    const [request] = f.service.list({ taskId }).requests;
+    const { review } = await prepared(f, request.requestId);
+    assert.equal(review.approved, true);
+    const repositoryId = f.store.read().tasks.find((t) => t.id === taskId)!.repositoryId;
+    assert.ok(repositoryId, 'задача принадлежит репозиторию');
+    type Page = {
+      scope: { owners: string[] };
+      records: { stage: string; owner: string }[];
+    };
+    const reports = new Observability(f.h);
+    const workspace = (reports.usage({}) as Page).records.filter((r) => r.stage === 'input-review');
+    assert.equal(workspace.length, 1, 'разбор ответа записан одним вызовом');
+    assert.equal(workspace[0].owner, '@workspace');
+    const component = reports.usage({ repositoryId }) as Page;
+    assert.deepEqual(component.scope, { owners: [repositoryId] });
+    assert.equal(
+      component.records.filter((r) => r.stage === 'input-review').length,
+      0,
+      'разбор ответа не входит в учёт компонента',
+    );
+  } finally {
+    await f.cleanup();
   }
 });
