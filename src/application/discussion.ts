@@ -217,13 +217,18 @@ export class DiscussionService {
           ? board?.revisions.at(-1)
           : board?.revisions.find((r) => r.number === v.refs.revision);
       if (!revision) throw new DomainError('Ревизия доски не найдена', 404);
-      // Непринятая ревизия меняется на месте: задача, добавленная или
-      // исправленная в ней после обращения, — уже внесённое изменение.
+      // Непринятая ревизия меняется на месте: задача обращения или задача
+      // из refs.taskIds, добавленная или исправленная в ней после обращения,
+      // — уже внесённое изменение; правка посторонней задачи ревизии — нет.
       // Принятая ревизия неизменна: изменение — только новая ревизия.
+      const named = (id: string) => id === request.taskId || !!v.refs.taskIds?.includes(id);
       if (
         v.outcome === 'accepted' &&
         revision.createdAt <= request.createdAt &&
-        !(revision.status !== 'accepted' && revision.taskIds.some(changedAfter))
+        !(
+          revision.status !== 'accepted' &&
+          revision.taskIds.some((id) => named(id) && changedAfter(id))
+        )
       )
         throw new DomainError('Ревизия старше обращения: изменение ещё не внесено', 409);
     }

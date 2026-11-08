@@ -265,6 +265,55 @@ test('D02-C2: обращение к черновику принимается п
   }
 });
 
+test('D02-C3: правка без изменений и правка посторонней задачи обращение не принимают', async () => {
+  const w = world();
+  try {
+    const other = w.h.addTask(w.board.id, input('Посторонняя задача ревизии'));
+    const request = w.d.post(
+      {
+        taskId: w.task.id,
+        kind: 'change-request',
+        text: 'Уточнить критерий черновика',
+        idempotencyKey: key(1),
+        expectedVersion: 0,
+      },
+      'operator',
+    );
+    const resolve = (refs: object) =>
+      w.d.resolve({
+        requestId: request.message.id,
+        outcome: 'accepted',
+        reason: 'Внесено',
+        refs,
+        idempotencyKey: key(2),
+        expectedVersion: request.version,
+      });
+    await new Promise((r) => setTimeout(r, 5));
+    // Правка с той же постановкой — изменения нет.
+    const same = w.store.read().tasks.find((t) => t.id === w.task.id)!;
+    w.h.editTask(w.task.id, input('Задача с обсуждением'), specDigest(same));
+    assert.equal(w.store.read().tasks.find((t) => t.id === w.task.id)!.specEditedAt, undefined);
+    assert.throws(() => resolve({ taskIds: [w.task.id] }), /Задача старше обращения/);
+    // Исправлена посторонняя задача ревизии: ссылка на доску её не засчитывает.
+    const unrelated = w.store.read().tasks.find((t) => t.id === other.id)!;
+    w.h.editTask(
+      other.id,
+      { ...input('Посторонняя задача ревизии'), acceptance: ['Другой критерий проверен.'] },
+      specDigest(unrelated),
+    );
+    assert.throws(() => resolve({ boardId: w.board.id }), /Ревизия старше обращения/);
+    assert.throws(
+      () => resolve({ boardId: w.board.id, taskIds: [w.task.id] }),
+      /Ревизия старше обращения/,
+    );
+    // Названная в refs.taskIds исправленная задача — внесённое изменение.
+    const done = resolve({ boardId: w.board.id, taskIds: [other.id] });
+    assert.equal(done.message.kind, 'disposition');
+  } finally {
+    w.cleanup();
+  }
+});
+
 test('D02-D: сообщения переживают перезапуск; страницы по cursor без пропусков; handoff даёт обращения', () => {
   const w = world();
   try {

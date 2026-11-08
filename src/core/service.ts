@@ -996,7 +996,13 @@ export class DevContour {
         (parsed.repositoryId !== ownerBoard.repositoryId || parsed.scope === 'workspace')
       )
         throw new DomainError('Локальная доска принимает только задачи своего компонента');
-      Object.assign(t, parsed, { preparation: developmentBinding(s), specEditedAt: now() });
+      // Отметка правки — только при изменённой постановке: правка без
+      // изменений не вносит изменения и не принимает обращение к черновику
+      // (`discussion_resolve`). Перепривязка к подготовке правкой не считается.
+      const unbound = (x: Task) => specDigest({ ...x, preparation: undefined });
+      const before = unbound(t);
+      Object.assign(t, parsed, { preparation: developmentBinding(s) });
+      if (unbound(t) !== before) t.specEditedAt = now();
       // Правка черновика находки — разбор ведущим: подсказка передачи
       // контекста больше не держит её как непроверенную.
       if (t.finding) t.triagedAt ??= now();
