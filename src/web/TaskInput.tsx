@@ -3,7 +3,7 @@ import { Badge } from '@/ui/badge.tsx';
 import { Button } from '@/ui/button.tsx';
 import { Textarea } from '@/ui/textarea.tsx';
 import type { InputService } from '../application/input.ts';
-import { inputNextText, inputStateLabels } from './input-labels.ts';
+import { inputNextText, inputStateLabels, repeatedQuestionText } from './input-labels.ts';
 import { discussionChanged } from './discussion-events.ts';
 
 export { inputStateLabels };
@@ -131,6 +131,13 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
           {current.floors.length ? ' · критический: ' + current.floors.join(', ') : ''}
         </span>
       </div>
+      {/* Повторные остановки вопросом: вопросы сверх предела засчитываются
+          в попытки, а частые вопросы — признак неполной постановки. */}
+      {current.questionStops && (
+        <p className="text-warning mt-1 mb-0 text-xs" data-question-stops>
+          {repeatedQuestionText(current.questionStops)}
+        </p>
+      )}
       <p className="mt-2 mb-1 whitespace-pre-wrap [overflow-wrap:anywhere]">{q.question}</p>
       {current.normalized && (
         <p className="text-faint m-0 text-xs">Вопрос пришёл вне схемы и приведён к ней контуром.</p>

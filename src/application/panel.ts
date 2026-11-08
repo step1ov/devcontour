@@ -23,6 +23,7 @@ import { taskProgress } from './context.ts';
 import { checksSummary } from './checks.ts';
 import { DIAGNOSTIC, SHORT, clip, short } from './bounded.ts';
 import { assumptionLines } from './assumptions.ts';
+import { questionStops } from '../core/input-labels.ts';
 import { workspaceDeclares } from '../runner/budget-doctor.ts';
 import { configApplyKeys, reconfigureSlotBusy } from '../runner/reconfigure.ts';
 import { loadConfig } from '../runner/config.ts';
@@ -801,7 +802,7 @@ export function panelTask(h: DevContour, id: string, query: Record<string, strin
         const t = state.tasks.find((x) => x.id === d);
         return { id: d, title: t?.title, status: t?.status };
       }),
-      runs: runsPage(state, id, query),
+      runs: runsPage(state, id, query, h.config.maxAttempts),
     };
   });
 }
@@ -836,8 +837,13 @@ function runsPage(
   state: DevContourState,
   taskId: string,
   query: Record<string, string | undefined>,
+  maxAttempts: number,
 ) {
-  const all = state.runs.filter((r) => r.taskId === taskId).reverse();
+  const own = state.runs.filter((r) => r.taskId === taskId);
+  // Остановка вопросом сверх предела вопросов засчитана в попытки: «Ход
+  // попыток» называет это, а не показывает её как бесплатную.
+  const { counted } = questionStops(own, maxAttempts);
+  const all = [...own].reverse();
   const before = query.before;
   const from = before ? all.findIndex((r) => r.id === before) + 1 : 0;
   if (before && from === 0) throw new DomainError('Попытка курсора не найдена', 404);
@@ -846,7 +852,10 @@ function runsPage(
   const items = all.slice(start, start + limit);
   return {
     total: all.length,
-    items: items.map(runDetail),
+    items: items.map((run) => ({
+      ...runDetail(run),
+      ...(counted.has(run.id) ? { counted: true } : {}),
+    })),
     next: start + limit < all.length ? start + limit : null,
     nextBefore: start + limit < all.length ? items.at(-1)!.id : null,
   };
@@ -856,7 +865,7 @@ export function panelRuns(
   taskId: string,
   query: Record<string, string | undefined>,
 ) {
-  return runsPage(sharedState(h), taskId, query);
+  return runsPage(sharedState(h), taskId, query, h.config.maxAttempts);
 }
 
 /**

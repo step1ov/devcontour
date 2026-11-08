@@ -21,14 +21,58 @@ export const inputStateLabels: Record<string, string> = {
  * номер попытки, и продолжение после ответа идёт с тем же номером: без
  * пометки «попытка 2 из 3» дважды читалась как повтор. Остановленная попытка
  * — `failureKind: needs-input`, продолжение — выдана с ответом (`input`).
+ * Остановка сверх предела вопросов (`counted`, см. `questionStops`) попытку
+ * не вернула — пометка это называет.
  */
 export function attemptInputNote(run: {
   failureKind?: string;
   input?: { requestId: string };
+  counted?: boolean;
 }): string | undefined {
-  if (run.input) return 'продолжение после ответа на вопрос';
-  if (run.failureKind === 'needs-input') return 'остановлена вопросом исполнителя';
+  const counted = run.counted ? ' · засчитана: предел вопросов исчерпан' : '';
+  if (run.input)
+    return (
+      'продолжение после ответа на вопрос' +
+      (run.failureKind === 'needs-input' ? ' · снова остановлена вопросом' + counted : '')
+    );
+  if (run.failureKind === 'needs-input') return 'остановлена вопросом исполнителя' + counted;
   return undefined;
+}
+
+/** С какого числа остановок вопросом по задаче оператор и ведущий видят сигнал. */
+export const REPEATED_QUESTION_STOPS = 2;
+
+/**
+ * Остановки вопросом исполнителя по задаче — правило движка harness
+ * (0.1.0-alpha.38): первые `maxAttempts` остановок возвращают попытку,
+ * каждая следующая засчитывается в предел попыток (`attempt.diagnosed` с
+ * `counted: true`). Прерванные штатной остановкой не считаются. `runs` —
+ * попытки одной задачи в порядке начала. Движок версий до возврата попытки
+ * засчитывал каждую остановку; по попыткам это не различить, проекция
+ * следует текущему правилу.
+ */
+export function questionStops(
+  runs: readonly { id: string; failureKind?: string; interrupted?: string }[],
+  maxAttempts: number,
+) {
+  const stops = runs.filter((r) => r.failureKind === 'needs-input' && r.interrupted !== 'shutdown');
+  return {
+    count: stops.length,
+    limit: maxAttempts,
+    /** Свободные остановки израсходованы: следующая засчитывается в попытки. */
+    exhausted: stops.length >= maxAttempts,
+    counted: new Set(stops.slice(maxAttempts).map((r) => r.id)),
+  };
+}
+
+/** Строка о повторных остановках вопросом словами оператора. */
+export function repeatedQuestionText(q: { count: number; limit: number; exhausted: boolean }) {
+  return (
+    `Исполнитель останавливался вопросом по этой задаче ${q.count} раз(а); ` +
+    (q.exhausted
+      ? `без расхода попыток — только первые ${q.limit}, следующие засчитываются в попытки. Если вопросы повторяются, уточните постановку задачи.`
+      : `без расхода попыток — первые ${q.limit}.`)
+  );
 }
 
 /** Порядок состояний основного пути: подписи следуют ему. */

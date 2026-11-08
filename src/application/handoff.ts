@@ -588,6 +588,11 @@ function inputStep(ctx: HostContext, taskId: string): HandoffHostNext | undefine
   };
   const base = { ...(boardId ? { boardId } : {}), input: ref };
   const operator = h.config.approvalMode === 'operator';
+  // Повторные остановки вопросом: свободные остановки кончаются, и частые
+  // вопросы — признак неполной постановки. Ведущий узнаёт это из шага.
+  const repeated = summary.questionStops
+    ? ` Task ${taskId} has stopped with a writer question ${summary.questionStops.count} times; only the first ${summary.questionStops.limit} give the attempt back${summary.questionStops.exhausted ? ', further stops count as attempts, and with the attempts used up input_apply returns blocker ATTEMPTS_EXHAUSTED until it is applied with reset {"reason": …}' : ''}. Consider making the task spec answer these questions up front (board_correct or reopen and respecify).`
+    : '';
   if (!summary.blocking)
     return {
       action: 'close-follow-up',
@@ -599,9 +604,10 @@ function inputStep(ctx: HostContext, taskId: string): HandoffHostNext | undefine
       action: 'answer-input',
       ...base,
       detail:
-        summary.actor === 'lead'
+        (summary.actor === 'lead'
           ? `Task ${taskId} waits for an answer to ${summary.requestId} (no floors, approvalMode agent): answer with input_answer {"requestId": "${summary.requestId}", "expectedVersion": ${summary.version}, …} after input_show, or let the operator answer in the panel (${hrefs.input(taskId)}). The answer does not resume the task by itself.`
-          : `Task ${taskId} waits for the operator's answer to ${summary.requestId} in the panel (${hrefs.input(taskId)})${summary.floors.length ? `: the question is critical (${summary.floors.join(', ')})` : ''}. Wait: the lead does not answer it and no queue step helps.`,
+          : `Task ${taskId} waits for the operator's answer to ${summary.requestId} in the panel (${hrefs.input(taskId)})${summary.floors.length ? `: the question is critical (${summary.floors.join(', ')})` : ''}. Wait: the lead does not answer it and no queue step helps.`) +
+        repeated,
     };
   const chain = operator
     ? `input_context, input_review --author-runtime; then the operator applies in the panel (${hrefs.input(taskId)})`
@@ -610,13 +616,14 @@ function inputStep(ctx: HostContext, taskId: string): HandoffHostNext | undefine
     action: 'apply-input',
     ...base,
     detail:
-      summary.state === 'stale'
+      (summary.state === 'stale'
         ? `The applied answer to ${summary.requestId} went stale before the next attempt (${summary.stale?.reason ?? 'context'}): rebuild it — ${chain}.`
         : summary.state === 'review-rejected'
           ? `The reviewer rejected the answer to ${summary.requestId} (input_show names the findings): correct the answer, or reopen and respecify the task${operator ? '; the operator may apply it only with explicit confirmation' : ''}.`
           : summary.state === 'applied-awaiting-claim'
             ? `The answer to ${summary.requestId} is applied; task ${taskId} waits for its next attempt.`
-            : `The answer to ${summary.requestId} is saved but not applied (${summary.state}): ${chain}.`,
+            : `The answer to ${summary.requestId} is saved but not applied (${summary.state}): ${chain}.`) +
+      repeated,
   };
 }
 

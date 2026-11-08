@@ -45,6 +45,7 @@ import { boardOf, UNASSIGNED_GRAPH } from '../harness/projection.ts';
 import { adapters, type AgentAdapter } from '../runner/adapters.ts';
 import { checkoutRoots } from '../runner/checkout-root.ts';
 import { DiscussionService } from './discussion.ts';
+import { questionStops, REPEATED_QUESTION_STOPS } from '../core/input-labels.ts';
 
 /** Кто действует: ведущий агент (агентский API), оператор (панель) или хост от его имени (CLI `--by host`). */
 export type InputActorKind = 'lead' | 'operator' | 'host';
@@ -314,8 +315,14 @@ export class InputService {
 
   /** Сводка запроса без текста вопроса и ответов. */
   private summary(view: ExecutionView, request: InputRequest) {
-    const task = this.h.store.read().tasks.find((t) => t.id === request.workId);
+    const current = this.h.store.read();
+    const task = current.tasks.find((t) => t.id === request.workId);
     const state = this.stateOf(view, request, task);
+    // Повторные остановки вопросом по задаче: сигнал оператору и ведущему.
+    const stops = questionStops(
+      current.runs.filter((r) => r.taskId === request.workId),
+      this.h.config.maxAttempts,
+    );
     return {
       requestId: request.id,
       taskId: request.workId,
@@ -333,6 +340,15 @@ export class InputService {
       ...(request.stale ? { stale: { reason: request.stale.reason, at: request.stale.at } } : {}),
       answers: request.answers.length,
       createdAt: request.createdAt,
+      ...(stops.count >= REPEATED_QUESTION_STOPS
+        ? {
+            questionStops: {
+              count: stops.count,
+              limit: stops.limit,
+              exhausted: stops.exhausted,
+            },
+          }
+        : {}),
       ...this.nextOf(request, state.state),
     };
   }
@@ -963,7 +979,9 @@ export class InputService {
             lifecycle: carried.request.lifecycle,
             version: carried.request.version,
             ...('active' in carried && carried.active ? { active: carried.active } : {}),
-            ...('blocker' in carried && carried.blocker ? { blocker: carried.blocker } : {}),
+            ...('blocker' in carried && carried.blocker
+              ? { blocker: this.explained(carried.blocker, request.workId) }
+              : {}),
           };
         }
         const applied = engine.applyInput(request.id, {
@@ -982,13 +1000,35 @@ export class InputService {
           lifecycle: applied.request.lifecycle,
           version: applied.request.version,
           ...('active' in applied && applied.active ? { active: applied.active } : {}),
-          ...('blocker' in applied && applied.blocker ? { blocker: applied.blocker } : {}),
+          ...('blocker' in applied && applied.blocker
+            ? { blocker: this.explained(applied.blocker, request.workId) }
+            : {}),
         };
       });
     } catch (error) {
       if (error instanceof HarnessError) throw toDomain(error);
       throw error;
     }
+  }
+
+  /**
+   * Почему ответ не применяется из-за исчерпанных попыток: остановки вопросом
+   * сверх предела засчитаны движком, и без объяснения отказ
+   * `ATTEMPTS_EXHAUSTED` читался как исчерпание сбоями.
+   */
+  private explained<T extends { code: string; message: string }>(blocker: T, taskId: string): T {
+    if (blocker.code !== 'ATTEMPTS_EXHAUSTED') return blocker;
+    const stops = questionStops(
+      this.h.store.read().runs.filter((r) => r.taskId === taskId),
+      this.h.config.maxAttempts,
+    );
+    if (!stops.counted.size) return blocker;
+    return {
+      ...blocker,
+      message:
+        blocker.message +
+        `. Задача остановилась вопросом ${stops.count} раз(а): без расхода попыток — только первые ${stops.limit}, остановки сверх них (${stops.counted.size}) засчитаны в попытки. Примените ответ со сбросом попыток (reset с причиной) или уточните постановку задачи, чтобы исполнитель не спрашивал снова`,
+    };
   }
 
   /* -------------------------------------------------------------- */
