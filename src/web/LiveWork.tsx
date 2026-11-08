@@ -17,6 +17,8 @@ import {
 } from '../core/work-status.ts';
 import { QueueStopBanner } from './QueueStopBanner.tsx';
 import { useNow } from './now.ts';
+import { WriterDecisions } from './WriterDecisions.tsx';
+import { attemptInputNote } from './input-labels.ts';
 
 // «Кто сейчас над чем работает» — первый вопрос, пока идёт разработка. Ответ
 // был на отдельной вкладке хода работ, ниже настроек контура; на графе и в
@@ -51,7 +53,12 @@ export type LiveState = {
     | 'startedAt'
     | 'reusedFrom'
     | 'timings'
-  > & { boardId?: string; liveness?: RunLiveness })[];
+  > & {
+    boardId?: string;
+    liveness?: RunLiveness;
+    /** Попытка выдана с ответом на вопрос исполнителя (продолжение). */
+    input?: { requestId: string };
+  })[];
   workflows?: LiveWorkflow[];
   /** Проверки вне попыток без движения (совместная, базы, доски). */
   operations?: OperationLiveness[];
@@ -359,6 +366,7 @@ export function LiveWork({
                     {run.attempt > 1
                       ? ` · попытка ${run.attempt}${state.config.maxAttempts ? ` из ${state.config.maxAttempts}` : ''}`
                       : ''}
+                    {run.input ? ' · продолжение после ответа на вопрос' : ''}
                     {run.reusedFrom ? ' · код взят у прошлой попытки' : ''}
                   </span>
                 </div>
@@ -457,19 +465,29 @@ function phaseDurations(run: Run) {
 }
 function Attempt({ run, number, reset }: { run: Run; number: number; reset: boolean }) {
   const end = run.finishedAt ?? new Date().toISOString();
+  const note = attemptInputNote(run);
+  // Остановка вопросом — ожидание ответа, а не провал попытки.
+  const asked = run.status === 'failed' && run.failureKind === 'needs-input';
   return (
     <li className="grid gap-1 border-b pb-2 text-sm last:border-b-0">
       <div className="flex flex-wrap items-center gap-x-2">
         <strong>Попытка {number}</strong>
         {reset && <span className="text-muted-foreground text-xs">после сброса бюджета</span>}
+        {/* Остановка вопросом и продолжение после ответа идут с одним номером
+            бюджета — пометка различает их. */}
+        {note && (
+          <span className="text-muted-foreground text-xs" data-attempt-input>
+            {note}
+          </span>
+        )}
         <span
           className={cn(
             run.status === 'succeeded' && 'text-success',
-            run.status === 'failed' && 'text-destructive',
+            run.status === 'failed' && !asked && 'text-destructive',
             run.status === 'active' && 'text-info',
           )}
         >
-          {outcomeNames[run.status]}
+          {asked ? 'ждала ответа' : outcomeNames[run.status]}
         </span>
         <span className="text-muted-foreground font-mono text-xs">
           {engine(run.runtime, run.model)}
@@ -490,6 +508,7 @@ function Attempt({ run, number, reset }: { run: Run; number: number; reset: bool
           {run.error.slice(0, 300)}
         </p>
       )}
+      <WriterDecisions items={run.assumptions} />
     </li>
   );
 }

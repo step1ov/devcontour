@@ -15,7 +15,7 @@ export { preparationStore, requirePreparation } from './preparation-store.ts';
 
 export async function startWorkspace(
   workspace: string,
-  options: { port: number; dev?: boolean; workspaceMode?: WorkspaceMode },
+  options: { port: number; dev?: boolean; workspaceMode?: WorkspaceMode; instance?: string },
 ) {
   mkdirSync(workspace, { recursive: true });
   const canonical = canonicalPath(workspace),
@@ -29,6 +29,7 @@ export async function startWorkspace(
     new Preparation(store).enable();
     const app = await serve(undefined, undefined, {
       ...options,
+      dataRoot: root,
       bootstrap: {
         store,
         workspace: canonical,

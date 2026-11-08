@@ -204,10 +204,20 @@ const board = (s: DevContourState, id: string) =>
     s.boards.find((b) => b.id === id),
     `Доска ${id} не найдена`,
   );
+/**
+ * Принятая ревизия закрыта для задач, утверждения и приёмки. Отказ называет
+ * оба законных пути: следующий этап того же релиза — импорт плана в эту же
+ * доску (ревизия N+1), изменение принятого результата — корректировка.
+ * Раньше отказ советовал только корректировку, и ведущий, добавлявший работу
+ * следующего этапа, шёл не тем путём.
+ */
 function activeRevision(s: DevContourState, id: string) {
   const b = board(s, id);
   const r = b.revisions.at(-1)!;
-  if (r.status !== 'active') throw new DomainError('Доска принята. Создайте корректировку.');
+  if (r.status !== 'active')
+    throw new DomainError(
+      `Ревизия ${r.number} доски ${b.id} принята. Новая работа релиза — следующий этап этой доски: plan_import с boardId (CLI: import-plan --board ${b.id}). Изменение принятого результата — корректировка: board_correct (CLI: correct --board ${b.id}).`,
+    );
   return r;
 }
 /**
@@ -248,6 +258,25 @@ function assertNotAccepted(s: DevContourState, t: Task) {
  * digest одного главного файла не закреплял бы gates компонентов.
  */
 export const loadedDigest = (config: Config) => digest(config);
+/**
+ * Digest каждого ключа верхнего уровня конфигурации. Запись применённой
+ * конфигурации хранит только общий digest; по этим digest doctor называет,
+ * какими ключами файл отличается от применённой (например, context-lock меняет
+ * только `contextPacks`, а не бюджеты).
+ */
+export const configKeyDigests = (config: Config): Record<string, string> =>
+  Object.fromEntries(
+    Object.entries(config)
+      .filter(([, value]) => value !== undefined)
+      .map(([key, value]) => [key, digest(JSON.stringify(value))]),
+  );
+/** Локальная запись: digest ключей применённой конфигурации (`applied-config-keys` в `server`). */
+export interface AppliedConfigKeys {
+  digest: string;
+  keys: Record<string, string>;
+}
+export const APPLIED_KEYS_NAMESPACE = 'server';
+export const APPLIED_KEYS_KEY = 'applied-config-keys';
 /**
  * Откуда конфигурация загружена: файлы (`config.json` и component config) —
  * путь в том виде, как его задали, разрешённая при загрузке цель и хэш именно
@@ -656,6 +685,27 @@ export class DevContour {
   recordConfig(by: string) {
     const { engine } = executionOf(this);
     domain(() => engine.recordPolicy(by));
+  }
+  /**
+   * Запомнить digest ключей конфигурации процесса, когда она стала
+   * применённой: без этой записи doctor знает только общий digest и не
+   * отличает правку бюджетов от перезакрепления контекста.
+   */
+  noteAppliedKeys() {
+    const applied = this.store.view().appliedConfig;
+    if (applied?.digest !== this.configDigest) return;
+    const recorded = this.store.localRecord<AppliedConfigKeys>(
+      APPLIED_KEYS_NAMESPACE,
+      undefined,
+      APPLIED_KEYS_KEY,
+    );
+    if (recorded?.digest === applied.digest) return;
+    this.store.atomic(() =>
+      this.store.saveLocal(APPLIED_KEYS_NAMESPACE, undefined, APPLIED_KEYS_KEY, {
+        digest: applied.digest,
+        keys: configKeyDigests(this.config),
+      } satisfies AppliedConfigKeys),
+    );
   }
   /** Digest политики исполнения этой конфигурации — то, с чем сверяется утверждение плана. */
   planPolicyDigest() {

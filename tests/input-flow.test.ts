@@ -21,6 +21,9 @@ import { InputService, inputHolds } from '../src/application/input.ts';
 import { executionOf } from '../src/harness/execution.ts';
 import { technicalReviewer } from '../src/harness/policy.ts';
 import { repositories } from '../src/core/repositories.ts';
+import { panelSummary, panelTask } from '../src/application/panel.ts';
+import { attemptInputNote } from '../src/core/input-labels.ts';
+import type { Run } from '../src/core/model.ts';
 
 after(() => inputDemos.close());
 
@@ -261,6 +264,92 @@ for (const storage of ['central', 'component'] as const)
       await f.cleanup();
     }
   });
+
+test('A question on the last attempt gives the attempt back: the answer applies without reset', async () => {
+  const f = await inputFixture(controlled(), { edit: (raw) => (raw.maxAttempts = 1) });
+  try {
+    assert.equal(f.h.config.maxAttempts, 1);
+    const { taskId, boardId } = f.askingTask();
+    await untilQuestion(f, boardId);
+    const stopped = f.store.read().tasks.find((t) => t.id === taskId)!;
+    assert.equal(stopped.failureKind, 'needs-input');
+    assert.equal(stopped.attempt, 0, 'остановка вопросом попытку не тратит');
+    const [request] = f.service.list({ taskId }).requests;
+    const ready = await prepared(f, request.requestId);
+    assert.deepEqual(ready.target.problems, []);
+    // Без reset: единственная попытка предела не потрачена вопросом.
+    const applied = f.service.apply(ready.apply, 'lead');
+    assert.equal(applied.applied, true, JSON.stringify(applied));
+    assert.equal(f.store.read().tasks.find((t) => t.id === taskId)!.status, 'ready');
+    await f.scheduler.drain();
+    const done = f.store.read().tasks.find((t) => t.id === taskId)!;
+    assert.equal(done.status, 'done', done.failure);
+    assert.equal(done.attempt, 1);
+    // Остановка и продолжение идут с одним номером бюджета; панель их различает.
+    const runs = f.store.read().runs.filter((r) => r.taskId === taskId);
+    assert.deepEqual(
+      runs.map((r) => r.attempt),
+      [1, 1],
+    );
+    const shown = (panelTask(f.h, taskId, {}).runs.items as Run[]).toReversed();
+    assert.deepEqual(shown.map(attemptInputNote), [
+      'остановлена вопросом исполнителя',
+      'продолжение после ответа на вопрос',
+    ]);
+    // Строка живой работы (сводка) несёт ту же отметку продолжения.
+    const line = (
+      panelSummary(f.h, f.root, { board: boardId }) as unknown as {
+        runs: { id: string; input?: { requestId: string } }[];
+      }
+    ).runs.find((r) => r.id === runs[1].id);
+    assert.ok(line, 'попытка-продолжение в сводке доски');
+    assert.deepEqual(line?.input, { requestId: request.requestId });
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('A writer that asks again and again ends with exhausted attempts, not an endless answer loop', async () => {
+  const f = await inputFixture(controlled({ alwaysAsk: true }), {
+    edit: (raw) => (raw.maxAttempts = 2),
+  });
+  try {
+    const { taskId, boardId } = f.askingTask();
+    await untilQuestion(f, boardId);
+    const seen: { attempt: number; runs: number }[] = [];
+    let refused: unknown;
+    // Ведущий отвечает и применяет в режиме agent, как модель: предел
+    // остановок вопросом, а не бюджет, обязан закончить цикл.
+    for (let round = 0; round < 10 && !refused; round++) {
+      const task = f.store.read().tasks.find((t) => t.id === taskId)!;
+      assert.equal(task.failureKind, 'needs-input');
+      seen.push({
+        attempt: task.attempt,
+        runs: f.store.read().runs.filter((r) => r.taskId === taskId).length,
+      });
+      const request = f.service
+        .list({ taskId })
+        .requests.find((r) => r.state === 'awaiting-answer')!;
+      const ready = await prepared(f, request.requestId, 'lead');
+      const applied = f.service.apply(ready.apply, 'lead');
+      if (!applied.applied) refused = applied;
+      else await f.scheduler.drain();
+    }
+    // Две остановки (maxAttempts) возвращают попытку, следующие две засчитаны.
+    assert.deepEqual(seen, [
+      { attempt: 0, runs: 1 },
+      { attempt: 0, runs: 2 },
+      { attempt: 1, runs: 3 },
+      { attempt: 2, runs: 4 },
+    ]);
+    assert.match(JSON.stringify(refused), /ATTEMPTS_EXHAUSTED/);
+    const task = f.store.read().tasks.find((t) => t.id === taskId)!;
+    assert.equal(task.status, 'failed');
+    assert.equal(task.attempt, 2);
+  } finally {
+    await f.cleanup();
+  }
+});
 
 test('reopen keeps the open question; after re-approval of the same spec the answer applies as usual', async () => {
   const runtimes = controlled();

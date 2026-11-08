@@ -52,6 +52,7 @@ import { IntentService } from '../runner/intent.ts';
 import { attachJournal, renderJournal } from '../runner/journal.ts';
 import { runActivity } from '../runner/activity.ts';
 import { LeadWorkflow } from '../core/lead-workflow.ts';
+import { dataIdentity } from '../runner/server-record.ts';
 import { queueStopOf, quietAttempts, quietOperations } from '../application/queue-stop.ts';
 import {
   cachedValueReport,
@@ -106,6 +107,10 @@ export async function serve(
   options: {
     port: number;
     dev?: boolean;
+    /** Идентификатор экземпляра: `GET /api/server` подтверждает им процесс для `stop`. */
+    instance?: string;
+    /** Каталог данных workspace: `GET /api/server` называет его для `stop`. */
+    dataRoot?: string;
     bootstrap?: {
       store: Store;
       workspace?: string;
@@ -185,6 +190,16 @@ export async function serve(
             !req.headers['content-type']?.startsWith('application/json'))
         )
           throw new DomainError('Отсутствует заголовок локального клиента', 403);
+        // Подтверждение процесса для `devcontour stop`: pid и экземпляр,
+        // записанные в server.json, и каталог данных `stop` должны совпасть с ответом.
+        if (req.method === 'GET' && path === '/api/server') {
+          json(res, 200, {
+            pid: process.pid,
+            instance: options.instance ?? null,
+            dataRoot: options.dataRoot ? dataIdentity(options.dataRoot) : null,
+          });
+          return;
+        }
         const preparationStore = h?.store ?? options.bootstrap?.store;
         if (req.method === 'GET' && path === '/api/preparation' && preparationStore) {
           const view = new Preparation(preparationStore).status(

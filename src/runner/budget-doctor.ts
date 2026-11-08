@@ -9,7 +9,12 @@ import {
   type Config,
   type DevContourState,
 } from '../core/model.ts';
-import { loadedDigest } from '../core/service.ts';
+import {
+  configKeyDigests,
+  loadedDigest,
+  operationalKeys,
+  type AppliedConfigKeys,
+} from '../core/service.ts';
 import type { Price, UsageRecord } from '../core/usage.ts';
 import { declaredRoles, repositories, reviewerBinding, roleBinding } from '../core/repositories.ts';
 
@@ -227,22 +232,79 @@ export function budgetChecks(
  * по применённой конфигурации. Если её digest другой, правка файла ещё не
  * действует: doctor говорит, как её применить. Без записи о применении
  * (контур не запускался) сравнивать не с чем — проверки нет.
+ *
+ * Когда известны digest ключей применённой конфигурации (`appliedKeys` с тем
+ * же общим digest), сравниваются ключи: `budgets:applied` — только если
+ * отличаются `budgets` или `prices`. Отличие одних прочих ключей (например,
+ * `contextPacks` после context-lock) — отдельная проверка `config:applied`.
+ * Способ применения назван по ключам: эксплуатационные (`stallSweep`,
+ * `inputPolicy`) работающий сервер применяет `config-apply --keys`, прочие —
+ * только перезапуск serve.
  */
 export function appliedCheck(
   config: Config,
-  state?: Partial<Pick<DevContourState, 'leader' | 'appliedConfig'>>,
+  state?: Partial<Pick<DevContourState, 'leader' | 'appliedConfig'>> & {
+    appliedKeys?: AppliedConfigKeys;
+  },
   now = Date.now(),
 ): Check | undefined {
   const applied = state?.appliedConfig;
   if (!applied || applied.digest === loadedDigest(config)) return undefined;
   const live = !!state.leader && state.leader.leaseUntil > now;
+  const recorded =
+    state.appliedKeys?.digest === applied.digest ? state.appliedKeys.keys : undefined;
+  let changed: string[] | undefined;
+  if (recorded) {
+    const current = configKeyDigests(config);
+    changed = [...new Set([...Object.keys(current), ...Object.keys(recorded)])]
+      .filter((key) => current[key] !== recorded[key])
+      .sort();
+    // Общий digest отличается только порядком ключей: содержимое то же.
+    if (!changed.length) return undefined;
+    if (!changed.some((key) => key === 'budgets' || key === 'prices'))
+      return {
+        id: 'config:applied',
+        status: live ? 'degraded' : 'passed',
+        detail: `config.json отличается от конфигурации, применённой контуром ${applied.at}, ключами ${changed.join(', ')}; prices и budgets те же. ${
+          live
+            ? `Работающий сервер их не применил — ${remedy(changed)}`
+            : 'Следующий запуск serve применит config.json целиком'
+        }.`,
+      };
+  }
   return {
     id: 'budgets:applied',
     status: 'degraded',
-    detail: `config.json отличается от конфигурации, применённой контуром ${applied.at}: показанные prices и budgets могут ещё не действовать. ${
+    detail: `config.json отличается от конфигурации, применённой контуром ${applied.at}${
+      changed ? ` (ключи ${changed.join(', ')})` : ''
+    }: показанные prices и budgets могут ещё не действовать. ${
       live
-        ? 'Не применено — выполните devcontour config-apply --keys budgets,prices (прочие ключи применяет перезапуск serve)'
+        ? `Не применено — ${
+            changed
+              ? remedy(changed)
+              : 'выполните devcontour config-apply --keys budgets,prices (прочие ключи применяет перезапуск serve)'
+          }`
         : 'Не применено — следующий запуск serve применит config.json целиком'
     }.`,
   };
+}
+
+/**
+ * Как применить отличающиеся ключи к работающему серверу: эксплуатационные
+ * (`config-apply --keys` из `operationalKeys`) — без перезапуска, прочие —
+ * перезапуском serve.
+ */
+function remedy(changed: readonly string[]) {
+  const live = operationalKeys.filter((key) => changed.includes(key));
+  const restart = changed.filter((key) => !(operationalKeys as readonly string[]).includes(key));
+  return [
+    ...(live.length ? [`выполните devcontour config-apply --keys ${live.join(',')}`] : []),
+    ...(restart.length
+      ? [
+          live.length
+            ? `${restart.join(', ')} применит только перезапуск serve`
+            : 'перезапустите serve',
+        ]
+      : []),
+  ].join('; ');
 }

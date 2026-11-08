@@ -16,8 +16,14 @@ export async function exists(path: string) {
 /**
  * Учебный workspace. `checkoutRoot` — корень рабочих деревьев (тесты держат
  * его в своём временном каталоге); без него — выбор по умолчанию.
+ * `approvalMode` — режим согласования учебного проекта (по умолчанию `agent`):
+ * `operator` показывает ручные действия оператора в панели. Стартовые доски
+ * готовятся одинаково в обоих режимах.
  */
-export async function setupDemo(root: string, options: { checkoutRoot?: string } = {}) {
+export async function setupDemo(
+  root: string,
+  options: { checkoutRoot?: string; approvalMode?: 'agent' | 'operator' } = {},
+) {
   root = resolve(root);
   const configPath = join(root, 'config.json');
   if (await exists(configPath)) return;
@@ -78,6 +84,7 @@ console.log('2 fixture assertions passed. No AI model was called.');\n`,
     ],
     protectedPaths: ['verify.mjs', '.gitignore'],
     ...(options.checkoutRoot ? { checkoutRoot: options.checkoutRoot } : {}),
+    ...(options.approvalMode ? { approvalMode: options.approvalMode } : {}),
     packs: [
       { id: 'base-process', version: '0.1.0', capabilities: ['dag', 'revisions', 'evidence'] },
     ],

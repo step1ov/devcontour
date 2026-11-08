@@ -7,6 +7,7 @@ import {
   FileSignature,
   FlaskConical,
   Loader2,
+  MessageCircleQuestion,
   Settings2,
   ScrollText,
   XCircle,
@@ -25,6 +26,7 @@ import type { QueueStopView } from '../core/work-status.ts';
 import { roleLabel } from './roles.ts';
 import { WorkerCards } from './Workers.tsx';
 import { taskStatus } from './status.ts';
+import { heldByInput, inputNextText } from './input-labels.ts';
 import { Badge } from '@/ui/badge.tsx';
 import { Card, CardContent, CardHeader, CardTitle } from '@/ui/card.tsx';
 import { InputPolicyCard, type InputPolicyConfig } from './InputPolicy.tsx';
@@ -341,6 +343,14 @@ function Contracts({
 function Queue({ revision }: { revision?: string }) {
   type Item = Pick<Task, 'id' | 'title' | 'status' | 'role' | 'repositoryId'> & {
     blockers?: string[];
+    /** Вопрос исполнителя, который держит задачу: состояние и кто действует. */
+    input?: {
+      requestId: string;
+      state?: string;
+      actor?: 'operator' | 'lead';
+      kind?: string;
+      operatorMode?: boolean;
+    };
   };
   const [items, setItems] = useState<Item[]>([]);
   const [total, setTotal] = useState(0);
@@ -388,8 +398,17 @@ function Queue({ revision }: { revision?: string }) {
         {items.length ? (
           <ul className="grid gap-2">
             {items.map((t) => (
-              <li key={t.id} className="flex flex-wrap items-center gap-3 border-b pb-2">
-                {t.status === 'failed' ? (
+              <li
+                key={t.id}
+                className="flex flex-wrap items-center gap-3 border-b pb-2"
+                {...(heldByInput(t) ? { 'data-input-waiting': '' } : {})}
+              >
+                {heldByInput(t) ? (
+                  <MessageCircleQuestion
+                    className="text-warning size-4 shrink-0"
+                    aria-hidden="true"
+                  />
+                ) : t.status === 'failed' ? (
                   <XCircle className="text-destructive size-4 shrink-0" aria-hidden="true" />
                 ) : (
                   <CircleDashed
@@ -401,6 +420,17 @@ function Queue({ revision }: { revision?: string }) {
                 <code className="text-muted-foreground font-mono text-xs">{t.repositoryId}</code>
                 <span className="text-muted-foreground text-xs">{roleLabel(t.role)}</span>
                 <Badge variant={taskStatus(t).badge}>{taskStatus(t).label}</Badge>
+                {heldByInput(t) && t.input?.state && t.input.actor && (
+                  <small className="text-muted-foreground basis-full pl-7 text-xs">
+                    Дальше:{' '}
+                    {inputNextText({
+                      state: t.input.state,
+                      actor: t.input.actor,
+                      kind: t.input.kind,
+                      operatorMode: t.input.operatorMode,
+                    })}
+                  </small>
+                )}
               </li>
             ))}
           </ul>
@@ -594,7 +624,9 @@ function Stage({
   workflows?: WorkflowView[];
 }) {
   const { total, done, drafts } = counts;
-  const failed = counts.statuses.failed ?? 0;
+  // Задача с открытым вопросом — ожидание ответа, а не сбой: повтор ей запрещён.
+  const waitingInput = counts.waitingInput ?? 0;
+  const failed = counts.failed ?? (counts.statuses.failed ?? 0) - waitingInput;
   const tasks = { length: total };
   // Остановленный цикл восстановления выглядел как обычное ожидание свободного
   // исполнителя: причина лежала в записи работы и доходила до агентского API,
@@ -633,6 +665,12 @@ function Stage({
               : 'Повтор возможен, пока не исчерпан бюджет попыток.'}
           </p>
         )}
+        {waitingInput > 0 && (
+          <p className="text-muted-foreground m-0 text-sm" data-stage-waiting-input="">
+            Ждут ответа на вопрос исполнителя: {waitingInput}. Повтор не нужен — работа продолжится
+            после ответа.
+          </p>
+        )}
         {stopped && (
           <p className="text-destructive m-0 text-sm break-words">
             Очередь остановилась сама: {stopped}
@@ -663,6 +701,10 @@ export type PanelProgress = {
   total: number;
   done: number;
   drafts: number;
+  /** Упавшие задачи без открытого вопроса (старый сервер поле не отдаёт). */
+  failed?: number;
+  /** Задачи, остановленные вопросом исполнителя. */
+  waitingInput?: number;
   statuses: Record<string, number>;
   blocks: { id: string; done: number; total: number }[];
   gates: { gate: string; passed: number; failed: number; tasks: number; phases: string[] }[];

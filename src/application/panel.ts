@@ -1,5 +1,5 @@
 import { join, resolve } from 'node:path';
-import { inputHolds } from './input.ts';
+import { InputService, inputHolds } from './input.ts';
 import { z } from 'zod';
 import type { DevContour } from '../core/service.ts';
 import { loadedDigest, specDigest } from '../core/service.ts';
@@ -22,6 +22,7 @@ import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { taskProgress } from './context.ts';
 import { checksSummary } from './checks.ts';
 import { DIAGNOSTIC, SHORT, clip, short } from './bounded.ts';
+import { assumptionLines } from './assumptions.ts';
 import { workspaceDeclares } from '../runner/budget-doctor.ts';
 import { configApplyKeys, reconfigureSlotBusy } from '../runner/reconfigure.ts';
 import { loadConfig } from '../runner/config.ts';
@@ -91,6 +92,8 @@ export type PanelRun = Pick<
 > & {
   error?: string;
   boardId?: string;
+  /** Попытка выдана с ответом на вопрос исполнителя: продолжение, а не повтор. */
+  input?: { requestId: string };
   /** Последняя отметка стадии: с неё считается «сколько идёт фаза». */
   timings?: Run['timings'];
   /**
@@ -125,6 +128,7 @@ function runLine(run: Run, boardId: string | undefined, now: number): PanelRun {
     blocked: run.blocked,
     reusedFrom: run.reusedFrom,
     failureKind: run.failureKind,
+    ...(run.input ? { input: { requestId: run.input.requestId } } : {}),
     error: short(run.error),
     boardId,
     ...(run.status === 'active' && run.timings ? { timings: run.timings.slice(-1) } : {}),
@@ -607,7 +611,7 @@ function buildSummary(
       .map((w) => clip({ ...w, history: (w.history ?? []).slice(-5) })),
     dataRoot: resolve(root),
     ready,
-    progress: progressOf(state),
+    progress: progressOf(state, inputs),
     counts: {
       boards: state.boards.length,
       tasks: state.tasks.length,
@@ -646,8 +650,11 @@ export type PanelSummary = ReturnType<typeof buildSummary>;
  * задачи без тестового evidence. Считаются на сервере — клиенту не нужны все
  * попытки.
  */
-function progressOf(state: DevContourState) {
+function progressOf(state: DevContourState, inputs: ReadonlyMap<string, string>) {
   const tasks = state.tasks.filter((t) => t.status !== 'cancelled');
+  // Остановка вопросом записана отказом, но это ожидание ответа: повтор
+  // запрещён, пока вопрос открыт. Сводка «Задач со сбоем» её не считает.
+  const waitingInput = tasks.filter((t) => t.status === 'failed' && inputs.has(t.id)).length;
   const repos = [...new Set(tasks.map((t) => t.repositoryId))].sort();
   const gates = new Map<
     string,
@@ -675,6 +682,10 @@ function progressOf(state: DevContourState) {
     total: tasks.length,
     done: tasks.filter((t) => t.status === 'done').length,
     drafts: tasks.filter((t) => t.status === 'draft').length,
+    /** Упавшие задачи без открытого вопроса: их разбирают и повторяют. */
+    failed: tasks.filter((t) => t.status === 'failed').length - waitingInput,
+    /** Задачи, остановленные вопросом исполнителя и ждущие ответа. */
+    waitingInput,
     statuses: Object.fromEntries(
       [...new Set(tasks.map((t) => t.status))].map((s) => [
         s,
@@ -853,11 +864,14 @@ export function panelRuns(
  * находки — первыми записями; patch черновика — только по своей команде.
  */
 function runDetail(run: Run) {
-  const { partial, evidence, ...rest } = run;
+  const { partial, evidence, assumptions, ...rest } = run;
+  const decisions = assumptionLines({ assumptions, inputPolicy: run.inputPolicy });
   return {
     ...clip(rest),
     // Токен владения попыткой — не для панели.
     token: '',
+    // Решения исполнителя ниже порога — рядом с результатом попытки.
+    ...(decisions.length ? { assumptions: decisions } : {}),
     ...(partial ? { partial: clip({ ...partial, patch: undefined }) } : {}),
     evidence: evidence.slice(0, 100).map(({ log, tests, findings, ...e }) => ({
       ...clip(e),
@@ -1003,18 +1017,40 @@ export function panelQueue(h: DevContour, query: Record<string, string | undefin
     state.tasks.filter((t) => !['done', 'cancelled', ...active].includes(t.status)),
     query,
   );
+  // Вопрос исполнителя держит задачу: движок записал остановку отказом, но
+  // очередь называет ожидание ответа и следующий шаг, а не сбой.
+  const holds = inputHolds(h);
+  const inputOf = (taskId: string, requestId: string) => {
+    const r = new InputService(h).list({ taskId }).requests.find((x) => x.requestId === requestId);
+    return r
+      ? {
+          requestId,
+          state: r.state,
+          actor: r.actor,
+          kind: r.kind,
+          operatorMode: h.config.approvalMode === 'operator',
+        }
+      : { requestId };
+  };
   return {
     ...result,
-    items: result.items.map((t) => ({
-      id: t.id,
-      title: t.title,
-      status: t.status,
-      role: t.role,
-      repositoryId: t.repositoryId,
-      // Готовая задача с незакрытыми зависимостями ждёт, а не готова к
-      // выдаче: панель называет её тем же словом, что граф и список.
-      blockers: t.dependsOn.filter((id) => !done.has(id)),
-    })),
+    items: result.items.map((t) => {
+      const held = holds.get(t.id);
+      return {
+        id: t.id,
+        title: t.title,
+        status: t.status,
+        role: t.role,
+        repositoryId: t.repositoryId,
+        // Готовая задача с незакрытыми зависимостями ждёт, а не готова к
+        // выдаче: панель называет её тем же словом, что граф и список.
+        blockers: [
+          ...t.dependsOn.filter((id) => !done.has(id)),
+          ...(held ? ['input:' + held] : []),
+        ],
+        ...(held ? { input: inputOf(t.id, held) } : {}),
+      };
+    }),
   };
 }
 

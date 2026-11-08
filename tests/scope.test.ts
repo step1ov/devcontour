@@ -76,6 +76,7 @@ test('CLI называет версии DevContour и движка; справк
   // Из исходников — npm script checkout; из собранного пакета — бинарник.
   const help = await run(tmpdir(), 'help');
   assert.match(help.stdout, /Запуск: npm run devcontour -- <команда>/);
+  assert.match(help.stdout, /^devcontour stop \[--timeout-ms 60000\] --workspace/m);
   assert.equal(help.stderr, '');
   assert.equal((await run(tmpdir(), 'doctor', '--help')).stderr, '');
   assert.equal(launcher(), 'npm run devcontour --');

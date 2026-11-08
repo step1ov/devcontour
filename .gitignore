@@ -27,3 +27,5 @@ test-results/
 # своём .devcontour-local, как у настоящего компонента.
 !/tests/fixtures/legacy/component/app/.devcontour-local/
 !/tests/fixtures/legacy-darwin/component/app/.devcontour-local/
+!/tests/fixtures/legacy-discussion/component/app/.devcontour-local/
+!/tests/fixtures/legacy-discussion-darwin/component/app/.devcontour-local/

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { DevContour, digest } from '../core/service.ts';
 import { DomainError } from '../core/model.ts';
-import { repository } from '../core/repositories.ts';
+import { repositories, repository } from '../core/repositories.ts';
 import { taskOwner } from '../core/sync-state.ts';
 import type { UsageRecord } from '../core/usage.ts';
 import { HarnessError, pageItems } from 'devcontour-harness';
@@ -68,15 +68,39 @@ export class Observability {
       ids = new Set(s.tasks.filter((t) => taskOwner(t) === repositoryId).map((t) => t.id));
     return s.runs.filter((r) => ids.has(r.taskId));
   }
+  /**
+   * Вызовы владельца: `repositoryId` — компонента, без него — общего контура
+   * workspace (планирование, разбор ответов на вопросы исполнителя). В
+   * embedded workspace общий контур и единственный компонент — один проект,
+   * поэтому без `repositoryId` отчёт включает вызовы обоих. `scope.owners`
+   * называет, чьи вызовы в выдаче, а `owner` записи — чей это вызов
+   * (`@workspace` — общий контур).
+   */
   usage(raw: unknown) {
     const input = observabilityInputs.usage_report.parse(raw);
     if (input.repositoryId) repository(this.h.config, input.repositoryId);
-    return page(
-      Object.values(this.h.store.localRecords<UsageRecord>('usage', input.repositoryId)).sort(
-        (a, b) => a.startedAt.localeCompare(b.startedAt) || a.id.localeCompare(b.id),
-      ),
-      input,
-    );
+    const owners: (string | undefined)[] = input.repositoryId
+      ? [input.repositoryId]
+      : this.h.config.workspaceMode === 'embedded'
+        ? [undefined, ...repositories(this.h.config).map((r) => r.id)]
+        : [undefined];
+    const records = owners
+      .flatMap((owner) =>
+        Object.values(this.h.store.localRecords<UsageRecord>('usage', owner)).map((r) => ({
+          ...r,
+          owner: owner ?? '@workspace',
+        })),
+      )
+      .sort(
+        (a, b) =>
+          a.startedAt.localeCompare(b.startedAt) ||
+          a.id.localeCompare(b.id) ||
+          a.owner.localeCompare(b.owner),
+      );
+    return {
+      scope: { owners: owners.map((owner) => owner ?? '@workspace') },
+      ...page(records, input),
+    };
   }
   decisions(raw: unknown) {
     const input = observabilityInputs.decision_report.parse(raw);

@@ -35,7 +35,13 @@ import {
 } from './budget-doctor.ts';
 import type { UsageRecord } from '../core/usage.ts';
 import { forgeAdapter } from './forge.ts';
-import { DevContour, supersededBy } from '../core/service.ts';
+import {
+  APPLIED_KEYS_KEY,
+  APPLIED_KEYS_NAMESPACE,
+  DevContour,
+  supersededBy,
+  type AppliedConfigKeys,
+} from '../core/service.ts';
 import { repository } from '../core/repositories.ts';
 import { artifactGuard } from './agent-control.ts';
 import { unguardedMessage } from './artifact-closure.ts';
@@ -333,6 +339,8 @@ export function doctorState(
   calls?: DoctorCall[];
   /** Опись записей новых версий (`compat:new-state`). */
   newState?: Check;
+  /** Digest ключей применённой конфигурации, если сервер их записал. */
+  appliedKeys?: AppliedConfigKeys;
 } {
   const file = join(root, 'state.sqlite');
   if (!existsSync(file)) return { state: emptyState() };
@@ -425,6 +433,11 @@ export function doctorState(
       return {
         state,
         newState: newStateOf(store, state, root),
+        appliedKeys: store.localRecord<AppliedConfigKeys>(
+          APPLIED_KEYS_NAMESPACE,
+          undefined,
+          APPLIED_KEYS_KEY,
+        ),
         calls: store
           .localEntries<UsageRecord>('usage')
           .map(({ value: { runtime, model, startedAt, costSource, outcome } }) => ({
@@ -454,7 +467,10 @@ export async function doctor(
   root: string,
   probe = false,
   state?: Pick<DevContourState, 'leader' | 'runs'> &
-    Partial<Pick<DevContourState, 'contracts' | 'appliedConfig'>>,
+    Partial<Pick<DevContourState, 'contracts' | 'appliedConfig'>> & {
+      /** Digest ключей применённой конфигурации — `doctorState`. */
+      appliedKeys?: AppliedConfigKeys;
+    },
   stateCheck?: Check,
   calls?: DoctorCall[],
   newState?: Check,

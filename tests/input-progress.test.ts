@@ -7,7 +7,8 @@ import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { controlled, inputDemos, inputFixture, untilQuestion } from './input-fixture.ts';
 import { AgentContext } from '../src/application/context.ts';
-import { panelTask } from '../src/application/panel.ts';
+import { panelQueue, panelSummary, panelTask } from '../src/application/panel.ts';
+import { inputNextText } from '../src/core/input-labels.ts';
 import { chainBlockers } from '../src/core/work-status.ts';
 import { statusKey, taskStatus } from '../src/web/status.ts';
 
@@ -50,6 +51,33 @@ test('A question stop reads as waiting for an answer, not as a failure to diagno
       { label: 'Ждёт ответа', tone: 'waiting' },
     );
 
+    // Очередь панели: та же задача — ожидание ответа со следующим шагом, не сбой.
+    type QueueItem = {
+      id: string;
+      status: string;
+      blockers: string[];
+      input?: { requestId: string; state: string; actor: 'operator' | 'lead'; kind?: string };
+    };
+    const queued = () => (panelQueue(f.h, {}).items as QueueItem[]).find((i) => i.id === taskId)!;
+    const waiting = queued();
+    assert.equal(waiting.status, 'failed');
+    assert.deepEqual(waiting.blockers, ['input:' + request.requestId]);
+    assert.equal(statusKey(waiting), 'input');
+    assert.equal(taskStatus(waiting).label, 'Ждёт ответа');
+    assert.equal(waiting.input?.requestId, request.requestId);
+    assert.equal(waiting.input?.state, 'awaiting-answer');
+    assert.equal(inputNextText(waiting.input), inputNextText(request));
+    assert.notEqual(inputNextText(waiting.input), '');
+
+    // Сводка этапа: задача с вопросом — «ждёт ответа», не «задача со сбоем».
+    type Counts = { failed: number; waitingInput: number; statuses: Record<string, number> };
+    const progress = () =>
+      (panelSummary(f.h, f.root, {}) as unknown as { progress: Counts }).progress;
+    const stage = progress();
+    assert.equal(stage.statuses.failed, 1, JSON.stringify(stage));
+    assert.equal(stage.failed, 0);
+    assert.equal(stage.waitingInput, 1);
+
     // Корень цепочки зависимой задачи — ожидание ответа, а не «сбой».
     const tasks = f.store.read().tasks.map((t) => ({
       ...t,
@@ -77,6 +105,14 @@ test('A question stop reads as waiting for an answer, not as a failure to diagno
       blockers: string[];
     };
     assert.equal(statusKey(after), 'failed');
+    const failedInQueue = queued();
+    assert.deepEqual(failedInQueue.blockers, []);
+    assert.equal(failedInQueue.input, undefined);
+    assert.equal(statusKey(failedInQueue), 'failed');
+    assert.deepEqual(
+      { failed: progress().failed, waitingInput: progress().waitingInput },
+      { failed: 1, waitingInput: 0 },
+    );
   } finally {
     await f.cleanup();
   }
