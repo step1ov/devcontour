@@ -262,6 +262,31 @@ for (const storage of ['central', 'component'] as const)
     }
   });
 
+test('A question on the last attempt gives the attempt back: the answer applies without reset', async () => {
+  const f = await inputFixture(controlled(), { edit: (raw) => (raw.maxAttempts = 1) });
+  try {
+    assert.equal(f.h.config.maxAttempts, 1);
+    const { taskId, boardId } = f.askingTask();
+    await untilQuestion(f, boardId);
+    const stopped = f.store.read().tasks.find((t) => t.id === taskId)!;
+    assert.equal(stopped.failureKind, 'needs-input');
+    assert.equal(stopped.attempt, 0, 'остановка вопросом попытку не тратит');
+    const [request] = f.service.list({ taskId }).requests;
+    const ready = await prepared(f, request.requestId);
+    assert.deepEqual(ready.target.problems, []);
+    // Без reset: единственная попытка предела не потрачена вопросом.
+    const applied = f.service.apply(ready.apply, 'lead');
+    assert.equal(applied.applied, true, JSON.stringify(applied));
+    assert.equal(f.store.read().tasks.find((t) => t.id === taskId)!.status, 'ready');
+    await f.scheduler.drain();
+    const done = f.store.read().tasks.find((t) => t.id === taskId)!;
+    assert.equal(done.status, 'done', done.failure);
+    assert.equal(done.attempt, 1);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test('reopen keeps the open question; after re-approval of the same spec the answer applies as usual', async () => {
   const runtimes = controlled();
   const f = await inputFixture(runtimes);
