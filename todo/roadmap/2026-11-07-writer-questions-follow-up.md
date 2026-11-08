@@ -17,7 +17,7 @@ digest конфигурации; после применения — резул�
 `inputPolicy`, значение показано только для чтения с подсказкой
 `workspace-init --file` и `config-apply --keys inputPolicy`. Данные — поля
 `config` сводки панели (`inputPolicyDeclared`, `configDigest`,
-`configPending`; описано в `docs/cli.md` и `docs/configuration.md`), тесты —
+`configPending`, `configDrift`; описано в `docs/cli.md` и `docs/configuration.md`), тесты —
 `tests/config-apply.test.ts` и `e2e/input-policy.spec.ts`.
 
 ## 2. Объявление `inputPolicy` в `workspace.json` и локальная правка — выполнено
