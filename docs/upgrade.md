@@ -333,8 +333,11 @@ SHA-256 `f4c394d621588665f3ff15cf0f919edfe310df5defd5c0a24bd5d3e63ad120d8`.
 
 Неизвестная версия документа состояния или поле, которого строгая схема
 движка не знает, отклоняются до любой записи. Проверка — тесты
-`tests/harness-versions.test.ts` и `tests/harness-legacy.test.ts`; сценарии
-обновления и отката — `npm run check:upgrade` (ниже).
+`tests/harness-versions.test.ts` и `tests/harness-legacy.test.ts`; база с
+обсуждениями задач, записанная до вопросов исполнителя (черновик и
+продолжение попытки, закреплённая политика, учёт вызовов, заметки и
+обращения), — `tests/legacy-discussion.test.ts`; сценарии обновления и
+отката — `npm run check:upgrade` (ниже).
 
 ### 0.4.0-alpha.11
 

@@ -1,0 +1,44 @@
+{
+  "source": {
+    "devcontour": "0.4.0-alpha.17",
+    "harness": "0.1.0-alpha.36",
+    "commit": "aee0ed9"
+  },
+  "tasks": {
+    "Задача accepted": {
+      "id": "T-a133e6b6-3e81-4361-8d2e-8b2f2bd3eb0d",
+      "status": "done",
+      "spec": "ee51bb1b4f9e7f8bd761ff8e3d577d57c86d956518da5749a9de8c65afe34b40",
+      "approvedPolicy": "c01dbf60118479260e390b53268af59f76e6639e80b0d63a15a08c586ed11db6"
+    },
+    "Задача draft": {
+      "id": "T-a06a0965-8635-45ac-8b5e-3380dce1fed7",
+      "status": "running",
+      "spec": "afa347fd83f0fe53555a462edd7c887f5581bcb229aef3adbc078b292aa8ae6c",
+      "approvedPolicy": "c01dbf60118479260e390b53268af59f76e6639e80b0d63a15a08c586ed11db6"
+    },
+    "Задача pending": {
+      "id": "T-f57da4a5-5dcf-40f1-9c35-8233f069a79d",
+      "status": "ready",
+      "spec": "c28159db9c090d1d61b17b176a467ccf97b2e545f9162f99ac59d1be4800712b",
+      "approvedPolicy": "c01dbf60118479260e390b53268af59f76e6639e80b0d63a15a08c586ed11db6"
+    }
+  },
+  "planPolicy": "c01dbf60118479260e390b53268af59f76e6639e80b0d63a15a08c586ed11db6",
+  "runs": {
+    "accepted": "a549a4a2-6d54-4d19-8f3f-114f4fa5660d",
+    "unfinished": "20b9d4b2-9c1d-4c08-b354-aba404c8dc82",
+    "continued": "b2c2613d-f3eb-4bf9-a950-79d8ec82f57f"
+  },
+  "usage": ["call-active-dead", "call-reported", "call-timeout"],
+  "discussion": {
+    "T-a06a0965-8635-45ac-8b5e-3380dce1fed7": [
+      "operator:note",
+      "operator:change-request",
+      "lead:disposition",
+      "lead:note"
+    ],
+    "T-f57da4a5-5dcf-40f1-9c35-8233f069a79d": ["operator:change-request"]
+  },
+  "openRequests": ["DM-efea1510-c130-4397-b1f6-0bf10ac73897"]
+}
