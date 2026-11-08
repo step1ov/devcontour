@@ -229,6 +229,36 @@ test('The operator answers the writer question in the panel; the answer reaches 
     .poll(async () => (await taskState(request, task.id))?.status, { timeout: 60000 })
     .toBe('done');
   await expect(card).toContainText('Передано в новую попытку');
+  // «Ход попыток»: остановка вопросом и продолжение после ответа идут с одним
+  // номером бюджета — пометки их различают.
+  const attempts = inspector.getByRole('region', { name: 'Ход попыток' });
+  const marks = attempts.locator('[data-attempt-input]');
+  await expect(marks).toHaveText([
+    'продолжение после ответа на вопрос',
+    'остановлена вопросом исполнителя',
+  ]);
+  await expect(attempts).toContainText('ждала ответа');
+  // Строка «Сейчас работают» называет продолжение той же подписью. Попытка
+  // demo проходит за секунды, поэтому идущей её показывает подмена сводки:
+  // попытка задачи с ответом объявлена идущей.
+  await page.route('**/api/summary*', async (route) => {
+    const response = await route.fetch();
+    const summary = (await response.json()) as {
+      unchanged?: boolean;
+      runs?: { taskId: string; input?: unknown }[];
+    };
+    if (summary.unchanged || !summary.runs) return route.fulfill({ response, json: summary });
+    const runs = summary.runs.map((r) =>
+      r.taskId === task.id && r.input ? { ...r, status: 'active', phase: 'running' } : r,
+    );
+    return route.fulfill({ response, json: { ...summary, runs } });
+  });
+  await page.reload();
+  const live = page.getByRole('region', { name: 'Сейчас работают' });
+  await expect(live).toContainText('Задача с вопросом исполнителя');
+  await expect(live).toContainText('продолжение после ответа на вопрос');
+  await page.unroute('**/api/summary*');
+  await page.reload();
   // Приёмка доски после вопроса: попытка с ответом — обычный принятый
   // результат, доска принимается из панели.
   await page.getByRole('button', { name: 'Принять доску' }).click();

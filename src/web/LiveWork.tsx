@@ -366,7 +366,9 @@ export function LiveWork({
                     {run.attempt > 1
                       ? ` · попытка ${run.attempt}${state.config.maxAttempts ? ` из ${state.config.maxAttempts}` : ''}`
                       : ''}
-                    {run.input ? ' · продолжение после ответа на вопрос' : ''}
+                    {/* Идущая попытка — только продолжение после ответа:
+                        подпись та же, что в «Ходе попыток». */}
+                    {attemptInputNote(run) ? ` · ${attemptInputNote(run)}` : ''}
                     {run.reusedFrom ? ' · код взят у прошлой попытки' : ''}
                   </span>
                 </div>
