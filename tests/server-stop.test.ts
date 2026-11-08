@@ -21,6 +21,7 @@ import { processAlive } from '../src/runner/resources.ts';
 import {
   dataIdentity,
   liveController,
+  manualStopSteps,
   serverRecordPath,
   stopServer,
   type ServerRecord,
@@ -167,7 +168,25 @@ test('stop without a record refuses while a live controller lease holds the stor
     const result = JSON.parse(refused.stdout) as { status: string; owner: string; detail: string };
     assert.equal(result.status, 'running-unrecorded');
     assert.equal(result.owner, 'pre-upgrade-server');
-    assert.match(result.detail, /остановите его вручную/);
+    assert.equal(refused.code, 1);
+    // Роль хранит только идентификатор владельца: pid оператор находит сам,
+    // сигнал посылает сам — в фоне (nohup) терминала для Ctrl+C нет.
+    assert.match(result.detail, /pid и хост роль не хранит/);
+    assert.match(result.detail, /остановите его сами по шагам manualStop/);
+    const steps = (JSON.parse(refused.stdout) as { manualStop: string[] }).manualStop;
+    const text = steps.join('\n');
+    assert.match(text, /ps -ax -o pid,command \| grep -F -- /);
+    assert.ok(text.includes(f.root), 'поиск по пути workspace');
+    assert.match(text, /lsof -nP -iTCP:<порт> -sTCP:LISTEN/);
+    assert.match(text, /командной строке/);
+    assert.match(text, /kill -TERM <pid>/);
+    assert.match(text, /nohup/);
+    assert.match(text, /devcontour stop .*not-running/);
+    // Путь workspace — из каталога данных `.devcontour-local`, с кавычками для shell.
+    assert.match(
+      manualStopSteps("/srv/it's/.devcontour-local")[0] ?? '',
+      /grep -F -- '\/srv\/it'\\''s' /,
+    );
 
     // Запись завершившегося процесса устарела, но роль живая — тоже отказ.
     const dead = spawn('true');
