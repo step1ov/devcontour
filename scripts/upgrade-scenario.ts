@@ -15,6 +15,9 @@
  *                 быстрого маршрута, вопрос исполнителя (неблокирующий запрос
  *                 ведущему от новой попытки), заметку обсуждения и отметку
  *                 центра внимания.
+ * reread        — версия «после» новым процессом перечитывает записи нового
+ *                 вида и возвращает их id по видам (P3 сверяет их по id с
+ *                 id шага after); роль и попытки не трогает.
  * crash         — версия «после» оставляет живую роль (аварийная остановка);
  *                 записи нового вида и журнал до них не изменились.
  * old-refuses   — версия «до» над состоянием с ролью новой версии: отказ до
@@ -37,7 +40,7 @@ import { executionOf } from '../src/harness/execution.ts';
 
 const [step, dir] = process.argv.slice(2);
 if (!step || !dir) {
-  console.error('upgrade-scenario: <before|after|crash|old-refuses> <каталог состояния>');
+  console.error('upgrade-scenario: <before|after|reread|crash|old-refuses> <каталог состояния>');
   process.exit(2);
 }
 const harnessVersion = (
@@ -138,6 +141,20 @@ function newRecords(store: Store, h: DevContour, accepted: string) {
     events: store.allEvents(),
   };
 }
+
+/** Id записей нового вида по видам: их хранит манифест P3 и сверяет по id. */
+function seededIds(records: ReturnType<typeof newRecords>) {
+  return {
+    quick: records.quick ? [records.quick.id] : [],
+    discussion: records.discussion.map((m) => m.id),
+    attention: Object.keys(records.attention),
+    input: records.input.map((r) => r.id),
+  };
+}
+const seededOf = () =>
+  JSON.parse(readFileSync(seededFile, 'utf8')) as ReturnType<typeof newRecords> & {
+    accepted: string;
+  };
 
 if (step === 'before') {
   const { store, h } = open();
@@ -276,17 +293,17 @@ if (step === 'before') {
   store.close();
   writeFileSync(seededFile, JSON.stringify({ accepted: acceptedId, ...seeded }));
   out({
-    seeded: {
-      quick: seeded.quick?.id,
-      discussion: seeded.discussion.map((m) => m.id),
-      attention: Object.keys(seeded.attention),
-      input: seeded.input.map((r) => r.id),
-    },
+    seeded: seededIds(seeded),
     liveRefused: live,
     previousAttempt: { id: old.id, status: old.status, task: stopped.status },
     newAttempt: { id: fresh.id, engineVersion: engineOf(fresh) },
     leader: s.leader,
   });
+} else if (step === 'reread') {
+  const { store, h } = open();
+  const now = newRecords(store, h, seededOf().accepted);
+  store.close();
+  out({ seeded: seededIds(now) });
 } else if (step === 'crash') {
   const { store, h } = open();
   // Тот же процесс новой версии продлевает роль и останавливается аварийно.
@@ -295,9 +312,7 @@ if (step === 'before') {
   assert.equal(engineOf(s.leader), harnessVersion);
   // Записи нового вида пережили повторное открытие: те же, журнал до них
   // прежний (продление роли событий не пишет — допускаются только новые).
-  const seeded = JSON.parse(readFileSync(seededFile, 'utf8')) as ReturnType<typeof newRecords> & {
-    accepted: string;
-  };
+  const seeded = seededOf();
   const now = JSON.parse(JSON.stringify(newRecords(store, h, seeded.accepted))) as ReturnType<
     typeof newRecords
   >;
@@ -311,7 +326,7 @@ if (step === 'before') {
     seeded.events,
     'журнал до записей нового вида изменился',
   );
-  out({ leader: s.leader, newRecords: 'unchanged' });
+  out({ leader: s.leader, newRecords: 'unchanged', seeded: seededIds(now) });
 } else if (step === 'old-refuses') {
   const hash = sha256(database);
   // Версия «до» над живой ролью новой версии: либо отказ до записи (движок,

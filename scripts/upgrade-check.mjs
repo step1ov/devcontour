@@ -72,8 +72,10 @@
  *     живой ролью; «после» — живую роль не перенимает, после истечения
  *     recovery, явный повтор — новая попытка с новым владением; принятая
  *     задача не меняется; новая версия пишет поручение быстрого маршрута,
- *     запрос ведущему, заметку обсуждения и отметку центра внимания, и при
- *     следующем открытии (шаг crash) они и журнал до них прежние;
+ *     запрос ведущему, заметку обсуждения и отметку центра внимания; их id
+ *     по видам — в манифесте P3 (`seeded`), и новый процесс (шаг reread)
+ *     читает те же id; при следующем открытии (шаг crash) они — те же id —
+ *     и журнал до них прежние;
  *  P4. `rollback-scenario.ts` в топологиях central и component на настоящих
  *     Git-репозиториях: «до» принимает A и B и выполняет Git sync
  *     (receipts); «после» открывает без перезаписи баз, история, SHA,
@@ -103,6 +105,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { seededProblems } from './upgrade-seeded.mjs';
 
 const { values: options, positionals } = parseArgs({
   allowPositionals: true,
@@ -602,12 +605,17 @@ function pairCheck() {
   const after = ran(scenario(b.dir, 'after'), b, 'after');
   check(after.liveRefused === true, 'роль прежнего процесса истекла до шага after');
   check(after.newAttempt.engineVersion === b.harnessVersion, 'новая попытка не под новой версией');
+  // Записи нового вида — по id: новый процесс перечитывает ту же базу.
+  const reread = ran(scenario(b.dir, 'reread'), b, 'reread');
+  const seededMismatch = seededProblems(after.seeded, reread.seeded);
+  check(!seededMismatch.length, 'записи нового вида: ' + seededMismatch.join('; '));
   pass('P3-lease-fencing-resume', {
     before: { accepted: before.accepted, active: before.active, leader: before.leader },
     liveRefused: after.liveRefused,
     previousAttempt: after.previousAttempt,
     newAttempt: after.newAttempt,
     leader: after.leader,
+    seeded: after.seeded,
   });
 
   // P4. Настоящие Git-репозитории, обе топологии: история и receipts «до»
@@ -701,6 +709,8 @@ function pairCheck() {
   // P5. Старый читатель — действительно старый DevContour над живой ролью новой.
   const crash = ran(scenario(b.dir, 'crash'), b, 'crash');
   check(crash.leader?.engineVersion === b.harnessVersion, 'роль без версии новой версии');
+  const crashMismatch = seededProblems(after.seeded, crash.seeded);
+  check(!crashMismatch.length, 'записи нового вида после crash: ' + crashMismatch.join('; '));
   const refused = ran(scenario(a.dir, 'old-refuses'), a, 'old-refuses');
   pass('P5-old-reader-new-state', {
     refusal: refused.refusal ?? null,
