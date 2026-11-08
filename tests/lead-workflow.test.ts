@@ -859,6 +859,83 @@ test('Живая задача, зависящая от отменённой ве
   }
 });
 
+test('Отмена ведущим уже выданной и упавшей задачи останавливает задание, как отмена человеком', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Failed then cut', '', 'main');
+    const failing = f.h.addTask(b.id, input('Fails its gate'));
+    const kept = f.h.addTask(b.id, input('Kept'));
+    f.h.approve(b.id);
+    f.h.pause(false);
+    const run = f.h.claim('test')!;
+    assert.equal(run.taskId, failing.id);
+    f.h.fail(run.id, run.token, 'gate failed', false, 'gate');
+    // Ведущий отменяет задачу, которую не удалось сделать зелёной.
+    f.h.cancel(failing.id, 'Не удаётся, убираю из доски', 'host');
+    complete(f.h, kept.id);
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    assert.notDeepEqual(loopOutlook(f.h, f.store.read(), { ...job, stage: 2 }), {
+      step: 'accept',
+    });
+    const runner = new LeadRunner(f.h, f.root);
+    for (let i = 0; i < 3; i++) await runner.tick();
+    await runner.stop();
+    const state = flow.get(job.key, 'main');
+    assert.equal(state.status, 'failed');
+    assert.match(String(state.error), new RegExp(`${failing.id}: Работа остановлена человеком`));
+    assert.notEqual(f.store.read().boards[0].revisions.at(-1)!.status, 'accepted');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Отмена без записанного актёра (прежняя версия) останавливает задание как отмена человеком', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Legacy cancel', '', 'main');
+    const dropped = f.h.addTask(b.id, input('Cancelled before the actor was recorded'));
+    f.h.addTask(b.id, input('Kept'));
+    f.h.approve(b.id);
+    f.h.cancel(dropped.id, 'Не нужна', 'host');
+    f.store.change('fixture.legacy', (s) => {
+      delete s.tasks.find((t) => t.id === dropped.id)!.cancelledBy;
+    });
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    const runner = new LeadRunner(f.h, f.root);
+    for (let i = 0; i < 3; i++) await runner.tick();
+    await runner.stop();
+    const state = flow.get(job.key, 'main');
+    assert.equal(state.status, 'failed');
+    assert.match(String(state.error), new RegExp(`${dropped.id}: Работа остановлена человеком`));
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Повтор и возврат в черновик снимают актёра отмены; отмена без актёра — человеком', () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Actor lifecycle', '', 'main');
+    const t = f.h.addTask(b.id, input('Cancelled and back'));
+    f.h.approve(b.id);
+    const actor = () => f.store.read().tasks.find((x) => x.id === t.id)!.cancelledBy;
+    f.h.cancel(t.id, 'Ведущий убрал', 'host');
+    assert.equal(actor(), 'host');
+    f.h.retry(t.id);
+    assert.equal(actor(), undefined);
+    f.h.cancel(t.id, 'Снова убрал', 'host');
+    f.h.reopen(t.id, 'Возвращаю в черновик для правки');
+    assert.equal(actor(), undefined);
+    // Без актёра отмена записывается как отмена человеком.
+    f.h.cancel(t.id);
+    assert.equal(actor(), 'operator');
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('Реальный Git: задание доски с задачей, отменённой ведущим, принимает доску без неё', async () => {
   const root = await mkdtemp(join(tmpdir(), 'devcontour-lead-cancel-'));
   await testDemo(root);

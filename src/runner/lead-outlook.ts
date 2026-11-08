@@ -143,21 +143,38 @@ export function boardTasks(s: DevContourState, boardId: string) {
 }
 
 /**
- * Задачи, которые ведёт задание доски. Отмена ведущим (`cancel --by host`) —
- * его решение об объёме ревизии, а не остановка человеком: такая задача, как
- * и в приёмке доски, в работу не входит, и задание идёт к приёмке без неё.
- * Отмена человеком или с неизвестным актёром остаётся в работе: восстановление
- * её не повторяет и останавливает задание (`repairStep`).
+ * Задачи, которые ведёт задание доски. Отмена ведущим (`cancel --by host`)
+ * задачи, которая ни разу не выдавалась (нет попыток и отказов), — его решение
+ * об объёме ревизии, а не остановка человеком: такая задача, как и в приёмке
+ * доски, в работу не входит, и задание идёт к приёмке без неё. Задача, которую
+ * уже выдавали (попытка, отказ, исчерпанный бюджет), отменой ведущего из
+ * работы не выпадает: иначе отмена упавшей задачи обходила бы остановку
+ * задания и принимала доску без её требования, мимо ревью плана. Такая
+ * отмена, как и отмена человеком или с неизвестным актёром, остаётся в работе:
+ * восстановление её не повторяет и останавливает задание (`repairStep`).
  *
- * Живая задача ревизии, которая зависит от отменённой ведущим, не будет
- * выдана никогда: задание не ждёт её молча, а останавливается с этой причиной.
+ * Живая задача ревизии, которая зависит от выпавшей, не будет выдана
+ * никогда: задание не ждёт её молча, а останавливается с этой причиной.
  */
-export function leadScope(tasks: readonly Task[]): {
+export function leadScope(
+  tasks: readonly Task[],
+  runs: DevContourState['runs'],
+): {
   tasks: Task[];
   stop?: { taskId: string; reason: string };
 } {
   const dropped = new Set(
-    tasks.filter((t) => t.status === 'cancelled' && t.cancelledBy === 'host').map((t) => t.id),
+    tasks
+      .filter(
+        (t) =>
+          t.status === 'cancelled' &&
+          t.cancelledBy === 'host' &&
+          t.attempt === 0 &&
+          !t.failure &&
+          !t.neutralFailures &&
+          !runs.some((r) => r.taskId === t.id),
+      )
+      .map((t) => t.id),
   );
   const kept = tasks.filter((t) => !dropped.has(t.id));
   const orphan = kept.find(
@@ -253,7 +270,7 @@ export function loopOutlook(h: DevContour, s: DevContourState, job: WorkflowJob)
   if (job.stage === 0)
     return planApproved(h, revision, tasks) ? { step: 'advance' } : { step: 'review-plan' };
   // Стадии исполнения и приёмки ведут задачи без отменённых ведущим (`leadScope`).
-  const scope = leadScope(tasks);
+  const scope = leadScope(tasks, s.runs);
   if (scope.stop) return { step: 'stop', ...scope.stop };
   const ids = scope.tasks.map((t) => t.id);
   const recovery = recoveryStep(h, s, job, ids);
@@ -301,7 +318,7 @@ export function liftsPause(h: DevContour, s: DevContourState, job: WorkflowJob):
     (outlook.step === 'recovery' && (outlook.action === 'retry-task' || outlook.action === 'wait'));
   if (!first) return false;
   const found = boardTasks(s, job.id);
-  return !!found && pauseStep(s, { ...job, stage }, leadScope(found.tasks).tasks).lift;
+  return !!found && pauseStep(s, { ...job, stage }, leadScope(found.tasks, s.runs).tasks).lift;
 }
 
 /**

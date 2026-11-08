@@ -714,6 +714,13 @@ export function stateFromRecords(
         ...previous,
         ...t,
         activeRunId: undefined,
+        // Актёр отмены — локальная запись: сохраняется, только если задача
+        // была отменена здесь же. Отмена, пришедшая через sync, — без
+        // актёра (считается отменой человеком), а не с устаревшим.
+        cancelledBy:
+          t.status === 'cancelled' && previous?.status === 'cancelled'
+            ? previous.cancelledBy
+            : undefined,
         failure:
           t.status === 'failed'
             ? (previous?.failure ??

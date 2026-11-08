@@ -359,6 +359,34 @@ test('Синхронизация не возрождает задачу, отм�
   }
 });
 
+test('Отмена, полученная синхронизацией, не наследует устаревшего актёра отмены ведущим', () => {
+  const f = fixture();
+  try {
+    const a = f.create('alice'),
+      board = a.h.createBoard('Release board', '', 'main');
+    const shared = a.h.addTask(board.id, input('Shared task'));
+    a.h.approve(board.id);
+    syncGit(a.h, { member: 'alice' });
+    a.commit();
+    const b = f.create('bob', a);
+    syncGit(b.h, { member: 'bob' });
+    // У Bob устаревший актёр прежней отмены ведущим (повтор прежней версии его не снял).
+    b.store.change('fixture.stale', (s) => {
+      s.tasks.find((t) => t.id === shared.id)!.cancelledBy = 'host';
+    });
+    a.h.cancel(shared.id, 'Решено в другой задаче', 'operator');
+    syncGit(a.h);
+    a.commit();
+    b.pull();
+    syncGit(b.h);
+    const task = b.store.read().tasks.find((t) => t.id === shared.id)!;
+    assert.equal(task.status, 'cancelled');
+    assert.equal(task.cancelledBy, undefined);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('Впервые полученная приёмка сверяется с манифестом, а не со своими задачами', () => {
   const f = fixture();
   try {

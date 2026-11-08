@@ -1849,8 +1849,10 @@ export class DevContour {
   // Причина отмены остаётся в журнале: отменённая находка без неё неотличима
   // от забытой. Панель отменяет без причины, ведущий агент — с ней.
   // `by` — актёр события `work.cancelled`: `operator` — человек (CLI, панель),
-  // `host` — актёр не назван (отчёт считает такую задачу неизвестной).
-  cancel(id: string, reason?: string, by: CancelActor = 'host') {
+  // `host` — ведущий агент (`cancel --by host`; отчёт harness считает такую
+  // задачу неизвестной). Без актёра — человек: отмена ведущим меняет объём
+  // работы задания доски (`leadScope`), и молча её не назначить.
+  cancel(id: string, reason?: string, by: CancelActor = 'operator') {
     const { store, engine } = executionOf(this);
     return domain(() =>
       store.host('task.cancelled', (ht) => {
@@ -1927,6 +1929,7 @@ export class DevContour {
       // ссылаясь на другую. Операция идемпотентна.
       const approved = t.approvedDigest;
       t.status = 'draft';
+      t.cancelledBy = undefined;
       t.approvedDigest = undefined;
       t.approvedScope = undefined;
       t.approval = undefined;
@@ -2004,6 +2007,9 @@ export class DevContour {
           throw new DomainError('Повтор доступен после сбоя или отмены');
         const spent = t.attempt;
         const exhausted = t.attempt >= this.config.maxAttempts;
+        // Повтор отменённой задачи снимает актёра прежней отмены: следующая
+        // отмена (в том числе пришедшая через sync) не унаследует его.
+        t.cancelledBy = undefined;
         engine.retry(id, reset, by);
         const data =
           exhausted && reset
