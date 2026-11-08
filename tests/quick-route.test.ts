@@ -419,6 +419,59 @@ test('D01-D: план setup ничего не пишет, сохраняет ф�
     rmSync(root, { recursive: true, force: true });
   }));
 
+test('F1: после приёма поручения quick-facts не выдаёт записи DevContour за незакоммиченную работу', () =>
+  withTestHome(async () => {
+    const root = temp();
+    repository(root);
+    const app = await startWorkspace(root, { port: 0, workspaceMode: 'embedded' });
+    try {
+      const response = await fetch(app.url + '/api/preparation/quick', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-devcontour-request': '1' },
+        body: JSON.stringify(intake(root)),
+      });
+      assert.equal(response.status, 200);
+      const cliFacts = () => {
+        const run = spawnSync(
+          process.execPath,
+          ['--import', 'tsx', cli, 'quick-facts', '--repository', root, '--workspace', root],
+          { encoding: 'utf8', env: process.env },
+        );
+        assert.equal(run.status, 0, run.stderr);
+        return JSON.parse(run.stdout) as QuickFacts;
+      };
+      const facts = cliFacts();
+      // Дерево действительно изменено приёмом: .gitignore, маркер режима и
+      // проекция изменения в docs/changes.
+      assert.ok(facts.facts.git.changes.includes('.gitignore'), facts.facts.git.changes.join());
+      assert.ok(facts.facts.git.changes.includes('devcontour.workspace.json'));
+      assert.ok(facts.facts.git.changes.some((p) => /^docs\/changes\/r-001\.[^/]+\//.test(p)));
+      assert.deepEqual(facts.diagnostics, []);
+      // Сырые факты в том же JSON не противоречат итоговым замечаниям.
+      assert.deepEqual(
+        facts.facts.diagnostics.map((d) => d.code),
+        [],
+      );
+      assert.equal(facts.facts.git.dirty, false);
+      // Панель читает те же факты: строка «есть незакоммиченные изменения» не появляется.
+      const view = (await getFresh(app.url + '/api/preparation/quick')) as { facts: QuickFacts };
+      assert.equal(view.facts.facts.git.dirty, false);
+      assert.deepEqual(
+        view.facts.facts.diagnostics.map((d) => d.code),
+        [],
+      );
+      // Чужая правка рядом — снова предупреждение в обоих списках.
+      writeFileSync(join(root, 'src/index.js'), 'export const add = (a, b) => a - b;\n');
+      const dirty = cliFacts();
+      assert.equal(dirty.facts.git.dirty, true);
+      assert.ok(dirty.diagnostics.some((d) => d.code === 'dirty-checkout'));
+      assert.ok(dirty.facts.diagnostics.some((d) => d.code === 'dirty-checkout'));
+    } finally {
+      await app.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }));
+
 test('D7: setup быстрого изменения не привязывает к developer правила контрактов', () =>
   withTestHome(async () => {
     const root = temp();
