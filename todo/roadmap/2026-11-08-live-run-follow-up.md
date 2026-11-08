@@ -34,7 +34,10 @@
   `devcontour/accepted`. Выполнено: шаг `merge --ff-only devcontour/accepted`
   перед коммитом правок, `context-lock` и `base-update`; тест
   `tests/start-context-commit.test.ts`.
-- Команда остановки сервера workspace.
+- Команда остановки сервера workspace. Выполнено: `stop --workspace` по
+  записи `.devcontour-local/server.json`; сигнал — только серверу, который
+  подтвердил pid и экземпляр через `GET /api/server`; описано в `docs/cli.md`,
+  тест `tests/server-stop.test.ts`.
 - `doctor` не сообщает `budgets:applied` после одного `context-lock`.
   Выполнено: ложное «не применено» — doctor сравнивал файл целиком. Сервер
   запоминает digest ключей применённой конфигурации; `budgets:applied` —
