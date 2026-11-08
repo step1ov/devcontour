@@ -74,6 +74,7 @@ function approveDesignTrack(
   approveStage(p, id, 'design');
 }
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
+import { AgentService } from '../src/application/agent.ts';
 import { Workspace } from '../src/core/workspace.ts';
 import { specDigest } from '../src/core/service.ts';
 import { quickResult, quickSteps } from '../src/runner/quick.ts';
@@ -1245,5 +1246,96 @@ test('Перезапуск, пока активное изменение в пр
   } finally {
     await app.close();
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Задачи доски привязываются к изменению доски, а не к активному; правка с preparation перепривязывает', () => {
+  const f = fixture(),
+    p = new Preparation(f.store);
+  try {
+    const first = approvePreparation(p);
+    const plan = (title: string, key: string) => ({
+      title,
+      description: 'Цель: ' + title,
+      tasks: [
+        { ...input('Task ' + key), featureId: 'member-block', key, dependsOn: [], contracts: [] },
+      ],
+    });
+    const { boardId } = f.h.importPlan(plan('Release', 'one'));
+    const one = f.store.read().tasks[0];
+    assert.equal(one.preparation?.changeId, first);
+    f.h.approve(boardId);
+    complete(f.h, one.id);
+    f.h.accept(boardId, MERGED);
+    // Второе изменение утверждено и активно.
+    const second = approvePreparation(p);
+    assert.notEqual(second, first);
+    assert.equal(f.store.read().preparation!.activeChangeId, second);
+    const api = new AgentService(f.h);
+    // Следующий этап доски первого изменения — к первому изменению.
+    const stage = api.execute({
+      operation: 'plan_import',
+      input: { plan: plan('Stage two', 'two'), boardId },
+    });
+    assert.equal(stage.changeId, first);
+    let state = f.store.read();
+    const two = state.tasks.find((t) => t.title === 'Task two')!;
+    assert.deepEqual(two.preparation, developmentBinding(state, first));
+    // Задача, добавленная в ревизию без preparation, — тоже к изменению доски;
+    // привязка видна в ответе.
+    const added = api.execute({
+      operation: 'task_create',
+      input: { boardId, task: { ...input('Task three'), featureId: 'member-block' } },
+    });
+    assert.deepEqual(added.preparation, {
+      changeId: first,
+      key: state.preparation!.changes[0].key,
+    });
+    // Правка с preparation другого изменения перепривязывает и меняет specDigest.
+    const edited = api.execute({
+      operation: 'task_edit',
+      input: {
+        taskId: two.id,
+        expectedDigest: specDigest(two),
+        task: {
+          ...input('Task two'),
+          featureId: 'member-block',
+          preparation: developmentBinding(state, second),
+        },
+      },
+    });
+    assert.notEqual(edited.specDigest, specDigest(two));
+    assert.equal((edited.preparation as { changeId: string }).changeId, second);
+    state = f.store.read();
+    assert.equal(state.tasks.find((t) => t.id === two.id)!.preparation?.changeId, second);
+    // Правка без preparation сохраняет собственное изменение задачи.
+    const again = state.tasks.find((t) => t.id === two.id)!;
+    api.execute({
+      operation: 'task_edit',
+      input: {
+        taskId: two.id,
+        expectedDigest: specDigest(again),
+        task: {
+          ...input('Task two'),
+          featureId: 'member-block',
+          description: 'Уточнённое описание задачи',
+        },
+      },
+    });
+    assert.equal(f.store.read().tasks.find((t) => t.id === two.id)!.preparation?.changeId, second);
+    // Новая доска — к активному изменению или к названному changeId.
+    const fresh = api.execute({ operation: 'plan_import', input: { plan: plan('Other', 'four') } });
+    assert.equal(fresh.changeId, second);
+    const named = api.execute({
+      operation: 'plan_import',
+      input: { plan: plan('Named', 'five'), changeId: first },
+    });
+    assert.equal(named.changeId, first);
+    assert.equal(
+      f.store.read().tasks.find((t) => t.title === 'Task five')!.preparation?.changeId,
+      first,
+    );
+  } finally {
+    f.cleanup();
   }
 });

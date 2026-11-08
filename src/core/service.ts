@@ -45,6 +45,7 @@ import {
   type Contract,
   type ContractArtifact,
   type Task,
+  type Board,
   type DevContourState,
   type Config,
   type Evidence,
@@ -205,6 +206,30 @@ const board = (s: DevContourState, id: string) =>
     s.boards.find((b) => b.id === id),
     `Доска ${id} не найдена`,
   );
+/**
+ * Изменение продукта доски: изменение последней по порядку задачи доски,
+ * привязанной к подготовке. Следующий этап и задачи, добавленные в ревизию,
+ * продолжают изменение доски, а не активное изменение workspace: изменения
+ * независимы, и активным может быть другое, проработка которого идёт
+ * параллельно.
+ */
+function boardChangeId(s: DevContourState, b: Board | undefined) {
+  if (!b) return undefined;
+  for (const r of [...b.revisions].reverse())
+    for (const id of [...r.taskIds].reverse()) {
+      const changeId = s.tasks.find((t) => t.id === id)?.preparation?.changeId;
+      if (changeId) return changeId;
+    }
+  return undefined;
+}
+/**
+ * Привязка новой или правленой задачи: к названному изменению, иначе к
+ * изменению по умолчанию (задачи, доски), иначе к активному. Привязка —
+ * всегда действующие утверждённые digests изменения.
+ */
+function bindingFor(s: DevContourState, ...changeIds: (string | undefined)[]) {
+  return developmentBinding(s, changeIds.find(Boolean));
+}
 /**
  * Принятая ревизия закрыта для задач, утверждения и приёмки. Отказ называет
  * оба законных пути: следующий этап того же релиза — импорт плана в эту же
@@ -852,7 +877,11 @@ export class DevContour {
    * корректировка: последняя ревизия — весь состав доски, её приёмка
    * проверяет и прежние результаты. Цель этапа хранится в причине ревизии.
    */
-  importPlan(input: unknown, boardId?: string) {
+  importPlan(
+    input: unknown,
+    boardId?: string,
+    changeId?: string,
+  ): { boardId: string; revision?: number; tasks: number; changeId?: string } {
     // Отказ схемы плана — по путям и сообщениям, а не сырым массивом zod:
     // ведущий исправляет план по названному полю.
     const parsedPlan = planIngest.safeParse(input);
@@ -888,6 +917,9 @@ export class DevContour {
       if (at('GRAPH_DUPLICATE_ID')) throw new DomainError('Ключи задач должны быть уникальны', 400);
       const ids = new Map<string, string>();
       for (const t of plan.tasks) ids.set(t.key, entityId(s, 'T'));
+      const preparation = s.preparation
+        ? bindingFor(s, changeId, boardChangeId(s, target))
+        : undefined;
       const tasks = plan.tasks.map((item, i) => {
         const unknown = at('GRAPH_UNKNOWN_DEPENDENCY', i);
         if (unknown) throw new DomainError(unknown.message, 404);
@@ -902,7 +934,7 @@ export class DevContour {
           throw new DomainError('Локальная доска принимает только задачи своего компонента');
         return {
           ...parsed,
-          preparation: developmentBinding(s),
+          preparation,
           assignee: parsed.assignee ?? s.team?.member,
           id: ids.get(item.key)!,
           status: 'draft' as const,
@@ -928,7 +960,12 @@ export class DevContour {
           createdAt: now(),
         };
         target.revisions.push(revision);
-        return { boardId: target.id, revision: revision.number, tasks: tasks.length };
+        return {
+          boardId: target.id,
+          revision: revision.number,
+          tasks: tasks.length,
+          ...(preparation ? { changeId: preparation.changeId } : {}),
+        };
       }
       const b = {
         id: entityId(s, 'B'),
@@ -945,7 +982,11 @@ export class DevContour {
         ],
       };
       s.boards.push(b);
-      return { boardId: b.id, tasks: tasks.length };
+      return {
+        boardId: b.id,
+        tasks: tasks.length,
+        ...(preparation ? { changeId: preparation.changeId } : {}),
+      };
     });
   }
   /**
@@ -1015,7 +1056,11 @@ export class DevContour {
         throw new DomainError('Локальная доска принимает только задачи своего компонента');
       const t: Task = {
         ...parsed,
-        preparation: developmentBinding(s),
+        preparation: bindingFor(
+          s,
+          parsed.preparation?.changeId,
+          boardChangeId(s, board(s, boardId)),
+        ),
         assignee: parsed.assignee ?? s.team?.member,
         id: entityId(s, 'T'),
         status: 'draft',
@@ -1052,7 +1097,16 @@ export class DevContour {
       // (`discussion_resolve`). Перепривязка к подготовке правкой не считается.
       const unbound = (x: Task) => specDigest({ ...x, preparation: undefined });
       const before = unbound(t);
-      Object.assign(t, parsed, { preparation: developmentBinding(s) });
+      // Правка с preparation перепривязывает к названному изменению; без неё
+      // задача остаётся в своём изменении (его действующие digests).
+      Object.assign(t, parsed, {
+        preparation: bindingFor(
+          s,
+          parsed.preparation?.changeId,
+          t.preparation?.changeId,
+          boardChangeId(s, ownerBoard),
+        ),
+      });
       if (unbound(t) !== before) t.specEditedAt = now();
       // Правка черновика находки — разбор ведущим: подсказка передачи
       // контекста больше не держит её как непроверенную.
@@ -1296,7 +1350,7 @@ export class DevContour {
         validateTaskContext(this.config, { ...original, requirements });
         s.tasks.push({
           ...original,
-          preparation: developmentBinding(s),
+          preparation: bindingFor(s, original.preparation?.changeId),
           requirements,
           sharedCompletion: undefined,
           id: map.get(id)!,

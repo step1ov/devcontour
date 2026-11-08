@@ -72,5 +72,9 @@
 // Намеренное изменение: описание usage_report называет область без
 // repositoryId (общий контур, в embedded — и его компонент), scope.owners и
 // owner записи; прочие операции байтово прежние.
-export const CATALOG_DIGEST = 'efabdcf264aa819443cfa9037b2f948324b954b53315e425d0409064d260c25e';
+// Намеренное изменение: plan_import принимает необязательный changeId;
+// описания plan_import, task_create и task_edit называют привязку задачи к
+// изменению продукта (названное, изменение доски или задачи, активное) и
+// привязку в ответе; прочие операции байтово прежние.
+export const CATALOG_DIGEST = 'a48929343546a15200670eba33eddb384ac939d19989660f65b378113e98132e';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';
