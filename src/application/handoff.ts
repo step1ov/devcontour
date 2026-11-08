@@ -832,11 +832,25 @@ export function devcontourHandoffWithin(
       if (boardId !== undefined) {
         if (!state.boards.some((b) => b.id === boardId))
           throw new DomainError('Доска не найдена: ' + boardId, 404);
-        if (!v.graph(boardId))
+        if (!v.graph(boardId)) {
+          // Движок ведёт граф доски только с первой утверждённой задачи:
+          // пакета черновой доски нет. Отказ называет, что на доске, и шаг.
+          const board = state.boards.find((b) => b.id === boardId)!;
+          const ids = new Set(board.revisions.at(-1)?.taskIds ?? []);
+          const drafts = state.tasks.filter((t) => ids.has(t.id) && t.status === 'draft').length;
           throw new DomainError(
-            `Доска ${boardId} ещё не выпущена: у неё нет утверждённых или выпущенных задач`,
+            `Доска ${boardId} ещё не выпущена: ${
+              drafts
+                ? `черновиков задач — ${drafts}, утверждённых или выпущенных нет`
+                : 'задач в работе нет'
+            }, поэтому пакета доски нет. Пакет без доски (session_handoff без boardId, в CLI — без --board) называет следующий шаг; пакет доски появится после ${
+              drafts
+                ? 'утверждения плана (review-plan)'
+                : 'добавления задач (task_create или plan_import) и утверждения плана'
+            }.`,
             409,
           );
+        }
       }
       const options = {
         ...(boardId !== undefined ? { graphId: boardId } : {}),
