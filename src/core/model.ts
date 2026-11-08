@@ -246,6 +246,12 @@ export interface Task extends TaskInput {
    * переносится; нет поля — отмена прежней версии или с клона, актёр неизвестен.
    */
   cancelledBy?: import('devcontour-harness').CancelActor;
+  /**
+   * Когда постановка черновика последний раз изменена правкой (`editTask`).
+   * Вне постановки; локальная запись, в Git не переносится. По ней принятое
+   * обращение обсуждения может ссылаться на исправленный черновик.
+   */
+  specEditedAt?: string;
   id: string;
   status: TaskStatus;
   /**

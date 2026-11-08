@@ -996,7 +996,7 @@ export class DevContour {
         (parsed.repositoryId !== ownerBoard.repositoryId || parsed.scope === 'workspace')
       )
         throw new DomainError('Локальная доска принимает только задачи своего компонента');
-      Object.assign(t, parsed, { preparation: developmentBinding(s) });
+      Object.assign(t, parsed, { preparation: developmentBinding(s), specEditedAt: now() });
       // Правка черновика находки — разбор ведущим: подсказка передачи
       // контекста больше не держит её как непроверенную.
       if (t.finding) t.triagedAt ??= now();
