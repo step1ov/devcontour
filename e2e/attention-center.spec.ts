@@ -6,10 +6,11 @@ import { join } from 'node:path';
 import { startWorkspace } from '../src/runner/start.ts';
 import { product } from '../tests/preparation-fixture.ts';
 import { useLiveCliGuard } from './live-cli-guard.ts';
+import { portEnv } from './free-ports.ts';
 
 // Свой демо-сервер (playwright.config.ts): сценарии центра внимания
 // запускают очередь, и общий демо-проект после них не тот, что ждут другие.
-test.use({ baseURL: 'http://127.0.0.1:4389' });
+test.use({ baseURL: `http://127.0.0.1:${process.env[portEnv.attention]}` });
 
 // Интерфейс центра внимания (D05). Демо-сервер общий для спецификаций:
 // каждый тест создаёт свои доску и задачу и находит свои карточки по

@@ -4,7 +4,8 @@ import { spawn, type ChildProcess } from 'node:child_process';
 
 // Карточка договора проверки на обезличенном стенде: задача дважды отказала
 // по свойству, корпус больше одной страницы, разбор ждёт ведущего.
-const port = 4398;
+// Порт выбирает ОС: стенд печатает фактический адрес в строке READY.
+const port = 0;
 let server: ChildProcess | undefined;
 let base = '';
 test.beforeAll(async () => {

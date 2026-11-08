@@ -2,6 +2,7 @@ import { defineConfig, devices } from '@playwright/test';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { sharedGuardEnv, writeLiveCliGuard } from './e2e/live-cli-guard.ts';
+import { sharedPorts } from './e2e/free-ports.ts';
 // Демо-данные — во временном каталоге системы, рабочие деревья попыток —
 // рядом с ними (не внутри каталога состояния: такой корень harness
 // отклоняет) и не в кэше пользователя. Оба — в одном временном каталоге
@@ -18,6 +19,12 @@ const guard = writeLiveCliGuard(process.env[sharedGuardEnv]);
 // наследуют PATH раннера с заглушками впереди.
 if (!process.env.PATH?.startsWith(guard.bin + delimiter))
   process.env.PATH = guard.bin + delimiter + (process.env.PATH ?? '');
+// Порты общих демо-серверов выбирает ОС: параллельные прогоны из разных
+// рабочих деревьев не ждут чужой сервер. Воркеры получают те же номера из
+// окружения раннера.
+const ports = sharedPorts();
+const demoUrl = `http://127.0.0.1:${ports.demo}`;
+const attentionUrl = `http://127.0.0.1:${ports.attention}`;
 const env = {
   PATH: process.env.PATH,
   GIT_AUTHOR_NAME: 'DevContour fixture',
@@ -40,7 +47,7 @@ export default defineConfig({
   // нагрузкой состоявшаяся приёмка выглядела ненайденной кнопкой.
   expect: { timeout: 20000 },
   use: {
-    baseURL: 'http://127.0.0.1:4399',
+    baseURL: demoUrl,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     ...devices['Desktop Chrome'],
@@ -51,8 +58,8 @@ export default defineConfig({
       // Демо-данные — во временном каталоге системы, а не в проекте: каждый
       // прогон оставлял рабочие копии и репозитории в дереве, и IDE
       // переиндексировала их после каждого прогона.
-      command: `npm run devcontour -- demo --data ${data} --checkout-root ${checkouts} --port 4399`,
-      url: 'http://127.0.0.1:4399/api/state',
+      command: `npm run devcontour -- demo --data ${data} --checkout-root ${checkouts} --port ${ports.demo}`,
+      url: `${demoUrl}/api/state`,
       reuseExistingServer: false,
       timeout: 60000,
     },
@@ -60,8 +67,8 @@ export default defineConfig({
       env,
       // Свой демо-сервер центра внимания: его сценарии запускают очередь, и
       // общий демо-проект после них уже не тот, что ждут другие сценарии.
-      command: `npm run devcontour -- demo --data ${join(run, 'attention-data')} --checkout-root ${join(run, 'attention-checkouts')} --port 4389`,
-      url: 'http://127.0.0.1:4389/api/state',
+      command: `npm run devcontour -- demo --data ${join(run, 'attention-data')} --checkout-root ${join(run, 'attention-checkouts')} --port ${ports.attention}`,
+      url: `${attentionUrl}/api/state`,
       reuseExistingServer: false,
       timeout: 60000,
     },

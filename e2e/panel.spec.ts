@@ -4,7 +4,8 @@ import { spawn, type ChildProcess } from 'node:child_process';
 // Панель на большой обезличенной истории: периодически опрашивается только
 // ограниченная сводка, детали задачи загружаются по запросу, сбои загрузки
 // деталей и опроса видны и восстанавливаются.
-const port = 4397;
+// Порт выбирает ОС: стенд печатает фактический адрес в строке READY.
+const port = 0;
 let server: ChildProcess | undefined;
 let base = '';
 let busyTask = '';

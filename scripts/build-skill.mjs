@@ -1,5 +1,4 @@
 import { readFile, mkdir, writeFile, stat, readdir } from 'node:fs/promises';
-import { capabilities } from '../lib/application/agent.js';
 
 const path = new URL('../skills/devcontour/references/agent-api.json', import.meta.url);
 
@@ -18,8 +17,15 @@ async function newest(dir) {
   }
   return latest;
 }
+// Генерация (build:assets) читает исходники через tsx и не требует lib:
+// в свежей рабочей копии `npm run build:assets` работает без build:lib.
+// Проверка (check:skill) по-прежнему сверяет справочник с собранным lib.
+const check = process.argv.includes('--check');
+const { capabilities } = await import(
+  check ? '../lib/application/agent.js' : '../src/application/agent.ts'
+);
 const expected = JSON.stringify(capabilities(), null, 2) + '\n';
-if (process.argv.includes('--check')) {
+if (check) {
   const source = new URL('../src/', import.meta.url);
   const built = new URL('../lib/', import.meta.url);
   if ((await newest(source)) > (await newest(built)))
