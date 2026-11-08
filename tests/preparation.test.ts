@@ -1144,3 +1144,41 @@ test('Следующий этап принятой доски: отказ task_c
     f.cleanup();
   }
 });
+
+test('Новое изменение в проработке не делает устаревшим задание доски утверждённого изменения', () => {
+  const f = fixture(),
+    p = new Preparation(f.store);
+  try {
+    const first = approvePreparation(p);
+    const b = f.h.createBoard('Первое изменение', '', 'main');
+    f.h.addTask(b.id, { ...input(), featureId: 'member-block' });
+    f.h.approve(b.id);
+    const flow = new LeadWorkflow(f.h),
+      request = { kind: 'board' as const, id: b.id, authorRuntime: 'codex' as const };
+    const job = flow.start(request);
+    const digest = flow.input('board', b.id).digest;
+    // Второе изменение заводится и становится активным, пока первое в работе.
+    p.execute('preparation_quick', {
+      requestKey: 'second-change',
+      title: 'Второе изменение',
+      repository: '/tmp/second',
+      brief: 'Второе поручение во время работы над первым',
+      criterion: 'Первое продолжает работу',
+    });
+    const s = f.store.read();
+    assert.notEqual(s.preparation!.activeChangeId, first);
+    // Вход задания первой доски от него не зависит: задание продолжает работу.
+    assert.equal(flow.input('board', b.id).digest, digest);
+    const claimed = flow.claim(job.key, 'main');
+    assert.ok(claimed, 'задание первой доски выдаётся');
+    assert.equal(flow.get(job.key, 'main').status, 'running');
+    assert.equal(flow.staleBoards().size, 0);
+    // Очередь запускается: разработка первого изменения готова.
+    f.h.pause(true);
+    f.h.pause(false);
+    // Повторное утверждение плана первой доски тоже не требует активного изменения.
+    f.h.approve(b.id);
+  } finally {
+    f.cleanup();
+  }
+});

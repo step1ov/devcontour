@@ -1,4 +1,4 @@
-import { developmentBinding, assertTaskPreparation } from './preparation.ts';
+import { assertAnyDevelopmentReady, assertTaskPreparation } from './preparation.ts';
 import { carriedTaskIds } from './work-status.ts';
 import { z } from 'zod';
 import {
@@ -80,7 +80,10 @@ export type WorkflowJob = z.infer<typeof workflowInput> & {
 export class LeadWorkflow {
   constructor(readonly h: DevContour) {}
   input(kind: WorkflowJob['kind'], id: string, s: DevContourState = this.h.store.read()) {
-    developmentBinding(s);
+    // Вход задания — собственные изменения его задач (их привязку проверяет
+    // assertTaskPreparation ниже), а не активное изменение: новое изменение в
+    // проработке не делает устаревшей работу над уже утверждённым.
+    assertAnyDevelopmentReady(s);
     const changeSet = kind === 'changeset' ? s.changeSets.find((c) => c.id === id) : undefined;
     if (kind === 'changeset' && !changeSet) throw new DomainError('ChangeSet не найден');
     const boardIds = changeSet?.boardIds ?? [id];

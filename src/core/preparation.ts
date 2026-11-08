@@ -147,6 +147,22 @@ export function developmentBinding(
     designDigest: design.digest,
   };
 }
+/**
+ * Разработка хоть одного изменения готова: её утверждения пройдены. Изменения
+ * независимы — новое изменение в проработке (даже активное) не останавливает
+ * работу над уже утверждённым. Нет готового — отказ причиной активного.
+ */
+export function assertAnyDevelopmentReady(s: DevContourState) {
+  if (!s.preparation) return;
+  for (const c of s.preparation.changes)
+    try {
+      developmentBinding(s, c.id);
+      return;
+    } catch (error) {
+      if (!(error instanceof DomainError)) throw error;
+    }
+  developmentBinding(s);
+}
 export function assertTaskPreparation(
   s: DevContourState,
   task: Pick<Task, 'id' | 'preparation' | 'featureId'>,

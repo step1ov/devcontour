@@ -2,6 +2,7 @@ import { domain, executionOf } from '../harness/execution.ts';
 import { readFileSync, realpathSync } from 'node:fs';
 import {
   developmentBinding,
+  assertAnyDevelopmentReady,
   assertFeatureOf,
   assertTaskFeature,
   assertTaskPreparation,
@@ -1180,7 +1181,8 @@ export class DevContour {
       before.tasks.filter((t) => revision?.taskIds.includes(t.id) && t.status === 'draft'),
     );
     return this.currentChange('board.approved', (s) => {
-      developmentBinding(s);
+      // Привязку каждой задачи к её изменению проверяет approvable.
+      assertAnyDevelopmentReady(s);
       const r = activeRevision(s, boardId);
       if (!r.taskIds.length) throw new DomainError('Добавьте задачи перед утверждением');
       const selected = taskIds ?? r.taskIds;
@@ -1429,7 +1431,9 @@ export class DevContour {
         // следующем запуске без решения человека.
         if (!value && serverStopping(this.store, ht.state.leader))
           throw new DomainError(SERVER_STOPPING, 409);
-        if (!value) developmentBinding(ht.state);
+        // Очередь выдаёт работу утверждённых изменений; изменение в
+        // проработке (даже активное) её запуск не держит.
+        if (!value) assertAnyDevelopmentReady(ht.state);
         // Решение человека заменяет паузу операции применения политики (как
         // и прежде): пауза переходит к человеку и снимается им. Выдачу до
         // применения конфигурации по-прежнему держит запрос операции.
