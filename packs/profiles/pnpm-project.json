@@ -42,6 +42,7 @@
     "developer": {
       "runtime": "claude",
       "title": "Разработчик",
+      "requiresContract": false,
       "reviewer": {
         "runtime": "codex"
       }

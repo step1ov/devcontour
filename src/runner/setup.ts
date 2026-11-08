@@ -30,11 +30,13 @@ const devcontourRoot = fileURLToPath(new URL('../../', import.meta.url));
 // Чему учить роль, кроме её собственной инструкции: тестировщика — проверкам,
 // тех, кто делает интерфейс, — дизайну, остальных — контрактам. Правило по виду
 // роли, а не по списку имён: `qa-mobile` и `qa-web` — тоже тестировщики.
-// `developer` быстрого изменения контрактом не связан: правила общих API и
-// versioned контекста библиотек противоречили бы его инструкции, и ревьюер
-// плана требовал бы по ним контракт, которого у задачи нет и быть не должно.
-const companionContext = (role: string) =>
-  role === 'developer'
+// Роль, явно объявленная без контракта (`requiresContract: false`, как
+// `developer` быстрого изменения), правил контрактов не получает: правила
+// общих API и versioned контекста библиотек противоречили бы её инструкции, и
+// ревьюер плана требовал бы по ним контракт, которого у задачи нет и быть не
+// должно. Решает объявление роли, а не её имя.
+const companionContext = (role: string, binding?: { requiresContract?: boolean }) =>
+  binding?.requiresContract === false
     ? undefined
     : role.startsWith('qa')
       ? 'testing'
@@ -42,7 +44,11 @@ const companionContext = (role: string) =>
         ? 'design'
         : 'contracts';
 
-export function defaultContextPacks(repositoryId = 'main', declared: string[] = [...roles]) {
+export function defaultContextPacks(
+  repositoryId = 'main',
+  declared: string[] = [...roles],
+  bindings: Record<string, { requiresContract?: boolean }> = {},
+) {
   const prefix = repositoryId === 'main' ? '' : repositoryId + '-';
   return [
     {
@@ -59,7 +65,9 @@ export function defaultContextPacks(repositoryId = 'main', declared: string[] = 
       roles: [role],
       files: [
         `.agents/roles/${role}.md`,
-        ...(companionContext(role) ? [`.agents/context/${companionContext(role)}.md`] : []),
+        ...(companionContext(role, bindings[role])
+          ? [`.agents/context/${companionContext(role, bindings[role])}.md`]
+          : []),
       ],
     })),
     {
@@ -267,10 +275,10 @@ async function runSetup(options: {
   const configuredPacks = [
     ...new Map(
       [
-        ...defaultContextPacks(
-          'main',
-          Object.keys(projectConfig(repository, selected, options.approvalMode).roles),
-        ),
+        ...(() => {
+          const declared = projectConfig(repository, selected, options.approvalMode).roles;
+          return defaultContextPacks('main', Object.keys(declared), declared);
+        })(),
         ...selected.contextPacks,
       ].map((pack) => [pack.id, pack]),
     ).values(),

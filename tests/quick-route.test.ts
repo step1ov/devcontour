@@ -21,7 +21,7 @@ import { join, resolve } from 'node:path';
 import { Preparation, validatePreparation } from '../src/core/preparation.ts';
 import { preparationStore, startWorkspace } from '../src/runner/start.ts';
 import { chooseWorkspaceMode } from '../src/runner/workspace-mode.ts';
-import { planSetup, setupProject } from '../src/runner/setup.ts';
+import { defaultContextPacks, planSetup, setupProject } from '../src/runner/setup.ts';
 import {
   leadActivityAt,
   markQuickSetup,
@@ -471,6 +471,17 @@ test('F1: после приёма поручения quick-facts не выдаё
       rmSync(root, { recursive: true, force: true });
     }
   }));
+
+test('D7: правила контрактов снимает объявление роли без контракта, а не её имя', () => {
+  const contracts = (bindings: Record<string, { requiresContract?: boolean }>) =>
+    defaultContextPacks('main', ['developer'], bindings)
+      .find((p) => p.id === 'developer')!
+      .files.includes('.agents/context/contracts.md');
+  // Своя роль developer полного маршрута с обязательным контрактом правила получает.
+  assert.equal(contracts({ developer: { requiresContract: true } }), true);
+  assert.equal(contracts({}), true);
+  assert.equal(contracts({ developer: { requiresContract: false } }), false);
+});
 
 test('D7: setup быстрого изменения не привязывает к developer правила контрактов', () =>
   withTestHome(async () => {
