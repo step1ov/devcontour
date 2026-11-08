@@ -178,6 +178,8 @@ test('stop without a record refuses while a live controller lease holds the stor
     assert.match(text, /ps -ax -o pid,command \| grep -F -- /);
     assert.ok(text.includes(f.root), 'поиск по пути workspace');
     assert.match(text, /lsof -nP -iTCP:<порт> -sTCP:LISTEN/);
+    // Путь в командной строке бывает другим (относительный, ссылка, свой --data).
+    assert.match(text, /относительным путём.*символическую ссылку.*--data вне.*realpath/);
     assert.match(text, /командной строке/);
     assert.match(text, /kill -TERM <pid>/);
     assert.match(text, /nohup/);
