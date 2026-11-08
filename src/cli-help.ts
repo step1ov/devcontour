@@ -7,6 +7,9 @@ export function printHelp() {
     'devcontour start --workspace /absolute/workspace [--workspace-mode embedded|separate] [--port 4317] — при первом запуске явно выберите размещение; панель до выбора стека и создания репозиториев',
   );
   console.log(
+    'devcontour stop [--timeout-ms 60000] --workspace ... — штатная остановка сервера workspace (start или serve) по записи .devcontour-local/server.json; сервер без записи (запущен до обновления) — status running-unrecorded, код 1: остановите его вручную',
+  );
+  console.log(
     'devcontour profile-show --profile <ID|./file.json> --repository /absolute/repo [--repository-id ID]',
   );
   console.log(
