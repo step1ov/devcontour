@@ -247,6 +247,10 @@ export function quickSteps(input: {
         : input.blocker,
   });
   const live = input.tasks.filter((t) => t.status !== 'cancelled');
+  // Изменение может нести несколько задач: следующий этап принятой доски
+  // добавляет свои. Тексты шагов называют их число, а не «задачу».
+  const several = live.length > 1;
+  const accepted = live.filter((t) => t.status === 'done').length;
   const prepared = input.configured && input.engineConnected && live.length > 0;
   const plan = input.plan;
   const conflicts = plan?.files.filter((f) => f.action === 'conflict') ?? [];
@@ -262,7 +266,9 @@ export function quickSteps(input: {
           : 'current',
     ...(prepared ? {} : { actor: 'lead' as const }),
     detail: prepared
-      ? 'Setup применён, задача поставлена'
+      ? several
+        ? `Setup применён, задач изменения: ${live.length}`
+        : 'Setup применён, задача поставлена'
       : !plan
         ? 'Ведущий агент предлагает профиль и проверки проекта'
         : plan.refusal
@@ -293,7 +299,12 @@ export function quickSteps(input: {
   // Индикатор работы — только по фактам: идущая попытка или задача в работе.
   // Черновик и пауза — дело ведущего агента, а не «исполнитель работает».
   const execution: Pick<QuickStep, 'state' | 'actor' | 'detail' | 'action'> = done
-    ? { state: 'done', detail: 'Задача принята по проверкам и ревью' }
+    ? {
+        state: 'done',
+        detail: several
+          ? `Все задачи изменения (${live.length}) приняты по проверкам и ревью`
+          : 'Задача принята по проверкам и ревью',
+      }
     : !prepared
       ? { state: 'waiting', detail: 'Ждёт подготовки' }
       : question === 'operator'
@@ -320,8 +331,9 @@ export function quickSteps(input: {
                 ? {
                     state: 'current',
                     actor: 'lead',
-                    detail:
-                      'Задача в черновике: ведущий агент проводит review плана и запускает её',
+                    detail: several
+                      ? `Принято задач: ${accepted} из ${live.length}; черновики — ход ведущего агента: review плана и запуск`
+                      : 'Задача в черновике: ведущий агент проводит review плана и запускает её',
                   }
                 : input.paused &&
                     input.pauseReason === 'base-check' &&
@@ -366,7 +378,9 @@ export function quickSteps(input: {
     ...(done ? { actor: 'operator' as const } : {}),
     detail: done
       ? 'Проверьте изменение; принятие задачи — не публикация и не готовность всего продукта'
-      : 'Появится после принятия задачи',
+      : several
+        ? `Принято задач: ${accepted} из ${live.length}; результат — после принятия всех`
+        : 'Появится после принятия задачи',
   });
   // Изменение ушло полным маршрутом: шаги быстрого не продолжаются.
   if (change.expanded)
@@ -426,6 +440,8 @@ export function quickResult(state: DevContourState, changeId: string, usage: Usa
       taskId: task.id,
       title: task.title,
       status: task.status,
+      /** Ревизия доски, в которой задача появилась: этап изменения. */
+      revision: revision?.number ?? null,
       boardId:
         state.boards.find((b) => b.revisions.some((r) => r.taskIds.includes(task.id)))?.id ?? null,
       resultSha: task.resultSha ?? null,

@@ -204,10 +204,20 @@ const board = (s: DevContourState, id: string) =>
     s.boards.find((b) => b.id === id),
     `Доска ${id} не найдена`,
   );
+/**
+ * Принятая ревизия закрыта для задач, утверждения и приёмки. Отказ называет
+ * оба законных пути: следующий этап того же релиза — импорт плана в эту же
+ * доску (ревизия N+1), изменение принятого результата — корректировка.
+ * Раньше отказ советовал только корректировку, и ведущий, добавлявший работу
+ * следующего этапа, шёл не тем путём.
+ */
 function activeRevision(s: DevContourState, id: string) {
   const b = board(s, id);
   const r = b.revisions.at(-1)!;
-  if (r.status !== 'active') throw new DomainError('Доска принята. Создайте корректировку.');
+  if (r.status !== 'active')
+    throw new DomainError(
+      `Ревизия ${r.number} доски ${b.id} принята. Новая работа релиза — следующий этап этой доски: plan_import с boardId (CLI: import-plan --board ${b.id}). Изменение принятого результата — корректировка: board_correct (CLI: correct --board ${b.id}).`,
+    );
   return r;
 }
 /**
