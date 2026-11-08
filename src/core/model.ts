@@ -240,6 +240,12 @@ export interface Task extends TaskInput {
    * задачу нестрогим `taskInput`, поле отбрасывает, а не отказывает.
    */
   triagedAt?: string;
+  /**
+   * Кто отменил задачу (актёр `work.cancelled`): `operator` — человек, `host`
+   * — ведущий агент (`cancel --by host`). Локальная запись, в Git не
+   * переносится; нет поля — отмена прежней версии или с клона, актёр неизвестен.
+   */
+  cancelledBy?: import('devcontour-harness').CancelActor;
   id: string;
   status: TaskStatus;
   /**

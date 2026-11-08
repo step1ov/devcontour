@@ -12,6 +12,7 @@ import { IntentService } from './intent.ts';
 import {
   afterStep,
   boardTasks,
+  leadScope,
   loopOutlook,
   pauseStep,
   recoveryStep,
@@ -255,7 +256,12 @@ export class LeadRunner {
     if (job.kind === 'board') {
       // Работа ревизии — без задач, перенесённых из принятой предыдущей: их
       // результат и отмены уже учтены приёмкой (см. carriedTaskIds).
-      const { board: b, tasks } = boardTasks(s, job.id)!;
+      const { board: b, tasks: all } = boardTasks(s, job.id)!;
+      // Исполнение и приёмка — без задач, отменённых ведущим (`leadScope`):
+      // их, как и приёмка доски, работа не ждёт.
+      const scope = leadScope(all);
+      const tasks = job.stage === 0 ? all : scope.tasks;
+      if (job.stage > 0 && scope.stop) throw new Error(scope.stop.reason);
       if (job.stage === 0) {
         // Согласование нужно черновикам и задачам, утверждённым при другой
         // политике исполнения: их движок не выдаёт до повторного утверждения

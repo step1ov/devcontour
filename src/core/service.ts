@@ -1872,6 +1872,9 @@ export class DevContour {
             throw error;
           }
         }
+        // Актёр первой отмены: повторная отмена задачу не меняет и актёра
+        // не переписывает (цикл ведущего различает их, `leadScope`).
+        if (t.status !== 'cancelled') t.cancelledBy = by;
         engine.cancel(id, reason, by);
         const data = reason ? { taskId: id, reason } : { taskId: id };
         ht.journal(data);
