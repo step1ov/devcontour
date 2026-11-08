@@ -632,7 +632,7 @@ async function main() {
   // Полный doctor тоже только читает базу: он не writer и не создаёт таблиц
   // и строк, которых нет в базе прежней версии (их создаст первый writer).
   if (operation === 'doctor') {
-    const { state: s, engine, check, calls, newState } = doctorState(config, root);
+    const { state: s, engine, check, calls, newState, appliedKeys } = doctorState(config, root);
     if (
       args.includes('--probe') &&
       (!s ||
@@ -653,7 +653,7 @@ async function main() {
       config,
       root,
       args.includes('--probe'),
-      s ?? engine,
+      s ? { ...s, appliedKeys } : engine,
       check,
       calls,
       newState,

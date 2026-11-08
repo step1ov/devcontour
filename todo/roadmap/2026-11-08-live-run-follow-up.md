@@ -36,6 +36,10 @@
   `tests/start-context-commit.test.ts`.
 - Команда остановки сервера workspace.
 - `doctor` не сообщает `budgets:applied` после одного `context-lock`.
+  Выполнено: ложное «не применено» — doctor сравнивал файл целиком. Сервер
+  запоминает digest ключей применённой конфигурации; `budgets:applied` —
+  только при отличии `budgets`/`prices`, иначе `config:applied` с ключами;
+  тест `tests/budget-doctor.test.ts`.
 - `usage_report` в embedded без `repositoryId` показывает все вызовы
   workspace, включая ревью ответа.
 - `session-handoff --board` для невыпущенной доски.

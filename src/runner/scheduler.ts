@@ -388,6 +388,7 @@ export class Scheduler {
       this.h.pinLegacyApprovals();
     // Запрошенное операцией применение конфигурации — до выдачи.
     serveReconfigure(this.h, join(this.root, 'config.json'), this.owner);
+    this.h.noteAppliedKeys();
     const runner = this.runner;
     if (!this.h.store.view().paused && runner.active < this.h.config.concurrency) {
       // Сверка базы — git на каждом такте; без расхождения повторно не читается.
