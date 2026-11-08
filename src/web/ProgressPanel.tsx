@@ -27,6 +27,7 @@ import { WorkerCards } from './Workers.tsx';
 import { taskStatus } from './status.ts';
 import { Badge } from '@/ui/badge.tsx';
 import { Card, CardContent, CardHeader, CardTitle } from '@/ui/card.tsx';
+import { InputPolicyCard, type InputPolicyConfig } from './InputPolicy.tsx';
 
 // What the operator wants to know while work runs: how far the whole thing is,
 // how far each architectural block is, who is holding which task right now, and
@@ -104,8 +105,8 @@ const eventNames: Record<string, string> = {
   preparation_question: 'Задан вопрос пользователю',
   preparation_progress: 'Заметка о работе агента',
   'config.saved': 'Сохранена конфигурация',
-  'config.applied': 'Сервер применил бюджеты и тарифы',
-  'config.apply-refused': 'Бюджеты и тарифы не применены',
+  'config.applied': 'Сервер применил конфигурацию',
+  'config.apply-refused': 'Конфигурация не применена',
   'context.locked': 'Закреплены context packs',
   'task.created': 'Создана задача',
   'task.status': 'Изменён статус задачи',
@@ -671,6 +672,7 @@ export type PanelProgress = {
 export function ProgressPanel({
   state,
   onSelect,
+  onConfigChanged,
 }: {
   state: {
     /** Задачи текущей работы; итоги по всей истории — в `progress`. */
@@ -700,7 +702,7 @@ export function ProgressPanel({
     pauseReason?: DevContourState['pauseReason'];
     waits?: DevContourState['waits'];
     workflows?: WorkflowView[];
-    config: {
+    config: InputPolicyConfig & {
       repositories?: { id: string; name?: string; kind?: string }[];
       gates?: Gate[];
       packs?: {
@@ -712,6 +714,8 @@ export function ProgressPanel({
     };
   };
   onSelect?: (taskId: string) => void;
+  /** Конфигурация изменена из панели: сводку стоит перечитать сразу. */
+  onConfigChanged?: () => void;
 }) {
   // Итоги — агрегаты сервера по всей истории: клиенту не нужны все попытки.
   // Черновик — запланированная работа, а не мусор; скрывается только отменённое.
@@ -738,6 +742,7 @@ export function ProgressPanel({
         gates={state.config.gates}
         packs={state.config.packs}
       />
+      <InputPolicyCard config={state.config} onChanged={onConfigChanged} />
 
       <Card>
         <CardHeader className="pb-3">

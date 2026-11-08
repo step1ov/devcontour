@@ -2215,6 +2215,7 @@ export function App() {
                     </p>
                     <ProgressPanel
                       state={data}
+                      onConfigChanged={() => void refresh()}
                       onSelect={(id) => {
                         setSelected(id);
                         setTab('list');
