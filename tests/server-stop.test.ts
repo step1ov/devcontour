@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import {
+  cpSync,
   existsSync,
   mkdtempSync,
   readFileSync,
@@ -45,6 +46,7 @@ test('stop terminates the recorded workspace server and refuses a process that i
   const workspace = realpathSync(mkdtempSync(join(tmpdir(), 'devcontour-stop-')));
   const root = join(workspace, '.devcontour-local');
   const children: ChildProcess[] = [];
+  const copy = realpathSync(mkdtempSync(join(tmpdir(), 'devcontour-stop-copy-')));
   try {
     const server = spawn(
       cli[0],
@@ -66,8 +68,18 @@ test('stop terminates the recorded workspace server and refuses a process that i
     const identity = (await (await fetch(new URL('/api/server', started.url))).json()) as {
       pid: number;
       instance: string;
+      dataRoot: string;
     };
-    assert.deepEqual(identity, { pid: server.pid, instance: started.instance });
+    assert.deepEqual(identity, { pid: server.pid, instance: started.instance, dataRoot: root });
+
+    // Workspace скопирован вместе с записью (`cp -r`): pid и экземпляр
+    // подтверждает сервер оригинала, но его каталог данных — не копии.
+    cpSync(root, join(copy, '.devcontour-local'), { recursive: true });
+    const copied = await command([...cli, 'stop', '--workspace', copy], process.cwd());
+    assert.notEqual(copied.code, 0);
+    assert.match(copied.stderr, new RegExp(`pid ${server.pid} не подтвердил`));
+    assert.match(copied.stderr, /сервер другого каталога данных/);
+    assert.ok(processAlive(server.pid!), 'сервер оригинала не остановлен по скопированной записи');
 
     // Чужой живой процесс под записанным pid: сервер по адресу его не подтверждает.
     const foreign = spawn('sleep', ['60'], { stdio: 'ignore' });
@@ -117,6 +129,7 @@ test('stop terminates the recorded workspace server and refuses a process that i
   } finally {
     for (const child of children) if (child.exitCode === null) child.kill('SIGKILL');
     rmSync(workspace, { recursive: true, force: true });
+    rmSync(copy, { recursive: true, force: true });
   }
 });
 

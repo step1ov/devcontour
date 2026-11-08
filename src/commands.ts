@@ -1437,7 +1437,12 @@ async function main() {
   if (!Number.isInteger(port) || (port !== 0 && port < 1024) || port > 65535)
     throw new Error('Некорректный port');
   const instance = serverInstance();
-  const app = await serve(h, scheduler, { port, dev: args.includes('--dev'), instance });
+  const app = await serve(h, scheduler, {
+    port,
+    dev: args.includes('--dev'),
+    instance,
+    dataRoot: root,
+  });
   writeServerRecord(root, {
     pid: process.pid,
     url: app.url,

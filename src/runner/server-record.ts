@@ -5,13 +5,15 @@
 // процесс только тогда, когда сервер по записанному адресу сам подтверждает
 // тот же pid и тот же экземпляр (`GET /api/server`). Pid, переиспользованный
 // чужим процессом, или чужой сервер на том же порту этого подтверждения не
-// дают — такой процесс не трогается.
+// дают — такой процесс не трогается. Сервер называет и свой каталог данных:
+// запись, скопированная вместе с workspace (`cp -r`), указывает на сервер
+// исходного workspace, и его копия не останавливает.
 //
 // Сервер версии до появления записи её не пишет. Без записи `stop` читает
 // роль controller из базы (только чтение, как doctor): живая роль — процесс
 // без записи держит workspace, и `stop` отказывает, не посылая сигнала.
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { controllerRow, effectiveLeader, readOnlyLocation } from '../core/store.ts';
@@ -68,6 +70,9 @@ export type StopResult =
   | { status: 'stopped'; pid: number; url: string }
   | { status: 'not-running'; detail: string }
   | { status: 'running-unrecorded'; owner: string; leaseUntil: string; detail: string };
+
+/** Канонический каталог данных: его называет `GET /api/server`. */
+export const dataIdentity = (root: string) => (existsSync(root) ? realpathSync(root) : root);
 
 /**
  * Живая роль controller базы `root`, прочитанная без записи. Базы или
@@ -136,7 +141,7 @@ export async function stopServer(
       `Сервер pid ${record.pid} уже не работает; устаревшая запись ${path} удалена`,
     );
   }
-  const identity = await confirm(record, options.confirmMs ?? 3000);
+  const identity = await confirm(record, dataIdentity(root), options.confirmMs ?? 3000);
   if (identity !== 'ours')
     throw new Error(
       `Процесс pid ${record.pid} не подтвердил, что он — сервер этого workspace (${record.url}: ${identity}). DevContour не останавливает чужой процесс. Проверьте процесс сами; если сервер этого workspace не запущен, удалите устаревшую запись ${path}`,
@@ -155,7 +160,7 @@ export async function stopServer(
   return { status: 'stopped', pid: record.pid, url: record.url };
 }
 
-async function confirm(record: ServerRecord, timeoutMs: number) {
+async function confirm(record: ServerRecord, dataRoot: string, timeoutMs: number) {
   let url: URL;
   try {
     url = new URL('/api/server', record.url);
@@ -167,10 +172,17 @@ async function confirm(record: ServerRecord, timeoutMs: number) {
   try {
     const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
     if (!response.ok) return `ответ ${response.status}`;
-    const body = (await response.json()) as { pid?: unknown; instance?: unknown };
-    return body.pid === record.pid && body.instance === record.instance
+    const body = (await response.json()) as {
+      pid?: unknown;
+      instance?: unknown;
+      dataRoot?: unknown;
+    };
+    if (body.pid !== record.pid || body.instance !== record.instance)
+      return 'по адресу отвечает другой сервер';
+    // Запись скопирована вместе с workspace: сервер записи ведёт другие данные.
+    return body.dataRoot === dataRoot
       ? 'ours'
-      : 'по адресу отвечает другой сервер';
+      : `по адресу отвечает сервер другого каталога данных (${typeof body.dataRoot === 'string' ? body.dataRoot : 'не назван'}); запись, вероятно, скопирована вместе с workspace`;
   } catch (error) {
     return `сервер не отвечает (${error instanceof Error ? error.message : String(error)})`;
   }

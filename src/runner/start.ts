@@ -29,6 +29,7 @@ export async function startWorkspace(
     new Preparation(store).enable();
     const app = await serve(undefined, undefined, {
       ...options,
+      dataRoot: root,
       bootstrap: {
         store,
         workspace: canonical,
