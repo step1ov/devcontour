@@ -31,7 +31,9 @@
 ## 4. Мелочи эксплуатации
 
 - START: перед коммитом обновлённого контекста перемотать основную ветку к
-  `devcontour/accepted`.
+  `devcontour/accepted`. Выполнено: шаг `merge --ff-only devcontour/accepted`
+  перед коммитом правок, `context-lock` и `base-update`; тест
+  `tests/start-context-commit.test.ts`.
 - Команда остановки сервера workspace.
 - `doctor` не сообщает `budgets:applied` после одного `context-lock`.
 - `usage_report` в embedded без `repositoryId` показывает все вызовы
