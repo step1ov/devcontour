@@ -865,7 +865,11 @@ export function panelRuns(
  */
 function runDetail(run: Run) {
   const { partial, evidence, assumptions, ...rest } = run;
-  const decisions = assumptionLines({ assumptions, inputPolicy: run.inputPolicy });
+  const decisions = assumptionLines({
+    assumptions,
+    inputPolicy: run.inputPolicy,
+    failureKind: run.failureKind,
+  });
   return {
     ...clip(rest),
     // Токен владения попыткой — не для панели.
