@@ -1,8 +1,8 @@
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { inputHolds } from './input.ts';
 import { z } from 'zod';
 import type { DevContour } from '../core/service.ts';
-import { specDigest } from '../core/service.ts';
+import { loadedDigest, specDigest } from '../core/service.ts';
 import {
   DomainError,
   type Board,
@@ -22,6 +22,9 @@ import { LeadWorkflow } from '../core/lead-workflow.ts';
 import { taskProgress } from './context.ts';
 import { checksSummary } from './checks.ts';
 import { DIAGNOSTIC, SHORT, clip, short } from './bounded.ts';
+import { workspaceDeclares } from '../runner/budget-doctor.ts';
+import { configApplyKeys, reconfigureSlotBusy } from '../runner/reconfigure.ts';
+import { loadConfig } from '../runner/config.ts';
 
 /**
  * Проекции панели. Периодический опрос получает ограниченную сводку: строки
@@ -323,6 +326,59 @@ function changeSetLine(c: ChangeSet) {
   };
 }
 
+/**
+ * Порог вопросов исполнителя для панели: действующее значение, объявлен ли
+ * он в `workspace.json` (тогда маршрут `POST /api/config/input-policy`
+ * отказывает 409 и панель показывает значение только для чтения), digest
+ * действующей конфигурации — ожидаемый digest правки, — занятый слот запроса
+ * применения (то же правило, что у маршрута: пока он занят, правка получила
+ * бы 409) и расхождение config.json с действующей конфигурацией (маршрут
+ * сверяет файл: правка с digest действующей тоже получила бы 409).
+ */
+export function inputPolicyView(h: DevContour, state: Readonly<DevContourState>, root: string) {
+  const request = state.reconfigure;
+  return {
+    inputPolicy: h.config.inputPolicy ?? null,
+    inputPolicyDeclared: workspaceDeclares(h.config, 'inputPolicy'),
+    configDigest: h.configDigest,
+    configPending:
+      request && reconfigureSlotBusy(request)
+        ? {
+            operation: request.operation,
+            requestedAt: request.requestedAt,
+            /** Ключи запроса `config-apply`; у запроса операции изменения контракта — нет. */
+            keys: configApplyKeys(request.operation),
+            ...(request.appliedAt ? { appliedAt: request.appliedAt } : {}),
+            ...(request.error ? { error: short(request.error, SHORT) } : {}),
+          }
+        : null,
+    configDrift: configDrift(h, root),
+  };
+}
+
+/**
+ * config.json разошёлся с конфигурацией процесса: файл правлен и не применён
+ * (или применение отклонено, а файл остался с отклонённым значением). Байты
+ * сверяются с загрузкой дёшево; digest считается только при изменённых
+ * байтах — переформатирование без смысловой правки расхождением не считается.
+ */
+function configDrift(h: DevContour, root: string) {
+  const changed = h.configProvenance();
+  if (!changed) return null;
+  try {
+    const fileDigest = loadedDigest(loadConfig(join(root, 'config.json')));
+    return fileDigest === h.configDigest ? null : { fileDigest, reason: short(changed, SHORT)! };
+  } catch (error) {
+    return {
+      fileDigest: null,
+      reason: short(
+        `config.json не принят: ${error instanceof Error ? error.message : String(error)}`,
+        SHORT,
+      )!,
+    };
+  }
+}
+
 const summaryQuery = z.object({
   board: z.string().max(200).optional(),
   boardRevision: z.coerce.number().int().min(1).optional(),
@@ -568,6 +624,9 @@ function buildSummary(
       // Метка «без вызовов моделей» — только если их правда нет.
       modelRuntimes: modelRuntimes(h.config),
       approvalMode: h.config.approvalMode,
+      // Порог вопросов исполнителя: элемент панели меняет его с ожидаемым
+      // digest конфигурации или показывает объявление реестра.
+      ...inputPolicyView(h, state, root),
       completionMode: h.config.completionMode,
       storage: h.config.storage,
       concurrency: h.config.concurrency,

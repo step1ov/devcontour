@@ -2430,7 +2430,7 @@
     },
     {
       "name": "discussion_resolve",
-      "description": "Record how a change request was handled: accepted (refs to the new board revision or tasks created for it), rejected with a reason, or needs-answer (the operator answers in the panel and the request returns to discussion_inbox). Only the latest version of a request is handled; accepted and rejected are final. expectedVersion is the thread version from discussion_inbox. Reading a request is not handling it.",
+      "description": "Record how a change request was handled: accepted (refs to the board revision or tasks created after the request, or to a draft task edited after it, alone or with its unaccepted revision), rejected with a reason, or needs-answer (the operator answers in the panel and the request returns to discussion_inbox). Only the latest version of a request is handled; accepted and rejected are final. expectedVersion is the thread version from discussion_inbox. Reading a request is not handling it.",
       "readOnly": false,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

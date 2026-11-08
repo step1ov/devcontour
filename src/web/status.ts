@@ -4,11 +4,14 @@
 // «Готова к выдаче»), а задачу с незакрытыми зависимостями ход работ
 // показывал готовой.
 
+import { heldByInput } from './input-labels.ts';
+
 export type StatusTone = 'neutral' | 'ready' | 'waiting' | 'active' | 'done' | 'failed';
 export type StatusKey =
   | 'draft'
   | 'ready'
   | 'blocked'
+  | 'input'
   | 'running'
   | 'verifying'
   | 'reviewing'
@@ -21,6 +24,7 @@ export const statusNames: Record<StatusKey, string> = {
   draft: 'Черновик',
   ready: 'Готова к запуску',
   blocked: 'Ждёт зависимостей',
+  input: 'Ждёт ответа',
   running: 'Разработка',
   verifying: 'Проверки',
   reviewing: 'Ревью',
@@ -34,6 +38,7 @@ const tones: Record<StatusKey, StatusTone> = {
   draft: 'neutral',
   ready: 'ready',
   blocked: 'waiting',
+  input: 'waiting',
   running: 'active',
   verifying: 'active',
   reviewing: 'active',
@@ -75,6 +80,10 @@ type StatusInput = {
 };
 
 export function statusKey(t: StatusInput): StatusKey {
+  // Вопрос исполнителя держит задачу: движок записал остановку отказом
+  // (`failed`), но это ожидание ответа, а не сбой; после устаревшего
+  // применения задача `ready`, но не выдаётся до нового ответа.
+  if (heldByInput(t) && t.status !== 'done' && t.status !== 'cancelled') return 'input';
   if (t.status === 'ready' && t.blockers?.length) return 'blocked';
   return (t.status in statusNames ? t.status : 'draft') as StatusKey;
 }

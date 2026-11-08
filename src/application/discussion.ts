@@ -201,9 +201,15 @@ export class DiscussionService {
     if (v.refs.revision !== undefined && !v.refs.boardId)
       throw new DomainError('Ревизия указывается вместе с доской (refs.boardId)', 400);
     // Ссылки любой обработки — на существующую работу; принятие — на
-    // настоящую новую: ревизию доски или задачи, созданные после обращения.
+    // настоящую новую: ревизию доски или задачи, созданные после обращения,
+    // либо черновик, чья постановка исправлена после него (`specEditedAt`):
+    // черновик меняют правкой, новая задача для этого не нужна.
     if (v.outcome === 'accepted' && !v.refs.boardId && !v.refs.taskIds?.length)
       throw new DomainError('Принятое обращение ссылается на ревизию доски или задачи', 400);
+    const changedAfter = (id: string) => {
+      const t = state.tasks.find((x) => x.id === id);
+      return !!t && (t.specEditedAt ?? t.createdAt) > request.createdAt;
+    };
     if (v.refs.boardId) {
       const board = state.boards.find((b) => b.id === v.refs.boardId);
       const revision =
@@ -211,13 +217,25 @@ export class DiscussionService {
           ? board?.revisions.at(-1)
           : board?.revisions.find((r) => r.number === v.refs.revision);
       if (!revision) throw new DomainError('Ревизия доски не найдена', 404);
-      if (v.outcome === 'accepted' && revision.createdAt <= request.createdAt)
+      // Непринятая ревизия меняется на месте: задача обращения или задача
+      // из refs.taskIds, добавленная или исправленная в ней после обращения,
+      // — уже внесённое изменение; правка посторонней задачи ревизии — нет.
+      // Принятая ревизия неизменна: изменение — только новая ревизия.
+      const named = (id: string) => id === request.taskId || !!v.refs.taskIds?.includes(id);
+      if (
+        v.outcome === 'accepted' &&
+        revision.createdAt <= request.createdAt &&
+        !(
+          revision.status !== 'accepted' &&
+          revision.taskIds.some((id) => named(id) && changedAfter(id))
+        )
+      )
         throw new DomainError('Ревизия старше обращения: изменение ещё не внесено', 409);
     }
     for (const id of v.refs.taskIds ?? []) {
       const t = state.tasks.find((x) => x.id === id);
       if (!t) throw new DomainError('Задача не найдена: ' + id, 404);
-      if (v.outcome === 'accepted' && t.createdAt <= request.createdAt)
+      if (v.outcome === 'accepted' && !changedAfter(id))
         throw new DomainError('Задача старше обращения: изменение ещё не внесено: ' + id, 409);
     }
     return this.append(request.taskId, 'lead', {

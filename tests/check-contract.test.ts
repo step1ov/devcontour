@@ -526,6 +526,9 @@ test('AC07: a plan whose first task needs a future node is not approved after re
     assert.equal(r.prompts.length, 1);
     assert.match(r.prompts[0], /independent acceptability/);
     assert.match(r.prompts[0], /"propertyScope"/);
+    // Ревьюер плана знает, какой роли нужен согласованный контракт.
+    assert.match(r.prompts[0], /"role":"backend","requiresContract":true/);
+    assert.match(r.prompts[0], /requiresContract=false needs no separate contract/);
     assert.ok(f.store.read().tasks.every((t) => t.status === 'draft'));
     edit(['knapsack-optimal']);
     const approved = await reviewPlan(f.h, p.root, board.id, 'codex', r.adapters);

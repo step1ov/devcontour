@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { ZodError, z } from 'zod';
 import { DevContour, loadedDigest, operationalKeys, type OperationalKey } from '../core/service.ts';
-import { DomainError, type Config } from '../core/model.ts';
+import { DomainError, type Config, type DevContourState } from '../core/model.ts';
 import { Store } from '../core/store.ts';
 import { repositories } from '../core/repositories.ts';
 import { executionOf } from '../harness/execution.ts';
@@ -132,6 +132,17 @@ export function configApplyKeys(operation: string): OperationalKey[] | undefined
 }
 
 /**
+ * Занят ли слот запроса применения: запрос другой операции занят и после
+ * `appliedAt` или отказа, пока она его не сняла; завершённый (применённый
+ * или отклонённый) запрос `config-apply` никто не ждёт — его снимает новый
+ * запрос. Одно правило для `config-apply`, маршрута порога из панели и вида
+ * панели (`configPending`).
+ */
+export function reconfigureSlotBusy(request: DevContourState['reconfigure']) {
+  return !!request && !(configApplyKeys(request.operation) && (request.appliedAt || request.error));
+}
+
+/**
  * Ключи без `--keys` — прежний состав запроса (`budgets,prices`). Сервер
  * версии до `stallSweep` не знает этого ключа: запрос с ним он прочитал бы не
  * как config-apply, а как применение конфигурации операцией, и отклонил бы
@@ -253,8 +264,7 @@ export async function requestConfigApply(
     // оставшийся после падения между подтверждением и снятием снимается здесь.
     store.atomic(() => {
       const current = store.read().reconfigure;
-      if (current && configApplyKeys(current.operation) && (current.appliedAt || current.error))
-        h.clearReconfigure(current.operation);
+      if (current && !reconfigureSlotBusy(current)) h.clearReconfigure(current.operation);
       else if (current)
         throw new Error(
           `Конфигурацию сейчас применяет операция ${current.operation}` +
@@ -366,7 +376,7 @@ export function requestInputPolicy(h: DevContour, root: string, raw: unknown) {
     );
   if (loadedDigest(current) !== input.expectedConfigDigest)
     throw new DomainError(
-      'config.json изменился после того, как его прочитала панель: обновите страницу и повторите',
+      'config.json отличается от конфигурации, которую видела панель: в файле неприменённые правки (примените их devcontour config-apply или верните файл) либо его изменили после чтения — обновите страницу и повторите',
       409,
     );
   const file = JSON.parse(text) as Record<string, unknown>;
@@ -396,9 +406,9 @@ export function requestInputPolicy(h: DevContour, root: string, raw: unknown) {
   try {
     h.store.atomic(() => {
       const busy = h.store.read().reconfigure;
-      if (busy && !(configApplyKeys(busy.operation) && (busy.appliedAt || busy.error)))
+      if (reconfigureSlotBusy(busy))
         throw new DomainError(
-          `Конфигурацию сейчас применяет операция ${busy.operation}: дождитесь её и повторите`,
+          `Конфигурацию сейчас применяет операция ${busy!.operation}: дождитесь её и повторите`,
           409,
         );
       if (busy) h.clearReconfigure(busy.operation);

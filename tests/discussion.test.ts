@@ -188,6 +188,132 @@ test('D02-C: обращение, его обработка и новая рев�
   }
 });
 
+test('D02-C2: обращение к черновику принимается правкой черновика; принятая ревизия по-прежнему требует новой', async () => {
+  const w = world();
+  try {
+    const request = w.d.post(
+      {
+        taskId: w.task.id,
+        kind: 'change-request',
+        text: 'Уточнить критерий черновика',
+        idempotencyKey: key(1),
+        expectedVersion: 0,
+      },
+      'operator',
+    );
+    const resolve = (refs: object, n: number) =>
+      w.d.resolve({
+        requestId: request.message.id,
+        outcome: 'accepted',
+        reason: 'Внесено правкой черновика',
+        refs,
+        idempotencyKey: key(n),
+        expectedVersion: request.version,
+      });
+    // Черновик ещё не исправлен — изменение не внесено.
+    assert.throws(() => resolve({ taskIds: [w.task.id] }, 2), /Задача старше обращения/);
+    assert.throws(
+      () => resolve({ boardId: w.board.id, revision: 1, taskIds: [w.task.id] }, 2),
+      /Ревизия старше обращения/,
+    );
+    await new Promise((r) => setTimeout(r, 5));
+    const draft = w.store.read().tasks.find((t) => t.id === w.task.id)!;
+    w.h.editTask(
+      w.task.id,
+      { ...input('Задача с обсуждением'), acceptance: ['Уточнённый критерий проверен.'] },
+      specDigest(draft),
+    );
+    // Правка черновика после обращения — внесённое изменение: и задача, и
+    // её непринятая ревизия.
+    const done = resolve({ boardId: w.board.id, revision: 1, taskIds: [w.task.id] }, 2);
+    assert.equal(done.message.kind, 'disposition');
+    assert.deepEqual(w.d.inbox({}).requests, []);
+
+    // Принятая ревизия неизменна: её задача после обращения не правится, и
+    // ссылка на неё не принимает обращение.
+    const accepted = w.h.createBoard('Accepted board');
+    const kept = w.h.addTask(accepted.id, input('Принятая задача'));
+    w.h.approve(accepted.id);
+    complete(w.h, kept.id);
+    w.h.accept(accepted.id, MERGED);
+    await new Promise((r) => setTimeout(r, 5));
+    const late = w.d.post(
+      {
+        taskId: kept.id,
+        kind: 'change-request',
+        text: 'Изменить принятое',
+        idempotencyKey: key(3),
+        expectedVersion: 0,
+      },
+      'operator',
+    );
+    for (const refs of [{ boardId: accepted.id }, { taskIds: [kept.id] }])
+      assert.throws(
+        () =>
+          w.d.resolve({
+            requestId: late.message.id,
+            outcome: 'accepted',
+            reason: 'Принято',
+            refs,
+            idempotencyKey: key(4),
+            expectedVersion: late.version,
+          }),
+        /старше обращения/,
+      );
+  } finally {
+    w.cleanup();
+  }
+});
+
+test('D02-C3: правка без изменений и правка посторонней задачи обращение не принимают', async () => {
+  const w = world();
+  try {
+    const other = w.h.addTask(w.board.id, input('Посторонняя задача ревизии'));
+    const request = w.d.post(
+      {
+        taskId: w.task.id,
+        kind: 'change-request',
+        text: 'Уточнить критерий черновика',
+        idempotencyKey: key(1),
+        expectedVersion: 0,
+      },
+      'operator',
+    );
+    const resolve = (refs: object) =>
+      w.d.resolve({
+        requestId: request.message.id,
+        outcome: 'accepted',
+        reason: 'Внесено',
+        refs,
+        idempotencyKey: key(2),
+        expectedVersion: request.version,
+      });
+    await new Promise((r) => setTimeout(r, 5));
+    // Правка с той же постановкой — изменения нет.
+    const same = w.store.read().tasks.find((t) => t.id === w.task.id)!;
+    w.h.editTask(w.task.id, input('Задача с обсуждением'), specDigest(same));
+    assert.equal(w.store.read().tasks.find((t) => t.id === w.task.id)!.specEditedAt, undefined);
+    assert.throws(() => resolve({ taskIds: [w.task.id] }), /Задача старше обращения/);
+    // Исправлена посторонняя задача ревизии: ссылка на доску её не засчитывает.
+    const unrelated = w.store.read().tasks.find((t) => t.id === other.id)!;
+    w.h.editTask(
+      other.id,
+      { ...input('Посторонняя задача ревизии'), acceptance: ['Другой критерий проверен.'] },
+      specDigest(unrelated),
+    );
+    assert.throws(() => resolve({ boardId: w.board.id }), /Ревизия старше обращения/);
+    assert.throws(
+      () => resolve({ boardId: w.board.id, taskIds: [w.task.id] }),
+      /Ревизия старше обращения/,
+    );
+    // Названная в refs.taskIds исправленная задача — внесённое изменение.
+    const done = resolve({ boardId: w.board.id, taskIds: [other.id] });
+    assert.equal(done.message.kind, 'disposition');
+  } finally {
+    w.cleanup();
+  }
+});
+
 test('D02-D: сообщения переживают перезапуск; страницы по cursor без пропусков; handoff даёт обращения', () => {
   const w = world();
   try {

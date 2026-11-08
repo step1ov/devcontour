@@ -115,6 +115,8 @@ const waitingReasons: Record<string, string> = {
     'План утверждён при другой политике исполнения: задача не выдаётся до повторного утверждения.',
   budget_blocked: 'Бюджет расходов не пускает задачу к выдаче.',
   failure_requires_diagnosis: 'Разберите причину сбоя перед повторной попыткой.',
+  input_required:
+    'Исполнитель остановился с вопросом: задача ждёт ответа и его применения, это не сбой.',
   attempts_exhausted: 'Лимит попыток исчерпан. Нужна диагностика и пересмотр решения.',
 };
 // Колонки привычной доски задач. Статус задачи и фаза её прогона уже
@@ -1509,7 +1511,8 @@ export function App() {
   const liveTasks = tasks.filter((t) => t.status !== 'cancelled');
   const done = liveTasks.filter((t) => t.status === 'done').length;
   const inWork = liveTasks.filter((t) => t.activeRunId).length;
-  const failedCount = liveTasks.filter((t) => t.status === 'failed').length;
+  // Остановка вопросом исполнителя — ожидание ответа, а не сбой.
+  const failedCount = liveTasks.filter((t) => t.status === 'failed' && !heldByInput(t)).length;
   const blocked = liveTasks.filter((t) => status(t) === 'blocked').length;
   const ready = liveTasks.filter((t) => status(t) === 'ready').length;
   const drafts = tasks.filter((t) => t.status === 'draft').length;
@@ -1667,11 +1670,13 @@ export function App() {
               ? `Сейчас: ${phaseLabel[run.phase] ?? run.phase}${run.liveness ? ', ' + livenessText(livenessNow(run.liveness, now)) : ''}.`
               : t.status === 'draft'
                 ? 'План не утверждён.'
-                : t.status === 'failed'
-                  ? 'Сбой, нужен повтор.'
-                  : data.paused
-                    ? 'Готова к запуску, ждёт очередь.'
-                    : 'Готова, ждёт свободного исполнителя.'}
+                : heldByInput(t)
+                  ? 'Ждёт ответа на вопрос исполнителя.'
+                  : t.status === 'failed'
+                    ? 'Сбой, нужен повтор.'
+                    : data.paused
+                      ? 'Готова к запуску, ждёт очередь.'
+                      : 'Готова, ждёт свободного исполнителя.'}
           </span>
         </>
       );
@@ -2215,6 +2220,7 @@ export function App() {
                     </p>
                     <ProgressPanel
                       state={data}
+                      onConfigChanged={() => void refresh()}
                       onSelect={(id) => {
                         setSelected(id);
                         setTab('list');

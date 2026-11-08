@@ -30,6 +30,7 @@ import {
   type InputRequest,
 } from 'devcontour-harness';
 import { DomainError, type Task } from '../core/model.ts';
+import { hrefs } from './panel-links.ts';
 import type { DevContour } from '../core/service.ts';
 import { executionOf, reviewExecutionOf, toDomain } from '../harness/execution.ts';
 import { devcontourContextSource, pinnedSnapshot, taskPacks } from '../harness/host.ts';
@@ -270,7 +271,7 @@ export class InputService {
             ? { actor: 'lead' as const, next: 'input_answer, or the operator answers in the panel' }
             : {
                 actor: 'operator' as const,
-                next: `answer in the panel: /tasks/${request.workId}#input`,
+                next: `answer in the panel: ${hrefs.input(request.workId)}`,
               };
       case 'answer-saved':
       case 'stale':
@@ -287,7 +288,7 @@ export class InputService {
           ? { actor: 'lead' as const, next: 'input_target, then input_apply' }
           : {
               actor: 'operator' as const,
-              next: `apply in the panel: /tasks/${request.workId}#input`,
+              next: `apply in the panel: ${hrefs.input(request.workId)}`,
             };
       case 'review-rejected':
         return agent && lead
@@ -298,11 +299,11 @@ export class InputService {
           : agent
             ? {
                 actor: 'operator' as const,
-                next: `the reviewer rejected the answer to a question the lead may not decide: the operator reads the findings and corrects the answer in the panel (/tasks/${request.workId}#input)`,
+                next: `the reviewer rejected the answer to a question the lead may not decide: the operator reads the findings and corrects the answer in the panel (${hrefs.input(request.workId)})`,
               }
             : {
                 actor: 'operator' as const,
-                next: `the reviewer rejected the answer: read the findings in the panel (/tasks/${request.workId}#input); correct the answer, or apply only with explicit confirmation`,
+                next: `the reviewer rejected the answer: read the findings in the panel (${hrefs.input(request.workId)}); correct the answer, or apply only with explicit confirmation`,
               };
       case 'applied-awaiting-claim':
         return { actor: 'lead' as const, next: 'wait for the next attempt of the task' };

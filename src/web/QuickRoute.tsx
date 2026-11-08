@@ -71,6 +71,8 @@ interface QuickResult {
   boardId: string | null;
   resultSha: string | null;
   attempts: number;
+  /** Задачу держит вопрос исполнителя: ожидание ответа, а не сбой попытки. */
+  waitingInput?: boolean;
   run: {
     id: string;
     status: string;
@@ -472,12 +474,16 @@ function Result({ view }: { view: QuickView }) {
                   variant={
                     task.status === 'done'
                       ? 'success'
-                      : task.status === 'failed'
-                        ? 'destructive'
-                        : 'ready'
+                      : task.waitingInput
+                        ? 'waiting'
+                        : task.status === 'failed'
+                          ? 'destructive'
+                          : 'ready'
                   }
                 >
-                  {taskStatusNames[task.status] ?? task.status}
+                  {task.waitingInput
+                    ? 'Ждёт ответа на вопрос'
+                    : (taskStatusNames[task.status] ?? task.status)}
                 </Badge>
               </div>
               <dl className="grid gap-2">

@@ -14,6 +14,7 @@ import { workspacePolicyDigest } from '../src/core/workspace.ts';
 import { executionDigest } from 'devcontour-harness';
 import { serve } from '../src/server/http.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
+import { inputPolicyView } from '../src/application/panel.ts';
 import {
   parseOperationalKeys,
   requestConfigApply,
@@ -609,6 +610,178 @@ test('The panel refuses an inputPolicy change when workspace.json declares input
     assert.equal(ok.status, 200, await ok.clone().text());
   } finally {
     await app.close();
+    s.cleanup();
+  }
+});
+
+test('The panel summary carries the inputPolicy view: value, declaration, expected digest and a pending apply', async () => {
+  const s = served();
+  const registry = mkdtempSync(join(s.root, 'workspace-'));
+  s.edit((raw) => (raw.workspaceRoot = registry));
+  // Сервер с workspaceRoot из файла: объявление реестра читается по нему.
+  const server = new DevContour(new Store(join(s.root, 'state.sqlite')), loadConfig(s.path));
+  try {
+    assert.ok(server.leader('server'));
+    server.recordConfig('server');
+    const view = () => inputPolicyView(server, server.store.read(), s.root);
+    assert.deepEqual(view(), {
+      inputPolicy: null,
+      inputPolicyDeclared: false,
+      configDigest: loadedDigest(loadConfig(s.path)),
+      configPending: null,
+      configDrift: null,
+    });
+    // Сводка панели несёт те же поля: элементу панели больше ничего не нужно.
+    const app = await serve(server, new Scheduler(server, s.root), { port: 0 });
+    try {
+      const summary = (await (await fetch(app.url + '/api/summary')).json()) as {
+        config: Record<string, unknown>;
+      };
+      for (const [key, value] of Object.entries(view()))
+        assert.deepEqual(summary.config[key], value, key);
+      const state = (await (await fetch(app.url + '/api/state')).json()) as {
+        config: Record<string, unknown>;
+      };
+      assert.equal(state.config.inputPolicyDeclared, false);
+    } finally {
+      await app.close();
+    }
+    // Запрос записан, но не применён: панель видит его и не шлёт правку,
+    // которую маршрут отклонил бы 409.
+    const requested = requestInputPolicy(server, s.root, {
+      threshold: 11,
+      criticalPaths: ['src/billing/'],
+      expectedConfigDigest: view().configDigest,
+    });
+    assert.deepEqual(view().configPending, {
+      operation: requested.operation,
+      requestedAt: server.store.read().reconfigure!.requestedAt,
+      keys: ['inputPolicy'],
+    });
+    assert.equal(view().inputPolicy, null, 'до применения действует прежний порог');
+    server.leader('server');
+    serveReconfigure(server, s.path, 'server');
+    assert.deepEqual(view(), {
+      inputPolicy: { threshold: 11, criticalPaths: ['src/billing/'] },
+      inputPolicyDeclared: false,
+      configDigest: loadedDigest(loadConfig(s.path)),
+      configPending: null,
+      configDrift: null,
+    });
+    const [applied] = server.store.events().filter((e) => e.type === 'config.applied');
+    assert.deepEqual((applied.data as { changed: string[] }).changed, ['inputPolicy']);
+    // Объявление реестра — признак для панели: значение только для чтения.
+    writeFileSync(
+      join(registry, 'workspace.json'),
+      JSON.stringify({ inputPolicy: { threshold: 9 } }),
+    );
+    assert.equal(view().inputPolicyDeclared, true);
+  } finally {
+    server.store.close();
+    s.cleanup();
+  }
+});
+
+test('configPending follows the route busy rule: an applied or refused contract-change slot stays busy until cleared', () => {
+  const s = served();
+  try {
+    const view = () => inputPolicyView(s.server, s.server.store.read(), s.root);
+    const change = () =>
+      requestInputPolicy(s.server, s.root, {
+        threshold: 3,
+        expectedConfigDigest: s.server.configDigest,
+      });
+    // Операция изменения контракта применена, но ещё не сняла запрос: слот занят.
+    const operation = 'contract-change:CC-1';
+    assert.ok(s.server.requestReconfigure(operation, s.server.configDigest));
+    s.server.leader('server');
+    assert.ok(s.server.settleReconfigure(operation, s.server.configDigest, 'server'));
+    assert.ok(s.server.store.read().reconfigure?.appliedAt, 'применена, не снята');
+    const pending = view().configPending;
+    assert.equal(pending?.operation, operation);
+    assert.ok(pending?.appliedAt);
+    assert.equal(pending?.keys, undefined);
+    const before = readFileSync(s.path, 'utf8');
+    assert.throws(change, /применяет операция contract-change:CC-1/);
+    assert.equal(readFileSync(s.path, 'utf8'), before);
+    // Отклонённая и не снятая операция — тоже занята.
+    s.server.clearReconfigure(operation);
+    assert.ok(s.server.requestReconfigure('contract-change:CC-2', 'b'.repeat(64)));
+    s.server.settleReconfigure(
+      'contract-change:CC-2',
+      'b'.repeat(64),
+      'server',
+      'digest не совпал',
+    );
+    assert.equal(view().configPending?.error, 'digest не совпал');
+    assert.throws(change, /применяет операция contract-change:CC-2/);
+    // Завершённый config-apply никого не держит: слот свободен, правка проходит.
+    s.server.clearReconfigure('contract-change:CC-2');
+    const done = requestInputPolicy(s.server, s.root, {
+      threshold: 4,
+      expectedConfigDigest: s.server.configDigest,
+    });
+    serveReconfigure(s.server, s.path, 'server');
+    s.server.requestReconfigure(`config-apply:budgets:stale0001`, s.server.configDigest);
+    s.server.settleReconfigure(`config-apply:budgets:stale0001`, s.server.configDigest, 'server');
+    assert.ok(s.server.store.read().reconfigure?.appliedAt);
+    assert.equal(view().configPending, null);
+    assert.equal(
+      requestInputPolicy(s.server, s.root, {
+        threshold: 5,
+        expectedConfigDigest: s.server.configDigest,
+      }).status,
+      'requested',
+    );
+    assert.ok(done.operation);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('configDrift names unapplied config.json edits and a refused apply; whitespace is not drift', () => {
+  const s = served();
+  try {
+    const view = () => inputPolicyView(s.server, s.server.store.read(), s.root);
+    assert.equal(view().configDrift, null);
+    // Переформатирование без смысловой правки — не расхождение.
+    writeFileSync(s.path, JSON.stringify(JSON.parse(readFileSync(s.path, 'utf8'))) + '\n\n');
+    assert.equal(view().configDrift, null);
+    // Неприменённая правка: маршрут откажет 409 с подсказкой config-apply.
+    s.edit((raw) => (raw.concurrency = 3));
+    const drift = view().configDrift;
+    assert.equal(drift?.fileDigest, loadedDigest(loadConfig(s.path)));
+    assert.match(drift?.reason ?? '', /изменился после загрузки/);
+    assert.throws(
+      () =>
+        requestInputPolicy(s.server, s.root, {
+          threshold: 5,
+          expectedConfigDigest: view().configDigest,
+        }),
+      /неприменённые правки .*config-apply/,
+    );
+    // Отклонённое применение: файл остаётся с отклонённым значением — расхождение.
+    const fresh = served();
+    try {
+      const freshView = () => inputPolicyView(fresh.server, fresh.server.store.read(), fresh.root);
+      requestInputPolicy(fresh.server, fresh.root, {
+        threshold: 9,
+        expectedConfigDigest: fresh.server.configDigest,
+      });
+      fresh.edit((raw) => (raw.concurrency = 3));
+      fresh.server.leader('server');
+      serveReconfigure(fresh.server, fresh.path, 'server');
+      assert.equal(fresh.events('config.apply-refused').length, 1);
+      assert.equal(freshView().configPending, null);
+      assert.ok(freshView().configDrift?.fileDigest);
+      // Битый файл — расхождение без digest, с причиной.
+      writeFileSync(fresh.path, '{');
+      assert.equal(freshView().configDrift?.fileDigest, null);
+      assert.match(freshView().configDrift!.reason, /config\.json не принят/);
+    } finally {
+      fresh.cleanup();
+    }
+  } finally {
     s.cleanup();
   }
 });

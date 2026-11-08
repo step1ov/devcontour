@@ -26,6 +26,7 @@ import {
   panelRun,
   panelRuns,
   panelSummary,
+  inputPolicyView,
   panelTask,
   panelTaskSearch,
 } from '../application/panel.ts';
@@ -277,6 +278,8 @@ export async function serve(
                 Object.values(h!.store.localRecords<UsageRecord>('usage', owner)),
               )
             : [];
+          // Задачу держит вопрос исполнителя: ожидание ответа, а не сбой попытки.
+          const asking = h ? inputHolds(h) : undefined;
           json(res, 200, {
             changeId: change.id,
             title: change.title,
@@ -299,7 +302,7 @@ export async function serve(
                       repo && r.run?.baseSha && head
                         ? await quickDiff(repo.path, r.run.baseSha, head).catch(() => null)
                         : null;
-                    return { ...r, diff };
+                    return { ...r, diff, ...(asking?.has(r.taskId) ? { waitingInput: true } : {}) };
                   }),
                 )
               : [],
@@ -604,8 +607,7 @@ export async function serve(
               approvalMode: h.config.approvalMode,
               // Порог вопросов исполнителя и digest действующей конфигурации:
               // панель меняет порог с ожидаемым digest.
-              inputPolicy: h.config.inputPolicy ?? null,
-              configDigest: h.configDigest,
+              ...inputPolicyView(h, state, scheduler.root),
               completionMode: h.config.completionMode,
               storage: h.config.storage,
               concurrency: h.config.concurrency,
