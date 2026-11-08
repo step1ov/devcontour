@@ -9,7 +9,7 @@ import { loadConfig } from '../../src/runner/config.ts';
 import { serve } from '../../src/server/http.ts';
 
 // Обезличенная большая история для e2e панели: учебное демо, размноженное.
-const port = Number(process.argv[2] ?? 4397);
+const port = Number(process.argv[2] ?? 0);
 const root = mkdtempSync(join(tmpdir(), 'devcontour-large-'));
 const data = join(root, 'data');
 await largeHistory(data, {
