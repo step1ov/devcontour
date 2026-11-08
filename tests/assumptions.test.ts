@@ -166,9 +166,39 @@ test('A fork at or above the pinned question threshold is the question that stop
     inputPolicy: { threshold: 7, criticalPaths: [] },
     assumptions: [fork('Какая модель данных?', 8), fork('Отступ в JSON?', 2), fork('Порог', 7)],
   } satisfies Pick<Run, 'status' | 'failureKind' | 'inputPolicy' | 'assumptions'>;
+  // Вопросом стала самая серьёзная развилка (8); вторая не ниже порога (7)
+  // видна с пометкой «не решено», а не пропадает.
   assert.deepEqual(
-    assumptionLines(stopped).map((a) => a.question),
-    ['Отступ в JSON?'],
+    assumptionLines(stopped).map((a) => [a.question, a.unresolved ?? false]),
+    [
+      ['Отступ в JSON?', false],
+      ['Порог', true],
+    ],
+  );
+  // Две развилки выше порога (9 и 8): вопрос — 9, а 8 видна нерешённой.
+  const two = {
+    ...stopped,
+    assumptions: [fork('Восьмая', 8), fork('Девятая', 9), fork('Мелочь', 1)],
+  };
+  assert.deepEqual(
+    assumptionLines(two).map((a) => [a.question, a.unresolved ?? false]),
+    [
+      ['Восьмая', true],
+      ['Мелочь', false],
+    ],
+  );
+  // Равная действующая серьёзность: вопрос — с большей самооценкой, затем первая.
+  const tie = {
+    ...stopped,
+    assumptions: [
+      { ...fork('Первая', 10), severity: 3 },
+      { ...fork('Вторая', 10), severity: 6 },
+      { ...fork('Третья', 10), severity: 6 },
+    ],
+  };
+  assert.deepEqual(
+    assumptionLines(tie).map((a) => a.question),
+    ['Первая', 'Третья'],
   );
   // Результат быстрого изменения берёт последнюю попытку — здесь остановленную.
   const state = {
@@ -180,7 +210,7 @@ test('A fork at or above the pinned question threshold is the question that stop
   const [result] = quickResult(bound(state, ['T-q']), 'PC-assume', []);
   assert.deepEqual(
     result.run?.assumptions.map((a) => a.question),
-    ['Отступ в JSON?'],
+    ['Отступ в JSON?', 'Порог'],
   );
   // Попытка прежней версии без закреплённой политики: порога нет, видны все.
   assert.equal(assumptionLines({ assumptions: stopped.assumptions }).length, 3);

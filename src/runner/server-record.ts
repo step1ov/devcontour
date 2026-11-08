@@ -71,8 +71,13 @@ export type StopResult =
   | { status: 'not-running'; detail: string }
   | { status: 'running-unrecorded'; owner: string; leaseUntil: string; detail: string };
 
-/** Канонический каталог данных: его называет `GET /api/server`. */
-export const dataIdentity = (root: string) => (existsSync(root) ? realpathSync(root) : root);
+/**
+ * Канонический каталог данных: его называет `GET /api/server`. Нативный
+ * realpath: на файловой системе без различия регистра (macOS) JS-вариант
+ * сохраняет регистр букв переданного пути, и путь в другом регистре читался
+ * бы как запись, скопированная вместе с workspace.
+ */
+export const dataIdentity = (root: string) => (existsSync(root) ? realpathSync.native(root) : root);
 
 /**
  * Живая роль controller базы `root`, прочитанная без записи. Базы или

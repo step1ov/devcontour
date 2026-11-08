@@ -7,6 +7,7 @@ import { once } from 'node:events';
 import {
   cpSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
@@ -18,6 +19,7 @@ import { join, resolve } from 'node:path';
 import { command } from '../src/runner/process.ts';
 import { processAlive } from '../src/runner/resources.ts';
 import {
+  dataIdentity,
   liveController,
   serverRecordPath,
   stopServer,
@@ -41,6 +43,25 @@ const record = (root: string) =>
   existsSync(serverRecordPath(root))
     ? (JSON.parse(readFileSync(serverRecordPath(root), 'utf8')) as ServerRecord)
     : undefined;
+
+test('The data root identity is the on-disk path whatever letter case the caller used', (t) => {
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), 'devcontour-case-')));
+  try {
+    const data = join(dir, 'Data');
+    mkdirSync(data);
+    assert.equal(dataIdentity(data), data);
+    const variant = join(dir, 'DATA');
+    if (!existsSync(variant)) {
+      t.skip('файловая система различает регистр букв: другой путь — другой каталог');
+      return;
+    }
+    // Сервер и stop называют один каталог одинаково, даже если пути
+    // переданы в разном регистре.
+    assert.equal(dataIdentity(variant), data);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('stop terminates the recorded workspace server and refuses a process that is not ours', async () => {
   const workspace = realpathSync(mkdtempSync(join(tmpdir(), 'devcontour-stop-')));

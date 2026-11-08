@@ -10,7 +10,7 @@ import { AgentContext } from '../src/application/context.ts';
 import { panelQueue, panelSummary, panelTask } from '../src/application/panel.ts';
 import { inputNextText } from '../src/core/input-labels.ts';
 import { chainBlockers } from '../src/core/work-status.ts';
-import { statusKey, taskStatus } from '../src/web/status.ts';
+import { kanbanColumnOf, statusKey, taskStatus } from '../src/web/status.ts';
 
 after(() => inputDemos.close());
 
@@ -50,6 +50,8 @@ test('A question stop reads as waiting for an answer, not as a failure to diagno
       { label: taskStatus(shown).label, tone: taskStatus(shown).tone },
       { label: 'Ждёт ответа', tone: 'waiting' },
     );
+    // Доска задач: колонка «Ждут ответа», а не «В работе — разработка и сбои».
+    assert.equal(kanbanColumnOf(shown), 'waiting');
 
     // Очередь панели: та же задача — ожидание ответа со следующим шагом, не сбой.
     type QueueItem = {
@@ -105,6 +107,7 @@ test('A question stop reads as waiting for an answer, not as a failure to diagno
       blockers: string[];
     };
     assert.equal(statusKey(after), 'failed');
+    assert.equal(kanbanColumnOf(after), 'doing');
     const failedInQueue = queued();
     assert.deepEqual(failedInQueue.blockers, []);
     assert.equal(failedInQueue.input, undefined);
@@ -116,4 +119,19 @@ test('A question stop reads as waiting for an answer, not as a failure to diagno
   } finally {
     await f.cleanup();
   }
+});
+
+test('The board column follows the shown status: a question hold waits apart from failures', () => {
+  const hold = ['input:R-1'];
+  assert.equal(kanbanColumnOf({ status: 'failed', blockers: hold }), 'waiting');
+  // Устаревшее применение: задача `ready`, но её держит вопрос.
+  assert.equal(kanbanColumnOf({ status: 'ready', blockers: hold }), 'waiting');
+  assert.equal(kanbanColumnOf({ status: 'failed' }), 'doing');
+  assert.equal(kanbanColumnOf({ status: 'running' }), 'doing');
+  assert.equal(kanbanColumnOf({ status: 'ready', blockers: ['T-2'] }), 'todo');
+  assert.equal(kanbanColumnOf({ status: 'draft' }), 'inbox');
+  assert.equal(kanbanColumnOf({ status: 'reviewing' }), 'review');
+  // Завершённую задачу прежний вопрос не держит.
+  assert.equal(kanbanColumnOf({ status: 'done', blockers: hold }), 'done');
+  assert.equal(kanbanColumnOf({ status: 'cancelled' }), 'done');
 });

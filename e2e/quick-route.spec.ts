@@ -232,7 +232,40 @@ test('Quick change: one change per request key, five steps, facts, setup plan, r
         json: {
           ...body,
           result: [
-            resultTask('T-1', 'Первая задача изменения', 'done', 1),
+            {
+              ...resultTask('T-1', 'Первая задача изменения', 'done', 1),
+              // Принятая попытка с решениями исполнителя: тексты — как у
+              // demo-исполнителя с маркером [demo:assume].
+              run: {
+                id: 'R-1',
+                status: 'succeeded',
+                baseSha: null,
+                candidateSha: null,
+                integrationSha: null,
+                candidate: [],
+                integration: [],
+                assumptions: [
+                  {
+                    question: 'Demo fixture: где хранить артефакт задачи?',
+                    chosen: 'deliverables/<id>.json, как у остальных задач',
+                    rationale: 'Так его читает fixture-проверка verify.mjs',
+                    severity: 2,
+                    effectiveSeverity: 2,
+                    floors: [],
+                    affects: [],
+                  },
+                  {
+                    question: 'Demo fixture: нужен ли отступ в JSON?',
+                    chosen: 'Два пробела',
+                    rationale: 'Совпадает с форматированием репозитория',
+                    severity: 1,
+                    effectiveSeverity: 4,
+                    floors: ['declared'],
+                    affects: ['product'],
+                  },
+                ],
+              },
+            },
             resultTask('T-2', 'Задача следующего этапа', 'draft', 2),
           ],
         },
@@ -247,6 +280,25 @@ test('Quick change: one change per request key, five steps, facts, setup plan, r
     await expect(summary.getByRole('listitem').nth(1)).toContainText('Этап 2');
     await expect(summary.getByRole('listitem').nth(1)).toContainText('Задача следующего этапа');
     await expect(page.getByText('Задачи изменения: принято 1 из 2')).toBeVisible();
+    // Решения исполнителя — в карточке задачи результата, рядом с проверками;
+    // у задачи без попытки списка нет.
+    const quick = page.getByRole('region', { name: 'Быстрое изменение' });
+    const decisions = quick.getByRole('region', { name: 'Решения исполнителя' });
+    await expect(decisions).toHaveCount(1);
+    await expect(decisions).toContainText('Решения исполнителя (2)');
+    const items = decisions.locator('[data-writer-decision]');
+    await expect(items).toHaveCount(2);
+    await expect(items.nth(0)).toContainText('Demo fixture: где хранить артефакт задачи?');
+    await expect(items.nth(0)).toContainText(
+      'Выбор: deliverables/<id>.json, как у остальных задач',
+    );
+    await expect(items.nth(0)).toContainText(
+      'Основание: Так его читает fixture-проверка verify.mjs',
+    );
+    await expect(items.nth(0)).toContainText('серьёзность 2');
+    await expect(items.nth(1)).toContainText(
+      'серьёзность 4 · исполнитель оценил 1 · поднята: объявленная область',
+    );
     await page.unroute('**/api/preparation/quick?*');
 
     expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);

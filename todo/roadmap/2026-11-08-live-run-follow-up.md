@@ -43,7 +43,9 @@
   `tests/start-context-commit.test.ts`.
 - `stop --workspace` останавливает сервер workspace по записи
   `.devcontour-local/server.json`; сигнал — только серверу, который
-  подтвердил pid и экземпляр через `GET /api/server`; описано в
+  подтвердил pid, экземпляр и свой каталог данных через `GET /api/server`
+  (запись, скопированная вместе с workspace, сервер оригинала не
+  останавливает); описано в
   `docs/cli.md`, тест `tests/server-stop.test.ts`.
 - `doctor` больше не сообщает ложное `budgets:applied` после одного
   `context-lock`: сервер запоминает digest ключей применённой конфигурации,

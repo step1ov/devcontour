@@ -29,7 +29,7 @@ import {
   previewProblems,
   stoppedWorkflows,
 } from './overview.ts';
-import { inputNextText, inputStateLabels } from '../core/input-labels.ts';
+import { inputNextText, inputStateLabels, repeatedQuestionText } from '../core/input-labels.ts';
 import { budgetBlocks, budgetHint } from './context.ts';
 import { InputService, inputHolds } from './input.ts';
 import { hrefs } from './panel-links.ts';
@@ -550,8 +550,11 @@ const inputSource: AttentionSourceRule = {
                 : `Вопрос исполнителя по задаче «${title}»: ${inputStateLabels[r.state] ?? r.state}`,
           // Следующий шаг — словами оператора: поле `next` сводки — указание
           // ведущему агенту по-английски, с операциями агентского API.
+          // Повторные остановки вопросом — первой строкой: длинный вопрос
+          // (он же — в форме ответа) не вытесняет сигнал за предел причины.
           reason: ctx.redact(
-            (rejected ? `Ревью отклонило ответ (раунд ${r.round}): ${findings} — ` : '') +
+            (r.questionStops ? `${repeatedQuestionText(r.questionStops)} ` : '') +
+              (rejected ? `Ревью отклонило ответ (раунд ${r.round}): ${findings} — ` : '') +
               (question ? `${question} — ` : '') +
               `Дальше: ${inputNextText({ ...r, operatorMode })}.`,
           ),
