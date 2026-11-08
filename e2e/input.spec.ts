@@ -248,6 +248,10 @@ test('A cancelled question leaves a retryable task: the retry button returns aft
   // Следующий шаг — тот же текст, что в карточке вопроса (inputNextText).
   await expect(queued).toContainText(/Дальше: (ответьте|ответит ведущий агент)/);
   await expect(queued).not.toContainText('Сбой');
+  // Сводка этапа считает её ожидающей ответа, а не «задачей со сбоем».
+  await expect(page.locator('[data-stage-waiting-input]')).toContainText(
+    /Ждут ответа на вопрос исполнителя: [1-9]/,
+  );
   await page.goto(`/?tab=list&board=${board}&task=${task}`);
   const inspector = page.getByRole('complementary', { name: 'Детали задачи' });
   const card = inspector.getByRole('region', { name: 'Вопрос исполнителя' });

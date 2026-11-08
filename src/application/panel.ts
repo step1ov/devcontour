@@ -92,6 +92,8 @@ export type PanelRun = Pick<
 > & {
   error?: string;
   boardId?: string;
+  /** Попытка выдана с ответом на вопрос исполнителя: продолжение, а не повтор. */
+  input?: { requestId: string };
   /** Последняя отметка стадии: с неё считается «сколько идёт фаза». */
   timings?: Run['timings'];
   /**
@@ -126,6 +128,7 @@ function runLine(run: Run, boardId: string | undefined, now: number): PanelRun {
     blocked: run.blocked,
     reusedFrom: run.reusedFrom,
     failureKind: run.failureKind,
+    ...(run.input ? { input: { requestId: run.input.requestId } } : {}),
     error: short(run.error),
     boardId,
     ...(run.status === 'active' && run.timings ? { timings: run.timings.slice(-1) } : {}),
@@ -608,7 +611,7 @@ function buildSummary(
       .map((w) => clip({ ...w, history: (w.history ?? []).slice(-5) })),
     dataRoot: resolve(root),
     ready,
-    progress: progressOf(state),
+    progress: progressOf(state, inputs),
     counts: {
       boards: state.boards.length,
       tasks: state.tasks.length,
@@ -647,8 +650,11 @@ export type PanelSummary = ReturnType<typeof buildSummary>;
  * задачи без тестового evidence. Считаются на сервере — клиенту не нужны все
  * попытки.
  */
-function progressOf(state: DevContourState) {
+function progressOf(state: DevContourState, inputs: ReadonlyMap<string, string>) {
   const tasks = state.tasks.filter((t) => t.status !== 'cancelled');
+  // Остановка вопросом записана отказом, но это ожидание ответа: повтор
+  // запрещён, пока вопрос открыт. Сводка «Задач со сбоем» её не считает.
+  const waitingInput = tasks.filter((t) => t.status === 'failed' && inputs.has(t.id)).length;
   const repos = [...new Set(tasks.map((t) => t.repositoryId))].sort();
   const gates = new Map<
     string,
@@ -676,6 +682,10 @@ function progressOf(state: DevContourState) {
     total: tasks.length,
     done: tasks.filter((t) => t.status === 'done').length,
     drafts: tasks.filter((t) => t.status === 'draft').length,
+    /** Упавшие задачи без открытого вопроса: их разбирают и повторяют. */
+    failed: tasks.filter((t) => t.status === 'failed').length - waitingInput,
+    /** Задачи, остановленные вопросом исполнителя и ждущие ответа. */
+    waitingInput,
     statuses: Object.fromEntries(
       [...new Set(tasks.map((t) => t.status))].map((s) => [
         s,
@@ -855,12 +865,13 @@ export function panelRuns(
  */
 function runDetail(run: Run) {
   const { partial, evidence, assumptions, ...rest } = run;
+  const decisions = assumptionLines({ assumptions, inputPolicy: run.inputPolicy });
   return {
     ...clip(rest),
     // Токен владения попыткой — не для панели.
     token: '',
     // Решения исполнителя ниже порога — рядом с результатом попытки.
-    ...(assumptions?.length ? { assumptions: assumptionLines({ assumptions }) } : {}),
+    ...(decisions.length ? { assumptions: decisions } : {}),
     ...(partial ? { partial: clip({ ...partial, patch: undefined }) } : {}),
     evidence: evidence.slice(0, 100).map(({ log, tests, findings, ...e }) => ({
       ...clip(e),

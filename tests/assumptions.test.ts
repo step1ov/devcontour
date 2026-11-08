@@ -149,3 +149,39 @@ test('Writer decisions in projections are bounded: at most 20, long texts clippe
   );
   assert.deepEqual(assumptionLines({}), []);
 });
+
+test('A fork at or above the pinned question threshold is the question that stopped the attempt, not a decision taken without stopping', () => {
+  const fork = (question: string, effectiveSeverity: number) => ({
+    question,
+    chosen: 'Выбор',
+    rationale: 'Основание',
+    severity: effectiveSeverity,
+    affects: [],
+    effectiveSeverity,
+    floors: [],
+  });
+  const stopped = {
+    status: 'failed',
+    failureKind: 'needs-input',
+    inputPolicy: { threshold: 7, criticalPaths: [] },
+    assumptions: [fork('Какая модель данных?', 8), fork('Отступ в JSON?', 2), fork('Порог', 7)],
+  } satisfies Pick<Run, 'status' | 'failureKind' | 'inputPolicy' | 'assumptions'>;
+  assert.deepEqual(
+    assumptionLines(stopped).map((a) => a.question),
+    ['Отступ в JSON?'],
+  );
+  // Результат быстрого изменения берёт последнюю попытку — здесь остановленную.
+  const state = {
+    tasks: [{ id: 'T-q', title: 'Задача', status: 'failed', repositoryId: 'app' }],
+    runs: [{ ...stopped, id: 'R-q', taskId: 'T-q', evidence: [] }],
+    boards: [],
+    changeSets: [],
+  } as unknown as DevContourState;
+  const [result] = quickResult(bound(state, ['T-q']), 'PC-assume', []);
+  assert.deepEqual(
+    result.run?.assumptions.map((a) => a.question),
+    ['Отступ в JSON?'],
+  );
+  // Попытка прежней версии без закреплённой политики: порога нет, видны все.
+  assert.equal(assumptionLines({ assumptions: stopped.assumptions }).length, 3);
+});

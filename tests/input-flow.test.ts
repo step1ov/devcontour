@@ -21,6 +21,9 @@ import { InputService, inputHolds } from '../src/application/input.ts';
 import { executionOf } from '../src/harness/execution.ts';
 import { technicalReviewer } from '../src/harness/policy.ts';
 import { repositories } from '../src/core/repositories.ts';
+import { panelSummary, panelTask } from '../src/application/panel.ts';
+import { attemptInputNote } from '../src/core/input-labels.ts';
+import type { Run } from '../src/core/model.ts';
 
 after(() => inputDemos.close());
 
@@ -282,6 +285,25 @@ test('A question on the last attempt gives the attempt back: the answer applies 
     const done = f.store.read().tasks.find((t) => t.id === taskId)!;
     assert.equal(done.status, 'done', done.failure);
     assert.equal(done.attempt, 1);
+    // Остановка и продолжение идут с одним номером бюджета; панель их различает.
+    const runs = f.store.read().runs.filter((r) => r.taskId === taskId);
+    assert.deepEqual(
+      runs.map((r) => r.attempt),
+      [1, 1],
+    );
+    const shown = (panelTask(f.h, taskId, {}).runs.items as Run[]).toReversed();
+    assert.deepEqual(shown.map(attemptInputNote), [
+      'остановлена вопросом исполнителя',
+      'продолжение после ответа на вопрос',
+    ]);
+    // Строка живой работы (сводка) несёт ту же отметку продолжения.
+    const line = (
+      panelSummary(f.h, f.root, { board: boardId }) as unknown as {
+        runs: { id: string; input?: { requestId: string } }[];
+      }
+    ).runs.find((r) => r.id === runs[1].id);
+    assert.ok(line, 'попытка-продолжение в сводке доски');
+    assert.deepEqual(line?.input, { requestId: request.requestId });
   } finally {
     await f.cleanup();
   }
