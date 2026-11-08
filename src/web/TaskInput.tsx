@@ -3,7 +3,7 @@ import { Badge } from '@/ui/badge.tsx';
 import { Button } from '@/ui/button.tsx';
 import { Textarea } from '@/ui/textarea.tsx';
 import type { InputService } from '../application/input.ts';
-import { inputStateLabels } from './input-labels.ts';
+import { inputNextText, inputStateLabels } from './input-labels.ts';
 import { discussionChanged } from './discussion-events.ts';
 
 export { inputStateLabels };
@@ -199,7 +199,8 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
       )}
       {current.state !== 'awaiting-answer' && current.next !== 'none' && (
         <p className="text-muted-foreground mt-2 mb-0 text-xs" data-input-next>
-          Дальше: {current.actor === 'operator' ? 'оператор' : 'ведущий'} — {current.next}
+          {/* Текст называет, кто действует; `next` сводки — указание ведущему агенту. */}
+          Дальше: {inputNextText({ ...current, operatorMode: view.approvalMode === 'operator' })}
         </p>
       )}
       {answerable && current.kind === 'question' && (

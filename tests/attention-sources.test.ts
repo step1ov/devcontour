@@ -726,6 +726,11 @@ test('S9 задание ведущего: упало — карточка, об�
     const card = byKey(await engineItems(f), key)!;
     assert.equal(card.actor, 'lead');
     assert.equal(card.occurrenceId, `job:${job.key}:1`);
+    // Итог по-русски, указание ведущему из пакета передачи — под подписью.
+    assert.match(
+      card.reason,
+      /^Задание ведущего агента упало, повтор продвинет его: ведущий агент повторяет задание\. Указание ведущему агенту: The lead workflow job of board /,
+    );
     assert.ok(card.actions.some((a) => a.kind === 'handoff'));
     const repeat = byKey(await engineItems(f, Date.now() + 3_600_000), key)!;
     assert.deepEqual([repeat.id, repeat.sourceVersion], [card.id, card.sourceVersion]);
@@ -739,6 +744,24 @@ test('S9 задание ведущего: упало — карточка, об�
     flow.fail(flow.claim(job.key, job.owner)!, 'review failed again');
     const again = byKey(await engineItems(f), key)!;
     assert.equal(again.occurrenceId, `job:${job.key}:2`);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('S9 план доски не согласован (агентский режим): итог карточки по-русски, указание ведущему — под подписью', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board with a later finding');
+    f.h.addTask(b.id, input('Approved task'));
+    f.h.approve(b.id);
+    f.h.addTask(b.id, input('Later finding'));
+    const card = byKey(await engineItems(f), `board:${b.id}`)!;
+    assert.equal(card.title, 'План доски «Board with a later finding» не согласован');
+    assert.match(
+      card.reason,
+      /^План не утверждён \(черновиков: 1\)\. Ведущий агент разбирает задачи и проводит ревью плана с выбранным объёмом\. Указание ведущему агенту: The plan of board /,
+    );
   } finally {
     f.cleanup();
   }

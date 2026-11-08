@@ -25,6 +25,12 @@ test('session_handoff: an answered question and a failed board job rank above th
     const pending = devcontourHandoff(f.h, {});
     assert.equal(pending.host.next?.action, 'answer-input', JSON.stringify(pending.host.next));
     assert.equal(pending.host.next?.input?.requestId, request.requestId);
+    // Ссылка на вопрос — адрес панели, а не путь, которого у панели нет.
+    assert.ok(
+      pending.host.next?.detail.includes(`(/?view=boards&tab=list&task=${taskId}#input)`),
+      pending.host.next?.detail,
+    );
+    assert.doesNotMatch(pending.host.next?.detail ?? '', /\/tasks\//);
 
     f.service.answer(
       {

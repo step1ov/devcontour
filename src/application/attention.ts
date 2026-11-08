@@ -29,9 +29,10 @@ import {
   previewProblems,
   stoppedWorkflows,
 } from './overview.ts';
-import { inputStateLabels } from '../core/input-labels.ts';
+import { inputNextText, inputStateLabels } from '../core/input-labels.ts';
 import { budgetBlocks, budgetHint } from './context.ts';
 import { InputService, inputHolds } from './input.ts';
+import { hrefs } from './panel-links.ts';
 import { inputReviewRounds } from '../harness/input-host.ts';
 import { DiscussionService } from './discussion.ts';
 import { taskOwner } from '../core/sync-state.ts';
@@ -78,28 +79,8 @@ const d = (value: unknown) => digest(value).slice(0, 32);
 const clip = (text: string, n: number) => (text.length > n ? text.slice(0, n - 1) + '…' : text);
 const one = (text: string) => text.replace(/\s+/g, ' ').trim();
 
-/** Ссылки панели: вид задаётся параметрами адреса. */
-export const hrefs = {
-  /** Изменение подготовки; этап и якорь ведут к его вопросам. */
-  preparation: (changeId?: string, stage?: string, anchor?: string) =>
-    (changeId
-      ? `/?change=${encodeURIComponent(changeId)}` +
-        (stage ? `&stage=${encodeURIComponent(stage)}` : '')
-      : '/') + (anchor ? `#${anchor}` : ''),
-  // Панель разработки внутри оболочки подготовки показывается с view=boards;
-  // без подготовки параметр безвреден.
-  task: (taskId: string) => `/?view=boards&tab=list&task=${encodeURIComponent(taskId)}`,
-  /** Сообщение обсуждения задачи (якорь `dm-<id>`). */
-  message: (taskId: string, messageId: string) =>
-    `/?view=boards&tab=list&task=${encodeURIComponent(taskId)}#dm-${messageId}`,
-  board: (boardId: string) => `/?view=boards&tab=graph&board=${encodeURIComponent(boardId)}`,
-  changesets: () => '/?view=boards&tab=changesets',
-  /** Карточка изменения на экране изменений (якорь `changeset-<id>`). */
-  changeset: (changeSetId: string) =>
-    `/?view=boards&tab=changesets#changeset-${encodeURIComponent(changeSetId)}`,
-  contracts: () => '/?view=boards&tab=contracts',
-  overview: () => '/',
-};
+/** Ссылки панели — общий модуль: их называют и тексты вопросов исполнителя. */
+export { hrefs };
 
 /** Карточка до отметок и влияния: что источник знает о предмете. */
 export interface Candidate {
@@ -567,12 +548,15 @@ const inputSource: AttentionSourceRule = {
               : apply
                 ? `Ответ по задаче «${title}» готов к применению`
                 : `Вопрос исполнителя по задаче «${title}»: ${inputStateLabels[r.state] ?? r.state}`,
+          // Следующий шаг — словами оператора: поле `next` сводки — указание
+          // ведущему агенту по-английски, с операциями агентского API.
           reason: ctx.redact(
             (rejected ? `Ревью отклонило ответ (раунд ${r.round}): ${findings} — ` : '') +
-              (question ? `${question} — ${r.next}` : r.next),
+              (question ? `${question} — ` : '') +
+              `Дальше: ${inputNextText({ ...r, operatorMode })}.`,
           ),
           since: r.createdAt,
-          subject: { kind: 'request', id: r.requestId, href: hrefs.task(r.taskId) + '#input' },
+          subject: { kind: 'request', id: r.requestId, href: hrefs.input(r.taskId) },
           actions: [
             ...(answer
               ? [
@@ -1041,6 +1025,31 @@ const approvedAnchor = (tasks: readonly Task[]) =>
  * Упавшие задания ChangeSet — `stoppedWorkflows` сводки.
  */
 const packNotNeeded = new Error('attention: workflow_start step is not shown');
+
+/**
+ * Шаг доски словами оператора. Подробность шага (`detail`) — указание
+ * ведущему агенту из пакета передачи, по-английски и с командами; карточка
+ * начинается с русского итога, а указание идёт следом под своей подписью.
+ */
+function boardStepText(step: NonNullable<ReturnType<typeof boardStep>>): string {
+  if (step.decision === 'plan' && step.plan) {
+    const p = step.plan;
+    const parts = [
+      `черновиков: ${p.drafts.length}`,
+      ...(p.stale.length ? [`утверждено при другой политике: ${p.stale.length}`] : []),
+      ...(p.unverifiedCount ? [`неразобранных находок: ${p.unverifiedCount}`] : []),
+      ...(p.blockedCount ? [`не проходят условия утверждения: ${p.blockedCount}`] : []),
+    ];
+    return `План не утверждён (${parts.join(', ')}). Ведущий агент разбирает задачи и проводит ревью плана с выбранным объёмом.`;
+  }
+  if (step.action === 'fix-input')
+    return 'Задание доски не зарегистрировать: ведущий агент устраняет причину отказа.';
+  if (step.action === 'workflow_retry')
+    return 'Задание ведущего агента упало, повтор продвинет его: ведущий агент повторяет задание.';
+  if (step.loop?.step === 'stop')
+    return 'Цикл задания доски остановится: ведущий агент сначала исправляет задачу или план.';
+  return 'Задание ведущего агента не продолжится само: ведущий агент разбирает причину и меняет доску или задачи.';
+}
 const boardSource: AttentionSourceRule = {
   id: 'board',
   engine: true,
@@ -1105,7 +1114,7 @@ const boardSource: AttentionSourceRule = {
                   : step.action === 'workflow_retry'
                     ? `Задание доски «${board.title}» упало`
                     : `Задание доски «${board.title}» требует решения`,
-            reason: ctx.redact(step.detail),
+            reason: ctx.redact(`${boardStepText(step)} Указание ведущему агенту: ${step.detail}`),
             since: step.job
               ? (jobs.find((j) => j.key === step.job!.key)?.history.at(-1)?.at ??
                 revision.createdAt)
@@ -2094,7 +2103,7 @@ inputSource.history = (ctx) => {
         title: `Вопрос исполнителя по задаче «${taskTitle(ctx, r.taskId)}»: ${inputStateLabels[r.state] ?? r.state}`,
         reason: inputStateLabels[r.state] ?? r.state,
         since: r.createdAt,
-        subject: { kind: 'request', id: r.requestId, href: hrefs.task(r.taskId) + '#input' },
+        subject: { kind: 'request', id: r.requestId, href: hrefs.input(r.taskId) },
         resolvedAt: at,
       };
     });

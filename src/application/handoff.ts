@@ -7,6 +7,7 @@
 // тот готовит результат к push/PR человеком.
 import { DiscussionService, type InboxRequest } from './discussion.ts';
 import { InputService } from './input.ts';
+import { hrefs } from './panel-links.ts';
 import {
   HANDOFF_MAX_BYTES,
   HANDOFF_MIN_BYTES,
@@ -599,11 +600,11 @@ function inputStep(ctx: HostContext, taskId: string): HandoffHostNext | undefine
       ...base,
       detail:
         summary.actor === 'lead'
-          ? `Task ${taskId} waits for an answer to ${summary.requestId} (no floors, approvalMode agent): answer with input_answer {"requestId": "${summary.requestId}", "expectedVersion": ${summary.version}, …} after input_show, or let the operator answer in the panel (/tasks/${taskId}#input). The answer does not resume the task by itself.`
-          : `Task ${taskId} waits for the operator's answer to ${summary.requestId} in the panel (/tasks/${taskId}#input)${summary.floors.length ? `: the question is critical (${summary.floors.join(', ')})` : ''}. Wait: the lead does not answer it and no queue step helps.`,
+          ? `Task ${taskId} waits for an answer to ${summary.requestId} (no floors, approvalMode agent): answer with input_answer {"requestId": "${summary.requestId}", "expectedVersion": ${summary.version}, …} after input_show, or let the operator answer in the panel (${hrefs.input(taskId)}). The answer does not resume the task by itself.`
+          : `Task ${taskId} waits for the operator's answer to ${summary.requestId} in the panel (${hrefs.input(taskId)})${summary.floors.length ? `: the question is critical (${summary.floors.join(', ')})` : ''}. Wait: the lead does not answer it and no queue step helps.`,
     };
   const chain = operator
-    ? `input_context, input_review --author-runtime; then the operator applies in the panel (/tasks/${taskId}#input)`
+    ? `input_context, input_review --author-runtime; then the operator applies in the panel (${hrefs.input(taskId)})`
     : 'input_context, input_review --author-runtime, input_target, input_apply';
   return {
     action: 'apply-input',

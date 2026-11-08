@@ -42,6 +42,12 @@ test('S15 вопрос исполнителя: забирает задачу, о
       asked.question.options.map((o) => o.id),
     );
     assert.equal(card.subject.href, `/?view=boards&tab=list&task=${taskId}#input`);
+    // Итог карточки — вопрос и следующий шаг словами оператора; указание
+    // ведущему из сводки запроса (по-английски) в неё не попадает, а его
+    // ссылка — адрес панели, а не путь, которого у панели нет.
+    assert.ok(card.reason.endsWith('Дальше: ответьте на вопрос в карточке задачи.'), card.reason);
+    assert.doesNotMatch(card.reason, /answer in the panel|\/tasks\//);
+    assert.equal(request.next, `answer in the panel: /?view=boards&tab=list&task=${taskId}#input`);
     assert.deepEqual(card.impact.taskIds, [taskId]);
     assert.equal(card.impact.waiting, 1, `${dependent} waits for the asking task`);
     // Задача, которую держит вопрос, своей карточки не даёт.
