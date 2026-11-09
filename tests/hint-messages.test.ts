@@ -136,6 +136,15 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
       loop: { step: 'stop', reason: 'TERMINAL' },
     },
   ],
+  'job-cancelled-task': (['host', 'operator', 'unknown'] as const).flatMap((by) =>
+    [true, false].map((budget) => ({
+      code: 'job-cancelled-task' as const,
+      params: { taskId: 't-1', by, budget, error: 'boom' },
+      boardId: 'board-1',
+      job,
+      loop: { step: 'stop' as const, taskId: 't-1', reason: 'cancelled' },
+    })),
+  ),
   'job-retry': [
     {
       code: 'job-retry',
@@ -355,8 +364,10 @@ test('Подсказки шага: новая конфигурация setup п�
  * намеренное и требует заметки в docs/upgrade.md.
  * Образцы `pause-operator` с `by: lead` добавлены; прежние образцы байтово
  * прежние.
+ * Образцы нового кода `job-cancelled-task` добавлены; прежние образцы байтово
+ * прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = 'c7c1bac72aef87e623800cbe0dee6c8108648f54804ed520c19c7cdf6f8061f7';
+const ENGLISH_SAMPLES_SHA256 = '842f75535b4caf2d2d12e802119cce570fd82f03d71a882c9c9e894552e24593';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

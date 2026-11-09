@@ -1069,6 +1069,56 @@ function boardStepText(step: NonNullable<ReturnType<typeof boardStep>>): string 
     return 'Цикл задания доски остановится: ведущий агент сначала исправляет задачу или план.';
   return 'Задание ведущего агента не продолжится само: ведущий агент разбирает причину и меняет доску или задачи.';
 }
+/**
+ * Задание доски стоит на задаче, отменённой после выдачи (`job-cancelled-task`):
+ * по D46 ведущий не выводит её из работы сам, и продолжение — решение
+ * человека: поднять исчерпанный бюджет (затем ведущий повторит задачу и
+ * задание) или принять ревизию без задачи на странице доски. Карточка —
+ * оператору; с карточкой задачи она не сворачивается, это другое решение.
+ * Появление — задание и его попытки, как у карточки задания доски.
+ */
+function cancelledTaskCard(
+  ctx: AttentionContext,
+  board: { id: string; title: string },
+  revision: { number: number; createdAt: string },
+  step: NonNullable<ReturnType<typeof boardStep>>,
+  jobs: readonly { key: string; history: { at: string }[] }[],
+): Candidate {
+  const p = step.params as { taskId: string; by: string; budget: boolean };
+  const title = taskTitle(ctx, p.taskId);
+  const who =
+    p.by === 'host'
+      ? 'отменена ведущим агентом после выдачи'
+      : p.by === 'operator'
+        ? 'отменена вами'
+        : 'отменена (актёр не записан)';
+  const retry = p.budget
+    ? 'поднимите предел бюджета (budgets, затем config-apply --keys budgets) — ведущий повторит задачу и задание'
+    : p.by === 'host'
+      ? 'верните задачу в работу (повтор задачи) — ведущий продолжит задание'
+      : 'повторите задачу — ведущий продолжит задание';
+  return {
+    sourceKey: `board:${board.id}`,
+    occurrenceId: step.job
+      ? `job:${step.job.key}:${step.job.attempts}:cancelled:${p.taskId}`
+      : `cancelled:r${revision.number}:${p.taskId}`,
+    sourceVersion: d({ code: step.code, taskId: p.taskId, by: p.by, budget: p.budget }),
+    source: 'board',
+    category: 'decision',
+    actor: 'operator',
+    title: `Доска «${board.title}»: задание остановлено отменённой задачей`,
+    reason: ctx.redact(
+      `Задача «${title}» ${who}${p.budget ? ' по бюджету' : ''}; задание доски без неё не продолжится. Решите: ${retry} или примите ревизию без задачи («Принять доску», когда остальные задачи готовы).`,
+    ),
+    since: step.job
+      ? (jobs.find((j) => j.key === step.job!.key)?.history.at(-1)?.at ?? revision.createdAt)
+      : revision.createdAt,
+    subject: { kind: 'board', id: board.id, href: hrefs.board(board.id) },
+    covered: unclaimed(ctx, [p.taskId]),
+    boards: [board.id],
+  };
+}
+
 const boardSource: AttentionSourceRule = {
   id: 'board',
   engine: true,
@@ -1089,7 +1139,14 @@ const boardSource: AttentionSourceRule = {
           const revision = board.revisions.at(-1);
           if (!revision) continue;
           const tasks = state.tasks.filter((t) => revision.taskIds.includes(t.id));
-          if (!tasks.some(open)) continue;
+          // Без открытых задач решение остаётся лишь у задания, которое стоит
+          // на задаче, отменённой после выдачи (D46): его ждёт приёмка доски.
+          const settled = !tasks.some(open);
+          if (
+            settled &&
+            (revision.status === 'accepted' || !tasks.some((t) => t.status === 'cancelled'))
+          )
+            continue;
           let step: ReturnType<typeof boardStep>;
           try {
             step = boardStep(board.id, host);
@@ -1098,6 +1155,11 @@ const boardSource: AttentionSourceRule = {
             throw error;
           }
           if (!step || !['decide', 'fix-input', 'workflow_retry'].includes(step.action)) continue;
+          if (step.code === 'job-cancelled-task') {
+            out.push(cancelledTaskCard(ctx, board, revision, step, jobs));
+            continue;
+          }
+          if (settled) continue;
           const stopped = step.loop && 'taskId' in step.loop ? step.loop.taskId : undefined;
           const work = stopped ? ctx.cards.get(`work:${stopped}`) : undefined;
           if (work) {

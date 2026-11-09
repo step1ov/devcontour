@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto';
 import type { Store } from '../src/core/store.ts';
 import { digest, type DevContour } from '../src/core/service.ts';
 import { Workspace, changeSnapshot, snapshotDigest } from '../src/core/workspace.ts';
-import { fixture, input } from './helpers.ts';
+import { complete as completeTask, fixture, input } from './helpers.ts';
 import { DiscussionService } from '../src/application/discussion.ts';
 import { AgentService } from '../src/application/agent.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
@@ -784,6 +784,42 @@ test('S9 свёртка: задание стоит на упавшей зада�
     assert.equal(byKey(items, `board:${b.id}`), undefined);
     const work = byKey(items, `work:${t.id}`)!;
     assert.deepEqual(work.impact.boards, [b.id]);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('S9 задание стоит на задаче, отменённой ведущим после бюджетного отказа: карточка решения оператору', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Budget board');
+    const stopped = f.h.addTask(b.id, input('Hits the budget'));
+    const kept = f.h.addTask(b.id, input('Kept'));
+    f.h.approve(b.id);
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex', maxAttempts: 3 });
+    f.h.pause(false);
+    const run = f.h.claim('test')!;
+    assert.equal(run.taskId, stopped.id);
+    f.h.fail(run.id, run.token, 'workspace budget exceeded', false, 'budget');
+    f.h.cancel(stopped.id, 'Budget stop', 'host');
+    completeTask(f.h, kept.id);
+    flow.fail(flow.claim(job.key, job.owner)!, `${stopped.id}: Работа остановлена человеком.`);
+    const key = `board:${b.id}`;
+    // Открытых задач нет, а доска не принята: карточка всё равно есть.
+    const card = byKey(await engineItems(f), key)!;
+    assert.ok(card, 'карточка решения по доске');
+    assert.equal(card.actor, 'operator');
+    assert.equal(card.category, 'decision');
+    assert.equal(card.title, 'Доска «Budget board»: задание остановлено отменённой задачей');
+    assert.match(card.reason, /отменена ведущим агентом после выдачи по бюджету/);
+    assert.match(card.reason, /поднимите предел бюджета/);
+    assert.match(card.reason, /примите ревизию без задачи/);
+    assert.deepEqual(card.impact.boards, [b.id]);
+    // Повтор задачи снимает решение.
+    f.h.retry(stopped.id, undefined, 'host');
+    const after = byKey(await engineItems(f), key);
+    assert.notEqual(after?.actor, 'operator');
   } finally {
     f.cleanup();
   }

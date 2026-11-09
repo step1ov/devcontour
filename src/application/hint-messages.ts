@@ -43,6 +43,18 @@ export interface HintParamMap {
   'job-retry-stops': { error?: string };
   /** Задание упало, повтор продвинет его. */
   'job-retry': { error?: string };
+  /**
+   * Задание стоит на задаче `taskId`, отменённой после выдачи (D46): `by` —
+   * актёр отмены (`unknown` — не записан, считается отменой человеком),
+   * `budget` — задачу остановил бюджет. Повтор и старт задания вернут то же
+   * упавшее задание.
+   */
+  'job-cancelled-task': {
+    taskId: string;
+    by: 'host' | 'operator' | 'graph' | 'unknown';
+    budget: boolean;
+    error?: string;
+  };
   /** Попытки задания исчерпаны. */
   'job-exhausted': { error?: string };
   /** Задание текущего входа уже stale или completed. */
@@ -193,6 +205,26 @@ const en: Catalog = {
     `workflow_start for board ${s.boardId!} would be refused: ${p.reason}. Fix that first (approvals in the panel, tasks of the board), then register the job.`,
   'job-retry-stops': (p, s) =>
     `The lead workflow job of board ${s.boardId!} failed${failedEn(p.error)}, and a retry would stop again: ${reasonOf(s.loop)}. ${STOP_REMEDY_EN} Then workflow_retry ${retryArgs(s)}.`,
+  'job-cancelled-task': (p, s) => {
+    const task = p.taskId;
+    const who =
+      p.by === 'host'
+        ? 'by the lead after it had been issued'
+        : p.by === 'operator'
+          ? 'by the user'
+          : "without a recorded actor (counted as the user's cancel)";
+    const retry = `task_retry (devcontour retry --task ${task} --by host), then workflow_retry ${retryArgs(s)}`;
+    const first = p.budget
+      ? `(1) the user raises the exceeded budget limit (budgets in the config, applied with devcontour config-apply --keys budgets); then ${retry}`
+      : p.by === 'host'
+        ? `(1) if the task is still needed, ${retry}`
+        : `(1) the user retries the task (devcontour retry --task ${task}); then workflow_retry ${retryArgs(s)}`;
+    const owner =
+      p.budget || p.by !== 'host'
+        ? "Both are the user's decisions and the attention center shows them to the operator: ask the user; do not raise budgets or accept the board yourself."
+        : "Accepting without the task is the user's decision and the attention center shows it to the operator: do not accept the board yourself.";
+    return `The lead workflow job of board ${s.boardId!} stopped${failedEn(p.error)}: task ${task} was cancelled ${who}${p.budget ? ' when it hit a budget' : ''}, and an issued task does not leave the job (D46, docs/decisions.md), so workflow_retry and workflow_start return the same failed job. Recovery paths: ${first}; (2) the user accepts the revision without task ${task} once its other tasks are done (the board page in the panel, or devcontour accept --board ${s.boardId!}). ${owner}`;
+  },
   'job-retry': (p, s) =>
     `The lead workflow job of board ${s.boardId!} failed${failedEn(p.error)}. On retry the job loop ${loopEn(s.loop!)}: workflow_retry ${retryArgs(s)}.`,
   'job-exhausted': (p, s) =>
@@ -339,6 +371,26 @@ const ru: Catalog = {
     `workflow_start для доски ${s.boardId!} будет отклонён: ${p.reason}. Сначала устраните это (согласования в панели, задачи доски), затем зарегистрируйте задание.`,
   'job-retry-stops': (p, s) =>
     `Задание ведущего доски ${s.boardId!} упало${failedRu(p.error)}, и повтор снова остановится: ${reasonOf(s.loop)}. ${STOP_REMEDY_RU} Затем workflow_retry ${retryArgs(s)}.`,
+  'job-cancelled-task': (p, s) => {
+    const task = p.taskId;
+    const who =
+      p.by === 'host'
+        ? 'отменена ведущим агентом уже после выдачи'
+        : p.by === 'operator'
+          ? 'отменена пользователем'
+          : 'отменена без записанного актёра (считается отменой пользователя)';
+    const retry = `task_retry (devcontour retry --task ${task} --by host), затем workflow_retry ${retryArgs(s)}`;
+    const first = p.budget
+      ? `(1) пользователь поднимает исчерпанный предел бюджета (budgets в конфигурации, применение — devcontour config-apply --keys budgets); затем ${retry}`
+      : p.by === 'host'
+        ? `(1) если задача ещё нужна — ${retry}`
+        : `(1) пользователь повторяет задачу (devcontour retry --task ${task}); затем workflow_retry ${retryArgs(s)}`;
+    const owner =
+      p.budget || p.by !== 'host'
+        ? 'Оба решения — пользователя, центр внимания показывает их оператору: спросите пользователя; сами не поднимайте бюджет и не принимайте доску.'
+        : 'Приёмка без задачи — решение пользователя, центр внимания показывает его оператору: сами доску не принимайте.';
+    return `Задание ведущего доски ${s.boardId!} остановлено${failedRu(p.error)}: задача ${task} ${who}${p.budget ? ', когда упёрлась в бюджет' : ''}, а выданная задача из работы задания не выпадает (D46, docs/decisions.md), поэтому workflow_retry и workflow_start возвращают то же упавшее задание. Пути восстановления: ${first}; (2) пользователь принимает ревизию без задачи ${task}, когда остальные задачи готовы (страница доски в панели или devcontour accept --board ${s.boardId!}). ${owner}`;
+  },
   'job-retry': (p, s) =>
     `Задание ведущего доски ${s.boardId!} упало${failedRu(p.error)}. После workflow_retry цикл задания ${loopRu(s.loop!)}: workflow_retry ${retryArgs(s)}.`,
   'job-exhausted': (p, s) =>
