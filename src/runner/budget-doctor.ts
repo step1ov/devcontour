@@ -238,7 +238,8 @@ export function budgetChecks(
  * отличаются `budgets` или `prices`. Отличие одних прочих ключей (например,
  * `contextPacks` после context-lock) — отдельная проверка `config:applied`.
  * Способ применения назван по ключам: эксплуатационные (`stallSweep`,
- * `inputPolicy`) работающий сервер применяет `config-apply --keys`, прочие —
+ * `inputPolicy`, `gateTimeoutFloorMs`) работающий сервер применяет
+ * `config-apply --keys`, прочие —
  * только перезапуск serve.
  */
 export function appliedCheck(

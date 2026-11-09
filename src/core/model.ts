@@ -1147,6 +1147,15 @@ export const configSchema = z.object({
     .default('devcontour/accepted'),
   mode: z.enum(['local', 'demo']).default('local'),
   approvalMode: z.enum(['agent', 'operator']).default('agent'),
+  /**
+   * Язык текстов шага DevContour в пакете передачи (`host.next.detail`) и
+   * указания ведущему агенту в карточке центра внимания. Нет поля —
+   * английский, тексты прежние; новая конфигурация setup пишет `ru`.
+   * Команды, JSON, id и пути — как есть на любом языке. Не входит в политику
+   * исполнения (план не переутверждается) и не применяется `config-apply`:
+   * действует после перезапуска `serve`.
+   */
+  hintLocale: z.enum(['en', 'ru']).optional(),
   concurrency: z.number().int().min(1).max(4).default(2),
   leaseMs: z.number().int().min(5000).default(30000),
   runTimeoutMs: z.number().int().min(1000).default(900000),

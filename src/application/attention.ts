@@ -23,6 +23,7 @@ import { executionOf } from '../harness/execution.ts';
 import { ContractChanges } from '../runner/contract-change.ts';
 import { boardTasks, planApproved, unapprovedTasks } from '../runner/lead-outlook.ts';
 import { boardStep, handoffRedactor, harnessOf, hostContext } from './handoff.ts';
+import { hintDetail } from './hint-messages.ts';
 import {
   pendingAcceptances,
   previewFailureTitle,
@@ -1032,8 +1033,9 @@ const packNotNeeded = new Error('attention: workflow_start step is not shown');
 
 /**
  * Шаг доски словами оператора. Подробность шага (`detail`) — указание
- * ведущему агенту из пакета передачи, по-английски и с командами; карточка
- * начинается с русского итога, а указание идёт следом под своей подписью.
+ * ведущему агенту из пакета передачи с командами, на языке подсказок
+ * (`hintLocale`: без него — по-английски); карточка начинается с русского
+ * итога, а указание идёт следом под своей подписью.
  */
 function boardStepText(step: NonNullable<ReturnType<typeof boardStep>>): string {
   if (step.decision === 'plan' && step.plan) {
@@ -1095,7 +1097,9 @@ const boardSource: AttentionSourceRule = {
               ? `plan:r${revision.number}:${approvedAnchor(tasks)}`
               : step.job
                 ? `job:${step.job.key}:${step.job.attempts}`
-                : `input:r${revision.number}:${d(step.detail).slice(0, 12)}`;
+                : // Английский текст — функция кода и параметров шага: появление
+                  // не зависит от языка подсказок, а прежние id сохраняются.
+                  `input:r${revision.number}:${d(hintDetail(step, 'en')).slice(0, 12)}`;
           const drafts = step.plan?.drafts ?? [];
           out.push({
             sourceKey: `board:${board.id}`,

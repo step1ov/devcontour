@@ -55,16 +55,22 @@ test('Adapter output equals the previous DevContour resolver for every builtin a
     assert.deepEqual(JSON.parse(JSON.stringify(actual)), c.profile, c.ref);
     // Умолчания gates, ролей и contextPacks в конфигурации setup — те же.
     // Намеренные изменения после снимка: setup защищает и pnpm-lock.yaml и
-    // пишет нижний предел срока проверок сразу после runTimeoutMs.
+    // пишет нижний предел срока проверок сразу после runTimeoutMs, а язык
+    // подсказок ведущему — сразу после approvalMode.
     const legacy = Object.fromEntries(
       Object.entries(structuredClone(c.config) as Record<string, unknown>).flatMap(
         ([key, value]): [string, unknown][] =>
-          key === 'runTimeoutMs'
+          key === 'approvalMode'
             ? [
                 [key, value],
-                ['gateTimeoutFloorMs', 60_000],
+                ['hintLocale', 'ru'],
               ]
-            : [[key, value]],
+            : key === 'runTimeoutMs'
+              ? [
+                  [key, value],
+                  ['gateTimeoutFloorMs', 60_000],
+                ]
+              : [[key, value]],
       ),
     ) as { protectedPaths: string[] };
     legacy.protectedPaths.push('pnpm-lock.yaml');
