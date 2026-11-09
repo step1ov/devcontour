@@ -487,3 +487,18 @@ export function hintDetail(step: HintSubject & HintOf, locale: HintLocale): stri
   const render = hintCatalogs[locale][step.code] as (p: unknown, s: HintSubject) => string;
   return render(step.params, step);
 }
+
+/**
+ * Язык человекочитаемого ответа независимого ревьюера (план, контракт):
+ * итог и находки показываются оператору в панели и центре внимания. Без
+ * `hintLocale` или с английским — указания нет, промпт прежний. Машинные
+ * поля, значения перечислений (`approved`, `severity`, `status`) и
+ * идентификаторы ревьюер оставляет как есть: их разбирает harness.
+ */
+export function reviewLanguageInstructions(locale: HintLocale): string[] {
+  return locale === 'ru'
+    ? [
+        'Language: the operator reads your review in Russian. Write all human-readable text of your answer in Russian: the summary, every finding message, the basis of each previous finding and any other free-text explanation. Keep JSON keys, enum values (approved, severity, status), rule names, ids, file paths, commands and code verbatim, in their original language.',
+      ]
+    : [];
+}
