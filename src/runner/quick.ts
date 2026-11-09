@@ -1,6 +1,6 @@
 import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
-import { inspectProject, type ProjectFacts } from 'devcontour-harness';
+import { inspectProject, type InputQuestion, type ProjectFacts } from 'devcontour-harness';
 import type { DevContourState } from '../core/model.ts';
 import type { ProductChange } from '../core/preparation-model.ts';
 import { usageTotals, type UsageRecord } from '../core/usage.ts';
@@ -398,7 +398,13 @@ export function quickSteps(input: {
  * Результат задач изменения: SHA двух фаз, проверки и ревью из evidence
  * последней попытки, расход с долей неизвестного. Только чтение состояния.
  */
-export function quickResult(state: DevContourState, changeId: string, usage: UsageRecord[]) {
+export function quickResult(
+  state: DevContourState,
+  changeId: string,
+  usage: UsageRecord[],
+  /** Вопросы блокирующих запросов по ID попытки (`stopQuestions`). */
+  questions: ReadonlyMap<string, InputQuestion> = new Map(),
+) {
   const tasks = state.tasks.filter((t) => t.preparation?.changeId === changeId && !t.finding);
   return tasks.map((task) => {
     const runs = state.runs.filter((r) => r.taskId === task.id);
@@ -457,7 +463,7 @@ export function quickResult(state: DevContourState, changeId: string, usage: Usa
             candidate: phase('candidate'),
             integration: phase('integration'),
             // Решения исполнителя ниже порога: оператор видит, на чём построен результат.
-            assumptions: assumptionLines(run),
+            assumptions: assumptionLines(run, questions.get(run.id)),
           }
         : null,
       usage: usageTotals(usage.filter((u) => u.runId && ids.has(u.runId))),

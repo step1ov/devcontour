@@ -23,6 +23,8 @@ import { technicalReviewer } from '../src/harness/policy.ts';
 import { repositories } from '../src/core/repositories.ts';
 import { panelSummary, panelTask } from '../src/application/panel.ts';
 import { attemptInputNote } from '../src/core/input-labels.ts';
+import { AttentionService } from '../src/application/attention.ts';
+import { devcontourHandoff } from '../src/application/handoff.ts';
 import type { Run } from '../src/core/model.ts';
 
 after(() => inputDemos.close());
@@ -346,6 +348,107 @@ test('A writer that asks again and again ends with exhausted attempts, not an en
     const task = f.store.read().tasks.find((t) => t.id === taskId)!;
     assert.equal(task.status, 'failed');
     assert.equal(task.attempt, 2);
+
+    // Засчитанные остановки — те же, что у движка (`attempt.diagnosed`):
+    // «Ход попыток» называет их, а не показывает бесплатными.
+    const own = f.store.read().runs.filter((r) => r.taskId === taskId);
+    const diagnosed = executionOf(f.h)
+      .store.events(0, 500)
+      .flatMap((e) =>
+        e.type === 'attempt.diagnosed' && own.some((r) => r.id === e.runId)
+          ? [[e.runId, e.payload.counted]]
+          : [],
+      );
+    assert.deepEqual(
+      diagnosed,
+      own.map((r, i) => [r.id, i >= 2]),
+    );
+    const timeline = (
+      panelTask(f.h, taskId, {}).runs.items as unknown as (Run & { counted?: boolean })[]
+    ).map((r) => attemptInputNote(r));
+    // Новые сначала; каждое продолжение снова остановлено вопросом.
+    assert.deepEqual(timeline, [
+      'продолжение после ответа на вопрос · снова остановлена вопросом · засчитана: предел вопросов исчерпан',
+      'продолжение после ответа на вопрос · снова остановлена вопросом · засчитана: предел вопросов исчерпан',
+      'продолжение после ответа на вопрос · снова остановлена вопросом',
+      'остановлена вопросом исполнителя',
+    ]);
+    // Отказ применения объясняет, что попытки съели вопросы, и что делать.
+    const blocker = (refused as { blocker: { code: string; message: string } }).blocker;
+    assert.equal(blocker.code, 'ATTEMPTS_EXHAUSTED');
+    assert.match(blocker.message, /остановилась вопросом 4 раз\(а\)/);
+    assert.match(blocker.message, /сверх них \(2\) засчитаны в попытки/);
+    assert.match(blocker.message, /со сбросом попыток/);
+    // Сводка запроса, карточка центра внимания и шаг ведущего называют повтор.
+    const open = f.service
+      .list({ taskId })
+      .requests.find((r) => !['cancelled', 'superseded', 'delivered'].includes(r.state))!;
+    assert.deepEqual(open.questionStops, { count: 4, limit: 2, exhausted: true });
+    const card = (await new AttentionService(f.store, f.h, { root: f.root }).active()).items.find(
+      (c) => c.sourceKey === 'input:' + open.requestId,
+    );
+    assert.ok(card, 'карточка вопроса в центре внимания');
+    assert.match(
+      card.reason,
+      /^Исполнитель останавливался вопросом по этой задаче 4 раз\(а\); без расхода попыток — только первые 2/,
+    );
+    const step = devcontourHandoff(f.h).host.next;
+    assert.equal(step?.input?.taskId, taskId, JSON.stringify(step));
+    assert.match(step?.detail ?? '', /stopped with a writer question 4 times/);
+    assert.match(step?.detail ?? '', /ATTEMPTS_EXHAUSTED until it is applied with reset/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('Counted question stops follow the engine verdict at stop time, not a maxAttempts changed later', async () => {
+  const f = await inputFixture(controlled({ alwaysAsk: true }), {
+    edit: (raw) => (raw.maxAttempts = 3),
+  });
+  try {
+    const { taskId, boardId } = f.askingTask();
+    await untilQuestion(f, boardId);
+    // Ответ ведущего и новая попытка — она снова останавливается вопросом.
+    const again = async () => {
+      const request = f.service
+        .list({ taskId })
+        .requests.find((r) => r.state === 'awaiting-answer')!;
+      const ready = await prepared(f, request.requestId, 'lead');
+      const applied = f.service.apply(ready.apply, 'lead');
+      assert.ok(applied.applied, JSON.stringify(applied));
+      await f.scheduler.drain();
+    };
+    await again();
+    const diagnosed = () => {
+      const own = f.store.read().runs.filter((r) => r.taskId === taskId);
+      return executionOf(f.h)
+        .store.events(0, 500)
+        .flatMap((e) =>
+          e.type === 'attempt.diagnosed' && own.some((r) => r.id === e.runId)
+            ? [e.payload.counted]
+            : [],
+        );
+    };
+    const marks = () =>
+      (panelTask(f.h, taskId, {}).runs.items as unknown as { counted?: boolean }[])
+        .map((r) => r.counted ?? false)
+        .reverse();
+    // Две остановки при пределе 3 — обе вернули попытку.
+    assert.deepEqual(diagnosed(), [false, false]);
+    // Предел снижен до 1 после них: прежний вывод по текущему пределу
+    // пометил бы вторую засчитанной, хотя движок её вернул.
+    f.h.config.maxAttempts = 1;
+    assert.deepEqual(marks(), [false, false]);
+    // Третья остановка — уже при пределе 1: движок её засчитал.
+    await again();
+    assert.deepEqual(diagnosed(), [false, false, true]);
+    assert.deepEqual(marks(), [false, false, true]);
+    // Предел поднят до 5: засчитанная остановка остаётся засчитанной.
+    f.h.config.maxAttempts = 5;
+    assert.deepEqual(marks(), [false, false, true]);
+    // Сводка запроса считает вперёд по текущему пределу.
+    const open = f.service.list({ taskId }).requests.find((r) => r.state === 'awaiting-answer')!;
+    assert.deepEqual(open.questionStops, { count: 3, limit: 5, exhausted: false });
   } finally {
     await f.cleanup();
   }

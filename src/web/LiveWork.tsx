@@ -366,7 +366,9 @@ export function LiveWork({
                     {run.attempt > 1
                       ? ` · попытка ${run.attempt}${state.config.maxAttempts ? ` из ${state.config.maxAttempts}` : ''}`
                       : ''}
-                    {run.input ? ' · продолжение после ответа на вопрос' : ''}
+                    {/* Идущая попытка — только продолжение после ответа:
+                        подпись та же, что в «Ходе попыток». */}
+                    {attemptInputNote(run) ? ` · ${attemptInputNote(run)}` : ''}
                     {run.reusedFrom ? ' · код взят у прошлой попытки' : ''}
                   </span>
                 </div>
@@ -463,7 +465,9 @@ function phaseDurations(run: Run) {
   }
   return [...totals].map(([stage, ms]) => ({ stage, ms }));
 }
-function Attempt({ run, number, reset }: { run: Run; number: number; reset: boolean }) {
+/** Попытка деталей задачи: `counted` — остановка вопросом сверх предела вопросов. */
+type TimelineRun = Run & { counted?: boolean };
+function Attempt({ run, number, reset }: { run: TimelineRun; number: number; reset: boolean }) {
   const end = run.finishedAt ?? new Date().toISOString();
   const note = attemptInputNote(run);
   // Остановка вопросом — ожидание ответа, а не провал попытки.
@@ -512,7 +516,13 @@ function Attempt({ run, number, reset }: { run: Run; number: number; reset: bool
     </li>
   );
 }
-export function AttemptTimeline({ runs, total = runs.length }: { runs: Run[]; total?: number }) {
+export function AttemptTimeline({
+  runs,
+  total = runs.length,
+}: {
+  runs: TimelineRun[];
+  total?: number;
+}) {
   if (!runs.length) return null;
   // Номер — сквозной порядок попыток: счётчик бюджета после сброса начинается
   // заново, и «попытка 1» над «попыткой 3» читалась как ошибка. Загружены

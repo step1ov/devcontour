@@ -27,6 +27,7 @@ import {
   type ContextSnapshot,
   type ExecutionView,
   type InputMessageRef,
+  type InputQuestion,
   type InputRequest,
 } from 'devcontour-harness';
 import { DomainError, type Task } from '../core/model.ts';
@@ -45,6 +46,7 @@ import { boardOf, UNASSIGNED_GRAPH } from '../harness/projection.ts';
 import { adapters, type AgentAdapter } from '../runner/adapters.ts';
 import { checkoutRoots } from '../runner/checkout-root.ts';
 import { DiscussionService } from './discussion.ts';
+import { questionStops, REPEATED_QUESTION_STOPS } from '../core/input-labels.ts';
 
 /** Кто действует: ведущий агент (агентский API), оператор (панель) или хост от его имени (CLI `--by host`). */
 export type InputActorKind = 'lead' | 'operator' | 'host';
@@ -155,6 +157,49 @@ export function inputHolds(h: DevContour): Map<string, string> {
   const holds = new Map<string, string>();
   for (const r of engine.inputRequests()) if (blocksWork(r)) holds.set(r.workId, r.id);
   return holds;
+}
+
+/** Прочитанная часть журнала: вердикты по попыткам и последний seq. */
+const verdictCache = new WeakMap<object, { seq: number; counted: Map<string, boolean> }>();
+
+/**
+ * Вердикты движка об остановках вопросом: ID попытки → засчитана ли
+ * остановка в предел попыток (`attempt.diagnosed`, поле `counted`). Движок
+ * решает это в момент остановки с тогдашним `maxAttempts`, поэтому
+ * проекция берёт вердикт, а не выводит его заново по текущему пределу.
+ * Журнал только дописывается: прочитанное хранится по базе, каждое чтение
+ * дочитывает новые события.
+ */
+export function questionVerdicts(h: DevContour): ReadonlyMap<string, boolean> {
+  const { store } = executionOf(h);
+  let entry = verdictCache.get(h.store);
+  if (!entry) verdictCache.set(h.store, (entry = { seq: 0, counted: new Map() }));
+  for (;;) {
+    const page = store.events(entry.seq, 500);
+    if (!page.length) break;
+    for (const e of page) {
+      if (e.type === 'attempt.diagnosed' && e.runId && e.payload.failureKind === 'needs-input')
+        entry.counted.set(e.runId, e.payload.counted);
+      entry.seq = e.seq;
+    }
+  }
+  return entry.counted;
+}
+
+/**
+ * Вопрос, которым остановилась попытка: ID попытки → вопрос её блокирующего
+ * запроса. Он нужен, чтобы отличить развилку, ставшую вопросом, от развилок,
+ * которые движок только записал (`assumptionLines`). Без `workId` — по всем
+ * задачам.
+ */
+export function stopQuestions(h: DevContour, workId?: string): Map<string, InputQuestion> {
+  // Все запросы, а не фильтр движка по поручению: фильтр читает и проверяет
+  // само поручение, и одна неполная запись задачи ломала бы карточку.
+  const questions = new Map<string, InputQuestion>();
+  for (const r of executionOf(h).engine.inputRequests())
+    if (r.kind === 'question' && r.blocking && (!workId || r.workId === workId))
+      questions.set(r.runId, r.question);
+  return questions;
 }
 
 export class InputService {
@@ -312,14 +357,39 @@ export class InputService {
     }
   }
 
+  /**
+   * Снимок состояния для сводок: читается один раз на операцию, задачи,
+   * попытки и доска — по задаче (доска — первая, в ревизии которой задача
+   * есть, как у `boardOf`). Список запросов не перечитывает базу и не
+   * фильтрует все попытки на каждый запрос.
+   */
+  private summaryContext() {
+    const current = this.h.store.read();
+    const tasks = new Map(current.tasks.map((t) => [t.id, t]));
+    const runs = new Map<string, (typeof current.runs)[number][]>();
+    for (const r of current.runs) {
+      const own = runs.get(r.taskId);
+      if (own) own.push(r);
+      else runs.set(r.taskId, [r]);
+    }
+    const boards = new Map<string, string>();
+    for (const b of current.boards)
+      for (const r of b.revisions)
+        for (const id of r.taskIds) if (!boards.has(id)) boards.set(id, b.id);
+    return { tasks, runs, boards };
+  }
+
   /** Сводка запроса без текста вопроса и ответов. */
-  private summary(view: ExecutionView, request: InputRequest) {
-    const task = this.h.store.read().tasks.find((t) => t.id === request.workId);
+  private summary(view: ExecutionView, request: InputRequest, context = this.summaryContext()) {
+    const task = context.tasks.get(request.workId);
     const state = this.stateOf(view, request, task);
+    // Повторные остановки вопросом по задаче: сигнал оператору и ведущему.
+    // Сводка несёт только счёт и предел (вперёд, по текущему `maxAttempts`).
+    const stops = questionStops(context.runs.get(request.workId) ?? [], this.h.config.maxAttempts);
     return {
       requestId: request.id,
       taskId: request.workId,
-      boardId: this.boardOf(request.workId)?.id ?? null,
+      boardId: context.boards.get(request.workId) ?? null,
       repositoryId: task?.repositoryId ?? null,
       kind: request.kind,
       blocking: request.blocking,
@@ -333,6 +403,15 @@ export class InputService {
       ...(request.stale ? { stale: { reason: request.stale.reason, at: request.stale.at } } : {}),
       answers: request.answers.length,
       createdAt: request.createdAt,
+      ...(stops.count >= REPEATED_QUESTION_STOPS
+        ? {
+            questionStops: {
+              count: stops.count,
+              limit: stops.limit,
+              exhausted: stops.exhausted,
+            },
+          }
+        : {}),
       ...this.nextOf(request, state.state),
     };
   }
@@ -343,7 +422,8 @@ export class InputService {
     try {
       const requests = engine.inputRequests(input.taskId ? { workId: input.taskId } : {});
       return engine.read((view) => {
-        const all = requests.map((r) => this.summary(view, r));
+        const context = this.summaryContext();
+        const all = requests.map((r) => this.summary(view, r, context));
         return {
           requests: all.filter(
             (r) =>
@@ -963,7 +1043,9 @@ export class InputService {
             lifecycle: carried.request.lifecycle,
             version: carried.request.version,
             ...('active' in carried && carried.active ? { active: carried.active } : {}),
-            ...('blocker' in carried && carried.blocker ? { blocker: carried.blocker } : {}),
+            ...('blocker' in carried && carried.blocker
+              ? { blocker: this.explained(carried.blocker, request.workId) }
+              : {}),
           };
         }
         const applied = engine.applyInput(request.id, {
@@ -982,13 +1064,38 @@ export class InputService {
           lifecycle: applied.request.lifecycle,
           version: applied.request.version,
           ...('active' in applied && applied.active ? { active: applied.active } : {}),
-          ...('blocker' in applied && applied.blocker ? { blocker: applied.blocker } : {}),
+          ...('blocker' in applied && applied.blocker
+            ? { blocker: this.explained(applied.blocker, request.workId) }
+            : {}),
         };
       });
     } catch (error) {
       if (error instanceof HarnessError) throw toDomain(error);
       throw error;
     }
+  }
+
+  /**
+   * Почему ответ не применяется из-за исчерпанных попыток: остановки вопросом
+   * сверх предела засчитаны движком, и без объяснения отказ
+   * `ATTEMPTS_EXHAUSTED` читался как исчерпание сбоями.
+   */
+  private explained<T extends { code: string; message: string }>(blocker: T, taskId: string): T {
+    if (blocker.code !== 'ATTEMPTS_EXHAUSTED') return blocker;
+    // Засчитанные остановки — вердикт движка в момент остановки, а не
+    // вывод по текущему пределу (его могли поменять после).
+    const stops = questionStops(
+      this.h.store.read().runs.filter((r) => r.taskId === taskId),
+      this.h.config.maxAttempts,
+      questionVerdicts(this.h),
+    );
+    if (!stops.counted.size) return blocker;
+    return {
+      ...blocker,
+      message:
+        blocker.message +
+        `. Задача остановилась вопросом ${stops.count} раз(а): без расхода попыток — только первые ${stops.limit}, остановки сверх них (${stops.counted.size}) засчитаны в попытки. Примените ответ со сбросом попыток (reset с причиной) или уточните постановку задачи, чтобы исполнитель не спрашивал снова`,
+    };
   }
 
   /* -------------------------------------------------------------- */

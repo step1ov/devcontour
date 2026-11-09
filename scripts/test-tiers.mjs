@@ -30,6 +30,8 @@ export const slowTests = {
     'Политика после утверждения плана: смена gate и правила вендора ревью держат',
   ],
   'autonomous-loop': true,
+  // Два запуска учебного сервера CLI (~20 с).
+  'demo-approval-mode': ['demo --approval-mode writes agent or operator'],
   'quick-result': true,
   'quick-route-e2e': true,
   'board-coverage': [

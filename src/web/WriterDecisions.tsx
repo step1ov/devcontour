@@ -27,7 +27,7 @@ export function WriterDecisions({
 }: {
   items?: Pick<
     AssumptionLine,
-    'question' | 'chosen' | 'rationale' | 'severity' | 'effectiveSeverity' | 'floors'
+    'question' | 'chosen' | 'rationale' | 'severity' | 'effectiveSeverity' | 'floors' | 'unresolved'
   >[];
 }) {
   if (!items?.length) return null;
@@ -45,8 +45,14 @@ export function WriterDecisions({
             key={i}
             className="border-rule grid gap-0.5 border-l-2 pl-2 text-xs [overflow-wrap:anywhere]"
             data-writer-decision
+            {...(a.unresolved ? { 'data-unresolved': '' } : {})}
           >
             <span className="text-foreground">{a.question}</span>
+            {/* Развилка не ниже порога вопросов на остановленной попытке:
+                исполнитель её не решил, вопросом стала другая. */}
+            {a.unresolved && (
+              <span className="text-warning">не решено: не ниже порога вопросов</span>
+            )}
             <span>
               <span className="text-muted-foreground">Выбор: </span>
               {a.chosen}

@@ -99,6 +99,25 @@ export function taskStatus(t: StatusInput) {
   };
 }
 
+/** Колонка доски задач (kanban) по показанному статусу. */
+export type KanbanColumn = 'inbox' | 'todo' | 'doing' | 'waiting' | 'review' | 'done';
+const kanbanOf: Record<StatusKey, KanbanColumn> = {
+  draft: 'inbox',
+  ready: 'todo',
+  blocked: 'todo',
+  running: 'doing',
+  failed: 'doing',
+  // Задача, которую держит вопрос исполнителя, — не сбой: движок записал
+  // остановку отказом, но она ждёт ответа, а не диагностики.
+  input: 'waiting',
+  verifying: 'review',
+  reviewing: 'review',
+  integrating: 'review',
+  done: 'done',
+  cancelled: 'done',
+};
+export const kanbanColumnOf = (t: StatusInput): KanbanColumn => kanbanOf[statusKey(t)];
+
 /** Подпись и тон для известного ключа (история проверок, ревизии). */
 export function statusOfKey(key: string) {
   const known = (key in statusNames ? key : 'draft') as StatusKey;

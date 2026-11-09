@@ -151,6 +151,17 @@ test('The operator answers the writer question in the panel; the answer reaches 
     .poll(async () => (await taskState(request, task.id))?.failureKind, { timeout: 60000 })
     .toBe('needs-input');
 
+  // Доска задач: задача с вопросом — в колонке «Ждут ответа», а не в
+  // «В работе» среди разработки и сбоев.
+  await page.goto(`/?tab=kanban&board=${board.id}&task=${task.id}`);
+  const columns = page.getByLabel('Колонки задач');
+  const waitingColumn = columns.getByRole('region', { name: 'Ждут ответа' });
+  await expect(waitingColumn).toContainText('Задача с вопросом исполнителя');
+  await expect(waitingColumn).toContainText('Ждёт ответа');
+  await expect(columns.getByRole('region', { name: 'В работе' })).not.toContainText(
+    'Задача с вопросом исполнителя',
+  );
+
   await page.goto(`/?tab=list&board=${board.id}&task=${task.id}`);
   const inspector = page.getByRole('complementary', { name: 'Детали задачи' });
   const card = inspector.getByRole('region', { name: 'Вопрос исполнителя' });
@@ -218,6 +229,36 @@ test('The operator answers the writer question in the panel; the answer reaches 
     .poll(async () => (await taskState(request, task.id))?.status, { timeout: 60000 })
     .toBe('done');
   await expect(card).toContainText('Передано в новую попытку');
+  // «Ход попыток»: остановка вопросом и продолжение после ответа идут с одним
+  // номером бюджета — пометки их различают.
+  const attempts = inspector.getByRole('region', { name: 'Ход попыток' });
+  const marks = attempts.locator('[data-attempt-input]');
+  await expect(marks).toHaveText([
+    'продолжение после ответа на вопрос',
+    'остановлена вопросом исполнителя',
+  ]);
+  await expect(attempts).toContainText('ждала ответа');
+  // Строка «Сейчас работают» называет продолжение той же подписью. Попытка
+  // demo проходит за секунды, поэтому идущей её показывает подмена сводки:
+  // попытка задачи с ответом объявлена идущей.
+  await page.route('**/api/summary*', async (route) => {
+    const response = await route.fetch();
+    const summary = (await response.json()) as {
+      unchanged?: boolean;
+      runs?: { taskId: string; input?: unknown }[];
+    };
+    if (summary.unchanged || !summary.runs) return route.fulfill({ response, json: summary });
+    const runs = summary.runs.map((r) =>
+      r.taskId === task.id && r.input ? { ...r, status: 'active', phase: 'running' } : r,
+    );
+    return route.fulfill({ response, json: { ...summary, runs } });
+  });
+  await page.reload();
+  const live = page.getByRole('region', { name: 'Сейчас работают' });
+  await expect(live).toContainText('Задача с вопросом исполнителя');
+  await expect(live).toContainText('продолжение после ответа на вопрос');
+  await page.unroute('**/api/summary*');
+  await page.reload();
   // Приёмка доски после вопроса: попытка с ответом — обычный принятый
   // результат, доска принимается из панели.
   await page.getByRole('button', { name: 'Принять доску' }).click();

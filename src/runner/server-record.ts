@@ -14,7 +14,7 @@
 // без записи держит workspace, и `stop` отказывает, не посылая сигнала.
 import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { controllerRow, effectiveLeader, readOnlyLocation } from '../core/store.ts';
 import { processAlive } from './resources.ts';
@@ -69,10 +69,22 @@ export function clearServerRecord(root: string, instance: string) {
 export type StopResult =
   | { status: 'stopped'; pid: number; url: string }
   | { status: 'not-running'; detail: string }
-  | { status: 'running-unrecorded'; owner: string; leaseUntil: string; detail: string };
+  | {
+      status: 'running-unrecorded';
+      owner: string;
+      leaseUntil: string;
+      detail: string;
+      /** Как оператору самому найти и остановить такой процесс: DevContour сигнала не посылает. */
+      manualStop: string[];
+    };
 
-/** Канонический каталог данных: его называет `GET /api/server`. */
-export const dataIdentity = (root: string) => (existsSync(root) ? realpathSync(root) : root);
+/**
+ * Канонический каталог данных: его называет `GET /api/server`. Нативный
+ * realpath: на файловой системе без различия регистра (macOS) JS-вариант
+ * сохраняет регистр букв переданного пути, и путь в другом регистре читался
+ * бы как запись, скопированная вместе с workspace.
+ */
+export const dataIdentity = (root: string) => (existsSync(root) ? realpathSync.native(root) : root);
 
 /**
  * Живая роль controller базы `root`, прочитанная без записи. Базы или
@@ -99,6 +111,25 @@ export function liveController(root: string, now = Date.now()) {
   }
 }
 
+/**
+ * Шаги ручной остановки процесса без записи. Роль controller хранит только
+ * случайный идентификатор владельца — ни pid, ни хоста в ней нет, поэтому
+ * шаги объясняют, как найти процесс по командной строке и порту. Сигнал
+ * посылает оператор после проверки командной строки, не DevContour.
+ */
+export function manualStopSteps(root: string): string[] {
+  // `--workspace W` и `--data W/.devcontour-local` оба содержат путь W.
+  const workspace = basename(root) === '.devcontour-local' ? dirname(root) : root;
+  const quoted = `'${workspace.replaceAll("'", "'\\''")}'`;
+  return [
+    `Найдите pid: ps -ax -o pid,command | grep -F -- ${quoted} | grep -v grep — нужен процесс \`devcontour serve\` или \`devcontour start\` с --workspace ${workspace} (или --data в его .devcontour-local), либо очередь \`run\` этого workspace`,
+    "Поиск по пути не найдёт сервер, запущенный с относительным путём (--workspace .), через символическую ссылку (/tmp и /private/tmp) или с --data вне этого workspace: тогда ищите все серверы — ps -ax -o pid,command | grep -E 'devcontour.* (serve|start|run)' | grep -v grep — и сверяйте их пути через realpath, либо по порту панели (по умолчанию 4317): lsof -nP -iTCP:<порт> -sTCP:LISTEN, затем ps -o pid,command -p <pid>",
+    'Убедитесь по командной строке, что это сервер именно этого workspace, и остановите его сами: kill -TERM <pid> — это штатная остановка, как Ctrl+C: сервер дожидается идущих операций и снимает роль controller',
+    'Запущенный в терминале сервер остановите Ctrl+C в этом терминале; запущенный в фоне (nohup, &, менеджер процессов) терминала не имеет — только kill -TERM <pid> или средствами его менеджера',
+    'Проверьте: devcontour stop --workspace ... должен ответить not-running',
+  ];
+}
+
 /** Без подтверждённой записи: живая роль controller — сервер без записи работает. */
 function withoutRecord(root: string, detail: string): StopResult {
   let leader: ReturnType<typeof liveController>;
@@ -115,7 +146,8 @@ function withoutRecord(root: string, detail: string): StopResult {
     status: 'running-unrecorded',
     owner: leader.owner,
     leaseUntil: until,
-    detail: `${detail}, но роль controller базы держит живой процесс (владелец ${leader.owner}, срок до ${until}). Вероятно, это сервер, запущенный версией без записи server.json (до обновления), или очередь \`run\`. DevContour не посылает сигнал процессу, который не подтвердил себя записью: остановите его вручную (Ctrl+C в его терминале) и повторите stop. Если такого процесса нет, роль истечёт в ${until}`,
+    detail: `${detail}, но роль controller базы держит живой процесс (владелец ${leader.owner}, срок до ${until}; pid и хост роль не хранит). Вероятно, это сервер, запущенный версией без записи server.json (до обновления), или очередь \`run\`. DevContour не посылает сигнал процессу, который не подтвердил себя записью: остановите его сами по шагам manualStop (найти pid, проверить командную строку, kill -TERM <pid>; в терминале — Ctrl+C) и повторите stop. Если такого процесса нет, роль истечёт в ${until}`,
+    manualStop: manualStopSteps(root),
   };
 }
 

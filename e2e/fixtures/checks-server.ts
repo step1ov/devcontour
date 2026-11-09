@@ -14,7 +14,7 @@ import {
   removeRoot,
 } from '../../tests/check-fixture.ts';
 
-const port = Number(process.argv[2] ?? 4398);
+const port = Number(process.argv[2] ?? 0);
 const zero = (v: number) => JSON.stringify({ items: [{ w: 0, v }], cap: 0 });
 const p = await checkProject({ 'check.mjs': check(120, { zeroWeights: false }) });
 const f = await fixture(p, {
