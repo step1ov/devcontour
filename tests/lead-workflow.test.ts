@@ -378,7 +378,9 @@ test('В режиме агента workflow доски сам проверяет
     assert.equal(state.paused, true, 'чувствительный перенос не снят автоматически');
     assert.equal(state.pauseReason, 'base-check');
     assert.match(detail(), /main:verify\.mjs/);
-    assert.match(detail(), /queue --start/);
+    // Карточка решения оператора называет кнопку панели, а не устаревший queue --start.
+    assert.match(detail(), /«Подтвердить и запустить» в «Внимании»/);
+    assert.doesNotMatch(detail(), /queue --start/);
     assert.equal(
       events('base.check.started').length,
       3,

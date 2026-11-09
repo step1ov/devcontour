@@ -23,7 +23,13 @@ import {
   setupProject,
 } from '../src/runner/setup.ts';
 import { loadConfig } from '../src/runner/config.ts';
-import { gateTimeoutCheck, installNetworkCheck, isInstallStep } from '../src/runner/doctor.ts';
+import {
+  doctor,
+  gateTimeoutCheck,
+  installNetworkCheck,
+  isInstallStep,
+} from '../src/runner/doctor.ts';
+import { emptyState } from '../src/core/model.ts';
 import { validateWorkflow } from '../src/core/workflow.ts';
 import { config, withTestHome } from './helpers.ts';
 
@@ -464,9 +470,12 @@ test('doctor предупреждает, когда проверки по оче
   const warning = gateTimeoutCheck({ ...base, runTimeoutMs: 100000, gateTimeoutFloorMs: 60000 });
   assert.equal(warning?.status, 'degraded');
   assert.equal(warning?.id, 'gates:timeout');
-  assert.match(warning?.detail ?? '', /компонента main по очереди займут до 2 мин/);
+  assert.match(
+    warning?.detail ?? '',
+    /компонента main — весь профиль: gates 2, по очереди до 2 мин/,
+  );
   assert.match(warning?.detail ?? '', /runTimeoutMs 1\.7 мин/);
-  assert.match(warning?.detail ?? '', /нижняя граница/);
+  assert.match(warning?.detail ?? '', /оценка снизу/);
   // Совместные проверки workspace: 3 × 30 с укладываются в 150 с, пока
   // нижний предел не поднял каждую до 60 с; проверки компонента (2 × 60 с) —
   // укладываются, и предупреждение называет только workspace.
@@ -488,8 +497,72 @@ test('doctor предупреждает, когда проверки по оче
     gateTimeoutFloorMs: 60000,
   });
   assert.equal(jointWarning?.status, 'degraded');
-  assert.match(jointWarning?.detail ?? '', /workspace \(совместные\) по очереди займут до 3 мин/);
+  assert.match(
+    jointWarning?.detail ?? '',
+    /workspace \(совместные\): gates 3, по очереди до 3 мин/,
+  );
   assert.doesNotMatch(jointWarning?.detail ?? '', /компонента main/);
+});
+
+test('doctor gates:timeout предупреждает по всему профилю: base-check и проверка покрытия доски исполняют его в одной фазе', () => {
+  // Монорепозиторий: проверка установки (предпосылка тестов) и 6 тестов по
+  // 20 мин — весь профиль 130 мин; задачи исполняют только свою область.
+  const install = {
+    id: 'install',
+    kind: 'check' as const,
+    command: ['node', '-v'],
+    timeoutMs: 10 * 60_000,
+  };
+  const gates = [
+    install,
+    ...['a', 'b', 'c', 'd', 'e', 'f'].map((id) => ({
+      id: 'test-' + id,
+      kind: 'test' as const,
+      command: ['node', '--test'],
+      timeoutMs: 20 * 60_000,
+      report: { type: 'junit' as const, path: '.reports/' + id + '.xml' },
+    })),
+  ];
+  const grouped = config({
+    gates,
+    gateGroups: { web: ['test-a', 'test-b', 'test-c'], api: ['test-d'] },
+    runTimeoutMs: 90 * 60_000,
+  });
+  // Группы меньше срока фазы, но весь профиль больше: base-check оборвётся —
+  // предупреждение есть, и наибольшая группа — только справка с предпосылкой.
+  const warning = gateTimeoutCheck(grouped);
+  assert.equal(warning?.status, 'degraded');
+  assert.match(
+    warning?.detail ?? '',
+    /компонента main — весь профиль: gates 7, по очереди до 130 мин/,
+  );
+  assert.match(
+    warning?.detail ?? '',
+    /справочно: .*наибольшая группа gates @web с предпосылками: gates 4, до 70 мин\)/,
+  );
+  assert.match(warning?.detail ?? '', /base-check/);
+  assert.doesNotMatch(warning?.detail ?? '', /не исполняет/);
+  // Открытые задачи с областью: предупреждение по-прежнему по профилю, справка —
+  // наибольшая область (T-2: 2 теста и установка — 50 мин); принятые не в счёт.
+  const task = (id: string, status: string, scope?: string[]) => ({
+    id,
+    status: status as never,
+    repositoryId: 'main',
+    ...(scope ? { gates: scope } : {}),
+  });
+  const scoped = [
+    task('T-1', 'ready', ['@api']),
+    task('T-2', 'draft', ['test-e', 'test-f']),
+    task('T-0', 'done', ['test-a', 'test-b', 'test-c', 'test-d', 'test-e', 'test-f']),
+  ];
+  const tight = gateTimeoutCheck({ ...grouped, runTimeoutMs: 45 * 60_000 }, scoped);
+  assert.match(tight?.detail ?? '', /весь профиль: gates 7, по очереди до 130 мин/);
+  assert.match(
+    tight?.detail ?? '',
+    /область задачи T-2 с предпосылками: gates 3, до 50 мин, тоже больше срока фазы/,
+  );
+  // Весь профиль укладывается — предупреждения нет, сколько бы ни было задач.
+  assert.equal(gateTimeoutCheck({ ...grouped, runTimeoutMs: 130 * 60_000 }, scoped), undefined);
 });
 
 test('быстрый setup пишет срок фазы по проверкам и сохраняет уже заданный срок', () =>
@@ -612,3 +685,31 @@ test('срок фазы — по проверкам сохранённого ф�
       rmSync(bare, { recursive: true, force: true });
     }
   }));
+
+test('doctor передаёт открытые задачи состояния в справку gates:timeout', async () => {
+  const root = temp();
+  try {
+    const gates = ['a', 'b'].map((id) => ({
+      id: 'test-' + id,
+      kind: 'test' as const,
+      command: ['node', '--test'],
+      timeoutMs: 20 * 60_000,
+      report: { type: 'junit' as const, path: '.reports/' + id + '.xml' },
+    }));
+    const c = config({ gates, runTimeoutMs: 30 * 60_000 });
+    const of = (r: Awaited<ReturnType<typeof doctor>>) =>
+      r.checks.find((x) => x.id === 'gates:timeout');
+    // Весь профиль (40 мин) больше срока фазы: предупреждение и без задач, и с
+    // задачей, которая исполняет один gate, — её область только справка.
+    const unscoped = of(await doctor(c, root, false, emptyState()));
+    assert.equal(unscoped?.status, 'degraded');
+    assert.match(unscoped?.detail ?? '', /весь профиль: gates 2, по очереди до 40 мин/);
+    assert.doesNotMatch(unscoped?.detail ?? '', /справочно/);
+    const tasks = [{ id: 'T-1', status: 'ready', repositoryId: 'main', gates: ['test-a'] }];
+    const scoped = of(await doctor(c, root, false, { ...emptyState(), tasks: tasks as never }));
+    assert.match(scoped?.detail ?? '', /весь профиль: gates 2, по очереди до 40 мин/);
+    assert.match(scoped?.detail ?? '', /область задачи T-1 с предпосылками: gates 1, до 20 мин\)/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

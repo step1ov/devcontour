@@ -84,5 +84,8 @@
 // Намеренное изменение: описание session_handoff называет стабильные code и
 // params шага host.next и язык его detail (hintLocale конфигурации); прочие
 // операции байтово прежние.
-export const CATALOG_DIGEST = 'c06e52f09f2d2d91dd34ff2e3cf053c40364bb0d0a5845a583b7ca44ae864b3d';
+// Намеренное изменение: task_briefing принимает необязательный repositoryId
+// (workspace из нескольких репозиториев; чужой компонент — отказ), описание
+// называет его; прочие операции байтово прежние.
+export const CATALOG_DIGEST = 'e8bc46b3b7b2c93f36fb71ba376dfa9ce970875efcfcbd3288a0f21915c9ac19';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

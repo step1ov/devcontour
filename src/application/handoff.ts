@@ -35,6 +35,7 @@ import {
   type LoopOutlook,
 } from '../runner/lead-outlook.ts';
 import { repositories } from '../core/repositories.ts';
+import { leadLiftsPause } from '../core/work-status.ts';
 import { executionOf, toDomain } from '../harness/execution.ts';
 import type { DevContourExecutionStore } from '../harness/store.ts';
 
@@ -635,7 +636,7 @@ function hostNext(ctx: HostContext): HandoffHostNext | undefined {
  * там делать нечего, и решение о плане остаётся его шагом.
  */
 function liveBlocker(ctx: HostContext): HandoffHostNext | undefined {
-  const { pack, state, h } = ctx;
+  const { pack, h } = ctx;
   const inScope = (boardId: string | null | undefined) => !pack.graphId || boardId === pack.graphId;
   const asking = new InputService(h)
     .list()
@@ -653,6 +654,17 @@ function liveBlocker(ctx: HostContext): HandoffHostNext | undefined {
     )
       return step;
   }
+  return jobBlocker(ctx);
+}
+
+/**
+ * Упавшее задание доски (повтор или решение по нему) в области пакета. Оно
+ * и без открытых поручений: все задачи доски приняты, а задание упало на
+ * стадии приёмки (например, по таймауту gate) — доска ждёт повтора.
+ */
+function jobBlocker(ctx: HostContext): HandoffHostNext | undefined {
+  const { pack, state } = ctx;
+  const inScope = (boardId: string) => !pack.graphId || boardId === pack.graphId;
   const boards = [...new Set(ctx.jobs.map((j) => j.id))].filter(
     (id) => inScope(id) && state.boards.some((b) => b.id === id),
   );
@@ -667,7 +679,10 @@ function liveBlocker(ctx: HostContext): HandoffHostNext | undefined {
 
 function hostStep(ctx: HostContext): HandoffHostNext | undefined {
   const { pack, view, state, h } = ctx;
-  if (!pack.summary.open) return undefined;
+  // Открытых поручений нет, но доска ещё не принята: шаг — только
+  // восстановление её упавшего задания (без него ведущий не узнал бы, что
+  // приёмку держит упавшее задание).
+  if (!pack.summary.open) return h.config.approvalMode === 'operator' ? undefined : jobBlocker(ctx);
   const input = inputNext(ctx);
   if (input) return input;
   if (h.config.approvalMode === 'operator')
@@ -753,7 +768,7 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
         action: 'queue_set',
         ...(first ? { boardId: first.id, job: jobRef(first), loop: ahead!.outlook } : {}),
         code: 'pause-operator',
-        params: {},
+        params: leadLiftsPause(state) ? { by: 'lead' } : {},
       });
     }
   }

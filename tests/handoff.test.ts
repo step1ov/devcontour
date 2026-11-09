@@ -28,6 +28,7 @@ import { DomainError, repositorySchema, type Config } from '../src/core/model.ts
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
 import { loopAhead } from '../src/runner/lead-outlook.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
+import { BASE_HELD_DETAIL } from '../src/runner/base-check.ts';
 import { DevContourExecutionStore } from '../src/harness/store.ts';
 import { projectionOptions } from '../src/harness/host.ts';
 import {
@@ -465,7 +466,7 @@ test('session_handoff: задание ведущего по доске — за�
   }
 });
 
-test('session_handoff: host.next по состоянию — сервер, задание, пауза остановки и человека', () => {
+test('session_handoff: host.next по состоянию — сервер, задание, пауза остановки и человека', async () => {
   // Сервер работает (роль controller жива), задания нет: исходную паузу
   // снимает только цикл задания доски — шаг workflow_start.
   {
@@ -513,9 +514,80 @@ test('session_handoff: host.next по состоянию — сервер, за�
       f.h.pause(true);
       assert.equal(f.store.read().pauseReason, 'operator');
       assert.equal(at().host.next?.action, 'queue_set');
+      assert.deepEqual(at().host.next?.params, {});
+      assert.match(at().host.next?.detail ?? '', /paused by the operator/);
+      // Пауза ведущего поверх паузы человека её не переписывает.
+      await new AgentService(f.h, f.root).run({ operation: 'queue_set', input: { paused: true } });
+      assert.deepEqual(at().host.next?.params, {});
+      // Ту же паузу поставил ведущий (queue_set) на идущей очереди: шаг называет
+      // его, а не решение пользователя.
+      f.h.pause(false);
+      tick();
+      await new AgentService(f.h, f.root).run({ operation: 'queue_set', input: { paused: true } });
+      const lead = at().host.next;
+      assert.equal(lead?.action, 'queue_set');
+      assert.deepEqual(lead?.params, { by: 'lead' });
+      assert.match(lead?.detail ?? '', /paused by the lead \(queue_set\)/);
+      // Под паузой ведущего удержанный перенос базы: снятие паузы сняло бы и
+      // ожидание, которое подтверждает только человек, — шаг снова решение
+      // пользователя.
+      f.store.change('fixture', (s) => {
+        s.waits = [
+          {
+            kind: 'base-check',
+            detail: `${BASE_HELD_DETAIL} (main:contracts/api.md)`,
+            at: new Date().toISOString(),
+          },
+        ];
+        return {};
+      });
+      const held = at().host.next;
+      assert.equal(held?.code, 'pause-operator');
+      assert.deepEqual(held?.params, {});
+      assert.match(held?.detail ?? '', /only on the user's decision/);
+      // Обычное ожидание переноса базы (не удержанное) под паузой ведущего —
+      // тоже решение человека: снятие паузы сняло бы его без проверки базы.
+      f.store.change('fixture', (s) => {
+        s.waits = [
+          {
+            kind: 'base-check',
+            detail: 'База прогонов перенесена (main): проверьте её гейтами и продолжите очередь',
+            at: new Date().toISOString(),
+          },
+        ];
+        return {};
+      });
+      const plain = at().host.next;
+      assert.equal(plain?.code, 'pause-operator');
+      assert.deepEqual(plain?.params, {});
+      assert.match(plain?.detail ?? '', /only on the user's decision/);
     } finally {
       f.cleanup();
     }
+  }
+});
+
+test('session_handoff: задание доски упало после приёмки всех задач — host.next называет workflow_retry', () => {
+  const f = fixture();
+  try {
+    const { board, task, at, start } = oneBoard(f.h);
+    const flow = new LeadWorkflow(f.h);
+    const job = start(3);
+    complete(f.h, task);
+    flow.fail(flow.claim(job.key, job.owner)!, 'gate coverage timed out after 900000 ms');
+    // Открытых поручений нет: прежде шага не было вовсе (host.next: null).
+    const failed = at();
+    assert.equal(failed.pack.summary.open, 0);
+    assert.equal(failed.host.next?.action, 'workflow_retry', JSON.stringify(failed.host.next));
+    assert.equal(failed.host.next?.code, 'job-retry');
+    assert.equal(failed.host.next?.boardId, board);
+    assert.equal(failed.host.next?.job?.key, job.key);
+    assert.match(failed.host.next.detail, /gate coverage timed out/);
+    assert.equal(devcontourHandoff(f.h, {}).host.next?.action, 'workflow_retry', 'и без --board');
+    assert.equal(flow.retry(job.key, job.owner).status, 'queued');
+    assert.notEqual(at().host.next?.action, 'workflow_retry');
+  } finally {
+    f.cleanup();
   }
 });
 

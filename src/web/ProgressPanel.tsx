@@ -610,6 +610,7 @@ function Stage({
   running,
   paused,
   pauseReason,
+  pausedBy,
   waits,
   stopped,
   workflows,
@@ -618,6 +619,8 @@ function Stage({
   running: number;
   paused?: boolean;
   pauseReason?: DevContourState['pauseReason'];
+  /** Паузу `operator` поставил ведущий агент (`queue_set`), а не человек. */
+  pausedBy?: 'lead';
   waits?: DevContourState['waits'];
   /** Причину остановки очереди сводка считает на сервере по полному журналу. */
   stopped?: string;
@@ -649,7 +652,7 @@ function Stage({
               : paused && pauseReason === 'reconfigure'
                 ? `Выдача остановлена операцией изменения контракта на время применения конфигурации — это не пауза человека, операция снимет её сама; принято ${done} из ${tasks.length}.`
                 : paused && pauseReason === 'operator'
-                  ? `Выдача остановлена человеком, принято ${done} из ${tasks.length}.`
+                  ? `Выдача остановлена ${pausedBy === 'lead' ? 'ведущим агентом' : 'человеком'}, принято ${done} из ${tasks.length}.`
                   : paused
                     ? `Выдача остановлена, принято ${done} из ${tasks.length}.`
                     : `Ожидание выдачи: принято ${done} из ${tasks.length}.`;
@@ -685,7 +688,10 @@ function Stage({
             {w.kind === 'base-check'
               ? 'Ожидает проверки базы'
               : 'Ожидает перезакрепления контекста'}
-            {pauseReason === 'operator' ? ' (пауза человека действует отдельно)' : ''}: {w.detail}
+            {pauseReason === 'operator'
+              ? ` (пауза ${pausedBy === 'lead' ? 'ведущего агента' : 'человека'} действует отдельно)`
+              : ''}
+            : {w.detail}
           </p>
         ))}
         {halted.map((w) => (
@@ -775,6 +781,7 @@ export function ProgressPanel({
         running={runs.length}
         paused={state.paused}
         pauseReason={state.pauseReason}
+        pausedBy={state.queue?.by}
         waits={state.waits}
         stopped={state.queue?.failed ? state.queue.stopReason : undefined}
         workflows={state.workflows}

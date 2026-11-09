@@ -38,6 +38,7 @@ import { inputReviewRounds } from '../harness/input-host.ts';
 import { DiscussionService } from './discussion.ts';
 import { taskOwner } from '../core/sync-state.ts';
 import { baseWaitOf, queueStopOf, quietAttempts, quietOperations } from './queue-stop.ts';
+import { pausedByLead } from '../core/work-status.ts';
 import type { DevContour } from '../core/service.ts';
 import type { Store } from '../core/store.ts';
 import type { DevContourState, Task } from '../core/model.ts';
@@ -769,6 +770,7 @@ const queueSource: AttentionSourceRule = {
           failures: s.pauseFailures ?? [],
           waits: (s.waits ?? []).map((w) => w.kind),
           ...(base ? { base: base.detail } : {}),
+          ...(pausedByLead(s) ? { by: 'lead' } : {}),
         }),
         source: 'queue',
         category: access ? 'access' : operator ? 'decision' : 'technical',
@@ -776,7 +778,9 @@ const queueSource: AttentionSourceRule = {
         title: access
           ? 'Выдача остановлена: нужен доступ'
           : s.pauseReason === 'operator'
-            ? 'Выдача задач остановлена оператором'
+            ? pausedByLead(s)
+              ? 'Выдача задач остановлена ведущим агентом'
+              : 'Выдача задач остановлена оператором'
             : 'Выдача задач на паузе',
         reason: ctx.redact(
           // Перенос базы — первым: причину режет предел длины, а запуск
@@ -792,7 +796,16 @@ const queueSource: AttentionSourceRule = {
         since: s.pausedAt ?? new Date(0).toISOString(),
         subject: { kind: 'queue', id: 'queue', href: hrefs.overview() },
         actions: operator
-          ? [{ id: 'resume', kind: 'domain', label: 'Запустить очередь', input: 'confirm' }]
+          ? [
+              {
+                id: 'resume',
+                kind: 'domain',
+                // Свёрнутый перенос базы подтверждается тем же запуском: кнопка
+                // называется так же, как в карточке переноса и в его тексте.
+                label: base ? 'Подтвердить и запустить' : 'Запустить очередь',
+                input: 'confirm',
+              },
+            ]
           : [handoffOf(ctx)],
         covered: [],
       },

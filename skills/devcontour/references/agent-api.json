@@ -2973,13 +2973,17 @@
     },
     {
       "name": "task_briefing",
-      "description": "Read all pages of the task requirements, contracts, execution policy and blocking reasons.",
+      "description": "Read all pages of the task requirements, contracts, execution policy and blocking reasons. Optional repositoryId (multi-repository workspace): the task must belong to that component, otherwise the call is refused.",
       "readOnly": true,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "properties": {
           "taskId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "repositoryId": {
             "type": "string",
             "pattern": "^[A-Za-z0-9_-]{1,80}$"
           },

@@ -161,6 +161,20 @@ test('Checkpoints stay with their component and cannot bypass completion or writ
     });
     const global = api.execute('project_overview', {}) as any;
     assert.equal(global.items.length, 0);
+    // Задача компонента читается и с его repositoryId; чужой компонент — отказ.
+    const scoped = api.execute('task_briefing', {
+      taskId: task.id,
+      repositoryId: 'library',
+    }) as { task: { repositoryId: string } };
+    assert.equal(scoped.task.repositoryId, 'library');
+    assert.throws(
+      () => api.execute('task_briefing', { taskId: task.id, repositoryId: 'product' }),
+      /принадлежит компоненту library/,
+    );
+    assert.throws(
+      () => api.execute('task_briefing', { taskId: task.id, repositoryId: 'absent' }),
+      /Неизвестный репозиторий/,
+    );
     const save = (repositoryId?: string) => {
       const overview = api.execute('project_overview', { repositoryId }) as any;
       return api.execute('checkpoint_save', {

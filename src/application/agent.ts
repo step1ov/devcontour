@@ -248,7 +248,7 @@ export const descriptions: Record<AgentOperation, string> = {
   project_overview:
     'Read bounded summaries of the common workspace or one repository; follow nextCursor.',
   task_briefing:
-    'Read all pages of the task requirements, contracts, execution policy and blocking reasons.',
+    'Read all pages of the task requirements, contracts, execution policy and blocking reasons. Optional repositoryId (multi-repository workspace): the task must belong to that component, otherwise the call is refused.',
   checkpoint_save:
     'Save an immutable Git-portable context note in the selected owner, requiring the current overview revision. This does not approve work.',
   checkpoint_changes:
@@ -815,7 +815,8 @@ export class AgentService {
       case 'queue_set': {
         const value = agentInputs.queue_set.parse(input);
         if (!value.paused && this.options.stopping?.()) throw new DomainError(SERVER_STOPPING, 409);
-        h.pause(value.paused);
+        // Паузу записывает актёр вызова — ведущий агент, а не человек.
+        h.pause(value.paused, 'operator', 'lead');
         return { ...value, queue: queueStopOf(h), serverRequiredForExecution: true };
       }
       default:

@@ -923,6 +923,15 @@ test('Doctor uses component tool profiles and executes isolated preflight with t
     result = await doctor(f.c, f.data, true);
     assert.ok(result.checks.some((c) => c.id === 'probe:library' && c.status === 'passed'));
     assert.equal(await readFile(join(repo.path, 'value.json'), 'utf8'), '1');
+    // У product нет preflight: подсказка после doctor --probe называет этот
+    // компонент, а не тот же запуск doctor --probe.
+    const probed = result.checks.find((c) => c.id === 'project-probes');
+    assert.match(probed?.detail ?? '', /^doctor --probe выполнен.*: product\./);
+    delete repo.preflight;
+    const probes = (await doctor(f.c, f.data, true)).checks.find((c) => c.id === 'project-probes');
+    assert.match(probes?.detail ?? '', /^doctor --probe выполнен.*: library, product\./);
+    const statics = (await doctor(f.c, f.data)).checks.find((c) => c.id === 'project-probes');
+    assert.match(statics?.detail ?? '', /^Настройте preflight .* выполните doctor --probe/);
   } finally {
     await f.close();
   }

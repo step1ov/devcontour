@@ -34,7 +34,7 @@ import { referenceKey, type StoryBinding } from './intent.ts';
 import { approvalPolicyDigest } from '../harness/policy.ts';
 import { planIngest } from './plan.ts';
 import { boardOwner, completion, receiptHolds, receiptRecordBytes } from './sync-state.ts';
-import { carriedTaskIds } from './work-status.ts';
+import { carriedTaskIds, pausedByLead } from './work-status.ts';
 import { assertDag, descendants, latestTaskId, impactGraph } from './graph.ts';
 import {
   DomainError,
@@ -1556,7 +1556,11 @@ export class DevContour {
    * (`pause('operator')` harness) — операция её уже не снимет, — затем снимает.
    * DevContour добавляет продуктовое условие продолжения: привязку разработки.
    */
-  pause(value: boolean, reason: 'operator' | 'shutdown' = 'operator') {
+  pause(
+    value: boolean,
+    reason: 'operator' | 'shutdown' = 'operator',
+    by: 'operator' | 'lead' = 'operator',
+  ) {
     const { store, engine } = executionOf(this);
     return domain(() =>
       store.host(value ? 'scheduler.paused' : 'scheduler.started', (ht) => {
@@ -1574,8 +1578,32 @@ export class DevContour {
         // применения конфигурации по-прежнему держит запрос операции.
         if (!value && engine.read((v) => v.control().pauseReason) === 'reconfigure')
           engine.pause('operator');
+        // Пауза ведущего поверх паузы человека ничего не меняет: решение
+        // человека остаётся его решением (и снимается только по нему), а не
+        // переписывается в паузу, которую ведущий вправе снять сам.
+        const before = engine.read((v) => v.control());
+        if (
+          value &&
+          reason === 'operator' &&
+          by === 'lead' &&
+          before.paused &&
+          before.pauseReason === 'operator' &&
+          !pausedByLead({ ...ht.state, ...before })
+        ) {
+          // Без записи и без события журнала: паузы ведущего не было.
+          return { paused: true, reason: before.pauseReason, kept: 'operator' as const };
+        }
         const { control } = value ? engine.pause(reason) : engine.resume();
-        const result = { paused: control.paused, reason: control.pauseReason };
+        // Кто поставил паузу `operator`: ведущий агент — отметкой со временем
+        // паузы; решение человека и снятие паузы отметку убирают.
+        const lead = value && reason === 'operator' && by === 'lead' && control.pausedAt;
+        if (lead) ht.state.pauseActor = { by: 'lead', at: control.pausedAt! };
+        else if (!value || reason === 'operator') delete ht.state.pauseActor;
+        const result = {
+          paused: control.paused,
+          reason: control.pauseReason,
+          ...(lead ? { by: 'lead' as const } : {}),
+        };
         ht.journal(result);
         return result;
       }),
