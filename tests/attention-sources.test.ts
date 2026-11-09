@@ -477,6 +477,9 @@ test('S12/S14 пауза оператора и ожидание переноса
       starts[0].reason,
     );
     assert.ok(starts[0].reason.includes('AGENTS.md'), 'причина называет перенос');
+    // Кнопка свёрнутой карточки называется так же, как в тексте переноса.
+    const resume = starts[0].actions.find((a) => a.id === 'resume');
+    assert.equal(resume && 'label' in resume ? resume.label : undefined, 'Подтвердить и запустить');
     // Один запуск очереди с карточки снимает и паузу, и ожидание переноса.
     const done = await new AttentionService(f.store, f.h).act({
       sourceKey: 'queue',

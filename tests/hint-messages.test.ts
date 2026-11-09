@@ -189,6 +189,14 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
   'pause-operator': [
     { code: 'pause-operator', params: {} },
     { code: 'pause-operator', params: {}, boardId: 'board-1', job, loop: { step: 'accept' } },
+    { code: 'pause-operator', params: { by: 'lead' } },
+    {
+      code: 'pause-operator',
+      params: { by: 'lead' },
+      boardId: 'board-1',
+      job,
+      loop: { step: 'accept' },
+    },
   ],
   'follow-up': [{ code: 'follow-up', params: { severity: 5, version: 3 }, input: input1 }],
   'answer-lead': [
@@ -345,8 +353,10 @@ test('Подсказки шага: новая конфигурация setup п�
  * Английский текст — прежний текст подсказок, и от текста `input-refused`
  * считается появление карточки «вход задания не построить»: изменение здесь
  * намеренное и требует заметки в docs/upgrade.md.
+ * Образцы `pause-operator` с `by: lead` добавлены; прежние образцы байтово
+ * прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = 'f5ae96c4e74c38ab80f501735a8884ece4a78f2a952b85b370b31fcadb0a8a65';
+const ENGLISH_SAMPLES_SHA256 = 'c7c1bac72aef87e623800cbe0dee6c8108648f54804ed520c19c7cdf6f8061f7';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

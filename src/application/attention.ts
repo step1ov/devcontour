@@ -796,7 +796,16 @@ const queueSource: AttentionSourceRule = {
         since: s.pausedAt ?? new Date(0).toISOString(),
         subject: { kind: 'queue', id: 'queue', href: hrefs.overview() },
         actions: operator
-          ? [{ id: 'resume', kind: 'domain', label: 'Запустить очередь', input: 'confirm' }]
+          ? [
+              {
+                id: 'resume',
+                kind: 'domain',
+                // Свёрнутый перенос базы подтверждается тем же запуском: кнопка
+                // называется так же, как в карточке переноса и в его тексте.
+                label: base ? 'Подтвердить и запустить' : 'Запустить очередь',
+                input: 'confirm',
+              },
+            ]
           : [handoffOf(ctx)],
         covered: [],
       },

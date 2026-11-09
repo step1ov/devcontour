@@ -63,6 +63,34 @@ export const pausedByLead = (
   !!state.pausedAt &&
   state.pauseActor?.by === 'lead' &&
   state.pauseActor.at === state.pausedAt;
+
+/** Ожидание проверки базы, перенос которой задел приёмку или настройку контура (`base.check.held`). */
+export const heldBaseWait = (detail: string | undefined) =>
+  !!detail && /меняет приёмку или настройку контура/.test(detail);
+
+/**
+ * Ожидание проверки базы, которое подтверждает только человек: удержанный
+ * перенос (приёмка или настройка контура) или любое ожидание в режиме
+ * оператора. Снятие паузы снимает и его, поэтому при нём пауза — решение
+ * человека, кто бы её ни поставил.
+ */
+export const operatorBaseWait = (
+  state: Pick<DevContourState, 'waits'>,
+  approvalMode: 'agent' | 'operator' = 'agent',
+) => {
+  const wait = state.waits?.find((w) => w.kind === 'base-check');
+  return !!wait && (approvalMode === 'operator' || heldBaseWait(wait.detail));
+};
+
+/** Паузу поставил ведущий, и снять её он вправе сам: ожидания человека под ней нет. */
+export const leadLiftsPause = (
+  state: Pick<DevContourState, 'paused' | 'pauseReason' | 'pausedAt' | 'pauseActor' | 'waits'>,
+  approvalMode: 'agent' | 'operator' = 'agent',
+) => pausedByLead(state) && !operatorBaseWait(state, approvalMode);
+
+/** Действие при удержанном переносе базы: подтверждает оператор в «Внимании». */
+export const HELD_BASE_ACTION =
+  'Перенос подтверждает оператор: «Подтвердить и запустить» в «Внимании» панели (на ручном маршруте — devcontour queue --start оператора); ведущий агент это ожидание и паузу сам не снимает';
 export interface QueueStopView {
   paused: boolean;
   reason?: QueueStopReason;
@@ -135,16 +163,18 @@ export function queueStopView(
       ];
     if (wait) {
       const checkFailed = wait.startsWith('Проверка базы не пройдена');
-      const held = /меняет приёмку или настройку контура/.test(wait);
+      const held = heldBaseWait(wait);
       return [
         wait,
-        reason === 'base-check' && agent && options.workflowActive && !held
-          ? checkFailed
-            ? 'Исправьте базу и выполните devcontour base-update (ведущий агент — с --by host) — цикл ведущего проверит её снова'
-            : 'Цикл ведущего проверит базу gates и продолжит выдачу сам'
-          : 'Проверьте базу gates, затем выполните ' +
-            start +
-            (reason === 'operator' ? ` — он снимет и ${pauser}, и ожидание` : ''),
+        held
+          ? HELD_BASE_ACTION
+          : reason === 'base-check' && agent && options.workflowActive
+            ? checkFailed
+              ? 'Исправьте базу и выполните devcontour base-update (ведущий агент — с --by host) — цикл ведущего проверит её снова'
+              : 'Цикл ведущего проверит базу gates и продолжит выдачу сам'
+            : 'Проверьте базу gates, затем выполните ' +
+              start +
+              (reason === 'operator' ? ` — он снимет и ${pauser}, и ожидание` : ''),
         false,
       ];
     }

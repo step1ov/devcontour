@@ -488,6 +488,13 @@ test('Пауза ведущего через queue_set: карточка выд�
     const service = new AttentionService(f.store, f.h);
     const human = byKey((await service.active()).items, 'queue')!;
     assert.equal(human.title, 'Выдача задач остановлена оператором');
+    // Поверх паузы человека пауза ведущего ничего не меняет.
+    f.h.pause(true, 'operator', 'lead');
+    assert.equal(
+      byKey((await service.active()).items, 'queue')!.title,
+      'Выдача задач остановлена оператором',
+    );
+    f.h.pause(false);
     f.h.pause(true, 'operator', 'lead');
     const lead = byKey((await service.active()).items, 'queue')!;
     assert.equal(lead.title, 'Выдача задач остановлена ведущим агентом');

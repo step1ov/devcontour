@@ -482,3 +482,59 @@ test('Пауза ведущего агента через queue_set записа
     f.cleanup();
   }
 });
+
+test('Пауза ведущего поверх паузы человека не переписывает решение человека', async () => {
+  const f = fixture();
+  try {
+    f.h.pause(false);
+    f.h.pause(true);
+    const human = f.h.store.read();
+    const agent = new AgentService(f.h, f.root);
+    const set = (await agent.run({ operation: 'queue_set', input: { paused: true } })) as {
+      queue: QueueStopView;
+    };
+    assert.equal(set.queue.stopReason, 'Выдача остановлена человеком');
+    assert.equal(set.queue.by, undefined);
+    const after = f.h.store.read();
+    assert.equal(after.pauseActor, undefined);
+    assert.equal(after.pausedAt, human.pausedAt, 'время решения человека прежнее');
+    // Пауза ведущего поверх своей же — его новая пауза, отметка остаётся.
+    f.h.pause(false);
+    await agent.run({ operation: 'queue_set', input: { paused: true } });
+    await agent.run({ operation: 'queue_set', input: { paused: true } });
+    assert.equal(queueStopView(f.h.store.read(), []).by, 'lead');
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Удержанный перенос базы: действие — подтверждение оператора в «Внимании», а не queue --start ведущего', async () => {
+  const f = fixture();
+  try {
+    const { BASE_HELD_DETAIL } = await import('../src/runner/base-check.ts');
+    const { HELD_BASE_ACTION } = await import('../src/core/work-status.ts');
+    f.h.pause(false);
+    await new AgentService(f.h, f.root).run({ operation: 'queue_set', input: { paused: true } });
+    f.h.store.change('fixture', (s) => {
+      s.waits = [
+        {
+          kind: 'base-check',
+          detail: `${BASE_HELD_DETAIL} (main:contracts/api.md): gates этой базы его не подтверждают.`,
+          at: new Date().toISOString(),
+        },
+      ];
+      return {};
+    });
+    for (const mode of ['agent', 'operator'] as const) {
+      const view = queueStopView(f.h.store.read(), [], {
+        approvalMode: mode,
+        workflowActive: true,
+      });
+      assert.equal(view.action, HELD_BASE_ACTION);
+      assert.match(view.action ?? '', /«Подтвердить и запустить» в «Внимании»/);
+      assert.doesNotMatch(view.action ?? '', /^Проверьте базу gates, затем выполните/);
+    }
+  } finally {
+    f.cleanup();
+  }
+});

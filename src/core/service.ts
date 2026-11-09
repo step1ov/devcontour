@@ -34,7 +34,7 @@ import { referenceKey, type StoryBinding } from './intent.ts';
 import { approvalPolicyDigest } from '../harness/policy.ts';
 import { planIngest } from './plan.ts';
 import { boardOwner, completion, receiptHolds, receiptRecordBytes } from './sync-state.ts';
-import { carriedTaskIds } from './work-status.ts';
+import { carriedTaskIds, pausedByLead } from './work-status.ts';
 import { assertDag, descendants, latestTaskId, impactGraph } from './graph.ts';
 import {
   DomainError,
@@ -1578,6 +1578,22 @@ export class DevContour {
         // применения конфигурации по-прежнему держит запрос операции.
         if (!value && engine.read((v) => v.control().pauseReason) === 'reconfigure')
           engine.pause('operator');
+        // Пауза ведущего поверх паузы человека ничего не меняет: решение
+        // человека остаётся его решением (и снимается только по нему), а не
+        // переписывается в паузу, которую ведущий вправе снять сам.
+        const before = engine.read((v) => v.control());
+        if (
+          value &&
+          reason === 'operator' &&
+          by === 'lead' &&
+          before.paused &&
+          before.pauseReason === 'operator' &&
+          !pausedByLead({ ...ht.state, ...before })
+        ) {
+          const kept = { paused: true, reason: before.pauseReason, kept: 'operator' as const };
+          ht.journal(kept);
+          return kept;
+        }
         const { control } = value ? engine.pause(reason) : engine.resume();
         // Кто поставил паузу `operator`: ведущий агент — отметкой со временем
         // паузы; решение человека и снятие паузы отметку убирают.

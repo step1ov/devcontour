@@ -28,6 +28,7 @@ import { DomainError, repositorySchema, type Config } from '../src/core/model.ts
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
 import { loopAhead } from '../src/runner/lead-outlook.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
+import { BASE_HELD_DETAIL } from '../src/runner/base-check.ts';
 import { DevContourExecutionStore } from '../src/harness/store.ts';
 import { projectionOptions } from '../src/harness/host.ts';
 import {
@@ -515,13 +516,35 @@ test('session_handoff: host.next по состоянию — сервер, за�
       assert.equal(at().host.next?.action, 'queue_set');
       assert.deepEqual(at().host.next?.params, {});
       assert.match(at().host.next?.detail ?? '', /paused by the operator/);
-      // Ту же паузу поставил ведущий (queue_set): шаг называет его, а не решение пользователя.
+      // Пауза ведущего поверх паузы человека её не переписывает.
+      await new AgentService(f.h, f.root).run({ operation: 'queue_set', input: { paused: true } });
+      assert.deepEqual(at().host.next?.params, {});
+      // Ту же паузу поставил ведущий (queue_set) на идущей очереди: шаг называет
+      // его, а не решение пользователя.
+      f.h.pause(false);
       tick();
       await new AgentService(f.h, f.root).run({ operation: 'queue_set', input: { paused: true } });
       const lead = at().host.next;
       assert.equal(lead?.action, 'queue_set');
       assert.deepEqual(lead?.params, { by: 'lead' });
       assert.match(lead?.detail ?? '', /paused by the lead \(queue_set\)/);
+      // Под паузой ведущего удержанный перенос базы: снятие паузы сняло бы и
+      // ожидание, которое подтверждает только человек, — шаг снова решение
+      // пользователя.
+      f.store.change('fixture', (s) => {
+        s.waits = [
+          {
+            kind: 'base-check',
+            detail: `${BASE_HELD_DETAIL} (main:contracts/api.md)`,
+            at: new Date().toISOString(),
+          },
+        ];
+        return {};
+      });
+      const held = at().host.next;
+      assert.equal(held?.code, 'pause-operator');
+      assert.deepEqual(held?.params, {});
+      assert.match(held?.detail ?? '', /only on the user's decision/);
     } finally {
       f.cleanup();
     }

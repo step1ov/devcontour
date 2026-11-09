@@ -35,7 +35,7 @@ import {
   type LoopOutlook,
 } from '../runner/lead-outlook.ts';
 import { repositories } from '../core/repositories.ts';
-import { pausedByLead } from '../core/work-status.ts';
+import { leadLiftsPause } from '../core/work-status.ts';
 import { executionOf, toDomain } from '../harness/execution.ts';
 import type { DevContourExecutionStore } from '../harness/store.ts';
 
@@ -768,7 +768,7 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
         action: 'queue_set',
         ...(first ? { boardId: first.id, job: jobRef(first), loop: ahead!.outlook } : {}),
         code: 'pause-operator',
-        params: pausedByLead(state) ? { by: 'lead' } : {},
+        params: leadLiftsPause(state, h.config.approvalMode) ? { by: 'lead' } : {},
       });
     }
   }
