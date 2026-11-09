@@ -2916,7 +2916,9 @@ export function App() {
                         Задача из ссылки не входит в показанную ревизию доски.
                       </p>
                     )}
-                    <TaskDescription key={task.id} text={task.description} />
+                    {/* Ключи соседей фрагмента различны: одинаковый ключ у описания и
+                        обсуждения размножал описание при каждом обновлении состояния. */}
+                    <TaskDescription key={'description:' + task.id} text={task.description} />
                     {/* Что нужно для продолжения — первым: это ответ на вопрос
                         «почему задача стоит» одной фразой. */}
                     {!!(task.progress?.reasons.length || task.progress?.workflowStale) && (
@@ -3321,7 +3323,7 @@ export function App() {
                       </Button>
                     )}
                     <TaskDiscussion
-                      key={task.id}
+                      key={'discussion:' + task.id}
                       taskId={task.id}
                       closed={['done', 'cancelled'].includes(task.status)}
                       onOpenTask={(id) => {
