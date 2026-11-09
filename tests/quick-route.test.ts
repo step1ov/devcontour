@@ -1099,3 +1099,34 @@ test('Изменения в репозитории: ключ продолжае�
       rmSync(root, { recursive: true, force: true });
     }
   }));
+
+test('Индекс изменений экранирует поля закоммиченного change.json', () =>
+  withTestHome(() => {
+    const root = temp();
+    const committed = join(root, 'docs/changes/r-001.odd');
+    mkdirSync(committed, { recursive: true });
+    writeFileSync(
+      join(committed, 'change.json'),
+      JSON.stringify({
+        title: 'Таблица | ломается\nи строка',
+        createdAt: '|x\n| — | — |',
+        product: [{ number: 1, status: 'approved' }],
+        architecture: [],
+      }),
+    );
+    const store = preparationStore(join(root, '.devcontour-local'));
+    try {
+      new Preparation(store, 'operator').execute('preparation_quick', intake(root));
+      const rows = readFileSync(join(root, 'docs/changes/README.md'), 'utf8')
+        .split('\n')
+        .filter((l) => l.startsWith('| [`'));
+      assert.equal(rows.length, 2);
+      const odd = rows.find((l) => l.includes('r-001.odd'))!;
+      assert.equal(odd.split('|').length, 8, odd);
+      assert.match(odd, /Таблица {3}ломается и строка \| v1 · утверждено \| — \| — \|  \|$/);
+      return Promise.resolve();
+    } finally {
+      store.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }));

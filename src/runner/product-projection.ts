@@ -348,7 +348,7 @@ type IndexRow = Pick<ProductChange, 'key' | 'title' | 'createdAt'> & {
   architecture: { number: number; status: keyof typeof names }[];
   design?: { number: number; status: keyof typeof names }[];
 };
-const folderKey = /^r-\d{3}\.[a-z0-9][a-z0-9-]{0,48}$/;
+const folderKey = /^r-\d{3,}\.[a-z0-9][a-z0-9-]{0,48}$/;
 /** Папки изменений в docs/changes: ключи, занятые на диске (без symlink). */
 export function changeFolders(root: string) {
   const dir = join(root, 'docs', 'changes');
@@ -391,7 +391,12 @@ export function committedChanges(root: string, owned: readonly string[]): IndexR
           {
             key,
             title: typeof value.title === 'string' ? value.title : key,
-            createdAt: typeof value.createdAt === 'string' ? value.createdAt : '',
+            // Поля закоммиченного файла — содержимое репозитория: в строку
+            // таблицы попадают только дата ISO и название без разрывов строк и `|`.
+            createdAt:
+              typeof value.createdAt === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value.createdAt)
+                ? value.createdAt.slice(0, 10)
+                : '',
             product: revisions(value.product),
             architecture: revisions(value.architecture),
             design: revisions(value.design),
@@ -415,7 +420,7 @@ export function renderIndex(changes: IndexRow[]) {
     ...changes.map((c) => {
       const state = (r?: { number: number; status: keyof typeof names }) =>
         r ? 'v' + r.number + ' · ' + names[r.status] : '—';
-      return `| [\`${c.key}\`](./${c.key}/) | ${line(c.title)} | ${state(c.product.at(-1))} | ${state(c.architecture.at(-1))} | ${state((c.design ?? []).at(-1))} | ${c.createdAt.slice(0, 10)} |`;
+      return `| [\`${c.key}\`](./${c.key}/) | ${line(c.title)} | ${state(c.product.at(-1))} | ${state(c.architecture.at(-1))} | ${state((c.design ?? []).at(-1))} | ${line(c.createdAt).slice(0, 10)} |`;
     }),
     '',
   ].join('\n');
