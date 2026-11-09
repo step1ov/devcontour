@@ -2,7 +2,7 @@
 // pid и экземпляр из server.json; чужой процесс не трогается.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import {
   cpSync,
@@ -25,6 +25,7 @@ import {
   manualStopSteps,
   serverRecordPath,
   stopServer,
+  stopServerByPid,
   type ServerRecord,
 } from '../src/runner/server-record.ts';
 import { fixture } from './helpers.ts';
@@ -209,44 +210,70 @@ test('stop without a record refuses while a live controller lease holds the stor
   }
 });
 
-test('stop --pid signals an unrecorded server only with a live controller lease and its own command line', async () => {
+const hasLsof = spawnSync('lsof', ['-v'], { stdio: 'ignore' }).error === undefined;
+
+test('stop --pid signals an unrecorded server only when the pid holds this database, listens and runs devcontour serve', async (t) => {
+  if (!hasLsof) {
+    t.skip('нет lsof: stop --pid отказывает, подтверждать нечем');
+    return;
+  }
   // Сервер прежней версии, запущенный через nohup: записи нет, терминала нет.
-  // Вместо настоящего сервера — дочерний процесс теста с той же формой
-  // командной строки; роль controller держит фикстура.
+  // Вместо настоящего сервера — дочерний процесс теста: программа в каталоге
+  // devcontour держит базу открытой и слушает порт. Роль controller держит фикстура.
   const f = fixture();
+  const bin = mkdtempSync(join(tmpdir(), 'devcontour-fake-bin-'));
   const children: ChildProcess[] = [];
-  const fake = (...args: string[]) => {
-    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', ...args], {
-      stdio: 'ignore',
+  const program = (dir: string, opensDatabase: boolean) => {
+    mkdirSync(join(bin, dir), { recursive: true });
+    const file = join(bin, dir, 'cli.js');
+    writeFileSync(
+      file,
+      `const { DatabaseSync } = require('node:sqlite');
+${opensDatabase ? `const db = new DatabaseSync(${JSON.stringify(join(f.root, 'state.sqlite'))});` : ''}
+require('node:http').createServer().listen(0, '127.0.0.1', () => process.stdout.write('ready\\n'));`,
+    );
+    return file;
+  };
+  const real = program('node_modules/devcontour/lib', true);
+  const blind = program('blind/devcontour', false);
+  const other = program('node_modules/other-tool/lib', true);
+  const fake = async (script: string, ...args: string[]) => {
+    const child = spawn(process.execPath, [script, ...args], {
+      stdio: ['ignore', 'pipe', 'ignore'],
     });
     children.push(child);
+    await once(child.stdout, 'data');
     return child;
   };
   const stop = (pid: number | undefined) =>
     command([...cli, 'stop', '--data', f.root, '--pid', String(pid)], process.cwd());
   try {
-    const server = fake('devcontour', 'serve', '--port', '4999', '--data', f.root);
+    const server = await fake(real, 'serve', '--port', '4999', '--data', f.root);
+    const noDatabase = await fake(blind, 'serve', '--data', f.root);
+    const lookalike = await fake(other, 'serve', '--data', f.root);
     const foreign = spawn('sleep', ['60'], { stdio: 'ignore' });
     children.push(foreign);
-    const other = fake('devcontour', 'serve', '--data', join(tmpdir(), 'another-workspace-data'));
-    await new Promise((r) => setTimeout(r, 300));
 
-    // Роли controller нет — процесс не подтверждён, сигнала нет.
+    // Роли controller нет — сигнала нет.
     const noLease = await stop(server.pid);
     assert.notEqual(noLease.code, 0);
     assert.match(noLease.stderr, /никто не держит/);
     assert.ok(processAlive(server.pid!));
 
     assert.equal(f.h.leader('pre-upgrade-server'), true);
-    // Командная строка не сервера DevContour или сервер другого workspace — отказ.
-    const notOurs = await stop(foreign.pid);
-    assert.notEqual(notOurs.code, 0);
-    assert.match(notOurs.stderr, /не похожа на сервер DevContour этого workspace/);
-    assert.ok(processAlive(foreign.pid!));
-    const elsewhere = await stop(other.pid);
-    assert.notEqual(elsewhere.code, 0);
-    assert.match(elsewhere.stderr, /не похожа на сервер DevContour этого workspace/);
-    assert.ok(processAlive(other.pid!));
+    // Не сервер DevContour по argv, хотя базу держит и порт слушает.
+    for (const [pid, why] of [
+      [foreign.pid, /командная строка/],
+      [lookalike.pid, /командная строка/],
+      // argv сервера, но базу этот процесс не держит: живая роль — чужая.
+      [noDatabase.pid, /не держит открытой базу/],
+    ] as const) {
+      const refused = await stop(pid);
+      assert.notEqual(refused.code, 0);
+      assert.match(refused.stderr, why);
+      assert.match(refused.stderr, /Сигнал не послан/);
+      assert.ok(processAlive(pid!));
+    }
     // Живая запись называет другой pid — stop без --pid, этот процесс не трогается.
     writeFileSync(
       serverRecordPath(f.root),
@@ -257,41 +284,101 @@ test('stop --pid signals an unrecorded server only with a live controller lease 
     assert.match(recorded.stderr, new RegExp(`называет сервер этого workspace pid ${foreign.pid}`));
     assert.ok(processAlive(server.pid!));
     rmSync(serverRecordPath(f.root));
-    // Несуществующий pid — ошибка.
     const dead = spawn('true');
     await once(dead, 'exit');
     assert.match((await stop(dead.pid)).stderr, /не работает/);
 
-    // Роль живая и командная строка — сервер этого workspace: SIGTERM.
+    // Всё подтверждено: SIGTERM.
     const exited = once(server, 'exit');
     const stopped = await stop(server.pid);
     assert.equal(stopped.code, 0, stopped.stderr);
     const result = JSON.parse(stopped.stdout) as { status: string; pid: number; verified: string };
     assert.equal(result.status, 'stopped');
     assert.equal(result.pid, server.pid);
-    assert.equal(result.verified, 'controller-and-command-line');
+    assert.equal(result.verified, 'database-listener-command-line');
     const [, signal] = (await exited) as [number | null, NodeJS.Signals | null];
     assert.equal(signal, 'SIGTERM');
-    assert.ok(processAlive(foreign.pid!) && processAlive(other.pid!), 'остальные не тронуты');
+    for (const child of [foreign, noDatabase, lookalike])
+      assert.ok(processAlive(child.pid!), 'остальные не тронуты');
   } finally {
     for (const child of children) if (child.exitCode === null) child.kill('SIGKILL');
+    rmSync(bin, { recursive: true, force: true });
     f.cleanup();
   }
 });
 
-test('the command line check names the workspace by --workspace or --data, never a lookalike', () => {
+test('stop --pid refuses without lsof proof or when the pid changes process during the checks', async () => {
+  const f = fixture();
+  const child = spawn('sleep', ['60'], { stdio: 'ignore' });
+  try {
+    assert.equal(f.h.leader('pre-upgrade-server'), true);
+    const argv = `node /opt/node_modules/devcontour/lib/cli.js serve --data ${f.root}`;
+    const base = {
+      commandLine: () => argv,
+      startTime: () => 'Mon Nov  9 10:00:00 2026',
+      openFiles: () => ({ files: [join(f.root, 'state.sqlite')], listening: true }),
+    };
+    await assert.rejects(
+      stopServerByPid(f.root, child.pid!, { probe: { ...base, openFiles: () => undefined } }),
+      /lsof недоступен/,
+    );
+    await assert.rejects(
+      stopServerByPid(f.root, child.pid!, {
+        probe: {
+          ...base,
+          openFiles: () => ({ files: [join(f.root, 'state.sqlite')], listening: false }),
+        },
+      }),
+      /не слушает TCP-порт/,
+    );
+    let calls = 0;
+    await assert.rejects(
+      stopServerByPid(f.root, child.pid!, {
+        probe: { ...base, startTime: () => (calls++ ? 'later' : 'earlier') },
+      }),
+      /сменил процесс/,
+    );
+    assert.ok(processAlive(child.pid!), 'сигнала не было');
+  } finally {
+    child.kill('SIGKILL');
+    f.cleanup();
+  }
+});
+test('the command line check parses argv structurally and refuses wrappers and lookalikes', () => {
   const workspace = realpathSync(mkdtempSync(join(tmpdir(), 'devcontour-cmdline-')));
   try {
     const root = join(workspace, '.devcontour-local');
     const ok = (cmd: string) => commandLineNamesServer(cmd, root);
     assert.ok(ok(`node ./node_modules/.bin/devcontour serve --port 4317 --workspace ${workspace}`));
-    assert.ok(ok(`node /x/devcontour/lib/cli.js start --workspace=${workspace}/`));
-    assert.ok(ok(`node devcontour run --data ${root}`));
-    // Другой workspace с тем же префиксом, не та подкоманда, не DevContour.
-    assert.ok(!ok(`node devcontour serve --workspace ${workspace}-copy`));
-    assert.ok(!ok(`node devcontour doctor --workspace ${workspace}`));
-    assert.ok(!ok(`node other-tool serve --workspace ${workspace}`));
-    assert.ok(!ok(`node devcontour serve --workspace .`));
+    assert.ok(
+      ok(
+        `/usr/local/bin/node /x/node_modules/devcontour/lib/cli.js start --workspace=${workspace}/`,
+      ),
+    );
+    assert.ok(ok(`node --import tsx /src/devcontour/src/cli.ts serve --data ${root}`));
+    assert.ok(ok(`/opt/bin/devcontour serve --workspace ${workspace}`));
+    for (const cmd of [
+      `claude -p use devcontour to serve --workspace ${workspace}`,
+      `vim notes-devcontour.md start --workspace ${workspace}`,
+      `tmux new-session -d devcontour serve --workspace ${workspace}`,
+      `ssh host devcontour serve --workspace ${workspace}`,
+      `tail -f devcontour.log --workspace ${workspace} run`,
+      `bash -c devcontour serve --workspace ${workspace}`,
+      `sudo node ./node_modules/.bin/devcontour serve --workspace ${workspace}`,
+      `env node ./node_modules/.bin/devcontour serve --workspace ${workspace}`,
+      `npx devcontour serve --workspace ${workspace}`,
+      `nohup node ./node_modules/.bin/devcontour serve --workspace ${workspace}`,
+      `node -e x ./node_modules/.bin/devcontour serve --workspace ${workspace}`,
+      `node ./node_modules/.bin/devcontour doctor --workspace ${workspace}`,
+      `node ./node_modules/.bin/devcontour run --workspace ${workspace}`,
+      `node ./node_modules/.bin/devcontour agent serve --workspace ${workspace}`,
+      `node ./node_modules/.bin/devcontour serve --workspace ${workspace}-copy`,
+      `node ./node_modules/.bin/devcontour serve --workspace .`,
+      `node /x/other-tool/cli.js serve --workspace ${workspace}`,
+      `node /x/devcontour-notes/cli.js serve --workspace ${workspace}`,
+      `node ./node_modules/.bin/devcontour --workspace ${workspace} serve`,
+    ])
+      assert.ok(!ok(cmd), cmd);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
