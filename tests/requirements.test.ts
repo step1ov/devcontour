@@ -17,7 +17,9 @@ import {
   requirementReport,
   correctRequirements,
 } from '../src/runner/requirements.ts';
-import { input } from './helpers.ts';
+import { config, input, removeTestCheckoutRoot, testCheckoutRoot } from './helpers.ts';
+import { AgentService } from '../src/application/agent.ts';
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 
 test('Requirement parser ignores examples, rejects duplicate IDs and bounds sections', () => {
   assert.equal(
@@ -142,5 +144,134 @@ test('Requirements survive real Git execution; changed spec loses current covera
     await scheduler.stop();
     store.close();
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Компонент с большим отчётом требований: реальный Git-репозиторий с ТЗ и
+ * много задач со ссылками на его требования.
+ */
+async function largeReport(tasks: number) {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'devcontour-req-page-')));
+  const repo = join(dir, 'repo');
+  await mkdir(join(repo, 'docs'), { recursive: true });
+  await git(repo, 'init', '-q', '-b', 'main');
+  await git(repo, 'config', 'user.email', 'test@example.invalid');
+  await git(repo, 'config', 'user.name', 'Test');
+  const ids = Array.from({ length: 6 }, (_, i) => `REQ-item-${i}`);
+  await writeFile(
+    join(repo, 'docs/spec.md'),
+    ids.map((id) => `## ${id}: Item ${id}\n${'Observable behaviour. '.repeat(5)}\n`).join('\n'),
+  );
+  await git(repo, 'add', 'docs/spec.md');
+  await git(repo, 'commit', '-q', '-m', 'Specify items');
+  const checkouts = testCheckoutRoot();
+  const store = new Store(join(dir, 'state.sqlite'));
+  const h = new DevContour(store, config({ repository: repo, checkoutRoot: checkouts }));
+  const snapshot = requirementSnapshot(repo, 'docs/spec.md');
+  const requirements = snapshot.requirements.map((r) => ({
+    ...r,
+    source: snapshot.source,
+    gate: 'test',
+    scenario: `Scenario of ${r.id}`,
+  }));
+  const created: string[] = [];
+  for (let b = 0; created.length < tasks; b++) {
+    const board = h.createBoard(`Requirements board ${b}`);
+    for (let i = 0; i < 40 && created.length < tasks; i++)
+      created.push(h.addTask(board.id, { ...input(`Task ${b}-${i}`), requirements }).id);
+  }
+  return {
+    h,
+    root: dir,
+    created,
+    cleanup: () => {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+      removeTestCheckoutRoot(checkouts);
+    },
+  };
+}
+
+test('requirements_report агента: сводка и страницы в пределе ответа вместо отказа 64 KiB', async () => {
+  const f = await largeReport(120);
+  try {
+    const full = requirementReport(f.h, 'main');
+    assert.equal(full.tasks.length, 120);
+    assert.ok(
+      Buffer.byteLength(JSON.stringify(full)) > 65536,
+      'полный отчёт больше предела ответа',
+    );
+    const agent = new AgentService(f.h, f.root);
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    let pages = 0;
+    do {
+      const page = (await agent.run({
+        operation: 'requirements_report',
+        input: { repositoryId: 'main', ...(cursor ? { cursor } : {}) },
+      })) as {
+        summary: {
+          tasks: number;
+          requirements: number;
+          stale: number;
+          proof: Record<string, number>;
+        };
+        tasks: { taskId: string; requirements: unknown[] }[];
+        nextCursor?: string;
+        full: string;
+      };
+      assert.ok(Buffer.byteLength(JSON.stringify(page)) <= 65536);
+      assert.deepEqual(page.summary, {
+        tasks: 120,
+        requirements: 720,
+        stale: 0,
+        proof: { none: 720 },
+      });
+      assert.match(page.full, /devcontour requirements-report --repository-id main/);
+      assert.ok(page.tasks.length > 0);
+      for (const t of page.tasks) assert.equal(t.requirements.length, 6);
+      seen.push(...page.tasks.map((t) => t.taskId));
+      cursor = page.nextCursor;
+      pages++;
+    } while (cursor && pages < 20);
+    assert.ok(pages > 1, 'больше одной страницы');
+    assert.deepEqual(seen, f.created, 'страницы покрывают все задачи по порядку без повторов');
+    // Явный предел страницы и синхронный путь агента — те же строки.
+    const small = agent.execute({
+      operation: 'requirements_report',
+      input: { repositoryId: 'main', limit: 3 },
+    }) as { tasks: { taskId: string }[]; nextCursor?: string };
+    assert.deepEqual(
+      small.tasks.map((t) => t.taskId),
+      f.created.slice(0, 3),
+    );
+    assert.equal(small.nextCursor, f.created[2]);
+    await assert.rejects(
+      agent.run({
+        operation: 'requirements_report',
+        input: { repositoryId: 'main', cursor: 'T-missing' },
+      }),
+      /Курсор отчёта требований не найден/,
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('requirements_report агента не держит цикл событий: таймер срабатывает до ответа', async () => {
+  const f = await largeReport(60);
+  try {
+    const agent = new AgentService(f.h, f.root);
+    const order: string[] = [];
+    const report = agent
+      .run({ operation: 'requirements_report', input: { repositoryId: 'main', limit: 1 } })
+      .then(() => order.push('report'));
+    setTimeout(() => order.push('timer'), 0);
+    await report;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.deepEqual(order, ['timer', 'report']);
+  } finally {
+    f.cleanup();
   }
 });
