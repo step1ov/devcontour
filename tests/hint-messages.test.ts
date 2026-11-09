@@ -8,6 +8,9 @@ import { DevContour } from '../src/core/service.ts';
 import { configSchema } from '../src/core/model.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { devcontourHandoff, handoffResponse } from '../src/application/handoff.ts';
+import { approvalPolicyDigest } from '../src/harness/policy.ts';
+import { profile } from '../src/runner/packs.ts';
+import { projectConfig } from '../src/runner/setup.ts';
 import {
   hintCatalogs,
   hintDetail,
@@ -297,4 +300,13 @@ test('Подсказки шага: шаг доски в агентском ре�
   } finally {
     f.cleanup();
   }
+});
+
+test('Подсказки шага: новая конфигурация setup пишет ru, digest политики исполнения прежний', async () => {
+  const c = projectConfig('/tmp/example-repository', await profile('npm-project'));
+  assert.equal(c.hintLocale, 'ru');
+  assert.equal(hintLocaleOf(c), 'ru');
+  const english = configSchema.parse({ ...c, hintLocale: undefined });
+  assert.equal(english.hintLocale, undefined);
+  assert.equal(approvalPolicyDigest(c), approvalPolicyDigest(english));
 });
