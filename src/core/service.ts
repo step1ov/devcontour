@@ -272,6 +272,18 @@ function bindingFor(s: DevContourState, ...changeIds: (string | undefined)[]) {
   return developmentBinding(s, changeIds.find(Boolean));
 }
 /**
+ * Следующий этап без changeId продолжает изменение доски. Если активно
+ * другое изменение, ведущий мог иметь в виду его: ответ называет оба и путь
+ * для активного — новую доску.
+ */
+function stageWarning(s: DevContourState, bound: string | undefined, named: string | undefined) {
+  const active = s.preparation?.activeChangeId;
+  if (!bound || named || !active || active === bound) return {};
+  return {
+    warning: `Этап привязан к изменению доски ${changeKeyOf(s, bound)}, а активно ${changeKeyOf(s, active)}. Работу изменения ${changeKeyOf(s, active)} планируйте на новой доске (plan_import без boardId)`,
+  };
+}
+/**
  * Привязка замены в корректировке — к изменению оригинала. Если его
  * постановку открыли заново и разработка изменения не готова, замена
  * остаётся без привязки (как перенос задачи), и её привязывает правка
@@ -936,7 +948,13 @@ export class DevContour {
     input: unknown,
     boardId?: string,
     changeId?: string,
-  ): { boardId: string; revision?: number; tasks: number; changeId?: string } {
+  ): {
+    boardId: string;
+    revision?: number;
+    tasks: number;
+    changeId?: string;
+    warning?: string;
+  } {
     // Отказ схемы плана — по путям и сообщениям, а не сырым массивом zod:
     // ведущий исправляет план по названному полю.
     const parsedPlan = planIngest.safeParse(input);
@@ -1021,6 +1039,7 @@ export class DevContour {
           revision: revision.number,
           tasks: tasks.length,
           ...(preparation ? { changeId: preparation.changeId } : {}),
+          ...stageWarning(s, preparation?.changeId, named),
         };
       }
       const b = {
