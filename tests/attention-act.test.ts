@@ -477,3 +477,22 @@ test('Карточка в ответе действия — с тем же вл�
     f.cleanup();
   }
 });
+
+test('Пауза ведущего через queue_set: карточка выдачи называет ведущего, а не оператора', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    f.h.addTask(b.id, input());
+    f.h.approve(b.id);
+    f.h.pause(true);
+    const service = new AttentionService(f.store, f.h);
+    const human = byKey((await service.active()).items, 'queue')!;
+    assert.equal(human.title, 'Выдача задач остановлена оператором');
+    f.h.pause(true, 'operator', 'lead');
+    const lead = byKey((await service.active()).items, 'queue')!;
+    assert.equal(lead.title, 'Выдача задач остановлена ведущим агентом');
+    assert.match(lead.reason, /Выдача остановлена ведущим агентом \(queue_set\)/);
+  } finally {
+    f.cleanup();
+  }
+});
