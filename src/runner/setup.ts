@@ -2,6 +2,7 @@ import { selectedWorkspaceMode, assertControllerCheckout } from './workspace-mod
 import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isIP } from 'node:net';
 import {
   HarnessError,
   applyFileWrites,
@@ -20,7 +21,12 @@ const builtinTitles: Record<string, string> = {
   qa: 'Тестировщик',
 };
 import { repositories } from '../core/repositories.ts';
-import { existingComponentFile, loadConfig, scopedConfig } from './config.ts';
+import {
+  componentConfigProblem,
+  existingComponentFile,
+  loadConfig,
+  scopedConfig,
+} from './config.ts';
 import { profile, profileMetadata, profilePin, packKey } from './packs.ts';
 import { git } from './process.ts';
 
@@ -177,8 +183,17 @@ export function componentProfileConfig(
  * pnpm падала отказом прокси, хотя doctor и план setup молчали. Реестр берётся
  * из `.npmrc` репозитория (`registry=` и `@scope:registry=`); без своего
  * `registry=` — публичный `registry.npmjs.org`. Адрес с подстановкой
- * переменной окружения заранее не известен и не добавляется.
+ * переменной окружения заранее не известен и не добавляется. Локальные
+ * адреса (`localhost`, `.local`, IP-литералы) автоматически не открываются:
+ * loopback открыл бы песочнице панель DevContour. Они возвращаются в
+ * `skipped`, и план предлагает добавить их вручную, если это намеренно.
  */
+const localHost = (host: string) =>
+  host === 'localhost' ||
+  host.endsWith('.localhost') ||
+  host.endsWith('.local') ||
+  host.startsWith('[') ||
+  isIP(host) !== 0;
 export async function packageRegistryDomains(
   repository: string,
   selected: { capabilities?: string[]; gates: { command?: string[] }[] },
@@ -188,7 +203,7 @@ export async function packageRegistryDomains(
     !selected.capabilities?.some((c) => c === 'npm' || c === 'pnpm') &&
     !selected.gates.some((g) => managers.includes(basename(g.command?.[0] ?? '')))
   )
-    return [];
+    return { domains: [] as string[], skipped: [] as string[] };
   const host = (value: string) => {
     if (value.includes('${')) return undefined;
     try {
@@ -213,12 +228,13 @@ export async function packageRegistryDomains(
       if (domain) scoped.push(domain);
     } else primary = domain;
   }
-  return [
+  const all = [
     ...new Set([
       ...(primary === null ? ['registry.npmjs.org'] : primary ? [primary] : []),
       ...scoped,
     ]),
   ];
+  return { domains: all.filter((d) => !localHost(d)), skipped: all.filter(localHost) };
 }
 
 /** Файл компонента, который setup сохраняет вместо своей конфигурации компонента. */
@@ -490,7 +506,9 @@ async function runSetup(options: {
               workspaceRoot,
             )
           : projectConfig(repository, selected, options.approvalMode)),
-        ...(registryDomains.length ? { isolation: { mode: 'os', domains: registryDomains } } : {}),
+        ...(registryDomains.domains.length
+          ? { isolation: { mode: 'os', domains: registryDomains.domains } }
+          : {}),
         ...(Object.keys(toolProfiles).length ? { toolProfiles } : {}),
         // Пакеты строятся по объявленным ролям: роль без своей инструкции
         // осталась бы с одним общим контекстом и не знала бы своего дела.
@@ -502,6 +520,17 @@ async function runSetup(options: {
     ) + '\n',
   );
 
+  // Сохранённый файл компонента проверяется схемой и правилами конфигурации
+  // сейчас, а не первой загрузкой после применения.
+  const componentProblem =
+    componentFile && componentPath
+      ? componentConfigProblem(
+          JSON.parse(files.get(join(data, 'config.json'))!) as Parameters<
+            typeof componentConfigProblem
+          >[0],
+          componentFile,
+        )
+      : undefined;
   // План до любой записи; существующие файлы, включая политику пользователя,
   // сохраняются. Сохранённый снимок профиля обязан совпадать байтово.
   const intents: FileIntent[] = [...files].map(([path, content]) =>
@@ -537,9 +566,27 @@ async function runSetup(options: {
     if (plan.conflicts)
       throw new Error('Сохранённый профиль изменён; требуется явная сверка версии');
     if (componentError) throw new Error(componentError);
+    if (componentProblem)
+      throw new Error(
+        `Файл компонента ${componentPath} не подходит конфигурации: ${componentProblem}. Исправьте его отдельным коммитом и повторите setup`,
+      );
     return approvalMode;
   };
   const plan = await planFileWrites({ files: intents });
+  // Что setup добавляет в config.json сверх профиля: оператор видит сетевую
+  // политику песочницы и профили инструментов до применения.
+  const generated = {
+    isolation: {
+      domains: registryDomains.domains,
+      ...(registryDomains.skipped.length
+        ? {
+            skipped: registryDomains.skipped,
+            note: `Локальные адреса реестра не открыты песочнице автоматически: ${registryDomains.skipped.join(', ')}. Если это намеренно, добавьте их в isolation.domains вручную.`,
+          }
+        : {}),
+    },
+    toolProfiles,
+  };
   // Проверки, которые будут действовать после setup.
   const effectiveGates = component?.precedence ? component.gates : gateSummary(selected.gates);
   if (options.plan) {
@@ -568,6 +615,7 @@ async function runSetup(options: {
       conflicts: plan.conflicts,
       gates: effectiveGates,
       ...(component ? { component } : {}),
+      ...generated,
       ...(refusal ? { refusal } : {}),
     };
   }
@@ -590,6 +638,11 @@ async function runSetup(options: {
     created: component?.action === 'create' ? [...created, component.path] : created,
     preserved: component?.action === 'preserve' ? [...preserved, component.path] : preserved,
     ...(component ? { gates: effectiveGates, component } : {}),
+    ...(registryDomains.domains.length ||
+    registryDomains.skipped.length ||
+    Object.keys(toolProfiles).length
+      ? generated
+      : {}),
     next: [
       ...(component?.precedence ? [component.note] : []),
       'Ведущий агент продолжает по START.md: каркас, настройки, реальные gates и исходный Git-коммит.',

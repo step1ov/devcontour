@@ -20,6 +20,7 @@ import { ATTENTION_NAMESPACE } from '../application/attention.ts';
 import { ignoredComponentCopies } from './config.ts';
 import { CheckoutRootError, checkoutRootFor } from './checkout-root.ts';
 import { installProbe } from './install-probe.ts';
+import { packageRegistryDomains } from './setup.ts';
 import { validateWorkflow } from '../core/workflow.ts';
 import { command, git } from './process.ts';
 import { outdatedContextPacks } from './context-library.ts';
@@ -67,30 +68,45 @@ type Check = {
   detail: string;
 };
 /** Готовность снимает только `blocked`; `degraded` и `not-checked` её не снимают. */
+const installVerbs = new Set(['ci', 'install', 'i', 'add']);
+/** Шаг ставит зависимости npm, pnpm или yarn — глагол где угодно после менеджера. */
+export function isInstallStep(command: string[] = []) {
+  const names = command.map((part) => part.split('/').at(-1) ?? '');
+  const at = names.findIndex((n) => n === 'npm' || n === 'pnpm' || n === 'yarn');
+  if (at < 0) return false;
+  const rest = names.slice(at + 1);
+  if (rest.some((n) => installVerbs.has(n))) return true;
+  // `yarn` без подкоманды — установка.
+  return names[at] === 'yarn' && !rest.some((n) => !n.startsWith('-'));
+}
 /**
  * Установка зависимостей npm/pnpm/yarn идёт в песочнице проверок, а внешняя
- * сеть там открыта только доменам `isolation.domains`. Пустой список при
- * gate установки — отказ прокси на первой задаче, а не на doctor.
+ * сеть там открыта только доменам `isolation.domains`. Нет домена реестра,
+ * который называет `.npmrc` компонента (или публичного, если своего нет), —
+ * отказ прокси на первой задаче, а не на doctor.
  */
-export function installNetworkCheck(config: Config): Check | undefined {
-  if (config.isolation.mode !== 'os' || config.isolation.domains.length) return undefined;
-  const installs = repositories(config).flatMap((repo) =>
-    [...repo.gates, ...(repo.prepare ?? [])]
-      .filter((step) => {
-        const [tool, verb] = (step.command ?? []).map((part) => part.split('/').at(-1));
-        return (
-          (tool === 'npm' && ['ci', 'install', 'i'].includes(verb ?? '')) ||
-          (tool === 'pnpm' && ['install', 'i', 'add'].includes(verb ?? '')) ||
-          (tool === 'yarn' && (verb === undefined || ['install', 'add'].includes(verb)))
-        );
-      })
-      .map((step) => `${repo.id}:${step.id}`),
-  );
-  if (!installs.length) return undefined;
+export async function installNetworkCheck(config: Config): Promise<Check | undefined> {
+  if (config.isolation.mode !== 'os') return undefined;
+  const allowed = new Set(config.isolation.domains);
+  const missing = new Set<string>();
+  const installs: string[] = [];
+  for (const repo of repositories(config)) {
+    const steps = [...repo.gates, ...(repo.prepare ?? [])].filter((step) =>
+      isInstallStep(step.command),
+    );
+    if (!steps.length) continue;
+    installs.push(...steps.map((step) => `${repo.id}:${step.id}`));
+    const { domains } = await packageRegistryDomains(repo.path, {
+      capabilities: ['npm'],
+      gates: [],
+    });
+    for (const domain of domains) if (!allowed.has(domain)) missing.add(domain);
+  }
+  if (!installs.length || !missing.size) return undefined;
   return {
     id: 'isolation:network',
     status: 'degraded',
-    detail: `Проверки установки зависимостей (${[...new Set(installs)].join(', ')}) идут в песочнице без внешней сети: isolation.domains пуст, и реестр пакетов будет закрыт. Добавьте домен реестра в isolation.domains (например registry.npmjs.org или реестр из .npmrc) и перезапустите сервер.`,
+    detail: `Проверки установки зависимостей (${[...new Set(installs)].join(', ')}) идут в песочнице, а домена реестра пакетов нет в isolation.domains: ${[...missing].join(', ')}. Реестр будет закрыт прокси песочницы. Добавьте домен в isolation.domains и перезапустите сервер.`,
   };
 }
 export const doctorReady = (checks: Pick<Check, 'status'>[]) =>
@@ -672,7 +688,7 @@ export async function doctor(
       (support.detail ? `; ${support.detail}` : '')
     );
   });
-  const network = installNetworkCheck(config);
+  const network = await installNetworkCheck(config);
   if (network) checks.push(network);
   checks.push(checkoutsCheck(config, root));
   // Механизм на месте ещё не значит, что gate установки в нём пройдёт:

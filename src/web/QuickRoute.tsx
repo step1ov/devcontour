@@ -123,6 +123,10 @@ export interface QuickView {
     gates?: { id: string; kind?: string; command?: string[] }[];
     /** Файл компонента: сохранённый закоммиченный файл действует вместо предложения. */
     component?: { path: string; action: 'create' | 'preserve'; precedence: boolean; note?: string };
+    /** Сеть песочницы, которую setup открывает: домены реестра пакетов. */
+    isolation?: { domains: string[]; skipped?: string[]; note?: string };
+    /** Профили инструментов, которые setup создаёт для ролей файла компонента. */
+    toolProfiles?: Record<string, { runtime: string }>;
   };
   steps: QuickStep[];
   lead: { lastActivityAt: string | null; present: boolean };
@@ -407,6 +411,29 @@ function Preparation({ view }: { view: QuickView }) {
             ) : (
               'файл компонента не объявляет проверок'
             )}
+          </Fact>
+        )}
+        {plan?.isolation && (
+          <Fact term="Сеть песочницы">
+            {plan.isolation.domains.length ? (
+              <span className="font-mono text-xs break-all">
+                {plan.isolation.domains.join(', ')}
+              </span>
+            ) : (
+              'внешняя сеть закрыта'
+            )}
+            {plan.isolation.note && (
+              <span className="text-muted-foreground block text-sm">{plan.isolation.note}</span>
+            )}
+          </Fact>
+        )}
+        {plan?.toolProfiles && Object.keys(plan.toolProfiles).length > 0 && (
+          <Fact term="Профили инструментов">
+            <span className="font-mono text-xs break-all">
+              {Object.entries(plan.toolProfiles)
+                .map(([name, p]) => `${name} (${p.runtime})`)
+                .join(', ')}
+            </span>
           </Fact>
         )}
       </dl>

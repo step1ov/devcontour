@@ -1,13 +1,21 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { chooseWorkspaceMode } from '../src/runner/workspace-mode.ts';
 import { packageRegistryDomains, planSetup, setupProject } from '../src/runner/setup.ts';
 import { loadConfig } from '../src/runner/config.ts';
-import { installNetworkCheck } from '../src/runner/doctor.ts';
+import { installNetworkCheck, isInstallStep } from '../src/runner/doctor.ts';
 import { validateWorkflow } from '../src/core/workflow.ts';
 import { withTestHome } from './helpers.ts';
 
@@ -173,26 +181,30 @@ test('pnpm и npm setup открывают песочнице реестр па�
     try {
       repository(root);
       chooseWorkspaceMode(root, 'embedded');
-      await setupProject({
-        repository: root,
-        workspace: root,
-        profile: 'pnpm-project',
-        quick: true,
-      });
+      const input = { repository: root, workspace: root, profile: 'pnpm-project', quick: true };
+      // План показывает сетевую политику песочницы до применения.
+      const plan = await planSetup(input);
+      assert.deepEqual(plan.isolation, { domains: ['registry.npmjs.org'] });
+      assert.deepEqual(plan.toolProfiles, {});
+      await setupProject(input);
       const config = loadConfig(join(root, '.devcontour-local/config.json'));
       assert.equal(config.isolation.mode, 'os');
       assert.deepEqual(config.isolation.domains, ['registry.npmjs.org']);
-      assert.equal(installNetworkCheck(config), undefined);
+      assert.equal(await installNetworkCheck(config), undefined);
       // Конфигурация без доменов: doctor предупреждает о gate установки.
       const closed = { ...config, isolation: { mode: 'os' as const, domains: [] } };
-      const warning = installNetworkCheck(closed);
+      const warning = await installNetworkCheck(closed);
       assert.equal(warning?.status, 'degraded');
       assert.match(warning?.detail ?? '', /main:install/);
-      assert.match(warning?.detail ?? '', /isolation\.domains/);
+      assert.match(warning?.detail ?? '', /registry\.npmjs\.org/);
       assert.equal(
-        installNetworkCheck({ ...closed, isolation: { mode: 'none', domains: [] } }),
+        await installNetworkCheck({ ...closed, isolation: { mode: 'none', domains: [] } }),
         undefined,
       );
+      // Домены есть, но не реестр из .npmrc — тоже предупреждение.
+      writeFileSync(join(root, '.npmrc'), 'registry=https://npm.example.test/\n');
+      const stale = await installNetworkCheck(config);
+      assert.match(stale?.detail ?? '', /npm\.example\.test/);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -207,23 +219,121 @@ test('pnpm и npm setup открывают песочнице реестр па�
           capabilities: ['npm'],
           gates: [{ command: ['npm', 'ci'] }],
         }),
-        ['npm.example.test', 'acme.example.test'],
+        { domains: ['npm.example.test', 'acme.example.test'], skipped: [] },
       );
       writeFileSync(join(mirror, '.npmrc'), '@acme:registry=https://acme.example.test\n');
       assert.deepEqual(
-        await packageRegistryDomains(mirror, { gates: [{ command: ['pnpm', 'install'] }] }),
+        (await packageRegistryDomains(mirror, { gates: [{ command: ['pnpm', 'install'] }] }))
+          .domains,
         ['registry.npmjs.org', 'acme.example.test'],
       );
       // Профиль без npm/pnpm сеть не открывает.
       assert.deepEqual(
-        await packageRegistryDomains(mirror, {
-          capabilities: ['go'],
-          gates: [{ command: ['go'] }],
-        }),
+        (
+          await packageRegistryDomains(mirror, {
+            capabilities: ['go'],
+            gates: [{ command: ['go'] }],
+          })
+        ).domains,
         [],
       );
     } finally {
       rmSync(mirror, { recursive: true, force: true });
+    }
+  }));
+
+test('локальные адреса реестра не открываются песочнице автоматически, план их называет', () =>
+  withTestHome(async () => {
+    const root = temp();
+    try {
+      repository(root, {
+        '.npmrc': [
+          'registry=http://localhost:4873/',
+          '@a:registry=http://127.0.0.1:4873/',
+          '@b:registry=http://10.1.2.3/',
+          '@c:registry=http://[::1]:4873/',
+          '@d:registry=http://169.254.1.1/',
+          '@e:registry=http://registry.local/',
+          '@f:registry=http://dev.localhost/',
+          '@g:registry=https://npm.example.test/',
+        ].join('\n'),
+      });
+      chooseWorkspaceMode(root, 'embedded');
+      const input = { repository: root, workspace: root, profile: 'pnpm-project', quick: true };
+      const plan = await planSetup(input);
+      assert.deepEqual(plan.isolation.domains, ['npm.example.test']);
+      assert.deepEqual(plan.isolation.skipped, [
+        'localhost',
+        '127.0.0.1',
+        '10.1.2.3',
+        '[::1]',
+        '169.254.1.1',
+        'registry.local',
+        'dev.localhost',
+      ]);
+      assert.match(plan.isolation.note ?? '', /вручную/);
+      await setupProject(input);
+      const config = loadConfig(join(root, '.devcontour-local/config.json'));
+      assert.deepEqual(config.isolation.domains, ['npm.example.test']);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }));
+
+test('doctor находит установку зависимостей в любом месте argv', () => {
+  for (const command of [
+    ['npm', 'ci'],
+    ['pnpm', '--filter', 'x', 'install'],
+    ['corepack', 'pnpm', 'install'],
+    ['npm', '--prefix', 'web', 'ci'],
+    ['yarn'],
+    ['yarn', 'install', '--frozen-lockfile'],
+    ['/usr/local/bin/pnpm', 'i'],
+  ])
+    assert.ok(isInstallStep(command), command.join(' '));
+  for (const command of [
+    ['npm', 'test'],
+    ['pnpm', 'run', 'lint'],
+    ['yarn', 'test'],
+    ['node', '--test'],
+  ])
+    assert.ok(!isInstallStep(command), command.join(' '));
+});
+
+test('файл компонента, не проходящий схему, — отказ плана и применения с причиной', () =>
+  withTestHome(async () => {
+    const root = temp();
+    try {
+      const { name: _name, ...nameless } = committedComponent;
+      repository(root, {
+        'devcontour.component.json': JSON.stringify({ ...nameless, gates: 'all' }) + '\n',
+      });
+      chooseWorkspaceMode(root, 'embedded');
+      const input = { repository: root, workspace: root, profile: 'pnpm-project', quick: true };
+      const plan = await planSetup(input);
+      assert.match(plan.refusal ?? '', /devcontour\.component\.json не подходит конфигурации/);
+      assert.match(plan.refusal ?? '', /gates/);
+      await assert.rejects(setupProject(input), /не подходит конфигурации/);
+      assert.equal(existsSync(join(root, '.devcontour-local/config.json')), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+    const noJunit = temp();
+    try {
+      repository(noJunit, {
+        'devcontour.component.json':
+          JSON.stringify({ ...committedComponent, gates: [committedComponent.gates[0]] }) + '\n',
+      });
+      chooseWorkspaceMode(noJunit, 'embedded');
+      const plan = await planSetup({
+        repository: noJunit,
+        workspace: noJunit,
+        profile: 'pnpm-project',
+        quick: true,
+      });
+      assert.match(plan.refusal ?? '', /Нужен test gate с JUnit/);
+    } finally {
+      rmSync(noJunit, { recursive: true, force: true });
     }
   }));
 
