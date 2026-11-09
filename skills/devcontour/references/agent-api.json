@@ -3322,7 +3322,7 @@
     },
     {
       "name": "task_create",
-      "description": "Add a draft task to an active board; DAG and component ownership are validated. In a product change the task is bound to task.preparation.changeId when given, otherwise to the change of the board's tasks, otherwise to the active change; the response names the binding. An accepted board takes no tasks: open the next stage with plan_import and its boardId; board_correct only changes accepted results.",
+      "description": "Add a draft task to an active board; DAG and component ownership are validated. In a product change the task is bound to task.preparation.changeId when given (changeId alone is enough; supplied digests must equal the current approved ones), otherwise to the change of the board's tasks, otherwise to the active change; a change other than that of the board's live tasks is refused; the response names the binding. An accepted board takes no tasks: open the next stage with plan_import and its boardId; board_correct only changes accepted results.",
       "readOnly": false,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -3364,10 +3364,7 @@
                   }
                 },
                 "required": [
-                  "changeId",
-                  "productDigest",
-                  "architectureDigest",
-                  "referencesDigest"
+                  "changeId"
                 ],
                 "additionalProperties": false
               },
@@ -3651,7 +3648,7 @@
     },
     {
       "name": "task_edit",
-      "description": "Edit a draft task using the specDigest read from task_briefing. Stale edits are rejected. task.preparation.changeId rebinds the task to that product change; without it the task keeps its own change. The response names the binding.",
+      "description": "Edit a draft task using the specDigest read from task_briefing. Stale edits are rejected. task.preparation.changeId rebinds the task to that product change (changeId alone is enough; stale supplied digests are refused, as is a change other than that of the board's other live tasks); without it the task keeps its own change. The response names the binding.",
       "readOnly": false,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -3697,10 +3694,7 @@
                   }
                 },
                 "required": [
-                  "changeId",
-                  "productDigest",
-                  "architectureDigest",
-                  "referencesDigest"
+                  "changeId"
                 ],
                 "additionalProperties": false
               },

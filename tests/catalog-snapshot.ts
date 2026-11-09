@@ -76,5 +76,10 @@
 // описания plan_import, task_create и task_edit называют привязку задачи к
 // изменению продукта (названное, изменение доски или задачи, активное) и
 // привязку в ответе; прочие операции байтово прежние.
-export const CATALOG_DIGEST = 'a48929343546a15200670eba33eddb384ac939d19989660f65b378113e98132e';
+// Намеренное изменение: preparation во входе task_create и task_edit
+// принимает один changeId (digests необязательны и сверяются с утверждёнными);
+// описания plan_import, task_create и task_edit называют отказы: changeId вне
+// продуктового процесса, устаревшие digests, другое изменение на доске;
+// прочие операции байтово прежние.
+export const CATALOG_DIGEST = '68132e756549e4287ac1cd862ce2947d11294d38425ac3d65b6e0710cdb1daa2';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

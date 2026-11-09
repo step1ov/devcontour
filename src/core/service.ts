@@ -8,6 +8,7 @@ import {
   assertTaskPreparation,
 } from './preparation.ts';
 import { validateTaskContext, validateWorkflow } from './workflow.ts';
+import type { PreparationRequest } from './preparation-model.ts';
 import { entityId } from './ids.ts';
 import { createHash } from 'node:crypto';
 import { repository, repositories, requiresContract, expandGates } from './repositories.ts';
@@ -207,20 +208,60 @@ const board = (s: DevContourState, id: string) =>
     `Доска ${id} не найдена`,
   );
 /**
- * Изменение продукта доски: изменение последней по порядку задачи доски,
- * привязанной к подготовке. Следующий этап и задачи, добавленные в ревизию,
- * продолжают изменение доски, а не активное изменение workspace: изменения
- * независимы, и активным может быть другое, проработка которого идёт
- * параллельно.
+ * Изменение продукта доски: изменение последней по порядку живой задачи
+ * доски, привязанной к подготовке (`except` — правленая задача). Следующий
+ * этап и задачи, добавленные в ревизию, продолжают изменение доски, а не
+ * активное изменение workspace: изменения независимы, и активным может быть
+ * другое, проработка которого идёт параллельно.
  */
-function boardChangeId(s: DevContourState, b: Board | undefined) {
-  if (!b) return undefined;
-  for (const r of [...b.revisions].reverse())
+function boardChanges(s: DevContourState, b: Board | undefined, except?: string) {
+  const ids: string[] = [];
+  for (const r of [...(b?.revisions ?? [])].reverse())
     for (const id of [...r.taskIds].reverse()) {
-      const changeId = s.tasks.find((t) => t.id === id)?.preparation?.changeId;
-      if (changeId) return changeId;
+      const t = s.tasks.find((t) => t.id === id);
+      if (!t || t.id === except || t.status === 'cancelled' || !t.preparation) continue;
+      if (!ids.includes(t.preparation.changeId)) ids.push(t.preparation.changeId);
     }
-  return undefined;
+  return ids;
+}
+const boardChangeId = (s: DevContourState, b: Board | undefined, except?: string) =>
+  boardChanges(s, b, except)[0];
+const changeKeyOf = (s: DevContourState, id: string) =>
+  s.preparation?.changes.find((c) => c.id === id)?.key ?? id;
+/**
+ * Явно названное изменение задачи или плана. Вне продуктового процесса —
+ * отказ, а не молчаливый пропуск. Переданные digests сверяются с действующими
+ * утверждёнными: устаревшая привязка отклоняется. Доска ведёт одно изменение:
+ * другое изменение на доске с живыми задачами — отказ.
+ */
+function requestedChange(
+  s: DevContourState,
+  request: PreparationRequest | undefined,
+  b: Board | undefined,
+  except?: string,
+) {
+  if (!request) return undefined;
+  if (!s.preparation)
+    throw new DomainError(
+      'Привязка к изменению продукта есть только в продуктовом процессе; уберите preparation/changeId',
+      409,
+    );
+  const current = developmentBinding(s, request.changeId)!;
+  const stale = (Object.keys(request) as (keyof PreparationRequest)[]).some(
+    (key) => key !== 'changeId' && request[key] !== undefined && request[key] !== current[key],
+  );
+  if (stale)
+    throw new DomainError(
+      `Привязка к изменению ${changeKeyOf(s, request.changeId)} устарела: digests не совпадают с утверждёнными. Перечитайте preparation_status или передайте только changeId`,
+      409,
+    );
+  const others = boardChanges(s, b, except);
+  if (b && others.length && !others.includes(request.changeId))
+    throw new DomainError(
+      `Доска ${b.id} ведёт изменение ${others.map((id) => changeKeyOf(s, id)).join(', ')}; задачи изменения ${changeKeyOf(s, request.changeId)} планируйте на его доске`,
+      409,
+    );
+  return request.changeId;
 }
 /**
  * Привязка новой или правленой задачи: к названному изменению, иначе к
@@ -229,6 +270,20 @@ function boardChangeId(s: DevContourState, b: Board | undefined) {
  */
 function bindingFor(s: DevContourState, ...changeIds: (string | undefined)[]) {
   return developmentBinding(s, changeIds.find(Boolean));
+}
+/**
+ * Привязка замены в корректировке — к изменению оригинала. Если его
+ * постановку открыли заново и разработка изменения не готова, замена
+ * остаётся без привязки (как перенос задачи), и её привязывает правка
+ * черновика ведущим: корректировка не отказывает целиком.
+ */
+function correctionBinding(s: DevContourState, original: Task) {
+  try {
+    return bindingFor(s, original.preparation?.changeId);
+  } catch (error) {
+    if (error instanceof DomainError) return undefined;
+    throw error;
+  }
 }
 /**
  * Принятая ревизия закрыта для задач, утверждения и приёмки. Отказ называет
@@ -917,8 +972,9 @@ export class DevContour {
       if (at('GRAPH_DUPLICATE_ID')) throw new DomainError('Ключи задач должны быть уникальны', 400);
       const ids = new Map<string, string>();
       for (const t of plan.tasks) ids.set(t.key, entityId(s, 'T'));
+      const named = requestedChange(s, changeId ? { changeId } : undefined, target);
       const preparation = s.preparation
-        ? bindingFor(s, changeId, boardChangeId(s, target))
+        ? bindingFor(s, named, boardChangeId(s, target))
         : undefined;
       const tasks = plan.tasks.map((item, i) => {
         const unknown = at('GRAPH_UNKNOWN_DEPENDENCY', i);
@@ -1048,7 +1104,7 @@ export class DevContour {
   addTask(boardId: string, input: unknown) {
     const parsed = taskIngest.parse(input);
     repository(this.config, parsed.repositoryId);
-    validateTaskContext(this.config, parsed);
+    validateTaskContext(this.config, { ...parsed, preparation: undefined });
     return this.store.change('task.created', (s) => {
       const r = activeRevision(s, boardId);
       const owner = board(s, boardId).repositoryId;
@@ -1058,7 +1114,7 @@ export class DevContour {
         ...parsed,
         preparation: bindingFor(
           s,
-          parsed.preparation?.changeId,
+          requestedChange(s, parsed.preparation, board(s, boardId)),
           boardChangeId(s, board(s, boardId)),
         ),
         assignee: parsed.assignee ?? s.team?.member,
@@ -1077,7 +1133,7 @@ export class DevContour {
   editTask(id: string, input: unknown, expectedDigest: string) {
     const parsed = taskIngest.parse(input);
     repository(this.config, parsed.repositoryId);
-    validateTaskContext(this.config, parsed);
+    validateTaskContext(this.config, { ...parsed, preparation: undefined });
     return this.store.change('task.edited', (s) => {
       const t = task(s, id);
       if (t.status !== 'draft')
@@ -1102,9 +1158,9 @@ export class DevContour {
       Object.assign(t, parsed, {
         preparation: bindingFor(
           s,
-          parsed.preparation?.changeId,
+          requestedChange(s, parsed.preparation, ownerBoard, t.id),
           t.preparation?.changeId,
-          boardChangeId(s, ownerBoard),
+          boardChangeId(s, ownerBoard, t.id),
         ),
       });
       if (unbound(t) !== before) t.specEditedAt = now();
@@ -1350,7 +1406,7 @@ export class DevContour {
         validateTaskContext(this.config, { ...original, requirements });
         s.tasks.push({
           ...original,
-          preparation: bindingFor(s, original.preparation?.changeId),
+          preparation: correctionBinding(s, original),
           requirements,
           sharedCompletion: undefined,
           id: map.get(id)!,

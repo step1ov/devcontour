@@ -1291,41 +1291,96 @@ test('Задачи доски привязываются к изменению �
       changeId: first,
       key: state.preparation!.changes[0].key,
     });
-    // Правка с preparation другого изменения перепривязывает и меняет specDigest.
+    // Доска ведёт одно изменение: задача другого изменения на ней — отказ.
+    assert.throws(
+      () =>
+        api.execute({
+          operation: 'task_edit',
+          input: {
+            taskId: two.id,
+            expectedDigest: specDigest(two),
+            task: {
+              ...input('Task two'),
+              featureId: 'member-block',
+              preparation: { changeId: second },
+            },
+          },
+        }),
+      /ведёт изменение/,
+    );
+    assert.throws(
+      () =>
+        api.execute({
+          operation: 'task_create',
+          input: {
+            boardId,
+            task: {
+              ...input('Task mixed'),
+              featureId: 'member-block',
+              preparation: { changeId: second },
+            },
+          },
+        }),
+      /ведёт изменение/,
+    );
+    // Переданные устаревшие digests — отказ, а не молчаливая замена.
+    assert.throws(
+      () =>
+        api.execute({
+          operation: 'task_edit',
+          input: {
+            taskId: two.id,
+            expectedDigest: specDigest(two),
+            task: {
+              ...input('Task two'),
+              featureId: 'member-block',
+              preparation: { ...developmentBinding(state, first)!, productDigest: '0'.repeat(64) },
+            },
+          },
+        }),
+      /устарела/,
+    );
+    // Новая доска — к активному изменению или к названному changeId.
+    const fresh = api.execute({ operation: 'plan_import', input: { plan: plan('Other', 'four') } });
+    assert.equal(fresh.changeId, second);
+    // Ошибочно привязанная задача перепривязывается правкой с одним changeId:
+    // других живых задач на её доске нет, specDigest меняется.
+    state = f.store.read();
+    const four = state.tasks.find((t) => t.title === 'Task four')!;
     const edited = api.execute({
       operation: 'task_edit',
       input: {
-        taskId: two.id,
-        expectedDigest: specDigest(two),
+        taskId: four.id,
+        expectedDigest: specDigest(four),
         task: {
-          ...input('Task two'),
+          ...input('Task four'),
           featureId: 'member-block',
-          preparation: developmentBinding(state, second),
+          preparation: { changeId: first },
         },
       },
     });
-    assert.notEqual(edited.specDigest, specDigest(two));
-    assert.equal((edited.preparation as { changeId: string }).changeId, second);
+    assert.notEqual(edited.specDigest, specDigest(four));
+    assert.equal((edited.preparation as { changeId: string }).changeId, first);
     state = f.store.read();
-    assert.equal(state.tasks.find((t) => t.id === two.id)!.preparation?.changeId, second);
-    // Правка без preparation сохраняет собственное изменение задачи.
-    const again = state.tasks.find((t) => t.id === two.id)!;
+    assert.deepEqual(
+      state.tasks.find((t) => t.id === four.id)!.preparation,
+      developmentBinding(state, first),
+    );
+    // Правка без preparation сохраняет собственное изменение задачи, хотя активно другое.
+    const again = state.tasks.find((t) => t.id === four.id)!;
     api.execute({
       operation: 'task_edit',
       input: {
-        taskId: two.id,
+        taskId: four.id,
         expectedDigest: specDigest(again),
         task: {
-          ...input('Task two'),
+          ...input('Task four'),
           featureId: 'member-block',
           description: 'Уточнённое описание задачи',
         },
       },
     });
-    assert.equal(f.store.read().tasks.find((t) => t.id === two.id)!.preparation?.changeId, second);
-    // Новая доска — к активному изменению или к названному changeId.
-    const fresh = api.execute({ operation: 'plan_import', input: { plan: plan('Other', 'four') } });
-    assert.equal(fresh.changeId, second);
+    assert.equal(f.store.read().tasks.find((t) => t.id === four.id)!.preparation?.changeId, first);
     const named = api.execute({
       operation: 'plan_import',
       input: { plan: plan('Named', 'five'), changeId: first },
@@ -1335,6 +1390,69 @@ test('Задачи доски привязываются к изменению �
       f.store.read().tasks.find((t) => t.title === 'Task five')!.preparation?.changeId,
       first,
     );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('plan_import с changeId вне продуктового процесса — отказ', () => {
+  const f = fixture();
+  try {
+    assert.throws(
+      () =>
+        new AgentService(f.h).execute({
+          operation: 'plan_import',
+          input: {
+            plan: {
+              title: 'Release',
+              description: 'Цель: Release',
+              tasks: [{ ...input('Task one'), key: 'one', dependsOn: [], contracts: [] }],
+            },
+            changeId: 'PC-missing',
+          },
+        }),
+      /только в продуктовом процессе/,
+    );
+    assert.equal(f.store.read().boards.length, 0);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Корректировка при заново открытой постановке изменения оригинала не отказывает: замена без привязки', () => {
+  const f = fixture(),
+    p = new Preparation(f.store);
+  try {
+    const changeId = approvePreparation(p);
+    const { boardId } = f.h.importPlan({
+      title: 'Release',
+      description: 'Цель: Release',
+      tasks: [
+        {
+          ...input('Task one'),
+          featureId: 'member-block',
+          key: 'one',
+          dependsOn: [],
+          contracts: [],
+        },
+      ],
+    });
+    const one = f.store.read().tasks[0];
+    f.h.approve(boardId);
+    complete(f.h, one.id);
+    f.h.accept(boardId, MERGED);
+    // Постановку изменения открывают заново: его разработка больше не готова.
+    p.execute('preparation_product', {
+      changeId,
+      expectedDigest: f.store.read().preparation!.changes[0].product.at(-1)!.digest,
+      reason: 'Уточнение постановки',
+      content: product,
+    });
+    assert.throws(() => developmentBinding(f.store.read(), changeId), /продуктовую/);
+    f.h.correct(boardId, [one.id], 'Исправить результат по уточнению');
+    const replacement = f.store.read().tasks.find((t) => t.supersedes === one.id)!;
+    assert.equal(replacement.status, 'draft');
+    assert.equal(replacement.preparation, undefined);
   } finally {
     f.cleanup();
   }
