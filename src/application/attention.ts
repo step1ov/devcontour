@@ -67,6 +67,7 @@ import {
   type CachedFacts,
   type QuickPrerequisites,
 } from './quick-view.ts';
+import { leadActivityMark } from '../runner/lead-activity.ts';
 
 /** Бюджет списка `attention_list` в ответе агентского API (предел ответа 64 KiB). */
 const AGENT_LIST_BYTES = 56_000;
@@ -2850,12 +2851,13 @@ export class AttentionService {
     });
   }
 
-  /** Присутствие ведущего по журналу активного изменения (правило быстрого маршрута). */
+  /**
+   * Присутствие ведущего по журналу активного изменения (правило быстрого
+   * маршрута) и отметке его обращений к агентскому API.
+   */
   private lead(ctx: AttentionContext) {
     const change = changesOf(ctx).find((c) => c.id === ctx.state.preparation?.activeChangeId);
-    return change
-      ? leadPresence(change, ctx.state, ctx.now)
-      : { present: false, lastActivityAt: null };
+    return leadPresence(change, ctx.state, ctx.now, leadActivityMark(this.store));
   }
 
   /** Карточка относится к компоненту: задачи компонента или его доски. */
