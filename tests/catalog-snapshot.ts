@@ -84,5 +84,13 @@
 // Намеренное изменение: описание session_handoff называет стабильные code и
 // params шага host.next и язык его detail (hintLocale конфигурации); прочие
 // операции байтово прежние.
-export const CATALOG_DIGEST = 'c06e52f09f2d2d91dd34ff2e3cf053c40364bb0d0a5845a583b7ca44ae864b3d';
+// Намеренное изменение: task_briefing принимает необязательный repositoryId
+// (workspace из нескольких репозиториев; чужой компонент — отказ), описание
+// называет его; прочие операции байтово прежние.
+// Намеренное изменение: requirements_report принимает необязательные cursor и
+// limit и отвечает сводкой по всем задачам компонента и страницей строк
+// задач в пределе ответа (без cursor и limit — весь список, если он
+// укладывается); описание называет страницы, nextCursor, full и complete;
+// прочие операции байтово прежние.
+export const CATALOG_DIGEST = '787694f3a3261c821a7d4bc65ed20940c67cfecc6c1e113d35e8696f4d1377d4';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

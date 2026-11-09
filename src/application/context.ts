@@ -44,7 +44,7 @@ const paging = {
 export const contextInputs = {
   project_context: z.object({}).strict(),
   project_overview: z.object({ ...scope, ...paging }).strict(),
-  task_briefing: z.object({ taskId: id, ...paging }).strict(),
+  task_briefing: z.object({ taskId: id, ...scope, ...paging }).strict(),
   checkpoint_save: z
     .object({
       ...scope,
@@ -498,6 +498,16 @@ export class AgentContext {
           s.tasks.find((t) => t.id === input.taskId),
           'Задача не найдена',
         );
+      // Компонент задачи в workspace из нескольких репозиториев: указанный
+      // repositoryId сверяется с задачей, чужой компонент — отказ.
+      if (input.repositoryId !== undefined) {
+        repository(h.config, input.repositoryId);
+        if (t.repositoryId !== input.repositoryId)
+          throw new DomainError(
+            `Задача ${t.id} принадлежит компоненту ${t.repositoryId}, а не ${input.repositoryId}`,
+            409,
+          );
+      }
       const sections: { kind: string; id: string; part: number; text: string }[] = [];
       const section = (kind: string, id: string, text: string) => {
         const chars = Array.from(text);

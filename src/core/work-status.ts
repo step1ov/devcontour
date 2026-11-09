@@ -53,6 +53,34 @@ export function queueStopReason(
  * всех ответах.
  */
 export type QueueStopReason = NonNullable<DevContourState['pauseReason']> | 'not-started';
+
+/** Действующую паузу `operator` поставил ведущий агент (`queue_set`), а не человек. */
+export const pausedByLead = (
+  state: Pick<DevContourState, 'paused' | 'pauseReason' | 'pausedAt' | 'pauseActor'>,
+) =>
+  state.paused === true &&
+  state.pauseReason === 'operator' &&
+  !!state.pausedAt &&
+  state.pauseActor?.by === 'lead' &&
+  state.pauseActor.at === state.pausedAt;
+
+/** Ожидание проверки базы, перенос которой задел приёмку или настройку контура (`base.check.held`). */
+export const heldBaseWait = (detail: string | undefined) =>
+  !!detail && /меняет приёмку или настройку контура/.test(detail);
+
+/**
+ * Паузу поставил ведущий, и снять её он вправе сам: под ней нет ожидания
+ * проверки базы. Снятие паузы снимает и ожидание без проверки базы, а под
+ * паузой `operator` ожидание снимает только человек (как `baseWaitOf`): ни
+ * цикл ведущего, ни автоматическая проверка его уже не снимут.
+ */
+export const leadLiftsPause = (
+  state: Pick<DevContourState, 'paused' | 'pauseReason' | 'pausedAt' | 'pauseActor' | 'waits'>,
+) => pausedByLead(state) && !state.waits?.some((w) => w.kind === 'base-check');
+
+/** Действие при удержанном переносе базы: подтверждает оператор в «Внимании». */
+export const HELD_BASE_ACTION =
+  'Перенос подтверждает оператор: «Подтвердить и запустить» в «Внимании» панели (на ручном маршруте — devcontour queue --start оператора); ведущий агент это ожидание и паузу сам не снимает';
 export interface QueueStopView {
   paused: boolean;
   reason?: QueueStopReason;
@@ -62,11 +90,16 @@ export interface QueueStopView {
   action?: string;
   /** Остановка вызвана сбоем (рантайм, провайдер, окружение), а не решением или ожиданием. */
   failed?: true;
+  /** Паузу `operator` поставил ведущий агент (`queue_set`), а не человек. */
+  by?: 'lead';
 }
 /** Ошибка `scheduler.error`, записанная не раньше паузы (секунда — на порядок записи). */
 const AFTER_PAUSE_SLACK_MS = 1000;
 export function queueStopView(
-  state: Pick<DevContourState, 'paused' | 'pauseReason' | 'pausedAt' | 'pauseFailures' | 'waits'>,
+  state: Pick<
+    DevContourState,
+    'paused' | 'pauseReason' | 'pausedAt' | 'pauseFailures' | 'waits' | 'pauseActor'
+  >,
   events: Pick<AuditEvent, 'id' | 'at' | 'type' | 'data'>[],
   options: { approvalMode?: 'agent' | 'operator'; workflowActive?: boolean } = {},
 ): QueueStopView {
@@ -88,6 +121,8 @@ export function queueStopView(
     state.pauseReason ?? (since || detail ? 'runtime' : 'not-started');
   const failures = (state.pauseFailures ?? []).filter((f) => f !== 'unknown');
   const wait = state.waits?.find((w) => w.kind === 'base-check')?.detail;
+  const lead = pausedByLead(state);
+  const pauser = lead ? 'паузу ведущего агента' : 'паузу человека';
   // Исходную и штатную паузы в режиме агента снимает цикл ведущего.
   const resume = !agent
     ? start
@@ -118,22 +153,28 @@ export function queueStopView(
       ];
     if (wait) {
       const checkFailed = wait.startsWith('Проверка базы не пройдена');
-      const held = /меняет приёмку или настройку контура/.test(wait);
+      const held = heldBaseWait(wait);
       return [
         wait,
-        reason === 'base-check' && agent && options.workflowActive && !held
-          ? checkFailed
-            ? 'Исправьте базу и выполните devcontour base-update (ведущий агент — с --by host) — цикл ведущего проверит её снова'
-            : 'Цикл ведущего проверит базу gates и продолжит выдачу сам'
-          : 'Проверьте базу gates, затем выполните ' +
-            start +
-            (reason === 'operator' ? ' — он снимет и паузу человека, и ожидание' : ''),
+        held
+          ? HELD_BASE_ACTION
+          : reason === 'base-check' && agent && options.workflowActive
+            ? checkFailed
+              ? 'Исправьте базу и выполните devcontour base-update (ведущий агент — с --by host) — цикл ведущего проверит её снова'
+              : 'Цикл ведущего проверит базу gates и продолжит выдачу сам'
+            : 'Проверьте базу gates, затем выполните ' +
+              start +
+              (reason === 'operator' ? ` — он снимет и ${pauser}, и ожидание` : ''),
         false,
       ];
     }
     switch (reason) {
       case 'operator':
-        return ['Выдача остановлена человеком', start, false];
+        return [
+          lead ? 'Выдача остановлена ведущим агентом (queue_set)' : 'Выдача остановлена человеком',
+          start,
+          false,
+        ];
       case 'shutdown':
         return ['Сервер был остановлен штатно', resume, false];
       case 'reconfigure':
@@ -176,6 +217,7 @@ export function queueStopView(
     ...(since ? { since } : {}),
     action,
     ...(failed ? { failed: true as const } : {}),
+    ...(lead ? { by: 'lead' as const } : {}),
   };
 }
 

@@ -21,7 +21,14 @@ import {
 } from '../core/service.ts';
 import { blobBytes, pinArtifacts } from './contract-artifacts.ts';
 import { assertUnderTest, unguardedDependencies, unguardedMessage } from './artifact-closure.ts';
-import { type Approval, type ContractAttempt, DomainError, relativePath } from '../core/model.ts';
+import {
+  type Approval,
+  type ContractAttempt,
+  CONTRACT_CONTENT_MAX,
+  CONTRACT_CONTENT_WARN,
+  DomainError,
+  relativePath,
+} from '../core/model.ts';
 import { adapters, type AgentAdapter } from './adapters.ts';
 import { declaredRoles, repositories, repository, requiresContract } from '../core/repositories.ts';
 import { git } from './process.ts';
@@ -72,7 +79,7 @@ const proposalSchema = (bounded: boolean) => {
     .object({
       repositoryId: z.string().optional(),
       title: z.string().trim().min(1).max(180),
-      content: z.string().trim().min(1).max(60000).optional(),
+      content: z.string().trim().min(1).max(CONTRACT_CONTENT_MAX).optional(),
       file: relativePath.optional(),
       /**
        * Нормативные файлы договора в том же компоненте: схема, приёмка, эталон.
@@ -161,6 +168,40 @@ export function proposalLimitIssues(input: unknown): LimitIssue[] {
   count('underTest', p.underTest);
   return issues;
 }
+/** Как вынести часть правил из длинного контракта (docs/cli.md, «Файл-продолжение»). */
+const CONTINUATION =
+  'Вынесите часть правил в файл-продолжение: второй контракт отдельным файлом, который в начале называет основной контракт и перечисляет, какие его правила меняет или дополняет; задачи привязывают оба контракта (docs/cli.md, «Файл-продолжение»)';
+const thousands = (n: number) => n.toLocaleString('ru-RU').replace(/\s/g, ' ');
+
+/**
+ * Размер документа контракта относительно предела записи. Документ из
+ * файла схема предложения не видит: без этой проверки превышение
+ * обнаруживалось только при регистрации — после оплаченного ревью.
+ * `refusal` — документ больше предела, `warning` — от 90 % предела.
+ */
+export interface ContractSize {
+  chars: number;
+  max: number;
+  warnAt: number;
+  refusal?: string;
+  warning?: string;
+}
+export function contractSize(content: string): ContractSize {
+  const chars = content.length;
+  const base = { chars, max: CONTRACT_CONTENT_MAX, warnAt: CONTRACT_CONTENT_WARN };
+  if (chars > CONTRACT_CONTENT_MAX)
+    return {
+      ...base,
+      refusal: `Документ контракта — ${thousands(chars)} знаков при пределе ${thousands(CONTRACT_CONTENT_MAX)}, длиннее на ${thousands(chars - CONTRACT_CONTENT_MAX)}: такой контракт не будет зарегистрирован, ревью не начато. ${CONTINUATION}.`,
+    };
+  if (chars >= CONTRACT_CONTENT_WARN)
+    return {
+      ...base,
+      warning: `Документ контракта — ${thousands(chars)} знаков из ${thousands(CONTRACT_CONTENT_MAX)} допустимых (осталось ${thousands(CONTRACT_CONTENT_MAX - chars)}): следующая правка может превысить предел. ${CONTINUATION}.`,
+    };
+  return base;
+}
+
 /** Отказ по пределам: что превышено, на сколько и как это исправить. */
 export function limitsMessage(issues: LimitIssue[]) {
   const lines = issues.map((i) =>
@@ -596,6 +637,9 @@ export async function reviewContract(
 ) {
   const parsed = parseProposal(input);
   const content = await contractContent(h, parsed, revision);
+  // Предел документа — до ревью: регистрация после одобрения отказала бы.
+  const size = contractSize(content);
+  if (size.refusal) throw new DomainError(size.refusal, 400);
   const owner = repository(h.config, parsed.repositoryId ?? defaultOwner(h));
   const pinned = await pinArtifacts(
     owner,
@@ -633,9 +677,15 @@ export async function reviewContract(
       samePin(c, content, pinned.artifacts, parsed.checks, parsed.underTest),
   );
   // Контракт без manifest по-прежнему работает, но закреплён только текст.
-  const warning = pinned.artifacts.length
-    ? undefined
-    : 'Контракт без artifacts: закреплён только документ; схемы и файлы приёмки, на которые он ссылается, могут измениться без ревью';
+  const warning =
+    [
+      pinned.artifacts.length
+        ? undefined
+        : 'Контракт без artifacts: закреплён только документ; схемы и файлы приёмки, на которые он ссылается, могут измениться без ревью',
+      size.warning,
+    ]
+      .filter(Boolean)
+      .join('. ') || undefined;
   // Утверждённый договор не отзывается задним числом: повтор называет
   // незащищённые зависимости предупреждением. Новый — отказ до ревью.
   if (existing)

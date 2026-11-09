@@ -238,6 +238,13 @@ export const taskIngest = taskInput.extend({
     .max(TASK_LIMITS.relatedRepositories, relatedRepositoriesTooMany)
     .optional(),
 });
+/**
+ * Предел документа контракта в знаках (как `String.length`): тот же, что у
+ * записи контракта в синхронизации команды. Предупреждение — от 90 %
+ * предела: следующая правка такого документа его, скорее всего, превысит.
+ */
+export const CONTRACT_CONTENT_MAX = 60000;
+export const CONTRACT_CONTENT_WARN = 54000;
 export interface Task extends TaskInput {
   sharedCompletion?: { receipt: CompletionReceipt; sourceCommit: string };
   /**
@@ -799,6 +806,12 @@ export interface DevContourState {
    * (прежней версией после отката), чужого диапазона не наследует.
    */
   baseMoves?: { at: string; bases: BaseMove[] };
+  /**
+   * Паузу `operator` поставил ведущий агент (`queue_set`), а не человек.
+   * Привязана ко времени паузы (`at` = `pausedAt`): новая пауза человека,
+   * снятие паузы или другая причина отменяют отметку.
+   */
+  pauseActor?: { by: 'lead'; at: string };
   /**
    * Классы отказов, держащие выдачу. Их несколько намеренно: временный
    * обрыв и отказ провайдера могут прийти с разных досок, и запомнив

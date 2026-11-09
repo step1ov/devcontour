@@ -227,7 +227,9 @@ export class ContractChanges {
     const impact = await contractImpact(this.h, proposal);
     if (impact.status === 'unchanged') return { status: 'unchanged' as const, impact };
     // Отказ до удержания задач и ревью: новая редакция с незащищённым
-    // helper приёмки не была бы одобрена всё равно.
+    // helper приёмки не была бы одобрена всё равно, а документ сверх предела
+    // не был бы зарегистрирован.
+    if (impact.size.refusal) throw new DomainError(impact.size.refusal, 400);
     if (impact.closure.refusal) throw new DomainError(impact.closure.refusal, 400);
     // Операция не заводит параллельный контракт для файла, который уже
     // зарегистрирован под другим компонентом: задачи прежнего остались бы
@@ -487,6 +489,7 @@ export class ContractChanges {
           'Пересмотр меняет тот же контракт: файл, название, repositoryId и компонент должны совпадать с операцией',
           400,
         );
+      if (impact.size.refusal) throw new DomainError(impact.size.refusal, 400);
       if (impact.closure.refusal) throw new DomainError(impact.closure.refusal, 400);
       if (proposal.checks) {
         const pinned = await pinArtifacts(

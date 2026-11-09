@@ -43,6 +43,21 @@ export interface HintParamMap {
   'job-retry-stops': { error?: string };
   /** Задание упало, повтор продвинет его. */
   'job-retry': { error?: string };
+  /**
+   * Задание стоит на задаче `taskId`, отменённой после выдачи (D46): `by` —
+   * актёр отмены (`graph` — задачу убрала новая редакция графа доски,
+   * `unknown` — не записан, считается отменой человеком),
+   * `budget` — задачу остановил бюджет. Повтор и старт задания вернут то же
+   * упавшее задание.
+   */
+  'job-cancelled-task': {
+    taskId: string;
+    by: 'host' | 'operator' | 'graph' | 'unknown';
+    budget: boolean;
+    /** Задание действует: после повтора задачи оно продолжится само. */
+    live: boolean;
+    error?: string;
+  };
   /** Попытки задания исчерпаны. */
   'job-exhausted': { error?: string };
   /** Задание текущего входа уже stale или completed. */
@@ -53,8 +68,8 @@ export interface HintParamMap {
   'board-start': { running: boolean };
   /** Пауза выдачи, её снимет действующее задание; `pause` — причина паузы. */
   'pause-lift': { pause: string; stage: number };
-  /** Пауза человека, её не снимает ни одно задание. */
-  'pause-operator': None;
+  /** Пауза человека (`by: lead` — её поставил ведущий через queue_set), её не снимает ни одно задание. */
+  'pause-operator': { by?: 'lead' };
   /** Открытый follow-up исполнителя. */
   'follow-up': { severity: number; version: number };
   /** Вопрос ждёт ответа ведущего (без минимумов, режим agent). */
@@ -193,6 +208,35 @@ const en: Catalog = {
     `workflow_start for board ${s.boardId!} would be refused: ${p.reason}. Fix that first (approvals in the panel, tasks of the board), then register the job.`,
   'job-retry-stops': (p, s) =>
     `The lead workflow job of board ${s.boardId!} failed${failedEn(p.error)}, and a retry would stop again: ${reasonOf(s.loop)}. ${STOP_REMEDY_EN} Then workflow_retry ${retryArgs(s)}.`,
+  'job-cancelled-task': (p, s) => {
+    const task = p.taskId;
+    const who =
+      p.by === 'host'
+        ? 'cancelled by the lead after it had been issued'
+        : p.by === 'operator'
+          ? 'cancelled by the user'
+          : p.by === 'graph'
+            ? 'removed by a new revision of the board graph'
+            : "cancelled without a recorded actor (counted as the user's cancel)";
+    // Повтор задачи ведущим — только своей отмены (или снятой редакцией графа).
+    const lead = p.by === 'host' || p.by === 'graph';
+    const job = p.live
+      ? 'the live job then continues on its own'
+      : `then workflow_retry ${retryArgs(s)}`;
+    const retry = lead
+      ? `task_retry (devcontour retry --task ${task} --by host), ${job}`
+      : `the user retries the task in the panel (the retry action on the task page; ask the user), ${job}`;
+    const first = p.budget
+      ? `(1) the user raises the exceeded budget limit (budgets in the config, applied with devcontour config-apply --keys budgets); then ${retry}`
+      : lead
+        ? `(1) if the task is still needed, ${retry}`
+        : `(1) ${retry}`;
+    const owner =
+      p.budget || !lead
+        ? "Both are the user's decisions and the attention center shows them to the operator: ask the user; do not raise budgets, retry the task or accept the board yourself."
+        : "Accepting without the task is the user's decision and the attention center shows it to the operator: do not accept the board yourself.";
+    return `The lead workflow job of board ${s.boardId!} ${p.live ? 'stops at its next step' : 'stopped'}${failedEn(p.error)}: task ${task} was ${who}${p.budget ? ' when it hit a budget' : ''}, and an issued task does not leave the job (D46, docs/decisions.md), so workflow_retry and workflow_start do not move it. Recovery paths: ${first}; (2) the operator accepts the revision without task ${task} in the panel (the accept action on the board page) once its other tasks are done. ${owner}`;
+  },
   'job-retry': (p, s) =>
     `The lead workflow job of board ${s.boardId!} failed${failedEn(p.error)}. On retry the job loop ${loopEn(s.loop!)}: workflow_retry ${retryArgs(s)}.`,
   'job-exhausted': (p, s) =>
@@ -208,8 +252,10 @@ const en: Catalog = {
       : ''),
   'pause-lift': (p, s) =>
     `Dispatch is paused (${p.pause}); the lead workflow job of board ${s.boardId!} lifts the pause at stage ${p.stage}${s.loop!.step === 'lift-pause' ? '' : ' after it ' + loopEn(s.loop!)}. ${SERVER_EN}`,
-  'pause-operator': (_, s) =>
-    'Dispatch is paused by the operator and no job loop lifts it: resume only on the user\'s decision with queue_set {"paused": false} (devcontour queue --start).' +
+  'pause-operator': (p, s) =>
+    (p.by === 'lead'
+      ? 'Dispatch is paused by the lead (queue_set) and no job loop lifts it: resume with queue_set {"paused": false} (devcontour queue --start) once the reason for the pause is resolved.'
+      : 'Dispatch is paused by the operator and no job loop lifts it: resume only on the user\'s decision with queue_set {"paused": false} (devcontour queue --start).') +
     (s.loop && s.boardId ? ` Meanwhile the job loop of board ${s.boardId} ${loopEn(s.loop)}.` : ''),
   'follow-up': (p, s) => {
     const { requestId, taskId } = s.input!;
@@ -337,6 +383,34 @@ const ru: Catalog = {
     `workflow_start для доски ${s.boardId!} будет отклонён: ${p.reason}. Сначала устраните это (согласования в панели, задачи доски), затем зарегистрируйте задание.`,
   'job-retry-stops': (p, s) =>
     `Задание ведущего доски ${s.boardId!} упало${failedRu(p.error)}, и повтор снова остановится: ${reasonOf(s.loop)}. ${STOP_REMEDY_RU} Затем workflow_retry ${retryArgs(s)}.`,
+  'job-cancelled-task': (p, s) => {
+    const task = p.taskId;
+    const who =
+      p.by === 'host'
+        ? 'отменена ведущим агентом уже после выдачи'
+        : p.by === 'operator'
+          ? 'отменена пользователем'
+          : p.by === 'graph'
+            ? 'убрана новой редакцией графа доски'
+            : 'отменена без записанного актёра (считается отменой пользователя)';
+    const lead = p.by === 'host' || p.by === 'graph';
+    const job = p.live
+      ? 'затем действующее задание продолжится само'
+      : `затем workflow_retry ${retryArgs(s)}`;
+    const retry = lead
+      ? `task_retry (devcontour retry --task ${task} --by host), ${job}`
+      : `пользователь повторяет задачу в панели (повтор на странице задачи; спросите пользователя), ${job}`;
+    const first = p.budget
+      ? `(1) пользователь поднимает исчерпанный предел бюджета (budgets в конфигурации, применение — devcontour config-apply --keys budgets); затем ${retry}`
+      : lead
+        ? `(1) если задача ещё нужна — ${retry}`
+        : `(1) ${retry}`;
+    const owner =
+      p.budget || !lead
+        ? 'Оба решения — пользователя, центр внимания показывает их оператору: спросите пользователя; сами не поднимайте бюджет, не повторяйте задачу и не принимайте доску.'
+        : 'Приёмка без задачи — решение пользователя, центр внимания показывает его оператору: сами доску не принимайте.';
+    return `Задание ведущего доски ${s.boardId!} ${p.live ? 'остановится на следующем такте' : 'остановлено'}${failedRu(p.error)}: задача ${task} ${who}${p.budget ? ', когда упёрлась в бюджет' : ''}, а выданная задача из работы задания не выпадает (D46, docs/decisions.md), поэтому workflow_retry и workflow_start его не продвинут. Пути восстановления: ${first}; (2) оператор принимает ревизию без задачи ${task} в панели (страница доски, «Принять доску»), когда остальные задачи готовы. ${owner}`;
+  },
   'job-retry': (p, s) =>
     `Задание ведущего доски ${s.boardId!} упало${failedRu(p.error)}. После workflow_retry цикл задания ${loopRu(s.loop!)}: workflow_retry ${retryArgs(s)}.`,
   'job-exhausted': (p, s) =>
@@ -352,8 +426,10 @@ const ru: Catalog = {
       : ''),
   'pause-lift': (p, s) =>
     `Выдача на паузе (${p.pause}); задание ведущего доски ${s.boardId!} снимет паузу на стадии ${p.stage}${s.loop!.step === 'lift-pause' ? '' : '; до этого цикл задания ' + loopRu(s.loop!)}. ${SERVER_RU}`,
-  'pause-operator': (_, s) =>
-    'Выдачу приостановил оператор, и ни один цикл задания её не снимет: возобновляйте только по решению пользователя — queue_set {"paused": false} (devcontour queue --start).' +
+  'pause-operator': (p, s) =>
+    (p.by === 'lead'
+      ? 'Выдачу приостановил ведущий агент (queue_set), и ни один цикл задания её не снимет: возобновите queue_set {"paused": false} (devcontour queue --start), когда причина паузы устранена.'
+      : 'Выдачу приостановил оператор, и ни один цикл задания её не снимет: возобновляйте только по решению пользователя — queue_set {"paused": false} (devcontour queue --start).') +
     (s.loop && s.boardId ? ` Тем временем цикл задания доски ${s.boardId} ${loopRu(s.loop)}.` : ''),
   'follow-up': (p, s) => {
     const { requestId, taskId } = s.input!;

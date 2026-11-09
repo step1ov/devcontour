@@ -34,7 +34,7 @@ import { referenceKey, type StoryBinding } from './intent.ts';
 import { approvalPolicyDigest } from '../harness/policy.ts';
 import { planIngest } from './plan.ts';
 import { boardOwner, completion, receiptHolds, receiptRecordBytes } from './sync-state.ts';
-import { carriedTaskIds } from './work-status.ts';
+import { carriedTaskIds, pausedByLead } from './work-status.ts';
 import { assertDag, descendants, latestTaskId, impactGraph } from './graph.ts';
 import {
   DomainError,
@@ -53,6 +53,7 @@ import {
   type Run,
   type Approval,
   type BaseMove,
+  CONTRACT_CONTENT_MAX,
 } from './model.ts';
 /**
  * Эксплуатационные ключи, которые работающий сервер применяет по запросу
@@ -1215,7 +1216,7 @@ export class DevContour {
         'underTest без artifacts: реализацию под тестом объявляют для закреплённой приёмки',
         400,
       );
-    if (!title.trim() || !content.trim() || content.length > 60000)
+    if (!title.trim() || !content.trim() || content.length > CONTRACT_CONTENT_MAX)
       throw new DomainError('Укажите название и содержимое контракта (до 60 000 символов)', 400);
     return this.store.change('contract.approved', (s) => {
       const c = {
@@ -1556,7 +1557,11 @@ export class DevContour {
    * (`pause('operator')` harness) — операция её уже не снимет, — затем снимает.
    * DevContour добавляет продуктовое условие продолжения: привязку разработки.
    */
-  pause(value: boolean, reason: 'operator' | 'shutdown' = 'operator') {
+  pause(
+    value: boolean,
+    reason: 'operator' | 'shutdown' = 'operator',
+    by: 'operator' | 'lead' = 'operator',
+  ) {
     const { store, engine } = executionOf(this);
     return domain(() =>
       store.host(value ? 'scheduler.paused' : 'scheduler.started', (ht) => {
@@ -1574,8 +1579,32 @@ export class DevContour {
         // применения конфигурации по-прежнему держит запрос операции.
         if (!value && engine.read((v) => v.control().pauseReason) === 'reconfigure')
           engine.pause('operator');
+        // Пауза ведущего поверх паузы человека ничего не меняет: решение
+        // человека остаётся его решением (и снимается только по нему), а не
+        // переписывается в паузу, которую ведущий вправе снять сам.
+        const before = engine.read((v) => v.control());
+        if (
+          value &&
+          reason === 'operator' &&
+          by === 'lead' &&
+          before.paused &&
+          before.pauseReason === 'operator' &&
+          !pausedByLead({ ...ht.state, ...before })
+        ) {
+          // Без записи и без события журнала: паузы ведущего не было.
+          return { paused: true, reason: before.pauseReason, kept: 'operator' as const };
+        }
         const { control } = value ? engine.pause(reason) : engine.resume();
-        const result = { paused: control.paused, reason: control.pauseReason };
+        // Кто поставил паузу `operator`: ведущий агент — отметкой со временем
+        // паузы; решение человека и снятие паузы отметку убирают.
+        const lead = value && reason === 'operator' && by === 'lead' && control.pausedAt;
+        if (lead) ht.state.pauseActor = { by: 'lead', at: control.pausedAt! };
+        else if (!value || reason === 'operator') delete ht.state.pauseActor;
+        const result = {
+          paused: control.paused,
+          reason: control.pauseReason,
+          ...(lead ? { by: 'lead' as const } : {}),
+        };
         ht.journal(result);
         return result;
       }),
@@ -2184,13 +2213,34 @@ export class DevContour {
    * `recovery` — восстановление цикла ведущего по правилу, `host` — актёр не
    * назван (по умолчанию; отчёт считает такую задачу неизвестной).
    */
-  retry(id: string, reset?: { reason: string }, by: RetryActor = 'host') {
+  retry(
+    id: string,
+    reset?: { reason: string },
+    by: RetryActor = 'host',
+    /**
+     * Повтор просит ведущий агент (MCP `task_retry`, CLI `retry --by host`):
+     * задачу, которую отменил человек или отмена без записанного актёра
+     * (D46: считается отменой человеком), он не повторяет — продолжение
+     * такой отмены — решение человека.
+     */
+    options: { lead?: boolean } = {},
+  ) {
     const { store, engine } = executionOf(this);
     return domain(() =>
       store.host('task.retry', (ht) => {
         const t = task(ht.state, id);
         // Продуктовое условие: принятую ревизией задачу повтор не трогает.
         assertNotAccepted(ht.state, t);
+        if (
+          options.lead &&
+          t.status === 'cancelled' &&
+          t.cancelledBy !== 'host' &&
+          t.cancelledBy !== 'graph'
+        )
+          throw new DomainError(
+            `${t.id}: задачу отменил человек${t.cancelledBy ? '' : ' (актёр отмены не записан — считается отменой человеком)'}; повтор такой отмены — решение пользователя: оператор повторяет её в панели или командой devcontour retry --task ${t.id}`,
+            409,
+          );
         const exhaustedReady = t.attempt >= this.config.maxAttempts && !t.activeRunId;
         if (!['failed', 'cancelled'].includes(t.status) && !exhaustedReady)
           throw new DomainError('Повтор доступен после сбоя или отмены');
