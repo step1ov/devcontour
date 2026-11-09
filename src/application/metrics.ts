@@ -527,7 +527,8 @@ export function workflowMetrics(
               : null,
         })),
     limitations: [
-      'Unknown or incomplete telemetry is not zero; tariffs are estimates, not subscription invoices',
+      'Unknown or incomplete telemetry is not zero; USD amounts are API-equivalent estimates (reported by the CLI or computed from prices), not subscription charges',
+      'Budgets count the same estimates; the workspace budget counts lifetime workspace spend, not a session',
       'Owner cost per accepted local task includes failed attempts and owner planning/review overhead',
       'Dispatch wait includes pauses, ownership and worker availability',
       'Imported results have no local execution timing',

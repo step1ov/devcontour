@@ -169,9 +169,9 @@ export function proposalLimitIssues(input: unknown): LimitIssue[] {
   return issues;
 }
 /** Как вынести часть правил из длинного контракта (docs/cli.md, «Файл-продолжение»). */
-const CONTINUATION =
+export const CONTINUATION =
   'Вынесите часть правил в файл-продолжение: второй контракт отдельным файлом, который в начале называет основной контракт и перечисляет, какие его правила меняет или дополняет; задачи привязывают оба контракта (docs/cli.md, «Файл-продолжение»)';
-const thousands = (n: number) => n.toLocaleString('ru-RU').replace(/\s/g, ' ');
+export const thousands = (n: number) => n.toLocaleString('ru-RU').replace(/\s/g, ' ');
 
 /**
  * Размер документа контракта относительно предела записи. Документ из

@@ -45,7 +45,7 @@ import {
   type AppliedConfigKeys,
 } from '../core/service.ts';
 import { repository } from '../core/repositories.ts';
-import { artifactGuard } from './agent-control.ts';
+import { artifactGuard, CONTINUATION, contractSize, thousands } from './agent-control.ts';
 import { unguardedMessage } from './artifact-closure.ts';
 import {
   Store,
@@ -972,6 +972,7 @@ export async function doctor(
   // закреплённой приёмки — предупреждение, а не блокировка. Новая редакция
   // с ним отклоняется до ревью (review-contract, contract-change).
   checks.push(...(await contractClosureChecks(config, state?.contracts ?? [])));
+  checks.push(...contractSizeChecks(state?.contracts ?? []));
   // Состояние прочитано не полностью: контракты баз компонентов не видны, и
   // отсутствие находок закрепления ничего не доказывает.
   if (stateCheck)
@@ -1080,6 +1081,35 @@ export function checkoutsCheck(config: Config, root: string): Check {
           ? `Рабочие деревья попыток и проверок — в заданном checkoutRoot ${choice.root}`
           : `Рабочие деревья попыток и проверок — в каталоге состояния ${root}`,
   };
+}
+
+/**
+ * Действующие контракты у предела размера документа. Контракт растёт
+ * поправками от этапа к этапу, а предел обнаруживался только отказом
+ * следующей редакции на review-contract. Предупреждение — с порога
+ * `contractSize`; готовность не снимает.
+ */
+export function contractSizeChecks(contracts: DevContourState['contracts']): Check[] {
+  return contracts
+    .filter((c) => !supersededBy(contracts, c.id))
+    .flatMap((c) => {
+      const size = contractSize(c.content);
+      // Текст отказа регистрации («не будет зарегистрирован») здесь неверен:
+      // контракт уже зарегистрирован и действует, отказ получит следующая
+      // редакция.
+      const detail = size.refusal
+        ? `документ — ${thousands(size.chars)} знаков при пределе ${thousands(size.max)}, длиннее на ${thousands(size.chars - size.max)}. Контракт зарегистрирован и действует, но следующая его редакция будет отклонена до ревью. ${CONTINUATION}.`
+        : size.warning;
+      return detail
+        ? [
+            {
+              id: `contract-size:${c.id}`,
+              status: 'degraded' as const,
+              detail: `Контракт ${c.id} (${c.title}${c.source ? `, ${c.source}` : ''}): ${detail}`,
+            },
+          ]
+        : [];
+    });
 }
 
 /**

@@ -15,7 +15,7 @@ import {
   operationalKeys,
   type AppliedConfigKeys,
 } from '../core/service.ts';
-import type { Price, UsageRecord } from '../core/usage.ts';
+import { COST_ESTIMATE_RU, type Price, type UsageRecord } from '../core/usage.ts';
 import { declaredRoles, repositories, reviewerBinding, roleBinding } from '../core/repositories.ts';
 
 type Check = { id: string; status: 'passed' | 'degraded'; detail: string };
@@ -122,14 +122,19 @@ export function budgetChecks(
               Date.parse(a.effectiveAt) - Date.parse(b.effectiveAt),
           )
           .map(tariff)
-          .join('; ')
+          .join('; ') + ` (по ним стоимость — ${COST_ESTIMATE_RU}, не списание)`
       : 'Тарифы не заданы: стоимость известна только там, где её сообщает провайдер (claude)',
   });
   checks.push({
     id: 'budgets',
     status: 'passed',
+    // Предел workspace — на весь прошлый расход, а не на сессию; суммы —
+    // эквивалент по тарифам API, а не списание по подписке.
     detail: budgets
-      ? `задача: ${limit(budgets.task)}; доска: ${limit(budgets.board)}; workspace: ${limit(budgets.workspace)}; onUnknown: ${budgets.onUnknown}`
+      ? `задача: ${limit(budgets.task)}; доска: ${limit(budgets.board)}; workspace (за всё время workspace): ${limit(budgets.workspace)}; onUnknown: ${budgets.onUnknown}` +
+        ([budgets.task, budgets.board, budgets.workspace].some((l) => l?.usd !== undefined)
+          ? `; суммы USD — ${COST_ESTIMATE_RU}, не списание`
+          : '')
       : 'Бюджеты не заданы: расходы вызовов не ограничены',
   });
 

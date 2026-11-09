@@ -136,17 +136,40 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
       loop: { step: 'stop', reason: 'TERMINAL' },
     },
   ],
-  'job-cancelled-task': (['host', 'operator', 'graph', 'unknown'] as const).flatMap((by) =>
-    [true, false].flatMap((budget) =>
-      [false, true].map((live) => ({
-        code: 'job-cancelled-task' as const,
-        params: { taskId: 't-1', by, budget, live, ...(live ? {} : { error: 'boom' }) },
-        boardId: 'board-1',
-        job,
-        loop: { step: 'stop' as const, taskId: 't-1', reason: 'cancelled' },
-      })),
+  'job-cancelled-task': [
+    ...(['host', 'operator', 'graph', 'unknown'] as const).flatMap((by) =>
+      [true, false].flatMap((budget) =>
+        [false, true].map((live) => ({
+          code: 'job-cancelled-task' as const,
+          params: {
+            taskId: 't-1',
+            by,
+            budget,
+            live,
+            ...(live ? {} : { error: 'boom' }),
+          },
+          boardId: 'board-1',
+          job,
+          loop: { step: 'stop' as const, taskId: 't-1', reason: 'cancelled' },
+        })),
+      ),
     ),
-  ),
+    // Все задачи ревизии отменены: второй путь — новая ревизия доски.
+    ...(['host', 'operator'] as const).map((by) => ({
+      code: 'job-cancelled-task' as const,
+      params: {
+        taskId: 't-1',
+        by,
+        budget: by === 'host',
+        live: false,
+        allCancelled: true as const,
+        error: 'boom',
+      },
+      boardId: 'board-1',
+      job,
+      loop: { step: 'stop' as const, taskId: 't-1', reason: 'cancelled' },
+    })),
+  ],
   'job-retry': [
     {
       code: 'job-retry',
@@ -368,8 +391,10 @@ test('Подсказки шага: новая конфигурация setup п�
  * прежние.
  * Образцы нового кода `job-cancelled-task` добавлены; прежние образцы байтово
  * прежние.
+ * Образцы `job-cancelled-task` с `allCancelled` добавлены (второй путь — новая
+ * ревизия доски); прежние образцы байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = 'e12ef1abfd5234af32260e3e3c2541f131d89979b2e48e0e5fcc1f177d1a6c11';
+const ENGLISH_SAMPLES_SHA256 = '193e8b2677472067951f134df47710649a04ce6a1cfcd1b712232353042aa140';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(
