@@ -160,6 +160,36 @@ test('A note, a change request and a correction: one message per composed text, 
   expect(errors).toEqual([]);
 });
 
+test('The task card shows its description once while the state updates', async ({
+  page,
+  request,
+}) => {
+  const ids = await taskOn(request, 'Описание без повторов');
+  await open(page, ids);
+  const inspector = page.getByRole('complementary', { name: 'Детали задачи' });
+  const description = inspector.getByText('Наблюдаемый результат для проверки обсуждения.', {
+    exact: true,
+  });
+  await expect(description).toHaveCount(1);
+  // Новая задача той же доски обновляет состояние и перерисовывает карточку:
+  // у описания и обсуждения был один ключ, и описание размножалось.
+  await request.post(`/api/boards/${ids.board}/tasks`, {
+    headers,
+    data: {
+      title: 'Соседняя задача',
+      description: 'Вторая задача доски для обновления состояния.',
+      role: 'backend',
+      repositoryId: 'main',
+      acceptance: ['Результат проходит независимую проверку.'],
+      dependsOn: [],
+      contracts: [],
+    },
+  });
+  await expect(page.getByText('Соседняя задача').first()).toBeVisible();
+  await expect(description).toHaveCount(1);
+  await expect(inspector.getByRole('region', { name: 'Обсуждение' })).toHaveCount(1);
+});
+
 test('A message from a second tab: the conflict re-reads the thread and keeps the typed text', async ({
   page,
   request,

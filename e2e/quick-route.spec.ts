@@ -197,6 +197,15 @@ test('Quick change: one change per request key, five steps, facts, setup plan, r
     );
     await expect(route.getByText('npm ci')).toBeVisible();
     await expect(route.getByText(/файлы не записаны/)).toBeVisible();
+    // Срок фазы попытки — оценка фазы интеграции: 10 + 4 мин проверок по
+    // очереди, повтор самой долгой 10 мин и запас.
+    await expect(route.locator('[data-run-timeout]')).toHaveAttribute(
+      'data-run-timeout',
+      '1800000',
+    );
+    await expect(
+      route.getByText(/оценка фазы интеграции 24 мин: проверки по очереди 14 мин.*запас 6 мин/),
+    ).toBeVisible();
 
     // Перезагрузка восстанавливает выбранное изменение и его маршрут.
     await page.reload();

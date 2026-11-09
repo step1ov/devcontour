@@ -12,6 +12,7 @@ import { budgetOverview } from '../src/harness/budget.ts';
 import { approvalPolicyDigest, policyFromConfig } from '../src/harness/policy.ts';
 import { workspacePolicyDigest } from '../src/core/workspace.ts';
 import { executionDigest } from 'devcontour-harness';
+import { executionOf } from '../src/harness/execution.ts';
 import { serve } from '../src/server/http.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { inputPolicyView } from '../src/application/panel.ts';
@@ -192,18 +193,103 @@ test('config-apply waits for work under the previous configuration; without a se
   }
 });
 
-test('--keys accepts only budgets, prices, stallSweep and inputPolicy', () => {
+test('--keys accepts only budgets, prices, stallSweep, inputPolicy and gateTimeoutFloorMs', () => {
   // Без флага — прежний состав запроса: сервер без stallSweep и inputPolicy его понимает.
   assert.deepEqual(parseOperationalKeys(), ['budgets', 'prices']);
   assert.deepEqual(parseOperationalKeys('prices,budgets'), ['budgets', 'prices']);
   assert.deepEqual(parseOperationalKeys('stallSweep'), ['stallSweep']);
   assert.deepEqual(parseOperationalKeys('stallSweep,budgets'), ['budgets', 'stallSweep']);
   assert.deepEqual(parseOperationalKeys('inputPolicy'), ['inputPolicy']);
+  assert.deepEqual(parseOperationalKeys('gateTimeoutFloorMs'), ['gateTimeoutFloorMs']);
   assert.throws(
     () => parseOperationalKeys('budgets,concurrency'),
     /не поддерживается: concurrency/,
   );
-  assert.throws(() => parseOperationalKeys(''), /только budgets, prices, stallSweep, inputPolicy/);
+  assert.throws(
+    () => parseOperationalKeys(''),
+    /только budgets, prices, stallSweep, inputPolicy, gateTimeoutFloorMs/,
+  );
+});
+
+test('gateTimeoutFloorMs applies without restart after the drain; approvals stay valid and the engine uses the new floor', async () => {
+  const s = served();
+  try {
+    s.server.pause(false);
+    const board = s.server.createBoard('Board');
+    s.server.addTask(board.id, input('First'));
+    s.server.addTask(board.id, input('Second'));
+    s.server.approve(board.id);
+    const approval = approvalPolicyDigest(s.server.config);
+    const task = s.server.taskPolicyDigest(s.server.store.read().tasks[0]);
+    const workspace = workspacePolicyDigest(s.server.config);
+    const first = s.server.claim('server');
+    assert.ok(first);
+    s.edit((raw) => (raw.gateTimeoutFloorMs = 120000));
+    // Без --keys ключ не применяется: файл отличается не только budgets/prices.
+    const implicit = await s.request(undefined, 300);
+    assert.notEqual(implicit.status, 'applied', JSON.stringify(implicit));
+    assert.equal(s.server.config.gateTimeoutFloorMs, undefined);
+    s.server.store.change('test.clear', (st) => {
+      st.reconfigure = undefined;
+    });
+    // Идущая попытка держит применение: срок проверок меняется только между попытками.
+    let held = false;
+    const pending = requestConfigApply(s.root, ['gateTimeoutFloorMs'], { waitMs: 5000 });
+    pending.then(
+      () => (held = true),
+      () => (held = true),
+    );
+    for (let i = 0; i < 5; i++) {
+      serveReconfigure(s.server, s.path, 'server');
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.equal(held, false, 'применение ждёт идущую попытку');
+    assert.equal(s.server.config.gateTimeoutFloorMs, undefined);
+    s.server.store.change('test.lease-expired', (st) => {
+      st.runs.find((r) => r.id === first.id)!.leaseUntil = 0;
+    });
+    while (!held) {
+      s.server.leader('server');
+      serveReconfigure(s.server, s.path, 'server');
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    const applied = await pending;
+    assert.equal(applied.status, 'applied', JSON.stringify(applied));
+    assert.equal(s.server.config.gateTimeoutFloorMs, 120000);
+    // Движок процесса пересобран с новым пределом.
+    assert.equal(executionOf(s.server).engine.policy.gateTimeoutFloorMs, 120000);
+    const [event] = s.events('config.applied');
+    assert.deepEqual((event.data as { changed: string[] }).changed, ['gateTimeoutFloorMs']);
+    // Эксплуатационный ключ: утверждения плана, договор задачи и workspace прежние.
+    assert.equal(approvalPolicyDigest(s.server.config), approval);
+    assert.equal(s.server.taskPolicyDigest(s.server.store.read().tasks[0]), task);
+    assert.equal(workspacePolicyDigest(s.server.config), workspace);
+    assert.equal(s.server.store.read().reconfigure, undefined);
+    assert.equal(s.server.configStale(), false);
+    // Следующая задача выдаётся без повторного утверждения.
+    const second = s.server.claim('server');
+    assert.ok(second, 'утверждённая задача выдаётся после применения');
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('gateTimeoutFloorMs above runTimeoutMs is refused before any request', async () => {
+  const s = served();
+  try {
+    s.edit((raw) => {
+      raw.runTimeoutMs = 60000;
+      raw.gateTimeoutFloorMs = 120000;
+    });
+    await assert.rejects(
+      requestConfigApply(s.root, ['gateTimeoutFloorMs'], { waitMs: 0 }),
+      /gateTimeoutFloorMs \(120000 мс\) больше runTimeoutMs \(60000 мс\)/,
+    );
+    assert.equal(s.server.store.read().reconfigure, undefined, 'запрос не записан');
+    assert.equal(s.server.config.gateTimeoutFloorMs, undefined);
+  } finally {
+    s.cleanup();
+  }
 });
 
 test('inputPolicy applies without restart: the attempt keeps its pinned threshold, the next claim pins the new one', async () => {

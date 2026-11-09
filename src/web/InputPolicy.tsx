@@ -254,8 +254,8 @@ export function InputPolicyCard({
                 <code className="font-mono text-xs [overflow-wrap:anywhere]">
                   devcontour config-apply --keys …
                 </code>{' '}
-                с изменёнными ключами (budgets, prices, stallSweep, inputPolicy; прочие поля —
-                перезапуском сервера) — или верните файл к действующему содержимому.
+                с изменёнными ключами (budgets, prices, stallSweep, inputPolicy, gateTimeoutFloorMs;
+                прочие поля — перезапуском сервера) — или верните файл к действующему содержимому.
               </AlertDescription>
             </Alert>
           ) : (
