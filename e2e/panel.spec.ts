@@ -306,7 +306,7 @@ test('Review findings beyond the first page load on request', async ({ page }) =
   const finding = (n: number) =>
     review.locator('li').filter({ hasText: new RegExp(`Находка стенда ${n}$`) });
   await expect(finding(1)).toHaveText('блокерНаходка стенда 1');
-  await expect(finding(2)).toHaveText('заметкаНаходка стенда 2');
+  await expect(finding(2)).toHaveText('замечаниеНаходка стенда 2');
   await expect(finding(3)).toHaveText('majorНаходка стенда 3');
   await review.getByRole('button', { name: 'Ещё замечания (10)' }).click();
   await expect(review).toContainText('Находка стенда 30');

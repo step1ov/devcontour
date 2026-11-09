@@ -30,6 +30,7 @@ import { heldByInput, inputNextText } from './input-labels.ts';
 import { Badge } from '@/ui/badge.tsx';
 import { Card, CardContent, CardHeader, CardTitle } from '@/ui/card.tsx';
 import { InputPolicyCard, type InputPolicyConfig } from './InputPolicy.tsx';
+import { findingSeverityLabel } from './review-labels.ts';
 
 // What the operator wants to know while work runs: how far the whole thing is,
 // how far each architectural block is, who is holding which task right now, and
@@ -501,10 +502,6 @@ function MoreFindings({ attempt, shown }: { attempt: AttemptLine; shown: number 
     </>
   );
 }
-// Подпись важности находки ревью; само значение (`blocking`, `note`) — поле
-// протокола harness, в данных не переводится. Неизвестное — как есть.
-const severityLabels: Record<string, string> = { blocking: 'блокер', note: 'заметка' };
-const severityLabel = (severity: string) => severityLabels[severity] ?? severity;
 function FindingList({ findings }: { findings: Finding[] }) {
   return (
     <ul className="mt-2 grid gap-1">
@@ -514,7 +511,7 @@ function FindingList({ findings }: { findings: Finding[] }) {
             variant={f.severity === 'blocking' ? 'destructive' : 'secondary'}
             className="shrink-0"
           >
-            {severityLabel(f.severity)}
+            {findingSeverityLabel(f.severity)}
           </Badge>
           <span className="max-w-[80ch]">{f.message}</span>
         </li>
