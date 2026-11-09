@@ -895,7 +895,7 @@ SHA-256 `24be97501f6af776e67dbfa4778f6f2dbada696a6fe4066f9492c97c031ea9ed`
   `server.json` следующий `stop` новой версии удалит, когда pid записи уже
   не работает.
 
-### После 0.4.0-alpha.20
+### 0.4.0-alpha.21
 
 Закреплённый движок сменился с 0.1.0-alpha.38 на 0.1.0-alpha.39 — локально
 собранный архив `vendor/harness/devcontour-harness-0.1.0-alpha.39.tgz` с
