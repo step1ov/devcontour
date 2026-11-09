@@ -1636,9 +1636,9 @@ test('session_handoff: отмена ведущим выданной задачи
     const next = devcontourHandoff(f.h, {}).host.next;
     assert.equal(next?.code, 'job-cancelled-task');
     assert.equal((next?.params as { budget: boolean }).budget, false);
-    assert.doesNotMatch(next!.detail, /config-apply/);
-    assert.match(next!.detail, /if the task is still needed, task_retry/);
-    assert.match(next!.detail, /Accepting without the task is the user's decision/);
+    assert.doesNotMatch(next.detail, /config-apply/);
+    assert.match(next.detail, /if the task is still needed, task_retry/);
+    assert.match(next.detail, /Accepting without the task is the user's decision/);
     // Повтор задачи ведущим снимает отмену: шаг больше не о ней.
     f.h.retry(stopped.id, undefined, 'host');
     assert.notEqual(devcontourHandoff(f.h, {}).host.next?.code, 'job-cancelled-task');
