@@ -3,14 +3,16 @@
 // в английском; без `hintLocale` тексты прежние.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { config, fixture, input } from './helpers.ts';
 import { DevContour } from '../src/core/service.ts';
-import { configSchema } from '../src/core/model.ts';
+import { configSchema, DomainError } from '../src/core/model.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { devcontourHandoff, handoffResponse } from '../src/application/handoff.ts';
 import { approvalPolicyDigest } from '../src/harness/policy.ts';
 import { profile } from '../src/runner/packs.ts';
 import { projectConfig } from '../src/runner/setup.ts';
+import type { LoopOutlook } from '../src/runner/lead-outlook.ts';
 import {
   hintCatalogs,
   hintDetail,
@@ -25,6 +27,20 @@ const job = { key: 'job-key-1', repositoryId: 'api', status: 'failed', stage: 1,
 const stops = { count: 4, limit: 2, exhausted: true };
 const input1 = { requestId: 'req-42', taskId: 'task-7' };
 const many = (prefix: string, n: number) => Array.from({ length: n }, (_, i) => `${prefix}-${i}`);
+
+/** Все шаги цикла задания. */
+const loops: LoopOutlook[] = [
+  { step: 'review-plan' },
+  { step: 'advance' },
+  { step: 'recovery', taskId: 't-1', action: 'analyze' },
+  { step: 'repair', taskId: 't-1', reason: 'gate' },
+  { step: 'stop', taskId: 't-1', reason: 'REPAIR_BUDGET' },
+  { step: 'check-base' },
+  { step: 'lift-pause', pause: 'reconfigure' },
+  { step: 'wait' },
+  { step: 'accept' },
+  { step: 'none' },
+];
 
 /** Шаг каждого кода с параметрами и полями, которые его текст читает. */
 const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[] } = {
@@ -100,15 +116,14 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
       loop: { step: 'stop', taskId: 't-1', reason: 'REPAIR_BUDGET' },
     },
   ],
-  'job-live': [
-    {
-      code: 'job-live',
-      params: { stage: 1 },
-      boardId: 'board-1',
-      job: { ...job, status: 'running' },
-      loop: { step: 'repair', taskId: 't-1', reason: 'gate' },
-    },
-  ],
+  // Каждый шаг цикла (`loopEn`, `loopRu`) — через шаг ожидания задания.
+  'job-live': loops.map((loop) => ({
+    code: 'job-live' as const,
+    params: { stage: 1 },
+    boardId: 'board-1',
+    job: { ...job, status: 'running' },
+    loop,
+  })),
   'input-refused': [
     { code: 'input-refused', params: { reason: 'нет референсов' }, boardId: 'board-1' },
   ],
@@ -124,13 +139,28 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
   'job-retry': [
     {
       code: 'job-retry',
+      params: { error: 'boom' },
+      boardId: 'board-1',
+      job,
+      loop: { step: 'review-plan' },
+    },
+    {
+      code: 'job-retry',
       params: {},
       boardId: 'board-1',
       job: { ...job, repositoryId: undefined },
       loop: { step: 'lift-pause', pause: 'shutdown' },
     },
   ],
-  'job-exhausted': [{ code: 'job-exhausted', params: { error: 'boom' }, boardId: 'board-1', job }],
+  'job-exhausted': [
+    {
+      code: 'job-exhausted',
+      params: {},
+      boardId: 'board-1',
+      job: { ...job, repositoryId: undefined },
+    },
+    { code: 'job-exhausted', params: { error: 'boom' }, boardId: 'board-1', job },
+  ],
   'job-settled': [
     { code: 'job-settled', params: {}, boardId: 'board-1', job: { ...job, status: 'stale' } },
     { code: 'job-settled', params: {}, boardId: 'board-1', job: { ...job, status: 'completed' } },
@@ -309,4 +339,77 @@ test('Подсказки шага: новая конфигурация setup п�
   const english = configSchema.parse({ ...c, hintLocale: undefined });
   assert.equal(english.hintLocale, undefined);
   assert.equal(approvalPolicyDigest(c), approvalPolicyDigest(english));
+});
+
+/**
+ * Английский текст — прежний текст подсказок, и от текста `input-refused`
+ * считается появление карточки «вход задания не построить»: изменение здесь
+ * намеренное и требует заметки в docs/upgrade.md.
+ */
+const ENGLISH_SAMPLES_SHA256 = 'f5ae96c4e74c38ab80f501735a8884ece4a78f2a952b85b370b31fcadb0a8a65';
+
+test('Подсказки шага: английские тексты образцов закреплены', () => {
+  assert.equal(
+    hintDetail(samples['input-refused'][0], 'en'),
+    'workflow_start for board board-1 would be refused: нет референсов. Fix that first (approvals in the panel, tasks of the board), then register the job.',
+  );
+  const all = Object.values(samples)
+    .flat()
+    .map((step) => hintDetail(step, 'en'))
+    .join('\n');
+  assert.equal(createHash('sha256').update(all).digest('hex'), ENGLISH_SAMPLES_SHA256);
+});
+
+test('Подсказки шага: host.next под маской секретов, длинная причина отказа усечена', () => {
+  const SECRET = 'okapi-hint-secret-value-31337';
+  const previous = process.env.DC_HINT_SECRET;
+  process.env.DC_HINT_SECRET = SECRET;
+  const f = fixture();
+  const original = Object.getOwnPropertyDescriptor(LeadWorkflow.prototype, 'input')!
+    .value as LeadWorkflow['input'];
+  try {
+    const h = new DevContour(
+      f.store,
+      config({
+        checkoutRoot: f.h.config.checkoutRoot,
+        hintLocale: 'ru',
+        environment: { inherit: [], values: {}, secrets: { API_TOKEN: 'DC_HINT_SECRET' } },
+      }),
+    );
+    const board = h.createBoard('Board', '', 'main');
+    h.addTask(board.id, input('Task'));
+    h.approve(board.id);
+    let reason = '';
+    LeadWorkflow.prototype.input = function (kind, id, s) {
+      if (id === board.id) throw new DomainError(reason, 409);
+      return original.call(this, kind, id, s);
+    };
+    // Предел — 1000 символов (999 и «…»): секрет в начале, у самой границы и
+    // поперёк неё маскируется до усечения и не виден даже частью.
+    for (const before of [6, 990, 995, 998, 999, 1000]) {
+      reason = 'x'.repeat(before) + SECRET + ' rejected ' + 'y'.repeat(3000);
+      const next = devcontourHandoff(h, { boardId: board.id }).host.next!;
+      assert.equal(next.code, 'input-refused');
+      const shown = JSON.stringify(next);
+      for (let n = 4; n <= SECRET.length; n++)
+        assert.ok(!shown.includes(SECRET.slice(0, n)), `${before}: часть секрета (${n})`);
+      const { reason: got } = next.params;
+      assert.ok([...got].length <= 1000 && got.endsWith('…'), `${before}: ${got.length}`);
+      assert.ok(next.detail.includes(got));
+    }
+    // Усечение по символам: суррогатная пара не разрезается.
+    reason = 'a' + '😀'.repeat(1500);
+    const { params } = devcontourHandoff(h, { boardId: board.id }).host.next!;
+    const got = (params as { reason: string }).reason;
+    assert.equal([...got].length, 1000);
+    assert.doesNotMatch(
+      got,
+      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
+    );
+  } finally {
+    LeadWorkflow.prototype.input = original;
+    if (previous === undefined) delete process.env.DC_HINT_SECRET;
+    else process.env.DC_HINT_SECRET = previous;
+    f.cleanup();
+  }
 });

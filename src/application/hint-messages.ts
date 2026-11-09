@@ -264,25 +264,25 @@ const en: Catalog = {
 function loopRu(o: LoopOutlook) {
   switch (o.step) {
     case 'review-plan':
-      return 'проводит ревью плана';
+      return 'проведёт ревью плана';
     case 'advance':
-      return 'завершает стадию';
+      return 'завершит стадию';
     case 'recovery':
-      return `ведёт эпизод свойства задачи ${o.taskId} (${o.action})`;
+      return `проведёт эпизод свойства задачи ${o.taskId} (${o.action})`;
     case 'repair':
-      return `повторяет задачу ${o.taskId} (${o.reason})`;
+      return `повторит задачу ${o.taskId} (${o.reason})`;
     case 'stop':
-      return `останавливает задание: ${o.reason}`;
+      return `остановится: ${o.reason}`;
     case 'check-base':
-      return 'проверяет сдвинутую базу';
+      return 'проверит сдвинутую базу';
     case 'lift-pause':
-      return `снимает паузу ${o.pause}`;
+      return `снимет паузу ${o.pause}`;
     case 'wait':
-      return 'ждёт задач доски';
+      return 'будет ждать задач доски';
     case 'accept':
-      return 'принимает доску';
+      return 'примет доску';
     case 'none':
-      return 'ничего не делает';
+      return 'ничего не сделает';
   }
 }
 
@@ -295,7 +295,7 @@ const SERVER_RU =
 
 const repeatedRu = (taskId: string, q: HintQuestionStops | undefined) =>
   q
-    ? ` Задача ${taskId} останавливалась вопросом исполнителя ${q.count} раз(а); попытку возвращают только первые ${q.limit}${q.exhausted ? ', дальнейшие остановки расходуют попытки, а при исчерпанных попытках input_apply возвращает блокер ATTEMPTS_EXHAUSTED, пока ответ не применён с reset {"reason": …}' : ''}. Стоит дополнить постановку задачи ответами на эти вопросы заранее (board_correct или переоткрытие с новой постановкой).`
+    ? ` Остановок задачи ${taskId} вопросом исполнителя: ${q.count}; попытку возвращают только первые ${q.limit}${q.exhausted ? ', дальнейшие остановки расходуют попытки, а при исчерпанных попытках input_apply возвращает блокер ATTEMPTS_EXHAUSTED, пока ответ не применён с reset {"reason": …}' : ''}. Стоит дополнить постановку задачи ответами на эти вопросы заранее (board_correct или переоткрытие с новой постановкой).`
     : '';
 const chainRu = (operator: boolean, taskId: string) =>
   operator
@@ -338,7 +338,7 @@ const ru: Catalog = {
   'job-retry-stops': (p, s) =>
     `Задание ведущего доски ${s.boardId!} упало${failedRu(p.error)}, и повтор снова остановится: ${reasonOf(s.loop)}. ${STOP_REMEDY_RU} Затем workflow_retry ${retryArgs(s)}.`,
   'job-retry': (p, s) =>
-    `Задание ведущего доски ${s.boardId!} упало${failedRu(p.error)}. При повторе цикл задания ${loopRu(s.loop!)}: workflow_retry ${retryArgs(s)}.`,
+    `Задание ведущего доски ${s.boardId!} упало${failedRu(p.error)}. После workflow_retry цикл задания ${loopRu(s.loop!)}: workflow_retry ${retryArgs(s)}.`,
   'job-exhausted': (p, s) =>
     `Задание ведущего доски ${s.boardId!} израсходовало все попытки (${s.job!.maxAttempts})${failedRu(p.error)}. Пока вход доски не изменится, workflow_start возвращает это упавшее задание: разберите причину, затем измените доску или её задачи (новый вход регистрирует новое задание) либо спросите пользователя.`,
   'job-settled': (_, s) =>
@@ -351,7 +351,7 @@ const ru: Catalog = {
       ? ' Идёт попытка: сервер завершит её и без задания; доску можно продолжить и вручную (MCP task_retry или devcontour retry --by host, accept; docs/cli.md).'
       : ''),
   'pause-lift': (p, s) =>
-    `Выдача на паузе (${p.pause}); задание ведущего доски ${s.boardId!} снимет паузу на стадии ${p.stage}${s.loop!.step === 'lift-pause' ? '' : ', после того как ' + loopRu(s.loop!)}. ${SERVER_RU}`,
+    `Выдача на паузе (${p.pause}); задание ведущего доски ${s.boardId!} снимет паузу на стадии ${p.stage}${s.loop!.step === 'lift-pause' ? '' : '; до этого цикл задания ' + loopRu(s.loop!)}. ${SERVER_RU}`,
   'pause-operator': (_, s) =>
     'Выдачу приостановил оператор, и ни один цикл задания её не снимет: возобновляйте только по решению пользователя — queue_set {"paused": false} (devcontour queue --start).' +
     (s.loop && s.boardId ? ` Тем временем цикл задания доски ${s.boardId} ${loopRu(s.loop)}.` : ''),

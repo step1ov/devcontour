@@ -14,7 +14,9 @@ import {
   handoffMarkdown,
   handoffPack,
   policySecrets,
+  redactDeep,
   redactor,
+  type Redactor,
   type ExecutionView,
   type HandoffPack,
   type HandoffSource,
@@ -758,6 +760,33 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
   return steps[0];
 }
 
+/**
+ * Предел свободного текста шага (причина, ошибка задания) в `params` и
+ * `detail` ответа: `host` пределом ответа не ужимается.
+ */
+const HINT_TEXT_CHARS = 1000;
+/** Усечение по символам Unicode: суррогатная пара не разрезается. */
+const clip = (text: string) => {
+  const chars = [...text];
+  return chars.length > HINT_TEXT_CHARS ? chars.slice(0, HINT_TEXT_CHARS - 1).join('') + '…' : text;
+};
+
+/**
+ * Шаг в ответе: под той же маской, что пакет (ошибка задания и причина отказа
+ * входа могут нести значения секретов), затем свободный текст усечён и текст
+ * собран заново. Маска — до усечения: секрет на границе усечения иначе
+ * остался бы частью. Сам шаг (`boardStep`) не усечён: появление карточки
+ * центра внимания считается по полному английскому тексту, как прежде.
+ */
+function presentable(h: DevContour, step: HandoffHostNext, redact: Redactor): HandoffHostNext {
+  const masked = redactDeep(step, redact);
+  const params: Record<string, unknown> = { ...masked.params };
+  for (const key of ['reason', 'error'])
+    if (typeof params[key] === 'string') params[key] = clip(params[key]);
+  const next = withDetail(h, { ...masked, params } as HostNextDraft);
+  return { ...next, detail: redact(next.detail) };
+}
+
 /** Предел всего ответа (пакет, приложение и команды) в формате ответа. */
 export interface HandoffLimit {
   bytes: number;
@@ -833,7 +862,10 @@ export function devcontourHandoffWithin(
       const pack = handoffPack(source, options);
       const ctx = hostContext(h, harness, v, state, () => pack);
       const liveBoards = [...new Set(ctx.jobs.filter(ctx.live).map((j) => j.id))];
-      const next = hostNext(ctx);
+      // Шаг — под той же маской, что пакет: ошибка задания и причина отказа
+      // входа могут нести значения секретов (в `detail` и в `params`).
+      const step = hostNext(ctx);
+      const next = step && presentable(h, step, options.redact);
       // Обращения — в своём байтовом бюджете: выдержки после редактора
       // секретов, полный текст — `discussion_read`. Бюджет — доля предела
       // ответа; если ответ всё же больше предела, он уменьшается ниже.
