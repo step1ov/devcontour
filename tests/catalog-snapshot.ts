@@ -96,5 +96,8 @@
 // input_supersede называют порядок переноса ответа (в черновике, затем
 // утверждение), область записи роли и отказ ROLE_SCOPE; прочие операции
 // байтово прежние.
-export const CATALOG_DIGEST = 'a0e58e238bb72313b9dcef21e4ca86cf084b9bc1307aca1ee6e2ec4770cf4464';
+// Намеренное изменение: описания usage_report, workflow_metrics и value_report
+// называют суммы USD оценкой по тарифам API, а бюджет workspace — бюджетом за
+// всё время workspace; прочие операции байтово прежние.
+export const CATALOG_DIGEST = '2377b2b91836516fa79ae5ba849e4668cfe020af2e2bafe0ac9f54b855e6373d';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';
