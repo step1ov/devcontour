@@ -636,7 +636,7 @@ function hostNext(ctx: HostContext): HandoffHostNext | undefined {
  * там делать нечего, и решение о плане остаётся его шагом.
  */
 function liveBlocker(ctx: HostContext): HandoffHostNext | undefined {
-  const { pack, state, h } = ctx;
+  const { pack, h } = ctx;
   const inScope = (boardId: string | null | undefined) => !pack.graphId || boardId === pack.graphId;
   const asking = new InputService(h)
     .list()

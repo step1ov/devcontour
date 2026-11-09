@@ -165,7 +165,7 @@ test('Checkpoints stay with their component and cannot bypass completion or writ
     const scoped = api.execute('task_briefing', {
       taskId: task.id,
       repositoryId: 'library',
-    }) as any;
+    }) as { task: { repositoryId: string } };
     assert.equal(scoped.task.repositoryId, 'library');
     assert.throws(
       () => api.execute('task_briefing', { taskId: task.id, repositoryId: 'product' }),
