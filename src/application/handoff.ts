@@ -545,6 +545,13 @@ function cancelledStop(
     !!task.neutralFailures ||
     ctx.state.runs.some((r) => r.taskId === task.id);
   if (!issued) return undefined;
+  // Приёмке доски нужна хотя бы одна неотменённая задача ревизии.
+  const revision = ctx.state.boards.find((b) => b.id === boardId)?.revisions.at(-1);
+  const allCancelled =
+    !!revision &&
+    revision.taskIds.every(
+      (id) => ctx.state.tasks.find((t) => t.id === id)?.status === 'cancelled',
+    );
   return {
     action: 'decide',
     decision: 'job',
@@ -557,6 +564,7 @@ function cancelledStop(
       by: task.cancelledBy ?? 'unknown',
       budget: stoppedOnBudget(task, ctx.state.runs),
       live,
+      ...(allCancelled ? { allCancelled: true as const } : {}),
       ...error,
     },
   };
