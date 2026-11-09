@@ -58,7 +58,9 @@ store.change('fixture.panel-details', (s) => {
       approved: false,
       summary: 'Ревью с множеством находок.',
       findings: Array.from({ length: 30 }, (_, k) => ({
-        severity: 'major',
+        // Значения протокола (blocking, note) панель подписывает по-русски;
+        // прежнее значение (major) — как есть.
+        severity: k === 0 ? 'blocking' : k === 1 ? 'note' : 'major',
         message: `Находка стенда ${k + 1}`,
       })),
       artifact: 'review.json',

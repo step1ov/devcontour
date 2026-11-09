@@ -30,6 +30,7 @@ import { heldByInput, inputNextText } from './input-labels.ts';
 import { Badge } from '@/ui/badge.tsx';
 import { Card, CardContent, CardHeader, CardTitle } from '@/ui/card.tsx';
 import { InputPolicyCard, type InputPolicyConfig } from './InputPolicy.tsx';
+import { findingSeverityLabel } from './review-labels.ts';
 
 // What the operator wants to know while work runs: how far the whole thing is,
 // how far each architectural block is, who is holding which task right now, and
@@ -510,7 +511,7 @@ function FindingList({ findings }: { findings: Finding[] }) {
             variant={f.severity === 'blocking' ? 'destructive' : 'secondary'}
             className="shrink-0"
           >
-            {f.severity === 'blocking' ? 'блокер' : f.severity}
+            {findingSeverityLabel(f.severity)}
           </Badge>
           <span className="max-w-[80ch]">{f.message}</span>
         </li>

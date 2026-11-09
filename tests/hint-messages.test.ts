@@ -8,7 +8,14 @@ import { config, fixture, input } from './helpers.ts';
 import { DevContour } from '../src/core/service.ts';
 import { configSchema, DomainError } from '../src/core/model.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
-import { devcontourHandoff, handoffResponse } from '../src/application/handoff.ts';
+import {
+  devcontourHandoff,
+  handoffHostCommands,
+  handoffHostCommandsByLocale,
+  handoffResponse,
+} from '../src/application/handoff.ts';
+import { reviewContract, reviewPlan } from '../src/runner/agent-control.ts';
+import type { AgentAdapter, AgentRequest } from '../src/runner/adapters.ts';
 import { approvalPolicyDigest } from '../src/harness/policy.ts';
 import { profile } from '../src/runner/packs.ts';
 import { projectConfig } from '../src/runner/setup.ts';
@@ -18,6 +25,7 @@ import {
   hintDetail,
   hintLocaleOf,
   hintLocales,
+  reviewLanguageInstructions,
   type HintCode,
   type HintOf,
   type HintSubject,
@@ -472,6 +480,126 @@ test('Подсказки шага: host.next под маской секрето�
     LeadWorkflow.prototype.input = original;
     if (previous === undefined) delete process.env.DC_HINT_SECRET;
     else process.env.DC_HINT_SECRET = previous;
+    f.cleanup();
+  }
+});
+
+test('Описания команд harness пакета: без hintLocale — прежние английские, ru — русские с теми же ключами', () => {
+  const { en, ru } = handoffHostCommandsByLocale;
+  assert.equal(handoffHostCommands, en);
+  assert.deepEqual(Object.keys(ru), Object.keys(en));
+  // Английский текст по умолчанию закреплён байтово.
+  assert.deepEqual(en, {
+    'harness run':
+      'Not a DevContour command. The running server holds the controller role but does not lift pauses itself: a board continues under its lead workflow job (workflow_start {"kind": "board", "id": BOARD, "authorRuntime": …}; workflow_status lists jobs). With approvalMode agent the job loop, at stage 1 (tasks), lifts the initial pause, the shutdown pause and an operator pause set before the job started, and checks a moved base itself (base-check); at stage 2 (acceptance) it lifts only the shutdown pause. It retries failed tasks within the repair budget and stops the job when the budget or the failure class allows no retry. With approvalMode operator jobs do not run: the operator starts the queue and retries. host.next names the step for this pack.',
+    'harness resume':
+      'queue_set {"paused": false}, or devcontour queue --start --workspace …; an operator pause is lifted only on the user\'s decision.',
+  });
+  // Команды, JSON и поля — как в английском.
+  for (const key of Object.keys(en) as (keyof typeof en)[]) {
+    const verbatim = (t: string) =>
+      [
+        ...t.matchAll(
+          /(\{[^}]*\}|devcontour [a-z-]+(?: --[a-z-]+)*|[a-z]+_[a-z]+|base-check|host\.next|approvalMode (?:agent|operator))/g,
+        ),
+      ].map((m) => m[0]);
+    assert.ok(verbatim(en[key]).length > 0, key);
+    assert.deepEqual(verbatim(ru[key]), verbatim(en[key]), key);
+    assert.match(ru[key], /[а-я]/);
+  }
+  assert.match(ru['harness run'], /^Не команда DevContour\./);
+  assert.match(ru['harness resume'], /паузу оператора снимают только по решению пользователя/);
+
+  const f = fixture();
+  try {
+    const at = (locale?: 'ru') =>
+      devcontourHandoff(
+        new DevContour(
+          f.store,
+          config({
+            checkoutRoot: f.h.config.checkoutRoot,
+            ...(locale ? { hintLocale: locale } : {}),
+          }),
+        ),
+        {},
+      );
+    const enValue = at();
+    const ruValue = at('ru');
+    assert.equal(enValue.locale, 'en');
+    assert.equal(ruValue.locale, 'ru');
+    assert.deepEqual(handoffResponse(enValue, 'json').commands, en);
+    const json = handoffResponse(ruValue, 'json');
+    assert.deepEqual(json.commands, ru);
+    // Язык — не поле ответа.
+    assert.deepEqual(Object.keys(json).sort(), ['commands', 'format', 'host', 'pack']);
+    const md = handoffResponse(ruValue, 'md');
+    assert.deepEqual(md.commands, ru);
+    assert.ok(md.markdown?.includes(`- \`harness resume\` — ${ru['harness resume']}`));
+    assert.ok(!md.markdown?.includes(en['harness resume']));
+    // Значение без языка (собранное вручную) — по-английски.
+    assert.deepEqual(
+      handoffResponse({ pack: ruValue.pack, host: ruValue.host }, 'json').commands,
+      en,
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Ревью плана и контракта: с hintLocale ru ревьюер пишет текст по-русски, машинные поля — как есть', async () => {
+  const [line] = reviewLanguageInstructions('ru');
+  assert.deepEqual(reviewLanguageInstructions('en'), []);
+  assert.match(line, /in Russian/);
+  assert.match(line, /summary, every finding message/);
+  assert.match(line, /Keep JSON keys, the boolean approved, enum values \(severity, status\)/);
+  assert.match(line, /report their state only in `previous`, by id, and do not restate them/);
+  // Один fixture на все языки: промпты различаются только указанием языка.
+  // Ревьюер записывает промпт и отказывает: ревью не закрепляется, и
+  // следующий вызов — тот же первый раунд того же предмета.
+  const f = fixture();
+  try {
+    f.h.config.mode = 'local';
+    const board = f.h.createBoard('Board');
+    f.h.addTask(board.id, input('Task'));
+    const at = async (locale?: 'en' | 'ru') => {
+      if (locale) f.h.config.hintLocale = locale;
+      else delete f.h.config.hintLocale;
+      const prompts: string[] = [];
+      const refuse = (name: 'codex' | 'claude'): AgentAdapter => ({
+        name,
+        execute: (r: AgentRequest) => {
+          prompts.push(r.prompt);
+          return Promise.reject(new Error('Fixture reviewer refuses; no provider called'));
+        },
+      });
+      const runtimes = { codex: refuse('codex'), claude: refuse('claude') };
+      await assert.rejects(
+        reviewContract(
+          f.h,
+          f.root,
+          { title: 'Catalog API v1', content: 'GET /products returns a documented list.' },
+          'codex',
+          runtimes,
+        ),
+      );
+      await assert.rejects(reviewPlan(f.h, f.root, board.id, 'codex', runtimes));
+      assert.equal(prompts.length, 2);
+      assert.match(prompts[0], /^Independently review this contract \/ architecture decision\./);
+      assert.match(prompts[1], /^Independently review this task plan\./);
+      return prompts;
+    };
+    const none = await at();
+    const en = await at('en');
+    const ru = await at('ru');
+    // Без hintLocale и с en промпт байтово один и тот же.
+    assert.deepEqual(en, none);
+    assert.ok(none.every((p) => !p.includes('Language:')));
+    // ru — тот же промпт с одной строкой языка.
+    for (const [i, prompt] of ru.entries()) {
+      assert.ok(prompt.includes(line + '\n\n'), 'указание языка в промпте');
+      assert.equal(prompt.replace(line + '\n\n', ''), en[i]);
+    }
+  } finally {
     f.cleanup();
   }
 });

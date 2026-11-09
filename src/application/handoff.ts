@@ -7,7 +7,13 @@
 // тот готовит результат к push/PR человеком.
 import { DiscussionService, type InboxRequest } from './discussion.ts';
 import { InputService } from './input.ts';
-import { hintDetail, hintLocaleOf, PLAN_HINT_IDS, type HintOf } from './hint-messages.ts';
+import {
+  hintDetail,
+  hintLocaleOf,
+  PLAN_HINT_IDS,
+  type HintLocale,
+  type HintOf,
+} from './hint-messages.ts';
 import {
   HANDOFF_MAX_BYTES,
   HANDOFF_MIN_BYTES,
@@ -71,12 +77,31 @@ export type HandoffRequest = z.infer<typeof handoffRequestInput>;
  * продолжает её задание ведущего (`workflow_start`), а не сервер сам по себе.
  * Правила цикла — `loopOutlook` (src/runner/lead-outlook.ts).
  */
-export const handoffHostCommands = {
+const hostCommandsEn = {
   'harness run':
     'Not a DevContour command. The running server holds the controller role but does not lift pauses itself: a board continues under its lead workflow job (workflow_start {"kind": "board", "id": BOARD, "authorRuntime": …}; workflow_status lists jobs). With approvalMode agent the job loop, at stage 1 (tasks), lifts the initial pause, the shutdown pause and an operator pause set before the job started, and checks a moved base itself (base-check); at stage 2 (acceptance) it lifts only the shutdown pause. It retries failed tasks within the repair budget and stops the job when the budget or the failure class allows no retry. With approvalMode operator jobs do not run: the operator starts the queue and retries. host.next names the step for this pack.',
   'harness resume':
     'queue_set {"paused": false}, or devcontour queue --start --workspace …; an operator pause is lifted only on the user\'s decision.',
-} as const;
+};
+
+const hostCommandsRu: Record<keyof typeof hostCommandsEn, string> = {
+  'harness run':
+    'Не команда DevContour. Работающий сервер держит роль controller, но паузы сам не снимает: доску продолжает её задание ведущего (workflow_start {"kind": "board", "id": BOARD, "authorRuntime": …}; workflow_status перечисляет задания). С approvalMode agent цикл задания на стадии 1 (задачи) снимает начальную паузу, паузу остановки и паузу оператора, поставленную до старта задания, и сам проверяет сдвинутую базу (base-check); на стадии 2 (приёмка) снимает только паузу остановки. Он повторяет упавшие задачи в пределах бюджета исправлений и останавливает задание, когда бюджет или класс отказа повтора не допускают. С approvalMode operator задания не исполняются: оператор запускает очередь и повторяет задачи. host.next называет шаг для этого пакета.',
+  'harness resume':
+    'queue_set {"paused": false} или devcontour queue --start --workspace …; паузу оператора снимают только по решению пользователя.',
+};
+
+/** Описания команд harness на языке подсказок (`hintLocale`); ключи — как есть. */
+export const handoffHostCommandsByLocale: Record<
+  HintLocale,
+  Record<keyof typeof hostCommandsEn, string>
+> = {
+  en: hostCommandsEn,
+  ru: hostCommandsRu,
+};
+
+/** Описания по умолчанию — английские, как прежде. */
+export const handoffHostCommands = hostCommandsEn;
 
 /**
  * Шаг DevContour вместо команды harness: что сделать ведущему агенту или
@@ -148,6 +173,11 @@ const withDetail = (h: DevContour, step: HostNextDraft): HandoffHostNext => ({
 /** Пакет harness и приложение DevContour. */
 export interface DevContourHandoff {
   pack: HandoffPack;
+  /**
+   * Язык описаний команд (`commands`) ответа — `hintLocale` конфигурации; в
+   * ответ не входит. Без поля — английский.
+   */
+  locale?: HintLocale;
   host: {
     next?: HandoffHostNext;
     /** Доски с действующим заданием ведущего (его очередь продолжает сервер). */
@@ -966,6 +996,7 @@ export function devcontourHandoffWithin(
         redact: handoffRedactor(h.config, engine.policy),
       };
       const pack = handoffPack(source, options);
+      const locale = hintLocaleOf(h.config);
       const ctx = hostContext(h, harness, v, state, () => pack);
       const liveBoards = [...new Set(ctx.jobs.filter(ctx.live).map((j) => j.id))];
       // Шаг — под той же маской, что пакет: ошибка задания и причина отказа
@@ -1002,9 +1033,10 @@ export function devcontourHandoffWithin(
         ? Math.min(HANDOFF_DISCUSSION_BYTES, Math.floor(limit.bytes / 4))
         : HANDOFF_DISCUSSION_BYTES;
       let host = withDiscussion(discussionOf(budget));
-      if (!limit) return { value: { pack, host }, trimmed: false };
-      const size = (p: HandoffPack) => bytes(handoffResponse({ pack: p, host }, limit.format));
-      if (size(pack) <= limit.bytes) return { value: { pack, host }, trimmed: false };
+      if (!limit) return { value: { pack, host, locale }, trimmed: false };
+      const size = (p: HandoffPack) =>
+        bytes(handoffResponse({ pack: p, host, locale }, limit.format));
+      if (size(pack) <= limit.bytes) return { value: { pack, host, locale }, trimmed: false };
       // Предел пакета — предел ответа без того, что добавляет DevContour
       // (приложение, команды, конверт). Для Markdown — без самого текста
       // пакета в его виде в ответе (строка JSON), чтобы экранирование
@@ -1056,7 +1088,8 @@ export function devcontourHandoffWithin(
       // Пакет не ужимается ниже `HANDOFF_MIN_BYTES`: остаток предела
       // освобождают обращения — меньше записей, затем только отметка о них.
       for (let i = 0; i < 4 && host.discussion?.requests.length; i++) {
-        const over = bytes(handoffResponse({ pack: fitted, host }, limit.format)) - limit.bytes;
+        const over =
+          bytes(handoffResponse({ pack: fitted, host, locale }, limit.format)) - limit.bytes;
         if (over <= 0) break;
         budget -= over;
         host = withDiscussion(
@@ -1064,7 +1097,7 @@ export function devcontourHandoffWithin(
         );
       }
       return {
-        value: { pack: fitted, host },
+        value: { pack: fitted, host, locale },
         trimmed: droppedOf(fitted.truncated) > droppedOf(pack.truncated),
       };
     });
@@ -1080,17 +1113,18 @@ export function devcontourHandoffWithin(
  */
 export function handoffResponse(value: DevContourHandoff, format: HandoffFormat) {
   const { pack, host } = value;
+  const commands = handoffHostCommandsByLocale[value.locale ?? 'en'];
   return format === 'md'
     ? {
         format,
-        markdown: handoffMarkdown(pack) + hostMarkdown(host),
+        markdown: handoffMarkdown(pack) + hostMarkdown(host, commands),
         host,
-        commands: handoffHostCommands,
+        commands,
       }
-    : { format, pack, host, commands: handoffHostCommands };
+    : { format, pack, host, commands };
 }
 
-function hostMarkdown(host: DevContourHandoff['host']) {
+function hostMarkdown(host: DevContourHandoff['host'], commands: Record<string, string>) {
   return [
     '',
     '## В DevContour',
@@ -1106,7 +1140,7 @@ function hostMarkdown(host: DevContourHandoff['host']) {
             : '- Есть обращения к ведущему без обработки — discussion_inbox',
         ]
       : []),
-    ...Object.entries(handoffHostCommands).map(([k, v]) => `- \`${k}\` — ${v}`),
+    ...Object.entries(commands).map(([k, v]) => `- \`${k}\` — ${v}`),
     '',
   ].join('\n');
 }

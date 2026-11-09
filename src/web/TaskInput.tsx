@@ -5,6 +5,9 @@ import { Textarea } from '@/ui/textarea.tsx';
 import type { InputService } from '../application/input.ts';
 import { inputNextText, inputStateLabels, repeatedQuestionText } from './input-labels.ts';
 import { discussionChanged } from './discussion-events.ts';
+import { findingSeverityLabel } from './review-labels.ts';
+
+const capitalized = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
 export { inputStateLabels };
 
@@ -191,8 +194,7 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
             <ul className="mt-1 mb-0 pl-4" aria-label="Находки ревью ответа">
               {lastReview.findings.map((f, i) => (
                 <li key={i}>
-                  {f.severity === 'blocking' ? 'Блокирующая: ' : 'Замечание: '}
-                  {f.message}
+                  {capitalized(findingSeverityLabel(f.severity))}: {f.message}
                 </li>
               ))}
             </ul>

@@ -43,6 +43,7 @@ import {
 import { spikeRecord, spikesOf } from './checks.ts';
 import { coverBoard } from './board-coverage.ts';
 import { checkoutRoots, workspaceCheckout } from './checkout-root.ts';
+import { hintLocaleOf, reviewLanguageInstructions } from '../application/hint-messages.ts';
 
 // Контракт живёт в репозитории, и предложение должно на него ссылаться, а не
 // нести копию: копию легко отправить на ревью устаревшей, и тогда принятый
@@ -414,6 +415,8 @@ async function review(
         ]
       : []),
     'Return approved=false and concrete blocking findings when revision is needed. Routine technical choices within the specification do not need human approval.',
+    // Итог и находки читает оператор: на его языке (`hintLocale`).
+    ...reviewLanguageInstructions(hintLocaleOf(h.config)),
     ...(checkout
       ? [
           `Your working directory is a read-only checkout of the integration branch ${checkout.ref} at ${checkout.sha}. Tasks of this plan branch from it; the operator's own checkout may lag behind and is not the base.`,
