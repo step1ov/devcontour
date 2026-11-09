@@ -466,6 +466,30 @@ test('doctor предупреждает, когда проверки по оче
   assert.equal(warning?.id, 'gates:timeout');
   assert.match(warning?.detail ?? '', /компонента main по очереди займут до 2 мин/);
   assert.match(warning?.detail ?? '', /runTimeoutMs 1\.7 мин/);
+  assert.match(warning?.detail ?? '', /нижняя граница/);
+  // Совместные проверки workspace: 3 × 30 с укладываются в 150 с, пока
+  // нижний предел не поднял каждую до 60 с; проверки компонента (2 × 60 с) —
+  // укладываются, и предупреждение называет только workspace.
+  const joint = config({
+    gates: base.gates,
+    workspaceGates: ['a', 'b', 'c'].map((id) => ({
+      id: 'joint-' + id,
+      repositoryId: 'main',
+      kind: 'check' as const,
+      command: ['node', '--version'],
+      timeoutMs: 30000,
+      artifacts: [],
+    })),
+  });
+  assert.equal(gateTimeoutCheck({ ...joint, runTimeoutMs: 150000 }), undefined);
+  const jointWarning = gateTimeoutCheck({
+    ...joint,
+    runTimeoutMs: 150000,
+    gateTimeoutFloorMs: 60000,
+  });
+  assert.equal(jointWarning?.status, 'degraded');
+  assert.match(jointWarning?.detail ?? '', /workspace \(совместные\) по очереди займут до 3 мин/);
+  assert.doesNotMatch(jointWarning?.detail ?? '', /компонента main/);
 });
 
 test('быстрый setup пишет срок фазы по проверкам и сохраняет уже заданный срок', () =>
