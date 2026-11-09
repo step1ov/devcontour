@@ -11,6 +11,7 @@ import {
   artifactGuard,
   checksWarnings,
   contractContent,
+  contractSize,
   defaultOwner,
   limitsMessage,
   proposalLimitIssues,
@@ -71,6 +72,9 @@ export async function contractImpact(h: DevContour, input: unknown) {
       400,
     );
   const content = await contractContent(h, parsed, head);
+  // Размер документа виден до отправки: превышение — отказ до ревью,
+  // приближение к пределу — предупреждение.
+  const size = contractSize(content);
   const pinned = await pinArtifacts(
     owner,
     parsed.artifacts ?? [],
@@ -216,6 +220,7 @@ export async function contractImpact(h: DevContour, input: unknown) {
     base,
     closure,
     limits,
+    size,
     requiredReviews,
     // Структурные предупреждения до ревью: их видно без вызова модели.
     warnings: status === 'unchanged' ? [] : checksWarnings(parsed, current),

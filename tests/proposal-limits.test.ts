@@ -12,12 +12,18 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { DomainError, GATE_SCOPE_LIMIT, taskInput } from '../src/core/model.ts';
-import { config, fixture, input } from './helpers.ts';
+import { config, fixture, input, statePrevious } from './helpers.ts';
 import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import { executionOf } from '../src/harness/execution.ts';
 import { loadConfig } from '../src/runner/config.ts';
-import { parseProposal, proposalLimitIssues, proposalLimits } from '../src/runner/agent-control.ts';
+import {
+  parseProposal,
+  proposalLimitIssues,
+  proposalLimits,
+  reviewContract,
+} from '../src/runner/agent-control.ts';
+import type { AgentAdapter, AgentRequest } from '../src/runner/adapters.ts';
 import { contractImpact } from '../src/runner/contract-impact.ts';
 import { assertArtifactsInBase, pinArtifacts } from '../src/runner/contract-artifacts.ts';
 import { agentInputs } from '../src/application/agent.ts';
@@ -374,5 +380,76 @@ test('Задача с 25 gates проходит проекцию в движок
   } finally {
     store.close();
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Документ контракта из файла сверх 60 000 знаков — отказ до ревью; от 90 % предела — предупреждение в отчёте и ответе ревью', async () => {
+  const f = fixture();
+  const repo = await mkdtemp(join(tmpdir(), 'devcontour-contract-size-'));
+  try {
+    f.h.config.repository = repo;
+    f.h.config.mode = 'local';
+    await git(repo, 'init', '-q', '-b', 'main');
+    const paragraph = 'Catalog search returns stable, paginated results. '.repeat(20) + '\n\n';
+    const doc = (chars: number) => ('# Contract\n\n' + paragraph.repeat(200)).slice(0, chars);
+    await writeFile(join(repo, 'big.md'), doc(61_000));
+    await writeFile(join(repo, 'near.md'), doc(55_000));
+    await git(repo, 'add', '.');
+    await git(repo, '-c', 'user.name=t', '-c', 'user.email=t@e', 'commit', '-qm', 'Contracts');
+    const calls: string[] = [];
+    const reviewer = (name: 'codex' | 'claude'): AgentAdapter => ({
+      name,
+      execute(r: AgentRequest) {
+        calls.push(r.prompt.slice(0, 40));
+        return Promise.resolve({
+          data: {
+            approved: true,
+            summary: 'Fixture',
+            findings: [],
+            discoveries: [],
+            previous: statePrevious(r.prompt, true),
+          },
+          log: 'Fixture only; no provider called',
+          command: ['fixture'],
+        });
+      },
+    });
+    const runtimes = { codex: reviewer('codex'), claude: reviewer('claude') };
+
+    const big = { title: 'Catalog search', file: 'big.md' };
+    const report = await contractImpact(f.h, big);
+    assert.equal(report.size.chars, 61_000);
+    assert.equal(report.size.max, 60_000);
+    assert.match(report.size.refusal ?? '', /61 000 знаков при пределе 60 000, длиннее на 1 000/);
+    assert.match(report.size.refusal ?? '', /файл-продолжение/);
+    await assert.rejects(
+      reviewContract(f.h, f.root, big, 'codex', runtimes),
+      (e: unknown) =>
+        e instanceof DomainError &&
+        /длиннее на 1 000/.test(e.message) &&
+        /ревью не начато/.test(e.message),
+    );
+    assert.deepEqual(calls, [], 'модель не вызвана');
+
+    const near = { title: 'Catalog near limit', file: 'near.md' };
+    const nearReport = await contractImpact(f.h, near);
+    assert.equal(nearReport.size.refusal, undefined);
+    assert.match(
+      nearReport.size.warning ?? '',
+      /55 000 знаков из 60 000 допустимых \(осталось 5 000\)/,
+    );
+    const reviewed = (await reviewContract(f.h, f.root, near, 'codex', runtimes)) as {
+      status: string;
+      warning?: string;
+    };
+    assert.equal(reviewed.status, 'approved');
+    assert.match(reviewed.warning ?? '', /следующая правка может превысить предел/);
+    assert.equal(calls.length, 1);
+    // Короткий документ — без предупреждения о размере.
+    const small = await contractImpact(f.h, { title: 'Small', content: 'Short contract text.' });
+    assert.deepEqual(small.size, { chars: 20, max: 60_000, warnAt: 54_000 });
+  } finally {
+    f.cleanup();
+    await rm(repo, { recursive: true, force: true });
   }
 });

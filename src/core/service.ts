@@ -53,6 +53,7 @@ import {
   type Run,
   type Approval,
   type BaseMove,
+  CONTRACT_CONTENT_MAX,
 } from './model.ts';
 /**
  * Эксплуатационные ключи, которые работающий сервер применяет по запросу
@@ -1215,7 +1216,7 @@ export class DevContour {
         'underTest без artifacts: реализацию под тестом объявляют для закреплённой приёмки',
         400,
       );
-    if (!title.trim() || !content.trim() || content.length > 60000)
+    if (!title.trim() || !content.trim() || content.length > CONTRACT_CONTENT_MAX)
       throw new DomainError('Укажите название и содержимое контракта (до 60 000 символов)', 400);
     return this.store.change('contract.approved', (s) => {
       const c = {
