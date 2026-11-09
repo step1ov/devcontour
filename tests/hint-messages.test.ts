@@ -1,0 +1,300 @@
+// Тексты шага DevContour пакета передачи (`host.next.detail`) по языку
+// подсказок: у каждого кода есть русский текст, команды, JSON и id в нём — как
+// в английском; без `hintLocale` тексты прежние.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { config, fixture, input } from './helpers.ts';
+import { DevContour } from '../src/core/service.ts';
+import { configSchema } from '../src/core/model.ts';
+import { LeadWorkflow } from '../src/core/lead-workflow.ts';
+import { devcontourHandoff, handoffResponse } from '../src/application/handoff.ts';
+import {
+  hintCatalogs,
+  hintDetail,
+  hintLocaleOf,
+  hintLocales,
+  type HintCode,
+  type HintOf,
+  type HintSubject,
+} from '../src/application/hint-messages.ts';
+
+const job = { key: 'job-key-1', repositoryId: 'api', status: 'failed', stage: 1, maxAttempts: 3 };
+const stops = { count: 4, limit: 2, exhausted: true };
+const input1 = { requestId: 'req-42', taskId: 'task-7' };
+const many = (prefix: string, n: number) => Array.from({ length: n }, (_, i) => `${prefix}-${i}`);
+
+/** Шаг каждого кода с параметрами и полями, которые его текст читает. */
+const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[] } = {
+  operator: [{ code: 'operator', params: {} }],
+  'plan-unapproved': [
+    {
+      code: 'plan-unapproved',
+      params: { scope: 2 },
+      boardId: 'board-1',
+      plan: {
+        drafts: ['t-1', 't-2'],
+        stale: [],
+        review: ['t-1'],
+        reviewCount: 1,
+        unverified: ['t-2'],
+        unverifiedCount: 1,
+        blocked: [{ id: 't-3', reason: 'no gates' }],
+        blockedCount: 1,
+      },
+    },
+    {
+      code: 'plan-unapproved',
+      params: { scope: 25 },
+      boardId: 'board-1',
+      plan: {
+        drafts: many('d', 24),
+        stale: ['s-0'],
+        review: many('d', 20),
+        reviewCount: 25,
+        unverified: [],
+        unverifiedCount: 0,
+        blocked: [],
+        blockedCount: 0,
+      },
+    },
+    {
+      code: 'plan-unapproved',
+      params: { scope: 30 },
+      boardId: 'board-1',
+      plan: {
+        drafts: many('d', 30),
+        stale: [],
+        review: many('d', 20),
+        reviewCount: 22,
+        unverified: many('u', 20),
+        unverifiedCount: 23,
+        blocked: [],
+        blockedCount: 0,
+      },
+    },
+    {
+      code: 'plan-unapproved',
+      params: { scope: 1 },
+      boardId: 'board-1',
+      plan: {
+        drafts: ['t-1'],
+        stale: [],
+        review: [],
+        reviewCount: 0,
+        unverified: ['t-1'],
+        unverifiedCount: 1,
+        blocked: [],
+        blockedCount: 0,
+      },
+    },
+  ],
+  'job-stops': [
+    {
+      code: 'job-stops',
+      params: { stage: 1 },
+      boardId: 'board-1',
+      job,
+      loop: { step: 'stop', taskId: 't-1', reason: 'REPAIR_BUDGET' },
+    },
+  ],
+  'job-live': [
+    {
+      code: 'job-live',
+      params: { stage: 1 },
+      boardId: 'board-1',
+      job: { ...job, status: 'running' },
+      loop: { step: 'repair', taskId: 't-1', reason: 'gate' },
+    },
+  ],
+  'input-refused': [
+    { code: 'input-refused', params: { reason: 'нет референсов' }, boardId: 'board-1' },
+  ],
+  'job-retry-stops': [
+    {
+      code: 'job-retry-stops',
+      params: { error: 'boom' },
+      boardId: 'board-1',
+      job,
+      loop: { step: 'stop', reason: 'TERMINAL' },
+    },
+  ],
+  'job-retry': [
+    {
+      code: 'job-retry',
+      params: {},
+      boardId: 'board-1',
+      job: { ...job, repositoryId: undefined },
+      loop: { step: 'lift-pause', pause: 'shutdown' },
+    },
+  ],
+  'job-exhausted': [{ code: 'job-exhausted', params: { error: 'boom' }, boardId: 'board-1', job }],
+  'job-settled': [
+    { code: 'job-settled', params: {}, boardId: 'board-1', job: { ...job, status: 'stale' } },
+    { code: 'job-settled', params: {}, boardId: 'board-1', job: { ...job, status: 'completed' } },
+  ],
+  'job-idle': [{ code: 'job-idle', params: {}, boardId: 'board-1', job }],
+  'board-start': [
+    { code: 'board-start', params: { running: true }, boardId: 'board-1', job },
+    { code: 'board-start', params: { running: false }, boardId: 'board-1' },
+  ],
+  'pause-lift': [
+    {
+      code: 'pause-lift',
+      params: { pause: 'initial', stage: 1 },
+      boardId: 'board-1',
+      job,
+      loop: { step: 'lift-pause', pause: 'initial' },
+    },
+    {
+      code: 'pause-lift',
+      params: { pause: 'operator', stage: 1 },
+      boardId: 'board-1',
+      job,
+      loop: { step: 'check-base' },
+    },
+  ],
+  'pause-operator': [
+    { code: 'pause-operator', params: {} },
+    { code: 'pause-operator', params: {}, boardId: 'board-1', job, loop: { step: 'accept' } },
+  ],
+  'follow-up': [{ code: 'follow-up', params: { severity: 5, version: 3 }, input: input1 }],
+  'answer-lead': [
+    { code: 'answer-lead', params: { version: 2 }, input: input1 },
+    { code: 'answer-lead', params: { version: 2, stops }, input: input1 },
+  ],
+  'answer-operator': [
+    { code: 'answer-operator', params: { floors: ['security', 'data'] }, input: input1 },
+    { code: 'answer-operator', params: { floors: [], stops }, input: input1 },
+  ],
+  'apply-stale': [
+    { code: 'apply-stale', params: { reason: 'context', operator: true }, input: input1 },
+    { code: 'apply-stale', params: { reason: 'base', operator: false, stops }, input: input1 },
+  ],
+  'apply-rejected': [
+    { code: 'apply-rejected', params: { operator: true }, input: input1 },
+    { code: 'apply-rejected', params: { operator: false }, input: input1 },
+  ],
+  'apply-claim': [
+    { code: 'apply-claim', params: { stops: { ...stops, exhausted: false } }, input: input1 },
+  ],
+  'apply-saved': [
+    { code: 'apply-saved', params: { state: 'answered', operator: false }, input: input1 },
+    { code: 'apply-saved', params: { state: 'reviewed', operator: true }, input: input1 },
+  ],
+};
+
+/**
+ * Что текст передаёт как есть: JSON-объекты, команды и флаги CLI, операции
+ * MCP и агентского API (snake_case), ссылки панели, коды блокеров.
+ */
+function verbatim(text: string) {
+  return [
+    ...(text.match(/\{"[^{}]*\}/g) ?? []),
+    ...(text.match(/devcontour [a-z-]+/g) ?? []),
+    ...(text.match(/--[a-z-]+/g) ?? []),
+    ...(text.match(/\b[a-z]+_[a-z_]+\b/g) ?? []),
+    ...(text.match(/\/\?view=[^\s)]+/g) ?? []),
+    ...(text.match(/\b[A-Z]+_[A-Z_]+\b/g) ?? []),
+    ...(text.match(/\bdocs\/[a-z.-]+/g) ?? []),
+  ];
+}
+
+test('Подсказки шага: у каждого кода есть текст на каждом языке', () => {
+  const codes = Object.keys(samples).sort();
+  for (const locale of hintLocales)
+    assert.deepEqual(Object.keys(hintCatalogs[locale]).sort(), codes, locale);
+});
+
+test('Подсказки шага: русский текст — по-русски, команды, JSON и id в нём как в английском', () => {
+  for (const [code, steps] of Object.entries(samples))
+    for (const step of steps as (HintSubject & HintOf)[]) {
+      const en = hintDetail(step, 'en');
+      const ru = hintDetail(step, 'ru');
+      assert.ok(en && ru, code);
+      assert.notEqual(ru, en, code);
+      assert.match(ru, /[а-яё]{3}/i, `${code}: русский текст`);
+      for (const token of verbatim(en))
+        assert.ok(ru.includes(token), `${code}: «${token}» нет в русском тексте:\n${ru}`);
+      for (const id of [step.boardId, step.input?.requestId, step.input?.taskId, step.job?.key])
+        if (id && en.includes(id)) assert.ok(ru.includes(id), `${code}: ${id}`);
+      // Английский текст шага — без кириллицы, кроме переданных как есть
+      // параметров и отметки об усечённом списке.
+      const own = en
+        .replace(/\(… ещё \d+: [^)]+\)/g, '')
+        .replace(String((step.params as { reason?: string }).reason ?? '\u0000'), '');
+      assert.doesNotMatch(own, /[а-яё]/i, `${code}: английский текст`);
+    }
+});
+
+test('Подсказки шага: без hintLocale — английский; ru — тот же код и параметры, русский текст', () => {
+  assert.equal(hintLocaleOf(config()), 'en');
+  assert.equal(configSchema.safeParse({ ...config(), hintLocale: 'de' }).success, false);
+  const f = fixture();
+  try {
+    const at = (locale?: 'ru') => {
+      const h = new DevContour(
+        f.store,
+        config({
+          checkoutRoot: f.h.config.checkoutRoot,
+          approvalMode: 'operator',
+          ...(locale ? { hintLocale: locale } : {}),
+        }),
+      );
+      return devcontourHandoff(h, {});
+    };
+    const board = f.h.createBoard('Board', '', 'main');
+    f.h.addTask(board.id, input('Task'));
+    f.h.approve(board.id);
+    new LeadWorkflow(f.h).start({ kind: 'board', id: board.id, authorRuntime: 'codex' });
+    const en = at();
+    const ru = at('ru');
+    assert.equal(en.host.next?.code, 'operator');
+    assert.deepEqual(en.host.next.params, {});
+    // Текст по умолчанию байтово прежний.
+    assert.equal(
+      en.host.next.detail,
+      'approvalMode operator: lead workflow jobs do not run. The operator reviews plans and accepts boards in the panel, starts the queue (devcontour queue --start --workspace …) and retries failed tasks (devcontour retry --task ID --workspace …).',
+    );
+    const { detail: enDetail, ...enRest } = en.host.next;
+    const { detail: ruDetail, ...ruRest } = ru.host.next!;
+    assert.deepEqual(ruRest, enRest);
+    assert.match(ruDetail, /^approvalMode operator: задания ведущего не исполняются/);
+    assert.notEqual(ruDetail, enDetail);
+    // Приложение Markdown — тот же текст шага.
+    const md = handoffResponse(ru, 'md').markdown ?? '';
+    assert.ok(md.includes(`- **Следующий шаг: operator** — ${ruDetail}`));
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Подсказки шага: шаг доски в агентском режиме — по-русски, с JSON задания как есть', () => {
+  const f = fixture();
+  try {
+    const board = f.h.createBoard('Board', '', 'main');
+    f.h.addTask(board.id, input('Task'));
+    f.h.approve(board.id);
+    const at = (locale?: 'ru') =>
+      devcontourHandoff(
+        new DevContour(
+          f.store,
+          config({
+            checkoutRoot: f.h.config.checkoutRoot,
+            ...(locale ? { hintLocale: locale } : {}),
+          }),
+        ),
+        { boardId: board.id },
+      ).host.next!;
+    const en = at();
+    const ru = at('ru');
+    assert.equal(en.action, 'workflow_start');
+    assert.equal(en.code, 'board-start');
+    assert.equal(ru.code, 'board-start');
+    const json = `workflow_start {"kind": "board", "id": ${JSON.stringify(board.id)}, "authorRuntime": …}`;
+    assert.ok(en.detail.includes(json), en.detail);
+    assert.ok(ru.detail.includes(json), ru.detail);
+    assert.match(ru.detail, /^У доски \S+ нет действующего задания ведущего/);
+  } finally {
+    f.cleanup();
+  }
+});
