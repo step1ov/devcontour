@@ -1126,7 +1126,7 @@ SHA-256 `cfeadab1eea9dbe5c01eb6e44ac489537e99a333c6556b0a3bc182f7433a38d2`
   прежний; `config-apply` его не применяет — нужен перезапуск `serve`.
   Описания команд harness (`commands`) остаются по-английски.
 
-### После 0.4.0-alpha.23
+### 0.4.0-alpha.24
 
 Закреплённый движок сменился с 0.1.0-alpha.40 на 0.1.0-alpha.41 — локально
 собранный архив `vendor/harness/devcontour-harness-0.1.0-alpha.41.tgz` с
