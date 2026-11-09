@@ -16,6 +16,7 @@ import { specDigest } from '../src/core/service.ts';
 import { serve } from '../src/server/http.ts';
 import { devcontourHandoff } from '../src/application/handoff.ts';
 import { queueStopOf } from '../src/application/queue-stop.ts';
+import { reviewLanguageInstructions } from '../src/application/hint-messages.ts';
 
 after(() => inputDemos.close());
 
@@ -380,5 +381,28 @@ test('input_review warns when attempts of the task graph are running: apply will
     assert.deepEqual(applied.active, [{ id: run.id, workId: other }]);
   } finally {
     await f.cleanup();
+  }
+});
+
+test('Ревью ответа исполнителю: с hintLocale ru ревьюер пишет текст по-русски, без него промпт прежний', async () => {
+  const [line] = reviewLanguageInstructions('ru');
+  for (const locale of [undefined, 'ru'] as const) {
+    const prompts: string[] = [];
+    const f = await inputFixture(controlled({ prompts }), {
+      ...(locale ? { edit: (raw: Record<string, unknown>) => (raw.hintLocale = locale) } : {}),
+    });
+    try {
+      const { requestId } = await question(f);
+      const p = await prepared(f, requestId, 'lead');
+      assert.equal(p.review.approved, true);
+      const reviews = prompts.filter((x) =>
+        x.startsWith(`review:Independently review an answer to the writer's question ${requestId}`),
+      );
+      assert.equal(reviews.length, 1, 'ревью ответа записано фикстурой');
+      if (locale) assert.ok(reviews[0].includes(line), 'указание языка в промпте');
+      else assert.ok(!/Russian/.test(reviews[0]), 'без hintLocale промпт прежний');
+    } finally {
+      await f.cleanup();
+    }
   }
 });

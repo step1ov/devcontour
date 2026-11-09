@@ -32,6 +32,7 @@ import {
 } from 'devcontour-harness';
 import { DomainError, type Task } from '../core/model.ts';
 import { hrefs } from './panel-links.ts';
+import { hintLocaleOf, reviewLanguageInstructions } from './hint-messages.ts';
 import type { DevContour } from '../core/service.ts';
 import { executionOf, reviewExecutionOf, toDomain } from '../harness/execution.ts';
 import { devcontourContextSource, pinnedSnapshot, taskPacks } from '../harness/host.ts';
@@ -895,6 +896,8 @@ export class InputService {
         JSON.stringify({ question: q.question, options: q.options, recommended: q.recommended }),
       `The answer is in the pinned context file input/${request.id}.md (revision ${answer.revision}, ${answer.kind}).`,
       'Return approved=false with a concrete blocking finding when the answer changes the approved specification.',
+      // Итог ревью ответа читает оператор в центре внимания: на его языке.
+      ...reviewLanguageInstructions(hintLocaleOf(this.h.config)),
     ];
     try {
       const record = await technicalReview(
