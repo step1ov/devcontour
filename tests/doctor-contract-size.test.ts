@@ -26,11 +26,11 @@ test('doctor предупреждает о действующем контрак
       ['contract-size:C-full', 'degraded'],
     ],
   );
-  const near = checks[0]!;
+  const near = checks[0];
   assert.match(near.detail, /^Контракт C-near \(Контракт C-near, docs\/contracts\/api\.md\): /);
   assert.match(near.detail, /54 000 знаков из 60 000 допустимых \(осталось 6 000\)/);
   assert.match(near.detail, /файл-продолжение/);
-  assert.match(checks[1]!.detail, /осталось 0/);
+  assert.match(checks[1].detail, /осталось 0/);
 });
 
 test('doctor не предупреждает о заменённой редакции контракта', () => {
