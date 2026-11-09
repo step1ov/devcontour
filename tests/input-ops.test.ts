@@ -384,25 +384,49 @@ test('input_review warns when attempts of the task graph are running: apply will
   }
 });
 
-test('Ревью ответа исполнителю: с hintLocale ru ревьюер пишет текст по-русски, без него промпт прежний', async () => {
+test('Ревью ответа исполнителю: с hintLocale ru ревьюер пишет текст по-русски, без него и с en промпт байтово прежний', async () => {
   const [line] = reviewLanguageInstructions('ru');
-  for (const locale of [undefined, 'ru'] as const) {
-    const prompts: string[] = [];
-    const f = await inputFixture(controlled({ prompts }), {
-      ...(locale ? { edit: (raw: Record<string, unknown>) => (raw.hintLocale = locale) } : {}),
-    });
-    try {
-      const { requestId } = await question(f);
-      const p = await prepared(f, requestId, 'lead');
-      assert.equal(p.review.approved, true);
-      const reviews = prompts.filter((x) =>
-        x.startsWith(`review:Independently review an answer to the writer's question ${requestId}`),
+  // Ревьюер ответа записывает промпт и отказывает: ревью не закрепляется, и
+  // каждый вызов — тот же раунд того же снимка; меняется только язык.
+  const prompts: string[] = [];
+  const runtimes = controlled();
+  const demo = runtimes.demo;
+  runtimes.demo = {
+    ...demo,
+    execute: (request) => {
+      if (!request.review || request.task?.id) return demo.execute(request);
+      prompts.push(request.prompt);
+      return Promise.reject(new Error('Fixture reviewer refuses; no provider called'));
+    },
+  };
+  const f = await inputFixture(runtimes);
+  try {
+    const { requestId, version } = await question(f);
+    f.service.answer(
+      { requestId, text: 'Use JSON as now.', optionId: 'json', expectedVersion: version },
+      'lead',
+    );
+    const { contextDigest } = await f.service.context({ requestId });
+    const at = async (locale?: 'en' | 'ru') => {
+      if (locale) f.h.config.hintLocale = locale;
+      else delete f.h.config.hintLocale;
+      const before = prompts.length;
+      await assert.rejects(f.service.review({ requestId, contextDigest, authorRuntime: 'codex' }));
+      assert.equal(prompts.length, before + 1, 'ревью ответа записано фикстурой');
+      const prompt = prompts.at(-1)!;
+      assert.ok(
+        prompt.startsWith(`Independently review an answer to the writer's question ${requestId}`),
       );
-      assert.equal(reviews.length, 1, 'ревью ответа записано фикстурой');
-      if (locale) assert.ok(reviews[0].includes(line), 'указание языка в промпте');
-      else assert.ok(!/Russian/.test(reviews[0]), 'без hintLocale промпт прежний');
-    } finally {
-      await f.cleanup();
-    }
+      return prompt;
+    };
+    const none = await at();
+    const en = await at('en');
+    const ru = await at('ru');
+    assert.equal(en, none);
+    assert.ok(!none.includes('Language:'));
+    assert.ok(ru.includes(line + '\n\n'), 'указание языка в промпте');
+    assert.equal(ru.replace(line + '\n\n', ''), en);
+  } finally {
+    await f.cleanup();
   }
 });

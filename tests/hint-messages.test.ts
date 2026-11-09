@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { closePrevious, config, fixture, input } from './helpers.ts';
+import { config, fixture, input } from './helpers.ts';
 import { DevContour } from '../src/core/service.ts';
 import { configSchema, DomainError } from '../src/core/model.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
@@ -521,63 +521,60 @@ test('Описания команд harness пакета: без hintLocale — 
   }
 });
 
-/** Fixture-ревьюер: записывает промпт и одобряет; модели не вызываются. */
-function promptRecorder(prompts: string[]) {
-  const make = (name: 'codex' | 'claude'): AgentAdapter => ({
-    name,
-    execute(r: AgentRequest) {
-      prompts.push(r.prompt);
-      return Promise.resolve({
-        data: {
-          approved: true,
-          summary: 'Fixture',
-          findings: [],
-          previous: closePrevious(r.prompt),
-        },
-        log: 'Fixture only; no provider called',
-        command: ['fixture'],
-      });
-    },
-  });
-  return { codex: make('codex'), claude: make('claude') };
-}
-
 test('Ревью плана и контракта: с hintLocale ru ревьюер пишет текст по-русски, машинные поля — как есть', async () => {
   const [line] = reviewLanguageInstructions('ru');
   assert.deepEqual(reviewLanguageInstructions('en'), []);
   assert.match(line, /in Russian/);
   assert.match(line, /summary, every finding message/);
-  assert.match(line, /Keep JSON keys, enum values \(approved, severity, status\)/);
-  for (const locale of [undefined, 'ru'] as const) {
-    const f = fixture();
-    try {
-      f.h.config.mode = 'local';
+  assert.match(line, /Keep JSON keys, the boolean approved, enum values \(severity, status\)/);
+  assert.match(line, /report their state only in `previous`, by id, and do not restate them/);
+  // Один fixture на все языки: промпты различаются только указанием языка.
+  // Ревьюер записывает промпт и отказывает: ревью не закрепляется, и
+  // следующий вызов — тот же первый раунд того же предмета.
+  const f = fixture();
+  try {
+    f.h.config.mode = 'local';
+    const board = f.h.createBoard('Board');
+    f.h.addTask(board.id, input('Task'));
+    const at = async (locale?: 'en' | 'ru') => {
       if (locale) f.h.config.hintLocale = locale;
+      else delete f.h.config.hintLocale;
       const prompts: string[] = [];
-      const contract = await reviewContract(
-        f.h,
-        f.root,
-        { title: 'Catalog API v1', content: 'GET /products returns a documented list and errors.' },
-        'codex',
-        promptRecorder(prompts),
+      const refuse = (name: 'codex' | 'claude'): AgentAdapter => ({
+        name,
+        execute: (r: AgentRequest) => {
+          prompts.push(r.prompt);
+          return Promise.reject(new Error('Fixture reviewer refuses; no provider called'));
+        },
+      });
+      const runtimes = { codex: refuse('codex'), claude: refuse('claude') };
+      await assert.rejects(
+        reviewContract(
+          f.h,
+          f.root,
+          { title: 'Catalog API v1', content: 'GET /products returns a documented list.' },
+          'codex',
+          runtimes,
+        ),
       );
-      assert.equal(contract.status, 'approved');
-      const board = f.h.createBoard('Board');
-      f.h.addTask(board.id, input('Task'));
-      const plan = await reviewPlan(f.h, f.root, board.id, 'codex', promptRecorder(prompts));
-      assert.equal(plan.status, 'approved');
+      await assert.rejects(reviewPlan(f.h, f.root, board.id, 'codex', runtimes));
       assert.equal(prompts.length, 2);
-      const [contractPrompt, planPrompt] = prompts;
-      assert.match(
-        contractPrompt,
-        /^Independently review this contract \/ architecture decision\./,
-      );
-      assert.match(planPrompt, /^Independently review this task plan\./);
-      for (const prompt of prompts)
-        if (locale) assert.ok(prompt.includes(line), 'указание языка в промпте');
-        else assert.ok(!/Russian/.test(prompt), 'без hintLocale промпт прежний');
-    } finally {
-      f.cleanup();
+      assert.match(prompts[0], /^Independently review this contract \/ architecture decision\./);
+      assert.match(prompts[1], /^Independently review this task plan\./);
+      return prompts;
+    };
+    const none = await at();
+    const en = await at('en');
+    const ru = await at('ru');
+    // Без hintLocale и с en промпт байтово один и тот же.
+    assert.deepEqual(en, none);
+    assert.ok(none.every((p) => !p.includes('Language:')));
+    // ru — тот же промпт с одной строкой языка.
+    for (const [i, prompt] of ru.entries()) {
+      assert.ok(prompt.includes(line + '\n\n'), 'указание языка в промпте');
+      assert.equal(prompt.replace(line + '\n\n', ''), en[i]);
     }
+  } finally {
+    f.cleanup();
   }
 });
