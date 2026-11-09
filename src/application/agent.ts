@@ -18,6 +18,9 @@ import { agentHandoff, handoffInput } from './handoff.ts';
 import {
   requirementSnapshot,
   requirementReport,
+  requirementReportAsync,
+  requirementReportPage,
+  REQUIREMENT_PAGE_MAX,
   correctRequirements,
 } from '../runner/requirements.ts';
 import { repositories, repository } from '../core/repositories.ts';
@@ -63,7 +66,11 @@ export const agentInputs = {
   value_report: valueReportInput,
   session_handoff: handoffInput,
   requirements_snapshot: z.strictObject({ repositoryId: id, source: z.string().min(1).max(500) }),
-  requirements_report: z.strictObject({ repositoryId: id }),
+  requirements_report: z.strictObject({
+    repositoryId: id,
+    cursor: id.optional(),
+    limit: z.number().int().min(1).max(REQUIREMENT_PAGE_MAX).optional(),
+  }),
   requirements_correct: z.strictObject({ boardId: id, reason: z.string().min(10).max(5000) }),
   ...contextInputs,
   plan_import: z
@@ -240,7 +247,7 @@ export const descriptions: Record<AgentOperation, string> = {
   requirements_snapshot:
     'Read REQ sections from committed repository HEAD. Bind returned digest/text to a task and a configured test gate.',
   requirements_report:
-    'Compare current requirement sections with task evidence. Historical done is unchanged; stale requirements are not current coverage.',
+    'Compare current requirement sections with task evidence. Historical done is unchanged; stale requirements are not current coverage. Returns a summary over all tasks of the component (tasks, requirements, stale, counts by proof level) and task rows within the response limit: without cursor and limit the whole list when it fits, otherwise one page (limit, default 50, max 200); pass nextCursor as cursor for the next page. complete is true only when tasks holds the whole report. A task whose requirements alone exceed the page lists omittedRequirements. full names the CLI command that prints the whole report. Read-only, no model calls.',
   requirements_correct:
     'Create draft replacements for changed requirements on an accepted board. Preserve history and require new plan review.',
   project_context:
@@ -459,6 +466,16 @@ export class AgentService {
     const request = parseAgentRequest(raw);
     // Обращение ведущего — его присутствие, даже если операция только читает.
     markLeadActivity(this.h.store, 'agent', request.operation);
+    // Отчёт требований читает Git и считает доказательства всех задач
+    // компонента: в процессе сервера — без блокировки цикла событий, чтобы
+    // другие запросы не ждали его.
+    if (request.operation === 'requirements_report') {
+      checkAgentInput(request);
+      const v = agentInputs.requirements_report.parse(request.input ?? {});
+      return this.bounded(
+        requirementReportPage(await requirementReportAsync(this.h, v.repositoryId), v),
+      );
+    }
     if (!asyncOperations.has(request.operation)) return this.bounded(this.dispatch(request));
     if (!this.root)
       throw new DomainError('Операция запускает процессы и требует каталога данных контура', 409);
@@ -658,8 +675,10 @@ export class AgentService {
         const v = agentInputs.requirements_snapshot.parse(input);
         return requirementSnapshot(repository(h.config, v.repositoryId).path, v.source);
       }
-      case 'requirements_report':
-        return requirementReport(h, agentInputs.requirements_report.parse(input).repositoryId);
+      case 'requirements_report': {
+        const v = agentInputs.requirements_report.parse(input);
+        return requirementReportPage(requirementReport(h, v.repositoryId), v);
+      }
       case 'requirements_correct': {
         const v = agentInputs.requirements_correct.parse(input);
         return correctRequirements(h, v.boardId, v.reason);
@@ -699,7 +718,7 @@ export class AgentService {
         const taskId = agentInputs.task_retry.parse(input).taskId;
         // Повтор ведущим агентом: не человек (`operator` отчёт относит к
         // действиям человека) и не правило восстановления — актёр не назван.
-        h.retry(taskId, undefined, 'host');
+        h.retry(taskId, undefined, 'host', { lead: true });
         return { taskId };
       }
       case 'task_assign': {

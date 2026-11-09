@@ -1563,3 +1563,214 @@ function rmFixture(root: string) {
   assert.ok(root.startsWith(realpathSync(tmpdir())) && root.includes('dc-handoff-read-'));
   rmSync(root, { recursive: true, force: true });
 }
+
+test('session_handoff: задание стоит на задаче, отменённой ведущим после бюджетного отказа — host.next называет законные пути', async () => {
+  for (const othersDone of [true, false]) {
+    const f = fixture();
+    try {
+      const b = f.h.createBoard('Budget stop', '', 'main');
+      const stopped = f.h.addTask(b.id, input('Hits the workspace budget'));
+      const kept = f.h.addTask(b.id, input('Kept'));
+      f.h.approve(b.id);
+      const flow = new LeadWorkflow(f.h);
+      const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+      f.h.pause(false);
+      const run = f.h.claim('test')!;
+      assert.equal(run.taskId, stopped.id);
+      f.h.fail(run.id, run.token, 'workspace budget exceeded', false, 'budget');
+      f.h.cancel(stopped.id, 'Budget stop', 'host');
+      if (othersDone) complete(f.h, kept.id);
+      const runner = new LeadRunner(f.h, f.root);
+      for (let i = 0; i < 4; i++) await runner.tick();
+      await runner.stop();
+      assert.equal(flow.get(job.key, 'main').status, 'failed');
+      for (const value of [devcontourHandoff(f.h, {}), devcontourHandoff(f.h, { boardId: b.id })]) {
+        const next = value.host.next;
+        assert.equal(next?.code, 'job-cancelled-task', JSON.stringify(next));
+        assert.equal(next?.action, 'decide');
+        assert.equal(next?.decision, 'job');
+        assert.equal(next?.boardId, b.id);
+        assert.equal(next?.job?.key, job.key);
+        assert.deepEqual(
+          { ...(next?.params as Record<string, unknown>), error: undefined },
+          { taskId: stopped.id, by: 'host', budget: true, live: false, error: undefined },
+        );
+        // Законные пути: подъём бюджета пользователем и повтор задачи и задания,
+        // либо приёмка ревизии без задачи пользователем.
+        assert.match(next.detail, /devcontour config-apply --keys budgets/);
+        assert.match(next.detail, new RegExp(`devcontour retry --task ${stopped.id} --by host`));
+        assert.match(next.detail, /workflow_retry \{"key": /);
+        // Приёмку без задачи ведущему называют действием оператора в панели,
+        // а не командой, которую он выполнил бы сам.
+        assert.doesNotMatch(next.detail, /devcontour accept/);
+        assert.match(next.detail, /the operator accepts the revision without task .* in the panel/);
+        assert.match(
+          next.detail,
+          /do not raise budgets, retry the task or accept the board yourself/,
+        );
+      }
+      // Правило D46 не ослаблено: повтор задания без решения падает снова.
+      flow.retry(job.key, 'main');
+      const again = new LeadRunner(f.h, f.root);
+      for (let i = 0; i < 3; i++) await again.tick();
+      await again.stop();
+      assert.equal(flow.get(job.key, 'main').status, 'failed');
+      assert.notEqual(f.store.read().boards[0].revisions.at(-1)!.status, 'accepted');
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test('session_handoff: отмена ведущим выданной задачи без бюджета — повтор задачи ведущим, приёмка без неё — пользователем', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Lead cut after issue', '', 'main');
+    const stopped = f.h.addTask(b.id, input('Fails its gate'));
+    const kept = f.h.addTask(b.id, input('Kept'));
+    f.h.approve(b.id);
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    f.h.pause(false);
+    const run = f.h.claim('test')!;
+    f.h.fail(run.id, run.token, 'gate failed', false, 'gate');
+    f.h.cancel(stopped.id, 'Not worth it', 'host');
+    complete(f.h, kept.id);
+    const runner = new LeadRunner(f.h, f.root);
+    for (let i = 0; i < 4; i++) await runner.tick();
+    await runner.stop();
+    const next = devcontourHandoff(f.h, {}).host.next;
+    assert.equal(next?.code, 'job-cancelled-task');
+    assert.equal((next?.params as { budget: boolean }).budget, false);
+    assert.doesNotMatch(next.detail, /config-apply/);
+    assert.match(next.detail, /if the task is still needed, task_retry/);
+    assert.match(next.detail, /Accepting without the task is the user's decision/);
+    // Повтор задачи ведущим снимает отмену: шаг больше не о ней.
+    f.h.retry(stopped.id, undefined, 'host');
+    assert.notEqual(devcontourHandoff(f.h, {}).host.next?.code, 'job-cancelled-task');
+    assert.ok(job.key);
+  } finally {
+    f.cleanup();
+  }
+});
+
+/** Доска с задачей, упавшей на бюджете после выдачи, и задание доски. */
+function budgetStop(h: DevContour) {
+  const b = h.createBoard('Budget stop', '', 'main');
+  const stopped = h.addTask(b.id, input('Hits the workspace budget'));
+  const kept = h.addTask(b.id, input('Kept'));
+  h.approve(b.id);
+  const flow = new LeadWorkflow(h);
+  const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+  h.pause(false);
+  const run = h.claim('test')!;
+  assert.equal(run.taskId, stopped.id);
+  h.fail(run.id, run.token, 'workspace budget exceeded', false, 'budget');
+  return { board: b.id, stopped: stopped.id, kept: kept.id, flow, job };
+}
+
+test('session_handoff: бюджетная остановка и отмена человеком — задачу повторяет пользователь, task_retry ведущего отказан', async () => {
+  for (const legacy of [false, true]) {
+    const f = fixture();
+    try {
+      const { stopped, kept, flow, job } = budgetStop(f.h);
+      f.h.cancel(stopped, 'Not worth the budget', 'operator');
+      if (legacy)
+        f.store.change('fixture.legacy', (s) => {
+          delete s.tasks.find((t) => t.id === stopped)!.cancelledBy;
+        });
+      complete(f.h, kept);
+      const runner = new LeadRunner(f.h, f.root);
+      for (let i = 0; i < 4; i++) await runner.tick();
+      await runner.stop();
+      assert.equal(flow.get(job.key, 'main').status, 'failed');
+      const next = devcontourHandoff(f.h, {}).host.next!;
+      assert.equal(next.code, 'job-cancelled-task');
+      assert.equal((next.params as { by: string }).by, legacy ? 'unknown' : 'operator');
+      assert.doesNotMatch(
+        next.detail,
+        /--by host/,
+        'ведущему не предлагают повторить отмену человека',
+      );
+      assert.match(
+        next.detail,
+        /the user retries the task in the panel \(the retry action on the task page; ask the user\), then workflow_retry/,
+      );
+      // Ни одной команды повтора: CLI retry без --by — повтор человеком, он
+      // обошёл бы отказ сервиса.
+      assert.doesNotMatch(next.detail, /devcontour retry/);
+      // Сервис отказывает ведущему и при попытке повторить такую задачу.
+      await assert.rejects(
+        new AgentService(f.h, f.root).run({ operation: 'task_retry', input: { taskId: stopped } }),
+        (e: unknown) => status(e) === 409 && /решение пользователя/.test(String(e)),
+      );
+      assert.equal(f.store.read().tasks.find((t) => t.id === stopped)!.status, 'cancelled');
+      // Повтор оператором допустим.
+      f.h.retry(stopped, undefined, 'operator');
+      assert.notEqual(f.store.read().tasks.find((t) => t.id === stopped)!.status, 'cancelled');
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test('session_handoff: исчерпанное задание на отменённой задаче остаётся job-exhausted, действующее — без workflow_retry', () => {
+  // Исчерпанное: workflow_retry его не примет — шаг прежний job-exhausted.
+  {
+    const f = fixture();
+    try {
+      const { stopped, kept, job } = budgetStop(f.h);
+      f.h.cancel(stopped, 'Budget stop', 'host');
+      complete(f.h, kept);
+      const exhausted = atStage(f.h, job.key, 'main', 1, {
+        status: 'failed',
+        attempts: job.maxAttempts,
+        error: `${stopped}: Работа остановлена человеком.`,
+      });
+      assert.equal(exhausted.status, 'failed');
+      const next = devcontourHandoff(f.h, {}).host.next;
+      assert.equal(next?.code, 'job-exhausted', JSON.stringify(next));
+    } finally {
+      f.cleanup();
+    }
+  }
+  // Действующее: после повтора задачи задание продолжится само.
+  {
+    const f = fixture();
+    try {
+      const { stopped, job } = budgetStop(f.h);
+      f.h.cancel(stopped, 'Budget stop', 'host');
+      atStage(f.h, job.key, 'main', 1);
+      const next = devcontourHandoff(f.h, {}).host.next!;
+      assert.equal(next.code, 'job-cancelled-task', JSON.stringify(next));
+      assert.equal((next.params as { live: boolean }).live, true);
+      assert.doesNotMatch(next.detail, /workflow_retry \{/);
+      assert.match(next.detail, /the live job then continues on its own/);
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test('session_handoff: задачу убрала новая редакция графа (by graph) — так и названо', async () => {
+  const f = fixture();
+  try {
+    const { stopped, kept, flow, job } = budgetStop(f.h);
+    f.h.cancel(stopped, 'Budget stop', 'host');
+    f.store.change('fixture.graph', (s) => {
+      s.tasks.find((t) => t.id === stopped)!.cancelledBy = 'graph';
+    });
+    complete(f.h, kept);
+    const runner = new LeadRunner(f.h, f.root);
+    for (let i = 0; i < 4; i++) await runner.tick();
+    await runner.stop();
+    assert.equal(flow.get(job.key, 'main').status, 'failed');
+    const next = devcontourHandoff(f.h, {}).host.next!;
+    assert.equal(next.code, 'job-cancelled-task');
+    assert.equal((next.params as { by: string }).by, 'graph');
+    assert.match(next.detail, /removed by a new revision of the board graph/);
+    assert.doesNotMatch(next.detail, /without a recorded actor/);
+  } finally {
+    f.cleanup();
+  }
+});

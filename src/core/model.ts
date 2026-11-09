@@ -238,6 +238,13 @@ export const taskIngest = taskInput.extend({
     .max(TASK_LIMITS.relatedRepositories, relatedRepositoriesTooMany)
     .optional(),
 });
+/**
+ * Предел документа контракта в знаках (как `String.length`): тот же, что у
+ * записи контракта в синхронизации команды. Предупреждение — от 90 %
+ * предела: следующая правка такого документа его, скорее всего, превысит.
+ */
+export const CONTRACT_CONTENT_MAX = 60000;
+export const CONTRACT_CONTENT_WARN = 54000;
 export interface Task extends TaskInput {
   sharedCompletion?: { receipt: CompletionReceipt; sourceCommit: string };
   /**

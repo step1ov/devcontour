@@ -1313,15 +1313,17 @@ async function main() {
         else throw new Error('Неизвестная команда: ' + operation);
       } else if (operation === 'reopen')
         result = h.reopen(option('--task', ''), option('--reason', ''));
-      else if (operation === 'retry')
+      else if (operation === 'retry') {
         // Команда CLI — действие человека (`operator`, как `harness retry`);
-        // ведущий агент передаёт `--by host`.
+        // ведущий агент передаёт `--by host` и не повторяет отмену человека.
+        const by = actorOf();
         result = h.retry(
           option('--task', ''),
           args.includes('--reset') ? { reason: option('--reason', '') } : undefined,
-          actorOf(),
+          by,
+          { lead: by === 'host' },
         );
-      else if (operation === 'edit-board')
+      } else if (operation === 'edit-board')
         result = h.editBoard(option('--board', ''), {
           title: args.includes('--title') ? option('--title', '') : undefined,
           description: args.includes('--description') ? option('--description', '') : undefined,

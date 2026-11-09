@@ -53,6 +53,7 @@ import {
   type Run,
   type Approval,
   type BaseMove,
+  CONTRACT_CONTENT_MAX,
 } from './model.ts';
 /**
  * Эксплуатационные ключи, которые работающий сервер применяет по запросу
@@ -1215,7 +1216,7 @@ export class DevContour {
         'underTest без artifacts: реализацию под тестом объявляют для закреплённой приёмки',
         400,
       );
-    if (!title.trim() || !content.trim() || content.length > 60000)
+    if (!title.trim() || !content.trim() || content.length > CONTRACT_CONTENT_MAX)
       throw new DomainError('Укажите название и содержимое контракта (до 60 000 символов)', 400);
     return this.store.change('contract.approved', (s) => {
       const c = {
@@ -2212,13 +2213,34 @@ export class DevContour {
    * `recovery` — восстановление цикла ведущего по правилу, `host` — актёр не
    * назван (по умолчанию; отчёт считает такую задачу неизвестной).
    */
-  retry(id: string, reset?: { reason: string }, by: RetryActor = 'host') {
+  retry(
+    id: string,
+    reset?: { reason: string },
+    by: RetryActor = 'host',
+    /**
+     * Повтор просит ведущий агент (MCP `task_retry`, CLI `retry --by host`):
+     * задачу, которую отменил человек или отмена без записанного актёра
+     * (D46: считается отменой человеком), он не повторяет — продолжение
+     * такой отмены — решение человека.
+     */
+    options: { lead?: boolean } = {},
+  ) {
     const { store, engine } = executionOf(this);
     return domain(() =>
       store.host('task.retry', (ht) => {
         const t = task(ht.state, id);
         // Продуктовое условие: принятую ревизией задачу повтор не трогает.
         assertNotAccepted(ht.state, t);
+        if (
+          options.lead &&
+          t.status === 'cancelled' &&
+          t.cancelledBy !== 'host' &&
+          t.cancelledBy !== 'graph'
+        )
+          throw new DomainError(
+            `${t.id}: задачу отменил человек${t.cancelledBy ? '' : ' (актёр отмены не записан — считается отменой человеком)'}; повтор такой отмены — решение пользователя: оператор повторяет её в панели или командой devcontour retry --task ${t.id}`,
+            409,
+          );
         const exhaustedReady = t.attempt >= this.config.maxAttempts && !t.activeRunId;
         if (!['failed', 'cancelled'].includes(t.status) && !exhaustedReady)
           throw new DomainError('Повтор доступен после сбоя или отмены');

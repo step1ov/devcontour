@@ -87,5 +87,10 @@
 // Намеренное изменение: task_briefing принимает необязательный repositoryId
 // (workspace из нескольких репозиториев; чужой компонент — отказ), описание
 // называет его; прочие операции байтово прежние.
-export const CATALOG_DIGEST = 'e8bc46b3b7b2c93f36fb71ba376dfa9ce970875efcfcbd3288a0f21915c9ac19';
+// Намеренное изменение: requirements_report принимает необязательные cursor и
+// limit и отвечает сводкой по всем задачам компонента и страницей строк
+// задач в пределе ответа (без cursor и limit — весь список, если он
+// укладывается); описание называет страницы, nextCursor, full и complete;
+// прочие операции байтово прежние.
+export const CATALOG_DIGEST = '787694f3a3261c821a7d4bc65ed20940c67cfecc6c1e113d35e8696f4d1377d4';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

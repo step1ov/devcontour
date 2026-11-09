@@ -416,6 +416,8 @@ function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefine
   const live = jobs.find(ctx.live);
   if (live) {
     const { stage, outlook: loop } = loopAhead(h, state, asLead(live));
+    const cancelled = cancelledStop(boardId, ctx, live, loop, {}, true);
+    if (cancelled) return cancelled;
     if (loop.step === 'stop')
       return {
         action: 'decide',
@@ -446,9 +448,13 @@ function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefine
   const job = jobs.find((j) => ctx.current(j));
   const error = job?.error ? { error: job.error } : {};
   if (job?.status === 'failed') {
+    // Повтор задания — тот же такт цикла по состоянию сейчас.
+    const { outlook: loop } = loopAhead(h, state, { ...asLead(job), status: 'queued' });
     if (job.attempts < job.maxAttempts) {
-      // Повтор задания — тот же такт цикла по состоянию сейчас.
-      const { outlook: loop } = loopAhead(h, state, { ...asLead(job), status: 'queued' });
+      // Исчерпанное задание сюда не входит: `workflow_retry` его не примет,
+      // и шаг остаётся `job-exhausted`.
+      const cancelled = cancelledStop(boardId, ctx, job, loop, error);
+      if (cancelled) return cancelled;
       if (loop.step === 'stop')
         return {
           action: 'decide',
@@ -506,6 +512,74 @@ function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefine
     params: { running },
   };
 }
+
+/**
+ * Задание стоит (или встанет) на задаче, отменённой после выдачи: отменой
+ * человека, отменой без актёра или отменой ведущего задачи, у которой уже
+ * была попытка или отказ (например, исчерпанный бюджет). По D46 такая задача
+ * из работы задания не выпадает: `workflow_retry` и `workflow_start` вернут
+ * то же упавшее задание. Шаг называет законные пути: повтор задачи (подъём
+ * предела, если её остановил бюджет, — решение пользователя; задачу, которую
+ * отменил человек или актёр не записан, повторяет только пользователь) или
+ * приёмку ревизии без неё — тоже решение пользователя (карточка центра
+ * внимания оператору). Ни бюджет, ни приёмку ведущий сам не меняет.
+ */
+function cancelledStop(
+  boardId: string,
+  ctx: HostContext,
+  job: HarnessJob,
+  loop: LoopOutlook,
+  error: { error?: string } = {},
+  /** Задание действует: после повтора задачи оно продолжится само, без `workflow_retry`. */
+  live = false,
+): HostNextDraft | undefined {
+  if (loop.step !== 'stop' || !loop.taskId) return undefined;
+  const task = ctx.state.tasks.find((t) => t.id === loop.taskId);
+  if (task?.status !== 'cancelled') return undefined;
+  return {
+    action: 'decide',
+    decision: 'job',
+    boardId,
+    job: jobRef(job),
+    loop,
+    code: 'job-cancelled-task',
+    params: {
+      taskId: task.id,
+      by: task.cancelledBy ?? 'unknown',
+      budget: stoppedOnBudget(task, ctx.state.runs),
+      live,
+      ...error,
+    },
+  };
+}
+
+/**
+ * Исчерпанное задание доски (`job-exhausted`), цикл которого стоит на задаче,
+ * отменённой после выдачи: параметры той же остановки, что у
+ * `job-cancelled-task`. Шаг ведущего остаётся `job-exhausted` (`workflow_retry`
+ * его не примет), а центр внимания по ним показывает решение оператору: приёмку
+ * без задачи или новую ревизию доски — без повтора задания.
+ */
+export function exhaustedOnCancelled(boardId: string, ctx: HostContext) {
+  const job = ctx.jobs.find((j) => j.id === boardId && ctx.current(j));
+  if (job?.status !== 'failed' || job.attempts < job.maxAttempts) return undefined;
+  const { outlook: loop } = loopAhead(ctx.h, ctx.state, { ...asLead(job), status: 'queued' });
+  const step = cancelledStop(boardId, ctx, job, loop);
+  return step?.code === 'job-cancelled-task' ? step.params : undefined;
+}
+
+/**
+ * Задачу остановил бюджет: её последняя попытка упала отказом класса `budget`
+ * или выдачу держало удержание бюджетом. Класс отказа самой задачи отмена
+ * переписывает (`cancelled`), поэтому он берётся из попытки.
+ */
+const stoppedOnBudget = (
+  t: { id: string; failureKind?: string; budgetBlock?: unknown },
+  runs: readonly { taskId: string; failureKind?: string }[],
+) =>
+  t.failureKind === 'budget' ||
+  !!t.budgetBlock ||
+  runs.findLast((r) => r.taskId === t.id)?.failureKind === 'budget';
 
 /** Срочность шага при выборе одного из досок workspace. */
 const urgency: Record<HandoffHostNext['action'], number> = {

@@ -98,3 +98,15 @@ test('The documented START command brings accepted work into the working branch,
     seed.release();
   }
 });
+
+// Ревью плана часто возвращает задачу, которая меняет ожидания существующих
+// тестов, не называя их: указание планирования называет это заранее.
+test('Planning guidance asks to name existing tests whose expectations the task changes', () => {
+  const start = readFileSync(new URL('../START.md', import.meta.url), 'utf8');
+  assert.match(
+    start,
+    /меняет поведение, которое уже проверяют существующие тесты, назови эти тесты и их новое ожидание/,
+  );
+  const skill = readFileSync(new URL('../skills/devcontour/SKILL.md', import.meta.url), 'utf8');
+  assert.match(skill, /existing tests already check, name those tests and their new expectation/);
+});
