@@ -259,7 +259,7 @@ test('Revisions invalidate architecture and stale decisions, plans and task atte
         .read((v) => engine.blockers(v.work(f.store.read().tasks[0].id)!, v))
         .map((b) => b.message)
         .join('; '),
-      /не связана/,
+      /не связана.*передайте только preparation\.changeId/,
     );
     assert.equal(specDigest(f.store.read().tasks[0]), original);
     assert.equal(f.store.read().preparation!.changes[0].product[0].status, 'approved');
@@ -1279,6 +1279,13 @@ test('Задачи доски привязываются к изменению �
       input: { plan: plan('Stage two', 'two'), boardId },
     });
     assert.equal(stage.changeId, first);
+    // Активно другое изменение: ответ предупреждает и называет путь новой доски.
+    const keys = f.store.read().preparation!.changes.map((c) => c.key);
+    assert.match(
+      String(stage.warning),
+      new RegExp(`изменению доски ${keys[0]}, а активно ${keys[1]}`),
+    );
+    assert.match(String(stage.warning), /новой доске \(plan_import без boardId\)/);
     let state = f.store.read();
     const two = state.tasks.find((t) => t.title === 'Task two')!;
     assert.deepEqual(two.preparation, developmentBinding(state, first));

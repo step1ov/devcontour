@@ -173,7 +173,7 @@ export function assertTaskPreparation(
     hash(task.preparation) !== hash(developmentBinding(s, task.preparation.changeId))
   )
     throw new DomainError(
-      `${task.id}: задача не связана с текущими утверждёнными продуктом и архитектурой; обновите её привязку правкой черновика`,
+      `${task.id}: задача не связана с текущими утверждёнными продуктом и архитектурой; обновите её привязку правкой черновика (task_edit): передайте только preparation.changeId`,
       409,
     );
   if (
