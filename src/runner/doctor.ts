@@ -604,7 +604,7 @@ export async function doctor(
   root: string,
   probe = false,
   state?: Pick<DevContourState, 'leader' | 'runs'> &
-    Partial<Pick<DevContourState, 'contracts' | 'appliedConfig'>> & {
+    Partial<Pick<DevContourState, 'contracts' | 'appliedConfig' | 'tasks'>> & {
       /** Digest ключей применённой конфигурации — `doctorState`. */
       appliedKeys?: AppliedConfigKeys;
     },
@@ -785,10 +785,7 @@ export async function doctor(
   });
   const network = await installNetworkCheck(config);
   if (network) checks.push(network);
-  const gateTimeouts = gateTimeoutCheck(
-    config,
-    state && 'tasks' in state ? (state.tasks as TimeoutTask[]) : [],
-  );
+  const gateTimeouts = gateTimeoutCheck(config, state?.tasks ?? []);
   if (gateTimeouts) checks.push(gateTimeouts);
   checks.push(checkoutsCheck(config, root));
   // Механизм на месте ещё не значит, что gate установки в нём пройдёт:
