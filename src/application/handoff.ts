@@ -14,6 +14,7 @@ import {
   handoffMarkdown,
   handoffPack,
   policySecrets,
+  redactDeep,
   redactor,
   type ExecutionView,
   type HandoffPack,
@@ -344,6 +345,14 @@ export function hostContext(
   };
 }
 
+/**
+ * Предел свободного текста шага (причина отказа входа, ошибка задания) в
+ * `params` и `detail`: `host` пределом ответа не ужимается.
+ */
+const HINT_TEXT_CHARS = 1000;
+const clip = (text: string) =>
+  text.length > HINT_TEXT_CHARS ? text.slice(0, HINT_TEXT_CHARS - 1) + '…' : text;
+
 /** Предел причины отказа одного черновика в `host.next.plan.blocked`. */
 const REASON_CHARS = 300;
 
@@ -438,10 +447,10 @@ function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefine
       action: 'fix-input',
       boardId,
       code: 'input-refused',
-      params: { reason: refused },
+      params: { reason: clip(refused) },
     };
   const job = jobs.find((j) => ctx.current(j));
-  const error = job?.error ? { error: job.error } : {};
+  const error = job?.error ? { error: clip(job.error) } : {};
   if (job?.status === 'failed') {
     if (job.attempts < job.maxAttempts) {
       // Повтор задания — тот же такт цикла по состоянию сейчас.
@@ -833,7 +842,10 @@ export function devcontourHandoffWithin(
       const pack = handoffPack(source, options);
       const ctx = hostContext(h, harness, v, state, () => pack);
       const liveBoards = [...new Set(ctx.jobs.filter(ctx.live).map((j) => j.id))];
-      const next = hostNext(ctx);
+      // Шаг — под той же маской, что пакет: ошибка задания и причина отказа
+      // входа могут нести значения секретов (в `detail` и в `params`).
+      const step = hostNext(ctx);
+      const next = step && redactDeep(step, options.redact);
       // Обращения — в своём байтовом бюджете: выдержки после редактора
       // секретов, полный текст — `discussion_read`. Бюджет — доля предела
       // ответа; если ответ всё же больше предела, он уменьшается ниже.

@@ -3,10 +3,12 @@
 // в английском; без `hintLocale` тексты прежние.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { config, fixture, input } from './helpers.ts';
 import { DevContour } from '../src/core/service.ts';
 import { configSchema } from '../src/core/model.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
+import { DomainError } from '../src/core/model.ts';
 import { devcontourHandoff, handoffResponse } from '../src/application/handoff.ts';
 import { approvalPolicyDigest } from '../src/harness/policy.ts';
 import { profile } from '../src/runner/packs.ts';
@@ -309,4 +311,62 @@ test('Подсказки шага: новая конфигурация setup п�
   const english = configSchema.parse({ ...c, hintLocale: undefined });
   assert.equal(english.hintLocale, undefined);
   assert.equal(approvalPolicyDigest(c), approvalPolicyDigest(english));
+});
+
+/**
+ * Английский текст — прежний текст подсказок, и от текста `input-refused`
+ * считается появление карточки «вход задания не построить»: изменение здесь
+ * намеренное и требует заметки в docs/upgrade.md.
+ */
+const ENGLISH_SAMPLES_SHA256 = 'd12f441219ecc63ca06a6014219b8e6f61dfde930ba06915870e0a7e8d228560';
+
+test('Подсказки шага: английские тексты образцов закреплены', () => {
+  assert.equal(
+    hintDetail(samples['input-refused'][0], 'en'),
+    'workflow_start for board board-1 would be refused: нет референсов. Fix that first (approvals in the panel, tasks of the board), then register the job.',
+  );
+  const all = Object.values(samples)
+    .flat()
+    .map((step) => hintDetail(step, 'en'))
+    .join('\n');
+  assert.equal(createHash('sha256').update(all).digest('hex'), ENGLISH_SAMPLES_SHA256);
+});
+
+test('Подсказки шага: host.next под маской секретов, длинная причина отказа усечена', () => {
+  const SECRET = 'okapi-hint-secret-value-31337';
+  const previous = process.env.DC_HINT_SECRET;
+  process.env.DC_HINT_SECRET = SECRET;
+  const f = fixture();
+  const original = Object.getOwnPropertyDescriptor(LeadWorkflow.prototype, 'input')!
+    .value as LeadWorkflow['input'];
+  try {
+    const h = new DevContour(
+      f.store,
+      config({
+        checkoutRoot: f.h.config.checkoutRoot,
+        hintLocale: 'ru',
+        environment: { inherit: [], values: {}, secrets: { API_TOKEN: 'DC_HINT_SECRET' } },
+      }),
+    );
+    const board = h.createBoard('Board', '', 'main');
+    h.addTask(board.id, input('Task'));
+    h.approve(board.id);
+    const reason = `token ${SECRET} rejected ` + 'x'.repeat(3000);
+    LeadWorkflow.prototype.input = function (kind, id, s) {
+      if (id === board.id) throw new DomainError(reason, 409);
+      return original.call(this, kind, id, s);
+    };
+    const next = devcontourHandoff(h, { boardId: board.id }).host.next!;
+    assert.equal(next.code, 'input-refused');
+    const shown = JSON.stringify(next);
+    assert.ok(!shown.includes(SECRET), 'секрет не виден ни в detail, ни в params');
+    const { reason: got } = next.params;
+    assert.ok(got.length <= 1000 && got.endsWith('…'), String(got.length));
+    assert.ok(next.detail.includes(got));
+  } finally {
+    LeadWorkflow.prototype.input = original;
+    if (previous === undefined) delete process.env.DC_HINT_SECRET;
+    else process.env.DC_HINT_SECRET = previous;
+    f.cleanup();
+  }
 });
