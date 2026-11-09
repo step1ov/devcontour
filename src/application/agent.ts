@@ -248,7 +248,7 @@ export const descriptions: Record<AgentOperation, string> = {
   project_overview:
     'Read bounded summaries of the common workspace or one repository; follow nextCursor.',
   task_briefing:
-    'Read all pages of the task requirements, contracts, execution policy and blocking reasons.',
+    'Read all pages of the task requirements, contracts, execution policy and blocking reasons. Optional repositoryId (multi-repository workspace): the task must belong to that component, otherwise the call is refused.',
   checkpoint_save:
     'Save an immutable Git-portable context note in the selected owner, requiring the current overview revision. This does not approve work.',
   checkpoint_changes:
