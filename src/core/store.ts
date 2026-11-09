@@ -229,6 +229,12 @@ export class Store {
   // 'full' once the technical configuration adds the delivery journal.
   projectionKind?: 'product' | 'full';
   projectionError?: string;
+  /**
+   * Ключи изменений продукта, уже занятые папками `docs/changes` на диске
+   * (например, закоммиченными прежней базой). Номер нового изменения идёт
+   * после них. Подключает проекция постановки; без неё — только состояние.
+   */
+  occupiedChangeKeys?: () => string[];
   constructor(
     path: string,
     locations?: ComponentLocation[],
@@ -295,8 +301,19 @@ export class Store {
       }
       return;
     }
+    this.db.exec('PRAGMA busy_timeout=20000;');
+    // Центральная база без компонентов: запрошенный DELETE не понижает уже
+    // включённый WAL. Выход из WAL требует исключительного доступа, а
+    // работающий сервер держит базу открытой в WAL — команда подготовки из
+    // CLI падала «database is locked». Атомарности одной базы режим журнала
+    // не меняет; базе с компонентами DELETE по-прежнему обязателен.
+    const keepWal =
+      journalMode === 'DELETE' &&
+      !locations?.length &&
+      (this.db.prepare('PRAGMA main.journal_mode').get() as { journal_mode: string })
+        .journal_mode === 'wal';
     this.db.exec(
-      `PRAGMA journal_mode=${journalMode ?? (locations?.length ? 'DELETE' : 'WAL')}; PRAGMA busy_timeout=20000; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;`,
+      `${keepWal ? '' : `PRAGMA journal_mode=${journalMode ?? (locations?.length ? 'DELETE' : 'WAL')};`} PRAGMA synchronous=FULL; PRAGMA secure_delete=ON;`,
     );
     this.db.exec(
       'CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, type TEXT NOT NULL, data TEXT NOT NULL); CREATE TABLE IF NOT EXISTS revision (id INTEGER PRIMARY KEY CHECK(id=1), n INTEGER NOT NULL, lease INTEGER NOT NULL DEFAULT 0); INSERT OR IGNORE INTO revision (id,n) VALUES(1,0);',

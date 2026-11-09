@@ -72,6 +72,6 @@ A writer that cannot finish without a decision stops with a question (`needs-inp
 
 ## Tools and compatibility
 
-Run `devcontour capabilities` for the installed version, tool names, limits and exact schemas. A generated copy ships in [references/agent-api.json](references/agent-api.json); prefer the live catalog after an upgrade. All tools also accept the same `{ "operation": "...", "input": {} }` envelope through `devcontour agent --file request.json --workspace ...`.
+Run `devcontour capabilities` for the installed version, tool names, limits and exact schemas. A generated copy ships in [references/agent-api.json](references/agent-api.json); prefer the live catalog after an upgrade. All tools also accept the same `{ "operation": "...", "input": {} }` envelope through `devcontour agent --file request.json --workspace ...`. The CLI envelope, including `preparation_*`, and `setup --change … --plan` work while the server is running; do not stop it for them. `POST {url}/api/agent` with the header `X-DevContour-Request: 1` accepts the same envelope.
 
 Reads are side-effect free. Creation tools are not generally idempotent: after an uncertain response inspect current state before resubmitting; only rely on the documented keys of `workflow_start` and `signal_ingest`. Never replace an unavailable mutation with a manual SQLite edit. Do not configure provider credentials, install global plugins, publish code or change unrelated projects merely because this skill is active.

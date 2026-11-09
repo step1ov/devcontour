@@ -73,11 +73,14 @@ test('Baseline setup: only docs/spec.md, no Git — host files and config, no .g
       'brief',
       'created',
       'data',
+      // Профиль с npm: setup называет открытый песочнице реестр пакетов.
+      'isolation',
       'next',
       'preserved',
       'profile',
       'repository',
       'status',
+      'toolProfiles',
       'workspace',
     ]);
     assert.equal(result.status, 'needs-agent-bootstrap');

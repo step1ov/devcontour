@@ -1,6 +1,6 @@
 import { workspaceDescription } from '../runner/workspace-mode.ts';
 import { DiscussionService } from '../application/discussion.ts';
-import { quickDiff, quickSetupApplied, quickResult } from '../runner/quick.ts';
+import { quickResultDiff, quickSetupApplied, quickResult } from '../runner/quick.ts';
 import { quickFactsCache, quickPrerequisites, quickView } from '../application/quick-view.ts';
 import { AttentionService } from '../application/attention.ts';
 import type { UsageRecord } from '../core/usage.ts';
@@ -312,10 +312,9 @@ export async function serve(
               ? await Promise.all(
                   quickResult(h.store.read(), change.id, usage, stopQuestions(h)).map(async (r) => {
                     const repo = repositories(h!.config).find((x) => x.id === r.repositoryId);
-                    const head = r.run?.integrationSha ?? r.run?.candidateSha;
                     const diff =
-                      repo && r.run?.baseSha && head
-                        ? await quickDiff(repo.path, r.run.baseSha, head).catch(() => null)
+                      repo && r.run
+                        ? await quickResultDiff(repo.path, r.run).catch(() => null)
                         : null;
                     return { ...r, diff, ...(asking?.has(r.taskId) ? { waitingInput: true } : {}) };
                   }),

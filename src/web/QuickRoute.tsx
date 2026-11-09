@@ -119,6 +119,14 @@ export interface QuickView {
     proposal: string;
     files: PlanFile[];
     refusal?: string;
+    /** Проверки, которые будут действовать после setup. */
+    gates?: { id: string; kind?: string; command?: string[] }[];
+    /** Файл компонента: сохранённый закоммиченный файл действует вместо предложения. */
+    component?: { path: string; action: 'create' | 'preserve'; precedence: boolean; note?: string };
+    /** Сеть песочницы, которую setup открывает: домены реестра пакетов. */
+    isolation?: { domains: string[]; skipped?: string[]; note?: string };
+    /** Профили инструментов, которые setup создаёт для ролей файла компонента. */
+    toolProfiles?: Record<string, { runtime: string }>;
   };
   steps: QuickStep[];
   lead: { lastActivityAt: string | null; present: boolean };
@@ -369,7 +377,7 @@ function Preparation({ view }: { view: QuickView }) {
         <Fact term="Почему так">
           <span className="whitespace-pre-wrap">{setup.reason}</span>
         </Fact>
-        <Fact term="Проверки">
+        <Fact term={plan?.component?.precedence ? 'Проверки в предложении' : 'Проверки'}>
           {setup.gates?.length ? (
             <ul className="grid gap-1">
               {setup.gates.map((g, i) => (
@@ -386,7 +394,55 @@ function Preparation({ view }: { view: QuickView }) {
             'проверки профиля по умолчанию'
           )}
         </Fact>
+        {plan?.component?.precedence && (
+          <Fact term="Действующие проверки">
+            {plan.gates?.length ? (
+              <ul className="grid gap-1" aria-label="Действующие проверки">
+                {plan.gates.map((g, i) => (
+                  <li key={g.id + i}>
+                    <strong className="font-medium">{g.id}</strong>{' '}
+                    {g.kind && <span className="text-muted-foreground text-sm">{g.kind}</span>}{' '}
+                    {g.command && (
+                      <code className="font-mono text-xs break-all">{g.command.join(' ')}</code>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              'файл компонента не объявляет проверок'
+            )}
+          </Fact>
+        )}
+        {plan?.isolation && (
+          <Fact term="Сеть песочницы">
+            {plan.isolation.domains.length ? (
+              <span className="font-mono text-xs break-all">
+                {plan.isolation.domains.join(', ')}
+              </span>
+            ) : (
+              'внешняя сеть закрыта'
+            )}
+            {plan.isolation.note && (
+              <span className="text-muted-foreground block text-sm">{plan.isolation.note}</span>
+            )}
+          </Fact>
+        )}
+        {plan?.toolProfiles && Object.keys(plan.toolProfiles).length > 0 && (
+          <Fact term="Профили инструментов">
+            <span className="font-mono text-xs break-all">
+              {Object.entries(plan.toolProfiles)
+                .map(([name, p]) => `${name} (${p.runtime})`)
+                .join(', ')}
+            </span>
+          </Fact>
+        )}
       </dl>
+      {plan?.component?.precedence && (
+        <Alert variant="warning">
+          <p className="mb-1 leading-none font-medium">Действует файл компонента репозитория</p>
+          <AlertDescription className="break-words">{plan.component.note}</AlertDescription>
+        </Alert>
+      )}
       {plan?.refusal && (
         <Alert variant="destructive">
           <p className="mb-1 leading-none font-medium">Setup по этому плану будет отклонён</p>

@@ -324,6 +324,13 @@ export const preparationBinding = z.strictObject({
   conceptDigest: hash.optional(),
   designDigest: hash.optional(),
 });
+/**
+ * Привязка во входе задачи (`task_create`, `task_edit`): достаточно
+ * `changeId`; digests, если переданы, обязаны совпасть с действующими
+ * утверждёнными — устаревшая привязка отклоняется, а не заменяется молча.
+ */
+export const preparationRequest = preparationBinding.partial().required({ changeId: true });
+export type PreparationRequest = z.infer<typeof preparationRequest>;
 export const preparationInputs = {
   preparation_status: z.strictObject({ changeId: id.optional() }),
   preparation_create: z.strictObject({

@@ -54,8 +54,19 @@ test('Adapter output equals the previous DevContour resolver for every builtin a
     assert.equal(JSON.stringify(actual), JSON.stringify(c.profile), c.ref);
     assert.deepEqual(JSON.parse(JSON.stringify(actual)), c.profile, c.ref);
     // Умолчания gates, ролей и contextPacks в конфигурации setup — те же.
-    // Намеренное изменение после снимка: setup защищает и pnpm-lock.yaml.
-    const legacy = structuredClone(c.config) as { protectedPaths: string[] };
+    // Намеренные изменения после снимка: setup защищает и pnpm-lock.yaml и
+    // пишет нижний предел срока проверок сразу после runTimeoutMs.
+    const legacy = Object.fromEntries(
+      Object.entries(structuredClone(c.config) as Record<string, unknown>).flatMap(
+        ([key, value]): [string, unknown][] =>
+          key === 'runTimeoutMs'
+            ? [
+                [key, value],
+                ['gateTimeoutFloorMs', 60_000],
+              ]
+            : [[key, value]],
+      ),
+    ) as { protectedPaths: string[] };
     legacy.protectedPaths.push('pnpm-lock.yaml');
     assert.equal(
       JSON.stringify(projectConfig('/fixture/product', actual)),

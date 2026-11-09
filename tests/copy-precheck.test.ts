@@ -112,6 +112,13 @@ if (process.env.FAKE_DOCKER_MODE === 'hang') {
   process.on('SIGTERM', () => {});
   setInterval(() => {}, 1000);
 } else {
+if (process.env.FAKE_DOCKER_MODE === 'lead-mark') {
+  // Ведущий обращается к агентскому API во время проверки: отметка
+  // присутствия в каталоге данных оригинала переписывается.
+  const original = join(mount.slice(mount.indexOf(':') + 1), 'ws', '.devcontour-local');
+  fs.writeFileSync(join(original, 'lead-activity.json'), JSON.stringify({ at: new Date().toISOString() }));
+  fs.writeFileSync(join(original, 'lead-activity.json.4242.tmp'), 'partial');
+}
 if (process.env.FAKE_DOCKER_MODE === 'write-db') {
   const db = new DatabaseSync(join(data, 'state.sqlite'));
   db.exec("INSERT INTO state VALUES (2, 'written by the container')");
@@ -348,6 +355,24 @@ test('copy-precheck: запись контейнера в базу копии в
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(r.report.copyDataChanged, ['ws/.devcontour-local/state.sqlite']);
     assert.equal(r.report.originalUnchanged, true);
+  } finally {
+    rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
+test('copy-precheck: отметка присутствия ведущего, переписанная во время проверки, не делает оригинал изменённым', () => {
+  const f = fixture();
+  try {
+    writeFileSync(join(f.data, 'lead-activity.json'), '{"at":"2026-11-08T10:00:00.000Z"}\n');
+    const r = f.run({ FAKE_DOCKER_MODE: 'lead-mark' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.report.originalUnchanged, true);
+    assert.deepEqual(r.report.copyChanged, []);
+    assert.notEqual(
+      readFileSync(join(f.data, 'lead-activity.json'), 'utf8'),
+      '{"at":"2026-11-08T10:00:00.000Z"}\n',
+      'отметка действительно переписана',
+    );
   } finally {
     rmSync(f.base, { recursive: true, force: true });
   }

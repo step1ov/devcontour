@@ -26,6 +26,7 @@ import { repository as selectedRepository, repository } from './core/repositorie
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { AgentService, capabilities } from './application/agent.ts';
+import { markLeadActivity } from './runner/lead-activity.ts';
 import { serveMcp } from './server/mcp.ts';
 import { readAgentJson } from './runner/json-file.ts';
 import { repositories } from './core/repositories.ts';
@@ -73,6 +74,7 @@ import {
   clearServerRecord,
   serverInstance,
   stopServer,
+  stopServerByPid,
   writeServerRecord,
 } from './runner/server-record.ts';
 import { modelRuntimes } from './core/repositories.ts';
@@ -317,7 +319,9 @@ async function main() {
     const timeout = Number(option('--timeout-ms', '60000'));
     if (!Number.isFinite(timeout) || timeout < 0)
       throw new Error('--timeout-ms — неотрицательное число миллисекунд');
-    const result = await stopServer(root, { timeoutMs: timeout });
+    const result = args.includes('--pid')
+      ? await stopServerByPid(root, Number(option('--pid', '')), { timeoutMs: timeout })
+      : await stopServer(root, { timeoutMs: timeout });
     console.log(JSON.stringify(result, null, 2));
     // Сервер без записи работает: команда не выполнена, сигнала не было.
     if (result.status === 'running-unrecorded') process.exitCode = 1;
@@ -762,6 +766,9 @@ async function main() {
       return [v];
     });
     const boardId = value('--board');
+    // Пакет просит ведущий агент новой сессии: это его обращение. Отметка —
+    // файл рядом с базой; сама база по-прежнему только читается.
+    markLeadActivity({ file: join(root, 'state.sqlite') }, 'session-handoff');
     const handoff = readOnlyRead(config, root, (h) =>
       devcontourHandoff(h, {
         ...(boardId ? { boardId } : {}),
@@ -1389,7 +1396,15 @@ async function main() {
   }
   if (operation === 'import-plan') {
     const input = await readAgentJson(resolve(option('--file', 'plan.json')));
-    console.log(JSON.stringify(h.importPlan(input, option('--board', '') || undefined)));
+    console.log(
+      JSON.stringify(
+        h.importPlan(
+          input,
+          option('--board', '') || undefined,
+          option('--change', '') || undefined,
+        ),
+      ),
+    );
     store.close();
     return;
   }

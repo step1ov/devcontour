@@ -34,6 +34,7 @@ import { QueueStopBanner } from './QueueStopBanner.tsx';
 import { QuickForm, QuickRoute } from './QuickRoute.tsx';
 import { AttentionCount, useAttentionScreen } from './AttentionProvider.tsx';
 import { AttentionCenter } from './AttentionCenter.tsx';
+import { developmentStatus } from './development-status.ts';
 
 const Development = lazy(() => import('./App.tsx').then((m) => ({ default: m.App })));
 type View = ReturnType<Preparation['status']> & {
@@ -990,9 +991,7 @@ export function PreparationPanel() {
                                     : designNotApplicable
                                       ? 'Не требуется (утверждено)'
                                       : 'Шаг ' + (designApproved + 1) + ' из 3'
-                                : view.developmentReady
-                                  ? 'Разрешена'
-                                  : 'Ожидает согласований'}
+                                : developmentStatus(view).step}
                         </small>
                       </Button>
                     </li>
@@ -1031,20 +1030,8 @@ export function PreparationPanel() {
                     label={tab === 'development' ? 'Последняя запись подготовки' : undefined}
                   />
                   {tab === 'development' ? (
-                    <Section
-                      title={
-                        view.developmentReady
-                          ? 'Постановка и архитектура утверждены'
-                          : 'Разработка ещё не разрешена'
-                      }
-                    >
-                      <p className="max-w-[78ch]">
-                        {view.developmentReady
-                          ? view.engineConnected
-                            ? 'Агент может декомпозировать работу и запустить технический workflow. Тесты, независимое ревью и приёмка остаются обязательными.'
-                            : 'Агент готовит репозитории, профили и настоящие проверки. Панель подключит технический workflow автоматически.'
-                          : view.blocker}
-                      </p>
+                    <Section title={developmentStatus(view).title}>
+                      <p className="max-w-[78ch]">{developmentStatus(view).text}</p>
                       <SetupProgress setup={view.setup} tasks={view.delivery.total} />
                       <p className="mt-4">
                         Принято задач: {view.delivery.done} из {view.delivery.total}. Сбоев:{' '}

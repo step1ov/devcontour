@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import type { DevContour } from '../core/service.ts';
 import type { DevContourState, AuditEvent } from '../core/model.ts';
 import { changeSnapshot } from '../core/workspace.ts';
-import { writeProduct } from './product-projection.ts';
+import { changeFolders, writeProduct } from './product-projection.ts';
 import type { Store } from '../core/store.ts';
 
 const line = (text: string) => text.replace(/[\r\n|]/g, ' ');
@@ -122,12 +122,14 @@ export function renderJournal(state: DevContourState, id: string, events: AuditE
 export function attachProductProjection(store: Store, workspaceRoot: string) {
   const root = realpathSync(workspaceRoot);
   store.onCommit = () => store.project((state) => writeProduct(state, root));
+  store.occupiedChangeKeys = () => changeFolders(root);
   store.projectionKind = 'product';
   store.refreshProjection();
 }
 export function attachJournal(h: DevContour) {
   if (!h.config.workspaceRoot) return;
   const root = realpathSync(h.config.workspaceRoot);
+  h.store.occupiedChangeKeys = () => changeFolders(root);
   h.store.onCommit = () =>
     h.store.project((state, events) => {
       writeProduct(state, root);

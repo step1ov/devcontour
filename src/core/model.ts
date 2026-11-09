@@ -1,4 +1,9 @@
-import { preparationBinding, featureId, type PreparationState } from './preparation-model.ts';
+import {
+  preparationBinding,
+  preparationRequest,
+  featureId,
+  type PreparationState,
+} from './preparation-model.ts';
 import type { FailureKind } from './failure.ts';
 import { priceSchema } from './usage.ts';
 import type { ReviewInspection } from './review.ts';
@@ -227,6 +232,7 @@ export const relatedRepositoriesTooMany = `Связанных компонент
  * продолжает загружаться.
  */
 export const taskIngest = taskInput.extend({
+  preparation: preparationRequest.optional(),
   relatedRepositories: z
     .array(id)
     .max(TASK_LIMITS.relatedRepositories, relatedRepositoriesTooMany)
@@ -1152,6 +1158,15 @@ export const configSchema = z.object({
    * план не переутверждается, digest исполнения не меняется.
    */
   stallSweep: stallSweepConfigSchema.optional(),
+  /**
+   * Нижний предел срока каждой проверки (`gateTimeoutFloorMs` политики
+   * harness): проверка исполняется со сроком не меньше этого, даже если её
+   * `timeoutMs` короче. Короткий срок быстрой проверки под нагрузкой хоста
+   * срывался и сжигал попытку. Ограничен сверху (10 мин); нет поля — сроки
+   * проверок как объявлены, digest исполнения прежний. Эксплуатационный
+   * предел: план не переутверждается.
+   */
+  gateTimeoutFloorMs: z.number().int().min(1000).max(600000).optional(),
   /**
    * Вопросы исполнителя (`inputPolicy` политики harness): порог серьёзности
    * 1–10, с которого writer останавливается и спрашивает, 11 — автономный

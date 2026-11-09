@@ -77,17 +77,7 @@ export function loadConfig(path: string, text = readFileSync(path, 'utf8')): Con
     ...repositories(c).map((r) => r.gates),
     ...(c.workspaceGates.length ? [c.workspaceGates] : []),
   ];
-  for (const gates of gateSets) {
-    if (new Set(gates.map((g) => g.id)).size !== gates.length)
-      throw new Error('Gate ids должны быть уникальны');
-    if (!gates.some((g) => g.kind === 'test' && g.report))
-      throw new Error('Нужен test gate с JUnit');
-    for (const g of gates) {
-      if (g.kind === 'test' && !g.report) throw new Error('Нужен JUnit report');
-      if (g.report && (isAbsolute(g.report.path) || g.report.path.split(/[\\/]/).includes('..')))
-        throw new Error('Report должен быть внутри worktree');
-    }
-  }
+  for (const gates of gateSets) checkGateSet(gates);
   for (const gate of c.workspaceGates) {
     if (!repositories(c).some((r) => r.id === gate.repositoryId))
       throw new Error('Неизвестный repositoryId проверки workspace');
@@ -261,6 +251,90 @@ export function readComponentConfig(
     dependsOn: entry.dependsOn,
     configFile: entry.configFile,
   };
+}
+/**
+ * Уже лежащий в репозитории файл компонента — его прочитает `scopedConfig`
+ * вместо записи своего. `absent` — файла нет, и setup его создаст.
+ */
+export function existingComponentFile(
+  repositoryPath: string,
+  file = 'devcontour.component.json',
+):
+  | { state: 'absent'; path: string }
+  | { state: 'file'; path: string; content: Record<string, unknown> }
+  | { state: 'invalid'; path: string; reason: string } {
+  const path = resolve(repositoryPath, file);
+  if (!existsSync(path) && !isSymlink(path)) return { state: 'absent', path };
+  const stat = lstatSync(path);
+  if (!stat.isFile()) return { state: 'invalid', path, reason: 'не обычный файл' };
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed))
+      return { state: 'invalid', path, reason: 'ожидался JSON-объект' };
+    return { state: 'file', path, content: parsed as Record<string, unknown> };
+  } catch (error) {
+    return { state: 'invalid', path, reason: (error as Error).message };
+  }
+}
+const isSymlink = (path: string) => {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+};
+function checkGateSet(gates: Config['gates']) {
+  if (new Set(gates.map((g) => g.id)).size !== gates.length)
+    throw new Error('Gate ids должны быть уникальны');
+  if (!gates.some((g) => g.kind === 'test' && g.report)) throw new Error('Нужен test gate с JUnit');
+  for (const g of gates) {
+    if (g.kind === 'test' && !g.report) throw new Error('Нужен JUnit report');
+    if (g.report && (isAbsolute(g.report.path) || g.report.path.split(/[\\/]/).includes('..')))
+      throw new Error('Report должен быть внутри worktree');
+  }
+}
+/**
+ * Причина, по которой конфигурация с сохранённым файлом компонента не
+ * загрузится: схема, проверки gates и согласованность ролей с профилями —
+ * без записи файлов. `config` — объект config.json до выноса компонента.
+ */
+export function componentConfigProblem(
+  config: { repositories?: Record<string, unknown>[] } & Record<string, unknown>,
+  file: Record<string, unknown>,
+): string | undefined {
+  try {
+    const entry = config.repositories?.[0];
+    if (!entry) return undefined;
+    const fileRoles = file.roles as Record<string, unknown> | undefined;
+    const entryRoles = entry.roles as Record<string, unknown> | undefined;
+    const repository: Record<string, unknown> = {
+      ...file,
+      ...(entryRoles || fileRoles ? { roles: { ...entryRoles, ...fileRoles } } : {}),
+      id: entry.id,
+      path: entry.path,
+      dependsOn: entry.dependsOn,
+    };
+    const raw = {
+      ...Object.fromEntries(
+        Object.entries(config).filter(([key]) => key !== 'gates' && key !== 'protectedPaths'),
+      ),
+      repositories: [repository],
+      gates: repository.gates,
+    };
+    const parsed = configSchema.safeParse(raw);
+    if (!parsed.success)
+      return parsed.error.issues
+        .slice(0, 3)
+        .map((i) => `${i.path.join('.')}: ${i.message}`)
+        .join('; ');
+    const c = parsed.data;
+    c.gates = c.repositories[0].gates;
+    checkGateSet(c.repositories[0].gates);
+    validateWorkflow(c);
+    return undefined;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
 }
 export function scopedConfig(config: Config) {
   if (config.storage !== 'component' && config.workspaceMode !== 'embedded') return config;
