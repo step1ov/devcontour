@@ -23,7 +23,13 @@ import {
   setupProject,
 } from '../src/runner/setup.ts';
 import { loadConfig } from '../src/runner/config.ts';
-import { gateTimeoutCheck, installNetworkCheck, isInstallStep } from '../src/runner/doctor.ts';
+import {
+  doctor,
+  gateTimeoutCheck,
+  installNetworkCheck,
+  isInstallStep,
+} from '../src/runner/doctor.ts';
+import { emptyState } from '../src/core/model.ts';
 import { validateWorkflow } from '../src/core/workflow.ts';
 import { config, withTestHome } from './helpers.ts';
 
@@ -464,9 +470,12 @@ test('doctor предупреждает, когда проверки по оче
   const warning = gateTimeoutCheck({ ...base, runTimeoutMs: 100000, gateTimeoutFloorMs: 60000 });
   assert.equal(warning?.status, 'degraded');
   assert.equal(warning?.id, 'gates:timeout');
-  assert.match(warning?.detail ?? '', /компонента main по очереди займут до 2 мин/);
+  assert.match(
+    warning?.detail ?? '',
+    /компонента main — весь профиль — задача без области gates: gates 2, по очереди до 2 мин/,
+  );
   assert.match(warning?.detail ?? '', /runTimeoutMs 1\.7 мин/);
-  assert.match(warning?.detail ?? '', /нижняя граница/);
+  assert.match(warning?.detail ?? '', /оценка снизу/);
   // Совместные проверки workspace: 3 × 30 с укладываются в 150 с, пока
   // нижний предел не поднял каждую до 60 с; проверки компонента (2 × 60 с) —
   // укладываются, и предупреждение называет только workspace.
@@ -488,8 +497,62 @@ test('doctor предупреждает, когда проверки по оче
     gateTimeoutFloorMs: 60000,
   });
   assert.equal(jointWarning?.status, 'degraded');
-  assert.match(jointWarning?.detail ?? '', /workspace \(совместные\) по очереди займут до 3 мин/);
+  assert.match(
+    jointWarning?.detail ?? '',
+    /workspace \(совместные\): gates 3, по очереди до 3 мин/,
+  );
   assert.doesNotMatch(jointWarning?.detail ?? '', /компонента main/);
+});
+
+test('doctor gates:timeout сравнивает срок фазы с набором одной попытки, а не со всем профилем', () => {
+  // Монорепозиторий: 6 gates по 20 мин (весь профиль — 120 мин), задача
+  // исполняет только свою область.
+  const gates = ['a', 'b', 'c', 'd', 'e', 'f'].map((id) => ({
+    id: 'test-' + id,
+    kind: 'test' as const,
+    command: ['node', '--test'],
+    timeoutMs: 20 * 60_000,
+    report: { type: 'junit' as const, path: '.reports/' + id + '.xml' },
+  }));
+  const base = config({ gates, runTimeoutMs: 90 * 60_000 });
+  // Без задач и групп — весь профиль: задача без области исполняет его целиком.
+  assert.match(
+    gateTimeoutCheck(base)?.detail ?? '',
+    /весь профиль .*gates 6, по очереди до 120 мин/,
+  );
+  // Группы компонента: оценка — наибольшая группа (60 мин), а не сумма профиля.
+  const grouped = config({
+    gates,
+    gateGroups: { web: ['test-a', 'test-b', 'test-c'], api: ['test-d'] },
+    runTimeoutMs: 90 * 60_000,
+  });
+  assert.equal(gateTimeoutCheck(grouped), undefined);
+  const tight = gateTimeoutCheck({ ...grouped, runTimeoutMs: 50 * 60_000 });
+  assert.match(tight?.detail ?? '', /наибольшая группа gates @web: gates 3, по очереди до 60 мин/);
+  assert.match(
+    tight?.detail ?? '',
+    /весь профиль \(gates: 6, до 120 мин\) одна попытка не исполняет/,
+  );
+  // Открытые задачи: оценка — наибольшая область задачи; принятые не в счёт.
+  const task = (id: string, status: string, scope?: string[]) => ({
+    id,
+    status: status as never,
+    repositoryId: 'main',
+    ...(scope ? { gates: scope } : {}),
+  });
+  const scoped = [task('T-1', 'ready', ['@api']), task('T-2', 'draft', ['test-e', 'test-f'])];
+  assert.equal(gateTimeoutCheck(grouped, scoped), undefined, '40 мин наибольшей области < 90 мин');
+  const narrow = gateTimeoutCheck({ ...grouped, runTimeoutMs: 30 * 60_000 }, scoped);
+  assert.match(narrow?.detail ?? '', /область задачи T-2: gates 2, по очереди до 40 мин/);
+  assert.equal(
+    gateTimeoutCheck(grouped, [...scoped, task('T-0', 'done')]),
+    undefined,
+    'принятая задача без области не исполняется',
+  );
+  assert.match(
+    gateTimeoutCheck(grouped, [...scoped, task('T-3', 'ready')])?.detail ?? '',
+    /задача T-3 без области gates — весь профиль: gates 6/,
+  );
 });
 
 test('быстрый setup пишет срок фазы по проверкам и сохраняет уже заданный срок', () =>
@@ -612,3 +675,28 @@ test('срок фазы — по проверкам сохранённого ф�
       rmSync(bare, { recursive: true, force: true });
     }
   }));
+
+test('doctor передаёт открытые задачи состояния в оценку gates:timeout', async () => {
+  const root = temp();
+  try {
+    const gates = ['a', 'b'].map((id) => ({
+      id: 'test-' + id,
+      kind: 'test' as const,
+      command: ['node', '--test'],
+      timeoutMs: 20 * 60_000,
+      report: { type: 'junit' as const, path: '.reports/' + id + '.xml' },
+    }));
+    const c = config({ gates, runTimeoutMs: 30 * 60_000 });
+    const of = (r: Awaited<ReturnType<typeof doctor>>) =>
+      r.checks.find((x) => x.id === 'gates:timeout');
+    // Весь профиль (40 мин) больше срока фазы, но открытая задача исполняет один gate.
+    assert.ok(of(await doctor(c, root, false, emptyState())));
+    const tasks = [{ id: 'T-1', status: 'ready', repositoryId: 'main', gates: ['test-a'] }];
+    assert.equal(
+      of(await doctor(c, root, false, { ...emptyState(), tasks: tasks as never })),
+      undefined,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

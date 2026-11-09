@@ -6,6 +6,7 @@ import { emptyState, type Config, type DevContourState, type Role } from '../cor
 import {
   codeReviewVendor,
   declaredRoles,
+  expandGates,
   repositories,
   reviewerBinding,
   roleBinding,
@@ -109,30 +110,98 @@ export async function installNetworkCheck(config: Config): Promise<Check | undef
     detail: `Проверки установки зависимостей (${[...new Set(installs)].join(', ')}) идут в песочнице, а домена реестра пакетов нет в isolation.domains: ${[...missing].join(', ')}. Реестр будет закрыт прокси песочницы. Добавьте домен в isolation.domains и перезапустите сервер.`,
   };
 }
+/** Задача для оценки набора проверок одной попытки (`gateTimeoutCheck`). */
+type TimeoutTask = Pick<DevContourState['tasks'][number], 'id' | 'status' | 'repositoryId'> &
+  Partial<Pick<DevContourState['tasks'][number], 'gates' | 'consumers'>>;
+
 /**
- * Проверки компонента идут по очереди в одной фазе попытки, ограниченной
- * `runTimeoutMs`; совместные проверки workspace — тоже. Если сумма их
- * действующих сроков (каждый не короче `gateTimeoutFloorMs`) больше срока
- * фазы, долгая проверка обрывается сроком фазы, а не своим, и попытка
- * сгорает как истечение срока. Это нижняя граница, а не оценка setup: без
- * повтора проверки, шагов подготовки и проверок потребителей; задача с
- * частью проверок может уложиться.
+ * Проверки одной попытки идут по очереди в одной фазе, ограниченной
+ * `runTimeoutMs`; совместные проверки workspace — тоже. Попытка исполняет не
+ * весь профиль компонента, а область задачи (`gates`, раскрытые группы) и
+ * проверки её потребителей; весь профиль — только задача без области. Поэтому
+ * оценка — наибольший набор одной попытки компонента:
+ * - есть открытые задачи компонента — наибольшая их область с потребителями;
+ * - нет — наибольшая группа gates компонента (`gateGroups`), а без групп —
+ *   весь профиль (его исполняет задача без области).
+ * Срок набора — сумма действующих сроков (каждый не короче
+ * `gateTimeoutFloorMs`). Если он больше срока фазы, долгая проверка
+ * обрывается сроком фазы, а не своим. Это оценка снизу: без повтора проверки,
+ * шагов подготовки и окружения; задача без области вне оценки по группам
+ * исполняет весь профиль.
  */
-export function gateTimeoutCheck(config: Config): Check | undefined {
+export function gateTimeoutCheck(
+  config: Config,
+  tasks: readonly TimeoutTask[] = [],
+): Check | undefined {
   const floor = config.gateTimeoutFloorMs ?? 0;
-  const over = [
-    ...repositories(config).map((repo) => ({
-      name: `компонента ${repo.id}`,
-      ms: gateTimeoutSum(repo.gates, floor),
-    })),
-    { name: 'workspace (совместные)', ms: gateTimeoutSum(config.workspaceGates, floor) },
-  ].filter((r) => r.ms > config.runTimeoutMs);
-  if (!over.length) return undefined;
   const min = (ms: number) => Math.round(ms / 6000) / 10 + ' мин';
+  const repos = repositories(config);
+  const byId = new Map(repos.map((r) => [r.id, r]));
+  /** Gates профиля компонента по ссылкам (группы раскрыты); при ошибке — весь профиль. */
+  const gatesOf = (repo: (typeof repos)[number], refs?: string[]) => {
+    let ids: string[];
+    try {
+      ids = expandGates(repo, refs);
+    } catch {
+      ids = repo.gates.map((g) => g.id);
+    }
+    return repo.gates.filter((g) => ids.includes(g.id));
+  };
+  const open = tasks.filter(
+    (t) => t.status !== 'done' && t.status !== 'cancelled' && byId.has(t.repositoryId),
+  );
+  const over = repos.flatMap((repo) => {
+    const whole = { count: repo.gates.length, ms: gateTimeoutSum(repo.gates, floor) };
+    const candidates = open
+      .filter((t) => t.repositoryId === repo.id)
+      .map((t) => {
+        const gates = [
+          ...gatesOf(repo, t.gates),
+          ...(t.consumers ?? []).flatMap((c) => {
+            const consumer = byId.get(c.repositoryId);
+            return consumer ? gatesOf(consumer, c.gates) : [];
+          }),
+        ];
+        const consumers = t.consumers?.length ? ', с проверками потребителей' : '';
+        return {
+          source: t.gates
+            ? `область задачи ${t.id}${consumers}`
+            : `задача ${t.id} без области gates — весь профиль${consumers}`,
+          count: gates.length,
+          ms: gateTimeoutSum(gates, floor),
+        };
+      });
+    if (!candidates.length)
+      for (const [name, refs] of Object.entries(repo.gateGroups ?? {})) {
+        const gates = gatesOf(repo, refs);
+        candidates.push({
+          source: `наибольшая группа gates @${name}`,
+          count: gates.length,
+          ms: gateTimeoutSum(gates, floor),
+        });
+      }
+    if (!candidates.length)
+      candidates.push({ source: 'весь профиль — задача без области gates', ...whole });
+    const largest = candidates.sort((a, b) => b.ms - a.ms)[0];
+    if (largest.ms <= config.runTimeoutMs) return [];
+    const profile =
+      largest.count === whole.count
+        ? ''
+        : `; весь профиль (gates: ${whole.count}, до ${min(whole.ms)}) одна попытка не исполняет`;
+    return [
+      `компонента ${repo.id} — ${largest.source}: gates ${largest.count}, по очереди до ${min(largest.ms)}${profile}`,
+    ];
+  });
+  const joint = gateTimeoutSum(config.workspaceGates, floor);
+  if (joint > config.runTimeoutMs)
+    over.push(
+      `workspace (совместные): gates ${config.workspaceGates.length}, по очереди до ${min(joint)}`,
+    );
+  if (!over.length) return undefined;
   return {
     id: 'gates:timeout',
     status: 'degraded',
-    detail: `Проверки ${over.map((r) => `${r.name} по очереди займут до ${min(r.ms)}`).join('; ')} (сумма сроков timeoutMs, каждый не короче gateTimeoutFloorMs), а фаза попытки ограничена runTimeoutMs ${min(config.runTimeoutMs)}: долгая проверка оборвётся сроком фазы. Это нижняя граница: повтор проверки на интеграции, шаги подготовки и окружения и проверки потребителей в неё не входят; задача с частью проверок может уложиться. Поднимите runTimeoutMs в config.json и перезапустите serve или сократите проверки.`,
+    detail: `Наибольший набор проверок одной попытки не укладывается в срок фазы runTimeoutMs ${min(config.runTimeoutMs)}: ${over.join('; ')}. Срок набора — сумма сроков timeoutMs, каждый не короче gateTimeoutFloorMs; долгая проверка оборвётся сроком фазы. Это оценка снизу: повтор проверки на интеграции и шаги подготовки и окружения в неё не входят; без открытых задач оценка берёт наибольшую группу gates, а задача без области gates исполняет весь профиль. Поднимите runTimeoutMs в config.json и перезапустите serve или сократите проверки.`,
   };
 }
 export const doctorReady = (checks: Pick<Check, 'status'>[]) =>
@@ -716,7 +785,10 @@ export async function doctor(
   });
   const network = await installNetworkCheck(config);
   if (network) checks.push(network);
-  const gateTimeouts = gateTimeoutCheck(config);
+  const gateTimeouts = gateTimeoutCheck(
+    config,
+    state && 'tasks' in state ? (state.tasks as TimeoutTask[]) : [],
+  );
   if (gateTimeouts) checks.push(gateTimeouts);
   checks.push(checkoutsCheck(config, root));
   // Механизм на месте ещё не значит, что gate установки в нём пройдёт:
