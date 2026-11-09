@@ -75,6 +75,7 @@ function approveDesignTrack(
 }
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 import { AgentService } from '../src/application/agent.ts';
+import { developmentStatus } from '../src/web/development-status.ts';
 import { Workspace } from '../src/core/workspace.ts';
 import { specDigest } from '../src/core/service.ts';
 import { quickResult, quickSteps } from '../src/runner/quick.ts';
@@ -1453,6 +1454,37 @@ test('Корректировка при заново открытой поста
     const replacement = f.store.read().tasks.find((t) => t.supersedes === one.id)!;
     assert.equal(replacement.status, 'draft');
     assert.equal(replacement.preparation, undefined);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Панель: пока активное изменение ждёт согласований, раздел разработки называет утверждённые изменения', () => {
+  const f = fixture(),
+    p = new Preparation(f.store);
+  try {
+    const first = approvePreparation(p);
+    p.execute('preparation_create', { title: 'Второе изменение' });
+    const view = p.status();
+    assert.ok(view.enabled);
+    assert.equal(view.developmentReady, false);
+    const key = f.store.read().preparation!.changes[0].key;
+    assert.deepEqual(view.readyChanges, [{ id: first, key, title: 'Модерация чата' }]);
+    const shown = developmentStatus({ ...view, engineConnected: true });
+    assert.equal(shown.title, 'Разработка этого изменения ещё не разрешена');
+    assert.match(shown.text, new RegExp(`Работа утверждённых изменений продолжается: ${key}`));
+    // Показанное утверждённое изменение — разрешено; без готовых — прежний текст.
+    const own = p.status(first);
+    assert.ok(own.enabled);
+    assert.equal(developmentStatus({ ...own, engineConnected: true }).step, 'Разрешена');
+    assert.deepEqual(
+      developmentStatus({ developmentReady: false, blocker: 'Нужна постановка', readyChanges: [] }),
+      {
+        title: 'Разработка ещё не разрешена',
+        text: 'Нужна постановка',
+        step: 'Ожидает согласований',
+      },
+    );
   } finally {
     f.cleanup();
   }

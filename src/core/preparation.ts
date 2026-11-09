@@ -735,6 +735,20 @@ export class Preparation {
                 ? 'concept'
                 : 'design',
       developmentReady: ready,
+      // Изменения независимы: разработка уже утверждённых идёт, пока другое
+      // (даже активное) ждёт согласований. Панель называет их, а не одну
+      // готовность показанного изменения.
+      readyChanges: p.changes
+        .filter((item) => {
+          try {
+            developmentBinding(s, item.id);
+            return true;
+          } catch (error) {
+            if (error instanceof DomainError) return false;
+            throw error;
+          }
+        })
+        .map((item) => ({ id: item.id, key: item.key, title: item.title })),
       blocker,
       // Отменённая работа не входит в объём: план, выпущенный заново, оставляет
       // за собой прежние задачи, и считать их значит показывать «0 из 70» там,
