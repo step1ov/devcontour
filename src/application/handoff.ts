@@ -653,6 +653,17 @@ function liveBlocker(ctx: HostContext): HandoffHostNext | undefined {
     )
       return step;
   }
+  return jobBlocker(ctx);
+}
+
+/**
+ * Упавшее задание доски (повтор или решение по нему) в области пакета. Оно
+ * и без открытых поручений: все задачи доски приняты, а задание упало на
+ * стадии приёмки (например, по таймауту gate) — доска ждёт повтора.
+ */
+function jobBlocker(ctx: HostContext): HandoffHostNext | undefined {
+  const { pack, state } = ctx;
+  const inScope = (boardId: string) => !pack.graphId || boardId === pack.graphId;
   const boards = [...new Set(ctx.jobs.map((j) => j.id))].filter(
     (id) => inScope(id) && state.boards.some((b) => b.id === id),
   );
@@ -667,7 +678,11 @@ function liveBlocker(ctx: HostContext): HandoffHostNext | undefined {
 
 function hostStep(ctx: HostContext): HandoffHostNext | undefined {
   const { pack, view, state, h } = ctx;
-  if (!pack.summary.open) return undefined;
+  // Открытых поручений нет, но доска ещё не принята: шаг — только
+  // восстановление её упавшего задания (без него ведущий не узнал бы, что
+  // приёмку держит упавшее задание).
+  if (!pack.summary.open)
+    return h.config.approvalMode === 'operator' ? undefined : jobBlocker(ctx);
   const input = inputNext(ctx);
   if (input) return input;
   if (h.config.approvalMode === 'operator')

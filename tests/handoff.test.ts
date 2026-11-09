@@ -519,6 +519,30 @@ test('session_handoff: host.next по состоянию — сервер, за�
   }
 });
 
+test('session_handoff: задание доски упало после приёмки всех задач — host.next называет workflow_retry', () => {
+  const f = fixture();
+  try {
+    const { board, task, at, start } = oneBoard(f.h);
+    const flow = new LeadWorkflow(f.h);
+    const job = start(3);
+    complete(f.h, task);
+    flow.fail(flow.claim(job.key, job.owner)!, 'gate coverage timed out after 900000 ms');
+    // Открытых поручений нет: прежде шага не было вовсе (host.next: null).
+    const failed = at();
+    assert.equal(failed.pack.summary.open, 0);
+    assert.equal(failed.host.next?.action, 'workflow_retry', JSON.stringify(failed.host.next));
+    assert.equal(failed.host.next?.code, 'job-retry');
+    assert.equal(failed.host.next?.boardId, board);
+    assert.equal(failed.host.next?.job?.key, job.key);
+    assert.match(failed.host.next.detail, /gate coverage timed out/);
+    assert.equal(devcontourHandoff(f.h, {}).host.next?.action, 'workflow_retry', 'и без --board');
+    assert.equal(flow.retry(job.key, job.owner).status, 'queued');
+    assert.notEqual(at().host.next?.action, 'workflow_retry');
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('session_handoff: host.next по заданию — упавшее (повтор или решение) и устаревшее', () => {
   {
     const f = fixture();
