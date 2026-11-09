@@ -128,7 +128,7 @@ export interface QuickView {
     /** Профили инструментов, которые setup создаёт для ролей файла компонента. */
     toolProfiles?: Record<string, { runtime: string }>;
     /** Срок фазы попытки (`runTimeoutMs`), который setup запишет, и почему. */
-    runTimeout?: { ms: number; source: string; gatesMs: number; reason: string };
+    runTimeout?: { ms: number; source: string; gatesMs: number; phaseMs?: number; reason: string };
   };
   steps: QuickStep[];
   lead: { lastActivityAt: string | null; present: boolean };

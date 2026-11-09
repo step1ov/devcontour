@@ -20,7 +20,7 @@ import { ATTENTION_NAMESPACE } from '../application/attention.ts';
 import { ignoredComponentCopies } from './config.ts';
 import { CheckoutRootError, checkoutRootFor } from './checkout-root.ts';
 import { installProbe } from './install-probe.ts';
-import { packageRegistryDomains } from './setup.ts';
+import { gateTimeoutSum, packageRegistryDomains } from './setup.ts';
 import { validateWorkflow } from '../core/workflow.ts';
 import { command, git } from './process.ts';
 import { outdatedContextPacks } from './context-library.ts';
@@ -107,6 +107,30 @@ export async function installNetworkCheck(config: Config): Promise<Check | undef
     id: 'isolation:network',
     status: 'degraded',
     detail: `Проверки установки зависимостей (${[...new Set(installs)].join(', ')}) идут в песочнице, а домена реестра пакетов нет в isolation.domains: ${[...missing].join(', ')}. Реестр будет закрыт прокси песочницы. Добавьте домен в isolation.domains и перезапустите сервер.`,
+  };
+}
+/**
+ * Проверки компонента идут по очереди в одной фазе попытки, ограниченной
+ * `runTimeoutMs`; совместные проверки workspace — тоже. Если сумма их
+ * действующих сроков (каждый не короче `gateTimeoutFloorMs`) больше срока
+ * фазы, долгая проверка обрывается сроком фазы, а не своим, и попытка
+ * сгорает как истечение срока.
+ */
+export function gateTimeoutCheck(config: Config): Check | undefined {
+  const floor = config.gateTimeoutFloorMs ?? 0;
+  const over = [
+    ...repositories(config).map((repo) => ({
+      name: `компонента ${repo.id}`,
+      ms: gateTimeoutSum(repo.gates, floor),
+    })),
+    { name: 'workspace (совместные)', ms: gateTimeoutSum(config.workspaceGates, floor) },
+  ].filter((r) => r.ms > config.runTimeoutMs);
+  if (!over.length) return undefined;
+  const min = (ms: number) => Math.round(ms / 6000) / 10 + ' мин';
+  return {
+    id: 'gates:timeout',
+    status: 'degraded',
+    detail: `Проверки ${over.map((r) => `${r.name} по очереди займут до ${min(r.ms)}`).join('; ')} (сроки timeoutMs, каждый не короче gateTimeoutFloorMs), а фаза попытки ограничена runTimeoutMs ${min(config.runTimeoutMs)}: долгая проверка оборвётся сроком фазы. Поднимите runTimeoutMs в config.json и перезапустите serve или сократите проверки.`,
   };
 }
 export const doctorReady = (checks: Pick<Check, 'status'>[]) =>
@@ -690,6 +714,8 @@ export async function doctor(
   });
   const network = await installNetworkCheck(config);
   if (network) checks.push(network);
+  const gateTimeouts = gateTimeoutCheck(config);
+  if (gateTimeouts) checks.push(gateTimeouts);
   checks.push(checkoutsCheck(config, root));
   // Механизм на месте ещё не значит, что gate установки в нём пройдёт:
   // песочница всегда закрывает часть путей и внутри worktree. Проба ставит

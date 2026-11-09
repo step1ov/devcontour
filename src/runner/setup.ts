@@ -125,12 +125,17 @@ const DEFAULT_GATE_TIMEOUT_MS = 120_000;
 export interface RunTimeoutChoice {
   ms: number;
   /**
-   * Откуда значение: сохранённая конфигурация workspace, профиль, сроки
-   * проверок или умолчание.
+   * Откуда значение: сохранённая конфигурация workspace, профиль, оценка
+   * фазы по проверкам или умолчание.
    */
   source: 'existing' | 'profile' | 'gates' | 'default';
-  /** Сумма действующих сроков проверок фазы — то, что должно уместиться. */
+  /** Сумма действующих сроков проверок (каждая не короче нижнего предела). */
   gatesMs: number;
+  /**
+   * Оценка фазы интеграции: шаги подготовки, все проверки по очереди и один
+   * повтор самой долгой проверки. Проверки потребителей не учтены.
+   */
+  phaseMs: number;
   reason: string;
 }
 
@@ -138,44 +143,67 @@ const minutes = (ms: number) => {
   const m = ms / 60_000;
   return `${Number.isInteger(m) ? m : m.toFixed(1)} мин`;
 };
+const timeoutOf = (step: { timeoutMs?: unknown }, fallback: number) =>
+  typeof step.timeoutMs === 'number' && step.timeoutMs > 0 ? step.timeoutMs : fallback;
+
+/** Сумма действующих сроков gates: каждый не короче `gateTimeoutFloorMs`. */
+export function gateTimeoutSum(gates: readonly { timeoutMs?: unknown }[], floorMs = 0) {
+  return gates.reduce(
+    (sum, g) => sum + Math.max(timeoutOf(g, DEFAULT_GATE_TIMEOUT_MS), floorMs),
+    0,
+  );
+}
 
 /**
- * Срок фазы попытки (`runTimeoutMs`) для конфигурации setup. Gates кандидата
- * исполняются по очереди в одной фазе, и вся очередь должна уложиться в
- * этот срок: длинные реальные проверки (установка зависимостей, typecheck и
- * тесты монорепозитория) не укладывались в прежние постоянные 15 минут.
+ * Срок фазы попытки (`runTimeoutMs`) для конфигурации setup. Каждая фаза
+ * попытки ограничена этим сроком, и самая долгая из них — интеграция: шаги
+ * подготовки (prepare, запуск окружения), все gates по очереди, один повтор
+ * проверки, упавшей на интеграции и прошедшей на кандидате, и проверки
+ * потребителей. Длинные реальные проверки (установка зависимостей,
+ * typecheck и тесты монорепозитория) не укладывались в прежние постоянные
+ * 15 минут.
  *
  * Уже заданное значение сохраняется: сохранённая конфигурация workspace
  * (setup её не перезаписывает) или `runTimeoutMs` профиля. Иначе срок —
- * сумма сроков проверок (каждая не короче `gateTimeoutFloorMs`) с запасом
- * 25%, но не меньше 2 минут, округлённая до минуты; не меньше умолчания
- * 15 минут и не больше 2 часов.
+ * оценка фазы интеграции (сроки шагов подготовки, сумма сроков gates и
+ * повтор самого долгого gate; проверки потребителей setup не знает) с
+ * запасом 25%, не меньше 2 минут, до минуты; не меньше 15 минут и не больше
+ * 2 часов. Тот же срок ограничивает вызовы моделей и срок ревью: большой
+ * срок позже прерывает зависший вызов — причина это называет.
  */
 export function chooseRunTimeout(input: {
   gates: readonly { timeoutMs?: unknown }[];
+  /** Шаги подготовки фазы (prepare, setup/ready окружения) с известными сроками. */
+  steps?: readonly { timeoutMs?: unknown }[];
   floorMs?: number;
   profileMs?: number;
   existingMs?: number;
 }): RunTimeoutChoice {
   const floor = input.floorMs ?? 0;
-  const gatesMs = input.gates.reduce(
-    (sum, g) =>
-      sum +
-      Math.max(
-        typeof g.timeoutMs === 'number' && g.timeoutMs > 0 ? g.timeoutMs : DEFAULT_GATE_TIMEOUT_MS,
-        floor,
-      ),
+  const gatesMs = gateTimeoutSum(input.gates, floor);
+  const recheckMs = Math.max(
+    0,
+    ...input.gates.map((g) => Math.max(timeoutOf(g, DEFAULT_GATE_TIMEOUT_MS), floor)),
+  );
+  const stepsMs = (input.steps ?? []).reduce(
+    (sum, s) => sum + timeoutOf(s, DEFAULT_GATE_TIMEOUT_MS),
     0,
   );
+  const phaseMs = stepsMs + gatesMs + recheckMs;
+  const estimate =
+    `оценка фазы интеграции ${minutes(phaseMs)}: ` +
+    (stepsMs ? `подготовка ${minutes(stepsMs)}, ` : '') +
+    `проверки по очереди ${minutes(gatesMs)} и повтор самой долгой ${minutes(recheckMs)}; проверки потребителей не учтены`;
   const shortfall = (ms: number) =>
-    gatesMs > ms
-      ? `; проверки по очереди займут до ${minutes(gatesMs)} — больше этого срока, поднимите runTimeoutMs`
-      : '';
+    phaseMs > ms ? `; ${estimate} — больше этого срока, поднимите runTimeoutMs` : '';
+  const models = (ms: number) =>
+    `. Тот же срок ограничивает вызовы моделей и ревью: зависший вызов прервётся через ${minutes(ms)}`;
   if (input.existingMs !== undefined)
     return {
       ms: input.existingMs,
       source: 'existing',
       gatesMs,
+      phaseMs,
       reason: `сохранён из существующей конфигурации workspace${shortfall(input.existingMs)}`,
     };
   if (input.profileMs !== undefined)
@@ -183,26 +211,29 @@ export function chooseRunTimeout(input: {
       ms: input.profileMs,
       source: 'profile',
       gatesMs,
+      phaseMs,
       reason: `задан профилем${shortfall(input.profileMs)}`,
     };
-  const margin = Math.max(120_000, Math.ceil(gatesMs * 0.25));
-  const derived = Math.ceil((gatesMs + margin) / 60_000) * 60_000;
+  const margin = Math.max(120_000, Math.ceil(phaseMs * 0.25));
+  const derived = Math.ceil((phaseMs + margin) / 60_000) * 60_000;
   if (derived <= DEFAULT_RUN_TIMEOUT_MS)
     return {
       ms: DEFAULT_RUN_TIMEOUT_MS,
       source: 'default',
       gatesMs,
-      reason: `умолчание: проверки по очереди займут до ${minutes(gatesMs)}, с запасом укладываются`,
+      phaseMs,
+      reason: `умолчание: ${estimate}, с запасом укладывается`,
     };
   const ms = Math.min(derived, MAX_DERIVED_RUN_TIMEOUT_MS);
   return {
     ms,
     source: 'gates',
     gatesMs,
+    phaseMs,
     reason:
-      derived > MAX_DERIVED_RUN_TIMEOUT_MS
-        ? `по срокам проверок: ${minutes(gatesMs)} по очереди с запасом больше предела — ограничен ${minutes(ms)}; сократите проверки или задайте runTimeoutMs вручную`
-        : `по срокам проверок: ${minutes(gatesMs)} по очереди и запас ${minutes(ms - gatesMs)}`,
+      (derived > MAX_DERIVED_RUN_TIMEOUT_MS
+        ? `${estimate}; с запасом больше предела — ограничен ${minutes(ms)}, сократите проверки или задайте runTimeoutMs вручную`
+        : `${estimate}; запас ${minutes(ms - phaseMs)}`) + models(ms),
   };
 }
 
@@ -525,13 +556,26 @@ async function runSetup(options: {
   const toolProfiles = componentFile ? referencedToolProfiles(componentFile) : {};
   const registryDomains = await packageRegistryDomains(repository, selected);
   // Срок фазы попытки — по проверкам, которые будут действовать после setup.
+  // Действующие после setup gates и шаги подготовки — один источник для
+  // плана и срока фазы: сохранённый файл компонента, если он действует
+  // (без массива gates — без проверок), иначе предложение или профиль.
+  const objects = (value: unknown) =>
+    (Array.isArray(value) ? value : []).filter(
+      (item): item is { timeoutMs?: unknown } => !!item && typeof item === 'object',
+    );
+  const effectiveGateSource: readonly { timeoutMs?: unknown }[] = component?.precedence
+    ? objects(componentFile?.gates)
+    : selected.gates;
+  const lifecycleOf = (value: unknown) => {
+    const l = value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+    return [...objects(l.setup), ...objects(l.ready)];
+  };
+  const effectiveSteps = component?.precedence
+    ? [...objects(componentFile?.prepare), ...lifecycleOf(componentFile?.lifecycle)]
+    : [...objects(selected.prepare), ...lifecycleOf(selected.lifecycle)];
   const runTimeout = chooseRunTimeout({
-    gates:
-      component?.precedence && Array.isArray(componentFile?.gates)
-        ? (componentFile.gates as { timeoutMs?: unknown }[]).filter(
-            (g) => g && typeof g === 'object',
-          )
-        : selected.gates,
+    gates: effectiveGateSource,
+    steps: effectiveSteps,
     floorMs: DEFAULT_GATE_TIMEOUT_FLOOR_MS,
     ...(selected.runTimeoutMs ? { profileMs: selected.runTimeoutMs } : {}),
     ...(await existingRunTimeout(join(data, 'config.json'))),
@@ -716,7 +760,7 @@ async function runSetup(options: {
     runTimeout,
   };
   // Проверки, которые будут действовать после setup.
-  const effectiveGates = component?.precedence ? component.gates : gateSummary(selected.gates);
+  const effectiveGates = gateSummary(effectiveGateSource);
   if (options.plan) {
     let refusal: string | undefined;
     try {

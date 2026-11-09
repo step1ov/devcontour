@@ -23,9 +23,9 @@ import {
   setupProject,
 } from '../src/runner/setup.ts';
 import { loadConfig } from '../src/runner/config.ts';
-import { installNetworkCheck, isInstallStep } from '../src/runner/doctor.ts';
+import { gateTimeoutCheck, installNetworkCheck, isInstallStep } from '../src/runner/doctor.ts';
 import { validateWorkflow } from '../src/core/workflow.ts';
-import { withTestHome } from './helpers.ts';
+import { config, withTestHome } from './helpers.ts';
 
 const env = {
   ...process.env,
@@ -373,7 +373,7 @@ test('конфигурация со ссылкой роли на несущес�
     }
   }));
 
-test('срок фазы попытки: умолчание, вывод из сроков проверок, предел, заданное значение', () => {
+test('срок фазы попытки: умолчание, оценка фазы интеграции, предел, заданное значение', () => {
   // Короткие проверки укладываются в умолчание; каждая — не короче нижнего предела.
   const small = chooseRunTimeout({
     gates: [{ timeoutMs: 1 }, { timeoutMs: 60000 }, {}],
@@ -383,24 +383,51 @@ test('срок фазы попытки: умолчание, вывод из ср
   assert.equal(small.ms, DEFAULT_RUN_TIMEOUT_MS);
   // 60 с (поднят предел) + 60 с + 120 с (умолчание схемы).
   assert.equal(small.gatesMs, 240000);
-  assert.match(small.reason, /умолчание/);
-  // Долгие проверки: сумма по очереди с запасом 25%, до минуты, не меньше умолчания.
+  // Фаза интеграции: проверки и повтор самой долгой (120 с).
+  assert.equal(small.phaseMs, 360000);
+  assert.match(small.reason, /умолчание: оценка фазы интеграции/);
+  // Долгие проверки: оценка фазы с запасом 25%, до минуты, не меньше умолчания.
   const long = chooseRunTimeout({
     gates: [{ timeoutMs: 600000 }, { timeoutMs: 600000 }, { timeoutMs: 300000 }],
     floorMs: DEFAULT_GATE_TIMEOUT_FLOOR_MS,
   });
   assert.equal(long.source, 'gates');
   assert.equal(long.gatesMs, 1500000);
-  assert.equal(long.ms, 1920000);
-  assert.match(long.reason, /по срокам проверок: 25 мин по очереди и запас 7 мин/);
-  // Сумма с запасом чуть выше умолчания: 14 мин + 3,5 мин → 18 мин.
-  const edge = chooseRunTimeout({ gates: [{ timeoutMs: 840000 }] });
-  assert.equal(edge.ms, 1_080_000);
+  assert.equal(long.phaseMs, 2100000);
+  // 35 мин + 8,75 мин → 44 мин.
+  assert.equal(long.ms, 2_640_000);
+  assert.match(
+    long.reason,
+    /оценка фазы интеграции 35 мин: проверки по очереди 25 мин и повтор самой долгой 10 мин; проверки потребителей не учтены; запас 9 мин/,
+  );
+  // Большой срок позже прерывает зависший вызов модели: причина это называет.
+  assert.match(
+    long.reason,
+    /ограничивает вызовы моделей и ревью: зависший вызов прервётся через 44 мин/,
+  );
+  // Одна доминирующая проверка: её повтор на интеграции тоже должен уместиться.
+  const dominant = chooseRunTimeout({
+    gates: [{ timeoutMs: 1_800_000 }, { timeoutMs: 60000 }, { timeoutMs: 60000 }],
+    floorMs: DEFAULT_GATE_TIMEOUT_FLOOR_MS,
+  });
+  assert.equal(dominant.gatesMs, 1_920_000);
+  assert.equal(dominant.phaseMs, 3_720_000);
+  // 62 мин + 15,5 мин → 78 мин; без повтора было бы 40 мин, и повтор
+  // 30-минутной проверки оборвался бы сроком фазы.
+  assert.equal(dominant.ms, 4_680_000);
+  assert.ok(dominant.ms > dominant.gatesMs + 1_800_000);
+  // Известные сроки шагов подготовки входят в оценку.
+  const prepared = chooseRunTimeout({
+    gates: [{ timeoutMs: 600000 }],
+    steps: [{ timeoutMs: 300000 }, {}],
+  });
+  assert.equal(prepared.phaseMs, 420000 + 1_200_000);
+  assert.match(prepared.reason, /подготовка 7 мин/);
   // Предел вывода — два часа.
   const capped = chooseRunTimeout({ gates: [{ timeoutMs: 6_000_000 }, { timeoutMs: 3_000_000 }] });
   assert.equal(capped.ms, MAX_DERIVED_RUN_TIMEOUT_MS);
   assert.match(capped.reason, /ограничен 120 мин/);
-  // Заданное значение сохраняется, даже если проверки дольше: план это называет.
+  // Заданное значение сохраняется, даже если фаза дольше: план это называет.
   const existing = chooseRunTimeout({
     gates: [{ timeoutMs: 1_800_000 }],
     profileMs: 1_200_000,
@@ -410,13 +437,35 @@ test('срок фазы попытки: умолчание, вывод из ср
     { ms: existing.ms, source: existing.source },
     { ms: 1_000_000, source: 'existing' },
   );
-  assert.match(existing.reason, /сохранён.*займут до 30 мин.*поднимите runTimeoutMs/);
+  assert.match(existing.reason, /сохранён.*оценка фазы интеграции 60 мин.*поднимите runTimeoutMs/);
   const profile = chooseRunTimeout({ gates: [{ timeoutMs: 60000 }], profileMs: 1_200_000 });
   assert.deepEqual(
     { ms: profile.ms, source: profile.source },
     { ms: 1_200_000, source: 'profile' },
   );
   assert.equal(profile.reason, 'задан профилем');
+});
+
+test('doctor предупреждает, когда проверки по очереди не укладываются в runTimeoutMs', () => {
+  const base = config({
+    gates: [
+      { id: 'lint', kind: 'check', command: ['node', '--version'], timeoutMs: 30000 },
+      {
+        id: 'test',
+        kind: 'test',
+        command: ['node', '--test'],
+        timeoutMs: 30000,
+        report: { type: 'junit', path: '.reports/junit.xml' },
+      },
+    ],
+  });
+  assert.equal(gateTimeoutCheck({ ...base, runTimeoutMs: 100000 }), undefined);
+  // Нижний предел поднимает каждую проверку до 60 с: 120 с больше 100 с.
+  const warning = gateTimeoutCheck({ ...base, runTimeoutMs: 100000, gateTimeoutFloorMs: 60000 });
+  assert.equal(warning?.status, 'degraded');
+  assert.equal(warning?.id, 'gates:timeout');
+  assert.match(warning?.detail ?? '', /компонента main по очереди займут до 2 мин/);
+  assert.match(warning?.detail ?? '', /runTimeoutMs 1\.7 мин/);
 });
 
 test('быстрый setup пишет срок фазы по проверкам и сохраняет уже заданный срок', () =>
@@ -450,14 +499,16 @@ test('быстрый setup пишет срок фазы по проверкам 
       };
       const plan = await planSetup(input);
       assert.equal(plan.refusal, undefined);
-      // 35 мин проверок + 25% запаса = 43,75 → 44 мин.
+      // Проверки 35 мин и повтор самой долгой 15 мин: 50 мин + 12,5 → 63 мин.
+      assert.equal(plan.runTimeout.gatesMs, 2_100_000);
+      assert.equal(plan.runTimeout.phaseMs, 3_000_000);
       assert.deepEqual(
         { ms: plan.runTimeout.ms, source: plan.runTimeout.source },
-        { ms: 2_640_000, source: 'gates' },
+        { ms: 3_780_000, source: 'gates' },
       );
       await setupProject(input);
       const configPath = join(root, '.devcontour-local/config.json');
-      assert.equal(loadConfig(configPath).runTimeoutMs, 2_640_000);
+      assert.equal(loadConfig(configPath).runTimeoutMs, 3_780_000);
       // Оператор задал свой срок: повторный setup его сохраняет и называет.
       const raw = JSON.parse(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
       raw.runTimeoutMs = 3_000_000;
@@ -471,5 +522,69 @@ test('быстрый setup пишет срок фазы по проверкам 
       assert.equal(loadConfig(configPath).runTimeoutMs, 3_000_000);
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  }));
+
+test('срок фазы — по проверкам сохранённого файла компонента; без gates в файле — без проверок', () =>
+  withTestHome(async () => {
+    const root = temp();
+    try {
+      const longComponent = {
+        ...committedComponent,
+        gates: [
+          { id: 'package-policy', kind: 'check', command: ['node', '--version'], timeoutMs: 60000 },
+          {
+            id: 'root-test',
+            kind: 'test',
+            command: ['node', '--test'],
+            timeoutMs: 1_800_000,
+            report: { type: 'junit', path: '.reports/junit.xml' },
+          },
+        ],
+      };
+      repository(root, {
+        'devcontour.component.json': JSON.stringify(longComponent, null, 2) + '\n',
+      });
+      chooseWorkspaceMode(root, 'embedded');
+      // Предложение короткое, но действует файл компонента: его 31 мин и повтор 30 мин.
+      const plan = await planSetup({
+        repository: root,
+        workspace: root,
+        profile: 'pnpm-project',
+        quick: true,
+        gates: proposal,
+      });
+      assert.equal(plan.refusal, undefined);
+      assert.deepEqual(
+        (plan.gates ?? []).map((g) => g.id),
+        ['package-policy', 'root-test'],
+      );
+      assert.equal(plan.runTimeout.gatesMs, 1_860_000);
+      assert.equal(plan.runTimeout.phaseMs, 3_660_000);
+      assert.equal(plan.runTimeout.source, 'gates');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+    const bare = temp();
+    try {
+      const withoutGates: Record<string, unknown> = { ...committedComponent };
+      delete withoutGates.gates;
+      repository(bare, {
+        'devcontour.component.json': JSON.stringify(withoutGates, null, 2) + '\n',
+      });
+      chooseWorkspaceMode(bare, 'embedded');
+      const plan = await planSetup({
+        repository: bare,
+        workspace: bare,
+        profile: 'pnpm-project',
+        quick: true,
+        gates: proposal,
+      });
+      // План и срок — из одного источника: файл без gates, проверок нет.
+      assert.deepEqual(plan.gates, []);
+      assert.equal(plan.runTimeout.gatesMs, 0);
+      assert.equal(plan.runTimeout.source, 'default');
+    } finally {
+      rmSync(bare, { recursive: true, force: true });
     }
   }));
