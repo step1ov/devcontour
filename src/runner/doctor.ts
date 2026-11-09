@@ -956,12 +956,18 @@ export async function doctor(
     detail:
       'Модели не вызываются. Авторизация и реальная работа инструментов подтверждаются отдельным пилотом.',
   });
-  if (!probe || !repositories(config).every((r) => r.preflight?.length))
+  // Компоненты без preflight: с --probe подсказка называет их, а не тот же
+  // запуск doctor --probe, который уже выполнен.
+  const unprobed = repositories(config)
+    .filter((r) => !r.preflight?.length)
+    .map((r) => r.id);
+  if (!probe || unprobed.length)
     checks.push({
       id: 'project-probes',
       status: 'not-checked',
-      detail:
-        'Настройте preflight команд установки/доступов/MCP и выполните doctor --probe. Отсутствующие проверки не считаются PASS.',
+      detail: probe
+        ? `doctor --probe выполнен, но у компонентов без preflight проверять нечего: ${unprobed.join(', ')}. Настройте для них preflight команд установки/доступов/MCP и повторите doctor --probe. Отсутствующие проверки не считаются PASS.`
+        : 'Настройте preflight команд установки/доступов/MCP и выполните doctor --probe. Отсутствующие проверки не считаются PASS.',
     });
   const result = {
     scope: probe ? 'configured-probes' : 'static',
