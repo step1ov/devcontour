@@ -122,7 +122,7 @@ export async function checkBase(
   if (touched.length)
     return hold(
       'base.check.held',
-      `${BASE_HELD_DETAIL} (${touched.slice(0, 20).join(', ')}): gates этой базы его не подтверждают. Проверьте перенос и выполните queue --start; изменение приёмки — через contract-change`,
+      `${BASE_HELD_DETAIL} (${touched.slice(0, 20).join(', ')}): gates этой базы его не подтверждают. Перенос проверяет и подтверждает оператор: «Подтвердить и запустить» в «Внимании» панели; ведущий агент это ожидание сам не снимает. Изменение приёмки — через contract-change`,
       { paths: touched.slice(0, 20) },
     );
   const { engine } = executionOf(h);
