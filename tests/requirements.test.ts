@@ -15,7 +15,9 @@ import {
   parseRequirements,
   requirementSnapshot,
   requirementReport,
+  requirementReportPage,
   correctRequirements,
+  type RequirementReportRow,
 } from '../src/runner/requirements.ts';
 import { config, input, removeTestCheckoutRoot, testCheckoutRoot } from './helpers.ts';
 import { AgentService } from '../src/application/agent.ts';
@@ -220,8 +222,11 @@ test('requirements_report агента: сводка и страницы в пр
         tasks: { taskId: string; requirements: unknown[] }[];
         nextCursor?: string;
         full: string;
+        complete: boolean;
       };
       assert.ok(Buffer.byteLength(JSON.stringify(page)) <= 65536);
+      // Отчёт больше предела: ни одна страница не весь отчёт.
+      assert.equal(page.complete, false);
       assert.deepEqual(page.summary, {
         tasks: 120,
         requirements: 720,
@@ -274,4 +279,86 @@ test('requirements_report агента не держит цикл событий
   } finally {
     f.cleanup();
   }
+});
+
+test('requirements_report агента: уложившийся отчёт без cursor и limit — весь список, как прежде, с complete', async () => {
+  const f = await largeReport(12);
+  try {
+    const agent = new AgentService(f.h, f.root);
+    const whole = (await agent.run({
+      operation: 'requirements_report',
+      input: { repositoryId: 'main' },
+    })) as { complete: boolean; tasks: { taskId: string }[]; nextCursor?: string };
+    assert.equal(whole.complete, true);
+    assert.deepEqual(
+      whole.tasks.map((t) => t.taskId),
+      f.created,
+    );
+    assert.equal(whole.nextCursor, undefined);
+    const page = (await agent.run({
+      operation: 'requirements_report',
+      input: { repositoryId: 'main', limit: 5 },
+    })) as { complete: boolean; nextCursor?: string };
+    assert.equal(page.complete, false);
+    assert.equal(page.nextCursor, f.created[4]);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('requirements_report агента: требования задачи, не вместившиеся в страницу одни, сокращаются с omittedRequirements', () => {
+  // Сценарий до 1500 знаков: 30 требований с кириллическим сценарием
+  // больше страницы строк задач.
+  const requirement = (i: number) => ({
+    id: `REQ-long-${i}`,
+    source: 'docs/spec.md',
+    digest: 'a'.repeat(64),
+    gate: 'test',
+    scenario: 'Сценарий '.repeat(160),
+    currentDigest: 'a'.repeat(64),
+    fresh: true,
+    verified: false,
+    proof: 'none',
+    proofReason: 'Задача ещё не принята',
+  });
+  const row = (id: string, n: number) =>
+    ({
+      taskId: id,
+      contracts: {},
+      specDigest: undefined,
+      resultSha: undefined,
+      requirements: Array.from({ length: n }, (_, i) => requirement(i)),
+    }) as unknown as RequirementReportRow;
+  const report = {
+    repositoryId: 'main',
+    source: 'committed HEAD',
+    tasks: [row('T-big', 30), row('T-next', 1)],
+  };
+  const first = requirementReportPage(report, {});
+  assert.equal(first.tasks.length, 1);
+  const big = first.tasks[0];
+  assert.equal(big.taskId, 'T-big');
+  assert.ok(big.requirements.length > 0 && big.requirements.length < 30);
+  assert.equal(big.omittedRequirements, 30 - big.requirements.length);
+  assert.equal(first.complete, false);
+  assert.equal(first.nextCursor, 'T-big');
+  assert.equal(first.summary.requirements, 31);
+  assert.ok(Buffer.byteLength(JSON.stringify(first)) <= 65536);
+  const second = requirementReportPage(report, { cursor: first.nextCursor });
+  assert.deepEqual(
+    second.tasks.map((t) => t.taskId),
+    ['T-next'],
+  );
+  assert.equal(second.nextCursor, undefined);
+  assert.equal(second.complete, false, 'не первая страница — не весь отчёт');
+  // Без cursor и limit уложившийся отчёт приходит целиком, и больше 50 задач.
+  const many = {
+    ...report,
+    tasks: Array.from({ length: 60 }, (_, i) => row(`T-${i}`, 0)),
+  };
+  const all = requirementReportPage(many, {});
+  assert.equal(all.tasks.length, 60);
+  assert.equal(all.complete, true);
+  assert.equal(all.nextCursor, undefined);
+  assert.equal(requirementReportPage(many, { limit: 50 }).complete, false);
 });

@@ -245,7 +245,8 @@ const jsonBytes = (v: unknown) => Buffer.byteLength(JSON.stringify(v));
 
 /**
  * Отчёт требований для операции агента: сводка по всем задачам и страница
- * строк задач в пределе ответа. `cursor` — id последней задачи прошлой
+ * строк задач в пределе ответа (без cursor и limit — весь отчёт, если он
+ * укладывается; `complete` называет, весь ли он). `cursor` — id последней задачи прошлой
  * страницы; `nextCursor` — продолжение. Требования задачи, не вместившиеся в
  * страницу одни, сокращаются (`omittedRequirements`); полный отчёт — CLI
  * `requirements-report` (`full`).
@@ -274,7 +275,13 @@ export function requirementReportPage(
       );
     start = at + 1;
   }
-  const limit = input.limit ?? REQUIREMENT_PAGE_DEFAULT;
+  // Без cursor и limit отчёт, который весь укладывается в предел, приходит
+  // целиком, как прежде; иначе — страница.
+  const whole =
+    input.cursor === undefined && input.limit === undefined
+      ? jsonBytes(all) <= REQUIREMENT_PAGE_BYTES
+      : false;
+  const limit = whole ? all.length : (input.limit ?? REQUIREMENT_PAGE_DEFAULT);
   const page: (RequirementReportRow & { omittedRequirements?: number })[] = [];
   let used = 0;
   for (const row of all.slice(start, start + limit)) {
@@ -305,6 +312,9 @@ export function requirementReportPage(
   return {
     repositoryId: report.repositoryId,
     source: report.source,
+    // Признак для клиента: `tasks` — весь отчёт (все задачи, ни одно
+    // требование не сокращено) или только его часть.
+    complete: start === 0 && end === all.length && !page.some((t) => t.omittedRequirements),
     summary: { tasks: all.length, requirements, stale, proof },
     tasks: page,
     ...(end < all.length ? { nextCursor: page.at(-1)!.taskId } : {}),

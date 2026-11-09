@@ -247,7 +247,7 @@ export const descriptions: Record<AgentOperation, string> = {
   requirements_snapshot:
     'Read REQ sections from committed repository HEAD. Bind returned digest/text to a task and a configured test gate.',
   requirements_report:
-    'Compare current requirement sections with task evidence. Historical done is unchanged; stale requirements are not current coverage. Returns a summary over all tasks of the component (tasks, requirements, stale, counts by proof level) and one page of task rows within the response limit (limit, default 50, max 200); pass nextCursor as cursor for the next page. A task whose requirements alone exceed the page lists omittedRequirements. full names the CLI command that prints the whole report. Read-only, no model calls.',
+    'Compare current requirement sections with task evidence. Historical done is unchanged; stale requirements are not current coverage. Returns a summary over all tasks of the component (tasks, requirements, stale, counts by proof level) and task rows within the response limit: without cursor and limit the whole list when it fits, otherwise one page (limit, default 50, max 200); pass nextCursor as cursor for the next page. complete is true only when tasks holds the whole report. A task whose requirements alone exceed the page lists omittedRequirements. full names the CLI command that prints the whole report. Read-only, no model calls.',
   requirements_correct:
     'Create draft replacements for changed requirements on an accepted board. Preserve history and require new plan review.',
   project_context:
