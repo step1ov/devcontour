@@ -197,6 +197,14 @@ test('Quick change: one change per request key, five steps, facts, setup plan, r
     );
     await expect(route.getByText('npm ci')).toBeVisible();
     await expect(route.getByText(/файлы не записаны/)).toBeVisible();
+    // Срок фазы попытки — по срокам проверок: 10 + 4 мин по очереди и запас.
+    await expect(route.locator('[data-run-timeout]')).toHaveAttribute(
+      'data-run-timeout',
+      '1080000',
+    );
+    await expect(
+      route.getByText(/по срокам проверок: 14 мин по очереди и запас 4 мин/),
+    ).toBeVisible();
 
     // Перезагрузка восстанавливает выбранное изменение и его маршрут.
     await page.reload();
