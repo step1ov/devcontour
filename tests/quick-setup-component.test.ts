@@ -256,6 +256,8 @@ test('локальные адреса реестра не открываются
           '@e:registry=http://registry.local/',
           '@f:registry=http://dev.localhost/',
           '@g:registry=https://npm.example.test/',
+          '@h:registry=http://localhost.:4873/',
+          '@i:registry=https://npm.example.test./',
         ].join('\n'),
       });
       chooseWorkspaceMode(root, 'embedded');

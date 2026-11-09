@@ -207,7 +207,7 @@ export async function packageRegistryDomains(
   const host = (value: string) => {
     if (value.includes('${')) return undefined;
     try {
-      return new URL(value.trim()).hostname || undefined;
+      return new URL(value.trim()).hostname.replace(/\.+$/, '') || undefined;
     } catch {
       return undefined;
     }
