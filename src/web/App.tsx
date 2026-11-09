@@ -51,6 +51,7 @@ import { Input } from '@/ui/input.tsx';
 import { Textarea } from '@/ui/textarea.tsx';
 import { cn, humanError, plural } from '@/lib/utils.ts';
 import { levels } from '../core/graph.ts';
+import { BUDGET_RAISE_RU, budgetNotes } from '../core/usage.ts';
 import type { taskProgress } from '../application/context.ts';
 import type { PanelEvidence, PanelRun, PanelSummary } from '../application/panel.ts';
 const GraphPanel = lazy(() => import('./GraphPanel.tsx'));
@@ -271,6 +272,10 @@ function TaskLive({
           ? stalledFailureText + ' '
           : ''}
         {task.failure}
+        {/* Бюджетная остановка: суммы — оценка, общий бюджет — за всё время
+            workspace, и как поднять предел. */}
+        {run?.failureKind === 'budget' &&
+          ' ' + [...budgetNotes(task.failure), BUDGET_RAISE_RU].join(' ') + '.'}
         {/* Исчерпанный бюджет — тупик, пока о сбросе никто не знает: без этой
             строки остаётся только править базу руками. */}
         {exhausted && (

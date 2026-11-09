@@ -76,6 +76,11 @@ test('Один бюджет держит 40 готовых задач — одн
     const { engine } = executionOf(f.h);
     const reason = engine.read((v) => engine.budgetBlockOf(f.store.read().tasks[0].id, v))!;
     assert.ok(budget[0].reason.startsWith(reason));
+    // Пометки и действие умещаются в причину карточки целиком.
+    assert.match(
+      budget[0].reason,
+      /\. Суммы — оценка по тарифам API, не списание\. Бюджет total — за всё время workspace\. Поднимите предел в budgets и примените: devcontour config-apply --keys budgets$/,
+    );
     // Предел поднят выше расхода — карточки нет; исчерпан снова — новое появление.
     f.h.config.budgets = { workspace: { usd: 5 }, onUnknown: 'stop' };
     const lifted = await new AttentionService(f.store, f.h).active();

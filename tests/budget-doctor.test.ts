@@ -71,7 +71,7 @@ test('doctor lists prices with effectiveAt and budget limits; a priced setup has
   assert.match(checks.prices.detail, /с 2026-11-05T00:00:00Z/);
   assert.equal(
     checks.budgets.detail,
-    'задача: 25 USD; доска: нет; workspace: 3600000 мс; onUnknown: stop',
+    'задача: 25 USD; доска: нет; workspace (за всё время workspace): 3600000 мс; onUnknown: stop; суммы USD — оценка по тарифам API, не списание',
   );
   assert.deepEqual(Object.keys(checks).sort(), ['budgets', 'prices']);
 });
@@ -289,7 +289,7 @@ test('doctor itself reports prices, budgets, unpriced calls and a config not yet
     assert.match(checks.prices?.detail ?? '', /codex\/gpt-x с 2026-10-01T00:00:00Z/);
     assert.equal(
       checks.budgets?.detail,
-      'задача: 25 USD; доска: нет; workspace: нет; onUnknown: continue',
+      'задача: 25 USD; доска: нет; workspace (за всё время workspace): нет; onUnknown: continue; суммы USD — оценка по тарифам API, не списание',
     );
     assert.equal(checks['prices:calls']?.status, 'degraded');
     assert.match(checks['prices:calls'].detail, /codex\/gpt-old — 1/);

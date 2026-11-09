@@ -668,6 +668,12 @@ const contractChangeSource: AttentionSourceRule = {
  * монотонен: при том же пределе исчерпанный бюджет снимает только новая
  * конфигурация, поэтому появление — предел и `onUnknown`.
  */
+/** Причина карточки бюджета: действие и пометки важнее подробностей расхода. */
+function budgetCardReason(reason: string) {
+  const full = `${reason}. ${budgetHint(reason)}`;
+  if (full.length <= ATTENTION_LIMITS.reason) return full;
+  return `${reason.split('; израсходовано')[0]}. ${budgetHint(reason)}`;
+}
 const budgetSource: AttentionSourceRule = {
   id: 'budget',
   engine: true,
@@ -701,7 +707,10 @@ const budgetSource: AttentionSourceRule = {
           actor: 'operator',
           title:
             b.state === 'exceeded' ? 'Бюджет исчерпан: задачи не выдаются' : 'Бюджет не определён',
-          reason: `${b.reason}. ${budgetHint(b.reason)}`,
+          // Причина движка с расходом и подсказка с пометками не всегда
+          // умещаются в предел карточки: тогда расход опускается, а
+          // пометки и действие остаются.
+          reason: budgetCardReason(b.reason),
           since:
             ctx.state.tasks
               .filter((t) => covered.includes(t.id))

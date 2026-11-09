@@ -224,3 +224,29 @@ export function usageTotals(records: UsageRecord[], uncovered = false, at = Date
     unknownDurationCalls: records.filter((r) => callDurationMs(r, at) === null).length,
   };
 }
+
+/**
+ * Пометка денежных сумм для людей. Стоимость вызова — эквивалент по тарифам
+ * API: её сообщает CLI или рассчитывает тариф `prices`. При подписке это не
+ * списание, и без пометки оператор читал суммы как оплату. Поля JSON
+ * прежние; пометка — в текстах панели, CLI и подсказок.
+ */
+export const COST_ESTIMATE_RU = 'оценка по тарифам API';
+export const COST_ESTIMATE_EN = 'API-equivalent estimate';
+/** Как поднять исчерпанный денежный или временной предел. */
+export const BUDGET_RAISE_RU =
+  'Поднимите предел в budgets и примените: devcontour config-apply --keys budgets';
+/**
+ * Пометки к причине бюджетной остановки движка: суммы — оценка, а общий
+ * бюджет (`total` движка, `workspace` в budgets) считает расход за всё время
+ * workspace, а не за сессию — предел ниже прошлого расхода останавливает
+ * первый же вызов.
+ */
+export function budgetNotes(reason: string): string[] {
+  return [
+    ...(/\$/.test(reason) ? [`Суммы — ${COST_ESTIMATE_RU}, не списание.`] : []),
+    ...(/Бюджет (времени )?total\b/.test(reason)
+      ? ['Бюджет total — за всё время workspace.']
+      : []),
+  ];
+}
