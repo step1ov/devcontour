@@ -825,6 +825,34 @@ test('S9 задание стоит на задаче, отменённой ве�
   }
 });
 
+test('S9 бюджетная остановка и отмена человеком: карточка просит оператора поднять бюджет и самому повторить задачу', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Budget board');
+    const stopped = f.h.addTask(b.id, input('Hits the budget'));
+    const kept = f.h.addTask(b.id, input('Kept'));
+    f.h.approve(b.id);
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex', maxAttempts: 3 });
+    f.h.pause(false);
+    const run = f.h.claim('test')!;
+    f.h.fail(run.id, run.token, 'workspace budget exceeded', false, 'budget');
+    f.h.cancel(stopped.id, 'Not worth it', 'operator');
+    completeTask(f.h, kept.id);
+    flow.fail(flow.claim(job.key, job.owner)!, `${stopped.id}: Работа остановлена человеком.`);
+    const card = byKey(await engineItems(f), `board:${b.id}`)!;
+    assert.equal(card.actor, 'operator');
+    assert.match(card.reason, /отменена вами по бюджету/);
+    assert.match(
+      card.reason,
+      /поднимите предел бюджета .* и повторите задачу — ведущий продолжит задание/,
+    );
+    assert.doesNotMatch(card.reason, /ведущий повторит задачу/);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('S17 preview: нет Docker — доступ оператора; потерянная версия — ведущему; новая выкладка снимает', async () => {
   const f = fixture();
   try {

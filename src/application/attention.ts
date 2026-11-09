@@ -1084,17 +1084,24 @@ function cancelledTaskCard(
   step: NonNullable<ReturnType<typeof boardStep>>,
   jobs: readonly { key: string; history: { at: string }[] }[],
 ): Candidate {
-  const p = step.params as { taskId: string; by: string; budget: boolean };
+  const p = step.params as { taskId: string; by: string; budget: boolean; live: boolean };
   const title = taskTitle(ctx, p.taskId);
   const who =
     p.by === 'host'
       ? 'отменена ведущим агентом после выдачи'
       : p.by === 'operator'
         ? 'отменена вами'
-        : 'отменена (актёр не записан)';
+        : p.by === 'graph'
+          ? 'убрана новой редакцией графа доски'
+          : 'отменена (актёр не записан — считается вашей отменой)';
+  // Задачу, которую отменил человек (или актёр не записан), повторяет только
+  // человек: ведущий повторяет лишь свою отмену.
+  const lead = p.by === 'host' || p.by === 'graph';
   const retry = p.budget
-    ? 'поднимите предел бюджета (budgets, затем config-apply --keys budgets) — ведущий повторит задачу и задание'
-    : p.by === 'host'
+    ? lead
+      ? 'поднимите предел бюджета (budgets, затем config-apply --keys budgets) — ведущий повторит задачу и задание'
+      : 'поднимите предел бюджета (budgets, затем config-apply --keys budgets) и повторите задачу — ведущий продолжит задание'
+    : lead
       ? 'верните задачу в работу (повтор задачи) — ведущий продолжит задание'
       : 'повторите задачу — ведущий продолжит задание';
   return {

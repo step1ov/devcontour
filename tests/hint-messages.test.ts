@@ -136,14 +136,16 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
       loop: { step: 'stop', reason: 'TERMINAL' },
     },
   ],
-  'job-cancelled-task': (['host', 'operator', 'unknown'] as const).flatMap((by) =>
-    [true, false].map((budget) => ({
-      code: 'job-cancelled-task' as const,
-      params: { taskId: 't-1', by, budget, error: 'boom' },
-      boardId: 'board-1',
-      job,
-      loop: { step: 'stop' as const, taskId: 't-1', reason: 'cancelled' },
-    })),
+  'job-cancelled-task': (['host', 'operator', 'graph', 'unknown'] as const).flatMap((by) =>
+    [true, false].flatMap((budget) =>
+      [false, true].map((live) => ({
+        code: 'job-cancelled-task' as const,
+        params: { taskId: 't-1', by, budget, live, ...(live ? {} : { error: 'boom' }) },
+        boardId: 'board-1',
+        job,
+        loop: { step: 'stop' as const, taskId: 't-1', reason: 'cancelled' },
+      })),
+    ),
   ),
   'job-retry': [
     {
@@ -367,7 +369,7 @@ test('Подсказки шага: новая конфигурация setup п�
  * Образцы нового кода `job-cancelled-task` добавлены; прежние образцы байтово
  * прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = '842f75535b4caf2d2d12e802119cce570fd82f03d71a882c9c9e894552e24593';
+const ENGLISH_SAMPLES_SHA256 = '50eccc73498e8f771c9dab9ac16c9a863a91141cf48c10f0407e6cd47d502443';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

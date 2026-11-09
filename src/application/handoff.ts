@@ -416,7 +416,7 @@ function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefine
   const live = jobs.find(ctx.live);
   if (live) {
     const { stage, outlook: loop } = loopAhead(h, state, asLead(live));
-    const cancelled = cancelledStop(boardId, ctx, live, loop);
+    const cancelled = cancelledStop(boardId, ctx, live, loop, {}, true);
     if (cancelled) return cancelled;
     if (loop.step === 'stop')
       return {
@@ -450,9 +450,11 @@ function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefine
   if (job?.status === 'failed') {
     // Повтор задания — тот же такт цикла по состоянию сейчас.
     const { outlook: loop } = loopAhead(h, state, { ...asLead(job), status: 'queued' });
-    const cancelled = cancelledStop(boardId, ctx, job, loop, error);
-    if (cancelled) return cancelled;
     if (job.attempts < job.maxAttempts) {
+      // Исчерпанное задание сюда не входит: `workflow_retry` его не примет,
+      // и шаг остаётся `job-exhausted`.
+      const cancelled = cancelledStop(boardId, ctx, job, loop, error);
+      if (cancelled) return cancelled;
       if (loop.step === 'stop')
         return {
           action: 'decide',
@@ -516,8 +518,9 @@ function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefine
  * человека, отменой без актёра или отменой ведущего задачи, у которой уже
  * была попытка или отказ (например, исчерпанный бюджет). По D46 такая задача
  * из работы задания не выпадает: `workflow_retry` и `workflow_start` вернут
- * то же упавшее задание. Шаг называет законные пути: повтор задачи (после
- * подъёма предела, если её остановил бюджет, — это решение пользователя) или
+ * то же упавшее задание. Шаг называет законные пути: повтор задачи (подъём
+ * предела, если её остановил бюджет, — решение пользователя; задачу, которую
+ * отменил человек или актёр не записан, повторяет только пользователь) или
  * приёмку ревизии без неё — тоже решение пользователя (карточка центра
  * внимания оператору). Ни бюджет, ни приёмку ведущий сам не меняет.
  */
@@ -527,6 +530,8 @@ function cancelledStop(
   job: HarnessJob,
   loop: LoopOutlook,
   error: { error?: string } = {},
+  /** Задание действует: после повтора задачи оно продолжится само, без `workflow_retry`. */
+  live = false,
 ): HostNextDraft | undefined {
   if (loop.step !== 'stop' || !loop.taskId) return undefined;
   const task = ctx.state.tasks.find((t) => t.id === loop.taskId);
@@ -542,6 +547,7 @@ function cancelledStop(
       taskId: task.id,
       by: task.cancelledBy ?? 'unknown',
       budget: stoppedOnBudget(task, ctx.state.runs),
+      live,
       ...error,
     },
   };
