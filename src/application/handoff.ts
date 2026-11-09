@@ -536,6 +536,15 @@ function cancelledStop(
   if (loop.step !== 'stop' || !loop.taskId) return undefined;
   const task = ctx.state.tasks.find((t) => t.id === loop.taskId);
   if (task?.status !== 'cancelled') return undefined;
+  // Только задача, которую уже выдавали (попытка, отказ, прогон): отмена
+  // невыданной задачи — решение об объёме плана, а не остановка работы,
+  // и пути «повтор или приёмка без неё» к ней не относятся (D46, `leadScope`).
+  const issued =
+    task.attempt > 0 ||
+    !!task.failure ||
+    !!task.neutralFailures ||
+    ctx.state.runs.some((r) => r.taskId === task.id);
+  if (!issued) return undefined;
   return {
     action: 'decide',
     decision: 'job',

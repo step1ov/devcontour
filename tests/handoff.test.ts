@@ -1774,3 +1774,22 @@ test('session_handoff: задачу убрала новая редакция г�
     f.cleanup();
   }
 });
+
+test('session_handoff: задача, отменённая до выдачи, — не job-cancelled-task (отмена объёма плана, а не остановка работы)', () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Replanned board', '', 'main');
+    const dropped = f.h.addTask(b.id, input('Dropped before issue'));
+    f.h.addTask(b.id, input('Kept'));
+    f.h.approve(b.id);
+    f.h.cancel(dropped.id, 'Replanned', 'operator');
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex', maxAttempts: 3 });
+    flow.fail(flow.claim(job.key, job.owner)!, 'review failed');
+    const next = devcontourHandoff(f.h, {}).host.next;
+    assert.ok(next, 'шаг есть');
+    assert.notEqual(next.code, 'job-cancelled-task', JSON.stringify(next));
+  } finally {
+    f.cleanup();
+  }
+});
