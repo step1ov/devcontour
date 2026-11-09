@@ -272,7 +272,7 @@ function loopRu(o: LoopOutlook) {
     case 'repair':
       return `повторит задачу ${o.taskId} (${o.reason})`;
     case 'stop':
-      return `остановит задание: ${o.reason}`;
+      return `остановится: ${o.reason}`;
     case 'check-base':
       return 'проверит сдвинутую базу';
     case 'lift-pause':
@@ -338,7 +338,7 @@ const ru: Catalog = {
   'job-retry-stops': (p, s) =>
     `Задание ведущего доски ${s.boardId!} упало${failedRu(p.error)}, и повтор снова остановится: ${reasonOf(s.loop)}. ${STOP_REMEDY_RU} Затем workflow_retry ${retryArgs(s)}.`,
   'job-retry': (p, s) =>
-    `Задание ведущего доски ${s.boardId!} упало${failedRu(p.error)}. При повторе цикл задания ${loopRu(s.loop!)}: workflow_retry ${retryArgs(s)}.`,
+    `Задание ведущего доски ${s.boardId!} упало${failedRu(p.error)}. После workflow_retry цикл задания ${loopRu(s.loop!)}: workflow_retry ${retryArgs(s)}.`,
   'job-exhausted': (p, s) =>
     `Задание ведущего доски ${s.boardId!} израсходовало все попытки (${s.job!.maxAttempts})${failedRu(p.error)}. Пока вход доски не изменится, workflow_start возвращает это упавшее задание: разберите причину, затем измените доску или её задачи (новый вход регистрирует новое задание) либо спросите пользователя.`,
   'job-settled': (_, s) =>
