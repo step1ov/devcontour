@@ -114,7 +114,9 @@ export async function installNetworkCheck(config: Config): Promise<Check | undef
  * `runTimeoutMs`; совместные проверки workspace — тоже. Если сумма их
  * действующих сроков (каждый не короче `gateTimeoutFloorMs`) больше срока
  * фазы, долгая проверка обрывается сроком фазы, а не своим, и попытка
- * сгорает как истечение срока.
+ * сгорает как истечение срока. Это нижняя граница, а не оценка setup: без
+ * повтора проверки, шагов подготовки и проверок потребителей; задача с
+ * частью проверок может уложиться.
  */
 export function gateTimeoutCheck(config: Config): Check | undefined {
   const floor = config.gateTimeoutFloorMs ?? 0;
@@ -130,7 +132,7 @@ export function gateTimeoutCheck(config: Config): Check | undefined {
   return {
     id: 'gates:timeout',
     status: 'degraded',
-    detail: `Проверки ${over.map((r) => `${r.name} по очереди займут до ${min(r.ms)}`).join('; ')} (сроки timeoutMs, каждый не короче gateTimeoutFloorMs), а фаза попытки ограничена runTimeoutMs ${min(config.runTimeoutMs)}: долгая проверка оборвётся сроком фазы. Поднимите runTimeoutMs в config.json и перезапустите serve или сократите проверки.`,
+    detail: `Проверки ${over.map((r) => `${r.name} по очереди займут до ${min(r.ms)}`).join('; ')} (сумма сроков timeoutMs, каждый не короче gateTimeoutFloorMs), а фаза попытки ограничена runTimeoutMs ${min(config.runTimeoutMs)}: долгая проверка оборвётся сроком фазы. Это нижняя граница: повтор проверки на интеграции, шаги подготовки и окружения и проверки потребителей в неё не входят; задача с частью проверок может уложиться. Поднимите runTimeoutMs в config.json и перезапустите serve или сократите проверки.`,
   };
 }
 export const doctorReady = (checks: Pick<Check, 'status'>[]) =>
