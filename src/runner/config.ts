@@ -307,21 +307,20 @@ export function componentConfigProblem(
     if (!entry) return undefined;
     const fileRoles = file.roles as Record<string, unknown> | undefined;
     const entryRoles = entry.roles as Record<string, unknown> | undefined;
-    const raw: Record<string, any> = {
-      ...config,
-      repositories: [
-        {
-          ...file,
-          ...(entryRoles || fileRoles ? { roles: { ...entryRoles, ...fileRoles } } : {}),
-          id: entry.id,
-          path: entry.path,
-          dependsOn: entry.dependsOn,
-        },
-      ],
+    const repository: Record<string, unknown> = {
+      ...file,
+      ...(entryRoles || fileRoles ? { roles: { ...entryRoles, ...fileRoles } } : {}),
+      id: entry.id,
+      path: entry.path,
+      dependsOn: entry.dependsOn,
     };
-    delete raw.gates;
-    delete raw.protectedPaths;
-    raw.gates = raw.repositories[0].gates;
+    const raw = {
+      ...Object.fromEntries(
+        Object.entries(config).filter(([key]) => key !== 'gates' && key !== 'protectedPaths'),
+      ),
+      repositories: [repository],
+      gates: repository.gates,
+    };
     const parsed = configSchema.safeParse(raw);
     if (!parsed.success)
       return parsed.error.issues

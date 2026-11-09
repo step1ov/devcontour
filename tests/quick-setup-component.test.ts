@@ -306,9 +306,8 @@ test('файл компонента, не проходящий схему, — �
   withTestHome(async () => {
     const root = temp();
     try {
-      const { name: _name, ...nameless } = committedComponent;
       repository(root, {
-        'devcontour.component.json': JSON.stringify({ ...nameless, gates: 'all' }) + '\n',
+        'devcontour.component.json': JSON.stringify({ ...committedComponent, gates: 'all' }) + '\n',
       });
       chooseWorkspaceMode(root, 'embedded');
       const input = { repository: root, workspace: root, profile: 'pnpm-project', quick: true };
