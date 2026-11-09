@@ -93,10 +93,118 @@ export function defaultContextPacks(
   ];
 }
 type Profile = Awaited<ReturnType<typeof profile>>;
+
+/**
+ * `runTimeoutMs` сохранённой конфигурации workspace: setup её не
+ * перезаписывает, поэтому действует он (без ключа — умолчание схемы). Нет
+ * файла — пусто; нечитаемый файл отклонит проверка конфигурации setup.
+ */
+async function existingRunTimeout(path: string): Promise<{ existingMs?: number }> {
+  try {
+    const raw: unknown = JSON.parse(await readFile(path, 'utf8'));
+    if (!raw || typeof raw !== 'object') return {};
+    const value = (raw as { runTimeoutMs?: unknown }).runTimeoutMs;
+    // Файл без ключа действует с умолчанием схемы.
+    return { existingMs: typeof value === 'number' ? value : DEFAULT_RUN_TIMEOUT_MS };
+  } catch {
+    return {};
+  }
+}
 export type ApprovalMode = 'agent' | 'operator';
 
 /** Нижний предел срока проверок в новой конфигурации (`gateTimeoutFloorMs`). */
 export const DEFAULT_GATE_TIMEOUT_FLOOR_MS = 60_000;
+
+/** Срок фазы попытки (`runTimeoutMs`) по умолчанию: setup не ставит меньше. */
+export const DEFAULT_RUN_TIMEOUT_MS = 900_000;
+/** Верхний предел срока, который setup выводит сам (предел `runTimeoutMs` профиля). */
+export const MAX_DERIVED_RUN_TIMEOUT_MS = 7_200_000;
+/** Срок gate без `timeoutMs` — умолчание схемы. */
+const DEFAULT_GATE_TIMEOUT_MS = 120_000;
+
+export interface RunTimeoutChoice {
+  ms: number;
+  /**
+   * Откуда значение: сохранённая конфигурация workspace, профиль, сроки
+   * проверок или умолчание.
+   */
+  source: 'existing' | 'profile' | 'gates' | 'default';
+  /** Сумма действующих сроков проверок фазы — то, что должно уместиться. */
+  gatesMs: number;
+  reason: string;
+}
+
+const minutes = (ms: number) => {
+  const m = ms / 60_000;
+  return `${Number.isInteger(m) ? m : m.toFixed(1)} мин`;
+};
+
+/**
+ * Срок фазы попытки (`runTimeoutMs`) для конфигурации setup. Gates кандидата
+ * исполняются по очереди в одной фазе, и вся очередь должна уложиться в
+ * этот срок: длинные реальные проверки (установка зависимостей, typecheck и
+ * тесты монорепозитория) не укладывались в прежние постоянные 15 минут.
+ *
+ * Уже заданное значение сохраняется: сохранённая конфигурация workspace
+ * (setup её не перезаписывает) или `runTimeoutMs` профиля. Иначе срок —
+ * сумма сроков проверок (каждая не короче `gateTimeoutFloorMs`) с запасом
+ * 25%, но не меньше 2 минут, округлённая до минуты; не меньше умолчания
+ * 15 минут и не больше 2 часов.
+ */
+export function chooseRunTimeout(input: {
+  gates: readonly { timeoutMs?: unknown }[];
+  floorMs?: number;
+  profileMs?: number;
+  existingMs?: number;
+}): RunTimeoutChoice {
+  const floor = input.floorMs ?? 0;
+  const gatesMs = input.gates.reduce(
+    (sum, g) =>
+      sum +
+      Math.max(
+        typeof g.timeoutMs === 'number' && g.timeoutMs > 0 ? g.timeoutMs : DEFAULT_GATE_TIMEOUT_MS,
+        floor,
+      ),
+    0,
+  );
+  const shortfall = (ms: number) =>
+    gatesMs > ms
+      ? `; проверки по очереди займут до ${minutes(gatesMs)} — больше этого срока, поднимите runTimeoutMs`
+      : '';
+  if (input.existingMs !== undefined)
+    return {
+      ms: input.existingMs,
+      source: 'existing',
+      gatesMs,
+      reason: `сохранён из существующей конфигурации workspace${shortfall(input.existingMs)}`,
+    };
+  if (input.profileMs !== undefined)
+    return {
+      ms: input.profileMs,
+      source: 'profile',
+      gatesMs,
+      reason: `задан профилем${shortfall(input.profileMs)}`,
+    };
+  const margin = Math.max(120_000, Math.ceil(gatesMs * 0.25));
+  const derived = Math.ceil((gatesMs + margin) / 60_000) * 60_000;
+  if (derived <= DEFAULT_RUN_TIMEOUT_MS)
+    return {
+      ms: DEFAULT_RUN_TIMEOUT_MS,
+      source: 'default',
+      gatesMs,
+      reason: `умолчание: проверки по очереди займут до ${minutes(gatesMs)}, с запасом укладываются`,
+    };
+  const ms = Math.min(derived, MAX_DERIVED_RUN_TIMEOUT_MS);
+  return {
+    ms,
+    source: 'gates',
+    gatesMs,
+    reason:
+      derived > MAX_DERIVED_RUN_TIMEOUT_MS
+        ? `по срокам проверок: ${minutes(gatesMs)} по очереди с запасом больше предела — ограничен ${minutes(ms)}; сократите проверки или задайте runTimeoutMs вручную`
+        : `по срокам проверок: ${minutes(gatesMs)} по очереди и запас ${minutes(ms - gatesMs)}`,
+  };
+}
 
 export function projectConfig(
   repository: string,
@@ -416,6 +524,18 @@ async function runSetup(options: {
   // Профили инструментов, которые называют роли сохранённого файла компонента.
   const toolProfiles = componentFile ? referencedToolProfiles(componentFile) : {};
   const registryDomains = await packageRegistryDomains(repository, selected);
+  // Срок фазы попытки — по проверкам, которые будут действовать после setup.
+  const runTimeout = chooseRunTimeout({
+    gates:
+      component?.precedence && Array.isArray(componentFile?.gates)
+        ? (componentFile.gates as { timeoutMs?: unknown }[]).filter(
+            (g) => g && typeof g === 'object',
+          )
+        : selected.gates,
+    floorMs: DEFAULT_GATE_TIMEOUT_FLOOR_MS,
+    ...(selected.runTimeoutMs ? { profileMs: selected.runTimeoutMs } : {}),
+    ...(await existingRunTimeout(join(data, 'config.json'))),
+  });
   const files = new Map<string, string>();
   // Инструкции стека приезжают из библиотеки DevContour по объявлению профиля,
   // а не лежат в каждом проекте заранее: подтвердили мобильное приложение —
@@ -512,6 +632,7 @@ async function runSetup(options: {
               workspaceRoot,
             )
           : projectConfig(repository, selected, options.approvalMode)),
+        runTimeoutMs: runTimeout.ms,
         ...(registryDomains.domains.length
           ? { isolation: { mode: 'os', domains: registryDomains.domains } }
           : {}),
@@ -592,6 +713,7 @@ async function runSetup(options: {
         : {}),
     },
     toolProfiles,
+    runTimeout,
   };
   // Проверки, которые будут действовать после setup.
   const effectiveGates = component?.precedence ? component.gates : gateSummary(selected.gates);
@@ -648,7 +770,7 @@ async function runSetup(options: {
     registryDomains.skipped.length ||
     Object.keys(toolProfiles).length
       ? generated
-      : {}),
+      : { runTimeout }),
     next: [
       ...(component?.precedence ? [component.note] : []),
       'Ведущий агент продолжает по START.md: каркас, настройки, реальные gates и исходный Git-коммит.',

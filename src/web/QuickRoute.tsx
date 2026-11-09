@@ -127,6 +127,8 @@ export interface QuickView {
     isolation?: { domains: string[]; skipped?: string[]; note?: string };
     /** Профили инструментов, которые setup создаёт для ролей файла компонента. */
     toolProfiles?: Record<string, { runtime: string }>;
+    /** Срок фазы попытки (`runTimeoutMs`), который setup запишет, и почему. */
+    runTimeout?: { ms: number; source: string; gatesMs: number; reason: string };
   };
   steps: QuickStep[];
   lead: { lastActivityAt: string | null; present: boolean };
@@ -425,6 +427,15 @@ function Preparation({ view }: { view: QuickView }) {
             {plan.isolation.note && (
               <span className="text-muted-foreground block text-sm">{plan.isolation.note}</span>
             )}
+          </Fact>
+        )}
+        {plan?.runTimeout && (
+          <Fact term="Срок фазы попытки">
+            <span data-run-timeout={plan.runTimeout.ms}>
+              {Math.round(plan.runTimeout.ms / 60_000)} мин{' '}
+              <code className="font-mono text-xs">runTimeoutMs: {plan.runTimeout.ms}</code>
+            </span>
+            <span className="text-muted-foreground block text-sm">{plan.runTimeout.reason}</span>
           </Fact>
         )}
         {plan?.toolProfiles && Object.keys(plan.toolProfiles).length > 0 && (

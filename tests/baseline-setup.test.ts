@@ -79,6 +79,8 @@ test('Baseline setup: only docs/spec.md, no Git — host files and config, no .g
       'preserved',
       'profile',
       'repository',
+      // Срок фазы попытки, который setup записал, и почему.
+      'runTimeout',
       'status',
       'toolProfiles',
       'workspace',
