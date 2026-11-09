@@ -238,6 +238,7 @@ export function policyFromConfig(
     leaseMs: config.leaseMs,
     runTimeoutMs: config.runTimeoutMs,
     ...(config.stallSweep ? { stallSweep: config.stallSweep } : {}),
+    ...(config.gateTimeoutFloorMs ? { gateTimeoutFloorMs: config.gateTimeoutFloorMs } : {}),
     ...(config.inputPolicy
       ? {
           inputPolicy: {
@@ -321,6 +322,9 @@ const operational = new Set([
   'leaseMs',
   'runTimeoutMs',
   'stallSweep',
+  // Нижний предел срока проверок — эксплуатационный: что и чем проверяется,
+  // он не меняет.
+  'gateTimeoutFloorMs',
   // Порог вопросов исполнителя закрепляется в попытке и действует со
   // следующей: план он не меняет.
   'inputPolicy',

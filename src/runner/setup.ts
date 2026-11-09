@@ -95,6 +95,9 @@ export function defaultContextPacks(
 type Profile = Awaited<ReturnType<typeof profile>>;
 export type ApprovalMode = 'agent' | 'operator';
 
+/** Нижний предел срока проверок в новой конфигурации (`gateTimeoutFloorMs`). */
+export const DEFAULT_GATE_TIMEOUT_FLOOR_MS = 60_000;
+
 export function projectConfig(
   repository: string,
   selected: Profile,
@@ -125,6 +128,9 @@ export function projectConfig(
     reviewer: { runtime: 'codex' },
     concurrency: selected.concurrency ?? 2,
     ...(selected.runTimeoutMs ? { runTimeoutMs: selected.runTimeoutMs } : {}),
+    // Короткий срок быстрой проверки под нагрузкой хоста срывается и сжигает
+    // попытку: новая конфигурация исполняет каждую проверку не короче минуты.
+    gateTimeoutFloorMs: DEFAULT_GATE_TIMEOUT_FLOOR_MS,
     gates: selected.gates,
     prepare: selected.prepare,
     environment: selected.environment,
