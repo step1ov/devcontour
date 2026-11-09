@@ -701,7 +701,10 @@ test('doctor передаёт открытые задачи состояния �
       r.checks.find((x) => x.id === 'gates:timeout');
     // Весь профиль (40 мин) больше срока фазы: предупреждение и без задач, и с
     // задачей, которая исполняет один gate, — её область только справка.
-    assert.doesNotMatch(of(await doctor(c, root, false, emptyState()))?.detail ?? '', /справочно/);
+    const unscoped = of(await doctor(c, root, false, emptyState()));
+    assert.equal(unscoped?.status, 'degraded');
+    assert.match(unscoped?.detail ?? '', /весь профиль: gates 2, по очереди до 40 мин/);
+    assert.doesNotMatch(unscoped?.detail ?? '', /справочно/);
     const tasks = [{ id: 'T-1', status: 'ready', repositoryId: 'main', gates: ['test-a'] }];
     const scoped = of(await doctor(c, root, false, { ...emptyState(), tasks: tasks as never }));
     assert.match(scoped?.detail ?? '', /весь профиль: gates 2, по очереди до 40 мин/);

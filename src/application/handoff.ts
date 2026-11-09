@@ -768,7 +768,7 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
         action: 'queue_set',
         ...(first ? { boardId: first.id, job: jobRef(first), loop: ahead!.outlook } : {}),
         code: 'pause-operator',
-        params: leadLiftsPause(state, h.config.approvalMode) ? { by: 'lead' } : {},
+        params: leadLiftsPause(state) ? { by: 'lead' } : {},
       });
     }
   }

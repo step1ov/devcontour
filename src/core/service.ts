@@ -1590,9 +1590,8 @@ export class DevContour {
           before.pauseReason === 'operator' &&
           !pausedByLead({ ...ht.state, ...before })
         ) {
-          const kept = { paused: true, reason: before.pauseReason, kept: 'operator' as const };
-          ht.journal(kept);
-          return kept;
+          // Без записи и без события журнала: паузы ведущего не было.
+          return { paused: true, reason: before.pauseReason, kept: 'operator' as const };
         }
         const { control } = value ? engine.pause(reason) : engine.resume();
         // Кто поставил паузу `operator`: ведущий агент — отметкой со временем

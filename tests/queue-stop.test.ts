@@ -489,6 +489,7 @@ test('Пауза ведущего поверх паузы человека не 
     f.h.pause(false);
     f.h.pause(true);
     const human = f.h.store.read();
+    const lastEvent = f.h.store.lastEventId();
     const agent = new AgentService(f.h, f.root);
     const set = (await agent.run({ operation: 'queue_set', input: { paused: true } })) as {
       queue: QueueStopView;
@@ -498,6 +499,9 @@ test('Пауза ведущего поверх паузы человека не 
     const after = f.h.store.read();
     assert.equal(after.pauseActor, undefined);
     assert.equal(after.pausedAt, human.pausedAt, 'время решения человека прежнее');
+    // Пауза ведущего не состоялась: события scheduler.paused нет (отчёт об
+    // эффекте посчитал бы его паузой оператора).
+    assert.equal(f.h.store.lastEventId(), lastEvent);
     // Пауза ведущего поверх своей же — его новая пауза, отметка остаётся.
     f.h.pause(false);
     await agent.run({ operation: 'queue_set', input: { paused: true } });

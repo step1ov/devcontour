@@ -545,6 +545,22 @@ test('session_handoff: host.next по состоянию — сервер, за�
       assert.equal(held?.code, 'pause-operator');
       assert.deepEqual(held?.params, {});
       assert.match(held?.detail ?? '', /only on the user's decision/);
+      // Обычное ожидание переноса базы (не удержанное) под паузой ведущего —
+      // тоже решение человека: снятие паузы сняло бы его без проверки базы.
+      f.store.change('fixture', (s) => {
+        s.waits = [
+          {
+            kind: 'base-check',
+            detail: 'База прогонов перенесена (main): проверьте её гейтами и продолжите очередь',
+            at: new Date().toISOString(),
+          },
+        ];
+        return {};
+      });
+      const plain = at().host.next;
+      assert.equal(plain?.code, 'pause-operator');
+      assert.deepEqual(plain?.params, {});
+      assert.match(plain?.detail ?? '', /only on the user's decision/);
     } finally {
       f.cleanup();
     }
