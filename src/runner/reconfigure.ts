@@ -18,7 +18,8 @@ import { workspaceDeclares } from './budget-doctor.ts';
  * от действующего может только закрепление context packs.
  *
  * Второй источник запроса — `config-apply` (`requestConfigApply`):
- * эксплуатационные пределы `budgets` и `prices`. Тот же запрос с ожидаемым
+ * эксплуатационные ключи `operationalKeys` (бюджеты, тарифы, пороги
+ * зависания и вопросов, нижний предел срока проверок). Тот же запрос с ожидаемым
  * digest и тот же drain; отличаться от действующей может только названная
  * часть, а итог — событие журнала `config.applied` или `config.apply-refused`.
  * Запрос снимает сам сервер: операции, которая повторила бы его, нет.
@@ -152,9 +153,9 @@ export function reconfigureSlotBusy(request: DevContourState['reconfigure']) {
 export const defaultOperationalKeys = ['budgets', 'prices'] as const satisfies OperationalKey[];
 
 /**
- * Ключи `--keys`: подмножество `budgets,prices,stallSweep,inputPolicy`; без
- * флага — `budgets,prices`. `inputPolicy`, как и `stallSweep`, — только
- * названным явно: прежний сервер этого ключа не знает.
+ * Ключи `--keys`: подмножество `operationalKeys`; без флага —
+ * `budgets,prices`. `stallSweep`, `inputPolicy` и `gateTimeoutFloorMs` —
+ * только названными явно: прежний сервер этих ключей не знает.
  */
 export function parseOperationalKeys(value?: string): OperationalKey[] {
   if (value === undefined) return [...defaultOperationalKeys];
@@ -201,7 +202,7 @@ export type ConfigApplyResult =
 
 /**
  * `devcontour config-apply`: запросить у работающего сервера применение
- * `budgets`/`prices` из `config.json`. Файл проверяется до запроса тем же
+ * эксплуатационных ключей (`operationalKeys`) из `config.json`. Файл проверяется до запроса тем же
  * загрузчиком, что и сервер: невалидный — отказ, применённые значения не
  * меняются. Сервер применяет на своём такте, когда нет работ под прежней
  * конфигурацией, и только если файл отличается от действующей конфигурации

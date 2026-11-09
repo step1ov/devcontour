@@ -441,6 +441,10 @@ test('doctor CLI reads the applied keys the server recorded and names config-app
       checks['config:applied'].detail,
       /config-apply --keys stallSweep; name применит только перезапуск serve/,
     );
+    // Нижний предел срока проверок тоже применяет config-apply.
+    checks = await doctorCli({ gateTimeoutFloorMs: 120000 });
+    assert.match(checks['config:applied'].detail, /config-apply --keys gateTimeoutFloorMs\./);
+    assert.doesNotMatch(checks['config:applied'].detail, /перезапуст/);
     // Бюджеты с порогом вопросов — одна команда config-apply.
     checks = await doctorCli({
       budgets: { task: { usd: 50 }, onUnknown: 'continue' },

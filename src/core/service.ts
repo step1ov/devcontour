@@ -59,7 +59,13 @@ import {
  * `config-apply` без перезапуска: в digest утверждения плана они не входят
  * (`approvalPolicyDigest`), и попытки по ним не устаревают.
  */
-export const operationalKeys = ['budgets', 'prices', 'stallSweep', 'inputPolicy'] as const;
+export const operationalKeys = [
+  'budgets',
+  'prices',
+  'stallSweep',
+  'inputPolicy',
+  'gateTimeoutFloorMs',
+] as const;
 export type OperationalKey = (typeof operationalKeys)[number];
 export const digest = (value: unknown) =>
   createHash('sha256')
@@ -700,7 +706,7 @@ export class DevContour {
    * остальное требует перезапуска процесса.
    *
    * `keys` — запрос `config-apply` эксплуатационных пределов: тогда
-   * отличаться могут только названные ключи (`budgets`, `prices`), а
+   * отличаться могут только названные ключи (`operationalKeys`), а
    * закрепление пакетов — нет.
    */
   reconfigure(next: Config, keys?: readonly OperationalKey[]) {
