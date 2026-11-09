@@ -53,6 +53,16 @@ export function queueStopReason(
  * всех ответах.
  */
 export type QueueStopReason = NonNullable<DevContourState['pauseReason']> | 'not-started';
+
+/** Действующую паузу `operator` поставил ведущий агент (`queue_set`), а не человек. */
+export const pausedByLead = (
+  state: Pick<DevContourState, 'paused' | 'pauseReason' | 'pausedAt' | 'pauseActor'>,
+) =>
+  state.paused === true &&
+  state.pauseReason === 'operator' &&
+  !!state.pausedAt &&
+  state.pauseActor?.by === 'lead' &&
+  state.pauseActor.at === state.pausedAt;
 export interface QueueStopView {
   paused: boolean;
   reason?: QueueStopReason;
@@ -62,11 +72,16 @@ export interface QueueStopView {
   action?: string;
   /** Остановка вызвана сбоем (рантайм, провайдер, окружение), а не решением или ожиданием. */
   failed?: true;
+  /** Паузу `operator` поставил ведущий агент (`queue_set`), а не человек. */
+  by?: 'lead';
 }
 /** Ошибка `scheduler.error`, записанная не раньше паузы (секунда — на порядок записи). */
 const AFTER_PAUSE_SLACK_MS = 1000;
 export function queueStopView(
-  state: Pick<DevContourState, 'paused' | 'pauseReason' | 'pausedAt' | 'pauseFailures' | 'waits'>,
+  state: Pick<
+    DevContourState,
+    'paused' | 'pauseReason' | 'pausedAt' | 'pauseFailures' | 'waits' | 'pauseActor'
+  >,
   events: Pick<AuditEvent, 'id' | 'at' | 'type' | 'data'>[],
   options: { approvalMode?: 'agent' | 'operator'; workflowActive?: boolean } = {},
 ): QueueStopView {
@@ -88,6 +103,8 @@ export function queueStopView(
     state.pauseReason ?? (since || detail ? 'runtime' : 'not-started');
   const failures = (state.pauseFailures ?? []).filter((f) => f !== 'unknown');
   const wait = state.waits?.find((w) => w.kind === 'base-check')?.detail;
+  const lead = pausedByLead(state);
+  const pauser = lead ? 'паузу ведущего агента' : 'паузу человека';
   // Исходную и штатную паузы в режиме агента снимает цикл ведущего.
   const resume = !agent
     ? start
@@ -127,13 +144,17 @@ export function queueStopView(
             : 'Цикл ведущего проверит базу gates и продолжит выдачу сам'
           : 'Проверьте базу gates, затем выполните ' +
             start +
-            (reason === 'operator' ? ' — он снимет и паузу человека, и ожидание' : ''),
+            (reason === 'operator' ? ` — он снимет и ${pauser}, и ожидание` : ''),
         false,
       ];
     }
     switch (reason) {
       case 'operator':
-        return ['Выдача остановлена человеком', start, false];
+        return [
+          lead ? 'Выдача остановлена ведущим агентом (queue_set)' : 'Выдача остановлена человеком',
+          start,
+          false,
+        ];
       case 'shutdown':
         return ['Сервер был остановлен штатно', resume, false];
       case 'reconfigure':
@@ -176,6 +197,7 @@ export function queueStopView(
     ...(since ? { since } : {}),
     action,
     ...(failed ? { failed: true as const } : {}),
+    ...(lead ? { by: 'lead' as const } : {}),
   };
 }
 

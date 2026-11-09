@@ -465,7 +465,7 @@ test('session_handoff: задание ведущего по доске — за�
   }
 });
 
-test('session_handoff: host.next по состоянию — сервер, задание, пауза остановки и человека', () => {
+test('session_handoff: host.next по состоянию — сервер, задание, пауза остановки и человека', async () => {
   // Сервер работает (роль controller жива), задания нет: исходную паузу
   // снимает только цикл задания доски — шаг workflow_start.
   {
@@ -513,6 +513,15 @@ test('session_handoff: host.next по состоянию — сервер, за�
       f.h.pause(true);
       assert.equal(f.store.read().pauseReason, 'operator');
       assert.equal(at().host.next?.action, 'queue_set');
+      assert.deepEqual(at().host.next?.params, {});
+      assert.match(at().host.next?.detail ?? '', /paused by the operator/);
+      // Ту же паузу поставил ведущий (queue_set): шаг называет его, а не решение пользователя.
+      tick();
+      await new AgentService(f.h, f.root).run({ operation: 'queue_set', input: { paused: true } });
+      const lead = at().host.next;
+      assert.equal(lead?.action, 'queue_set');
+      assert.deepEqual(lead?.params, { by: 'lead' });
+      assert.match(lead?.detail ?? '', /paused by the lead \(queue_set\)/);
     } finally {
       f.cleanup();
     }

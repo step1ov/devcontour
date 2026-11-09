@@ -452,3 +452,33 @@ test('R4-M1: ожидание после base-update без workflow ждёт ч
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('Пауза ведущего агента через queue_set записана за ним, а не за человеком', async () => {
+  const f = fixture();
+  try {
+    f.h.pause(false);
+    const agent = new AgentService(f.h, f.root);
+    const set = (await agent.run({ operation: 'queue_set', input: { paused: true } })) as {
+      queue: QueueStopView;
+    };
+    assert.equal(set.queue.reason, 'operator');
+    assert.equal(set.queue.by, 'lead');
+    assert.equal(set.queue.stopReason, 'Выдача остановлена ведущим агентом (queue_set)');
+    const journal = f.h.store
+      .events()
+      .filter((e) => e.type === 'scheduler.paused')
+      .at(-1);
+    assert.equal((journal?.data as { by?: string }).by, 'lead');
+    // Новая пауза человека — его решение: отметка ведущего снята.
+    f.h.pause(true);
+    const human = queueStopView(f.h.store.read(), f.h.store.events());
+    assert.equal(human.stopReason, 'Выдача остановлена человеком');
+    assert.equal(human.by, undefined);
+    // Снятие паузы тоже снимает отметку.
+    await agent.run({ operation: 'queue_set', input: { paused: true } });
+    f.h.pause(false);
+    assert.equal(f.h.store.read().pauseActor, undefined);
+  } finally {
+    f.cleanup();
+  }
+});

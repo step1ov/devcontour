@@ -35,6 +35,7 @@ import {
   type LoopOutlook,
 } from '../runner/lead-outlook.ts';
 import { repositories } from '../core/repositories.ts';
+import { pausedByLead } from '../core/work-status.ts';
 import { executionOf, toDomain } from '../harness/execution.ts';
 import type { DevContourExecutionStore } from '../harness/store.ts';
 
@@ -681,8 +682,7 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
   // Открытых поручений нет, но доска ещё не принята: шаг — только
   // восстановление её упавшего задания (без него ведущий не узнал бы, что
   // приёмку держит упавшее задание).
-  if (!pack.summary.open)
-    return h.config.approvalMode === 'operator' ? undefined : jobBlocker(ctx);
+  if (!pack.summary.open) return h.config.approvalMode === 'operator' ? undefined : jobBlocker(ctx);
   const input = inputNext(ctx);
   if (input) return input;
   if (h.config.approvalMode === 'operator')
@@ -768,7 +768,7 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
         action: 'queue_set',
         ...(first ? { boardId: first.id, job: jobRef(first), loop: ahead!.outlook } : {}),
         code: 'pause-operator',
-        params: {},
+        params: pausedByLead(state) ? { by: 'lead' } : {},
       });
     }
   }

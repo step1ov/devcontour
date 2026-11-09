@@ -1556,7 +1556,11 @@ export class DevContour {
    * (`pause('operator')` harness) — операция её уже не снимет, — затем снимает.
    * DevContour добавляет продуктовое условие продолжения: привязку разработки.
    */
-  pause(value: boolean, reason: 'operator' | 'shutdown' = 'operator') {
+  pause(
+    value: boolean,
+    reason: 'operator' | 'shutdown' = 'operator',
+    by: 'operator' | 'lead' = 'operator',
+  ) {
     const { store, engine } = executionOf(this);
     return domain(() =>
       store.host(value ? 'scheduler.paused' : 'scheduler.started', (ht) => {
@@ -1575,7 +1579,16 @@ export class DevContour {
         if (!value && engine.read((v) => v.control().pauseReason) === 'reconfigure')
           engine.pause('operator');
         const { control } = value ? engine.pause(reason) : engine.resume();
-        const result = { paused: control.paused, reason: control.pauseReason };
+        // Кто поставил паузу `operator`: ведущий агент — отметкой со временем
+        // паузы; решение человека и снятие паузы отметку убирают.
+        const lead = value && reason === 'operator' && by === 'lead' && control.pausedAt;
+        if (lead) ht.state.pauseActor = { by: 'lead', at: control.pausedAt! };
+        else if (!value || reason === 'operator') delete ht.state.pauseActor;
+        const result = {
+          paused: control.paused,
+          reason: control.pauseReason,
+          ...(lead ? { by: 'lead' as const } : {}),
+        };
         ht.journal(result);
         return result;
       }),

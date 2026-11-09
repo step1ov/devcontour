@@ -1220,7 +1220,11 @@ async function main() {
         // сервер отмечает остановку в базе, и отметка действует, пока он
         // держит живую роль controller (`DevContour.pause`).
         if (!args.includes('--start') && !args.includes('--pause')) result = queueStopOf(h);
-        else if (args.includes('--pause')) result = { ...h.pause(true), ...queueStopOf(h) };
+        else if (args.includes('--pause'))
+          result = {
+            ...h.pause(true, 'operator', actorOf() === 'host' ? 'lead' : 'operator'),
+            ...queueStopOf(h),
+          };
         else {
           // Снятие паузы подтверждает работающий сервер: очередь, которую он
           // сразу снова остановил, — отказ с его причиной, а не успех.

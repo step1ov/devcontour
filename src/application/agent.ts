@@ -815,7 +815,8 @@ export class AgentService {
       case 'queue_set': {
         const value = agentInputs.queue_set.parse(input);
         if (!value.paused && this.options.stopping?.()) throw new DomainError(SERVER_STOPPING, 409);
-        h.pause(value.paused);
+        // Паузу записывает актёр вызова — ведущий агент, а не человек.
+        h.pause(value.paused, 'operator', 'lead');
         return { ...value, queue: queueStopOf(h), serverRequiredForExecution: true };
       }
       default:
