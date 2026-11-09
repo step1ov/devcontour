@@ -92,5 +92,9 @@
 // задач в пределе ответа (без cursor и limit — весь список, если он
 // укладывается); описание называет страницы, nextCursor, full и complete;
 // прочие операции байтово прежние.
-export const CATALOG_DIGEST = '787694f3a3261c821a7d4bc65ed20940c67cfecc6c1e113d35e8696f4d1377d4';
+// Намеренное изменение: описания input_answer, input_review, input_target и
+// input_supersede называют порядок переноса ответа (в черновике, затем
+// утверждение), область записи роли и отказ ROLE_SCOPE; прочие операции
+// байтово прежние.
+export const CATALOG_DIGEST = 'a0e58e238bb72313b9dcef21e4ca86cf084b9bc1307aca1ee6e2ec4770cf4464';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

@@ -7,7 +7,12 @@ import {
   assertTaskFeature,
   assertTaskPreparation,
 } from './preparation.ts';
-import { validateTaskContext, validateWorkflow } from './workflow.ts';
+import {
+  outsideRoleScope,
+  roleScopeAdvice,
+  validateTaskContext,
+  validateWorkflow,
+} from './workflow.ts';
 import type { PreparationRequest } from './preparation-model.ts';
 import { entityId } from './ids.ts';
 import { createHash } from 'node:crypto';
@@ -29,9 +34,10 @@ import {
   type PropertyRecovery,
   type RetryActor,
 } from 'devcontour-harness';
-import { closeEpisodeIfBasisChanged, storyGuard } from '../harness/host.ts';
+import { closeEpisodeIfBasisChanged, episodeBasisOf, storyGuard } from '../harness/host.ts';
 import { referenceKey, type StoryBinding } from './intent.ts';
 import { approvalPolicyDigest } from '../harness/policy.ts';
+import { rebindInputContext } from '../harness/input-host.ts';
 import { planIngest } from './plan.ts';
 import { boardOwner, completion, receiptHolds, receiptRecordBytes } from './sync-state.ts';
 import { carriedTaskIds, pausedByLead } from './work-status.ts';
@@ -46,6 +52,7 @@ import {
   type Contract,
   type ContractArtifact,
   type Task,
+  type TaskInput,
   type Board,
   type DevContourState,
   type Config,
@@ -68,36 +75,8 @@ export const operationalKeys = [
   'gateTimeoutFloorMs',
 ] as const;
 export type OperationalKey = (typeof operationalKeys)[number];
-export const digest = (value: unknown) =>
-  createHash('sha256')
-    .update(typeof value === 'string' ? value : JSON.stringify(value))
-    .digest('hex');
-/** Область проверок задачи: её gates и потребители, как они записаны в постановке. */
-export const scopeDigest = (t: Pick<Task, 'gates' | 'consumers'>) =>
-  digest({ gates: t.gates ?? [], consumers: t.consumers ?? [] });
-export const specDigest = (t: Task) =>
-  digest({
-    ...(t.preparation ? { preparation: t.preparation } : {}),
-    ...(t.repositoryId && t.repositoryId !== 'main' ? { repositoryId: t.repositoryId } : {}),
-    ...(t.requirements?.length ? { requirements: t.requirements } : {}),
-    title: t.title,
-    description: t.description,
-    role: t.role,
-    dependsOn: t.dependsOn,
-    acceptance: t.acceptance,
-    ...(t.scope === 'workspace'
-      ? { scope: t.scope, relatedRepositories: t.relatedRepositories }
-      : {}),
-    contracts: t.contracts,
-    contractDigests: t.contractDigests,
-    ...(t.contextPacks?.length ? { contextPacks: t.contextPacks } : {}),
-    ...(t.writePaths?.length ? { writePaths: t.writePaths } : {}),
-    ...(t.resources?.length ? { resources: t.resources } : {}),
-    ...(t.finding ? { finding: t.finding } : {}),
-    // Область задачи в договоре проверки — часть утверждаемого: включение
-    // механизма для задачи проходит обычное ревью плана.
-    ...(t.properties?.length ? { properties: t.properties } : {}),
-  });
+export { digest, scopeDigest, specDigest } from './task-digest.ts';
+import { digest, scopeDigest, specDigest } from './task-digest.ts';
 /**
  * Digest контракта: документ и, если объявлены, нормативные артефакты —
  * путь, назначение и содержимое. Контракт без артефактов сохраняет прежний
@@ -1010,6 +989,9 @@ export class DevContour {
         });
         repository(this.config, parsed.repositoryId);
         validateTaskContext(this.config, parsed);
+        // Путь вне области роли — как у task_create (F15): план — главный
+        // путь создания задач ведущим.
+        this.assertWithinRole(parsed, [], `Задача плана ${item.key}`);
         const owner = target && boardOwner(target, s);
         if (owner && (parsed.repositoryId !== owner || parsed.scope === 'workspace'))
           throw new DomainError('Локальная доска принимает только задачи своего компонента');
@@ -1131,6 +1113,7 @@ export class DevContour {
     const parsed = taskIngest.parse(input);
     repository(this.config, parsed.repositoryId);
     validateTaskContext(this.config, { ...parsed, preparation: undefined });
+    this.assertWithinRole(parsed);
     return this.store.change('task.created', (s) => {
       const r = activeRevision(s, boardId);
       const owner = board(s, boardId).repositoryId;
@@ -1156,6 +1139,22 @@ export class DevContour {
       return t;
     });
   }
+  /**
+   * Добавленные пути области записи задачи должны лежать в области её роли
+   * (F15): путь вне неё исполнитель не вправе изменить, и задача тратила бы
+   * попытки на отказ по области. Отказ называет роль, которой путь
+   * принадлежит, — нужна отдельная задача этой роли. `kept` — пути прежней
+   * постановки той же роли, которые правка не трогает.
+   */
+  private assertWithinRole(
+    task: Pick<TaskInput, 'role' | 'repositoryId' | 'writePaths'>,
+    kept: string[] = [],
+    label = 'Область записи задачи',
+  ) {
+    const added = outsideRoleScope(this.config, task).filter((p) => !kept.includes(p));
+    if (added.length)
+      throw new DomainError(label + ': ' + roleScopeAdvice(this.config, task, added), 400);
+  }
   editTask(id: string, input: unknown, expectedDigest: string) {
     const parsed = taskIngest.parse(input);
     repository(this.config, parsed.repositoryId);
@@ -1168,6 +1167,9 @@ export class DevContour {
         );
       if (specDigest(t) !== expectedDigest)
         throw new DomainError('Задача изменилась. Обновите страницу.');
+      // Новые пути — только в области роли; прежние (записанные до этого
+      // правила или до сужения роли) правка не отвергает.
+      this.assertWithinRole(parsed, t.role === parsed.role ? t.writePaths : undefined);
       const ownerBoard = s.boards.find((b) => b.revisions.some((r) => r.taskIds.includes(t.id)));
       if (
         ownerBoard?.repositoryId &&
@@ -1355,9 +1357,15 @@ export class DevContour {
       // без неё принятая работа держала бы историю непроверенной навсегда.
       storyCheck(selected.map((id) => task(s, id)).filter((t) => t.status === 'draft'));
       const repinned: string[] = [];
+      const restarted: { taskId: string; spent: number }[] = [];
+      const kept: { taskId: string; spent: number; reason: string }[] = [];
       for (const id of selected) {
         const t = task(s, id);
         if (t.status === 'draft') {
+          // Постановка черновика до закрепления контрактов: с ней сверяется
+          // снимок с ответом, перенесённым в этот черновик (F14). ID
+          // контрактов входят в постановку, новая редакция — новый ID.
+          const draftSpec = specDigest(t);
           t.contractDigests = this.approvable(s, t);
           t.approvedAt = now();
           t.approvedDigest = specDigest(t);
@@ -1366,6 +1374,10 @@ export class DevContour {
           t.approval = approval;
           t.status = 'ready';
           closeEpisodeIfBasisChanged(t, now());
+          rebindInputContext(t, draftSpec);
+          const outcome = this.restartAttempts(s, t);
+          if (outcome && 'restarted' in outcome) restarted.push(outcome.restarted);
+          if (outcome && 'kept' in outcome) kept.push(outcome.kept);
         } else if (this.approvalStale(t, policy)) {
           // Повторное утверждение после смены политики: постановка и
           // закреплённые контракты прежние, утверждается план при новой
@@ -1375,8 +1387,54 @@ export class DevContour {
           repinned.push(t.id);
         }
       }
-      return { boardId, revision: r.number, approval, ...(repinned.length ? { repinned } : {}) };
+      return {
+        boardId,
+        revision: r.number,
+        approval,
+        ...(repinned.length ? { repinned } : {}),
+        ...(restarted.length ? { attemptsRestarted: restarted } : {}),
+        ...(kept.length ? { attemptsKept: kept } : {}),
+      };
     });
+  }
+  /**
+   * Счётчик попыток после нового утверждения изменённой постановки (D47).
+   * Попытки, потраченные на прежнее основание (постановка и закреплённые
+   * контракты, как у эпизода разбора), к новой постановке не относятся: она
+   * прошла независимое ревью плана заново, как корректировка, которая тоже
+   * начинает с нуля. Поэтому счётчик начинается заново — автоматически не
+   * больше одного раза за жизнь задачи: иначе ведущий покупал бы попытки
+   * косметическими правками. Прежние попытки остаются в истории, перезапуск —
+   * в журнале (`attemptsRestarted`), а отказ в нём — `attemptsKept` с причиной.
+   *
+   * Не перезапускается: исчерпанный счётчик (остановка для человека,
+   * `retry --reset` с причиной), возврат из отмены человеком (D46), второй
+   * перезапуск. То же утверждение той же постановки счётчик не трогает.
+   * Бюджеты и предел остановок вопросом считаются по истории.
+   */
+  private restartAttempts(
+    s: DevContourState,
+    t: Task,
+  ):
+    | { restarted: { taskId: string; spent: number } }
+    | { kept: { taskId: string; spent: number; reason: string } }
+    | undefined {
+    if (t.attempt <= 0) return undefined;
+    const last = s.runs.findLast((r) => r.taskId === t.id && r.episodeBasis);
+    if (!last || last.episodeBasis === episodeBasisOf(t)) return undefined;
+    const spent = t.attempt;
+    const reason =
+      t.attempt >= this.config.maxAttempts
+        ? 'exhausted'
+        : t.restartBlocked
+          ? t.restartBlocked
+          : (t.attemptRestarts ?? 0) >= 1
+            ? 'restart-limit'
+            : undefined;
+    if (reason) return { kept: { taskId: t.id, spent, reason } };
+    t.attempt = 0;
+    t.attemptRestarts = (t.attemptRestarts ?? 0) + 1;
+    return { restarted: { taskId: t.id, spent } };
   }
   impact(boardId: string, roots: string[]) {
     const s = this.store.read();
@@ -2146,6 +2204,12 @@ export class DevContour {
       // digest контрактов, и задача продолжала бы закреплять одну редакцию,
       // ссылаясь на другую. Операция идемпотентна.
       const approved = t.approvedDigest;
+      // Отмена человеком (или без записанного актёра — D46) — его решение:
+      // возврат её не отменяет счёт попыток, новая постановка не перезапустит
+      // его автоматически (D47).
+      const humanCancel =
+        t.status === 'cancelled' && t.cancelledBy !== 'host' && t.cancelledBy !== 'graph';
+      if (humanCancel) t.restartBlocked = 'human-cancel';
       t.status = 'draft';
       t.cancelledBy = undefined;
       t.approvedDigest = undefined;
@@ -2156,7 +2220,12 @@ export class DevContour {
       // другую: исполнитель получил бы противоречащие обязательства.
       t.contractDigests = {};
       t.failure = undefined;
-      return { taskId: id, reason: reason.trim(), wasApproved: Boolean(approved) };
+      return {
+        taskId: id,
+        reason: reason.trim(),
+        wasApproved: Boolean(approved),
+        ...(humanCancel ? { humanCancel: true } : {}),
+      };
     });
   }
   /**

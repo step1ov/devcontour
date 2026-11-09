@@ -463,7 +463,9 @@ export function workflowMetrics(
       (t) =>
         !t.sharedCompletion && ['done', 'failed', 'cancelled'].includes(t.status) && t.attempt > 0,
     ).length
-      ? done.filter((t) => !t.sharedCompletion && t.attempt === 1).length /
+      ? // Задача, счёт которой перезапущен новой постановкой (D47), с первой
+        // попытки не принята: её попытки прежней постановки — в истории.
+        done.filter((t) => !t.sharedCompletion && t.attempt === 1 && !t.attemptRestarts).length /
         tasks.filter(
           (t) =>
             !t.sharedCompletion &&
