@@ -883,6 +883,35 @@ test('S9 исчерпанное задание на задаче, отменён
   }
 });
 
+test('S9 все задачи ревизии отменены, одна после выдачи: карточка не предлагает «Принять доску»', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('All cancelled board');
+    const stopped = f.h.addTask(b.id, input('Hits the budget'));
+    const other = f.h.addTask(b.id, input('Dropped'));
+    f.h.approve(b.id);
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex', maxAttempts: 3 });
+    f.h.pause(false);
+    const run = f.h.claim('test')!;
+    assert.equal(run.taskId, stopped.id);
+    f.h.fail(run.id, run.token, 'workspace budget exceeded', false, 'budget');
+    f.h.cancel(stopped.id, 'Budget stop', 'host');
+    f.h.cancel(other.id, 'Not needed', 'host');
+    flow.fail(flow.claim(job.key, job.owner)!, `${stopped.id}: Работа остановлена человеком.`);
+    const card = byKey(await engineItems(f), `board:${b.id}`)!;
+    assert.ok(card, 'карточка решения по доске');
+    assert.equal(card.actor, 'operator');
+    assert.match(
+      card.reason,
+      /Все задачи ревизии отменены — принять её нечем\. Решите: поручите ведущему агенту новую ревизию доски или поднимите предел бюджета .* ведущий повторит задачу и задание\.$/,
+    );
+    assert.doesNotMatch(card.reason, /Принять доску|примите ревизию/);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('S17 preview: нет Docker — доступ оператора; потерянная версия — ведущему; новая выкладка снимает', async () => {
   const f = fixture();
   try {
