@@ -1,4 +1,9 @@
-import { preparationBinding, featureId, type PreparationState } from './preparation-model.ts';
+import {
+  preparationBinding,
+  preparationRequest,
+  featureId,
+  type PreparationState,
+} from './preparation-model.ts';
 import type { FailureKind } from './failure.ts';
 import { priceSchema } from './usage.ts';
 import type { ReviewInspection } from './review.ts';
@@ -227,6 +232,7 @@ export const relatedRepositoriesTooMany = `Связанных компонент
  * продолжает загружаться.
  */
 export const taskIngest = taskInput.extend({
+  preparation: preparationRequest.optional(),
   relatedRepositories: z
     .array(id)
     .max(TASK_LIMITS.relatedRepositories, relatedRepositoriesTooMany)

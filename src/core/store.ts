@@ -229,6 +229,12 @@ export class Store {
   // 'full' once the technical configuration adds the delivery journal.
   projectionKind?: 'product' | 'full';
   projectionError?: string;
+  /**
+   * Ключи изменений продукта, уже занятые папками `docs/changes` на диске
+   * (например, закоммиченными прежней базой). Номер нового изменения идёт
+   * после них. Подключает проекция постановки; без неё — только состояние.
+   */
+  occupiedChangeKeys?: () => string[];
   constructor(
     path: string,
     locations?: ComponentLocation[],

@@ -74,6 +74,8 @@ function approveDesignTrack(
   approveStage(p, id, 'design');
 }
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
+import { AgentService } from '../src/application/agent.ts';
+import { developmentStatus } from '../src/web/development-status.ts';
 import { Workspace } from '../src/core/workspace.ts';
 import { specDigest } from '../src/core/service.ts';
 import { quickResult, quickSteps } from '../src/runner/quick.ts';
@@ -1140,6 +1142,349 @@ test('Следующий этап принятой доски: отказ task_c
     assert.match(step('execution').detail, /Принято задач: 1 из 2/);
     assert.equal(step('result').state, 'waiting');
     assert.match(step('result').detail, /Принято задач: 1 из 2/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Новое изменение в проработке не делает устаревшим задание доски утверждённого изменения', () => {
+  const f = fixture(),
+    p = new Preparation(f.store);
+  try {
+    const first = approvePreparation(p);
+    const b = f.h.createBoard('Первое изменение', '', 'main');
+    f.h.addTask(b.id, { ...input(), featureId: 'member-block' });
+    f.h.approve(b.id);
+    const flow = new LeadWorkflow(f.h),
+      request = { kind: 'board' as const, id: b.id, authorRuntime: 'codex' as const };
+    const job = flow.start(request);
+    const digest = flow.input('board', b.id).digest;
+    // Второе изменение заводится и становится активным, пока первое в работе.
+    p.execute('preparation_quick', {
+      requestKey: 'second-change',
+      title: 'Второе изменение',
+      repository: '/tmp/second',
+      brief: 'Второе поручение во время работы над первым',
+      criterion: 'Первое продолжает работу',
+    });
+    const s = f.store.read();
+    assert.notEqual(s.preparation!.activeChangeId, first);
+    // Вход задания первой доски от него не зависит: задание продолжает работу.
+    assert.equal(flow.input('board', b.id).digest, digest);
+    const claimed = flow.claim(job.key, 'main');
+    assert.ok(claimed, 'задание первой доски выдаётся');
+    assert.equal(flow.get(job.key, 'main').status, 'running');
+    assert.equal(flow.staleBoards().size, 0);
+    // Очередь запускается: разработка первого изменения готова.
+    f.h.pause(true);
+    f.h.pause(false);
+    // Повторное утверждение плана первой доски тоже не требует активного изменения.
+    f.h.approve(b.id);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Перезапуск, пока активное изменение в проработке, подключает технику по применённой конфигурации', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-restart-')),
+    workspace = join(root, 'workspace');
+  const repo = join(root, 'product');
+  mkdirSync(repo);
+  const git = (...args: string[]) =>
+    execFileSync('git', ['-C', repo, ...args], {
+      stdio: 'pipe',
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: 'Fixture',
+        GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
+        GIT_COMMITTER_NAME: 'Fixture',
+        GIT_COMMITTER_EMAIL: 'fixture@example.invalid',
+      },
+    });
+  git('init', '-b', 'main');
+  writeFileSync(join(repo, 'README.md'), 'Product fixture');
+  git('add', '.');
+  git('commit', '-m', 'initial');
+  mkdirSync(join(workspace, '.devcontour-local'), { recursive: true });
+  // Первое изменение утверждено, конфигурация применена; второе — в проработке и активно.
+  let store = preparationStore(join(workspace, '.devcontour-local'));
+  approvePreparation(new Preparation(store));
+  store.close();
+  writeFileSync(
+    join(workspace, '.devcontour-local/config.json'),
+    JSON.stringify(
+      config({
+        repository: repo,
+        workspaceRoot: realpathSync(workspace),
+        targetBranch: 'devcontour/integration',
+        storage: 'component',
+      }),
+    ),
+  );
+  store = preparationStore(join(workspace, '.devcontour-local'));
+  new Preparation(store).execute('preparation_create', { title: 'Второе изменение' });
+  store.close();
+  const app = await startWorkspace(workspace, { port: 0, workspaceMode: 'separate' });
+  try {
+    const deadline = Date.now() + 20000;
+    let state: { engineConnected?: boolean; developmentReady?: boolean; startupError?: string } =
+      {};
+    while (Date.now() < deadline) {
+      state = (await (await fetch(app.url + '/api/preparation')).json()) as typeof state;
+      if (state.startupError) throw new Error(state.startupError);
+      if (state.engineConnected) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    // Активное изменение не готово, но техника подключена: работа первого доступна.
+    assert.equal(state.developmentReady, false);
+    assert.equal(state.engineConnected, true);
+    const response = await fetch(app.url + '/api/agent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-DevContour-Request': '1' },
+      body: JSON.stringify({ operation: 'board_create', input: { title: 'Работа первого' } }),
+    });
+    assert.equal(response.status, 200, await response.clone().text());
+  } finally {
+    await app.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Задачи доски привязываются к изменению доски, а не к активному; правка с preparation перепривязывает', () => {
+  const f = fixture(),
+    p = new Preparation(f.store);
+  try {
+    const first = approvePreparation(p);
+    const plan = (title: string, key: string) => ({
+      title,
+      description: 'Цель: ' + title,
+      tasks: [
+        { ...input('Task ' + key), featureId: 'member-block', key, dependsOn: [], contracts: [] },
+      ],
+    });
+    const { boardId } = f.h.importPlan(plan('Release', 'one'));
+    const one = f.store.read().tasks[0];
+    assert.equal(one.preparation?.changeId, first);
+    f.h.approve(boardId);
+    complete(f.h, one.id);
+    f.h.accept(boardId, MERGED);
+    // Второе изменение утверждено и активно.
+    const second = approvePreparation(p);
+    assert.notEqual(second, first);
+    assert.equal(f.store.read().preparation!.activeChangeId, second);
+    const api = new AgentService(f.h);
+    // Следующий этап доски первого изменения — к первому изменению.
+    const stage = api.execute({
+      operation: 'plan_import',
+      input: { plan: plan('Stage two', 'two'), boardId },
+    });
+    assert.equal(stage.changeId, first);
+    let state = f.store.read();
+    const two = state.tasks.find((t) => t.title === 'Task two')!;
+    assert.deepEqual(two.preparation, developmentBinding(state, first));
+    // Задача, добавленная в ревизию без preparation, — тоже к изменению доски;
+    // привязка видна в ответе.
+    const added = api.execute({
+      operation: 'task_create',
+      input: { boardId, task: { ...input('Task three'), featureId: 'member-block' } },
+    });
+    assert.deepEqual(added.preparation, {
+      changeId: first,
+      key: state.preparation!.changes[0].key,
+    });
+    // Доска ведёт одно изменение: задача другого изменения на ней — отказ.
+    assert.throws(
+      () =>
+        api.execute({
+          operation: 'task_edit',
+          input: {
+            taskId: two.id,
+            expectedDigest: specDigest(two),
+            task: {
+              ...input('Task two'),
+              featureId: 'member-block',
+              preparation: { changeId: second },
+            },
+          },
+        }),
+      /ведёт изменение/,
+    );
+    assert.throws(
+      () =>
+        api.execute({
+          operation: 'task_create',
+          input: {
+            boardId,
+            task: {
+              ...input('Task mixed'),
+              featureId: 'member-block',
+              preparation: { changeId: second },
+            },
+          },
+        }),
+      /ведёт изменение/,
+    );
+    // Переданные устаревшие digests — отказ, а не молчаливая замена.
+    assert.throws(
+      () =>
+        api.execute({
+          operation: 'task_edit',
+          input: {
+            taskId: two.id,
+            expectedDigest: specDigest(two),
+            task: {
+              ...input('Task two'),
+              featureId: 'member-block',
+              preparation: { ...developmentBinding(state, first)!, productDigest: '0'.repeat(64) },
+            },
+          },
+        }),
+      /устарела/,
+    );
+    // Новая доска — к активному изменению или к названному changeId.
+    const fresh = api.execute({ operation: 'plan_import', input: { plan: plan('Other', 'four') } });
+    assert.equal(fresh.changeId, second);
+    // Ошибочно привязанная задача перепривязывается правкой с одним changeId:
+    // других живых задач на её доске нет, specDigest меняется.
+    state = f.store.read();
+    const four = state.tasks.find((t) => t.title === 'Task four')!;
+    const edited = api.execute({
+      operation: 'task_edit',
+      input: {
+        taskId: four.id,
+        expectedDigest: specDigest(four),
+        task: {
+          ...input('Task four'),
+          featureId: 'member-block',
+          preparation: { changeId: first },
+        },
+      },
+    });
+    assert.notEqual(edited.specDigest, specDigest(four));
+    assert.equal((edited.preparation as { changeId: string }).changeId, first);
+    state = f.store.read();
+    assert.deepEqual(
+      state.tasks.find((t) => t.id === four.id)!.preparation,
+      developmentBinding(state, first),
+    );
+    // Правка без preparation сохраняет собственное изменение задачи, хотя активно другое.
+    const again = state.tasks.find((t) => t.id === four.id)!;
+    api.execute({
+      operation: 'task_edit',
+      input: {
+        taskId: four.id,
+        expectedDigest: specDigest(again),
+        task: {
+          ...input('Task four'),
+          featureId: 'member-block',
+          description: 'Уточнённое описание задачи',
+        },
+      },
+    });
+    assert.equal(f.store.read().tasks.find((t) => t.id === four.id)!.preparation?.changeId, first);
+    const named = api.execute({
+      operation: 'plan_import',
+      input: { plan: plan('Named', 'five'), changeId: first },
+    });
+    assert.equal(named.changeId, first);
+    assert.equal(
+      f.store.read().tasks.find((t) => t.title === 'Task five')!.preparation?.changeId,
+      first,
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('plan_import с changeId вне продуктового процесса — отказ', () => {
+  const f = fixture();
+  try {
+    assert.throws(
+      () =>
+        new AgentService(f.h).execute({
+          operation: 'plan_import',
+          input: {
+            plan: {
+              title: 'Release',
+              description: 'Цель: Release',
+              tasks: [{ ...input('Task one'), key: 'one', dependsOn: [], contracts: [] }],
+            },
+            changeId: 'PC-missing',
+          },
+        }),
+      /только в продуктовом процессе/,
+    );
+    assert.equal(f.store.read().boards.length, 0);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Корректировка при заново открытой постановке изменения оригинала не отказывает: замена без привязки', () => {
+  const f = fixture(),
+    p = new Preparation(f.store);
+  try {
+    const changeId = approvePreparation(p);
+    const { boardId } = f.h.importPlan({
+      title: 'Release',
+      description: 'Цель: Release',
+      tasks: [
+        {
+          ...input('Task one'),
+          featureId: 'member-block',
+          key: 'one',
+          dependsOn: [],
+          contracts: [],
+        },
+      ],
+    });
+    const one = f.store.read().tasks[0];
+    f.h.approve(boardId);
+    complete(f.h, one.id);
+    f.h.accept(boardId, MERGED);
+    // Постановку изменения открывают заново: его разработка больше не готова.
+    p.execute('preparation_product', {
+      changeId,
+      expectedDigest: f.store.read().preparation!.changes[0].product.at(-1)!.digest,
+      reason: 'Уточнение постановки',
+      content: product,
+    });
+    assert.throws(() => developmentBinding(f.store.read(), changeId), /продуктовую/);
+    f.h.correct(boardId, [one.id], 'Исправить результат по уточнению');
+    const replacement = f.store.read().tasks.find((t) => t.supersedes === one.id)!;
+    assert.equal(replacement.status, 'draft');
+    assert.equal(replacement.preparation, undefined);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Панель: пока активное изменение ждёт согласований, раздел разработки называет утверждённые изменения', () => {
+  const f = fixture(),
+    p = new Preparation(f.store);
+  try {
+    const first = approvePreparation(p);
+    p.execute('preparation_create', { title: 'Второе изменение' });
+    const view = p.status();
+    assert.ok(view.enabled);
+    assert.equal(view.developmentReady, false);
+    const key = f.store.read().preparation!.changes[0].key;
+    assert.deepEqual(view.readyChanges, [{ id: first, key, title: 'Модерация чата' }]);
+    const shown = developmentStatus({ ...view, engineConnected: true });
+    assert.equal(shown.title, 'Разработка этого изменения ещё не разрешена');
+    assert.match(shown.text, new RegExp(`Работа утверждённых изменений продолжается: ${key}`));
+    // Показанное утверждённое изменение — разрешено; без готовых — прежний текст.
+    const own = p.status(first);
+    assert.ok(own.enabled);
+    assert.equal(developmentStatus({ ...own, engineConnected: true }).step, 'Разрешена');
+    assert.deepEqual(
+      developmentStatus({ developmentReady: false, blocker: 'Нужна постановка', readyChanges: [] }),
+      {
+        title: 'Разработка ещё не разрешена',
+        text: 'Нужна постановка',
+        step: 'Ожидает согласований',
+      },
+    );
   } finally {
     f.cleanup();
   }

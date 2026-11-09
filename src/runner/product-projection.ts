@@ -6,6 +6,7 @@ import {
   lstatSync,
   realpathSync,
   existsSync,
+  readdirSync,
 } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -342,7 +343,71 @@ export function renderChangeJournal(change: ProductChange) {
 }
 // The index is the thing a folder listing cannot give: which change is open,
 // which is awaiting a decision and which is already approved.
-export function renderIndex(changes: ProductChange[]) {
+type IndexRow = Pick<ProductChange, 'key' | 'title' | 'createdAt'> & {
+  product: { number: number; status: keyof typeof names }[];
+  architecture: { number: number; status: keyof typeof names }[];
+  design?: { number: number; status: keyof typeof names }[];
+};
+const folderKey = /^r-\d{3,}\.[a-z0-9][a-z0-9-]{0,48}$/;
+/** Папки изменений в docs/changes: ключи, занятые на диске (без symlink). */
+export function changeFolders(root: string) {
+  const dir = join(root, 'docs', 'changes');
+  try {
+    if (lstatSync(dir).isSymbolicLink()) return [];
+    return readdirSync(dir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && folderKey.test(e.name))
+      .map((e) => e.name)
+      .sort();
+  } catch {
+    return [];
+  }
+}
+const revisions = (value: unknown) =>
+  Array.isArray(value)
+    ? value.flatMap((r: unknown) => {
+        const item = r as { number?: unknown; status?: unknown } | null;
+        return item &&
+          typeof item.number === 'number' &&
+          typeof item.status === 'string' &&
+          item.status in names
+          ? [{ number: item.number, status: item.status as keyof typeof names }]
+          : [];
+      })
+    : [];
+/**
+ * Изменения, закоммиченные в репозиторий, но не принадлежащие этой базе
+ * (например, после свежего `.devcontour-local`): их строки индекс сохраняет по
+ * `change.json` папки. Нечитаемый файл строки не даёт — папку проекция не трогает.
+ */
+export function committedChanges(root: string, owned: readonly string[]): IndexRow[] {
+  return changeFolders(root)
+    .filter((key) => !owned.includes(key))
+    .flatMap((key) => {
+      const file = join(root, 'docs', 'changes', key, 'change.json');
+      try {
+        if (lstatSync(file).isSymbolicLink()) return [];
+        const value = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+        return [
+          {
+            key,
+            title: typeof value.title === 'string' ? value.title : key,
+            // Поля закоммиченного файла — содержимое репозитория: в строку
+            // таблицы попадают только дата ISO и название без разрывов строк и `|`.
+            createdAt:
+              typeof value.createdAt === 'string' && /^\d{4}-\d{2}-\d{2}/.test(value.createdAt)
+                ? value.createdAt.slice(0, 10)
+                : '',
+            product: revisions(value.product),
+            architecture: revisions(value.architecture),
+            design: revisions(value.design),
+          },
+        ];
+      } catch {
+        return [];
+      }
+    });
+}
+export function renderIndex(changes: IndexRow[]) {
   return [
     '# Изменения продукта',
     '',
@@ -355,7 +420,7 @@ export function renderIndex(changes: ProductChange[]) {
     ...changes.map((c) => {
       const state = (r?: { number: number; status: keyof typeof names }) =>
         r ? 'v' + r.number + ' · ' + names[r.status] : '—';
-      return `| [\`${c.key}\`](./${c.key}/) | ${line(c.title)} | ${state(c.product.at(-1))} | ${state(c.architecture.at(-1))} | ${state((c.design ?? []).at(-1))} | ${c.createdAt.slice(0, 10)} |`;
+      return `| [\`${c.key}\`](./${c.key}/) | ${line(c.title)} | ${state(c.product.at(-1))} | ${state(c.architecture.at(-1))} | ${state((c.design ?? []).at(-1))} | ${line(c.createdAt).slice(0, 10)} |`;
     }),
     '',
   ].join('\n');
@@ -383,7 +448,14 @@ function atomicWrite(destination: string, content: string) {
 export function writeProduct(state: DevContourState, root: string) {
   const changes = state.preparation?.changes ?? [];
   if (!changes.length) return;
-  atomicWrite(join(directory(root), 'README.md'), renderIndex(changes));
+  const rows: IndexRow[] = [
+    ...committedChanges(
+      root,
+      changes.map((c) => c.key),
+    ),
+    ...changes,
+  ].sort((a, b) => a.key.localeCompare(b.key));
+  atomicWrite(join(directory(root), 'README.md'), renderIndex(rows));
   for (const change of changes) {
     const dir = directory(root, change.key);
     atomicWrite(join(dir, 'product.md'), renderProduct(change));

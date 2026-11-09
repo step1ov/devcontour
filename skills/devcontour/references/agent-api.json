@@ -3071,7 +3071,7 @@
     },
     {
       "name": "plan_import",
-      "description": "Import a draft task DAG. Without boardId it opens a new board; with boardId of an accepted board it opens the next stage as that board's next revision, so one release stays on one board. In a product change, imported tasks are bound to the active change exactly as task_create binds them. This does not approve the plan or execute agents. Do not blindly retry creation after an uncertain response.",
+      "description": "Import a draft task DAG. Without boardId it opens a new board; with boardId of an accepted board it opens the next stage as that board's next revision, so one release stays on one board. In a product change, imported tasks are bound to changeId when given, otherwise to the change of the board's tasks (next stage), otherwise to the active change; the response names changeId. This does not approve the plan or execute agents. Do not blindly retry creation after an uncertain response.",
       "readOnly": false,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -3279,6 +3279,10 @@
           "boardId": {
             "type": "string",
             "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "changeId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
           }
         },
         "required": [
@@ -3318,7 +3322,7 @@
     },
     {
       "name": "task_create",
-      "description": "Add a draft task to an active board; DAG and component ownership are validated. An accepted board takes no tasks: open the next stage with plan_import and its boardId; board_correct only changes accepted results.",
+      "description": "Add a draft task to an active board; DAG and component ownership are validated. In a product change the task is bound to task.preparation.changeId when given (changeId alone is enough; supplied digests must equal the current approved ones), otherwise to the change of the board's tasks, otherwise to the active change; a change other than that of the board's live tasks is refused; the response names the binding. An accepted board takes no tasks: open the next stage with plan_import and its boardId; board_correct only changes accepted results.",
       "readOnly": false,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -3360,10 +3364,7 @@
                   }
                 },
                 "required": [
-                  "changeId",
-                  "productDigest",
-                  "architectureDigest",
-                  "referencesDigest"
+                  "changeId"
                 ],
                 "additionalProperties": false
               },
@@ -3647,7 +3648,7 @@
     },
     {
       "name": "task_edit",
-      "description": "Edit a draft task using the specDigest read from task_briefing. Stale edits are rejected.",
+      "description": "Edit a draft task using the specDigest read from task_briefing. Stale edits are rejected. task.preparation.changeId rebinds the task to that product change (changeId alone is enough; stale supplied digests are refused, as is a change other than that of the board's other live tasks); without it the task keeps its own change. The response names the binding.",
       "readOnly": false,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -3693,10 +3694,7 @@
                   }
                 },
                 "required": [
-                  "changeId",
-                  "productDigest",
-                  "architectureDigest",
-                  "referencesDigest"
+                  "changeId"
                 ],
                 "additionalProperties": false
               },

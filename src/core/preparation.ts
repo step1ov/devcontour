@@ -32,6 +32,16 @@ const hash = (value: unknown) =>
 const now = () => new Date().toISOString();
 const changeKeyOf = (number: number, slug: string) =>
   'r-' + String(number).padStart(3, '0') + '.' + slug;
+const keyNumber = (key: string) => Number(/^r-(\d+)\./.exec(key)?.[1] ?? 0);
+/**
+ * Номер следующего изменения: после изменений состояния и папок, уже
+ * лежащих в docs/changes (закоммиченных прежней базой). Иначе свежая база
+ * над таким репозиторием повторяла бы занятый ключ.
+ */
+function nextChangeNumber(store: Store, changes: ProductChange[]) {
+  const keys = [...changes.map((c) => c.key), ...(store.occupiedChangeKeys?.() ?? [])];
+  return Math.max(changes.length, ...keys.map(keyNumber)) + 1;
+}
 // States saved before the journal existed carry no arrays; normalise on access so
 // every caller can append without re-checking.
 function journal(c: ProductChange) {
@@ -136,6 +146,22 @@ export function developmentBinding(
     conceptDigest: concept.digest,
     designDigest: design.digest,
   };
+}
+/**
+ * Разработка хоть одного изменения готова: её утверждения пройдены. Изменения
+ * независимы — новое изменение в проработке (даже активное) не останавливает
+ * работу над уже утверждённым. Нет готового — отказ причиной активного.
+ */
+export function assertAnyDevelopmentReady(s: DevContourState) {
+  if (!s.preparation) return;
+  for (const c of s.preparation.changes)
+    try {
+      developmentBinding(s, c.id);
+      return;
+    } catch (error) {
+      if (!(error instanceof DomainError)) throw error;
+    }
+  developmentBinding(s);
 }
 export function assertTaskPreparation(
   s: DevContourState,
@@ -709,6 +735,20 @@ export class Preparation {
                 ? 'concept'
                 : 'design',
       developmentReady: ready,
+      // Изменения независимы: разработка уже утверждённых идёт, пока другое
+      // (даже активное) ждёт согласований. Панель называет их, а не одну
+      // готовность показанного изменения.
+      readyChanges: p.changes
+        .filter((item) => {
+          try {
+            developmentBinding(s, item.id);
+            return true;
+          } catch (error) {
+            if (error instanceof DomainError) return false;
+            throw error;
+          }
+        })
+        .map((item) => ({ id: item.id, key: item.key, title: item.title })),
       blocker,
       // Отменённая работа не входит в объём: план, выпущенный заново, оставляет
       // за собой прежние задачи, и считать их значит показывать «0 из 70» там,
@@ -778,7 +818,7 @@ export class Preparation {
           selected = 'PC-' + randomUUID();
           p.changes.push({
             id: selected,
-            key: changeKeyOf(p.changes.length + 1, slugify(v.title)),
+            key: changeKeyOf(nextChangeNumber(this.store, p.changes), slugify(v.title)),
             title: v.title,
             createdAt: now(),
             product: [],
@@ -804,7 +844,7 @@ export class Preparation {
           selected = 'PC-' + randomUUID();
           p.changes.push({
             id: selected,
-            key: changeKeyOf(p.changes.length + 1, v.slug ?? slugify(v.title)),
+            key: changeKeyOf(nextChangeNumber(this.store, p.changes), v.slug ?? slugify(v.title)),
             title: v.title,
             createdAt: now(),
             product: [],

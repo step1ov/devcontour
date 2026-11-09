@@ -1389,7 +1389,15 @@ async function main() {
   }
   if (operation === 'import-plan') {
     const input = await readAgentJson(resolve(option('--file', 'plan.json')));
-    console.log(JSON.stringify(h.importPlan(input, option('--board', '') || undefined)));
+    console.log(
+      JSON.stringify(
+        h.importPlan(
+          input,
+          option('--board', '') || undefined,
+          option('--change', '') || undefined,
+        ),
+      ),
+    );
     store.close();
     return;
   }
