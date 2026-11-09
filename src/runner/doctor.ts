@@ -45,7 +45,7 @@ import {
   type AppliedConfigKeys,
 } from '../core/service.ts';
 import { repository } from '../core/repositories.ts';
-import { artifactGuard, contractSize } from './agent-control.ts';
+import { artifactGuard, CONTINUATION, contractSize, thousands } from './agent-control.ts';
 import { unguardedMessage } from './artifact-closure.ts';
 import {
   Store,
@@ -1094,7 +1094,12 @@ export function contractSizeChecks(contracts: DevContourState['contracts']): Che
     .filter((c) => !supersededBy(contracts, c.id))
     .flatMap((c) => {
       const size = contractSize(c.content);
-      const detail = size.refusal ?? size.warning;
+      // Текст отказа регистрации («не будет зарегистрирован») здесь неверен:
+      // контракт уже зарегистрирован и действует, отказ получит следующая
+      // редакция.
+      const detail = size.refusal
+        ? `документ — ${thousands(size.chars)} знаков при пределе ${thousands(size.max)}, длиннее на ${thousands(size.chars - size.max)}. Контракт зарегистрирован и действует, но следующая его редакция будет отклонена до ревью. ${CONTINUATION}.`
+        : size.warning;
       return detail
         ? [
             {

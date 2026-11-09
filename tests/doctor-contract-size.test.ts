@@ -1,7 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { CONTRACT_CONTENT_MAX, CONTRACT_CONTENT_WARN, type Contract } from '../src/core/model.ts';
-import { contractSizeChecks } from '../src/runner/doctor.ts';
+import { contractSizeChecks, doctor } from '../src/runner/doctor.ts';
+import { config } from './helpers.ts';
 
 const contract = (id: string, chars: number, extra: Partial<Contract> = {}): Contract => ({
   id,
@@ -44,4 +48,37 @@ test('doctor не предупреждает о заменённой редак�
     contractSizeChecks([current, old]).map((c) => c.id),
     ['contract-size:C-api-1'],
   );
+});
+
+test('уже зарегистрированный контракт сверх предела: doctor не пишет «не будет зарегистрирован»', () => {
+  const [check] = contractSizeChecks([contract('C-over', CONTRACT_CONTENT_MAX + 100)]);
+  assert.equal(check?.status, 'degraded');
+  assert.match(check.detail, /60 100 знаков при пределе 60 000, длиннее на 100/);
+  assert.match(
+    check.detail,
+    /зарегистрирован и действует, но следующая его редакция будет отклонена до ревью/,
+  );
+  assert.doesNotMatch(check.detail, /не будет зарегистрирован|ревью не начато/);
+});
+
+test('doctor() показывает contract-size по состоянию и готовность не снимает', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-contract-size-'));
+  try {
+    // Роли demo: остальные проверки doctor не зовут внешних runtime.
+    const c = config();
+    const leader = { owner: 'server', leaseUntil: Date.now() + 60000 };
+    const run = async (contracts: Contract[]) =>
+      doctor(c, root, false, { leader, runs: [], contracts });
+    const without = await run([]);
+    const near = await run([contract('C-near', CONTRACT_CONTENT_WARN)]);
+    assert.equal(
+      without.checks.some((x) => x.id.startsWith('contract-size:')),
+      false,
+    );
+    const check = near.checks.find((x) => x.id === 'contract-size:C-near');
+    assert.equal(check?.status, 'degraded', JSON.stringify(near.checks.map((x) => x.id)));
+    assert.equal(near.ready, without.ready);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
