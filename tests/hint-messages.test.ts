@@ -369,7 +369,7 @@ test('Подсказки шага: новая конфигурация setup п�
  * Образцы нового кода `job-cancelled-task` добавлены; прежние образцы байтово
  * прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = '50eccc73498e8f771c9dab9ac16c9a863a91141cf48c10f0407e6cd47d502443';
+const ENGLISH_SAMPLES_SHA256 = 'e12ef1abfd5234af32260e3e3c2541f131d89979b2e48e0e5fcc1f177d1a6c11';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(
@@ -381,6 +381,20 @@ test('Подсказки шага: английские тексты образ�
     .map((step) => hintDetail(step, 'en'))
     .join('\n');
   assert.equal(createHash('sha256').update(all).digest('hex'), ENGLISH_SAMPLES_SHA256);
+});
+
+test('Подсказки шага: job-cancelled-task не даёт ведущему команду повтора отмены человека', () => {
+  for (const step of samples['job-cancelled-task'])
+    for (const locale of hintLocales) {
+      const text = hintDetail(step, locale);
+      const lead = step.params.by === 'host' || step.params.by === 'graph';
+      // Ведущему — только свой повтор (`--by host`, его проверяет сервис);
+      // повтор отмены человека — действие пользователя в панели, без команды.
+      for (const command of text.match(/devcontour retry[^,;)]*/g) ?? [])
+        assert.match(command, /--by host/, `${locale} ${step.params.by}: ${command}`);
+      if (!lead) assert.doesNotMatch(text, /devcontour retry/, `${locale} ${step.params.by}`);
+      assert.doesNotMatch(text, /devcontour accept/, `${locale} ${step.params.by}`);
+    }
 });
 
 test('Подсказки шага: host.next под маской секретов, длинная причина отказа усечена', () => {

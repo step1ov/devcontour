@@ -554,6 +554,21 @@ function cancelledStop(
 }
 
 /**
+ * Исчерпанное задание доски (`job-exhausted`), цикл которого стоит на задаче,
+ * отменённой после выдачи: параметры той же остановки, что у
+ * `job-cancelled-task`. Шаг ведущего остаётся `job-exhausted` (`workflow_retry`
+ * его не примет), а центр внимания по ним показывает решение оператору: приёмку
+ * без задачи или новую ревизию доски — без повтора задания.
+ */
+export function exhaustedOnCancelled(boardId: string, ctx: HostContext) {
+  const job = ctx.jobs.find((j) => j.id === boardId && ctx.current(j));
+  if (job?.status !== 'failed' || job.attempts < job.maxAttempts) return undefined;
+  const { outlook: loop } = loopAhead(ctx.h, ctx.state, { ...asLead(job), status: 'queued' });
+  const step = cancelledStop(boardId, ctx, job, loop);
+  return step?.code === 'job-cancelled-task' ? step.params : undefined;
+}
+
+/**
  * Задачу остановил бюджет: её последняя попытка упала отказом класса `budget`
  * или выдачу держало удержание бюджетом. Класс отказа самой задачи отмена
  * переписывает (`cancelled`), поэтому он берётся из попытки.

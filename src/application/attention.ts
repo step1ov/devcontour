@@ -22,7 +22,13 @@ import { CheckCorpus } from '../core/check-store.ts';
 import { executionOf } from '../harness/execution.ts';
 import { ContractChanges } from '../runner/contract-change.ts';
 import { boardTasks, planApproved, unapprovedTasks } from '../runner/lead-outlook.ts';
-import { boardStep, handoffRedactor, harnessOf, hostContext } from './handoff.ts';
+import {
+  boardStep,
+  exhaustedOnCancelled,
+  handoffRedactor,
+  harnessOf,
+  hostContext,
+} from './handoff.ts';
 import { hintDetail } from './hint-messages.ts';
 import {
   pendingAcceptances,
@@ -1083,8 +1089,15 @@ function cancelledTaskCard(
   revision: { number: number; createdAt: string },
   step: NonNullable<ReturnType<typeof boardStep>>,
   jobs: readonly { key: string; history: { at: string }[] }[],
+  /** Параметры остановки исчерпанного задания (`exhaustedOnCancelled`). */
+  exhausted?: { taskId: string; by: string; budget: boolean },
 ): Candidate {
-  const p = step.params as { taskId: string; by: string; budget: boolean; live: boolean };
+  const p = (exhausted ?? step.params) as {
+    taskId: string;
+    by: string;
+    budget: boolean;
+    live?: boolean;
+  };
   const title = taskTitle(ctx, p.taskId);
   const who =
     p.by === 'host'
@@ -1109,13 +1122,23 @@ function cancelledTaskCard(
     occurrenceId: step.job
       ? `job:${step.job.key}:${step.job.attempts}:cancelled:${p.taskId}`
       : `cancelled:r${revision.number}:${p.taskId}`,
-    sourceVersion: d({ code: step.code, taskId: p.taskId, by: p.by, budget: p.budget }),
+    sourceVersion: d({
+      code: step.code,
+      taskId: p.taskId,
+      by: p.by,
+      budget: p.budget,
+      ...(exhausted ? { exhausted: true } : {}),
+    }),
     source: 'board',
     category: 'decision',
     actor: 'operator',
     title: `Доска «${board.title}»: задание остановлено отменённой задачей`,
     reason: ctx.redact(
-      `Задача «${title}» ${who}${p.budget ? ' по бюджету' : ''}; задание доски без неё не продолжится. Решите: ${retry} или примите ревизию без задачи («Принять доску», когда остальные задачи готовы).`,
+      exhausted
+        ? // Попытки задания исчерпаны: повтор задания не поможет, остаются
+          // приёмка без задачи и новая ревизия доски.
+          `Задача «${title}» ${who}${p.budget ? ' по бюджету' : ''}; задание доски исчерпало попытки и не продолжится. Решите: примите ревизию без задачи («Принять доску», когда остальные задачи готовы) или поручите ведущему агенту новую ревизию доски.`
+        : `Задача «${title}» ${who}${p.budget ? ' по бюджету' : ''}; задание доски без неё не продолжится. Решите: ${retry} или примите ревизию без задачи («Принять доску», когда остальные задачи готовы).`,
     ),
     since: step.job
       ? (jobs.find((j) => j.key === step.job!.key)?.history.at(-1)?.at ?? revision.createdAt)
@@ -1164,6 +1187,14 @@ const boardSource: AttentionSourceRule = {
           if (!step || !['decide', 'fix-input', 'workflow_retry'].includes(step.action)) continue;
           if (step.code === 'job-cancelled-task') {
             out.push(cancelledTaskCard(ctx, board, revision, step, jobs));
+            continue;
+          }
+          // Исчерпанное задание на отменённой выданной задаче: решение то же,
+          // оператору, но без повтора задания.
+          const exhausted =
+            step.code === 'job-exhausted' ? exhaustedOnCancelled(board.id, host) : undefined;
+          if (exhausted) {
+            out.push(cancelledTaskCard(ctx, board, revision, step, jobs, exhausted));
             continue;
           }
           if (settled) continue;

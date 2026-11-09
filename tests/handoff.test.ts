@@ -1694,10 +1694,11 @@ test('session_handoff: бюджетная остановка и отмена ч�
       );
       assert.match(
         next.detail,
-        new RegExp(
-          `the user retries the task \\(devcontour retry --task ${stopped}, the operator's command\\), then workflow_retry`,
-        ),
+        /the user retries the task in the panel \(the retry action on the task page; ask the user\), then workflow_retry/,
       );
+      // Ни одной команды повтора: CLI retry без --by — повтор человеком, он
+      // обошёл бы отказ сервиса.
+      assert.doesNotMatch(next.detail, /devcontour retry/);
       // Сервис отказывает ведущему и при попытке повторить такую задачу.
       await assert.rejects(
         new AgentService(f.h, f.root).run({ operation: 'task_retry', input: { taskId: stopped } }),

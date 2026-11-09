@@ -225,7 +225,7 @@ const en: Catalog = {
       : `then workflow_retry ${retryArgs(s)}`;
     const retry = lead
       ? `task_retry (devcontour retry --task ${task} --by host), ${job}`
-      : `the user retries the task (devcontour retry --task ${task}, the operator's command), ${job}`;
+      : `the user retries the task in the panel (the retry action on the task page; ask the user), ${job}`;
     const first = p.budget
       ? `(1) the user raises the exceeded budget limit (budgets in the config, applied with devcontour config-apply --keys budgets); then ${retry}`
       : lead
@@ -399,7 +399,7 @@ const ru: Catalog = {
       : `затем workflow_retry ${retryArgs(s)}`;
     const retry = lead
       ? `task_retry (devcontour retry --task ${task} --by host), ${job}`
-      : `пользователь повторяет задачу (devcontour retry --task ${task} — команда оператора), ${job}`;
+      : `пользователь повторяет задачу в панели (повтор на странице задачи; спросите пользователя), ${job}`;
     const first = p.budget
       ? `(1) пользователь поднимает исчерпанный предел бюджета (budgets в конфигурации, применение — devcontour config-apply --keys budgets); затем ${retry}`
       : lead

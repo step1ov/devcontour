@@ -853,6 +853,36 @@ test('S9 бюджетная остановка и отмена человеко�
   }
 });
 
+test('S9 исчерпанное задание на задаче, отменённой человеком, без другой открытой работы: карточка оператору без повтора задания', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Exhausted board');
+    const stopped = f.h.addTask(b.id, input('Hits the budget'));
+    const kept = f.h.addTask(b.id, input('Kept'));
+    f.h.approve(b.id);
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex', maxAttempts: 1 });
+    f.h.pause(false);
+    const run = f.h.claim('test')!;
+    f.h.fail(run.id, run.token, 'workspace budget exceeded', false, 'budget');
+    f.h.cancel(stopped.id, 'Not worth it', 'operator');
+    completeTask(f.h, kept.id);
+    flow.fail(flow.claim(job.key, job.owner)!, `${stopped.id}: Работа остановлена человеком.`);
+    const failed = flow.get(job.key, job.owner);
+    assert.equal(failed.attempts, failed.maxAttempts, 'попытки задания исчерпаны');
+    const card = byKey(await engineItems(f), `board:${b.id}`)!;
+    assert.ok(card, 'карточка решения есть и без открытых задач');
+    assert.equal(card.actor, 'operator');
+    assert.equal(card.category, 'decision');
+    assert.match(card.reason, /исчерпало попытки/);
+    assert.match(card.reason, /примите ревизию без задачи/);
+    assert.match(card.reason, /новую ревизию доски/);
+    assert.doesNotMatch(card.reason, /повторите задачу|продолжит задание/);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('S17 preview: нет Docker — доступ оператора; потерянная версия — ведущему; новая выкладка снимает', async () => {
   const f = fixture();
   try {
