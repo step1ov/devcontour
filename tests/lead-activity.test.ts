@@ -2,7 +2,17 @@
 // session-handoff — тоже его действия, даже если они только читают.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AgentService } from '../src/application/agent.ts';
@@ -13,6 +23,7 @@ import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
 import {
   LEAD_ACTIVITY_FILE,
+  LEAD_MARK_SKEW_MS,
   leadActivityMark,
   markLeadActivity,
 } from '../src/runner/lead-activity.ts';
@@ -37,6 +48,22 @@ test('Отметка обращений ведущего: запись рядо�
     // База в памяти: отметке негде жить, запись — без ошибки.
     markLeadActivity({ file: ':memory:' }, 'agent');
     assert.equal(leadActivityMark({ file: ':memory:' }), null);
+    // Отметка из будущего дальше допустимого расхождения часов не учитывается.
+    const now = Date.parse('2026-11-08T10:00:00.000Z');
+    markLeadActivity(store, 'agent', 'x', new Date(now + LEAD_MARK_SKEW_MS - 1000));
+    assert.ok(leadActivityMark(store, now), 'в пределах расхождения часов');
+    markLeadActivity(store, 'agent', 'x', new Date(now + LEAD_MARK_SKEW_MS + 1000));
+    assert.equal(leadActivityMark(store, now), null);
+    markLeadActivity(store, 'agent', 'x', new Date('2099-01-01T00:00:00.000Z'));
+    assert.equal(leadActivityMark(store), null);
+    // Запись не удалась (на месте отметки — непустой каталог): временный файл не остаётся.
+    rmSync(join(root, LEAD_ACTIVITY_FILE));
+    mkdirSync(join(root, LEAD_ACTIVITY_FILE, 'blocker'), { recursive: true });
+    markLeadActivity(store, 'agent', 'x');
+    assert.deepEqual(
+      readdirSync(root).filter((n) => n.startsWith(LEAD_ACTIVITY_FILE)),
+      [LEAD_ACTIVITY_FILE],
+    );
     // Каталога нет: запись по возможности, операция не падает.
     markLeadActivity({ file: join(root, 'missing', 'state.sqlite') }, 'agent');
     assert.equal(existsSync(join(root, 'missing')), false);
@@ -138,8 +165,21 @@ test('CLI session-handoff отмечает обращение ведущего; 
         process.cwd(),
       );
     assert.equal(leadActivityMark(store), null);
+    // Байты базы и файлов её журнала до и после пакета.
+    const database = () =>
+      readdirSync(data)
+        .filter((n) => n.startsWith('state.sqlite'))
+        .sort()
+        .map((n) => [
+          n,
+          createHash('sha256')
+            .update(readFileSync(join(data, n)))
+            .digest('hex'),
+        ]);
+    const before = database();
     const done = await cli();
     assert.equal(done.code, 0, done.stderr);
+    assert.deepEqual(database(), before, 'база только читается');
     const mark = leadActivityMark(store);
     assert.ok(mark && Math.abs(Date.parse(mark) - Date.now()) < minutes(2), String(mark));
   } finally {

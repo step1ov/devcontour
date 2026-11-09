@@ -132,7 +132,7 @@ export function quickView(input: {
     tasks,
     findings,
     steps,
-    lead: leadPresence(change, tasks, input.now, leadActivityMark(input.store)),
+    lead: leadPresence(change, tasks, input.now, leadActivityMark(input.store, input.now)),
   };
 }
 

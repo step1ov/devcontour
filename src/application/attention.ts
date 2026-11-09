@@ -2857,7 +2857,7 @@ export class AttentionService {
    */
   private lead(ctx: AttentionContext) {
     const change = changesOf(ctx).find((c) => c.id === ctx.state.preparation?.activeChangeId);
-    return leadPresence(change, ctx.state, ctx.now, leadActivityMark(this.store));
+    return leadPresence(change, ctx.state, ctx.now, leadActivityMark(this.store, ctx.now));
   }
 
   /** Карточка относится к компоненту: задачи компонента или его доски. */
