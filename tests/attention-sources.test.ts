@@ -1144,6 +1144,17 @@ test('S9 вход задания не построить: ограничение
     // — прежнее появление (ограничение источника, названо в docs/attention.md).
     enable();
     assert.equal(byKey(await engineItems(f), key)!.occurrenceId, card.occurrenceId);
+    // Появление считается по английскому тексту шага, как прежде: id прежний,
+    // и смена языка подсказок не возвращает признанную карточку.
+    const english = card.reason.split('Указание ведущему агенту: ')[1];
+    assert.equal(card.occurrenceId, `input:r1:${digest(english).slice(0, 12)}`);
+    f.h.config.hintLocale = 'ru';
+    const ru = byKey(await engineItems(f), key)!;
+    assert.equal(ru.occurrenceId, card.occurrenceId);
+    assert.match(
+      ru.reason,
+      /Указание ведущему агенту: workflow_start для доски \S+ будет отклонён/,
+    );
   } finally {
     f.cleanup();
   }

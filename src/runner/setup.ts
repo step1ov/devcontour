@@ -270,6 +270,8 @@ export function projectConfig(
     // Короткий срок быстрой проверки под нагрузкой хоста срывается и сжигает
     // попытку: новая конфигурация исполняет каждую проверку не короче минуты.
     gateTimeoutFloorMs: DEFAULT_GATE_TIMEOUT_FLOOR_MS,
+    // Панель и вопросы исполнителя — на русском: подсказки шага ведущему тоже.
+    hintLocale: 'ru',
     gates: selected.gates,
     prepare: selected.prepare,
     environment: selected.environment,

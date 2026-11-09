@@ -7,7 +7,7 @@
 // тот готовит результат к push/PR человеком.
 import { DiscussionService, type InboxRequest } from './discussion.ts';
 import { InputService } from './input.ts';
-import { hrefs } from './panel-links.ts';
+import { hintDetail, hintLocaleOf, PLAN_HINT_IDS, type HintOf } from './hint-messages.ts';
 import {
   HANDOFF_MAX_BYTES,
   HANDOFF_MIN_BYTES,
@@ -75,8 +75,16 @@ export const handoffHostCommands = {
     'queue_set {"paused": false}, or devcontour queue --start --workspace …; an operator pause is lifted only on the user\'s decision.',
 } as const;
 
-/** Шаг DevContour вместо команды harness: что сделать ведущему агенту или человеку. */
-export interface HandoffHostNext {
+/**
+ * Шаг DevContour вместо команды harness: что сделать ведущему агенту или
+ * человеку. `code` и `params` — стабильное описание шага (`HintParamMap`,
+ * src/application/hint-messages.ts): параметры — только то, чего нет в
+ * полях шага; `detail` — его текст на языке подсказок конфигурации
+ * (`hintLocale`, без поля — английский).
+ */
+export type HandoffHostNext = HandoffHostNextFields & HintOf;
+
+interface HandoffHostNextFields {
   action:
     | 'workflow_start'
     | 'workflow_retry'
@@ -124,6 +132,15 @@ export interface HandoffHostNext {
   input?: { requestId: string; taskId: string; state: string; actor: 'lead' | 'operator' };
   detail: string;
 }
+
+/** Шаг без текста: текст собирает каталог по коду (`hintDetail`). */
+type HostNextDraft = Omit<HandoffHostNextFields, 'detail'> & HintOf;
+
+/** Шаг с текстом на языке подсказок конфигурации. */
+const withDetail = (h: DevContour, step: HostNextDraft): HandoffHostNext => ({
+  ...step,
+  detail: hintDetail(step, hintLocaleOf(h.config)),
+});
 
 /** Пакет harness и приложение DevContour. */
 export interface DevContourHandoff {
@@ -283,36 +300,6 @@ const jobRef = (job: HarnessJob) => ({
   repairs: job.repairs ?? 0,
 });
 
-/** Что сделает цикл — словами для `detail`. */
-function loopText(o: LoopOutlook) {
-  switch (o.step) {
-    case 'review-plan':
-      return 'reviews the plan';
-    case 'advance':
-      return 'finishes its stage';
-    case 'recovery':
-      return `handles the property episode of task ${o.taskId} (${o.action})`;
-    case 'repair':
-      return `retries task ${o.taskId} (${o.reason})`;
-    case 'stop':
-      return `stops the job: ${o.reason}`;
-    case 'check-base':
-      return 'checks the moved base';
-    case 'lift-pause':
-      return `lifts the ${o.pause} pause`;
-    case 'wait':
-      return "waits for the board's tasks";
-    case 'accept':
-      return 'accepts the board';
-    case 'none':
-      return 'has nothing to do';
-  }
-}
-
-/** Как снять остановку цикла: задачу чинит человек или ведущий, не повтор задания. */
-const STOP_REMEDY =
-  'Diagnose it; fix or retry the task by hand (MCP task_retry, or devcontour retry --task ID --by host [--reset --reason TEXT]; a property episode — recovery_decide) or ask the user. Retrying the job (workflow_retry) before that fails again.';
-
 export interface HostContext {
   h: DevContour;
   pack: HandoffPack;
@@ -357,11 +344,6 @@ export function hostContext(
   };
 }
 
-const OPERATOR_STEP =
-  'approvalMode operator: lead workflow jobs do not run. The operator reviews plans and accepts boards in the panel, starts the queue (devcontour queue --start --workspace …) and retries failed tasks (devcontour retry --task ID --workspace …).';
-
-/** Сколько id задач называет подсказка ревью плана. */
-const PLAN_HINT_IDS = 20;
 /** Предел причины отказа одного черновика в `host.next.plan.blocked`. */
 const REASON_CHARS = 300;
 
@@ -395,42 +377,17 @@ export function planStep(boardId: string, ctx: HostContext): HandoffHostNext | u
     })),
     blockedCount: why.blocked.length,
   };
-  const list = (xs: string[], total: number, field: string, sep = ',') =>
-    xs.slice(0, PLAN_HINT_IDS).join(sep) +
-    (total > PLAN_HINT_IDS ? ` (… ещё ${total - PLAN_HINT_IDS}: host.next.${field})` : '');
-  // Правка черновика сохраняет отсутствующие в файле необязательные поля, но
-  // ключи со значением по умолчанию получают его: их переносят из задачи.
-  const edit =
-    'devcontour edit-task --task ID --file FILE --workspace …; fields absent from the file are kept, except repositoryId, scope, dependsOn and contracts, which fall back to their defaults: copy them from the current task';
-  const unverified = plan.unverifiedCount
-    ? ` ${plan.unverifiedCount} draft task(s) are unverified agent findings: the lead triages them before approval — verify the reproduction and priority, merge duplicates, cancel stale or misrouted ones (devcontour cancel --task ID --reason … --by host --workspace …), write testable acceptance and gates (${edit}; the edit marks the finding triaged): ${list(plan.unverified, plan.unverifiedCount, 'plan.unverified')}.`
-    : '';
-  const blocked = plan.blockedCount
-    ? ` ${plan.blockedCount} draft task(s) fail approval preconditions, so approval refuses them and review-plan stops on them before the model call; fix these first (${edit}) or cancel them: ${list(
-        plan.blocked.map((b) => `${b.id} — ${b.reason}`),
-        plan.blockedCount,
-        'plan.blocked',
-        '; ',
-      )}.`
-    : '';
-  // Область длиннее подсказки: весь план — ревью без --tasks; иначе область
-  // в подсказке усечена, и это сказано прямо, а не спрятано за «ещё N».
-  const tasks =
-    review.length <= PLAN_HINT_IDS
-      ? `--tasks ${review.join(',')} `
-      : review.length === scope.length
-        ? `(the whole plan, ${review.length} tasks: no --tasks needed) `
-        : `--tasks ${plan.review.join(',')} (scope truncated: the first ${PLAN_HINT_IDS} of ${review.length} reviewable tasks; review the rest in a later round) `;
-  const next = review.length
-    ? ` Review the plan with an explicit scope (devcontour review-plan --board ${boardId} ${tasks}--author-runtime codex|claude --workspace …, keeping only the tasks to run; review-plan also checks INTENT story bindings, which this hint does not), or edit/cancel the tasks first; register workflow_start only for an approved plan.`
-    : ' No task of the plan is ready for review: review-plan only after these are handled; register workflow_start only for an approved plan.';
-  return {
+  // Текст подсказки (`plan-unapproved` каталога) называет задачи `plan`:
+  // неразобранные находки, черновики, которые утверждение отвергнет, и
+  // область ревью — весь план без --tasks или явный усечённый список.
+  return withDetail(ctx.h, {
     action: 'decide',
     decision: 'plan',
     boardId,
     plan,
-    detail: `The plan of board ${boardId} is not approved (${plan.drafts.length} draft task(s)${plan.stale.length ? `, ${plan.stale.length} approved under another policy` : ''}).${unverified}${blocked} workflow_start would send the whole plan to review and run every task once approved: choosing the scope is the lead's or the user's decision.${next}`,
-  };
+    code: 'plan-unapproved',
+    params: { scope: scope.length },
+  });
 }
 
 /** Цикл задания сам что-то сделает (не только ждёт задач). */
@@ -439,6 +396,11 @@ const acts = (loop: LoopOutlook | undefined) =>
 
 /** Шаг по заданиям одной доски: ждать, повторить, начать, исправить вход или решить. */
 export function boardStep(boardId: string, ctx: HostContext): HandoffHostNext | undefined {
+  const step = boardDraft(boardId, ctx);
+  return step && withDetail(ctx.h, step);
+}
+
+function boardDraft(boardId: string, ctx: HostContext): HostNextDraft | undefined {
   const { h, state } = ctx;
   // Принятая ревизия без открытых задач: заданию доски делать нечего.
   const done = boardTasks(state, boardId);
@@ -458,14 +420,16 @@ export function boardStep(boardId: string, ctx: HostContext): HandoffHostNext | 
         boardId,
         job: jobRef(live),
         loop,
-        detail: `Next, at stage ${stage}, the lead workflow job of board ${boardId} stops: ${loop.reason}. ${STOP_REMEDY}`,
+        code: 'job-stops',
+        params: { stage },
       };
     return {
       action: 'wait',
       boardId,
       job: jobRef(live),
       loop,
-      detail: `Board ${boardId} has a live lead workflow job (stage ${live.stage}); next, at stage ${stage}, the job loop ${loopText(loop)}. The running DevContour server continues it; if the server is stopped, start it (devcontour start --workspace …).`,
+      code: 'job-live',
+      params: { stage },
     };
   }
   const refused = ctx.inputError(boardId);
@@ -473,9 +437,11 @@ export function boardStep(boardId: string, ctx: HostContext): HandoffHostNext | 
     return {
       action: 'fix-input',
       boardId,
-      detail: `workflow_start for board ${boardId} would be refused: ${refused}. Fix that first (approvals in the panel, tasks of the board), then register the job.`,
+      code: 'input-refused',
+      params: { reason: refused },
     };
   const job = jobs.find((j) => ctx.current(j));
+  const error = job?.error ? { error: job.error } : {};
   if (job?.status === 'failed') {
     if (job.attempts < job.maxAttempts) {
       // Повтор задания — тот же такт цикла по состоянию сейчас.
@@ -487,14 +453,16 @@ export function boardStep(boardId: string, ctx: HostContext): HandoffHostNext | 
           boardId,
           job: jobRef(job),
           loop,
-          detail: `The lead workflow job of board ${boardId} failed${job.error ? ': ' + job.error : ''}, and a retry would stop again: ${loop.reason}. ${STOP_REMEDY} Then workflow_retry {"key": ${JSON.stringify(job.key)}${job.owner ? ', "repositoryId": ' + JSON.stringify(job.owner) : ''}}.`,
+          code: 'job-retry-stops',
+          params: error,
         };
       return {
         action: 'workflow_retry',
         boardId,
         job: jobRef(job),
         loop,
-        detail: `The lead workflow job of board ${boardId} failed${job.error ? ': ' + job.error : ''}. On retry the job loop ${loopText(loop)}: workflow_retry {"key": ${JSON.stringify(job.key)}${job.owner ? ', "repositoryId": ' + JSON.stringify(job.owner) : ''}}.`,
+        code: 'job-retry',
+        params: error,
       };
     }
     return {
@@ -502,7 +470,8 @@ export function boardStep(boardId: string, ctx: HostContext): HandoffHostNext | 
       decision: 'job',
       boardId,
       job: jobRef(job),
-      detail: `The lead workflow job of board ${boardId} used all ${job.maxAttempts} attempts${job.error ? ': ' + job.error : ''}. workflow_start returns this failed job until the board input changes: diagnose, then change the board or its tasks (a new input registers a new job) or ask the user.`,
+      code: 'job-exhausted',
+      params: error,
     };
   }
   if (job?.status === 'stale' || job?.status === 'completed')
@@ -511,14 +480,16 @@ export function boardStep(boardId: string, ctx: HostContext): HandoffHostNext | 
       decision: 'job',
       boardId,
       job: jobRef(job),
-      detail: `A lead workflow job for exactly the current input of board ${boardId} is already ${job.status}${job.status === 'stale' ? ' (the input changed and then returned to it)' : ''}; workflow_start returns it unchanged and it will not run. Change the board or its tasks to register a new job, or continue by hand (devcontour queue --start, retry, accept; docs/cli.md), or ask the user.`,
+      code: 'job-settled',
+      params: {},
     };
   if (job)
     return {
       action: 'wait',
       boardId,
       job: jobRef(job),
-      detail: `The lead workflow job of board ${boardId} is ${job.status} but does not continue now (a policy apply is pending or another process holds it); check workflow_status.`,
+      code: 'job-idle',
+      params: {},
     };
   const plan = planStep(boardId, ctx);
   if (plan) return plan;
@@ -528,11 +499,8 @@ export function boardStep(boardId: string, ctx: HostContext): HandoffHostNext | 
     action: 'workflow_start',
     boardId,
     ...(previous ? { job: jobRef(previous) } : {}),
-    detail:
-      `No live lead workflow job for board ${boardId}${previous ? ` (its ${previous.status} job was started on another input)` : ''}: with the DevContour server running, register workflow_start {"kind": "board", "id": ${JSON.stringify(boardId)}, "authorRuntime": …}; queue_set {"paused": false} alone resumes dispatch without the job's pause handling and repairs.` +
-      (running
-        ? ' An attempt is running: the server finishes it without a job; the board can also be continued by hand (MCP task_retry or devcontour retry --by host, accept; docs/cli.md).'
-        : ''),
+    code: 'board-start',
+    params: { running },
   };
 }
 
@@ -590,41 +558,36 @@ function inputStep(ctx: HostContext, taskId: string): HandoffHostNext | undefine
   const operator = h.config.approvalMode === 'operator';
   // Повторные остановки вопросом: свободные остановки кончаются, и частые
   // вопросы — признак неполной постановки. Ведущий узнаёт это из шага.
-  const repeated = summary.questionStops
-    ? ` Task ${taskId} has stopped with a writer question ${summary.questionStops.count} times; only the first ${summary.questionStops.limit} give the attempt back${summary.questionStops.exhausted ? ', further stops count as attempts, and with the attempts used up input_apply returns blocker ATTEMPTS_EXHAUSTED until it is applied with reset {"reason": …}' : ''}. Consider making the task spec answer these questions up front (board_correct or reopen and respecify).`
-    : '';
+  const stops = summary.questionStops ? { stops: summary.questionStops } : {};
   if (!summary.blocking)
-    return {
+    return withDetail(h, {
       action: 'close-follow-up',
       ...base,
-      detail: `Follow-up ${summary.requestId} of task ${taskId} (a decision the writer took itself, severity ${summary.severity}): accept it with input_cancel {"requestId": "${summary.requestId}", "expectedVersion": ${summary.version}, "reason": "assumption accepted"} or, if it changes requirements, correct the board (board_correct) and input_supersede with the replacement task (a task without an accepted result: reopen, respecify and supersede with the same task).`,
-    };
+      code: 'follow-up',
+      params: { severity: summary.severity, version: summary.version },
+    });
   if (summary.state === 'awaiting-answer')
-    return {
+    return withDetail(h, {
       action: 'answer-input',
       ...base,
-      detail:
-        (summary.actor === 'lead'
-          ? `Task ${taskId} waits for an answer to ${summary.requestId} (no floors, approvalMode agent): answer with input_answer {"requestId": "${summary.requestId}", "expectedVersion": ${summary.version}, …} after input_show, or let the operator answer in the panel (${hrefs.input(taskId)}). The answer does not resume the task by itself.`
-          : `Task ${taskId} waits for the operator's answer to ${summary.requestId} in the panel (${hrefs.input(taskId)})${summary.floors.length ? `: the question is critical (${summary.floors.join(', ')})` : ''}. Wait: the lead does not answer it and no queue step helps.`) +
-        repeated,
-    };
-  const chain = operator
-    ? `input_context, input_review --author-runtime; then the operator applies in the panel (${hrefs.input(taskId)})`
-    : 'input_context, input_review --author-runtime, input_target, input_apply';
-  return {
+      ...(summary.actor === 'lead'
+        ? { code: 'answer-lead' as const, params: { version: summary.version, ...stops } }
+        : { code: 'answer-operator' as const, params: { floors: summary.floors, ...stops } }),
+    });
+  return withDetail(h, {
     action: 'apply-input',
     ...base,
-    detail:
-      (summary.state === 'stale'
-        ? `The applied answer to ${summary.requestId} went stale before the next attempt (${summary.stale?.reason ?? 'context'}): rebuild it — ${chain}.`
-        : summary.state === 'review-rejected'
-          ? `The reviewer rejected the answer to ${summary.requestId} (input_show names the findings): correct the answer, or reopen and respecify the task${operator ? '; the operator may apply it only with explicit confirmation' : ''}.`
-          : summary.state === 'applied-awaiting-claim'
-            ? `The answer to ${summary.requestId} is applied; task ${taskId} waits for its next attempt.`
-            : `The answer to ${summary.requestId} is saved but not applied (${summary.state}): ${chain}.`) +
-      repeated,
-  };
+    ...(summary.state === 'stale'
+      ? {
+          code: 'apply-stale' as const,
+          params: { reason: summary.stale?.reason ?? 'context', operator, ...stops },
+        }
+      : summary.state === 'review-rejected'
+        ? { code: 'apply-rejected' as const, params: { operator, ...stops } }
+        : summary.state === 'applied-awaiting-claim'
+          ? { code: 'apply-claim' as const, params: stops }
+          : { code: 'apply-saved' as const, params: { state: summary.state, operator, ...stops } }),
+  });
 }
 
 /**
@@ -642,12 +605,13 @@ function followUpNext(ctx: HostContext): HandoffHostNext | undefined {
         (!pack.graphId || r.boardId === pack.graphId),
     );
   if (!open) return undefined;
-  return {
+  return withDetail(h, {
     action: 'close-follow-up',
     ...(open.boardId ? { boardId: open.boardId } : {}),
     input: { requestId: open.requestId, taskId: open.taskId, state: open.state, actor: 'lead' },
-    detail: `Follow-up ${open.requestId} of task ${open.taskId} (a decision the writer took itself, severity ${open.severity}): accept it with input_cancel {"requestId": "${open.requestId}", "expectedVersion": ${open.version}, "reason": "assumption accepted"} or, if it changes requirements, correct the board (board_correct) and input_supersede with the replacement task (a task without an accepted result: reopen, respecify and supersede with the same task).`,
-  };
+    code: 'follow-up',
+    params: { severity: open.severity, version: open.version },
+  });
 }
 
 function hostNext(ctx: HostContext): HandoffHostNext | undefined {
@@ -704,7 +668,8 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
   if (!pack.summary.open) return undefined;
   const input = inputNext(ctx);
   if (input) return input;
-  if (h.config.approvalMode === 'operator') return { action: 'operator', detail: OPERATOR_STEP };
+  if (h.config.approvalMode === 'operator')
+    return withDetail(h, { action: 'operator', code: 'operator', params: {} });
   const workId = pack.next.workId;
   const next = (workId ? view.work(workId)?.graphId : undefined) ?? pack.graphId;
   // Решение ведущего или пользователя, не связанное с очередью (разбор
@@ -769,24 +734,25 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
     for (const job of live)
       if (liftsPause(h, state, asLead(job))) {
         const { stage, outlook: loop } = loopAhead(h, state, asLead(job));
-        return {
+        return withDetail(h, {
           action: 'wait',
           boardId: job.id,
           job: jobRef(job),
           loop,
-          detail: `Dispatch is paused (${state.pauseReason ?? 'initial'}); the lead workflow job of board ${job.id} lifts the pause at stage ${stage}${loop.step === 'lift-pause' ? '' : ' after it ' + loopText(loop)}. The running DevContour server continues it; if the server is stopped, start it (devcontour start --workspace …).`,
-        };
+          code: 'pause-lift',
+          params: { pause: state.pauseReason ?? 'initial', stage },
+        });
       }
     if (state.pauseReason === 'operator') {
       const first = live[0];
       const ahead = first ? loopAhead(h, state, asLead(first)) : undefined;
-      return {
+      // «Тем временем» текста называет цикл задания этой доски (`loop`).
+      return withDetail(h, {
         action: 'queue_set',
         ...(first ? { boardId: first.id, job: jobRef(first), loop: ahead!.outlook } : {}),
-        detail:
-          'Dispatch is paused by the operator and no job loop lifts it: resume only on the user\'s decision with queue_set {"paused": false} (devcontour queue --start).' +
-          (ahead ? ` Meanwhile the job loop of board ${first.id} ${loopText(ahead.outlook)}.` : ''),
-      };
+        code: 'pause-operator',
+        params: {},
+      });
     }
   }
   return steps[0];

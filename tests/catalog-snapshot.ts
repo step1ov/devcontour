@@ -81,5 +81,8 @@
 // описания plan_import, task_create и task_edit называют отказы: changeId вне
 // продуктового процесса, устаревшие digests, другое изменение на доске;
 // прочие операции байтово прежние.
-export const CATALOG_DIGEST = '68132e756549e4287ac1cd862ce2947d11294d38425ac3d65b6e0710cdb1daa2';
+// Намеренное изменение: описание session_handoff называет стабильные code и
+// params шага host.next и язык его detail (hintLocale конфигурации); прочие
+// операции байтово прежние.
+export const CATALOG_DIGEST = 'c06e52f09f2d2d91dd34ff2e3cf053c40364bb0d0a5845a583b7ca44ae864b3d';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';
