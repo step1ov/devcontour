@@ -37,7 +37,8 @@ import {
   stoppedWorkflows,
 } from './overview.ts';
 import { inputNextText, inputStateLabels, repeatedQuestionText } from '../core/input-labels.ts';
-import { budgetBlocks, budgetHint } from './context.ts';
+import { budgetBlocks } from './context.ts';
+import { budgetCardReason } from '../core/usage.ts';
 import { InputService, inputHolds } from './input.ts';
 import { hrefs } from './panel-links.ts';
 import { inputReviewRounds } from '../harness/input-host.ts';
@@ -668,12 +669,6 @@ const contractChangeSource: AttentionSourceRule = {
  * монотонен: при том же пределе исчерпанный бюджет снимает только новая
  * конфигурация, поэтому появление — предел и `onUnknown`.
  */
-/** Причина карточки бюджета: действие и пометки важнее подробностей расхода. */
-function budgetCardReason(reason: string) {
-  const full = `${reason}. ${budgetHint(reason)}`;
-  if (full.length <= ATTENTION_LIMITS.reason) return full;
-  return `${reason.split('; израсходовано')[0]}. ${budgetHint(reason)}`;
-}
 const budgetSource: AttentionSourceRule = {
   id: 'budget',
   engine: true,
@@ -707,10 +702,9 @@ const budgetSource: AttentionSourceRule = {
           actor: 'operator',
           title:
             b.state === 'exceeded' ? 'Бюджет исчерпан: задачи не выдаются' : 'Бюджет не определён',
-          // Причина движка с расходом и подсказка с пометками не всегда
-          // умещаются в предел карточки: тогда расход опускается, а
-          // пометки и действие остаются.
-          reason: budgetCardReason(b.reason),
+          // Причина движка с расходом и подсказка не всегда умещаются в
+          // предел карточки: команда действия сохраняется всегда.
+          reason: budgetCardReason(b.reason, ATTENTION_LIMITS.reason),
           since:
             ctx.state.tasks
               .filter((t) => covered.includes(t.id))
@@ -1155,8 +1149,8 @@ function cancelledTaskCard(
           // задачи (пока задание не исчерпано) и новая ревизия доски.
           // Новая ревизия названа первой: длинная причина обрезается по пределу.
           exhausted
-          ? `Задача «${title}» ${who}${p.budget ? ' по бюджету' : ''}; задание доски исчерпало попытки. Все задачи ревизии отменены — принять её нечем. Решите: поручите ведущему агенту новую ревизию доски.`
-          : `Задача «${title}» ${who}${p.budget ? ' по бюджету' : ''}. Все задачи ревизии отменены — принять её нечем. Решите: поручите ведущему агенту новую ревизию доски или ${retry}.`
+          ? `Задача «${title}» ${who}${p.budget ? ' по бюджету' : ''}; задание доски исчерпало попытки. Все задачи ревизии отменены — принимать нечего. Решите: поручите ведущему агенту новую ревизию доски.`
+          : `Задача «${title}» ${who}${p.budget ? ' по бюджету' : ''}. Все задачи ревизии отменены — принимать нечего. Решите: поручите ведущему агенту новую ревизию доски или ${retry}.`
         : exhausted
           ? // Попытки задания исчерпаны: повтор задания не поможет, остаются
             // приёмка без задачи и новая ревизия доски.

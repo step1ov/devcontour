@@ -437,7 +437,10 @@ test('The task card computes the budget block live: raising the limit by config-
     assert.match(p.budgetBlock!.hint, /Поднимите предел в budgets.*config-apply --keys budgets$/);
     // Суммы — оценка по тарифам API, общий бюджет — за всё время workspace.
     assert.match(p.budgetBlock!.hint, /^Суммы — оценка по тарифам API, не списание\. /);
-    assert.match(p.budgetBlock!.hint, /Бюджет total — за всё время workspace\./);
+    assert.match(
+      p.budgetBlock!.hint,
+      /Бюджет total \(workspace в budgets\) — за всё время workspace\./,
+    );
     // Повышение предела применено, выдачи не было (очередь на паузе): блок снят сразу.
     s.edit((raw) => (raw.budgets = { workspace: { usd: 100 }, onUnknown: 'continue' }));
     assert.equal((await s.request()).status, 'applied');

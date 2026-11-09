@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AttentionService } from '../src/application/attention.ts';
+import { ATTENTION_LIMITS } from '../src/core/attention-model.ts';
 import { chainBlockers } from '../src/core/work-status.ts';
 import { executionOf } from '../src/harness/execution.ts';
 import { fixture, input } from './helpers.ts';
@@ -75,12 +76,15 @@ test('Один бюджет держит 40 готовых задач — одн
     assert.equal(view.items[0].source, 'budget', 'блокировка бюджета — в начале очереди');
     const { engine } = executionOf(f.h);
     const reason = engine.read((v) => engine.budgetBlockOf(f.store.read().tasks[0].id, v))!;
-    assert.ok(budget[0].reason.startsWith(reason));
-    // Пометки и действие умещаются в причину карточки целиком.
+    // Причина карточки — та же причина движка (без подробности расхода,
+    // если целиком не умещается), а команда действия уцелела в пределе.
+    assert.ok(budget[0].reason.startsWith(reason.split('; израсходовано')[0]));
+    assert.ok(budget[0].reason.length <= ATTENTION_LIMITS.reason);
     assert.match(
       budget[0].reason,
-      /\. Суммы — оценка по тарифам API, не списание\. Бюджет total — за всё время workspace\. Поднимите предел в budgets и примените: devcontour config-apply --keys budgets$/,
+      /Поднимите предел в budgets и примените: devcontour config-apply --keys budgets\./,
     );
+    assert.match(budget[0].reason, /за всё время workspace/);
     // Предел поднят выше расхода — карточки нет; исчерпан снова — новое появление.
     f.h.config.budgets = { workspace: { usd: 5 }, onUnknown: 'stop' };
     const lifted = await new AttentionService(f.store, f.h).active();
@@ -90,6 +94,56 @@ test('Один бюджет держит 40 готовых задач — одн
       (i) => i.source === 'budget',
     )!;
     assert.notEqual(again.occurrenceId, budget[0].occurrenceId);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Неопределённый бюджет: карточка в пределе сохраняет команду onUnknown и не советует поднять предел', async () => {
+  const f = fixture();
+  try {
+    f.h.config.budgets = { workspace: { usd: 100 }, onUnknown: 'stop' };
+    const b = f.h.createBoard('Board');
+    f.h.addTask(b.id, input('Task'));
+    f.h.approve(b.id);
+    // Завершённые вызовы без стоимости: бюджет не определён.
+    f.store.atomic(() => {
+      for (const id of ['U1', 'U2', 'U3'])
+        f.store.saveLocal('usage', undefined, id, {
+          id,
+          stage: 'implementation',
+          runtime: 'codex',
+          model: null,
+          runtimeVersion: null,
+          startedAt: new Date().toISOString(),
+          outcome: 'returned',
+          promptBytes: 1,
+          promptDigest: 'd'.repeat(64),
+          usage: {
+            inputTokens: 1,
+            outputTokens: 1,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
+            reportedUsd: null,
+            complete: true,
+            source: 'fixture',
+          },
+          costUsd: null,
+          costSource: 'unknown',
+        });
+    });
+    const card = (await new AttentionService(f.store, f.h).active()).items.find(
+      (i) => i.source === 'budget',
+    )!;
+    assert.ok(card, 'карточка неопределённого бюджета');
+    assert.equal(card.title, 'Бюджет не определён');
+    assert.match(card.reason, /^Бюджет total не определён: у 3 вызовов неизвестна стоимость/);
+    assert.ok(card.reason.length <= ATTENTION_LIMITS.reason);
+    assert.match(
+      card.reason,
+      /onUnknown: "continue".*devcontour config-apply --keys budgets,prices/,
+    );
+    assert.doesNotMatch(card.reason, /Поднимите предел|…$/);
   } finally {
     f.cleanup();
   }
