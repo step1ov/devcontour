@@ -13,6 +13,7 @@ import {
   quickSteps,
   type QuickFacts,
 } from '../runner/quick.ts';
+import { leadActivityMark } from '../runner/lead-activity.ts';
 import { selectedWorkspaceMode } from '../runner/workspace-mode.ts';
 import { baseWaitOf } from './queue-stop.ts';
 import { InputService, inputHolds } from './input.ts';
@@ -131,7 +132,7 @@ export function quickView(input: {
     tasks,
     findings,
     steps,
-    lead: leadPresence(change, tasks, input.now),
+    lead: leadPresence(change, tasks, input.now, leadActivityMark(input.store, input.now)),
   };
 }
 
@@ -168,17 +169,24 @@ function changeTasks(state: Readonly<DevContourState>, change: ProductChange) {
 }
 
 /**
- * Присутствие ведущего агента известно только по его журналу: без свежей
- * записи панель не изображает идущую работу. `tasks` — задачи изменения
- * (по умолчанию — из состояния).
+ * Присутствие ведущего агента известно только по его следам: записям
+ * изменения и отметке обращений к агентскому API (`mark`, см.
+ * `runner/lead-activity.ts`). Без свежего следа панель не изображает идущую
+ * работу. `tasks` — задачи изменения (по умолчанию — из состояния); без
+ * изменения присутствие — по одной отметке.
  */
 export function leadPresence(
-  change: ProductChange,
+  change: ProductChange | undefined,
   tasks: { createdAt?: string; approvedAt?: string }[] | Readonly<DevContourState>,
   now: number,
+  mark: string | null = null,
 ) {
-  const own = Array.isArray(tasks) ? tasks : changeTasks(tasks, change).tasks;
-  const leadAt = leadActivityAt(change, own);
+  const own = !change ? [] : Array.isArray(tasks) ? tasks : changeTasks(tasks, change).tasks;
+  const leadAt =
+    [change ? leadActivityAt(change, own) : null, mark]
+      .filter((x): x is string => Boolean(x))
+      .sort()
+      .at(-1) ?? null;
   return {
     lastActivityAt: leadAt,
     present: Boolean(leadAt && now - Date.parse(leadAt) < LEAD_QUIET_MS),

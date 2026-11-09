@@ -10,6 +10,15 @@ import { digest, supersededBy, type DevContour } from '../core/service.ts';
 import { taskOwner } from '../core/sync-state.ts';
 import { assertArtifactsInBase, componentArtifacts } from '../runner/contract-artifacts.ts';
 
+/**
+ * Язык текста для оператора. Панель DevContour — на русском, а запрос
+ * исполнителю harness — на английском, и без указания вопросы исполнителя и
+ * попутные находки приходили оператору по-английски. Только writer: код,
+ * идентификаторы и файлы следуют соглашениям репозитория.
+ */
+export const OPERATOR_LANGUAGE_NOTE =
+  'The operator reads DevContour in Russian. Write every question to the operator (the input request: question, options, their consequences and your recommendation) and every discovery title and observation in Russian; keep commands, paths, identifiers and quoted code verbatim. Code, comments and other repository files follow the repository conventions.';
+
 export function devcontourHooks(h: DevContour): RunnerHooks {
   /** Текст памяти, закреплённой за попыткой: writer и reviewer видят одни и те же записи. */
   const memories = new Map<string, string>();
@@ -65,7 +74,7 @@ export function devcontourHooks(h: DevContour): RunnerHooks {
       });
       memories.set(attempt.id, text);
     },
-    notes: ({ work, attempt }) => {
+    notes: ({ work, attempt, review }) => {
       const task = taskOf(work.id);
       const memory = memories.get(attempt.id);
       return [
@@ -84,6 +93,7 @@ export function devcontourHooks(h: DevContour): RunnerHooks {
             ]
           : []),
         'Use repo AGENTS.md and scoped memory.',
+        ...(review ? [] : [OPERATOR_LANGUAGE_NOTE]),
       ];
     },
     // Отказ, который повторится на любой задаче, движок уже остановил выдачей;

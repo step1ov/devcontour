@@ -41,6 +41,7 @@ import { queueStopOf, quietAttempts, quietOperations } from './queue-stop.ts';
 import { InputService, inputOperationInputs } from './input.ts';
 import { AttentionService } from './attention.ts';
 import { attentionInputs } from '../core/attention-model.ts';
+import { markLeadActivity } from '../runner/lead-activity.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 export { SERVER_STOPPING };
@@ -444,7 +445,9 @@ export class AgentService {
     } = {},
   ) {}
   execute(raw: unknown): Record<string, unknown> {
-    return this.bounded(this.dispatch(parseAgentRequest(raw)));
+    const request = parseAgentRequest(raw);
+    markLeadActivity(this.h.store, 'agent', request.operation);
+    return this.bounded(this.dispatch(request));
   }
   private bounded(result: Record<string, unknown>) {
     if (!checkJsonBytes(result, 65536).within)
@@ -454,6 +457,8 @@ export class AgentService {
   /** Общий вход транспортов: синхронные операции и операции с внешними процессами. */
   async run(raw: unknown): Promise<Record<string, unknown>> {
     const request = parseAgentRequest(raw);
+    // Обращение ведущего — его присутствие, даже если операция только читает.
+    markLeadActivity(this.h.store, 'agent', request.operation);
     if (!asyncOperations.has(request.operation)) return this.bounded(this.dispatch(request));
     if (!this.root)
       throw new DomainError('Операция запускает процессы и требует каталога данных контура', 409);

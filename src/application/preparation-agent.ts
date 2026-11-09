@@ -11,6 +11,7 @@ import { DevContour } from '../core/service.ts';
 import { AgentService } from './agent.ts';
 import { checkJsonBytes } from 'devcontour-harness';
 import { AttentionService } from './attention.ts';
+import { markLeadActivity } from '../runner/lead-activity.ts';
 
 // The early workspace has no repository, stack, fake gates or model configuration.
 export class PreparationAgent {
@@ -18,6 +19,7 @@ export class PreparationAgent {
   execute(raw: unknown): Record<string, unknown> {
     if (!checkJsonBytes(raw, 100000).within) throw new DomainError('Слишком большой запрос', 413);
     const { operation, input } = agentRequest.parse(raw);
+    markLeadActivity(this.store, 'agent', operation);
     // Центр внимания работает до setup: вопросы и согласования подготовки.
     if (operation === 'attention_list') {
       const list = new AttentionService(this.store, undefined).agentList(input ?? {});

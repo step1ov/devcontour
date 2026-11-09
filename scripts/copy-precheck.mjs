@@ -236,6 +236,11 @@ const head = (dir, base) => {
   };
   return git('symbolic-ref', '-q', 'HEAD') + '@' + git('rev-parse', '-q', '--verify', 'HEAD');
 };
+// Отметка присутствия ведущего агента (`lead-activity.json` и временный
+// файл её записи) — подсказка панели вне контракта данных: её переписывает
+// любое обращение ведущего к агентскому API, в том числе только для чтения,
+// и данные проверки от неё не зависят. В отпечаток она не входит.
+const presenceMark = /^lead-activity\.json(\.\d+\.tmp)?$/;
 // Отпечаток входов: путь относительно base → содержимое файла (ссылка — её
 // цель), `<репозиторий>@HEAD` → ветка и коммит. Отсутствующий путь пропускается.
 function tree(base) {
@@ -243,6 +248,7 @@ function tree(base) {
   const hash = (full) => createHash('sha256').update(readFileSync(full)).digest('hex');
   const visit = (dir) => {
     for (const name of readdirSync(dir).sort()) {
+      if (presenceMark.test(name)) continue;
       const full = join(dir, name);
       const rel = relative(base, full);
       const st = lstatSync(full);

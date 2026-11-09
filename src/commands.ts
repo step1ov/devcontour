@@ -26,6 +26,7 @@ import { repository as selectedRepository, repository } from './core/repositorie
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { AgentService, capabilities } from './application/agent.ts';
+import { markLeadActivity } from './runner/lead-activity.ts';
 import { serveMcp } from './server/mcp.ts';
 import { readAgentJson } from './runner/json-file.ts';
 import { repositories } from './core/repositories.ts';
@@ -765,6 +766,9 @@ async function main() {
       return [v];
     });
     const boardId = value('--board');
+    // Пакет просит ведущий агент новой сессии: это его обращение. Отметка —
+    // файл рядом с базой; сама база по-прежнему только читается.
+    markLeadActivity({ file: join(root, 'state.sqlite') }, 'session-handoff');
     const handoff = readOnlyRead(config, root, (h) =>
       devcontourHandoff(h, {
         ...(boardId ? { boardId } : {}),

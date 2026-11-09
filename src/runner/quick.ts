@@ -502,6 +502,23 @@ export async function quickDiff(repository: string, base: string, head: string) 
 }
 
 /**
+ * Дифф результата задачи быстрого изменения. Интегрированный результат — от
+ * рабочей ветки, на которую он слит (первый родитель коммита интеграции): база
+ * попытки могла отстать, пока раньше интегрировалась работа другой доски, и
+ * дифф от неё показал бы чужие файлы под этим изменением. Без интеграции —
+ * кандидат от базы попытки.
+ */
+export function quickResultDiff(
+  repository: string,
+  run: { baseSha?: string | null; candidateSha?: string | null; integrationSha?: string | null },
+) {
+  if (run.integrationSha)
+    return quickDiff(repository, `${run.integrationSha}^1`, run.integrationSha);
+  if (run.baseSha && run.candidateSha) return quickDiff(repository, run.baseSha, run.candidateSha);
+  return Promise.resolve(null);
+}
+
+/**
  * Последняя запись ведущего агента по изменению: журнал, ревизии этапов,
  * вопросы и решения, предложения setup, задачи изменения. Чтение следов не
  * оставляет, поэтому присутствие — по записям, а не по обращениям.
