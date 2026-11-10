@@ -1030,6 +1030,12 @@ export interface Verification {
   impact?: ComponentImpact;
   evidence: WorkspaceEvidence[];
   error?: string;
+  /**
+   * Движок отметил проверку прерванной до первого gate: в предел
+   * совместных проверок набора она не засчитывается. Прежние движки поля
+   * не пишут.
+   */
+  interrupted?: boolean;
 }
 export interface ChangeSet {
   releaseId?: string;

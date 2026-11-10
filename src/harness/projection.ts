@@ -511,6 +511,8 @@ const verificationKeys = [
   'impact',
   'evidence',
   'error',
+  // Отметка движка «прервана до первого gate»: прежние движки её не пишут.
+  'interrupted',
 ] as const;
 
 export function verificationOf(v: Verification): JointVerificationState {
@@ -599,6 +601,8 @@ export const hostNamespace: Record<
   reviews: 'reviews',
   'contract-documents': 'contract-documents',
   'input-requests': 'input-requests',
+  // Сбросы предела совместных проверок набора (решение оператора).
+  'joint-budget-resets': 'joint-budget-resets',
 };
 
 /** Учёт вызова: `taskId` ↔ `workId`, `boardId` ↔ `groupId`, `taskIds` ↔ `workIds`. */

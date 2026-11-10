@@ -1,6 +1,7 @@
 import type { DevContour } from '../core/service.ts';
 import type { ChangeSet, DevContourState, Task } from '../core/model.ts';
 import { boardPhase } from '../core/work-status.ts';
+import { BUDGET_RESET_ASK, gatelessJoint, interruptedJoint } from '../core/joint-budget.ts';
 import { repositories } from '../core/repositories.ts';
 import { servingPreview, type Preview } from '../core/preview.ts';
 import { currentVerification } from '../core/delivery.ts';
@@ -149,9 +150,59 @@ export function stoppedWorkflows<
       if (!board || !r || r.status === 'accepted') return true;
       return !tasks.some((t) => r.taskIds.includes(t.id) && t.status !== 'cancelled');
     }
-    return !!s.changeSets.find((c) => c.id === w.id)?.acceptance;
+    const c = s.changeSets.find((c) => c.id === w.id);
+    if (!c || c.acceptance) return true;
+    // ChangeSet закрыт другим, созданным позже и принятым: того же
+    // продуктового релиза или включающим все его доски. Операции закрытия у
+    // ChangeSet нет, и без этого карточка упавшего задания оставалась
+    // навсегда — после ручного маршрута и после нового ChangeSet. Принятый
+    // раньше ChangeSet упавший не закрывает: упавший — продолжение после
+    // него (следующий ChangeSet того же релиза), и его остановка — решение.
+    return s.changeSets.some(
+      (x) =>
+        x.id !== c.id &&
+        !!x.acceptance &&
+        x.createdAt > c.createdAt &&
+        ((!!c.releaseId && x.releaseId === c.releaseId) ||
+          c.boardIds.every((id) => x.boardIds.includes(id))),
+    );
   };
   return jobs.filter((w) => w.status === 'failed' && w.error && !superseded(w));
+}
+
+/**
+ * Остановка задания ChangeSet словами оператора: причина задания, итог
+ * последней совместной проверки (прерванная до первого gate — отдельно: она
+ * не дала результата о коде, но расходует предел проверок набора) и пути.
+ * Прежде карточка повторяла лишь «Исчерпаны попытки стадии».
+ */
+export function changeSetStopReason(
+  s: DevContourState,
+  w: { id: string; key: string; error?: string; attempts: number; maxAttempts: number },
+) {
+  const c = s.changeSets.find((x) => x.id === w.id);
+  const last = c?.verifications.at(-1);
+  const parts = [`Задание ChangeSet ${w.id} остановлено: ${w.error ?? 'без причины'}.`];
+  if (last)
+    parts.push(
+      `Последняя совместная проверка ${last.id}: ${last.status}` +
+        (last.error ? ` — ${last.error}` : '') +
+        (interruptedJoint(last)
+          ? ' (прервана до результата gates: в предел проверок набора не засчитывается)'
+          : gatelessJoint(last)
+            ? ' (без результата gates: предел проверок набора расходует, его снимает сброс оператора)'
+            : '') +
+        '.',
+    );
+  parts.push(
+    (w.attempts < w.maxAttempts
+      ? `Когда причина устранена — workflow_retry {"key": ${JSON.stringify(w.key)}}. `
+      : 'Попытки задания исчерпаны: workflow_retry его не примет. ') +
+      `Ручной путь: devcontour workspace-verify --changeset ${w.id}, затем changeset-accept --changeset ${w.id}. ` +
+      `Если исчерпан предел совместных проверок набора задач и его заполняют проверки без результата gates — ${BUDGET_RESET_ASK}; если предел исчерпан проверками с результатом gates, новый ChangeSet над теми же задачами получит тот же отказ — измените набор (новая ревизия доски), примите доску и создайте ChangeSet по ней. ` +
+      'Карточка закрывается, когда принят этот ChangeSet или созданный после него ChangeSet того же релиза (или включающий его доски).',
+  );
+  return parts.join(' ');
 }
 
 /** Заголовок отказа выкладки preview по его классу: сборка — не выкладка. */
