@@ -261,8 +261,6 @@ export function budgetBlocks(h: DevContour, s: DevContourState) {
   });
   return blocks;
 }
-/** Подсказка к бюджетному блоку — `core/usage.ts`; здесь для прежних импортов. */
-export { budgetHint };
 function boardOwner(b: Board, s: DevContourState) {
   if (b.scope === 'workspace') return undefined;
   if (b.repositoryId) return b.repositoryId;

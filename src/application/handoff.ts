@@ -41,7 +41,7 @@ import {
   type LoopOutlook,
 } from '../runner/lead-outlook.ts';
 import { repositories } from '../core/repositories.ts';
-import { leadLiftsPause } from '../core/work-status.ts';
+import { leadLiftsPause, pausedByLead } from '../core/work-status.ts';
 import { executionOf, toDomain } from '../harness/execution.ts';
 import type { DevContourExecutionStore } from '../harness/store.ts';
 
@@ -763,21 +763,34 @@ function carryNext(ctx: HostContext): HandoffHostNext | undefined {
   // уже утверждена (`now`), а очередь идёт: заменённый вопрос выдачу не
   // держит, и по окончании попыток планировщик выдал бы её без ответа —
   // сначала пауза очереди. Паузу, которую снимет цикл задания (начальная,
-  // остановки, пауза человека до старта задания), ведущий тоже ставит
-  // заново: своей паузы цикл не снимает.
+  // остановки), ведущий ставит заново: своей паузы цикл не снимает. Пауза
+  // человека до старта задания — иначе: пауза ведущего поверх неё ничего
+  // не меняет (её снимает только человек, а цикл — как прежде), и удержать
+  // задачу может только новая пауза человека (`userPause`).
   const waiting = carry.active.length > 0;
   const lifted =
     ctx.state.paused && ctx.jobs.filter(ctx.live).some((j) => liftsPause(h, ctx.state, asLead(j)));
-  const pause = waiting && carry.order === 'now' && (!ctx.state.paused || lifted);
+  const human =
+    ctx.state.paused && ctx.state.pauseReason === 'operator' && !pausedByLead(ctx.state);
+  const held = waiting && carry.order === 'now' && (!ctx.state.paused || lifted);
+  const pause = held && !human;
+  const userPause = held && human;
   return withDetail(h, {
     action: pause ? 'queue_set' : waiting ? 'wait' : 'apply-input',
     ...(carry.boardId ? { boardId: carry.boardId } : {}),
-    input: { requestId: carry.requestId, taskId: carry.taskId, state: 'superseded', actor: 'lead' },
+    // Повторная пауза — действие пользователя, ведущий его только передаёт.
+    input: {
+      requestId: carry.requestId,
+      taskId: carry.taskId,
+      state: 'superseded',
+      actor: userPause ? 'operator' : 'lead',
+    },
     code: 'apply-carry',
     params: {
       order: carry.order,
       ...(waiting ? { active: carry.active } : {}),
       ...(pause ? { pause: true as const } : {}),
+      ...(userPause ? { userPause: true as const } : {}),
     },
   });
 }
