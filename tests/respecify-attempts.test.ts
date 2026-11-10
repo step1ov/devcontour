@@ -122,12 +122,19 @@ test('F16: a second respecification does not restart the counter again: one auto
     const shown = attemptHistory(f.store.read(), [task()], f.h.config.maxAttempts);
     assert.equal(shown.attemptHistory?.tasks[0].restartsUsed, 1);
     assert.deepEqual(
-      shown.attemptHistory?.tasks[0].runs.map((r) => [r.attempt, r.status, r.failureKind]),
+      shown.attemptHistory?.tasks[0].runs.map((r) => [
+        r.number,
+        r.attempt,
+        r.status,
+        r.failureKind,
+      ]),
+      // Счётчик после перезапуска — снова 1; сквозной номер различает серии.
       [
-        [1, 'failed', 'empty-result'],
-        [1, 'failed', 'empty-result'],
+        [1, 1, 'failed', 'empty-result'],
+        [2, 1, 'failed', 'empty-result'],
       ],
     );
+    assert.match(shown.attemptHistory.note, /number, its position in the task history/);
   } finally {
     await f.cleanup();
   }

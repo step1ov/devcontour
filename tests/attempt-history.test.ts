@@ -46,10 +46,10 @@ test('n1: the plan reviewer sees the failures of an issued, cancelled task of th
   assert.equal(sibling.taskId, 'T-old');
   assert.deepEqual(sibling.writePaths, ['src/api']);
   assert.deepEqual(
-    sibling.runs.map((r) => [r.attempt, r.failureKind]),
+    sibling.runs.map((r) => [r.number, r.attempt, r.failureKind]),
     [
-      [1, 'gate'],
-      [2, 'gate'],
+      [1, 1, 'gate'],
+      [2, 2, 'gate'],
     ],
   );
   // Число показанных отменённых задач ограничено, остальные посчитаны.
@@ -89,4 +89,32 @@ test('n2: failure text is labelled as data, not instructions, and the history si
   const small = attemptHistory(stateOf(runs.slice(0, 2)), drafts.slice(0, 1), 3).attemptHistory!;
   assert.equal(small.truncated, undefined);
   assert.equal(small.tasks[0].runs[0].error, injected.slice(0, 300));
+});
+
+test('attempt numbers: a counter restarted from 1 keeps a unique number per run, also past the shown slice', () => {
+  const draft = task('T-re', 'draft', { attempt: 1, attemptRestarts: 1 });
+  // Две попытки прежней серии, перезапуск счёта, затем одиннадцать новых
+  // (номер счётчика здесь значения не имеет): показаны последние десять.
+  const runs = [
+    run('T-re', 1, '2026-01-01T00:00:00Z'),
+    run('T-re', 2, '2026-01-01T01:00:00Z'),
+    ...Array.from({ length: 11 }, (_, i) => run('T-re', 1, `2026-01-02T${10 + i}:00:00Z`)),
+  ];
+  const shown = attemptHistory(stateOf(runs), [draft], 3).attemptHistory!;
+  const numbers = shown.tasks[0].runs.map((r) => r.number);
+  assert.deepEqual(numbers, [4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
+  assert.ok(shown.tasks[0].runs.every((r) => r.attempt === 1));
+  // Без перезапуска номер совпадает со счётчиком.
+  const plain = attemptHistory(
+    stateOf([run('T-p', 1, '2026-01-01T00:00:00Z'), run('T-p', 2, '2026-01-01T01:00:00Z')]),
+    [task('T-p', 'draft', { attempt: 2 })],
+    3,
+  ).attemptHistory!;
+  assert.deepEqual(
+    plain.tasks[0].runs.map((r) => [r.number, r.attempt]),
+    [
+      [1, 1],
+      [2, 2],
+    ],
+  );
 });
