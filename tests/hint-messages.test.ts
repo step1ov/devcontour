@@ -264,6 +264,11 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
     { code: 'apply-saved', params: { state: 'answered', operator: false }, input: input1 },
     { code: 'apply-saved', params: { state: 'reviewed', operator: true }, input: input1 },
   ],
+  'apply-carry': [
+    { code: 'apply-carry', params: { order: 'draft' }, input: input1 },
+    { code: 'apply-carry', params: { order: 'unreleased' }, input: input1 },
+    { code: 'apply-carry', params: { order: 'now' }, input: input1 },
+  ],
 };
 
 /**
@@ -401,8 +406,10 @@ test('Подсказки шага: новая конфигурация setup п�
  * прежние.
  * Образцы `job-cancelled-task` с `allCancelled` добавлены (второй путь — новая
  * ревизия доски); прежние образцы байтово прежние.
+ * Образцы нового кода `apply-carry` добавлены (перенос ответа заменённого
+ * вопроса); прежние образцы байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = '193e8b2677472067951f134df47710649a04ce6a1cfcd1b712232353042aa140';
+const ENGLISH_SAMPLES_SHA256 = '8129891e34996a9b415369a6cf18280b0eea13bd1c04aca8473d08806937484d';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

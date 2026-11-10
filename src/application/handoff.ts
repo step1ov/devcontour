@@ -156,7 +156,11 @@ interface HandoffHostNextFields {
     blocked: { id: string; reason: string }[];
     blockedCount: number;
   };
-  /** Вопрос исполнителя, к которому относится шаг (`answer-input`, `apply-input`, `close-follow-up`). */
+  /**
+   * Вопрос исполнителя, к которому относится шаг (`answer-input`, `apply-input`,
+   * `close-follow-up`); у переноса ответа заменённого вопроса (`apply-carry`)
+   * `state` — `superseded`.
+   */
   input?: { requestId: string; taskId: string; state: string; actor: 'lead' | 'operator' };
   detail: string;
 }
@@ -738,6 +742,29 @@ function followUpNext(ctx: HostContext): HandoffHostNext | undefined {
   });
 }
 
+/**
+ * Ответ заменённого вопроса ждёт переноса в постановку задачи (F14). Вопрос
+ * выдачу не держит, и пакет harness его не называет: без этого шага ведущий
+ * видел бы ожидание, старт задания или утверждение плана — и попытка (или
+ * утверждение черновика) прошла бы без ответа.
+ */
+function carryNext(ctx: HostContext): HandoffHostNext | undefined {
+  const { pack, h } = ctx;
+  // В режиме оператора ответ переносит оператор в панели: шаг ведущего — `operator`.
+  if (h.config.approvalMode === 'operator') return undefined;
+  const carry = new InputService(h)
+    .pendingCarries()
+    .find((c) => !pack.graphId || c.boardId === pack.graphId);
+  if (!carry) return undefined;
+  return withDetail(h, {
+    action: 'apply-input',
+    ...(carry.boardId ? { boardId: carry.boardId } : {}),
+    input: { requestId: carry.requestId, taskId: carry.taskId, state: 'superseded', actor: 'lead' },
+    code: 'apply-carry',
+    params: { order: carry.order },
+  });
+}
+
 function hostNext(ctx: HostContext): HandoffHostNext | undefined {
   const step = hostStep(ctx);
   // Решение о плане — о будущем объёме (например, разбор находок на
@@ -746,7 +773,11 @@ function hostNext(ctx: HostContext): HandoffHostNext | undefined {
   // на вопрос исполнителя, который ждёт применения, и упавшее задание доски.
   // Они — раньше решения о плане.
   if (step?.decision === 'plan') return liveBlocker(ctx) ?? step;
-  return step ?? followUpNext(ctx);
+  // Перенос ответа — раньше шагов очереди и ожидания (`rank` больше 0): они
+  // выдали бы задачу без ответа. Решения о задании, вопросы и режим
+  // оператора — прежде переноса.
+  if (step && rank(step) === 0) return step;
+  return carryNext(ctx) ?? step ?? followUpNext(ctx);
 }
 
 /**
@@ -775,7 +806,9 @@ function liveBlocker(ctx: HostContext): HandoffHostNext | undefined {
     )
       return step;
   }
-  return jobBlocker(ctx);
+  // Перенос в черновике — до утверждения плана, и до повтора задания: тот
+  // выдал бы задачу без ответа.
+  return carryNext(ctx) ?? jobBlocker(ctx);
 }
 
 /**

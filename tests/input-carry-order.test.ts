@@ -10,6 +10,7 @@ import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { controlled, inputDemos, inputFixture, untilQuestion } from './input-fixture.ts';
 import { specDigest } from '../src/core/service.ts';
+import { devcontourHandoff } from '../src/application/handoff.ts';
 
 after(() => inputDemos.close());
 
@@ -407,5 +408,43 @@ test('F14: a single-task board has no basis in the draft: the hints name pause, 
     assert.equal(staleEvents(f), 0);
   } finally {
     await f.cleanup();
+  }
+});
+
+test('F14: host.next names the answer waiting to be carried, in the order of the board, until it is carried', async () => {
+  for (const alone of [false, true]) {
+    const f = await inputFixture(controlled(), { edit: scoped });
+    try {
+      const { taskId, boardId, requestId, answered } = await respecified(f, { alone });
+      // Заменённый вопрос выдачу не держит, и пакет harness его не называет:
+      // без шага ведущий видел бы утверждение плана или паузу.
+      const next = (input = {}) => devcontourHandoff(f.h, input).host.next;
+      const expectCarry = (order: string, input = {}) => {
+        const step = next(input);
+        assert.equal(step?.action, 'apply-input', JSON.stringify(step));
+        assert.equal(step.code, 'apply-carry');
+        assert.deepEqual(step.params, { order });
+        assert.deepEqual(step.input, { requestId, taskId, state: 'superseded', actor: 'lead' });
+        assert.equal(step.boardId, boardId);
+        assert.ok(step.detail.includes(requestId), step.detail);
+      };
+      expectCarry(alone ? 'unreleased' : 'draft');
+      if (!alone) expectCarry('draft', { boardId });
+      if (alone) {
+        // Названный порядок: утверждение под паузой, затем перенос сразу.
+        f.h.approve(boardId, [taskId]);
+        expectCarry('now');
+        expectCarry('now', { boardId });
+      }
+      // Пакет другой доски переноса этой не называет.
+      const other = f.h.createBoard('Other board').id;
+      f.plainTask(other, 'Task of another board');
+      f.h.approve(other);
+      assert.notEqual(next({ boardId: other })?.code, 'apply-carry');
+      await carry(f, requestId, answered.answerDigest);
+      assert.notEqual(next()?.code, 'apply-carry', JSON.stringify(next()));
+    } finally {
+      await f.cleanup();
+    }
   }
 });

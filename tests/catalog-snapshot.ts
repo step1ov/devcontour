@@ -99,5 +99,8 @@
 // Намеренное изменение: описания usage_report, workflow_metrics и value_report
 // называют суммы USD оценкой по тарифам API, а бюджет workspace — бюджетом за
 // всё время workspace; прочие операции байтово прежние.
-export const CATALOG_DIGEST = '2377b2b91836516fa79ae5ba849e4668cfe020af2e2bafe0ac9f54b855e6373d';
+// Намеренное изменение: описание session_handoff называет шаг apply-input с
+// кодом apply-carry (ответ заменённого вопроса ждёт переноса, params.order);
+// прочие операции байтово прежние.
+export const CATALOG_DIGEST = 'b7939db048ce6623f00dcc8ef4b3ad52d087bfd6946bd02b4e4fc0e3c4ea8e6d';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

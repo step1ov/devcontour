@@ -90,7 +90,16 @@ export interface HintParamMap {
   'apply-claim': Stops;
   /** Ответ сохранён, но не применён (`state`). */
   'apply-saved': { state: string; operator: boolean } & Stops;
+  /**
+   * Ответ заменённого вопроса ждёт переноса в постановку задачи (F14):
+   * `draft` — перенос в черновике, затем утверждение; `unreleased` — доска
+   * без утверждённых задач: пауза, утверждение, перенос, снятие паузы;
+   * `now` — задача утверждена, перенос сразу.
+   */
+  'apply-carry': { order: CarryOrder };
 }
+/** Порядок переноса ответа заменённого вопроса (`apply-carry`). */
+export type CarryOrder = 'draft' | 'unreleased' | 'now';
 export type HintCode = keyof HintParamMap;
 
 /** Поля шага, из которых текст берёт доску, задание, цикл, план и вопрос. */
@@ -316,6 +325,17 @@ const en: Catalog = {
       repeatedEn(taskId, p.stops)
     );
   },
+  'apply-carry': (p, s) => {
+    const { requestId, taskId } = s.input!;
+    const chain = 'input_context, input_review, input_target, input_apply';
+    return `The answer to the superseded question ${requestId} waits to be carried into task ${taskId}: ${
+      p.order === 'draft'
+        ? `carry it while the task is a draft (${chain}), then approve the task (workflow_start or review-plan --tasks ${taskId}): the approval keeps the carried answer when the spec is unchanged after the carry.`
+        : p.order === 'unreleased'
+          ? `the board of the task has no approved task yet, so the answer cannot be carried into the draft: pause the queue (queue_set), approve the task (workflow_start or review-plan --tasks ${taskId}), carry the answer (${chain}), then lift the pause.`
+          : `carry it now (${chain}): the superseded question does not hold the task, so pause the queue (queue_set) if an attempt without the answer must not start.`
+    }`;
+  },
 };
 
 // ── Русский ────────────────────────────────────────────────────────────────
@@ -495,6 +515,17 @@ const ru: Catalog = {
       `Ответ на ${requestId} сохранён, но не применён (${p.state}): ${chainRu(p.operator, taskId)}.` +
       repeatedRu(taskId, p.stops)
     );
+  },
+  'apply-carry': (p, s) => {
+    const { requestId, taskId } = s.input!;
+    const chain = 'input_context, input_review, input_target, input_apply';
+    return `Ответ заменённого вопроса ${requestId} ждёт переноса в задачу ${taskId}: ${
+      p.order === 'draft'
+        ? `перенесите его, пока задача — черновик (${chain}), затем утвердите задачу (workflow_start или review-plan --tasks ${taskId}): утверждение сохраняет перенесённый ответ, если постановка после переноса не менялась.`
+        : p.order === 'unreleased'
+          ? `у доски задачи ещё нет утверждённых задач, и перенести ответ в черновик нельзя: поставьте очередь на паузу (queue_set), утвердите задачу (workflow_start или review-plan --tasks ${taskId}), перенесите ответ (${chain}), затем снимите паузу.`
+          : `перенесите его сейчас (${chain}): заменённый вопрос выдачу задачи не держит, поэтому поставьте очередь на паузу (queue_set), если попытка без ответа начаться не должна.`
+    }`;
   },
 };
 
