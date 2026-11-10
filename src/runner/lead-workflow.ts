@@ -42,6 +42,16 @@ export class LeadRunner {
    * Останавливает её только остановка цикла (`halt`, остановка сервера).
    */
   private joints = new Map<string, JointFlight>();
+  /**
+   * Отказ начала проверки по ожиданию (`NOT_READY`) — повторяемое ожидание,
+   * но ограниченное: `limit` отказов подряд с паузой перед новым началом
+   * (`delayMs`, удваивается). Иначе постоянная причина (например,
+   * расхождение состояния задач продукта и движка) держала бы задание в
+   * ожидании навсегда, повторяя синхронный снимок релиза каждые секунды, и
+   * не давала бы ни провала, ни карточки.
+   */
+  startRetry = { limit: 4, delayMs: 15_000 };
+  private startWaits = new Map<string, { count: number; notBefore: number }>();
   constructor(
     readonly h: DevContour,
     readonly root: string,
@@ -118,7 +128,11 @@ export class LeadRunner {
         // An operator-controlled workspace never spends model calls automatically.
         if (this.h.config.approvalMode === 'operator') continue;
         const job = this.workflow.claim(saved.key, owner);
-        if (!job) continue;
+        if (!job) {
+          // Попытки исчерпаны прерываниями: причина последнего — в ошибке.
+          this.workflow.noteExhausted(saved, owner);
+          continue;
+        }
         const controller = (this.controller = new AbortController());
         const timer = setInterval(
           () => {
@@ -434,15 +448,32 @@ export class LeadRunner {
         // Начало, отложенное за пределы такта, может встретить ожидание:
         // попытку, выданную в этом окне, или остановку цикла. Это не итог
         // проверки — стадия ждёт и начнёт проверку снова.
-        if (
-          codeOf(error) === 'NOT_READY' ||
-          (error instanceof Error && error.message === SERVER_STOPPING)
-        )
+        const message = error instanceof Error ? error.message : String(error);
+        if (message === SERVER_STOPPING) return true;
+        if (codeOf(error) === 'NOT_READY') {
+          const count = (this.startWaits.get(c.id)?.count ?? 0) + 1;
+          if (count > this.startRetry.limit) {
+            this.startWaits.delete(c.id);
+            throw new Error(
+              `Совместная проверка не начинается: ${message} (отказ начала ${count} раз подряд)`,
+            );
+          }
+          this.startWaits.set(c.id, {
+            count,
+            notBefore: Date.now() + this.startRetry.delayMs * 2 ** (count - 1),
+          });
           return true;
+        }
+        this.startWaits.delete(c.id);
         // Итог проверки — провал стадии, без кода отказа движка.
-        throw new Error(error instanceof Error ? error.message : String(error));
+        throw new Error(message);
       }
-      if (flight) return false;
+      if (flight) {
+        this.startWaits.delete(c.id);
+        return false;
+      }
+      // Пауза после отказа начала: без новой проверки и без снимка релиза.
+      if ((this.startWaits.get(c.id)?.notBefore ?? 0) > Date.now()) return true;
       const last = c.verifications.at(-1);
       let productFresh = c.releaseId === last?.productRelease?.releaseId;
       if (c.releaseId && last?.productRelease) {

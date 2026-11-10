@@ -17,6 +17,9 @@ import { Workspace } from './workspace.ts';
 import { repositories } from './repositories.ts';
 import { technicalReviewer } from '../harness/policy.ts';
 
+/** Текст очереди harness для задания, исчерпавшего попытки стадии. */
+const STAGE_ATTEMPTS_EXHAUSTED = 'Исчерпаны попытки стадии';
+
 /** Событие истории задания: стадия ждёт ответов на вопросы исполнителя. */
 export const WAITING_INPUT = 'waiting:input';
 
@@ -287,6 +290,28 @@ export class LeadWorkflow {
       const tasks = s.tasks.filter((t) => revision.taskIds.includes(t.id));
       return scopeGaps(this.h, tasks).map((gap) => ({ boardId, ...gap }));
     });
+  }
+  /**
+   * Задание, которое взятие закрыло «Исчерпаны попытки стадии» после
+   * прерываний (потеря владения, остановка): очередь заменяет причину
+   * последнего прерывания общим текстом. Здесь она дописывается — без неё
+   * оператор не видел, почему попытки кончились. `before` — задание до
+   * взятия (в очереди, с причиной прерывания).
+   */
+  noteExhausted(before: WorkflowJob, owner?: string) {
+    if (before.status !== 'queued' || !before.error) return;
+    const { engine } = executionOf(this.h);
+    domain(() =>
+      engine.host.store.transact('workflow.updated', (tx) => {
+        const current = tx.local('workflow-jobs', owner ?? WORKSPACE_OWNER, before.key) as
+          WorkflowJob | undefined;
+        if (current?.status !== 'failed' || current.error !== STAGE_ATTEMPTS_EXHAUSTED) return;
+        tx.putLocal('workflow-jobs', owner ?? WORKSPACE_OWNER, before.key, {
+          ...current,
+          error: `${STAGE_ATTEMPTS_EXHAUSTED}; последняя причина: ${before.error}`.slice(0, 1000),
+        });
+      }),
+    );
   }
   claim(key: string, owner?: string) {
     return domain(() => this.queue().claim(key, owner)) as WorkflowJob | undefined;

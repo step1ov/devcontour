@@ -189,3 +189,58 @@ test('Workspace.start: незавершённые задачи называют�
     await f.cleanup();
   }
 });
+
+test('Постоянный отказ начала проверки (NOT_READY) ждёт ограниченно, с паузами, и затем проваливает стадию с причиной', async () => {
+  const f = await jointFixture({ gateMs: 100 });
+  const verify = Object.getOwnPropertyDescriptor(WorkspaceRunner.prototype, 'verify')!;
+  const starts: number[] = [];
+  // Причина не проходит: состояние задач продукта и движка разошлось.
+  WorkspaceRunner.prototype.verify = function () {
+    starts.push(Date.now());
+    throw Object.assign(new DomainError('Сначала завершите все поручения набора'), {
+      code: 'NOT_READY',
+    });
+  };
+  try {
+    f.lead.startRetry = { limit: 2, delayMs: 300 };
+    const job = await untilSettled(f, 30_000);
+    assert.equal(job.status, 'failed', JSON.stringify(job));
+    assert.match(
+      job.error ?? '',
+      /Совместная проверка не начинается: Сначала завершите все поручения набора \(отказ начала 3 раз подряд\)/,
+    );
+    // Три начала, между ними — паузы 300 и 600 мс, а не каждый такт.
+    assert.equal(starts.length, 3);
+    assert.ok(starts[1] - starts[0] >= 300);
+    assert.ok(starts[2] - starts[1] >= 600);
+    assert.equal(f.verifications().length, 0);
+  } finally {
+    Object.defineProperty(WorkspaceRunner.prototype, 'verify', verify);
+    await f.cleanup();
+  }
+});
+
+test('Попытки стадии, исчерпанные потерей владения, оставляют в ошибке задания её причину', async () => {
+  const f = await jointFixture({ gateMs: 100 });
+  try {
+    const finish = f.lead.workflow.finish.bind(f.lead.workflow);
+    f.lead.workflow.finish = (job: WorkflowJob, wait?: boolean) => {
+      if (job.kind === 'changeset') {
+        const saved = f.flow.get(job.key);
+        f.store.atomic(() =>
+          f.store.saveLocal('lead', undefined, job.key, { ...saved, leaseUntil: 0 }),
+        );
+      }
+      return finish(job, wait);
+    };
+    const job = await untilSettled(f, 30_000);
+    assert.equal(job.status, 'failed', JSON.stringify(job));
+    assert.equal(job.stage, 0);
+    assert.match(
+      job.error ?? '',
+      /^Исчерпаны попытки стадии; последняя причина: Владение заданием утрачено/,
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
