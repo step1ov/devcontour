@@ -275,6 +275,11 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
       params: { order: 'now', active: ['R-1'], pause: true },
       input: input1,
     },
+    {
+      code: 'apply-carry',
+      params: { order: 'now', active: ['R-1'], userPause: true },
+      input: input1,
+    },
   ],
 };
 
@@ -421,8 +426,12 @@ test('Подсказки шага: новая конфигурация setup п�
  * прежние образцы байтово прежние.
  * Текст `apply-carry` с `pause` уточнён: пауза, которую снимет цикл задания,
  * не в счёт; прочие образцы байтово прежние.
+ * Образец `apply-carry` с `userPause` добавлен (пауза человека до старта
+ * задания); прежние образцы байтово прежние.
+ * Текст `apply-carry` с `userPause` называет команду пользователя
+ * `devcontour queue --pause` вместо панели; прочие образцы байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = '26b30d4d16ed6169e6633428a8fbcb76f27d21bc877e74dd716f548dc4911be5';
+const ENGLISH_SAMPLES_SHA256 = '7081e40117c09e576ddc9f2e1722e0f9ad4a5a1ce51e333f2ff0b0e91e378d32';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(
