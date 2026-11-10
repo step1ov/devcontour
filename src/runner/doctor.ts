@@ -1091,7 +1091,9 @@ export function checkoutsCheck(config: Config, root: string): Check {
  */
 export function contractSizeChecks(contracts: DevContourState['contracts']): Check[] {
   return contracts
-    .filter((c) => !supersededBy(contracts, c.id))
+    // doctor читает состояние до разбора схемой: запись без текста документа
+    // (незавершённая или чужой формы) не мерится, а не роняет весь doctor.
+    .filter((c) => typeof c.content === 'string' && !supersededBy(contracts, c.id))
     .flatMap((c) => {
       const size = contractSize(c.content);
       // Текст отказа регистрации («не будет зарегистрирован») здесь неверен:
