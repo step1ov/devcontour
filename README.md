@@ -64,14 +64,14 @@ npm run demo
 
 ## Установка
 
-Предварительные версии публикуются в npm с меткой `alpha`. Движок исполнения `devcontour-harness` — обычная зависимость с точной версией: npm ставит его рядом из registry, integrity фиксирует lock, отдельно его ставить не нужно. Новая версия harness приходит только с новой версией DevContour:
+Предварительные версии публикуются в npm с меткой `alpha`. Движок исполнения `devcontour-harness` — обычная зависимость с точной версией: npm ставит его из registry сам (в проекте — рядом в `node_modules`, при глобальной установке — внутри каталога пакета DevContour), отдельно его ставить не нужно. Новая версия harness приходит только с новой версией DevContour. npm не публикует `package-lock.json`, поэтому при установке из npm или из архива lock checkout не действует: точно закреплена только версия `devcontour-harness`, а опубликованная версия неизменяема — это те же байты, integrity которых при закреплении сверена с проверенным архивом. Остальное дерево — зависимости harness (например, `^`-диапазоны `@anthropic-ai/sandbox-runtime`) и `^`-зависимости самого DevContour — npm разрешает в момент установки.
 
 ```sh
 npm install --global devcontour@alpha
 devcontour help
 ```
 
-Тот же пакет можно установить из архива `devcontour-<version>.tgz`; закреплённый harness npm возьмёт из registry или своего кэша:
+Тот же пакет можно установить из архива `devcontour-<version>.tgz`; закреплённый harness и остальные зависимости npm возьмёт из registry или своего кэша:
 
 ```sh
 mkdir devcontour-install && cd devcontour-install
