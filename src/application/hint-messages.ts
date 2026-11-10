@@ -90,7 +90,20 @@ export interface HintParamMap {
   'apply-claim': Stops;
   /** Ответ сохранён, но не применён (`state`). */
   'apply-saved': { state: string; operator: boolean } & Stops;
+  /**
+   * Ответ заменённого вопроса ждёт переноса в постановку задачи (F14):
+   * `draft` — перенос в черновике, затем утверждение; `unreleased` — доска
+   * без утверждённых задач: пауза, утверждение, перенос, снятие паузы;
+   * `now` — задача утверждена, перенос сразу. `active` — идущие попытки
+   * графа доски: движок откажет в переносе до их окончания (шаг `wait`).
+   * `pause` — задача утверждена, а очередь идёт (или её паузу снимет цикл
+   * задания): сначала пауза очереди
+   * (шаг `queue_set`), иначе по окончании попыток задачу выдадут без ответа.
+   */
+  'apply-carry': { order: CarryOrder; active?: string[]; pause?: true };
 }
+/** Порядок переноса ответа заменённого вопроса (`apply-carry`). */
+export type CarryOrder = 'draft' | 'unreleased' | 'now';
 export type HintCode = keyof HintParamMap;
 
 /** Поля шага, из которых текст берёт доску, задание, цикл, план и вопрос. */
@@ -174,6 +187,12 @@ const repeatedEn = (taskId: string, q: HintQuestionStops | undefined) =>
   q
     ? ` Task ${taskId} has stopped with a writer question ${q.count} times; only the first ${q.limit} give the attempt back${q.exhausted ? ', further stops count as attempts, and with the attempts used up input_apply returns blocker ATTEMPTS_EXHAUSTED until it is applied with reset {"reason": …}' : ''}. Consider making the task spec answer these questions up front (board_correct or reopen and respecify).`
     : '';
+/** Пауза до переноса: задача утверждена, очередь идёт (`apply-carry` с `pause`). */
+const pauseCarryEn =
+  ' First pause the queue yourself (queue_set {"paused": true}; a pause that the job loop lifts does not count): the superseded question does not hold the task, and once the running attempts end the queue would issue it without the answer.';
+/** Ожидание переноса: в графе доски идут попытки (`apply-carry` с `active`). */
+const waitCarryEn = (active: string[]) =>
+  ` Wait: attempts run on the board of the task (${active.slice(0, 5).join(', ')}${active.length > 5 ? ', …' : ''}), and input_target and input_apply refuse the carry until they end; start the chain (input_review calls a model) only then.`;
 const chainEn = (operator: boolean, taskId: string) =>
   operator
     ? `input_context, input_review --author-runtime; then the operator applies in the panel (${hrefs.input(taskId)})`
@@ -316,6 +335,23 @@ const en: Catalog = {
       repeatedEn(taskId, p.stops)
     );
   },
+  'apply-carry': (p, s) => {
+    const { requestId, taskId } = s.input!;
+    const chain = 'input_context, input_review, input_target, input_apply';
+    return (
+      `The answer to the superseded question ${requestId} waits to be carried into task ${taskId}: ${
+        p.order === 'draft'
+          ? `carry it while the task is a draft (${chain}), then approve the task (workflow_start or review-plan --tasks ${taskId}): the approval keeps the carried answer when the spec is unchanged after the carry.`
+          : p.order === 'unreleased'
+            ? `the board of the task has no approved task yet, so the answer cannot be carried into the draft: pause the queue (queue_set), approve the task (workflow_start or review-plan --tasks ${taskId}), carry the answer (${chain}), then lift the pause.`
+            : p.active
+              ? `carry it after they end (${chain}).`
+              : `carry it now (${chain}): the superseded question does not hold the task, so pause the queue (queue_set) if an attempt without the answer must not start.`
+      }` +
+      (p.pause ? pauseCarryEn : '') +
+      (p.active ? waitCarryEn(p.active) : '')
+    );
+  },
 };
 
 // ── Русский ────────────────────────────────────────────────────────────────
@@ -356,6 +392,12 @@ const repeatedRu = (taskId: string, q: HintQuestionStops | undefined) =>
   q
     ? ` Остановок задачи ${taskId} вопросом исполнителя: ${q.count}; попытку возвращают только первые ${q.limit}${q.exhausted ? ', дальнейшие остановки расходуют попытки, а при исчерпанных попытках input_apply возвращает блокер ATTEMPTS_EXHAUSTED, пока ответ не применён с reset {"reason": …}' : ''}. Стоит дополнить постановку задачи ответами на эти вопросы заранее (board_correct или переоткрытие с новой постановкой).`
     : '';
+/** Пауза до переноса: задача утверждена, очередь идёт (`apply-carry` с `pause`). */
+const pauseCarryRu =
+  ' Сначала сами поставьте очередь на паузу (queue_set {"paused": true}; пауза, которую снимет цикл задания, не в счёт): заменённый вопрос выдачу задачи не держит, и по окончании идущих попыток очередь выдала бы её без ответа.';
+/** Ожидание переноса: в графе доски идут попытки (`apply-carry` с `active`). */
+const waitCarryRu = (active: string[]) =>
+  ` Подождите: в графе доски задачи идут попытки (${active.slice(0, 5).join(', ')}${active.length > 5 ? ', …' : ''}), и input_target и input_apply откажут в переносе до их окончания; цепочку начинайте только потом (input_review вызывает модель).`;
 const chainRu = (operator: boolean, taskId: string) =>
   operator
     ? `input_context, input_review --author-runtime; затем оператор применяет ответ в панели (${hrefs.input(taskId)})`
@@ -494,6 +536,23 @@ const ru: Catalog = {
     return (
       `Ответ на ${requestId} сохранён, но не применён (${p.state}): ${chainRu(p.operator, taskId)}.` +
       repeatedRu(taskId, p.stops)
+    );
+  },
+  'apply-carry': (p, s) => {
+    const { requestId, taskId } = s.input!;
+    const chain = 'input_context, input_review, input_target, input_apply';
+    return (
+      `Ответ заменённого вопроса ${requestId} ждёт переноса в задачу ${taskId}: ${
+        p.order === 'draft'
+          ? `перенесите его, пока задача — черновик (${chain}), затем утвердите задачу (workflow_start или review-plan --tasks ${taskId}): утверждение сохраняет перенесённый ответ, если постановка после переноса не менялась.`
+          : p.order === 'unreleased'
+            ? `у доски задачи ещё нет утверждённых задач, и перенести ответ в черновик нельзя: поставьте очередь на паузу (queue_set), утвердите задачу (workflow_start или review-plan --tasks ${taskId}), перенесите ответ (${chain}), затем снимите паузу.`
+            : p.active
+              ? `перенесите его после их окончания (${chain}).`
+              : `перенесите его сейчас (${chain}): заменённый вопрос выдачу задачи не держит, поэтому поставьте очередь на паузу (queue_set), если попытка без ответа начаться не должна.`
+      }` +
+      (p.pause ? pauseCarryRu : '') +
+      (p.active ? waitCarryRu(p.active) : '')
     );
   },
 };

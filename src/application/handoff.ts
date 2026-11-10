@@ -156,7 +156,11 @@ interface HandoffHostNextFields {
     blocked: { id: string; reason: string }[];
     blockedCount: number;
   };
-  /** Вопрос исполнителя, к которому относится шаг (`answer-input`, `apply-input`, `close-follow-up`). */
+  /**
+   * Вопрос исполнителя, к которому относится шаг (`answer-input`, `apply-input`,
+   * `close-follow-up`); у переноса ответа заменённого вопроса (`apply-carry`)
+   * `state` — `superseded`.
+   */
   input?: { requestId: string; taskId: string; state: string; actor: 'lead' | 'operator' };
   detail: string;
 }
@@ -738,6 +742,46 @@ function followUpNext(ctx: HostContext): HandoffHostNext | undefined {
   });
 }
 
+/**
+ * Ответ заменённого вопроса ждёт переноса в постановку задачи (F14). Вопрос
+ * выдачу не держит, и пакет harness его не называет: без этого шага ведущий
+ * видел бы ожидание, старт задания или утверждение плана — и попытка (или
+ * утверждение черновика) прошла бы без ответа.
+ */
+function carryNext(ctx: HostContext): HandoffHostNext | undefined {
+  const { pack, h } = ctx;
+  // В режиме оператора ответ переносит оператор в панели: шаг ведущего — `operator`.
+  if (h.config.approvalMode === 'operator') return undefined;
+  // Перенос, который можно начать, — раньше ждущего.
+  const carry = new InputService(h)
+    .pendingCarries()
+    .filter((c) => !pack.graphId || c.boardId === pack.graphId)
+    .sort((a, b) => Number(!!a.active.length) - Number(!!b.active.length))[0];
+  if (!carry) return undefined;
+  // Идущие попытки графа доски: движок откажет в переносе до их окончания,
+  // и шаг — ожидание (ревью ответа до того — лишний вызов модели). Задача
+  // уже утверждена (`now`), а очередь идёт: заменённый вопрос выдачу не
+  // держит, и по окончании попыток планировщик выдал бы её без ответа —
+  // сначала пауза очереди. Паузу, которую снимет цикл задания (начальная,
+  // остановки, пауза человека до старта задания), ведущий тоже ставит
+  // заново: своей паузы цикл не снимает.
+  const waiting = carry.active.length > 0;
+  const lifted =
+    ctx.state.paused && ctx.jobs.filter(ctx.live).some((j) => liftsPause(h, ctx.state, asLead(j)));
+  const pause = waiting && carry.order === 'now' && (!ctx.state.paused || lifted);
+  return withDetail(h, {
+    action: pause ? 'queue_set' : waiting ? 'wait' : 'apply-input',
+    ...(carry.boardId ? { boardId: carry.boardId } : {}),
+    input: { requestId: carry.requestId, taskId: carry.taskId, state: 'superseded', actor: 'lead' },
+    code: 'apply-carry',
+    params: {
+      order: carry.order,
+      ...(waiting ? { active: carry.active } : {}),
+      ...(pause ? { pause: true as const } : {}),
+    },
+  });
+}
+
 function hostNext(ctx: HostContext): HandoffHostNext | undefined {
   const step = hostStep(ctx);
   // Решение о плане — о будущем объёме (например, разбор находок на
@@ -746,6 +790,26 @@ function hostNext(ctx: HostContext): HandoffHostNext | undefined {
   // на вопрос исполнителя, который ждёт применения, и упавшее задание доски.
   // Они — раньше решения о плане.
   if (step?.decision === 'plan') return liveBlocker(ctx) ?? step;
+  // Перенос ответа — раньше шагов очереди и ожидания (`rank` больше 0): они
+  // выдали бы задачу без ответа. Решения о задании, вопросы и режим
+  // оператора — прежде переноса.
+  // Ожидание переноса (идут попытки доски) своей доски — на том же месте:
+  // старт задания или снятие паузы продолжили бы выдачу до переноса.
+  if (step && rank(step) === 0) return step;
+  // Ожидание переноса — как ожидание (`rank` шага `wait`): действие другой
+  // доски (старт или повтор задания) оно не прячет, только шаги своей доски,
+  // другие ожидания и шаги паузы: снятие паузы до переноса выдало бы задачу
+  // без ответа.
+  const carry = carryNext(ctx);
+  if (
+    carry &&
+    (carry.action !== 'wait' ||
+      !step ||
+      rank(step) >= rank(carry) ||
+      step.action === 'queue_set' ||
+      step.boardId === carry.boardId)
+  )
+    return carry;
   return step ?? followUpNext(ctx);
 }
 
@@ -775,7 +839,15 @@ function liveBlocker(ctx: HostContext): HandoffHostNext | undefined {
     )
       return step;
   }
-  return jobBlocker(ctx);
+  // Перенос в черновике — до утверждения плана и до повтора задания: тот
+  // выдал бы задачу без ответа. Решение о задании — раньше переноса, как в
+  // основном пути.
+  const job = jobBlocker(ctx);
+  if (job && rank(job) === 0) return job;
+  // Ожидание переноса не прячет повтор задания другой доски.
+  const carry = carryNext(ctx);
+  if (carry?.action === 'wait' && job && job.boardId !== carry.boardId) return job;
+  return carry ?? job;
 }
 
 /**

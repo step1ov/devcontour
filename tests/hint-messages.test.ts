@@ -264,6 +264,18 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
     { code: 'apply-saved', params: { state: 'answered', operator: false }, input: input1 },
     { code: 'apply-saved', params: { state: 'reviewed', operator: true }, input: input1 },
   ],
+  'apply-carry': [
+    { code: 'apply-carry', params: { order: 'draft' }, input: input1 },
+    { code: 'apply-carry', params: { order: 'unreleased' }, input: input1 },
+    { code: 'apply-carry', params: { order: 'now' }, input: input1 },
+    { code: 'apply-carry', params: { order: 'now', active: ['R-1', 'R-2'] }, input: input1 },
+    { code: 'apply-carry', params: { order: 'draft', active: ['R-1'] }, input: input1 },
+    {
+      code: 'apply-carry',
+      params: { order: 'now', active: ['R-1'], pause: true },
+      input: input1,
+    },
+  ],
 };
 
 /**
@@ -401,8 +413,16 @@ test('Подсказки шага: новая конфигурация setup п�
  * прежние.
  * Образцы `job-cancelled-task` с `allCancelled` добавлены (второй путь — новая
  * ревизия доски); прежние образцы байтово прежние.
+ * Образцы нового кода `apply-carry` добавлены (перенос ответа заменённого
+ * вопроса); прежние образцы байтово прежние.
+ * Образцы `apply-carry` с `active` добавлены (ожидание идущих попыток доски);
+ * прежние образцы байтово прежние.
+ * Образец `apply-carry` с `pause` добавлен (пауза очереди до ожидания);
+ * прежние образцы байтово прежние.
+ * Текст `apply-carry` с `pause` уточнён: пауза, которую снимет цикл задания,
+ * не в счёт; прочие образцы байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = '193e8b2677472067951f134df47710649a04ce6a1cfcd1b712232353042aa140';
+const ENGLISH_SAMPLES_SHA256 = '26b30d4d16ed6169e6633428a8fbcb76f27d21bc877e74dd716f548dc4911be5';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

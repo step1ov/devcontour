@@ -1326,6 +1326,28 @@ export class Store {
       ? this.components.events(rows)
       : rows.map((e) => ({ ...e, data: JSON.parse(e.data) as unknown }));
   }
+  /**
+   * События названных типов не раньше `at`, новые сначала, без окна
+   * `latestEvents`: для редкой выборки с известным началом (сбросы счёта
+   * попыток с первой нужной попытки истории). Индекса нет — вызывающий
+   * читает только при необходимости.
+   */
+  eventsSince(types: readonly string[], at: string): AuditEvent[] {
+    if (!types.length) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM main.events WHERE at >= ? AND type IN (${types.map(() => '?').join(',')}) ORDER BY id DESC`,
+      )
+      .all(at, ...types) as unknown as {
+      id: number;
+      at: string;
+      type: string;
+      data: string;
+    }[];
+    return this.components
+      ? this.components.events(rows)
+      : rows.map((e) => ({ ...e, data: JSON.parse(e.data) as unknown }));
+  }
   events(after = 0): AuditEvent[] {
     const rows = this.db
       .prepare('SELECT * FROM main.events WHERE id>? ORDER BY id DESC LIMIT 150')

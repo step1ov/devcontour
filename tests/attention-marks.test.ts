@@ -11,7 +11,7 @@ import {
 } from '../src/application/attention.ts';
 import { DiscussionService } from '../src/application/discussion.ts';
 import { Store } from '../src/core/store.ts';
-import { DevContour } from '../src/core/service.ts';
+import { DevContour, specDigest } from '../src/core/service.ts';
 import type { AttentionItem } from '../src/core/attention-model.ts';
 import { budgetOverview } from '../src/harness/budget.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
@@ -363,4 +363,130 @@ test('Вернувшееся прежнее появление продолжа�
     row.earlier?.map((e) => e.occurrenceId),
     ['b'],
   );
+});
+
+test('История сбоев задачи: после сброса счёта попыток сбой решает следующая попытка по порядку, а не больший номер', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const t = f.h.addTask(b.id, input('Reset'));
+    f.h.approve(b.id);
+    const service = new AttentionService(f.store, f.h);
+    const key = `work:${t.id}`;
+    const fail = async () => {
+      f.h.pause(false);
+      const run = f.h.claim('test')!;
+      assert.equal(run.taskId, t.id);
+      f.h.fail(run.id, run.token, 'fixture failure', false, 'gate');
+      // Отмеченное появление попадает в историю, когда сбой решён.
+      await service.mark({ marks: [mark(byKey((await service.active()).items, key)!, 'read')] });
+      return run;
+    };
+    // Счётчик исчерпан, затем сброс человеком: счёт снова с 1, как после
+    // перезапуска новой постановкой.
+    const max = f.h.config.maxAttempts;
+    const early = [await fail()];
+    while (early.length < max) {
+      f.h.retry(t.id);
+      early.push(await fail());
+    }
+    f.h.retry(t.id, { reason: 'fixture: reset the attempt counter' });
+    const after = await fail();
+    const runs = f.store.read().runs.filter((r) => r.taskId === t.id);
+    assert.deepEqual(
+      runs.map((r) => r.attempt),
+      [...early.map((_, i) => i + 1), 1],
+    );
+    const resolved = new Map(
+      service
+        .history()
+        .items.filter((i) => i.sourceKey === key)
+        .map((i) => [i.occurrenceId, i.resolvedAt]),
+    );
+    const startOf = (id: string) => runs.find((r) => r.id === id)!.startedAt;
+    for (let i = 0; i + 1 < early.length; i++)
+      assert.equal(resolved.get(early[i].id), startOf(early[i + 1].id));
+    // Сбой последней попытки серии решён попыткой после сброса (её номер меньше).
+    assert.equal(resolved.get(early.at(-1)!.id), startOf(after.id));
+    // Текущий сбой не решён: ранняя попытка с большим номером его не решает.
+    assert.equal(resolved.has(after.id), false);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('История сбоев задачи: перезапуск счёта после первой попытки решает сбой, возвращённая попытка — нет', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const t = f.h.addTask(b.id, input('Restart'));
+    f.h.approve(b.id);
+    const service = new AttentionService(f.store, f.h);
+    const key = `work:${t.id}`;
+    const fail = async (kind: 'gate' | 'environment' = 'gate') => {
+      f.h.pause(false);
+      const run = f.h.claim('test')!;
+      assert.equal(run.taskId, t.id);
+      f.h.fail(run.id, run.token, 'fixture failure', false, kind);
+      const item = byKey((await service.active()).items, key);
+      if (item) await service.mark({ marks: [mark(item, 'read')] });
+      return run;
+    };
+    const resolved = () =>
+      new Map(
+        service
+          .history()
+          .items.filter((i) => i.sourceKey === key)
+          .map((i) => [i.occurrenceId, i.resolvedAt]),
+      );
+    const startOf = (id: string) => f.store.read().runs.find((r) => r.id === id)!.startedAt;
+    // Возвращённая попытка (отказ окружения) повторяет номер счётчика.
+    const given = await fail('environment');
+    f.h.retry(t.id);
+    const first = await fail();
+    const counters = () =>
+      f.store
+        .read()
+        .runs.filter((r) => r.taskId === t.id)
+        .map((r) => r.attempt);
+    assert.deepEqual(counters(), [1, 1]);
+    assert.equal(resolved().has(given.id), false, 'тот же номер без сброса сбой не решает');
+    // Новая постановка после упавшей попытки: счётчик снова с того же номера.
+    f.h.pause(true);
+    f.h.reopen(t.id, 'The failure shows the spec must change');
+    const draft = f.store.read().tasks.find((x) => x.id === t.id)!;
+    f.h.editTask(
+      t.id,
+      {
+        title: 'Restarted spec',
+        description: draft.description,
+        role: draft.role,
+        acceptance: draft.acceptance,
+        dependsOn: draft.dependsOn,
+      },
+      specDigest(draft),
+    );
+    assert.deepEqual(
+      f.h.approve(b.id, [t.id]).attemptsRestarted?.map((x) => x.taskId),
+      [t.id],
+    );
+    // Длинный журнал: после перезапуска — много других утверждений. Перезапуск
+    // ищется не только среди последних событий.
+    const raw = new DatabaseSync(join(f.root, 'state.sqlite'));
+    try {
+      const insert = raw.prepare('INSERT INTO events(at,type,data) VALUES(?,?,?)');
+      const at = new Date().toISOString();
+      raw.exec('BEGIN');
+      for (let i = 0; i < 600; i++) insert.run(at, 'board.approved', '{"boardId":"B-padding"}');
+      raw.exec('COMMIT');
+    } finally {
+      raw.close();
+    }
+    const restarted = await fail();
+    assert.equal(counters().at(-1), counters().at(-2), 'номер счётчика совпал');
+    assert.equal(resolved().get(first.id), startOf(restarted.id));
+    assert.equal(resolved().has(restarted.id), false);
+  } finally {
+    f.cleanup();
+  }
 });

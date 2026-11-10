@@ -32,7 +32,7 @@ import {
 } from 'devcontour-harness';
 import { DomainError, type Task } from '../core/model.ts';
 import { hrefs } from './panel-links.ts';
-import { hintLocaleOf, reviewLanguageInstructions } from './hint-messages.ts';
+import { hintLocaleOf, reviewLanguageInstructions, type CarryOrder } from './hint-messages.ts';
 import type { DevContour } from '../core/service.ts';
 import { executionOf, reviewExecutionOf, toDomain } from '../harness/execution.ts';
 import { devcontourContextSource, pinnedSnapshot, taskPacks } from '../harness/host.ts';
@@ -63,11 +63,22 @@ const carryStep = (
   task: Pick<Task, 'id' | 'status' | 'approvedDigest'> | undefined,
   unreleased = false,
 ) =>
+  ({
+    unreleased: `the board of the task has no approved task yet, so the answer cannot be carried into the draft: pause the queue (queue_set), approve the task (workflow_start or review-plan --tasks ${task?.id ?? '<task>'}), carry the answer (input_context, input_review, input_target, input_apply), then lift the pause`,
+    draft: `carry the answer while the task is a draft (input_context, input_review, input_target, input_apply), then approve the task (workflow_start or review-plan --tasks ${task?.id ?? '<task>'}): the approval keeps the carried answer when the spec is unchanged after the carry`,
+    now: 'carry the answer now (input_context, input_review, input_target, input_apply): the superseded question does not hold the task, so pause the queue (queue_set) if an attempt without the answer must not start',
+  })[carryOrder(task, unreleased)];
+
+/** Порядок переноса: тот же выбор, что у `carryStep` (шаг пакета передачи — `apply-carry`). */
+const carryOrder = (
+  task: Pick<Task, 'status' | 'approvedDigest'> | undefined,
+  unreleased: boolean,
+): CarryOrder =>
   unreleased
-    ? `the board of the task has no approved task yet, so the answer cannot be carried into the draft: pause the queue (queue_set), approve the task (workflow_start or review-plan --tasks ${task?.id ?? '<task>'}), carry the answer (input_context, input_review, input_target, input_apply), then lift the pause`
+    ? 'unreleased'
     : !task || task.status === 'draft' || !task.approvedDigest
-      ? `carry the answer while the task is a draft (input_context, input_review, input_target, input_apply), then approve the task (workflow_start or review-plan --tasks ${task?.id ?? '<task>'}): the approval keeps the carried answer when the spec is unchanged after the carry`
-      : 'carry the answer now (input_context, input_review, input_target, input_apply): the superseded question does not hold the task, so pause the queue (queue_set) if an attempt without the answer must not start';
+      ? 'draft'
+      : 'now';
 
 /** Кто действует: ведущий агент (агентский API), оператор (панель) или хост от его имени (CLI `--by host`). */
 export type InputActorKind = 'lead' | 'operator' | 'host';
@@ -492,6 +503,48 @@ export class InputService {
               (!input.state || r.state === input.state),
           ),
         };
+      });
+    } catch (error) {
+      throw toDomain(error);
+    }
+  }
+
+  /**
+   * Заменённые вопросы, ответ которых ждёт переноса (F14): заменённый вопрос
+   * выдачу не держит, и пакет harness его не называет — шаг пакета передачи
+   * ведущего (`apply-carry`) берёт их отсюда: только перенос, который движок
+   * сейчас разрешил бы (`carryAllowed`), в задачу, которая не снята и не
+   * принята.
+   */
+  pendingCarries() {
+    const { engine } = executionOf(this.h);
+    try {
+      const requests = engine.inputRequests({});
+      return engine.read((view) => {
+        const context = this.summaryContext();
+        return requests.flatMap((request) => {
+          if (request.kind !== 'question' || !request.blocking || request.target) return [];
+          // Переносить некуда: задача снята или принята (движок откажет).
+          const task = context.tasks.get(request.workId);
+          if (!task || task.status === 'cancelled' || task.status === 'done') return [];
+          const work = view.work(request.workId);
+          if (work?.status === 'cancelled' || work?.status === 'done') return [];
+          if (this.stateOf(view, request, task).state !== 'superseded') return [];
+          // Право переноса — правило движка сейчас; отметка `closed.carry` —
+          // лишь запись момента замены.
+          if (!engine.carryAllowed(view, request)) return [];
+          const unreleased = !!this.unreleasedBoard(task);
+          return [
+            {
+              requestId: request.id,
+              taskId: request.workId,
+              boardId: context.boards.get(request.workId) ?? null,
+              order: carryOrder(task, unreleased),
+              /** Идущие попытки графа доски: перенос подождёт их окончания. */
+              active: unreleased ? [] : this.activeInGraph(task.id).map((a) => a.id),
+            },
+          ];
+        });
       });
     } catch (error) {
       throw toDomain(error);
