@@ -364,3 +364,53 @@ test('Вернувшееся прежнее появление продолжа�
     ['b'],
   );
 });
+
+test('История сбоев задачи: после сброса счёта попыток сбой решает следующая попытка по порядку, а не больший номер', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Board');
+    const t = f.h.addTask(b.id, input('Reset'));
+    f.h.approve(b.id);
+    const service = new AttentionService(f.store, f.h);
+    const key = `work:${t.id}`;
+    const fail = async () => {
+      f.h.pause(false);
+      const run = f.h.claim('test')!;
+      assert.equal(run.taskId, t.id);
+      f.h.fail(run.id, run.token, 'fixture failure', false, 'gate');
+      // Отмеченное появление попадает в историю, когда сбой решён.
+      await service.mark({ marks: [mark(byKey((await service.active()).items, key)!, 'read')] });
+      return run;
+    };
+    // Счётчик исчерпан, затем сброс человеком: счёт снова с 1, как после
+    // перезапуска новой постановкой.
+    const max = f.h.config.maxAttempts;
+    const early = [await fail()];
+    while (early.length < max) {
+      f.h.retry(t.id);
+      early.push(await fail());
+    }
+    f.h.retry(t.id, { reason: 'fixture: reset the attempt counter' });
+    const after = await fail();
+    const runs = f.store.read().runs.filter((r) => r.taskId === t.id);
+    assert.deepEqual(
+      runs.map((r) => r.attempt),
+      [...early.map((_, i) => i + 1), 1],
+    );
+    const resolved = new Map(
+      service
+        .history()
+        .items.filter((i) => i.sourceKey === key)
+        .map((i) => [i.occurrenceId, i.resolvedAt]),
+    );
+    const startOf = (id: string) => runs.find((r) => r.id === id)!.startedAt;
+    for (let i = 0; i + 1 < early.length; i++)
+      assert.equal(resolved.get(early[i].id), startOf(early[i + 1].id));
+    // Сбой последней попытки серии решён попыткой после сброса (её номер меньше).
+    assert.equal(resolved.get(early.at(-1)!.id), startOf(after.id));
+    // Текущий сбой не решён: ранняя попытка с большим номером его не решает.
+    assert.equal(resolved.has(after.id), false);
+  } finally {
+    f.cleanup();
+  }
+});

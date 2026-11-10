@@ -1,4 +1,5 @@
 import { repositories } from '../core/repositories.ts';
+import { attemptNumbers } from '../core/attempt-numbers.ts';
 import { mkdirSync, writeFileSync, renameSync, lstatSync, realpathSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -160,6 +161,8 @@ export function attachJournal(h: DevContour) {
             '> Автоматическая проекция локальной базы задач.',
             '',
           ];
+          // Сквозной номер попытки: счётчик после перезапуска или сброса — снова с 1.
+          const numbers = attemptNumbers(state.runs);
           for (const task of tasks) {
             rows.push(
               `## ${task.id}: ${line(task.title)}`,
@@ -173,7 +176,7 @@ export function attachJournal(h: DevContour) {
             );
             for (const run of state.runs.filter((r) => r.taskId === task.id))
               rows.push(
-                `- Попытка ${run.attempt}: ${run.status}; ${run.runtime} / ${run.model ?? 'default'}; SHA ${run.integrationSha ?? run.candidateSha ?? '—'}`,
+                `- Попытка ${numbers.get(run.id)}${numbers.get(run.id) === run.attempt ? '' : ` (счёт ${run.attempt})`}: ${run.status}; ${run.runtime} / ${run.model ?? 'default'}; SHA ${run.integrationSha ?? run.candidateSha ?? '—'}`,
                 ...run.evidence.map(
                   (e) => `  - ${e.gate}: ${e.passed ? 'PASS' : 'FAIL'}; ${e.sha}; ${e.log}`,
                 ),

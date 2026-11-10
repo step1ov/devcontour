@@ -2023,7 +2023,13 @@ workSource.history = (ctx) => {
     if (run.status !== 'failed') return [];
     const task = ctx.state.tasks.find((t) => t.id === run.taskId);
     if (!task) return [];
-    const next = ctx.state.runs.find((r) => r.taskId === run.taskId && r.attempt > run.attempt);
+    // Следующая попытка — по порядку выдачи: счётчик после перезапуска (D47)
+    // или сброса начинается с 1, и большой номер ранней серии стоит раньше.
+    // Тот же номер — возвращённая попытка: сбой ею не решён, как прежде.
+    const after = ctx.state.runs.indexOf(run);
+    const next = ctx.state.runs.find(
+      (r, i) => i > after && r.taskId === run.taskId && r.attempt !== run.attempt,
+    );
     const accepted =
       task.status === 'done'
         ? ctx.state.runs.findLast((r) => r.taskId === task.id && r.status === 'succeeded')
