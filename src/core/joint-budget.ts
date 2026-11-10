@@ -1,4 +1,5 @@
 import type { JointBudgetCheckpoint } from 'devcontour-harness/contracts';
+import { MAX_NEUTRAL_FAILURES, WORKSPACE_OWNER, type ExecutionView } from 'devcontour-harness';
 import { DomainError, type DevContourState, type Verification } from './model.ts';
 
 /** Область бюджета не зависит от порядка задач, ChangeSet, модели или digest. */
@@ -59,20 +60,32 @@ export function acceptedJointBudgetCheckpoints(
 }
 
 /**
- * Проверка, оборванная до первого gate (остановка, потеря срока владения,
- * отказ окружения до установки): записей gates у неё нет. Результата о
- * коде она не дала. Движок, который сам отмечает такие проверки
- * (`interrupted`), их в предел не засчитывает; прежний движок засчитывает.
+ * Проверка, прерванная до результата gates (остановка хоста, потеря
+ * владения), — определение движка (`jointInterrupted`): отметка движка и нет
+ * evidence. Предел набора она не тратит; у таких проверок свой предел
+ * (`MAX_NEUTRAL_FAILURES`).
  */
 export const interruptedJoint = (v: Pick<Verification, 'status' | 'evidence' | 'interrupted'>) =>
-  v.status === 'failed' && (v.interrupted === true || !v.evidence.length);
+  v.status === 'failed' && v.interrupted === true && !v.evidence.length;
 
 /**
- * Проверки набора, которые движок засчитывает в предел сейчас: после
- * последнего сброса (принятого ChangeSet этого набора — его checkpoint) и
- * без отмеченных движком как прерванные.
+ * Завершённая проверка без результата gates: прерванная или отказ до gates,
+ * в том числе записанная прежними версиями без отметки. Её снимает явный
+ * сброс бюджета оператором; проверки с evidence сброс не снимает.
  */
-export function jointBudgetRuns(state: DevContourState, workIds: readonly string[]) {
+export const gatelessJoint = (v: Pick<Verification, 'status' | 'evidence'>) =>
+  v.status === 'failed' && !v.evidence.length;
+
+/**
+ * Окно бюджета набора, как его считает движок (`jointBudgetWindow`):
+ * проверки набора после принятого ChangeSet этого набора (checkpoint) и не
+ * снятые сбросом оператора (`resetIds` — снятые сбросами проверки).
+ */
+export function jointBudgetRuns(
+  state: DevContourState,
+  workIds: readonly string[],
+  resetIds: ReadonlySet<string> = new Set(),
+) {
   let settled = new Set<string>();
   try {
     settled = new Set(
@@ -83,40 +96,62 @@ export function jointBudgetRuns(state: DevContourState, workIds: readonly string
   }
   return state.changeSets
     .flatMap((c) => c.verifications)
-    .filter((v) => sameWorks(v, workIds) && !settled.has(v.id) && v.interrupted !== true);
+    .filter((v) => sameWorks(v, workIds) && !settled.has(v.id) && !resetIds.has(v.id));
 }
 
+/** Проверки, снятые сбросами бюджета (`joint-budget-resets` движка). */
+export function jointResetIds(view: Pick<ExecutionView, 'locals'>) {
+  return new Set(
+    view
+      .locals('joint-budget-resets', WORKSPACE_OWNER)
+      .flatMap((r) => r.value.settledVerificationIds),
+  );
+}
+
+/** Команда сброса бюджета оператором — для отказов и карточки. */
+export const budgetResetCommand = (changeSetId: string) =>
+  `devcontour changeset-budget-reset --changeset ${changeSetId} --reason … --workspace …`;
+
 /**
- * Отказ начала проверки по пределу: что исчерпано, сколько из засчитанного
- * — проверки без результата gate и какой путь остаётся. Предел движка — по
- * набору задач (а не по ChangeSet) до принятия ChangeSet этого набора, и
- * сбросить его нельзя: при исчерпанном пределе набора новый ChangeSet над
- * теми же задачами получает тот же отказ. Предел самого ChangeSet (`scope`
- * changeset) — другой: при запасе у набора новый ChangeSet проверку начнёт.
+ * Отказ начала проверки по пределу: сколько засчитано, сколько прервано до
+ * результата gates (не засчитываются, свой предел), что снимает сброс
+ * оператора и какой путь остаётся. Предел движка — по набору задач (а не по
+ * ChangeSet) до принятия ChangeSet этого набора. Предел самого ChangeSet
+ * (`scope` changeset) — другой: при запасе у набора новый ChangeSet
+ * проверку начнёт.
  */
 export function jointBudgetRefusal(
   state: DevContourState,
   workIds: readonly string[],
   limit: number,
   scope: 'changeset' | 'set',
+  options: { changeSetId: string; resetIds?: ReadonlySet<string> },
 ) {
-  const runs = jointBudgetRuns(state, workIds);
-  const interrupted = runs.filter(interruptedJoint).length;
-  const setSpent = scope === 'set' || runs.length >= limit;
+  const window = jointBudgetRuns(state, workIds, options.resetIds);
+  const interrupted = window.filter(interruptedJoint).length;
+  const counted = window.length - interrupted;
+  const resettable = window.filter(gatelessJoint).length;
+  const setSpent = scope === 'set' || counted >= limit || interrupted >= MAX_NEUTRAL_FAILURES;
   const head =
     scope === 'changeset'
       ? `Исчерпан лимит попыток ChangeSet (${limit})`
       : `Исчерпан предел совместных проверок этого набора задач (${limit})`;
   const route =
     'Путь: измените набор задач (новая ревизия доски: добавьте задачу, например исправление по провалу gate, или отмените ненужную), примите доску и создайте ChangeSet по ней; либо спросите пользователя.';
+  const reset = resettable
+    ? ` Без результата gates — ${resettable}: их снимает сброс бюджета оператором с причиной (${budgetResetCommand(options.changeSetId)}; решение человека, ведущий агент его не выполняет). Проверки с результатом gates сброс не снимает.`
+    : '';
   return (
     head +
+    `: засчитано проверок набора ${counted} из ${limit}` +
     (interrupted
-      ? `; из засчитанных проверок этого набора ${interrupted} прерваны до первого gate и результата о коде не дали, но предел расходуют`
+      ? `; прервано до результата gates ${interrupted} (в предел не засчитываются, их предел ${MAX_NEUTRAL_FAILURES})`
       : '') +
+    '.' +
     (setSpent
-      ? '. Предел набора считается по задачам до принятия ChangeSet этого набора, поэтому новый ChangeSet над теми же задачами получит тот же отказ. ' +
+      ? reset +
+        ' Иначе предел набора снимает только принятие ChangeSet этого набора, поэтому новый ChangeSet над теми же задачами получит тот же отказ. ' +
         route
-      : `. У набора задач осталось проверок: ${limit - runs.length} — создайте новый ChangeSet по тем же доскам и проверьте его (workspace-verify).`)
+      : ` У набора задач осталось проверок: ${limit - counted} — создайте новый ChangeSet по тем же доскам и проверьте его (workspace-verify).`)
   );
 }

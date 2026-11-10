@@ -1,5 +1,10 @@
 import { assertTaskPreparation } from './preparation.ts';
-import { jointBudgetRefusal, settledJointVerifications } from './joint-budget.ts';
+import {
+  interruptedJoint,
+  jointBudgetRefusal,
+  jointResetIds,
+  settledJointVerifications,
+} from './joint-budget.ts';
 import { delivered } from './delivery.ts';
 import { entityId } from './ids.ts';
 import { z } from 'zod';
@@ -183,9 +188,16 @@ export class Workspace {
           throw new DomainError('Доставка ещё выполняется');
         const snapshot = changeSnapshot(s, c);
         const workIds = snapshot.tasks.map((t) => t.id);
-        if (c.verifications.length >= this.h.config.maxAttempts)
+        // Предел самого ChangeSet — те же правила, что у движка: прерванные
+        // до результата gates и снятые сбросом оператора проверки не тратят.
+        const resetIds = jointResetIds(ht.tx);
+        const refusal = { changeSetId: id, resetIds };
+        if (
+          c.verifications.filter((v) => !interruptedJoint(v) && !resetIds.has(v.id)).length >=
+          this.h.config.maxAttempts
+        )
           throw new DomainError(
-            jointBudgetRefusal(s, workIds, this.h.config.maxAttempts, 'changeset'),
+            jointBudgetRefusal(s, workIds, this.h.config.maxAttempts, 'changeset', refusal),
           );
         snapshot.tasks.forEach((t) => assertTaskPreparation(s, t));
         if (!snapshot.tasks.length) throw new DomainError('Сначала завершите все задачи ChangeSet');
@@ -218,7 +230,9 @@ export class Workspace {
           // Предел движка — по набору задач: отказ называет и прерванные
           // проверки, и путь, которого у прежнего текста не было.
           if (error instanceof HarnessError && error.code === 'ATTEMPTS_EXHAUSTED')
-            throw new DomainError(jointBudgetRefusal(s, workIds, this.h.config.maxAttempts, 'set'));
+            throw new DomainError(
+              jointBudgetRefusal(s, workIds, this.h.config.maxAttempts, 'set', refusal),
+            );
           throw error;
         }
         const v = c.verifications.find((x) => x.id === started.id)!;
@@ -229,6 +243,23 @@ export class Workspace {
         return structuredClone(v);
       }),
     );
+  }
+  /**
+   * Сброс бюджета совместных проверок набора задач ChangeSet — решение
+   * оператора с причиной (`jointBudgetReset` движка): снимает только
+   * завершённые проверки набора без результата gates. Никогда не вызывается
+   * автоматически и не доступен ведущему агенту.
+   */
+  budgetReset(id: string, reason: string) {
+    if (!reason.trim()) throw new DomainError('Укажите причину сброса: --reason …');
+    const { engine } = executionOf(this.h);
+    const s = this.h.store.read();
+    const c = find(s, id);
+    if (c.acceptance) throw new DomainError('ChangeSet уже принят: его набору сброс не нужен');
+    const workIds = changeSnapshot(s, c).tasks.map((t) => t.id);
+    if (!workIds.length) throw new DomainError('В ChangeSet нет задач');
+    const record = domain(() => engine.jointBudgetReset(workIds, { reason, actor: 'operator' }));
+    return { changeSetId: id, ...record };
   }
   /** Текущая проверка ChangeSet: записи — только её владельцем (fencing движка). */
   private latest(id: string) {
