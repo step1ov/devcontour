@@ -752,18 +752,29 @@ function carryNext(ctx: HostContext): HandoffHostNext | undefined {
   const { pack, h } = ctx;
   // В режиме оператора ответ переносит оператор в панели: шаг ведущего — `operator`.
   if (h.config.approvalMode === 'operator') return undefined;
+  // Перенос, который можно начать, — раньше ждущего.
   const carry = new InputService(h)
     .pendingCarries()
-    .find((c) => !pack.graphId || c.boardId === pack.graphId);
+    .filter((c) => !pack.graphId || c.boardId === pack.graphId)
+    .sort((a, b) => Number(!!a.active.length) - Number(!!b.active.length))[0];
   if (!carry) return undefined;
   // Идущие попытки графа доски: движок откажет в переносе до их окончания,
-  // и шаг — ожидание (ревью ответа до того — лишний вызов модели).
+  // и шаг — ожидание (ревью ответа до того — лишний вызов модели). Задача
+  // уже утверждена (`now`), а очередь идёт: заменённый вопрос выдачу не
+  // держит, и по окончании попыток планировщик выдал бы её без ответа —
+  // сначала пауза очереди.
+  const waiting = carry.active.length > 0;
+  const pause = waiting && carry.order === 'now' && !ctx.state.paused;
   return withDetail(h, {
-    action: carry.active.length ? 'wait' : 'apply-input',
+    action: pause ? 'queue_set' : waiting ? 'wait' : 'apply-input',
     ...(carry.boardId ? { boardId: carry.boardId } : {}),
     input: { requestId: carry.requestId, taskId: carry.taskId, state: 'superseded', actor: 'lead' },
     code: 'apply-carry',
-    params: { order: carry.order, ...(carry.active.length ? { active: carry.active } : {}) },
+    params: {
+      order: carry.order,
+      ...(waiting ? { active: carry.active } : {}),
+      ...(pause ? { pause: true as const } : {}),
+    },
   });
 }
 
@@ -778,10 +789,24 @@ function hostNext(ctx: HostContext): HandoffHostNext | undefined {
   // Перенос ответа — раньше шагов очереди и ожидания (`rank` больше 0): они
   // выдали бы задачу без ответа. Решения о задании, вопросы и режим
   // оператора — прежде переноса.
-  // Ожидание переноса (идут попытки доски) — на том же месте: старт задания
-  // или снятие паузы продолжили бы выдачу до переноса.
+  // Ожидание переноса (идут попытки доски) своей доски — на том же месте:
+  // старт задания или снятие паузы продолжили бы выдачу до переноса.
   if (step && rank(step) === 0) return step;
-  return carryNext(ctx) ?? step ?? followUpNext(ctx);
+  // Ожидание переноса — как ожидание (`rank` шага `wait`): действие другой
+  // доски (старт или повтор задания) оно не прячет, только шаги своей доски,
+  // другие ожидания и шаги паузы: снятие паузы до переноса выдало бы задачу
+  // без ответа.
+  const carry = carryNext(ctx);
+  if (
+    carry &&
+    (carry.action !== 'wait' ||
+      !step ||
+      rank(step) >= rank(carry) ||
+      step.action === 'queue_set' ||
+      step.boardId === carry.boardId)
+  )
+    return carry;
+  return step ?? followUpNext(ctx);
 }
 
 /**
@@ -815,7 +840,10 @@ function liveBlocker(ctx: HostContext): HandoffHostNext | undefined {
   // основном пути.
   const job = jobBlocker(ctx);
   if (job && rank(job) === 0) return job;
-  return carryNext(ctx) ?? job;
+  // Ожидание переноса не прячет повтор задания другой доски.
+  const carry = carryNext(ctx);
+  if (carry?.action === 'wait' && job && job.boardId !== carry.boardId) return job;
+  return carry ?? job;
 }
 
 /**

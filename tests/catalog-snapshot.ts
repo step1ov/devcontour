@@ -105,5 +105,8 @@
 // Намеренное изменение: описание session_handoff называет условия шага
 // apply-carry (перенос, который движок разрешил бы, ожидание wait с
 // params.active); прочие операции байтово прежние.
-export const CATALOG_DIGEST = '22894719ee1a3bc794d2b674bd6fb4b7299abcf31fbe878af394af0c8e561a5b';
+// Намеренное изменение: описание session_handoff называет паузу очереди до
+// ожидания переноса (queue_set с params.pause) и то, что ожидание переноса не
+// прячет шаг другой доски; прочие операции байтово прежние.
+export const CATALOG_DIGEST = '6c3b0521fe64634ed19f077a966259195943a4196e965a7bb558c9da3fdf6d2a';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

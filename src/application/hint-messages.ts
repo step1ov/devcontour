@@ -96,8 +96,10 @@ export interface HintParamMap {
    * без утверждённых задач: пауза, утверждение, перенос, снятие паузы;
    * `now` — задача утверждена, перенос сразу. `active` — идущие попытки
    * графа доски: движок откажет в переносе до их окончания (шаг `wait`).
+   * `pause` — задача утверждена, а очередь идёт: сначала пауза очереди
+   * (шаг `queue_set`), иначе по окончании попыток задачу выдадут без ответа.
    */
-  'apply-carry': { order: CarryOrder; active?: string[] };
+  'apply-carry': { order: CarryOrder; active?: string[]; pause?: true };
 }
 /** Порядок переноса ответа заменённого вопроса (`apply-carry`). */
 export type CarryOrder = 'draft' | 'unreleased' | 'now';
@@ -184,6 +186,9 @@ const repeatedEn = (taskId: string, q: HintQuestionStops | undefined) =>
   q
     ? ` Task ${taskId} has stopped with a writer question ${q.count} times; only the first ${q.limit} give the attempt back${q.exhausted ? ', further stops count as attempts, and with the attempts used up input_apply returns blocker ATTEMPTS_EXHAUSTED until it is applied with reset {"reason": …}' : ''}. Consider making the task spec answer these questions up front (board_correct or reopen and respecify).`
     : '';
+/** Пауза до переноса: задача утверждена, очередь идёт (`apply-carry` с `pause`). */
+const pauseCarryEn =
+  ' First pause the queue (queue_set {"paused": true}): the superseded question does not hold the task, and once the running attempts end the queue would issue it without the answer.';
 /** Ожидание переноса: в графе доски идут попытки (`apply-carry` с `active`). */
 const waitCarryEn = (active: string[]) =>
   ` Wait: attempts run on the board of the task (${active.slice(0, 5).join(', ')}${active.length > 5 ? ', …' : ''}), and input_target and input_apply refuse the carry until they end; start the chain (input_review calls a model) only then.`;
@@ -341,7 +346,9 @@ const en: Catalog = {
             : p.active
               ? `carry it after they end (${chain}).`
               : `carry it now (${chain}): the superseded question does not hold the task, so pause the queue (queue_set) if an attempt without the answer must not start.`
-      }` + (p.active ? waitCarryEn(p.active) : '')
+      }` +
+      (p.pause ? pauseCarryEn : '') +
+      (p.active ? waitCarryEn(p.active) : '')
     );
   },
 };
@@ -384,6 +391,9 @@ const repeatedRu = (taskId: string, q: HintQuestionStops | undefined) =>
   q
     ? ` Остановок задачи ${taskId} вопросом исполнителя: ${q.count}; попытку возвращают только первые ${q.limit}${q.exhausted ? ', дальнейшие остановки расходуют попытки, а при исчерпанных попытках input_apply возвращает блокер ATTEMPTS_EXHAUSTED, пока ответ не применён с reset {"reason": …}' : ''}. Стоит дополнить постановку задачи ответами на эти вопросы заранее (board_correct или переоткрытие с новой постановкой).`
     : '';
+/** Пауза до переноса: задача утверждена, очередь идёт (`apply-carry` с `pause`). */
+const pauseCarryRu =
+  ' Сначала поставьте очередь на паузу (queue_set {"paused": true}): заменённый вопрос выдачу задачи не держит, и по окончании идущих попыток очередь выдала бы её без ответа.';
 /** Ожидание переноса: в графе доски идут попытки (`apply-carry` с `active`). */
 const waitCarryRu = (active: string[]) =>
   ` Подождите: в графе доски задачи идут попытки (${active.slice(0, 5).join(', ')}${active.length > 5 ? ', …' : ''}), и input_target и input_apply откажут в переносе до их окончания; цепочку начинайте только потом (input_review вызывает модель).`;
@@ -539,7 +549,9 @@ const ru: Catalog = {
             : p.active
               ? `перенесите его после их окончания (${chain}).`
               : `перенесите его сейчас (${chain}): заменённый вопрос выдачу задачи не держит, поэтому поставьте очередь на паузу (queue_set), если попытка без ответа начаться не должна.`
-      }` + (p.active ? waitCarryRu(p.active) : '')
+      }` +
+      (p.pause ? pauseCarryRu : '') +
+      (p.active ? waitCarryRu(p.active) : '')
     );
   },
 };

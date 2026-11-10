@@ -270,6 +270,11 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
     { code: 'apply-carry', params: { order: 'now' }, input: input1 },
     { code: 'apply-carry', params: { order: 'now', active: ['R-1', 'R-2'] }, input: input1 },
     { code: 'apply-carry', params: { order: 'draft', active: ['R-1'] }, input: input1 },
+    {
+      code: 'apply-carry',
+      params: { order: 'now', active: ['R-1'], pause: true },
+      input: input1,
+    },
   ],
 };
 
@@ -412,8 +417,10 @@ test('Подсказки шага: новая конфигурация setup п�
  * вопроса); прежние образцы байтово прежние.
  * Образцы `apply-carry` с `active` добавлены (ожидание идущих попыток доски);
  * прежние образцы байтово прежние.
+ * Образец `apply-carry` с `pause` добавлен (пауза очереди до ожидания);
+ * прежние образцы байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = '47965854cc0dc6b467422a16bd8149b3e0943f1c6a42219734ec391c58551a0c';
+const ENGLISH_SAMPLES_SHA256 = 'be7fe705b788431433464ac97b62450ab693424b28455b69ddc7796324209f40';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(
