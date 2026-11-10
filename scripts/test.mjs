@@ -21,9 +21,10 @@ import { slowFile, slowFirst, slowPatterns } from './test-tiers.mjs';
 // DEVCONTOUR_TEST_CONCURRENCY overrides it (check lowers it by one while the
 // browser suite runs beside this one).
 const directory = new URL('../tests/', import.meta.url);
-const concurrency = Number(process.env.DEVCONTOUR_TEST_CONCURRENCY) || 4;
+const configured = process.env.DEVCONTOUR_TEST_CONCURRENCY;
+const concurrency = configured === undefined || configured === '' ? 4 : Number(configured);
 if (!(Number.isInteger(concurrency) && concurrency >= 1))
-  throw new Error('DEVCONTOUR_TEST_CONCURRENCY must be a positive integer');
+  throw new Error(`DEVCONTOUR_TEST_CONCURRENCY must be a positive integer, got ${configured}`);
 // Предел времени на один тест; переменная — для проверки самого раннера.
 const testTimeoutMs = Number(process.env.DEVCONTOUR_TEST_TIMEOUT_MS) || 15 * 60_000;
 const rank = (name) => {
@@ -103,8 +104,12 @@ if (options.list) {
   process.once('SIGTERM', terminate);
   // Тесты держат рабочие деревья в своих временных каталогах (checkoutRoot
   // фикстур). Новый элемент в настоящем кэше пользователя после прогона —
-  // тест, который пишет туда: прогон не проходит. Сравнение — до и после,
-  // поэтому во время полного прогона другие процессы harness не запускают.
+  // тест, который пишет туда: прогон не проходит. Сравнение — до и после, а
+  // `npm run check` в это же время выполняет рядом проверку пакета и e2e.
+  // smoke-package запускает harness со своими HOME и XDG_CACHE_HOME, серверы
+  // e2e — с явным --checkout-root, спецификации подменяют HOME
+  // (e2e/live-cli-guard.ts). Если один из них всё же запишет в настоящий кэш,
+  // отказ здесь назовёт его запись так же, как запись теста.
   const xdg = process.env.XDG_CACHE_HOME;
   const cache =
     process.platform === 'darwin'

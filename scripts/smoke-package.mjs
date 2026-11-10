@@ -200,6 +200,9 @@ syncBuiltinESMExports();
   const childEnv = {
     ...process.env,
     HOME: home,
+    // Linux cache of the harness follows XDG_CACHE_HOME before HOME; the
+    // Node suite running beside this check compares the real cache.
+    XDG_CACHE_HOME: join(home, '.cache'),
     GIT_AUTHOR_NAME: 'Package fixture',
     GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
     GIT_COMMITTER_NAME: 'Package fixture',

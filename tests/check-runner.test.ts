@@ -132,8 +132,10 @@ test('Fast tier omits its named slow test but still refuses explicit skip and to
     `.replace('SLOW_NAME', JSON.stringify(slowPrefix)),
     );
     const env = { ...process.env };
-    // This child is a new runner, not a nested test worker.
+    // This child is a new runner, not a nested test worker, and runs with the
+    // default concurrency, not the one check gave this suite.
     delete env.NODE_TEST_CONTEXT;
+    delete env.DEVCONTOUR_TEST_CONCURRENCY;
     const result = spawnSync(process.execPath, ['scripts/test.mjs', '--fast'], {
       cwd: root,
       env,
@@ -200,8 +202,10 @@ test('A hung test fails by name, a file that never exits is named, and late test
     `,
     );
     const env: NodeJS.ProcessEnv = { ...process.env, DEVCONTOUR_TEST_TIMEOUT_MS: '2000' };
-    // This child is a new runner, not a nested test worker.
+    // This child is a new runner, not a nested test worker, and runs with the
+    // default concurrency, not the one check gave this suite.
     delete env.NODE_TEST_CONTEXT;
+    delete env.DEVCONTOUR_TEST_CONCURRENCY;
     const result = spawnSync(process.execPath, ['scripts/test.mjs'], {
       cwd: root,
       env,
@@ -352,63 +356,78 @@ test('A slow process snapshot under load does not stop the check; a lasting fail
   assert.equal(pollFailures(count, true).fatal, true, 'a lasting failure stops the check');
 });
 
-for (const outcome of ['pass', 'e2e-fails'] as const)
+/** A release check over stub steps; `body` is the step script (argv[2] names the step). */
+async function releaseCheck(body: string) {
+  const root = await mkdtemp(join(tmpdir(), 'check-release-'));
+  const scripts = join(root, 'scripts');
+  await mkdir(scripts);
+  for (const file of ['check.mjs', 'check-processes.mjs'])
+    await copyFile(join(source, 'scripts', file), join(scripts, file));
+  const steps = ['check:environment', 'lint', 'build:lib', 'check:skill', 'build:assets'];
+  await writeFile(
+    join(root, 'package.json'),
+    JSON.stringify({
+      type: 'module',
+      scripts: {
+        ...Object.fromEntries(steps.map((s) => [s, `node step.mjs ${s}`])),
+        test: 'node step.mjs test',
+        'test:e2e': 'node step.mjs e2e',
+      },
+    }),
+  );
+  await writeFile(join(scripts, 'smoke-package.mjs'), "import '../step.mjs';\n");
+  await writeFile(
+    join(root, 'step.mjs'),
+    `import {existsSync,writeFileSync} from 'node:fs';
+import {spawn} from 'node:child_process';
+const name=process.argv[2]??'smoke';
+const wait=(file)=>new Promise((r)=>{const t=setInterval(()=>{if(existsSync(file)){clearInterval(t);r();}},10);});
+const sleep=(ms)=>new Promise((r)=>setTimeout(r,ms));
+${body}`,
+  );
+  const env: NodeJS.ProcessEnv = { ...process.env, DEVCONTOUR_TEST_CONCURRENCY: '4' };
+  delete env.NODE_TEST_CONTEXT;
+  const result = spawnSync(process.execPath, [join(scripts, 'check.mjs')], {
+    cwd: root,
+    encoding: 'utf8',
+    env,
+    timeout: 60_000,
+  });
+  const pid = async (file: string) => Number(await readFile(join(root, file), 'utf8'));
+  return { root, result, output: result.stdout + result.stderr, pid };
+}
+
+for (const outcome of ['pass', 'e2e-fails', 'test-fails'] as const)
   test(`Release check runs the browser suite beside the Node suite, one file slot fewer, and keeps each output whole (${outcome})`, async () => {
-    const root = await mkdtemp(join(tmpdir(), 'check-release-'));
+    // The Node suite finishes only after the browser suite has printed, so a
+    // passing check proves they overlap; their lines interleave in time, and
+    // the browser suite's still must come out as one block. A failing suite
+    // must stop the other one, which would otherwise wait forever.
+    const { root, result, output, pid } = await releaseCheck(`
+if(name==='test') {
+  writeFileSync('test.pid',String(process.pid));
+  writeFileSync('concurrency',String(process.env.DEVCONTOUR_TEST_CONCURRENCY));
+  console.log('ℹ tests 1');
+  await wait('e2e-started');
+  console.log('ℹ pass 1');
+  ${outcome === 'test-fails' ? "await wait('e2e-diagnostics');process.exit(1);" : ''}
+  await wait('e2e-line');
+} else if(name==='e2e') {
+  writeFileSync('e2e.pid',String(process.pid));
+  writeFileSync('e2e-started','1');
+  console.log('e2e first');
+  await sleep(100);
+  console.error('e2e diagnostics');
+  writeFileSync('e2e-diagnostics','1');
+  // Chunks of the two pipes keep their order only when apart in time.
+  await sleep(100);
+  ${outcome === 'e2e-fails' ? 'process.exit(1);' : ''}
+  ${outcome === 'test-fails' ? "await wait('never');" : ''}
+  console.log('  1 passed');
+  writeFileSync('e2e-line','1');
+} else if(name==='smoke') console.log('smoke line');
+`);
     try {
-      const scripts = join(root, 'scripts');
-      await mkdir(scripts);
-      for (const file of ['check.mjs', 'check-processes.mjs'])
-        await copyFile(join(source, 'scripts', file), join(scripts, file));
-      const steps = ['check:environment', 'lint', 'build:lib', 'check:skill', 'build:assets'];
-      await writeFile(
-        join(root, 'package.json'),
-        JSON.stringify({
-          type: 'module',
-          scripts: {
-            ...Object.fromEntries(steps.map((s) => [s, `node step.mjs ${s}`])),
-            test: 'node step.mjs test',
-            'test:e2e': 'node step.mjs e2e',
-          },
-        }),
-      );
-      await writeFile(join(scripts, 'smoke-package.mjs'), "console.log('smoke line');\n");
-      // The Node suite finishes only after the browser suite has started, so
-      // a passing check proves they overlap; its lines are interleaved in time
-      // with the browser suite's, which still must come out as one block.
-      await writeFile(
-        join(root, 'step.mjs'),
-        `
-      import {existsSync,writeFileSync} from 'node:fs';
-      const name=process.argv[2];
-      const wait=(file)=>new Promise((r)=>{const t=setInterval(()=>{if(existsSync(file)){clearInterval(t);r();}},10);});
-      if(name==='test') {
-        writeFileSync('concurrency',String(process.env.DEVCONTOUR_TEST_CONCURRENCY));
-        console.log('ℹ tests 1');
-        await wait('e2e-started');
-        console.log('ℹ pass 1');
-        await wait('e2e-line');
-        writeFileSync('test-finished','1');
-      } else if(name==='e2e') {
-        writeFileSync('e2e-started','1');
-        console.log('e2e first');
-        await new Promise((r)=>setTimeout(r,100));
-        console.error('e2e diagnostics');
-        // Chunks of the two pipes keep their order only when apart in time.
-        await new Promise((r)=>setTimeout(r,100));
-        ${outcome === 'e2e-fails' ? 'process.exit(1);' : ''}
-        console.log('  1 passed');
-        writeFileSync('e2e-line','1');
-      }
-    `,
-      );
-      const result = spawnSync(process.execPath, [join(scripts, 'check.mjs')], {
-        cwd: root,
-        encoding: 'utf8',
-        env: { ...process.env, DEVCONTOUR_TEST_CONCURRENCY: '4' },
-        timeout: 60_000,
-      });
-      const output = result.stdout + result.stderr;
       assert.equal(result.status, outcome === 'pass' ? 0 : 1, output);
       assert.equal(await readFile(join(root, 'concurrency'), 'utf8'), '3');
       // Node suite lines stream unprefixed: its summary greps as in a run of its own.
@@ -418,16 +437,41 @@ for (const outcome of ['pass', 'e2e-fails'] as const)
         `──── test:e2e ────\ne2e first\ne2e diagnostics\n${outcome === 'pass' ? ' {2}1 passed\n✔' : '(?:[^\n]*\n)*?✖'} test:e2e [^\n]*\n──── end of test:e2e ────\n`,
       );
       assert.match(result.stdout, section, result.stdout);
-      assert.match(result.stdout, /──── smoke-package ────\nsmoke line\n✔ smoke-package/);
+      // The final line is the only authoritative result besides the exit code.
+      const last = result.stderr.trimEnd().split('\n').at(-1);
       if (outcome === 'pass') {
-        assert.ok(existsSync(join(root, 'test-finished')));
-        assert.match(result.stderr, /check: passed/);
+        assert.match(result.stdout, /──── smoke-package ────\nsmoke line\n✔ smoke-package/);
+        assert.match(last ?? '', /^check: passed in /);
       } else {
-        // The failure stops the Node suite before it finishes, and the check says so.
-        assert.equal(existsSync(join(root, 'test-finished')), false);
-        assert.match(result.stderr, /check: FAILED/);
+        assert.match(
+          last ?? '',
+          new RegExp(`^check: failed in ${outcome === 'e2e-fails' ? 'test:e2e' : 'test'} \\(`),
+        );
+        // The sibling that would have waited forever was stopped with the check.
+        const sibling = await pid(outcome === 'e2e-fails' ? 'test.pid' : 'e2e.pid');
+        await until(() => !alive(sibling), 'the other suite was stopped');
       }
     } finally {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+test('A step that exits but leaves a descendant holding its output does not hang the check; the descendant is stopped', async () => {
+  const { root, result, output, pid } = await releaseCheck(`
+if(name==='smoke') {
+  const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:['ignore','inherit','inherit'],detached:true});
+  writeFileSync('leak.pid',String(child.pid));
+  child.unref();
+  console.log('smoke line');
+}
+`);
+  try {
+    assert.equal(result.signal, null, 'the check hung: ' + output);
+    assert.equal(result.status, 0, output);
+    assert.match(output, /✔ smoke-package [^\n]*a descendant kept its output open/);
+    const leaked = await pid('leak.pid');
+    await until(() => !alive(leaked), 'the leaked descendant was stopped');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
