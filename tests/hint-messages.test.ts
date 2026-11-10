@@ -163,12 +163,19 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
       ),
     ),
     // Все задачи ревизии отменены: второй путь — новая ревизия доски.
-    ...(['host', 'operator'] as const).map((by) => ({
+    // Хост без бюджета — четвёртая фраза о владельце решения.
+    ...(
+      [
+        ['host', true],
+        ['operator', false],
+        ['host', false],
+      ] as const
+    ).map(([by, budget]) => ({
       code: 'job-cancelled-task' as const,
       params: {
         taskId: 't-1',
         by,
-        budget: by === 'host',
+        budget,
         live: false,
         allCancelled: true as const,
         error: 'boom',
@@ -430,8 +437,10 @@ test('Подсказки шага: новая конфигурация setup п�
  * задания); прежние образцы байтово прежние.
  * Текст `apply-carry` с `userPause` называет команду пользователя
  * `devcontour queue --pause` вместо панели; прочие образцы байтово прежние.
+ * Образец `job-cancelled-task` с `allCancelled` от хоста без бюджета добавлен
+ * (четвёртая фраза о владельце решения); прежние образцы байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = '7081e40117c09e576ddc9f2e1722e0f9ad4a5a1ce51e333f2ff0b0e91e378d32';
+const ENGLISH_SAMPLES_SHA256 = '85cc515d2b4bebfbfdbce87de8c081cf535b10c2f01aabe022b4f2965abdbd60';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(
