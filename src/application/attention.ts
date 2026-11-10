@@ -2019,16 +2019,38 @@ workSource.history = (ctx) => {
     const taskId = (e.data as { taskId?: string } | null)?.taskId;
     if (taskId && !cancelledAt.has(taskId)) cancelledAt.set(taskId, e.at);
   }
+  // Сбросы счёта попыток задачи: перезапуск новой постановкой (D47,
+  // `attemptsRestarted` утверждения) и сброс человеком (`reset` повтора).
+  const resetsOf = new Map<string, string[]>();
+  for (const e of ctx.store.latestEvents(['board.approved', 'task.retry'], 500)) {
+    const data = e.data as {
+      taskId?: string;
+      reset?: unknown;
+      attemptsRestarted?: { taskId: string }[];
+    } | null;
+    const ids = [
+      ...(data?.reset && data.taskId ? [data.taskId] : []),
+      ...(data?.attemptsRestarted ?? []).map((x) => x.taskId),
+    ];
+    for (const id of ids) resetsOf.set(id, [...(resetsOf.get(id) ?? []), e.at]);
+  }
   return runs.flatMap((run): Resolved[] => {
     if (run.status !== 'failed') return [];
     const task = ctx.state.tasks.find((t) => t.id === run.taskId);
     if (!task) return [];
     // Следующая попытка — по порядку выдачи: счётчик после перезапуска (D47)
     // или сброса начинается с 1, и большой номер ранней серии стоит раньше.
-    // Тот же номер — возвращённая попытка: сбой ею не решён, как прежде.
+    // Тот же номер без сброса между ними — возвращённая попытка (отказ
+    // окружения, незасчитанная остановка вопросом, прерывание): сбой ею не
+    // решён, как прежде. Тот же номер после сброса — новая серия.
     const after = ctx.state.runs.indexOf(run);
+    const resets = resetsOf.get(run.taskId) ?? [];
     const next = ctx.state.runs.find(
-      (r, i) => i > after && r.taskId === run.taskId && r.attempt !== run.attempt,
+      (r, i) =>
+        i > after &&
+        r.taskId === run.taskId &&
+        (r.attempt !== run.attempt ||
+          resets.some((at) => at >= (run.finishedAt ?? run.startedAt) && at <= r.startedAt)),
     );
     const accepted =
       task.status === 'done'
