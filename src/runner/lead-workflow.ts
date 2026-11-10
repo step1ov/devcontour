@@ -357,7 +357,7 @@ export class LeadRunner {
         // политике исполнения: их движок не выдаёт до повторного утверждения
         // (правило `loopOutlook`).
         if (loopOutlook(this.h, s, job).step !== 'review-plan') return false;
-        assertTasksRequirements(this.h, tasks);
+        await assertTasksRequirements(this.h, tasks);
         if (this.h.config.mode === 'demo')
           this.h.store.atomic(() => {
             guard();
@@ -442,7 +442,7 @@ export class LeadRunner {
             });
           return true;
         }
-        assertTasksRequirements(this.h, tasks);
+        await assertTasksRequirements(this.h, tasks);
         const root = job.owner
           ? join(repository(this.h.config, job.owner).path, '.devcontour-local')
           : this.root;
@@ -474,14 +474,14 @@ export class LeadRunner {
       return true;
     if (job.stage === 1)
       try {
-        return this.jointStage(c, s, flight);
+        return await this.jointStage(c, s, flight);
       } catch (error) {
         // Стадия упала (любая причина): следующая попытка задания начинает
         // ожидания начала заново, с паузами.
         this.startWaits.delete(c.id);
         throw error;
       }
-    assertTasksRequirements(this.h, changeSnapshot(s, c).tasks);
+    await assertTasksRequirements(this.h, changeSnapshot(s, c).tasks);
     const workspace = new Workspace(this.h, new IntentService(this.h));
     if (
       this.h.config.completionMode === 'remote' &&
@@ -498,8 +498,12 @@ export class LeadRunner {
    * Стадия 1 задания ChangeSet: свежесть требований, итог начатой циклом
    * проверки, ожидание после отказа начала и начало новой проверки.
    */
-  private jointStage(c: ChangeSet, s: DevContourState, flight: JointFlight | undefined): boolean {
-    assertTasksRequirements(this.h, changeSnapshot(s, c).tasks);
+  private async jointStage(
+    c: ChangeSet,
+    s: DevContourState,
+    flight: JointFlight | undefined,
+  ): Promise<boolean> {
+    await assertTasksRequirements(this.h, changeSnapshot(s, c).tasks);
     // Закончившаяся проверка цикла — итог стадии: отказ — провал стадии,
     // как прежде; успех — дальше, к приёмке, которая сама проверит
     // актуальность.
