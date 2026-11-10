@@ -470,6 +470,18 @@ test('История сбоев задачи: перезапуск счёта п
       f.h.approve(b.id, [t.id]).attemptsRestarted?.map((x) => x.taskId),
       [t.id],
     );
+    // Длинный журнал: после перезапуска — много других утверждений. Перезапуск
+    // ищется не только среди последних событий.
+    const raw = new DatabaseSync(join(f.root, 'state.sqlite'));
+    try {
+      const insert = raw.prepare('INSERT INTO events(at,type,data) VALUES(?,?,?)');
+      const at = new Date().toISOString();
+      raw.exec('BEGIN');
+      for (let i = 0; i < 600; i++) insert.run(at, 'board.approved', '{"boardId":"B-padding"}');
+      raw.exec('COMMIT');
+    } finally {
+      raw.close();
+    }
     const restarted = await fail();
     assert.equal(counters().at(-1), counters().at(-2), 'номер счётчика совпал');
     assert.equal(resolved().get(first.id), startOf(restarted.id));

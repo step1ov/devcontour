@@ -2021,8 +2021,17 @@ workSource.history = (ctx) => {
   }
   // Сбросы счёта попыток задачи: перезапуск новой постановкой (D47,
   // `attemptsRestarted` утверждения) и сброс человеком (`reset` повтора).
+  // Нужны, только если за упавшей попыткой идёт попытка с тем же номером;
+  // журнал читается с самой ранней такой попытки, без окна последних
+  // событий: иначе ранние перезапуски длинного workspace выпадали бы.
   const resetsOf = new Map<string, string[]>();
-  for (const e of ctx.store.latestEvents(['board.approved', 'task.retry'], 500)) {
+  const sameCounter = runs.filter(
+    (run, i) =>
+      run.status === 'failed' &&
+      runs.some((r, j) => j > i && r.taskId === run.taskId && r.attempt === run.attempt),
+  );
+  const since = sameCounter.map((r) => r.finishedAt ?? r.startedAt).sort()[0];
+  for (const e of since ? ctx.store.eventsSince(['board.approved', 'task.retry'], since) : []) {
     const data = e.data as {
       taskId?: string;
       reset?: unknown;
