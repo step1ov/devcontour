@@ -7,7 +7,7 @@ import { Workspace, changeSnapshot, currentJoint } from '../core/workspace.ts';
 import { reviewPlan, acceptBoard } from './agent-control.ts';
 import { WorkspaceRunner } from './workspace.ts';
 import { adapters } from './adapters.ts';
-import { assertRequirements } from './requirements.ts';
+import { assertTasksRequirements } from './requirements.ts';
 import { IntentService } from './intent.ts';
 import {
   afterStep,
@@ -267,7 +267,7 @@ export class LeadRunner {
         // политике исполнения: их движок не выдаёт до повторного утверждения
         // (правило `loopOutlook`).
         if (loopOutlook(this.h, s, job).step !== 'review-plan') return false;
-        for (const task of tasks) assertRequirements(this.h, task);
+        assertTasksRequirements(this.h, tasks);
         if (this.h.config.mode === 'demo')
           this.h.store.atomic(() => {
             guard();
@@ -352,7 +352,7 @@ export class LeadRunner {
             });
           return true;
         }
-        for (const task of tasks) assertRequirements(this.h, task);
+        assertTasksRequirements(this.h, tasks);
         const root = job.owner
           ? join(repository(this.h.config, job.owner).path, '.devcontour-local')
           : this.root;
@@ -366,7 +366,7 @@ export class LeadRunner {
       return c.boardIds.some(
         (id) => s.boards.find((b) => b.id === id)?.revisions.at(-1)?.status !== 'accepted',
       );
-    for (const task of changeSnapshot(s, c).tasks) assertRequirements(this.h, task);
+    assertTasksRequirements(this.h, changeSnapshot(s, c).tasks);
     const workspace = new Workspace(this.h, new IntentService(this.h));
     if (job.stage === 1) {
       const last = c.verifications.at(-1);

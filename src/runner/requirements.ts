@@ -100,12 +100,36 @@ export function currentRequirements(
     };
   });
 }
-export function assertRequirements(h: DevContour, task: Task, cwd?: string, ref?: string) {
-  const stale = currentRequirements(h, task, cwd, ref).filter((r) => !r.fresh);
+export function assertRequirements(
+  h: DevContour,
+  task: Task,
+  cwd?: string,
+  ref?: string,
+  snapshots?: SnapshotCache,
+) {
+  const stale = currentRequirements(h, task, cwd, ref, snapshots).filter((r) => !r.fresh);
   if (stale.length)
     throw new DomainError(
       'Требования изменились или удалены: ' + stale.map((r) => r.id).join(', '),
     );
+}
+/**
+ * Свежесть требований набора задач одним чтением на источник: снимок ТЗ
+ * общий для задач одного репозитория (HEAD читается один раз).
+ *
+ * Раньше каждая задача заново запускала Git на каждый свой источник
+ * синхронно. На ChangeSet из десятков задач это сотни процессов подряд, и
+ * процесс сервера стоял дольше срока владения заданием ведущего: продление
+ * владения не успевало, задание теряло его и прерывало свою же стадию.
+ */
+export function assertTasksRequirements(h: DevContour, tasks: readonly Task[]) {
+  const caches = new Map<string, SnapshotCache>();
+  for (const task of tasks) {
+    if (!task.requirements?.length) continue;
+    const cwd = repository(h.config, task.repositoryId).path;
+    if (!caches.has(cwd)) caches.set(cwd, new Map());
+    assertRequirements(h, task, cwd, 'HEAD', caches.get(cwd));
+  }
 }
 /**
  * Критерий, назвавший свой тест, обязан его предъявить на принятом SHA.
