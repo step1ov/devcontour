@@ -778,7 +778,13 @@ function carryNext(ctx: HostContext): HandoffHostNext | undefined {
   return withDetail(h, {
     action: pause ? 'queue_set' : waiting ? 'wait' : 'apply-input',
     ...(carry.boardId ? { boardId: carry.boardId } : {}),
-    input: { requestId: carry.requestId, taskId: carry.taskId, state: 'superseded', actor: 'lead' },
+    // Повторная пауза — действие пользователя, ведущий его только передаёт.
+    input: {
+      requestId: carry.requestId,
+      taskId: carry.taskId,
+      state: 'superseded',
+      actor: userPause ? 'operator' : 'lead',
+    },
     code: 'apply-carry',
     params: {
       order: carry.order,

@@ -194,7 +194,7 @@ const pauseCarryEn =
   ' First pause the queue yourself (queue_set {"paused": true}; a pause that the job loop lifts does not count): the superseded question does not hold the task, and once the running attempts end the queue would issue it without the answer.';
 /** Пауза человека до старта задания: её снимет цикл (`apply-carry` с `userPause`). */
 const userPauseCarryEn =
-  ' The queue is paused by the user, but the pause was set before the board job started, so the job loop lifts it, and a lead pause (queue_set) does not replace a user pause: the queue would issue the task without the answer once the running attempts end. Ask the user to pause the queue again in the panel now (a pause set after the job start is not lifted by its loop).';
+  ' The queue is paused by the user, but the pause was set before the board job started, so the job loop lifts it, and a lead pause (queue_set) does not replace a user pause: the queue would issue the task without the answer once the running attempts end. Ask the user to pause the queue again now with devcontour queue --pause --workspace … (a command the user runs, without --by host): a pause set after the job start is not lifted by its loop. The user must not start the queue first: while it is paused the panel offers only a start, and a start lets the queue issue the task at once.';
 /** Ожидание переноса: в графе доски идут попытки (`apply-carry` с `active`). */
 const waitCarryEn = (active: string[]) =>
   ` Wait: attempts run on the board of the task (${active.slice(0, 5).join(', ')}${active.length > 5 ? ', …' : ''}), and input_target and input_apply refuse the carry until they end; start the chain (input_review calls a model) only then.`;
@@ -403,7 +403,7 @@ const pauseCarryRu =
   ' Сначала сами поставьте очередь на паузу (queue_set {"paused": true}; пауза, которую снимет цикл задания, не в счёт): заменённый вопрос выдачу задачи не держит, и по окончании идущих попыток очередь выдала бы её без ответа.';
 /** Пауза человека до старта задания: её снимет цикл (`apply-carry` с `userPause`). */
 const userPauseCarryRu =
-  ' Очередь приостановил пользователь, но до старта задания доски, поэтому цикл задания эту паузу снимет, а пауза ведущего (queue_set) паузу пользователя не заменяет: по окончании идущих попыток очередь выдала бы задачу без ответа. Попросите пользователя сейчас снова поставить очередь на паузу в панели (паузу, поставленную после старта задания, его цикл не снимает).';
+  ' Очередь приостановил пользователь, но до старта задания доски, поэтому цикл задания эту паузу снимет, а пауза ведущего (queue_set) паузу пользователя не заменяет: по окончании идущих попыток очередь выдала бы задачу без ответа. Попросите пользователя сейчас снова поставить очередь на паузу командой devcontour queue --pause --workspace … (его собственная команда, без --by host): паузу, поставленную после старта задания, его цикл не снимает. Запускать очередь перед этим пользователь не должен: пока очередь на паузе, панель предлагает только запуск, а запуск сразу позволит очереди выдать задачу.';
 /** Ожидание переноса: в графе доски идут попытки (`apply-carry` с `active`). */
 const waitCarryRu = (active: string[]) =>
   ` Подождите: в графе доски задачи идут попытки (${active.slice(0, 5).join(', ')}${active.length > 5 ? ', …' : ''}), и input_target и input_apply откажут в переносе до их окончания; цепочку начинайте только потом (input_review вызывает модель).`;

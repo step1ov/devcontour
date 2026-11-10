@@ -633,7 +633,13 @@ test('F14: under a user pause set before the job started, the carry step asks th
     const ask = next();
     assert.equal(ask?.action, 'wait', JSON.stringify(ask));
     assert.deepEqual(ask.params, { order: 'now', active: [run.id], userPause: true });
-    assert.match(ask.detail, /Ask the user to pause the queue again in the panel/);
+    assert.match(
+      ask.detail,
+      /Ask the user to pause the queue again now with devcontour queue --pause --workspace … \(a command the user runs, without --by host\)/,
+    );
+    assert.match(ask.detail, /must not start the queue first/);
+    assert.doesNotMatch(ask.detail, /in the panel now/);
+    assert.equal(ask.input?.actor, 'operator');
     assert.doesNotMatch(ask.detail, /First pause the queue yourself/);
     // Пауза ведущего поверх паузы человека ничего не меняет — и шаг тот же.
     f.h.pause(true, 'operator', 'lead');
@@ -645,6 +651,7 @@ test('F14: under a user pause set before the job started, the carry step asks th
     const waiting = next();
     assert.equal(waiting?.action, 'wait', JSON.stringify(waiting));
     assert.deepEqual(waiting.params, { order: 'now', active: [run.id] });
+    assert.equal(waiting.input?.actor, 'lead');
   } finally {
     await f.cleanup();
   }
