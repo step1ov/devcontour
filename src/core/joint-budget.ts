@@ -61,18 +61,38 @@ export function acceptedJointBudgetCheckpoints(
 /**
  * Проверка, оборванная до первого gate (остановка, потеря срока владения,
  * отказ окружения до установки): записей gates у неё нет. Результата о
- * коде она не дала, но предел совместных проверок набора движок считает по
- * числу начатых проверок, и такая проверка его расходует.
+ * коде она не дала. Движок, который сам отмечает такие проверки
+ * (`interrupted`), их в предел не засчитывает; прежний движок засчитывает.
  */
-export const interruptedJoint = (v: Pick<Verification, 'status' | 'evidence'>) =>
-  v.status === 'failed' && !v.evidence.length;
+export const interruptedJoint = (v: Pick<Verification, 'status' | 'evidence' | 'interrupted'>) =>
+  v.status === 'failed' && (v.interrupted === true || !v.evidence.length);
 
 /**
- * Отказ начала проверки по пределу: что исчерпано, сколько из этого —
- * проверки без результата gate и какой путь остаётся. Движок считает
- * предел по набору задач (а не по ChangeSet) до принятия ChangeSet этого
- * набора и сбросить его не даёт: новый ChangeSet над теми же задачами
- * получает тот же отказ.
+ * Проверки набора, которые движок засчитывает в предел сейчас: после
+ * последнего сброса (принятого ChangeSet этого набора — его checkpoint) и
+ * без отмеченных движком как прерванные.
+ */
+export function jointBudgetRuns(state: DevContourState, workIds: readonly string[]) {
+  let settled = new Set<string>();
+  try {
+    settled = new Set(
+      acceptedJointBudgetCheckpoints(state, workIds).flatMap((c) => c.settledVerificationIds),
+    );
+  } catch {
+    /* Повреждённый checkpoint отклонит сам движок; текст считает без него. */
+  }
+  return state.changeSets
+    .flatMap((c) => c.verifications)
+    .filter((v) => sameWorks(v, workIds) && !settled.has(v.id) && v.interrupted !== true);
+}
+
+/**
+ * Отказ начала проверки по пределу: что исчерпано, сколько из засчитанного
+ * — проверки без результата gate и какой путь остаётся. Предел движка — по
+ * набору задач (а не по ChangeSet) до принятия ChangeSet этого набора, и
+ * сбросить его нельзя: при исчерпанном пределе набора новый ChangeSet над
+ * теми же задачами получает тот же отказ. Предел самого ChangeSet (`scope`
+ * changeset) — другой: при запасе у набора новый ChangeSet проверку начнёт.
  */
 export function jointBudgetRefusal(
   state: DevContourState,
@@ -80,19 +100,23 @@ export function jointBudgetRefusal(
   limit: number,
   scope: 'changeset' | 'set',
 ) {
-  const runs = state.changeSets
-    .flatMap((c) => c.verifications)
-    .filter((v) => sameWorks(v, workIds));
+  const runs = jointBudgetRuns(state, workIds);
   const interrupted = runs.filter(interruptedJoint).length;
+  const setSpent = scope === 'set' || runs.length >= limit;
   const head =
     scope === 'changeset'
       ? `Исчерпан лимит попыток ChangeSet (${limit})`
       : `Исчерпан предел совместных проверок этого набора задач (${limit})`;
+  const route =
+    'Путь: измените набор задач (новая ревизия доски: добавьте задачу, например исправление по провалу gate, или отмените ненужную), примите доску и создайте ChangeSet по ней; либо спросите пользователя.';
   return (
     head +
     (interrupted
-      ? `; из начатых проверок этого набора ${interrupted} прерваны до первого gate и результата о коде не дали, но предел расходуют`
+      ? `; из засчитанных проверок этого набора ${interrupted} прерваны до первого gate и результата о коде не дали, но предел расходуют`
       : '') +
-    '. Предел считается по набору задач до принятия ChangeSet этого набора, поэтому новый ChangeSet над теми же задачами получит тот же отказ. Путь: измените набор задач (новая ревизия доски: добавьте задачу, например исправление по провалу gate, или отмените ненужную), примите доску и создайте ChangeSet по ней; либо спросите пользователя.'
+    (setSpent
+      ? '. Предел набора считается по задачам до принятия ChangeSet этого набора, поэтому новый ChangeSet над теми же задачами получит тот же отказ. ' +
+        route
+      : `. У набора задач осталось проверок: ${limit - runs.length} — создайте новый ChangeSet по тем же доскам и проверьте его (workspace-verify).`)
   );
 }

@@ -51,13 +51,53 @@ test('Отказ по пределу совместных проверок на�
   assert.match(set, /2 прерваны до первого gate/);
   assert.match(set, /новый ChangeSet над теми же задачами получит тот же отказ/);
   assert.match(set, /новая ревизия доски/);
+  // Предел самого ChangeSet при запасе у набора: новый ChangeSet проверку начнёт.
   const own = jointBudgetRefusal(
     state([changeSet('CHG-1', { verifications: [gated] })]),
     ['T-1', 'T-2'],
     3,
     'changeset',
   );
-  assert.match(own, /^Исчерпан лимит попыток ChangeSet \(3\)\. Предел/);
+  assert.match(
+    own,
+    /^Исчерпан лимит попыток ChangeSet \(3\)\. У набора задач осталось проверок: 2/,
+  );
+  assert.doesNotMatch(own, /тот же отказ/);
+  // Исчерпан и набор — тот же путь, что у отказа движка.
+  assert.match(
+    jointBudgetRefusal(s, ['T-1', 'T-2'], 3, 'changeset'),
+    /^Исчерпан лимит попыток ChangeSet \(3\); из засчитанных .* 2 прерваны.*тот же отказ/,
+  );
+  // Отмеченные движком прерванные проверки предел не расходуют и не считаются.
+  assert.equal(interruptedJoint(verification('V-6', { interrupted: true, evidence: [] })), true);
+  const flagged = state([
+    changeSet('CHG-1', {
+      verifications: [verification('V-6', { interrupted: true }), gated],
+    }),
+  ]);
+  assert.match(jointBudgetRefusal(flagged, ['T-1', 'T-2'], 3, 'changeset'), /осталось проверок: 2/);
+});
+
+test('Текст предела считает только проверки после принятого ChangeSet набора (сброс предела)', () => {
+  const passed = verification('V-2', {
+    status: 'passed',
+    evidence: [{ gate: 'test', passed: true } as Verification['evidence'][number]],
+  });
+  const before = verification('V-1', { error: 'This operation was aborted' });
+  const after = verification('V-3', { error: 'This operation was aborted' });
+  const s = state([
+    changeSet('CHG-1', {
+      verifications: [before, passed],
+      acceptance: {
+        verificationId: 'V-2',
+        jointBudgetCheckpoint: { verificationId: 'V-2', settledVerificationIds: ['V-1', 'V-2'] },
+      } as unknown as ChangeSet['acceptance'],
+    }),
+    changeSet('CHG-2', { verifications: [after] }),
+  ]);
+  const text = jointBudgetRefusal(s, ['T-1', 'T-2'], 3, 'set');
+  // V-1 до принятия в предел больше не входит: прерванная после него — одна.
+  assert.match(text, /из засчитанных проверок этого набора 1 прерваны/);
 });
 
 test('Карточка остановленного задания ChangeSet называет причину и пути и закрывается принятием другого ChangeSet релиза', () => {

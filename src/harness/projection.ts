@@ -511,6 +511,8 @@ const verificationKeys = [
   'impact',
   'evidence',
   'error',
+  // Отметка движка «прервана до первого gate»: прежние движки её не пишут.
+  'interrupted',
 ] as const;
 
 export function verificationOf(v: Verification): JointVerificationState {
