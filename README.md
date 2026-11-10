@@ -62,9 +62,16 @@ npm run demo
 
 Установку DevContour можно использовать для нескольких независимых workspace. Подготовленный этап продолжает выполняться сервером и после закрытия чата; для нового планирования и разбора сбоев нужен ведущий агент. [Подробный порядок работы](docs/workflow.md).
 
-## Установка из архива
+## Установка
 
-DevContour поставляется архивом `devcontour-<version>.tgz`; движок исполнения `devcontour-harness` вложен в него и закреплён по версии и integrity, отдельный checkout harness не нужен:
+Предварительные версии публикуются в npm с меткой `alpha`; движок исполнения `devcontour-harness` вложен в пакет и закреплён по версии и integrity, отдельно его ставить не нужно:
+
+```sh
+npm install --global devcontour@alpha
+devcontour help
+```
+
+Тот же пакет можно установить из архива `devcontour-<version>.tgz` без registry:
 
 ```sh
 mkdir devcontour-install && cd devcontour-install

@@ -1,7 +1,22 @@
 {
   "name": "devcontour",
   "version": "0.4.0-alpha.29",
-  "private": true,
+  "description": "Local control plane for AI-agent development: contracts, task graphs, isolated runs, gates, review and acceptance",
+  "keywords": [
+    "ai-agents",
+    "claude-code",
+    "codex",
+    "mcp",
+    "developer-tools"
+  ],
+  "homepage": "https://github.com/step1ov/devcontour#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/step1ov/devcontour.git"
+  },
+  "bugs": {
+    "url": "https://github.com/step1ov/devcontour/issues"
+  },
   "type": "module",
   "bin": {
     "devcontour": "lib/cli.js"
