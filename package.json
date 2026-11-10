@@ -1,6 +1,6 @@
 {
   "name": "devcontour",
-  "version": "0.4.0-alpha.29",
+  "version": "0.4.0-alpha.30",
   "description": "Local control plane for AI-agent development: contracts, task graphs, isolated runs, gates, review and acceptance",
   "keywords": [
     "ai-agents",
