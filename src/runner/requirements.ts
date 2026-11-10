@@ -121,14 +121,28 @@ export function assertRequirements(
  * синхронно. На ChangeSet из десятков задач это сотни процессов подряд, и
  * процесс сервера стоял дольше срока владения заданием ведущего: продление
  * владения не успевало, задание теряло его и прерывало свою же стадию.
+ *
+ * Git идёт асинхронно (`requirementSnapshotAsync`): цикл ведущего читает
+ * требования под сроком владения заданием, и даже одно чтение на источник
+ * при медленном Git (большой репозиторий, холодный кэш, много источников)
+ * не должно держать процесс — продление владения идёт между вызовами.
  */
-export function assertTasksRequirements(h: DevContour, tasks: readonly Task[]) {
-  const caches = new Map<string, SnapshotCache>();
+export async function assertTasksRequirements(h: DevContour, tasks: readonly Task[]) {
+  const snapshots = new Map<string, Promise<RequirementSnapshot>>();
   for (const task of tasks) {
     if (!task.requirements?.length) continue;
+    const stale: string[] = [];
     const cwd = repository(h.config, task.repositoryId).path;
-    if (!caches.has(cwd)) caches.set(cwd, new Map());
-    assertRequirements(h, task, cwd, 'HEAD', caches.get(cwd));
+    for (const link of task.requirements) {
+      const key = JSON.stringify([cwd, link.source]);
+      if (!snapshots.has(key)) snapshots.set(key, requirementSnapshotAsync(cwd, link.source));
+      const current = (await snapshots.get(key)!).requirements.find((r) => r.id === link.id);
+      if (current?.digest !== link.digest) stale.push(link.id);
+    }
+    // Тот же отказ, что у `assertRequirements`: первая задача с устаревшими
+    // требованиями называет свои.
+    if (stale.length)
+      throw new DomainError('Требования изменились или удалены: ' + stale.join(', '));
   }
 }
 /**
