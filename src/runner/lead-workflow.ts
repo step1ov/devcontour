@@ -23,8 +23,8 @@ import type { AgentAdapter } from './adapters.ts';
 import { analyzeRecovery, applyCases } from './recovery.ts';
 import { checkBase } from './base-check.ts';
 
-/** Отказ fencing задания ведущего (`WorkflowQueue.guard`): владение истекло или перехвачено. */
-const JOB_LEASE_LOST = 'Владение заданием утрачено';
+/** Код отказа, у которого есть `code` (ошибки движка, переведённые в доменные). */
+const codeOf = (e: unknown) => (e as { code?: unknown } | undefined)?.code;
 
 export class LeadRunner {
   readonly workflow: LeadWorkflow;
@@ -94,7 +94,8 @@ export class LeadRunner {
         await runner.verify(changeSetId);
       })
       .catch((error: unknown) => {
-        flight.error = error instanceof Error ? error.message : String(error);
+        flight.failed = true;
+        flight.error = error;
       })
       .finally(() => {
         flight.done = true;
@@ -148,10 +149,10 @@ export class LeadRunner {
           // Утраченное владение (срок истёк раньше продления) — тоже
           // прерывание, а не итог стадии: задание снова в очереди, как при
           // отмене сигналом по сбою продления.
-          const lost =
-            e instanceof DomainError &&
-            (e as DomainError & { code?: string }).code === 'LEASE_STALE' &&
-            e.message === JOB_LEASE_LOST;
+          // По коду, а не по тексту: текст отказа — дело движка. Итог
+          // совместной проверки стадия передаёт без кода (см. `execute`),
+          // поэтому истёкший срок самой проверки сюда не попадает.
+          const lost = e instanceof DomainError && codeOf(e) === 'LEASE_STALE';
           this.workflow.fail(
             job,
             e instanceof Error ? e.message : String(e),
@@ -408,25 +409,40 @@ export class LeadRunner {
       return false;
     }
     const c = s.changeSets.find((c) => c.id === job.id)!;
+    // Начатая циклом проверка ещё идёт — ждать, ничего не перечитывая.
+    // Закончившаяся забирается сразу, до всех проверок стадии: её итог
+    // относится к этому такту и не достаётся следующей попытке, если стадия
+    // упадёт по другой причине (например, изменились требования).
+    let flight = this.joints.get(c.id);
+    if (flight && !flight.done) {
+      if (job.stage === 1) return true;
+      flight = undefined;
+    } else if (flight) this.joints.delete(c.id);
     if (c.acceptance) return false;
     if (job.stage === 0)
       return c.boardIds.some(
         (id) => s.boards.find((b) => b.id === id)?.revisions.at(-1)?.status !== 'accepted',
       );
-    // Начатая циклом проверка ещё идёт — ждать, ничего не перечитывая.
-    const flight = this.joints.get(c.id);
-    if (job.stage === 1 && flight && !flight.done) return true;
     assertTasksRequirements(this.h, changeSnapshot(s, c).tasks);
     const workspace = new Workspace(this.h, new IntentService(this.h));
     if (job.stage === 1) {
       // Закончившаяся проверка цикла — итог стадии: отказ — провал стадии,
       // как прежде; успех — дальше, к приёмке, которая сама проверит
       // актуальность.
-      if (flight) {
-        this.joints.delete(c.id);
-        if (flight.error !== undefined) throw new Error(flight.error);
-        return false;
+      if (flight?.failed) {
+        const error = flight.error;
+        // Начало, отложенное за пределы такта, может встретить ожидание:
+        // попытку, выданную в этом окне, или остановку цикла. Это не итог
+        // проверки — стадия ждёт и начнёт проверку снова.
+        if (
+          codeOf(error) === 'NOT_READY' ||
+          (error instanceof Error && error.message === SERVER_STOPPING)
+        )
+          return true;
+        // Итог проверки — провал стадии, без кода отказа движка.
+        throw new Error(error instanceof Error ? error.message : String(error));
       }
+      if (flight) return false;
       const last = c.verifications.at(-1);
       let productFresh = c.releaseId === last?.productRelease?.releaseId;
       if (c.releaseId && last?.productRelease) {
@@ -470,5 +486,6 @@ type JointFlight = {
   runner: WorkspaceRunner;
   promise: Promise<void>;
   done: boolean;
-  error?: string;
+  failed?: boolean;
+  error?: unknown;
 };
