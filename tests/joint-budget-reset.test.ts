@@ -54,7 +54,9 @@ test('Сброс бюджета оператором снимает провер
           'Исчерпан лимит попыток ChangeSet (2): засчитано проверок набора 2 из 2',
         ) &&
         e.message.includes('Без результата gates — 2') &&
-        e.message.includes(`devcontour changeset-budget-reset --changeset ${f.change.id}`),
+        // Ведущему — просьба к пользователю, а не готовая команда.
+        e.message.includes('попросите пользователя снять предел командой оператора') &&
+        !/devcontour\s+changeset-budget-reset|changeset-budget-reset\s+--/.test(e.message),
     );
     // Решение человека: в каталоге агента операции нет, CLI отклоняет --by host.
     assert.ok(!agentOperations.some((op) => /budget/i.test(op)));

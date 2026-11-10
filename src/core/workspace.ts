@@ -1,6 +1,6 @@
 import { assertTaskPreparation } from './preparation.ts';
 import {
-  interruptedJoint,
+  changeSetSpent,
   jointBudgetRefusal,
   jointResetIds,
   settledJointVerifications,
@@ -192,10 +192,7 @@ export class Workspace {
         // до результата gates и снятые сбросом оператора проверки не тратят.
         const resetIds = jointResetIds(ht.tx);
         const refusal = { changeSetId: id, resetIds };
-        if (
-          c.verifications.filter((v) => !interruptedJoint(v) && !resetIds.has(v.id)).length >=
-          this.h.config.maxAttempts
-        )
+        if (changeSetSpent(c, resetIds) >= this.h.config.maxAttempts)
           throw new DomainError(
             jointBudgetRefusal(s, workIds, this.h.config.maxAttempts, 'changeset', refusal),
           );

@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { gatelessJoint, interruptedJoint, jointBudgetRefusal } from '../src/core/joint-budget.ts';
+import {
+  changeSetSpent,
+  gatelessJoint,
+  interruptedJoint,
+  jointBudgetRefusal,
+} from '../src/core/joint-budget.ts';
 import { changeSetStopReason, stoppedWorkflows } from '../src/application/overview.ts';
 import type { ChangeSet, DevContourState, Verification } from '../src/core/model.ts';
 
@@ -35,6 +40,14 @@ const state = (changeSets: ChangeSet[]) =>
 const gate = (passed: boolean) => [{ gate: 'test', passed } as Verification['evidence'][number]];
 const opts = { changeSetId: 'CHG-1' };
 
+/**
+ * Тексты, которые читает ведущий агент, не содержат готовой команды сброса:
+ * ни вызова `devcontour …`, ни аргументов команды.
+ */
+function assertNoRunnableReset(text: string) {
+  assert.doesNotMatch(text, /devcontour\s+changeset-budget-reset|changeset-budget-reset\s+--/);
+}
+
 test('Отказ по пределу: засчитанные, прерванные (не засчитываются), сброс оператора и путь', () => {
   const legacy = verification('V-1', { error: 'This operation was aborted' });
   const gated = verification('V-2', { evidence: gate(false) });
@@ -60,8 +73,9 @@ test('Отказ по пределу: засчитанные, прерванны
     /^Исчерпан предел совместных проверок этого набора задач \(3\): засчитано проверок набора 3 из 3; прервано до результата gates 1/,
   );
   // Сброс снимает проверки без результата gates: V-1, V-5 и V-6.
-  assert.match(set, /Без результата gates — 3: их снимает сброс бюджета оператором/);
-  assert.match(set, /devcontour changeset-budget-reset --changeset CHG-1 --reason/);
+  // Сброс помогает: после снятия трёх без результата gates засчитанных — 1 из 3.
+  assert.match(set, /Без результата gates — 3: сброс бюджета их снимет; попросите пользователя/);
+  assertNoRunnableReset(set);
   assert.match(set, /новый ChangeSet над теми же задачами получит тот же отказ/);
   // Предел самого ChangeSet при запасе у набора: новый ChangeSet проверку начнёт.
   const own = jointBudgetRefusal(
@@ -103,6 +117,69 @@ test('Текст предела считает только проверки п�
   assert.match(text, /засчитано проверок набора 1 из 3\. Без результата gates — 1/);
 });
 
+test('Сброс предлагается, только если движок его примет; иначе — реальный выход', () => {
+  // Предел 3: три отказа gate и одна прерванная — сброс снял бы одну, а
+  // засчитанных осталось бы 3 из 3: движок сброс отклонит.
+  const gated = (id: string) => verification(id, { evidence: gate(false) });
+  const s = state([
+    changeSet('CHG-1', {
+      verifications: [gated('V-1'), gated('V-2'), gated('V-3'), verification('V-4')],
+    }),
+  ]);
+  const text = jointBudgetRefusal(s, ['T-1', 'T-2'], 3, 'set', opts);
+  assert.match(
+    text,
+    /Сброс бюджета не поможет: после снятия 1 проверок без результата gates засчитанных останется 3 из 3/,
+  );
+  assert.doesNotMatch(text, /попросите пользователя снять предел/);
+  assert.match(text, /новая ревизия доски/);
+  // Успешная непринятая проверка тоже остаётся в окне: выход — принять её.
+  const passed = state([
+    changeSet('CHG-1', {
+      verifications: [
+        gated('V-1'),
+        gated('V-2'),
+        verification('V-3', { status: 'passed', evidence: gate(true) }),
+        verification('V-4'),
+      ],
+    }),
+  ]);
+  const withPassed = jointBudgetRefusal(passed, ['T-1', 'T-2'], 3, 'set', opts);
+  assert.match(withPassed, /Сброс бюджета не поможет/);
+  assert.match(withPassed, /принятие её ChangeSet \(changeset-accept\) снимает предел/);
+});
+
+test('Предел прерываний (MAX_NEUTRAL_FAILURES) исчерпывает набор и снимается сбросом; ChangeSet со сменившимся набором считает свои проверки', () => {
+  const interrupted = (id: string) => verification(id, { interrupted: true });
+  const s = state([
+    changeSet('CHG-1', {
+      verifications: [interrupted('V-1'), interrupted('V-2'), interrupted('V-3')],
+    }),
+  ]);
+  // Предел самого ChangeSet не тратится, но набор упёрся в предел прерываний.
+  const text = jointBudgetRefusal(s, ['T-1', 'T-2'], 3, 'changeset', opts);
+  assert.match(
+    text,
+    /засчитано проверок набора 0 из 3; прервано до результата gates 3 \(в предел не засчитываются, их предел 3\)\. Без результата gates — 3: сброс бюджета их снимет; попросите пользователя/,
+  );
+  assertNoRunnableReset(text);
+  // Доски ChangeSet менялись: проверки прежнего набора задач — тоже его
+  // проверки; снятые сбросом и прерванные предел ChangeSet не тратят.
+  const mixed = changeSet('CHG-1', {
+    verifications: [
+      verification('V-5', { tasks: [{ id: 'T-1' }] as Verification['tasks'] }),
+      verification('V-6', {
+        tasks: [{ id: 'T-1' }] as Verification['tasks'],
+        evidence: gate(false),
+      }),
+      interrupted('V-7'),
+      verification('V-8', { evidence: gate(false) }),
+    ],
+  });
+  assert.equal(changeSetSpent(mixed), 3);
+  assert.equal(changeSetSpent(mixed, new Set(['V-5'])), 2);
+});
+
 test('Карточка остановленного задания ChangeSet называет причину и пути и закрывается принятием другого ChangeSet релиза', () => {
   const job = {
     id: 'CHG-1',
@@ -124,7 +201,8 @@ test('Карточка остановленного задания ChangeSet н�
     reason,
     /V-1: failed — This operation was aborted \(без результата gates: предел проверок набора расходует, его снимает сброс оператора\)/,
   );
-  assert.match(reason, /devcontour changeset-budget-reset --changeset CHG-1 --reason/);
+  assert.match(reason, /попросите пользователя снять предел командой оператора/);
+  assertNoRunnableReset(reason);
   assert.match(
     changeSetStopReason(
       state([{ ...failed, verifications: [verification('V-1', { interrupted: true })] }]),

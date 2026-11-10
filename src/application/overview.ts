@@ -1,7 +1,7 @@
 import type { DevContour } from '../core/service.ts';
 import type { ChangeSet, DevContourState, Task } from '../core/model.ts';
 import { boardPhase } from '../core/work-status.ts';
-import { budgetResetCommand, gatelessJoint, interruptedJoint } from '../core/joint-budget.ts';
+import { BUDGET_RESET_ASK, gatelessJoint, interruptedJoint } from '../core/joint-budget.ts';
 import { repositories } from '../core/repositories.ts';
 import { servingPreview, type Preview } from '../core/preview.ts';
 import { currentVerification } from '../core/delivery.ts';
@@ -199,7 +199,7 @@ export function changeSetStopReason(
       ? `Когда причина устранена — workflow_retry {"key": ${JSON.stringify(w.key)}}. `
       : 'Попытки задания исчерпаны: workflow_retry его не примет. ') +
       `Ручной путь: devcontour workspace-verify --changeset ${w.id}, затем changeset-accept --changeset ${w.id}. ` +
-      `Если исчерпан предел совместных проверок набора задач: проверки без результата gates снимает сброс бюджета оператором с причиной (${budgetResetCommand(w.id)}; решение человека, ведущий агент его не выполняет); если предел исчерпан проверками с результатом gates, новый ChangeSet над теми же задачами получит тот же отказ — измените набор (новая ревизия доски), примите доску и создайте ChangeSet по ней. ` +
+      `Если исчерпан предел совместных проверок набора задач и его заполняют проверки без результата gates — ${BUDGET_RESET_ASK}; если предел исчерпан проверками с результатом gates, новый ChangeSet над теми же задачами получит тот же отказ — измените набор (новая ревизия доски), примите доску и создайте ChangeSet по ней. ` +
       'Карточка закрывается, когда принят этот ChangeSet или созданный после него ChangeSet того же релиза (или включающий его доски).',
   );
   return parts.join(' ');

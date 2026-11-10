@@ -1,6 +1,6 @@
 import type { JointBudgetCheckpoint } from 'devcontour-harness/contracts';
 import { MAX_NEUTRAL_FAILURES, WORKSPACE_OWNER, type ExecutionView } from 'devcontour-harness';
-import { DomainError, type DevContourState, type Verification } from './model.ts';
+import { DomainError, type ChangeSet, type DevContourState, type Verification } from './model.ts';
 
 /** Область бюджета не зависит от порядка задач, ChangeSet, модели или digest. */
 function sameWorks(verification: Verification, workIds: readonly string[]) {
@@ -99,6 +99,16 @@ export function jointBudgetRuns(
     .filter((v) => sameWorks(v, workIds) && !settled.has(v.id) && !resetIds.has(v.id));
 }
 
+/**
+ * Сколько проверок засчитано в предел самого ChangeSet: все его проверки (в
+ * том числе прежнего набора задач, если доски менялись между проверками),
+ * кроме прерванных до результата gates и снятых сбросом оператора.
+ */
+export const changeSetSpent = (
+  c: Pick<ChangeSet, 'verifications'>,
+  resetIds: ReadonlySet<string> = new Set(),
+) => c.verifications.filter((v) => !interruptedJoint(v) && !resetIds.has(v.id)).length;
+
 /** Проверки, снятые сбросами бюджета (`joint-budget-resets` движка). */
 export function jointResetIds(view: Pick<ExecutionView, 'locals'>) {
   return new Set(
@@ -108,9 +118,15 @@ export function jointResetIds(view: Pick<ExecutionView, 'locals'>) {
   );
 }
 
-/** Команда сброса бюджета оператором — для отказов и карточки. */
-export const budgetResetCommand = (changeSetId: string) =>
-  `devcontour changeset-budget-reset --changeset ${changeSetId} --reason … --workspace …`;
+/**
+ * Путь сброса бюджета в текстах, которые читает ведущий агент (отказы
+ * начала проверки, карточка остановленного задания ChangeSet): решение
+ * человека. Готовой строки команды здесь нет — ведущий не должен её
+ * выполнять, иначе движок записал бы решение оператора, которого никто не
+ * принимал. Команду с аргументами знает пользователь (docs/cli.md).
+ */
+export const BUDGET_RESET_ASK =
+  'попросите пользователя снять предел командой оператора `changeset-budget-reset` с причиной (docs/cli.md) — это решение человека, сами её не выполняйте';
 
 /**
  * Отказ начала проверки по пределу: сколько засчитано, сколько прервано до
@@ -138,8 +154,19 @@ export function jointBudgetRefusal(
       : `Исчерпан предел совместных проверок этого набора задач (${limit})`;
   const route =
     'Путь: измените набор задач (новая ревизия доски: добавьте задачу, например исправление по провалу gate, или отмените ненужную), примите доску и создайте ChangeSet по ней; либо спросите пользователя.';
-  const reset = resettable
-    ? ` Без результата gates — ${resettable}: их снимает сброс бюджета оператором с причиной (${budgetResetCommand(options.changeSetId)}; решение человека, ведущий агент его не выполняет). Проверки с результатом gates сброс не снимает.`
+  // Арифметика сброса движка (`jointBudgetReset`): снимаются только
+  // проверки без результата gates, и сброс принимается, только если после
+  // него набор не исчерпан.
+  const remaining = window.length - resettable;
+  const resetHelps = resettable > 0 && remaining < limit;
+  const passed = window.some((v) => v.status === 'passed');
+  const reset = resetHelps
+    ? ` Без результата gates — ${resettable}: сброс бюджета их снимет; ${BUDGET_RESET_ASK}. Проверки с результатом gates сброс не снимает.`
+    : resettable
+      ? ` Сброс бюджета не поможет: после снятия ${resettable} проверок без результата gates засчитанных останется ${remaining} из ${limit}.`
+      : '';
+  const accept = passed
+    ? ' Есть успешная непринятая проверка набора: принятие её ChangeSet (changeset-accept) снимает предел.'
     : '';
   return (
     head +
@@ -150,7 +177,9 @@ export function jointBudgetRefusal(
     '.' +
     (setSpent
       ? reset +
-        ' Иначе предел набора снимает только принятие ChangeSet этого набора, поэтому новый ChangeSet над теми же задачами получит тот же отказ. ' +
+        accept +
+        (resetHelps ? ' Иначе' : ' Предел') +
+        ' набора снимает только принятие ChangeSet этого набора, поэтому новый ChangeSet над теми же задачами получит тот же отказ. ' +
         route
       : ` У набора задач осталось проверок: ${limit - counted} — создайте новый ChangeSet по тем же доскам и проверьте его (workspace-verify).`)
   );
