@@ -211,7 +211,14 @@ export function ProductPanel({ onRepository }: { onRepository: (id: string) => v
                       <p key={check.gate}>
                         {check.passed ? '✓' : '○'} {check.scenario}
                         <br />
-                        <span className="text-muted-foreground">{check.gate}</span>
+                        <span className="text-muted-foreground">
+                          {check.gate}
+                          {check.status === 'deferred'
+                            ? ' · отложен: ' + check.deferred
+                            : check.status === 'missing'
+                              ? ' · нет теста сценария'
+                              : ''}
+                        </span>
                       </p>
                     ))}
                   </td>

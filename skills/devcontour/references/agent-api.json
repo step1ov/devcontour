@@ -1509,7 +1509,7 @@
     },
     {
       "name": "intent_render",
-      "description": "Render component intent from committed REQ sources, or a workspace product/application/feature map with pinned local story references. Returns Markdown only; does not write, approve or commit it.",
+      "description": "Render component intent from committed REQ sources, or a workspace product/application/feature map with pinned local story references. A feature check scenario may carry deferred: <reason> to leave it out of the release explicitly. Returns Markdown only; does not write, approve or commit it.",
       "readOnly": true,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2071,6 +2071,11 @@
                                       "type": "string",
                                       "minLength": 3,
                                       "maxLength": 2000
+                                    },
+                                    "deferred": {
+                                      "type": "string",
+                                      "minLength": 3,
+                                      "maxLength": 2000
                                     }
                                   },
                                   "required": [
@@ -2138,7 +2143,7 @@
     },
     {
       "name": "intent_report",
-      "description": "Audit all release stories and REQ sources. Product maps add application/feature progress and current bound ChangeSet acceptance. Read-only; never accepts a release or copies local task text.",
+      "description": "Audit all release stories and REQ sources. Product maps add application/feature progress, release scenarios with their evidence (a release task requirements link naming the scenario text and its testId, proven on the accepted SHA) or recorded deferral, and current bound ChangeSet acceptance. A scenario without either keeps coverage incomplete. Read-only; never accepts a release or copies local task text.",
       "readOnly": true,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2161,7 +2166,7 @@
     },
     {
       "name": "product_view",
-      "description": "Read the committed product/application/component map and computed feature progress for a release. Includes explicit deferred/not-applicable scope and joint verification. No writes or model calls.",
+      "description": "Read the committed product/application/component map and computed feature progress for a release. Includes explicit deferred/not-applicable scope, per-scenario evidence status and joint verification; a release is not accepted while a scenario lacks evidence or a recorded deferral. No writes or model calls.",
       "readOnly": true,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

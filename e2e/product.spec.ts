@@ -44,7 +44,7 @@ test('Product UI presents application scope, release selection, repository navig
         ...product.features.find((f) => f.id === scope.featureId)!,
         status: scope.featureId === 'block-member' ? 'awaiting-verification' : 'deferred',
         channels: scope.channels.map((a) => ({ ...a, covered: true, planned: true })),
-        checks: scope.checks.map((c) => ({ ...c, passed: false })),
+        checks: scope.checks.map((c) => ({ ...c, passed: false, status: 'missing', evidence: [] })),
       })),
     };
     await route.fulfill({ json: view });

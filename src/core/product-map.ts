@@ -25,8 +25,25 @@ const channelScope = z.discriminatedUnion('scope', [
 export const featureScope = z.strictObject({
   featureId: id,
   channels: z.array(channelScope).min(1).max(30),
-  checks: z.array(z.strictObject({ gate: id, scenario: text })).max(30),
+  /**
+   * Сценарии приёмки релиза. Сценарий подтверждает testcase принятой задачи
+   * релиза, чья связь requirements называет тот же текст сценария и свой
+   * testId; `deferred` — записанная причина, по которой сценарий в этот релиз
+   * не входит. Зелёный общий gate сам по себе сценарий не подтверждает.
+   */
+  checks: z.array(z.strictObject({ gate: id, scenario: text, deferred: text.optional() })).max(30),
 });
+/** Сценарий сравнивается по тексту без различий в пробелах. */
+export const scenarioKey = (scenario: string) => scenario.trim().replace(/\s+/g, ' ');
+export type ScenarioStatus = 'evidenced' | 'deferred' | 'missing';
+export interface ReleaseScenario {
+  featureId: string;
+  gate: string;
+  scenario: string;
+  status: ScenarioStatus;
+  deferred?: string;
+  evidence: { repositoryId: string; taskId: string; testId: string }[];
+}
 export const productMap = z.strictObject({
   channels: z
     .array(
@@ -191,7 +208,11 @@ export interface FeatureProgress {
   outcome: string;
   status: FeatureStatus;
   channels: (FeatureScope['channels'][number] & { covered?: boolean; planned?: boolean })[];
-  checks: (FeatureScope['checks'][number] & { passed: boolean })[];
+  checks: (FeatureScope['checks'][number] & {
+    passed: boolean;
+    status: ScenarioStatus;
+    evidence: ReleaseScenario['evidence'];
+  })[];
 }
 export type ProductView =
   | { available: false; reason: string }

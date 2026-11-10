@@ -45,6 +45,8 @@ const localDefinition = {
     },
   ],
 };
+const releaseScenario = 'Клиент показывает блокировку, которую применяет API.';
+const sceneProof = { scenario: releaseScenario, testId: 'policy type' };
 const map = () => {
   const definition = intentDefinition.parse({
     kind: 'workspace',
@@ -134,7 +136,7 @@ const map = () => {
             checks: [
               {
                 gate: 'moderation',
-                scenario: 'Клиент показывает блокировку, которую применяет API.',
+                scenario: releaseScenario,
               },
             ],
           },
@@ -267,7 +269,7 @@ process.exitCode=ok?0:1;`,
     runner = new WorkspaceRunner(h, root);
   await scheduler.init();
   const boards: string[] = [];
-  const plan = () => {
+  const plan = (scenario: { scenario: string; testId?: string } = sceneProof) => {
     for (const repo of repos) {
       const board = h.createBoard('Сценарий блокировки ' + repo.id, '', repo.id);
       const snapshot = intent.snapshot({ repositoryId: repo.id, storyId: 'block' });
@@ -276,9 +278,15 @@ process.exitCode=ok?0:1;`,
       h.addTask(board.id, {
         ...input('Блокировка в ' + repo.id),
         repositoryId: repo.id,
-        requirements: [snapshot.stories[0].requirement, { ...local, source: 'spec.md' }].map(
-          (r) => ({ ...r, gate: 'local', scenario: 'Проверка ограничения участника.' }),
-        ),
+        requirements: [
+          {
+            ...snapshot.stories[0].requirement,
+            gate: 'local',
+            scenario: 'Проверка ограничения участника.',
+          },
+          // Сценарий релиза подтверждает названный testcase задачи релиза.
+          { ...local, source: 'spec.md', gate: 'local', ...scenario },
+        ],
       });
       boards.push(board.id);
       h.approve(board.id);
@@ -444,6 +452,10 @@ test('A product release needs every local board and real joint tests; acceptance
     const checked = f.view();
     assert.equal(checked.features[0].status, 'verified');
     assert.ok(checked.features[0].checks.every((c) => c.passed));
+    assert.deepEqual(
+      checked.features[0].checks.map((c) => [c.status, c.evidence.map((e) => e.testId)]),
+      [['evidenced', ['policy type', 'policy type']]],
+    );
     assert.equal(checked.releaseAccepted, false);
     const verification = f.store
       .read()
@@ -505,6 +517,71 @@ test('A product release needs every local board and real joint tests; acceptance
       f.store.read().changeSets.find((c) => c.id === change.id)!.acceptance,
       receipt,
     );
+  } finally {
+    await f.close();
+  }
+});
+
+test('A release scenario needs its own testcase or a recorded deferral; story coverage alone does not accept the release', async () => {
+  const f = await fixture();
+  try {
+    // Истории покрыты принятыми задачами, но связь называет сценарий без
+    // testcase: зелёный gate не доказывает, что сценарий кто-то проверил.
+    f.plan({ scenario: releaseScenario });
+    await f.run();
+    await f.accept();
+    const unmet = f.view();
+    assert.equal(unmet.coverageComplete, false);
+    assert.equal(unmet.features[0].checks[0].status, 'missing');
+    assert.ok(
+      unmet.issues.some(
+        (i) =>
+          i.includes('сценарий релиза block без доказательства') && i.includes(releaseScenario),
+      ),
+      JSON.stringify(unmet.issues),
+    );
+    const report = f.intent.report({ releaseId: 'mvp' }) as {
+      coverageComplete: boolean;
+      scenarios: { status: string }[] | null;
+    };
+    assert.equal(report.coverageComplete, false);
+    assert.deepEqual(
+      report.scenarios?.map((s) => s.status),
+      ['missing'],
+    );
+    const change = f.runner.workspace.create({
+      title: 'Релиз модерации',
+      description: 'Сценарий без своего теста.',
+      boardIds: f.boards,
+      releaseId: 'mvp',
+    });
+    assert.throws(
+      () => f.runner.verify(change.id),
+      (e: Error) => /не покрыт/.test(e.message) && e.message.includes('testId'),
+    );
+    // Записанная причина отложить сценарий — явное решение, видимое в карте.
+    const deferred = map();
+    deferred.releases[0].features![0].checks[0].deferred =
+      'Проверка на устройстве переносится в следующий релиз.';
+    await f.save(deferred);
+    const view = f.view();
+    assert.equal(view.coverageComplete, true, JSON.stringify(view.issues));
+    assert.equal(view.features[0].checks[0].status, 'deferred');
+    assert.equal(view.features[0].checks[0].passed, false);
+    await f.runner.verify(change.id);
+    f.runner.workspace.accept(change.id);
+    assert.equal(f.view().releaseAccepted, true);
+    // Релиз без карты фич сценариев не объявляет: отчёт говорит об этом прямо.
+    const legacy = map();
+    delete legacy.product;
+    for (const release of legacy.releases) delete release.features;
+    await f.save(legacy);
+    const plain = f.intent.report({ releaseId: 'mvp' }) as {
+      scenarios: unknown;
+      note: string;
+    };
+    assert.equal(plain.scenarios, null);
+    assert.match(plain.note, /scenarios are not tracked/);
   } finally {
     await f.close();
   }

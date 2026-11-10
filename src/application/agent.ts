@@ -211,13 +211,13 @@ export const descriptions: Record<AgentOperation, string> = {
     'Record a decision with its rationale in the durable journal, optionally closing an answered question, or withdraw decisions that no longer hold. Does not approve a stage.',
 
   intent_render:
-    'Render component intent from committed REQ sources, or a workspace product/application/feature map with pinned local story references. Returns Markdown only; does not write, approve or commit it.',
+    'Render component intent from committed REQ sources, or a workspace product/application/feature map with pinned local story references. A feature check scenario may carry deferred: <reason> to leave it out of the release explicitly. Returns Markdown only; does not write, approve or commit it.',
   intent_snapshot:
     'Read the committed intent source returned for the selected owner (docs/implementation-intent.md in embedded mode, otherwise INTENT.md) and exact story REQ bindings. Add a configured test gate/scenario, and bind the detailed requirements too.',
   intent_report:
-    'Audit all release stories and REQ sources. Product maps add application/feature progress and current bound ChangeSet acceptance. Read-only; never accepts a release or copies local task text.',
+    'Audit all release stories and REQ sources. Product maps add application/feature progress, release scenarios with their evidence (a release task requirements link naming the scenario text and its testId, proven on the accepted SHA) or recorded deferral, and current bound ChangeSet acceptance. A scenario without either keeps coverage incomplete. Read-only; never accepts a release or copies local task text.',
   product_view:
-    'Read the committed product/application/component map and computed feature progress for a release. Includes explicit deferred/not-applicable scope and joint verification. No writes or model calls.',
+    'Read the committed product/application/component map and computed feature progress for a release. Includes explicit deferred/not-applicable scope, per-scenario evidence status and joint verification; a release is not accepted while a scenario lacks evidence or a recorded deferral. No writes or model calls.',
   usage_report:
     'Read paginated owner-local invocation costs (USD amounts are API-equivalent estimates — reported by the CLI or computed from prices — not subscription charges), versions and telemetry coverage; never evidence. With repositoryId: that component. Without it: the workspace contour (planning, answer review); in an embedded workspace also its component. scope.owners names the owners read; each record carries owner (@workspace for the contour).',
   decision_report:

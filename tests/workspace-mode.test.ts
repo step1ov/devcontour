@@ -406,7 +406,13 @@ test('Embedded product map and local intent drive real worktrees, joint verifica
       ...input(),
       featureId: 'member-block',
       requirements: [snapshot.stories[0].requirement, { ...req, source: 'docs/spec.md' }].map(
-        (r) => ({ ...r, gate: 'test', scenario: 'Blocked participant cannot post' }),
+        // Сценарий релиза подтверждает названный testcase, а не зелёный gate.
+        (r) => ({
+          ...r,
+          gate: 'test',
+          scenario: 'Blocked participant cannot post',
+          testId: 'blocked participant',
+        }),
       ),
     });
     f.h.approve(board.id);
