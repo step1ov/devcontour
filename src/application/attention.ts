@@ -35,6 +35,7 @@ import {
   previewFailureTitle,
   previewProblems,
   stoppedWorkflows,
+  changeSetStopReason,
 } from './overview.ts';
 import { inputNextText, inputStateLabels, repeatedQuestionText } from '../core/input-labels.ts';
 import { budgetBlocks } from './context.ts';
@@ -1271,12 +1272,17 @@ const boardSource: AttentionSourceRule = {
         out.push({
           sourceKey: `workflow:changeset:${w.id}`,
           occurrenceId: `${w.key}:${w.attempts}`,
-          sourceVersion: d(w.error ?? ''),
+          sourceVersion: d([
+            w.error ?? '',
+            (ctx.state as DevContourState).changeSets
+              .find((c) => c.id === w.id)
+              ?.verifications.at(-1)?.id ?? null,
+          ]),
           source: 'board',
           category: 'technical',
           actor: 'lead',
-          title: 'Автоматическое восстановление ChangeSet остановлено',
-          reason: ctx.redact(w.error ?? ''),
+          title: 'Задание ChangeSet остановлено',
+          reason: ctx.redact(changeSetStopReason(ctx.state, w)),
           since: w.history.at(-1)?.at ?? w.startedAt,
           subject: { kind: 'changeset', id: w.id, href: hrefs.changesets() },
           actions: [handoffOf(ctx)],
