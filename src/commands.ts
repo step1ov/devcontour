@@ -600,6 +600,7 @@ async function main() {
     'changeset-create',
     'workspace-verify',
     'changeset-accept',
+    'changeset-budget-reset',
     'journal',
     'contract-impact',
     'contract-change',
@@ -1099,7 +1100,19 @@ async function main() {
         result = workspace.create(await readAgentJson(resolve(option('--file', 'changeset.json'))));
       else if (operation === 'workspace-verify')
         result = await workspaceRunner.verify(option('--changeset', ''));
-      else if (operation === 'changeset-accept')
+      else if (operation === 'changeset-budget-reset') {
+        // Решение человека с причиной: ведущий агент сброс не выполняет —
+        // в каталоге агента и MCP этой операции нет, `--by host` отклоняется.
+        if (actorOf() !== 'operator')
+          throw new Error(
+            'Сброс бюджета совместных проверок — решение оператора; --by host не допускается',
+          );
+        if (!args.includes('--reason') || !option('--reason', '').trim())
+          throw new Error(
+            'Укажите --reason: почему проверки набора без результата gates не должны тратить предел',
+          );
+        result = workspace.budgetReset(option('--changeset', ''), option('--reason', ''));
+      } else if (operation === 'changeset-accept')
         result = workspace.accept(option('--changeset', ''), {
           actor: 'agent',
           authorRuntime: authorRuntime(),
