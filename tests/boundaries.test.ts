@@ -123,6 +123,12 @@ test('S3.1: harness — точная версия из npm registry, не вло
     'lock: опубликованный пакет из registry',
   );
   assert.match(locked?.integrity ?? '', /^sha512-/, 'lock фиксирует integrity');
+  // Запись закрепления называет ту же версию и integrity, что и lock.
+  const record = readFileSync('vendor/harness/README.md', 'utf8')
+    .split('\n')
+    .find((line) => line.startsWith('| ') && line.includes(`\`${locked?.integrity}\``));
+  assert.ok(record, 'vendor/harness/README.md не называет integrity из lock');
+  assert.equal(record.split('|')[1].trim(), version, 'версия в записи закрепления');
   assert.equal(locked?.inBundle, undefined);
   // Корневой архив ничего не вкладывает: inBundle у пакетов верхнего уровня
   // (вложенные внутри чужих пакетов — их собственная поставка).

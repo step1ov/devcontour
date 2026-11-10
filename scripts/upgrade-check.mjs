@@ -803,7 +803,7 @@ try {
       .filter(Boolean)
       .map((line) => line.slice(3));
     const outside = changed.filter(
-      (p) => !['package.json', 'package-lock.json'].includes(p) && !p.startsWith('vendor/harness/'),
+      (p) => !['package.json', 'package-lock.json', 'vendor/harness/README.md'].includes(p),
     );
     check(outside.length === 0, 'смена зависимости изменила лишнее: ' + outside.join(', '));
     pass('2-pinned-to', { changed, ...pinned(after_, to) });

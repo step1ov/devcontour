@@ -3,7 +3,9 @@
  * версия из registry, lock фиксирует опубликованные resolved и integrity, в
  * архив DevContour ничего не вкладывается. npm оставляет запись lock той же
  * версии с прежним resolved (локальный архив); скрипт обязан её заменить.
- * Registry — локальный HTTP-сервер теста, сеть не нужна.
+ * Registry — локальный HTTP-сервер теста (`PIN_HARNESS_REGISTRY`), сеть не
+ * нужна; что lock checkout указывает на registry.npmjs.org, проверяет
+ * tests/boundaries.test.ts.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -49,8 +51,11 @@ function archive(dir: string, name: string, version: string, body: string) {
 const sha512 = (file: string) =>
   'sha512-' + createHash('sha512').update(readFileSync(file)).digest('base64');
 
-/** Registry с одной опубликованной версией: packument и tarball. */
-async function registry(published: string) {
+/**
+ * Registry с одной опубликованной версией: packument и tarball. `served` —
+ * байты, которые registry отдаёт вместо опубликованных (порча при загрузке).
+ */
+async function registry(published: string, served = published) {
   const server: Server = createServer((req, res) => {
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     const tarball = `/devcontour-harness/-/devcontour-harness-${VERSION}.tgz`;
@@ -70,7 +75,7 @@ async function registry(published: string) {
           },
         }),
       );
-    } else if (req.url === tarball) res.end(readFileSync(published));
+    } else if (req.url === tarball) res.end(readFileSync(served));
     else res.writeHead(404).end();
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -80,9 +85,12 @@ async function registry(published: string) {
 const env = (dir: string, registryUrl: string) => ({
   ...process.env,
   npm_config_registry: registryUrl,
+  PIN_HARNESS_REGISTRY: registryUrl,
   npm_config_cache: join(dir, 'npm-cache'),
   npm_config_offline: 'false',
   npm_config_prefer_offline: 'false',
+  // Испорченная загрузка — сразу отказ, без повторов npm.
+  npm_config_fetch_retries: '0',
 });
 /** Потребитель в прежней форме: вложенный архив той же версии по `file:`. */
 function consumer(dir: string, vendored: string, registryUrl: string) {
@@ -140,6 +148,11 @@ test('pin-harness: вложенный архив той же версии зам
 
     const r = await pin(root, dir, url, VERSION, '--archive', published);
     assert.equal(r.status, 0, r.stderr);
+    // Вложенный архив прежней формы после перехода удалён.
+    assert.equal(
+      existsSync(join(root, 'vendor', 'harness', `devcontour-harness-${VERSION}.tgz`)),
+      false,
+    );
     const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
       dependencies: Record<string, string>;
       bundledDependencies?: string[];
@@ -179,10 +192,41 @@ test('pin-harness: архив не равен опубликованным ба�
     assert.deepEqual(files(), before);
     assert.equal(existsSync(join(root, 'vendor', 'harness', 'README.md')), false);
 
-    const range = await pin(root, dir, url, '^' + VERSION);
+    const range = await pin(root, dir, url, '^' + VERSION, '--archive', published);
     assert.equal(range.status, 1);
     assert.match(range.stderr, /точную версию/);
     assert.deepEqual(files(), before);
+
+    // Без проверенного архива закрепления нет.
+    const unchecked = await pin(root, dir, url, VERSION);
+    assert.equal(unchecked.status, 1);
+    assert.match(unchecked.stderr, /укажите --archive/);
+    assert.deepEqual(files(), before);
+  } finally {
+    server.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('pin-harness: отказ после записи (байты из registry не те) возвращает package.json и lock', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pin-harness-'));
+  const published = archive(dir, 'published', VERSION, 'module.exports = "registry";\n');
+  const corrupted = archive(dir, 'corrupted', VERSION, 'module.exports = "corrupted";\n');
+  // Packument называет integrity опубликованных байтов, tarball отдаёт другие.
+  const local = archive(dir, 'local', VERSION, 'module.exports = "vendored";\n');
+  const { server, url } = await registry(published, corrupted);
+  try {
+    // Вложенный архив других байтов: опубликованных байтов нет в кэше npm.
+    const root = consumer(dir, local, url);
+    const files = () =>
+      ['package.json', 'package-lock.json'].map((f) => readFileSync(join(root, f), 'utf8'));
+    const before = files();
+
+    const r = await pin(root, dir, url, VERSION, '--archive', published);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /package\.json и package-lock\.json возвращены/);
+    assert.deepEqual(files(), before);
+    assert.equal(existsSync(join(root, 'vendor', 'harness', 'README.md')), false);
   } finally {
     server.close();
     rmSync(dir, { recursive: true, force: true });

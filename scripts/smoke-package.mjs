@@ -118,7 +118,11 @@ try {
   assert.equal(packed.bundledDependencies ?? packed.bundleDependencies, undefined);
   const lockedHarness = lock.packages['node_modules/devcontour-harness'];
   assert.equal(lockedHarness?.version, harnessVersion, 'lock: версия harness');
-  assert.match(lockedHarness?.resolved ?? '', /^https?:\/\//, 'lock: harness из registry');
+  assert.equal(
+    new URL(lockedHarness?.resolved ?? 'file:').host,
+    'registry.npmjs.org',
+    'lock: harness с registry.npmjs.org',
+  );
   await writeFile(join(installation, 'package.json'), '{"private":true}');
   console.error('smoke-package: installing archive into a fresh directory');
   await exec(

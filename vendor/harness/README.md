@@ -2,8 +2,9 @@
 
 Зависимость `devcontour-harness` — точная версия из npm registry; она не
 вкладывается в архив DevContour. `package-lock.json` фиксирует resolved и
-integrity опубликованных байтов. Смена версии — новый выпуск DevContour:
-`node scripts/pin-harness.mjs <версия> --commit <SHA> [--archive <архив>]`.
+integrity опубликованных байтов; при закреплении integrity сверена с
+проверенным архивом. Смена версии — новый выпуск DevContour:
+`node scripts/pin-harness.mjs <версия> --commit <SHA> --archive <архив>`.
 
 | Версия         | Integrity опубликованного пакета                                                                  | Исходный commit harness                    |
 | -------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------ |
