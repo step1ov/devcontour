@@ -9,7 +9,7 @@ import { git } from '../src/runner/process.ts';
 import { requirementSnapshot } from '../src/runner/requirements.ts';
 import { WorkspaceRunner } from '../src/runner/workspace.ts';
 import { input } from './helpers.ts';
-import { jointFixture, tickFor } from './joint-fixture.ts';
+import { jointFixture, sleep, tickFor } from './joint-fixture.ts';
 
 type Fixture = Awaited<ReturnType<typeof jointFixture>>;
 
@@ -241,6 +241,74 @@ test('Попытки стадии, исчерпанные потерей вла�
       /^Исчерпаны попытки стадии; последняя причина: Владение заданием утрачено/,
     );
   } finally {
+    await f.cleanup();
+  }
+});
+
+test('Счётчик ожиданий начала сбрасывается, когда стадия падает по другой причине: повтор задания снова ждёт с паузами; в паузе требования не перечитываются', async () => {
+  const f = await jointFixture({ gateMs: 100, start: false });
+  const verify = Object.getOwnPropertyDescriptor(WorkspaceRunner.prototype, 'verify')!;
+  let starts = 0;
+  WorkspaceRunner.prototype.verify = function () {
+    starts++;
+    throw Object.assign(new DomainError('Дождитесь текущих попыток перед совместной проверкой'), {
+      code: 'NOT_READY',
+    });
+  };
+  try {
+    const repo = f.config.repository;
+    const spec = join(repo, 'docs/spec.md');
+    const commit = async (text: string) => {
+      await writeFile(spec, text);
+      await git(repo, 'add', 'docs/spec.md');
+      await git(repo, 'commit', '-qm', 'Spec');
+    };
+    await mkdir(join(repo, 'docs'), { recursive: true });
+    const original = '## REQ-joint: Joint\nThe joint result works.\n';
+    await commit(original);
+    const snapshot = requirementSnapshot(repo, 'docs/spec.md');
+    f.store.change('fixture.requirements', (s) => {
+      for (const t of s.tasks)
+        t.requirements = [
+          {
+            ...snapshot.requirements[0],
+            source: snapshot.source,
+            gate: f.config.gates[0].id,
+            scenario: 'Joint result',
+          },
+        ] as typeof t.requirements;
+    });
+    const job = f.flow.start({ kind: 'changeset', id: f.change.id, authorRuntime: 'codex' });
+    f.lead.startRetry = { limit: 2, delayMs: 1500 };
+    await f.lead.tick(); // стадия 0
+    await f.lead.tick(); // начало
+    await f.lead.settled();
+    await f.lead.tick(); // отказ начала 1: пауза 1,5 с
+    assert.equal(starts, 1);
+    assert.equal(f.flow.get(job.key).status, 'queued');
+    // Требования изменились во время паузы: пауза их не перечитывает.
+    await commit(original.replace('works', 'works offline'));
+    await f.lead.tick();
+    assert.equal(f.flow.get(job.key).status, 'queued');
+    await sleep(1600);
+    await f.lead.tick();
+    let current = f.flow.get(job.key);
+    assert.equal(current.status, 'failed');
+    assert.match(current.error ?? '', /Требования изменились/);
+    // Повтор после исправления: ожидания начала идут заново — три начала
+    // (два ожидания с паузами и провал), а не продолжение прежнего счёта.
+    await commit(original);
+    f.flow.retry(job.key);
+    starts = 0;
+    const deadline = Date.now() + 30_000;
+    while (['queued', 'running'].includes(f.flow.get(job.key).status) && Date.now() < deadline)
+      await tickFor(f.lead, 2000);
+    current = f.flow.get(job.key);
+    assert.equal(current.status, 'failed', JSON.stringify(current));
+    assert.match(current.error ?? '', /отказ начала 3 раз подряд/);
+    assert.equal(starts, 3);
+  } finally {
+    Object.defineProperty(WorkspaceRunner.prototype, 'verify', verify);
     await f.cleanup();
   }
 });

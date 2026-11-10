@@ -1,7 +1,7 @@
 import { join } from 'node:path';
 import { LeadWorkflow, type WorkflowJob } from '../core/lead-workflow.ts';
 import { SERVER_STOPPING, type DevContour } from '../core/service.ts';
-import { DomainError } from '../core/model.ts';
+import { DomainError, type ChangeSet, type DevContourState } from '../core/model.ts';
 import { repositories, repository } from '../core/repositories.ts';
 import { Workspace, changeSnapshot, currentJoint } from '../core/workspace.ts';
 import { reviewPlan, acceptBoard } from './agent-control.ts';
@@ -112,6 +112,22 @@ export class LeadRunner {
       });
     this.joints.set(changeSetId, flight);
   }
+  /**
+   * Сбросить счётчик ожиданий начала ChangeSet, когда у него не осталось
+   * идущего задания (провал, устаревший вход, завершение).
+   */
+  private forgetStartWaits(changeSetId: string, owner?: string) {
+    if (!this.startWaits.has(changeSetId)) return;
+    const live = this.workflow
+      .list(owner)
+      .some(
+        (j) =>
+          j.kind === 'changeset' &&
+          j.id === changeSetId &&
+          ['queued', 'running'].includes(j.status),
+      );
+    if (!live) this.startWaits.delete(changeSetId);
+  }
   tick() {
     if (this.pending) return this.pending;
     this.pending = this.advance().finally(() => {
@@ -124,13 +140,25 @@ export class LeadRunner {
     for (const owner of owners)
       for (const saved of this.workflow.list(owner)) {
         if (this.stopping) return;
-        if (!['queued', 'running'].includes(saved.status)) continue;
+        if (!['queued', 'running'].includes(saved.status)) {
+          // Закончившееся задание: паузы начала его ChangeSet не нужны.
+          if (saved.kind === 'changeset') this.forgetStartWaits(saved.id, owner);
+          continue;
+        }
         // An operator-controlled workspace never spends model calls automatically.
         if (this.h.config.approvalMode === 'operator') continue;
         const job = this.workflow.claim(saved.key, owner);
         if (!job) {
           // Попытки исчерпаны прерываниями: причина последнего — в ошибке.
-          this.workflow.noteExhausted(saved, owner);
+          // Запись причины — пояснение: её сбой не останавливает такт.
+          try {
+            this.workflow.noteExhausted(saved, owner);
+          } catch {
+            /* причина останется общей */
+          }
+          // Задание закончилось (провал, устаревший вход): паузы начала
+          // проверки его ChangeSet больше не нужны.
+          if (saved.kind === 'changeset') this.forgetStartWaits(saved.id, owner);
           continue;
         }
         const controller = (this.controller = new AbortController());
@@ -432,84 +460,105 @@ export class LeadRunner {
       if (job.stage === 1) return true;
       flight = undefined;
     } else if (flight) this.joints.delete(c.id);
-    if (c.acceptance) return false;
+    if (c.acceptance) {
+      this.startWaits.delete(c.id);
+      return false;
+    }
     if (job.stage === 0)
       return c.boardIds.some(
         (id) => s.boards.find((b) => b.id === id)?.revisions.at(-1)?.status !== 'accepted',
       );
+    // Пауза после отказа начала: стадия только ждёт — без чтения
+    // требований (Git), новой проверки и снимка релиза.
+    if (job.stage === 1 && !flight && (this.startWaits.get(c.id)?.notBefore ?? 0) > Date.now())
+      return true;
+    if (job.stage === 1)
+      try {
+        return this.jointStage(c, s, flight);
+      } catch (error) {
+        // Стадия упала (любая причина): следующая попытка задания начинает
+        // ожидания начала заново, с паузами.
+        this.startWaits.delete(c.id);
+        throw error;
+      }
     assertTasksRequirements(this.h, changeSnapshot(s, c).tasks);
     const workspace = new Workspace(this.h, new IntentService(this.h));
-    if (job.stage === 1) {
-      // Закончившаяся проверка цикла — итог стадии: отказ — провал стадии,
-      // как прежде; успех — дальше, к приёмке, которая сама проверит
-      // актуальность.
-      if (flight?.failed) {
-        const error = flight.error;
-        // Начало, отложенное за пределы такта, может встретить ожидание:
-        // попытку, выданную в этом окне, или остановку цикла. Это не итог
-        // проверки — стадия ждёт и начнёт проверку снова.
-        const message = error instanceof Error ? error.message : String(error);
-        if (message === SERVER_STOPPING) return true;
-        if (codeOf(error) === 'NOT_READY') {
-          const count = (this.startWaits.get(c.id)?.count ?? 0) + 1;
-          if (count > this.startRetry.limit) {
-            this.startWaits.delete(c.id);
-            throw new Error(
-              `Совместная проверка не начинается: ${message} (отказ начала ${count} раз подряд)`,
-            );
-          }
-          this.startWaits.set(c.id, {
-            count,
-            notBefore: Date.now() + this.startRetry.delayMs * 2 ** (count - 1),
-          });
-          return true;
-        }
-        this.startWaits.delete(c.id);
-        // Итог проверки — провал стадии, без кода отказа движка.
-        throw new Error(message);
-      }
-      if (flight) {
-        this.startWaits.delete(c.id);
-        return false;
-      }
-      // Пауза после отказа начала: без новой проверки и без снимка релиза.
-      if ((this.startWaits.get(c.id)?.notBefore ?? 0) > Date.now()) return true;
-      const last = c.verifications.at(-1);
-      let productFresh = c.releaseId === last?.productRelease?.releaseId;
-      if (c.releaseId && last?.productRelease) {
-        try {
-          new IntentService(this.h).validate(
-            last.productRelease,
-            changeSnapshot(s, c),
-            last.manifest,
-          );
-        } catch {
-          productFresh = false;
-        }
-      }
-      // Актуальность проверки — правило движка; продуктовый релиз — выше.
-      if (productFresh && currentJoint(this.h, c).current) return false;
-      if (
-        s.runs.some((r) => r.status === 'active') ||
-        s.changeSets.some((c) =>
-          c.verifications.some((v) => v.status === 'active' && v.leaseUntil > Date.now()),
-        )
-      )
-        return true;
-      this.launch(c.id);
+    if (
+      this.h.config.completionMode === 'remote' &&
+      !c.deliveries?.some((d) => d.status === 'delivered')
+    )
       return true;
-    } else {
-      if (
-        this.h.config.completionMode === 'remote' &&
-        !c.deliveries?.some((d) => d.status === 'delivered')
-      )
-        return true;
-      this.h.store.atomic(() => {
-        guard();
-        workspace.accept(c.id, { actor: 'agent', authorRuntime: job.authorRuntime });
-      });
-    }
+    this.h.store.atomic(() => {
+      guard();
+      workspace.accept(c.id, { actor: 'agent', authorRuntime: job.authorRuntime });
+    });
     return false;
+  }
+  /**
+   * Стадия 1 задания ChangeSet: свежесть требований, итог начатой циклом
+   * проверки, ожидание после отказа начала и начало новой проверки.
+   */
+  private jointStage(c: ChangeSet, s: DevContourState, flight: JointFlight | undefined): boolean {
+    assertTasksRequirements(this.h, changeSnapshot(s, c).tasks);
+    // Закончившаяся проверка цикла — итог стадии: отказ — провал стадии,
+    // как прежде; успех — дальше, к приёмке, которая сама проверит
+    // актуальность.
+    if (flight?.failed) {
+      const error = flight.error;
+      // Начало, отложенное за пределы такта, может встретить ожидание:
+      // попытку, выданную в этом окне, или остановку цикла. Это не итог
+      // проверки — стадия ждёт и начнёт проверку снова.
+      const message = error instanceof Error ? error.message : String(error);
+      if (message === SERVER_STOPPING) return true;
+      if (codeOf(error) === 'NOT_READY') {
+        const count = (this.startWaits.get(c.id)?.count ?? 0) + 1;
+        if (count > this.startRetry.limit) {
+          this.startWaits.delete(c.id);
+          throw new Error(
+            `Совместная проверка не начинается: ${message} (отказ начала ${count} раз подряд)`,
+          );
+        }
+        this.startWaits.set(c.id, {
+          count,
+          notBefore: Date.now() + this.startRetry.delayMs * 2 ** (count - 1),
+        });
+        return true;
+      }
+      this.startWaits.delete(c.id);
+      // Итог проверки — провал стадии, без кода отказа движка.
+      throw new Error(message);
+    }
+    if (flight) {
+      this.startWaits.delete(c.id);
+      return false;
+    }
+    const last = c.verifications.at(-1);
+    let productFresh = c.releaseId === last?.productRelease?.releaseId;
+    if (c.releaseId && last?.productRelease) {
+      try {
+        new IntentService(this.h).validate(
+          last.productRelease,
+          changeSnapshot(s, c),
+          last.manifest,
+        );
+      } catch {
+        productFresh = false;
+      }
+    }
+    // Актуальность проверки — правило движка; продуктовый релиз — выше.
+    if (productFresh && currentJoint(this.h, c).current) {
+      this.startWaits.delete(c.id);
+      return false;
+    }
+    if (
+      s.runs.some((r) => r.status === 'active') ||
+      s.changeSets.some((c) =>
+        c.verifications.some((v) => v.status === 'active' && v.leaseUntil > Date.now()),
+      )
+    )
+      return true;
+    this.launch(c.id);
+    return true;
   }
 }
 
