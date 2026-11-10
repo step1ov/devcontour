@@ -762,9 +762,13 @@ function carryNext(ctx: HostContext): HandoffHostNext | undefined {
   // и шаг — ожидание (ревью ответа до того — лишний вызов модели). Задача
   // уже утверждена (`now`), а очередь идёт: заменённый вопрос выдачу не
   // держит, и по окончании попыток планировщик выдал бы её без ответа —
-  // сначала пауза очереди.
+  // сначала пауза очереди. Паузу, которую снимет цикл задания (начальная,
+  // остановки, пауза человека до старта задания), ведущий тоже ставит
+  // заново: своей паузы цикл не снимает.
   const waiting = carry.active.length > 0;
-  const pause = waiting && carry.order === 'now' && !ctx.state.paused;
+  const lifted =
+    ctx.state.paused && ctx.jobs.filter(ctx.live).some((j) => liftsPause(h, ctx.state, asLead(j)));
+  const pause = waiting && carry.order === 'now' && (!ctx.state.paused || lifted);
   return withDetail(h, {
     action: pause ? 'queue_set' : waiting ? 'wait' : 'apply-input',
     ...(carry.boardId ? { boardId: carry.boardId } : {}),

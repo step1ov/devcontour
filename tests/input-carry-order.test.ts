@@ -11,6 +11,7 @@ import assert from 'node:assert/strict';
 import { controlled, inputDemos, inputFixture, untilQuestion } from './input-fixture.ts';
 import { DevContour, specDigest } from '../src/core/service.ts';
 import { devcontourHandoff } from '../src/application/handoff.ts';
+import { LeadWorkflow } from '../src/core/lead-workflow.ts';
 
 after(() => inputDemos.close());
 
@@ -524,7 +525,7 @@ test('F14: an approved task waiting for the carry while the queue runs: pause fi
     assert.equal(pause?.action, 'queue_set', JSON.stringify(pause));
     assert.equal(pause.code, 'apply-carry');
     assert.deepEqual(pause.params, { order: 'now', active: [run.id], pause: true });
-    assert.match(pause.detail, /First pause the queue \(queue_set \{"paused": true\}\)/);
+    assert.match(pause.detail, /First pause the queue yourself \(queue_set \{"paused": true\};/);
     f.h.pause(true);
     const waiting = next();
     assert.equal(waiting?.action, 'wait', JSON.stringify(waiting));
@@ -538,25 +539,76 @@ test('F14: an approved task waiting for the carry while the queue runs: pause fi
   }
 });
 
-test('F14: a waiting carry of one board does not hide the actionable step of another board', async () => {
+test('F14: in the workspace pack a waiting carry stands in for the plan decision of its own board', async () => {
   const f = await inputFixture(controlled(), { edit: scoped });
   try {
     const { boardId } = await respecified(f);
     runningNeighbour(f, boardId);
-    assert.equal(devcontourHandoff(f.h, { boardId }).host.next?.code, 'apply-carry');
-    // Другая доска утверждена, задания нет: её шаг — старт задания.
+    // Другая доска утверждена, задания нет: её пакет называет старт задания.
     const other = f.h.createBoard('Other board').id;
     f.plainTask(other, 'Task of another board');
     f.h.approve(other);
     const own = devcontourHandoff(f.h, { boardId: other }).host.next;
     assert.equal(own?.action, 'workflow_start', JSON.stringify(own));
-    // В пакете workspace шаг выбирает доска первой работы пакета (здесь —
-    // доска A с черновиком): ожидание переноса стоит вместо её же решения о
-    // плане, а не вместо шага доски B.
+    // Пакет workspace выбирает шаг по доске первой работы пакета (здесь —
+    // доска с черновиком): ожидание переноса стоит вместо её решения о плане.
     const next = devcontourHandoff(f.h, {}).host.next;
     assert.equal(next?.code, 'apply-carry', JSON.stringify(next));
     assert.equal(next.boardId, boardId);
-    assert.notEqual(next.boardId, other);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('F14: on the plan path a waiting carry does not hide the failed job of another board', async () => {
+  const f = await inputFixture(controlled(), { edit: scoped });
+  try {
+    const { boardId } = await respecified(f);
+    runningNeighbour(f, boardId);
+    // Упавшее задание другой доски: повтор продвинет его.
+    const other = f.h.createBoard('Board with a failed job').id;
+    f.plainTask(other, 'Task of the failed job');
+    f.h.approve(other);
+    const flow = new LeadWorkflow(f.h);
+    const job = flow.start({ kind: 'board', id: other, authorRuntime: 'codex', maxAttempts: 3 });
+    flow.fail(flow.claim(job.key, job.owner)!, 'plan review runtime unavailable');
+    const next = devcontourHandoff(f.h, {}).host.next;
+    assert.equal(next?.action, 'workflow_retry', JSON.stringify(next));
+    assert.equal(next.boardId, other);
+    // Пакет доски переноса по-прежнему называет ожидание переноса.
+    assert.equal(devcontourHandoff(f.h, { boardId }).host.next?.code, 'apply-carry');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('F14: under a pause the job loop lifts, a carry into an approved task still asks for the lead pause', async () => {
+  const f = await inputFixture(controlled(), { edit: scoped });
+  try {
+    const { taskId, boardId } = await respecified(f);
+    f.h.approve(boardId, [taskId]);
+    const { run } = runningNeighbour(f, boardId);
+    // Начальная пауза (без причины), которую снимет задание доски: она
+    // задачу не удержит.
+    f.store.change('fixture', (s) => {
+      s.paused = true;
+      s.pauseReason = undefined;
+      return {};
+    });
+    new LeadWorkflow(f.h).start({
+      kind: 'board',
+      id: boardId,
+      authorRuntime: 'codex',
+      maxAttempts: 3,
+    });
+    const pause = devcontourHandoff(f.h, {}).host.next;
+    assert.equal(pause?.action, 'queue_set', JSON.stringify(pause));
+    assert.deepEqual(pause.params, { order: 'now', active: [run.id], pause: true });
+    // Пауза ведущего после старта задания: её цикл не снимет — ожидание.
+    f.h.pause(true);
+    const waiting = devcontourHandoff(f.h, {}).host.next;
+    assert.equal(waiting?.action, 'wait', JSON.stringify(waiting));
+    assert.deepEqual(waiting.params, { order: 'now', active: [run.id] });
   } finally {
     await f.cleanup();
   }

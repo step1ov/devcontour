@@ -96,7 +96,8 @@ export interface HintParamMap {
    * без утверждённых задач: пауза, утверждение, перенос, снятие паузы;
    * `now` — задача утверждена, перенос сразу. `active` — идущие попытки
    * графа доски: движок откажет в переносе до их окончания (шаг `wait`).
-   * `pause` — задача утверждена, а очередь идёт: сначала пауза очереди
+   * `pause` — задача утверждена, а очередь идёт (или её паузу снимет цикл
+   * задания): сначала пауза очереди
    * (шаг `queue_set`), иначе по окончании попыток задачу выдадут без ответа.
    */
   'apply-carry': { order: CarryOrder; active?: string[]; pause?: true };
@@ -188,7 +189,7 @@ const repeatedEn = (taskId: string, q: HintQuestionStops | undefined) =>
     : '';
 /** Пауза до переноса: задача утверждена, очередь идёт (`apply-carry` с `pause`). */
 const pauseCarryEn =
-  ' First pause the queue (queue_set {"paused": true}): the superseded question does not hold the task, and once the running attempts end the queue would issue it without the answer.';
+  ' First pause the queue yourself (queue_set {"paused": true}; a pause that the job loop lifts does not count): the superseded question does not hold the task, and once the running attempts end the queue would issue it without the answer.';
 /** Ожидание переноса: в графе доски идут попытки (`apply-carry` с `active`). */
 const waitCarryEn = (active: string[]) =>
   ` Wait: attempts run on the board of the task (${active.slice(0, 5).join(', ')}${active.length > 5 ? ', …' : ''}), and input_target and input_apply refuse the carry until they end; start the chain (input_review calls a model) only then.`;
@@ -393,7 +394,7 @@ const repeatedRu = (taskId: string, q: HintQuestionStops | undefined) =>
     : '';
 /** Пауза до переноса: задача утверждена, очередь идёт (`apply-carry` с `pause`). */
 const pauseCarryRu =
-  ' Сначала поставьте очередь на паузу (queue_set {"paused": true}): заменённый вопрос выдачу задачи не держит, и по окончании идущих попыток очередь выдала бы её без ответа.';
+  ' Сначала сами поставьте очередь на паузу (queue_set {"paused": true}; пауза, которую снимет цикл задания, не в счёт): заменённый вопрос выдачу задачи не держит, и по окончании идущих попыток очередь выдала бы её без ответа.';
 /** Ожидание переноса: в графе доски идут попытки (`apply-carry` с `active`). */
 const waitCarryRu = (active: string[]) =>
   ` Подождите: в графе доски задачи идут попытки (${active.slice(0, 5).join(', ')}${active.length > 5 ? ', …' : ''}), и input_target и input_apply откажут в переносе до их окончания; цепочку начинайте только потом (input_review вызывает модель).`;
