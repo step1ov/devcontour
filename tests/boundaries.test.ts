@@ -1,6 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -97,28 +96,42 @@ test('devcontour-harness/projections разрешён ровно домену и
   assert.equal((await lint('tests/boundaries.test.ts', projections)).length, 0);
 });
 
-test('S3.1: harness — закреплённый versioned archive из vendor/harness, установленный в node_modules', async () => {
+test('S3.1: harness — точная версия из npm registry, не вложенная в архив и установленная в node_modules', async () => {
   const pkg = JSON.parse(readFileSync('package.json', 'utf8')) as {
     dependencies: Record<string, string>;
     bundledDependencies?: string[];
+    bundleDependencies?: string[];
+    peerDependencies?: Record<string, string>;
   };
-  const spec = pkg.dependencies['devcontour-harness'];
-  const match = /^file:vendor\/harness\/devcontour-harness-([0-9A-Za-z.-]+)\.tgz$/.exec(spec ?? '');
-  assert.ok(match, 'зависимость — относительный versioned archive: ' + spec);
-  const version = match[1];
-  assert.deepEqual(pkg.bundledDependencies, ['devcontour-harness']);
-  const archive = spec.slice('file:'.length);
-  const bytes = readFileSync(archive);
+  const version = pkg.dependencies['devcontour-harness'];
+  // Точная версия: установка DevContour не подтягивает непроверенный harness.
+  assert.match(version ?? '', /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$/, 'точная версия: ' + version);
+  assert.equal(pkg.bundledDependencies, undefined, 'harness не вкладывается в архив');
+  assert.equal(pkg.bundleDependencies, undefined);
+  assert.equal(pkg.peerDependencies?.['devcontour-harness'], undefined, 'не peer');
   const lock = JSON.parse(readFileSync('package-lock.json', 'utf8')) as {
-    packages: Record<string, { version?: string; resolved?: string; integrity?: string }>;
+    packages: Record<
+      string,
+      { version?: string; resolved?: string; integrity?: string; inBundle?: boolean }
+    >;
   };
   const locked = lock.packages['node_modules/devcontour-harness'];
   assert.equal(locked?.version, version);
-  assert.equal(locked?.resolved, spec);
   assert.equal(
-    locked?.integrity,
-    'sha512-' + createHash('sha512').update(bytes).digest('base64'),
-    'lock фиксирует integrity поставленного архива',
+    locked?.resolved,
+    `https://registry.npmjs.org/devcontour-harness/-/devcontour-harness-${version}.tgz`,
+    'lock: опубликованный пакет из registry',
+  );
+  assert.match(locked?.integrity ?? '', /^sha512-/, 'lock фиксирует integrity');
+  assert.equal(locked?.inBundle, undefined);
+  // Корневой архив ничего не вкладывает: inBundle у пакетов верхнего уровня
+  // (вложенные внутри чужих пакетов — их собственная поставка).
+  assert.deepEqual(
+    Object.entries(lock.packages)
+      .filter(([path, p]) => p.inBundle && /^node_modules\/(?:@[^/]+\/)?[^/]+$/.test(path))
+      .map(([path]) => path),
+    [],
+    'в lock нет вложенных в архив DevContour пакетов',
   );
   // Ни соседнего checkout, ни абсолютных путей, ни ссылки.
   const manifests =

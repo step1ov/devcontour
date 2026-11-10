@@ -67,7 +67,7 @@ Pre-commit запускает token lint, ESLint и typecheck; pre-push и те�
 
 Медленный ярус и выбор по замыканию не заменяют полный check: зависимость, которую статический разбор не видит (путь, вычисленный во время исполнения), проявится только в полном прогоне.
 
-Поставка уже проверенного архива `devcontour-harness` не требует повторять check репозитория harness: архив проверен полным check harness на коммите, который передаётся в `--commit`. `scripts/vendor-harness.mjs` сверяет с архивом integrity в lock и каждый установленный файл. В DevContour изменение `vendor/harness`, `package.json` и lock запускает в `test:affected` весь набор, а перед выпуском — обычный `npm run check`: он проверяет DevContour с новой версией движка, а не сам движок.
+DevContour закрепляет только опубликованную версию `devcontour-harness`: сначала выпускается и публикуется harness (его полный check на коммите, который передаётся в `--commit`), затем `node scripts/pin-harness.mjs <версия> --commit <SHA> --archive <проверенный архив>` ставит точную версию из registry. Скрипт до изменений сверяет integrity опубликованного пакета с байтами архива, затем — lock и каждый установленный файл, и пишет запись в `vendor/harness/README.md`. Невыпущенного кандидата harness до публикации проверяют локально без смены зависимости: `npm install --no-save ./devcontour-harness-<версия>.tgz`, затем тесты; такой кандидат не закрепляется и не выпускается. В DevContour изменение `vendor/harness`, `package.json` и lock запускает в `test:affected` весь набор, а перед выпуском — обычный `npm run check`: он проверяет DevContour с новой версией движка, а не сам движок.
 
 ## Первое знакомство с кодом
 

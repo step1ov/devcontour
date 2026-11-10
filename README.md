@@ -64,14 +64,14 @@ npm run demo
 
 ## Установка
 
-Предварительные версии публикуются в npm с меткой `alpha`; движок исполнения `devcontour-harness` вложен в пакет и закреплён по версии и integrity, отдельно его ставить не нужно:
+Предварительные версии публикуются в npm с меткой `alpha`. Движок исполнения `devcontour-harness` — обычная зависимость с точной версией: npm ставит его рядом из registry, integrity фиксирует lock, отдельно его ставить не нужно. Новая версия harness приходит только с новой версией DevContour:
 
 ```sh
 npm install --global devcontour@alpha
 devcontour help
 ```
 
-Тот же пакет можно установить из архива `devcontour-<version>.tgz` без registry:
+Тот же пакет можно установить из архива `devcontour-<version>.tgz`; закреплённый harness npm возьмёт из registry или своего кэша:
 
 ```sh
 mkdir devcontour-install && cd devcontour-install
@@ -80,7 +80,7 @@ npm install --omit=dev --ignore-scripts ./devcontour-<version>.tgz
 npx devcontour help
 ```
 
-Проверка выпущенного архива целиком — `npm run check:install -- <архив>` из checkout DevContour: установка в отдельный каталог без сети, CLI, MCP, сервер и настоящий Git-цикл на fixture runtime, без чтения файлов checkout. Закреплённая версия harness и её архив — в [vendor/harness](vendor/harness/README.md).
+Проверка выпущенного архива целиком — `npm run check:install -- <архив>` из checkout DevContour: установка в отдельный каталог без сети (из прогретого кэша npm), CLI, MCP, сервер и настоящий Git-цикл на fixture runtime, без чтения файлов checkout. Закреплённая версия harness, integrity и исходный commit — в [vendor/harness](vendor/harness/README.md).
 
 Общие с harness алгоритмы — подготовка файлов, диагностика остановок, планирование, ограничение ответов агентских операций и разрешение профилей — DevContour берёт из этого пакета; продуктовые согласования, память, UI и хранилище остаются в DevContour ([архитектура](docs/architecture.md#общие-алгоритмы-из-harness)).
 

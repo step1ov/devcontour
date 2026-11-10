@@ -1,10 +1,10 @@
-# Поставленный пакет harness
+# Закреплённая версия harness
 
-Зависимость `devcontour-harness` — относительный versioned archive из этого
-каталога; `package-lock.json` фиксирует его integrity. Обновление —
-`node scripts/vendor-harness.mjs <архив> --commit <SHA>`: новый номер версии,
-уже поставленный номер другими байтами не заменяется.
+Зависимость `devcontour-harness` — точная версия из npm registry; она не
+вкладывается в архив DevContour. `package-lock.json` фиксирует resolved и
+integrity опубликованных байтов. Смена версии — новый выпуск DevContour:
+`node scripts/pin-harness.mjs <версия> --commit <SHA> [--archive <архив>]`.
 
-| Версия         | SHA-256 архива                                                     | Исходный commit harness                    |
-| -------------- | ------------------------------------------------------------------ | ------------------------------------------ |
-| 0.1.0-alpha.44 | `b6c2773cd0828aa235952d38b736c33eb31949e9d409474a7bf060d1ceff4b94` | `0aa2775b8f094f66bf78c2116202a5585c512d16` |
+| Версия         | Integrity опубликованного пакета                                                                  | Исходный commit harness                    |
+| -------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| 0.1.0-alpha.44 | `sha512-SdKXvIGFJVilKYk7bWuaXdoYQ8+Tyi2FlAsiPYk1RSDGbvpkqFNqF4PjpQ99HuARer7+ojgyEEXyjY1f0wKVuQ==` | `0aa2775b8f094f66bf78c2116202a5585c512d16` |
