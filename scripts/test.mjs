@@ -18,8 +18,7 @@ import { slowFile, slowFirst, slowPatterns } from './test-tiers.mjs';
 //   --depth N    with --affected: only files within N import hops (not fail safe)
 //   --list       print the selected files instead of running them
 // Keep process isolation. Four test files run at a time;
-// DEVCONTOUR_TEST_CONCURRENCY overrides it (check lowers it by one while the
-// browser suite runs beside this one).
+// DEVCONTOUR_TEST_CONCURRENCY overrides it.
 const directory = new URL('../tests/', import.meta.url);
 const configured = process.env.DEVCONTOUR_TEST_CONCURRENCY;
 const concurrency = configured === undefined || configured === '' ? 4 : Number(configured);
@@ -105,11 +104,10 @@ if (options.list) {
   // Тесты держат рабочие деревья в своих временных каталогах (checkoutRoot
   // фикстур). Новый элемент в настоящем кэше пользователя после прогона —
   // тест, который пишет туда: прогон не проходит. Сравнение — до и после, а
-  // `npm run check` в это же время выполняет рядом проверку пакета и e2e.
-  // smoke-package запускает harness со своими HOME и XDG_CACHE_HOME, серверы
-  // e2e — с явным --checkout-root, спецификации подменяют HOME
-  // (e2e/live-cli-guard.ts). Если один из них всё же запишет в настоящий кэш,
-  // отказ здесь назовёт его запись так же, как запись теста.
+  // `npm run check` в это же время выполняет рядом проверку пакета: она
+  // запускает harness со своими HOME и XDG_CACHE_HOME. Если она всё же
+  // запишет в настоящий кэш, отказ здесь назовёт её запись так же, как
+  // запись теста. Другие процессы harness во время полного прогона не идут.
   const xdg = process.env.XDG_CACHE_HOME;
   const cache =
     process.platform === 'darwin'

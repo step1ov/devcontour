@@ -397,59 +397,69 @@ ${body}`,
   return { root, result, output: result.stdout + result.stderr, pid };
 }
 
-for (const outcome of ['pass', 'e2e-fails', 'test-fails'] as const)
-  test(`Release check runs the browser suite beside the Node suite, one file slot fewer, and keeps each output whole (${outcome})`, async () => {
-    // The Node suite finishes only after the browser suite has printed, so a
-    // passing check proves they overlap; their lines interleave in time, and
-    // the browser suite's still must come out as one block. A failing suite
-    // must stop the other one, which would otherwise wait forever.
+for (const outcome of ['pass', 'smoke-fails', 'test-fails'] as const)
+  test(`Release check runs the package smoke beside the Node suite and the browser suite after both (${outcome})`, async () => {
+    // The Node suite finishes only after the smoke has printed, so a passing
+    // check proves they overlap; their lines interleave in time, and the
+    // smoke's still must come out as one block. A failing step must stop the
+    // other one, which would otherwise wait forever, and the browser suite
+    // starts only after the Node suite has passed.
     const { root, result, output, pid } = await releaseCheck(`
 if(name==='test') {
   writeFileSync('test.pid',String(process.pid));
   writeFileSync('concurrency',String(process.env.DEVCONTOUR_TEST_CONCURRENCY));
   console.log('ℹ tests 1');
-  await wait('e2e-started');
+  await wait('smoke-started');
   console.log('ℹ pass 1');
-  ${outcome === 'test-fails' ? "await wait('e2e-diagnostics');process.exit(1);" : ''}
-  await wait('e2e-line');
-} else if(name==='e2e') {
-  writeFileSync('e2e.pid',String(process.pid));
-  writeFileSync('e2e-started','1');
-  console.log('e2e first');
+  ${outcome === 'test-fails' ? "await wait('smoke-diagnostics');process.exit(1);" : ''}
+  await wait('smoke-line');
+  writeFileSync('test-finished','1');
+} else if(name==='smoke') {
+  writeFileSync('smoke.pid',String(process.pid));
+  writeFileSync('smoke-started','1');
+  console.log('smoke first');
   await sleep(100);
-  console.error('e2e diagnostics');
-  writeFileSync('e2e-diagnostics','1');
+  console.error('smoke diagnostics');
+  writeFileSync('smoke-diagnostics','1');
   // Chunks of the two pipes keep their order only when apart in time.
   await sleep(100);
-  ${outcome === 'e2e-fails' ? 'process.exit(1);' : ''}
+  ${outcome === 'smoke-fails' ? 'process.exit(1);' : ''}
   ${outcome === 'test-fails' ? "await wait('never');" : ''}
+  console.log('smoke done');
+  writeFileSync('smoke-line','1');
+} else if(name==='e2e') {
+  writeFileSync('e2e-started',existsSync('test-finished')?'after the Node suite':'too early');
   console.log('  1 passed');
-  writeFileSync('e2e-line','1');
-} else if(name==='smoke') console.log('smoke line');
+}
 `);
     try {
       assert.equal(result.status, outcome === 'pass' ? 0 : 1, output);
-      assert.equal(await readFile(join(root, 'concurrency'), 'utf8'), '3');
+      // The Node suite keeps the concurrency it was given.
+      assert.equal(await readFile(join(root, 'concurrency'), 'utf8'), '4');
       // Node suite lines stream unprefixed: its summary greps as in a run of its own.
       assert.match(result.stdout, /^ℹ tests 1$/m);
-      // The browser suite is one contiguous section with its stderr inside.
+      // The smoke is one contiguous section with its stderr inside.
       const section = new RegExp(
-        `──── test:e2e ────\ne2e first\ne2e diagnostics\n${outcome === 'pass' ? ' {2}1 passed\n✔' : '(?:[^\n]*\n)*?✖'} test:e2e [^\n]*\n──── end of test:e2e ────\n`,
+        `──── smoke-package ────\nsmoke first\nsmoke diagnostics\n${outcome === 'pass' ? 'smoke done\n✔' : '(?:[^\n]*\n)*?✖'} smoke-package [^\n]*\n──── end of smoke-package ────\n`,
       );
       assert.match(result.stdout, section, result.stdout);
       // The final line is the only authoritative result besides the exit code.
-      const last = result.stderr.trimEnd().split('\n').at(-1);
+      const last = result.stderr.trimEnd().split('\n').at(-1) ?? '';
       if (outcome === 'pass') {
-        assert.match(result.stdout, /──── smoke-package ────\nsmoke line\n✔ smoke-package/);
-        assert.match(last ?? '', /^check: passed in /);
+        assert.equal(await readFile(join(root, 'e2e-started'), 'utf8'), 'after the Node suite');
+        assert.match(result.stdout, /^ {2}1 passed$/m);
+        assert.match(last, /^check: passed in /);
       } else {
         assert.match(
-          last ?? '',
-          new RegExp(`^check: failed in ${outcome === 'e2e-fails' ? 'test:e2e' : 'test'} \\(`),
+          last,
+          new RegExp(
+            `^check: failed in ${outcome === 'smoke-fails' ? 'smoke-package' : 'test'} \\(`,
+          ),
         );
         // The sibling that would have waited forever was stopped with the check.
-        const sibling = await pid(outcome === 'e2e-fails' ? 'test.pid' : 'e2e.pid');
-        await until(() => !alive(sibling), 'the other suite was stopped');
+        const sibling = await pid(outcome === 'smoke-fails' ? 'test.pid' : 'smoke.pid');
+        await until(() => !alive(sibling), 'the other step was stopped');
+        assert.equal(existsSync(join(root, 'e2e-started')), false, 'e2e never started');
       }
     } finally {
       await rm(root, { recursive: true, force: true });
