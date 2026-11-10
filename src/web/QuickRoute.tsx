@@ -612,8 +612,8 @@ function Result({ view }: { view: QuickView }) {
                   {u.calls === 0
                     ? 'вызовов не было'
                     : u.complete
-                      ? `$${(u.costUsd ?? u.knownCostUsd).toFixed(2)} за ${u.calls} вызов(ов)`
-                      : `известно $${u.knownCostUsd.toFixed(2)}, неизвестно ${u.unknownCalls} вызов(ов)`}
+                      ? `$${(u.costUsd ?? u.knownCostUsd).toFixed(2)} за ${u.calls} вызов(ов) — оценка по тарифам API`
+                      : `известно $${u.knownCostUsd.toFixed(2)} (оценка по тарифам API), неизвестно ${u.unknownCalls} вызов(ов)`}
                 </Fact>
               </dl>
               {task.diff && task.diff.count > 0 && (

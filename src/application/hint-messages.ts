@@ -56,6 +56,12 @@ export interface HintParamMap {
     budget: boolean;
     /** Задание действует: после повтора задачи оно продолжится само. */
     live: boolean;
+    /**
+     * Все задачи ревизии отменены: приёмке нужна хотя бы одна выполненная
+     * задача, поэтому второй путь — новая ревизия доски, а не приёмка без
+     * задачи. Нет поля — в ревизии есть неотменённые задачи.
+     */
+    allCancelled?: true;
     error?: string;
   };
   /** Попытки задания исчерпаны. */
@@ -231,11 +237,18 @@ const en: Catalog = {
       : lead
         ? `(1) if the task is still needed, ${retry}`
         : `(1) ${retry}`;
-    const owner =
-      p.budget || !lead
+    const owner = p.allCancelled
+      ? p.budget || !lead
+        ? "Both are the user's decisions and the attention center shows them to the operator: ask the user; do not raise budgets, retry the task or replan the board yourself."
+        : "A new board revision instead of the task is the user's decision and the attention center shows it to the operator: ask the user before replanning."
+      : p.budget || !lead
         ? "Both are the user's decisions and the attention center shows them to the operator: ask the user; do not raise budgets, retry the task or accept the board yourself."
         : "Accepting without the task is the user's decision and the attention center shows it to the operator: do not accept the board yourself.";
-    return `The lead workflow job of board ${s.boardId!} ${p.live ? 'stops at its next step' : 'stopped'}${failedEn(p.error)}: task ${task} was ${who}${p.budget ? ' when it hit a budget' : ''}, and an issued task does not leave the job (D46, docs/decisions.md), so workflow_retry and workflow_start do not move it. Recovery paths: ${first}; (2) the operator accepts the revision without task ${task} in the panel (the accept action on the board page) once its other tasks are done. ${owner}`;
+    // Все задачи ревизии отменены: принимать нечего, второй путь — новая ревизия.
+    const second = p.allCancelled
+      ? `(2) every task of the revision is cancelled, so the board cannot be accepted: when the user decides so, the lead plans a new revision of board ${s.boardId!}`
+      : `(2) the operator accepts the revision without task ${task} in the panel (the accept action on the board page) once its other tasks are done`;
+    return `The lead workflow job of board ${s.boardId!} ${p.live ? 'stops at its next step' : 'stopped'}${failedEn(p.error)}: task ${task} was ${who}${p.budget ? ' when it hit a budget' : ''}, and an issued task does not leave the job (D46, docs/decisions.md), so workflow_retry and workflow_start do not move it. Recovery paths: ${first}; ${second}. ${owner}`;
   },
   'job-retry': (p, s) =>
     `The lead workflow job of board ${s.boardId!} failed${failedEn(p.error)}. On retry the job loop ${loopEn(s.loop!)}: workflow_retry ${retryArgs(s)}.`,
@@ -405,11 +418,17 @@ const ru: Catalog = {
       : lead
         ? `(1) если задача ещё нужна — ${retry}`
         : `(1) ${retry}`;
-    const owner =
-      p.budget || !lead
+    const owner = p.allCancelled
+      ? p.budget || !lead
+        ? 'Оба решения — пользователя, центр внимания показывает их оператору: спросите пользователя; сами не поднимайте бюджет, не повторяйте задачу и не перепланируйте доску.'
+        : 'Новая ревизия доски вместо задачи — решение пользователя, центр внимания показывает его оператору: спросите пользователя, прежде чем перепланировать.'
+      : p.budget || !lead
         ? 'Оба решения — пользователя, центр внимания показывает их оператору: спросите пользователя; сами не поднимайте бюджет, не повторяйте задачу и не принимайте доску.'
         : 'Приёмка без задачи — решение пользователя, центр внимания показывает его оператору: сами доску не принимайте.';
-    return `Задание ведущего доски ${s.boardId!} ${p.live ? 'остановится на следующем такте' : 'остановлено'}${failedRu(p.error)}: задача ${task} ${who}${p.budget ? ', когда упёрлась в бюджет' : ''}, а выданная задача из работы задания не выпадает (D46, docs/decisions.md), поэтому workflow_retry и workflow_start его не продвинут. Пути восстановления: ${first}; (2) оператор принимает ревизию без задачи ${task} в панели (страница доски, «Принять доску»), когда остальные задачи готовы. ${owner}`;
+    const second = p.allCancelled
+      ? `(2) все задачи ревизии отменены, принимать нечего: по решению пользователя ведущий планирует новую ревизию доски ${s.boardId!}`
+      : `(2) оператор принимает ревизию без задачи ${task} в панели (страница доски, «Принять доску»), когда остальные задачи готовы`;
+    return `Задание ведущего доски ${s.boardId!} ${p.live ? 'остановится на следующем такте' : 'остановлено'}${failedRu(p.error)}: задача ${task} ${who}${p.budget ? ', когда упёрлась в бюджет' : ''}, а выданная задача из работы задания не выпадает (D46, docs/decisions.md), поэтому workflow_retry и workflow_start его не продвинут. Пути восстановления: ${first}; ${second}. ${owner}`;
   },
   'job-retry': (p, s) =>
     `Задание ведущего доски ${s.boardId!} упало${failedRu(p.error)}. После workflow_retry цикл задания ${loopRu(s.loop!)}: workflow_retry ${retryArgs(s)}.`,
@@ -486,4 +505,21 @@ export const hintCatalogs: Record<HintLocale, Catalog> = { en, ru };
 export function hintDetail(step: HintSubject & HintOf, locale: HintLocale): string {
   const render = hintCatalogs[locale][step.code] as (p: unknown, s: HintSubject) => string;
   return render(step.params, step);
+}
+
+/**
+ * Язык человекочитаемого ответа независимого ревьюера (план, контракт):
+ * итог и находки показываются оператору в панели и центре внимания. Без
+ * `hintLocale` или с английским — указания нет, промпт прежний. Машинные
+ * поля, булево `approved`, значения перечислений (`severity`, `status`) и
+ * идентификаторы ревьюер оставляет как есть: их разбирает harness. Прежние
+ * находки после смены языка остаются на прежнем: их состояние — только в
+ * `previous`, без повтора новыми находками по-русски.
+ */
+export function reviewLanguageInstructions(locale: HintLocale): string[] {
+  return locale === 'ru'
+    ? [
+        'Language: the operator reads your review in Russian. Write all human-readable text of your answer in Russian: the summary, every finding message, the basis of each previous finding and any other free-text explanation. Keep JSON keys, the boolean approved, enum values (severity, status), rule names, ids, file paths, commands and code verbatim, in their original language. Previous findings may be in another language: report their state only in `previous`, by id, and do not restate them as new findings in Russian.',
+      ]
+    : [];
 }

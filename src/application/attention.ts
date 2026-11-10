@@ -37,7 +37,8 @@ import {
   stoppedWorkflows,
 } from './overview.ts';
 import { inputNextText, inputStateLabels, repeatedQuestionText } from '../core/input-labels.ts';
-import { budgetBlocks, budgetHint } from './context.ts';
+import { budgetBlocks } from './context.ts';
+import { budgetCardReason } from '../core/usage.ts';
 import { InputService, inputHolds } from './input.ts';
 import { hrefs } from './panel-links.ts';
 import { inputReviewRounds } from '../harness/input-host.ts';
@@ -701,7 +702,9 @@ const budgetSource: AttentionSourceRule = {
           actor: 'operator',
           title:
             b.state === 'exceeded' ? 'Бюджет исчерпан: задачи не выдаются' : 'Бюджет не определён',
-          reason: `${b.reason}. ${budgetHint(b.reason)}`,
+          // Причина движка с расходом и подсказка не всегда умещаются в
+          // предел карточки: команда действия сохраняется всегда.
+          reason: budgetCardReason(b.reason, ATTENTION_LIMITS.reason),
           since:
             ctx.state.tasks
               .filter((t) => covered.includes(t.id))
@@ -1091,6 +1094,12 @@ function cancelledTaskCard(
   jobs: readonly { key: string; history: { at: string }[] }[],
   /** Параметры остановки исчерпанного задания (`exhaustedOnCancelled`). */
   exhausted?: { taskId: string; by: string; budget: boolean },
+  /**
+   * В ревизии есть неотменённая задача. Приёмке доски нужна хотя бы одна
+   * выполненная задача: когда отменены все, «Принять доску» не сработает, и
+   * карточка его не предлагает.
+   */
+  acceptable = true,
 ): Candidate {
   const p = (exhausted ?? step.params) as {
     taskId: string;
@@ -1128,17 +1137,25 @@ function cancelledTaskCard(
       by: p.by,
       budget: p.budget,
       ...(exhausted ? { exhausted: true } : {}),
+      ...(acceptable ? {} : { allCancelled: true }),
     }),
     source: 'board',
     category: 'decision',
     actor: 'operator',
     title: `Доска «${board.title}»: задание остановлено отменённой задачей`,
     reason: ctx.redact(
-      exhausted
-        ? // Попытки задания исчерпаны: повтор задания не поможет, остаются
-          // приёмка без задачи и новая ревизия доски.
-          `Задача «${title}» ${who}${p.budget ? ' по бюджету' : ''}; задание доски исчерпало попытки и не продолжится. Решите: примите ревизию без задачи («Принять доску», когда остальные задачи готовы) или поручите ведущему агенту новую ревизию доски.`
-        : `Задача «${title}» ${who}${p.budget ? ' по бюджету' : ''}; задание доски без неё не продолжится. Решите: ${retry} или примите ревизию без задачи («Принять доску», когда остальные задачи готовы).`,
+      !acceptable
+        ? // Отменены все задачи ревизии: принимать нечего, остаются повтор
+          // задачи (пока задание не исчерпано) и новая ревизия доски.
+          // Новая ревизия названа первой: длинная причина обрезается по пределу.
+          exhausted
+          ? `Задача «${title}» ${who}${p.budget ? ' по бюджету' : ''}; задание доски исчерпало попытки. Все задачи ревизии отменены — принимать нечего. Решите: поручите ведущему агенту новую ревизию доски.`
+          : `Задача «${title}» ${who}${p.budget ? ' по бюджету' : ''}. Все задачи ревизии отменены — принимать нечего. Решите: поручите ведущему агенту новую ревизию доски или ${retry}.`
+        : exhausted
+          ? // Попытки задания исчерпаны: повтор задания не поможет, остаются
+            // приёмка без задачи и новая ревизия доски.
+            `Задача «${title}» ${who}${p.budget ? ' по бюджету' : ''}; задание доски исчерпало попытки и не продолжится. Решите: примите ревизию без задачи («Принять доску», когда остальные задачи готовы) или поручите ведущему агенту новую ревизию доски.`
+          : `Задача «${title}» ${who}${p.budget ? ' по бюджету' : ''}; задание доски без неё не продолжится. Решите: ${retry} или примите ревизию без задачи («Принять доску», когда остальные задачи готовы).`,
     ),
     since: step.job
       ? (jobs.find((j) => j.key === step.job!.key)?.history.at(-1)?.at ?? revision.createdAt)
@@ -1185,8 +1202,9 @@ const boardSource: AttentionSourceRule = {
             throw error;
           }
           if (!step || !['decide', 'fix-input', 'workflow_retry'].includes(step.action)) continue;
+          const acceptable = tasks.some((t) => t.status !== 'cancelled');
           if (step.code === 'job-cancelled-task') {
-            out.push(cancelledTaskCard(ctx, board, revision, step, jobs));
+            out.push(cancelledTaskCard(ctx, board, revision, step, jobs, undefined, acceptable));
             continue;
           }
           // Исчерпанное задание на отменённой выданной задаче: решение то же,
@@ -1194,7 +1212,7 @@ const boardSource: AttentionSourceRule = {
           const exhausted =
             step.code === 'job-exhausted' ? exhaustedOnCancelled(board.id, host) : undefined;
           if (exhausted) {
-            out.push(cancelledTaskCard(ctx, board, revision, step, jobs, exhausted));
+            out.push(cancelledTaskCard(ctx, board, revision, step, jobs, exhausted, acceptable));
             continue;
           }
           if (settled) continue;

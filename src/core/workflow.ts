@@ -254,6 +254,50 @@ export function validateTaskContext(config: Config, task: TaskInput) {
     if (!config.contextPacks.some((p) => p.id === id))
       throw new DomainError('Неизвестный context pack: ' + id);
 }
+/**
+ * Пути области записи задачи, которые роль не может изменить ни в какой
+ * части: путь не лежит в области роли и не содержит её часть. Действующая
+ * область — пересечение, поэтому такой путь исполнитель тронуть не вправе:
+ * правка в нём — отказ «файлы вне области поручения/роли» и потраченная
+ * попытка. Роль без области — весь репозиторий, лишних путей нет.
+ */
+export function outsideRoleScope(
+  config: Config,
+  task: Pick<TaskInput, 'role' | 'repositoryId' | 'writePaths'>,
+): string[] {
+  const roleScope = roleBinding(config, task.role, task.repositoryId)?.writePaths;
+  if (!task.writePaths?.length || !roleScope?.length) return [];
+  return task.writePaths.filter(
+    (path) => !withinPaths(path, roleScope) && !roleScope.some((p) => withinPaths(p, [path])),
+  );
+}
+
+/**
+ * Причина отказа для путей вне области роли: какие роли того же компонента
+ * вправе их изменить и что делать — отдельная задача такой роли, от которой
+ * эта зависит, а не расширение области этой задачи.
+ */
+export function roleScopeAdvice(
+  config: Config,
+  task: Pick<TaskInput, 'role' | 'repositoryId'>,
+  paths: string[],
+): string {
+  const roleScope = roleBinding(config, task.role, task.repositoryId)?.writePaths ?? [];
+  const owners = declaredRoles(config, task.repositoryId).filter((role) => {
+    if (role === task.role) return false;
+    const scope = roleBinding(config, role, task.repositoryId)?.writePaths;
+    // Роль без области пишет весь репозиторий, но такой совет ничего не
+    // сужает: называются только роли, чья область явно покрывает пути.
+    return !!scope?.length && paths.every((p) => withinPaths(p, scope));
+  });
+  return (
+    `пути ${paths.join(', ')} вне области записи роли ${task.role} (${roleScope.join(', ')}): ` +
+    'исполнитель этой роли не вправе их изменить, и попытка закончится отказом по области записи. ' +
+    `Уберите их из задачи и создайте отдельную задачу ${owners.length ? 'роли ' + owners.join(' или ') : 'роли, которой принадлежат эти пути'}, ` +
+    'от которой эта задача зависит (dependsOn)'
+  );
+}
+
 export const withinPaths = (path: string, prefixes: string[]) =>
   prefixes.some(
     (prefix) => path === prefix || path.startsWith(prefix.endsWith('/') ? prefix : prefix + '/'),

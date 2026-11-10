@@ -768,7 +768,12 @@ export function PreparationPanel() {
           >
             ← Продукт и архитектура
           </Button>
-          <span>{c?.title}</span>
+          {/* Разработка показывает доски всех изменений: одно название
+              изменения над чужой доской читалось как её изменение. Названо
+              изменение, к этапам которого ведёт «Назад». */}
+          <span className="text-muted-foreground text-sm">
+            Доски всех изменений{c ? ` · назад — к этапам «${c.title}»` : ''}
+          </span>
         </div>
         <Suspense fallback={<p role="status">Загрузка разработки…</p>}>
           <Development />
@@ -1034,8 +1039,10 @@ export function PreparationPanel() {
                       <p className="max-w-[78ch]">{developmentStatus(view).text}</p>
                       <SetupProgress setup={view.setup} tasks={view.delivery.total} />
                       <p className="mt-4">
-                        Принято задач: {view.delivery.done} из {view.delivery.total}. Сбоев:{' '}
-                        {view.delivery.failed}.
+                        {/* Счёт — задачи этого изменения; работа других видна на
+                        досках разработки. */}
+                        Принято задач этого изменения: {view.delivery.done} из {view.delivery.total}
+                        . Сбоев: {view.delivery.failed}.
                       </p>
                       {view.delivery.unbound ? (
                         <p className="text-muted-foreground mt-1 text-sm">

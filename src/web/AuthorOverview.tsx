@@ -310,10 +310,17 @@ export function AuthorOverviewPanel({
       </Section>
 
       <Section title="Расходы">
+        {/* Суммы — эквивалент по тарифам API: при подписке оператор читал их
+            как реальные списания. */}
         <p className="m-0">
-          Вызовов моделей: {o.spend.calls}. Известная стоимость: ${o.spend.knownCostUsd.toFixed(2)}{' '}
-          (сообщено провайдером ${(o.spend.reportedUsd ?? 0).toFixed(2)}, оценено по тарифу $
+          Вызовов моделей за всё время workspace: {o.spend.calls}. Известная стоимость — оценка по
+          тарифам API: ${o.spend.knownCostUsd.toFixed(2)} (сообщено CLI $
+          {(o.spend.reportedUsd ?? 0).toFixed(2)}, рассчитано по тарифам prices $
           {(o.spend.estimatedUsd ?? 0).toFixed(2)}).
+        </p>
+        <p className="text-muted-foreground m-0">
+          Это не списание: при подписке фактическая оплата другая. Бюджеты в budgets считают ту же
+          оценку.
         </p>
         {(o.spend.abandonedCalls ?? 0) > 0 && (
           <p className="text-muted-foreground m-0">
@@ -329,8 +336,12 @@ export function AuthorOverviewPanel({
               key={`${b.scope.kind}:${b.scope.id ?? ''}`}
               className={b.state === 'within' ? 'm-0' : 'm-0 text-destructive'}
             >
-              {b.reason ??
-                `Бюджет ${b.scope.kind === 'workspace' ? 'workspace' : b.scope.id}: ` +
+              {(b.reason &&
+                b.reason +
+                  (b.scope.kind === 'workspace'
+                    ? ' (бюджет workspace считает расход за всё время workspace)'
+                    : '')) ||
+                `Бюджет ${b.scope.kind === 'workspace' ? 'workspace (за всё время workspace)' : b.scope.id}: ` +
                   (b.remainingUsd !== null ? `осталось $${b.remainingUsd.toFixed(2)}` : '') +
                   (b.remainingUsd !== null && b.remainingMs !== null ? ', ' : '') +
                   (b.remainingMs !== null ? `осталось ${Math.round(b.remainingMs / 1000)} с` : '') +

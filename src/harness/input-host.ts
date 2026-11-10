@@ -16,6 +16,7 @@ import {
   type WorkState,
 } from 'devcontour-harness';
 import type { DevContour } from '../core/service.ts';
+import { specDigest } from '../core/task-digest.ts';
 import type { Task } from '../core/model.ts';
 import { approvalPolicyDigest } from './policy.ts';
 import { reviewExecutionOf } from './execution.ts';
@@ -27,11 +28,13 @@ export const inputReviewSubject = (requestId: string) => 'input-' + requestId;
 /**
  * Digest предложения, которое проверяет ревью ответа: задача, запрос,
  * точный ответ, утверждение задачи и утверждаемая часть политики. Другой
- * ответ, переутверждение или смена политики — новый раунд.
+ * ответ, переутверждение или смена политики — новый раунд. У черновика
+ * утверждения нет, и его заменяет постановка: ревью одной редакции черновика
+ * не годится для применения к другой (перенос ответа в черновике, F14).
  */
 export function inputReviewDigest(
   h: DevContour,
-  task: Pick<Task, 'id' | 'approvedDigest'>,
+  task: Task,
   requestId: string,
   answerDigest: string,
 ) {
@@ -41,6 +44,7 @@ export function inputReviewDigest(
     requestId,
     answerDigest,
     approvedDigest: task.approvedDigest ?? null,
+    ...(task.approvedDigest ? {} : { draftSpec: specDigest(task) }),
     approvalPolicy: approvalPolicyDigest(h.config),
   });
 }
@@ -63,6 +67,24 @@ export function inputReviewRounds(view: ExecutionView, requestId: string): Revie
 export function activeInputContext(task: Task) {
   const context = task.inputContext;
   return context && context.approvedDigest === task.approvedDigest ? context : undefined;
+}
+
+/**
+ * Утверждение черновика сохраняет снимок с ответами, активированный в этом
+ * черновике (перенос ответа после `reopen` и новой постановки, F14), если
+ * утверждена ровно та постановка, к которой ответ применён. Прежде снимок
+ * терял привязку при утверждении, применение устаревало (`input.stale`), и
+ * цепочку ответа проходили второй раз. Постановка, изменённая после
+ * применения, снимок не наследует: ответ ревьюировали для другой редакции.
+ * `draftSpec` — постановка черновика до закрепления контрактов утверждением
+ * (в черновике `contractDigests` пусты, утверждение их закрепляет);
+ * вызывается после записи нового `approvedDigest`.
+ */
+export function rebindInputContext(task: Task, draftSpec: string) {
+  const context = task.inputContext;
+  if (!context || context.approvedDigest || !context.specDigest || !task.approvedDigest) return;
+  if (context.specDigest !== draftSpec) return;
+  context.approvedDigest = task.approvedDigest;
 }
 
 const taskOf = (store: DevContourExecutionStore, view: ExecutionView, work: WorkState) => {
@@ -119,7 +141,11 @@ export function devcontourInputHost(h: DevContour, store: DevContourExecutionSto
         const previous = activeInputContext(task);
         task.inputContext = {
           digest: target.contextDigest,
-          ...(task.approvedDigest ? { approvedDigest: task.approvedDigest } : {}),
+          // Черновик: снимок привязан к постановке, и её утверждение
+          // привяжет его к себе (`rebindInputContext`, F14).
+          ...(task.approvedDigest
+            ? { approvedDigest: task.approvedDigest }
+            : { specDigest: specDigest(task) }),
           requestIds: [
             ...(previous?.requestIds ?? []).filter((id) => id !== request.id),
             request.id,

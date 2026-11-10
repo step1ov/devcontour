@@ -1654,6 +1654,41 @@ test('session_handoff: отмена ведущим выданной задачи
   }
 });
 
+test('session_handoff: все задачи ревизии отменены — второй путь новая ревизия доски, а не приёмка', async () => {
+  const f = fixture();
+  try {
+    const b = f.h.createBoard('Everything cut', '', 'main');
+    const stopped = f.h.addTask(b.id, input('Fails its gate'));
+    const other = f.h.addTask(b.id, input('Dropped'));
+    f.h.approve(b.id);
+    const flow = new LeadWorkflow(f.h);
+    flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    f.h.pause(false);
+    const run = f.h.claim('test')!;
+    assert.equal(run.taskId, stopped.id);
+    f.h.fail(run.id, run.token, 'gate failed', false, 'gate');
+    f.h.cancel(stopped.id, 'Not worth it', 'host');
+    f.h.cancel(other.id, 'Not needed', 'host');
+    const runner = new LeadRunner(f.h, f.root);
+    for (let i = 0; i < 4; i++) await runner.tick();
+    await runner.stop();
+    const next = devcontourHandoff(f.h, {}).host.next;
+    assert.equal(next?.code, 'job-cancelled-task', JSON.stringify(next));
+    assert.equal((next.params as { allCancelled?: boolean }).allCancelled, true);
+    assert.match(
+      next.detail,
+      /every task of the revision is cancelled, so the board cannot be accepted/,
+    );
+    assert.match(next.detail, /the lead plans a new revision of board/);
+    assert.doesNotMatch(
+      next.detail,
+      /accepts the revision without task|Accepting without the task/,
+    );
+  } finally {
+    f.cleanup();
+  }
+});
+
 /** Доска с задачей, упавшей на бюджете после выдачи, и задание доски. */
 function budgetStop(h: DevContour) {
   const b = h.createBoard('Budget stop', '', 'main');

@@ -2519,7 +2519,7 @@
     },
     {
       "name": "usage_report",
-      "description": "Read paginated owner-local invocation costs, versions and telemetry coverage; never evidence. With repositoryId: that component. Without it: the workspace contour (planning, answer review); in an embedded workspace also its component. scope.owners names the owners read; each record carries owner (@workspace for the contour).",
+      "description": "Read paginated owner-local invocation costs (USD amounts are API-equivalent estimates — reported by the CLI or computed from prices — not subscription charges), versions and telemetry coverage; never evidence. With repositoryId: that component. Without it: the workspace contour (planning, answer review); in an embedded workspace also its component. scope.owners names the owners read; each record carries owner (@workspace for the contour).",
       "readOnly": true,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2777,7 +2777,7 @@
     },
     {
       "name": "workflow_metrics",
-      "description": "Read per-owner execution measurements, incomplete attempts and unknown cost. No model calls.",
+      "description": "Read per-owner execution measurements, incomplete attempts and unknown cost. USD amounts and budgets are API-equivalent estimates, not subscription charges; the workspace budget counts lifetime workspace spend. No model calls.",
       "readOnly": true,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2793,7 +2793,7 @@
     },
     {
       "name": "value_report",
-      "description": "Read the effect report: accepted tasks, first try, sent back by checks/review, approval-to-merge time, known spend per accepted task, environment failures and recorded interventions. Omit repositoryId for the whole workspace. Bounds are explicit: \"lower\" means at least, a range means unknown inputs, null/unknown is never zero; under 20 no percentages, under 5 no medians. JSON only; summary detail omits per-task rows and evidence links (the CLI report has them). Read-only, no model calls.",
+      "description": "Read the effect report: accepted tasks, first try, sent back by checks/review, approval-to-merge time, known spend per accepted task (API-equivalent estimate), environment failures and recorded interventions. Omit repositoryId for the whole workspace. Bounds are explicit: \"lower\" means at least, a range means unknown inputs, null/unknown is never zero; under 20 no percentages, under 5 no medians. JSON only; summary detail omits per-task rows and evidence links (the CLI report has them). Read-only, no model calls.",
       "readOnly": true,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -5195,7 +5195,7 @@
     },
     {
       "name": "input_answer",
-      "description": "Answer a writer question with the expected request version. The lead may answer only a question without floors in approvalMode agent; otherwise the operator answers in the panel. A requirement-change answer is not continued: reopen and respecify the task, approve it, then input_supersede with the same task and carry the answer. Does not resume the task.",
+      "description": "Answer a writer question with the expected request version. The lead may answer only a question without floors in approvalMode agent; otherwise the operator answers in the panel. A requirement-change answer is not continued: reopen and respecify the task within the write scope of its role (paths of another role need a separate task of that role), input_supersede with the same task, carry the answer while the task is a draft, then approve the task; the approval keeps the carried answer when the spec is unchanged after the carry. Does not resume the task.",
       "readOnly": false,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -5265,7 +5265,7 @@
     },
     {
       "name": "input_review",
-      "description": "Review the answer snapshot with the plan reviewer (round subject input-<id>): approve only if the answer clarifies without changing the approved spec. Refused before the model call when the snapshot is missing or does not carry the latest answer. Approval does not activate anything. When attempts of the task board are running, the result carries warning and activeAttempts: input_apply waits for them (applied: false with active).",
+      "description": "Review the answer snapshot with the plan reviewer (round subject input-<id>): approve only if the answer clarifies without changing the approved spec; the reviewer sees the write scope of the role. Refused before the model call when the snapshot is missing or does not carry the latest answer, and for a carry whose task writePaths lie outside the write scope of the role (409 ROLE_SCOPE). Approval does not activate anything. When attempts of the task board are running, the result carries warning and activeAttempts: input_apply waits for them (applied: false with active).",
       "readOnly": false,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -5297,7 +5297,7 @@
     },
     {
       "name": "input_target",
-      "description": "Propose the continuation target for a reviewed answer snapshot (or the carry target of a superseded question) and list why applying would be refused now. Read-only.",
+      "description": "Propose the continuation target for a reviewed answer snapshot (or the carry target of a superseded question) and list why applying would be refused now, including carry writePaths outside the role write scope and a board not yet released (all tasks drafts). Read-only.",
       "readOnly": true,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -5406,7 +5406,7 @@
     },
     {
       "name": "input_supersede",
-      "description": "Supersede a writer question once the spec of its task has changed: reopen and respecify the task (draft or re-approved), then supersede with the same task and carry the answer (input_context, input_review, input_target, input_apply). Refused with 409 SPEC_UNCHANGED while the spec is unchanged; a blocking question the lead may not answer is superseded by the operator (403 OPERATOR_ANSWERS). The old task is not resumed by a requirement change without carry. A non-blocking follow-up may also be superseded by a newer task of the same board, for example the replacement created by board_correct.",
+      "description": "Supersede a writer question once the spec of its task has changed: reopen and respecify the task, then supersede with the same task and carry the answer (input_context, input_review, input_target, input_apply) while the task is a draft, then approve it: the approval keeps the carried answer when the spec is unchanged after the carry. A superseded question does not hold the task, so a carry after the approval needs a queue pause. The result nextStep names the order. Refused with 409 SPEC_UNCHANGED while the spec is unchanged; a blocking question the lead may not answer is superseded by the operator (403 OPERATOR_ANSWERS). The old task is not resumed by a requirement change without carry. A non-blocking follow-up may also be superseded by a newer task of the same board, for example the replacement created by board_correct.",
       "readOnly": false,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

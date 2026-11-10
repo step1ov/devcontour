@@ -92,5 +92,12 @@
 // задач в пределе ответа (без cursor и limit — весь список, если он
 // укладывается); описание называет страницы, nextCursor, full и complete;
 // прочие операции байтово прежние.
-export const CATALOG_DIGEST = '787694f3a3261c821a7d4bc65ed20940c67cfecc6c1e113d35e8696f4d1377d4';
+// Намеренное изменение: описания input_answer, input_review, input_target и
+// input_supersede называют порядок переноса ответа (в черновике, затем
+// утверждение), область записи роли и отказ ROLE_SCOPE; прочие операции
+// байтово прежние.
+// Намеренное изменение: описания usage_report, workflow_metrics и value_report
+// называют суммы USD оценкой по тарифам API, а бюджет workspace — бюджетом за
+// всё время workspace; прочие операции байтово прежние.
+export const CATALOG_DIGEST = '2377b2b91836516fa79ae5ba849e4668cfe020af2e2bafe0ac9f54b855e6373d';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

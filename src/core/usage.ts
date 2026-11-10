@@ -224,3 +224,74 @@ export function usageTotals(records: UsageRecord[], uncovered = false, at = Date
     unknownDurationCalls: records.filter((r) => callDurationMs(r, at) === null).length,
   };
 }
+
+/**
+ * Пометка денежных сумм для людей. Стоимость вызова — эквивалент по тарифам
+ * API: её сообщает CLI или рассчитывает тариф `prices`. При подписке это не
+ * списание, и без пометки оператор читал суммы как оплату. Поля JSON
+ * прежние; пометка — в текстах панели, CLI и подсказок.
+ */
+export const COST_ESTIMATE_RU = 'оценка по тарифам API';
+export const COST_ESTIMATE_EN = 'API-equivalent estimate';
+/** Как поднять исчерпанный денежный или временной предел. */
+export const BUDGET_RAISE_RU =
+  'Поднимите предел в budgets и примените: devcontour config-apply --keys budgets';
+/** Неопределённый бюджет снимает не предел, а `onUnknown: "continue"`. */
+const UNDETERMINED_RU =
+  'Стоимость части вызовов неизвестна, и предел её не снимет: задайте onUnknown: "continue" в budgets (тариф модели в prices оценит только новые вызовы) и примените: devcontour config-apply --keys budgets,prices';
+/** Короткий вариант для карточки, где причина уже называет неизвестные вызовы. */
+const UNDETERMINED_SHORT_RU =
+  'Предел это не снимет: задайте onUnknown: "continue" в budgets и примените: devcontour config-apply --keys budgets,prices';
+/**
+ * Пометки к причине бюджетной остановки движка. «Суммы — оценка» — только
+ * когда причина о денежном пределе (`предел $…`): у бюджета времени сумм в
+ * причине нет, хотя подробность расхода их называет. Общий бюджет (`total`
+ * движка, ключ `workspace` в budgets) считает расход за всё время workspace,
+ * а не за сессию — предел ниже прошлого расхода останавливает первый же вызов.
+ */
+export function budgetNotes(reason: string): string[] {
+  return [
+    ...(/предел \$/.test(reason) ? [`Суммы — ${COST_ESTIMATE_RU}, не списание.`] : []),
+    ...(/Бюджет (времени )?total\b/.test(reason)
+      ? ['Бюджет total (workspace в budgets) — за всё время workspace.']
+      : []),
+  ];
+}
+/**
+ * Что сделать с бюджетной остановкой. Неопределённый бюджет (стоимость
+ * вызовов неизвестна) снимает не предел, а `onUnknown: "continue"` в
+ * `budgets`; тариф в `prices` прошлые вызовы не переоценивает. Исчерпанный —
+ * более высокий предел. `compact` — короткий текст для карточки.
+ */
+export function budgetAction(reason: string, compact = false) {
+  if (!/не определён/.test(reason)) return BUDGET_RAISE_RU;
+  return compact ? UNDETERMINED_SHORT_RU : UNDETERMINED_RU;
+}
+/** Подсказка к причине: пометки, затем действие. */
+export function budgetHint(reason: string) {
+  return [...budgetNotes(reason), budgetAction(reason)].join(' ');
+}
+/** Причина и подсказка одной строкой: причина движка не кончается точкой. */
+export function budgetText(reason: string) {
+  return `${reason.replace(/\.$/, '')}. ${budgetHint(reason)}`;
+}
+/**
+ * Причина карточки в пределах `limit` знаков: команда действия важнее
+ * пометок и подробностей расхода. По очереди: всё целиком; причина без
+ * подробности расхода, действие, пометки; без пометок; короткое действие;
+ * и наконец действие впереди причины — обрезка заденет причину, а не команду.
+ */
+export function budgetCardReason(reason: string, limit: number) {
+  const base = reason.replace(/\.$/, '');
+  const short = base.split('; израсходовано')[0];
+  const notes = budgetNotes(reason).join(' ');
+  const action = budgetAction(reason);
+  const compact = budgetAction(reason, true);
+  const candidates = [
+    budgetText(reason),
+    `${short}. ${action}.${notes ? ` ${notes}` : ''}`,
+    `${short}. ${action}.`,
+    `${short}. ${compact}.`,
+  ];
+  return candidates.find((c) => c.length <= limit) ?? `${compact}. ${short}.`;
+}

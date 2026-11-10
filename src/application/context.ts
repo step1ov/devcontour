@@ -2,6 +2,7 @@ import { memoryDirectory } from '../core/placement.ts';
 import { assertTaskPreparation } from '../core/preparation.ts';
 import { ProjectMemory } from './memory.ts';
 import { short } from './bounded.ts';
+import { budgetHint } from '../core/usage.ts';
 import { z } from 'zod';
 import { randomUUID } from 'node:crypto';
 import {
@@ -260,16 +261,8 @@ export function budgetBlocks(h: DevContour, s: DevContourState) {
   });
   return blocks;
 }
-/**
- * Что сделать с бюджетным блоком. Неопределённый бюджет (стоимость вызовов
- * неизвестна) снимает не предел, а `onUnknown: "continue"` в `budgets`; тариф
- * в `prices` прошлые вызовы не переоценивает. Исчерпанный — более высокий предел.
- */
-export function budgetHint(reason: string) {
-  return /не определён/.test(reason)
-    ? 'Стоимость части вызовов неизвестна, и предел её не снимет: задайте onUnknown: "continue" в budgets (тариф модели в prices оценит только новые вызовы) и примените: devcontour config-apply --keys budgets,prices'
-    : 'Поднимите предел в budgets и примените: devcontour config-apply --keys budgets';
-}
+/** Подсказка к бюджетному блоку — `core/usage.ts`; здесь для прежних импортов. */
+export { budgetHint };
 function boardOwner(b: Board, s: DevContourState) {
   if (b.scope === 'workspace') return undefined;
   if (b.repositoryId) return b.repositoryId;

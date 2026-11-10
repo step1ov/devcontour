@@ -463,7 +463,9 @@ export function workflowMetrics(
       (t) =>
         !t.sharedCompletion && ['done', 'failed', 'cancelled'].includes(t.status) && t.attempt > 0,
     ).length
-      ? done.filter((t) => !t.sharedCompletion && t.attempt === 1).length /
+      ? // Задача, счёт которой перезапущен новой постановкой (D47), с первой
+        // попытки не принята: её попытки прежней постановки — в истории.
+        done.filter((t) => !t.sharedCompletion && t.attempt === 1 && !t.attemptRestarts).length /
         tasks.filter(
           (t) =>
             !t.sharedCompletion &&
@@ -527,7 +529,8 @@ export function workflowMetrics(
               : null,
         })),
     limitations: [
-      'Unknown or incomplete telemetry is not zero; tariffs are estimates, not subscription invoices',
+      'Unknown or incomplete telemetry is not zero; USD amounts are API-equivalent estimates (reported by the CLI or computed from prices), not subscription charges',
+      'Budgets count the same estimates; the workspace budget counts lifetime workspace spend, not a session',
       'Owner cost per accepted local task includes failed attempts and owner planning/review overhead',
       'Dispatch wait includes pauses, ownership and worker availability',
       'Imported results have no local execution timing',

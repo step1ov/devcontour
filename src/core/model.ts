@@ -302,6 +302,17 @@ export interface Task extends TaskInput {
   contractDigests: Record<string, string>;
   activeRunId?: string;
   attempt: number;
+  /**
+   * Сколько раз утверждение новой постановки начинало счёт попыток заново
+   * (D47): автоматически — не больше одного раза за жизнь задачи. Локальная
+   * запись: в Git не переносится.
+   */
+  attemptRestarts?: number;
+  /**
+   * Задачу вернули в черновик из отмены человеком (D46): счёт попыток новая
+   * постановка автоматически не перезапускает. Локальная запись.
+   */
+  restartBlocked?: 'human-cancel';
   resultSha?: string;
   failure?: string;
   /**
@@ -337,6 +348,11 @@ export interface TaskInputContext {
   digest: string;
   /** Утверждение задачи, к которому привязан снимок: другое — снимок не действует. */
   approvedDigest?: string;
+  /**
+   * Постановка черновика, в котором снимок активирован (нет `approvedDigest`):
+   * утверждение именно этой постановки привязывает снимок к себе.
+   */
+  specDigest?: string;
   /** Запросы, ответы которых несёт снимок, по порядку активации. */
   requestIds: string[];
   /** Digest основания продолжения последней активации. */
