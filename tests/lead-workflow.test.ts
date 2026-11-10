@@ -253,9 +253,12 @@ test('A real Git board resumes after process replacement without duplicating rev
       id: change.id,
       authorRuntime: 'codex',
     });
-    await lead.tick();
-    await lead.tick();
-    await lead.tick();
+    // Стадия 1 начинает совместную проверку и ждёт её итога следующими
+    // тактами: проверка живёт дольше такта (своим lease), а не под ним.
+    for (let i = 0; i < 20 && new LeadWorkflow(h).get(sharedJob.key).status !== 'completed'; i++) {
+      await lead.tick();
+      await lead.settled();
+    }
     assert.equal(new LeadWorkflow(h).get(sharedJob.key).status, 'completed');
     assert.ok(store.read().changeSets[0].acceptance);
   } finally {

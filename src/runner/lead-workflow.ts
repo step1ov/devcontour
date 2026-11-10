@@ -23,12 +23,25 @@ import type { AgentAdapter } from './adapters.ts';
 import { analyzeRecovery, applyCases } from './recovery.ts';
 import { checkBase } from './base-check.ts';
 
+/** Отказ fencing задания ведущего (`WorkflowQueue.guard`): владение истекло или перехвачено. */
+const JOB_LEASE_LOST = 'Владение заданием утрачено';
+
 export class LeadRunner {
   readonly workflow: LeadWorkflow;
   private stopping = false;
   private timer?: NodeJS.Timeout;
   private pending?: Promise<void>;
   private controller?: AbortController;
+  /**
+   * Совместные проверки ChangeSet, начатые стадией 1. Проверка идёт минуты
+   * (установка и полные тесты workspace) и живёт дольше такта и владения
+   * заданием: у неё свой lease и heartbeat в движке. Стадия её начинает и
+   * отвечает «жду», следующие такты ждут итога. Раньше стадия ждала
+   * проверку под своим сигналом, и потеря владения заданием (процесс стоял
+   * дольше срока, продление не успело) обрывала проверку до первого gate.
+   * Останавливает её только остановка цикла (`halt`, остановка сервера).
+   */
+  private joints = new Map<string, JointFlight>();
   constructor(
     readonly h: DevContour,
     readonly root: string,
@@ -56,10 +69,37 @@ export class LeadRunner {
     clearInterval(this.timer);
     this.timer = undefined;
     this.controller?.abort();
+    for (const flight of this.joints.values()) void flight.runner.stop();
   }
   async stop() {
     this.halt();
     await this.pending;
+    await Promise.allSettled([...this.joints.values()].map((f) => f.promise));
+  }
+  /** Дождаться начатых стадиями совместных проверок (их итог читает следующий такт). */
+  async settled() {
+    await Promise.allSettled([...this.joints.values()].map((f) => f.promise));
+  }
+  /**
+   * Начать совместную проверку вне такта: стадия уже ответила «жду», и
+   * начало (продуктовый снимок релиза, синхронный Git) не идёт под сроком
+   * владения заданием. Отказ начала и итог проверки читает следующий такт.
+   */
+  private launch(changeSetId: string) {
+    const runner = new WorkspaceRunner(this.h, this.root);
+    const flight: JointFlight = { runner, done: false, promise: Promise.resolve() };
+    flight.promise = new Promise<void>((resolve) => setImmediate(resolve))
+      .then(async () => {
+        if (this.stopping) throw new Error(SERVER_STOPPING);
+        await runner.verify(changeSetId);
+      })
+      .catch((error: unknown) => {
+        flight.error = error instanceof Error ? error.message : String(error);
+      })
+      .finally(() => {
+        flight.done = true;
+      });
+    this.joints.set(changeSetId, flight);
   }
   tick() {
     if (this.pending) return this.pending;
@@ -105,10 +145,17 @@ export class LeadRunner {
             } catch {
               /* ниже — прерывание */
             }
+          // Утраченное владение (срок истёк раньше продления) — тоже
+          // прерывание, а не итог стадии: задание снова в очереди, как при
+          // отмене сигналом по сбою продления.
+          const lost =
+            e instanceof DomainError &&
+            (e as DomainError & { code?: string }).code === 'LEASE_STALE' &&
+            e.message === JOB_LEASE_LOST;
           this.workflow.fail(
             job,
             e instanceof Error ? e.message : String(e),
-            controller.signal.aborted || stopping,
+            controller.signal.aborted || stopping || lost,
           );
         } finally {
           clearInterval(timer);
@@ -366,9 +413,20 @@ export class LeadRunner {
       return c.boardIds.some(
         (id) => s.boards.find((b) => b.id === id)?.revisions.at(-1)?.status !== 'accepted',
       );
+    // Начатая циклом проверка ещё идёт — ждать, ничего не перечитывая.
+    const flight = this.joints.get(c.id);
+    if (job.stage === 1 && flight && !flight.done) return true;
     assertTasksRequirements(this.h, changeSnapshot(s, c).tasks);
     const workspace = new Workspace(this.h, new IntentService(this.h));
     if (job.stage === 1) {
+      // Закончившаяся проверка цикла — итог стадии: отказ — провал стадии,
+      // как прежде; успех — дальше, к приёмке, которая сама проверит
+      // актуальность.
+      if (flight) {
+        this.joints.delete(c.id);
+        if (flight.error !== undefined) throw new Error(flight.error);
+        return false;
+      }
       const last = c.verifications.at(-1);
       let productFresh = c.releaseId === last?.productRelease?.releaseId;
       if (c.releaseId && last?.productRelease) {
@@ -391,17 +449,8 @@ export class LeadRunner {
         )
       )
         return true;
-      const runner = new WorkspaceRunner(this.h, this.root);
-      const abort = () => {
-        void runner.stop();
-      };
-      signal.addEventListener('abort', abort, { once: true });
-      try {
-        await runner.verify(c.id);
-      } finally {
-        signal.removeEventListener('abort', abort);
-        await runner.stop();
-      }
+      this.launch(c.id);
+      return true;
     } else {
       if (
         this.h.config.completionMode === 'remote' &&
@@ -416,3 +465,10 @@ export class LeadRunner {
     return false;
   }
 }
+
+type JointFlight = {
+  runner: WorkspaceRunner;
+  promise: Promise<void>;
+  done: boolean;
+  error?: string;
+};
