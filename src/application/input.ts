@@ -512,7 +512,9 @@ export class InputService {
   /**
    * Заменённые вопросы, ответ которых ждёт переноса (F14): заменённый вопрос
    * выдачу не держит, и пакет harness его не называет — шаг пакета передачи
-   * ведущего (`apply-carry`) берёт их отсюда. То же условие, что у `nextOf`.
+   * ведущего (`apply-carry`) берёт их отсюда: только перенос, который движок
+   * сейчас разрешил бы (`carryAllowed`), в задачу, которая не снята и не
+   * принята.
    */
   pendingCarries() {
     const { engine } = executionOf(this.h);
@@ -521,15 +523,25 @@ export class InputService {
       return engine.read((view) => {
         const context = this.summaryContext();
         return requests.flatMap((request) => {
-          if (!request.closed?.carry || request.target) return [];
+          if (request.kind !== 'question' || !request.blocking || request.target) return [];
+          // Переносить некуда: задача снята или принята (движок откажет).
           const task = context.tasks.get(request.workId);
+          if (!task || task.status === 'cancelled' || task.status === 'done') return [];
+          const work = view.work(request.workId);
+          if (work?.status === 'cancelled' || work?.status === 'done') return [];
           if (this.stateOf(view, request, task).state !== 'superseded') return [];
+          // Право переноса — правило движка сейчас; отметка `closed.carry` —
+          // лишь запись момента замены.
+          if (!engine.carryAllowed(view, request)) return [];
+          const unreleased = !!this.unreleasedBoard(task);
           return [
             {
               requestId: request.id,
               taskId: request.workId,
               boardId: context.boards.get(request.workId) ?? null,
-              order: carryOrder(task, !!task && !!this.unreleasedBoard(task)),
+              order: carryOrder(task, unreleased),
+              /** Идущие попытки графа доски: перенос подождёт их окончания. */
+              active: unreleased ? [] : this.activeInGraph(task.id).map((a) => a.id),
             },
           ];
         });

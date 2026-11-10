@@ -102,5 +102,8 @@
 // Намеренное изменение: описание session_handoff называет шаг apply-input с
 // кодом apply-carry (ответ заменённого вопроса ждёт переноса, params.order);
 // прочие операции байтово прежние.
-export const CATALOG_DIGEST = 'b7939db048ce6623f00dcc8ef4b3ad52d087bfd6946bd02b4e4fc0e3c4ea8e6d';
+// Намеренное изменение: описание session_handoff называет условия шага
+// apply-carry (перенос, который движок разрешил бы, ожидание wait с
+// params.active); прочие операции байтово прежние.
+export const CATALOG_DIGEST = '22894719ee1a3bc794d2b674bd6fb4b7299abcf31fbe878af394af0c8e561a5b';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

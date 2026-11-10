@@ -9,7 +9,7 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { controlled, inputDemos, inputFixture, untilQuestion } from './input-fixture.ts';
-import { specDigest } from '../src/core/service.ts';
+import { DevContour, specDigest } from '../src/core/service.ts';
 import { devcontourHandoff } from '../src/application/handoff.ts';
 
 after(() => inputDemos.close());
@@ -446,5 +446,81 @@ test('F14: host.next names the answer waiting to be carried, in the order of the
     } finally {
       await f.cleanup();
     }
+  }
+});
+
+test('F14: host.next drops a carry the engine would refuse: the task was cancelled after the supersede', async () => {
+  const f = await inputFixture(controlled(), { edit: scoped });
+  try {
+    const { taskId, requestId } = await respecified(f);
+    const next = (input = {}) => devcontourHandoff(f.h, input).host.next;
+    assert.equal(next()?.code, 'apply-carry');
+    f.h.cancel(taskId, 'The respecified task is not needed');
+    // Переносить некуда: шаг не держит пакет, и шаг другой доски виден.
+    assert.notEqual(next()?.code, 'apply-carry', JSON.stringify(next()));
+    const other = f.h.createBoard('Other board').id;
+    f.plainTask(other, 'Task of another board');
+    f.h.approve(other);
+    const own = next({ boardId: other });
+    assert.ok(own, 'у другой доски есть шаг');
+    assert.notEqual(next()?.code, 'apply-carry');
+    assert.equal(next()?.code, own.code);
+    // Запрос остаётся заменённым: отметка переноса — лишь запись момента замены.
+    assert.equal(f.service.show({ requestId }).state, 'superseded');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('F14: while attempts run on the board, host.next waits with the carry instead of asking to carry now', async () => {
+  const f = await inputFixture(controlled(), { edit: scoped });
+  try {
+    const { taskId, boardId, requestId } = await respecified(f);
+    // Попытка соседней задачи той же доски: движок откажет в переносе до её конца.
+    const neighbour = f.h.addTask(boardId, {
+      title: 'Second neighbour task',
+      description: 'An observable independent outcome of the demo.',
+      role: 'architect',
+      acceptance: ['The artifact exists.'],
+    }).id;
+    f.h.approve(boardId, [neighbour]);
+    f.h.pause(false);
+    // Выдача — от контура, который ведёт очередь, без её выполнения.
+    const run = f.h.claim(f.scheduler.owner)!;
+    assert.equal(run.taskId, neighbour);
+    f.h.pause(true);
+    const waiting = devcontourHandoff(f.h, {}).host.next;
+    assert.equal(waiting?.action, 'wait', JSON.stringify(waiting));
+    assert.equal(waiting.code, 'apply-carry');
+    assert.deepEqual(waiting.params, { order: 'draft', active: [run.id] });
+    assert.deepEqual(waiting.input, { requestId, taskId, state: 'superseded', actor: 'lead' });
+    assert.match(waiting.detail, new RegExp(`Wait: attempts run on the board.*${run.id}`));
+    // Попытка закончилась — снова перенос.
+    f.h.fail(run.id, run.token, 'fixture failure', false, 'gate');
+    const carry = devcontourHandoff(f.h, {}).host.next;
+    assert.equal(carry?.action, 'apply-input', JSON.stringify(carry));
+    assert.deepEqual(carry.params, { order: 'draft' });
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('F14: apply-carry yields to a question waiting for an answer and is absent in approvalMode operator', async () => {
+  const f = await inputFixture(controlled(), { edit: scoped });
+  try {
+    const { requestId } = await respecified(f, { alone: true });
+    const operator = new DevContour(f.store, { ...f.h.config, approvalMode: 'operator' });
+    // Режим оператора: переносит оператор в панели, у ведущего шага переноса нет.
+    assert.notEqual(devcontourHandoff(operator, {}).host.next?.code, 'apply-carry');
+    assert.equal(devcontourHandoff(f.h, {}).host.next?.code, 'apply-carry');
+    // Блокирующий вопрос другой доски, ждущий ответа, — срочнее переноса.
+    const asking = f.askingTask('Another asking task');
+    await untilQuestion(f, asking.boardId);
+    const next = devcontourHandoff(f.h, {}).host.next;
+    assert.equal(next?.action, 'answer-input', JSON.stringify(next));
+    assert.equal(next.input?.taskId, asking.taskId);
+    assert.notEqual(next.input?.requestId, requestId);
+  } finally {
+    await f.cleanup();
   }
 });

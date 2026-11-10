@@ -756,12 +756,14 @@ function carryNext(ctx: HostContext): HandoffHostNext | undefined {
     .pendingCarries()
     .find((c) => !pack.graphId || c.boardId === pack.graphId);
   if (!carry) return undefined;
+  // Идущие попытки графа доски: движок откажет в переносе до их окончания,
+  // и шаг — ожидание (ревью ответа до того — лишний вызов модели).
   return withDetail(h, {
-    action: 'apply-input',
+    action: carry.active.length ? 'wait' : 'apply-input',
     ...(carry.boardId ? { boardId: carry.boardId } : {}),
     input: { requestId: carry.requestId, taskId: carry.taskId, state: 'superseded', actor: 'lead' },
     code: 'apply-carry',
-    params: { order: carry.order },
+    params: { order: carry.order, ...(carry.active.length ? { active: carry.active } : {}) },
   });
 }
 
@@ -776,6 +778,8 @@ function hostNext(ctx: HostContext): HandoffHostNext | undefined {
   // Перенос ответа — раньше шагов очереди и ожидания (`rank` больше 0): они
   // выдали бы задачу без ответа. Решения о задании, вопросы и режим
   // оператора — прежде переноса.
+  // Ожидание переноса (идут попытки доски) — на том же месте: старт задания
+  // или снятие паузы продолжили бы выдачу до переноса.
   if (step && rank(step) === 0) return step;
   return carryNext(ctx) ?? step ?? followUpNext(ctx);
 }
@@ -806,9 +810,12 @@ function liveBlocker(ctx: HostContext): HandoffHostNext | undefined {
     )
       return step;
   }
-  // Перенос в черновике — до утверждения плана, и до повтора задания: тот
-  // выдал бы задачу без ответа.
-  return carryNext(ctx) ?? jobBlocker(ctx);
+  // Перенос в черновике — до утверждения плана и до повтора задания: тот
+  // выдал бы задачу без ответа. Решение о задании — раньше переноса, как в
+  // основном пути.
+  const job = jobBlocker(ctx);
+  if (job && rank(job) === 0) return job;
+  return carryNext(ctx) ?? job;
 }
 
 /**
