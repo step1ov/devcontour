@@ -149,9 +149,54 @@ export function stoppedWorkflows<
       if (!board || !r || r.status === 'accepted') return true;
       return !tasks.some((t) => r.taskIds.includes(t.id) && t.status !== 'cancelled');
     }
-    return !!s.changeSets.find((c) => c.id === w.id)?.acceptance;
+    const c = s.changeSets.find((c) => c.id === w.id);
+    if (!c || c.acceptance) return true;
+    // ChangeSet закрыт другим: принят ChangeSet того же продуктового релиза
+    // или более поздний, включающий все его доски. Операции закрытия у
+    // ChangeSet нет, и без этого карточка упавшего задания оставалась
+    // навсегда — после ручного маршрута и после нового ChangeSet.
+    return s.changeSets.some(
+      (x) =>
+        x.id !== c.id &&
+        !!x.acceptance &&
+        ((!!c.releaseId && x.releaseId === c.releaseId) ||
+          (x.createdAt > c.createdAt && c.boardIds.every((id) => x.boardIds.includes(id)))),
+    );
   };
   return jobs.filter((w) => w.status === 'failed' && w.error && !superseded(w));
+}
+
+/**
+ * Остановка задания ChangeSet словами оператора: причина задания, итог
+ * последней совместной проверки (прерванная до первого gate — отдельно: она
+ * не дала результата о коде, но расходует предел проверок набора) и пути.
+ * Прежде карточка повторяла лишь «Исчерпаны попытки стадии».
+ */
+export function changeSetStopReason(
+  s: DevContourState,
+  w: { id: string; key: string; error?: string; attempts: number; maxAttempts: number },
+) {
+  const c = s.changeSets.find((x) => x.id === w.id);
+  const last = c?.verifications.at(-1);
+  const parts = [`Задание ChangeSet ${w.id} остановлено: ${w.error ?? 'без причины'}.`];
+  if (last)
+    parts.push(
+      `Последняя совместная проверка ${last.id}: ${last.status}` +
+        (last.error ? ` — ${last.error}` : '') +
+        (last.status === 'failed' && !last.evidence.length
+          ? ' (прервана до первого gate: результата о коде нет, но предел проверок набора расходует)'
+          : '') +
+        '.',
+    );
+  parts.push(
+    (w.attempts < w.maxAttempts
+      ? `Когда причина устранена — workflow_retry {"key": ${JSON.stringify(w.key)}}. `
+      : 'Попытки задания исчерпаны: workflow_retry его не примет. ') +
+      `Ручной путь: devcontour workspace-verify --changeset ${w.id}, затем changeset-accept --changeset ${w.id}. ` +
+      'Если исчерпан предел совместных проверок набора задач, новый ChangeSet над теми же задачами получит тот же отказ: измените набор (новая ревизия доски), примите доску и создайте ChangeSet по ней. ' +
+      'Карточка закрывается, когда этот ChangeSet или другой ChangeSet того же релиза (или включающий его доски) принят.',
+  );
+  return parts.join(' ');
 }
 
 /** Заголовок отказа выкладки preview по его классу: сборка — не выкладка. */
