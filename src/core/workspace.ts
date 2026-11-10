@@ -12,7 +12,7 @@ import { HarnessError } from 'devcontour-harness';
 import { DevContour, digest, specDigest } from './service.ts';
 import { domain, executionOf } from '../harness/execution.ts';
 import { repositories } from './repositories.ts';
-import type { ProductReleaseProof } from './product-map.ts';
+import type { DeferredScenario, ProductReleaseProof } from './product-map.ts';
 import {
   DomainError,
   requireValue,
@@ -69,11 +69,12 @@ export const snapshotDigest = (snapshot: ReturnType<typeof changeSnapshot>) =>
 
 export interface ProductReleaseGuard {
   capture(releaseId: string, snapshot: ReturnType<typeof changeSnapshot>): ProductReleaseProof;
+  /** Отказывает, если релиз не готов; называет отложенные решением пользователя сценарии. */
   validate(
     proof: ProductReleaseProof,
     snapshot: ReturnType<typeof changeSnapshot>,
     manifest?: Verification['manifest'],
-  ): void;
+  ): { deferredScenarios: DeferredScenario[] };
 }
 
 /**
@@ -311,21 +312,28 @@ export class Workspace {
       const c = find(s, id);
       if (c.acceptance) return { status: 'already-accepted', changeSetId: id };
       changeSnapshot(s, c).tasks.forEach((t) => assertTaskPreparation(s, t));
+      let deferred: DeferredScenario[] = [];
       const { verification: v, current } = currentJoint(this.h, c);
       if (!v || !current || c.releaseId !== v.productRelease?.releaseId)
         throw new DomainError('Нет актуальной успешной проверки всего ChangeSet');
       if (c.releaseId) {
         if (v.productRelease?.releaseId !== c.releaseId)
           throw new DomainError('Нет закреплённой проверки продуктового релиза');
-        this.guard().validate(v.productRelease, changeSnapshot(s, c), v.manifest);
+        deferred = this.guard().validate(
+          v.productRelease,
+          changeSnapshot(s, c),
+          v.manifest,
+        ).deferredScenarios;
       }
+      // Отложенные сценарии не проверены: приёмка называет их, а не молчит.
+      const notes = deferred.length ? { deferredScenarios: deferred } : {};
       const delivery = delivered(this.h, c);
       if (this.h.config.completionMode === 'remote' && !delivery)
         throw new DomainError(
           'ChangeSet проверен локально; сначала подтвердите публикацию, merge и CI через read-only forge adapter',
         );
       if (this.h.config.approvalMode === 'operator' && approval.actor !== 'operator')
-        return { status: 'awaiting-operator', changeSetId: id };
+        return { status: 'awaiting-operator', changeSetId: id, ...notes };
       c.acceptance = {
         at: new Date().toISOString(),
         verificationId: v.id,
@@ -340,7 +348,7 @@ export class Workspace {
           ),
         },
       };
-      return { status: 'accepted', changeSetId: id, ...c.acceptance };
+      return { status: 'accepted', changeSetId: id, ...c.acceptance, ...notes };
     });
   }
 }

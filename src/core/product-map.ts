@@ -29,7 +29,9 @@ export const featureScope = z.strictObject({
    * Сценарии приёмки релиза. Сценарий подтверждает testcase принятой задачи
    * релиза, чья связь requirements называет тот же текст сценария и свой
    * testId; `deferred` — записанная причина, по которой сценарий в этот релиз
-   * не входит. Зелёный общий gate сам по себе сценарий не подтверждает.
+   * не входит. Отложить сценарий решает пользователь: ведущий предлагает и
+   * спрашивает. Зелёный общий gate сам по себе сценарий не подтверждает.
+   * Пара gate и сценарий уникальна: один gate проверяет несколько сценариев.
    */
   checks: z.array(z.strictObject({ gate: id, scenario: text, deferred: text.optional() })).max(30),
 });
@@ -44,6 +46,16 @@ export interface ReleaseScenario {
   deferred?: string;
   evidence: { repositoryId: string; taskId: string; testId: string }[];
 }
+/** Сценарий, отложенный записанным решением пользователя, с причиной. */
+export interface DeferredScenario {
+  featureId: string;
+  gate: string;
+  scenario: string;
+  reason: string;
+}
+/** Ключ сценария фичи в отчётах и на панели: gate и текст сценария. */
+export const checkKey = (check: { gate: string; scenario: string }) =>
+  JSON.stringify([check.gate, scenarioKey(check.scenario)]);
 export const productMap = z.strictObject({
   channels: z
     .array(
@@ -161,9 +173,11 @@ export function validateProductMap(
       const included = scope.channels.filter((a) => a.scope === 'included');
       if (Boolean(included.length) !== Boolean(scope.checks.length))
         throw new DomainError('Сквозные проверки обязательны только для включённой фичи');
+      // Один gate может проверять несколько сценариев фичи: каждый из них
+      // доказывается отдельно, поэтому уникальна пара gate и сценарий.
       unique(
-        scope.checks.map((c) => c.gate),
-        'feature gate',
+        scope.checks.map((c) => JSON.stringify([c.gate, scenarioKey(c.scenario)])),
+        'feature scenario',
       );
       for (const app of scope.channels) {
         if (!product.channels.some((a) => a.id === app.channelId))
@@ -230,4 +244,8 @@ export type ProductView =
       verification?: { changeSetId: string; verificationId: string };
       issues: string[];
       features: FeatureProgress[];
+      /** Сценарии, отложенные записанным решением; ведущий не откладывает их сам. */
+      deferredScenarios: DeferredScenario[];
+      /** Приёмка записана прежним правилом без доказанных сценариев. */
+      acceptanceOverridden?: string;
     };

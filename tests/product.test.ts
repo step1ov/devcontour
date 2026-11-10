@@ -269,7 +269,12 @@ process.exitCode=ok?0:1;`,
     runner = new WorkspaceRunner(h, root);
   await scheduler.init();
   const boards: string[] = [];
-  const plan = (scenario: { scenario: string; testId?: string } = sceneProof) => {
+  // Связь со сценарием релиза получают задачи `linked` репозиториев;
+  // остальные — только сценарий истории.
+  const plan = (
+    scenario: { scenario: string; testId?: string } = sceneProof,
+    linked = repos.map((r) => r.id),
+  ) => {
     for (const repo of repos) {
       const board = h.createBoard('Сценарий блокировки ' + repo.id, '', repo.id);
       const snapshot = intent.snapshot({ repositoryId: repo.id, storyId: 'block' });
@@ -285,7 +290,14 @@ process.exitCode=ok?0:1;`,
             scenario: 'Проверка ограничения участника.',
           },
           // Сценарий релиза подтверждает названный testcase задачи релиза.
-          { ...local, source: 'spec.md', gate: 'local', ...scenario },
+          {
+            ...local,
+            source: 'spec.md',
+            gate: 'local',
+            ...(linked.includes(repo.id)
+              ? scenario
+              : { scenario: 'Проверка ограничения участника.' }),
+          },
         ],
       });
       boards.push(board.id);
@@ -568,8 +580,23 @@ test('A release scenario needs its own testcase or a recorded deferral; story co
     assert.equal(view.coverageComplete, true, JSON.stringify(view.issues));
     assert.equal(view.features[0].checks[0].status, 'deferred');
     assert.equal(view.features[0].checks[0].passed, false);
+    // Отложенный сценарий не проверен: карта, отчёт и приёмка называют его.
+    const listed = [
+      {
+        featureId: 'block',
+        gate: 'moderation',
+        scenario: releaseScenario,
+        reason: 'Проверка на устройстве переносится в следующий релиз.',
+      },
+    ];
+    assert.deepEqual(view.deferredScenarios, listed);
+    assert.deepEqual(
+      (f.intent.report({ releaseId: 'mvp' }) as { deferredScenarios: unknown }).deferredScenarios,
+      listed,
+    );
     await f.runner.verify(change.id);
-    f.runner.workspace.accept(change.id);
+    const accepted = f.runner.workspace.accept(change.id) as { deferredScenarios?: unknown };
+    assert.deepEqual(accepted.deferredScenarios, listed);
     assert.equal(f.view().releaseAccepted, true);
     // Релиз без карты фич сценариев не объявляет: отчёт говорит об этом прямо.
     const legacy = map();
@@ -582,6 +609,127 @@ test('A release scenario needs its own testcase or a recorded deferral; story co
     };
     assert.equal(plain.scenarios, null);
     assert.match(plain.note, /scenarios are not tracked/);
+  } finally {
+    await f.close();
+  }
+});
+
+test('A release accepted under the earlier rule without proven scenarios is not accepted now, and its pending verification cannot be accepted', async () => {
+  const f = await fixture();
+  // Прежняя версия не знала сценариев: покрытие считалось по историям, а
+  // сценарий не требовал testcase. Так записываются проверка и приёмка
+  // прежней версии; затем правило возвращается.
+  const proto = IntentService.prototype as unknown as {
+    workspaceCoverage: (...args: unknown[]) => {
+      issues: string[];
+      components: { coverageComplete: boolean }[];
+      scenarios: unknown[];
+      complete: boolean;
+    };
+  };
+  const current = proto.workspaceCoverage;
+  proto.workspaceCoverage = function (this: unknown, ...args: unknown[]) {
+    const coverage = current.apply(this, args);
+    return {
+      ...coverage,
+      scenarios: [],
+      complete: !coverage.issues.length && coverage.components.every((c) => c.coverageComplete),
+    };
+  };
+  try {
+    f.plan({ scenario: releaseScenario });
+    await f.run();
+    await f.accept();
+    const create = (title: string) =>
+      f.runner.workspace.create({
+        title,
+        description: 'Проверка прежней версии.',
+        boardIds: f.boards,
+        releaseId: 'mvp',
+      });
+    const pending = create('Проверен, но не принят');
+    await f.runner.verify(pending.id);
+    const old = create('Принят прежней версией');
+    await f.runner.verify(old.id);
+    f.runner.workspace.accept(old.id);
+    assert.equal(f.view().releaseAccepted, true);
+    proto.workspaceCoverage = current;
+    assert.throws(
+      () => f.runner.workspace.accept(pending.id),
+      (e: Error) =>
+        e.message.startsWith('Сценарии релиза не подтверждены') &&
+        e.message.includes(releaseScenario),
+    );
+    const view = f.view();
+    assert.equal(view.releaseAccepted, false);
+    assert.equal(view.features[0].status, 'verified');
+    assert.match(view.issues[0], /принят по прежнему правилу/);
+    assert.ok(view.acceptanceOverridden);
+    const cli = await command(
+      [
+        process.execPath,
+        '--import',
+        'tsx',
+        'src/cli.ts',
+        'product-view',
+        '--release',
+        'mvp',
+        '--require-accepted',
+        '--data',
+        f.root,
+      ],
+      process.cwd(),
+      { timeoutMs: 20000 },
+    );
+    assert.equal(cli.code, 1);
+    assert.equal(JSON.parse(cli.stdout).releaseAccepted, false);
+  } finally {
+    proto.workspaceCoverage = current;
+    await f.close();
+  }
+});
+
+test('Scenario evidence counts only for the feature whose stories the task serves, and one gate tracks several scenarios separately', async () => {
+  const f = await fixture();
+  try {
+    const second = 'Модератор видит причину блокировки в журнале.';
+    const scoped = map();
+    const [block, exported] = scoped.releases[0].features!;
+    // Два сценария на одном gate: каждый доказывается отдельно.
+    block.checks.push({ gate: 'moderation', scenario: second });
+    // Вторая фича обслуживается только историей библиотеки, а её сценарий
+    // дословно совпадает со сценарием первой фичи.
+    exported.channels[0] = {
+      channelId: 'admin',
+      scope: 'included',
+      stories: [{ repositoryId: 'chat', storyId: 'block' }],
+    };
+    exported.checks = [{ gate: 'moderation', scenario: releaseScenario }];
+    await f.save(scoped);
+    // Сценарий связывает только задача приложения.
+    f.plan(sceneProof, ['app']);
+    await f.run();
+    await f.accept();
+    const view = f.view();
+    const status = (featureId: string) =>
+      view.features
+        .find((x) => x.id === featureId)!
+        .checks.map((c) => [c.scenario, c.status, c.evidence.map((e) => e.repositoryId)]);
+    assert.deepEqual(status('block'), [
+      [releaseScenario, 'evidenced', ['app']],
+      [second, 'missing', []],
+    ]);
+    assert.deepEqual(status('export'), [[releaseScenario, 'missing', []]]);
+    assert.equal(view.coverageComplete, false);
+    assert.ok(view.issues.some((i) => i.includes('сценарий релиза export (gate moderation)')));
+    assert.ok(view.issues.some((i) => i.includes(second)));
+    // Повтор той же пары gate и сценария — ошибка карты.
+    const repeated = map();
+    repeated.releases[0].features![0].checks.push({
+      gate: 'moderation',
+      scenario: ' ' + releaseScenario,
+    });
+    assert.throws(() => f.intent.render({ definition: repeated }), /Повтор feature scenario/);
   } finally {
     await f.close();
   }

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { FeatureStatus, ProductView } from '../core/product-map.ts';
+import { Alert, AlertTitle } from '@/ui/alert.tsx';
 import { Button } from '@/ui/button.tsx';
 import { cn } from '@/lib/utils.ts';
 
@@ -144,6 +145,21 @@ export function ProductPanel({ onRepository }: { onRepository: (id: string) => v
           </ul>
         </details>
       )}
+      {(view.deferredScenarios ?? []).length > 0 && (
+        <Alert variant="warning" role="status">
+          <AlertTitle>
+            Отложено решением пользователя ({view.deferredScenarios.length}): эти сценарии релиза не
+            проверены и в релиз не входят
+          </AlertTitle>
+          <ul className="mt-2 grid gap-1">
+            {view.deferredScenarios.map((s) => (
+              <li key={s.featureId + '\u0000' + s.gate + '\u0000' + s.scenario}>
+                {s.scenario} — {s.reason}
+              </li>
+            ))}
+          </ul>
+        </Alert>
+      )}
       {mode === 'features' ? (
         <div className={scroll} tabIndex={0} role="region" aria-label="Карта фич по приложениям">
           <table className={table}>
@@ -208,7 +224,7 @@ export function ProductPanel({ onRepository }: { onRepository: (id: string) => v
                   <td>
                     <strong>{labels[feature.status]}</strong>
                     {feature.checks.map((check) => (
-                      <p key={check.gate}>
+                      <p key={check.gate + '\u0000' + check.scenario}>
                         {check.passed ? '✓' : '○'} {check.scenario}
                         <br />
                         <span className="text-muted-foreground">

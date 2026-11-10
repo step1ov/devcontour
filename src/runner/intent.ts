@@ -6,6 +6,7 @@ import {
   relativePath,
   requireValue,
   type Task,
+  requirementLink,
   type RequirementLink,
   type Verification,
 } from '../core/model.ts';
@@ -18,6 +19,7 @@ import {
   type ProductReleaseGuard,
 } from '../core/workspace.ts';
 import {
+  checkKey,
   scenarioKey,
   storyKey,
   type FeatureProgress,
@@ -483,14 +485,22 @@ export class IntentService implements ProductReleaseGuard {
       coverageComplete: coverage.complete,
       components: coverage.components,
       scenarios: coverage.scenariosTracked ? coverage.scenarios : null,
+      deferredScenarios: deferredScenarios(coverage.scenarios),
       ...(product
-        ? { product, issues: [...coverage.issues, ...scenarioGaps(coverage.scenarios)] }
+        ? {
+            product,
+            issues: [
+              ...(product.acceptanceOverridden ? [product.acceptanceOverridden] : []),
+              ...scenarioGaps(coverage.scenarios),
+              ...coverage.issues,
+            ],
+          }
         : {}),
       releaseAccepted: product?.releaseAccepted ?? false,
       note:
         'Coverage is not release acceptance. Product releases require a bound ChangeSet and fresh joint verification. Component task text stays local.' +
         (coverage.scenariosTracked
-          ? ' Every release scenario needs a task test (requirements link with the scenario text and testId) or a recorded deferral; story coverage alone does not complete a release.'
+          ? ' Every release scenario needs a test of a task of that feature (requirements link with the same scenario text and testId) or a deferral decided by the user; story coverage alone does not complete a release.'
           : ' Release scenarios are not tracked: this release has no feature map in INTENT.'),
     };
   }
@@ -532,10 +542,21 @@ export class IntentService implements ProductReleaseGuard {
     );
     // Релиз без карты фич сценариев не объявляет: покрытие по историям
     // остаётся прежним, а отчёт прямо говорит, что сценарии не отслеживаются.
-    const scenarios: ReleaseScenario[] = (release.features ?? []).flatMap((f) =>
-      f.checks.map((c) => {
+    // Доказательство засчитывается только задачей истории этой фичи: две фичи
+    // с одинаковым текстом сценария доказывают его каждая своей задачей.
+    const scenarios: ReleaseScenario[] = (release.features ?? []).flatMap((f) => {
+      const stories = new Set(
+        f.channels.flatMap((a) => (a.scope === 'included' ? a.stories.map(storyKey) : [])),
+      );
+      return f.checks.map((c) => {
         const evidence = proofs
-          .filter((p) => p.scenario === scenarioKey(c.scenario))
+          .filter(
+            (p) =>
+              p.scenario === scenarioKey(c.scenario) &&
+              p.storyIds.some((storyId) =>
+                stories.has(storyKey({ repositoryId: p.repositoryId, storyId })),
+              ),
+          )
           .slice(0, 10)
           .map(({ repositoryId, taskId, testId }) => ({ repositoryId, taskId, testId }));
         return {
@@ -545,9 +566,9 @@ export class IntentService implements ProductReleaseGuard {
           status: c.deferred ? 'deferred' : evidence.length ? 'evidenced' : 'missing',
           ...(c.deferred ? { deferred: c.deferred } : {}),
           evidence,
-        };
-      }),
-    );
+        } satisfies ReleaseScenario;
+      });
+    });
     return {
       release,
       locals,
@@ -750,6 +771,9 @@ export class IntentService implements ProductReleaseGuard {
     proof: ProductReleaseProof,
     selected: ReturnType<typeof changeSnapshot>,
     manifest?: Verification['manifest'],
+    // Карта продукта отличает приёмку прежнего правила от устаревшей: ей
+    // нужна сверка без правила сценариев, которое она применяет сама.
+    { scenarios = true }: { scenarios?: boolean } = {},
   ) {
     const snapshot = this.read();
     if (snapshot.digest !== proof.intentDigest)
@@ -768,7 +792,7 @@ export class IntentService implements ProductReleaseGuard {
       throw new DomainError('Покрытие или проверки релиза изменились; нужна новая проверка');
     // Проверка, начатая прежней версией, сценарии не сверяла: приёмка
     // сверяет их сама, а не принимает релиз по покрытию историй.
-    const unmet = scenarioGaps(coverage.scenarios);
+    const unmet = scenarios ? scenarioGaps(coverage.scenarios) : [];
     if (unmet.length) throw new DomainError('Сценарии релиза не подтверждены: ' + unmet.join('; '));
     for (const [id, sha] of Object.entries(proof.acceptedHeads)) {
       const repo = repository(this.h.config, id);
@@ -791,6 +815,7 @@ export class IntentService implements ProductReleaseGuard {
           'Проверяемые SHA не содержат актуальные источники продуктового релиза',
         );
     }
+    return { deferredScenarios: deferredScenarios(coverage.scenarios) };
   }
 
   private mapGateIds(release: WorkspaceIntent['releases'][number]) {
@@ -822,7 +847,7 @@ export class IntentService implements ProductReleaseGuard {
         continue;
       try {
         const selected = changeSnapshot(state, changeSet);
-        this.validate(run.productRelease, selected, run.manifest);
+        this.validateCurrent(run.productRelease, selected, run.manifest, { scenarios: false });
         verification = { changeSetId: changeSet.id, verificationId: run.id };
         releaseAccepted =
           changeSet.acceptance?.verificationId === run.id &&
@@ -836,7 +861,8 @@ export class IntentService implements ProductReleaseGuard {
     // Приёмка, записанная без подтверждённых сценариев (прежней версией),
     // остаётся историей: релиз готов, только когда каждый сценарий доказан
     // или явно отложен.
-    if (coverage.scenarios.some((s) => s.status === 'missing')) releaseAccepted = false;
+    const overridden = releaseAccepted && coverage.scenarios.some((s) => s.status === 'missing');
+    if (overridden) releaseAccepted = false;
     const features: FeatureProgress[] = coverage.release.features!.map((scope) => {
       const feature = doc.product!.features.find((f) => f.id === scope.featureId)!;
       const channels = scope.channels.map((app) => {
@@ -872,7 +898,7 @@ export class IntentService implements ProductReleaseGuard {
         channels,
         checks: scope.checks.map((c) => {
           const scenario = coverage.scenarios.find(
-            (s) => s.featureId === scope.featureId && s.scenario === c.scenario,
+            (s) => s.featureId === scope.featureId && checkKey(s) === checkKey(c),
           );
           const status = scenario?.status ?? 'missing';
           return {
@@ -884,7 +910,18 @@ export class IntentService implements ProductReleaseGuard {
         }),
       };
     });
-    return { features, verification, releaseAccepted };
+    return {
+      features,
+      verification,
+      releaseAccepted,
+      deferredScenarios: deferredScenarios(coverage.scenarios),
+      ...(overridden
+        ? {
+            acceptanceOverridden:
+              'Релиз был принят по прежнему правилу, без доказанных сценариев; он не считается принятым, пока каждый сценарий не доказан testcase или не отложен решением пользователя',
+          }
+        : {}),
+    };
   }
 
   private productViewCurrent(raw: unknown = {}): ProductView {
@@ -910,12 +947,14 @@ export class IntentService implements ProductReleaseGuard {
       };
     const releaseId = input.releaseId ?? doc.releases[0].id;
     const coverage = this.workspaceCoverage(doc, releaseId);
+    const progress = this.productProgress(doc, snapshot.digest, releaseId, coverage);
     const issues = [
+      ...(progress.acceptanceOverridden ? [progress.acceptanceOverridden] : []),
+      ...scenarioGaps(coverage.scenarios),
       ...coverage.issues,
       ...coverage.components
         .filter((c) => !c.coverageComplete)
         .map((c) => 'Нет актуального полного покрытия компонента: ' + c.repositoryId),
-      ...scenarioGaps(coverage.scenarios),
     ];
     return {
       available: true,
@@ -928,7 +967,7 @@ export class IntentService implements ProductReleaseGuard {
       intentDigest: snapshot.digest,
       coverageComplete: coverage.complete,
       issues,
-      ...this.productProgress(doc, snapshot.digest, releaseId, coverage),
+      ...progress,
     };
   }
 
@@ -1221,7 +1260,12 @@ export class IntentService implements ProductReleaseGuard {
       .flatMap((t) =>
         (t.requirements ?? [])
           .filter((l) => l.testId && proven(t, l))
-          .map((l) => ({ scenario: scenarioKey(l.scenario), taskId: t.id, testId: l.testId! })),
+          .map((l) => ({
+            scenario: scenarioKey(l.scenario ?? ''),
+            taskId: t.id,
+            testId: l.testId!,
+            storyIds: stories.filter((s) => s.taskIds.includes(t.id)).map((s) => s.id),
+          })),
       );
     return {
       repositoryId,
@@ -1247,24 +1291,45 @@ export class IntentService implements ProductReleaseGuard {
 
 const gapLimit = 12;
 const scenarioShown = 120;
+// Предел текста сценария в связи requirements задачи (тот же у движка).
+const requirementScenarioLimit = requirementLink.shape.scenario.maxLength ?? 1500;
 /**
  * Сценарии релиза без доказательства и следующий шаг. Покрытие историй
  * задачами релиз не закрывает: каждый сценарий подтверждает свой testcase
  * или явно записанная причина отложить его.
  */
 export function scenarioGaps(scenarios: ReleaseScenario[]) {
+  const shown = (s: ReleaseScenario) =>
+    s.scenario.length > scenarioShown ? s.scenario.slice(0, scenarioShown) + '…' : s.scenario;
   return scenarios
     .filter((s) => s.status === 'missing')
     .map(
       (s) =>
         'сценарий релиза ' +
         s.featureId +
-        ' без доказательства: «' +
-        (s.scenario.length > scenarioShown
-          ? s.scenario.slice(0, scenarioShown) + '…'
-          : s.scenario) +
-        '» — добавьте задаче релиза связь requirements с этим текстом сценария и testId проверяющего testcase, либо отложите сценарий в INTENT с причиной (deferred)',
+        ' (gate ' +
+        s.gate +
+        ') без доказательства: «' +
+        shown(s) +
+        '» — задаче истории этой фичи нужна связь requirements, чей scenario совпадает с текстом сценария слово в слово (различия только в пробелах), и testId testcase, который его проверяет; у выполненной задачи связь добавляют обычной корректировкой задачи, не переписывая историю' +
+        (s.scenario.length > requirementScenarioLimit
+          ? '; текст длиннее ' +
+            requirementScenarioLimit +
+            ' символов, которые вмещает связь, — сократите сценарий в INTENT'
+          : '') +
+        '. Отложить сценарий (deferred с причиной) решает пользователь: предложите и спросите, не откладывайте сами ради прохождения проверки',
     );
+}
+/** Отложенные сценарии — решение пользователя; отчёты и приёмка называют их отдельно. */
+export function deferredScenarios(scenarios: ReleaseScenario[]) {
+  return scenarios
+    .filter((s) => s.status === 'deferred')
+    .map((s) => ({
+      featureId: s.featureId,
+      gate: s.gate,
+      scenario: s.scenario,
+      reason: s.deferred!,
+    }));
 }
 const requirementGap: Record<string, string> = {
   'stale-source': 'источник изменился',
@@ -1296,7 +1361,9 @@ export function coverageGaps(coverage: {
     }
   >;
 }) {
-  const gaps = [...coverage.issues];
+  // Сценарии первыми: предел строк не должен прятать то, что релиз не
+  // доказан, за длинным перечнем историй.
+  const gaps = [...scenarioGaps(coverage.scenarios ?? []), ...coverage.issues];
   for (const c of coverage.components) {
     if (c.coverageComplete) continue;
     const local = coverage.locals.get(c.repositoryId);
@@ -1336,7 +1403,6 @@ export function coverageGaps(coverage: {
       gaps.push('история ' + c.repositoryId + '/' + story.id + ': ' + text);
     }
   }
-  gaps.push(...scenarioGaps(coverage.scenarios ?? []));
   if (!gaps.length) gaps.push('причина не определена; запустите intent-report');
   return gaps.length > gapLimit
     ? [...gaps.slice(0, gapLimit), 'и ещё ' + (gaps.length - gapLimit)]

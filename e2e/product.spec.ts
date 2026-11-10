@@ -40,6 +40,14 @@ test('Product UI presents application scope, release selection, repository navig
       coverageComplete: true,
       releaseAccepted: false,
       issues: [],
+      deferredScenarios: [
+        {
+          featureId: 'block-member',
+          gate: 'joint',
+          scenario: 'Проверка на устройстве',
+          reason: 'Переносится в следующий релиз',
+        },
+      ],
       features: definition.releases[0].features!.map((scope) => ({
         ...product.features.find((f) => f.id === scope.featureId)!,
         status: scope.featureId === 'block-member' ? 'awaiting-verification' : 'deferred',
@@ -55,6 +63,9 @@ test('Product UI presents application scope, release selection, repository navig
   await expect(page.getByRole('heading', { name: 'Система общения', exact: true })).toBeVisible();
   await expect(page.getByText('Ждёт сквозной проверки', { exact: true })).toBeVisible();
   await expect(page.getByText('Не применяется', { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole('status').filter({ hasText: 'Отложено решением пользователя' }),
+  ).toContainText('Проверка на устройстве — Переносится в следующий релиз');
   await expect(page.getByText('Релиз принят на проверенной совместной версии.')).toHaveCount(0);
   await page.getByLabel('Продуктовый релиз').selectOption('next');
   await expect.poll(() => requests.some((url) => url.endsWith('?release=next'))).toBe(true);
