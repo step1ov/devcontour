@@ -242,16 +242,27 @@ const UNDETERMINED_RU =
 /** Короткий вариант для карточки, где причина уже называет неизвестные вызовы. */
 const UNDETERMINED_SHORT_RU =
   'Предел это не снимет: задайте onUnknown: "continue" в budgets и примените: devcontour config-apply --keys budgets,prices';
+/** Предел бюджета: нужен, чтобы узнать, денежный ли он. */
+export interface BudgetLimitShape {
+  usd?: number;
+}
 /**
  * Пометки к причине бюджетной остановки движка. «Суммы — оценка» — только
- * когда причина о денежном пределе (`предел $…`): у бюджета времени сумм в
- * причине нет, хотя подробность расхода их называет. Общий бюджет (`total`
- * движка, ключ `workspace` в budgets) считает расход за всё время workspace,
- * а не за сессию — предел ниже прошлого расхода останавливает первый же вызов.
+ * у денежного предела: исчерпанный называет его в причине (`предел $…`);
+ * у неопределённого предела в причине нет, и денежный его выдают
+ * переданный `limit` или неизвестная стоимость вызовов (движок называет её
+ * только при пределе в долларах). У бюджета времени сумм в причине нет,
+ * хотя подробность расхода их называет. Общий бюджет (`total` движка, ключ
+ * `workspace` в budgets) считает расход за всё время workspace, а не за
+ * сессию — предел ниже прошлого расхода останавливает первый же вызов.
  */
-export function budgetNotes(reason: string): string[] {
+export function budgetNotes(reason: string, limit?: BudgetLimitShape): string[] {
+  const money =
+    /предел \$/.test(reason) ||
+    (/не определён/.test(reason) &&
+      (limit?.usd !== undefined || /неизвестна стоимость/.test(reason)));
   return [
-    ...(/предел \$/.test(reason) ? [`Суммы — ${COST_ESTIMATE_RU}, не списание.`] : []),
+    ...(money ? [`Суммы — ${COST_ESTIMATE_RU}, не списание.`] : []),
     ...(/Бюджет (времени )?total\b/.test(reason)
       ? ['Бюджет total (workspace в budgets) — за всё время workspace.']
       : []),
@@ -268,30 +279,29 @@ export function budgetAction(reason: string, compact = false) {
   return compact ? UNDETERMINED_SHORT_RU : UNDETERMINED_RU;
 }
 /** Подсказка к причине: пометки, затем действие. */
-export function budgetHint(reason: string) {
-  return [...budgetNotes(reason), budgetAction(reason)].join(' ');
-}
-/** Причина и подсказка одной строкой: причина движка не кончается точкой. */
-export function budgetText(reason: string) {
-  return `${reason.replace(/\.$/, '')}. ${budgetHint(reason)}`;
+export function budgetHint(reason: string, limit?: BudgetLimitShape) {
+  return [...budgetNotes(reason, limit), budgetAction(reason)].join(' ');
 }
 /**
- * Причина карточки в пределах `limit` знаков: команда действия важнее
- * пометок и подробностей расхода. По очереди: всё целиком; причина без
- * подробности расхода, действие, пометки; без пометок; короткое действие;
- * и наконец действие впереди причины — обрезка заденет причину, а не команду.
+ * Причина карточки в пределах `max` знаков: команда действия важнее
+ * пометок и подробностей расхода. Каждый вариант — причина, действие,
+ * пометки, с точкой в конце. По очереди: всё целиком; причина без
+ * подробности расхода; без пометок; короткое действие; и наконец действие
+ * впереди причины — обрезка заденет причину, а не команду. `limit` —
+ * предел бюджета, если он известен (пометка о суммах).
  */
-export function budgetCardReason(reason: string, limit: number) {
+export function budgetCardReason(reason: string, max: number, limit?: BudgetLimitShape) {
   const base = reason.replace(/\.$/, '');
   const short = base.split('; израсходовано')[0];
-  const notes = budgetNotes(reason).join(' ');
+  const notes = budgetNotes(reason, limit).join(' ');
   const action = budgetAction(reason);
   const compact = budgetAction(reason, true);
+  const tail = notes ? ` ${notes}` : '';
   const candidates = [
-    budgetText(reason),
-    `${short}. ${action}.${notes ? ` ${notes}` : ''}`,
+    `${base}. ${action}.${tail}`,
+    `${short}. ${action}.${tail}`,
     `${short}. ${action}.`,
     `${short}. ${compact}.`,
   ];
-  return candidates.find((c) => c.length <= limit) ?? `${compact}. ${short}.`;
+  return candidates.find((c) => c.length <= max) ?? `${compact}. ${short}.`;
 }

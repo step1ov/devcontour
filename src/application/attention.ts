@@ -704,7 +704,7 @@ const budgetSource: AttentionSourceRule = {
             b.state === 'exceeded' ? 'Бюджет исчерпан: задачи не выдаются' : 'Бюджет не определён',
           // Причина движка с расходом и подсказка не всегда умещаются в
           // предел карточки: команда действия сохраняется всегда.
-          reason: budgetCardReason(b.reason, ATTENTION_LIMITS.reason),
+          reason: budgetCardReason(b.reason, ATTENTION_LIMITS.reason, b.limit),
           since:
             ctx.state.tasks
               .filter((t) => covered.includes(t.id))
