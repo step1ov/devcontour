@@ -119,4 +119,15 @@ test('Карточка остановленного задания ChangeSet н�
     ]).map((w) => w.id),
     ['CHG-1'],
   );
+  // Принятый раньше ChangeSet того же релиза (и тех же досок) упавший не
+  // закрывает: упавший — следующий ChangeSet релиза после принятого.
+  const earlier = accepted('CHG-0', {
+    releaseId: 'r1',
+    boardIds: ['B-1'],
+    createdAt: '2025-12-31T00:00:00.000Z',
+  });
+  assert.deepEqual(
+    stoppedWorkflows(state([earlier, { ...failed, supersedes: 'CHG-0' }]), [job]).map((w) => w.id),
+    ['CHG-1'],
+  );
 });

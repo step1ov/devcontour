@@ -151,16 +151,19 @@ export function stoppedWorkflows<
     }
     const c = s.changeSets.find((c) => c.id === w.id);
     if (!c || c.acceptance) return true;
-    // ChangeSet закрыт другим: принят ChangeSet того же продуктового релиза
-    // или более поздний, включающий все его доски. Операции закрытия у
+    // ChangeSet закрыт другим, созданным позже и принятым: того же
+    // продуктового релиза или включающим все его доски. Операции закрытия у
     // ChangeSet нет, и без этого карточка упавшего задания оставалась
-    // навсегда — после ручного маршрута и после нового ChangeSet.
+    // навсегда — после ручного маршрута и после нового ChangeSet. Принятый
+    // раньше ChangeSet упавший не закрывает: упавший — продолжение после
+    // него (следующий ChangeSet того же релиза), и его остановка — решение.
     return s.changeSets.some(
       (x) =>
         x.id !== c.id &&
         !!x.acceptance &&
+        x.createdAt > c.createdAt &&
         ((!!c.releaseId && x.releaseId === c.releaseId) ||
-          (x.createdAt > c.createdAt && c.boardIds.every((id) => x.boardIds.includes(id)))),
+          c.boardIds.every((id) => x.boardIds.includes(id))),
     );
   };
   return jobs.filter((w) => w.status === 'failed' && w.error && !superseded(w));
@@ -194,7 +197,7 @@ export function changeSetStopReason(
       : 'Попытки задания исчерпаны: workflow_retry его не примет. ') +
       `Ручной путь: devcontour workspace-verify --changeset ${w.id}, затем changeset-accept --changeset ${w.id}. ` +
       'Если исчерпан предел совместных проверок набора задач, новый ChangeSet над теми же задачами получит тот же отказ: измените набор (новая ревизия доски), примите доску и создайте ChangeSet по ней. ' +
-      'Карточка закрывается, когда этот ChangeSet или другой ChangeSet того же релиза (или включающий его доски) принят.',
+      'Карточка закрывается, когда принят этот ChangeSet или созданный после него ChangeSet того же релиза (или включающий его доски).',
   );
   return parts.join(' ');
 }
