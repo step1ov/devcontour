@@ -2,6 +2,11 @@
  * T40/T41: обновление закреплённого пакета harness в DevContour между двумя
  * неизменяемыми архивами — на отдельной копии этого checkout, во временном
  * каталоге; рабочее дерево и любые реальные workspace не затрагиваются.
+ * Архивы — локальные копии опубликованных версий (`npm pack
+ * devcontour-harness@<версия>`): зависимость — точная версия из registry, и
+ * integrity в lock обязана совпасть с байтами архива. Снимки DevContour до
+ * 0.4.0-alpha.30 закреплены прежней формой — вложенным архивом
+ * `vendor/harness/<архив>`; проверка принимает обе формы.
  *
  *   node scripts/upgrade-check.mjs <devcontour-harness-<from>.tgz> \
  *     <devcontour-harness-<to>.tgz> --to-commit <SHA исходников to> \
@@ -9,14 +14,14 @@
  *
  * Если HEAD закреплён не на <from> (например, проверяется обновление на
  * версию, которую поставляет HEAD), обе копии сначала закрепляются на <from>
- * тем же `vendor-harness.mjs` локальным коммитом копии; нужен `--from-commit`.
+ * тем же `pin-harness.mjs` локальным коммитом копии; нужен `--from-commit`.
  *
  * Шаги (каждый — PASS или исключение с ненулевым exit):
  *  1. копия checkout (`git clone --no-local`, HEAD) закреплена на <from>:
  *     зависимость, lock и integrity соответствуют байтам архива;
- *  2. смена зависимости во второй копии (`vendor-harness.mjs`): меняются
- *     только package.json, package-lock.json и vendor/harness; версия, lock и
- *     integrity согласованы;
+ *  2. смена зависимости во второй копии (`pin-harness.mjs`): меняются
+ *     только package.json, package-lock.json и запись vendor/harness/README.md;
+ *     версия, lock и integrity согласованы;
  *  3. состояние «до» (первая копия): принятая задача и активная попытка с
  *     живой ролью controller (аварийная остановка);
  *  4. состояние «после» (вторая копия, сразу): новая версия не перенимает живую роль прежнего
@@ -65,9 +70,10 @@
  * шаг — `node --import tsx <snapshot>/scripts/…` с cwd в snapshot той
  * версии, которую он представляет, production modules — только её):
  *  P1/P2. snapshot «до»/«после»: HEAD равен SHA, digest `git ls-tree -r`,
- *     зависимость, lock, integrity, байты vendored archive и строка
- *     `vendor/harness/README.md` (SHA-256 архива, commit исходников harness)
- *     соответствуют аргументам; `npm ci` своей стороны;
+ *     зависимость, lock, integrity (и для прежней формы — байты вложенного
+ *     архива) и строка `vendor/harness/README.md` (integrity или SHA-256
+ *     архива, commit исходников harness) соответствуют аргументам; `npm ci`
+ *     своей стороны;
  *  P3. `upgrade-scenario.ts`: «до» — принятая задача и активная попытка с
  *     живой ролью; «после» — живую роль не перенимает, после истечения
  *     recovery, явный повтор — новая попытка с новым владением; принятая
@@ -187,18 +193,35 @@ const pinned = (consumer, archive) => {
   const installed = JSON.parse(
     readFileSync(join(consumer, 'node_modules', 'devcontour-harness', 'package.json'), 'utf8'),
   ).version;
-  const vendored = join(consumer, 'vendor', 'harness', basename(archive.path));
-  check(
-    pkg.dependencies['devcontour-harness'] === `file:vendor/harness/${basename(archive.path)}`,
-    'зависимость не указывает на архив ' + basename(archive.path),
-  );
+  const spec = pkg.dependencies['devcontour-harness'];
+  const vendoredSpec = `file:vendor/harness/${basename(archive.path)}`;
+  const form = spec === vendoredSpec ? 'vendored' : 'registry';
+  if (form === 'vendored') {
+    // Прежняя форма (до 0.4.0-alpha.30): вложенный архив в checkout.
+    const vendored = join(consumer, 'vendor', 'harness', basename(archive.path));
+    check(entry.resolved === vendoredSpec, 'lock: resolved ' + entry.resolved);
+    check(sha256(vendored) === sha256(archive.path), 'vendor: байты архива отличаются');
+  } else {
+    check(spec === archive.version, `зависимость не закреплена на ${archive.version}: ${spec}`);
+    check(
+      /^https?:\/\//.test(entry.resolved ?? '') &&
+        entry.resolved.endsWith(`-${archive.version}.tgz`),
+      'lock: resolved не из registry: ' + entry.resolved,
+    );
+  }
   check(entry.version === archive.version, `lock: версия ${entry.version}`);
-  check(entry.resolved === `file:vendor/harness/${basename(archive.path)}`, 'lock: resolved');
   check(entry.integrity === sha512(archive.path), 'lock: integrity не равна байтам архива');
-  check(sha256(vendored) === sha256(archive.path), 'vendor: байты архива отличаются');
   check(installed === archive.version, `установлена версия ${installed}`);
-  return { version: installed, integrity: entry.integrity };
+  return { version: installed, integrity: entry.integrity, form };
 };
+/** Закрепление копии на версии архива тем же скриптом, что и в checkout. */
+const pinHarness = (consumer, archive, commit) =>
+  run(
+    consumer,
+    process.execPath,
+    ['scripts/pin-harness.mjs', archive.version, '--archive', archive.path, '--commit', commit],
+    { stdio: 'pipe' },
+  );
 const install = (consumer) =>
   run(consumer, 'npm', ['ci', '--prefer-offline', '--no-audit', '--no-fund']);
 
@@ -274,13 +297,7 @@ const pin = (consumer, archive) => {
     'vendor/harness',
   ]);
   run(consumer, 'git', ['clean', '-qfd', '--', 'vendor/harness']);
-  if (archive === to)
-    run(
-      consumer,
-      process.execPath,
-      ['scripts/vendor-harness.mjs', to.path, '--commit', options['to-commit']],
-      { stdio: 'pipe' },
-    );
+  if (archive === to) pinHarness(consumer, to, options['to-commit']);
   install(consumer);
   return pinned(consumer, archive);
 };
@@ -308,13 +325,8 @@ function rollback() {
     pin(after_, from);
     const init = step(before_, 'init', dir, topology);
     const refs0 = refs(dir);
-    // Зависимость уже указывает на новый архив, установка обрывается.
-    run(
-      after_,
-      process.execPath,
-      ['scripts/vendor-harness.mjs', to.path, '--commit', options['to-commit']],
-      { stdio: 'pipe' },
-    );
+    // Зависимость уже указывает на новую версию, установка обрывается.
+    pinHarness(after_, to, options['to-commit']);
     const child = spawnSync(
       'sh',
       ['-c', 'npm ci --prefer-offline --no-audit --no-fund & sleep 2; kill -9 $!'],
@@ -520,21 +532,30 @@ function snapshot(name, commit, archive, harnessCommit, withWorktree) {
   }
   // Пакет этой стороны — тот, что поставляет её commit; не перепаковывается.
   const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
-  const vendored = join(dir, 'vendor', 'harness', basename(archive.path));
+  const spec = pkg.dependencies['devcontour-harness'];
+  const vendoredSpec = `file:vendor/harness/${basename(archive.path)}`;
   check(
-    pkg.dependencies['devcontour-harness'] === `file:vendor/harness/${basename(archive.path)}`,
-    `snapshot ${name} закреплён не на ${basename(archive.path)}: ` +
-      pkg.dependencies['devcontour-harness'],
+    spec === vendoredSpec || spec === archive.version,
+    `snapshot ${name} закреплён не на ${archive.version}: ${spec}`,
   );
-  check(existsSync(vendored), `snapshot ${name}: нет ${vendored}`);
   const archiveSha256 = sha256(archive.path);
-  check(sha256(vendored) === archiveSha256, `snapshot ${name}: байты vendored archive отличаются`);
+  if (spec === vendoredSpec) {
+    const vendored = join(dir, 'vendor', 'harness', basename(archive.path));
+    check(existsSync(vendored), `snapshot ${name}: нет ${vendored}`);
+    check(
+      sha256(vendored) === archiveSha256,
+      `snapshot ${name}: байты vendored archive отличаются`,
+    );
+  }
+  // Запись закрепления: SHA-256 вложенного архива (прежняя форма) или
+  // integrity опубликованного пакета.
+  const mark = spec === vendoredSpec ? archiveSha256 : sha512(archive.path);
   const readme = readFileSync(join(dir, 'vendor', 'harness', 'README.md'), 'utf8');
-  const row = readme.split('\n').find((line) => line.includes(`\`${archiveSha256}\``));
+  const row = readme.split('\n').find((line) => line.includes(`\`${mark}\``));
   check(
     row?.includes(`\`${harnessCommit}\``) && row.includes(archive.version),
     `snapshot ${name}: vendor/harness/README.md не называет ${archive.version} ` +
-      `${archiveSha256} @ ${harnessCommit}`,
+      `${mark} @ ${harnessCommit}`,
   );
   install(dir);
   const pin = pinned(dir, archive);
@@ -741,17 +762,15 @@ try {
       run(consumer, 'git', ['checkout', '-q', '--detach', head]);
       const dependency = JSON.parse(readFileSync(join(consumer, 'package.json'), 'utf8'))
         .dependencies['devcontour-harness'];
-      if (dependency !== `file:vendor/harness/${basename(from.path)}`) {
+      if (
+        dependency !== `file:vendor/harness/${basename(from.path)}` &&
+        dependency !== from.version
+      ) {
         if (!/^[0-9a-f]{40}$/.test(options['from-commit'] ?? ''))
           fail(
             'HEAD закреплён не на ' + basename(from.path) + ': укажите --from-commit <полный SHA>',
           );
-        run(
-          consumer,
-          process.execPath,
-          ['scripts/vendor-harness.mjs', from.path, '--commit', options['from-commit']],
-          { stdio: 'pipe' },
-        );
+        pinHarness(consumer, from, options['from-commit']);
         run(consumer, 'git', [
           'add',
           '-A',
@@ -776,22 +795,15 @@ try {
     pass('1-pinned-from', { head, ...pinned(before_, from) });
 
     // 2. Смена зависимости во второй копии: меняются только зависимость, lock и
-    // vendor/harness; версия, lock и integrity согласованы.
-    run(
-      after_,
-      process.execPath,
-      ['scripts/vendor-harness.mjs', to.path, '--commit', options['to-commit']],
-      {
-        stdio: 'pipe',
-      },
-    );
+    // запись vendor/harness; версия, lock и integrity согласованы.
+    pinHarness(after_, to, options['to-commit']);
     install(after_);
     const changed = run(after_, 'git', ['status', '--porcelain', '--untracked-files=all'])
       .split('\n')
       .filter(Boolean)
       .map((line) => line.slice(3));
     const outside = changed.filter(
-      (p) => !['package.json', 'package-lock.json'].includes(p) && !p.startsWith('vendor/harness/'),
+      (p) => !['package.json', 'package-lock.json', 'vendor/harness/README.md'].includes(p),
     );
     check(outside.length === 0, 'смена зависимости изменила лишнее: ' + outside.join(', '));
     pass('2-pinned-to', { changed, ...pinned(after_, to) });
@@ -835,7 +847,6 @@ try {
         'package-lock.json',
         'vendor/harness',
       ]);
-      rmSync(join(after_, 'vendor', 'harness', basename(to.path)), { force: true });
       install(after_);
       pass('6a-lock-pins-from', pinned(after_, from));
       const refused = scenario(after_, 'old-refuses');

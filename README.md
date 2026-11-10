@@ -62,9 +62,16 @@ npm run demo
 
 Установку DevContour можно использовать для нескольких независимых workspace. Подготовленный этап продолжает выполняться сервером и после закрытия чата; для нового планирования и разбора сбоев нужен ведущий агент. [Подробный порядок работы](docs/workflow.md).
 
-## Установка из архива
+## Установка
 
-DevContour поставляется архивом `devcontour-<version>.tgz`; движок исполнения `devcontour-harness` вложен в него и закреплён по версии и integrity, отдельный checkout harness не нужен:
+Предварительные версии публикуются в npm с меткой `alpha`. Движок исполнения `devcontour-harness` — обычная зависимость с точной версией: npm ставит его из registry сам (в проекте — рядом в `node_modules`, при глобальной установке — внутри каталога пакета DevContour), отдельно его ставить не нужно. Новая версия harness приходит только с новой версией DevContour. npm не публикует `package-lock.json`, поэтому при установке из npm или из архива lock checkout не действует: точно закреплена только версия `devcontour-harness`, а опубликованная версия неизменяема — это те же байты, integrity которых при закреплении сверена с проверенным архивом. Остальное дерево — зависимости harness (например, `^`-диапазоны `@anthropic-ai/sandbox-runtime`) и `^`-зависимости самого DevContour — npm разрешает в момент установки.
+
+```sh
+npm install --global devcontour@alpha
+devcontour help
+```
+
+Тот же пакет можно установить из архива `devcontour-<version>.tgz`; закреплённый harness и остальные зависимости npm возьмёт из registry или своего кэша:
 
 ```sh
 mkdir devcontour-install && cd devcontour-install
@@ -73,7 +80,7 @@ npm install --omit=dev --ignore-scripts ./devcontour-<version>.tgz
 npx devcontour help
 ```
 
-Проверка выпущенного архива целиком — `npm run check:install -- <архив>` из checkout DevContour: установка в отдельный каталог без сети, CLI, MCP, сервер и настоящий Git-цикл на fixture runtime, без чтения файлов checkout. Закреплённая версия harness и её архив — в [vendor/harness](vendor/harness/README.md).
+Проверка выпущенного архива целиком — `npm run check:install -- <архив>` из checkout DevContour: установка в отдельный каталог без сети (из прогретого кэша npm), CLI, MCP, сервер и настоящий Git-цикл на fixture runtime, без чтения файлов checkout. Закреплённая версия harness, integrity и исходный commit — в [vendor/harness](vendor/harness/README.md).
 
 Общие с harness алгоритмы — подготовка файлов, диагностика остановок, планирование, ограничение ответов агентских операций и разрешение профилей — DevContour берёт из этого пакета; продуктовые согласования, память, UI и хранилище остаются в DevContour ([архитектура](docs/architecture.md#общие-алгоритмы-из-harness)).
 

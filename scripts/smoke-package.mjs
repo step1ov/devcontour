@@ -1,12 +1,13 @@
 /**
- * Проверка настоящего архива DevContour: состав, вложенный harness,
- * установка без dev-зависимостей и скриптов в отдельный каталог, CLI, MCP,
+ * Проверка настоящего архива DevContour: состав, закреплённый harness из
+ * registry, установка без dev-зависимостей и скриптов в отдельный каталог, CLI, MCP,
  * сервер и настоящий Git-цикл из чужого cwd. Каждый процесс установленного
  * пакета пишет журнал загруженных модулей и открытых файлов; ни один путь
  * журнала не может вести в checkout.
  *
  * `--archive F` проверяет уже выпущенный архив вместо свежей упаковки,
- * `--offline` ставит его без сети (из кэша npm).
+ * `--offline` ставит его без сети (из кэша npm: в нём должны быть runtime
+ * dependencies, включая закреплённый devcontour-harness).
  */
 import assert from 'node:assert/strict';
 import { packageWorkflowDiagnostics } from './package-smoke-diagnostics.mjs';
@@ -74,8 +75,7 @@ try {
     );
     [archive] = JSON.parse(stdout);
   }
-  // Файлы DevContour и вложенного harness без путей машины автора, приватных
-  // каталогов и ключей (сторонние модули не проверяются этим правилом).
+  // Файлы DevContour без путей машины автора, приватных каталогов и ключей.
   const unpacked = join(root, 'unpacked');
   await mkdir(unpacked);
   execFileSync('tar', ['-xzf', join(root, archive.filename), '-C', unpacked]);
@@ -84,8 +84,6 @@ try {
   );
   for (const entry of await readdir(unpacked, { recursive: true })) {
     const own = entry.replace(/^package\//, '');
-    if (own.startsWith('node_modules/') && !own.startsWith('node_modules/devcontour-harness/'))
-      continue;
     const file = join(unpacked, entry);
     if (!(await stat(file)).isFile()) continue;
     const text = await readFile(file, 'utf8');
@@ -105,49 +103,26 @@ try {
     !archive.files.some((f) => /^todo\/roadmap\/(?:evidence\/|[^/]*-review\.md$)/.test(f.path)),
   );
   assert.ok(!archive.files.some((f) => /^(src|tests|\.devcontour-local)\//.test(f.path)));
-  // node_modules в архиве — только намеренно вложенный пакет harness и
-  // замыкание его runtime-зависимостей по lock; ничего больше.
+  // Архив ничего не вкладывает: harness — точная версия из registry, она
+  // ставится рядом с DevContour по integrity из lock.
   const lock = JSON.parse(await readFile(join(source, 'package-lock.json'), 'utf8'));
-  const bundled = new Set();
-  const visit = (name) => {
-    if (bundled.has(name)) return;
-    const entry = lock.packages['node_modules/' + name];
-    assert.ok(entry, 'нет в lock: ' + name);
-    bundled.add(name);
-    for (const dep of Object.keys({ ...entry.dependencies, ...entry.optionalDependencies }))
-      if (lock.packages['node_modules/' + dep]) visit(dep);
-  };
-  visit('devcontour-harness');
-  const packedModules = new Set(
-    archive.files
-      .map((f) => /^node_modules\/((?:@[^/]+\/)?[^/]+)\//.exec(f.path)?.[1])
-      .filter(Boolean),
+  const pinned = JSON.parse(await readFile(join(source, 'package.json'), 'utf8'));
+  assert.ok(
+    !archive.files.some((f) => f.path.startsWith('node_modules/')),
+    'архив содержит node_modules',
   );
-  assert.deepEqual([...packedModules].sort(), [...bundled].sort(), 'состав вложенных модулей');
-  // Состав вложенного harness — его собственный whitelist, без исходников и тестов.
-  const harnessFiles = archive.files
-    .map((f) => f.path)
-    .filter((p) => p.startsWith('node_modules/devcontour-harness/'))
-    .map((p) => p.slice('node_modules/devcontour-harness/'.length));
-  const harnessTop = new Set(harnessFiles.map((p) => p.split('/')[0]));
-  for (const entry of harnessTop)
-    assert.ok(
-      [
-        'lib',
-        'schemas',
-        'docs',
-        'examples',
-        'profiles',
-        'skills',
-        'templates',
-        'LICENSE',
-        'README.md',
-        'package.json',
-      ].includes(entry),
-      'лишнее во вложенном harness: ' + entry,
-    );
-  for (const required of ['lib/index.js', 'lib/cli.js', 'package.json'])
-    assert.ok(harnessFiles.includes(required), 'нет во вложенном harness: ' + required);
+  const packed = JSON.parse(await readFile(join(unpacked, 'package', 'package.json'), 'utf8'));
+  const harnessVersion = packed.dependencies?.['devcontour-harness'];
+  assert.match(harnessVersion ?? '', /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$/, 'точная версия harness');
+  assert.equal(harnessVersion, pinned.dependencies['devcontour-harness']);
+  assert.equal(packed.bundledDependencies ?? packed.bundleDependencies, undefined);
+  const lockedHarness = lock.packages['node_modules/devcontour-harness'];
+  assert.equal(lockedHarness?.version, harnessVersion, 'lock: версия harness');
+  assert.equal(
+    new URL(lockedHarness?.resolved ?? 'file:').host,
+    'registry.npmjs.org',
+    'lock: harness с registry.npmjs.org',
+  );
   await writeFile(join(installation, 'package.json'), '{"private":true}');
   console.error('smoke-package: installing archive into a fresh directory');
   await exec(
@@ -195,19 +170,23 @@ syncBuiltinESMExports();
   const bin = join(installation, 'node_modules/.bin/devcontour');
   await assert.rejects(access(join(installed, 'src')));
   await assert.rejects(access(join(installation, 'node_modules/tsx')));
-  // Исполнение DevContour загружает вложенный пакет закреплённой версии.
-  const pinned = JSON.parse(await readFile(join(source, 'package.json'), 'utf8'));
-  const harnessVersion = /devcontour-harness-(.+)\.tgz$/.exec(
-    pinned.dependencies['devcontour-harness'],
-  )[1];
+  // Исполнение DevContour загружает пакет закреплённой версии, поставленный
+  // рядом с ним из registry, и именно с integrity из lock DevContour.
+  await assert.rejects(access(join(installed, 'node_modules/devcontour-harness')));
   const nested = JSON.parse(
-    await readFile(join(installed, 'node_modules/devcontour-harness/package.json'), 'utf8'),
+    await readFile(join(installation, 'node_modules/devcontour-harness/package.json'), 'utf8'),
   );
   assert.equal(nested.version, harnessVersion);
+  const installedLock = JSON.parse(await readFile(join(installation, 'package-lock.json'), 'utf8'));
+  assert.equal(
+    installedLock.packages['node_modules/devcontour-harness']?.integrity,
+    lockedHarness.integrity,
+    'установлены байты, закреплённые в lock DevContour',
+  );
   const { harnessVersion: loaded } = await import(
     new URL('file://' + join(installed, 'lib/harness/index.js'))
   );
-  assert.equal(loaded, harnessVersion, 'DevContour загружает вложенный harness');
+  assert.equal(loaded, harnessVersion, 'DevContour загружает закреплённый harness');
   for (const [name, range] of Object.entries(nested.dependencies ?? {}))
     if (pinned.dependencies[name] !== undefined)
       assert.equal(pinned.dependencies[name], range, 'общая зависимость ' + name);
@@ -632,7 +611,7 @@ syncBuiltinESMExports();
   assert.deepEqual(leaked.slice(0, 5), [], 'пакет читал файлы checkout');
   assert.ok(
     reads.some((p) => p.includes(join('node_modules', 'devcontour-harness', 'lib'))),
-    'журнал чтения не содержит модулей вложенного harness',
+    'журнал чтения не содержит модулей закреплённого harness',
   );
 
   console.log(
@@ -643,6 +622,7 @@ syncBuiltinESMExports();
         reads: reads.length,
         size: archive.size,
         checks: [
+          'nothing bundled; exact harness version installed from registry with the locked integrity',
           'isolated production install',
           'no source or tsx',
           'explicit workspace',

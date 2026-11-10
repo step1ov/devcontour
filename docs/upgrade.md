@@ -11,7 +11,7 @@ DevContour.
 
 | Что                                      | Где видно                                                                                                                                                          |
 | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| DevContour                               | `devcontour --version` (версии DevContour и вложенного движка), `package.json`                                                                                     |
+| DevContour                               | `devcontour --version` (версии DevContour и закреплённого движка), `package.json`                                                                                  |
 | Движок исполнения (`devcontour-harness`) | `vendor/harness/README.md`, `package-lock.json` (версия и integrity), `devcontour doctor`                                                                          |
 | Состояние                                | центральная база `<workspace>/.devcontour-local/state.sqlite`; при `storage: component` — ещё база каждого компонента `<компонент>/.devcontour-local/state.sqlite` |
 | Общие записи Git sync                    | каталог `.devcontour` в репозиториях workspace и компонентов (receipts принятых задач)                                                                             |
@@ -1572,6 +1572,38 @@ SHA-256 `b6c2773cd0828aa235952d38b736c33eb31949e9d409474a7bf060d1ceff4b94`
   Текст отказа при изменившихся требованиях прежний. Сверка продуктового
   релиза (ChangeSet с `releaseId`) по-прежнему читает Git синхронно.
 
+### После 0.4.0-alpha.29
+
+- **Движок исполнения ставится из npm точной версией, а не вкладывается в
+  архив.** Зависимость `devcontour-harness` — точная версия (`0.1.0-alpha.44`)
+  в `dependencies`, без `^`/`~` и не `peerDependencies`; `bundledDependencies`
+  нет, и в архиве DevContour нет `node_modules`; архив стал примерно втрое
+  меньше. При установке DevContour npm ставит закреплённый движок из
+  registry (в проекте — рядом в `node_modules`, при глобальной установке —
+  внутри каталога пакета DevContour). npm не публикует `package-lock.json`:
+  точно закреплена только версия движка, а опубликованная версия
+  неизменяема, поэтому это те же байты, что прежде лежали в
+  `vendor/harness` (integrity сверена при закреплении). Зависимости движка
+  с диапазонами и `^`-зависимости DevContour npm разрешает в момент
+  установки, как и прежде для зависимостей DevContour; прежде зависимости
+  движка входили в архив. Другую версию движка установка не подтягивает:
+  его смена — новый выпуск DevContour с проверкой обновления. Формат
+  состояния не меняется.
+- **Закрепление — `scripts/pin-harness.mjs` вместо `vendor-harness.mjs`.**
+  Скрипт закрепляет только опубликованную версию и до изменений сверяет её
+  integrity с локальным проверенным архивом (`--archive`); `vendor/harness`
+  хранит только запись закрепления (версия, integrity, исходный commit), а
+  вложенный архив прежней формы скрипт удаляет. `--archive` обязателен;
+  npm вызывается с `--registry=https://registry.npmjs.org/`, resolved в lock
+  обязан вести туда; при отказе после первой записи `package.json` и lock
+  возвращаются. `check:install` без сети берёт движок из кэша npm.
+  `check:upgrade` нужна сеть; он принимает архивы — копии опубликованных
+  версий — и снимки DevContour в обеих формах закрепления; архив движка
+  снимка до 0.4.0-alpha.29 включительно берётся из checkout этой версии.
+- **Публикация предварительной версии — только с меткой.** `prepublishOnly`
+  отказывает в `npm publish` версии с суффиксом `-…` без `--tag` или с
+  `--tag latest` и подсказывает `npm publish --tag alpha`.
+
 ## Перед обновлением
 
 1. **Остановить записывающих.** `devcontour queue --pause --workspace W`,
@@ -1668,14 +1700,18 @@ SHA-256 `b6c2773cd0828aa235952d38b736c33eb31949e9d409474a7bf060d1ceff4b94`
 
 ## Обновление
 
-- **Установка DevContour** — новый архив: `npm install --omit=dev
---ignore-scripts ./devcontour-<version>.tgz` (движок вложен в архив).
-- **Смена закреплённого движка в checkout DevContour** —
-  `node scripts/vendor-harness.mjs ./devcontour-harness-<version>.tgz --commit <SHA исходников>`,
-  затем `npm ci` и `npm run check`. Меняются только `package.json`,
-  `package-lock.json` и `vendor/harness`; пакет сам не обновляется. Check
-  репозитория harness для уже проверенного архива не повторяется:
-  [руководство разработчика](development.md#три-уровня-проверки).
+- **Установка DevContour** — новая версия из npm (`npm install --global
+devcontour@<version>`) или новый архив: `npm install --omit=dev
+--ignore-scripts ./devcontour-<version>.tgz`. Закреплённый движок npm
+  ставит из registry точной версией этой версии DevContour; остальные
+  зависимости разрешаются при установке (lock не публикуется).
+- **Смена закреплённого движка в checkout DevContour** — только
+  опубликованная версия: `node scripts/pin-harness.mjs <version> --commit
+<SHA исходников> --archive ./devcontour-harness-<version>.tgz`, затем
+  `npm ci` и `npm run check`. Меняются только `package.json`,
+  `package-lock.json` и `vendor/harness/README.md`; пакет сам не
+  обновляется. Check репозитория harness для уже проверенного архива не
+  повторяется: [руководство разработчика](development.md#три-уровня-проверки).
 
 После обновления — **обязательно полный** `devcontour doctor --workspace W`
 на хосте, до возобновления writers: это проверка среды (CLI агентов,

@@ -1,7 +1,22 @@
 {
   "name": "devcontour",
   "version": "0.4.0-alpha.29",
-  "private": true,
+  "description": "Local control plane for AI-agent development: contracts, task graphs, isolated runs, gates, review and acceptance",
+  "keywords": [
+    "ai-agents",
+    "claude-code",
+    "codex",
+    "mcp",
+    "developer-tools"
+  ],
+  "homepage": "https://github.com/step1ov/devcontour#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/step1ov/devcontour.git"
+  },
+  "bugs": {
+    "url": "https://github.com/step1ov/devcontour/issues"
+  },
   "type": "module",
   "bin": {
     "devcontour": "lib/cli.js"
@@ -34,6 +49,7 @@
     "check:skill": "node scripts/build-skill.mjs --check",
     "check:environment": "node scripts/check-test-environment.mjs && node scripts/check-preview.mjs",
     "prepack": "npm run build",
+    "prepublishOnly": "node scripts/publish-guard.mjs",
     "test:package": "npm run build && node scripts/smoke-package.mjs",
     "check:install": "node scripts/install-check.mjs",
     "check:upgrade": "node scripts/upgrade-check.mjs",
@@ -69,7 +85,7 @@
     "@xyflow/react": "12.11.6",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "devcontour-harness": "file:vendor/harness/devcontour-harness-0.1.0-alpha.44.tgz",
+    "devcontour-harness": "0.1.0-alpha.44",
     "fast-xml-parser": "5.11.1",
     "lucide-react": "1.46.0",
     "react": "19.3.0",
@@ -96,8 +112,5 @@
     "typescript-eslint": "8.70.0",
     "vite": "8.3.5"
   },
-  "license": "MIT",
-  "bundledDependencies": [
-    "devcontour-harness"
-  ]
+  "license": "MIT"
 }
