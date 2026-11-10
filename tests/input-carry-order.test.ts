@@ -614,6 +614,42 @@ test('F14: under a pause the job loop lifts, a carry into an approved task still
   }
 });
 
+test('F14: under a user pause set before the job started, the carry step asks the user to pause again, not the lead', async () => {
+  const f = await inputFixture(controlled(), { edit: scoped });
+  try {
+    const { taskId, boardId } = await respecified(f);
+    f.h.approve(boardId, [taskId]);
+    const { run } = runningNeighbour(f, boardId);
+    // Пауза человека, затем старт задания: его цикл эту паузу снимет.
+    f.h.pause(true);
+    await new Promise((r) => setTimeout(r, 5));
+    new LeadWorkflow(f.h).start({
+      kind: 'board',
+      id: boardId,
+      authorRuntime: 'codex',
+      maxAttempts: 3,
+    });
+    const next = () => devcontourHandoff(f.h, {}).host.next;
+    const ask = next();
+    assert.equal(ask?.action, 'wait', JSON.stringify(ask));
+    assert.deepEqual(ask.params, { order: 'now', active: [run.id], userPause: true });
+    assert.match(ask.detail, /Ask the user to pause the queue again in the panel/);
+    assert.doesNotMatch(ask.detail, /First pause the queue yourself/);
+    // Пауза ведущего поверх паузы человека ничего не меняет — и шаг тот же.
+    f.h.pause(true, 'operator', 'lead');
+    assert.deepEqual(next()?.params, { order: 'now', active: [run.id], userPause: true });
+    // Пользователь снова ставит паузу — после старта задания: её цикл не
+    // снимет, и шаг — ожидание попыток.
+    await new Promise((r) => setTimeout(r, 5));
+    f.h.pause(true);
+    const waiting = next();
+    assert.equal(waiting?.action, 'wait', JSON.stringify(waiting));
+    assert.deepEqual(waiting.params, { order: 'now', active: [run.id] });
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test('F14: apply-carry yields to a question waiting for an answer and is absent in approvalMode operator', async () => {
   const f = await inputFixture(controlled(), { edit: scoped });
   try {
