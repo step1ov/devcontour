@@ -4,7 +4,12 @@ import { mkdirSync, mkdtempSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { WORKSPACE_OWNER, digestOf } from 'devcontour-harness';
+import {
+  WORKSPACE_OWNER,
+  digestOf,
+  type ExecutionStore,
+  type JointVerificationState,
+} from 'devcontour-harness';
 import { executionStoreContract } from 'devcontour-harness/testing';
 import { Store } from '../src/core/store.ts';
 import { DevContourExecutionStore } from '../src/harness/store.ts';
@@ -31,8 +36,31 @@ const component = (dir: string) => {
   );
 };
 
-executionStoreContract('DevContour central', test, central, temp);
-executionStoreContract('DevContour component', test, component, temp);
+/**
+ * Новую совместную проверку DevContour заводит операция ChangeSet: проверка
+ * живёт в ChangeSet (`withJointTarget`), а не отдельной записью.
+ */
+const contractOptions = {
+  startVerification: (store: ExecutionStore, verification: JointVerificationState) => {
+    const host = store as DevContourExecutionStore;
+    const changeSetId = 'CHG-contract-' + verification.id;
+    host.store.change('changeset.created', (s) => {
+      s.changeSets.push({
+        id: changeSetId,
+        title: 'Contract',
+        description: 'Store contract joint verification.',
+        boardIds: [],
+        createdAt: '2026-01-01T00:00:00.000Z',
+        verifications: [],
+      });
+    });
+    host.withJointTarget(changeSetId, () =>
+      store.transact('workspace.verification.started', (tx) => tx.putVerification(verification)),
+    );
+  },
+};
+executionStoreContract('DevContour central', test, central, temp, contractOptions);
+executionStoreContract('DevContour component', test, component, temp, contractOptions);
 
 /** Задача доски так, как её создаёт продукт (с утверждением). */
 function seed(store: Store) {

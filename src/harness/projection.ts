@@ -601,6 +601,8 @@ export const hostNamespace: Record<
   reviews: 'reviews',
   'contract-documents': 'contract-documents',
   'input-requests': 'input-requests',
+  // Сбросы предела совместных проверок набора (решение оператора).
+  'joint-budget-resets': 'joint-budget-resets',
 };
 
 /** Учёт вызова: `taskId` ↔ `workId`, `boardId` ↔ `groupId`, `taskIds` ↔ `workIds`. */
