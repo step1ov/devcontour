@@ -351,3 +351,83 @@ test('A slow process snapshot under load does not stop the check; a lasting fail
   assert.equal(pollFailures(count, false).count, 0, 'a good snapshot resets the streak');
   assert.equal(pollFailures(count, true).fatal, true, 'a lasting failure stops the check');
 });
+
+for (const outcome of ['pass', 'e2e-fails'] as const)
+  test(`Release check runs the browser suite beside the Node suite, one file slot fewer, and keeps each output whole (${outcome})`, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'check-release-'));
+    try {
+      const scripts = join(root, 'scripts');
+      await mkdir(scripts);
+      for (const file of ['check.mjs', 'check-processes.mjs'])
+        await copyFile(join(source, 'scripts', file), join(scripts, file));
+      const steps = ['check:environment', 'lint', 'build:lib', 'check:skill', 'build:assets'];
+      await writeFile(
+        join(root, 'package.json'),
+        JSON.stringify({
+          type: 'module',
+          scripts: {
+            ...Object.fromEntries(steps.map((s) => [s, `node step.mjs ${s}`])),
+            test: 'node step.mjs test',
+            'test:e2e': 'node step.mjs e2e',
+          },
+        }),
+      );
+      await writeFile(join(scripts, 'smoke-package.mjs'), "console.log('smoke line');\n");
+      // The Node suite finishes only after the browser suite has started, so
+      // a passing check proves they overlap; its lines are interleaved in time
+      // with the browser suite's, which still must come out as one block.
+      await writeFile(
+        join(root, 'step.mjs'),
+        `
+      import {existsSync,writeFileSync} from 'node:fs';
+      const name=process.argv[2];
+      const wait=(file)=>new Promise((r)=>{const t=setInterval(()=>{if(existsSync(file)){clearInterval(t);r();}},10);});
+      if(name==='test') {
+        writeFileSync('concurrency',String(process.env.DEVCONTOUR_TEST_CONCURRENCY));
+        console.log('ℹ tests 1');
+        await wait('e2e-started');
+        console.log('ℹ pass 1');
+        await wait('e2e-line');
+        writeFileSync('test-finished','1');
+      } else if(name==='e2e') {
+        writeFileSync('e2e-started','1');
+        console.log('e2e first');
+        await new Promise((r)=>setTimeout(r,100));
+        console.error('e2e diagnostics');
+        // Chunks of the two pipes keep their order only when apart in time.
+        await new Promise((r)=>setTimeout(r,100));
+        ${outcome === 'e2e-fails' ? 'process.exit(1);' : ''}
+        console.log('  1 passed');
+        writeFileSync('e2e-line','1');
+      }
+    `,
+      );
+      const result = spawnSync(process.execPath, [join(scripts, 'check.mjs')], {
+        cwd: root,
+        encoding: 'utf8',
+        env: { ...process.env, DEVCONTOUR_TEST_CONCURRENCY: '4' },
+        timeout: 60_000,
+      });
+      const output = result.stdout + result.stderr;
+      assert.equal(result.status, outcome === 'pass' ? 0 : 1, output);
+      assert.equal(await readFile(join(root, 'concurrency'), 'utf8'), '3');
+      // Node suite lines stream unprefixed: its summary greps as in a run of its own.
+      assert.match(result.stdout, /^ℹ tests 1$/m);
+      // The browser suite is one contiguous section with its stderr inside.
+      const section = new RegExp(
+        `──── test:e2e ────\ne2e first\ne2e diagnostics\n${outcome === 'pass' ? ' {2}1 passed\n✔' : '(?:[^\n]*\n)*?✖'} test:e2e [^\n]*\n──── end of test:e2e ────\n`,
+      );
+      assert.match(result.stdout, section, result.stdout);
+      assert.match(result.stdout, /──── smoke-package ────\nsmoke line\n✔ smoke-package/);
+      if (outcome === 'pass') {
+        assert.ok(existsSync(join(root, 'test-finished')));
+        assert.match(result.stderr, /check: passed/);
+      } else {
+        // The failure stops the Node suite before it finishes, and the check says so.
+        assert.equal(existsSync(join(root, 'test-finished')), false);
+        assert.match(result.stderr, /check: FAILED/);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });

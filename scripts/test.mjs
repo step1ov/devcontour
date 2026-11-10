@@ -17,8 +17,13 @@ import { slowFile, slowFirst, slowPatterns } from './test-tiers.mjs';
 //                merge base with --base (default master); needs `--import tsx`
 //   --depth N    with --affected: only files within N import hops (not fail safe)
 //   --list       print the selected files instead of running them
-// Keep process isolation and the existing limit of four simultaneous test files.
+// Keep process isolation. Four test files run at a time;
+// DEVCONTOUR_TEST_CONCURRENCY overrides it (check lowers it by one while the
+// browser suite runs beside this one).
 const directory = new URL('../tests/', import.meta.url);
+const concurrency = Number(process.env.DEVCONTOUR_TEST_CONCURRENCY) || 4;
+if (!(Number.isInteger(concurrency) && concurrency >= 1))
+  throw new Error('DEVCONTOUR_TEST_CONCURRENCY must be a positive integer');
 // Предел времени на один тест; переменная — для проверки самого раннера.
 const testTimeoutMs = Number(process.env.DEVCONTOUR_TEST_TIMEOUT_MS) || 15 * 60_000;
 const rank = (name) => {
@@ -150,7 +155,7 @@ if (options.list) {
   if (ready) {
     const results = run({
       files,
-      concurrency: 4,
+      concurrency,
       // Зависший тест не держит прогон часами: предел времени на тест падает
       // с именем теста (у `run()` параметр `timeout` до дочерних процессов не
       // доходит — нужен флаг). Самый долгий тест полного прогона под
