@@ -1,8 +1,10 @@
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { WorkflowJob } from '../src/core/lead-workflow.ts';
 import { DomainError } from '../src/core/model.ts';
-import { jointFixture, sleep, tickFor } from './joint-fixture.ts';
+import { jointDemos, jointFixture, sleep, tickFor } from './joint-fixture.ts';
+
+after(() => jointDemos.close());
 
 test('Совместная проверка ChangeSet переживает такт и потерю владения заданием ведущего', async () => {
   // Проверка дольше срока владения заданием. Продление владения однажды

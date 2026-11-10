@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, writeFile } from 'node:fs/promises';
@@ -6,7 +6,9 @@ import { delimiter, join } from 'node:path';
 import { git } from '../src/runner/process.ts';
 import { requirementSnapshot } from '../src/runner/requirements.ts';
 import { WorkspaceRunner } from '../src/runner/workspace.ts';
-import { jointFixture } from './joint-fixture.ts';
+import { jointDemos, jointFixture } from './joint-fixture.ts';
+
+after(() => jointDemos.close());
 
 type Fixture = Awaited<ReturnType<typeof jointFixture>>;
 

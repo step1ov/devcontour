@@ -1,9 +1,11 @@
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { command } from '../src/runner/process.ts';
 import { WorkspaceRunner } from '../src/runner/workspace.ts';
 import { agentOperations } from '../src/application/agent.ts';
-import { jointFixture } from './joint-fixture.ts';
+import { jointDemos, jointFixture } from './joint-fixture.ts';
+
+after(() => jointDemos.close());
 
 type Fixture = Awaited<ReturnType<typeof jointFixture>>;
 

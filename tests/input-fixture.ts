@@ -2,7 +2,8 @@
 // demo-вопросом и управляемый reviewer ответа. Модели не вызываются.
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { demoPool, testDemo } from './demo-pool.ts';
+import { demoPool } from './demo-pool.ts';
+import { completedDemo } from './large-history.ts';
 import { loadConfig } from '../src/runner/config.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 import { DevContour } from '../src/core/service.ts';
@@ -11,8 +12,12 @@ import { repositories } from '../src/core/repositories.ts';
 import { DEMO_ASK, adapters, type AgentAdapter } from '../src/runner/adapters.ts';
 import { InputService } from '../src/application/input.ts';
 
-/** Пул demo-workspace; файл теста закрывает его в `after`. */
-export const inputDemos = demoPool(testDemo);
+/**
+ * Пул demo-workspace; файл теста закрывает его в `after`. Учебная доска
+ * каталога выполнена один раз при подготовке копии: тесты вопросов проверяют
+ * только свои задачи, и без этого каждый `drain` заново выполнял бы её задачи.
+ */
+export const inputDemos = demoPool(completedDemo);
 
 export async function inputFixture(
   runtimes: Record<string, AgentAdapter> = adapters,

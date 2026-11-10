@@ -1,10 +1,8 @@
 import { BASE_HELD_DETAIL } from '../src/runner/base-check.ts';
 import { executionOf } from '../src/harness/execution.ts';
-import { test } from 'node:test';
-import { testDemo } from './demo-pool.ts';
+import { after, test } from 'node:test';
+import { demoPool, testDemo } from './demo-pool.ts';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { complete, config, fixture, input, MERGED } from './helpers.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
@@ -22,6 +20,10 @@ import { writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { checkBase } from '../src/runner/base-check.ts';
 import { baseUpdateOperation } from '../src/runner/base-update.ts';
+
+// Копии одного учебного workspace вместо новой сборки демо в каждом тесте.
+const demos = demoPool(testDemo);
+after(() => demos.close());
 
 test('Workflow enqueue is idempotent, expired owners are fenced and changed inputs become stale', () => {
   const f = fixture();
@@ -179,8 +181,8 @@ test('Removed workflow inputs become stale without starving unrelated jobs', asy
 });
 
 test('A real Git board resumes after process replacement without duplicating review or acceptance', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'devcontour-lead-'));
-  await testDemo(root);
+  const seed = await demos.acquire();
+  const root = seed.root;
   const config = loadConfig(join(root, 'config.json'));
   let store = new Store(join(root, 'state.sqlite'));
   let h = new DevContour(store, config),
@@ -265,14 +267,14 @@ test('A real Git board resumes after process replacement without duplicating rev
     await lead.stop();
     await scheduler?.stop();
     store.close();
-    await rm(root, { recursive: true, force: true });
+    seed.release();
   }
 });
 
 /** Демо-workspace в режиме агента с gate базы: проходит, пока base.txt входит в `accepted`. */
 async function baseCheckFixture() {
-  const root = await mkdtemp(join(tmpdir(), 'devcontour-base-check-'));
-  await testDemo(root);
+  const seed = await demos.acquire();
+  const root = seed.root;
   const config = loadConfig(join(root, 'config.json'));
   const gate = (accepted: string[]) => [
     process.execPath,
@@ -312,7 +314,7 @@ async function baseCheckFixture() {
   const cleanup = async () => {
     await lead.stop();
     store.close();
-    await rm(root, { recursive: true, force: true });
+    seed.release();
   };
   return { root, config, store, h, lead, target, gate, commit, events, detail, cleanup };
 }
@@ -942,8 +944,8 @@ test('Повтор и возврат в черновик снимают актё
 });
 
 test('Реальный Git: задание доски с задачей, отменённой ведущим, принимает доску без неё', async () => {
-  const root = await mkdtemp(join(tmpdir(), 'devcontour-lead-cancel-'));
-  await testDemo(root);
+  const seed = await demos.acquire();
+  const root = seed.root;
   const config = loadConfig(join(root, 'config.json'));
   const store = new Store(join(root, 'state.sqlite'));
   const h = new DevContour(store, config);
@@ -977,7 +979,7 @@ test('Реальный Git: задание доски с задачей, отм�
     await lead.stop();
     await scheduler?.stop();
     store.close();
-    await rm(root, { recursive: true, force: true });
+    seed.release();
   }
 });
 
