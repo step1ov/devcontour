@@ -474,7 +474,7 @@ export class LeadRunner {
       return true;
     if (job.stage === 1)
       try {
-        return await this.jointStage(c, s, flight);
+        return await this.jointStage(c, s, flight, guard);
       } catch (error) {
         // Стадия упала (любая причина): следующая попытка задания начинает
         // ожидания начала заново, с паузами.
@@ -499,11 +499,24 @@ export class LeadRunner {
    * проверки, ожидание после отказа начала и начало новой проверки.
    */
   private async jointStage(
-    c: ChangeSet,
-    s: DevContourState,
+    before: ChangeSet,
+    read: DevContourState,
     flight: JointFlight | undefined,
+    guard: () => void,
   ): Promise<boolean> {
-    await assertTasksRequirements(this.h, changeSnapshot(s, c).tasks);
+    await assertTasksRequirements(this.h, changeSnapshot(read, before).tasks);
+    // Чтение требований идёт секунды, и состояние за это время меняется:
+    // оператор начинает проверку вручную, становится активной попытка.
+    // Дальше стадия решает по свежему состоянию, иначе начала бы вторую
+    // проверку поверх идущей.
+    guard();
+    const s = this.h.store.read();
+    const c = s.changeSets.find((x) => x.id === before.id);
+    if (!c) throw new DomainError('ChangeSet не найден: ' + before.id);
+    if (c.acceptance) {
+      this.startWaits.delete(c.id);
+      return false;
+    }
     // Закончившаяся проверка цикла — итог стадии: отказ — провал стадии,
     // как прежде; успех — дальше, к приёмке, которая сама проверит
     // актуальность.

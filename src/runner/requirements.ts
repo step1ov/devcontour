@@ -129,9 +129,9 @@ export function assertRequirements(
  */
 export async function assertTasksRequirements(h: DevContour, tasks: readonly Task[]) {
   const snapshots = new Map<string, Promise<RequirementSnapshot>>();
-  const stale: string[] = [];
   for (const task of tasks) {
     if (!task.requirements?.length) continue;
+    const stale: string[] = [];
     const cwd = repository(h.config, task.repositoryId).path;
     for (const link of task.requirements) {
       const key = JSON.stringify([cwd, link.source]);
