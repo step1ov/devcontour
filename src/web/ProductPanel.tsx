@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { FeatureStatus, ProductView } from '../core/product-map.ts';
-import { Alert, AlertTitle } from '@/ui/alert.tsx';
+import { Alert } from '@/ui/alert.tsx';
 import { Button } from '@/ui/button.tsx';
 import { cn } from '@/lib/utils.ts';
 
@@ -147,16 +147,16 @@ export function ProductPanel({ onRepository }: { onRepository: (id: string) => v
       )}
       {view.acceptanceOverridden && (
         <Alert variant="warning" role="status">
-          <AlertTitle>Релиз не принят по текущему правилу</AlertTitle>
+          <p className="m-0 font-medium">Релиз не принят по текущему правилу</p>
           <p className="m-0">{view.acceptanceOverridden}</p>
         </Alert>
       )}
       {(view.deferredScenarios ?? []).length > 0 && (
         <Alert variant="warning" role="status">
-          <AlertTitle>
+          <p className="m-0 font-medium">
             Отложено решением пользователя ({view.deferredScenarios.length}): эти сценарии релиза не
             проверены и в релиз не входят
-          </AlertTitle>
+          </p>
           <ul className="mt-2 grid gap-1">
             {view.deferredScenarios.map((s) => (
               <li key={s.featureId + '\u0000' + s.gate + '\u0000' + s.scenario}>
