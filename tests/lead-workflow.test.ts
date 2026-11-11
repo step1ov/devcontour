@@ -16,7 +16,7 @@ import { Scheduler } from '../src/runner/scheduler.ts';
 import { taskProgress } from '../src/application/context.ts';
 import { panelSummary, panelTask, type PanelSummary } from '../src/application/panel.ts';
 import { git } from '../src/runner/process.ts';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, symlink, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { checkBase } from '../src/runner/base-check.ts';
 import { baseUpdateOperation } from '../src/runner/base-update.ts';
@@ -1171,7 +1171,11 @@ test('Доказательство ревью документа контрак�
     await held(doc, 'рабочий файл вместо blob');
     await git(config.repository, 'checkout', '--', doc);
 
-    // Одобрение без ревьюера, без решения ревью или ревью тем же runtime.
+    // Одобрение без ревьюера, без решения ревью или без автора; ревью тем же
+    // runtime — при правиле ревью контрактов, которое этого ревьюера автору не
+    // выбирает (явный ревьюер codex без vendor — different-vendor).
+    const review = h.config.review;
+    h.config.review = { contract: { reviewer: { runtime: 'codex' } } };
     const partial = [
       { actor: 'agent' as const, authorRuntime: 'codex' as const, artifact: join(root, 'x') },
       {
@@ -1189,6 +1193,7 @@ test('Доказательство ревью документа контрак�
       await commit(i % 2 ? 'ok' : 'ok 2', { [doc]: text });
       await held(doc, 'неполное одобрение ' + JSON.stringify(approval));
     }
+    h.config.review = review;
 
     // Документ контракта и одновременно файл приёмки (protectedPaths демо).
     const acceptance = 'process.exit(0);\n';
@@ -1235,6 +1240,209 @@ test('Доказательство ревью документа контрак�
     assert.ok(waiting(), 'ожидание осталось');
     assert.equal(lifts(), before, 'снятия по устаревшему доказательству нет');
     await held(doc, 'новая редакция за время gates');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('Ревью документа тем же runtime снимает перенос, только пока правило review.contract само выбирает этому автору ревьюера того же вендора', async () => {
+  const f = await baseCheckFixture();
+  const { root, config, store, h, commit, events, detail } = f;
+  const roots = { data: root, state: root };
+  const doc = 'docs/contracts/api.md';
+  const waiting = () => store.read().paused && store.read().pauseReason === 'base-check';
+  const sameRuntime = (id: string) => ({
+    ...reviewed(root, id),
+    authorRuntime: 'claude' as const,
+    reviewerRuntime: 'claude' as const,
+  });
+  /** Документ одобрен claude/claude и перенесён ровно в этой редакции. */
+  const move = async (text: string, base: string) => {
+    h.contract('API', text, sameRuntime('r-' + base), undefined, doc);
+    h.holdForBaseUpdate();
+    await commit(base, { [doc]: text });
+  };
+  try {
+    h.pause(false);
+    await mkdir(join(config.repository, 'docs', 'contracts'), { recursive: true });
+    // Правило по умолчанию (явный ревьюер claude без vendor — different-vendor):
+    // ревью тем же runtime этим правилом не выбирается — человек.
+    h.config.review = { contract: { reviewer: { runtime: 'claude' } } };
+    await move('# API\n\nSame runtime, default rule.\n', 'ok');
+    assert.equal(await checkBase(h, roots, () => {}), false);
+    assert.ok(waiting());
+    assert.match(detail(), /main:docs\/contracts\/api\.md/);
+    h.pause(false);
+
+    // Тот же вендор разрешён, но правило выбирает другого ревьюера (codex):
+    // записанный ревьюер claude ему не соответствует — человек.
+    h.config.review = {
+      contract: { reviewer: { runtime: 'codex' }, vendor: 'same-vendor-allowed' },
+    };
+    await move('# API\n\nSame runtime, other configured reviewer.\n', 'ok 2');
+    assert.equal(await checkBase(h, roots, () => {}), false);
+    assert.ok(waiting());
+    h.pause(false);
+
+    // Правило выбирает автору claude ревьюера claude того же вендора: снято,
+    // с доказательством.
+    h.config.review = {
+      contract: { reviewer: { runtime: 'claude' }, vendor: 'same-vendor-allowed' },
+    };
+    await move('# API\n\nSame runtime, same-vendor rule.\n', 'ok 3');
+    assert.equal(await checkBase(h, roots, () => {}), true, detail());
+    const lifted = events('base.checked').at(-1)!.data as {
+      liftedBy?: string;
+      reviewedContracts?: { authorRuntime: string; reviewerRuntime: string }[];
+    };
+    assert.equal(lifted.liftedBy, 'agent');
+    assert.equal(lifted.reviewedContracts?.[0].reviewerRuntime, 'claude');
+    assert.equal(lifted.reviewedContracts?.[0].authorRuntime, 'claude');
+
+    // Возврат к different-vendor: прежнее одобрение тем же runtime больше не
+    // снимает перенос (правило читается в момент снятия).
+    h.config.review = {
+      contract: { reviewer: { runtime: 'claude' }, vendor: 'different-vendor' },
+    };
+    await move('# API\n\nSame runtime after the rule changed back.\n', 'ok 4');
+    assert.equal(await checkBase(h, roots, () => {}), false);
+    assert.ok(waiting());
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('Доказательство ревью: порядок реестра, а не время одобрения; задача прежней редакции, возвращённая за время gates; ссылка вместо файла', async () => {
+  const f = await baseCheckFixture();
+  const { root, config, store, h, target, commit, events, detail } = f;
+  const roots = { data: root, state: root };
+  const doc = 'docs/contracts/api.md';
+  const waiting = () => store.read().paused && store.read().pauseReason === 'base-check';
+  const lifts = () =>
+    events('base.checked').filter((e) => (e.data as { liftedBy?: string }).liftedBy).length;
+  try {
+    h.pause(false);
+    await mkdir(join(config.repository, 'docs', 'contracts'), { recursive: true });
+    // Последняя по реестру редакция записана с более ранним временем (Git
+    // sync приносит чужие отметки): последней остаётся она, а не более
+    // поздняя по времени.
+    const recent = '# API\n\nRecent by time.\n';
+    const last = '# API\n\nLast in the registry.\n';
+    h.contract('API', recent, reviewed(root, 'r-recent'), undefined, doc);
+    const registered = h.contract('API', last, reviewed(root, 'r-last'), undefined, doc);
+    store.change('fixture.approved-at', (s) => {
+      s.contracts = s.contracts.map((c) =>
+        c.id === registered.id ? { ...c, approvedAt: '2000-01-01T00:00:00.000Z' } : c,
+      );
+    });
+    h.holdForBaseUpdate();
+    await commit('ok', { [doc]: recent });
+    assert.equal(await checkBase(h, roots, () => {}), false, 'не последняя по реестру');
+    assert.ok(waiting());
+    h.pause(false);
+
+    // Задача, закреплённая за прежней редакцией, возвращена в работу за время
+    // gates: транзакция решения сверяет и это правило.
+    const old = '# API\n\nOld redaction.\n';
+    const current = '# API\n\nCurrent redaction.\n';
+    const earlier = h.contract('API', old, reviewed(root, 'r-old'), undefined, doc);
+    const b = h.createBoard('Pinned board', '', 'main');
+    const pinned = h.addTask(b.id, { ...input(), contracts: [earlier.id] });
+    store.change('fixture.cancel', (s) => {
+      s.tasks = s.tasks.map((t) => (t.id === pinned.id ? { ...t, status: 'cancelled' } : t));
+    });
+    h.contract('API', current, reviewed(root, 'r-current'), undefined, doc);
+    h.holdForBaseUpdate();
+    await commit('ok 2', { [doc]: current });
+    const passed = events('base.check.passed').length;
+    let reopened = false;
+    const late = () => {
+      if (!reopened && events('base.check.passed').length === passed + 1) {
+        reopened = true;
+        store.change('fixture.reopen', (s) => {
+          s.tasks = s.tasks.map((t) => (t.id === pinned.id ? { ...t, status: 'draft' } : t));
+        });
+      }
+    };
+    const before = lifts();
+    assert.equal(await checkBase(h, roots, late), false);
+    assert.ok(reopened);
+    assert.ok(waiting(), 'ожидание осталось');
+    assert.equal(lifts(), before);
+    assert.equal(await checkBase(h, roots, () => {}), false);
+    assert.match(detail(), /main:docs\/contracts\/api\.md/);
+    h.pause(false);
+    store.change('fixture.drop', (s) => {
+      s.tasks = s.tasks.filter((t) => t.id !== pinned.id);
+    });
+
+    // Ссылка, текст которой равен одобренному тексту: blob тот же, но это не
+    // обычный файл — человек.
+    const link = 'reviewed-target.md';
+    h.contract('API', link, reviewed(root, 'r-link'), undefined, doc);
+    h.holdForBaseUpdate();
+    await git(config.repository, 'rm', '-q', '--', doc);
+    await symlink(link, join(config.repository, doc));
+    await writeFile(join(config.repository, 'base.txt'), 'ok 3');
+    await git(config.repository, 'add', '--', doc, 'base.txt');
+    await git(config.repository, 'commit', '-qm', 'Link instead of the document');
+    const from = await git(config.repository, 'rev-parse', target);
+    const linked = await git(config.repository, 'rev-parse', 'HEAD');
+    await git(config.repository, 'update-ref', target, linked);
+    h.baseUpdated([{ repositoryId: 'main', from, to: linked }]);
+    assert.equal(
+      await git(config.repository, 'rev-parse', `${linked}:${doc}`),
+      execFileSync('git', ['-C', config.repository, 'hash-object', '--stdin'], {
+        input: link,
+        encoding: 'utf8',
+      }).trim(),
+      'blob ссылки равен blob одобренного текста',
+    );
+    assert.equal(await checkBase(h, roots, () => {}), false, 'ссылка не снята');
+    assert.ok(waiting());
+    assert.match(detail(), /main:docs\/contracts\/api\.md/);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('Удержанный перенос на стадии 1 отмечен в истории задания, и переход на стадию 2 то же удержание не отмечает снова', async () => {
+  const f = await baseCheckFixture();
+  const { store, h, lead } = f;
+  try {
+    store.change('fixture.reset', (s) => {
+      s.tasks = [];
+      s.boards = [];
+      s.runs = [];
+    });
+    const b = h.createBoard('Stage one hold', '', 'main');
+    h.addTask(b.id, input());
+    const flow = new LeadWorkflow(h);
+    const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    await lead.tick(); // стадия 0: согласование (demo)
+    assert.equal(flow.get(job.key, job.owner).stage, 1);
+    store.change('fixture.held-base', (s) => {
+      s.paused = true;
+      s.pauseReason = 'base-check';
+      s.waits = [
+        {
+          kind: 'base-check',
+          detail: `${BASE_HELD_DETAIL} (main:verify.mjs): gates этой базы его не подтверждают.`,
+          at: new Date().toISOString(),
+        },
+      ];
+    });
+    const notes = () =>
+      flow
+        .get(job.key, job.owner)
+        .history.filter((x) => x.event === 'waiting:base-held')
+        .map((x) => x.stage);
+    await lead.tick(); // стадия 1
+    assert.deepEqual(notes(), [1]);
+    assert.equal(flow.get(job.key, job.owner).stage, 2);
+    await lead.tick(); // стадия 2
+    await lead.tick();
+    assert.deepEqual(notes(), [1], 'то же удержание после смены стадии не отмечено снова');
   } finally {
     await f.cleanup();
   }
