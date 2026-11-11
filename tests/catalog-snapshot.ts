@@ -118,5 +118,9 @@
 // Намеренное изменение: тот же шаг называет input.actor operator и команду
 // пользователя devcontour queue --pause вместо панели; прочие операции
 // байтово прежние.
-export const CATALOG_DIGEST = 'd265b4513324b534a73d556232bef10680a5c08052e42973129b7b2abd5a2130';
+// Намеренное изменение: описания intent_render, intent_report и product_view
+// называют сценарии проверок фичи, их доказательство задачей истории самой
+// фичи и отсрочку deferred решением пользователя; прочие операции байтово
+// прежние.
+export const CATALOG_DIGEST = '977ad1182db1f6755edfe7cdba2d0500f06d5167568584dbdbfee6b387f7d250';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';
