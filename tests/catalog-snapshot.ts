@@ -122,5 +122,11 @@
 // называют сценарии проверок фичи, их доказательство задачей истории самой
 // фичи и отсрочку deferred решением пользователя; прочие операции байтово
 // прежние.
-export const CATALOG_DIGEST = '977ad1182db1f6755edfe7cdba2d0500f06d5167568584dbdbfee6b387f7d250';
+// Намеренное изменение: новая операция только чтения requirements_testcases
+// (ID testcases последней записи gate, как их называет testId) после
+// requirements_report; вход intent_render принимает вычисляемые поля своего
+// вывода (version, sourceSha, digest требований, intentDigest компонентов);
+// описания intent_render, intent_report и product_view называют это и
+// unconfirmedScenarios; прочие операции байтово прежние.
+export const CATALOG_DIGEST = 'b778fb8193b39a29368c0ec36cb9a1c0a7ef5edc333403ea2f313d7773283b12';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

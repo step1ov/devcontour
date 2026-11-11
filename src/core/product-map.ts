@@ -55,6 +55,75 @@ export interface DeferredScenario {
   scenario: string;
   reason: string;
 }
+/**
+ * Сценарий релиза так, как его объявляет INTENT: фича, gate, текст и
+ * записанная причина отложить. Снимок закрепляется в доказательстве
+ * проверки релиза и служит образцом объёма для следующей приёмки.
+ */
+export interface ReleaseCheck {
+  featureId: string;
+  gate: string;
+  scenario: string;
+  deferred?: string;
+}
+/** Сценарии релиза из карты в порядке фич и проверок. */
+export const releaseChecks = (features: FeatureScope[] | undefined): ReleaseCheck[] =>
+  (features ?? []).flatMap((f) =>
+    f.checks.map((c) => ({
+      featureId: f.featureId,
+      gate: c.gate,
+      scenario: c.scenario,
+      ...(c.deferred ? { deferred: c.deferred } : {}),
+    })),
+  );
+/**
+ * Сценарий последней приёмки релиза, которого в текущей карте нет:
+ * `changed` — у той же фичи появился другой сценарий (переформулировка),
+ * `removed` — замены нет. Такое изменение сужает объём релиза так же, как
+ * `deferred`, поэтому приёмку подтверждает пользователь.
+ */
+export interface UnconfirmedScenario {
+  featureId: string;
+  gate: string;
+  /** Текст сценария в принятой карте. */
+  scenario: string;
+  change: 'changed' | 'removed';
+  /** Новые сценарии той же фичи, которых не было в принятой карте. */
+  current?: string[];
+}
+/** Образец объёма: последняя приёмка релиза. */
+export interface ScopeReference {
+  changeSetId: string;
+  verificationId: string;
+  acceptedAt: string;
+  /** false: карту той приёмки не найти, сверка объёма невозможна. */
+  found: boolean;
+}
+/**
+ * Сценарии образца, которых нет в текущей карте. Сравнение — по фиче и
+ * тексту без различий в пробелах; смена gate или причины отложить объём
+ * не сужает.
+ */
+export function scopeChanges(reference: ReleaseCheck[], current: ReleaseCheck[]) {
+  const key = (c: ReleaseCheck) => JSON.stringify([c.featureId, scenarioKey(c.scenario)]);
+  const before = new Set(reference.map(key)),
+    now = new Set(current.map(key));
+  return reference
+    .filter((r) => !now.has(key(r)))
+    .map((r): UnconfirmedScenario => {
+      const added = current
+        .filter((c) => c.featureId === r.featureId && !before.has(key(c)))
+        .map((c) => c.scenario);
+      return {
+        featureId: r.featureId,
+        gate: r.gate,
+        scenario: r.scenario,
+        ...(added.length
+          ? { change: 'changed' as const, current: added }
+          : { change: 'removed' as const }),
+      };
+    });
+}
 /** Ключ сценария фичи в отчётах и на панели: gate и текст сценария. */
 export const checkKey = (check: { gate: string; scenario: string }) =>
   JSON.stringify([check.gate, scenarioKey(check.scenario)]);
@@ -211,6 +280,11 @@ export interface ProductReleaseProof {
   acceptedHeads: Record<string, string>;
   sources: { repositoryId: string; files: string[]; digest: string }[];
   stateDigest: string;
+  /**
+   * Сценарии релиза в проверенной карте. Нет у проверок прежних версий:
+   * тогда карту находит история Git workspace по `intentDigest`.
+   */
+  scenarios?: ReleaseCheck[];
 }
 
 export type FeatureStatus =
@@ -251,6 +325,13 @@ export type ProductView =
       features: FeatureProgress[];
       /** Сценарии, отложенные записанным решением; ведущий не откладывает их сам. */
       deferredScenarios: DeferredScenario[];
+      /**
+       * Сценарии последней приёмки релиза, изменённые или удалённые в
+       * текущей карте: сужение объёма, которое подтверждает пользователь.
+       */
+      unconfirmedScenarios: UnconfirmedScenario[];
+      /** Последняя приёмка релиза — образец объёма; нет, если релиз ещё не принимали. */
+      scopeReference?: ScopeReference;
       /** Приёмка записана прежним правилом без доказанных сценариев. */
       acceptanceOverridden?: string;
     };

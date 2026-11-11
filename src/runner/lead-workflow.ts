@@ -492,7 +492,9 @@ export class LeadRunner {
       guard();
       // Результат приёмки, с отложенными решением пользователя сценариями
       // (`deferredScenarios`), пишется в журнал событием changeset.accepted;
-      // ведущий читает их там и в product-view.
+      // ведущий читает их там и в product-view. Если сценарии прошлой
+      // приёмки изменены или удалены, ответ — awaiting-operator: задание
+      // заканчивается, приёмку решает пользователь карточкой «Примите …».
       workspace.accept(c.id, { actor: 'agent', authorRuntime: job.authorRuntime });
     });
     return false;

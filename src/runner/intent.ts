@@ -20,10 +20,15 @@ import {
 } from '../core/workspace.ts';
 import {
   checkKey,
+  releaseChecks,
   scenarioKey,
+  scopeChanges,
   storyKey,
   type FeatureProgress,
+  type ReleaseCheck,
   type ReleaseScenario,
+  type ScopeReference,
+  type UnconfirmedScenario,
   type ProductReleaseProof,
   type ProductView,
 } from '../core/product-map.ts';
@@ -112,6 +117,15 @@ function git(root: string, ...args: string[]) {
     stdio: ['ignore', 'pipe', 'pipe'],
   }).trimEnd();
 }
+/**
+ * Сценарии релизов карты workspace по её digest, найденные в истории Git:
+ * так читается образец объёма для приёмки, записанной до того, как
+ * доказательство стало хранить сценарии. Содержимое по digest неизменно,
+ * поэтому найденное кэшируется на процесс; промах — до смены HEAD.
+ */
+const historyChecks = new Map<string, Record<string, ReleaseCheck[]>>();
+const historyMisses = new Set<string>();
+const historyDepth = 200;
 export class IntentService implements ProductReleaseGuard {
   constructor(readonly h: DevContour) {}
   private readCache?: Map<string, string>;
@@ -488,9 +502,12 @@ export class IntentService implements ProductReleaseGuard {
       deferredScenarios: deferredScenarios(coverage.scenarios),
       ...(product
         ? {
+            unconfirmedScenarios: product.unconfirmedScenarios,
+            ...(product.scopeReference ? { scopeReference: product.scopeReference } : {}),
             product,
             issues: [
               ...(product.acceptanceOverridden ? [product.acceptanceOverridden] : []),
+              ...scopeGaps(product.unconfirmedScenarios, product.scopeReference),
               ...scenarioGaps(coverage.scenarios),
               ...coverage.issues,
             ],
@@ -688,7 +705,94 @@ export class IntentService implements ProductReleaseGuard {
         };
       }),
       stateDigest: this.coverageStateDigest(coverage, selected),
+      scenarios: releaseChecks(coverage.release.features),
     };
+  }
+
+  /**
+   * Сверка объёма релиза с последней приёмкой: её сценарии, которых нет в
+   * текущей карте, сужают релиз без решения пользователя (F23). Образец —
+   * сценарии из доказательства принятой проверки, а у приёмки прежней
+   * версии — из карты с её digest в истории Git workspace. Релиз, который
+   * ещё не принимали, образца не имеет.
+   */
+  private scopeReview(release: WorkspaceIntent['releases'][number]): {
+    reference?: ScopeReference;
+    unconfirmed: UnconfirmedScenario[];
+  } {
+    const state = this.h.store.read();
+    const last = state.changeSets
+      .flatMap((c) => {
+        const v = c.acceptance
+          ? c.verifications.find((x) => x.id === c.acceptance!.verificationId)
+          : undefined;
+        return c.releaseId === release.id && v?.productRelease?.releaseId === release.id
+          ? [{ c, v, proof: v.productRelease, at: c.acceptance!.at }]
+          : [];
+      })
+      .toSorted((a, b) => a.at.localeCompare(b.at))
+      .at(-1);
+    if (!last) return { unconfirmed: [] };
+    const checks =
+      last.proof.scenarios ?? this.checksAt(last.proof.intentDigest)?.[release.id] ?? undefined;
+    return {
+      reference: {
+        changeSetId: last.c.id,
+        verificationId: last.v.id,
+        acceptedAt: last.at,
+        found: Boolean(checks),
+      },
+      unconfirmed: checks ? scopeChanges(checks, releaseChecks(release.features)) : [],
+    };
+  }
+
+  /** Сценарии релизов карты workspace с этим digest из истории Git (см. `historyChecks`). */
+  private checksAt(intentDigest: string) {
+    const root = this.root(),
+      key = JSON.stringify([root, intentDigest]);
+    const known = historyChecks.get(key);
+    if (known) return known;
+    let head: string;
+    try {
+      head = this.git(root, 'rev-parse', '--verify', 'HEAD^{commit}');
+    } catch {
+      return undefined;
+    }
+    if (historyMisses.has(key + head)) return undefined;
+    let shas: string[] = [];
+    try {
+      shas = this.git(
+        root,
+        'log',
+        '--format=%H',
+        '-n',
+        String(historyDepth),
+        head,
+        '--',
+        'INTENT.md',
+      )
+        .split('\n')
+        .filter(Boolean);
+    } catch {
+      /* истории нет — образец не найден */
+    }
+    for (const sha of shas) {
+      try {
+        const snapshot = this.read(undefined, sha);
+        if (snapshot.digest !== intentDigest || snapshot.document.kind !== 'workspace') continue;
+        const found = Object.fromEntries(
+          snapshot.document.releases.map((r) => [r.id, releaseChecks(r.features)]),
+        );
+        if (historyChecks.size > 50) historyChecks.clear();
+        historyChecks.set(key, found);
+        return found;
+      } catch {
+        /* версия карты не читается — ищем дальше */
+      }
+    }
+    if (historyMisses.size > 200) historyMisses.clear();
+    historyMisses.add(key + head);
+    return undefined;
   }
 
   private sourceDigest(repositoryId: string, files: string[], ref: string) {
@@ -815,7 +919,10 @@ export class IntentService implements ProductReleaseGuard {
           'Проверяемые SHA не содержат актуальные источники продуктового релиза',
         );
     }
-    return { deferredScenarios: deferredScenarios(coverage.scenarios) };
+    return {
+      deferredScenarios: deferredScenarios(coverage.scenarios),
+      unconfirmedScenarios: this.scopeReview(release).unconfirmed,
+    };
   }
 
   private mapGateIds(release: WorkspaceIntent['releases'][number]) {
@@ -910,11 +1017,14 @@ export class IntentService implements ProductReleaseGuard {
         }),
       };
     });
+    const scope = this.scopeReview(coverage.release);
     return {
       features,
       verification,
       releaseAccepted,
       deferredScenarios: deferredScenarios(coverage.scenarios),
+      unconfirmedScenarios: scope.unconfirmed,
+      ...(scope.reference ? { scopeReference: scope.reference } : {}),
       ...(overridden
         ? {
             acceptanceOverridden:
@@ -950,6 +1060,7 @@ export class IntentService implements ProductReleaseGuard {
     const progress = this.productProgress(doc, snapshot.digest, releaseId, coverage);
     const issues = [
       ...(progress.acceptanceOverridden ? [progress.acceptanceOverridden] : []),
+      ...scopeGaps(progress.unconfirmedScenarios, progress.scopeReference),
       ...scenarioGaps(coverage.scenarios),
       ...coverage.issues,
       ...coverage.components
@@ -1299,26 +1410,66 @@ const requirementScenarioLimit = requirementLink.shape.scenario.maxLength ?? 150
  * или явно записанная причина отложить его.
  */
 export function scenarioGaps(scenarios: ReleaseScenario[]) {
-  const shown = (s: ReleaseScenario) =>
-    s.scenario.length > scenarioShown ? s.scenario.slice(0, scenarioShown) + '…' : s.scenario;
-  return scenarios
-    .filter((s) => s.status === 'missing')
-    .map(
+  const missing = scenarios.filter((s) => s.status === 'missing');
+  if (!missing.length) return [];
+  // Одна строка подсказки и короткая строка на сценарий: длинная подсказка
+  // в каждой строке прятала, сколько сценариев на самом деле не доказано.
+  return [
+    'сценариев релиза без доказательства: ' +
+      missing.length +
+      ' — задаче истории фичи нужна связь requirements, чей scenario совпадает с текстом сценария слово в слово (различия только в пробелах), и testId testcase, который его проверяет; у выполненной задачи связь добавляют обычной корректировкой задачи, не переписывая историю. Отложить сценарий (deferred с причиной) решает пользователь: предложите и спросите, не откладывайте сами ради прохождения проверки',
+    ...missing.map(
       (s) =>
         'сценарий релиза ' +
         s.featureId +
         ' (gate ' +
         s.gate +
         ') без доказательства: «' +
-        shown(s) +
-        '» — задаче истории этой фичи нужна связь requirements, чей scenario совпадает с текстом сценария слово в слово (различия только в пробелах), и testId testcase, который его проверяет; у выполненной задачи связь добавляют обычной корректировкой задачи, не переписывая историю' +
+        shownScenario(s.scenario) +
+        '»' +
         (s.scenario.length > requirementScenarioLimit
-          ? '; текст длиннее ' +
+          ? ' — текст длиннее ' +
             requirementScenarioLimit +
             ' символов, которые вмещает связь, — сократите сценарий в INTENT'
-          : '') +
-        '. Отложить сценарий (deferred с причиной) решает пользователь: предложите и спросите, не откладывайте сами ради прохождения проверки',
-    );
+          : ''),
+    ),
+  ];
+}
+const shownScenario = (scenario: string) =>
+  scenario.length > scenarioShown ? scenario.slice(0, scenarioShown) + '…' : scenario;
+/**
+ * Сценарии последней приёмки, изменённые или удалённые в текущей карте:
+ * строка о том, кто решает, и короткая строка на сценарий.
+ */
+export function scopeGaps(unconfirmed: UnconfirmedScenario[], reference?: ScopeReference) {
+  if (reference && !reference.found)
+    return [
+      'карта последней приёмки релиза (' +
+        reference.changeSetId +
+        ') не найдена в истории Git workspace: изменение сценариев относительно неё не проверить — сверьте объём релиза с пользователем',
+    ];
+  if (!unconfirmed.length) return [];
+  return [
+    'сценарии релиза изменены или удалены после приёмки ' +
+      reference!.changeSetId +
+      ' без решения пользователя: ' +
+      unconfirmed.length +
+      ' — это сужает объём релиза, как deferred; приёмку подтверждает пользователь («Принять» во «Внимании» или в панели), ведущий не принимает такой релиз сам. Верните сценарий в INTENT, если изменение не согласовано',
+    ...unconfirmed.map(
+      (u) =>
+        'сценарий ' +
+        u.featureId +
+        ' (gate ' +
+        u.gate +
+        ') ' +
+        (u.change === 'changed'
+          ? 'изменён: «' +
+            shownScenario(u.scenario) +
+            '» → ' +
+            u.current!.map((c) => '«' + shownScenario(c) + '»').join(', ')
+          : 'удалён: «' + shownScenario(u.scenario) + '»'),
+    ),
+  ];
 }
 /** Отложенные сценарии — решение пользователя; отчёты и приёмка называют их отдельно. */
 export function deferredScenarios(scenarios: ReleaseScenario[]) {
