@@ -1,7 +1,8 @@
 import { execFileSync } from 'node:child_process';
 import { isAbsolute, relative } from 'node:path';
 import { contractRedactionsOf, latestRedaction, type DevContour } from '../core/service.ts';
-import { independentAgentApproval, type DevContourState } from '../core/model.ts';
+import type { Approval, Config, DevContourState } from '../core/model.ts';
+import { technicalReviewer } from '../harness/policy.ts';
 import { repository } from '../core/repositories.ts';
 import { assertArtifactsInBase, componentArtifacts } from './contract-artifacts.ts';
 import { git, hostGitArgs } from './process.ts';
@@ -118,22 +119,36 @@ export interface ReviewedContractDocument {
 }
 
 /**
+ * Одобрение контракта годится в доказательство для снятия переноса базы:
+ * агент, названы runtime автора и ревьюера, есть сохранённое решение ревью.
+ * Ревьюер — другой runtime, либо тот же, но только если текущее правило ревью
+ * контрактов (`review.contract`) само выбирает для этого автора ревьюера того
+ * же вендора и именно этого runtime (`same-vendor-allowed`). Правило читается
+ * в момент снятия: возврат к `different-vendor` прекращает такие снятия.
+ * Правило утверждения задач при Git sync (sync-state) — отдельное.
+ */
+export function liftableContractApproval(config: Config, a: Approval | undefined) {
+  if (a?.actor !== 'agent' || !a.authorRuntime || !a.reviewerRuntime || !a.artifact) return false;
+  if (a.authorRuntime !== a.reviewerRuntime) return true;
+  const chosen = technicalReviewer(config, 'contract', a.authorRuntime);
+  return chosen?.sameVendor === true && chosen.runtime === a.reviewerRuntime;
+}
+
+/**
  * Причина, по которой последняя редакция документа не годится в
  * доказательство, — по одному состоянию, без Git. Её же сверяет транзакция
  * решения: за время gates могли зарегистрировать новую редакцию или вернуть
  * в работу задачу, закреплённую за прежней.
  */
 export function reviewedRedaction(
+  config: Config,
   s: Readonly<DevContourState>,
   repositoryId: string,
   path: string,
 ) {
   const records = contractRedactionsOf(s.contracts, path, repositoryId);
   const latest = latestRedaction(s.contracts, path, repositoryId);
-  const approval = latest?.approval;
-  // Независимость — то же правило, что у утверждения задачи (Git sync), и
-  // сохранённое решение ревью.
-  if (!latest || !independentAgentApproval(approval) || !approval?.artifact) return undefined;
+  if (!latest || !liftableContractApproval(config, latest.approval)) return undefined;
   const open = s.tasks.filter((t) => !['done', 'cancelled'].includes(t.status));
   if (records.some((c) => c.id !== latest.id && open.some((t) => t.contracts.includes(c.id))))
     return undefined;
@@ -145,8 +160,8 @@ export function reviewedRedaction(
  * редакции, что одобрило независимое ревью (`review-contract` или
  * contract-change в режиме агента). Доказательство — последняя
  * зарегистрированная редакция этого документа (`latestRedaction`, тот же
- * порядок, что у `supersededBy`): независимое согласование агента (runtime
- * автора и ревьюера названы и различны) с сохранённым решением; на `to` по
+ * порядок, что у `supersededBy`) с одобрением, годным для снятия
+ * (`liftableContractApproval`); на `to` по
  * этому пути лежит обычный файл (100644 или 100755), и его blob равен blob
  * текста редакции (`git hash-object` точных байтов). Нет доказательства —
  * `undefined`, и перенос по-прежнему подтверждает человек: другая редакция
@@ -163,7 +178,7 @@ export async function reviewedContractDocument(
   to: string,
 ): Promise<ReviewedContractDocument | undefined> {
   const repo = repository(h.config, repositoryId);
-  const latest = reviewedRedaction(s, repositoryId, path);
+  const latest = reviewedRedaction(h.config, s, repositoryId, path);
   const approval = latest?.approval;
   if (!latest || !approval?.artifact || !approval.authorRuntime || !approval.reviewerRuntime)
     return undefined;

@@ -279,7 +279,11 @@ export async function checkBase(
     // редакция документа или возвращённая в работу задача, закреплённая за
     // прежней, за время gates — проверить на следующем такте.
     const now = h.store.read();
-    if (reviewed.some((r) => reviewedRedaction(now, r.repositoryId, r.path)?.id !== r.contractId))
+    if (
+      reviewed.some(
+        (r) => reviewedRedaction(h.config, now, r.repositoryId, r.path)?.id !== r.contractId,
+      )
+    )
       return 'moved';
     for (const b of bases) {
       const repo = repository(h.config, b.repositoryId);
