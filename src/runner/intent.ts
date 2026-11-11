@@ -20,7 +20,9 @@ import {
 } from '../core/workspace.ts';
 import {
   checkKey,
+  lastAcceptedRelease,
   releaseChecks,
+  scopeChangeText,
   scenarioKey,
   scopeChanges,
   storyKey,
@@ -720,25 +722,14 @@ export class IntentService implements ProductReleaseGuard {
     reference?: ScopeReference;
     unconfirmed: UnconfirmedScenario[];
   } {
-    const state = this.h.store.read();
-    const last = state.changeSets
-      .flatMap((c) => {
-        const v = c.acceptance
-          ? c.verifications.find((x) => x.id === c.acceptance!.verificationId)
-          : undefined;
-        return c.releaseId === release.id && v?.productRelease?.releaseId === release.id
-          ? [{ c, v, proof: v.productRelease, at: c.acceptance!.at }]
-          : [];
-      })
-      .toSorted((a, b) => a.at.localeCompare(b.at))
-      .at(-1);
+    const last = lastAcceptedRelease(this.h.store.read(), release.id);
     if (!last) return { unconfirmed: [] };
     const checks =
       last.proof.scenarios ?? this.checksAt(last.proof.intentDigest)?.[release.id] ?? undefined;
     return {
       reference: {
-        changeSetId: last.c.id,
-        verificationId: last.v.id,
+        changeSetId: last.changeSet.id,
+        verificationId: last.verification.id,
         acceptedAt: last.at,
         found: Boolean(checks),
       },
@@ -919,9 +910,13 @@ export class IntentService implements ProductReleaseGuard {
           'Проверяемые SHA не содержат актуальные источники продуктового релиза',
         );
     }
+    const scope = this.scopeReview(release);
     return {
       deferredScenarios: deferredScenarios(coverage.scenarios),
-      unconfirmedScenarios: this.scopeReview(release).unconfirmed,
+      unconfirmedScenarios: scope.unconfirmed,
+      // Карту прошлой приёмки не найти — сверить объём нельзя: приёмку, как и
+      // при изменённых сценариях, подтверждает пользователь.
+      scopeUnverifiable: Boolean(scope.reference && !scope.reference.found),
     };
   }
 
@@ -1446,28 +1441,17 @@ export function scopeGaps(unconfirmed: UnconfirmedScenario[], reference?: ScopeR
     return [
       'карта последней приёмки релиза (' +
         reference.changeSetId +
-        ') не найдена в истории Git workspace: изменение сценариев относительно неё не проверить — сверьте объём релиза с пользователем',
+        ') не найдена в истории Git workspace: изменение сценариев относительно неё не проверить, поэтому приёмку подтверждает пользователь («Принять» во «Внимании»); ведущий не принимает такой релиз сам — сверьте объём релиза с пользователем',
     ];
   if (!unconfirmed.length) return [];
   return [
-    'сценарии релиза изменены или удалены после приёмки ' +
+    'сценарии релиза изменены, удалены или отложены после приёмки ' +
       reference!.changeSetId +
       ' без решения пользователя: ' +
       unconfirmed.length +
       ' — это сужает объём релиза, как deferred; приёмку подтверждает пользователь («Принять» во «Внимании» или в панели), ведущий не принимает такой релиз сам. Верните сценарий в INTENT, если изменение не согласовано',
     ...unconfirmed.map(
-      (u) =>
-        'сценарий ' +
-        u.featureId +
-        ' (gate ' +
-        u.gate +
-        ') ' +
-        (u.change === 'changed'
-          ? 'изменён: «' +
-            shownScenario(u.scenario) +
-            '» → ' +
-            u.current!.map((c) => '«' + shownScenario(c) + '»').join(', ')
-          : 'удалён: «' + shownScenario(u.scenario) + '»'),
+      (u) => 'сценарий ' + u.featureId + ' (gate ' + u.gate + ') ' + scopeChangeText(u),
     ),
   ];
 }

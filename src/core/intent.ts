@@ -70,7 +70,7 @@ const workspace = z.strictObject({
 // не вычищая их вручную. Схемы документа не меняются — порядок их ключей
 // входит в digest закреплённой карты.
 const computed = <T extends z.ZodType>(schema: T) =>
-  schema.optional().describe('Вычисляется intent_render; на входе игнорируется и пересчитывается');
+  schema.optional().describe('Computed by intent_render; ignored on input and recomputed');
 const referenceInput = reference.extend({ digest: computed(hash) });
 const componentInput = component.extend({
   stories: z

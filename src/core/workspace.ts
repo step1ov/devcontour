@@ -78,7 +78,12 @@ export interface ProductReleaseGuard {
     proof: ProductReleaseProof,
     snapshot: ReturnType<typeof changeSnapshot>,
     manifest?: Verification['manifest'],
-  ): { deferredScenarios: DeferredScenario[]; unconfirmedScenarios?: UnconfirmedScenario[] };
+  ): {
+    deferredScenarios: DeferredScenario[];
+    unconfirmedScenarios?: UnconfirmedScenario[];
+    /** Карту прошлой приёмки не найти: объём не сверить. */
+    scopeUnverifiable?: boolean;
+  };
 }
 
 /**
@@ -336,6 +341,7 @@ export class Workspace {
       changeSnapshot(s, c).tasks.forEach((t) => assertTaskPreparation(s, t));
       let deferred: DeferredScenario[] = [];
       let unconfirmed: UnconfirmedScenario[] = [];
+      let unverifiable = false;
       const { verification: v, current } = currentJoint(this.h, c);
       if (!v || !current || c.releaseId !== v.productRelease?.releaseId)
         throw new DomainError('Нет актуальной успешной проверки всего ChangeSet');
@@ -345,6 +351,7 @@ export class Workspace {
         const checked = this.guard().validate(v.productRelease, changeSnapshot(s, c), v.manifest);
         deferred = checked.deferredScenarios;
         unconfirmed = checked.unconfirmedScenarios ?? [];
+        unverifiable = checked.scopeUnverifiable ?? false;
       }
       // Отложенные сценарии не проверены: приёмка называет их, а не молчит.
       const notes = deferred.length ? { deferredScenarios: deferred } : {};
@@ -357,13 +364,16 @@ export class Workspace {
       // релиз без решения пользователя: такую приёмку подтверждает оператор и
       // в режиме agent. Его приёмка и есть решение — она становится образцом
       // объёма следующей сверки.
-      if (unconfirmed.length && approval.actor !== 'operator')
+      // Карту прошлой приёмки не найти — объём не сверить: так же закрыто.
+      if ((unconfirmed.length || unverifiable) && approval.actor !== 'operator')
         return {
           status: 'awaiting-operator',
           changeSetId: id,
-          unconfirmedScenarios: unconfirmed,
-          reason:
-            'Сценарии релиза изменены или удалены после прошлой приёмки: объём релиза подтверждает пользователь приёмкой ChangeSet («Принять» во «Внимании»)',
+          ...(unconfirmed.length ? { unconfirmedScenarios: unconfirmed } : {}),
+          ...(unverifiable ? { scopeUnverifiable: true } : {}),
+          reason: unconfirmed.length
+            ? 'Сценарии релиза изменены, удалены или отложены после прошлой приёмки: объём релиза подтверждает пользователь приёмкой ChangeSet («Принять» во «Внимании»)'
+            : 'Карта прошлой приёмки релиза не найдена в истории Git workspace, объём не сверить: приёмку подтверждает пользователь («Принять» во «Внимании»)',
           ...notes,
         };
       if (this.h.config.approvalMode === 'operator' && approval.actor !== 'operator')

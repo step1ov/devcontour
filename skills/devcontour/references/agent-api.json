@@ -1668,7 +1668,7 @@
                                       "pattern": "^REQ-[A-Za-z0-9_-]{1,64}$"
                                     },
                                     "digest": {
-                                      "description": "Вычисляется intent_render; на входе игнорируется и пересчитывается",
+                                      "description": "Computed by intent_render; ignored on input and recomputed",
                                       "type": "string",
                                       "pattern": "^[a-f0-9]{64}$"
                                     }
@@ -1716,7 +1716,7 @@
                           "pattern": "^REQ-[A-Za-z0-9_-]{1,64}$"
                         },
                         "digest": {
-                          "description": "Вычисляется intent_render; на входе игнорируется и пересчитывается",
+                          "description": "Computed by intent_render; ignored on input and recomputed",
                           "type": "string",
                           "pattern": "^[a-f0-9]{64}$"
                         },
@@ -1735,12 +1735,12 @@
                     }
                   },
                   "version": {
-                    "description": "Вычисляется intent_render; на входе игнорируется и пересчитывается",
+                    "description": "Computed by intent_render; ignored on input and recomputed",
                     "type": "number",
                     "const": 1
                   },
                   "sourceSha": {
-                    "description": "Вычисляется intent_render; на входе игнорируется и пересчитывается",
+                    "description": "Computed by intent_render; ignored on input and recomputed",
                     "type": "string",
                     "pattern": "^[a-f0-9]{40,64}$"
                   }
@@ -1960,7 +1960,7 @@
                                 "pattern": "^[A-Za-z0-9_-]{1,50}$"
                               },
                               "intentDigest": {
-                                "description": "Вычисляется intent_render; на входе игнорируется и пересчитывается",
+                                "description": "Computed by intent_render; ignored on input and recomputed",
                                 "type": "string",
                                 "pattern": "^[a-f0-9]{64}$"
                               }
@@ -2129,7 +2129,7 @@
                     }
                   },
                   "version": {
-                    "description": "Вычисляется intent_render; на входе игнорируется и пересчитывается",
+                    "description": "Computed by intent_render; ignored on input and recomputed",
                     "type": "number",
                     "const": 1
                   }
@@ -2173,7 +2173,7 @@
     },
     {
       "name": "intent_report",
-      "description": "Audit all release stories and REQ sources. Product maps add application/feature progress, release scenarios with their evidence (a task of a story of the feature itself whose requirements link repeats the scenario text word for word and names its testId, proven on the accepted SHA) or a deferral decided by the user, and current bound ChangeSet acceptance. A scenario without either keeps coverage incomplete. unconfirmedScenarios lists scenarios of the last acceptance of the release that the map has since reworded or removed: that narrows the release like a deferral, so only the user accepts it (changeset acceptance by the lead returns awaiting-operator). Read-only; never accepts a release or copies local task text.",
+      "description": "Audit all release stories and REQ sources. Product maps add application/feature progress, release scenarios with their evidence (a task of a story of the feature itself whose requirements link repeats the scenario text word for word and names its testId, proven on the accepted SHA) or a deferral decided by the user, and current bound ChangeSet acceptance. A scenario without either keeps coverage incomplete. unconfirmedScenarios lists scenarios of the last acceptance of the release that the map has since reworded, removed or newly deferred: that narrows the release like a deferral, so only the user accepts it (changeset acceptance by the lead returns awaiting-operator). Read-only; never accepts a release or copies local task text.",
       "readOnly": true,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2196,7 +2196,7 @@
     },
     {
       "name": "product_view",
-      "description": "Read the committed product/application/component map and computed feature progress for a release. Includes explicit deferred/not-applicable scope, per-scenario evidence status and joint verification; a release is not accepted while a scenario lacks evidence or a recorded deferral. unconfirmedScenarios names scenarios of the last acceptance reworded or removed since, which only the user can accept. No writes or model calls.",
+      "description": "Read the committed product/application/component map and computed feature progress for a release. Includes explicit deferred/not-applicable scope, per-scenario evidence status and joint verification; a release is not accepted while a scenario lacks evidence or a recorded deferral. unconfirmedScenarios names scenarios of the last acceptance reworded, removed or newly deferred since, which only the user can accept; so does a last acceptance whose map cannot be found (scopeReference.found false). No writes or model calls.",
       "readOnly": true,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2955,7 +2955,7 @@
     },
     {
       "name": "requirements_testcases",
-      "description": "List the testcase ids of the latest test record of a gate (optionally of one component or task), exactly as a requirements link testId must name them: classname + \".\" + name from the JUnit report. Also returns the run, SHA, phase and outcome of that record; limit caps the list (default 200). Joint workspace gates keep no testcase manifest. Read-only, no model calls.",
+      "description": "List the testcase ids of the latest test record of a gate (optionally of one component or task), exactly as a requirements link testId must name them: classname + \".\" + name from the JUnit report. Also returns the run, SHA, phase and outcome of that record; limit caps the list (default 200) and so does the response limit; omitted counts the ids left out. Joint workspace gates keep no testcase manifest. Read-only, no model calls.",
       "readOnly": true,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

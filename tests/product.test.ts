@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm, readFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, readFile, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { config, input, testCheckoutRoot } from './helpers.ts';
@@ -172,7 +172,10 @@ async function fixture(
   local: typeof localDefinition = localDefinition,
   initial?: ReturnType<typeof map>,
 ) {
-  const root = await mkdtemp(join(tmpdir(), 'devcontour-product-'));
+  // Канонический путь: CLI читает config.json и раскрывает символические
+  // ссылки (/var → /private/var на macOS); с другим путём у него была бы другая
+  // политика совместной проверки, и проверка теста была бы для него неактуальна.
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'devcontour-product-')));
   const repos: Repository[] = [];
   const commit = async (path: string, message: string) => {
     await git(path, 'add', '.');
@@ -877,6 +880,19 @@ test('A release scenario reworded or removed after acceptance needs the user to 
       undefined,
     );
     assert.equal(f.view().releaseAccepted, false);
+    // Карточка пользователя называет, что приёмка подтверждает сужение
+    // объёма, — по доказательствам проверок в состоянии, без Git.
+    const cards = new AgentService(f.h).execute({
+      operation: 'attention_list',
+      input: { actor: 'operator' },
+    }) as { items: { sourceKey: string; reason: string }[] };
+    const card = cards.items.find((i) => i.sourceKey === 'changeset:' + narrowed.id)!;
+    assert.ok(
+      card.reason.includes('подтверждаете сужение объёма релиза после приёмки ' + first.id) &&
+        card.reason.includes(second) &&
+        card.reason.includes(reworded),
+      card.reason,
+    );
     // Приёмка пользователя — решение: она становится новым образцом объёма.
     const confirmed = f.runner.workspace.accept(narrowed.id, { actor: 'operator' }) as {
       status: string;
@@ -887,6 +903,24 @@ test('A release scenario reworded or removed after acceptance needs the user to 
     assert.deepEqual(f.view().unconfirmedScenarios, []);
     assert.equal(f.view().releaseAccepted, true);
     assert.equal(f.view().scopeReference?.changeSetId, narrowed.id);
+    // Отсрочка сценария, проверенного в принятой карте, — тоже сужение.
+    const postponed = map();
+    postponed.releases[0].features![0].checks[0].deferred = 'Проверка на устройстве — позже.';
+    postponed.releases[0].features![0].checks.push({
+      gate: 'moderation',
+      scenario: reworded,
+      deferred: reason,
+    });
+    await f.save(postponed);
+    assert.deepEqual(f.view().unconfirmedScenarios, [
+      {
+        featureId: 'block',
+        gate: 'moderation',
+        scenario: releaseScenario,
+        change: 'deferred',
+        reason: 'Проверка на устройстве — позже.',
+      },
+    ]);
     // Удалённый сценарий — то же сужение.
     await f.save(map());
     assert.deepEqual(f.view().unconfirmedScenarios, [
@@ -911,6 +945,73 @@ test('A release scenario reworded or removed after acceptance needs the user to 
     const lost = f.view();
     assert.equal(lost.scopeReference?.found, false);
     assert.ok(lost.issues.some((i) => i.includes('не найдена в истории Git')));
+    // Сверка невозможна — приёмка закрыта так же: решает пользователь, и его
+    // приёмка закрепляет новый образец.
+    const unverifiable = create('Объём не сверить');
+    await f.runner.verify(unverifiable.id);
+    const refused = f.runner.workspace.accept(unverifiable.id, { actor: 'agent' }) as {
+      status: string;
+      scopeUnverifiable?: boolean;
+    };
+    assert.equal(refused.status, 'awaiting-operator');
+    assert.equal(refused.scopeUnverifiable, true);
+    assert.equal(
+      f.store.read().changeSets.find((c) => c.id === unverifiable.id)!.acceptance,
+      undefined,
+    );
+    assert.equal(
+      f.runner.workspace.accept(unverifiable.id, { actor: 'operator' }).status,
+      'accepted',
+    );
+    const healed = f.view();
+    assert.equal(healed.scopeReference?.changeSetId, unverifiable.id);
+    assert.equal(healed.scopeReference?.found, true);
+    assert.deepEqual(healed.unconfirmedScenarios, []);
+    // CLI ведущего — тоже agent: обходного пути нет. Последний шаг: процесс
+    // CLI закрепляет свою политику исполнения, после чего процесс теста
+    // писать уже не может. Отсрочка проверенного в образце сценария.
+    const deferredLast = map();
+    deferredLast.releases[0].features![0].checks[0].deferred = 'Проверка на устройстве — позже.';
+    await f.save(deferredLast);
+    const viaCli = create('Приёмка через CLI');
+    await f.runner.verify(viaCli.id);
+    const cliExpected = [
+      {
+        featureId: 'block',
+        gate: 'moderation',
+        scenario: releaseScenario,
+        change: 'deferred',
+        reason: 'Проверка на устройстве — позже.',
+      },
+    ];
+    assert.deepEqual(f.view().unconfirmedScenarios, cliExpected);
+    const cliAccept = (...extra: string[]) =>
+      command(
+        [
+          process.execPath,
+          '--import',
+          'tsx',
+          'src/cli.ts',
+          'changeset-accept',
+          '--changeset',
+          viaCli.id,
+          ...extra,
+          '--data',
+          f.root,
+        ],
+        process.cwd(),
+        { timeoutMs: 20000 },
+      );
+    // Без обязательного --author-runtime команда отказывает до приёмки.
+    const bare = await cliAccept();
+    assert.notEqual(bare.code, 0);
+    assert.match(bare.stderr, /--author-runtime/);
+    const cli = await cliAccept('--author-runtime', 'claude');
+    assert.equal(cli.code, 0, cli.stderr);
+    const out = JSON.parse(cli.stdout) as { status: string; unconfirmedScenarios: unknown };
+    assert.equal(out.status, 'awaiting-operator', cli.stdout);
+    assert.deepEqual(out.unconfirmedScenarios, cliExpected);
+    assert.equal(f.store.read().changeSets.find((c) => c.id === viaCli.id)!.acceptance, undefined);
   } finally {
     await f.close();
   }

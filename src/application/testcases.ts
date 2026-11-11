@@ -11,6 +11,8 @@ export const testcasesInput = z.strictObject({
   limit: z.number().int().min(1).max(500).optional(),
 });
 const shownLimit = 200;
+/** Бюджет списка testcases: остаток предела ответа 64 KiB — полям записи. */
+const listBytes = 48_000;
 
 /**
  * Идентификаторы testcases из манифеста последней test-записи gate:
@@ -45,7 +47,16 @@ export function gateTestcases(state: DevContourState, raw: unknown) {
       note: 'No test record of this gate with a testcase manifest: the gate needs report junit and at least one finished attempt.',
     };
   const tests = last.evidence.tests!;
+  // Предел по числу и по байтам: ID testcase бывает до 1000 символов.
   const limit = input.limit ?? shownLimit;
+  const shown: typeof tests = [];
+  let used = 2;
+  for (const t of tests.slice(0, limit)) {
+    const bytes = Buffer.byteLength(JSON.stringify(t)) + 1;
+    if (used + bytes > listBytes) break;
+    used += bytes;
+    shown.push(t);
+  }
   return {
     gate: input.gate,
     found: true,
@@ -56,8 +67,8 @@ export function gateTestcases(state: DevContourState, raw: unknown) {
     createdAt: last.evidence.createdAt,
     passed: last.evidence.passed,
     ...(last.evidence.testsTruncated ? { truncated: true } : {}),
-    testcases: tests.slice(0, limit),
-    ...(tests.length > limit ? { omitted: tests.length - limit } : {}),
+    testcases: shown,
+    ...(tests.length > shown.length ? { omitted: tests.length - shown.length } : {}),
     format,
   };
 }

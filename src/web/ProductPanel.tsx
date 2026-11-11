@@ -170,7 +170,7 @@ export function ProductPanel({ onRepository }: { onRepository: (id: string) => v
         <Alert variant="warning" role="status">
           <p className="m-0 font-medium">
             Нужно подтверждение пользователя ({view.unconfirmedScenarios.length}): сценарии релиза
-            изменены или удалены после приёмки {view.scopeReference?.changeSetId}
+            изменены, удалены или отложены после приёмки {view.scopeReference?.changeSetId}
           </p>
           <p className="m-0">
             Это сужает объём релиза. Примите ChangeSet во «Внимании», если согласны; иначе попросите
@@ -181,7 +181,9 @@ export function ProductPanel({ onRepository }: { onRepository: (id: string) => v
               <li key={s.featureId + '\u0000' + s.gate + '\u0000' + s.scenario}>
                 {s.change === 'changed'
                   ? `Изменён: «${s.scenario}» → ${(s.current ?? []).map((c) => '«' + c + '»').join(', ')}`
-                  : `Удалён: «${s.scenario}»`}
+                  : s.change === 'deferred'
+                    ? `Отложен: «${s.scenario}» — ${s.reason ?? ''}`
+                    : `Удалён: «${s.scenario}»`}
               </li>
             ))}
           </ul>
@@ -192,7 +194,7 @@ export function ProductPanel({ onRepository }: { onRepository: (id: string) => v
           <p className="m-0 font-medium">Объём релиза не сверить с прошлой приёмкой</p>
           <p className="m-0">
             Карта приёмки {view.scopeReference.changeSetId} не найдена в истории Git workspace.
-            Сверьте сценарии релиза с пользователем.
+            Приёмку релиза подтверждает пользователь во «Внимании»; сверьте сценарии релиза.
           </p>
         </Alert>
       )}

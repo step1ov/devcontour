@@ -128,5 +128,9 @@
 // вывода (version, sourceSha, digest требований, intentDigest компонентов);
 // описания intent_render, intent_report и product_view называют это и
 // unconfirmedScenarios; прочие операции байтово прежние.
-export const CATALOG_DIGEST = 'b778fb8193b39a29368c0ec36cb9a1c0a7ef5edc333403ea2f313d7773283b12';
+// Намеренное изменение: описания вычисляемых полей входа intent_render — на
+// английском; описания intent_report и product_view называют отложенный
+// после приёмки сценарий и ненайденный образец объёма, requirements_testcases —
+// предел ответа и omitted; прочие операции байтово прежние.
+export const CATALOG_DIGEST = '4c93781d97ca14b18f514439125b3a0c448aa0583790972282cea53ce2c833cd';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';
