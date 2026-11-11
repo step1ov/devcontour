@@ -1,5 +1,5 @@
-import { test } from 'node:test';
-import { testDemo } from './demo-pool.ts';
+import { after, test } from 'node:test';
+import { demoPool, testDemo } from './demo-pool.ts';
 import assert from 'node:assert/strict';
 import type { Evidence } from '../src/core/model.ts';
 import { mkdtemp, writeFile, mkdir, rm } from 'node:fs/promises';
@@ -19,6 +19,10 @@ import { Workspace } from '../src/core/workspace.ts';
 import { completion } from '../src/core/sync-state.ts';
 import { adapters, cliArguments, type AgentRequest } from '../src/runner/adapters.ts';
 import { isolation, claudeFileDenies, codexPermissions } from '../src/runner/isolation.ts';
+
+// Копии одного учебного workspace вместо новой сборки демо в каждом тесте.
+const demos = demoPool(testDemo);
+after(() => demos.close());
 
 const SHA = 'a'.repeat(40);
 const OTHER = 'b'.repeat(40);
@@ -45,8 +49,8 @@ function evidence(over: Partial<Evidence> = {}): Evidence {
 test('На настоящем прогоне приёмка требует именно названный тест', async () => {
   // Проверка идёт через реальный gate с отчётом JUnit: манифест собирается из
   // того, что действительно выполнилось, а не подставляется в evidence руками.
-  const root = await mkdtemp(join(tmpdir(), 'devcontour-proof-'));
-  await testDemo(root);
+  const seed = await demos.acquire();
+  const root = seed.root;
   const config = loadConfig(join(root, 'config.json'));
   const store = new Store(join(root, 'state.sqlite'));
   const h = new DevContour(store, config);
@@ -114,7 +118,7 @@ test('На настоящем прогоне приёмка требует им�
     assert.equal(report.tasks[0].requirements[0].proof, 'testcase');
   } finally {
     store.close();
-    await rm(root, { recursive: true, force: true });
+    seed.release();
   }
 });
 
@@ -243,8 +247,8 @@ test('Намеренно внесённый дефект ловится назв
   // замечает сломанного поведения. Здесь тест настоящий: он вызывает то, что
   // написал исполнитель, и пишет в отчёт исход каждого testcase. Исполнитель
   // сначала вносит значимый дефект (вычитание вместо сложения), затем чинит.
-  const root = await mkdtemp(join(tmpdir(), 'devcontour-oracle-'));
-  await testDemo(root);
+  const seed = await demos.acquire();
+  const root = seed.root;
   const config = loadConfig(join(root, 'config.json'));
   const store = new Store(join(root, 'state.sqlite'));
   const h = new DevContour(store, config);
@@ -343,7 +347,7 @@ process.exit(cases.some((c) => c.includes('<failure')) ? 1 : 0);
     await scheduler.stop();
   } finally {
     store.close();
-    await rm(root, { recursive: true, force: true });
+    seed.release();
   }
 });
 
@@ -351,8 +355,8 @@ test('Задача без названного testcase не публикует�
   // Отказ при приёмке доски был поздним: задача уже получила done, её
   // результат лежал в целевой ветке, и зависимая задача работала поверх
   // неподтверждённого результата. Тест назван с момента утверждения.
-  const root = await mkdtemp(join(tmpdir(), 'devcontour-admission-'));
-  await testDemo(root);
+  const seed = await demos.acquire();
+  const root = seed.root;
   const config = loadConfig(join(root, 'config.json'));
   const store = new Store(join(root, 'state.sqlite'));
   const h = new DevContour(store, config);
@@ -414,7 +418,7 @@ test('Задача без названного testcase не публикует�
     assert.throws(() => h.accept(board.id, before), /выполнены|проверки|интеграцию/);
   } finally {
     store.close();
-    await rm(root, { recursive: true, force: true });
+    seed.release();
   }
 });
 

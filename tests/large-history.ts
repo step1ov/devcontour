@@ -47,8 +47,8 @@ export async function largeHistory(root: string, shape: HistoryShape = LARGE) {
 }
 
 /** A real completed demo; all processes and SQLite handles are closed on return. */
-export async function completedDemo(root: string) {
-  await testDemo(root);
+export async function completedDemo(root: string, checkoutRoot?: string) {
+  await testDemo(root, checkoutRoot);
   const config = loadConfig(join(root, 'config.json'));
   const store = new Store(join(root, 'state.sqlite'));
   const h = new DevContour(store, config);

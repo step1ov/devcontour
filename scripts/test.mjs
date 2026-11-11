@@ -17,8 +17,13 @@ import { slowFile, slowFirst, slowPatterns } from './test-tiers.mjs';
 //                merge base with --base (default master); needs `--import tsx`
 //   --depth N    with --affected: only files within N import hops (not fail safe)
 //   --list       print the selected files instead of running them
-// Keep process isolation and the existing limit of four simultaneous test files.
+// Keep process isolation. Four test files run at a time;
+// DEVCONTOUR_TEST_CONCURRENCY overrides it.
 const directory = new URL('../tests/', import.meta.url);
+const configured = process.env.DEVCONTOUR_TEST_CONCURRENCY;
+const concurrency = configured === undefined || configured === '' ? 4 : Number(configured);
+if (!(Number.isInteger(concurrency) && concurrency >= 1))
+  throw new Error(`DEVCONTOUR_TEST_CONCURRENCY must be a positive integer, got ${configured}`);
 // Предел времени на один тест; переменная — для проверки самого раннера.
 const testTimeoutMs = Number(process.env.DEVCONTOUR_TEST_TIMEOUT_MS) || 15 * 60_000;
 const rank = (name) => {
@@ -98,8 +103,11 @@ if (options.list) {
   process.once('SIGTERM', terminate);
   // Тесты держат рабочие деревья в своих временных каталогах (checkoutRoot
   // фикстур). Новый элемент в настоящем кэше пользователя после прогона —
-  // тест, который пишет туда: прогон не проходит. Сравнение — до и после,
-  // поэтому во время полного прогона другие процессы harness не запускают.
+  // тест, который пишет туда: прогон не проходит. Сравнение — до и после, а
+  // `npm run check` в это же время выполняет рядом проверку пакета: она
+  // запускает harness со своими HOME и XDG_CACHE_HOME. Если она всё же
+  // запишет в настоящий кэш, отказ здесь назовёт её запись так же, как
+  // запись теста. Другие процессы harness во время полного прогона не идут.
   const xdg = process.env.XDG_CACHE_HOME;
   const cache =
     process.platform === 'darwin'
@@ -150,7 +158,7 @@ if (options.list) {
   if (ready) {
     const results = run({
       files,
-      concurrency: 4,
+      concurrency,
       // Зависший тест не держит прогон часами: предел времени на тест падает
       // с именем теста (у `run()` параметр `timeout` до дочерних процессов не
       // доходит — нужен флаг). Самый долгий тест полного прогона под

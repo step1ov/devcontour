@@ -65,14 +65,22 @@ const small: HistoryShape = {
 };
 
 test('The polled summary is bounded, carries no history bodies and does not grow with finished attempts, checks and events', async () => {
+  // Одна копия истории за раз: вторая берёт тот же слот пула, а не строит
+  // ещё один полный демо-прогон.
   const a = await history(small);
+  let sa: PanelSummary, aRuns: number;
+  try {
+    sa = a.summary();
+    aRuns = a.store.read().runs.length;
+  } finally {
+    a.close();
+  }
   const b = await history({ ...small, failedAttempts: 12, events: 5000, verifications: 9 });
   try {
-    const sa = a.summary();
     const sb = b.summary();
     // Другая история той же формы досок: больше отказавших попыток, проверок
     // ChangeSet и событий. Размер сводки от этого не зависит.
-    assert.ok(b.store.read().runs.length > a.store.read().runs.length * 2);
+    assert.ok(b.store.read().runs.length > aRuns * 2);
     assert.ok(bytes(sb) < bytes(sa) * 1.1, `${bytes(sb)} vs ${bytes(sa)}`);
     const text = JSON.stringify(sb);
     // Тела истории — только в деталях.
@@ -96,16 +104,20 @@ test('The polled summary is bounded, carries no history bodies and does not grow
     assert.ok(sb.board!.revisions.at(-1)!.taskIds.length > 0);
     assert.ok(sb.events.length <= 40);
   } finally {
-    a.close();
     b.close();
   }
 });
 
 test('Doubling the boards grows the summary only by compact board and change set lines', async () => {
   const a = await history(small);
+  let sa: PanelSummary;
+  try {
+    sa = a.summary();
+  } finally {
+    a.close();
+  }
   const b = await history({ ...small, copies: small.copies * 2, changeSets: small.changeSets * 2 });
   try {
-    const sa = a.summary();
     const sb = b.summary();
     const extraBoards = sb.boards.length - sa.boards.length;
     const extraChanges = sb.changeSets.length - sa.changeSets.length;
@@ -120,7 +132,6 @@ test('Doubling the boards grows the summary only by compact board and change set
     // Задачи сводки — выбранная доска и текущая работа, а не все задачи.
     assert.ok(sb.tasks.length < b.store.read().tasks.length / 2);
   } finally {
-    a.close();
     b.close();
   }
 });

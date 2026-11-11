@@ -131,6 +131,8 @@ export function checkProcesses() {
   let pending;
   let polling;
   let failedPolls = 0;
+  /** Why the check was stopped when no step's own failure stopped it. */
+  let cause;
   const remember = (rows) => {
     const found = ownedProcesses(rows, seen);
     for (const [pid, start] of found) seen.set(pid, start);
@@ -156,15 +158,19 @@ export function checkProcesses() {
       await delay(100);
     }
   };
-  const stop = (signal = 'SIGTERM') => {
+  // `reason` names the cause of a stop that is not a step's own exit (a
+  // snapshot or spawn failure); only the first stop's reason is kept.
+  const stop = (signal = 'SIGTERM', reason) => {
     if (pending) return pending;
     stopping = true;
+    cause = reason;
     clearInterval(poll);
     // ChildProcess tracks its own exit; unlike kill(-oldPid), this does not
     // reuse a remembered process group after the leader has exited.
     if (process.platform === 'win32') for (const child of children) child.kill(signal);
     pending = sweep(signal).catch((error) => {
       process.exitCode ||= 1;
+      cause ??= error.message;
       console.error(error.message);
       for (const child of children) {
         child.kill('SIGKILL');
@@ -194,8 +200,9 @@ export function checkProcesses() {
           failedPolls = next.count;
           if (!next.fatal) return;
           process.exitCode ||= 1;
-          console.error(`${error.message} (${next.count} snapshots in a row)`);
-          return stop();
+          const reason = `${error.message} (${next.count} snapshots in a row)`;
+          console.error(reason);
+          return stop('SIGTERM', reason);
         },
       )
       .finally(() => {
@@ -209,6 +216,10 @@ export function checkProcesses() {
     get stopping() {
       return stopping;
     },
+    /** The reason of a stop no step's own exit caused, or of a failed cleanup. */
+    get cause() {
+      return cause;
+    },
     spawn(command, args, options = {}) {
       if (stopping) return undefined;
       const child = spawn(command, args, {
@@ -221,11 +232,11 @@ export function checkProcesses() {
         void sample(true).catch((error) => {
           process.exitCode ||= 1;
           console.error(error.message);
-          return stop();
+          return stop('SIGTERM', error.message);
         });
       });
-      child.once('error', () => {
-        void stop();
+      child.once('error', (error) => {
+        void stop('SIGTERM', `Cannot start ${command}: ${error.message}`);
       });
       // A detached descendant can keep stdio open, so do not wait for close.
       child.once('exit', (code) => {

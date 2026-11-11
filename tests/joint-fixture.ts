@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { testDemo } from './demo-pool.ts';
+import { demoPool, testDemo } from './demo-pool.ts';
 import { input } from './helpers.ts';
 import { LeadWorkflow, type WorkflowJob } from '../src/core/lead-workflow.ts';
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
@@ -13,6 +12,9 @@ import { Workspace } from '../src/core/workspace.ts';
 import { Scheduler } from '../src/runner/scheduler.ts';
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Пул demo-workspace; файл теста закрывает его в `after`. */
+export const jointDemos = demoPool(testDemo);
 
 /**
  * Принятая доска демо-workspace и задание ChangeSet над ней (не начатое,
@@ -25,8 +27,8 @@ export async function jointFixture(options: {
   maxAttempts?: number;
   start?: boolean;
 }) {
-  const root = await mkdtemp(join(tmpdir(), 'devcontour-joint-'));
-  await testDemo(root);
+  const seed = await jointDemos.acquire();
+  const root = seed.root;
   // Политика — в файле до загрузки: процесс работает с применённой.
   const file = join(root, 'config.json');
   const raw = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>;
@@ -58,7 +60,7 @@ export async function jointFixture(options: {
     await lead.stop();
     await scheduler.stop();
     store.close();
-    await rm(root, { recursive: true, force: true });
+    seed.release();
   };
   try {
     store.change('fixture.reset', (s) => {
