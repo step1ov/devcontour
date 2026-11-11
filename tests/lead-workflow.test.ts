@@ -1211,6 +1211,8 @@ test('Доказательство ревью документа контрак�
     await git(config.repository, 'update-ref', target, dropped);
     h.baseUpdated([{ repositoryId: 'main', from, to: dropped }]);
     await held(doc, 'удалённый документ');
+    // git rm убрал и опустевший каталог.
+    await mkdir(join(config.repository, 'docs', 'contracts'), { recursive: true });
 
     // Новая редакция документа за время gates: доказательство устарело,
     // ожидание остаётся; следующая проверка держит перенос человеку.
