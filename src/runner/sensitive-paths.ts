@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { isAbsolute, relative } from 'node:path';
 import { contractRedactionsOf, latestRedaction, type DevContour } from '../core/service.ts';
 import type { Approval, Config, DevContourState } from '../core/model.ts';
-import { technicalReviewer } from '../harness/policy.ts';
+import { independentReviewer } from '../harness/policy.ts';
 import { repository } from '../core/repositories.ts';
 import { assertArtifactsInBase, componentArtifacts } from './contract-artifacts.ts';
 import { git, hostGitArgs } from './process.ts';
@@ -121,17 +121,14 @@ export interface ReviewedContractDocument {
 /**
  * Одобрение контракта годится в доказательство для снятия переноса базы:
  * агент, названы runtime автора и ревьюера, есть сохранённое решение ревью.
- * Ревьюер — другой runtime, либо тот же, но только если текущее правило ревью
- * контрактов (`review.contract`) само выбирает для этого автора ревьюера того
- * же вендора и именно этого runtime (`same-vendor-allowed`). Правило читается
- * в момент снятия: возврат к `different-vendor` прекращает такие снятия.
- * Правило утверждения задач при Git sync (sync-state) — отдельное.
+ * Ревьюер независим по текущему правилу ревью контрактов (`review.contract`,
+ * `independentReviewer`): другой runtime, либо тот же, если правило само его
+ * выбирает (`same-vendor-allowed`). Возврат к `different-vendor` прекращает
+ * такие снятия. Импорт задач при Git sync сверяет то же по `review.plan`.
  */
 export function liftableContractApproval(config: Config, a: Approval | undefined) {
   if (a?.actor !== 'agent' || !a.authorRuntime || !a.reviewerRuntime || !a.artifact) return false;
-  if (a.authorRuntime !== a.reviewerRuntime) return true;
-  const chosen = technicalReviewer(config, 'contract', a.authorRuntime);
-  return chosen?.sameVendor === true && chosen.runtime === a.reviewerRuntime;
+  return independentReviewer(config, 'contract', a.authorRuntime, a.reviewerRuntime);
 }
 
 /**

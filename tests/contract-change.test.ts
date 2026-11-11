@@ -14,6 +14,7 @@ import { type AgentAdapter, type AgentRequest } from '../src/runner/adapters.ts'
 import { readyTasks } from '../src/core/graph.ts';
 import { command } from '../src/runner/process.ts';
 import { reviewers, stage } from './contract-change-fixture.ts';
+import { withQuotedGitPaths } from './helpers.ts';
 
 test('A contract change runs as one command: review, rebind, plan review, base and release', async () => {
   const s = await stage();
@@ -445,4 +446,32 @@ test('Work reverted within the branch does not stop the base move; a file rename
   } finally {
     await r.remove();
   }
+});
+
+test('A contract artifact with a Cyrillic path moves to the base: it is not work outside the contract', async () => {
+  await withQuotedGitPaths(async () => {
+    const s = await stage();
+    try {
+      // Новый артефакт кириллицей: экранированный git путь не совпал бы с
+      // путём артефакта, и операция отказала бы «вне контракта».
+      await writeFile(join(s.repo, 'типы.txt'), 'типы ответа\n');
+      s.sh('add', 'типы.txt');
+      s.sh('commit', '-qm', 'cyrillic artifact');
+      const proposal = {
+        ...s.proposal,
+        artifacts: [...s.proposal.artifacts, { path: 'типы.txt', purpose: 'Типы' }],
+      };
+      const { operation } = (await s.changes().start(proposal, 'codex')) as {
+        operation: ContractChange;
+      };
+      const done = await s.changes().advance(operation.id);
+      assert.equal(done.status, 'completed', done.error);
+      assert.equal(
+        s.sh('rev-parse', 'devcontour/accepted:типы.txt'),
+        s.sh('rev-parse', 'HEAD:типы.txt'),
+      );
+    } finally {
+      await s.remove();
+    }
+  });
 });

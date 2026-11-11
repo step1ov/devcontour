@@ -979,8 +979,10 @@ export async function reviewPlan(
     // Что рабочая ветка добавила после общей точки с базой (и после интеграций).
     const since = await git(repo.path, 'merge-base', base, head).catch(() => '');
     if (!since || since === head) continue;
-    const changed = (await git(repo.path, 'diff', '--name-only', '--no-renames', since, head))
-      .split('\n')
+    // `-z`: не-ASCII путь без экранирования (core.quotePath), иначе он не
+    // совпадал с префиксом и подготовка контура оставалась незамеченной.
+    const changed = (await git(repo.path, 'diff', '--name-only', '-z', '--no-renames', since, head))
+      .split('\0')
       .filter(Boolean);
     // Только то, без чего ревьюер слеп к контуру: правила агентов и описание
     // изменения. Документы контрактов сюда не входят — ревью плана при смене

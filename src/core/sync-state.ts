@@ -6,6 +6,7 @@ import { portableTest } from './proof.ts';
 import { validatePreparation } from './preparation.ts';
 import { contractDigest, digest, scopeDigest, specDigest, type DevContour } from './service.ts';
 import { receiptProblems } from '../harness/receipt.ts';
+import { independentReviewer } from '../harness/policy.ts';
 import {
   CheckCorpus,
   configuredSpellings,
@@ -639,6 +640,11 @@ export function stateFromRecords(
         }),
       );
       const previous = old.tasks.find((t) => t.id === data.id);
+      // Одобрение, которое эта копия уже держит для той же постановки.
+      const retained =
+        previous?.approval !== undefined &&
+        previous.approvedDigest === progress.approvedDigest &&
+        canonical(approval(previous.approval)) === canonical(progress.approval);
       const t: Task = {
         ...data,
         status: progress.status,
@@ -651,11 +657,7 @@ export function stateFromRecords(
         ...(progress.checkVersion ? { checkVersion: progress.checkVersion } : {}),
         ...(progress.storyBindings ? { storyBindings: progress.storyBindings } : {}),
         ...(progress.triagedAt ? { triagedAt: progress.triagedAt } : {}),
-        approval:
-          previous?.approvedDigest === progress.approvedDigest &&
-          canonical(approval(previous?.approval)) === canonical(progress.approval)
-            ? previous?.approval
-            : progress.approval,
+        approval: retained ? previous.approval : progress.approval,
       };
       if (progress.approvedDigest && progress.approvedDigest !== specDigest(t))
         throw new Error('Постановка изменилась после утверждения: ' + t.id);
@@ -668,13 +670,22 @@ export function stateFromRecords(
           (requiresContract(h.config, t.role, t.repositoryId) && !t.contracts.length))
       )
         throw new Error('Нет утверждённой постановки: ' + t.id);
-      if (
-        t.approval?.actor === 'agent' &&
-        (!t.approval.authorRuntime ||
-          !t.approval.reviewerRuntime ||
-          t.approval.authorRuntime === t.approval.reviewerRuntime)
-      )
-        throw new Error('Нет независимого согласования: ' + t.id);
+      // Постановку задачи агент утверждает ревью плана: независимость нового
+      // для этой копии одобрения — по правилу `review.plan`, настроенному
+      // здесь и сейчас. Тот же runtime годится, только если это правило само
+      // его выбирает (`same-vendor-allowed`). Одобрение, которое копия уже
+      // держит, правилом не перепроверяется: иначе смена правила навсегда
+      // закрывала бы sync из-за собственной истории (принятые и отменённые
+      // задачи заново не утверждаются).
+      if (t.approval?.actor === 'agent') {
+        const { authorRuntime: author, reviewerRuntime: reviewer } = t.approval;
+        if (!author || !reviewer) throw new Error('Нет независимого согласования: ' + t.id);
+        if (!retained && !independentReviewer(h.config, 'plan', author, reviewer))
+          throw new Error(
+            `Нет независимого согласования: ${t.id} (${author} → ${reviewer}); ` +
+              `review.plan этой копии не выбирает автору ${author} ревьюера ${reviewer} — согласуйте review.plan с автором одобрения`,
+          );
+      }
       if (previous && previous.status !== 'draft' && specDigest(previous) !== specDigest(t))
         throw new Error('Нужна корректировка утверждённой задачи: ' + t.id);
       if (previous?.status === 'done' && t.status !== 'done')
