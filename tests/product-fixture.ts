@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { config, input, testCheckoutRoot } from './helpers.ts';
@@ -165,7 +165,10 @@ export async function fixture(
   local: typeof localDefinition = localDefinition,
   initial?: ReturnType<typeof map>,
 ) {
-  const root = await mkdtemp(join(tmpdir(), 'devcontour-product-'));
+  // Канонический путь: CLI читает config.json и раскрывает символические
+  // ссылки (/var → /private/var на macOS); с другим путём у него была бы другая
+  // политика совместной проверки, и проверка теста была бы для него неактуальна.
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'devcontour-product-')));
   const repos: Repository[] = [];
   const commit = async (path: string, message: string) => {
     await git(path, 'add', '.');

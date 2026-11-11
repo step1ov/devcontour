@@ -65,7 +65,50 @@ const workspace = z.strictObject({
     .min(1)
     .max(20),
 });
-export const intentDefinition = z.discriminatedUnion('kind', [component, workspace]);
+// Поля, которые вычисляет intent_render, на входе принимаются и
+// пересчитываются: вывод (блок devcontour-intent) можно подать на вход снова,
+// не вычищая их вручную. Схемы документа не меняются — порядок их ключей
+// входит в digest закреплённой карты.
+const computed = <T extends z.ZodType>(schema: T) =>
+  schema.optional().describe('Computed by intent_render; ignored on input and recomputed');
+const referenceInput = reference.extend({ digest: computed(hash) });
+const componentInput = component.extend({
+  stories: z
+    .array(
+      story.extend({
+        criteria: z
+          .array(criterion.extend({ requirements: z.array(referenceInput).min(1).max(20) }))
+          .min(1)
+          .max(20),
+      }),
+    )
+    .min(1)
+    .max(100),
+  exclusions: z
+    .array(referenceInput.extend({ reason: text }))
+    .max(200)
+    .default([]),
+  version: computed(z.literal(1)),
+  sourceSha: computed(z.string().regex(/^[a-f0-9]{40,64}$/)),
+});
+const workspaceInput = workspace.extend({
+  releases: z
+    .array(
+      z.strictObject({
+        id,
+        title,
+        components: z
+          .array(target.extend({ intentDigest: computed(hash) }))
+          .min(1)
+          .max(10),
+        features: releaseFeatures,
+      }),
+    )
+    .min(1)
+    .max(20),
+  version: computed(z.literal(1)),
+});
+export const intentDefinition = z.discriminatedUnion('kind', [componentInput, workspaceInput]);
 export const intentDocument = z.discriminatedUnion('kind', [
   component.extend({
     version: z.literal(1),

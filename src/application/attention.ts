@@ -54,6 +54,7 @@ import { DomainError } from '../core/model.ts';
 import { descendants } from '../core/graph.ts';
 import { Preparation, assertStageUpstream } from '../core/preparation.ts';
 import type { ProductChange } from '../core/preparation-model.ts';
+import { pendingScopeNote } from '../core/product-map.ts';
 import {
   ATTENTION_LIMITS,
   attentionInputs,
@@ -1382,19 +1383,31 @@ const changesetSource: AttentionSourceRule = {
     return pendingAcceptances(h, ctx.state as DevContourState).map(
       ({ changeSet: c, verification: v, onPreview }): Candidate => {
         const deploy = !onPreview && !!h.config.preview;
+        // Приёмка релиза с изменёнными после прошлой приёмки сценариями —
+        // решение пользователя о сужении объёма: карточка называет его.
+        const scope = pendingScopeNote(ctx.state, c, v.productRelease);
         return {
           sourceKey: `changeset:${c.id}`,
           occurrenceId: v.id,
-          sourceVersion: d({ manifest: v.manifestDigest, onPreview, deploy }),
+          sourceVersion: d({
+            manifest: v.manifestDigest,
+            onPreview,
+            deploy,
+            ...(scope ? { scope } : {}),
+          }),
           source: 'changeset',
           category: 'decision',
           actor: 'operator',
           title: `Примите «${c.title}»`,
-          reason: onPreview
-            ? 'Изменение прошло совместную проверку и работает в preview: попробуйте и примите.'
-            : deploy
-              ? 'Изменение прошло совместную проверку. Можно выложить его в preview и попробовать до приёмки.'
-              : 'Изменение прошло совместную проверку.',
+          // Решение о сужении объёма — первым: причина карточки ограничена
+          // по длине.
+          reason:
+            (scope ? scope + ' ' : '') +
+            (onPreview
+              ? 'Изменение прошло совместную проверку и работает в preview: попробуйте и примите.'
+              : deploy
+                ? 'Изменение прошло совместную проверку. Можно выложить его в preview и попробовать до приёмки.'
+                : 'Изменение прошло совместную проверку.'),
           since: v.finishedAt ?? v.startedAt,
           subject: { kind: 'changeset', id: c.id, href: hrefs.changeset(c.id) },
           evidence: [{ kind: 'evidence', id: v.id }],

@@ -198,7 +198,7 @@ export function changeSetStopReason(
     (w.attempts < w.maxAttempts
       ? `Когда причина устранена — workflow_retry {"key": ${JSON.stringify(w.key)}}. `
       : 'Попытки задания исчерпаны: workflow_retry его не примет. ') +
-      `Ручной путь: devcontour workspace-verify --changeset ${w.id}, затем changeset-accept --changeset ${w.id}. ` +
+      `Ручной путь: devcontour workspace-verify --changeset ${w.id}, затем changeset-accept --changeset ${w.id} --author-runtime codex|claude. ` +
       `Если исчерпан предел совместных проверок набора задач и его заполняют проверки без результата gates — ${BUDGET_RESET_ASK}; если предел исчерпан проверками с результатом gates, новый ChangeSet над теми же задачами получит тот же отказ — измените набор (новая ревизия доски), примите доску и создайте ChangeSet по ней. ` +
       'Карточка закрывается, когда принят этот ChangeSet или созданный после него ChangeSet того же релиза (или включающий его доски).',
   );

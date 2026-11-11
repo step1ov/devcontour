@@ -166,6 +166,38 @@ export function ProductPanel({ onRepository }: { onRepository: (id: string) => v
           </ul>
         </Alert>
       )}
+      {(view.unconfirmedScenarios ?? []).length > 0 && (
+        <Alert variant="warning" role="status">
+          <p className="m-0 font-medium">
+            Нужно подтверждение пользователя ({view.unconfirmedScenarios.length}): сценарии релиза
+            изменены, удалены или отложены после приёмки {view.scopeReference?.changeSetId}
+          </p>
+          <p className="m-0">
+            Это сужает объём релиза. Примите ChangeSet во «Внимании», если согласны; иначе попросите
+            ведущего вернуть сценарий в карту.
+          </p>
+          <ul className="mt-2 grid gap-1">
+            {view.unconfirmedScenarios.map((s) => (
+              <li key={s.featureId + '\u0000' + s.gate + '\u0000' + s.scenario}>
+                {s.change === 'changed'
+                  ? `Изменён: «${s.scenario}» → ${(s.current ?? []).map((c) => '«' + c + '»').join(', ')}`
+                  : s.change === 'deferred'
+                    ? `Отложен: «${s.scenario}» — ${s.reason ?? ''}`
+                    : `Удалён: «${s.scenario}»`}
+              </li>
+            ))}
+          </ul>
+        </Alert>
+      )}
+      {view.scopeReference && !view.scopeReference.found && (
+        <Alert variant="warning" role="status">
+          <p className="m-0 font-medium">Объём релиза не сверить с прошлой приёмкой</p>
+          <p className="m-0">
+            Карта приёмки {view.scopeReference.changeSetId} не найдена в истории Git workspace.
+            Приёмку релиза подтверждает пользователь во «Внимании»; сверьте сценарии релиза.
+          </p>
+        </Alert>
+      )}
       {mode === 'features' ? (
         <div className={scroll} tabIndex={0} role="region" aria-label="Карта фич по приложениям">
           <table className={table}>

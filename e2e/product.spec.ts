@@ -49,6 +49,21 @@ test('Product UI presents application scope, release selection, repository navig
           reason: 'Переносится в следующий релиз',
         },
       ],
+      unconfirmedScenarios: [
+        {
+          featureId: 'block-member',
+          gate: 'joint',
+          scenario: 'Журнал хранит причину блокировки',
+          change: 'changed',
+          current: ['Журнал хранит дату блокировки'],
+        },
+      ],
+      scopeReference: {
+        changeSetId: 'CHG-accepted',
+        verificationId: 'V-accepted',
+        acceptedAt: '2026-11-01T00:00:00.000Z',
+        found: true,
+      },
       features: definition.releases[0].features!.map((scope) => ({
         ...product.features.find((f) => f.id === scope.featureId)!,
         status: scope.featureId === 'block-member' ? 'awaiting-verification' : 'deferred',
@@ -70,6 +85,12 @@ test('Product UI presents application scope, release selection, repository navig
   await expect(
     page.getByRole('status').filter({ hasText: 'Отложено решением пользователя' }),
   ).toContainText('Проверка на устройстве — Переносится в следующий релиз');
+  await expect(
+    page.getByRole('status').filter({ hasText: 'Нужно подтверждение пользователя (1)' }),
+  ).toContainText('Изменён: «Журнал хранит причину блокировки» → «Журнал хранит дату блокировки»');
+  await expect(
+    page.getByRole('status').filter({ hasText: 'Нужно подтверждение пользователя' }),
+  ).toContainText('после приёмки CHG-accepted');
   await expect(page.getByText('Релиз принят на проверенной совместной версии.')).toHaveCount(0);
   await page.getByLabel('Продуктовый релиз').selectOption('next');
   await expect.poll(() => requests.some((url) => url.endsWith('?release=next'))).toBe(true);

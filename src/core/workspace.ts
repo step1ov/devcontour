@@ -12,7 +12,7 @@ import { HarnessError } from 'devcontour-harness';
 import { DevContour, digest, specDigest } from './service.ts';
 import { domain, executionOf } from '../harness/execution.ts';
 import { repositories } from './repositories.ts';
-import type { DeferredScenario, ProductReleaseProof } from './product-map.ts';
+import type { DeferredScenario, ProductReleaseProof, UnconfirmedScenario } from './product-map.ts';
 import {
   DomainError,
   requireValue,
@@ -69,12 +69,21 @@ export const snapshotDigest = (snapshot: ReturnType<typeof changeSnapshot>) =>
 
 export interface ProductReleaseGuard {
   capture(releaseId: string, snapshot: ReturnType<typeof changeSnapshot>): ProductReleaseProof;
-  /** Отказывает, если релиз не готов; называет отложенные решением пользователя сценарии. */
+  /**
+   * Отказывает, если релиз не готов; называет отложенные решением
+   * пользователя сценарии и сценарии последней приёмки, изменённые или
+   * удалённые без его решения.
+   */
   validate(
     proof: ProductReleaseProof,
     snapshot: ReturnType<typeof changeSnapshot>,
     manifest?: Verification['manifest'],
-  ): { deferredScenarios: DeferredScenario[] };
+  ): {
+    deferredScenarios: DeferredScenario[];
+    unconfirmedScenarios?: UnconfirmedScenario[];
+    /** Карту прошлой приёмки не найти: объём не сверить. */
+    scopeUnverifiable?: boolean;
+  };
 }
 
 /**
@@ -331,17 +340,18 @@ export class Workspace {
       if (c.acceptance) return { status: 'already-accepted', changeSetId: id, ...acceptedNotes(c) };
       changeSnapshot(s, c).tasks.forEach((t) => assertTaskPreparation(s, t));
       let deferred: DeferredScenario[] = [];
+      let unconfirmed: UnconfirmedScenario[] = [];
+      let unverifiable = false;
       const { verification: v, current } = currentJoint(this.h, c);
       if (!v || !current || c.releaseId !== v.productRelease?.releaseId)
         throw new DomainError('Нет актуальной успешной проверки всего ChangeSet');
       if (c.releaseId) {
         if (v.productRelease?.releaseId !== c.releaseId)
           throw new DomainError('Нет закреплённой проверки продуктового релиза');
-        deferred = this.guard().validate(
-          v.productRelease,
-          changeSnapshot(s, c),
-          v.manifest,
-        ).deferredScenarios;
+        const checked = this.guard().validate(v.productRelease, changeSnapshot(s, c), v.manifest);
+        deferred = checked.deferredScenarios;
+        unconfirmed = checked.unconfirmedScenarios ?? [];
+        unverifiable = checked.scopeUnverifiable ?? false;
       }
       // Отложенные сценарии не проверены: приёмка называет их, а не молчит.
       const notes = deferred.length ? { deferredScenarios: deferred } : {};
@@ -350,6 +360,22 @@ export class Workspace {
         throw new DomainError(
           'ChangeSet проверен локально; сначала подтвердите публикацию, merge и CI через read-only forge adapter',
         );
+      // Сценарии последней приёмки, изменённые или удалённые в карте, сужают
+      // релиз без решения пользователя: такую приёмку подтверждает оператор и
+      // в режиме agent. Его приёмка и есть решение — она становится образцом
+      // объёма следующей сверки.
+      // Карту прошлой приёмки не найти — объём не сверить: так же закрыто.
+      if ((unconfirmed.length || unverifiable) && approval.actor !== 'operator')
+        return {
+          status: 'awaiting-operator',
+          changeSetId: id,
+          ...(unconfirmed.length ? { unconfirmedScenarios: unconfirmed } : {}),
+          ...(unverifiable ? { scopeUnverifiable: true } : {}),
+          reason: unconfirmed.length
+            ? 'Сценарии релиза изменены, удалены или отложены после прошлой приёмки: объём релиза подтверждает пользователь приёмкой ChangeSet («Принять» во «Внимании»)'
+            : 'Карта прошлой приёмки релиза не найдена в истории Git workspace, объём не сверить: приёмку подтверждает пользователь («Принять» во «Внимании»)',
+          ...notes,
+        };
       if (this.h.config.approvalMode === 'operator' && approval.actor !== 'operator')
         return { status: 'awaiting-operator', changeSetId: id, ...notes };
       c.acceptance = {
@@ -366,7 +392,13 @@ export class Workspace {
           ),
         },
       };
-      return { status: 'accepted', changeSetId: id, ...c.acceptance, ...notes };
+      return {
+        status: 'accepted',
+        changeSetId: id,
+        ...c.acceptance,
+        ...notes,
+        ...(unconfirmed.length ? { confirmedScenarioChanges: unconfirmed } : {}),
+      };
     });
   }
 }

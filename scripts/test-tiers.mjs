@@ -18,6 +18,7 @@ export const fileSeconds = {
   'contract-change-reconfigure': 385,
   'git-sync': 384,
   'product-scenarios': 379,
+  'product-scope': 375,
   'product-proof': 371,
   engineering: 368,
   'runner-base': 349,
@@ -244,6 +245,7 @@ export const slowTests = {
     'Changing the product map after joint verification blocks',
     'A release proof pins only its own tasks: other work in the component keeps it',
   ],
+  'product-scope': ['A release scenario reworded or removed after acceptance needs the user to'],
   profiles: ['Custom Python gate fails a no-op writer, then verifies candidate and'],
   proof: [
     'Намеренно внесённый дефект ловится названным тестом: без этого',

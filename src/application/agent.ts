@@ -45,6 +45,7 @@ import { InputService, inputOperationInputs } from './input.ts';
 import { AttentionService } from './attention.ts';
 import { attentionInputs } from '../core/attention-model.ts';
 import { markLeadActivity } from '../runner/lead-activity.ts';
+import { gateTestcases, testcasesInput } from './testcases.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 export { SERVER_STOPPING };
@@ -71,6 +72,7 @@ export const agentInputs = {
     cursor: id.optional(),
     limit: z.number().int().min(1).max(REQUIREMENT_PAGE_MAX).optional(),
   }),
+  requirements_testcases: testcasesInput,
   requirements_correct: z.strictObject({ boardId: id, reason: z.string().min(10).max(5000) }),
   ...contextInputs,
   plan_import: z
@@ -211,13 +213,13 @@ export const descriptions: Record<AgentOperation, string> = {
     'Record a decision with its rationale in the durable journal, optionally closing an answered question, or withdraw decisions that no longer hold. Does not approve a stage.',
 
   intent_render:
-    'Render component intent from committed REQ sources, or a workspace product/application/feature map with pinned local story references. A feature check scenario may carry deferred: <reason>; the user decides on deferring: propose it and ask, never defer to pass the gate. Returns Markdown only; does not write, approve or commit it.',
+    'Render component intent from committed REQ sources, or a workspace product/application/feature map with pinned local story references. A feature check scenario may carry deferred: <reason>; the user decides on deferring: propose it and ask, never defer to pass the gate. The rendered devcontour-intent block round-trips: its computed fields (version, sourceSha, requirement digests, components[].intentDigest) are accepted on input and recomputed. Returns Markdown only; does not write, approve or commit it.',
   intent_snapshot:
     'Read the committed intent source returned for the selected owner (docs/implementation-intent.md in embedded mode, otherwise INTENT.md) and exact story REQ bindings. Add a configured test gate/scenario, and bind the detailed requirements too.',
   intent_report:
-    'Audit all release stories and REQ sources. Product maps add application/feature progress, release scenarios with their evidence (a task of a story of the feature itself whose requirements link repeats the scenario text word for word and names its testId, proven on the accepted SHA) or a deferral decided by the user, and current bound ChangeSet acceptance. A scenario without either keeps coverage incomplete. Read-only; never accepts a release or copies local task text.',
+    'Audit all release stories and REQ sources. Product maps add application/feature progress, release scenarios with their evidence (a task of a story of the feature itself whose requirements link repeats the scenario text word for word and names its testId, proven on the accepted SHA) or a deferral decided by the user, and current bound ChangeSet acceptance. A scenario without either keeps coverage incomplete. unconfirmedScenarios lists scenarios of the last acceptance of the release that the map has since reworded, removed or newly deferred: that narrows the release like a deferral, so only the user accepts it (changeset acceptance by the lead returns awaiting-operator). Read-only; never accepts a release or copies local task text.',
   product_view:
-    'Read the committed product/application/component map and computed feature progress for a release. Includes explicit deferred/not-applicable scope, per-scenario evidence status and joint verification; a release is not accepted while a scenario lacks evidence or a recorded deferral. No writes or model calls.',
+    'Read the committed product/application/component map and computed feature progress for a release. Includes explicit deferred/not-applicable scope, per-scenario evidence status and joint verification; a release is not accepted while a scenario lacks evidence or a recorded deferral. unconfirmedScenarios names scenarios of the last acceptance reworded, removed or newly deferred since, which only the user can accept; so does a last acceptance whose map cannot be found (scopeReference.found false). No writes or model calls.',
   usage_report:
     'Read paginated owner-local invocation costs (USD amounts are API-equivalent estimates — reported by the CLI or computed from prices — not subscription charges), versions and telemetry coverage; never evidence. With repositoryId: that component. Without it: the workspace contour (planning, answer review); in an embedded workspace also its component. scope.owners names the owners read; each record carries owner (@workspace for the contour).',
   decision_report:
@@ -248,6 +250,8 @@ export const descriptions: Record<AgentOperation, string> = {
     'Read REQ sections from committed repository HEAD. Bind returned digest/text to a task and a configured test gate.',
   requirements_report:
     'Compare current requirement sections with task evidence. Historical done is unchanged; stale requirements are not current coverage. Returns a summary over all tasks of the component (tasks, requirements, stale, counts by proof level) and task rows within the response limit: without cursor and limit the whole list when it fits, otherwise one page (limit, default 50, max 200); pass nextCursor as cursor for the next page. complete is true only when tasks holds the whole report. A task whose requirements alone exceed the page lists omittedRequirements. full names the CLI command that prints the whole report. Read-only, no model calls.',
+  requirements_testcases:
+    'List the testcase ids of the latest test record of a gate (optionally of one component or task), exactly as a requirements link testId must name them: classname + "." + name from the JUnit report. Also returns the run, SHA, phase and outcome of that record; limit caps the list (default 200) and so does the response limit; omitted counts the ids left out. Joint workspace gates keep no testcase manifest. Read-only, no model calls.',
   requirements_correct:
     'Create draft replacements for changed requirements on an accepted board. Preserve history and require new plan review.',
   project_context:
@@ -345,6 +349,7 @@ export const readOnly = (name: AgentOperation) =>
     'checkpoint_changes',
     'requirements_snapshot',
     'requirements_report',
+    'requirements_testcases',
     'workflow_metrics',
     'value_report',
     'session_handoff',
@@ -679,6 +684,8 @@ export class AgentService {
         const v = agentInputs.requirements_report.parse(input);
         return requirementReportPage(requirementReport(h, v.repositoryId), v);
       }
+      case 'requirements_testcases':
+        return gateTestcases(h.store.read(), input);
       case 'requirements_correct': {
         const v = agentInputs.requirements_correct.parse(input);
         return correctRequirements(h, v.boardId, v.reason);
