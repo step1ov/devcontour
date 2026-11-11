@@ -13,7 +13,7 @@ import {
 } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -408,6 +408,9 @@ ${body}`,
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     DEVCONTOUR_TEST_CONCURRENCY: '4',
+    // Inherited by every stub and its descendants: cleanup signals a recorded
+    // pid only while it still carries this run's own root.
+    CHECK_RUNNER_STUB: root,
     ...extraEnv,
   };
   delete env.NODE_TEST_CONTEXT;
@@ -436,17 +439,39 @@ ${body}`,
   child.stderr.destroy();
   const result = { status, signal, stdout, stderr, timedOut };
   const pid = async (file: string) => Number(await readFile(join(root, file), 'utf8'));
-  /** SIGKILL every recorded stub (a no-op after a working check), then remove the root. */
+  /** Whether `pid` is still a stub of this run (its pid may have been reused since). */
+  const ownStub = async (pid: number) => {
+    const needle = `CHECK_RUNNER_STUB=${root}`;
+    try {
+      if (process.platform === 'linux')
+        return (await readFile(`/proc/${pid}/environ`, 'utf8')).split('\0').includes(needle);
+      const ps = spawnSync('/bin/ps', ['-Eww', '-o', 'command=', '-p', String(pid)], {
+        encoding: 'utf8',
+        timeout: 15_000,
+        killSignal: 'SIGKILL',
+      });
+      return ps.stdout.split(/\s/).includes(needle);
+    } catch {
+      return false;
+    }
+  };
+  /**
+   * SIGKILL every recorded stub still alive (none after a working check),
+   * remove a smoke log the check had no chance to remove, then the root.
+   */
   const cleanup = async () => {
     for (const file of stubPidFiles) {
       const recorded = existsSync(join(root, file)) ? await pid(file) : 0;
-      if (Number.isInteger(recorded) && recorded > 1 && recorded !== process.pid)
+      if (Number.isInteger(recorded) && recorded > 1 && (await ownStub(recorded)))
         try {
           process.kill(recorded, 'SIGKILL');
         } catch {
           /* Already stopped. */
         }
     }
+    const log = /output is held until it ends; meanwhile: (\S+)$/m.exec(stderr)?.[1];
+    if (log && dirname(log) === tmpdir() && /^devcontour-check-[\w-]+\.log$/.test(basename(log)))
+      await rm(log, { force: true });
     await rm(root, { recursive: true, force: true });
   };
   return { root, result, output: stdout + stderr, pid, cleanup };
