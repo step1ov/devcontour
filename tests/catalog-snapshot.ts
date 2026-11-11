@@ -132,5 +132,9 @@
 // английском; описания intent_report и product_view называют отложенный
 // после приёмки сценарий и ненайденный образец объёма, requirements_testcases —
 // предел ответа и omitted; прочие операции байтово прежние.
-export const CATALOG_DIGEST = '4c93781d97ca14b18f514439125b3a0c448aa0583790972282cea53ce2c833cd';
+// Намеренное изменение: описание workflow_status называет otherOwners и
+// otherOwnersHint без repositoryId и ожидание verification задания ChangeSet;
+// описание session_handoff — boardId однозначным префиксом и
+// host.verifications; прочие операции байтово прежние.
+export const CATALOG_DIGEST = '5cf131144bb95835616e9810b5c7ba24e943492886209b6e8512eaa2c8b1504c';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

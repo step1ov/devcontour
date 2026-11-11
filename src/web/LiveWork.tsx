@@ -37,6 +37,11 @@ export type LiveWorkflow = {
   /** Ревьюер плана по правилу вендора; `sameVendor` — разрешённое ревью тем же вендором. */
   reviewer?: { runtime: string; sameVendor: boolean };
   history?: { at: string; stage: number; event: string }[];
+  /**
+   * Ожидание стадии: у ChangeSet — идущая совместная проверка. Задание на это
+   * время стоит `queued` (стадия отвечает «жду»), а проверка идёт.
+   */
+  waiting?: { kind: string; verificationId?: string; startedAt?: string };
 };
 export type LiveState = {
   runs: (Pick<
@@ -139,17 +144,22 @@ export function activeWork(state: LiveState) {
 
 // Ревью плана и совместная проверка идут без прогона задачи: раньше полоса
 // в это время говорила «никто не работает», хотя codex читал план.
+// Совместная проверка идёт вне такта: задание ChangeSet всё это время стоит
+// `queued`, и строку даёт ожидание проверки (`waiting.kind: verification`).
 export function workflowWork(state: LiveState) {
   return (state.workflows ?? [])
     .filter(
       (w) =>
-        w.status === 'running' &&
-        ((w.kind === 'board' && w.stage === 0) || (w.kind === 'changeset' && w.stage === 1)),
+        (w.status === 'running' &&
+          ((w.kind === 'board' && w.stage === 0) || (w.kind === 'changeset' && w.stage === 1))) ||
+        (w.kind === 'changeset' && w.waiting?.kind === 'verification'),
     )
     .map((w) => {
       const board = w.kind === 'board' ? state.boards.find((b) => b.id === w.id) : undefined;
       const change = state.changeSets?.find((c) => c.id === w.id);
+      const verification = w.waiting?.kind === 'verification' ? w.waiting : undefined;
       const since =
+        verification?.startedAt ??
         [...(w.history ?? [])].reverse().find((h) => h.event === 'running')?.at ??
         new Date().toISOString();
       return w.kind === 'board'
@@ -167,7 +177,9 @@ export function workflowWork(state: LiveState) {
             key: w.key,
             id: w.id,
             label: 'Совместная проверка',
-            who: 'проверки',
+            who: verification?.verificationId
+              ? `проверка ${verification.verificationId.slice(0, 8)}`
+              : 'проверки',
             subject: change?.title ?? w.id,
             since,
           };

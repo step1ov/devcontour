@@ -431,7 +431,7 @@ export class LeadRunner {
         if (!tasks.every((t) => t.status === 'done')) {
           // Задачи ждут только ответов на вопросы исполнителя: задание ждёт
           // (без повтора и без провала) и отмечает это в истории один раз.
-          if (this.workflow.waitingOf(job, s)) this.workflow.noteWaiting(job);
+          if (this.workflow.inputWaitingOf(job, s)) this.workflow.noteWaiting(job);
           const pause = pauseStep(s, job, tasks);
           if (pause.checkBase) await this.checkBase(job, guard, signal);
           if (pause.lift)

@@ -63,6 +63,31 @@ export function inputWaiting(
     : undefined;
 }
 
+/**
+ * Идущая совместная проверка ChangeSet задания на стадии 1: id проверки,
+ * начало и сколько она идёт (`elapsedMs` на момент чтения). Проверка с
+ * истёкшим сроком владения не идёт — её заменит следующий такт.
+ */
+export function jointWaiting(
+  s: DevContourState,
+  job: Pick<WorkflowJob, 'kind' | 'id' | 'stage'>,
+  now = Date.now(),
+):
+  | { kind: 'verification'; verificationId: string; startedAt: string; elapsedMs: number }
+  | undefined {
+  if (job.kind !== 'changeset' || job.stage !== 1) return undefined;
+  const v = s.changeSets
+    .find((c) => c.id === job.id)
+    ?.verifications.findLast((v) => v.status === 'active' && v.leaseUntil > now);
+  if (!v) return undefined;
+  return {
+    kind: 'verification',
+    verificationId: v.id,
+    startedAt: v.startedAt,
+    elapsedMs: Math.max(0, now - Date.parse(v.startedAt)),
+  };
+}
+
 export const workflowInput = z.strictObject({
   kind: z.enum(['board', 'changeset']),
   id: z.string().regex(/^[A-Za-z0-9_-]{1,80}$/),
@@ -172,7 +197,8 @@ export class LeadWorkflow {
    * интерфейсу они не нужны и не должны быть доступны.
    */
   view() {
-    const stale = this.staleBoards();
+    const state = this.h.store.read();
+    const stale = this.staleBoards(state);
     return [undefined, ...repositories(this.h.config).map((r) => r.id)].flatMap((owner) =>
       this.list(owner).map((job) => ({
         ...(job.kind === 'board' && stale.get(job.id)?.key === job.key
@@ -196,17 +222,60 @@ export class LeadWorkflow {
         repairs: job.repairs ?? 0,
         repairBudget: this.h.config.repairBudget,
         history: job.history.slice(-20),
-        ...(job.kind === 'board' && ['queued', 'running'].includes(job.status)
+        ...(['queued', 'running'].includes(job.status)
           ? (() => {
-              const waiting = this.waitingOf(job);
+              const waiting = this.waitingOf(job, state);
               return waiting ? { waiting } : {};
             })()
           : {}),
       })),
     );
   }
+  /**
+   * Задания владельцев-компонентов (локальные доски), когда список читается без
+   * `repositoryId`: только он показывает задания workspace, и ведущий иначе
+   * заключал «ничего не идёт», пока работала доска компонента. Сводка по
+   * компоненту — число заданий и действующих (queued, running), не сами
+   * задания: ответ ограничен числом компонентов конфигурации.
+   */
+  otherOwners() {
+    const owners = repositories(this.h.config).flatMap((r) => {
+      const jobs = this.list(r.id);
+      return jobs.length
+        ? [
+            {
+              repositoryId: r.id,
+              jobs: jobs.length,
+              active: jobs.filter((j) => ['queued', 'running'].includes(j.status)).length,
+            },
+          ]
+        : [];
+    });
+    if (!owners.length) return {};
+    const active = owners.filter((o) => o.active).map((o) => o.repositoryId);
+    return {
+      otherOwners: owners,
+      otherOwnersHint: active.length
+        ? `Active jobs of component-local boards are not in jobs: call workflow_status with repositoryId ${active.join(', ')}.`
+        : 'Jobs of component-local boards are not in jobs: call workflow_status with repositoryId to read them.',
+    };
+  }
+  /**
+   * Ожидание стадии задания (чтение, без записи): доски — ответов на вопросы
+   * исполнителя; ChangeSet на стадии 1 — идущей совместной проверки. Задание
+   * ChangeSet во время проверки стоит `queued` (стадия отвечает «жду» каждый
+   * такт), и без этого признака ведущий видел «в очереди, попыток 0» все
+   * минуты проверки.
+   */
+  waitingOf(
+    job: Pick<WorkflowJob, 'kind' | 'id' | 'stage'>,
+    s = this.h.store.read(),
+    now = Date.now(),
+  ) {
+    return job.kind === 'changeset' ? jointWaiting(s, job, now) : this.inputWaitingOf(job, s);
+  }
   /** Ожидание ответов на вопросы исполнителя стадией доски (чтение, без записи). */
-  waitingOf(job: Pick<WorkflowJob, 'kind' | 'id' | 'stage'>, s = this.h.store.read()) {
+  inputWaitingOf(job: Pick<WorkflowJob, 'kind' | 'id' | 'stage'>, s = this.h.store.read()) {
     if (job.kind !== 'board' || job.stage < 1) return undefined;
     const revision = s.boards.find((b) => b.id === job.id)?.revisions.at(-1);
     return revision ? inputWaiting(this.h, s, revision.taskIds) : undefined;
