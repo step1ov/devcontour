@@ -270,3 +270,37 @@ test('Проверка базы и совместная проверка без 
   );
   await shot(page, 'live-cell-checks-phone');
 });
+
+test('Совместная проверка задания ChangeSet в очереди — строкой ведущего цикла с id проверки и временем от её начала', async ({
+  page,
+}) => {
+  // Стадия 1 отвечает «жду», пока проверка идёт вне такта: задание стоит
+  // `queued`, попыток 0, а проверка идёт минуты.
+  await withSummary(page, () => ({
+    run: false,
+    workflows: [
+      {
+        key: 'changeset:CHG-verifying-e2e',
+        kind: 'changeset',
+        id: 'CHG-verifying-e2e',
+        stage: 1,
+        status: 'queued',
+        attempts: 0,
+        history: [],
+        waiting: {
+          kind: 'verification',
+          verificationId: '0f0f0f0f-1111-4000-8000-000000000001',
+          startedAt: new Date(Date.now() - 7 * MIN).toISOString(),
+          elapsedMs: 7 * MIN,
+        },
+      },
+    ],
+  }));
+  await page.goto('/?tab=graph');
+  const live = page.getByRole('region', { name: 'Сейчас работают' });
+  const joint = live.getByRole('list', { name: 'Работа ведущего цикла' }).getByRole('listitem');
+  await expect(joint).toHaveCount(1);
+  await expect(joint).toContainText('Совместная проверка');
+  await expect(joint).toContainText('проверка 0f0f0f0f');
+  await expect(joint).toContainText('7 мин');
+});

@@ -31,7 +31,7 @@ import {
 import { z } from 'zod';
 import { DomainError, type Config } from '../core/model.ts';
 import type { DevContour } from '../core/service.ts';
-import { LeadWorkflow, type WorkflowJob } from '../core/lead-workflow.ts';
+import { LeadWorkflow, jointWaiting, type WorkflowJob } from '../core/lead-workflow.ts';
 import {
   boardTasks,
   liftsPause,
@@ -43,6 +43,7 @@ import {
 import { repositories } from '../core/repositories.ts';
 import { heldBasePaths, heldBaseWait, leadLiftsPause, pausedByLead } from '../core/work-status.ts';
 import { executionOf, toDomain } from '../harness/execution.ts';
+import { resolveIdPrefix } from '../core/id-prefix.ts';
 import type { DevContourExecutionStore } from '../harness/store.ts';
 
 export const handoffFormats = ['json', 'md'] as const;
@@ -197,7 +198,56 @@ export interface DevContourHandoff {
       nextCursor?: string;
       omitted?: true;
     };
+    /**
+     * Задания ChangeSet, чья совместная проверка идёт сейчас (до пяти; с
+     * `boardId` — только наборы с этой доской). Задание на это время стоит
+     * `queued` с попытками 0: проверка идёт вне такта, и без этой записи
+     * ведущий не видел, что минуты уходят на неё.
+     */
+    verifications?: {
+      changeSetId: string;
+      job: { key: string; status: string; stage: number; attempts: number };
+      verificationId: string;
+      startedAt: string;
+      elapsedMs: number;
+    }[];
   };
+}
+
+/** Предел записей `host.verifications`. */
+const HANDOFF_VERIFICATIONS = 5;
+
+/** Идущие совместные проверки заданий ChangeSet (`host.verifications`). */
+function verificationsOf(
+  h: DevContour,
+  state: State,
+  boardId?: string,
+): DevContourHandoff['host']['verifications'] {
+  const now = Date.now();
+  const found = new LeadWorkflow(h)
+    .list()
+    .filter((j) => j.kind === 'changeset' && ['queued', 'running'].includes(j.status))
+    .filter(
+      (j) =>
+        boardId === undefined ||
+        state.changeSets.some((c) => c.id === j.id && c.boardIds.includes(boardId)),
+    )
+    .flatMap((j) => {
+      const w = jointWaiting(state, j, now);
+      return w
+        ? [
+            {
+              changeSetId: j.id,
+              job: { key: j.key, status: j.status, stage: j.stage, attempts: j.attempts },
+              verificationId: w.verificationId,
+              startedAt: w.startedAt,
+              elapsedMs: w.elapsedMs,
+            },
+          ]
+        : [];
+    })
+    .slice(0, HANDOFF_VERIFICATIONS);
+  return found.length ? found : undefined;
 }
 
 /** Владельцы заданий ведущего: workspace и компоненты (как `LeadWorkflow.view`). */
@@ -1061,10 +1111,19 @@ export function devcontourHandoffWithin(
   const harness = harnessOf(h);
   const { source, engine } = harness;
   const { store } = executionOf(h);
-  const { boardId } = request;
   try {
     return store.read((v) => {
       const state = store.stateOf(v);
+      // Короткая форма из журнала и панели (`B-xxxxxxxx`) — однозначный
+      // префикс полного id; неоднозначный называет кандидатов.
+      const boardId =
+        request.boardId === undefined
+          ? undefined
+          : (resolveIdPrefix(
+              state.boards.map((b) => b.id),
+              request.boardId,
+              'Доска',
+            ) ?? request.boardId);
       if (boardId !== undefined) {
         if (!state.boards.some((b) => b.id === boardId))
           throw new DomainError('Доска не найдена: ' + boardId, 404);
@@ -1122,9 +1181,11 @@ export function devcontourHandoffWithin(
           throw error;
         }
       };
+      const verifications = verificationsOf(h, state, boardId);
       const withDiscussion = (discussion: DevContourHandoff['host']['discussion']) => ({
         ...(next ? { next } : {}),
         liveBoards,
+        ...(verifications ? { verifications } : {}),
         ...(discussion ? { discussion } : {}),
       });
       let budget = limit
@@ -1229,6 +1290,10 @@ function hostMarkdown(host: DevContourHandoff['host'], commands: Record<string, 
     '',
     ...(host.next ? [`- **Следующий шаг: ${host.next.action}** — ${host.next.detail}`] : []),
     `- Действующие задания досок: ${host.liveBoards.length ? host.liveBoards.join(', ') : 'нет'}`,
+    ...(host.verifications ?? []).map(
+      (v) =>
+        `- Идёт совместная проверка ChangeSet ${v.changeSetId}: ${v.verificationId}, ${v.elapsedMs < 60_000 ? '<1' : Math.floor(v.elapsedMs / 60_000)} мин (задание ${v.job.key} — ${v.job.status}, стадия ${v.job.stage})`,
+    ),
     ...(host.discussion
       ? [
           host.discussion.requests.length
