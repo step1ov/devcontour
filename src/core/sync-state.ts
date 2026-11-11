@@ -17,6 +17,7 @@ import { dependencyOrder, repository, requiresContract } from './repositories.ts
 import { assertDag } from './graph.ts';
 import { validateTaskContext } from './workflow.ts';
 import {
+  independentAgentApproval,
   taskInput,
   type DevContourState,
   type Task,
@@ -668,12 +669,7 @@ export function stateFromRecords(
           (requiresContract(h.config, t.role, t.repositoryId) && !t.contracts.length))
       )
         throw new Error('Нет утверждённой постановки: ' + t.id);
-      if (
-        t.approval?.actor === 'agent' &&
-        (!t.approval.authorRuntime ||
-          !t.approval.reviewerRuntime ||
-          t.approval.authorRuntime === t.approval.reviewerRuntime)
-      )
+      if (t.approval?.actor === 'agent' && !independentAgentApproval(t.approval))
         throw new Error('Нет независимого согласования: ' + t.id);
       if (previous && previous.status !== 'draft' && specDigest(previous) !== specDigest(t))
         throw new Error('Нужна корректировка утверждённой задачи: ' + t.id);

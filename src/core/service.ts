@@ -171,16 +171,35 @@ export function samePin(
  * же файла. Редакции одного контракта — один источник в одном репозитории.
  */
 export function supersededBy(contracts: Contract[], id: string): Contract | undefined {
-  // Реестр только дополняется, поэтому порядок в нём — порядок утверждения;
-  // отметки времени в пределах миллисекунды совпадают.
   const at = contracts.findIndex((x) => x.id === id);
   const c = contracts[at];
   if (!c?.source) return undefined;
-  return contracts
-    .slice(at + 1)
-    .findLast(
-      (x) => x.source === c.source && (x.repositoryId ?? 'main') === (c.repositoryId ?? 'main'),
-    );
+  const latest = latestRedaction(contracts, c.source, c.repositoryId);
+  return latest && contracts.indexOf(latest) > at ? latest : undefined;
+}
+/** Редакции документа контракта `source` компонента в порядке реестра. */
+export function contractRedactionsOf(
+  contracts: readonly Contract[],
+  source: string,
+  repositoryId: string | undefined,
+): Contract[] {
+  return contracts.filter(
+    (x) => x.source === source && (x.repositoryId ?? 'main') === (repositoryId ?? 'main'),
+  );
+}
+/**
+ * Последняя редакция документа контракта — единое определение для
+ * `supersededBy` и снятия переноса базы по доказательству ревью. Реестр
+ * только дополняется, поэтому порядок в нём — порядок утверждения; отметки
+ * времени в пределах миллисекунды совпадают, а после Git sync приходят
+ * чужими, поэтому по ним не сортируется.
+ */
+export function latestRedaction(
+  contracts: readonly Contract[],
+  source: string,
+  repositoryId: string | undefined,
+): Contract | undefined {
+  return contractRedactionsOf(contracts, source, repositoryId).at(-1);
 }
 const now = () => new Date().toISOString();
 const task = (s: DevContourState, id: string) =>

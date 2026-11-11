@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { isAbsolute, relative } from 'node:path';
-import type { DevContour } from '../core/service.ts';
-import type { DevContourState } from '../core/model.ts';
+import { contractRedactionsOf, latestRedaction, type DevContour } from '../core/service.ts';
+import { independentAgentApproval, type DevContourState } from '../core/model.ts';
 import { repository } from '../core/repositories.ts';
 import { assertArtifactsInBase, componentArtifacts } from './contract-artifacts.ts';
 import { git, hostGitArgs } from './process.ts';
@@ -49,8 +49,10 @@ export async function sensitiveBaseEntries(
   to: string,
 ): Promise<SensitiveBaseEntry[]> {
   const repo = repository(h.config, repositoryId);
-  const changed = (await git(repo.path, 'diff', '--name-only', '--no-renames', from, to))
-    .split('\n')
+  // `-z`: пути как есть. Без него git экранирует не-ASCII пути
+  // (core.quotePath), и путь кириллицей не совпадал ни с одним правилом.
+  const changed = (await git(repo.path, 'diff', '--name-only', '-z', '--no-renames', from, to))
+    .split('\0')
     .filter(Boolean);
   const own = (r?: string) => (r ?? 'main') === repositoryId;
   const exact = new Set<string>();
@@ -111,35 +113,47 @@ export interface ReviewedContractDocument {
   contractId: string;
   /** Ревью, одобрившее этот текст (каталог решения `decisions/<id>`). */
   reviewId: string;
-  authorRuntime?: string;
+  authorRuntime: string;
   reviewerRuntime: string;
 }
 
-/** Зарегистрированные редакции документа контракта компонента, от ранней к последней. */
-export function contractRedactions(
+/**
+ * Причина, по которой последняя редакция документа не годится в
+ * доказательство, — по одному состоянию, без Git. Её же сверяет транзакция
+ * решения: за время gates могли зарегистрировать новую редакцию или вернуть
+ * в работу задачу, закреплённую за прежней.
+ */
+export function reviewedRedaction(
   s: Readonly<DevContourState>,
   repositoryId: string,
   path: string,
 ) {
-  const own = (r?: string) => (r ?? 'main') === repositoryId;
-  return s.contracts
-    .map((c, i) => ({ c, i }))
-    .filter(({ c }) => c.source === path && own(c.repositoryId))
-    .sort((a, b) => a.c.approvedAt.localeCompare(b.c.approvedAt) || a.i - b.i)
-    .map(({ c }) => c);
+  const records = contractRedactionsOf(s.contracts, path, repositoryId);
+  const latest = latestRedaction(s.contracts, path, repositoryId);
+  const approval = latest?.approval;
+  // Независимость — то же правило, что у утверждения задачи (Git sync), и
+  // сохранённое решение ревью.
+  if (!latest || !independentAgentApproval(approval) || !approval?.artifact) return undefined;
+  const open = s.tasks.filter((t) => !['done', 'cancelled'].includes(t.status));
+  if (records.some((c) => c.id !== latest.id && open.some((t) => t.contracts.includes(c.id))))
+    return undefined;
+  return latest;
 }
 
 /**
  * Документ контракта `path`, который перенос базы приносит ровно в той
  * редакции, что одобрило независимое ревью (`review-contract` или
  * contract-change в режиме агента). Доказательство — последняя
- * зарегистрированная редакция этого документа: одобрение агента с ревьюером
- * и сохранённым решением, а blob её текста (`git hash-object` точных байтов)
- * равен blob файла на `to`. Нет доказательства — `undefined`, и перенос
- * по-прежнему подтверждает человек: другая редакция (правка после ревью,
- * откат к прежней), удалённый документ, одобрение оператора или запись без
- * ревьюера, а также открытая задача, закреплённая за прежней редакцией того
- * же документа, — её договор этот перенос поменял бы без contract-change.
+ * зарегистрированная редакция этого документа (`latestRedaction`, тот же
+ * порядок, что у `supersededBy`): независимое согласование агента (runtime
+ * автора и ревьюера названы и различны) с сохранённым решением; на `to` по
+ * этому пути лежит обычный файл (100644 или 100755), и его blob равен blob
+ * текста редакции (`git hash-object` точных байтов). Нет доказательства —
+ * `undefined`, и перенос по-прежнему подтверждает человек: другая редакция
+ * (правка после ревью, откат к прежней), удалённый документ, ссылка или
+ * подмодуль, одобрение оператора или запись без runtime либо решения ревью,
+ * а также открытая задача, закреплённая за прежней редакцией того же
+ * документа, — её договор этот перенос поменял бы без contract-change.
  */
 export async function reviewedContractDocument(
   h: DevContour,
@@ -149,18 +163,15 @@ export async function reviewedContractDocument(
   to: string,
 ): Promise<ReviewedContractDocument | undefined> {
   const repo = repository(h.config, repositoryId);
-  const records = contractRedactions(s, repositoryId, path);
-  const latest = records.at(-1);
+  const latest = reviewedRedaction(s, repositoryId, path);
   const approval = latest?.approval;
-  if (!latest || approval?.actor !== 'agent' || !approval.reviewerRuntime || !approval.artifact)
+  if (!latest || !approval?.artifact || !approval.authorRuntime || !approval.reviewerRuntime)
     return undefined;
-  const open = s.tasks.filter((t) => !['done', 'cancelled'].includes(t.status));
-  if (records.some((c) => c.id !== latest.id && open.some((t) => t.contracts.includes(c.id))))
-    return undefined;
-  let blob: string;
+  let entry: string;
   let approved: string;
   try {
-    blob = await git(repo.path, 'rev-parse', '--verify', '--quiet', `${to}:${path}`);
+    // Запись дерева на `to`, а не рабочий файл: режим и blob из одного места.
+    entry = await git(repo.path, 'ls-tree', '-z', to, '--', path);
     // Точные байты одобренного текста, без фильтров атрибутов и перевода строк.
     approved = execFileSync(
       'git',
@@ -170,14 +181,19 @@ export async function reviewedContractDocument(
   } catch {
     return undefined;
   }
-  if (!blob || blob !== approved) return undefined;
+  const records = entry.split('\0').filter(Boolean);
+  const match = /^(\d+) (\w+) ([0-9a-f]+)\t([\s\S]*)$/.exec(records[0] ?? '');
+  if (records.length !== 1 || !match || match[4] !== path) return undefined;
+  const [, mode, type, blob] = match;
+  if (type !== 'blob' || (mode !== '100644' && mode !== '100755')) return undefined;
+  if (blob !== approved) return undefined;
   return {
     repositoryId,
     path,
     blob,
     contractId: latest.id,
     reviewId: approval.artifact.split(/[\\/]/).at(-1) || approval.artifact,
-    ...(approval.authorRuntime ? { authorRuntime: approval.authorRuntime } : {}),
+    authorRuntime: approval.authorRuntime,
     reviewerRuntime: approval.reviewerRuntime,
   };
 }

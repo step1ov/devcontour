@@ -9,8 +9,8 @@ import { controllerBoundary } from './checks.ts';
 import { checkoutRootOption, workspaceCheckoutRoot } from './checkout-root.ts';
 import { journalError } from './board-coverage.ts';
 import {
-  contractRedactions,
   reviewedContractDocument,
+  reviewedRedaction,
   sensitiveBaseEntries,
   type ReviewedContractDocument,
 } from './sensitive-paths.ts';
@@ -275,14 +275,11 @@ export async function checkBase(
     guard();
     if (!waiting()) return 'cleared';
     if (ranges() !== range) return 'moved';
-    // Доказательство ревью относится к последней редакции документа: новая
-    // регистрация за время gates — проверить заново.
+    // Доказательство ревью сверяется заново по текущему состоянию: новая
+    // редакция документа или возвращённая в работу задача, закреплённая за
+    // прежней, за время gates — проверить на следующем такте.
     const now = h.store.read();
-    if (
-      reviewed.some(
-        (r) => contractRedactions(now, r.repositoryId, r.path).at(-1)?.id !== r.contractId,
-      )
-    )
+    if (reviewed.some((r) => reviewedRedaction(now, r.repositoryId, r.path)?.id !== r.contractId))
       return 'moved';
     for (const b of bases) {
       const repo = repository(h.config, b.repositoryId);

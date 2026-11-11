@@ -367,6 +367,16 @@ export interface Approval {
   artifact?: string;
   digest?: string;
 }
+/**
+ * Согласование агента — независимое: названы runtime автора и ревьюера, и они
+ * различны. То же правило принимает утверждение задачи из Git sync и снятие
+ * переноса базы с документом контракта по доказательству ревью.
+ */
+export const independentAgentApproval = (a: Approval | undefined) =>
+  a?.actor === 'agent' &&
+  !!a.authorRuntime &&
+  !!a.reviewerRuntime &&
+  a.authorRuntime !== a.reviewerRuntime;
 export interface Revision {
   number: number;
   status: 'active' | 'accepted';
