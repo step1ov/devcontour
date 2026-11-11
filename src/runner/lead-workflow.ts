@@ -1,5 +1,6 @@
 import { join } from 'node:path';
-import { LeadWorkflow, type WorkflowJob } from '../core/lead-workflow.ts';
+import { LeadWorkflow, WAITING_BASE_HELD, type WorkflowJob } from '../core/lead-workflow.ts';
+import { heldBaseWait } from '../core/work-status.ts';
 import { SERVER_STOPPING, type DevContour } from '../core/service.ts';
 import { DomainError, type ChangeSet, type DevContourState } from '../core/model.ts';
 import { repositories, repository } from '../core/repositories.ts';
@@ -433,8 +434,15 @@ export class LeadRunner {
           // (без повтора и без провала) и отмечает это в истории один раз.
           if (this.workflow.waitingOf(job, s)) this.workflow.noteWaiting(job);
           const pause = pauseStep(s, job, tasks);
-          if (pause.checkBase)
+          if (pause.checkBase) {
             await checkBase(this.h, { data: this.root, state: this.boardRoot(job) }, guard, signal);
+            // Удержанный перенос ждёт человека: задание отмечает это в
+            // истории один раз за удержание, а не ждёт молча каждый такт.
+            const after = this.h.store.read();
+            const wait = after.waits?.find((w) => w.kind === 'base-check');
+            if (after.paused && after.pauseReason === 'base-check' && heldBaseWait(wait?.detail))
+              this.workflow.noteWaiting(job, WAITING_BASE_HELD, wait!.at);
+          }
           if (pause.lift)
             this.h.store.atomic(() => {
               guard();

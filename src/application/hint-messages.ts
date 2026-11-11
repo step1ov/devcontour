@@ -76,6 +76,12 @@ export interface HintParamMap {
   'pause-lift': { pause: string; stage: number };
   /** Пауза человека (`by: lead` — её поставил ведущий через queue_set), её не снимает ни одно задание. */
   'pause-operator': { by?: 'lead' };
+  /**
+   * Перенос базы удержан до подтверждения человека (`base.check.held`):
+   * `paths` — чувствительные пути (`компонент:путь`), которые цикл задания
+   * снять не вправе.
+   */
+  'base-held': { paths: string[] };
   /** Открытый follow-up исполнителя. */
   'follow-up': { severity: number; version: number };
   /** Вопрос ждёт ответа ведущего (без минимумов, режим agent). */
@@ -294,6 +300,9 @@ const en: Catalog = {
       ? 'Dispatch is paused by the lead (queue_set) and no job loop lifts it: resume with queue_set {"paused": false} (devcontour queue --start) once the reason for the pause is resolved.'
       : 'Dispatch is paused by the operator and no job loop lifts it: resume only on the user\'s decision with queue_set {"paused": false} (devcontour queue --start).') +
     (s.loop && s.boardId ? ` Meanwhile the job loop of board ${s.boardId} ${loopEn(s.loop)}.` : ''),
+  'base-held': (p, s) =>
+    `operator: confirm the base move. The moved base changes acceptance or contour setup (${p.paths.length ? p.paths.join(', ') : 'see the wait in the attention center'}), and gates of that base do not prove such a change, so dispatch waits for a human: ask the user to confirm it with the confirm-and-start action of the base move card in the attention center of the panel. The lead does not lift this wait itself (no queue_set, no workflow_retry). The job loop lifts on its own only contract documents at the exact text that an independent review approved (review-contract or contract-change); acceptance files, profile, config and gates always need the user.` +
+    (s.boardId ? ` The job loop of board ${s.boardId} waits until then.` : ''),
   'follow-up': (p, s) => {
     const { requestId, taskId } = s.input!;
     return `Follow-up ${requestId} of task ${taskId} (a decision the writer took itself, severity ${p.severity}): accept it with input_cancel {"requestId": "${requestId}", "expectedVersion": ${p.version}, "reason": "assumption accepted"} or, if it changes requirements, correct the board (board_correct) and input_supersede with the replacement task (a task without an accepted result: reopen, respecify and supersede with the same task).`;
@@ -501,6 +510,9 @@ const ru: Catalog = {
       ? 'Выдачу приостановил ведущий агент (queue_set), и ни один цикл задания её не снимет: возобновите queue_set {"paused": false} (devcontour queue --start), когда причина паузы устранена.'
       : 'Выдачу приостановил оператор, и ни один цикл задания её не снимет: возобновляйте только по решению пользователя — queue_set {"paused": false} (devcontour queue --start).') +
     (s.loop && s.boardId ? ` Тем временем цикл задания доски ${s.boardId} ${loopRu(s.loop)}.` : ''),
+  'base-held': (p, s) =>
+    `operator: подтвердите перенос базы. Перенесённая база меняет приёмку или настройку контура (${p.paths.length ? p.paths.join(', ') : 'см. ожидание в центре внимания'}), а gates этой базы такое изменение не доказывают, поэтому выдача ждёт человека: попросите пользователя подтвердить перенос кнопкой «Подтвердить и запустить» в «Внимании» панели. Ведущий агент это ожидание сам не снимает (ни queue_set, ни workflow_retry). Цикл задания сам снимает только документы контрактов в редакции, одобренной независимым ревью (review-contract или contract-change); файлы приёмки, профиль, конфигурацию и gates всегда подтверждает пользователь.` +
+    (s.boardId ? ` До этого цикл задания доски ${s.boardId} ждёт.` : ''),
   'follow-up': (p, s) => {
     const { requestId, taskId } = s.input!;
     return `Follow-up ${requestId} задачи ${taskId} (решение, которое исполнитель принял сам, серьёзность ${p.severity}): примите его через input_cancel {"requestId": "${requestId}", "expectedVersion": ${p.version}, "reason": "assumption accepted"} или, если оно меняет требования, скорректируйте доску (board_correct) и выполните input_supersede с задачей-заменой (задача без принятого результата: переоткройте её, задайте новую постановку и замените той же задачей).`;

@@ -41,7 +41,7 @@ import {
   type LoopOutlook,
 } from '../runner/lead-outlook.ts';
 import { repositories } from '../core/repositories.ts';
-import { leadLiftsPause, pausedByLead } from '../core/work-status.ts';
+import { heldBasePaths, heldBaseWait, leadLiftsPause, pausedByLead } from '../core/work-status.ts';
 import { executionOf, toDomain } from '../harness/execution.ts';
 import type { DevContourExecutionStore } from '../harness/store.ts';
 
@@ -951,9 +951,22 @@ function hostStep(ctx: HostContext): HandoffHostNext | undefined {
       (x) => (x.action === 'decide' && x.decision !== 'plan') || x.action === 'fix-input',
     );
     if (decision) return decision;
+    const live = ctx.jobs.filter(ctx.live);
+    // Удержанный перенос базы (`base.check.held`) не снимет ни один цикл
+    // задания: «цикл проверит базу» скрыл бы, что ждут человека. Шаг —
+    // подтверждение оператора с путями переноса.
+    const wait = state.waits?.find((w) => w.kind === 'base-check')?.detail;
+    if (state.pauseReason === 'base-check' && heldBaseWait(wait)) {
+      const first = live[0];
+      return withDetail(h, {
+        action: 'operator',
+        ...(first ? { boardId: first.id, job: jobRef(first) } : {}),
+        code: 'base-held',
+        params: { paths: heldBasePaths(wait) },
+      });
+    }
     // Пауза выдачи общая: её снимает любое действующее задание, чей цикл
     // снимет её — сразу или после такта, который сначала чинит задачу.
-    const live = ctx.jobs.filter(ctx.live);
     for (const job of live)
       if (liftsPause(h, state, asLead(job))) {
         const { stage, outlook: loop } = loopAhead(h, state, asLead(job));

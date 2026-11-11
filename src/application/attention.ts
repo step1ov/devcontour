@@ -46,7 +46,7 @@ import { inputReviewRounds } from '../harness/input-host.ts';
 import { DiscussionService } from './discussion.ts';
 import { taskOwner } from '../core/sync-state.ts';
 import { baseWaitOf, queueStopOf, quietAttempts, quietOperations } from './queue-stop.ts';
-import { pausedByLead } from '../core/work-status.ts';
+import { heldBasePaths, heldBaseWait, pausedByLead } from '../core/work-status.ts';
 import type { DevContour } from '../core/service.ts';
 import type { Store } from '../core/store.ts';
 import type { DevContourState, Task } from '../core/model.ts';
@@ -854,9 +854,30 @@ const waitSource: AttentionSourceRule = {
           },
         ];
       const wait = baseWaitOf(h, s);
-      if (!wait?.needsOperator || foldedBaseWait(h, s)) return [];
+      if (!wait?.needsOperator) return [];
+      // Удержанный перенос подтверждает только человек; ведущий видит это
+      // своим пунктом по умолчанию, а не ждёт молча цикла, который его не
+      // снимет (карточка оператора — рядом или в паузе оператора).
+      const lead: Candidate[] = heldBaseWait(wait.detail)
+        ? [
+            {
+              ...base,
+              sourceKey: 'wait:base-check:lead',
+              sourceVersion: d({ detail: wait.detail, lead: true }),
+              category: 'decision',
+              actor: 'lead',
+              title: 'Перенос базы ждёт подтверждения человека',
+              reason: ctx.redact(
+                `Подтвердить перенос должен человек: он меняет приёмку или настройку контура (${heldBasePaths(wait.detail).join(', ') || 'пути — в ожидании'}), а gates этой базы такое изменение не доказывают. Ведущий агент ожидание сам не снимает: попросите пользователя нажать «Подтвердить и запустить» в «Внимании» панели. Документы контрактов в редакции, одобренной независимым ревью (review-contract), цикл задания снимает сам; файлы приёмки, профиль, конфигурацию и gates — только человек`,
+              ),
+              actions: [handoffOf(ctx)],
+            },
+          ]
+        : [];
+      if (foldedBaseWait(h, s)) return lead;
       const failed = wait.detail.startsWith('Проверка базы не пройдена');
       return [
+        ...lead,
         {
           ...base,
           sourceVersion: d({ detail: wait.detail, needsOperator: wait.needsOperator, failed }),

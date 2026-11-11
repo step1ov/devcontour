@@ -247,6 +247,15 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
       loop: { step: 'accept' },
     },
   ],
+  'base-held': [
+    { code: 'base-held', params: { paths: [] } },
+    {
+      code: 'base-held',
+      params: { paths: ['main:verify.mjs', 'main:docs/contracts/api.md'] },
+      boardId: 'board-1',
+      job,
+    },
+  ],
   'follow-up': [{ code: 'follow-up', params: { severity: 5, version: 3 }, input: input1 }],
   'answer-lead': [
     { code: 'answer-lead', params: { version: 2 }, input: input1 },

@@ -16,10 +16,12 @@ import { Scheduler } from '../src/runner/scheduler.ts';
 import { taskProgress } from '../src/application/context.ts';
 import { panelSummary, panelTask, type PanelSummary } from '../src/application/panel.ts';
 import { git } from '../src/runner/process.ts';
-import { writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { checkBase } from '../src/runner/base-check.ts';
 import { baseUpdateOperation } from '../src/runner/base-update.ts';
+import { devcontourHandoff } from '../src/application/handoff.ts';
+import { AgentService } from '../src/application/agent.ts';
 
 // Копии одного учебного workspace вместо новой сборки демо в каждом тесте.
 const demos = demoPool(testDemo);
@@ -1002,5 +1004,178 @@ test('ChangeSet не требует done от отменённой задачи 
     );
   } finally {
     f.cleanup();
+  }
+});
+
+/** Одобрение независимого ревью контракта (как `review-contract` в режиме агента). */
+const reviewed = (root: string, id: string) => ({
+  actor: 'agent' as const,
+  authorRuntime: 'codex' as const,
+  reviewerRuntime: 'claude' as const,
+  artifact: join(root, 'decisions', id),
+  digest: 'review-' + id,
+});
+
+test('Перенос базы только с документом контракта в одобренной ревью редакции снимает цикл с доказательством; другая редакция и файл приёмки рядом ждут человека, и ведущий это видит', async () => {
+  const f = await baseCheckFixture();
+  const { root, config, store, h, lead, commit, events, detail } = f;
+  const doc = 'docs/contracts/api.md';
+  const text = '# API v1\n\nGET /items returns the list of items.\n';
+  try {
+    store.change('fixture.reset', (s) => {
+      s.tasks = [];
+      s.boards = [];
+      s.runs = [];
+    });
+    await mkdir(join(config.repository, 'docs', 'contracts'), { recursive: true });
+    const b = h.createBoard('Reviewed contract board', '', 'main');
+    h.addTask(b.id, input());
+    const flow = new LeadWorkflow(h);
+    const job = flow.start({ kind: 'board', id: b.id, authorRuntime: 'codex' });
+    await lead.tick();
+    await lead.tick();
+    assert.equal(store.read().paused, false, 'workflow запустил очередь');
+    const notes = () =>
+      flow.get(job.key, job.owner).history.filter((x) => x.event === 'waiting:base-held');
+
+    // (a) Документ, одобренный независимым ревью, перенесён ровно в этой
+    // редакции: цикл снимает ожидание после gates и называет доказательство.
+    const approved = h.contract('API v1', text, reviewed(root, 'review-1'), undefined, doc);
+    h.holdForBaseUpdate();
+    const first = await commit('ok', { [doc]: text });
+    await lead.tick();
+    let state = store.read();
+    assert.equal(state.paused, false, 'одобренный документ снят циклом: ' + detail());
+    assert.equal(events('base.check.held').length, 0);
+    assert.equal(events('base.check.passed').length, 1, 'gates базы прошли до снятия');
+    const lifted = events('base.checked').at(-1)!.data as {
+      liftedBy?: string;
+      reviewedContracts?: unknown[];
+    };
+    assert.equal(lifted.liftedBy, 'agent');
+    assert.deepEqual(lifted.reviewedContracts, [
+      {
+        repositoryId: 'main',
+        path: doc,
+        blob: await git(config.repository, 'rev-parse', `${first}:${doc}`),
+        contractId: approved.id,
+        reviewId: 'review-1',
+        authorRuntime: 'codex',
+        reviewerRuntime: 'claude',
+      },
+    ]);
+    assert.equal(notes().length, 0);
+
+    // (b) Документ изменён после ревью: blob не тот, что одобрен, — ждёт человека.
+    h.holdForBaseUpdate();
+    await commit('ok 2', { [doc]: text + '\nEdited after the review.\n' });
+    await lead.tick();
+    state = store.read();
+    assert.equal(state.paused, true, 'изменённый после ревью документ не снят');
+    assert.equal(state.pauseReason, 'base-check');
+    assert.ok(detail().startsWith(BASE_HELD_DETAIL), detail());
+    assert.match(detail(), /main:docs\/contracts\/api\.md/);
+    assert.equal(events('base.check.held').length, 1);
+    assert.equal(events('base.check.started').length, 1, 'gates удержанного переноса не шли');
+
+    // (c) Удержание видно ведущему: host.next — подтверждение оператора с
+    // путями, пункт attention_list по умолчанию (ведущий), отметка в истории
+    // задания — одна на удержание, а не на такт.
+    const next = devcontourHandoff(h, {}).host.next!;
+    assert.equal(next.action, 'operator', JSON.stringify(next));
+    assert.equal(next.code, 'base-held');
+    assert.deepEqual(next.params, { paths: ['main:docs/contracts/api.md'] });
+    assert.equal(next.boardId, b.id);
+    assert.match(next.detail, /^operator: confirm the base move/);
+    const leadItems = new AgentService(h).execute({ operation: 'attention_list', input: {} })
+      .items as { sourceKey: string; actor: string; reason: string }[];
+    const item = leadItems.find((i) => i.sourceKey === 'wait:base-check:lead');
+    assert.ok(item, JSON.stringify(leadItems.map((i) => i.sourceKey)));
+    assert.equal(item.actor, 'lead');
+    assert.match(item.reason, /Подтвердить перенос должен человек/);
+    assert.match(item.reason, /main:docs\/contracts\/api\.md/);
+    assert.equal(notes().length, 1, 'задание отметило ожидание человека');
+    await lead.tick();
+    await lead.tick();
+    assert.equal(notes().length, 1, 'повторные такты той же отметки не добавляют');
+    assert.equal(events('base.check.held').length, 1);
+    // Решение человека.
+    h.pause(false);
+
+    // (d) Документ в новой одобренной редакции, но рядом файл приёмки
+    // (protectedPaths демо-проекта): весь перенос ждёт человека.
+    const v2 = text + '\nGET /items/:id returns one item.\n';
+    h.contract('API v1', v2, reviewed(root, 'review-2'), undefined, doc);
+    h.holdForBaseUpdate();
+    await commit('ok 3', { [doc]: v2, 'verify.mjs': 'process.exit(0);\n' });
+    await lead.tick();
+    state = store.read();
+    assert.equal(state.paused, true, 'файл приёмки рядом держит перенос');
+    assert.match(detail(), /main:verify\.mjs/);
+    assert.doesNotMatch(detail(), /main:docs\/contracts\/api\.md/, 'одобренный документ не назван');
+    assert.equal(events('base.check.started').length, 1);
+    assert.deepEqual(devcontourHandoff(h, {}).host.next?.params, { paths: ['main:verify.mjs'] });
+    assert.equal(notes().length, 2, 'новое удержание — новая отметка');
+    await lead.tick();
+    assert.equal(notes().length, 2);
+    h.pause(false);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('Документ контракта в одобренной редакции: одобрение оператора, прежняя редакция открытой задачи и режим оператора переноса не снимают', async () => {
+  const f = await baseCheckFixture();
+  const { root, config, store, h, commit, events, detail } = f;
+  const roots = { data: root, state: root };
+  const doc = 'docs/contracts/api.md';
+  const waiting = () => store.read().paused && store.read().pauseReason === 'base-check';
+  try {
+    h.pause(false);
+    await mkdir(join(config.repository, 'docs', 'contracts'), { recursive: true });
+    // Одобрение человека (не независимое ревью) — не доказательство для цикла.
+    const manual = '# Manual\n';
+    h.contract('Manual', manual, { actor: 'operator' }, undefined, doc);
+    h.holdForBaseUpdate();
+    await commit('ok', { [doc]: manual });
+    assert.equal(await checkBase(h, roots, () => {}), false);
+    assert.ok(waiting());
+    assert.match(detail(), /main:docs\/contracts\/api\.md/);
+    h.pause(false);
+
+    // Открытая задача закреплена за прежней редакцией документа: новая
+    // одобренная редакция поменяла бы её договор без contract-change.
+    const old = h.contract('API', '# API\n', reviewed(root, 'review-old'), undefined, doc);
+    const b = h.createBoard('Pinned board', '', 'main');
+    h.addTask(b.id, { ...input(), contracts: [old.id] });
+    const fresh = '# API\n\nReviewed again.\n';
+    h.contract('API', fresh, reviewed(root, 'review-new'), undefined, doc);
+    h.holdForBaseUpdate();
+    await commit('ok 2', { [doc]: fresh });
+    assert.equal(await checkBase(h, roots, () => {}), false);
+    assert.ok(waiting());
+    assert.match(detail(), /main:docs\/contracts\/api\.md/);
+    h.pause(false);
+    store.change('fixture.drop-pinned', (s) => {
+      s.tasks = s.tasks.filter((t) => !t.contracts.includes(old.id));
+    });
+
+    // Режим оператора: даже документ в одобренной ревью редакции цикл не снимает.
+    h.config.approvalMode = 'operator';
+    const third = '# API\n\nReviewed a third time.\n';
+    h.contract('API', third, reviewed(root, 'review-third'), undefined, doc);
+    h.pause(true, 'shutdown');
+    await commit('ok 3', { [doc]: third });
+    assert.equal(store.read().pauseReason, 'base-check');
+    const started = events('base.check.started').length;
+    assert.equal(await checkBase(h, roots, () => {}), false);
+    assert.ok(waiting(), 'режим оператора: ожидание остаётся решением человека');
+    assert.equal(events('base.check.started').length, started, 'gates не исполнялись');
+    assert.equal(
+      events('base.checked').filter((e) => (e.data as { liftedBy?: string }).liftedBy).length,
+      0,
+    );
+  } finally {
+    await f.cleanup();
   }
 });

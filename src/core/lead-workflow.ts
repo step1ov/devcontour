@@ -22,6 +22,11 @@ const STAGE_ATTEMPTS_EXHAUSTED = 'Исчерпаны попытки стадии
 
 /** Событие истории задания: стадия ждёт ответов на вопросы исполнителя. */
 export const WAITING_INPUT = 'waiting:input';
+/**
+ * Событие истории задания: стадия ждёт подтверждения человеком удержанного
+ * переноса базы (`base.check.held`) — цикл его не снимет.
+ */
+export const WAITING_BASE_HELD = 'waiting:base-held';
 
 /**
  * Стадия доски ждёт только ответов: попыток задач нет, а каждая
@@ -209,15 +214,16 @@ export class LeadWorkflow {
   /**
    * Отметить ожидание ответов в истории задания один раз: повторный такт,
    * который снова ждёт, второй записи не добавляет (захват стадии `running`
-   * между ними не считается).
+   * между ними не считается). `since` — начало ожидания: отметка того же
+   * события раньше него относится к прежнему ожиданию, и новое отмечается.
    */
-  noteWaiting(job: WorkflowJob, event = WAITING_INPUT) {
+  noteWaiting(job: WorkflowJob, event = WAITING_INPUT, since?: string) {
     const { engine } = executionOf(this.h);
     domain(() =>
       engine.host.store.transact('workflow.updated', (tx) => {
         const current = this.queue().guard(job, tx) as WorkflowJob;
         const last = current.history.filter((h) => h.event !== 'running').at(-1);
-        if (last?.event === event) return;
+        if (last?.event === event && (!since || last.at >= since)) return;
         tx.putLocal('workflow-jobs', job.owner ?? WORKSPACE_OWNER, job.key, {
           ...current,
           history: [...current.history, { at: new Date().toISOString(), stage: job.stage, event }],
