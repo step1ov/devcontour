@@ -32,6 +32,40 @@ async function until(check: () => boolean, detail: string) {
   assert.ok(check(), detail);
 }
 
+/**
+ * Check runs under test give every stub `CHECK_RUNNER_STUB=<the run's root>`.
+ * Stubs are detached and outlive a killed check; cleanup SIGKILLs a recorded
+ * pid only while it still carries the marker (the pid may have been reused).
+ */
+async function killRecordedStubs(root: string, files: string[]) {
+  const needle = `CHECK_RUNNER_STUB=${root}`;
+  const owned = async (pid: number) => {
+    try {
+      if (process.platform === 'linux')
+        return (await readFile(`/proc/${pid}/environ`, 'utf8')).split('\0').includes(needle);
+      const ps = spawnSync('/bin/ps', ['-Eww', '-o', 'command=', '-p', String(pid)], {
+        encoding: 'utf8',
+        timeout: 15_000,
+        killSignal: 'SIGKILL',
+      });
+      return ps.stdout.split(/\s/).includes(needle);
+    } catch {
+      return false;
+    }
+  };
+  for (const file of files) {
+    const recorded = existsSync(join(root, file))
+      ? Number(await readFile(join(root, file), 'utf8'))
+      : 0;
+    if (Number.isInteger(recorded) && recorded > 1 && (await owned(recorded)))
+      try {
+        process.kill(recorded, 'SIGKILL');
+      } catch {
+        /* Already stopped. */
+      }
+  }
+}
+
 for (const detached of [false, true])
   for (const mode of ['failure', 'signal'] as const)
     test(
@@ -64,6 +98,7 @@ for (const detached of [false, true])
       import {spawn} from 'node:child_process';
       import {existsSync,writeFileSync} from 'node:fs';
       const name=process.argv[2];
+      writeFileSync(name+'.pid',String(process.pid));
       if(name==='typecheck') {
         spawn(process.execPath,['-e',
           "const fs=require('node:fs');process.on('SIGTERM',()=>{});fs.writeFileSync('descendant.pid',String(process.pid));setInterval(()=>{},1000)"
@@ -81,14 +116,22 @@ for (const detached of [false, true])
         );
         const child = spawn(process.execPath, [join(scripts, 'check.mjs'), ...['--fast']], {
           cwd: root,
+          env: { ...process.env, CHECK_RUNNER_STUB: root },
           stdio: ['ignore', 'pipe', 'pipe'],
         });
         let output = '';
         child.stdout.on('data', (chunk) => (output += String(chunk)));
         child.stderr.on('data', (chunk) => (output += String(chunk)));
+        // Bounded by the test, not by the check (whose SIGTERM handling is
+        // under test): past the bound the check is SIGKILLed, so the test
+        // ends and its cleanup runs before the test timeout.
+        const bound = setTimeout(() => {
+          output += '\n[the check hung; SIGKILLed by the test]';
+          child.kill('SIGKILL');
+        }, 15_000);
         const closed = new Promise<number | null>((resolve, reject) => {
           child.once('error', reject);
-          child.once('close', resolve);
+          child.once('exit', resolve);
         });
         try {
           await until(() => existsSync(join(root, 'descendant.pid')), 'descendant started');
@@ -103,9 +146,10 @@ for (const detached of [false, true])
             'later stages never started',
           );
         } finally {
+          clearTimeout(bound);
           unrelated.kill('SIGKILL');
           child.kill('SIGKILL');
-          if (pid && alive(pid)) process.kill(pid, 'SIGKILL');
+          await killRecordedStubs(root, ['lint.pid', 'typecheck.pid', 'descendant.pid']);
           await rm(root, { recursive: true, force: true });
         }
       },
@@ -439,36 +483,12 @@ ${body}`,
   child.stderr.destroy();
   const result = { status, signal, stdout, stderr, timedOut };
   const pid = async (file: string) => Number(await readFile(join(root, file), 'utf8'));
-  /** Whether `pid` is still a stub of this run (its pid may have been reused since). */
-  const ownStub = async (pid: number) => {
-    const needle = `CHECK_RUNNER_STUB=${root}`;
-    try {
-      if (process.platform === 'linux')
-        return (await readFile(`/proc/${pid}/environ`, 'utf8')).split('\0').includes(needle);
-      const ps = spawnSync('/bin/ps', ['-Eww', '-o', 'command=', '-p', String(pid)], {
-        encoding: 'utf8',
-        timeout: 15_000,
-        killSignal: 'SIGKILL',
-      });
-      return ps.stdout.split(/\s/).includes(needle);
-    } catch {
-      return false;
-    }
-  };
   /**
    * SIGKILL every recorded stub still alive (none after a working check),
    * remove a smoke log the check had no chance to remove, then the root.
    */
   const cleanup = async () => {
-    for (const file of stubPidFiles) {
-      const recorded = existsSync(join(root, file)) ? await pid(file) : 0;
-      if (Number.isInteger(recorded) && recorded > 1 && (await ownStub(recorded)))
-        try {
-          process.kill(recorded, 'SIGKILL');
-        } catch {
-          /* Already stopped. */
-        }
-    }
+    await killRecordedStubs(root, stubPidFiles);
     const log = /output is held until it ends; meanwhile: (\S+)$/m.exec(stderr)?.[1];
     if (log && dirname(log) === tmpdir() && /^devcontour-check-[\w-]+\.log$/.test(basename(log)))
       await rm(log, { force: true });
