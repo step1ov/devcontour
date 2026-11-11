@@ -466,7 +466,7 @@ test('An environment refusal does not spend the task attempt budget', () => {
     // не дойдя до исполнителя.
     const blocked = f.h.claim('one')!;
     f.h.fail(blocked.id, blocked.token, 'runtime: Not logged in', true);
-    // Классификацию самого отказа проверяет runner.test.ts: там она проходит
+    // Классификацию самого отказа проверяет runner-refusals.test.ts: там она проходит
     // через scheduler, а здесь — только учёт попытки.
     assert.equal(f.store.read().tasks[0].attempt, 0);
     assert.equal(f.store.read().runs[0].blocked, true);

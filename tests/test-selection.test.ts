@@ -177,7 +177,7 @@ test('Working changes cover commits since the merge base, the index, the worktre
 });
 
 type Tiers = {
-  slowFirst: string[];
+  fileSeconds: Record<string, number>;
   slowTests: Record<string, true | string[]>;
   slowPatterns: () => RegExp[];
 };
@@ -192,7 +192,8 @@ const sources = Object.fromEntries(
 );
 
 test('Every slow tier entry names a test file and a test prefix that still exist', () => {
-  for (const name of tiers.slowFirst) assert.ok(sources[name] !== undefined, name);
+  for (const name of Object.keys(tiers.fileSeconds))
+    assert.ok(sources[name] !== undefined, `schedule table: no tests/${name}.test.ts`);
   for (const [name, entry] of Object.entries(tiers.slowTests)) {
     assert.ok(sources[name] !== undefined, `slow tier: no tests/${name}.test.ts`);
     if (entry === true) continue;
@@ -223,6 +224,22 @@ test('The full list runs every test file; the fast list leaves out only whole sl
       .map((path) => path.slice(testsDir.length).replace(/\.test\.ts$/, ''))
       .sort();
   assert.deepEqual(list(), Object.keys(sources).sort());
+  // Longest first: the files of the schedule table by their seconds, then the rest by name.
+  const order = execFileSync(process.execPath, [script, '--list'], { encoding: 'utf8' })
+    .trim()
+    .split('\n')
+    .map((path) => path.slice(testsDir.length));
+  const estimate = (name: string) => tiers.fileSeconds[name.replace(/\.test\.ts$/, '')] ?? 0;
+  assert.deepEqual(
+    order,
+    [...order].sort((a, b) => estimate(b) - estimate(a) || a.localeCompare(b)),
+  );
+  assert.equal(
+    order[0].replace(/\.test\.ts$/, ''),
+    Object.keys(tiers.fileSeconds).reduce((a, b) =>
+      tiers.fileSeconds[a] >= tiers.fileSeconds[b] ? a : b,
+    ),
+  );
   const whole = Object.keys(tiers.slowTests).filter((name) => tiers.slowTests[name] === true);
   assert.deepEqual(
     list('--fast'),
