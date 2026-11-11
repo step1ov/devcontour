@@ -6,6 +6,7 @@ import { portableTest } from './proof.ts';
 import { validatePreparation } from './preparation.ts';
 import { contractDigest, digest, scopeDigest, specDigest, type DevContour } from './service.ts';
 import { receiptProblems } from '../harness/receipt.ts';
+import { independentReviewer } from '../harness/policy.ts';
 import {
   CheckCorpus,
   configuredSpellings,
@@ -668,11 +669,20 @@ export function stateFromRecords(
           (requiresContract(h.config, t.role, t.repositoryId) && !t.contracts.length))
       )
         throw new Error('Нет утверждённой постановки: ' + t.id);
+      // Постановку задачи агент утверждает ревью плана: независимость
+      // одобрения — по правилу `review.plan`, настроенному здесь и сейчас.
+      // Тот же runtime годится, только если это правило само его выбирает
+      // (`same-vendor-allowed`); возврат к `different-vendor` снова отклоняет.
       if (
         t.approval?.actor === 'agent' &&
         (!t.approval.authorRuntime ||
           !t.approval.reviewerRuntime ||
-          t.approval.authorRuntime === t.approval.reviewerRuntime)
+          !independentReviewer(
+            h.config,
+            'plan',
+            t.approval.authorRuntime,
+            t.approval.reviewerRuntime,
+          ))
       )
         throw new Error('Нет независимого согласования: ' + t.id);
       if (previous && previous.status !== 'draft' && specDigest(previous) !== specDigest(t))

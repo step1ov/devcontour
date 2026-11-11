@@ -310,6 +310,25 @@ export function technicalReviewer(
 }
 
 /**
+ * Независимо ли ревью `reviewer` для автора `author` по правилу вида `kind`,
+ * настроенному сейчас: другой runtime — да; тот же — только если это правило
+ * (`review.<kind>`) само выбирает автору ревьюера того же вендора и именно
+ * этого runtime (`same-vendor-allowed`). Правило читается в момент вызова:
+ * возврат к `different-vendor` снова отклоняет одобрения одного runtime.
+ * Записи одобрения хранят только runtime, поэтому сверяется вендор, а не сессия.
+ */
+export function independentReviewer(
+  config: Config,
+  kind: 'plan' | 'contract',
+  author: 'codex' | 'claude',
+  reviewer: string,
+) {
+  if (author !== reviewer) return true;
+  const chosen = technicalReviewer(config, kind, author);
+  return chosen?.sameVendor === true && chosen.runtime === reviewer;
+}
+
+/**
  * Часть политики исполнения, которую утверждает ревью плана (D43): что и
  * как исполняется и проверяется — gates, роли с областями записи, ревьюеры и
  * правила вендора, защищённые и генерируемые пути, окружение, изоляция,

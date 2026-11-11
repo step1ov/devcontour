@@ -223,6 +223,59 @@ test('Синхронизация не возрождает задачу, отм�
   }
 });
 
+test('Импорт одобрения постановки одним runtime следует настроенному правилу вендора ревью плана', () => {
+  const f = fixture();
+  try {
+    // Постановку агент утверждает ревью плана: правило — `review.plan`.
+    const sameVendor = {
+      plan: { reviewer: { runtime: 'claude' as const }, vendor: 'same-vendor-allowed' as const },
+    };
+    const a = f.create('alice');
+    a.h.config.review = sameVendor;
+    const board = a.h.createBoard('Same-vendor board', '', 'main');
+    const t = a.h.addTask(board.id, input());
+    a.h.approve(board.id, undefined, {
+      actor: 'agent',
+      authorRuntime: 'claude',
+      reviewerRuntime: 'claude',
+    });
+    syncGit(a.h, { member: 'alice' });
+    a.commit();
+    const b = f.create('bob', a),
+      before = canonical(b.store.read());
+    const rejected = (review: typeof b.h.config.review) => {
+      b.h.config.review = review;
+      assert.throws(() => syncGit(b.h, { member: 'bob' }), /Нет независимого согласования/);
+      assert.equal(canonical(b.store.read()), before);
+    };
+    // Правило по умолчанию: ревьюер другого вендора.
+    rejected(undefined);
+    // Тот же ревьюер, но вендор должен отличаться.
+    rejected({ plan: { reviewer: { runtime: 'claude' }, vendor: 'different-vendor' } });
+    // Тот же вендор разрешён, но правило выбирает другого ревьюера.
+    rejected({ plan: { reviewer: { runtime: 'codex' }, vendor: 'same-vendor-allowed' } });
+    // Ревью контрактов задачу не утверждает: его правило не в счёт.
+    rejected({ contract: { reviewer: { runtime: 'claude' }, vendor: 'same-vendor-allowed' } });
+
+    b.h.config.review = sameVendor;
+    syncGit(b.h, { member: 'bob' });
+    const imported = b.store.read().tasks.find((x) => x.id === t.id)!;
+    assert.equal(imported.status, 'ready');
+    assert.equal(imported.approval?.actor, 'agent');
+    assert.equal(imported.approval?.authorRuntime, 'claude');
+    assert.equal(imported.approval?.reviewerRuntime, 'claude');
+
+    // Правило читается при каждом импорте: возврат к другому вендору снова
+    // отклоняет то же одобрение.
+    const afterImport = canonical(b.store.read());
+    b.h.config.review = { plan: { reviewer: { runtime: 'claude' }, vendor: 'different-vendor' } };
+    assert.throws(() => syncGit(b.h, { member: 'bob' }), /Нет независимого согласования/);
+    assert.equal(canonical(b.store.read()), afterImport);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test('Отмена, полученная синхронизацией, не наследует устаревшего актёра отмены ведущим', () => {
   const f = fixture();
   try {
