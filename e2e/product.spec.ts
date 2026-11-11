@@ -40,6 +40,7 @@ test('Product UI presents application scope, release selection, repository navig
       coverageComplete: true,
       releaseAccepted: false,
       issues: [],
+      acceptanceOverridden: 'Релиз был принят по прежнему правилу, без доказанных сценариев',
       deferredScenarios: [
         {
           featureId: 'block-member',
@@ -63,6 +64,9 @@ test('Product UI presents application scope, release selection, repository navig
   await expect(page.getByRole('heading', { name: 'Система общения', exact: true })).toBeVisible();
   await expect(page.getByText('Ждёт сквозной проверки', { exact: true })).toBeVisible();
   await expect(page.getByText('Не применяется', { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole('status').filter({ hasText: 'Релиз не принят по текущему правилу' }),
+  ).toContainText('принят по прежнему правилу');
   await expect(
     page.getByRole('status').filter({ hasText: 'Отложено решением пользователя' }),
   ).toContainText('Проверка на устройстве — Переносится в следующий релиз');

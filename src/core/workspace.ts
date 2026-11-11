@@ -308,9 +308,27 @@ export class Workspace {
       : undefined;
   }
   accept(id: string, approval: Approval = { actor: 'agent' }) {
+    // Повтор приёмки называет отложенные сценарии так же, как первая:
+    // принятый релиз с непроверенными сценариями не выглядит полным.
+    const acceptedNotes = (c: ChangeSet) => {
+      const v = c.verifications.find((x) => x.id === c.acceptance?.verificationId);
+      if (!c.releaseId || !v?.productRelease) return {};
+      try {
+        const { deferredScenarios } = this.guard().validate(
+          v.productRelease,
+          changeSnapshot(this.h.store.read(), c),
+          v.manifest,
+        );
+        return deferredScenarios.length ? { deferredScenarios } : {};
+      } catch {
+        // Карта или покрытие изменились после приёмки: актуальный список
+        // показывает product-view, а не повтор приёмки.
+        return {};
+      }
+    };
     return this.h.currentChange('changeset.accepted', (s) => {
       const c = find(s, id);
-      if (c.acceptance) return { status: 'already-accepted', changeSetId: id };
+      if (c.acceptance) return { status: 'already-accepted', changeSetId: id, ...acceptedNotes(c) };
       changeSnapshot(s, c).tasks.forEach((t) => assertTaskPreparation(s, t));
       let deferred: DeferredScenario[] = [];
       const { verification: v, current } = currentJoint(this.h, c);

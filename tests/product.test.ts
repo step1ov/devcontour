@@ -168,7 +168,10 @@ const map = () => {
   });
   return definition;
 };
-async function fixture(local: typeof localDefinition = localDefinition) {
+async function fixture(
+  local: typeof localDefinition = localDefinition,
+  initial?: ReturnType<typeof map>,
+) {
   const root = await mkdtemp(join(tmpdir(), 'devcontour-product-'));
   const repos: Repository[] = [];
   const commit = async (path: string, message: string) => {
@@ -263,7 +266,7 @@ process.exitCode=ok?0:1;`,
     await writeFile(join(control, 'INTENT.md'), intent.render({ definition }).markdown);
     await commit(control, 'Product map');
   };
-  await save();
+  await save(initial);
   await writeFile(join(root, 'config.json'), JSON.stringify(c));
   const scheduler = new Scheduler(h, root),
     runner = new WorkspaceRunner(h, root);
@@ -548,7 +551,8 @@ test('A release scenario needs its own testcase or a recorded deferral; story co
     assert.ok(
       unmet.issues.some(
         (i) =>
-          i.includes('сценарий релиза block без доказательства') && i.includes(releaseScenario),
+          i.includes('сценарий релиза block (gate moderation) без доказательства') &&
+          i.includes(releaseScenario),
       ),
       JSON.stringify(unmet.issues),
     );
@@ -730,6 +734,59 @@ test('Scenario evidence counts only for the feature whose stories the task serve
       scenario: ' ' + releaseScenario,
     });
     assert.throws(() => f.intent.render({ definition: repeated }), /Повтор feature scenario/);
+    // Доказательство сопоставляется по тексту, а не по gate: тот же текст на
+    // другом gate фичи был бы доказан тем же testcase, и карта его отклоняет.
+    const otherGate = map();
+    otherGate.releases[0].features![0].checks.push({
+      gate: 'release-acceptance',
+      scenario: releaseScenario,
+    });
+    assert.throws(() => f.intent.render({ definition: otherGate }), /Повтор feature scenario/);
+  } finally {
+    await f.close();
+  }
+});
+
+test('Scenario evidence is scoped by story, not by repository: another story of the same component does not prove the feature', async () => {
+  // Вторая история в тех же репозиториях: фича export обслуживается ею, а
+  // доказательство сценария несёт задача истории block того же репозитория.
+  const local = structuredClone(localDefinition);
+  local.stories.push({
+    id: 'audit',
+    title: 'Журнал блокировок',
+    releaseId: 'mvp',
+    criteria: [
+      {
+        id: 'audited',
+        text: 'Блокировка видна в журнале модератора.',
+        requirements: [{ source: 'spec.md', id: 'REQ-moderation' }],
+      },
+    ],
+  });
+  const scoped = map();
+  const exported = scoped.releases[0].features![1];
+  exported.channels[0] = {
+    channelId: 'admin',
+    scope: 'included',
+    stories: [
+      { repositoryId: 'app', storyId: 'audit' },
+      { repositoryId: 'chat', storyId: 'audit' },
+    ],
+  };
+  exported.checks = [{ gate: 'moderation', scenario: releaseScenario }];
+  scoped.releases.pop();
+  const f = await fixture(local, scoped);
+  try {
+    f.plan();
+    await f.run();
+    const view = f.view();
+    const status = (featureId: string) =>
+      view.features
+        .find((x) => x.id === featureId)!
+        .checks.map((c) => [c.status, [...new Set(c.evidence.map((e) => e.repositoryId))]]);
+    assert.deepEqual(status('block'), [['evidenced', ['app', 'chat']]]);
+    // Те же репозитории, тот же текст сценария, но другая история.
+    assert.deepEqual(status('export'), [['missing', []]]);
   } finally {
     await f.close();
   }

@@ -27,11 +27,13 @@ export const featureScope = z.strictObject({
   channels: z.array(channelScope).min(1).max(30),
   /**
    * Сценарии приёмки релиза. Сценарий подтверждает testcase принятой задачи
-   * релиза, чья связь requirements называет тот же текст сценария и свой
-   * testId; `deferred` — записанная причина, по которой сценарий в этот релиз
+   * одной из историй этой фичи, чья связь requirements повторяет текст
+   * сценария и называет свой testId; `deferred` — записанная причина, по которой сценарий в этот релиз
    * не входит. Отложить сценарий решает пользователь: ведущий предлагает и
    * спрашивает. Зелёный общий gate сам по себе сценарий не подтверждает.
-   * Пара gate и сценарий уникальна: один gate проверяет несколько сценариев.
+   * Один gate проверяет несколько сценариев; текст сценария в фиче
+   * уникален, потому что доказательство сопоставляется по тексту, а не по
+   * gate.
    */
   checks: z.array(z.strictObject({ gate: id, scenario: text, deferred: text.optional() })).max(30),
 });
@@ -173,10 +175,13 @@ export function validateProductMap(
       const included = scope.channels.filter((a) => a.scope === 'included');
       if (Boolean(included.length) !== Boolean(scope.checks.length))
         throw new DomainError('Сквозные проверки обязательны только для включённой фичи');
-      // Один gate может проверять несколько сценариев фичи: каждый из них
-      // доказывается отдельно, поэтому уникальна пара gate и сценарий.
+      // Один gate может проверять несколько сценариев фичи, и каждый
+      // доказывается отдельно. Доказательство сопоставляется по тексту
+      // сценария (gate связи — gate задачи компонента), поэтому один текст на
+      // двух gates фичи был бы доказан одним testcase дважды: такой повтор —
+      // ошибка карты.
       unique(
-        scope.checks.map((c) => JSON.stringify([c.gate, scenarioKey(c.scenario)])),
+        scope.checks.map((c) => scenarioKey(c.scenario)),
         'feature scenario',
       );
       for (const app of scope.channels) {

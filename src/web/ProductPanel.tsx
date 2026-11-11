@@ -145,6 +145,12 @@ export function ProductPanel({ onRepository }: { onRepository: (id: string) => v
           </ul>
         </details>
       )}
+      {view.acceptanceOverridden && (
+        <Alert variant="warning" role="status">
+          <AlertTitle>Релиз не принят по текущему правилу</AlertTitle>
+          <p className="m-0">{view.acceptanceOverridden}</p>
+        </Alert>
+      )}
       {(view.deferredScenarios ?? []).length > 0 && (
         <Alert variant="warning" role="status">
           <AlertTitle>

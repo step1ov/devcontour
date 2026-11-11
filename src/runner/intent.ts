@@ -1261,7 +1261,7 @@ export class IntentService implements ProductReleaseGuard {
         (t.requirements ?? [])
           .filter((l) => l.testId && proven(t, l))
           .map((l) => ({
-            scenario: scenarioKey(l.scenario ?? ''),
+            scenario: scenarioKey(l.scenario),
             taskId: t.id,
             testId: l.testId!,
             storyIds: stories.filter((s) => s.taskIds.includes(t.id)).map((s) => s.id),
