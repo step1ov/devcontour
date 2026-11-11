@@ -62,6 +62,7 @@ for (const mode of ['pass', 'fail', 'cancel', 'fast', 'unit'] as const)
         PREFLIGHT_FIXTURE_MODE: mode,
       };
       delete env.NODE_TEST_CONTEXT;
+      delete env.DEVCONTOUR_TEST_CONCURRENCY;
       const result = spawnSync(
         process.execPath,
         ['scripts/test.mjs', ...(mode === 'fast' ? ['--fast'] : [])],

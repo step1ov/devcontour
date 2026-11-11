@@ -1,7 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { copyFile, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -356,8 +365,19 @@ test('A slow process snapshot under load does not stop the check; a lasting fail
   assert.equal(pollFailures(count, true).fatal, true, 'a lasting failure stops the check');
 });
 
+/**
+ * A run of the release check is bounded by the test, not by the check: the
+ * check handles SIGTERM by stopping its steps, so a broken stop path would
+ * ignore a polite timeout (and spawnSync would block the test's own timeout).
+ * A normal run takes a few seconds; past the bound the check is SIGKILLed.
+ */
+const RELEASE_CHECK_BOUND_MS = 25_000;
+const releaseTest = { timeout: 30_000 };
+/** Stub pids a release check records; its stubs are detached and may outlive a killed check. */
+const stubPidFiles = ['test.pid', 'smoke.pid', 'leak.pid'];
+
 /** A release check over stub steps; `body` is the step script (argv[2] names the step). */
-async function releaseCheck(body: string) {
+async function releaseCheck(body: string, extraEnv: NodeJS.ProcessEnv = {}) {
   const root = await mkdtemp(join(tmpdir(), 'check-release-'));
   const scripts = join(root, 'scripts');
   await mkdir(scripts);
@@ -385,26 +405,66 @@ const wait=(file)=>new Promise((r)=>{const t=setInterval(()=>{if(existsSync(file
 const sleep=(ms)=>new Promise((r)=>setTimeout(r,ms));
 ${body}`,
   );
-  const env: NodeJS.ProcessEnv = { ...process.env, DEVCONTOUR_TEST_CONCURRENCY: '4' };
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    DEVCONTOUR_TEST_CONCURRENCY: '4',
+    ...extraEnv,
+  };
   delete env.NODE_TEST_CONTEXT;
-  const result = spawnSync(process.execPath, [join(scripts, 'check.mjs')], {
+  const child = spawn(process.execPath, [join(scripts, 'check.mjs')], {
     cwd: root,
-    encoding: 'utf8',
     env,
-    timeout: 60_000,
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8').on('data', (chunk: string) => (stdout += chunk));
+  child.stderr.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk));
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    child.kill('SIGKILL');
+  }, RELEASE_CHECK_BOUND_MS);
+  // The exit, not the close: a stub left alive by a broken check may still
+  // hold a pipe the check passed on to it.
+  const [status, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((resolve) =>
+    child.once('exit', (code, sig) => resolve([code, sig])),
+  );
+  clearTimeout(timer);
+  await Promise.race([new Promise((done) => child.once('close', done)), delay(1000)]);
+  child.stdout.destroy();
+  child.stderr.destroy();
+  const result = { status, signal, stdout, stderr, timedOut };
   const pid = async (file: string) => Number(await readFile(join(root, file), 'utf8'));
-  return { root, result, output: result.stdout + result.stderr, pid };
+  /** SIGKILL every recorded stub (a no-op after a working check), then remove the root. */
+  const cleanup = async () => {
+    for (const file of stubPidFiles) {
+      const recorded = existsSync(join(root, file)) ? await pid(file) : 0;
+      if (Number.isInteger(recorded) && recorded > 1 && recorded !== process.pid)
+        try {
+          process.kill(recorded, 'SIGKILL');
+        } catch {
+          /* Already stopped. */
+        }
+    }
+    await rm(root, { recursive: true, force: true });
+  };
+  return { root, result, output: stdout + stderr, pid, cleanup };
 }
 
 for (const outcome of ['pass', 'smoke-fails', 'test-fails'] as const)
-  test(`Release check runs the package smoke beside the Node suite and the browser suite after both (${outcome})`, async () => {
-    // The Node suite finishes only after the smoke has printed, so a passing
-    // check proves they overlap; their lines interleave in time, and the
-    // smoke's still must come out as one block. A failing step must stop the
-    // other one, which would otherwise wait forever, and the browser suite
-    // starts only after the Node suite has passed.
-    const { root, result, output, pid } = await releaseCheck(`
+  test(
+    `Release check runs the package smoke beside the Node suite and the browser suite after both (${outcome})`,
+    releaseTest,
+    async () => {
+      // Overlap is proven by two things: the smoke prints as a held-back
+      // section (a step alone in its stage inherits stdio and prints none), and
+      // in the test-fails case the Node suite fails while the smoke still waits
+      // on a file nobody writes, so the check ends only if the two ran at once
+      // and the failure stopped the smoke. A passing run alone would also finish
+      // if the smoke ran first. The smoke's lines must come out as one block,
+      // and the browser suite starts only after the Node suite has passed.
+      const { root, result, output, pid, cleanup } = await releaseCheck(`
 if(name==='test') {
   writeFileSync('test.pid',String(process.pid));
   writeFileSync('concurrency',String(process.env.DEVCONTOUR_TEST_CONCURRENCY));
@@ -432,42 +492,56 @@ if(name==='test') {
   console.log('  1 passed');
 }
 `);
-    try {
-      assert.equal(result.status, outcome === 'pass' ? 0 : 1, output);
-      // The Node suite keeps the concurrency it was given.
-      assert.equal(await readFile(join(root, 'concurrency'), 'utf8'), '4');
-      // Node suite lines stream unprefixed: its summary greps as in a run of its own.
-      assert.match(result.stdout, /^ℹ tests 1$/m);
-      // The smoke is one contiguous section with its stderr inside.
-      const section = new RegExp(
-        `──── smoke-package ────\nsmoke first\nsmoke diagnostics\n${outcome === 'pass' ? 'smoke done\n✔' : '(?:[^\n]*\n)*?✖'} smoke-package [^\n]*\n──── end of smoke-package ────\n`,
-      );
-      assert.match(result.stdout, section, result.stdout);
-      // The final line is the only authoritative result besides the exit code.
-      const last = result.stderr.trimEnd().split('\n').at(-1) ?? '';
-      if (outcome === 'pass') {
-        assert.equal(await readFile(join(root, 'e2e-started'), 'utf8'), 'after the Node suite');
-        assert.match(result.stdout, /^ {2}1 passed$/m);
-        assert.match(last, /^check: passed in /);
-      } else {
-        assert.match(
-          last,
-          new RegExp(
-            `^check: failed in ${outcome === 'smoke-fails' ? 'smoke-package' : 'test'} \\(`,
-          ),
+      try {
+        // The run ended by itself within the bound: a check whose stop path is
+        // broken waits forever for the stopped sibling.
+        assert.equal(result.timedOut, false, 'the check hung: ' + output);
+        assert.equal(result.status, outcome === 'pass' ? 0 : 1, output);
+        // The Node suite keeps the concurrency it was given.
+        assert.equal(await readFile(join(root, 'concurrency'), 'utf8'), '4');
+        // Node suite lines stream unprefixed: its summary greps as in a run of its own.
+        assert.match(result.stdout, /^ℹ tests 1$/m);
+        // The smoke is one contiguous section with its stderr inside.
+        const section = new RegExp(
+          `──── smoke-package ────\nsmoke first\nsmoke diagnostics\n${outcome === 'pass' ? 'smoke done\n✔' : '(?:[^\n]*\n)*?✖'} smoke-package [^\n]*\n──── end of smoke-package ────\n`,
         );
-        // The sibling that would have waited forever was stopped with the check.
-        const sibling = await pid(outcome === 'smoke-fails' ? 'test.pid' : 'smoke.pid');
-        await until(() => !alive(sibling), 'the other step was stopped');
-        assert.equal(existsSync(join(root, 'e2e-started')), false, 'e2e never started');
+        assert.match(result.stdout, section, result.stdout);
+        // While held back, the smoke's output goes to a log named on its start
+        // line; the section replaces it, so the log is gone afterwards.
+        const log = /smoke-package output is held until it ends; meanwhile: (\S+)$/m.exec(
+          result.stderr,
+        )?.[1];
+        assert.ok(log, result.stderr);
+        assert.equal(existsSync(log), false, 'the smoke log is removed after its section');
+        // The final line is the only authoritative result besides the exit code.
+        const last = result.stderr.trimEnd().split('\n').at(-1) ?? '';
+        if (outcome === 'pass') {
+          assert.equal(await readFile(join(root, 'e2e-started'), 'utf8'), 'after the Node suite');
+          assert.match(result.stdout, /^ {2}1 passed$/m);
+          assert.match(last, /^check: passed in /);
+        } else {
+          assert.match(
+            last,
+            new RegExp(
+              `^check: failed in ${outcome === 'smoke-fails' ? 'smoke-package' : 'test'} \\(`,
+            ),
+          );
+          // The sibling that would have waited forever was stopped with the check.
+          const sibling = await pid(outcome === 'smoke-fails' ? 'test.pid' : 'smoke.pid');
+          await until(() => !alive(sibling), 'the other step was stopped');
+          assert.equal(existsSync(join(root, 'e2e-started')), false, 'e2e never started');
+        }
+      } finally {
+        await cleanup();
       }
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
+    },
+  );
 
-test('A step that exits but leaves a descendant holding its output does not hang the check; the descendant is stopped', async () => {
-  const { root, result, output, pid } = await releaseCheck(`
+test(
+  'A step that exits but leaves a descendant holding its output does not hang the check; the descendant is stopped',
+  releaseTest,
+  async () => {
+    const { result, output, pid, cleanup } = await releaseCheck(`
 if(name==='smoke') {
   const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:['ignore','inherit','inherit'],detached:true});
   writeFileSync('leak.pid',String(child.pid));
@@ -475,13 +549,104 @@ if(name==='smoke') {
   console.log('smoke line');
 }
 `);
-  try {
-    assert.equal(result.signal, null, 'the check hung: ' + output);
-    assert.equal(result.status, 0, output);
-    assert.match(output, /✔ smoke-package [^\n]*a descendant kept its output open/);
-    const leaked = await pid('leak.pid');
-    await until(() => !alive(leaked), 'the leaked descendant was stopped');
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
+    try {
+      assert.equal(result.timedOut, false, 'the check hung: ' + output);
+      assert.equal(result.signal, null, output);
+      assert.equal(result.status, 0, output);
+      assert.match(output, /✔ smoke-package [^\n]*a descendant kept its output open/);
+      const leaked = await pid('leak.pid');
+      await until(() => !alive(leaked), 'the leaked descendant was stopped');
+    } finally {
+      await cleanup();
+    }
+  },
+);
+
+test(
+  'A bad DEVCONTOUR_TEST_CONCURRENCY fails the check before any step, and the Node suite runner reads it too',
+  releaseTest,
+  async () => {
+    for (const value of ['0', '-1', '1.5', 'abc']) {
+      const { root, result, output, cleanup } = await releaseCheck(
+        "writeFileSync('started-'+name,'1');",
+        { DEVCONTOUR_TEST_CONCURRENCY: value },
+      );
+      try {
+        assert.equal(result.timedOut, false, output);
+        assert.notEqual(result.status, 0, `${value}: ${output}`);
+        assert.match(
+          result.stderr,
+          new RegExp(`DEVCONTOUR_TEST_CONCURRENCY must be a positive integer, got ${value}`),
+        );
+        assert.doesNotMatch(output, /▶ /, `${value}: no step started`);
+        assert.deepEqual(
+          (await readdir(root)).filter((f) => f.startsWith('started-')),
+          [],
+          `${value}: no step ran`,
+        );
+      } finally {
+        await cleanup();
+      }
+    }
+    // scripts/test.mjs validates the same variable itself: it refuses a bad
+    // value even when it is started without check, and accepts a good one.
+    const root = await mkdtemp(join(tmpdir(), 'test-concurrency-'));
+    try {
+      await mkdir(join(root, 'scripts'));
+      await mkdir(join(root, 'tests'));
+      for (const file of [
+        'test.mjs',
+        'test-tiers.mjs',
+        'test-scratch.mjs',
+        'test-environment.mjs',
+        'check-test-environment.mjs',
+        'check-processes.mjs',
+      ])
+        await copyFile(join(source, 'scripts', file), join(root, 'scripts', file));
+      await writeFile(join(root, 'package.json'), JSON.stringify({ type: 'module' }));
+      await writeFile(join(root, 'tests', 'probe.test.ts'), '');
+      const list = (value: string) => {
+        const env: NodeJS.ProcessEnv = { ...process.env, DEVCONTOUR_TEST_CONCURRENCY: value };
+        delete env.NODE_TEST_CONTEXT;
+        return spawnSync(process.execPath, ['scripts/test.mjs', '--list'], {
+          cwd: root,
+          env,
+          encoding: 'utf8',
+          timeout: 15_000,
+          killSignal: 'SIGKILL',
+        });
+      };
+      for (const value of ['0', 'abc']) {
+        const refused = list(value);
+        assert.notEqual(refused.status, 0, refused.stdout + refused.stderr);
+        assert.match(
+          refused.stderr,
+          new RegExp(`DEVCONTOUR_TEST_CONCURRENCY must be a positive integer, got ${value}`),
+        );
+      }
+      const accepted = list('3');
+      assert.equal(accepted.status, 0, accepted.stdout + accepted.stderr);
+      assert.match(accepted.stdout, /probe\.test\.ts$/m);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  'A step that cannot be started fails the check by name with its cause and the final line',
+  releaseTest,
+  async () => {
+    // PATH without npm: every npm step fails to spawn (ENOENT), which emits
+    // an error and possibly no exit.
+    const { result, output, cleanup } = await releaseCheck('', { PATH: '/nonexistent' });
+    try {
+      assert.equal(result.timedOut, false, 'the check hung: ' + output);
+      assert.equal(result.status, 1, output);
+      const last = result.stderr.trimEnd().split('\n').at(-1) ?? '';
+      assert.match(last, /^check: failed in [\w:]+: Cannot start npm: [^\n]*ENOENT/, output);
+    } finally {
+      await cleanup();
+    }
+  },
+);

@@ -1,3 +1,6 @@
+import { closeSync, openSync, unlinkSync, writeSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { checkProcesses } from './check-processes.mjs';
 
 // `npm run check` (release) and `npm run check:fast` (one fix).
@@ -23,7 +26,10 @@ import { checkProcesses } from './check-processes.mjs';
 // Output of concurrent steps: the first stage prefixes every line with its
 // step name. Beside the Node suite, which streams unprefixed so its summary
 // lines read as in a run of its own, smoke-package's output is held back and
-// printed as one section when it ends (passed, failed or stopped).
+// printed as one section when it ends (passed, failed or stopped). While it
+// runs, the same output is written as it arrives to a log file named on its
+// start line, so a hung step can be read while it hangs and its output
+// survives a check killed outright; the log is removed after the section.
 //
 // Extra arguments go to the last step (test:affected for --fast: --base, --depth).
 const release = [
@@ -78,9 +84,19 @@ function step(name, rest, mode) {
       stdio: mode === 'inherit' ? 'inherit' : ['ignore', 'pipe', 'pipe'],
     });
     if (!child) return resolve(false);
-    child.once('error', (error) => console.error(`${prefix}${error.message}`));
     // A held-back section keeps stdout and stderr chunks in arrival order.
     const held = [];
+    // Exclusive create: the check removes only a log it created itself.
+    let log;
+    if (mode === 'section') {
+      const path = join(tmpdir(), `devcontour-check-${name}-${process.pid}-${started}.log`);
+      try {
+        log = { path, fd: openSync(path, 'wx') };
+        console.error(`${prefix}  ${name} output is held until it ends; meanwhile: ${path}`);
+      } catch (error) {
+        console.error(`${prefix}  ${name} output is held until it ends (no log: ${error.message})`);
+      }
+    }
     const flushes = [];
     for (const [stream, out] of [
       [child.stdout, process.stdout],
@@ -89,7 +105,16 @@ function step(name, rest, mode) {
       let buffer = '';
       stream?.setEncoding('utf8');
       stream?.on('data', (chunk) => {
-        if (mode === 'section') return void held.push([out, chunk]);
+        if (mode === 'section') {
+          held.push([out, chunk]);
+          if (log)
+            try {
+              writeSync(log.fd, chunk);
+            } catch {
+              /* The section still prints the output. */
+            }
+          return;
+        }
         const lines = (buffer + chunk).split('\n');
         buffer = lines.pop();
         for (const line of lines) out.write(prefix + line + '\n');
@@ -107,9 +132,8 @@ function step(name, rest, mode) {
     // the check: past the grace the pipes are dropped, and the descendant
     // (marked like every check process) is stopped by the sweep at the end of
     // the check — a sweep now would also stop sibling steps.
-    child.once('exit', async (code, signal) => {
+    const finish = async (code, signal, error) => {
       const ok = code === 0;
-      if (!ok) failed ??= name;
       let timer;
       const open = await Promise.race([
         closed.then(() => false),
@@ -125,7 +149,7 @@ function step(name, rest, mode) {
       const leak = open
         ? ' (a descendant kept its output open; stopped at the end of the check)'
         : '';
-      const result = `${prefix}${ok ? '✔' : '✖'} ${name} ${seconds}s${ok ? '' : ` (${signal ?? code})`}${leak}`;
+      const result = `${prefix}${ok ? '✔' : '✖'} ${name} ${seconds}s${ok ? '' : ` (${error ?? signal ?? code})`}${leak}`;
       if (mode === 'section') {
         // One write to one stream, stdout and stderr chunks in arrival order:
         // the section cannot be split by the lines of a step that keeps
@@ -134,8 +158,33 @@ function step(name, rest, mode) {
         process.stdout.write(
           `──── ${name} ────\n${output}${output && !output.endsWith('\n') ? '\n' : ''}${result}\n──── end of ${name} ────\n`,
         );
+        if (log)
+          try {
+            closeSync(log.fd);
+            unlinkSync(log.path);
+          } catch {
+            /* A log left behind is harmless. */
+          }
       } else console.error(result);
       resolve(ok);
+    };
+    // A step settles once: on its exit, or on an error that means it never ran
+    // (a spawn failure may emit no exit at all).
+    let settled = false;
+    child.once('error', (error) => {
+      console.error(`${prefix}${error.message}`);
+      if (settled) return;
+      settled = true;
+      failed ??= name;
+      void finish(undefined, undefined, error.code ?? 'error');
+    });
+    child.once('exit', (code, signal) => {
+      if (settled) return;
+      settled = true;
+      // A step stopped for a cause of the check's own (a failed process
+      // snapshot) did not fail by itself; the final line names the cause.
+      if (code !== 0 && !processes.cause) failed ??= name;
+      void finish(code, signal);
     });
   });
 }
@@ -143,10 +192,10 @@ function step(name, rest, mode) {
 const started = Date.now();
 for (const chains of stages) {
   const parallel = chains.length > 1;
+  const testStage = chains.some((c) => c.includes(live));
   const results = await Promise.all(
     chains.map(async (chain) => {
       for (const name of chain) {
-        const testStage = chains.some((c) => c.includes(live));
         const mode = !parallel
           ? 'inherit'
           : !testStage
@@ -171,13 +220,18 @@ await processes.dispose();
 const total = ((Date.now() - started) / 1000).toFixed(1);
 // The only authoritative result besides the exit code: summary lines of a
 // suite stopped part-way (`ℹ fail 0`, `N passed`) say nothing about the check.
+// A stop no step's own exit caused (a process snapshot or spawn failure, or a
+// failed cleanup) is named, not left to the first step it happened to stop.
+const cause = processes.cause;
 const outcome = !process.exitCode
   ? `passed in ${total}s`
   : `${
       process.exitCode === 130 || process.exitCode === 143
         ? 'interrupted'
         : failed
-          ? `failed in ${failed}`
-          : 'failed'
+          ? `failed in ${failed}${cause ? `: ${cause}` : ''}`
+          : cause
+            ? `failed: ${cause}`
+            : 'failed'
     } (${total}s)`;
 console.error(`check${isFast ? ':fast' : ''}: ${outcome}`);
