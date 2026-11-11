@@ -528,7 +528,9 @@ if(name==='test') {
   writeFileSync('smoke-diagnostics','1');
   // Chunks of the two pipes keep their order only when apart in time.
   await sleep(100);
-  ${outcome === 'smoke-fails' ? 'process.exit(1);' : ''}
+  // Fail only once the Node suite has recorded its concurrency: under load the
+  // stop could otherwise come before that write.
+  ${outcome === 'smoke-fails' ? "await wait('concurrency');process.exit(1);" : ''}
   ${outcome === 'test-fails' ? "await wait('never');" : ''}
   console.log('smoke done');
   writeFileSync('smoke-line','1');
