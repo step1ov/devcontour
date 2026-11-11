@@ -230,28 +230,41 @@ test('Импорт одобрения постановки одним runtime с
     const sameVendor = {
       plan: { reviewer: { runtime: 'claude' as const }, vendor: 'same-vendor-allowed' as const },
     };
+    const differentVendor = {
+      plan: { reviewer: { runtime: 'claude' as const }, vendor: 'different-vendor' as const },
+    };
     const a = f.create('alice');
     a.h.config.review = sameVendor;
-    const board = a.h.createBoard('Same-vendor board', '', 'main');
-    const t = a.h.addTask(board.id, input());
-    a.h.approve(board.id, undefined, {
-      actor: 'agent',
-      authorRuntime: 'claude',
-      reviewerRuntime: 'claude',
-    });
+    const approved = (title: string, reviewerRuntime: 'codex' | 'claude') => {
+      const board = a.h.createBoard(title, '', 'main');
+      const t = a.h.addTask(board.id, input(title));
+      a.h.approve(board.id, undefined, {
+        actor: 'agent',
+        authorRuntime: 'claude',
+        reviewerRuntime,
+      });
+      return t;
+    };
+    const t = approved('Same-vendor board', 'claude');
+    // Другой runtime независим при любом правиле, даже когда правило
+    // выбрало бы автору другого ревьюера (здесь claude).
+    const cross = approved('Cross-vendor board', 'codex');
     syncGit(a.h, { member: 'alice' });
     a.commit();
     const b = f.create('bob', a),
       before = canonical(b.store.read());
     const rejected = (review: typeof b.h.config.review) => {
       b.h.config.review = review;
-      assert.throws(() => syncGit(b.h, { member: 'bob' }), /Нет независимого согласования/);
+      assert.throws(
+        () => syncGit(b.h, { member: 'bob' }),
+        /Нет независимого согласования: T-\S+ \(claude → claude\);.*review\.plan/,
+      );
       assert.equal(canonical(b.store.read()), before);
     };
     // Правило по умолчанию: ревьюер другого вендора.
     rejected(undefined);
     // Тот же ревьюер, но вендор должен отличаться.
-    rejected({ plan: { reviewer: { runtime: 'claude' }, vendor: 'different-vendor' } });
+    rejected(differentVendor);
     // Тот же вендор разрешён, но правило выбирает другого ревьюера.
     rejected({ plan: { reviewer: { runtime: 'codex' }, vendor: 'same-vendor-allowed' } });
     // Ревью контрактов задачу не утверждает: его правило не в счёт.
@@ -259,18 +272,77 @@ test('Импорт одобрения постановки одним runtime с
 
     b.h.config.review = sameVendor;
     syncGit(b.h, { member: 'bob' });
-    const imported = b.store.read().tasks.find((x) => x.id === t.id)!;
-    assert.equal(imported.status, 'ready');
-    assert.equal(imported.approval?.actor, 'agent');
-    assert.equal(imported.approval?.authorRuntime, 'claude');
-    assert.equal(imported.approval?.reviewerRuntime, 'claude');
+    const imported = (id: string) => b.store.read().tasks.find((x) => x.id === id)!;
+    assert.equal(imported(t.id).status, 'ready');
+    assert.equal(imported(t.id).approval?.actor, 'agent');
+    assert.equal(imported(t.id).approval?.authorRuntime, 'claude');
+    assert.equal(imported(t.id).approval?.reviewerRuntime, 'claude');
+    assert.equal(imported(cross.id).status, 'ready');
+    assert.equal(imported(cross.id).approval?.reviewerRuntime, 'codex');
 
-    // Правило читается при каждом импорте: возврат к другому вендору снова
-    // отклоняет то же одобрение.
-    const afterImport = canonical(b.store.read());
-    b.h.config.review = { plan: { reviewer: { runtime: 'claude' }, vendor: 'different-vendor' } };
-    assert.throws(() => syncGit(b.h, { member: 'bob' }), /Нет независимого согласования/);
-    assert.equal(canonical(b.store.read()), afterImport);
+    // Одобрение, которое копия уже держит, смена правила не перепроверяет:
+    // sync и sync-status работают дальше, а не закрываются навсегда.
+    b.h.config.review = differentVendor;
+    syncGit(b.h, { member: 'bob', dryRun: true });
+    syncGit(b.h, { member: 'bob' });
+    assert.equal(imported(t.id).approval?.reviewerRuntime, 'claude');
+
+    // Новое пришедшее одобрение одним runtime по-прежнему отклоняется.
+    approved('Another same-vendor board', 'claude');
+    syncGit(a.h);
+    a.commit();
+    b.pull();
+    const held = canonical(b.store.read());
+    for (const options of [{ dryRun: true }, {}])
+      assert.throws(
+        () => syncGit(b.h, { member: 'bob', ...options }),
+        /Нет независимого согласования: T-\S+ \(claude → claude\)/,
+      );
+    assert.equal(canonical(b.store.read()), held);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Без своего ревьюера плана исход одобрения одним runtime решает выбор правила для автора', () => {
+  const f = fixture();
+  try {
+    // `review.plan` разрешает тот же вендор, но ревьюера не называет:
+    // правило берёт первый подходящий runtime из [codex, claude]. Автору
+    // codex оно выбирает codex, автору claude — тоже codex.
+    const rule = { plan: { vendor: 'same-vendor-allowed' as const } };
+    const a = f.create('alice');
+    a.h.config.mode = 'local';
+    a.h.config.review = rule;
+    const approved = (title: string, runtime: 'codex' | 'claude') => {
+      const board = a.h.createBoard(title, '', 'main');
+      const t = a.h.addTask(board.id, input(title));
+      a.h.approve(board.id, undefined, {
+        actor: 'agent',
+        authorRuntime: runtime,
+        reviewerRuntime: runtime,
+      });
+      return t;
+    };
+    const codex = approved('Codex board', 'codex');
+    syncGit(a.h, { member: 'alice' });
+    a.commit();
+    const b = f.create('bob', a);
+    b.h.config.mode = 'local';
+    b.h.config.review = rule;
+    syncGit(b.h, { member: 'bob' });
+    assert.equal(b.store.read().tasks.find((t) => t.id === codex.id)!.status, 'ready');
+
+    approved('Claude board', 'claude');
+    syncGit(a.h);
+    a.commit();
+    b.pull();
+    const held = canonical(b.store.read());
+    assert.throws(
+      () => syncGit(b.h, { member: 'bob' }),
+      /Нет независимого согласования: T-\S+ \(claude → claude\)/,
+    );
+    assert.equal(canonical(b.store.read()), held);
   } finally {
     f.cleanup();
   }
