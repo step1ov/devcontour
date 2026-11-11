@@ -34,6 +34,16 @@ const registrySchema = z.strictObject({
 
 const MAX_FILE_BYTES = 200_000;
 
+/**
+ * Пути файлов `HEAD` как есть. `-z`: без него git экранирует не-ASCII путь
+ * (core.quotePath), и такой файл не проходил ни фильтр `.md`, ни префиксы.
+ */
+export async function trackedFiles(checkout: string) {
+  return (await git(checkout, 'ls-tree', '-r', '--name-only', '-z', 'HEAD'))
+    .split('\0')
+    .filter(Boolean);
+}
+
 export async function contextSources() {
   return registrySchema.parse(JSON.parse(await readFile(registryFile, 'utf8'))).sources;
 }
@@ -59,10 +69,7 @@ export async function importContextSource(
     await git(checkout, 'fetch', '--quiet', '--depth', '1', 'origin', source.commit);
     await git(checkout, 'checkout', '--quiet', 'FETCH_HEAD');
 
-    const listed = (await git(checkout, 'ls-tree', '-r', '--name-only', 'HEAD'))
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean);
+    const listed = await trackedFiles(checkout);
     const wanted = listed.filter(
       (file) =>
         file.endsWith('.md') &&

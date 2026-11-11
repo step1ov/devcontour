@@ -831,10 +831,19 @@ export class ContractChanges {
         // правка, отменённая позже в той же ветке, в базу не попадает. Без
         // переименований: перенос постороннего файла на путь артефакта
         // виден удалением прежнего пути.
+        // `-z`: пути как есть; без него не-ASCII путь приходит экранированным
+        // (core.quotePath) и не совпадал с путём документа или артефакта.
         const paths = (
-          await git(repo.path, 'diff', '--name-only', '--no-renames', `${target}...${reviewed}`)
+          await git(
+            repo.path,
+            'diff',
+            '--name-only',
+            '-z',
+            '--no-renames',
+            `${target}...${reviewed}`,
+          )
         )
-          .split('\n')
+          .split('\0')
           .filter(Boolean);
         const extra = [...new Set(paths.filter((p) => !allowed.has(p)))];
         if (extra.length)

@@ -233,3 +233,26 @@ export async function withTestHome<T>(action: (home: string) => Promise<T>) {
     await rm(home, { recursive: true, force: true });
   }
 }
+
+/**
+ * Git экранирует не-ASCII пути (`core.quotePath=true`, значение по умолчанию)
+ * независимо от настроек машины: проверка разбора путей осмысленна, только
+ * когда git их экранирует. Переменные окружения наследуют и вызовы git
+ * продукта, и вызовы теста.
+ */
+export async function withQuotedGitPaths<T>(action: () => Promise<T>) {
+  const keys = ['GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0'] as const;
+  if (process.env.GIT_CONFIG_COUNT) throw new Error('GIT_CONFIG_COUNT уже задан окружением');
+  const saved = keys.map((k) => process.env[k]);
+  process.env.GIT_CONFIG_COUNT = '1';
+  process.env.GIT_CONFIG_KEY_0 = 'core.quotePath';
+  process.env.GIT_CONFIG_VALUE_0 = 'true';
+  try {
+    return await action();
+  } finally {
+    keys.forEach((k, i) => {
+      if (saved[i] === undefined) delete process.env[k];
+      else process.env[k] = saved[i];
+    });
+  }
+}

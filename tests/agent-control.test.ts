@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile, mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { closePrevious, complete, fixture, input, MERGED } from './helpers.ts';
+import { closePrevious, complete, fixture, input, MERGED, withQuotedGitPaths } from './helpers.ts';
 import { executionOf } from '../src/harness/execution.ts';
 import cp, { execFileSync } from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
@@ -1195,6 +1195,57 @@ test('Contract impact takes the document and artifacts from one commit even if H
     syncBuiltinESMExports();
     await repo.remove();
     f.cleanup();
+  }
+});
+
+test('Подготовка контура по пути кириллицей тоже задерживает ревью плана до переноса базы', async () => {
+  const f = fixture();
+  const repo = await mkdtemp(join(tmpdir(), 'devcontour-stale-base-ru-'));
+  const g = (...args: string[]) =>
+    execFileSync('git', ['-C', repo, ...args], {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: 't',
+        GIT_AUTHOR_EMAIL: 't@t',
+        GIT_COMMITTER_NAME: 't',
+        GIT_COMMITTER_EMAIL: 't@t',
+      },
+    }).trim();
+  try {
+    await withQuotedGitPaths(async () => {
+      g('init', '-q', '-b', 'main');
+      await writeFile(join(repo, 'README.md'), '# app\n');
+      g('add', '-A');
+      g('commit', '-qm', 'app');
+      g('branch', f.h.config.targetBranch);
+      // Единственное изменение рабочей ветки — правило роли с именем кириллицей:
+      // экранированный git путь не совпал бы с префиксом `.agents/`.
+      await mkdir(join(repo, '.agents/роли'), { recursive: true });
+      await writeFile(join(repo, '.agents/роли/разработчик.md'), 'rules\n');
+      g('add', '-A');
+      g('commit', '-qm', 'bootstrap');
+      f.h.config.mode = 'local';
+      f.h.config.repository = repo;
+      for (const r of f.h.config.repositories) r.path = repo;
+      const b = f.h.createBoard('Stale base');
+      f.h.addTask(b.id, input());
+      let called = 0;
+      await assert.rejects(
+        reviewPlan(
+          f.h,
+          f.root,
+          b.id,
+          'claude',
+          runtimes(() => called++),
+        ),
+        /отстаёт от рабочей ветки.*\.agents\/роли\/разработчик\.md.*base-update/,
+      );
+      assert.equal(called, 0);
+    });
+  } finally {
+    f.cleanup();
+    await rm(repo, { recursive: true, force: true });
   }
 });
 
