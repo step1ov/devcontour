@@ -1114,7 +1114,7 @@ export function devcontourHandoffWithin(
   try {
     return store.read((v) => {
       const state = store.stateOf(v);
-      // Короткая форма из журнала и панели (`B-94be8215`) — однозначный
+      // Короткая форма из журнала и панели (`B-xxxxxxxx`) — однозначный
       // префикс полного id; неоднозначный называет кандидатов.
       const boardId =
         request.boardId === undefined
@@ -1292,7 +1292,7 @@ function hostMarkdown(host: DevContourHandoff['host'], commands: Record<string, 
     `- Действующие задания досок: ${host.liveBoards.length ? host.liveBoards.join(', ') : 'нет'}`,
     ...(host.verifications ?? []).map(
       (v) =>
-        `- Идёт совместная проверка ChangeSet ${v.changeSetId}: ${v.verificationId}, ${Math.floor(v.elapsedMs / 60_000)} мин (задание ${v.job.key} — ${v.job.status}, стадия ${v.job.stage})`,
+        `- Идёт совместная проверка ChangeSet ${v.changeSetId}: ${v.verificationId}, ${v.elapsedMs < 60_000 ? '<1' : Math.floor(v.elapsedMs / 60_000)} мин (задание ${v.job.key} — ${v.job.status}, стадия ${v.job.stage})`,
     ),
     ...(host.discussion
       ? [

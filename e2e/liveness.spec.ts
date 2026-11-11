@@ -289,7 +289,7 @@ test('Совместная проверка задания ChangeSet в очер
         history: [],
         waiting: {
           kind: 'verification',
-          verificationId: 'fe786c6d-d95e-45c7-a5e3-b41506042ceb',
+          verificationId: '0f0f0f0f-1111-4000-8000-000000000001',
           startedAt: new Date(Date.now() - 7 * MIN).toISOString(),
           elapsedMs: 7 * MIN,
         },
@@ -301,6 +301,6 @@ test('Совместная проверка задания ChangeSet в очер
   const joint = live.getByRole('list', { name: 'Работа ведущего цикла' }).getByRole('listitem');
   await expect(joint).toHaveCount(1);
   await expect(joint).toContainText('Совместная проверка');
-  await expect(joint).toContainText('проверка fe786c6d');
+  await expect(joint).toContainText('проверка 0f0f0f0f');
   await expect(joint).toContainText('7 мин');
 });

@@ -30,7 +30,7 @@ const cases: [string, string, RegExp][] = [
   ],
   [
     'группа не определена',
-    `Бюджет group B-94be8215-0d1e-4c4a-9a51-2f7d3c1b9e10 не определён: у 3 вызовов неизвестна стоимость; ${spent(3)}`,
+    `Бюджет group B-5e5e5e5e-0d1e-4c4a-9a51-2f7d3c1b9e10 не определён: у 3 вызовов неизвестна стоимость; ${spent(3)}`,
     /onUnknown: "continue".*devcontour config-apply --keys budgets,prices/,
   ],
 ];
