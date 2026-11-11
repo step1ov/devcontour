@@ -7,7 +7,7 @@ import { run } from 'node:test';
 import { spec } from 'node:test/reporters';
 import { testEnvironment } from './test-environment.mjs';
 import { checkTestEnvironment, requiresTestTools } from './check-test-environment.mjs';
-import { slowFile, slowFirst, slowPatterns } from './test-tiers.mjs';
+import { fileSeconds, slowFile, slowPatterns } from './test-tiers.mjs';
 
 // Without options every tests/*.test.ts file and every test in it is run: that
 // is the release check. The day-to-day tiers only narrow it and keep the same
@@ -26,13 +26,12 @@ if (!(Number.isInteger(concurrency) && concurrency >= 1))
   throw new Error(`DEVCONTOUR_TEST_CONCURRENCY must be a positive integer, got ${configured}`);
 // Предел времени на один тест; переменная — для проверки самого раннера.
 const testTimeoutMs = Number(process.env.DEVCONTOUR_TEST_TIMEOUT_MS) || 15 * 60_000;
-const rank = (name) => {
-  const index = slowFirst.indexOf(name.replace(/\.test\.ts$/, ''));
-  return index < 0 ? slowFirst.length : index;
-};
+// Longest file first (scripts/test-tiers.mjs `fileSeconds`): with a fixed
+// number of slots, a long file that starts late is the tail of the run.
+const seconds = (name) => fileSeconds[name.replace(/\.test\.ts$/, '')] ?? 0;
 const all = readdirSync(directory)
   .filter((name) => name.endsWith('.test.ts'))
-  .sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+  .sort((a, b) => seconds(b) - seconds(a) || a.localeCompare(b));
 if (!all.length) throw new Error('No tests/*.test.ts files found');
 
 let options;
@@ -191,9 +190,27 @@ if (options.list) {
       'test:diagnostic',
     ])
       results.on(type, () => (lastEvent = Date.now()));
-    results.on('test:complete', ({ file, name, nesting }) => {
+    const fileTimes = new Map();
+    results.on('test:complete', ({ file, name, nesting, details }) => {
       lastEvent = Date.now();
       if (nesting === 0 && name === file) unfinished.delete(file);
+      // A file's time is the sum of its top-level tests, as in the table.
+      else if (nesting === 0 && file) {
+        const key = relative(fileURLToPath(directory), file);
+        fileTimes.set(key, (fileTimes.get(key) ?? 0) + (details?.duration_ms ?? 0) / 1000);
+      }
+    });
+    // Durations per file, for the schedule table in scripts/test-tiers.mjs.
+    results.once('end', () => {
+      const slowest = [...fileTimes].sort(([, a], [, b]) => b - a);
+      if (!slowest.length) return;
+      const show = ([name, s]) => `${name.replace(/\.test\.ts$/, '')} ${Math.round(s)} s`;
+      console.error(`slowest files: ${slowest.slice(0, 10).map(show).join(', ')}`);
+      const unlisted = slowest.filter(([name, s]) => s >= 30 && !seconds(name));
+      if (unlisted.length)
+        console.error(
+          `files of 30 s and more missing from fileSeconds in scripts/test-tiers.mjs (they start last): ${unlisted.map(show).join(', ')}`,
+        );
     });
     const watchdog = setInterval(
       () => {
