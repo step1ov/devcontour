@@ -212,9 +212,10 @@ export class LeadWorkflow {
     return revision ? inputWaiting(this.h, s, revision.taskIds) : undefined;
   }
   /**
-   * Отметить ожидание ответов в истории задания один раз: повторный такт,
-   * который снова ждёт, второй записи не добавляет (захват стадии `running`
-   * между ними не считается). `since` — начало ожидания: отметка того же
+   * Отметить ожидание (`event`, по умолчанию ответов) в истории задания один
+   * раз: повторный такт, который снова ждёт, второй записи не добавляет
+   * (захват стадии `running` и отметки других ожиданий между ними не
+   * считаются). `since` — начало ожидания: отметка того же
    * события раньше него относится к прежнему ожиданию, и новое отмечается.
    */
   noteWaiting(job: WorkflowJob, event = WAITING_INPUT, since?: string) {
@@ -222,8 +223,20 @@ export class LeadWorkflow {
     domain(() =>
       engine.host.store.transact('workflow.updated', (tx) => {
         const current = this.queue().guard(job, tx) as WorkflowJob;
-        const last = current.history.filter((h) => h.event !== 'running').at(-1);
-        if (last?.event === event && (!since || last.at >= since)) return;
+        // Отметки ожиданий одного отрезка (после последнего события, которое
+        // не захват и не ожидание) сверяются по своему виду: две причины
+        // ожидания одного такта (ответы и удержанный перенос) не чередуются
+        // в истории на каждом такте.
+        const from =
+          current.history.findLastIndex(
+            (h) => h.event !== 'running' && !h.event.startsWith('waiting:'),
+          ) + 1;
+        // Ожидание с началом (`since`) узнаётся по нему во всей истории:
+        // переход стадии не делает то же удержание новым.
+        const last = (since ? current.history : current.history.slice(from)).findLast(
+          (h) => h.event === event,
+        );
+        if (last && (!since || last.at >= since)) return;
         tx.putLocal('workflow-jobs', job.owner ?? WORKSPACE_OWNER, job.key, {
           ...current,
           history: [...current.history, { at: new Date().toISOString(), stage: job.stage, event }],

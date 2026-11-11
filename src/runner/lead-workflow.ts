@@ -406,8 +406,7 @@ export class LeadRunner {
         // агента перенесённую базу проверяет сам цикл (base-check.ts).
         // Правило — `pauseStep`, общее с пакетом передачи.
         const pause = pauseStep(s, job, tasks);
-        if (pause.checkBase)
-          await checkBase(this.h, { data: this.root, state: this.boardRoot(job) }, guard, signal);
+        if (pause.checkBase) await this.checkBase(job, guard, signal);
         if (pause.lift)
           this.h.store.atomic(() => {
             guard();
@@ -434,15 +433,7 @@ export class LeadRunner {
           // (без повтора и без провала) и отмечает это в истории один раз.
           if (this.workflow.waitingOf(job, s)) this.workflow.noteWaiting(job);
           const pause = pauseStep(s, job, tasks);
-          if (pause.checkBase) {
-            await checkBase(this.h, { data: this.root, state: this.boardRoot(job) }, guard, signal);
-            // Удержанный перенос ждёт человека: задание отмечает это в
-            // истории один раз за удержание, а не ждёт молча каждый такт.
-            const after = this.h.store.read();
-            const wait = after.waits?.find((w) => w.kind === 'base-check');
-            if (after.paused && after.pauseReason === 'base-check' && heldBaseWait(wait?.detail))
-              this.workflow.noteWaiting(job, WAITING_BASE_HELD, wait!.at);
-          }
+          if (pause.checkBase) await this.checkBase(job, guard, signal);
           if (pause.lift)
             this.h.store.atomic(() => {
               guard();
@@ -504,6 +495,22 @@ export class LeadRunner {
       workspace.accept(c.id, { actor: 'agent', authorRuntime: job.authorRuntime });
     });
     return false;
+  }
+  /**
+   * Проверка перенесённой базы стадией доски (`checkBase`). Удержанный
+   * перенос ждёт человека: задание отмечает это в истории один раз за
+   * удержание (по его началу), а не ждёт молча каждый такт.
+   */
+  private async checkBase(
+    job: WorkflowJob,
+    guard: (options?: { closing?: boolean }) => void,
+    signal: AbortSignal,
+  ) {
+    await checkBase(this.h, { data: this.root, state: this.boardRoot(job) }, guard, signal);
+    const after = this.h.store.read();
+    const wait = after.waits?.find((w) => w.kind === 'base-check');
+    if (wait && after.paused && after.pauseReason === 'base-check' && heldBaseWait(wait.detail))
+      this.workflow.noteWaiting(job, WAITING_BASE_HELD, wait.at);
   }
   /**
    * Стадия 1 задания ChangeSet: свежесть требований, итог начатой циклом
