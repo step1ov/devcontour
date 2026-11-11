@@ -16,6 +16,7 @@ import { git, command } from '../src/runner/process.ts';
 import { acceptBoard } from '../src/runner/agent-control.ts';
 import { requirementSnapshot } from '../src/runner/requirements.ts';
 import { AgentService } from '../src/application/agent.ts';
+import { gateTestcases } from '../src/application/testcases.ts';
 import { syncGit } from '../src/runner/git-sync.ts';
 import { recordsFromState, stateFromRecords } from '../src/core/sync-state.ts';
 import { LeadWorkflow } from '../src/core/lead-workflow.ts';
@@ -936,6 +937,32 @@ test('A release scenario reworded or removed after acceptance needs the user to 
       f.view().unconfirmedScenarios.map((u) => [u.scenario, u.change]),
       [[reworded, 'removed']],
     );
+    // Найденная в Git карта — сверяемый образец: приёмку держит изменение
+    // сценария, а не прежняя форма доказательства.
+    const legacyCheck = create('Образец из истории Git');
+    await f.runner.verify(legacyCheck.id);
+    const pendingProof = () => {
+      const s = f.store.read(),
+        c = s.changeSets.find((x) => x.id === legacyCheck.id)!,
+        v = c.verifications.at(-1)!;
+      return f.intent.validate(v.productRelease!, changeSnapshot(s, c), v.manifest);
+    };
+    const legacyFound = pendingProof();
+    assert.equal(legacyFound.scopeUnverifiable, false);
+    assert.deepEqual(
+      legacyFound.unconfirmedScenarios?.map((u) => [u.scenario, u.change]),
+      [[reworded, 'removed']],
+    );
+    const operatorCard = (id: string) =>
+      (
+        new AgentService(f.h).execute({
+          operation: 'attention_list',
+          input: { actor: 'operator' },
+        }) as { items: { sourceKey: string; reason: string }[] }
+      ).items.find((i) => i.sourceKey === 'changeset:' + id)!.reason;
+    // Сценарии прежней приёмки в состоянии не сохранены: карточка без Git
+    // сравнить их не может и просит сверить объём в карте продукта.
+    assert.match(operatorCard(legacyCheck.id), /^Сверьте объём релиза в карте продукта/);
     // Карты той приёмки в истории нет: сверка невозможна, и карта говорит это прямо.
     f.store.change('fixture.lost-map', (s) => {
       s.changeSets
@@ -967,6 +994,14 @@ test('A release scenario reworded or removed after acceptance needs the user to 
     assert.equal(healed.scopeReference?.changeSetId, unverifiable.id);
     assert.equal(healed.scopeReference?.found, true);
     assert.deepEqual(healed.unconfirmedScenarios, []);
+    // Объём не менялся: ведущий принимает следующий релиз сам — блок не
+    // «залипает» после первой приёмки или ненайденного образца.
+    const unchanged = create('Объём не менялся');
+    await f.runner.verify(unchanged.id);
+    const plainCard = operatorCard(unchanged.id);
+    assert.ok(!/сужение|Сверьте/.test(plainCard), plainCard);
+    assert.equal(f.runner.workspace.accept(unchanged.id, { actor: 'agent' }).status, 'accepted');
+    assert.equal(f.view().scopeReference?.changeSetId, unchanged.id);
     // CLI ведущего — тоже agent: обходного пути нет. Последний шаг: процесс
     // CLI закрепляет свою политику исполнения, после чего процесс теста
     // писать уже не может. Отсрочка проверенного в образце сценария.
@@ -1090,6 +1125,37 @@ test('requirements_testcases lists the testcase ids of the last gate record as t
     }) as { found: boolean; testcases: unknown[] };
     assert.equal(absent.found, false);
     assert.deepEqual(absent.testcases, []);
+    // Предел ответа: ID бывает до 1000 символов, список ограничен и байтами.
+    const long = Array.from({ length: 200 }, (_, i) => ({
+      id: String(i).padStart(4, '0') + 'x'.repeat(996),
+      status: 'passed' as const,
+    }));
+    const capped = gateTestcases(
+      {
+        tasks: [],
+        runs: [
+          {
+            id: 'R-long',
+            taskId: 'T-long',
+            evidence: [
+              {
+                kind: 'test',
+                gate: 'wide',
+                phase: 'integration',
+                sha: 'a'.repeat(40),
+                passed: true,
+                createdAt: '2026-01-01T00:00:00.000Z',
+                tests: long,
+              },
+            ],
+          },
+        ],
+      } as unknown as Parameters<typeof gateTestcases>[0],
+      { gate: 'wide' },
+    );
+    assert.ok(capped.testcases.length > 0 && capped.testcases.length < 200);
+    assert.equal((capped as { omitted?: number }).omitted, 200 - capped.testcases.length);
+    assert.ok(Buffer.byteLength(JSON.stringify(capped)) < 65536);
   } finally {
     await f.close();
   }
