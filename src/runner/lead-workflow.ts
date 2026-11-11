@@ -490,6 +490,9 @@ export class LeadRunner {
       return true;
     this.h.store.atomic(() => {
       guard();
+      // Результат приёмки, с отложенными решением пользователя сценариями
+      // (`deferredScenarios`), пишется в журнал событием changeset.accepted;
+      // ведущий читает их там и в product-view.
       workspace.accept(c.id, { actor: 'agent', authorRuntime: job.authorRuntime });
     });
     return false;

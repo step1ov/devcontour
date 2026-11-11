@@ -25,8 +25,39 @@ const channelScope = z.discriminatedUnion('scope', [
 export const featureScope = z.strictObject({
   featureId: id,
   channels: z.array(channelScope).min(1).max(30),
-  checks: z.array(z.strictObject({ gate: id, scenario: text })).max(30),
+  /**
+   * Сценарии приёмки релиза. Сценарий подтверждает testcase принятой задачи
+   * одной из историй этой фичи, чья связь requirements повторяет текст
+   * сценария и называет свой testId; `deferred` — записанная причина, по которой сценарий в этот релиз
+   * не входит. Отложить сценарий решает пользователь: ведущий предлагает и
+   * спрашивает. Зелёный общий gate сам по себе сценарий не подтверждает.
+   * Один gate проверяет несколько сценариев; текст сценария в фиче
+   * уникален, потому что доказательство сопоставляется по тексту, а не по
+   * gate.
+   */
+  checks: z.array(z.strictObject({ gate: id, scenario: text, deferred: text.optional() })).max(30),
 });
+/** Сценарий сравнивается по тексту без различий в пробелах. */
+export const scenarioKey = (scenario: string) => scenario.trim().replace(/\s+/g, ' ');
+export type ScenarioStatus = 'evidenced' | 'deferred' | 'missing';
+export interface ReleaseScenario {
+  featureId: string;
+  gate: string;
+  scenario: string;
+  status: ScenarioStatus;
+  deferred?: string;
+  evidence: { repositoryId: string; taskId: string; testId: string }[];
+}
+/** Сценарий, отложенный записанным решением пользователя, с причиной. */
+export interface DeferredScenario {
+  featureId: string;
+  gate: string;
+  scenario: string;
+  reason: string;
+}
+/** Ключ сценария фичи в отчётах и на панели: gate и текст сценария. */
+export const checkKey = (check: { gate: string; scenario: string }) =>
+  JSON.stringify([check.gate, scenarioKey(check.scenario)]);
 export const productMap = z.strictObject({
   channels: z
     .array(
@@ -144,9 +175,14 @@ export function validateProductMap(
       const included = scope.channels.filter((a) => a.scope === 'included');
       if (Boolean(included.length) !== Boolean(scope.checks.length))
         throw new DomainError('Сквозные проверки обязательны только для включённой фичи');
+      // Один gate может проверять несколько сценариев фичи, и каждый
+      // доказывается отдельно. Доказательство сопоставляется по тексту
+      // сценария (gate связи — gate задачи компонента), поэтому один текст на
+      // двух gates фичи был бы доказан одним testcase дважды: такой повтор —
+      // ошибка карты.
       unique(
-        scope.checks.map((c) => c.gate),
-        'feature gate',
+        scope.checks.map((c) => scenarioKey(c.scenario)),
+        'feature scenario',
       );
       for (const app of scope.channels) {
         if (!product.channels.some((a) => a.id === app.channelId))
@@ -191,7 +227,11 @@ export interface FeatureProgress {
   outcome: string;
   status: FeatureStatus;
   channels: (FeatureScope['channels'][number] & { covered?: boolean; planned?: boolean })[];
-  checks: (FeatureScope['checks'][number] & { passed: boolean })[];
+  checks: (FeatureScope['checks'][number] & {
+    passed: boolean;
+    status: ScenarioStatus;
+    evidence: ReleaseScenario['evidence'];
+  })[];
 }
 export type ProductView =
   | { available: false; reason: string }
@@ -209,4 +249,8 @@ export type ProductView =
       verification?: { changeSetId: string; verificationId: string };
       issues: string[];
       features: FeatureProgress[];
+      /** Сценарии, отложенные записанным решением; ведущий не откладывает их сам. */
+      deferredScenarios: DeferredScenario[];
+      /** Приёмка записана прежним правилом без доказанных сценариев. */
+      acceptanceOverridden?: string;
     };
