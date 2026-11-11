@@ -686,7 +686,7 @@ test('A release accepted under the earlier rule without proven scenarios is not 
       { timeoutMs: 20000 },
     );
     assert.equal(cli.code, 1);
-    assert.equal(JSON.parse(cli.stdout).releaseAccepted, false);
+    assert.equal((JSON.parse(cli.stdout) as { releaseAccepted: boolean }).releaseAccepted, false);
   } finally {
     proto.workspaceCoverage = current;
     await f.close();
