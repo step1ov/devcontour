@@ -6,7 +6,8 @@ import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { controlled, inputDemos, inputFixture, prepared } from './input-fixture.ts';
 import { LeadRunner } from '../src/runner/lead-workflow.ts';
-import { LeadWorkflow, WAITING_INPUT } from '../src/core/lead-workflow.ts';
+import { LeadWorkflow, WAITING_BASE_HELD, WAITING_INPUT } from '../src/core/lead-workflow.ts';
+import { BASE_HELD_DETAIL } from '../src/runner/base-check.ts';
 import { AgentService } from '../src/application/agent.ts';
 import { DevContour } from '../src/core/service.ts';
 import { Store } from '../src/core/store.ts';
@@ -90,5 +91,46 @@ test('Board job: A asks, B is independent, C depends on A — B finishes, C wait
     if (store === f.store) await f.scheduler.stop();
     store.close();
     f.release();
+  }
+});
+
+test('Board job: answers awaited and a held base move at once — each wait is noted once, history does not grow across ticks', async () => {
+  const runtimes = controlled();
+  const f = await inputFixture(runtimes);
+  try {
+    const { boardId } = f.askingTask('Asking A');
+    const job = new LeadWorkflow(f.h).start({ kind: 'board', id: boardId, authorRuntime: 'codex' });
+    const lead = new LeadRunner(f.h, f.root, runtimes);
+    await lead.tick();
+    await lead.tick();
+    await f.scheduler.drain();
+    await lead.tick();
+    await lead.tick();
+    const saved = () => new LeadWorkflow(f.h).get(job.key, job.owner);
+    const count = (event: string) => saved().history.filter((e) => e.event === event).length;
+    assert.equal(count(WAITING_INPUT), 1, JSON.stringify(saved().history));
+    // Удержанный перенос базы поверх ожидания ответов (ожидание без диапазона
+    // цикл не снимает и не перепроверяет).
+    f.store.change('fixture.held-base', (s) => {
+      s.paused = true;
+      s.pauseReason = 'base-check';
+      s.waits = [
+        {
+          kind: 'base-check',
+          detail: `${BASE_HELD_DETAIL} (main:verify.mjs): gates этой базы его не подтверждают.`,
+          at: new Date().toISOString(),
+        },
+      ];
+    });
+    await lead.tick();
+    assert.equal(count(WAITING_BASE_HELD), 1, JSON.stringify(saved().history));
+    const length = saved().history.length;
+    for (let i = 0; i < 4; i++) await lead.tick();
+    assert.notEqual(saved().status, 'failed', saved().error);
+    assert.equal(count(WAITING_INPUT), 1);
+    assert.equal(count(WAITING_BASE_HELD), 1);
+    assert.equal(saved().history.length, length, JSON.stringify(saved().history));
+  } finally {
+    await f.cleanup();
   }
 });

@@ -69,6 +69,16 @@ export const heldBaseWait = (detail: string | undefined) =>
   !!detail && /меняет приёмку или настройку контура/.test(detail);
 
 /**
+ * Пути удержанного переноса (`компонент:путь`), как их называет причина
+ * `base.check.held`: «… контура (main:a, main:b): …». Нет списка — пусто.
+ */
+export const heldBasePaths = (detail: string | undefined): string[] => {
+  if (!heldBaseWait(detail)) return [];
+  const list = /меняет приёмку или настройку контура \((.*?)\):/.exec(detail!)?.[1];
+  return list ? list.split(', ').filter(Boolean) : [];
+};
+
+/**
  * Паузу поставил ведущий, и снять её он вправе сам: под ней нет ожидания
  * проверки базы. Снятие паузы снимает и ожидание без проверки базы, а под
  * паузой `operator` ожидание снимает только человек (как `baseWaitOf`): ни

@@ -8,7 +8,12 @@ import { git } from './process.ts';
 import { controllerBoundary } from './checks.ts';
 import { checkoutRootOption, workspaceCheckoutRoot } from './checkout-root.ts';
 import { journalError } from './board-coverage.ts';
-import { sensitiveBasePaths } from './sensitive-paths.ts';
+import {
+  reviewedContractDocument,
+  reviewedRedaction,
+  sensitiveBaseEntries,
+  type ReviewedContractDocument,
+} from './sensitive-paths.ts';
 
 /** Локальная запись проверки базы: компонент, SHA базы, договор и исход. */
 export const BASE_CHECK = 'base-check';
@@ -65,6 +70,12 @@ export type CheckGuard = (options?: { closing?: boolean }) => void;
  * артефактов (`sensitiveBasePaths`, D42). Перенос, меняющий приёмку или
  * настройку контура, gates той же базы не доказывают — они сами могли быть
  * ослаблены этим переносом; такое ожидание снимает только `queue --start`.
+ * Исключение — документ контракта, единственная причина чувствительности
+ * которого — сам документ, в редакции, одобренной независимым ревью
+ * (`reviewedContractDocument`: blob на базе равен blob одобренного текста).
+ * Его, как и обычный перенос, снимают gates; доказательство (ревью и blob)
+ * пишется в `base.checked`. Любой другой чувствительный путь рядом держит
+ * весь перенос.
  *
  * Исход хранится по SHA и договору; провал повторяется один раз
  * (`BASE_CHECK_RETRIES`), дальше база не проверяется повторно, пока её не
@@ -113,16 +124,25 @@ export async function checkBase(
     })),
   );
   const touched: string[] = [];
+  // Документы контрактов, которые перенос приносит в редакции, одобренной
+  // независимым ревью: их снимает цикл, с доказательством в `base.checked`.
+  const reviewed: ReviewedContractDocument[] = [];
   for (const m of moves) {
     const to = bases.find((b) => b.repositoryId === m.repositoryId)?.sha;
     if (!to) continue;
-    const paths = await sensitiveBasePaths(h, roots.data, state, m.repositoryId, m.from, to);
-    touched.push(...paths.map((p) => `${m.repositoryId}:${p}`));
+    const entries = await sensitiveBaseEntries(h, roots.data, state, m.repositoryId, m.from, to);
+    for (const e of entries) {
+      const evidence = e.contractDocument
+        ? await reviewedContractDocument(h, state, m.repositoryId, e.path, to)
+        : undefined;
+      if (evidence) reviewed.push(evidence);
+      else touched.push(`${m.repositoryId}:${e.path}`);
+    }
   }
   if (touched.length)
     return hold(
       'base.check.held',
-      `${BASE_HELD_DETAIL} (${touched.slice(0, 20).join(', ')}): gates этой базы его не подтверждают. Перенос проверяет и подтверждает оператор: «Подтвердить и запустить» в «Внимании» панели; ведущий агент это ожидание сам не снимает. Изменение приёмки — через contract-change`,
+      `${BASE_HELD_DETAIL} (${touched.slice(0, 20).join(', ')}): gates этой базы его не подтверждают. Перенос проверяет и подтверждает оператор: «Подтвердить и запустить» в «Внимании» панели; ведущий агент это ожидание сам не снимает. Сам цикл снимает только документы контрактов в редакции, одобренной независимым ревью (review-contract); изменение приёмки — через contract-change`,
       { paths: touched.slice(0, 20) },
     );
   const { engine } = executionOf(h);
@@ -255,12 +275,27 @@ export async function checkBase(
     guard();
     if (!waiting()) return 'cleared';
     if (ranges() !== range) return 'moved';
+    // Доказательство ревью сверяется заново по текущему состоянию: новая
+    // редакция документа или возвращённая в работу задача, закреплённая за
+    // прежней, за время gates — проверить на следующем такте.
+    const now = h.store.read();
+    if (
+      reviewed.some(
+        (r) => reviewedRedaction(h.config, now, r.repositoryId, r.path)?.id !== r.contractId,
+      )
+    )
+      return 'moved';
     for (const b of bases) {
       const repo = repository(h.config, b.repositoryId);
       if (targetSha(repo.path, repo.targetBranch) !== b.sha) return 'moved';
     }
     if (failed.length) return 'failed';
-    h.store.appendEvent('base.checked', { bases });
+    h.store.appendEvent('base.checked', {
+      bases,
+      // Кто снял чувствительный перенос и на каком доказательстве: ревью
+      // документа и blob одобренного текста, равный blob на базе.
+      ...(reviewed.length ? { liftedBy: 'agent', reviewedContracts: reviewed } : {}),
+    });
     h.pause(false);
     return 'cleared';
   });

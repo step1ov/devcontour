@@ -247,6 +247,15 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
       loop: { step: 'accept' },
     },
   ],
+  'base-held': [
+    { code: 'base-held', params: { paths: [] } },
+    {
+      code: 'base-held',
+      params: { paths: ['main:verify.mjs', 'main:docs/contracts/api.md'] },
+      boardId: 'board-1',
+      job,
+    },
+  ],
   'follow-up': [{ code: 'follow-up', params: { severity: 5, version: 3 }, input: input1 }],
   'answer-lead': [
     { code: 'answer-lead', params: { version: 2 }, input: input1 },
@@ -439,8 +448,10 @@ test('Подсказки шага: новая конфигурация setup п�
  * `devcontour queue --pause` вместо панели; прочие образцы байтово прежние.
  * Образец `job-cancelled-task` с `allCancelled` от хоста без бюджета добавлен
  * (четвёртая фраза о владельце решения); прежние образцы байтово прежние.
+ * Образцы нового кода `base-held` добавлены (удержанный перенос базы ждёт
+ * подтверждения человека); прежние образцы байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = '85cc515d2b4bebfbfdbce87de8c081cf535b10c2f01aabe022b4f2965abdbd60';
+const ENGLISH_SAMPLES_SHA256 = 'b93b5240d95c417910b4231e3405a91f76923e405d454e554885be321d72a119';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(
