@@ -1382,6 +1382,8 @@ test('Доказательство ревью: порядок реестра, а
     h.contract('API', link, reviewed(root, 'r-link'), undefined, doc);
     h.holdForBaseUpdate();
     await git(config.repository, 'rm', '-q', '--', doc);
+    // git rm убрал и опустевший каталог.
+    await mkdir(join(config.repository, 'docs', 'contracts'), { recursive: true });
     await symlink(link, join(config.repository, doc));
     await writeFile(join(config.repository, 'base.txt'), 'ok 3');
     await git(config.repository, 'add', '--', doc, 'base.txt');
