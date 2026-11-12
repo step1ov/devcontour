@@ -719,10 +719,19 @@ export function PreparationPanel() {
     d = c?.design;
   const revisions = { product: p, architecture: a, references: refs, concept: con, design: d };
   const current = tab === 'development' ? undefined : revisions[tab];
-  const architectureCurrent = p?.status === 'approved' && a?.productDigest === p.digest;
-  const referencesCurrent = a?.status === 'approved' && refs?.architectureDigest === a.digest;
-  const conceptCurrent = refs?.status === 'approved' && con?.referencesDigest === refs.digest;
-  const designCurrent = con?.status === 'approved' && d?.conceptDigest === con.digest;
+  // Актуальность редакций считает сервер тем же правилом, что и согласование:
+  // черновик новой постановки не делает устаревшими архитектуру и дизайн,
+  // а перенос критериев между релизами их сохраняет.
+  const fresh = c?.binding?.fresh;
+  const productApproved = c?.binding?.productNumber !== undefined;
+  // Сохранит ли утверждение новой версии постановки утверждённую цепочку;
+  // без утверждённой архитектуры сервер поле не передаёт.
+  const pendingProduct =
+    c?.binding?.pendingProduct?.keepsChain === undefined ? undefined : c.binding.pendingProduct;
+  const architectureCurrent = Boolean(fresh?.architecture);
+  const referencesCurrent = Boolean(fresh?.references);
+  const conceptCurrent = Boolean(fresh?.concept);
+  const designCurrent = Boolean(fresh?.design);
   // How far the design stage has got: used by the stepper and the sub-nav.
   // Референсы с applicable: false — утверждённое решение «дизайн не нужен»:
   // концепт и дизайн-система не требуются, шаги 2–3 не ждут.
@@ -983,7 +992,7 @@ export function PreparationPanel() {
                               ? names[p.status]
                               : 'Нужна постановка'
                             : step === 'architecture'
-                              ? p?.status !== 'approved'
+                              ? !productApproved
                                 ? 'После согласования продукта'
                                 : architectureCurrent && a
                                   ? names[a.status]
@@ -1171,6 +1180,17 @@ export function PreparationPanel() {
                           </AlertDescription>
                         </Alert>
                       )}
+                      {tab === 'product' && productApproved && pendingProduct && (
+                        <Alert variant="info" className="mt-4">
+                          <AlertDescription>
+                            Разработка идёт по утверждённой версии {c.binding.productNumber}; эта
+                            версия вступит в силу после вашего решения.{' '}
+                            {pendingProduct.keepsChain
+                              ? 'Архитектура и дизайн её не затрагивают.'
+                              : 'Её утверждение потребует заново утвердить архитектуру и дизайн.'}
+                          </AlertDescription>
+                        </Alert>
+                      )}
                       {!stageCurrent && current && tab !== 'product' && (
                         <Alert variant="warning" className="mt-4">
                           <AlertDescription>
@@ -1232,7 +1252,7 @@ export function PreparationPanel() {
                           ) : (
                             <Alert className="max-w-[78ch] border-dashed">
                               <AlertDescription>
-                                {p?.status === 'approved'
+                                {productApproved
                                   ? 'Агент готовит архитектуру, сравнение стеков и диаграммы C1/C2.'
                                   : 'Архитектура будет прорабатываться после вашего утверждения продуктовой части.'}
                               </AlertDescription>
@@ -1344,7 +1364,11 @@ export function PreparationPanel() {
                             <p className="max-w-[78ch]">
                               {tab === 'design'
                                 ? 'После утверждения агент сможет настроить проект и начать разработку по этой версии.'
-                                : 'После утверждения откроется следующий этап. Разработка останется заблокированной.'}
+                                : tab === 'product' && productApproved && pendingProduct
+                                  ? pendingProduct.keepsChain
+                                    ? `Изменено только распределение критериев по релизам: архитектура и дизайн остаются в силе, разработка продолжится по этой версии. До решения она идёт по версии ${c.binding.productNumber}.`
+                                    : `После утверждения архитектуру и дизайн нужно будет утвердить заново, и до этого задачи изменения не выдаются. До решения разработка идёт по версии ${c.binding.productNumber}.`
+                                  : 'После утверждения откроется следующий этап. Разработка останется заблокированной.'}
                             </p>
                             <Label htmlFor="decision-comment" className="mt-4 block">
                               Комментарий к решению

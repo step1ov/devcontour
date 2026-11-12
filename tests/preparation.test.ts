@@ -182,13 +182,25 @@ test('Product and architecture require distinct operator decisions; no agent or 
     f.h.pause(false);
     const r = f.h.claim('worker')!;
     assert.equal(r.taskId, t.id);
+    // Черновик не меняет привязку и доступен во время работы; решение по нему
+    // меняет привязку и ждёт остановки выдачи.
+    const late = p.execute('preparation_product', {
+      changeId: id,
+      expectedDigest: digest,
+      reason: 'Late scope change',
+      content: product,
+    });
+    assert.equal(late.enabled && late.developmentReady, true);
+    const draft = f.store.read().preparation!.changes[0].product.at(-1)!.digest;
+    p.execute('preparation_submit', { changeId: id, stage: 'product', expectedDigest: draft });
     assert.throws(
       () =>
-        p.execute('preparation_product', {
+        p.decide({
           changeId: id,
-          expectedDigest: digest,
-          reason: 'Late scope change',
-          content: product,
+          stage: 'product',
+          expectedDigest: draft,
+          decision: 'approve',
+          comment: '',
         }),
       /дождитесь/,
     );
@@ -233,10 +245,9 @@ test('Revisions invalidate architecture and stale decisions, plans and task atte
         }),
       /Версия изменилась/,
     );
-    assert.throws(
-      () => new LeadWorkflow(f.h).start({ kind: 'board', id: b.id, authorRuntime: 'codex' }),
-      /продуктовую/,
-    );
+    // Черновик не трогает работу: разработка привязана к утверждённой версии.
+    assert.equal(developmentBinding(f.store.read())!.productDigest, before.product.at(-1)!.digest);
+    new LeadWorkflow(f.h).input('board', b.id);
     approveStage(p, id, 'product');
     assert.throws(() => developmentBinding(f.store.read()), /архитектуру/);
     p.execute('preparation_architecture', {
@@ -1449,14 +1460,15 @@ test('Корректировка при заново открытой поста
     f.h.approve(boardId);
     complete(f.h, one.id);
     f.h.accept(boardId, MERGED);
-    // Постановку изменения открывают заново: его разработка больше не готова.
+    // Утверждена постановка с иным объёмом: разработка ждёт новой архитектуры.
     p.execute('preparation_product', {
       changeId,
       expectedDigest: f.store.read().preparation!.changes[0].product.at(-1)!.digest,
       reason: 'Уточнение постановки',
-      content: product,
+      content: { ...product, outcome: product.outcome + ' Уточнено.' },
     });
-    assert.throws(() => developmentBinding(f.store.read(), changeId), /продуктовую/);
+    approveStage(p, changeId, 'product');
+    assert.throws(() => developmentBinding(f.store.read(), changeId), /архитектуру/);
     f.h.correct(boardId, [one.id], 'Исправить результат по уточнению');
     const replacement = f.store.read().tasks.find((t) => t.supersedes === one.id)!;
     assert.equal(replacement.status, 'draft');
