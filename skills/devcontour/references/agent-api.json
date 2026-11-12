@@ -2384,7 +2384,7 @@
     },
     {
       "name": "discussion_post",
-      "description": "Post a note or a change request to a task discussion as the lead. Needs idempotencyKey (a repeat returns the same message, another payload under it is refused) and expectedVersion (the thread version you read; a mismatch is 409 — re-read). Text: up to 16 KiB UTF-8, no control characters other than newline and tab; the reply carries an excerpt of long text. supersedes corrects your own latest version of a message. A change request does not alter an approved or accepted task: apply it through a new revision. kind answer answers a writer question: input {requestId, expectedVersion (the request version, which is the check instead of the thread version), optionId?, kind?}; the lead rule of input_answer applies, the answer text lives once in the request and the message links its revision; an answer to a question already cancelled or superseded is kept as discussion history (input.accepted false) and resumes nothing; an applied answer is not corrected (409).",
+      "description": "Post a note or a change request to a task discussion as the lead. Needs idempotencyKey (a repeat returns the same message, another payload under it is refused) and expectedVersion (the thread version you read; a mismatch is 409 — re-read). Text: up to 16 KiB UTF-8, no control characters other than newline and tab; the reply carries an excerpt of long text. supersedes corrects your own latest version of a message. A change request does not alter an approved or accepted task: apply it through a new revision. kind answer answers a writer question: input {requestId, expectedVersion (the request version, which is the check instead of the thread version), optionId?, kind?}; the lead rule of input_answer applies, the answer text lives once in the request and the message links its revision; an answer to a question already cancelled or superseded is kept as discussion history (input.accepted false) and resumes nothing; an applied answer is not corrected (409). kind stand-in records a decision you took on behalf of the owner without their answer (a product choice, a scope cut, a smallest-path default): text is the decision and why, standIn {question, impact} names the open question of the owner and what depends on it (up to 2 KiB each); post it on the task whose spec or contract carries the decision, as soon as you take it. Only the owner confirms or reverses it (panel attention center or devcontour decision-confirm / decision-reverse); this API has no such operation. A reversal arrives as a change request in discussion_inbox with the alternative of the owner: handle it with discussion_resolve (accepted or needs-answer; rejected is refused). The tool itself records a stand-in when the lead answers a writer question with kind requirement-change or cancels a follow-up (assumption accepted). A stand-in can be corrected (supersedes) until the owner rules; then it is final.",
       "readOnly": false,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -2399,11 +2399,28 @@
             "enum": [
               "note",
               "change-request",
-              "answer"
+              "answer",
+              "stand-in"
             ]
           },
           "text": {
             "type": "string"
+          },
+          "standIn": {
+            "type": "object",
+            "properties": {
+              "question": {
+                "type": "string"
+              },
+              "impact": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "question",
+              "impact"
+            ],
+            "additionalProperties": false
           },
           "input": {
             "type": "object",
@@ -2465,7 +2482,7 @@
     },
     {
       "name": "discussion_resolve",
-      "description": "Record how a change request was handled: accepted (refs to the board revision or tasks created after the request, or to a draft task edited after it, alone or with its unaccepted revision), rejected with a reason, or needs-answer (the operator answers in the panel and the request returns to discussion_inbox). Only the latest version of a request is handled; accepted and rejected are final. expectedVersion is the thread version from discussion_inbox. Reading a request is not handling it.",
+      "description": "Record how a change request was handled: accepted (refs to the board revision or tasks created after the request, or to a draft task edited after it, alone or with its unaccepted revision), rejected with a reason, or needs-answer (the operator answers in the panel and the request returns to discussion_inbox). Only the latest version of a request is handled; accepted and rejected are final. expectedVersion is the thread version from discussion_inbox. Reading a request is not handling it. A change request with ruling reversed (the owner reversed a stand-in decision) cannot be rejected (403 owner-ruling): accept it with refs to the new revision or task, or ask the owner with needs-answer.",
       "readOnly": false,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -5551,7 +5568,7 @@
     },
     {
       "name": "attention_list",
-      "description": "List the attention center: one ordered list of current items that need someone to act, from the same source rules as the panel (preparation questions and stage reviews, writer questions, stopped tasks, lead job decisions, discussion requests, pauses, waits, budgets, contract changes, ChangeSet acceptance, preview problems, stalls). Default actor lead; each item has sourceKey, occurrenceId, sourceVersion, category, actor, reason, impact (covered tasks and the tasks waiting on them), subject and since. A cascade is one root item. Links open the panel at the subject (task list, the stage of the question, the discussion message). Operator domain actions carry the full question (prompt) and answer choices. Reading is not handling: act through the source operation (preparation_*, discussion_*, input_*, task_retry, workflow_*). Read-only; operator read marks are not included. Available before setup.",
+      "description": "List the attention center: one ordered list of current items that need someone to act, from the same source rules as the panel (preparation questions and stage reviews, writer questions, stopped tasks, lead job decisions, discussion requests, stand-in decisions awaiting the owner, pauses, waits, budgets, contract changes, ChangeSet acceptance, preview problems, stalls). Default actor lead; each item has sourceKey, occurrenceId, sourceVersion, category, actor, reason, impact (covered tasks and the tasks waiting on them), subject and since. A cascade is one root item. Links open the panel at the subject (task list, the stage of the question, the discussion message). Operator domain actions carry the full question (prompt) and answer choices. Reading is not handling: act through the source operation (preparation_*, discussion_*, input_*, task_retry, workflow_*). Read-only; operator read marks are not included. Available before setup.",
       "readOnly": true,
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

@@ -1691,6 +1691,109 @@ const discussionNeedsAnswerSource: AttentionSourceRule = {
 };
 
 /**
+ * S7b. Решение, которое ведущий принял за владельца (`stand-in` в обсуждении
+ * задачи), ждёт подтверждения владельцем. Предмет — цепочка исправлений
+ * решения (первое сообщение), версия — его последняя версия. Решение
+ * владельца (подтвердить или отменить) снимает карточку; отмена становится
+ * обращением к ведущему — карточкой `discussion-request`.
+ */
+/**
+ * Полный текст решения для подтверждения: вопрос и влияние сокращаются
+ * первыми, решение — только сверх предела подсказки, и тогда подсказка
+ * говорит, где полный текст.
+ */
+function decisionPrompt(question: string, decision: string, impact: string) {
+  const limit = ATTENTION_LIMITS.prompt;
+  const head = `Вопрос: ${clip(question, 300)}\nВлияние: ${clip(impact, 300)}\nРешение ведущего: `;
+  const room = limit - head.length;
+  if (decision.length <= room) return head + decision;
+  const tail = '… Полный текст — в обсуждении задачи.';
+  return head + decision.slice(0, room - tail.length) + tail;
+}
+
+const standInSource: AttentionSourceRule = {
+  id: 'stand-in',
+  engine: true,
+  collect: (ctx) => {
+    const { h } = engineOf(ctx);
+    const service = new DiscussionService(h);
+    return service.standIns(DISCUSSION_ITEMS).map(({ owner, message, version }): Candidate => {
+      const root = service.chain(owner, message.id)?.rootId ?? message.id;
+      const question = ctx.redact(message.standIn?.question ?? '');
+      const impact = ctx.redact(message.standIn?.impact ?? '');
+      const decision = ctx.redact(message.text);
+      return {
+        sourceKey: `discussion:si:${root}`,
+        occurrenceId: root,
+        sourceVersion: d({ latestId: message.id }),
+        source: 'stand-in',
+        category: 'decision',
+        actor: 'operator',
+        title: `Ведущий решил за вас — подтвердите или отмените: ${clip(one(question), 100)}`,
+        reason: clip(`Решено: ${one(decision)}. Влияние: ${one(impact)}`, ATTENTION_LIMITS.reason),
+        since: message.createdAt,
+        subject: {
+          kind: 'task',
+          id: message.taskId,
+          href: hrefs.message(message.taskId, message.id),
+        },
+        evidence: [
+          { kind: 'message', id: message.id, href: hrefs.message(message.taskId, message.id) },
+        ],
+        // Решение за владельца ничего не держит: задачу карточка не
+        // захватывает и ждущих не считает (предмет — сообщение задачи).
+        actions: [
+          {
+            id: 'confirm',
+            kind: 'domain',
+            label: 'Подтвердить',
+            input: 'confirm',
+            prompt: decisionPrompt(question, decision, impact),
+          },
+          {
+            id: 'reverse',
+            kind: 'domain',
+            label: 'Отменить решение',
+            // Полный текст решения — в подсказке подтверждения (одна на карточку).
+            input: 'text',
+          },
+        ],
+        basis: { taskId: message.taskId, messageId: message.id, threadVersion: version },
+      };
+    });
+  },
+  history: (ctx) => {
+    const { h } = engineOf(ctx);
+    const service = new DiscussionService(h);
+    return service
+      .standIns(HISTORY_DISPOSITIONS, true, true)
+      .filter((row) => row.ruling)
+      .map(({ owner, message, ruling }): Resolved => {
+        const root = service.chain(owner, message.id)?.rootId ?? message.id;
+        const question = ctx.redact(message.standIn?.question ?? '');
+        return {
+          sourceKey: `discussion:si:${root}`,
+          occurrenceId: root,
+          sourceVersion: d({ latestId: message.id }),
+          source: 'stand-in',
+          category: 'decision',
+          actor: 'operator',
+          title: `${ruling!.ruling === 'reversed' ? 'Решение за вас отменено' : 'Решение за вас подтверждено'}: ${clip(one(question), 100)}`,
+          reason: clip(one(ctx.redact(ruling!.text)), ATTENTION_LIMITS.reason),
+          since: message.createdAt,
+          subject: {
+            kind: 'task',
+            id: message.taskId,
+            href: hrefs.message(message.taskId, ruling!.id),
+          },
+          evidence: [{ kind: 'message', id: ruling!.id }],
+          resolvedAt: ruling!.createdAt,
+        };
+      });
+  },
+};
+
+/**
  * Источники движка в порядке владения корнями: вопрос исполнителя,
  * удержание операцией, бюджет,
  * пауза (свёртка отказов провайдера), ожидания, задача, доска, план.
@@ -1706,6 +1809,7 @@ export const engineSources: AttentionSourceRule[] = [
   planSource,
   discussionNeedsAnswerSource,
   discussionRequestSource,
+  standInSource,
   changesetSource,
   previewSource,
   corpusSource,
@@ -1780,6 +1884,8 @@ const ownCas = new Set([
   'prep-stage/request-changes',
   'plan/approve',
   'discussion-needs-answer/answer',
+  'stand-in/confirm',
+  'stand-in/reverse',
   'input/answer',
   'input/apply',
   'corpus/approve',
@@ -1797,6 +1903,7 @@ export function sourceOfKey(key: string): AttentionSource | undefined {
     ['plan:', 'plan'],
     ['discussion:cr:', 'discussion-request'],
     ['discussion:na:', 'discussion-needs-answer'],
+    ['discussion:si:', 'stand-in'],
     ['board:', 'board'],
     ['workflow:', 'board'],
     ['work:', 'work'],
@@ -1813,6 +1920,29 @@ export function sourceOfKey(key: string): AttentionSource | undefined {
   if (key === 'queue') return 'queue';
   return prefixes.find(([prefix]) => key.startsWith(prefix))?.[1];
 }
+
+/** Решение владельца с карточки решения за него: та же операция, что в CLI. */
+const rule = (
+  ctx: AttentionContext,
+  item: Candidate,
+  ruling: 'confirmed' | 'reversed',
+  input: ActContext['input'],
+  key: string | undefined,
+): ActOutcome => {
+  const b = basisOf<{ taskId: string; messageId: string; threadVersion: number }>(item);
+  const text = (input.text ?? input.comment ?? '').trim();
+  const posted = new DiscussionService(ctx.h!).rule(
+    {
+      messageId: b.messageId,
+      ruling,
+      ...(text ? { text } : {}),
+      expectedVersion: b.threadVersion,
+      idempotencyKey: key ?? 'attention-' + randomUUID(),
+    },
+    'operator',
+  );
+  return { result: { messageId: posted.message.id, ruling, version: posted.version } };
+};
 
 const actionHandlers: Record<string, (a: ActContext) => ActOutcome> = {
   'prep-question/answer': ({ ctx, item, input }) => {
@@ -1875,6 +2005,9 @@ const actionHandlers: Record<string, (a: ActContext) => ActOutcome> = {
     );
     return { result: { messageId: posted.message.id, version: posted.version } };
   },
+  'stand-in/confirm': ({ ctx, item, input, key }) => rule(ctx, item, 'confirmed', input, key),
+  'stand-in/reverse': ({ ctx, item, input, key }) =>
+    rule(ctx, item, 'reversed', { text: textOf(input) }, key),
   'queue/resume': resume,
   'wait/resume': resume,
   'input/answer': ({ ctx, item, input, key, root }) => {
@@ -2818,7 +2951,7 @@ export class AttentionService {
       } catch {
         return undefined;
       }
-    else if (v.sourceKey.startsWith('discussion:na:')) {
+    else if (v.sourceKey.startsWith('discussion:na:') || v.sourceKey.startsWith('discussion:si:')) {
       const root = v.sourceKey.slice('discussion:na:'.length);
       for (const owner of owners) {
         const row = h.store.discussionById(owner, root) as { taskId?: string } | undefined;
@@ -2846,7 +2979,12 @@ export class AttentionService {
    * (на что отвечали) берётся из сохранённой записи: карточка уже решена.
    */
   private sameReplay(
-    v: { sourceKey: string; idempotencyKey: string; input?: ActContext['input'] },
+    v: {
+      sourceKey: string;
+      idempotencyKey: string;
+      action?: string;
+      input?: ActContext['input'];
+    },
     replayed: { taskId: string; message: ReplayedMessage },
   ) {
     const h = this.h!;
@@ -2874,6 +3012,22 @@ export class AttentionService {
           ...(input.kind ? { kind: input.kind } : {}),
           ...(message.replyTo ? { replyTo: message.replyTo } : {}),
           ...(message.supersedes ? { supersedes: message.supersedes } : {}),
+        },
+        'operator',
+      );
+      return;
+    }
+    // Решение владельца по решению за него: та же операция с тем же ключом —
+    // прежняя запись или 409 idempotency-conflict.
+    if (v.sourceKey.startsWith('discussion:si:') && message.replyTo) {
+      const text = (input.text ?? input.comment ?? '').trim();
+      discussion.rule(
+        {
+          messageId: message.replyTo,
+          ruling: v.action === 'reverse' ? 'reversed' : 'confirmed',
+          ...(text ? { text } : {}),
+          idempotencyKey: v.idempotencyKey,
+          expectedVersion: 0,
         },
         'operator',
       );

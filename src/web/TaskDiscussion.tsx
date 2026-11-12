@@ -13,7 +13,7 @@ import { cn } from '@/lib/utils.ts';
 // сообщений показывается как текст, без разметки.
 
 type Author = 'operator' | 'lead' | 'runtime';
-type Kind = 'note' | 'change-request' | 'answer' | 'disposition';
+type Kind = 'note' | 'change-request' | 'answer' | 'disposition' | 'stand-in';
 type Outcome = 'accepted' | 'rejected' | 'needs-answer';
 export interface DiscussionMessage {
   id: string;
@@ -33,6 +33,10 @@ export interface DiscussionMessage {
   input?:
     | { requestId: string; revision: number; answerDigest: string }
     | { requestId: string; accepted: false; lifecycle: string };
+  /** Решение ведущего за владельца: какой вопрос закрыт и на что влияет. */
+  standIn?: { question: string; impact: string };
+  /** Решение владельца по решению за него (ответ на него). */
+  ruling?: 'confirmed' | 'reversed';
 }
 interface Page {
   taskId: string;
@@ -60,6 +64,19 @@ const kindNames: Record<Exclude<Kind, 'disposition'>, string> = {
   note: 'заметка',
   'change-request': 'обращение к ведущему',
   answer: 'ответ',
+  'stand-in': 'решение за вас',
+};
+/** Состояние отмены по исходу её обработки ведущим (отклонить отмену он не может). */
+function reversalState(handled: DiscussionMessage | undefined, answered: boolean) {
+  const outcome = handled?.disposition?.outcome;
+  if (outcome === 'accepted') return 'Отменено вами — ведущий агент ссылается на изменение';
+  // После вашего ответа отмена снова ждёт ведущего.
+  if (outcome === 'needs-answer' && !answered) return 'Отменено вами — ведущий агент просит ответа';
+  return 'Отменено вами — ждёт обработки ведущим агентом';
+}
+const rulingNames: Record<'confirmed' | 'reversed', string> = {
+  confirmed: 'вы подтвердили решение',
+  reversed: 'вы отменили решение',
 };
 const outcomeNames: Record<Outcome, string> = {
   accepted: 'принято',
@@ -264,8 +281,11 @@ export function TaskDiscussion({
   const dispositions = new Map<string, DiscussionMessage>();
   // Ответы оператора на запросы ведущего «нужен ответ», по id обработки.
   const answers = new Map<string, DiscussionMessage>();
+  // Решения владельца по решениям за него, по id решения.
+  const rulings = new Map<string, DiscussionMessage>();
   for (const m of messages) {
     if (m.supersedes) correctedBy.set(m.supersedes, m);
+    if (m.ruling && m.replyTo) rulings.set(m.replyTo, m);
     if (m.kind === 'disposition' && m.replyTo) dispositions.set(m.replyTo, m);
     if (m.author === 'operator' && m.replyTo) answers.set(m.replyTo, m);
   }
@@ -411,8 +431,12 @@ export function TaskDiscussion({
             const correction = correctedBy.get(m.id);
             const handled = dispositions.get(m.id);
             const request = m.replyTo ? byId.get(m.replyTo) : undefined;
+            // Решение владельца окончательно и не исправляется.
             const own =
-              m.author === 'operator' && (m.kind === 'note' || m.kind === 'change-request');
+              m.author === 'operator' &&
+              !m.ruling &&
+              (m.kind === 'note' || m.kind === 'change-request');
+            const ruled = rulings.get(m.id);
             // Исход accepted/rejected окончателен: изменение — новое обращение.
             const final =
               m.kind === 'change-request' &&
@@ -427,14 +451,24 @@ export function TaskDiscussion({
                 className="bg-raised min-w-0 rounded-sm px-2.5 py-2 outline-offset-2"
               >
                 <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs">
-                  <strong className="font-medium">{authorNames[m.author]}</strong>
+                  <strong className="font-medium">
+                    {m.kind === 'stand-in' && m.author === 'runtime'
+                      ? 'DevContour за ведущего агента'
+                      : authorNames[m.author]}
+                  </strong>
                   {m.kind === 'disposition' && m.disposition ? (
                     <Badge variant={outcomeTone[m.disposition.outcome]}>
                       обработка: {outcomeNames[m.disposition.outcome]}
                     </Badge>
                   ) : (
-                    <Badge variant={m.kind === 'change-request' ? 'ready' : 'secondary'}>
-                      {kindNames[m.kind as Exclude<Kind, 'disposition'>] ?? m.kind}
+                    <Badge
+                      variant={
+                        m.kind === 'change-request' || m.kind === 'stand-in' ? 'ready' : 'secondary'
+                      }
+                    >
+                      {m.ruling
+                        ? rulingNames[m.ruling]
+                        : (kindNames[m.kind as Exclude<Kind, 'disposition'>] ?? m.kind)}
                       {m.input && 'revision' in m.input ? ` на вопрос, r${m.input.revision}` : ''}
                     </Badge>
                   )}
@@ -460,6 +494,18 @@ export function TaskDiscussion({
                   {correction && <span className="sr-only">Исправлено: </span>}
                   {m.text}
                 </p>
+                {m.standIn && (
+                  <dl className="m-0 mt-1 grid gap-0.5 text-xs [overflow-wrap:anywhere]">
+                    <div>
+                      <dt className="text-muted-foreground inline">Вопрос: </dt>
+                      <dd className="m-0 inline whitespace-pre-wrap">{m.standIn.question}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-muted-foreground inline">Влияние: </dt>
+                      <dd className="m-0 inline whitespace-pre-wrap">{m.standIn.impact}</dd>
+                    </div>
+                  </dl>
+                )}
                 <div className="text-muted-foreground flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-xs empty:hidden">
                   {correction && (
                     <a
@@ -499,6 +545,51 @@ export function TaskDiscussion({
                   )}
                   {m.disposition && (
                     <DispositionRefs refs={m.disposition.refs} onOpenTask={onOpenTask} />
+                  )}
+                  {m.kind === 'stand-in' &&
+                    !correction &&
+                    (ruled ? (
+                      <>
+                        <a
+                          href={'#' + anchor(ruled.id)}
+                          className="text-info underline-offset-2 hover:underline"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            jump(ruled.id);
+                          }}
+                        >
+                          {ruled.ruling !== 'reversed'
+                            ? 'Подтверждено вами'
+                            : reversalState(
+                                dispositions.get(ruled.id),
+                                answers.has(dispositions.get(ruled.id)?.id ?? ''),
+                              )}
+                        </a>
+                        {/* Принятая отмена — со ссылками, чтобы владелец проверил изменение. */}
+                        {ruled.ruling === 'reversed' &&
+                          dispositions.get(ruled.id)?.disposition?.outcome === 'accepted' && (
+                            <DispositionRefs
+                              refs={dispositions.get(ruled.id)!.disposition!.refs}
+                              onOpenTask={onOpenTask}
+                            />
+                          )}
+                      </>
+                    ) : (
+                      <span data-stand-in-pending>
+                        Ждёт вашего подтверждения или отмены в центре внимания
+                      </span>
+                    ))}
+                  {m.ruling && m.replyTo && (
+                    <a
+                      href={'#' + anchor(m.replyTo)}
+                      className="text-info underline-offset-2 hover:underline"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        jump(m.replyTo!);
+                      }}
+                    >
+                      К решению за вас
+                    </a>
                   )}
                   {m.kind === 'change-request' &&
                     !correction &&

@@ -544,9 +544,14 @@ export function AttentionCard({
       {domain.map(
         (a) =>
           a.prompt && (
-            <details key={a.id} className="text-sm">
+            // Решение за владельца подтверждают, прочитав его целиком: текст открыт.
+            <details key={a.id} className="text-sm" open={item.source === 'stand-in'}>
               <summary className="text-muted-foreground cursor-pointer">
-                {a.round !== undefined ? 'Находки ревью полностью' : 'Вопрос полностью'}
+                {a.round !== undefined
+                  ? 'Находки ревью полностью'
+                  : item.source === 'stand-in'
+                    ? 'Решение полностью'
+                    : 'Вопрос полностью'}
               </summary>
               <p className="mt-1 mb-0 whitespace-pre-wrap">{a.prompt}</p>
             </details>

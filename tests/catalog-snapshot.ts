@@ -142,5 +142,13 @@
 // task_story; прочие операции байтово прежние.
 // Намеренное изменение: описание task_scenario_proof называет отказ до
 // прогона для сценария вне фичи историй задачи; прочие операции байтово прежние.
-export const CATALOG_DIGEST = '530adfdeb7f1d2424ce8704ab10dc3c70f2ac1fc737151b803fa08a9b6f48cbe';
+// Намеренное изменение: discussion_post принимает kind stand-in с полем
+// standIn {question, impact} (решение ведущего за владельца, которое владелец
+// подтверждает или отменяет вне агентского API); описания discussion_post и
+// attention_list называют это; прочие операции байтово прежние.
+// Намеренное изменение: описание discussion_resolve называет отказ
+// owner-ruling для отмены решения за владельца, описание discussion_post —
+// запись решения за владельца самим инструментом; прочие операции байтово
+// прежние.
+export const CATALOG_DIGEST = 'a3656166b292e13a681b477d66ba0ef8c2be372bd0d13492c6217511f9838751';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';
