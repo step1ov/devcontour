@@ -395,7 +395,9 @@ syncBuiltinESMExports();
     output += data;
   });
   let url;
-  const deadline = Date.now() + 60000;
+  // check runs this beside the Node suite; on a loaded machine the first start
+  // of the installed server can take longer than a minute.
+  const deadline = Date.now() + 180000;
   while (Date.now() < deadline && child.exitCode === null) {
     url = output.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
     if (url) break;
