@@ -266,29 +266,54 @@ export class DiscussionService {
   /**
    * Решение за владельца, которое записывает сам инструмент, когда ведущий
    * решил за владельца через вопрос исполнителя (ответ с изменением
-   * требований, принятое допущение follow-up). Автор — ведущий: решение его.
-   * Ключ повтора выводится из запроса, поэтому повтор не дублирует запись;
-   * задачи нет — записи нет.
+   * требований, принятое допущение follow-up). Автор — `runtime`
+   * (инструмент): агентский API под ним не пишет, поэтому ключи не заняты
+   * ведущим, а запись он не исправляет. Ключ выводится из запроса — повтор
+   * не дублирует запись; задачи нет — записи нет. Вызывается внутри
+   * транзакции ответа или закрытия вопроса.
    */
   recordStandIn(
     taskId: string,
     value: { text: string; question: string; impact: string },
     idempotencyKey: string,
+    /** Ключи прежних записей того же запроса, новые первыми: нерешённую последнюю заменяем. */
+    earlierKeys: string[] = [],
   ) {
     const state = this.h.store.read();
     const task = state.tasks.find((t) => t.id === taskId);
     if (!task) return undefined;
     const owner = taskOwner(task);
     const field = (t: string) => clipText(t.trim() || '—', STAND_IN_FIELD_BYTES).excerpt;
-    return this.h.store.atomic(() =>
-      this.append(taskId, 'lead', {
+    return this.h.store.atomic(() => {
+      const same = this.h.store.discussionByKey(owner, taskId, 'runtime', idempotencyKey);
+      if (same)
+        return {
+          message: this.parse(same),
+          version: this.h.store.discussionVersion(owner, taskId),
+        };
+      // Прежняя запись того же запроса, ещё не решённая владельцем и не
+      // заменённая, — заменяется: одна карточка на вопрос.
+      let supersedes: string | undefined;
+      for (const key of earlierKeys) {
+        const row = this.h.store.discussionByKey(owner, taskId, 'runtime', key) as
+          { id?: string } | undefined;
+        if (!row?.id) continue;
+        if (
+          !this.h.store.discussionSupersededBy(owner, row.id) &&
+          !this.h.store.discussionRuling(owner, row.id)
+        )
+          supersedes = row.id;
+        break;
+      }
+      return this.append(taskId, 'runtime', {
         kind: 'stand-in',
         text: clipText(value.text.trim() || '—', DISCUSSION_TEXT_BYTES).excerpt,
         standIn: { question: field(value.question), impact: field(value.impact) },
         idempotencyKey,
         expectedVersion: this.h.store.discussionVersion(owner, taskId),
-      }),
-    );
+        ...(supersedes ? { supersedes } : {}),
+      });
+    });
   }
 
   /** Решение за владельца ещё ждёт его: последняя версия и без решения. */

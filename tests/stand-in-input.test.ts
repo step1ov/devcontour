@@ -1,20 +1,36 @@
 // Решения за владельца, которые записывает сам инструмент: ведущий ответил
 // на вопрос исполнителя изменением требований или принял допущение
-// follow-up. Модели не вызываются: demo-исполнитель и управляемый reviewer.
+// follow-up. Запись — в транзакции ответа, от автора `runtime`: ведущий не
+// занимает её ключ и не исправляет её. Модели не вызываются:
+// demo-исполнитель и управляемый reviewer.
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { controlled, inputDemos, inputFixture, untilQuestion } from './input-fixture.ts';
 import { DiscussionService } from '../src/application/discussion.ts';
+import { DomainError } from '../src/core/model.ts';
 
 after(() => inputDemos.close());
 
-test('F21: ответ ведущего изменением требований записывает решение за владельца; ответ оператора — нет', async () => {
+test('F21: ответ ведущего изменением требований записывает одно решение за владельца на вопрос', async () => {
   const f = await inputFixture(controlled());
   try {
     const { taskId, boardId } = f.askingTask();
     await untilQuestion(f, boardId);
     const [r] = f.service.list({ taskId }).requests;
     const d = new DiscussionService(f.h);
+    // Ведущий занимает будущие ключи записи заранее — запись это не останавливает:
+    // ключи автора runtime ему недоступны.
+    for (const key of [`si-${r.requestId}-r1`, `si-${r.requestId}-r2`])
+      d.post(
+        {
+          taskId,
+          kind: 'note',
+          text: 'Заметка под ключом инструмента',
+          idempotencyKey: key,
+          expectedVersion: d.read({ taskId }).version,
+        },
+        'lead',
+      );
     // Уточнение ведущего решением за владельца не считается.
     const clarified = f.service.answer(
       { requestId: r.requestId, text: 'Use JSON as now.', expectedVersion: r.version },
@@ -33,7 +49,7 @@ test('F21: ответ ведущего изменением требований
     const [stand] = d.standIns(10);
     assert.ok(stand, 'решение за владельца записано инструментом');
     assert.equal(stand.message.taskId, taskId);
-    assert.equal(stand.message.author, 'lead');
+    assert.equal(stand.message.author, 'runtime');
     assert.match(
       stand.message.text,
       /изменением требований: Change the acceptance: produce YAML\./,
@@ -43,8 +59,25 @@ test('F21: ответ ведущего изменением требований
       f.service.show({ requestId: r.requestId }).question.question,
     );
     assert.match(stand.message.standIn?.impact ?? '', /Постановка и результат задачи/);
+    // Ведущий не переписывает запись инструмента.
+    assert.throws(
+      () =>
+        d.post(
+          {
+            taskId,
+            kind: 'stand-in',
+            text: 'Мягче',
+            standIn: { question: 'Вопрос', impact: 'Влияние' },
+            supersedes: stand.message.id,
+            idempotencyKey: 'lead-rewrite-0001',
+            expectedVersion: d.read({ taskId }).version,
+          },
+          'lead',
+        ),
+      (e: unknown) => e instanceof DomainError && e.status === 403,
+    );
     // Тот же ответ повторно — без второй записи.
-    f.service.answer(
+    const again = f.service.answer(
       {
         requestId: r.requestId,
         text: 'Change the acceptance: produce YAML.',
@@ -53,59 +86,85 @@ test('F21: ответ ведущего изменением требований
       },
       'lead',
     );
-    assert.equal(d.standIns(10).length, 1);
+    assert.equal(d.standIns(10, true).length, 1);
+    // Другая версия изменения требований заменяет нерешённую запись: одна карточка.
+    f.service.answer(
+      {
+        requestId: r.requestId,
+        text: 'Change the acceptance: produce TOML.',
+        kind: 'requirement-change',
+        expectedVersion: again.version,
+      },
+      'lead',
+    );
+    const pending = d.standIns(10);
+    assert.equal(pending.length, 1);
+    assert.match(pending[0].message.text, /produce TOML/);
+    assert.equal(pending[0].message.supersedes, stand.message.id);
     // Изменение требований оператором — его собственное решение.
     const current = f.service.show({ requestId: r.requestId });
     f.service.answer(
       {
         requestId: r.requestId,
-        text: 'Produce TOML instead.',
+        text: 'Produce CSV instead.',
         kind: 'requirement-change',
         expectedVersion: current.version,
       },
       'operator',
     );
     assert.equal(d.standIns(10).length, 1);
+    assert.match(d.standIns(10)[0].message.text, /produce TOML/);
   } finally {
     await f.cleanup();
   }
 });
 
-test('F21: ведущий принимает допущение follow-up — инструмент записывает решение за владельца', async () => {
+test('F21: ведущий принимает допущение follow-up — решение за владельца в той же транзакции', async () => {
   const f = await inputFixture(controlled({ assume: true }), {
     edit: (raw) => (raw.inputPolicy = { threshold: 11 }),
   });
   try {
     const board = f.h.createBoard('Autonomous board');
     const taskId = f.plainTask(board.id, 'Autonomous task');
+    const otherId = f.plainTask(board.id, 'Second autonomous task');
     f.h.approve(board.id);
     f.h.pause(false);
     await f.scheduler.drain();
     const followUps = f.service
       .list()
       .requests.filter((r) => r.kind === 'follow-up' && r.state === 'awaiting-answer');
-    const own = followUps.find((r) => r.taskId === taskId)!;
-    assert.ok(own);
+    const own = followUps.find((r) => r.taskId === taskId);
+    const other = followUps.find((r) => r.taskId === otherId);
+    assert.ok(own && other, JSON.stringify(followUps.map((r) => r.taskId)));
     const d = new DiscussionService(f.h);
+    // Ключ записи занят ведущим заранее — закрытие всё равно записывает решение.
+    d.post(
+      {
+        taskId,
+        kind: 'note',
+        text: 'Заметка под ключом инструмента',
+        idempotencyKey: `si-${own.requestId}-accepted`,
+        expectedVersion: d.read({ taskId }).version,
+      },
+      'lead',
+    );
     f.service.cancel(
       { requestId: own.requestId, expectedVersion: own.version, reason: 'assumption accepted' },
       'lead',
     );
     const recorded = d.standIns(50).filter((s) => s.message.taskId === taskId);
     assert.equal(recorded.length, 1);
+    assert.equal(recorded[0].message.author, 'runtime');
     assert.match(
       recorded[0].message.text,
       /Ведущий принял допущение исполнителя: .*assumption accepted/,
     );
     // Закрытие follow-up оператором — его решение, записи нет.
-    const other = followUps.find((r) => r.taskId !== taskId);
-    if (other) {
-      f.service.cancel(
-        { requestId: other.requestId, expectedVersion: other.version, reason: 'ok' },
-        'operator',
-      );
-      assert.equal(d.standIns(50).filter((s) => s.message.taskId === other.taskId).length, 0);
-    }
+    f.service.cancel(
+      { requestId: other.requestId, expectedVersion: other.version, reason: 'operator accepted' },
+      'operator',
+    );
+    assert.equal(d.standIns(50).filter((s) => s.message.taskId === otherId).length, 0);
   } finally {
     await f.cleanup();
   }

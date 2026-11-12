@@ -415,8 +415,6 @@ async function review(
           'A task whose role has requiresContract=false needs no separate contract: its tests on the acceptance criterion, written within its writePaths, are its executable contract. Do not block such a task for lacking a contract, and do not require a library context pack the configuration does not declare.',
         ]
       : []),
-    // Решения за владельца не прячутся в контракте или плане (F21).
-    "List each product choice in the proposal (scope, user-visible behavior, a default, a data model limit) that traces neither to the owner's specification or approvals nor to a recorded stand-in decision (task discussion kind stand-in), and report each as a finding: the lead records it as a stand-in or asks the owner.",
     'Return approved=false and concrete blocking findings when revision is needed. Routine technical choices within the specification do not need human approval.',
     // Итог и находки читает оператор: на его языке (`hintLocale`).
     ...reviewLanguageInstructions(hintLocaleOf(h.config)),

@@ -67,10 +67,11 @@ const kindNames: Record<Exclude<Kind, 'disposition'>, string> = {
   'stand-in': 'решение за вас',
 };
 /** Состояние отмены по исходу её обработки ведущим (отклонить отмену он не может). */
-function reversalState(handled: DiscussionMessage | undefined) {
+function reversalState(handled: DiscussionMessage | undefined, answered: boolean) {
   const outcome = handled?.disposition?.outcome;
-  if (outcome === 'accepted') return 'Отменено вами — ведущий агент внёс изменение';
-  if (outcome === 'needs-answer') return 'Отменено вами — ведущий агент просит ответа';
+  if (outcome === 'accepted') return 'Отменено вами — ведущий агент ссылается на изменение';
+  // После вашего ответа отмена снова ждёт ведущего.
+  if (outcome === 'needs-answer' && !answered) return 'Отменено вами — ведущий агент просит ответа';
   return 'Отменено вами — ждёт обработки ведущим агентом';
 }
 const rulingNames: Record<'confirmed' | 'reversed', string> = {
@@ -450,7 +451,11 @@ export function TaskDiscussion({
                 className="bg-raised min-w-0 rounded-sm px-2.5 py-2 outline-offset-2"
               >
                 <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs">
-                  <strong className="font-medium">{authorNames[m.author]}</strong>
+                  <strong className="font-medium">
+                    {m.kind === 'stand-in' && m.author === 'runtime'
+                      ? 'DevContour за ведущего агента'
+                      : authorNames[m.author]}
+                  </strong>
                   {m.kind === 'disposition' && m.disposition ? (
                     <Badge variant={outcomeTone[m.disposition.outcome]}>
                       обработка: {outcomeNames[m.disposition.outcome]}
@@ -544,18 +549,31 @@ export function TaskDiscussion({
                   {m.kind === 'stand-in' &&
                     !correction &&
                     (ruled ? (
-                      <a
-                        href={'#' + anchor(ruled.id)}
-                        className="text-info underline-offset-2 hover:underline"
-                        onClick={(e) => {
-                          e.preventDefault();
-                          jump(ruled.id);
-                        }}
-                      >
-                        {ruled.ruling !== 'reversed'
-                          ? 'Подтверждено вами'
-                          : reversalState(dispositions.get(ruled.id))}
-                      </a>
+                      <>
+                        <a
+                          href={'#' + anchor(ruled.id)}
+                          className="text-info underline-offset-2 hover:underline"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            jump(ruled.id);
+                          }}
+                        >
+                          {ruled.ruling !== 'reversed'
+                            ? 'Подтверждено вами'
+                            : reversalState(
+                                dispositions.get(ruled.id),
+                                answers.has(dispositions.get(ruled.id)?.id ?? ''),
+                              )}
+                        </a>
+                        {/* Принятая отмена — со ссылками, чтобы владелец проверил изменение. */}
+                        {ruled.ruling === 'reversed' &&
+                          dispositions.get(ruled.id)?.disposition?.outcome === 'accepted' && (
+                            <DispositionRefs
+                              refs={dispositions.get(ruled.id)!.disposition!.refs}
+                              onOpenTask={onOpenTask}
+                            />
+                          )}
+                      </>
                     ) : (
                       <span data-stand-in-pending>
                         Ждёт вашего подтверждения или отмены в центре внимания
