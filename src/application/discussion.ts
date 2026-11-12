@@ -12,6 +12,7 @@ import {
   clipText,
   discussionInputs,
   discussionMessage,
+  standInRulingInput,
   textTooLong,
   type DiscussionMessage,
 } from '../core/discussion-model.ts';
@@ -177,6 +178,21 @@ export class DiscussionService {
         'Поле input — только у ответа на вопрос исполнителя (kind answer)',
         400,
       );
+    // Решение за владельца записывает ведущий: слово самого владельца —
+    // заметка или обращение, а не допущение от его имени.
+    if (v.kind === 'stand-in' && author !== 'lead')
+      throw new DomainError(
+        'Решение за владельца записывает ведущий агент; ваше решение — заметка или обращение',
+        403,
+        { code: 'lead-only' },
+      );
+    if (v.kind === 'stand-in' && !v.standIn)
+      throw new DomainError(
+        'Решению за владельца нужны standIn.question и standIn.impact: какой вопрос закрыт и на что влияет',
+        400,
+      );
+    if (v.kind !== 'stand-in' && v.standIn)
+      throw new DomainError('Поле standIn — только у решения за владельца (kind stand-in)', 400);
     return this.append(v.taskId, author, {
       kind: v.kind,
       text: v.text,
@@ -184,7 +200,77 @@ export class DiscussionService {
       expectedVersion: v.expectedVersion,
       ...(v.replyTo ? { replyTo: v.replyTo } : {}),
       ...(v.supersedes ? { supersedes: v.supersedes } : {}),
+      ...(v.standIn ? { standIn: v.standIn } : {}),
     });
+  }
+
+  /**
+   * Решение владельца по решению за него: подтвердить или отменить последнюю
+   * версию `stand-in`. Только оператор (панель, CLI): агентский API этой
+   * операции не имеет, а вход с другим автором отклоняется. Отмена —
+   * обращение к ведущему (очередь `discussion_inbox`, обработка
+   * `discussion_resolve`), подтверждение — заметка. Решение окончательно.
+   */
+  rule(raw: unknown, author: Exclude<Author, 'runtime'>) {
+    tooLong(raw);
+    if (author !== 'operator')
+      throw new DomainError(
+        'Подтвердить или отменить решение за владельца может только владелец (оператор в панели или CLI)',
+        403,
+        { code: 'owner-only' },
+      );
+    const v = standInRulingInput.parse(raw);
+    const target = this.find(v.messageId);
+    if (!target || target.kind !== 'stand-in')
+      throw new DomainError('Решение за владельца не найдено', 404);
+    const comment = v.text?.trim();
+    if (v.ruling === 'reversed' && !comment)
+      throw new DomainError('Отмена решения называет, что сделать взамен (text)', 400);
+    const question = target.standIn?.question ?? '';
+    return this.append(target.taskId, 'operator', {
+      kind: v.ruling === 'reversed' ? 'change-request' : 'note',
+      text:
+        v.ruling === 'reversed'
+          ? `Владелец отменил решение за него. Вопрос: ${question}\nРешение было: ${target.text}\nВзамен: ${comment}`
+          : comment || 'Владелец подтвердил решение.',
+      replyTo: target.id,
+      ruling: v.ruling,
+      idempotencyKey: v.idempotencyKey,
+      expectedVersion: v.expectedVersion,
+      check: (owner) => this.assertRulable(owner, target.id),
+    });
+  }
+
+  /** Решение за владельца ещё ждёт его: последняя версия и без решения. */
+  private assertRulable(owner: string | undefined, id: string) {
+    if (this.h.store.discussionSupersededBy(owner, id))
+      throw new DomainError('Решение исправлено: решите его новую версию', 409, {
+        code: 'stand-in-superseded',
+      });
+    if (this.h.store.discussionRuling(owner, id))
+      throw new DomainError('Владелец уже решил по этому решению', 409, {
+        code: 'already-ruled',
+      });
+  }
+
+  /**
+   * Решения за владельца по всем схемам хранения, старые первыми: только
+   * последние версии; без `all` — только неподтверждённые (без решения
+   * владельца). У решённых — его решение.
+   */
+  standIns(limit: number, all = false) {
+    return this.schemaOwners().flatMap((owner) =>
+      this.h.store.discussionStandIns(owner, limit, all).map((row) => {
+        const message = this.parse(row.message);
+        return {
+          owner,
+          message,
+          ...(row.ruling ? { ruling: this.parse(row.ruling) } : {}),
+          /** Версия треда — `expectedVersion` решения владельца. */
+          version: this.h.store.discussionVersion(owner, message.taskId),
+        };
+      }),
+    );
   }
 
   /**
@@ -559,6 +645,8 @@ export class DiscussionService {
       replyTo?: string;
       supersedes?: string;
       disposition?: DiscussionMessage['disposition'];
+      standIn?: DiscussionMessage['standIn'];
+      ruling?: DiscussionMessage['ruling'];
       check?: (owner: string | undefined) => void;
     },
   ) {
@@ -570,6 +658,10 @@ export class DiscussionService {
       replyTo: input.replyTo ?? null,
       supersedes: input.supersedes ?? null,
       disposition: input.disposition ?? null,
+      // Поля решения за владельца — только когда есть: отпечаток прежних
+      // сообщений под ключом повтора не меняется.
+      ...(input.standIn ? { standIn: input.standIn } : {}),
+      ...(input.ruling ? { ruling: input.ruling } : {}),
     };
     const payloadDigest = digest(payload);
     return this.h.store.atomic(() => {
@@ -608,6 +700,25 @@ export class DiscussionService {
           throw new DomainError('Исправить можно только своё сообщение', 403);
         if (target.kind === 'disposition')
           throw new DomainError('Обработка обращения не исправляется: запишите новую', 400);
+        // Решение владельца окончательно; решённое им решение за него — тоже:
+        // дальнейшее изменение — новое обращение или новое решение за владельца.
+        if (target.ruling)
+          throw new DomainError(
+            'Решение владельца не исправляется: дальнейшее изменение — новое обращение',
+            409,
+            { code: 'ruling-final' },
+          );
+        if (target.kind === 'stand-in' && this.h.store.discussionRuling(owner, target.id))
+          throw new DomainError(
+            'Владелец уже решил по этому решению: запишите новое решение за владельца',
+            409,
+            { code: 'already-ruled' },
+          );
+        if ((target.kind === 'stand-in') !== (input.kind === 'stand-in'))
+          throw new DomainError(
+            'Решение за владельца исправляется только новой версией решения за владельца',
+            400,
+          );
         // История линейна: исправляется только последняя версия сообщения.
         if (this.h.store.discussionSupersededBy(owner, input.supersedes))
           throw new DomainError('Сообщение уже исправлено: исправьте его новую версию', 409, {
@@ -660,6 +771,8 @@ export class DiscussionService {
         idempotencyKey: input.idempotencyKey,
         payloadDigest,
         ...(input.disposition ? { disposition: input.disposition } : {}),
+        ...(input.standIn ? { standIn: input.standIn } : {}),
+        ...(input.ruling ? { ruling: input.ruling } : {}),
       };
       const seq = this.h.store.discussionInsert(
         owner,
@@ -681,6 +794,7 @@ export class DiscussionService {
         kind: input.kind,
         author,
         ...(replyTo ? { replyTo: replyTo } : {}),
+        ...(input.ruling ? { ruling: input.ruling } : {}),
       });
       const message = discussionMessage.parse({ ...record, seq });
       return { message, version: seq };

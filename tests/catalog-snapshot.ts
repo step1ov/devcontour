@@ -136,5 +136,9 @@
 // otherOwnersHint без repositoryId и ожидание verification задания ChangeSet;
 // описание session_handoff — boardId однозначным префиксом и
 // host.verifications; прочие операции байтово прежние.
-export const CATALOG_DIGEST = '5cf131144bb95835616e9810b5c7ba24e943492886209b6e8512eaa2c8b1504c';
+// Намеренное изменение: discussion_post принимает kind stand-in с полем
+// standIn {question, impact} (решение ведущего за владельца, которое владелец
+// подтверждает или отменяет вне агентского API); описания discussion_post и
+// attention_list называют это; прочие операции байтово прежние.
+export const CATALOG_DIGEST = 'c85fa7f3ad80f1affe0a5c6d995b49a039338bf3e1c09e466fdba7f92b41313f';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

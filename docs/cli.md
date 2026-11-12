@@ -158,6 +158,18 @@ Plan содержит `title`, `description`, `tasks` (1–30), у каждой 
 | `input-cancel`    | `--request IR-... --version N --reason ...` [`--by operator\|host`]                                                                                     | Отменяет вопрос; закрывает follow-up (допущение принято)                                                              |
 | `input-supersede` | `--request IR-... --version N --reason ... --successor T2` [`--by operator\|host`]                                                                      | Заменяет вопрос после новой постановки задачи (та же задача и перенос ответа; для follow-up — и новая задача доски)   |
 
+## Решения за владельца
+
+Решения, которые ведущий принял за владельца без его ответа (`discussion_post` с `kind: stand-in`, см. [решения за владельца](agent-interface.md#решения-за-владельца)). Команды — действие владельца: флага `--by` нет, агентский API этих операций не имеет.
+
+```bash
+devcontour decisions [--all] --workspace /absolute/workspace
+devcontour decision-confirm --message DM-... [--text "комментарий"] --workspace /absolute/workspace
+devcontour decision-reverse --message DM-... --text "что сделать взамен" --workspace /absolute/workspace
+```
+
+`decisions` без `--all` печатает ждущие подтверждения (`state: unconfirmed`): `messageId`, задачу, вопрос, решение, влияние и версию треда; с `--all` — и решённые (`confirmed`, `reversed`). Отмена становится обращением к ведущему агенту: оно ждёт его обработки в `discussion_inbox`. Версия треда по умолчанию — текущая (`--version N` — явная), ключ повтора — новый (`--key K` — свой).
+
 ## Требования, продолжение этапов и измерения
 
 | Команда                 | Параметры                                                                                                  | Результат                                                                                                                                                                                                |

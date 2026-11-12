@@ -10,6 +10,8 @@ export const DISCUSSION_TEXT_BYTES = 16 * 1024;
 /** Записей на странице и байтов страницы для панели. */
 export const DISCUSSION_PAGE_ITEMS = 50;
 export const DISCUSSION_PAGE_BYTES = 256 * 1024;
+/** Предел вопроса и влияния решения за владельца в байтах UTF-8. */
+export const STAND_IN_FIELD_BYTES = 2 * 1024;
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,80}$/);
 const messageId = z.string().regex(/^DM-[0-9a-f-]{36}$/);
@@ -31,6 +33,12 @@ const text = z
     (t) => Buffer.byteLength(t, 'utf8') <= DISCUSSION_TEXT_BYTES,
     `Сообщение больше ${DISCUSSION_TEXT_BYTES} байт UTF-8`,
   );
+/** Вопрос и влияние решения за владельца: короткий текст, без управляющих символов. */
+const standInText = z
+  .string()
+  .refine((t) => t.trim().length > 0, 'Текст пустой')
+  .refine((t) => !CONTROL.test(t), 'Текст содержит управляющие символы')
+  .refine((t) => Buffer.byteLength(t, 'utf8') <= STAND_IN_FIELD_BYTES, 'Текст длиннее 2 KiB UTF-8');
 /** Сохранённый текст читается без входных проверок: запись не должна блокировать чтение. */
 const storedText = z.string().min(1);
 
@@ -66,7 +74,7 @@ export const discussionMessage = z.strictObject({
   /** Тред v1 — сама задача. */
   threadId: id,
   author: z.enum(['operator', 'lead', 'runtime']),
-  kind: z.enum(['note', 'change-request', 'answer', 'disposition']),
+  kind: z.enum(['note', 'change-request', 'answer', 'disposition', 'stand-in']),
   text: storedText,
   createdAt: z.iso.datetime(),
   replyTo: messageId.optional(),
@@ -106,6 +114,18 @@ export const discussionMessage = z.strictObject({
       }),
     ])
     .optional(),
+  /**
+   * Только у `kind: stand-in` — решение, которое ведущий принял за владельца
+   * без его ответа: какой вопрос владельца закрыт допущением и на что оно
+   * влияет. `text` — само решение и основание.
+   */
+  standIn: z.strictObject({ question: storedText, impact: storedText }).optional(),
+  /**
+   * Решение владельца по решению за него (ответ на последнюю версию
+   * `stand-in`, только оператор): `confirmed` — заметка, `reversed` —
+   * обращение к ведущему, которое он обрабатывает как любое обращение.
+   */
+  ruling: z.enum(['confirmed', 'reversed']).optional(),
 });
 export type DiscussionMessage = z.infer<typeof discussionMessage>;
 
@@ -132,8 +152,14 @@ export const discussionInputs = {
   }),
   discussion_post: z.strictObject({
     taskId: id,
-    kind: z.enum(['note', 'change-request', 'answer']),
+    kind: z.enum(['note', 'change-request', 'answer', 'stand-in']),
     text,
+    /**
+     * Только у `kind: stand-in` (пишет ведущий): вопрос владельца, который
+     * закрыт допущением, и влияние решения. Владелец подтверждает или
+     * отменяет его в панели или CLI.
+     */
+    standIn: z.strictObject({ question: standInText, impact: standInText }).optional(),
     /**
      * Только у `kind: answer` — ответ на вопрос исполнителя: запрос, версия
      * запроса, которую видел автор (она, а не версия треда, — CAS ответа),
@@ -170,3 +196,16 @@ export const discussionInputs = {
   }),
 };
 export type DiscussionOperation = keyof typeof discussionInputs;
+
+/**
+ * Решение владельца по решению за него. Вне `discussionInputs`: агентский
+ * API этой операции не имеет — подтверждает и отменяет только оператор
+ * (панель, CLI).
+ */
+export const standInRulingInput = z.strictObject({
+  messageId,
+  ruling: z.enum(['confirmed', 'reversed']),
+  /** У отмены обязателен: что взамен; у подтверждения — необязательная заметка. */
+  text: text.optional(),
+  ...write,
+});

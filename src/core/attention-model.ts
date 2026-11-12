@@ -32,6 +32,7 @@ export const attentionSources = [
   'plan',
   'discussion-request',
   'discussion-needs-answer',
+  'stand-in',
   'board',
   'work',
   'budget',
