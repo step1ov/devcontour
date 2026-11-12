@@ -185,7 +185,7 @@ export const agentRequest = z
   .strict();
 export const descriptions: Record<AgentOperation, string> = {
   preparation_status:
-    'Read product and architecture stages, exact revisions, operator feedback and linked development. Available before project setup.',
+    'Read product and architecture stages, exact revisions, operator feedback and linked development. Available before project setup. current.product is the latest revision and may be an unapproved draft; development is bound to the last approved one (binding.productNumber). While a newer revision is pending, current.boundProduct is that approved revision and binding.pendingProduct says what its approval would change. Plan tasks from the approved revision: docs/changes/<key>/product.md shows it, product.draft.md the pending one.',
   preparation_create:
     'Create a product change. Product and architecture require explicit operator decisions in the web panel before development.',
   preparation_activate:
@@ -197,7 +197,7 @@ export const descriptions: Record<AgentOperation, string> = {
   preparation_expand:
     'Move a quick change to the full route when it needs several components or dependent tasks. Keeps the instruction, criterion and all revisions; explain why.',
   preparation_product:
-    'Save a new immutable product draft with optimistic concurrency: personas with goals and pains, releases as the scope boundary, and features whose scenarios name a persona and whose acceptance criteria name a release. Resolve ambiguity the way the relevant persona would. Never approves it; a revision invalidates the prior architecture for new work.',
+    'Save a new immutable product draft with optimistic concurrency: personas with goals and pains, releases as the scope boundary, and features whose scenarios name a persona and whose acceptance criteria name a release. Resolve ambiguity the way the relevant persona would. Never approves it. Drafts and revisions in review do not touch running work: development stays bound to the last approved revision until the operator approves a newer one. Plan from the approved revision until then. A newer approved revision that only moves acceptance criteria between the existing, unchanged releases keeps the approved architecture, references, concept and design and the bindings of tasks in flight; any other change, release edits included, requires the operator to approve architecture and design again, and until then tasks of the change are not issued.',
   preparation_architecture:
     'Save architecture, justified stack and structured C1/C2 only after operator product approval. Does not approve development.',
   preparation_references:
@@ -207,7 +207,7 @@ export const descriptions: Record<AgentOperation, string> = {
   preparation_design:
     'Save the third design step after the operator approved the concept: the palette, semantic tokens, guidelines, what is shared and what differs per channel, and the handoff package. Screen layouts stay per-feature UI contracts inside development.',
   preparation_submit:
-    'Validate the current draft and send it to the operator for approval. Unresolved questions or incomplete C1/C2 block submission.',
+    'Validate the current draft and send it to the operator for approval. Unresolved questions or incomplete C1/C2 block submission, as does a draft built on an earlier upstream revision (a product revision that only moves criteria between existing releases counts as the same upstream). Submission does not change what development is bound to; only the operator approval does.',
   preparation_progress:
     'Append a short note about the work in progress so the panel shows the session is active before any revision exists. Context only; never approves or reports evidence.',
   preparation_question:

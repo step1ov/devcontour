@@ -384,6 +384,76 @@ function Questions({
     </Foldable>
   );
 }
+type PendingProduct = NonNullable<NonNullable<View['current']>['binding']['pendingProduct']>;
+const pendingStates: Record<string, (n: number) => string> = {
+  'in-review': (n) => `Версия ${n} ждёт вашего решения и до него не действует.`,
+  draft: (n) => `Версия ${n} — черновик агента, на согласование ещё не отправлена.`,
+  'changes-requested': (n) => `Версия ${n} возвращена на доработку и не действует.`,
+};
+// Что значит новая версия постановки, пока по ней нет решения: какая версия
+// действует и что сделает утверждение.
+function pendingStatusText(pending: PendingProduct, bound: number, ready: boolean) {
+  return [
+    pendingStates[pending.status](pending.number),
+    ready
+      ? `Разработка идёт по утверждённой версии ${bound}.`
+      : `Действующая утверждённая версия — ${bound}; разработка изменения ещё ждёт остальных согласований.`,
+    pending.keepsChain === true
+      ? `Её утверждение сохранит архитектуру и дизайн: ${chainReason(pending)}.`
+      : pending.keepsChain === false
+        ? 'Её утверждение потребует заново утвердить архитектуру и дизайн.'
+        : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+}
+// Почему цепочка сохраняется. Вердикт сравнивает с версией, по которой
+// утверждена архитектура; при возврате к прежнему объёму или той же версии
+// изменений против действующей нет — тогда называем ту версию.
+function chainReason(pending: PendingProduct) {
+  return pending.sameBase && pending.changes?.length
+    ? 'перенесены только критерии между существующими релизами'
+    : `по объёму совпадает с версией ${pending.chainSource}, по которой утверждены архитектура и дизайн`;
+}
+const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+function decisionText(pending: PendingProduct, bound: number, ready: boolean) {
+  return [
+    pending.keepsChain === true
+      ? `${capitalize(chainReason(pending))}: архитектура и дизайн остаются в силе.` +
+        (ready ? ' Разработка продолжится по этой версии.' : '')
+      : pending.keepsChain === false
+        ? 'После утверждения архитектуру и дизайн нужно будет утвердить заново; до этого задачи изменения не выдаются.'
+        : 'После утверждения откроется следующий этап. Разработка останется заблокированной.',
+    ready ? `До решения разработка идёт по версии ${bound}.` : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+}
+// Изменения релизов против действующей версии и переносы в уже выполненную работу.
+function ReleaseChanges({ pending }: { pending: PendingProduct }) {
+  const changes = pending.changes ?? [];
+  const warnings = pending.warnings;
+  if (!changes.length && !warnings.length) return null;
+  return (
+    <div className="mt-4 grid max-w-[78ch] gap-2">
+      {changes.length > 0 && (
+        <>
+          <strong>Изменения релизов</strong>
+          <ul className="list-disc pl-5">
+            {changes.map((x) => (
+              <li key={x}>{x}</li>
+            ))}
+          </ul>
+        </>
+      )}
+      {warnings.map((x) => (
+        <Alert key={x} variant="warning">
+          <AlertDescription>{x}</AlertDescription>
+        </Alert>
+      ))}
+    </div>
+  );
+}
 // A stage with nothing in it is either untouched or waiting on the operator.
 // Saying which, and pointing at the step that holds it, is the difference
 // between an empty tab and a tab that explains itself.
@@ -719,10 +789,20 @@ export function PreparationPanel() {
     d = c?.design;
   const revisions = { product: p, architecture: a, references: refs, concept: con, design: d };
   const current = tab === 'development' ? undefined : revisions[tab];
-  const architectureCurrent = p?.status === 'approved' && a?.productDigest === p.digest;
-  const referencesCurrent = a?.status === 'approved' && refs?.architectureDigest === a.digest;
-  const conceptCurrent = refs?.status === 'approved' && con?.referencesDigest === refs.digest;
-  const designCurrent = con?.status === 'approved' && d?.conceptDigest === con.digest;
+  // Актуальность редакций считает сервер тем же правилом, что и согласование:
+  // черновик новой постановки не делает устаревшими архитектуру и дизайн,
+  // а перенос критериев между релизами их сохраняет.
+  const fresh = c?.binding?.fresh;
+  const productApproved = c?.binding?.productNumber !== undefined;
+  // Сохранит ли утверждение новой версии постановки утверждённую цепочку;
+  // без утверждённой архитектуры сервер поле не передаёт.
+  // Новая неутверждённая версия поверх утверждённой: что сделает её утверждение.
+  const pendingProduct = productApproved ? c?.binding?.pendingProduct : undefined;
+  const boundNumber = c?.binding?.productNumber;
+  const architectureCurrent = Boolean(fresh?.architecture);
+  const referencesCurrent = Boolean(fresh?.references);
+  const conceptCurrent = Boolean(fresh?.concept);
+  const designCurrent = Boolean(fresh?.design);
   // How far the design stage has got: used by the stepper and the sub-nav.
   // Референсы с applicable: false — утверждённое решение «дизайн не нужен»:
   // концепт и дизайн-система не требуются, шаги 2–3 не ждут.
@@ -983,7 +1063,7 @@ export function PreparationPanel() {
                               ? names[p.status]
                               : 'Нужна постановка'
                             : step === 'architecture'
-                              ? p?.status !== 'approved'
+                              ? !productApproved
                                 ? 'После согласования продукта'
                                 : architectureCurrent && a
                                   ? names[a.status]
@@ -1171,6 +1251,13 @@ export function PreparationPanel() {
                           </AlertDescription>
                         </Alert>
                       )}
+                      {tab === 'product' && pendingProduct && (
+                        <Alert variant="info" className="mt-4">
+                          <AlertDescription>
+                            {pendingStatusText(pendingProduct, boundNumber!, view.developmentReady)}
+                          </AlertDescription>
+                        </Alert>
+                      )}
                       {!stageCurrent && current && tab !== 'product' && (
                         <Alert variant="warning" className="mt-4">
                           <AlertDescription>
@@ -1232,7 +1319,7 @@ export function PreparationPanel() {
                           ) : (
                             <Alert className="max-w-[78ch] border-dashed">
                               <AlertDescription>
-                                {p?.status === 'approved'
+                                {productApproved
                                   ? 'Агент готовит архитектуру, сравнение стеков и диаграммы C1/C2.'
                                   : 'Архитектура будет прорабатываться после вашего утверждения продуктовой части.'}
                               </AlertDescription>
@@ -1344,8 +1431,17 @@ export function PreparationPanel() {
                             <p className="max-w-[78ch]">
                               {tab === 'design'
                                 ? 'После утверждения агент сможет настроить проект и начать разработку по этой версии.'
-                                : 'После утверждения откроется следующий этап. Разработка останется заблокированной.'}
+                                : tab === 'product' && pendingProduct
+                                  ? decisionText(
+                                      pendingProduct,
+                                      boundNumber!,
+                                      view.developmentReady,
+                                    )
+                                  : 'После утверждения откроется следующий этап. Разработка останется заблокированной.'}
                             </p>
+                            {tab === 'product' && pendingProduct && (
+                              <ReleaseChanges pending={pendingProduct} />
+                            )}
                             <Label htmlFor="decision-comment" className="mt-4 block">
                               Комментарий к решению
                             </Label>

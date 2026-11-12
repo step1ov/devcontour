@@ -58,19 +58,172 @@ function change(s: DevContourState, id?: string) {
   if (!c) throw new DomainError('Выберите изменение продукта', 409);
   return journal(c);
 }
+/**
+ * Действующая редакция этапа — последняя утверждённая. Черновик, редакция на
+ * согласовании или возвращённая на доработку привязку разработки не меняют:
+ * её сдвигает только решение пользователя.
+ */
+function approvedOf<T extends { status: string }>(revisions: T[]) {
+  return revisions.findLast((r) => r.status === 'approved');
+}
+/**
+ * Вход архитектуры и дизайна из постановки — всё, кроме релиза каждого
+ * критерия. Перенос критерия между существующими релизами меняет порядок
+ * поставки, а не то, что строится. Список релизов (версии, названия, цели)
+ * остаётся во входе: цель релиза — свободный текст, и в нём могут быть
+ * требования, которые пользователь должен видеть в архитектуре.
+ */
+function productScope(content: ProductBrief) {
+  return hash({
+    ...content,
+    features: content.features.map((f) => ({
+      ...f,
+      acceptance: f.acceptance.map((a) => ({ ...a, releaseId: undefined })),
+    })),
+  });
+}
+/**
+ * Утверждённая редакция постановки с этим digest описывает то же, что
+ * действующая, кроме релиза отдельных критериев: построенное по ней
+ * остаётся в силе.
+ */
+function sameScope(c: ProductChange, digest: string, product: ProductChange['product'][number]) {
+  if (digest === product.digest) return true;
+  const earlier = c.product.find((v) => v.digest === digest && v.status === 'approved');
+  return Boolean(earlier) && productScope(earlier!.content) === productScope(product.content);
+}
+export type ReleaseDiff = {
+  /**
+   * Критерий сменил релиз: фича, текст, прежний и новый релиз. Критерий,
+   * который вместе с переносом переформулирован, сопоставляется по месту в
+   * фиче (`position`, с 1) и текста не несёт (`reworded`): текст черновика в
+   * перечень не попадает.
+   */
+  moved: {
+    featureId: string;
+    text: string;
+    from: string;
+    to: string;
+    position?: number;
+    reworded?: boolean;
+  }[];
+  added: string[];
+  removed: string[];
+  edited: { id: string; fields: ('version' | 'title' | 'goal')[] }[];
+};
+/**
+ * Что изменилось в релизах между утверждённой редакцией и новой: перенесённые
+ * критерии (по фиче и тексту, иначе по месту в фиче), добавленные, удалённые и
+ * правленые релизы.
+ */
+export function releaseDiff(from: ProductBrief, to: ProductBrief): ReleaseDiff {
+  const moved: ReleaseDiff['moved'] = [];
+  for (const feature of to.features) {
+    const before = from.features.find((f) => f.id === feature.id)?.acceptance ?? [];
+    const used = new Set<number>();
+    const unmatched: number[] = [];
+    feature.acceptance.forEach((criterion, index) => {
+      const at = before.findIndex((a, i) => !used.has(i) && a.text === criterion.text);
+      if (at < 0) return unmatched.push(index);
+      used.add(at);
+      if (before[at].releaseId !== criterion.releaseId)
+        moved.push({
+          featureId: feature.id,
+          text: criterion.text,
+          from: before[at].releaseId,
+          to: criterion.releaseId,
+        });
+    });
+    // Переформулированный критерий: на том же месте прежний, тоже без пары.
+    for (const index of unmatched) {
+      const previous = before[index];
+      if (!previous || used.has(index)) continue;
+      used.add(index);
+      if (previous.releaseId !== feature.acceptance[index].releaseId)
+        moved.push({
+          featureId: feature.id,
+          text: previous.text,
+          from: previous.releaseId,
+          to: feature.acceptance[index].releaseId,
+          position: index + 1,
+          reworded: true,
+        });
+    }
+  }
+  const ids = (b: ProductBrief) => b.releases.map((r) => r.id);
+  return {
+    moved,
+    added: ids(to).filter((id) => !ids(from).includes(id)),
+    removed: ids(from).filter((id) => !ids(to).includes(id)),
+    edited: to.releases.flatMap((r) => {
+      const old = from.releases.find((x) => x.id === r.id);
+      const fields = old
+        ? (['version', 'title', 'goal'] as const).filter((k) => old[k] !== r[k])
+        : [];
+      return fields.length ? [{ id: r.id, fields: [...fields] }] : [];
+    }),
+  };
+}
+const fieldNames = { version: 'версия', title: 'название', goal: 'цель' };
+/** Перечень изменений релизов по-русски: для формы решения и центра внимания. */
+export function describeReleaseDiff(diff: ReleaseDiff) {
+  return [
+    ...diff.moved.map((m) =>
+      m.reworded
+        ? `критерий №${m.position} фичи ${m.featureId} переформулирован и перенесён из ${m.from} в ${m.to}`
+        : `критерий «${m.text}» (${m.featureId}) перенесён из ${m.from} в ${m.to}`,
+    ),
+    ...diff.added.map((id) => `добавлен релиз ${id}`),
+    ...diff.removed.map((id) => `удалён релиз ${id}`),
+    ...diff.edited.map(
+      (e) => `у релиза ${e.id} изменены: ${e.fields.map((f) => fieldNames[f]).join(', ')}`,
+    ),
+  ];
+}
+/**
+ * Новая неутверждённая редакция постановки поверх утверждённой: её номер,
+ * статус, изменения релизов и — при утверждённой архитектуре — сохранит ли её
+ * утверждение цепочку (тот же объём, что у постановки архитектуры).
+ */
+export function pendingProduct(c: ProductChange) {
+  const approved = approvedOf(c.product),
+    latest = c.product.at(-1);
+  if (!latest || latest === approved || latest.status === 'approved') return undefined;
+  const built = approvedOf(c.architecture);
+  const source = built
+    ? c.product.find((v) => v.digest === built.productDigest && v.status === 'approved')
+    : undefined;
+  return {
+    number: latest.number,
+    status: latest.status,
+    // Вердикт о цепочке сравнивает с версией, по которой утверждена
+    // архитектура (chainSource), перечень изменений — с действующей; при
+    // возврате к прежнему объёму это разные версии.
+    ...(built
+      ? {
+          keepsChain:
+            Boolean(source) && productScope(source!.content) === productScope(latest.content),
+          ...(source ? { chainSource: source.number, sameBase: source === approved } : {}),
+        }
+      : {}),
+    ...(approved
+      ? (() => {
+          const releases = releaseDiff(approved.content, latest.content);
+          return { releases, changes: describeReleaseDiff(releases) };
+        })()
+      : {}),
+  };
+}
 function productReady(c: ProductChange) {
-  if (c.product.at(-1)?.status !== 'approved')
+  const product = approvedOf(c.product);
+  if (!product)
     throw new DomainError('Сначала пользователь должен утвердить продуктовую постановку', 409);
-  return c.product.at(-1)!;
+  return product;
 }
 function architectureReady(c: ProductChange) {
   const product = productReady(c),
-    architecture = c.architecture.at(-1);
-  if (
-    !architecture ||
-    architecture.status !== 'approved' ||
-    architecture.productDigest !== product.digest
-  )
+    architecture = approvedOf(c.architecture);
+  if (!architecture || !sameScope(c, architecture.productDigest, product))
     throw new DomainError(
       'Сначала пользователь должен утвердить актуальные архитектуру и стек',
       409,
@@ -79,32 +232,41 @@ function architectureReady(c: ProductChange) {
 }
 function referencesReady(c: ProductChange) {
   const architecture = architectureReady(c),
-    references = c.references.at(-1);
-  if (
-    !references ||
-    references.status !== 'approved' ||
-    references.architectureDigest !== architecture.digest
-  )
+    references = approvedOf(c.references);
+  if (!references || references.architectureDigest !== architecture.digest)
     throw new DomainError('Сначала пользователь должен утвердить референсы', 409);
   return references;
 }
 function conceptReady(c: ProductChange) {
   const references = referencesReady(c),
-    concept = c.concept.at(-1);
-  if (!concept || concept.status !== 'approved' || concept.referencesDigest !== references.digest)
+    concept = approvedOf(c.concept);
+  if (!concept || concept.referencesDigest !== references.digest)
     throw new DomainError('Сначала пользователь должен утвердить концепт и эскизы', 409);
   return concept;
+}
+function designReady(c: ProductChange) {
+  const concept = conceptReady(c),
+    design = approvedOf(c.design);
+  if (!design || design.conceptDigest !== concept.digest)
+    throw new DomainError('Сначала пользователь должен утвердить макет и дизайн-систему', 409);
+  return design;
 }
 /**
  * Последняя редакция этапа относится к утверждённой редакции предыдущего
  * этапа; иначе отказ согласования с причиной. Правило решения оператора
- * (`decide`) и центра внимания: кнопка не предлагается, если её отклонят.
+ * (`decide`), отправки (`preparation_submit`) и центра внимания: кнопка не
+ * предлагается, если её отклонят. Архитектура, построенная по постановке,
+ * которая отличается от действующей только релизом критериев (тот же вход,
+ * `productScope`), остаётся актуальной.
  */
 export function assertStageUpstream(
   c: ProductChange,
   stage: z.infer<typeof preparationDecision>['stage'],
 ) {
-  if (stage === 'architecture' && c.architecture.at(-1)!.productDigest !== productReady(c).digest)
+  if (
+    stage === 'architecture' &&
+    !sameScope(c, c.architecture.at(-1)!.productDigest, productReady(c))
+  )
     throw new DomainError('Архитектура относится к прежней постановке');
   if (
     stage === 'references' &&
@@ -135,9 +297,7 @@ export function developmentBinding(
       referencesDigest: references.digest,
     };
   const concept = conceptReady(c),
-    design = c.design.at(-1);
-  if (!design || design.status !== 'approved' || design.conceptDigest !== concept.digest)
-    throw new DomainError('Сначала пользователь должен утвердить макет и дизайн-систему', 409);
+    design = designReady(c);
   return {
     changeId: c.id,
     productDigest: product.digest,
@@ -163,15 +323,24 @@ export function assertAnyDevelopmentReady(s: DevContourState) {
     }
   developmentBinding(s);
 }
+/**
+ * Привязка задачи действует, если совпадает с текущей или отличается только
+ * утверждённой редакцией постановки с тем же объёмом (перенос критериев между
+ * релизами): работа в полёте переживает такое утверждение со своими digests.
+ */
+function bindingHolds(s: DevContourState, binding: PreparationBinding) {
+  const current = developmentBinding(s, binding.changeId)!;
+  if (hash(binding) === hash(current)) return true;
+  if (hash({ ...binding, productDigest: current.productDigest }) !== hash(current)) return false;
+  const c = change(s, binding.changeId);
+  return sameScope(c, binding.productDigest, productReady(c));
+}
 export function assertTaskPreparation(
   s: DevContourState,
   task: Pick<Task, 'id' | 'preparation' | 'featureId'>,
 ) {
   if (!s.preparation) return;
-  if (
-    !task.preparation ||
-    hash(task.preparation) !== hash(developmentBinding(s, task.preparation.changeId))
-  )
+  if (!task.preparation || !bindingHolds(s, task.preparation))
     throw new DomainError(
       `${task.id}: задача не связана с текущими утверждёнными продуктом и архитектурой; обновите её привязку правкой черновика (task_edit): передайте только preparation.changeId`,
       409,
@@ -574,6 +743,164 @@ export function validatePreparation(s: DevContourState, previous?: DevContourSta
       }
   }
 }
+/**
+ * Готовность релизов и фич утверждённой постановки по живым задачам
+ * изменения: карта продукта, форма решения и центр внимания считают одинаково.
+ */
+function readinessMap(planned: ProductChange['product'][number] | undefined, live: Task[]) {
+  // A release aggregates the features that carry at least one of its
+  // criteria; a feature spanning two releases counts in both.
+  const releases = planned
+    ? planned.content.releases.map((r) => {
+        const own = planned.content.features.filter((f) =>
+          f.acceptance.some((a) => a.releaseId === r.id),
+        );
+        const ids = own.map((f) => f.id);
+        // Отменённая задача — снятое решение, а не незавершённая
+        // работа: с ней фича не становилась готовой никогда.
+        const bound = live.filter((t) => t.featureId && ids.includes(t.featureId));
+        const done = bound.filter((t) => t.status === 'done').length;
+        return {
+          id: r.id,
+          features: own.length,
+          criteria: own.reduce(
+            (sum, f) => sum + f.acceptance.filter((a) => a.releaseId === r.id).length,
+            0,
+          ),
+          tasks: bound.length,
+          done,
+          failed: bound.filter((t) => t.status === 'failed').length,
+          readiness: !bound.length
+            ? ('unplanned' as const)
+            : done === bound.length
+              ? ('done' as const)
+              : bound.some((t) => t.status === 'failed')
+                ? ('failed' as const)
+                : ('in-progress' as const),
+        };
+      })
+    : [];
+  // Readiness only: the feature text already travels in product.content,
+  // and duplicating it pushed the agent response past its size budget.
+  const features = planned
+    ? planned.content.features.map((f) => {
+        const own = live.filter((t) => t.featureId === f.id);
+        const done = own.filter((t) => t.status === 'done').length;
+        return {
+          id: f.id,
+          tasks: own.length,
+          done,
+          failed: own.filter((t) => t.status === 'failed').length,
+          readiness: !own.length
+            ? ('unplanned' as const)
+            : done === own.length
+              ? ('done' as const)
+              : own.some((t) => t.status === 'failed')
+                ? ('failed' as const)
+                : ('in-progress' as const),
+        };
+      })
+    : [];
+  return { releases, features };
+}
+/**
+ * Новая неутверждённая версия постановки с предупреждениями о переносе
+ * критериев в релиз, работа которого уже выполнена (центр внимания).
+ */
+export function pendingProductOf(s: DevContourState, c: ProductChange) {
+  const live = s.tasks.filter((t) => t.preparation?.changeId === c.id && t.status !== 'cancelled');
+  return withTargets(bindingView(c), readinessMap(approvedOf(c.product), live).releases)
+    .pendingProduct;
+}
+/**
+ * Этап, из-за которого разработка изменения не идёт; undefined — идёт.
+ * Правило `developmentBinding` без состояния: для проекции в файлы.
+ */
+export function changeBlockedStage(c: ProductChange) {
+  try {
+    const references = referencesReady(c);
+    if (references.content.applicable) designReady(c);
+    return undefined;
+  } catch (error) {
+    if (!(error instanceof DomainError)) throw error;
+    return blockedStage(c);
+  }
+}
+/** Первый этап, который держит разработку изменения (правило `developmentBinding`). */
+function blockedStage(c: ProductChange) {
+  const checks = [
+    ['product', productReady],
+    ['architecture', architectureReady],
+    ['references', referencesReady],
+    ['concept', conceptReady],
+  ] as const;
+  for (const [stage, ready] of checks)
+    try {
+      ready(c);
+    } catch (error) {
+      if (error instanceof DomainError) return stage;
+      throw error;
+    }
+  return 'design' as const;
+}
+/**
+ * Перенос критерия в релиз, работа которого уже выполнена: задачи
+ * для него, скорее всего, нет, и карта показала бы релиз готовым.
+ */
+function withTargets(
+  view: ReturnType<typeof bindingView>,
+  releases: { id: string; readiness: string }[],
+) {
+  const pending = view.pendingProduct;
+  if (!pending) return { ...view, pendingProduct: undefined };
+  const moved = (pending.releases?.moved ?? []).map((m) => ({
+    ...m,
+    targetDone: releases.find((r) => r.id === m.to)?.readiness === 'done',
+  }));
+  return {
+    ...view,
+    pendingProduct: {
+      ...pending,
+      ...(pending.releases ? { releases: { ...pending.releases, moved } } : {}),
+      warnings: moved
+        .filter((m) => m.targetDone)
+        .map(
+          (m) =>
+            `Критерий ${m.reworded ? '№' + m.position : '«' + m.text + '»'} (${m.featureId}) переносится в релиз ${m.to}, где работа уже выполнена: задачи для него может не быть — проверьте покрытие и при необходимости запланируйте её`,
+        ),
+    },
+  };
+}
+/**
+ * Что видит оператор о привязке разработки: утверждённая редакция постановки,
+ * по которой идёт работа; более новая неутверждённая и сохранит ли её
+ * утверждение архитектуру и дизайн; актуальна ли последняя редакция каждого
+ * следующего этапа (то же правило, что у согласования).
+ */
+function bindingView(c: ProductChange) {
+  const approved = approvedOf(c.product);
+  const fresh = (stage: 'architecture' | 'references' | 'concept' | 'design') => {
+    if (!c[stage].length) return false;
+    try {
+      assertStageUpstream(c, stage);
+      return true;
+    } catch (error) {
+      if (error instanceof DomainError) return false;
+      throw error;
+    }
+  };
+  return {
+    productNumber: approved?.number,
+    productDigest: approved?.digest,
+    pendingProduct: pendingProduct(c),
+    fresh: {
+      architecture: fresh('architecture'),
+      references: fresh('references'),
+      concept: fresh('concept'),
+      design: fresh('design'),
+    },
+  };
+}
 export class Preparation {
   // Who enters a quick change is set by the entry point (panel or agent), not
   // by a field of the payload.
@@ -605,6 +932,9 @@ export class Preparation {
       references = c?.references?.at(-1),
       concept = c?.concept?.at(-1),
       design = c?.design?.at(-1);
+    // Карта готовности — по постановке, к которой привязана разработка:
+    // черновик новой редакции её не меняет, пока его не утвердят.
+    const planned = c ? (approvedOf(c.product) ?? product) : undefined;
     let ready = false,
       blocker = 'Создайте изменение и поручите агенту проработать продуктовую часть';
     if (c)
@@ -620,6 +950,7 @@ export class Preparation {
     // Находки исполнителя — долг фичи, но не задачи изменения: готовность
     // изменения их не ждёт.
     const work = live.filter((t) => !t.finding);
+    const { releases, features } = readinessMap(planned, live);
     // The newest note of any change tells the operator the session is alive even
     // before the first revision exists.
     const latest = p.changes
@@ -654,59 +985,12 @@ export class Preparation {
             activity: [...(c.activity ?? [])].reverse().slice(0, 40),
             questions: c.questions ?? [],
             decisions: [...(c.decisions ?? [])].reverse(),
-            // A release aggregates the features that carry at least one of its
-            // criteria; a feature spanning two releases counts in both.
-            releases: product
-              ? product.content.releases.map((r) => {
-                  const own = product.content.features.filter((f) =>
-                    f.acceptance.some((a) => a.releaseId === r.id),
-                  );
-                  const ids = own.map((f) => f.id);
-                  // Отменённая задача — снятое решение, а не незавершённая
-                  // работа: с ней фича не становилась готовой никогда.
-                  const bound = live.filter((t) => t.featureId && ids.includes(t.featureId));
-                  const done = bound.filter((t) => t.status === 'done').length;
-                  return {
-                    id: r.id,
-                    features: own.length,
-                    criteria: own.reduce(
-                      (sum, f) => sum + f.acceptance.filter((a) => a.releaseId === r.id).length,
-                      0,
-                    ),
-                    tasks: bound.length,
-                    done,
-                    failed: bound.filter((t) => t.status === 'failed').length,
-                    readiness: !bound.length
-                      ? ('unplanned' as const)
-                      : done === bound.length
-                        ? ('done' as const)
-                        : bound.some((t) => t.status === 'failed')
-                          ? ('failed' as const)
-                          : ('in-progress' as const),
-                  };
-                })
-              : [],
-            // Readiness only: the feature text already travels in product.content,
-            // and duplicating it pushed the agent response past its size budget.
-            features: product
-              ? product.content.features.map((f) => {
-                  const own = live.filter((t) => t.featureId === f.id);
-                  const done = own.filter((t) => t.status === 'done').length;
-                  return {
-                    id: f.id,
-                    tasks: own.length,
-                    done,
-                    failed: own.filter((t) => t.status === 'failed').length,
-                    readiness: !own.length
-                      ? ('unplanned' as const)
-                      : done === own.length
-                        ? ('done' as const)
-                        : own.some((t) => t.status === 'failed')
-                          ? ('failed' as const)
-                          : ('in-progress' as const),
-                  };
-                })
-              : [],
+            releases,
+            features,
+            // Утверждённая редакция, по которой идёт разработка, когда новее
+            // неё есть неутверждённая: планировать — по ней, а не по product.
+            ...(planned && planned !== product ? { boundProduct: strip(planned) } : {}),
+            binding: withTargets(bindingView(c), releases),
             history: (
               ['product', 'architecture', 'references', 'concept', 'design'] as const
             ).flatMap((stage) =>
@@ -722,18 +1006,7 @@ export class Preparation {
             ),
           }
         : undefined,
-      phase: ready
-        ? 'development'
-        : product?.status !== 'approved'
-          ? 'product'
-          : architecture?.status !== 'approved' || architecture.productDigest !== product.digest
-            ? 'architecture'
-            : references?.status !== 'approved' ||
-                references.architectureDigest !== architecture.digest
-              ? 'references'
-              : concept?.status !== 'approved' || concept.referencesDigest !== references.digest
-                ? 'concept'
-                : 'design',
+      phase: ready || !c ? (ready ? 'development' : 'product') : blockedStage(c),
       developmentReady: ready,
       // Изменения независимы: разработка уже утверждённых идёт, пока другое
       // (даже активное) ждёт согласований. Панель называет их, а не одну
@@ -861,11 +1134,12 @@ export class Preparation {
           const v = preparationInputs[operation].parse(input),
             c = change(s, v.changeId);
           selected = c.id;
-          // The journal only appends context; it never rewrites an approved revision,
-          // so it stays available while the queue is running.
+          // The journal only appends context, and drafts and submissions never
+          // move the development binding (only an operator approval does), so
+          // they stay available while the queue is running.
           if (
-            !(
-              ['preparation_progress', 'preparation_question', 'preparation_resolve'] as string[]
+            (
+              ['preparation_activate', 'preparation_setup', 'preparation_expand'] as string[]
             ).includes(operation)
           )
             editable(s, c.id);
@@ -1061,23 +1335,7 @@ export class Preparation {
                 'Сначала получите ответы на открытые вопросы этапа: ' + open.length,
                 409,
               );
-            if (
-              v.stage === 'architecture' &&
-              c.architecture.at(-1)!.productDigest !== productReady(c).digest
-            )
-              throw new DomainError('Архитектура относится к прежней постановке');
-            if (
-              v.stage === 'references' &&
-              c.references.at(-1)!.architectureDigest !== architectureReady(c).digest
-            )
-              throw new DomainError('Референсы относятся к прежней архитектуре');
-            if (
-              v.stage === 'concept' &&
-              c.concept.at(-1)!.referencesDigest !== referencesReady(c).digest
-            )
-              throw new DomainError('Концепт относится к прежним референсам');
-            if (v.stage === 'design' && c.design.at(-1)!.conceptDigest !== conceptReady(c).digest)
-              throw new DomainError('Дизайн относится к прежнему концепту');
+            if (v.stage !== 'product') assertStageUpstream(c, v.stage);
             r.status = 'in-review';
           }
         }

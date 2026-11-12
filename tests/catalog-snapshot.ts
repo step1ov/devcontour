@@ -150,5 +150,10 @@
 // owner-ruling для отмены решения за владельца, описание discussion_post —
 // запись решения за владельца самим инструментом; прочие операции байтово
 // прежние.
-export const CATALOG_DIGEST = 'a3656166b292e13a681b477d66ba0ef8c2be372bd0d13492c6217511f9838751';
+// Намеренное изменение: описания preparation_product и preparation_submit
+// называют привязку разработки к последней утверждённой редакции и сохранение
+// архитектуры и дизайна при переносе критериев между существующими релизами;
+// preparation_status — утверждённую редакцию для планирования (boundProduct,
+// product.md) рядом с черновиком; прочие операции байтово прежние.
+export const CATALOG_DIGEST = 'a0292df0e0a25111c869a75fdc7b62d09c143cd6afddd8c9f794ba0b40aec37e';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';
