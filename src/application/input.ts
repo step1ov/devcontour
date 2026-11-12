@@ -645,7 +645,7 @@ export class InputService {
       );
       // Ведущий изменил требования за владельца — решение за владельца
       // записывает сам инструмент, по состоянию запроса (и при повторе).
-      this.standInOf(request.id);
+      this.standInOf(request.id, actor);
       return {
         requestId: request.id,
         lifecycle: result.request.lifecycle,
@@ -694,7 +694,7 @@ export class InputService {
       );
       // Ведущий принял допущение исполнителя (follow-up) — решение за
       // владельца записывает сам инструмент в той же транзакции.
-      this.standInOf(request.id);
+      this.standInOf(request.id, actor, input.reason);
       return {
         requestId: request.id,
         lifecycle: result.request.lifecycle,
@@ -715,7 +715,10 @@ export class InputService {
    * и не исправляет запись. Новая версия ответа заменяет нерешённую запись
    * прежней версии, а не добавляет вторую карточку.
    */
-  private standInOf(requestId: string) {
+  private standInOf(requestId: string, actor: InputActorKind, cancelReason?: string) {
+    // Вызов оператора не пишет решение за ведущего, даже когда состояние
+    // запроса его называет (запрос закрыт раньше, прежней версией).
+    if (actor === 'operator') return;
     const request = this.request(requestId);
     const last = request.answers.at(-1);
     const discussion = new DiscussionService(this.h);
@@ -730,6 +733,13 @@ export class InputService {
           ? `; критические пути: ${request.criticalHits.slice(0, 5).join(', ')}`
           : ''),
     };
+    // Допущение принято именно этим закрытием (или его повтором): причина
+    // закрытия — причина этого вызова. Follow-up, закрытый движком при отмене
+    // задачи, своей причиной («Поручение отменено») сюда не попадает.
+    const closedHere =
+      cancelReason !== undefined &&
+      request.closed !== undefined &&
+      [cancelReason, cancelReason.trim().slice(0, 1000)].includes(request.closed.reason);
     if (
       request.kind === 'follow-up' &&
       request.lifecycle === 'cancelled' &&
@@ -737,6 +747,7 @@ export class InputService {
       request.closed.by !== 'operator' &&
       request.closed.by !== 'controller'
     ) {
+      if (!closedHere) return;
       const q = request.question;
       const chosen =
         q.options.find((o) => o.id === q.recommended)?.label ?? q.options[0]?.label ?? '—';

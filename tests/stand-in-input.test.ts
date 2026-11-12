@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 import { controlled, inputDemos, inputFixture, untilQuestion } from './input-fixture.ts';
 import { DiscussionService } from '../src/application/discussion.ts';
 import { DomainError } from '../src/core/model.ts';
+import { executionOf } from '../src/harness/execution.ts';
 
 after(() => inputDemos.close());
 
@@ -165,6 +166,124 @@ test('F21: ведущий принимает допущение follow-up — р
       'operator',
     );
     assert.equal(d.standIns(50).filter((s) => s.message.taskId === otherId).length, 0);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+/** Подменяет запись решения за владельца на время `fn`: сбой или пропуск. */
+async function withRecord<T>(
+  replacement: DiscussionService['recordStandIn'],
+  fn: () => T | Promise<T>,
+) {
+  // Дескриптор, а не метод: прототип восстанавливается как был.
+  const proto = DiscussionService.prototype;
+  const original = Object.getOwnPropertyDescriptor(proto, 'recordStandIn')!;
+  Object.defineProperty(proto, 'recordStandIn', { ...original, value: replacement });
+  try {
+    return await fn();
+  } finally {
+    Object.defineProperty(proto, 'recordStandIn', original);
+  }
+}
+
+test('F21: сбой записи решения откатывает ответ ведущего, повтор дописывает пропущенную запись', async () => {
+  const f = await inputFixture(controlled());
+  try {
+    const { taskId, boardId } = f.askingTask();
+    await untilQuestion(f, boardId);
+    const [r] = f.service.list({ taskId }).requests;
+    const d = new DiscussionService(f.h);
+    const change = {
+      requestId: r.requestId,
+      text: 'Change the acceptance: produce YAML.',
+      kind: 'requirement-change' as const,
+      expectedVersion: r.version,
+    };
+    // Сбой записи — ответа нет: одна транзакция.
+    await withRecord(
+      () => {
+        throw new Error('forced stand-in failure');
+      },
+      () => assert.throws(() => f.service.answer(change, 'lead'), /forced stand-in failure/),
+    );
+    const untouched = f.service.show({ requestId: r.requestId });
+    assert.equal(untouched.answers.length, 0);
+    assert.equal(untouched.version, r.version);
+    assert.equal(d.standIns(10, true).length, 0);
+    // Запись пропущена (как в прежней версии без транзакции) — повтор того же
+    // ответа её дописывает.
+    await withRecord(
+      () => undefined,
+      () => f.service.answer(change, 'lead'),
+    );
+    assert.equal(f.service.show({ requestId: r.requestId }).answers.length, 1);
+    assert.equal(d.standIns(10).length, 0);
+    f.service.answer(change, 'lead');
+    assert.equal(f.service.show({ requestId: r.requestId }).answers.length, 1);
+    assert.equal(d.standIns(10).length, 1);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('F21: follow-up — сбой записи откатывает закрытие; закрытие с другой причиной и вызов оператора не пишут решение', async () => {
+  const f = await inputFixture(controlled({ assume: true }), {
+    edit: (raw) => (raw.inputPolicy = { threshold: 11 }),
+  });
+  try {
+    const board = f.h.createBoard('Autonomous board');
+    const first = f.plainTask(board.id, 'First autonomous task');
+    const second = f.plainTask(board.id, 'Second autonomous task');
+    f.h.approve(board.id);
+    f.h.pause(false);
+    await f.scheduler.drain();
+    const open = f.service
+      .list()
+      .requests.filter((r) => r.kind === 'follow-up' && r.state === 'awaiting-answer');
+    const a = open.find((r) => r.taskId === first);
+    const b = open.find((r) => r.taskId === second);
+    assert.ok(a && b);
+    const d = new DiscussionService(f.h);
+    const accept = {
+      requestId: a.requestId,
+      expectedVersion: a.version,
+      reason: 'assumption accepted',
+    };
+    await withRecord(
+      () => {
+        throw new Error('forced stand-in failure');
+      },
+      () => assert.throws(() => f.service.cancel(accept, 'lead'), /forced stand-in failure/),
+    );
+    assert.equal(f.service.show({ requestId: a.requestId }).lifecycle, 'pending');
+    // Пропуск записи, затем повтор того же закрытия — запись дописана.
+    await withRecord(
+      () => undefined,
+      () => f.service.cancel(accept, 'lead'),
+    );
+    assert.equal(f.service.show({ requestId: a.requestId }).lifecycle, 'cancelled');
+    assert.equal(d.standIns(50).filter((s) => s.message.taskId === first).length, 0);
+    f.service.cancel(accept, 'lead');
+    assert.equal(d.standIns(50).filter((s) => s.message.taskId === first).length, 1);
+    // Follow-up закрыт движком с другой причиной (как при отмене задачи) —
+    // ни вызов оператора, ни закрытие ведущего с иной причиной не пишут
+    // «допущение принято».
+    executionOf(f.h).engine.cancelInput(
+      b.requestId,
+      { by: 'lead', reason: 'Поручение отменено' },
+      b.version,
+    );
+    const closed = f.service.show({ requestId: b.requestId });
+    f.service.cancel(
+      { requestId: b.requestId, expectedVersion: closed.version, reason: 'operator closes' },
+      'operator',
+    );
+    f.service.cancel(
+      { requestId: b.requestId, expectedVersion: closed.version, reason: 'assumption accepted' },
+      'lead',
+    );
+    assert.equal(d.standIns(50).filter((s) => s.message.taskId === second).length, 0);
   } finally {
     await f.cleanup();
   }
