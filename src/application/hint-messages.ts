@@ -86,8 +86,12 @@ export interface HintParamMap {
   'follow-up': { severity: number; version: number };
   /** Вопрос ждёт ответа ведущего (без минимумов, режим agent). */
   'answer-lead': { version: number } & Stops;
-  /** Вопрос ждёт ответа оператора; `floors` — минимумы критичности. */
-  'answer-operator': { floors: string[] } & Stops;
+  /**
+   * Вопрос ждёт ответа оператора; `floors` — минимумы критичности,
+   * `version` — версия запроса для `input_propose`, `proposed` — текущее
+   * предложение ведущего ждёт подтверждения оператора (F37).
+   */
+  'answer-operator': { floors: string[]; version?: number; proposed?: boolean } & Stops;
   /** Применённый ответ устарел; `operator` — применяет оператор. */
   'apply-stale': { reason: string; operator: boolean } & Stops;
   /** Ревью отклонило ответ. */
@@ -317,7 +321,10 @@ const en: Catalog = {
   'answer-operator': (p, s) => {
     const { requestId, taskId } = s.input!;
     return (
-      `Task ${taskId} waits for the operator's answer to ${requestId} in the panel (${hrefs.input(taskId)})${p.floors.length ? `: the question is critical (${p.floors.join(', ')})` : ''}. Wait: the lead does not answer it and no queue step helps.` +
+      `Task ${taskId} waits for the operator's answer to ${requestId} in the panel (${hrefs.input(taskId)})${p.floors.length ? `: the question is critical (${p.floors.join(', ')})` : ''}. The lead does not answer it itself and no queue step helps. ` +
+      (p.proposed
+        ? 'Your proposed answer waits for the operator to confirm it in one click or answer differently; replace it with input_propose only if the facts changed, and tell the user the decision is waiting.'
+        : `If the registered contracts and accepted files decide it, propose the answer: input_propose {"requestId": "${requestId}", "expectedVersion": ${p.version ?? '…'}, "text": …, "optionId": …, "reasoning": …} after input_show; the operator confirms it in one click or answers differently. Otherwise ask the user to answer in the panel.`) +
       repeatedEn(taskId, p.stops)
     );
   },
@@ -527,7 +534,10 @@ const ru: Catalog = {
   'answer-operator': (p, s) => {
     const { requestId, taskId } = s.input!;
     return (
-      `Задача ${taskId} ждёт ответа оператора на ${requestId} в панели (${hrefs.input(taskId)})${p.floors.length ? `: вопрос критический (${p.floors.join(', ')})` : ''}. Ждите: ведущий на него не отвечает, и шаг очереди не поможет.` +
+      `Задача ${taskId} ждёт ответа оператора на ${requestId} в панели (${hrefs.input(taskId)})${p.floors.length ? `: вопрос критический (${p.floors.join(', ')})` : ''}. Ведущий сам на него не отвечает, и шаг очереди не поможет. ` +
+      (p.proposed
+        ? 'Ваше предложение ответа ждёт оператора: он подтвердит его одним нажатием или ответит иначе. Заменяйте его через input_propose, только если факты изменились, и сообщите пользователю, что решение ждёт его.'
+        : `Если ответ следует из зарегистрированных контрактов и принятых файлов, предложите его: input_propose {"requestId": "${requestId}", "expectedVersion": ${p.version ?? '…'}, "text": …, "optionId": …, "reasoning": …} после input_show; оператор подтвердит его одним нажатием или ответит иначе. Иначе попросите пользователя ответить в панели.`) +
       repeatedRu(taskId, p.stops)
     );
   },

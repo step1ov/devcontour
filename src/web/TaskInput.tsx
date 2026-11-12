@@ -74,6 +74,10 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
     messageRef?: string;
   }[];
   const latest = answers.at(-1);
+  const proposal = current.proposal;
+  const proposalOption = proposal?.optionId
+    ? current.question.options.find((o) => o.id === proposal.optionId)?.label
+    : undefined;
   const act = async (fn: () => Promise<unknown>) => {
     setBusy(true);
     setError('');
@@ -211,6 +215,38 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
           {/* Текст называет, кто действует; `next` сводки — указание ведущему агенту. */}
           Дальше: {inputNextText({ ...current, operatorMode: view.approvalMode === 'operator' })}
         </p>
+      )}
+      {/* Предложение ведущего (F37): на вопрос отвечает оператор, ведущий
+          предложил ответ по контрактам. Подтверждение сохраняет ответ
+          оператора с этим содержимым; ответить иначе — форма ниже. */}
+      {proposal?.current && current.actor === 'operator' && (
+        <div className="bg-raised mt-2 grid gap-1 rounded-md p-2" data-input-proposal>
+          <p className="m-0 text-xs font-medium">
+            Ведущий предлагает ответ ({kindLabels[proposal.kind] ?? proposal.kind}
+            {proposalOption ? `, вариант «${proposalOption}»` : ''}):
+          </p>
+          <p className="m-0 whitespace-pre-wrap [overflow-wrap:anywhere]">{proposal.text}</p>
+          <p className="text-muted-foreground m-0 text-xs whitespace-pre-wrap [overflow-wrap:anywhere]">
+            Обоснование ведущего: {proposal.reasoning}
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              disabled={busy}
+              onClick={() =>
+                void act(() =>
+                  post(`tasks/${taskId}/input/${current.requestId}/confirm-proposal`, {
+                    proposalDigest: proposal.digest,
+                    expectedVersion: current.version,
+                  }),
+                )
+              }
+            >
+              Подтвердить ответ ведущего
+            </Button>
+            <span className="text-muted-foreground text-xs">или ответьте иначе ниже</span>
+          </div>
+        </div>
       )}
       {answerable && current.kind === 'question' && (
         <form

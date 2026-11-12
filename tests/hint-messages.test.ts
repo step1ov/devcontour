@@ -264,6 +264,16 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
   'answer-operator': [
     { code: 'answer-operator', params: { floors: ['security', 'data'] }, input: input1 },
     { code: 'answer-operator', params: { floors: [], stops }, input: input1 },
+    {
+      code: 'answer-operator',
+      params: { floors: ['declared'], version: 3, proposed: false },
+      input: input1,
+    },
+    {
+      code: 'answer-operator',
+      params: { floors: ['declared'], version: 3, proposed: true },
+      input: input1,
+    },
   ],
   'apply-stale': [
     { code: 'apply-stale', params: { reason: 'context', operator: true }, input: input1 },
@@ -450,8 +460,11 @@ test('Подсказки шага: новая конфигурация setup п�
  * (четвёртая фраза о владельце решения); прежние образцы байтово прежние.
  * Образцы нового кода `base-held` добавлены (удержанный перенос базы ждёт
  * подтверждения человека); прежние образцы байтово прежние.
+ * Текст `answer-operator` называет предложение ответа ведущего
+ * (`input_propose`) вместо «ждите»; добавлены образцы с `version` и
+ * `proposed`; прочие образцы байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = 'b93b5240d95c417910b4231e3405a91f76923e405d454e554885be321d72a119';
+const ENGLISH_SAMPLES_SHA256 = '88cb42fcac5f1ebf5ad22525e49010a7d8a202a65a6a782bd5f597dac3642b7c';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

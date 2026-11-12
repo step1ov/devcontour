@@ -7,7 +7,7 @@
 // обсуждения, а снимок — выбранные сообщения (`messages`). Канонический
 // текст ответа живёт один раз — в запросе harness.
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { z } from 'zod';
 import {
@@ -102,6 +102,9 @@ export const inputStates = [
 ] as const;
 export type InputState = (typeof inputStates)[number];
 
+/** Предел обоснования предложения ведущего (знаков). */
+const PROPOSAL_REASONING = 2000;
+
 export const inputOperationInputs = {
   input_list: z.strictObject({
     taskId: id.optional(),
@@ -114,6 +117,15 @@ export const inputOperationInputs = {
     text: z.string().trim().min(1).max(INPUT_LIMITS.answer),
     optionId: z.string().max(40).optional(),
     kind: z.enum(['clarification', 'requirement-change']).default('clarification'),
+    expectedVersion: version,
+  }),
+  input_propose: z.strictObject({
+    requestId,
+    text: z.string().trim().min(1).max(INPUT_LIMITS.answer),
+    optionId: z.string().max(40).optional(),
+    kind: z.enum(['clarification', 'requirement-change']).default('clarification'),
+    /** Почему ответ следует из контрактов и принятых файлов: читает оператор. */
+    reasoning: z.string().trim().min(10).max(PROPOSAL_REASONING),
     expectedVersion: version,
   }),
   input_context: z.strictObject({
@@ -176,6 +188,30 @@ const EARLIER_EXCERPT = 500;
 /** Локальные записи аренды ревью ответа (`local_workflow`), ключ — ID запроса. */
 const REVIEW_LEASE = 'input-review-lease';
 type InputReviewLease = { token: string; startedAt: string; leaseUntil: number };
+
+/**
+ * Предложение ответа ведущего (F37) — локальная запись, ключ — ID запроса.
+ * Одно на запрос: новое заменяет прежнее. Ответом оно становится только
+ * действием оператора («Подтвердить ответ ведущего»); запрос harness ведущий
+ * этим не меняет.
+ */
+const PROPOSAL = 'input-proposal';
+export interface InputProposal {
+  requestId: string;
+  taskId: string;
+  /** Версия запроса, которую видел ведущий: другая версия — предложение устарело. */
+  requestVersion: number;
+  text: string;
+  optionId: string | null;
+  kind: 'clarification' | 'requirement-change';
+  reasoning: string;
+  by: 'lead' | 'host';
+  at: string;
+  /** Отпечаток содержимого и версии: подтверждение называет именно его. */
+  digest: string;
+}
+/** Состояния, в которых ответ даёт оператор и предложение уместно. */
+const proposable = new Set<InputState>(['awaiting-answer', 'review-rejected']);
 
 const refuse = (code: string, message: string, status = 409) => {
   const error = new DomainError(message, status);
@@ -366,7 +402,7 @@ export class InputService {
   }
 
   /** Кто действует следующим и что делает. */
-  private nextOf(request: InputRequest, state: InputState, task?: Task) {
+  private nextOf(request: InputRequest, state: InputState, task?: Task, proposed = false) {
     const agent = this.h.config.approvalMode === 'agent';
     const lead = this.leadMayDecide(request);
     // Заменённый вопрос ждёт переноса ответа. Выдачу он не держит (правило
@@ -388,7 +424,9 @@ export class InputService {
             ? { actor: 'lead' as const, next: 'input_answer, or the operator answers in the panel' }
             : {
                 actor: 'operator' as const,
-                next: `answer in the panel: ${hrefs.input(request.workId)}`,
+                next: proposed
+                  ? `the operator confirms the lead's proposed answer or answers differently in the panel: ${hrefs.input(request.workId)}`
+                  : `answer in the panel: ${hrefs.input(request.workId)}; the lead may propose an answer (input_propose) for the operator to confirm`,
               };
       case 'answer-saved':
       case 'stale':
@@ -416,7 +454,9 @@ export class InputService {
           : agent
             ? {
                 actor: 'operator' as const,
-                next: `the reviewer rejected the answer to a question the lead may not decide: the operator reads the findings and corrects the answer in the panel (${hrefs.input(request.workId)})`,
+                next: proposed
+                  ? `the reviewer rejected the answer to a question the lead may not decide: the operator confirms the lead's proposed correction or corrects the answer in the panel (${hrefs.input(request.workId)})`
+                  : `the reviewer rejected the answer to a question the lead may not decide: the operator reads the findings and corrects the answer in the panel (${hrefs.input(request.workId)}); the lead may propose a corrected answer (input_propose)`,
               }
             : {
                 actor: 'operator' as const,
@@ -455,6 +495,7 @@ export class InputService {
   private summary(view: ExecutionView, request: InputRequest, context = this.summaryContext()) {
     const task = context.tasks.get(request.workId);
     const state = this.stateOf(view, request, task);
+    const proposal = this.proposalOf(request, state.state);
     // Повторные остановки вопросом по задаче: сигнал оператору и ведущему.
     // Сводка несёт только счёт и предел (вперёд, по текущему `maxAttempts`).
     const stops = questionStops(context.runs.get(request.workId) ?? [], this.h.config.maxAttempts);
@@ -474,6 +515,16 @@ export class InputService {
       ...(request.normalized ? { normalized: true } : {}),
       ...(request.stale ? { stale: { reason: request.stale.reason, at: request.stale.at } } : {}),
       answers: request.answers.length,
+      // Текущее предложение ответа ведущего (F37): текст — в `input_show`.
+      ...(proposal?.current
+        ? {
+            proposal: {
+              digest: proposal.record.digest,
+              by: proposal.record.by,
+              at: proposal.record.at,
+            },
+          }
+        : {}),
       createdAt: request.createdAt,
       ...(stops.count >= REPEATED_QUESTION_STOPS
         ? {
@@ -484,7 +535,7 @@ export class InputService {
             },
           }
         : {}),
-      ...this.nextOf(request, state.state, task),
+      ...this.nextOf(request, state.state, task, !!proposal?.current),
     };
   }
 
@@ -558,8 +609,14 @@ export class InputService {
     const { engine } = executionOf(this.h);
     return engine.read((view) => {
       const last = request.answers.length;
+      // Предложение ведущего целиком (F37) вместо краткой формы сводки;
+      // `current: false` — вопрос изменился или на него уже ответили:
+      // подтвердить его нельзя.
+      const summary = this.summary(view, request);
+      const proposal = this.proposalOf(request, summary.state);
       return {
-        ...this.summary(view, request),
+        ...summary,
+        proposal: proposal ? { ...proposal.record, current: proposal.current } : undefined,
         question: request.question,
         draft: request.draft,
         criticalPaths: request.criticalHits,
@@ -744,6 +801,152 @@ export class InputService {
     } catch (error) {
       throw toDomain(error);
     }
+  }
+
+  /* -------------------------------------------------------------- */
+  /* Предложение ответа ведущего (F37)                                */
+  /* -------------------------------------------------------------- */
+
+  /**
+   * Ведущий предлагает ответ на вопрос, на который отвечает оператор
+   * (минимумы или approvalMode operator): текст, вариант, вид и обоснование.
+   * Ответа в запросе это не создаёт — его записывает только оператор,
+   * подтвердив предложение (`confirmProposalInTask`) или ответив иначе.
+   * Вопрос, на который ведущий вправе ответить сам, — 409 `LEAD_ANSWERS`.
+   */
+  propose(raw: unknown, actor: InputActorKind) {
+    const input = inputOperationInputs.input_propose.parse(raw);
+    if (actor === 'operator')
+      throw refuse(
+        'OPERATOR_ANSWERS',
+        'Оператор отвечает сам: предложение ответа — операция ведущего агента',
+        403,
+      );
+    const request = this.request(input.requestId);
+    if (request.kind !== 'question' || !request.blocking)
+      throw refuse(
+        'NOT_READY',
+        `Запрос ${request.id} — не блокирующий вопрос: предложение ответа не нужно`,
+      );
+    if (this.leadMayDecide(request))
+      throw refuse(
+        'LEAD_ANSWERS',
+        `На вопрос ${request.id} ведущий отвечает сам (минимумов нет, approvalMode agent): input_answer`,
+      );
+    if (request.version !== input.expectedVersion)
+      throw refuse(
+        'REVISION_CONFLICT',
+        `Запрос ${request.id}: версия ${request.version}, ожидалась ${input.expectedVersion}; перечитайте запрос`,
+      );
+    const task = this.h.store.read().tasks.find((t) => t.id === request.workId);
+    const { state } = this.engine.read((view) => this.stateOf(view, request, task));
+    if (!proposable.has(state))
+      throw refuse(
+        'NOT_READY',
+        `Вопрос ${request.id} в состоянии ${state}: предложение ответа — только пока оператор отвечает (awaiting-answer или review-rejected)`,
+      );
+    if (input.optionId && !request.question.options.some((o) => o.id === input.optionId))
+      throw new DomainError(
+        `Варианта ${input.optionId} у вопроса ${request.id} нет: ${request.question.options.map((o) => o.id).join(', ') || 'вариантов нет'}`,
+        400,
+      );
+    const content = {
+      requestId: request.id,
+      requestVersion: request.version,
+      text: input.text,
+      optionId: input.optionId ?? null,
+      kind: input.kind,
+      reasoning: input.reasoning,
+    };
+    const digestOf = createHash('sha256').update(JSON.stringify(content)).digest('hex');
+    const store = this.h.store;
+    return store.atomic(() => {
+      const held = store.localRecord<InputProposal>(PROPOSAL, undefined, request.id);
+      const changed = held?.digest !== digestOf;
+      if (changed)
+        store.saveLocal(PROPOSAL, undefined, request.id, {
+          ...content,
+          taskId: request.workId,
+          by: actor === 'host' ? 'host' : 'lead',
+          at: new Date().toISOString(),
+          digest: digestOf,
+        } satisfies InputProposal);
+      return {
+        requestId: request.id,
+        proposalDigest: digestOf,
+        requestVersion: request.version,
+        changed,
+        nextStep: `the operator confirms the proposed answer in one click or answers differently in the panel (${hrefs.input(request.workId)}); you never answer this question yourself. A newer input_propose replaces this proposal`,
+      };
+    });
+  }
+
+  /** Запись предложения ведущего как есть (действительность — `proposal` сводки). */
+  proposalRecord(requestId: string) {
+    return this.h.store.localRecord<InputProposal>(PROPOSAL, undefined, requestId);
+  }
+
+  /**
+   * Предложение ведущего по запросу и его действительность: текущее, пока
+   * версия запроса та, что видел ведущий, а ответ даёт оператор.
+   */
+  private proposalOf(request: InputRequest, state?: InputState) {
+    const record = this.h.store.localRecord<InputProposal>(PROPOSAL, undefined, request.id);
+    if (!record) return undefined;
+    const current =
+      record.requestVersion === request.version &&
+      (state === undefined || proposable.has(state)) &&
+      !this.leadMayDecide(request);
+    return { record, current };
+  }
+
+  /**
+   * Оператор подтверждает предложение ведущего (панель, центр внимания):
+   * сервер записывает обычный ответ оператора с содержимым предложения —
+   * тот же путь, что ответ из формы (`answerInTask`). Подтверждение называет
+   * отпечаток показанного предложения и версию запроса: изменённое
+   * предложение или вопрос — 409. Запись предложения снимается в той же
+   * транзакции. Агентского API у этого действия нет.
+   */
+  confirmProposalInTask(taskId: string, requestId: string, raw: unknown) {
+    const request = this.ofTask(taskId, requestId);
+    const v = z.strictObject({ proposalDigest: digest, expectedVersion: version }).parse(raw);
+    const task = this.h.store.read().tasks.find((t) => t.id === request.workId);
+    const { state } = this.engine.read((view) => this.stateOf(view, request, task));
+    const proposal = this.proposalOf(request, state);
+    if (!proposal)
+      throw new DomainError(
+        `Предложения ведущего по вопросу ${requestId} нет: оно уже подтверждено или не записано`,
+        404,
+      );
+    if (proposal.record.digest !== v.proposalDigest)
+      throw refuse(
+        'PROPOSAL_CHANGED',
+        'Ведущий изменил предложение, пока вы читали: прочитайте новое и подтвердите его',
+      );
+    if (!proposal.current || request.version !== v.expectedVersion)
+      throw refuse(
+        'REVISION_CONFLICT',
+        `Вопрос ${requestId} изменился после предложения ведущего: ответьте в карточке задачи`,
+      );
+    const { record } = proposal;
+    const latest = latestAnswer(request);
+    return this.h.store.atomic(() => {
+      const result = this.answerInTask(taskId, requestId, {
+        text: record.text,
+        ...(record.optionId ? { optionId: record.optionId } : {}),
+        kind: record.kind,
+        expectedVersion: request.version,
+        // Повтор подтверждения того же предложения — то же сообщение.
+        idempotencyKey: 'proposal-' + record.digest.slice(0, 40),
+        // Исправление после отклонённого ревью — цепочка ответов оператора, как в форме.
+        ...(latest?.actor.kind === 'operator' && latest.messageRef
+          ? { supersedes: latest.messageRef }
+          : {}),
+      });
+      this.h.store.deleteLocal(PROPOSAL, undefined, requestId);
+      return { ...result, proposalDigest: record.digest };
+    });
   }
 
   /**

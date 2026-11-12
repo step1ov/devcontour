@@ -40,7 +40,7 @@ import {
 import { inputNextText, inputStateLabels, repeatedQuestionText } from '../core/input-labels.ts';
 import { budgetBlocks } from './context.ts';
 import { budgetCardReason } from '../core/usage.ts';
-import { InputService, inputHolds } from './input.ts';
+import { InputService, inputHolds, type InputProposal } from './input.ts';
 import { hrefs } from './panel-links.ts';
 import { inputReviewRounds } from '../harness/input-host.ts';
 import { DiscussionService } from './discussion.ts';
@@ -498,6 +498,11 @@ const inputActionable = new Set([
   'ready-to-apply',
 ]);
 
+/** Предложение ведущего словами оператора: ответ, вид, вариант и обоснование. */
+const proposalPrompt = (p: InputProposal, label: string | undefined) =>
+  `Ответ ведущего${p.kind === 'requirement-change' ? ' (изменение требований)' : ''}` +
+  `${label ? `, вариант «${label}»` : ''}:\n${p.text}\n\nОбоснование ведущего:\n${p.reasoning}`;
+
 /**
  * S15. Вопрос исполнителя (`InputService.list`: состояние и кто действует).
  * Предмет и появление — запрос: новая попытка задаёт новый запрос. Раунд
@@ -512,7 +517,8 @@ const inputSource: AttentionSourceRule = {
     const { h } = engineOf(ctx);
     const { engine } = executionOf(h);
     const operatorMode = h.config.approvalMode === 'operator';
-    return new InputService(h, ctx.root)
+    const service = new InputService(h, ctx.root);
+    return service
       .list()
       .requests.filter((r) => inputActionable.has(r.state))
       .map((r): Candidate => {
@@ -540,6 +546,13 @@ const inputSource: AttentionSourceRule = {
           operator &&
           operatorMode &&
           (r.state === 'ready-to-apply' || (rejected && !r.problems?.length));
+        // Текущее предложение ответа ведущего (F37): оператор подтверждает его
+        // одним действием; ответить иначе — прежнее «Ответить».
+        const held = answer && r.proposal ? service.proposalRecord(r.requestId) : undefined;
+        const proposal = held && held.digest === r.proposal?.digest ? held : undefined;
+        const proposalLabel = proposal
+          ? options.find((o) => o.id === proposal.optionId)?.label
+          : undefined;
         let findings = '';
         if (rejected)
           engine.read((v) => {
@@ -549,7 +562,10 @@ const inputSource: AttentionSourceRule = {
         return {
           sourceKey: `input:${r.requestId}`,
           occurrenceId: r.requestId,
-          sourceVersion: `${r.version}:${r.state}:${r.round ?? 0}`,
+          // Новое предложение ведущего — новая версия карточки.
+          sourceVersion:
+            `${r.version}:${r.state}:${r.round ?? 0}` +
+            (proposal ? `:p${proposal.digest.slice(0, 12)}` : ''),
           source: 'input',
           category: operator ? 'question' : 'technical',
           actor: operator ? 'operator' : 'lead',
@@ -568,11 +584,25 @@ const inputSource: AttentionSourceRule = {
             (r.questionStops ? `${repeatedQuestionText(r.questionStops)} ` : '') +
               (rejected ? `Ревью отклонило ответ (раунд ${r.round}): ${findings} — ` : '') +
               (question ? `${question} — ` : '') +
+              (proposal
+                ? `Ведущий предлагает ответ${proposalLabel ? ` (вариант «${proposalLabel}»)` : ''}: ${proposal.text} — `
+                : '') +
               `Дальше: ${inputNextText({ ...r, operatorMode })}.`,
           ),
           since: r.createdAt,
           subject: { kind: 'request', id: r.requestId, href: hrefs.input(r.taskId) },
           actions: [
+            ...(proposal
+              ? [
+                  {
+                    id: 'confirm-proposal',
+                    kind: 'domain' as const,
+                    label: 'Подтвердить ответ ведущего',
+                    input: 'confirm' as const,
+                    prompt: proposalPrompt(proposal, proposalLabel),
+                  },
+                ]
+              : []),
             ...(answer
               ? [
                   {
@@ -618,6 +648,7 @@ const inputSource: AttentionSourceRule = {
             requestId: r.requestId,
             expectedVersion: r.version,
             ...(rejected && r.round !== undefined ? { rejectedRound: r.round } : {}),
+            ...(proposal ? { proposalDigest: proposal.digest } : {}),
           },
         };
       });
@@ -1781,6 +1812,7 @@ const ownCas = new Set([
   'plan/approve',
   'discussion-needs-answer/answer',
   'input/answer',
+  'input/confirm-proposal',
   'input/apply',
   'corpus/approve',
   'changeset/deploy-preview',
@@ -1896,6 +1928,23 @@ const actionHandlers: Record<string, (a: ActContext) => ActOutcome> = {
         ...(input.kind ? { kind: input.kind } : {}),
         expectedVersion: b.expectedVersion,
         ...(key ? { idempotencyKey: key } : {}),
+      }),
+    };
+  },
+  // Подтверждение предложения ведущего (F37): ответ оператора с содержимым
+  // показанного предложения; сверка отпечатка и версии — в операции.
+  'input/confirm-proposal': ({ ctx, item, root }) => {
+    const b = basisOf<{
+      taskId: string;
+      requestId: string;
+      expectedVersion: number;
+      proposalDigest?: string;
+    }>(item);
+    if (!b.proposalDigest) throw new DomainError('Предложения ведущего нет', 404);
+    return {
+      result: new InputService(ctx.h!, root).confirmProposalInTask(b.taskId, b.requestId, {
+        proposalDigest: b.proposalDigest,
+        expectedVersion: b.expectedVersion,
       }),
     };
   },

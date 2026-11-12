@@ -47,7 +47,10 @@ test('S15 вопрос исполнителя: забирает задачу, о
     // ссылка — адрес панели, а не путь, которого у панели нет.
     assert.ok(card.reason.endsWith('Дальше: ответьте на вопрос в карточке задачи.'), card.reason);
     assert.doesNotMatch(card.reason, /answer in the panel|\/tasks\//);
-    assert.equal(request.next, `answer in the panel: /?view=boards&tab=list&task=${taskId}#input`);
+    assert.equal(
+      request.next,
+      `answer in the panel: /?view=boards&tab=list&task=${taskId}#input; the lead may propose an answer (input_propose) for the operator to confirm`,
+    );
     assert.deepEqual(card.impact.taskIds, [taskId]);
     assert.equal(card.impact.waiting, 1, `${dependent} waits for the asking task`);
     // Задача, которую держит вопрос, своей карточки не даёт.

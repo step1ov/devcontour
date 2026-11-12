@@ -546,7 +546,11 @@ export function AttentionCard({
           a.prompt && (
             <details key={a.id} className="text-sm">
               <summary className="text-muted-foreground cursor-pointer">
-                {a.round !== undefined ? 'Находки ревью полностью' : 'Вопрос полностью'}
+                {a.round !== undefined
+                  ? 'Находки ревью полностью'
+                  : a.id === 'confirm-proposal'
+                    ? 'Ответ ведущего и обоснование'
+                    : 'Вопрос полностью'}
               </summary>
               <p className="mt-1 mb-0 whitespace-pre-wrap">{a.prompt}</p>
             </details>

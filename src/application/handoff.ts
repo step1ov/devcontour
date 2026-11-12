@@ -750,7 +750,15 @@ function inputStep(ctx: HostContext, taskId: string): HandoffHostNext | undefine
       ...base,
       ...(summary.actor === 'lead'
         ? { code: 'answer-lead' as const, params: { version: summary.version, ...stops } }
-        : { code: 'answer-operator' as const, params: { floors: summary.floors, ...stops } }),
+        : {
+            code: 'answer-operator' as const,
+            params: {
+              floors: summary.floors,
+              version: summary.version,
+              proposed: !!summary.proposal,
+              ...stops,
+            },
+          }),
     });
   return withDetail(h, {
     action: 'apply-input',

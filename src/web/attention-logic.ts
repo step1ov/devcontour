@@ -83,6 +83,8 @@ const statusTexts: Record<string, string> = {
   'queue/resume': 'Очередь запущена.',
   'wait/resume': 'Очередь запущена.',
   'input/answer': 'Ответ сохранён. Дальше ведущий готовит контекст новой попытки.',
+  'input/confirm-proposal':
+    'Ответ ведущего подтверждён. Дальше ведущий готовит контекст новой попытки.',
   'input/apply': 'Ответ применён: он уйдёт в следующую попытку.',
   'changeset/accept': 'Изменение принято.',
   'changeset/deploy-preview': 'Выкладка preview начата.',

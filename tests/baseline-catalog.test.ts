@@ -82,6 +82,7 @@ const operations = [
   'input_list',
   'input_show',
   'input_answer',
+  'input_propose',
   'input_context',
   'input_review',
   'input_target',

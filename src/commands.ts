@@ -615,6 +615,7 @@ async function main() {
     'input-list',
     'input-show',
     'input-answer',
+    'input-propose',
     'input-context',
     'input-review',
     'input-target',
@@ -1263,6 +1264,20 @@ async function main() {
               text: option('--text', ''),
               ...(args.includes('--option') ? { optionId: option('--option', '') } : {}),
               ...(args.includes('--kind') ? { kind: option('--kind', '') } : {}),
+              expectedVersion,
+            },
+            actorOf(),
+          );
+        else if (operation === 'input-propose')
+          // Предложение ответа — действие ведущего (`--by host`); подтверждает
+          // его оператор в панели, CLI-подтверждения нет.
+          result = service.propose(
+            {
+              requestId: request,
+              text: option('--text', ''),
+              ...(args.includes('--option') ? { optionId: option('--option', '') } : {}),
+              ...(args.includes('--kind') ? { kind: option('--kind', '') } : {}),
+              reasoning: option('--reasoning', ''),
               expectedVersion,
             },
             actorOf(),

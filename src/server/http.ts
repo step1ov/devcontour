@@ -816,6 +816,10 @@ export async function serve(
             if (parts[5] === 'answer') result = input2.answerInTask(taskId, requestId, input);
             else if (parts[5] === 'apply') result = input2.applyInTask(taskId, requestId, input);
             else if (parts[5] === 'cancel') result = input2.cancelInTask(taskId, requestId, input);
+            // Подтверждение предложения ведущего (F37) — ответ оператора с его
+            // содержимым; агентский API этого действия не имеет.
+            else if (parts[5] === 'confirm-proposal')
+              result = input2.confirmProposalInTask(taskId, requestId, input);
             else throw new DomainError('Команда не найдена', 404);
           } else if (parts[1] === 'tasks') {
             // Кнопки панели — действие человека (`operator`).

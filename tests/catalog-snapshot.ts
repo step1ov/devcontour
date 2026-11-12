@@ -136,5 +136,9 @@
 // otherOwnersHint без repositoryId и ожидание verification задания ChangeSet;
 // описание session_handoff — boardId однозначным префиксом и
 // host.verifications; прочие операции байтово прежние.
-export const CATALOG_DIGEST = '5cf131144bb95835616e9810b5c7ba24e943492886209b6e8512eaa2c8b1504c';
+// Намеренное изменение: новая пишущая операция input_propose (предложение
+// ответа ведущего на вопрос, на который отвечает оператор) после
+// input_answer; описания input_answer и session_handoff называют её и
+// params.proposed шага answer-operator; прочие операции байтово прежние.
+export const CATALOG_DIGEST = '529c31ee49be52673b657a926ff8066017654b7fbfe0c87ada91d518665bdc13';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';
