@@ -16,6 +16,8 @@ const EMPTY = {
   setupProposals: 0,
   expansions: 0,
   discussions: 0,
+  standIns: 0,
+  rulings: 0,
   attentionMarks: 0,
   inputRequests: 0,
   openInputRequests: 0,
@@ -122,6 +124,8 @@ test('compat:new-state: каждая запись новой версии наз
       setupProposals: 1,
       expansions: 1,
       discussions: 2,
+      standIns: 0,
+      rulings: 0,
       attentionMarks: 1,
       inputRequests: 2,
       openInputRequests: 1,
@@ -142,6 +146,51 @@ test('compat:new-state: каждая запись новой версии наз
     const data = dataDoctor(f.h.config, f.root);
     assert.deepEqual(found(data.checks), check);
     assert.deepEqual(doctorState(f.h.config, f.root).newState, check);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('compat:new-state: решения за владельца и решения владельца названы с последствиями отката', () => {
+  const f = fixture();
+  try {
+    const board = f.h.createBoard('Board');
+    const task = f.h.addTask(board.id, input());
+    const d = new DiscussionService(f.h);
+    const posted = d.post(
+      {
+        taskId: task.id,
+        kind: 'stand-in',
+        text: 'Решение',
+        standIn: { question: 'Вопрос', impact: 'Влияние' },
+        idempotencyKey: 'doctor-si-1',
+        expectedVersion: 0,
+      },
+      'lead',
+    );
+    d.rule(
+      {
+        messageId: posted.message.id,
+        ruling: 'reversed',
+        text: 'Иначе',
+        idempotencyKey: 'doctor-si-2',
+        expectedVersion: posted.version,
+      },
+      'operator',
+    );
+    const store = new Store(join(f.root, 'state.sqlite'), undefined, false, undefined, true);
+    let inventory;
+    try {
+      inventory = newStateInventory(store, store.read(), f.root);
+    } finally {
+      store.close();
+    }
+    assert.equal(inventory.standIns, 1);
+    assert.equal(inventory.rulings, 1);
+    assert.match(
+      newStateCheck(inventory).detail,
+      /решения за владельца: 1, решений владельца по ним 1 — .*discussion_inbox, session_handoff и весь центр внимания/,
+    );
   } finally {
     f.cleanup();
   }

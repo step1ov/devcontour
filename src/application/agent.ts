@@ -38,6 +38,7 @@ import { checksQuery, taskChecks } from './checks.ts';
 import { CheckCorpus } from '../core/check-store.ts';
 import { checkJsonBytes, operationCatalog, recoveryActions } from 'devcontour-harness';
 import { applyCases } from '../runner/recovery.ts';
+import { proveScenario, scenarioProofInput } from '../runner/scenario-proof.ts';
 import { ContractChanges } from '../runner/contract-change.ts';
 import { contractProposal, limitsMessage, proposalLimitIssues } from '../runner/agent-control.ts';
 import { queueStopOf, quietAttempts, quietOperations } from './queue-stop.ts';
@@ -94,6 +95,7 @@ export const agentInputs = {
     .object({ taskId: id, member: z.string().regex(/^[A-Za-z0-9_.@-]{1,80}$/) })
     .strict(),
   task_story: storyBindingInput,
+  task_scenario_proof: scenarioProofInput,
   board_correct: z
     .object({
       boardId: id,
@@ -174,6 +176,7 @@ export const asyncOperations = new Set<string>([
   'contract_change_revise',
   'input_context',
   'input_review',
+  'task_scenario_proof',
 ]);
 export type AgentOperation = keyof typeof agentInputs;
 export const agentOperations = Object.keys(agentInputs) as AgentOperation[];
@@ -182,7 +185,7 @@ export const agentRequest = z
   .strict();
 export const descriptions: Record<AgentOperation, string> = {
   preparation_status:
-    'Read product and architecture stages, exact revisions, operator feedback and linked development. Available before project setup.',
+    'Read product and architecture stages, exact revisions, operator feedback and linked development. Available before project setup. current.product is the latest revision and may be an unapproved draft; development is bound to the last approved one (binding.productNumber). While a newer revision is pending, current.boundProduct is that approved revision and binding.pendingProduct says what its approval would change. Plan tasks from the approved revision: docs/changes/<key>/product.md shows it, product.draft.md the pending one.',
   preparation_create:
     'Create a product change. Product and architecture require explicit operator decisions in the web panel before development.',
   preparation_activate:
@@ -194,7 +197,7 @@ export const descriptions: Record<AgentOperation, string> = {
   preparation_expand:
     'Move a quick change to the full route when it needs several components or dependent tasks. Keeps the instruction, criterion and all revisions; explain why.',
   preparation_product:
-    'Save a new immutable product draft with optimistic concurrency: personas with goals and pains, releases as the scope boundary, and features whose scenarios name a persona and whose acceptance criteria name a release. Resolve ambiguity the way the relevant persona would. Never approves it; a revision invalidates the prior architecture for new work.',
+    'Save a new immutable product draft with optimistic concurrency: personas with goals and pains, releases as the scope boundary, and features whose scenarios name a persona and whose acceptance criteria name a release. Resolve ambiguity the way the relevant persona would. Never approves it. Drafts and revisions in review do not touch running work: development stays bound to the last approved revision until the operator approves a newer one. Plan from the approved revision until then. A newer approved revision that only moves acceptance criteria between the existing, unchanged releases keeps the approved architecture, references, concept and design and the bindings of tasks in flight; any other change, release edits included, requires the operator to approve architecture and design again, and until then tasks of the change are not issued.',
   preparation_architecture:
     'Save architecture, justified stack and structured C1/C2 only after operator product approval. Does not approve development.',
   preparation_references:
@@ -204,7 +207,7 @@ export const descriptions: Record<AgentOperation, string> = {
   preparation_design:
     'Save the third design step after the operator approved the concept: the palette, semantic tokens, guidelines, what is shared and what differs per channel, and the handoff package. Screen layouts stay per-feature UI contracts inside development.',
   preparation_submit:
-    'Validate the current draft and send it to the operator for approval. Unresolved questions or incomplete C1/C2 block submission.',
+    'Validate the current draft and send it to the operator for approval. Unresolved questions or incomplete C1/C2 block submission, as does a draft built on an earlier upstream revision (a product revision that only moves criteria between existing releases counts as the same upstream). Submission does not change what development is bound to; only the operator approval does.',
   preparation_progress:
     'Append a short note about the work in progress so the panel shows the session is active before any revision exists. Context only; never approves or reports evidence.',
   preparation_question:
@@ -276,6 +279,8 @@ export const descriptions: Record<AgentOperation, string> = {
   task_assign: 'Assign a task to a team member. Assignment is not a distributed lease.',
   task_story:
     "Bind done tasks to an INTENT story without changing their approved spec, when they link the story's detailed REQs but not REQ-intent-<story>. Every detailed REQ of each task must be in that story's criteria; the story digest is pinned from committed HEAD and a reason is journaled. intent_report marks these tasks boundAfterAcceptance: the story text was not in the author's prompt. Drafts get the REQ-intent link in requirements instead.",
+  task_scenario_proof:
+    "Prove a release scenario of a done story task with a test that already exists, without a writer and without changing its approved spec: runs the named test gate at the task's accepted result SHA (same execution as integration) and records the proof only if the named testId ran and passed there. Refused before the run unless the scenario is a non-deferred check of a feature that a confirmed story of the task serves (a proof the release would not count). intent_report and product_view count it as scenario evidence with afterAcceptance: true. A missing or failing testcase is refused with the reason; a behaviour without a test needs a task that writes it. Local to this copy (Git sync does not carry it). In approvalMode operator the operator runs CLI scenario-proof.",
   board_correct:
     'Create a correction after board acceptance, preserving history and recalculating transitive impact.',
   changeset_create:
@@ -301,9 +306,9 @@ export const descriptions: Record<AgentOperation, string> = {
   discussion_read:
     'Read a task discussion page in seq order: forward from cursor (the last seq returned; follow nextCursor), or backward with latest: true or before: <seq> (follow previousCursor). version is the thread version for writes. Notes, change requests and their dispositions are local history of the task owner: they never change the task, its approvals, queue or attempts, and Git sync does not carry them.',
   discussion_post:
-    'Post a note or a change request to a task discussion as the lead. Needs idempotencyKey (a repeat returns the same message, another payload under it is refused) and expectedVersion (the thread version you read; a mismatch is 409 — re-read). Text: up to 16 KiB UTF-8, no control characters other than newline and tab; the reply carries an excerpt of long text. supersedes corrects your own latest version of a message. A change request does not alter an approved or accepted task: apply it through a new revision. kind answer answers a writer question: input {requestId, expectedVersion (the request version, which is the check instead of the thread version), optionId?, kind?}; the lead rule of input_answer applies, the answer text lives once in the request and the message links its revision; an answer to a question already cancelled or superseded is kept as discussion history (input.accepted false) and resumes nothing; an applied answer is not corrected (409).',
+    'Post a note or a change request to a task discussion as the lead. Needs idempotencyKey (a repeat returns the same message, another payload under it is refused) and expectedVersion (the thread version you read; a mismatch is 409 — re-read). Text: up to 16 KiB UTF-8, no control characters other than newline and tab; the reply carries an excerpt of long text. supersedes corrects your own latest version of a message. A change request does not alter an approved or accepted task: apply it through a new revision. kind answer answers a writer question: input {requestId, expectedVersion (the request version, which is the check instead of the thread version), optionId?, kind?}; the lead rule of input_answer applies, the answer text lives once in the request and the message links its revision; an answer to a question already cancelled or superseded is kept as discussion history (input.accepted false) and resumes nothing; an applied answer is not corrected (409). kind stand-in records a decision you took on behalf of the owner without their answer (a product choice, a scope cut, a smallest-path default): text is the decision and why, standIn {question, impact} names the open question of the owner and what depends on it (up to 2 KiB each); post it on the task whose spec or contract carries the decision, as soon as you take it. Only the owner confirms or reverses it (panel attention center or devcontour decision-confirm / decision-reverse); this API has no such operation. A reversal arrives as a change request in discussion_inbox with the alternative of the owner: handle it with discussion_resolve (accepted or needs-answer; rejected is refused). The tool itself records a stand-in when the lead answers a writer question with kind requirement-change or cancels a follow-up (assumption accepted). A stand-in can be corrected (supersedes) until the owner rules; then it is final.',
   discussion_resolve:
-    'Record how a change request was handled: accepted (refs to the board revision or tasks created after the request, or to a draft task edited after it, alone or with its unaccepted revision), rejected with a reason, or needs-answer (the operator answers in the panel and the request returns to discussion_inbox). Only the latest version of a request is handled; accepted and rejected are final. expectedVersion is the thread version from discussion_inbox. Reading a request is not handling it.',
+    'Record how a change request was handled: accepted (refs to the board revision or tasks created after the request, or to a draft task edited after it, alone or with its unaccepted revision), rejected with a reason, or needs-answer (the operator answers in the panel and the request returns to discussion_inbox). Only the latest version of a request is handled; accepted and rejected are final. expectedVersion is the thread version from discussion_inbox. Reading a request is not handling it. A change request with ruling reversed (the owner reversed a stand-in decision) cannot be rejected (403 owner-ruling): accept it with refs to the new revision or task, or ask the owner with needs-answer.',
   discussion_inbox:
     'List change requests waiting for the lead across tasks, oldest event first: the latest version of each request without a disposition, or answered by the operator after needs-answer (reopened). Each new operator answer is a new event: the request may appear again, later in the order, even on a later page of the same pass. Each entry is bounded: an excerpt, textBytes, truncated and the thread version for discussion_resolve; read the full text with discussion_read. Follow nextCursor.',
   input_list:
@@ -327,7 +332,7 @@ export const descriptions: Record<AgentOperation, string> = {
   input_supersede:
     'Supersede a writer question once the spec of its task has changed: reopen and respecify the task, then supersede with the same task and carry the answer (input_context, input_review, input_target, input_apply) while the task is a draft, then approve it: the approval keeps the carried answer when the spec is unchanged after the carry. A superseded question does not hold the task, so a carry after the approval needs a queue pause. The result nextStep names the order. Refused with 409 SPEC_UNCHANGED while the spec is unchanged; a blocking question the lead may not answer is superseded by the operator (403 OPERATOR_ANSWERS). The old task is not resumed by a requirement change without carry. A non-blocking follow-up may also be superseded by a newer task of the same board, for example the replacement created by board_correct.',
   attention_list:
-    'List the attention center: one ordered list of current items that need someone to act, from the same source rules as the panel (preparation questions and stage reviews, writer questions, stopped tasks, lead job decisions, discussion requests, pauses, waits, budgets, contract changes, ChangeSet acceptance, preview problems, stalls). Default actor lead; each item has sourceKey, occurrenceId, sourceVersion, category, actor, reason, impact (covered tasks and the tasks waiting on them), subject and since. A cascade is one root item. Links open the panel at the subject (task list, the stage of the question, the discussion message). Operator domain actions carry the full question (prompt) and answer choices. Reading is not handling: act through the source operation (preparation_*, discussion_*, input_*, task_retry, workflow_*). Read-only; operator read marks are not included. Available before setup.',
+    'List the attention center: one ordered list of current items that need someone to act, from the same source rules as the panel (preparation questions and stage reviews, writer questions, stopped tasks, lead job decisions, discussion requests, stand-in decisions awaiting the owner, pauses, waits, budgets, contract changes, ChangeSet acceptance, preview problems, stalls). Default actor lead; each item has sourceKey, occurrenceId, sourceVersion, category, actor, reason, impact (covered tasks and the tasks waiting on them), subject and since. A cascade is one root item. Links open the panel at the subject (task list, the stage of the question, the discussion message). Operator domain actions carry the full question (prompt) and answer choices. Reading is not handling: act through the source operation (preparation_*, discussion_*, input_*, task_retry, workflow_*). Read-only; operator read marks are not included. Available before setup.',
   preview_status:
     'Read the local preview: which verified release serves the URL, its states (built, deployed, healthy, confirmed or unconfirmed), and past deployments with their errors. Deploying and rolling back are separate controlled actions through the CLI or panel.',
 };
@@ -555,6 +560,15 @@ export class AgentService {
         return this.bounded(await new InputService(this.h, this.root).context(input));
       case 'input_review':
         return this.bounded(await new InputService(this.h, this.root).review(input));
+      case 'task_scenario_proof':
+        // Что существующий тест проверяет сценарий — решение того, кто
+        // утверждает: в operator mode агент его сам не записывает.
+        if (this.h.config.approvalMode === 'operator')
+          throw new DomainError(
+            'В approvalMode operator доказательство сценария записывает оператор: devcontour scenario-proof --task ID --gate G --scenario ... --test-id ... --reason ...',
+            409,
+          );
+        return this.bounded(await proveScenario(this.h, this.root, input, 'agent'));
       default:
         throw new DomainError('Неизвестная операция', 400);
     }

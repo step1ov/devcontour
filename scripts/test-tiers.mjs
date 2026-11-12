@@ -40,6 +40,8 @@ export const fileSeconds = {
   'input-races': 209,
   enterprise: 207,
   'lead-joint-flight': 198,
+  // Оценка по отдельному прогону (~45 с) с запасом на нагрузку полной проверки.
+  'scenario-proof': 190,
   'respecify-attempts': 171,
   'property-gate': 168,
   workspace: 165,
@@ -108,6 +110,8 @@ export const slowTests = {
   'demo-approval-mode': ['demo --approval-mode writes agent or operator'],
   'quick-result': true,
   'quick-route-e2e': true,
+  // Обе проверки исполняют доски и gates на принятом SHA.
+  'scenario-proof': true,
   'board-coverage': [
     'Приёмка доски выполняет непокрытые gates один раз на итоговом SHA и принимает',
     'Провал непокрытого gate на итоговом SHA доски — отказ приёмки с названным gate;',

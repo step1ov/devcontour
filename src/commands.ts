@@ -8,6 +8,7 @@ import {
 import { startWorkspace, requirePreparation, preparationStore } from './runner/start.ts';
 import { PreparationAgent, WorkspaceAgent } from './application/preparation-agent.ts';
 import { preparationInputs } from './core/preparation-model.ts';
+import { proveScenario } from './runner/scenario-proof.ts';
 import { IntentService } from './runner/intent.ts';
 import { engineeringEvals } from './runner/engineering-evals.ts';
 import { compareEvaluations } from './application/eval-comparison.ts';
@@ -63,6 +64,8 @@ import {
 } from './runner/setup.ts';
 import { markQuickSetup, quickFacts } from './runner/quick.ts';
 import { InputService } from './application/input.ts';
+import { DiscussionService } from './application/discussion.ts';
+import { randomUUID } from 'node:crypto';
 import { acceptBoard, reviewContract, reviewPlan } from './runner/agent-control.ts';
 import { specDigest } from './core/service.ts';
 import { WorkspaceRunner } from './runner/workspace.ts';
@@ -622,10 +625,14 @@ async function main() {
     'input-apply',
     'input-cancel',
     'input-supersede',
+    'decisions',
+    'decision-confirm',
+    'decision-reverse',
     'edit-task',
     'edit-board',
     'task-feature',
     'task-story',
+    'scenario-proof',
     'cancel',
     'correct',
   ];
@@ -1245,6 +1252,45 @@ async function main() {
           result = await startQueue(h);
           if ((result as { paused: boolean }).paused) process.exitCode = 1;
         }
+      } else if (operation === 'decisions' || operation.startsWith('decision-')) {
+        // Решения ведущего за владельца. Подтвердить и отменить может только
+        // владелец: команда CLI — его действие (`operator`), варианта
+        // `--by host` нет, а агентский API этой операции не имеет.
+        if (args.includes('--by'))
+          throw new Error(
+            'Решение за владельца подтверждает или отменяет только владелец: без --by',
+          );
+        const service = new DiscussionService(h);
+        if (operation === 'decisions')
+          result = service.standIns(500, args.includes('--all')).map((row) => ({
+            messageId: row.message.id,
+            taskId: row.message.taskId,
+            question: row.message.standIn?.question,
+            decision: row.message.text,
+            impact: row.message.standIn?.impact,
+            createdAt: row.message.createdAt,
+            state: row.ruling?.ruling ?? 'unconfirmed',
+            ...(row.ruling ? { rulingId: row.ruling.id, ruledAt: row.ruling.createdAt } : {}),
+            version: row.version,
+          }));
+        else if (operation === 'decision-confirm' || operation === 'decision-reverse') {
+          const messageId = option('--message', '');
+          const text = args.includes('--text') ? option('--text', '') : undefined;
+          result = service.rule(
+            {
+              messageId,
+              ruling: operation === 'decision-confirm' ? 'confirmed' : 'reversed',
+              ...(text ? { text } : {}),
+              // Версия треда по умолчанию — текущая: решение по последней
+              // версии проверяет сама операция (исправленное — 409).
+              expectedVersion: args.includes('--version')
+                ? Number(option('--version', '0'))
+                : (service.standInVersion(messageId) ?? 0),
+              idempotencyKey: args.includes('--key') ? option('--key', '') : 'cli-' + randomUUID(),
+            },
+            'operator',
+          );
+        } else throw new Error('Неизвестная команда: ' + operation);
       } else if (operation.startsWith('input-')) {
         // Вопросы исполнителя: CLI — действие человека (`operator`); ведущий
         // агент передаёт `--by host` и подчиняется правилу ведущего.
@@ -1374,6 +1420,21 @@ async function main() {
             ...(args.includes('--repository-id')
               ? { repositoryId: option('--repository-id', '') }
               : {}),
+          },
+          'operator',
+        );
+      } else if (operation === 'scenario-proof') {
+        if (!args.includes('--reason') || !option('--reason', '').trim())
+          throw new Error('Укажите --reason: почему существующий тест проверяет этот сценарий');
+        result = await proveScenario(
+          h,
+          root,
+          {
+            taskId: option('--task', ''),
+            gate: option('--gate', ''),
+            scenario: option('--scenario', ''),
+            testId: option('--test-id', ''),
+            reason: option('--reason', ''),
           },
           'operator',
         );

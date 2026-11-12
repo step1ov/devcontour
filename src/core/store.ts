@@ -919,6 +919,22 @@ export class Store {
         ).n;
     return count;
   }
+  /** Решения за владельца и решения владельца по ним во всех схемах (опись doctor). */
+  standInCounts(): { standIns: number; rulings: number } {
+    const schemas = ['main', ...(this.components?.locations.map((l) => l.schema) ?? [])];
+    const out = { standIns: 0, rulings: 0 };
+    for (const schema of schemas)
+      if (this.discussionTable(schema, false)) {
+        const row = this.db
+          .prepare(
+            `SELECT sum(kind='stand-in') AS s, sum(json_extract(data,'$.ruling') IS NOT NULL) AS r FROM ${schema}.discussion`,
+          )
+          .get() as { s: number | null; r: number | null };
+        out.standIns += row.s ?? 0;
+        out.rulings += row.r ?? 0;
+      }
+    return out;
+  }
   private discussionRows(sql: string, owner: string | undefined, ...args: (string | number)[]) {
     const schema = this.syncSchema(owner);
     if (!this.discussionTable(schema, false)) return [];
@@ -1015,6 +1031,46 @@ export class Store {
       owner,
       id,
     )[0];
+  }
+  /** Решение владельца по решению за него `id`, если есть. */
+  discussionRuling(owner: string | undefined, id: string) {
+    return this.discussionRows(
+      "SELECT seq,data FROM $schema.discussion WHERE reply_to=? AND author='operator' AND json_extract(data,'$.ruling') IS NOT NULL ORDER BY seq LIMIT 1",
+      owner,
+      id,
+    )[0];
+  }
+  /**
+   * Решения за владельца схемы: последние версии (без исправления), старые
+   * первыми (`newestFirst` — новые первыми, для истории); без `all` — только без решения владельца. Не больше `limit`.
+   */
+  discussionStandIns(owner: string | undefined, limit: number, all: boolean, newestFirst = false) {
+    const schema = this.syncSchema(owner);
+    if (!this.discussionTable(schema, false)) return [];
+    const ruled = (alias: string) =>
+      `SELECT ${alias}.seq FROM ${schema}.discussion ${alias} WHERE ${alias}.reply_to=d.id AND ${alias}.author='operator' AND json_extract(${alias}.data,'$.ruling') IS NOT NULL ORDER BY ${alias}.seq LIMIT 1`;
+    const rows = this.db
+      .prepare(
+        `SELECT d.seq, d.data, (${ruled('r')}) AS ruling_seq,
+           (SELECT x.data FROM ${schema}.discussion x WHERE x.seq=(${ruled('q')})) AS ruling
+         FROM ${schema}.discussion d
+         WHERE d.kind='stand-in'
+           AND NOT EXISTS (SELECT 1 FROM ${schema}.discussion s WHERE json_extract(s.data,'$.supersedes')=d.id)
+           AND (? = 1 OR NOT EXISTS (${ruled('n')}))
+         ORDER BY d.seq ${newestFirst ? 'DESC' : 'ASC'} LIMIT ?`,
+      )
+      .all(all ? 1 : 0, limit) as {
+      seq: number;
+      data: string;
+      ruling_seq: number | null;
+      ruling: string | null;
+    }[];
+    return rows.map((r) => ({
+      message: { ...(JSON.parse(r.data) as object), seq: r.seq },
+      ...(r.ruling && r.ruling_seq !== null
+        ? { ruling: { ...(JSON.parse(r.ruling) as object), seq: r.ruling_seq } }
+        : {}),
+    }));
   }
   /** Последняя обработка обращения `id`, если есть. */
   discussionLatestDisposition(owner: string | undefined, id: string) {

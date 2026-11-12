@@ -259,6 +259,9 @@ export interface NewStateInventory {
   setupProposals: number;
   expansions: number;
   discussions: number;
+  /** Решения за владельца (`kind: stand-in`) и решения владельца по ним (`ruling`). */
+  standIns: number;
+  rulings: number;
   attentionMarks: number;
   inputRequests: number;
   openInputRequests: number;
@@ -278,6 +281,7 @@ export function newStateInventory(
     setupProposals: changes.reduce((n, c) => n + (c.setup?.length ?? 0), 0),
     expansions: changes.filter((c) => c.expanded).length,
     discussions: store.discussionCount(),
+    ...store.standInCounts(),
     attentionMarks: store.localEntries(ATTENTION_NAMESPACE).length,
     inputRequests: requests.length,
     openInputRequests: requests.filter(
@@ -305,6 +309,10 @@ export function newStateCheck(inventory: NewStateInventory): Check {
     parts.push(
       `обсуждения задач: сообщений ${i.discussions} — читает DevContour после 0.4.0-alpha.17 с движком 0.1.0-alpha.36 и новее; 0.4.0-alpha.17 таблицу не читает: после отката обсуждения не видны, после повторного обновления видны снова`,
     );
+  if (i.standIns || i.rulings)
+    parts.push(
+      `решения за владельца: ${i.standIns}, решений владельца по ним ${i.rulings} — читает DevContour после 0.4.0-alpha.33; 0.4.0-alpha.33 строгой схемой отклоняет такие сообщения: не открывается тред задачи с решением за владельца или его подтверждением, а после отмены владельцем (обращение к ведущему с полем ruling) — ещё discussion_inbox, session_handoff и весь центр внимания`,
+    );
   if (i.attentionMarks)
     parts.push(
       `отметки центра внимания: ${i.attentionMarks} — читает DevContour после 0.4.0-alpha.17 с движком 0.1.0-alpha.37; 0.4.0-alpha.17 их не читает, на работу они не влияют`,
@@ -322,7 +330,7 @@ export function newStateCheck(inventory: NewStateInventory): Check {
     status: 'passed',
     detail: parts.length
       ? `${parts.join('; ')}. ${ROLLBACK}`
-      : 'Записей быстрого маршрута, обсуждений задач, отметок центра внимания, вопросов исполнителя и отметки quick-setup.json нет',
+      : 'Записей быстрого маршрута, обсуждений задач, решений за владельца, отметок центра внимания, вопросов исполнителя и отметки quick-setup.json нет',
   };
 }
 
@@ -1090,28 +1098,30 @@ export function checkoutsCheck(config: Config, root: string): Check {
  * `contractSize`; готовность не снимает.
  */
 export function contractSizeChecks(contracts: DevContourState['contracts']): Check[] {
-  return contracts
-    // doctor читает состояние до разбора схемой: запись без текста документа
-    // (незавершённая или чужой формы) не мерится, а не роняет весь doctor.
-    .filter((c) => typeof c.content === 'string' && !supersededBy(contracts, c.id))
-    .flatMap((c) => {
-      const size = contractSize(c.content);
-      // Текст отказа регистрации («не будет зарегистрирован») здесь неверен:
-      // контракт уже зарегистрирован и действует, отказ получит следующая
-      // редакция.
-      const detail = size.refusal
-        ? `документ — ${thousands(size.chars)} знаков при пределе ${thousands(size.max)}, длиннее на ${thousands(size.chars - size.max)}. Контракт зарегистрирован и действует, но следующая его редакция будет отклонена до ревью. ${CONTINUATION}.`
-        : size.warning;
-      return detail
-        ? [
-            {
-              id: `contract-size:${c.id}`,
-              status: 'degraded' as const,
-              detail: `Контракт ${c.id} (${c.title}${c.source ? `, ${c.source}` : ''}): ${detail}`,
-            },
-          ]
-        : [];
-    });
+  return (
+    contracts
+      // doctor читает состояние до разбора схемой: запись без текста документа
+      // (незавершённая или чужой формы) не мерится, а не роняет весь doctor.
+      .filter((c) => typeof c.content === 'string' && !supersededBy(contracts, c.id))
+      .flatMap((c) => {
+        const size = contractSize(c.content);
+        // Текст отказа регистрации («не будет зарегистрирован») здесь неверен:
+        // контракт уже зарегистрирован и действует, отказ получит следующая
+        // редакция.
+        const detail = size.refusal
+          ? `документ — ${thousands(size.chars)} знаков при пределе ${thousands(size.max)}, длиннее на ${thousands(size.chars - size.max)}. Контракт зарегистрирован и действует, но следующая его редакция будет отклонена до ревью. ${CONTINUATION}.`
+          : size.warning;
+        return detail
+          ? [
+              {
+                id: `contract-size:${c.id}`,
+                status: 'degraded' as const,
+                detail: `Контракт ${c.id} (${c.title}${c.source ? `, ${c.source}` : ''}): ${detail}`,
+              },
+            ]
+          : [];
+      })
+  );
 }
 
 /**

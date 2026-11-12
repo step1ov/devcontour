@@ -80,6 +80,8 @@ const statusTexts: Record<string, string> = {
   'prep-stage/request-changes': 'Возвращено на доработку.',
   'plan/approve': 'План утверждён: задачи доступны очереди.',
   'discussion-needs-answer/answer': 'Ответ отправлен ведущему агенту.',
+  'stand-in/confirm': 'Решение подтверждено.',
+  'stand-in/reverse': 'Решение отменено: ведущий агент получил обращение с вашим вариантом.',
   'queue/resume': 'Очередь запущена.',
   'wait/resume': 'Очередь запущена.',
   'input/answer': 'Ответ сохранён. Дальше ведущий готовит контекст новой попытки.',

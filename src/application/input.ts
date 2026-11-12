@@ -680,6 +680,17 @@ export class InputService {
           : `В approvalMode operator на вопрос ${request.id} отвечает оператор в панели`,
         403,
       );
+    // Ответ и решение за владельца — одна транзакция: записанный ответ без
+    // записи решения не остаётся (вложенный `atomic`, как у ответа из обсуждения).
+    return this.h.store.atomic(() => this.answerNow(request, input, actor, link));
+  }
+
+  private answerNow(
+    request: InputRequest,
+    input: z.infer<typeof inputOperationInputs.input_answer>,
+    actor: InputActorKind,
+    link: { messageRef?: string },
+  ) {
     try {
       const result = this.engine.answerInput(
         request.id,
@@ -692,6 +703,9 @@ export class InputService {
         },
         input.expectedVersion,
       );
+      // Ведущий изменил требования за владельца — решение за владельца
+      // записывает сам инструмент, по состоянию запроса (и при повторе).
+      this.standInOf(request.id, actor);
       return {
         requestId: request.id,
         lifecycle: result.request.lifecycle,
@@ -724,12 +738,23 @@ export class InputService {
         }`,
         403,
       );
+    return this.h.store.atomic(() => this.cancelNow(request, input, actor));
+  }
+
+  private cancelNow(
+    request: InputRequest,
+    input: z.infer<typeof inputOperationInputs.input_cancel>,
+    actor: InputActorKind,
+  ) {
     try {
       const result = this.engine.cancelInput(
         request.id,
         { by: actor, reason: input.reason },
         input.expectedVersion,
       );
+      // Ведущий принял допущение исполнителя (follow-up) — решение за
+      // владельца записывает сам инструмент в той же транзакции.
+      this.standInOf(request.id, actor, input.reason);
       return {
         requestId: request.id,
         lifecycle: result.request.lifecycle,
@@ -739,6 +764,78 @@ export class InputService {
     } catch (error) {
       throw toDomain(error);
     }
+  }
+
+  /**
+   * Решение за владельца, которого требует состояние запроса: последний
+   * ответ — изменение требований не от оператора, или follow-up закрыт не
+   * оператором (допущение принято). Запись идемпотентна по ключу запроса,
+   * поэтому повтор операции дописывает недостающую. Автор — `runtime`
+   * (инструмент): ведущий не пишет под этим автором, не занимает его ключи
+   * и не исправляет запись. Новая версия ответа заменяет нерешённую запись
+   * прежней версии, а не добавляет вторую карточку.
+   */
+  private standInOf(requestId: string, actor: InputActorKind, cancelReason?: string) {
+    // Вызов оператора не пишет решение за ведущего, даже когда состояние
+    // запроса его называет (запрос закрыт раньше, прежней версией).
+    if (actor === 'operator') return;
+    const request = this.request(requestId);
+    const last = request.answers.at(-1);
+    const discussion = new DiscussionService(this.h);
+    const task = this.h.store.read().tasks.find((t) => t.id === request.workId);
+    const affects = request.question.affects;
+    const base = {
+      question: request.question.question,
+      impact:
+        `Постановка и результат задачи «${task?.title ?? request.workId}»` +
+        (affects.length ? `; затронуто: ${affects.join(', ')}` : '') +
+        (request.criticalHits.length
+          ? `; критические пути: ${request.criticalHits.slice(0, 5).join(', ')}`
+          : ''),
+    };
+    // Допущение принято именно этим закрытием (или его повтором): причина
+    // закрытия — причина этого вызова. Follow-up, закрытый движком при отмене
+    // задачи, своей причиной («Поручение отменено») сюда не попадает.
+    const closedHere =
+      cancelReason !== undefined &&
+      request.closed !== undefined &&
+      [cancelReason, cancelReason.trim().slice(0, 1000)].includes(request.closed.reason);
+    if (
+      request.kind === 'follow-up' &&
+      request.lifecycle === 'cancelled' &&
+      request.closed &&
+      request.closed.by !== 'operator' &&
+      request.closed.by !== 'controller'
+    ) {
+      if (!closedHere) return;
+      const q = request.question;
+      const chosen =
+        q.options.find((o) => o.id === q.recommended)?.label ?? q.options[0]?.label ?? '—';
+      discussion.recordStandIn(
+        request.workId,
+        {
+          ...base,
+          text: `Ведущий принял допущение исполнителя: ${chosen}. Основание исполнителя: ${q.rationale || '—'}. Ведущий: ${request.closed.reason}`,
+        },
+        `si-${request.id}-accepted`,
+      );
+      return;
+    }
+    if (!last || last.kind !== 'requirement-change' || last.actor.kind === 'operator') return;
+    // Прежние записи этого запроса — по ключам версий ответа.
+    const earlier = request.answers
+      .slice(0, -1)
+      .map((a) => `si-${request.id}-r${a.revision}`)
+      .reverse();
+    discussion.recordStandIn(
+      request.workId,
+      {
+        ...base,
+        text: `Ведущий ответил на вопрос исполнителя изменением требований: ${last.text}`,
+      },
+      `si-${request.id}-r${last.revision}`,
+      earlier,
+    );
   }
 
   /**
