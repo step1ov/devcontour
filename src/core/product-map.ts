@@ -53,6 +53,21 @@ export interface ReleaseScenario {
    */
   evidence: { repositoryId: string; taskId: string; testId: string; afterAcceptance?: true }[];
 }
+/**
+ * Сценарий, доказанный после приёмки существующим тестом задачи
+ * (`task_scenario_proof`): кто и почему сопоставил тест сценарию. Отдельного
+ * ревью сопоставления нет; приёмка и карта продукта называют его.
+ */
+export interface AfterAcceptanceScenario {
+  featureId: string;
+  gate: string;
+  scenario: string;
+  repositoryId: string;
+  taskId: string;
+  testId: string;
+  actor: 'agent' | 'operator';
+  reason: string;
+}
 /** Сценарий, отложенный записанным решением пользователя, с причиной. */
 export interface DeferredScenario {
   featureId: string;
@@ -407,6 +422,8 @@ export type ProductView =
       features: FeatureProgress[];
       /** Сценарии, отложенные записанным решением; ведущий не откладывает их сам. */
       deferredScenarios: DeferredScenario[];
+      /** Сценарии, доказанные после приёмки существующим тестом задачи. */
+      afterAcceptanceScenarios?: AfterAcceptanceScenario[];
       /**
        * Сценарии последней приёмки релиза, изменённые или удалённые в
        * текущей карте: сужение объёма, которое подтверждает пользователь.

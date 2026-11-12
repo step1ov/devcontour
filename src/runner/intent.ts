@@ -48,7 +48,13 @@ import {
   type WorkspaceIntent,
 } from '../core/intent.ts';
 import { parseRequirements, requirementSnapshot } from './requirements.ts';
-import { proofHolds, scenarioProofs } from './scenario-proof.ts';
+import {
+  SCENARIO_PROOF,
+  proofHolds,
+  proofKey,
+  scenarioProofs,
+  type ScenarioProof,
+} from './scenario-proof.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,50}$/);
 const scope = {
@@ -503,6 +509,7 @@ export class IntentService implements ProductReleaseGuard {
       components: coverage.components,
       scenarios: coverage.scenariosTracked ? coverage.scenarios : null,
       deferredScenarios: deferredScenarios(coverage.scenarios),
+      afterAcceptanceScenarios: this.afterAcceptanceScenarios(coverage.scenarios).map(publicProof),
       ...(product
         ? {
             unconfirmedScenarios: product.unconfirmedScenarios,
@@ -520,7 +527,7 @@ export class IntentService implements ProductReleaseGuard {
       note:
         'Coverage is not release acceptance. Product releases require a bound ChangeSet and fresh joint verification. Component task text stays local.' +
         (coverage.scenariosTracked
-          ? ' Every release scenario needs a test of a task of that feature (requirements link with the same scenario text and testId) or a deferral decided by the user; story coverage alone does not complete a release.'
+          ? ' Every release scenario needs a test of a task of that feature (requirements link with the same scenario text and testId, or task_scenario_proof running an existing test at the accepted SHA of a done task) or a deferral decided by the user; story coverage alone does not complete a release.'
           : ' Release scenarios are not tracked: this release has no feature map in INTENT.'),
     };
   }
@@ -839,23 +846,20 @@ export class IntentService implements ProductReleaseGuard {
         story.excludedTasks.forEach((t) => ids.add(t.id));
       }
     const tasks = state.tasks.filter((t) => ids.has(t.id));
-    const proofs = new Map<string, ReturnType<typeof scenarioProofs>>();
-    const proofsOf = (t: Task) => {
-      const owner = taskOwner(t);
-      if (!owner) return [];
-      if (!proofs.has(owner)) proofs.set(owner, scenarioProofs(this.h, owner));
-      return proofs
-        .get(owner)!
-        .filter((p) => proofHolds(t, p))
-        .map((p) => ({
-          scenario: scenarioKey(p.scenario),
-          testId: p.testId,
-          gate: p.gate,
-          runId: p.runId,
-          sha: p.resultSha,
-        }))
-        .toSorted((a, b) => a.runId.localeCompare(b.runId));
-    };
+    // Доказательства после приёмки, которые засчитало покрытие этого релиза,
+    // без ID прогона: повтор того же доказательства проверку не устаревает.
+    // Поле — только при их наличии: прежние доказательства проверки актуальны.
+    const counted = this.afterAcceptanceScenarios(coverage.scenarios)
+      .map((p) => ({
+        featureId: p.featureId,
+        scenario: scenarioKey(p.scenario),
+        repositoryId: p.repositoryId,
+        taskId: p.taskId,
+        gate: p.proofGate,
+        testId: p.testId,
+        sha: p.sha,
+      }))
+      .toSorted((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
     return digest({
       // Отсутствующая задача из набора тоже часть состояния: её id остаётся.
       taskIds: [...ids].sort(),
@@ -869,9 +873,6 @@ export class IntentService implements ProductReleaseGuard {
           resultSha: t.resultSha ?? null,
           requirements: t.requirements ?? [],
           storyBindings: t.storyBindings ?? [],
-          // Доказательства после приёмки меняют покрытие сценариев; поле
-          // только при их наличии — прежние доказательства проверки актуальны.
-          ...(proofsOf(t).length ? { scenarioProofs: proofsOf(t) } : {}),
           supersedes: t.supersedes ?? null,
           superseded: replaced.has(t.id),
           // Решающая запись без `current` — то, что читает покрытие, в том
@@ -885,6 +886,7 @@ export class IntentService implements ProductReleaseGuard {
         .map((r) => ({ id: r.id, taskId: r.taskId, evidence: r.evidence }))
         .toSorted((a, b) => a.id.localeCompare(b.id)),
       boards: boards.map(({ id, revision, status }) => ({ id, revision, status })),
+      ...(counted.length ? { scenarioProofs: counted } : {}),
     });
   }
 
@@ -937,13 +939,116 @@ export class IntentService implements ProductReleaseGuard {
         );
     }
     const scope = this.scopeReview(release);
+    const afterAcceptance = this.afterAcceptanceScenarios(coverage.scenarios).map(publicProof);
     return {
       deferredScenarios: deferredScenarios(coverage.scenarios),
+      ...(afterAcceptance.length ? { afterAcceptanceScenarios: afterAcceptance } : {}),
       unconfirmedScenarios: scope.unconfirmed,
       // Карту прошлой приёмки не найти — сверить объём нельзя: приёмку, как и
       // при изменённых сценариях, подтверждает пользователь.
       scopeUnverifiable: Boolean(scope.reference && !scope.reference.found),
     };
+  }
+
+  /**
+   * Сценарии, доказанные после приёмки (`task_scenario_proof`), с записью
+   * доказательства: кто и почему сопоставил тест сценарию. Отдельного ревью
+   * сопоставления нет — приёмка и карта продукта называют его.
+   */
+  private afterAcceptanceScenarios(scenarios: ReleaseScenario[]) {
+    const records = new Map<string, Map<string, ScenarioProof>>();
+    const recordsOf = (repositoryId: string) => {
+      if (!records.has(repositoryId))
+        records.set(
+          repositoryId,
+          new Map(
+            Object.entries(this.h.store.localRecords<ScenarioProof>(SCENARIO_PROOF, repositoryId)),
+          ),
+        );
+      return records.get(repositoryId)!;
+    };
+    return scenarios.flatMap((s) =>
+      s.evidence
+        .filter((e) => e.afterAcceptance)
+        .flatMap((e) => {
+          const p = recordsOf(e.repositoryId).get(proofKey(e.taskId, s.scenario));
+          return p
+            ? [
+                {
+                  featureId: s.featureId,
+                  gate: s.gate,
+                  scenario: s.scenario,
+                  repositoryId: e.repositoryId,
+                  taskId: e.taskId,
+                  testId: e.testId,
+                  actor: p.actor,
+                  reason: p.reason,
+                  proofGate: p.gate,
+                  sha: p.resultSha,
+                },
+              ]
+            : [];
+        }),
+    );
+  }
+
+  /**
+   * Доказать после приёмки можно только сценарий, который покрытие засчитает:
+   * сценарий проверки фичи (не отложенный), в историях включённых каналов
+   * которой есть история задачи, а задача — её подтверждённая работа.
+   */
+  assertScenarioScope(task: Task, scenario: string) {
+    return this.reading(() => {
+      const owner = taskOwner(task)!;
+      const key = scenarioKey(scenario);
+      let doc: WorkspaceIntent | undefined;
+      try {
+        const read = this.read();
+        if (read.document.kind === 'workspace') doc = read.document;
+      } catch {
+        doc = undefined;
+      }
+      const candidates = new Map<string, Set<string>>();
+      for (const release of doc?.releases ?? []) {
+        const local = release.components.find((c) => c.repositoryId === owner);
+        if (!local) continue;
+        for (const f of release.features ?? []) {
+          if (!f.checks.some((c) => !c.deferred && scenarioKey(c.scenario) === key)) continue;
+          for (const channel of f.channels)
+            if (channel.scope === 'included')
+              for (const story of channel.stories)
+                if (story.repositoryId === owner)
+                  candidates.set(
+                    local.releaseId,
+                    (candidates.get(local.releaseId) ?? new Set()).add(story.storyId),
+                  );
+        }
+      }
+      if (candidates.size) {
+        const snapshot = this.read(owner);
+        if (snapshot.document.kind === 'component')
+          for (const [releaseId, storyIds] of candidates) {
+            const report = this.componentReport(
+              owner,
+              releaseId,
+              snapshot as typeof snapshot & { document: ComponentIntent },
+            );
+            if (
+              report.stories.some(
+                (s) =>
+                  storyIds.has(s.id) &&
+                  s.taskIds.includes(task.id) &&
+                  !s.unverifiedTaskIds.includes(task.id),
+              )
+            )
+              return;
+          }
+      }
+      throw new DomainError(
+        `${task.id}: сценарий «${shownScenario(scenario)}» не является сценарием проверки фичи, которую обслуживает подтверждённая история этой задачи в INTENT workspace; такое доказательство релиз не засчитал бы. Сверьте текст сценария с картой (слово в слово) и задачу истории этой фичи`,
+        409,
+      );
+    });
   }
 
   private mapGateIds(release: WorkspaceIntent['releases'][number]) {
@@ -1044,6 +1149,7 @@ export class IntentService implements ProductReleaseGuard {
       verification,
       releaseAccepted,
       deferredScenarios: deferredScenarios(coverage.scenarios),
+      afterAcceptanceScenarios: this.afterAcceptanceScenarios(coverage.scenarios).map(publicProof),
       unconfirmedScenarios: scope.unconfirmed,
       ...(scope.reference ? { scopeReference: scope.reference } : {}),
       ...(overridden
@@ -1410,7 +1516,7 @@ export class IntentService implements ProductReleaseGuard {
               storyIds,
             })),
           ...afterAcceptance
-            .filter((p) => proofHolds(t, p))
+            .filter((p) => proofHolds(this.h, t, p))
             .map((p) => ({
               scenario: scenarioKey(p.scenario),
               taskId: t.id,
@@ -1513,6 +1619,17 @@ export function deferredScenarios(scenarios: ReleaseScenario[]) {
       reason: s.deferred!,
     }));
 }
+/** Доказательство после приёмки для отчётов и приёмки: без служебных полей. */
+const publicProof = (p: ReturnType<IntentService['afterAcceptanceScenarios']>[number]) => ({
+  featureId: p.featureId,
+  gate: p.gate,
+  scenario: p.scenario,
+  repositoryId: p.repositoryId,
+  taskId: p.taskId,
+  testId: p.testId,
+  actor: p.actor,
+  reason: p.reason.length > 500 ? p.reason.slice(0, 500) + '…' : p.reason,
+});
 const requirementGap: Record<string, string> = {
   'stale-source': 'источник изменился',
   unplanned: 'нет актуальной задачи',

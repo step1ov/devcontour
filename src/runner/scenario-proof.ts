@@ -17,6 +17,7 @@ import { executionOf, toDomain } from '../harness/execution.ts';
 import { controllerBoundary } from './checks.ts';
 import { checkoutRootOption, workspaceCheckoutRoot } from './checkout-root.ts';
 import { journalError } from './board-coverage.ts';
+import { IntentService } from './intent.ts';
 
 /**
  * Доказательство сценария принятой задачи после приёмки (`task_scenario_proof`).
@@ -62,12 +63,18 @@ export interface ScenarioProof {
   runId: string;
   /** Договор компонента, под которым исполнен gate. */
   policyDigest: string;
+  /**
+   * Определение gate (запись профиля компонента), которое исполнил прогон.
+   * Другое определение того же ID — другой gate: доказательство перестаёт
+   * действовать.
+   */
+  gateDigest: string;
   /** Решающая test-запись gate этого прогона (с манифестом testcases). */
   evidence: Evidence;
   at: string;
 }
 
-const proofKey = (taskId: string, scenario: string) =>
+export const proofKey = (taskId: string, scenario: string) =>
   taskId + ':' + digest(scenarioKey(scenario)).slice(0, 32);
 
 /** Запись сценария как связь для правила доказательства harness. */
@@ -86,13 +93,43 @@ export function scenarioProofs(h: DevContour, repositoryId: string): ScenarioPro
   return Object.values(h.store.localRecords<ScenarioProof>(SCENARIO_PROOF, repositoryId));
 }
 
-export function proofHolds(task: Task, p: ScenarioProof) {
+/** Digest текущего определения gate компонента; нет gate — undefined. */
+export function gateDigestOf(h: DevContour, repositoryId: string, gate: string) {
+  try {
+    const found = repository(h.config, repositoryId).gates.find((g) => g.id === gate);
+    return found ? digest(found) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Решающая запись: та же выборка, что у `requirementProof`, и код выхода 0. */
+const decisiveOf = (evidence: readonly Evidence[], gate: string, sha: string) =>
+  evidence.findLast(
+    (e) =>
+      e.kind === 'test' &&
+      !e.consumer &&
+      e.gate === gate &&
+      e.phase === 'integration' &&
+      e.sha === sha,
+  );
+
+/**
+ * Доказательство действует, пока относится к принятому результату и
+ * постановке задачи, gate с тем же ID определён так же, как при прогоне, а
+ * сохранённая запись прогона доказывает testcase правилом приёмки (с кодом
+ * выхода 0, как у связи в постановке).
+ */
+export function proofHolds(h: DevContour, task: Task, p: ScenarioProof) {
   return (
     p.taskId === task.id &&
     task.status === 'done' &&
     Boolean(task.resultSha) &&
     p.resultSha === task.resultSha &&
     p.approvedDigest === task.approvedDigest &&
+    p.gateDigest !== undefined &&
+    p.gateDigest === gateDigestOf(h, p.repositoryId, p.gate) &&
+    p.evidence.exitCode === 0 &&
     requirementProof(linkOf(p), [p.evidence], task.resultSha).level === 'testcase'
   );
 }
@@ -142,7 +179,11 @@ export async function proveScenario(
         (tests.length ? `; test gates: ${tests.join(', ')}` : ''),
       400,
     );
+  // Сценарий, который доказательство не засчитало бы (не сценарий фичи
+  // историй задачи), — отказ до прогона.
+  new IntentService(h).assertScenarioScope(task, input.scenario);
   const approvedDigest = task.approvedDigest!;
+  const gateDigest = digest(gate);
   const policyDigest = h.policyDigest(repositoryId);
   const runId = 'SP-' + randomUUID();
   const subject = { taskId: task.id, repositoryId, sha: resultSha, gate: input.gate, runId };
@@ -190,13 +231,12 @@ export async function proveScenario(
       { reason: proof.reason },
     );
   }
-  const decisive = evidence.findLast(
-    (e) =>
-      e.kind === 'test' &&
-      e.gate === input.gate &&
-      e.phase === 'integration' &&
-      e.sha === resultSha,
-  )!;
+  const decisive = decisiveOf(evidence, input.gate, resultSha)!;
+  if (decisive.exitCode !== 0) {
+    const reason = `Проверка ${input.gate} завершилась с кодом ${decisive.exitCode}`;
+    event('scenario.proof.failed', { testId: input.testId, reason });
+    throw new DomainError(`Сценарий не доказан: ${reason}`, 409, { reason });
+  }
   const record: ScenarioProof = {
     taskId: task.id,
     repositoryId,
@@ -209,26 +249,41 @@ export async function proveScenario(
     actor,
     runId,
     policyDigest,
+    gateDigest,
     evidence: decisive,
     at: new Date().toISOString(),
   };
-  h.store.atomic(() => {
-    // Задача и договор те же, что при запуске прогона: иначе прогон доказывал
-    // бы не то, что записано.
-    const now = provable(h, h.store.read(), task.id);
-    if (now.resultSha !== resultSha || now.task.approvedDigest !== approvedDigest)
-      throw new DomainError('Принятый результат задачи изменился во время прогона', 409);
-    if (h.policyDigest(repositoryId) !== policyDigest)
-      throw new DomainError('Договор компонента изменился во время прогона', 409);
-    h.store.saveLocal(SCENARIO_PROOF, repositoryId, proofKey(task.id, input.scenario), record);
-    h.store.appendEvent('scenario.proof.recorded', {
-      ...subject,
-      testId: input.testId,
-      scenario: input.scenario,
-      reason: input.reason,
-      actor,
+  try {
+    h.store.atomic(() => {
+      // Задача и договор те же, что при запуске прогона: иначе прогон доказывал
+      // бы не то, что записано.
+      const now = provable(h, h.store.read(), task.id);
+      if (now.resultSha !== resultSha || now.task.approvedDigest !== approvedDigest)
+        throw new DomainError('Принятый результат задачи изменился во время прогона', 409);
+      if (h.policyDigest(repositoryId) !== policyDigest)
+        throw new DomainError('Договор компонента изменился во время прогона', 409);
+      h.store.saveLocal(SCENARIO_PROOF, repositoryId, proofKey(task.id, input.scenario), record);
+      h.store.appendEvent('scenario.proof.recorded', {
+        ...subject,
+        testId: input.testId,
+        scenario: input.scenario,
+        reason: input.reason,
+        actor,
+      });
     });
-  });
+  } catch (error) {
+    // Начатый прогон кончается событием и тогда, когда запись не состоялась.
+    try {
+      event('scenario.proof.failed', {
+        testId: input.testId,
+        reason: 'record',
+        error: journalError(error, roots),
+      });
+    } catch {
+      // Без права записи событие не пишется; причина — исходная ошибка.
+    }
+    throw error;
+  }
   return {
     taskId: task.id,
     repositoryId,
