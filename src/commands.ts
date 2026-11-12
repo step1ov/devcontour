@@ -8,6 +8,7 @@ import {
 import { startWorkspace, requirePreparation, preparationStore } from './runner/start.ts';
 import { PreparationAgent, WorkspaceAgent } from './application/preparation-agent.ts';
 import { preparationInputs } from './core/preparation-model.ts';
+import { proveScenario } from './runner/scenario-proof.ts';
 import { IntentService } from './runner/intent.ts';
 import { engineeringEvals } from './runner/engineering-evals.ts';
 import { compareEvaluations } from './application/eval-comparison.ts';
@@ -625,6 +626,7 @@ async function main() {
     'edit-board',
     'task-feature',
     'task-story',
+    'scenario-proof',
     'cancel',
     'correct',
   ];
@@ -1358,6 +1360,21 @@ async function main() {
             ...(args.includes('--repository-id')
               ? { repositoryId: option('--repository-id', '') }
               : {}),
+          },
+          'operator',
+        );
+      } else if (operation === 'scenario-proof') {
+        if (!args.includes('--reason') || !option('--reason', '').trim())
+          throw new Error('Укажите --reason: почему существующий тест проверяет этот сценарий');
+        result = await proveScenario(
+          h,
+          root,
+          {
+            taskId: option('--task', ''),
+            gate: option('--gate', ''),
+            scenario: option('--scenario', ''),
+            testId: option('--test-id', ''),
+            reason: option('--reason', ''),
           },
           'operator',
         );

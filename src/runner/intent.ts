@@ -48,6 +48,7 @@ import {
   type WorkspaceIntent,
 } from '../core/intent.ts';
 import { parseRequirements, requirementSnapshot } from './requirements.ts';
+import { proofHolds, scenarioProofs } from './scenario-proof.ts';
 
 const id = z.string().regex(/^[A-Za-z0-9_-]{1,50}$/);
 const scope = {
@@ -577,7 +578,12 @@ export class IntentService implements ProductReleaseGuard {
               ),
           )
           .slice(0, 10)
-          .map(({ repositoryId, taskId, testId }) => ({ repositoryId, taskId, testId }));
+          .map(({ repositoryId, taskId, testId, afterAcceptance }) => ({
+            repositoryId,
+            taskId,
+            testId,
+            ...(afterAcceptance ? { afterAcceptance } : {}),
+          }));
         return {
           featureId: f.featureId,
           gate: c.gate,
@@ -833,6 +839,23 @@ export class IntentService implements ProductReleaseGuard {
         story.excludedTasks.forEach((t) => ids.add(t.id));
       }
     const tasks = state.tasks.filter((t) => ids.has(t.id));
+    const proofs = new Map<string, ReturnType<typeof scenarioProofs>>();
+    const proofsOf = (t: Task) => {
+      const owner = taskOwner(t);
+      if (!owner) return [];
+      if (!proofs.has(owner)) proofs.set(owner, scenarioProofs(this.h, owner));
+      return proofs
+        .get(owner)!
+        .filter((p) => proofHolds(t, p))
+        .map((p) => ({
+          scenario: scenarioKey(p.scenario),
+          testId: p.testId,
+          gate: p.gate,
+          runId: p.runId,
+          sha: p.resultSha,
+        }))
+        .toSorted((a, b) => a.runId.localeCompare(b.runId));
+    };
     return digest({
       // Отсутствующая задача из набора тоже часть состояния: её id остаётся.
       taskIds: [...ids].sort(),
@@ -846,6 +869,9 @@ export class IntentService implements ProductReleaseGuard {
           resultSha: t.resultSha ?? null,
           requirements: t.requirements ?? [],
           storyBindings: t.storyBindings ?? [],
+          // Доказательства после приёмки меняют покрытие сценариев; поле
+          // только при их наличии — прежние доказательства проверки актуальны.
+          ...(proofsOf(t).length ? { scenarioProofs: proofsOf(t) } : {}),
           supersedes: t.supersedes ?? null,
           superseded: replaced.has(t.id),
           // Решающая запись без `current` — то, что читает покрытие, в том
@@ -1361,18 +1387,39 @@ export class IntentService implements ProductReleaseGuard {
     const eligibleIds = new Set(
       stories.flatMap((s) => s.taskIds.filter((id) => !s.unverifiedTaskIds.includes(id))),
     );
-    const scenarioEvidence = tasks
+    // Доказательство после приёмки (`task_scenario_proof`) — прогон gate на
+    // принятом SHA той же задачи; связь в постановке задача не получает.
+    const afterAcceptance = scenarioProofs(this.h, repositoryId);
+    const scenarioEvidence: {
+      scenario: string;
+      taskId: string;
+      testId: string;
+      storyIds: string[];
+      afterAcceptance?: true;
+    }[] = tasks
       .filter((t) => eligibleIds.has(t.id) && completed(t))
-      .flatMap((t) =>
-        (t.requirements ?? [])
-          .filter((l) => l.testId && proven(t, l))
-          .map((l) => ({
-            scenario: scenarioKey(l.scenario),
-            taskId: t.id,
-            testId: l.testId!,
-            storyIds: stories.filter((s) => s.taskIds.includes(t.id)).map((s) => s.id),
-          })),
-      );
+      .flatMap((t) => {
+        const storyIds = stories.filter((s) => s.taskIds.includes(t.id)).map((s) => s.id);
+        return [
+          ...(t.requirements ?? [])
+            .filter((l) => l.testId && proven(t, l))
+            .map((l) => ({
+              scenario: scenarioKey(l.scenario),
+              taskId: t.id,
+              testId: l.testId!,
+              storyIds,
+            })),
+          ...afterAcceptance
+            .filter((p) => proofHolds(t, p))
+            .map((p) => ({
+              scenario: scenarioKey(p.scenario),
+              taskId: t.id,
+              testId: p.testId,
+              storyIds,
+              afterAcceptance: true as const,
+            })),
+        ];
+      });
     return {
       repositoryId,
       releaseId,
@@ -1412,7 +1459,7 @@ export function scenarioGaps(scenarios: ReleaseScenario[]) {
   return [
     'сценариев релиза без доказательства: ' +
       missing.length +
-      ' — задаче истории фичи нужна связь requirements, чей scenario совпадает с текстом сценария слово в слово (различия только в пробелах), и testId testcase, который его проверяет; у выполненной задачи связь добавляют обычной корректировкой задачи, не переписывая историю. Отложить сценарий (deferred с причиной) решает пользователь: предложите и спросите, не откладывайте сами ради прохождения проверки',
+      ' — задаче истории фичи нужна связь requirements, чей scenario совпадает с текстом сценария слово в слово (различия только в пробелах), и testId testcase, который его проверяет; если поведение уже проверяет существующий тест выполненной задачи истории, сценарий доказывает task_scenario_proof (CLI scenario-proof): названный gate исполняется на её принятом SHA, testcase должен выполниться и пройти, постановка и история задачи не меняются; если такого теста нет — задача, которая его напишет. Отложить сценарий (deferred с причиной) решает пользователь: предложите и спросите, не откладывайте сами ради прохождения проверки',
     ...missing.map(
       (s) =>
         'сценарий релиза ' +

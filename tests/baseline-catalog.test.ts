@@ -67,6 +67,7 @@ const operations = [
   'task_retry',
   'task_assign',
   'task_story',
+  'task_scenario_proof',
   'board_correct',
   'changeset_create',
   'queue_set',

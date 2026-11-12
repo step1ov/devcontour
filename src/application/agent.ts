@@ -38,6 +38,7 @@ import { checksQuery, taskChecks } from './checks.ts';
 import { CheckCorpus } from '../core/check-store.ts';
 import { checkJsonBytes, operationCatalog, recoveryActions } from 'devcontour-harness';
 import { applyCases } from '../runner/recovery.ts';
+import { proveScenario, scenarioProofInput } from '../runner/scenario-proof.ts';
 import { ContractChanges } from '../runner/contract-change.ts';
 import { contractProposal, limitsMessage, proposalLimitIssues } from '../runner/agent-control.ts';
 import { queueStopOf, quietAttempts, quietOperations } from './queue-stop.ts';
@@ -94,6 +95,7 @@ export const agentInputs = {
     .object({ taskId: id, member: z.string().regex(/^[A-Za-z0-9_.@-]{1,80}$/) })
     .strict(),
   task_story: storyBindingInput,
+  task_scenario_proof: scenarioProofInput,
   board_correct: z
     .object({
       boardId: id,
@@ -174,6 +176,7 @@ export const asyncOperations = new Set<string>([
   'contract_change_revise',
   'input_context',
   'input_review',
+  'task_scenario_proof',
 ]);
 export type AgentOperation = keyof typeof agentInputs;
 export const agentOperations = Object.keys(agentInputs) as AgentOperation[];
@@ -276,6 +279,8 @@ export const descriptions: Record<AgentOperation, string> = {
   task_assign: 'Assign a task to a team member. Assignment is not a distributed lease.',
   task_story:
     "Bind done tasks to an INTENT story without changing their approved spec, when they link the story's detailed REQs but not REQ-intent-<story>. Every detailed REQ of each task must be in that story's criteria; the story digest is pinned from committed HEAD and a reason is journaled. intent_report marks these tasks boundAfterAcceptance: the story text was not in the author's prompt. Drafts get the REQ-intent link in requirements instead.",
+  task_scenario_proof:
+    "Prove a release scenario of a done story task with a test that already exists, without a writer and without changing its approved spec: runs the named test gate at the task's accepted result SHA (same execution as integration) and records the proof only if the named testId ran and passed there. intent_report and product_view count it as scenario evidence with afterAcceptance: true. A missing or failing testcase is refused with the reason; a behaviour without a test needs a task that writes it. Local to this copy (Git sync does not carry it). In approvalMode operator the operator runs CLI scenario-proof.",
   board_correct:
     'Create a correction after board acceptance, preserving history and recalculating transitive impact.',
   changeset_create:
@@ -553,6 +558,15 @@ export class AgentService {
         return this.bounded(await new InputService(this.h, this.root).context(input));
       case 'input_review':
         return this.bounded(await new InputService(this.h, this.root).review(input));
+      case 'task_scenario_proof':
+        // Что существующий тест проверяет сценарий — решение того, кто
+        // утверждает: в operator mode агент его сам не записывает.
+        if (this.h.config.approvalMode === 'operator')
+          throw new DomainError(
+            'В approvalMode operator доказательство сценария записывает оператор: devcontour scenario-proof --task ID --gate G --scenario ... --test-id ... --reason ...',
+            409,
+          );
+        return this.bounded(await proveScenario(this.h, this.root, input, 'agent'));
       default:
         throw new DomainError('Неизвестная операция', 400);
     }

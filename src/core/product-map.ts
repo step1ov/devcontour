@@ -46,7 +46,12 @@ export interface ReleaseScenario {
   scenario: string;
   status: ScenarioStatus;
   deferred?: string;
-  evidence: { repositoryId: string; taskId: string; testId: string }[];
+  /**
+   * Задачи с testcase, доказавшим сценарий. `afterAcceptance` — доказано
+   * прогоном gate на принятом SHA после приёмки (`task_scenario_proof`), а не
+   * связью в постановке задачи.
+   */
+  evidence: { repositoryId: string; taskId: string; testId: string; afterAcceptance?: true }[];
 }
 /** Сценарий, отложенный записанным решением пользователя, с причиной. */
 export interface DeferredScenario {
