@@ -284,3 +284,100 @@ test('The operator edits a section in the panel and the change reaches state and
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+type Status = {
+  activeChangeId: string;
+  developmentReady: boolean;
+  current: Record<string, { digest: string }> & { binding: { productNumber: number } };
+};
+test('A product draft over the approved version keeps development and names its release moves', async ({
+  page,
+  request,
+}) => {
+  const root = mkdtempSync(join(tmpdir(), 'devcontour-ui-binding-'));
+  const app = await startWorkspace(join(root, 'workspace'), { port: 0, workspaceMode: 'embedded' });
+  const headers = { 'X-DevContour-Request': '1' };
+  const send = async (operation: string, input: unknown) => {
+    const response = await request.post(app.url + '/api/agent', {
+      headers,
+      data: { operation, input },
+    });
+    expect(response.ok(), await response.text()).toBeTruthy();
+    return (await response.json()) as Status;
+  };
+  const status = async () =>
+    (await (await request.get(app.url + '/api/preparation')).json()) as Status;
+  const early = 'Блокировку можно снять досрочно.';
+  const base = {
+    ...product,
+    features: product.features.map((f) =>
+      f.id === 'member-block'
+        ? { ...f, acceptance: [...f.acceptance, { releaseId: 'r1', text: early }] }
+        : f,
+    ),
+  };
+  try {
+    const created = await send('preparation_create', { title: 'Модерация чата' });
+    const changeId = created.activeChangeId;
+    const approve = async (stage: string, operation: string, content: unknown) => {
+      const saved = await send(operation, {
+        changeId,
+        expectedDigest: null,
+        reason: 'Версия для проверки',
+        content,
+      });
+      const digest = saved.current[stage].digest;
+      await send('preparation_submit', { changeId, stage, expectedDigest: digest });
+      const decided = await request.post(app.url + '/api/preparation/decision', {
+        headers,
+        data: { changeId, stage, expectedDigest: digest, decision: 'approve', comment: '' },
+      });
+      expect(decided.ok(), await decided.text()).toBeTruthy();
+    };
+    await approve('product', 'preparation_product', base);
+    await approve('architecture', 'preparation_architecture', architecture);
+    await approve('references', 'preparation_references', referencesFixture);
+    await approve('concept', 'preparation_concept', conceptFixture);
+    await approve('design', 'preparation_design', designFixture);
+    const { current } = await status();
+    const draft = await send('preparation_product', {
+      changeId,
+      expectedDigest: current.product.digest,
+      reason: 'Досрочное снятие — во втором релизе',
+      content: {
+        ...base,
+        features: base.features.map((f) => ({
+          ...f,
+          acceptance: f.acceptance.map((a) => (a.text === early ? { ...a, releaseId: 'r2' } : a)),
+        })),
+      },
+    });
+    expect(draft.developmentReady).toBe(true);
+    await page.goto(app.url);
+    await page.getByRole('button', { name: /1 Продукт/ }).click();
+    await expect(
+      page.getByText(/Версия 2 — черновик агента, на согласование ещё не отправлена\./),
+    ).toBeVisible();
+    await expect(page.getByText(/Разработка идёт по утверждённой версии 1\./)).toBeVisible();
+    await send('preparation_submit', {
+      changeId,
+      stage: 'product',
+      expectedDigest: draft.current.product.digest,
+    });
+    await expect(
+      page.getByText(
+        'Перенесены только критерии между существующими релизами: архитектура и дизайн остаются в силе. Разработка продолжится по этой версии. До решения разработка идёт по версии 1.',
+      ),
+    ).toBeVisible();
+    await expect(
+      page.getByText(`критерий «${early}» (member-block) перенесён из r1 в r2`),
+    ).toBeVisible();
+    await page.getByRole('button', { name: 'Утвердить версию 2', exact: true }).click();
+    await expect.poll(async () => (await status()).current.binding.productNumber).toBe(2);
+    const after = await status();
+    expect(after.developmentReady).toBe(true);
+  } finally {
+    await app.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

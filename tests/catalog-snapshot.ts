@@ -138,7 +138,8 @@
 // host.verifications; прочие операции байтово прежние.
 // Намеренное изменение: описания preparation_product и preparation_submit
 // называют привязку разработки к последней утверждённой редакции и сохранение
-// архитектуры и дизайна при переносе критериев между релизами; прочие
-// операции байтово прежние.
-export const CATALOG_DIGEST = 'fc55d547e2678a3488be1b71c6c8ddf8be27afd7b82eed77df5983b66864c758';
+// архитектуры и дизайна при переносе критериев между существующими релизами;
+// preparation_status — утверждённую редакцию для планирования (boundProduct,
+// product.md) рядом с черновиком; прочие операции байтово прежние.
+export const CATALOG_DIGEST = '681fe091add71345af17e37b23efda18a17dc99ca10623ab497602cc91795f8e';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

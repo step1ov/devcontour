@@ -27,15 +27,69 @@ const header = (change: ProductChange, part: string) => [
   '',
 ];
 
-// The brief is what the operator approves and every later task is bound to.
+type Revision = { number: number; status: keyof typeof names };
+/**
+ * Действующая версия этапа — последняя утверждённая: по ней идёт разработка.
+ * Более новая неутверждённая версия (черновик, на согласовании, возвращённая)
+ * не действует до решения пользователя и показывается отдельно.
+ */
+export function boundRevision<T extends Revision>(revisions: readonly T[]) {
+  const approved = revisions.findLast((r) => r.status === 'approved'),
+    latest = revisions.at(-1);
+  return {
+    shown: approved ?? latest,
+    pending: approved && latest !== approved ? latest : undefined,
+  };
+}
+const pendingNotice = (current: Revision, pending: Revision, file: string) => [
+  `> Разработка идёт по утверждённой версии ${current.number}. Версия ${pending.number} (${names[pending.status]}) не действует до решения пользователя: она в \`${file}\`. Планируйте по этому файлу.`,
+  '',
+];
+const draftNotice = (current: Revision, pending: Revision, file: string) => [
+  `> Версия ${pending.number} (${names[pending.status]}) не утверждена: разработка идёт по версии ${current.number} из \`${file}\`. Не планируйте по этому файлу.`,
+  '',
+];
+// The brief is what the operator approves. product.md shows the approved
+// version development is bound to; a newer unapproved one goes to
+// product.draft.md, so planning is never fed a draft as the product.
 // Keeping it only in SQLite made it unreadable without a running server.
 export function renderProduct(change: ProductChange) {
-  const product = change.product.at(-1);
-  const rows = header(change, 'постановка');
-  if (!product) {
+  const { shown, pending } = boundRevision(change.product);
+  if (!shown) {
+    const rows = header(change, 'постановка');
     rows.push('Постановка ещё не сохранена.', '');
     return rows.join('\n');
   }
+  return renderProductVersion(
+    change,
+    shown,
+    'постановка',
+    pending ? pendingNotice(shown, pending, 'product.draft.md') : [],
+  );
+}
+/** Неутверждённая версия новее действующей; без неё — короткая отсылка. */
+export function renderProductDraft(change: ProductChange) {
+  const { shown, pending } = boundRevision(change.product);
+  if (!shown || !pending) {
+    const rows = header(change, 'черновик постановки');
+    rows.push('Неутверждённой версии новее действующей нет: постановка — в `product.md`.', '');
+    return rows.join('\n');
+  }
+  return renderProductVersion(
+    change,
+    pending,
+    'черновик постановки',
+    draftNotice(shown, pending, 'product.md'),
+  );
+}
+function renderProductVersion(
+  change: ProductChange,
+  product: ProductChange['product'][number],
+  part: string,
+  notice: string[],
+) {
+  const rows = header(change, part);
+  rows.push(...notice);
   const content = product.content;
   rows.push(
     `Версия ${product.number} · ${names[product.status]} · ${product.createdAt}`,
@@ -122,12 +176,44 @@ export function renderProduct(change: ProductChange) {
   return rows.join('\n');
 }
 export function renderArchitecture(change: ProductChange) {
-  const architecture = change.architecture.at(-1);
-  const rows = header(change, 'архитектура и стек');
-  if (!architecture) {
+  const { shown, pending } = boundRevision(change.architecture);
+  if (!shown) {
+    const rows = header(change, 'архитектура и стек');
     rows.push('Архитектура прорабатывается после утверждения продуктовой постановки.', '');
     return rows.join('\n');
   }
+  return renderArchitectureVersion(
+    change,
+    shown,
+    'архитектура и стек',
+    pending ? pendingNotice(shown, pending, 'architecture.draft.md') : [],
+  );
+}
+export function renderArchitectureDraft(change: ProductChange) {
+  const { shown, pending } = boundRevision(change.architecture);
+  if (!shown || !pending) {
+    const rows = header(change, 'черновик архитектуры');
+    rows.push(
+      'Неутверждённой версии новее действующей нет: архитектура — в `architecture.md`.',
+      '',
+    );
+    return rows.join('\n');
+  }
+  return renderArchitectureVersion(
+    change,
+    pending,
+    'черновик архитектуры',
+    draftNotice(shown, pending, 'architecture.md'),
+  );
+}
+function renderArchitectureVersion(
+  change: ProductChange,
+  architecture: ProductChange['architecture'][number],
+  part: string,
+  notice: string[],
+) {
+  const rows = header(change, part);
+  rows.push(...notice);
   const content = architecture.content;
   rows.push(
     `Версия ${architecture.number} · ${names[architecture.status]} · ${architecture.createdAt}`,
@@ -200,9 +286,26 @@ export function renderArchitecture(change: ProductChange) {
 }
 export function renderDesign(change: ProductChange) {
   const rows = header(change, 'дизайн');
-  const references = (change.references ?? []).at(-1);
-  const concept = (change.concept ?? []).at(-1);
-  const design = (change.design ?? []).at(-1);
+  // Каждый шаг показывает действующую (утверждённую) версию; более новая
+  // неутверждённая только называется — её содержимое в панели и change.json.
+  const steps = [
+    boundRevision<Revision>(change.references ?? []),
+    boundRevision<Revision>(change.concept ?? []),
+    boundRevision<Revision>(change.design ?? []),
+  ];
+  const references = boundRevision(change.references ?? []).shown;
+  const concept = boundRevision(change.concept ?? []).shown;
+  const design = boundRevision(change.design ?? []).shown;
+  const pendingLine = (step: number) => {
+    const { shown, pending } = steps[step];
+    return shown && pending
+      ? [
+          `> Версия ${pending.number} (${names[pending.status]}) не действует до решения пользователя; здесь — действующая версия ${shown.number}.`,
+          '',
+        ]
+      : [];
+  };
+  const product = boundRevision(change.product).shown;
   if (!references) {
     rows.push('Дизайн прорабатывается после утверждения архитектуры.', '');
     return rows.join('\n');
@@ -212,6 +315,7 @@ export function renderDesign(change: ProductChange) {
     '',
     `Причина версии: ${line(references.reason)}`,
     '',
+    ...pendingLine(0),
   );
   if (!references.content.applicable) {
     rows.push('Изменению не нужно направление дизайна.', '', references.content.reason, '');
@@ -234,6 +338,7 @@ export function renderDesign(change: ProductChange) {
       '',
       `Причина версии: ${line(concept.reason)}`,
       '',
+      ...pendingLine(1),
       concept.content.concept,
       '',
     );
@@ -255,6 +360,7 @@ export function renderDesign(change: ProductChange) {
       '',
       `Причина версии: ${line(design.reason)}`,
       '',
+      ...pendingLine(2),
       '### Палитра',
       '',
       '| Имя | Значение | Роль |',
@@ -278,7 +384,7 @@ export function renderDesign(change: ProductChange) {
     );
     for (const item of content.channels)
       rows.push(
-        `#### ${line(change.product.at(-1)?.content.channels.find((x) => x.id === item.channelId)?.title ?? item.channelId)}`,
+        `#### ${line(product?.content.channels.find((x) => x.id === item.channelId)?.title ?? item.channelId)}`,
         '',
         ...item.notes.map((n) => `- ${line(n)}`),
         '',
@@ -418,9 +524,16 @@ export function renderIndex(changes: IndexRow[]) {
     '| Ключ | Изменение | Продукт | Архитектура | Дизайн | Создано |',
     '| --- | --- | --- | --- | --- | --- |',
     ...changes.map((c) => {
-      const state = (r?: { number: number; status: keyof typeof names }) =>
-        r ? 'v' + r.number + ' · ' + names[r.status] : '—';
-      return `| [\`${c.key}\`](./${c.key}/) | ${line(c.title)} | ${state(c.product.at(-1))} | ${state(c.architecture.at(-1))} | ${state((c.design ?? []).at(-1))} | ${line(c.createdAt).slice(0, 10)} |`;
+      // Действующая версия и, если есть, более новая неутверждённая.
+      const state = (list: readonly Revision[]) => {
+        const { shown, pending } = boundRevision(list);
+        if (!shown) return '—';
+        const own = 'v' + shown.number + ' · ' + names[shown.status];
+        return pending
+          ? own + ' (действует); v' + pending.number + ' · ' + names[pending.status]
+          : own;
+      };
+      return `| [\`${c.key}\`](./${c.key}/) | ${line(c.title)} | ${state(c.product)} | ${state(c.architecture)} | ${state(c.design ?? [])} | ${line(c.createdAt).slice(0, 10)} |`;
     }),
     '',
   ].join('\n');
@@ -460,6 +573,18 @@ export function writeProduct(state: DevContourState, root: string) {
     const dir = directory(root, change.key);
     atomicWrite(join(dir, 'product.md'), renderProduct(change));
     atomicWrite(join(dir, 'architecture.md'), renderArchitecture(change));
+    // Черновики новее действующей версии — в отдельных файлах. Без черновика
+    // файл не создаётся, а уже созданный получает отсылку к действующему
+    // (проекция ничего не удаляет).
+    for (const [name, pending, render] of [
+      ['product.draft.md', boundRevision(change.product).pending, renderProductDraft],
+      [
+        'architecture.draft.md',
+        boundRevision(change.architecture).pending,
+        renderArchitectureDraft,
+      ],
+    ] as const)
+      if (pending || existsSync(join(dir, name))) atomicWrite(join(dir, name), render(change));
     atomicWrite(join(dir, 'design.md'), renderDesign(change));
     atomicWrite(join(dir, 'journal.md'), renderChangeJournal(change));
     const { activity: _activity, ...durable } = change;
