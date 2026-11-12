@@ -12,6 +12,7 @@ import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { DevContourState } from '../core/model.ts';
 import type { ProductChange } from '../core/preparation-model.ts';
+import { changeBlockedStage } from '../core/preparation.ts';
 
 const line = (text: string) => text.replace(/[\r\n|]/g, ' ');
 const names = {
@@ -41,12 +42,32 @@ export function boundRevision<T extends Revision>(revisions: readonly T[]) {
     pending: approved && latest !== approved ? latest : undefined,
   };
 }
-const pendingNotice = (current: Revision, pending: Revision, file: string) => [
-  `> Разработка идёт по утверждённой версии ${current.number}. Версия ${pending.number} (${names[pending.status]}) не действует до решения пользователя: она в \`${file}\`. Планируйте по этому файлу.`,
+const stageNames = {
+  product: 'постановка',
+  architecture: 'архитектура и стек',
+  references: 'референсы',
+  concept: 'концепт',
+  design: 'дизайн-система',
+};
+// Разработка идёт не всегда: пока этап не утверждён (или устарел после новой
+// постановки), задачи изменения не выдаются, и «планируйте» было бы неправдой.
+const boundLine = (change: ProductChange, current: Revision) => {
+  const blocked = changeBlockedStage(change);
+  return blocked
+    ? `Действующая утверждённая версия — ${current.number}; разработка изменения не идёт, пока не утверждён этап «${stageNames[blocked]}».`
+    : `Разработка идёт по утверждённой версии ${current.number}.`;
+};
+const pendingNotice = (
+  change: ProductChange,
+  current: Revision,
+  pending: Revision,
+  file: string,
+) => [
+  `> ${boundLine(change, current)} Версия ${pending.number} (${names[pending.status]}) не действует до решения пользователя: она в \`${file}\`.${changeBlockedStage(change) ? '' : ' Планируйте по этому файлу.'}`,
   '',
 ];
-const draftNotice = (current: Revision, pending: Revision, file: string) => [
-  `> Версия ${pending.number} (${names[pending.status]}) не утверждена: разработка идёт по версии ${current.number} из \`${file}\`. Не планируйте по этому файлу.`,
+const draftNotice = (change: ProductChange, current: Revision, pending: Revision, file: string) => [
+  `> Версия ${pending.number} (${names[pending.status]}) не утверждена. ${boundLine(change, current)} Действующая версия — в \`${file}\`. Не планируйте по этому файлу.`,
   '',
 ];
 // The brief is what the operator approves. product.md shows the approved
@@ -64,7 +85,7 @@ export function renderProduct(change: ProductChange) {
     change,
     shown,
     'постановка',
-    pending ? pendingNotice(shown, pending, 'product.draft.md') : [],
+    pending ? pendingNotice(change, shown, pending, 'product.draft.md') : [],
   );
 }
 /** Неутверждённая версия новее действующей; без неё — короткая отсылка. */
@@ -79,7 +100,7 @@ export function renderProductDraft(change: ProductChange) {
     change,
     pending,
     'черновик постановки',
-    draftNotice(shown, pending, 'product.md'),
+    draftNotice(change, shown, pending, 'product.md'),
   );
 }
 function renderProductVersion(
@@ -186,7 +207,7 @@ export function renderArchitecture(change: ProductChange) {
     change,
     shown,
     'архитектура и стек',
-    pending ? pendingNotice(shown, pending, 'architecture.draft.md') : [],
+    pending ? pendingNotice(change, shown, pending, 'architecture.draft.md') : [],
   );
 }
 export function renderArchitectureDraft(change: ProductChange) {
@@ -203,7 +224,7 @@ export function renderArchitectureDraft(change: ProductChange) {
     change,
     pending,
     'черновик архитектуры',
-    draftNotice(shown, pending, 'architecture.md'),
+    draftNotice(change, shown, pending, 'architecture.md'),
   );
 }
 function renderArchitectureVersion(
@@ -288,14 +309,19 @@ export function renderDesign(change: ProductChange) {
   const rows = header(change, 'дизайн');
   // Каждый шаг показывает действующую (утверждённую) версию; более новая
   // неутверждённая только называется — её содержимое в панели и change.json.
-  const steps = [
-    boundRevision<Revision>(change.references ?? []),
-    boundRevision<Revision>(change.concept ?? []),
-    boundRevision<Revision>(change.design ?? []),
+  const bound = {
+    references: boundRevision(change.references ?? []),
+    concept: boundRevision(change.concept ?? []),
+    design: boundRevision(change.design ?? []),
+  };
+  const steps: { shown?: Revision; pending?: Revision }[] = [
+    bound.references,
+    bound.concept,
+    bound.design,
   ];
-  const references = boundRevision(change.references ?? []).shown;
-  const concept = boundRevision(change.concept ?? []).shown;
-  const design = boundRevision(change.design ?? []).shown;
+  const references = bound.references.shown;
+  const concept = bound.concept.shown;
+  const design = bound.design.shown;
   const pendingLine = (step: number) => {
     const { shown, pending } = steps[step];
     return shown && pending

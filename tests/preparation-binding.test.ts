@@ -53,6 +53,13 @@ function view(p: Preparation) {
   return s;
 }
 const pending = (p: Preparation) => view(p).current!.binding.pendingProduct;
+async function cardReason(store: Preparation['store'], changeId: string) {
+  const item = byKey(
+    (await new AttentionService(store, undefined).active()).items,
+    `prep:stage:${changeId}:product`,
+  );
+  return item?.reason ?? '';
+}
 function approveWith(p: Preparation, content: Brief) {
   p.execute('preparation_create', { title: 'Модерация чата' });
   const changeId = view(p).activeChangeId!;
@@ -424,19 +431,118 @@ test('Возврат к прежнему объёму: P1 → P2 (объём) �
   }
 });
 
-test('Перенос критерия в релиз с выполненной работой называется в форме решения', () => {
+test('Предупреждение о выполненной работе — по релизу назначения, не по прежнему', async () => {
   const f = fixture(),
     p = new Preparation(f.store);
   try {
     const changeId = approveWith(p, base);
     const { one, two } = plan(f);
+    // Выполнен релиз-источник r1, релиз назначения r2 — нет: предупреждения нет.
     complete(f.h, one);
-    complete(f.h, two);
-    assert.equal(view(p).current!.releases.find((r) => r.id === 'r2')!.readiness, 'done');
+    const releases = () => view(p).current!.releases;
+    assert.deepEqual(
+      releases().map((r) => [r.id, r.readiness]),
+      [
+        ['r1', 'done'],
+        ['r2', 'in-progress'],
+      ],
+    );
     saveProduct(p, changeId, moved);
-    const impact = pending(p)!;
-    assert.equal(impact.warnings.length, 1);
-    assert.match(impact.warnings[0], /переносится в релиз r2, где работа/);
+    submitProduct(p, changeId);
+    assert.deepEqual(pending(p)!.warnings, []);
+    const before = await cardReason(f.store, changeId);
+    assert.match(before, /перенесён из r1 в r2/);
+    assert.doesNotMatch(before, /где работа уже выполнена/);
+    // Выполнен и релиз назначения: предупреждение в форме и в карточке.
+    complete(f.h, two);
+    assert.equal(pending(p)!.warnings.length, 1);
+    assert.match(pending(p)!.warnings[0], /переносится в релиз r2, где работа уже выполнена/);
+    assert.match(await cardReason(f.store, changeId), /переносится в релиз r2, где работа/);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Предупреждение при выполненном релизе назначения и невыполненном источнике', () => {
+  const f = fixture(),
+    p = new Preparation(f.store);
+  try {
+    const changeId = approveWith(p, base);
+    const { one, two } = plan(f);
+    f.h.cancel(one, 'Блокировку переносим');
+    complete(f.h, two);
+    assert.deepEqual(
+      view(p).current!.releases.map((r) => [r.id, r.readiness]),
+      [
+        ['r1', 'unplanned'],
+        ['r2', 'done'],
+      ],
+    );
+    saveProduct(p, changeId, moved);
+    assert.equal(pending(p)!.warnings.length, 1);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Перенос с переформулировкой виден в перечне изменений по месту критерия', () => {
+  const f = fixture(),
+    p = new Preparation(f.store);
+  try {
+    const changeId = approveWith(p, base);
+    saveProduct(
+      p,
+      changeId,
+      withCriteria(base, 'member-block', (list) =>
+        list.map((a) =>
+          a.text === early ? { releaseId: 'r2', text: 'Блокировку снимает старший модератор.' } : a,
+        ),
+      ),
+    );
+    assert.equal(pending(p)!.keepsChain, false);
+    assert.deepEqual(pending(p)!.changes, [
+      'критерий №2 фичи member-block переформулирован и перенесён из r1 в r2',
+    ]);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test('Вердикт о цепочке называет версию, по которой утверждена архитектура', async () => {
+  const f = fixture(),
+    p = new Preparation(f.store);
+  try {
+    const changeId = approveWith(p, base);
+    // Та же постановка ещё раз: изменений нет, цепочка сохраняется.
+    saveProduct(p, changeId, base);
+    assert.deepEqual(
+      [pending(p)!.keepsChain, pending(p)!.sameBase, pending(p)!.chainSource, pending(p)!.changes],
+      [true, true, 1, []],
+    );
+    submitProduct(p, changeId);
+    assert.match(
+      await cardReason(f.store, changeId),
+      /По объёму совпадает с версией 1, по которой утверждены архитектура и дизайн/,
+    );
+    // Возврат: P2 меняет объём и утверждена, P3 возвращает объём P1.
+    p.decide({
+      changeId,
+      stage: 'product',
+      expectedDigest: latestDigest(p),
+      decision: 'request-changes',
+      comment: 'Без изменений не нужна',
+    });
+    saveProduct(p, changeId, rescoped);
+    approveStage(p, changeId, 'product');
+    saveProduct(p, changeId, base);
+    assert.deepEqual(
+      [pending(p)!.keepsChain, pending(p)!.sameBase, pending(p)!.chainSource],
+      [true, false, 1],
+    );
+    submitProduct(p, changeId);
+    const reason = await cardReason(f.store, changeId);
+    assert.match(reason, /По объёму совпадает с версией 1/);
+    assert.doesNotMatch(reason, /Перенесены только критерии/);
   } finally {
     f.cleanup();
   }
@@ -478,6 +584,15 @@ test('Проекция показывает утверждённую верси�
     approveStage(p, changeId, 'product');
     assert.match(readFileSync(join(dir, 'product.md'), 'utf8'), /Блокировка имеет срок действия/);
     assert.match(readFileSync(join(dir, 'product.draft.md'), 'utf8'), /Неутверждённой версии/);
+    // Утверждена постановка другого объёма: разработка стоит, и проекция не
+    // предлагает планировать.
+    saveProduct(p, changeId, base);
+    const blocked = readFileSync(join(dir, 'product.md'), 'utf8');
+    assert.match(
+      blocked,
+      /Действующая утверждённая версия — 2; разработка изменения не идёт, пока не утверждён этап «архитектура и стек»/,
+    );
+    assert.doesNotMatch(blocked, /Планируйте по этому файлу/);
   } finally {
     store.close();
     rmSync(root, { recursive: true, force: true });

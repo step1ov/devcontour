@@ -399,7 +399,7 @@ function pendingStatusText(pending: PendingProduct, bound: number, ready: boolea
       ? `Разработка идёт по утверждённой версии ${bound}.`
       : `Действующая утверждённая версия — ${bound}; разработка изменения ещё ждёт остальных согласований.`,
     pending.keepsChain === true
-      ? 'Её утверждение сохранит архитектуру и дизайн: перенесены только критерии между существующими релизами.'
+      ? `Её утверждение сохранит архитектуру и дизайн: ${chainReason(pending)}.`
       : pending.keepsChain === false
         ? 'Её утверждение потребует заново утвердить архитектуру и дизайн.'
         : '',
@@ -407,10 +407,19 @@ function pendingStatusText(pending: PendingProduct, bound: number, ready: boolea
     .filter(Boolean)
     .join(' ');
 }
+// Почему цепочка сохраняется. Вердикт сравнивает с версией, по которой
+// утверждена архитектура; при возврате к прежнему объёму или той же версии
+// изменений против действующей нет — тогда называем ту версию.
+function chainReason(pending: PendingProduct) {
+  return pending.sameBase && pending.changes?.length
+    ? 'перенесены только критерии между существующими релизами'
+    : `по объёму совпадает с версией ${pending.chainSource}, по которой утверждены архитектура и дизайн`;
+}
+const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 function decisionText(pending: PendingProduct, bound: number, ready: boolean) {
   return [
     pending.keepsChain === true
-      ? 'Перенесены только критерии между существующими релизами: архитектура и дизайн остаются в силе.' +
+      ? `${capitalize(chainReason(pending))}: архитектура и дизайн остаются в силе.` +
         (ready ? ' Разработка продолжится по этой версии.' : '')
       : pending.keepsChain === false
         ? 'После утверждения архитектуру и дизайн нужно будет утвердить заново; до этого задачи изменения не выдаются.'

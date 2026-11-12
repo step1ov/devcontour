@@ -52,12 +52,7 @@ import type { Store } from '../core/store.ts';
 import type { DevContourState, Task } from '../core/model.ts';
 import { DomainError } from '../core/model.ts';
 import { descendants } from '../core/graph.ts';
-import {
-  Preparation,
-  assertStageUpstream,
-  describeReleaseDiff,
-  pendingProduct,
-} from '../core/preparation.ts';
+import { Preparation, assertStageUpstream, pendingProductOf } from '../core/preparation.ts';
 import type { ProductChange } from '../core/preparation-model.ts';
 import { pendingScopeNote } from '../core/product-map.ts';
 import {
@@ -253,17 +248,24 @@ const prepAnswerPending: AttentionSourceRule = {
  * Что сделает утверждение новой версии постановки поверх утверждённой:
  * сохранит ли архитектуру и дизайн и что изменилось в релизах.
  */
-function productImpact(c: ProductChange, reason: string) {
-  const impact = pendingProduct(c);
+function productImpact(ctx: AttentionContext, c: ProductChange, reason: string) {
+  const impact = pendingProductOf(ctx.state, c);
   if (!impact) return reason;
+  const changes = impact.changes ?? [];
   const chain =
     impact.keepsChain === undefined
       ? ''
-      : impact.keepsChain
-        ? ' Перенесены только критерии между релизами: архитектура и дизайн остаются в силе.'
-        : ' После утверждения архитектуру и дизайн нужно утвердить заново; до этого задачи изменения не выдаются.';
-  const changes = impact.releases ? describeReleaseDiff(impact.releases) : [];
-  return reason + chain + (changes.length ? ' Релизы: ' + changes.join('; ') + '.' : '');
+      : !impact.keepsChain
+        ? ' После утверждения архитектуру и дизайн нужно утвердить заново; до этого задачи изменения не выдаются.'
+        : impact.sameBase && changes.length
+          ? ' Перенесены только критерии между существующими релизами: архитектура и дизайн остаются в силе.'
+          : ` По объёму совпадает с версией ${impact.chainSource}, по которой утверждены архитектура и дизайн: они остаются в силе.`;
+  return (
+    reason +
+    chain +
+    (changes.length ? ' Релизы: ' + changes.join('; ') + '.' : '') +
+    impact.warnings.map((w) => ' ' + w + '.').join('')
+  );
 }
 
 /** Предыдущий этап утверждён и редакция относится к нему (правило `decide`). */
@@ -325,7 +327,7 @@ const prepStage: AttentionSourceRule = {
             ...base,
             actor: 'operator',
             title: `Утвердите ${stageTitles[stage]} «${c.title}»`,
-            reason: stage === 'product' ? one(productImpact(c, r.reason)) : one(r.reason),
+            reason: stage === 'product' ? one(productImpact(ctx, c, r.reason)) : one(r.reason),
             actions: [
               { id: 'approve', kind: 'domain', label: 'Утвердить', input: 'confirm' },
               {
