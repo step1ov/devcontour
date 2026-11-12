@@ -136,5 +136,11 @@
 // otherOwnersHint без repositoryId и ожидание verification задания ChangeSet;
 // описание session_handoff — boardId однозначным префиксом и
 // host.verifications; прочие операции байтово прежние.
-export const CATALOG_DIGEST = '5cf131144bb95835616e9810b5c7ba24e943492886209b6e8512eaa2c8b1504c';
+// Намеренное изменение: новая пишущая операция task_scenario_proof
+// (доказательство сценария релиза принятой задачи прогоном её существующего
+// теста на принятом SHA, без исполнителя и без изменения постановки) после
+// task_story; прочие операции байтово прежние.
+// Намеренное изменение: описание task_scenario_proof называет отказ до
+// прогона для сценария вне фичи историй задачи; прочие операции байтово прежние.
+export const CATALOG_DIGEST = '530adfdeb7f1d2424ce8704ab10dc3c70f2ac1fc737151b803fa08a9b6f48cbe';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';

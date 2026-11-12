@@ -166,6 +166,23 @@ export function ProductPanel({ onRepository }: { onRepository: (id: string) => v
           </ul>
         </Alert>
       )}
+      {(view.afterAcceptanceScenarios ?? []).length > 0 && (
+        <Alert variant="info" role="status">
+          <p className="m-0 font-medium">
+            Доказано после приёмки существующим тестом ({view.afterAcceptanceScenarios!.length}):
+            тест прошёл на принятом SHA задачи; что он проверяет именно этот сценарий, отдельно не
+            ревьюировалось
+          </p>
+          <ul className="mt-2 grid gap-1">
+            {view.afterAcceptanceScenarios!.map((s) => (
+              <li key={s.featureId + '\u0000' + s.scenario + '\u0000' + s.taskId}>
+                {s.scenario} — {s.taskId}, тест «{s.testId}» (
+                {s.actor === 'operator' ? 'оператор' : 'агент'}): {s.reason}
+              </li>
+            ))}
+          </ul>
+        </Alert>
+      )}
       {(view.unconfirmedScenarios ?? []).length > 0 && (
         <Alert variant="warning" role="status">
           <p className="m-0 font-medium">

@@ -12,7 +12,12 @@ import { HarnessError } from 'devcontour-harness';
 import { DevContour, digest, specDigest } from './service.ts';
 import { domain, executionOf } from '../harness/execution.ts';
 import { repositories } from './repositories.ts';
-import type { DeferredScenario, ProductReleaseProof, UnconfirmedScenario } from './product-map.ts';
+import type {
+  AfterAcceptanceScenario,
+  DeferredScenario,
+  ProductReleaseProof,
+  UnconfirmedScenario,
+} from './product-map.ts';
 import {
   DomainError,
   requireValue,
@@ -80,6 +85,8 @@ export interface ProductReleaseGuard {
     manifest?: Verification['manifest'],
   ): {
     deferredScenarios: DeferredScenario[];
+    /** Сценарии, доказанные после приёмки существующим тестом задачи. */
+    afterAcceptanceScenarios?: AfterAcceptanceScenario[];
     unconfirmedScenarios?: UnconfirmedScenario[];
     /** Карту прошлой приёмки не найти: объём не сверить. */
     scopeUnverifiable?: boolean;
@@ -323,12 +330,15 @@ export class Workspace {
       const v = c.verifications.find((x) => x.id === c.acceptance?.verificationId);
       if (!c.releaseId || !v?.productRelease) return {};
       try {
-        const { deferredScenarios } = this.guard().validate(
+        const { deferredScenarios, afterAcceptanceScenarios = [] } = this.guard().validate(
           v.productRelease,
           changeSnapshot(this.h.store.read(), c),
           v.manifest,
         );
-        return deferredScenarios.length ? { deferredScenarios } : {};
+        return {
+          ...(deferredScenarios.length ? { deferredScenarios } : {}),
+          ...(afterAcceptanceScenarios.length ? { afterAcceptanceScenarios } : {}),
+        };
       } catch {
         // Карта или покрытие изменились после приёмки: актуальный список
         // показывает product-view, а не повтор приёмки.
@@ -340,6 +350,7 @@ export class Workspace {
       if (c.acceptance) return { status: 'already-accepted', changeSetId: id, ...acceptedNotes(c) };
       changeSnapshot(s, c).tasks.forEach((t) => assertTaskPreparation(s, t));
       let deferred: DeferredScenario[] = [];
+      let afterAcceptance: AfterAcceptanceScenario[] = [];
       let unconfirmed: UnconfirmedScenario[] = [];
       let unverifiable = false;
       const { verification: v, current } = currentJoint(this.h, c);
@@ -350,11 +361,17 @@ export class Workspace {
           throw new DomainError('Нет закреплённой проверки продуктового релиза');
         const checked = this.guard().validate(v.productRelease, changeSnapshot(s, c), v.manifest);
         deferred = checked.deferredScenarios;
+        afterAcceptance = checked.afterAcceptanceScenarios ?? [];
         unconfirmed = checked.unconfirmedScenarios ?? [];
         unverifiable = checked.scopeUnverifiable ?? false;
       }
       // Отложенные сценарии не проверены: приёмка называет их, а не молчит.
-      const notes = deferred.length ? { deferredScenarios: deferred } : {};
+      // Сценарии, доказанные после приёмки существующим тестом, — сопоставление
+      // без отдельного ревью: приёмка (и её запись в журнале) называет их.
+      const notes = {
+        ...(deferred.length ? { deferredScenarios: deferred } : {}),
+        ...(afterAcceptance.length ? { afterAcceptanceScenarios: afterAcceptance } : {}),
+      };
       const delivery = delivered(this.h, c);
       if (this.h.config.completionMode === 'remote' && !delivery)
         throw new DomainError(

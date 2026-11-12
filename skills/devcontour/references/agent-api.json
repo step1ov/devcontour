@@ -4140,6 +4140,48 @@
       }
     },
     {
+      "name": "task_scenario_proof",
+      "description": "Prove a release scenario of a done story task with a test that already exists, without a writer and without changing its approved spec: runs the named test gate at the task's accepted result SHA (same execution as integration) and records the proof only if the named testId ran and passed there. Refused before the run unless the scenario is a non-deferred check of a feature that a confirmed story of the task serves (a proof the release would not count). intent_report and product_view count it as scenario evidence with afterAcceptance: true. A missing or failing testcase is refused with the reason; a behaviour without a test needs a task that writes it. Local to this copy (Git sync does not carry it). In approvalMode operator the operator runs CLI scenario-proof.",
+      "readOnly": false,
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "taskId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "gate": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,80}$"
+          },
+          "scenario": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 1500
+          },
+          "testId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 5000
+          }
+        },
+        "required": [
+          "taskId",
+          "gate",
+          "scenario",
+          "testId",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "board_correct",
       "description": "Create a correction after board acceptance, preserving history and recalculating transitive impact.",
       "readOnly": false,
