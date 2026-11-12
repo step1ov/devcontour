@@ -1269,7 +1269,7 @@ async function main() {
             actorOf(),
           );
         else if (operation === 'input-propose')
-          // Предложение ответа — действие ведущего (`--by host`); подтверждает
+          // Предложение ответа — действие ведущего (`--by host` по умолчанию); подтверждает
           // его оператор в панели, CLI-подтверждения нет.
           result = service.propose(
             {
@@ -1280,7 +1280,8 @@ async function main() {
               reasoning: option('--reasoning', ''),
               expectedVersion,
             },
-            actorOf(),
+            // Операция ведущего: без `--by` — host, а не человек.
+            args.includes('--by') ? actorOf() : 'host',
           );
         else if (operation === 'input-context')
           result = await service.context({

@@ -95,7 +95,12 @@ export interface HintParamMap {
   /** Применённый ответ устарел; `operator` — применяет оператор. */
   'apply-stale': { reason: string; operator: boolean } & Stops;
   /** Ревью отклонило ответ. */
-  'apply-rejected': { operator: boolean } & Stops;
+  /**
+   * Ревью отклонило ответ. `operator` — применяет оператор; `operatorAnswers` —
+   * исправляет ответ оператор (ведущий только предлагает, `input_propose`),
+   * `proposed` — предложение исправления уже ждёт оператора (F37).
+   */
+  'apply-rejected': { operator: boolean; operatorAnswers?: boolean; proposed?: boolean } & Stops;
   /** Ответ применён, задача ждёт следующей попытки. */
   'apply-claim': Stops;
   /** Ответ сохранён, но не применён (`state`). */
@@ -321,7 +326,7 @@ const en: Catalog = {
   'answer-operator': (p, s) => {
     const { requestId, taskId } = s.input!;
     return (
-      `Task ${taskId} waits for the operator's answer to ${requestId} in the panel (${hrefs.input(taskId)})${p.floors.length ? `: the question is critical (${p.floors.join(', ')})` : ''}. The lead does not answer it itself and no queue step helps. ` +
+      `Task ${taskId} waits for the operator's answer to ${requestId} in the panel (${hrefs.input(taskId)})${p.floors.length ? `: the question is critical (${p.floors.join(', ')})` : ''}. Do not answer it yourself; no queue step helps. ` +
       (p.proposed
         ? 'Your proposed answer waits for the operator to confirm it in one click or answer differently; replace it with input_propose only if the facts changed, and tell the user the decision is waiting.'
         : `If the registered contracts and accepted files decide it, propose the answer: input_propose {"requestId": "${requestId}", "expectedVersion": ${p.version ?? '…'}, "text": …, "optionId": …, "reasoning": …} after input_show; the operator confirms it in one click or answers differently. Otherwise ask the user to answer in the panel.`) +
@@ -338,7 +343,13 @@ const en: Catalog = {
   'apply-rejected': (p, s) => {
     const { requestId, taskId } = s.input!;
     return (
-      `The reviewer rejected the answer to ${requestId} (input_show names the findings): correct the answer, or reopen and respecify the task${p.operator ? '; the operator may apply it only with explicit confirmation' : ''}.` +
+      `The reviewer rejected the answer to ${requestId} (input_show names the findings): ` +
+      (p.operatorAnswers
+        ? p.proposed
+          ? 'the operator corrects the answer; your proposed correction waits for the operator to confirm it'
+          : 'the operator corrects the answer; propose a corrected answer with input_propose for the operator to confirm, or reopen and respecify the task'
+        : 'correct the answer, or reopen and respecify the task') +
+      `${p.operator ? '; the operator may apply it only with explicit confirmation' : ''}.` +
       repeatedEn(taskId, p.stops)
     );
   },
@@ -534,7 +545,7 @@ const ru: Catalog = {
   'answer-operator': (p, s) => {
     const { requestId, taskId } = s.input!;
     return (
-      `Задача ${taskId} ждёт ответа оператора на ${requestId} в панели (${hrefs.input(taskId)})${p.floors.length ? `: вопрос критический (${p.floors.join(', ')})` : ''}. Ведущий сам на него не отвечает, и шаг очереди не поможет. ` +
+      `Задача ${taskId} ждёт ответа оператора на ${requestId} в панели (${hrefs.input(taskId)})${p.floors.length ? `: вопрос критический (${p.floors.join(', ')})` : ''}. Сами на него не отвечайте; шаг очереди не поможет. ` +
       (p.proposed
         ? 'Ваше предложение ответа ждёт оператора: он подтвердит его одним нажатием или ответит иначе. Заменяйте его через input_propose, только если факты изменились, и сообщите пользователю, что решение ждёт его.'
         : `Если ответ следует из зарегистрированных контрактов и принятых файлов, предложите его: input_propose {"requestId": "${requestId}", "expectedVersion": ${p.version ?? '…'}, "text": …, "optionId": …, "reasoning": …} после input_show; оператор подтвердит его одним нажатием или ответит иначе. Иначе попросите пользователя ответить в панели.`) +
@@ -551,7 +562,13 @@ const ru: Catalog = {
   'apply-rejected': (p, s) => {
     const { requestId, taskId } = s.input!;
     return (
-      `Ревьюер отклонил ответ на ${requestId} (замечания — в input_show): исправьте ответ или переоткройте задачу с новой постановкой${p.operator ? '; оператор может применить его только с явным подтверждением' : ''}.` +
+      `Ревьюер отклонил ответ на ${requestId} (замечания — в input_show): ` +
+      (p.operatorAnswers
+        ? p.proposed
+          ? 'ответ исправляет оператор; ваше предложение исправления ждёт его подтверждения'
+          : 'ответ исправляет оператор; предложите исправленный ответ через input_propose, чтобы оператор подтвердил его, или переоткройте задачу с новой постановкой'
+        : 'исправьте ответ или переоткройте задачу с новой постановкой') +
+      `${p.operator ? '; оператор может применить его только с явным подтверждением' : ''}.` +
       repeatedRu(taskId, p.stops)
     );
   },

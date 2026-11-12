@@ -282,6 +282,16 @@ const samples: { [C in HintCode]: (HintSubject & Extract<HintOf, { code: C }>)[]
   'apply-rejected': [
     { code: 'apply-rejected', params: { operator: true }, input: input1 },
     { code: 'apply-rejected', params: { operator: false }, input: input1 },
+    {
+      code: 'apply-rejected',
+      params: { operator: false, operatorAnswers: true, proposed: false },
+      input: input1,
+    },
+    {
+      code: 'apply-rejected',
+      params: { operator: true, operatorAnswers: true, proposed: true },
+      input: input1,
+    },
   ],
   'apply-claim': [
     { code: 'apply-claim', params: { stops: { ...stops, exhausted: false } }, input: input1 },
@@ -460,11 +470,12 @@ test('Подсказки шага: новая конфигурация setup п�
  * (четвёртая фраза о владельце решения); прежние образцы байтово прежние.
  * Образцы нового кода `base-held` добавлены (удержанный перенос базы ждёт
  * подтверждения человека); прежние образцы байтово прежние.
- * Текст `answer-operator` называет предложение ответа ведущего
+ * Текст `answer-operator` (второе лицо) называет предложение ответа ведущего
  * (`input_propose`) вместо «ждите»; добавлены образцы с `version` и
+ * `proposed`; добавлены образцы `apply-rejected` с `operatorAnswers` и
  * `proposed`; прочие образцы байтово прежние.
  */
-const ENGLISH_SAMPLES_SHA256 = '88cb42fcac5f1ebf5ad22525e49010a7d8a202a65a6a782bd5f597dac3642b7c';
+const ENGLISH_SAMPLES_SHA256 = '77db091366ccd05e377458831c483a5813b280bcb778dde3a8832a86a0f09039';
 
 test('Подсказки шага: английские тексты образцов закреплены', () => {
   assert.equal(

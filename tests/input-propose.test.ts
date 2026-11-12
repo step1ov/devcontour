@@ -16,7 +16,10 @@ import { AgentService } from '../src/application/agent.ts';
 import { AttentionService } from '../src/application/attention.ts';
 import { devcontourHandoff } from '../src/application/handoff.ts';
 import { executionOf } from '../src/harness/execution.ts';
-import { byKey } from './attention-fixture.ts';
+import { byKey, dumpDatabase } from './attention-fixture.ts';
+import { join } from 'node:path';
+import { taskOwner } from '../src/core/sync-state.ts';
+import { DomainError } from '../src/core/model.ts';
 
 after(() => inputDemos.close());
 
@@ -69,6 +72,7 @@ test('A critical question: the lead proposes an answer, handoff names input_prop
     // Проверки входа и права — до записи.
     assert.equal(await codeOf(() => run({ ...proposal, reasoning: 'short' })), '400:-');
     assert.equal(await codeOf(() => run({ ...proposal, optionId: 'nope' })), '400:-');
+    assert.equal(await codeOf(() => run({ ...proposal, optionId: '' })), '400:-');
     assert.equal(
       await codeOf(() => run({ ...proposal, expectedVersion: version + 1 })),
       '409:REVISION_CONFLICT',
@@ -158,17 +162,30 @@ test('A critical question: the lead proposes an answer, handoff names input_prop
     assert.equal(after.state, 'answer-saved');
     assert.equal(after.actor, 'lead');
     assert.equal(after.proposal, undefined, 'запись предложения снята');
-    // Повторное подтверждение — предложения уже нет, второго ответа нет.
-    assert.equal(
-      await codeOf(() =>
-        f.service.confirmProposalInTask(taskId, requestId, {
-          proposalDigest: final.proposalDigest,
-          expectedVersion: after.version,
-        }),
-      ),
-      '404:-',
+    // Происхождение ответа — в журнале: подтверждено предложение ведущего.
+    const events = f.store
+      .allEvents()
+      .filter((e) => e.type === 'input.proposal-confirmed') as unknown as {
+      data: { requestId: string; proposalDigest: string; proposedBy: string; messageId: string };
+    }[];
+    assert.equal(events.length, 1);
+    assert.deepEqual(
+      [events[0].data.requestId, events[0].data.proposalDigest, events[0].data.proposedBy],
+      [requestId, final.proposalDigest, 'lead'],
     );
+    assert.equal(events[0].data.messageId, answers[0].messageRef);
+    // Повторное нажатие — тот же ответ (replayed), второго ответа и события нет.
+    const again = f.service.confirmProposalInTask(taskId, requestId, {
+      proposalDigest: final.proposalDigest,
+      expectedVersion: after.version,
+    }) as { replayed?: boolean; messageId: string };
+    assert.equal(again.replayed, true);
+    assert.equal(again.messageId, answers[0].messageRef);
     assert.equal(engineRequest(f, requestId).answers.length, 1);
+    assert.equal(
+      f.store.allEvents().filter((e) => e.type === 'input.proposal-confirmed').length,
+      1,
+    );
     // Ответ сохранён: предложение больше не принимается.
     assert.equal(
       await codeOf(() => run({ ...proposal, expectedVersion: after.version })),
@@ -277,6 +294,205 @@ test('Attention card: «Подтвердить ответ ведущего» fir
       answered.actions.some((a) => a.id === 'confirm-proposal'),
       false,
     );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+const reasoning = 'The registered contract and the accepted file both decide this answer.';
+
+test('Confirm guards: a wrong expectedVersion alone is refused; a failed write keeps the proposal and writes no answer', async () => {
+  const f = await inputFixture(controlled({ critical: true }));
+  try {
+    const { taskId, requestId, version } = await question(f);
+    const saved = f.service.propose(
+      { requestId, text: 'Use JSON.', optionId: 'json', reasoning, expectedVersion: version },
+      'lead',
+    );
+    // Digest верный, предложение текущее — отказ только по версии.
+    assert.equal(
+      await codeOf(() =>
+        f.service.confirmProposalInTask(taskId, requestId, {
+          proposalDigest: saved.proposalDigest,
+          expectedVersion: version + 1,
+        }),
+      ),
+      '409:REVISION_CONFLICT',
+    );
+    // Сбой внутри транзакции после ответа и снятия записи: всё откатывается.
+    const original = f.store.appendEvent.bind(f.store);
+    f.store.appendEvent = ((type: string, ...rest: unknown[]) => {
+      if (type === 'input.proposal-confirmed') throw new Error('fixture: journal unavailable');
+      return (original as (...a: unknown[]) => unknown)(type, ...rest);
+    }) as typeof f.store.appendEvent;
+    try {
+      assert.throws(
+        () =>
+          f.service.confirmProposalInTask(taskId, requestId, {
+            proposalDigest: saved.proposalDigest,
+            expectedVersion: version,
+          }),
+        /journal unavailable/,
+      );
+    } finally {
+      f.store.appendEvent = original;
+    }
+    assert.equal(engineRequest(f, requestId).answers.length, 0);
+    const kept = f.service.show({ requestId });
+    assert.equal(kept.proposal?.current, true);
+    assert.equal(kept.proposal?.digest, saved.proposalDigest);
+    // После сбоя подтверждение проходит.
+    f.service.confirmProposalInTask(taskId, requestId, {
+      proposalDigest: saved.proposalDigest,
+      expectedVersion: version,
+    });
+    assert.equal(engineRequest(f, requestId).answers.length, 1);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('A requirement-change proposal is confirmed as a requirement-change operator answer', async () => {
+  const f = await inputFixture(controlled({ critical: true }));
+  try {
+    const { taskId, requestId, version } = await question(f);
+    const saved = f.service.propose(
+      {
+        requestId,
+        text: 'Switch the artifact to YAML; the spec changes.',
+        optionId: 'yaml',
+        kind: 'requirement-change',
+        reasoning,
+        expectedVersion: version,
+      },
+      'lead',
+    );
+    f.service.confirmProposalInTask(taskId, requestId, {
+      proposalDigest: saved.proposalDigest,
+      expectedVersion: version,
+    });
+    const [answer] = engineRequest(f, requestId).answers;
+    assert.equal(answer.kind, 'requirement-change');
+    assert.equal(answer.actor.kind, 'operator');
+    assert.equal(answer.optionId, 'yaml');
+    assert.equal(f.service.show({ requestId }).state, 'answer-saved');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('Review rejected: the lead proposes a correction; confirming it supersedes the operator answer message', async () => {
+  const f = await inputFixture(controlled({ critical: true, verdict: { approve: false } }));
+  try {
+    const { taskId, requestId, version } = await question(f);
+    const first = f.service.answerInTask(taskId, requestId, {
+      text: 'Use YAML.',
+      expectedVersion: version,
+    });
+    const context = await f.service.context({ requestId });
+    const review = await f.service.review({
+      requestId,
+      contextDigest: context.contextDigest,
+      authorRuntime: 'codex',
+    });
+    assert.equal(review.approved, false);
+    const rejected = f.service.show({ requestId });
+    assert.equal(rejected.state, 'review-rejected');
+    assert.equal(rejected.actor, 'operator');
+    assert.match(rejected.next, /input_propose/);
+    const handoff = devcontourHandoff(f.h, {}).host.next!;
+    assert.equal(handoff.code, 'apply-rejected');
+    assert.deepEqual(
+      [
+        (handoff.params as { operatorAnswers?: boolean }).operatorAnswers,
+        (handoff.params as { proposed?: boolean }).proposed,
+      ],
+      [true, false],
+    );
+    assert.match(handoff.detail, /input_propose/);
+    const saved = f.service.propose(
+      {
+        requestId,
+        text: 'Use JSON as the contract fixes.',
+        optionId: 'json',
+        reasoning,
+        expectedVersion: rejected.version,
+      },
+      'lead',
+    );
+    assert.match(f.service.show({ requestId }).next, /confirms the lead's proposed correction/);
+    assert.equal(
+      (devcontourHandoff(f.h, {}).host.next!.params as { proposed?: boolean }).proposed,
+      true,
+    );
+    const confirmed = f.service.confirmProposalInTask(taskId, requestId, {
+      proposalDigest: saved.proposalDigest,
+      expectedVersion: rejected.version,
+    }) as { messageId: string };
+    const answers = engineRequest(f, requestId).answers;
+    assert.equal(answers.length, 2);
+    assert.deepEqual(
+      answers.map((a) => a.actor.kind),
+      ['operator', 'operator'],
+    );
+    assert.equal(answers[1].text, 'Use JSON as the contract fixes.');
+    const task = f.store.read().tasks.find((t) => t.id === taskId)!;
+    const message = f.store.discussionById(taskOwner(task), confirmed.messageId) as {
+      supersedes?: string;
+    };
+    assert.equal(message.supersedes, first.messageId);
+    assert.equal(f.service.show({ requestId }).state, 'answer-saved');
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test('Attention card: a long or masked proposal is not confirmable from the card; a stale card writes nothing', async () => {
+  const f = await inputFixture(controlled({ critical: true }));
+  try {
+    const { requestId, version } = await question(f);
+    const service = () => new AttentionService(f.store, f.h, { root: f.root });
+    const key = `input:${requestId}`;
+    const domain = async () => {
+      const card = byKey((await service().active()).items, key)!;
+      return { card, ids: card.actions.filter((a) => a.kind === 'domain').map((a) => a.id) };
+    };
+    const propose = (text: string, kind?: 'requirement-change') =>
+      f.service.propose(
+        { requestId, text, reasoning, expectedVersion: version, ...(kind ? { kind } : {}) },
+        'lead',
+      );
+    // 2500 знаков: карточка показала бы усечённый текст — подтверждения нет.
+    propose('J'.repeat(2500));
+    const long = await domain();
+    assert.deepEqual(long.ids, ['answer']);
+    assert.match(long.card.reason, /подтвердите его в карточке задачи/);
+    // Маскируемый секрет: показан под маской — подтверждения нет.
+    propose('Clone https://deploy:s3cr3t-fixture@example.invalid/repo.git and keep JSON.');
+    const masked = await domain();
+    assert.deepEqual(masked.ids, ['answer']);
+    assert.doesNotMatch(JSON.stringify(masked.card), /s3cr3t-fixture/);
+    // Изменение требований видно в строке причины.
+    propose('Switch to YAML.', 'requirement-change');
+    const change = await domain();
+    assert.deepEqual(change.ids, ['confirm-proposal', 'answer']);
+    assert.match(change.card.reason, /^Ведущий предлагает ответ \(изменение требований\)/);
+    // Карточка, показанная до замены предложения, устарела: ничего не пишется.
+    propose('Keep JSON.');
+    const before = dumpDatabase(join(f.root, 'state.sqlite'));
+    await assert.rejects(
+      service().act({
+        sourceKey: change.card.sourceKey,
+        occurrenceId: change.card.occurrenceId,
+        expectedVersion: change.card.sourceVersion,
+        action: 'confirm-proposal',
+        input: {},
+      }),
+      (e: unknown) =>
+        e instanceof DomainError && e.status === 409 && e.details?.code === 'attention-stale',
+    );
+    assert.equal(dumpDatabase(join(f.root, 'state.sqlite')), before);
+    assert.equal(engineRequest(f, requestId).answers.length, 0);
   } finally {
     await f.cleanup();
   }

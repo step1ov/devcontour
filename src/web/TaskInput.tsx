@@ -213,7 +213,13 @@ export function TaskInput({ taskId, revision }: { taskId: string; revision: stri
       {current.state !== 'awaiting-answer' && current.next !== 'none' && (
         <p className="text-muted-foreground mt-2 mb-0 text-xs" data-input-next>
           {/* Текст называет, кто действует; `next` сводки — указание ведущему агенту. */}
-          Дальше: {inputNextText({ ...current, operatorMode: view.approvalMode === 'operator' })}
+          Дальше:{' '}
+          {inputNextText({
+            ...current,
+            operatorMode: view.approvalMode === 'operator',
+            // Устаревшее предложение подтвердить нельзя: шаг его не называет.
+            proposal: current.proposal?.current ? current.proposal : undefined,
+          })}
         </p>
       )}
       {/* Предложение ведущего (F37): на вопрос отвечает оператор, ведущий

@@ -553,6 +553,14 @@ const inputSource: AttentionSourceRule = {
         const proposalLabel = proposal
           ? options.find((o) => o.id === proposal.optionId)?.label
           : undefined;
+        // Подтверждение с карточки центра — только когда она показывает
+        // предложение целиком и как есть: без усечения и без маски. Иначе
+        // оператор подтверждает в карточке задачи, где текст полный.
+        const proposalText = proposal ? proposalPrompt(proposal, proposalLabel) : '';
+        const confirmable =
+          !!proposal &&
+          proposalText.length <= ATTENTION_LIMITS.prompt &&
+          ctx.redact(proposalText) === proposalText;
         let findings = '';
         if (rejected)
           engine.read((v) => {
@@ -582,24 +590,29 @@ const inputSource: AttentionSourceRule = {
           // (он же — в форме ответа) не вытесняет сигнал за предел причины.
           reason: ctx.redact(
             (r.questionStops ? `${repeatedQuestionText(r.questionStops)} ` : '') +
+              // Предложение ведущего — до вопроса: причина усекается, а
+              // вид ответа (изменение требований) должен быть виден сразу.
+              (proposal
+                ? `Ведущий предлагает ответ${proposal.kind === 'requirement-change' ? ' (изменение требований)' : ''}${proposalLabel ? ` (вариант «${proposalLabel}»)` : ''}` +
+                  (confirmable
+                    ? ': полностью — в «Ответ ведущего и обоснование». '
+                    : ': он длинный или содержит скрытые данные — прочитайте и подтвердите его в карточке задачи. ')
+                : '') +
               (rejected ? `Ревью отклонило ответ (раунд ${r.round}): ${findings} — ` : '') +
               (question ? `${question} — ` : '') +
-              (proposal
-                ? `Ведущий предлагает ответ${proposalLabel ? ` (вариант «${proposalLabel}»)` : ''}: ${proposal.text} — `
-                : '') +
               `Дальше: ${inputNextText({ ...r, operatorMode })}.`,
           ),
           since: r.createdAt,
           subject: { kind: 'request', id: r.requestId, href: hrefs.input(r.taskId) },
           actions: [
-            ...(proposal
+            ...(confirmable
               ? [
                   {
                     id: 'confirm-proposal',
                     kind: 'domain' as const,
                     label: 'Подтвердить ответ ведущего',
                     input: 'confirm' as const,
-                    prompt: proposalPrompt(proposal, proposalLabel),
+                    prompt: proposalText,
                   },
                 ]
               : []),
@@ -648,7 +661,7 @@ const inputSource: AttentionSourceRule = {
             requestId: r.requestId,
             expectedVersion: r.version,
             ...(rejected && r.round !== undefined ? { rejectedRound: r.round } : {}),
-            ...(proposal ? { proposalDigest: proposal.digest } : {}),
+            ...(confirmable ? { proposalDigest: proposal.digest } : {}),
           },
         };
       });

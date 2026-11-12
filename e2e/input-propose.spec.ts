@@ -153,7 +153,7 @@ test.describe('Lead proposal for an operator question', () => {
     await expect(card).toContainText('Ведущий предлагает ответ (вариант «JSON»)');
     const actions = card.getByRole('button', { name: /Подтвердить ответ ведущего|Ответить/ });
     await expect(actions.first()).toHaveText('Подтвердить ответ ведущего');
-    await card.getByText('Ответ ведущего и обоснование').click();
+    await card.locator('summary', { hasText: 'Ответ ведущего и обоснование' }).click();
     await expect(card).toContainText('Обоснование ведущего:');
     await card.getByRole('button', { name: 'Подтвердить ответ ведущего' }).click();
     await expect

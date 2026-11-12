@@ -50,6 +50,7 @@ import { DiscussionService } from './discussion.ts';
 import { questionStops, REPEATED_QUESTION_STOPS } from '../core/input-labels.ts';
 import { outsideRoleScope, roleScopeAdvice } from '../core/workflow.ts';
 import { roleBinding } from '../core/repositories.ts';
+import { taskOwner } from '../core/sync-state.ts';
 
 /**
  * Шаг переноса ответа заменённого вопроса (F14). В черновике — перенос, затем
@@ -122,7 +123,7 @@ export const inputOperationInputs = {
   input_propose: z.strictObject({
     requestId,
     text: z.string().trim().min(1).max(INPUT_LIMITS.answer),
-    optionId: z.string().max(40).optional(),
+    optionId: z.string().min(1).max(40).optional(),
     kind: z.enum(['clarification', 'requirement-change']).default('clarification'),
     /** Почему ответ следует из контрактов и принятых файлов: читает оператор. */
     reasoning: z.string().trim().min(10).max(PROPOSAL_REASONING),
@@ -460,7 +461,9 @@ export class InputService {
               }
             : {
                 actor: 'operator' as const,
-                next: `the reviewer rejected the answer: read the findings in the panel (${hrefs.input(request.workId)}); correct the answer, or apply only with explicit confirmation`,
+                next: proposed
+                  ? `the reviewer rejected the answer: read the findings in the panel (${hrefs.input(request.workId)}); confirm the lead's proposed correction, correct the answer, or apply only with explicit confirmation`
+                  : `the reviewer rejected the answer: read the findings in the panel (${hrefs.input(request.workId)}); correct the answer, or apply only with explicit confirmation; the lead may propose a corrected answer (input_propose)`,
               };
       case 'applied-awaiting-claim':
         return { actor: 'lead' as const, next: 'wait for the next attempt of the task' };
@@ -845,6 +848,13 @@ export class InputService {
         'NOT_READY',
         `Вопрос ${request.id} в состоянии ${state}: предложение ответа — только пока оператор отвечает (awaiting-answer или review-rejected)`,
       );
+    // Ответов у запроса не больше предела движка: подтвердить такое
+    // предложение было бы нельзя.
+    if (request.answers.length >= INPUT_LIMITS.answers)
+      throw refuse(
+        'ANSWER_LIMIT',
+        `У вопроса ${request.id} уже ${request.answers.length} ответов — предел ${INPUT_LIMITS.answers}: оператор отвечает в карточке задачи или снимает вопрос`,
+      );
     if (input.optionId && !request.question.options.some((o) => o.id === input.optionId))
       throw new DomainError(
         `Варианта ${input.optionId} у вопроса ${request.id} нет: ${request.question.options.map((o) => o.id).join(', ') || 'вариантов нет'}`,
@@ -914,11 +924,26 @@ export class InputService {
     const task = this.h.store.read().tasks.find((t) => t.id === request.workId);
     const { state } = this.engine.read((view) => this.stateOf(view, request, task));
     const proposal = this.proposalOf(request, state);
-    if (!proposal)
+    const key = 'proposal-' + v.proposalDigest.slice(0, 40);
+    if (!proposal) {
+      // Повторное нажатие: предложение уже подтверждено этим ключом — тот же
+      // ответ, без второго сообщения и без ошибки.
+      const owner = task ? taskOwner(task) : undefined;
+      const row = this.h.store.discussionByKey(owner, taskId, 'operator', key) as
+        { id?: string } | undefined;
+      if (row?.id)
+        return {
+          requestId,
+          replayed: true,
+          messageId: row.id,
+          proposalDigest: v.proposalDigest,
+          note: 'Ответ ведущего уже подтверждён',
+        };
       throw new DomainError(
-        `Предложения ведущего по вопросу ${requestId} нет: оно уже подтверждено или не записано`,
+        `Предложения ведущего по вопросу ${requestId} нет: оно заменено ответом оператора или не записано`,
         404,
       );
+    }
     if (proposal.record.digest !== v.proposalDigest)
       throw refuse(
         'PROPOSAL_CHANGED',
@@ -938,13 +963,24 @@ export class InputService {
         kind: record.kind,
         expectedVersion: request.version,
         // Повтор подтверждения того же предложения — то же сообщение.
-        idempotencyKey: 'proposal-' + record.digest.slice(0, 40),
+        idempotencyKey: key,
         // Исправление после отклонённого ревью — цепочка ответов оператора, как в форме.
         ...(latest?.actor.kind === 'operator' && latest.messageRef
           ? { supersedes: latest.messageRef }
           : {}),
       });
       this.h.store.deleteLocal(PROPOSAL, undefined, requestId);
+      // Происхождение ответа: оператор подтвердил предложение ведущего
+      // (без текста — он в запросе).
+      this.h.store.appendEvent('input.proposal-confirmed', {
+        requestId,
+        taskId,
+        proposalDigest: record.digest,
+        proposedBy: record.by,
+        proposedAt: record.at,
+        kind: record.kind,
+        messageId: result.messageId,
+      });
       return { ...result, proposalDigest: record.digest };
     });
   }

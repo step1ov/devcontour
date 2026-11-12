@@ -769,7 +769,17 @@ function inputStep(ctx: HostContext, taskId: string): HandoffHostNext | undefine
           params: { reason: summary.stale?.reason ?? 'context', operator, ...stops },
         }
       : summary.state === 'review-rejected'
-        ? { code: 'apply-rejected' as const, params: { operator, ...stops } }
+        ? {
+            code: 'apply-rejected' as const,
+            params: {
+              operator,
+              // Исправляет оператор: ведущий предлагает исправление (F37).
+              ...(summary.actor === 'operator'
+                ? { operatorAnswers: true, proposed: !!summary.proposal }
+                : {}),
+              ...stops,
+            },
+          }
         : summary.state === 'applied-awaiting-claim'
           ? { code: 'apply-claim' as const, params: stops }
           : { code: 'apply-saved' as const, params: { state: summary.state, operator, ...stops } }),

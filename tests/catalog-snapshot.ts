@@ -139,6 +139,7 @@
 // Намеренное изменение: новая пишущая операция input_propose (предложение
 // ответа ведущего на вопрос, на который отвечает оператор) после
 // input_answer; описания input_answer и session_handoff называют её и
-// params.proposed шага answer-operator; прочие операции байтово прежние.
-export const CATALOG_DIGEST = '529c31ee49be52673b657a926ff8066017654b7fbfe0c87ada91d518665bdc13';
+// params.proposed шага answer-operator; optionId input_propose — непустой;
+// прочие операции байтово прежние.
+export const CATALOG_DIGEST = '7aa25c5f3c7a668433dc2c606ff501f92cc20df4242777964271970156d3b1e6';
 export const SNAPSHOT_VERSION = '0.4.0-alpha.7';
